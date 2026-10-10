@@ -876,6 +876,54 @@ fn a_cached_reply_reports_the_row_as_it_is_now_not_as_it_was() {
     assert_eq!(operations_of_kind(&fx, OperationKind::UploadVersion).len(), 1);
 }
 
+/// Spec 2026-10-09 §7.2 (I-1): the create arm hands a deletion-conflicted create's three
+/// fields to the engine, which modifies the template's item instead of creating a second
+/// file. macOS only: the other unix builds ignore the fields (an ordinary create).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_deletion_conflicted_create_over_the_socket_modifies_the_template_item() {
+    const TEMPLATE: &str = "3f2a9c1e-0000-4000-8000-0000000000c1";
+    let fx = IpcFixture::start(|db| {
+        db.upsert_file(&FileEntry {
+            file_id: TEMPLATE.into(),
+            path: "t2.txt".into(),
+            status: FileStatus::Local,
+            size_bytes: 28,
+            modified_at: 1_700_000_100,
+            content_hash: None,
+            remote_updated_at: 1_700_000_100,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+        let mut contract = db.get_file_contract_state(TEMPLATE).unwrap().unwrap();
+        contract.current_version = 1;
+        db.set_file_contract_state(&contract).unwrap();
+    });
+    let src = tempfile::tempdir().unwrap();
+    let path = source_file(&src, "t2.txt");
+    let mut request: serde_json::Value = serde_json::from_slice(&create_request("t2.txt", &path, None)).unwrap();
+    request["QueueFinderCreate"]["deletion_conflicted"] = serde_json::json!(true);
+    request["QueueFinderCreate"]["template_identifier"] = serde_json::json!(TEMPLATE);
+    request["QueueFinderCreate"]["template_content_version"] = serde_json::json!("1");
+    let mut line = serde_json::to_vec(&request).unwrap();
+    line.push(b'\n');
+    let reply = fx.rt.block_on(send_one(&fx, line));
+    assert_eq!(
+        reply["WriteQueued"]["item"]["identifier"],
+        serde_json::json!(TEMPLATE),
+        "the reply names the template's item: {reply}"
+    );
+    let ops = operations_of_kind(&fx, OperationKind::UploadVersion);
+    assert_eq!(ops.len(), 1, "{reply}");
+    assert_eq!(
+        ops[0].file_id.as_deref(),
+        Some(TEMPLATE),
+        "a content modify of the template's item"
+    );
+    assert_eq!(fx.db.list_files().unwrap().len(), 1, "no second file");
+}
+
 #[test]
 fn a_queued_modify_replies_with_the_size_of_the_bytes_it_was_handed() {
     // The system keeps the bytes it handed over and does not fetch them back,

@@ -63,6 +63,17 @@ pub enum IpcRequest {
         /// and docs/IPC_PROTOCOL.md.
         #[serde(default)]
         request_id: Option<String>,
+        /// The system recreates an item it could not delete because the person edited it
+        /// (`NSFileProviderCreateItemDeletionConflicted`, spec 2026-10-09 §7.2). Absent from
+        /// an older extension, which then gets an ordinary create.
+        #[serde(default)]
+        deletion_conflicted: bool,
+        /// With `deletion_conflicted`: the template's identifier, the item the delete was for.
+        #[serde(default)]
+        template_identifier: Option<String>,
+        /// With `deletion_conflicted`: the template's content version, the base of the edit.
+        #[serde(default)]
+        template_content_version: Option<String>,
     },
     QueueFinderModify {
         file_id: String,
@@ -1431,6 +1442,9 @@ fn log_refused_write(op: &'static str, reason: &'static str) {
 /// [`log_refused_write`]. The error's text can carry user data (names, paths),
 /// so it is classified, never logged.
 fn write_refusal_category(error: &anyhow::Error) -> &'static str {
+    if error.downcast_ref::<crate::engine_bridge::UnknownItem>().is_some() {
+        return "unknown_item";
+    }
     if error.is::<crate::engine_bridge::FinderStagingUnavailable>() {
         return "staging_root_unavailable";
     }
@@ -1785,12 +1799,7 @@ async fn handle_connection(
             }
         };
         let resp = match req {
-            IpcRequest::GetFileStatus { file_id } => match db.get_file(&file_id) {
-                Ok(Some(e)) => IpcResponse::FileStatus(file_entry_payload_for_db(&db, &e, FP_ROOT_APPLE)),
-                _ => IpcResponse::Error {
-                    message: "not found".into(),
-                },
-            },
+            IpcRequest::GetFileStatus { file_id } => file_status_response(&db, &file_id),
             IpcRequest::ListFileProviderItems { container_id } => IpcResponse::FileProviderItems {
                 items: list_file_provider_items(&db, &container_id),
             },
@@ -1812,6 +1821,9 @@ async fn handle_connection(
                 contents_path,
                 content_type,
                 request_id,
+                deletion_conflicted,
+                template_identifier,
+                template_content_version,
             } => {
                 match admit_write_contents(&contents_policy, "create", contents_path) {
                     Err(refusal) => contents_refusal_response(refusal),
@@ -1854,13 +1866,26 @@ async fn handle_connection(
                         dedup_write(&write_dedup, &db, request_id, fingerprint, move || {
                             // The engine reads the opened file, never the path.
                             let opened = staged.as_ref().map(StagedContents::file);
-                            // Only the macOS File Provider path mints write tokens (spec §8.8).
+                            // Only the macOS File Provider path mints write tokens (spec §8.8),
+                            // and only it resolves a deletion-conflicted create (§7.2).
                             #[cfg(target_os = "macos")]
-                            let result = work_bridge.queue_file_provider_create_from(target, opened);
+                            let result = if deletion_conflicted {
+                                work_bridge.queue_file_provider_deletion_conflicted_create(
+                                    target,
+                                    template_identifier,
+                                    template_content_version,
+                                    opened,
+                                )
+                            } else {
+                                work_bridge.queue_file_provider_create_from(target, opened)
+                            };
                             #[cfg(not(target_os = "macos"))]
-                            let result = work_bridge
-                                .queue_finder_create_from(target, opened)
-                                .map(crate::engine_bridge::FpWrite::plain);
+                            let result = {
+                                let _ = (deletion_conflicted, template_identifier, template_content_version);
+                                work_bridge
+                                    .queue_finder_create_from(target, opened)
+                                    .map(crate::engine_bridge::FpWrite::plain)
+                            };
                             let response = write_outcome_response("create", &work_db, result);
                             drop(staged);
                             response
@@ -1983,12 +2008,14 @@ async fn handle_connection(
                         match thumbnail_destination_error(&dest, &allowed_roots) {
                             Some(message) => Err(IpcResponse::Error { message }),
                             None => {
-                                // `fetch_thumbnail_to_memory` is async (HTTP
-                                // + decrypt); the staging write that follows
-                                // is a small blocking file write, which the
-                                // other dispatch arms also do inline.
+                                // `finder_thumbnail` is async (HTTP + decrypt;
+                                // through the alias, and an error while the
+                                // item's write is queued, spec §5.6); the
+                                // staging write that follows is a small
+                                // blocking file write, which the other
+                                // dispatch arms also do inline.
                                 let fetched = bridge
-                                    .fetch_thumbnail_to_memory(&file_id, thumbnail_variant(max_dimension))
+                                    .finder_thumbnail(&file_id, thumbnail_variant(max_dimension))
                                     .await;
                                 match fetched {
                                     Ok(plaintext) => {
@@ -2165,6 +2192,16 @@ async fn hydrate_over_ipc(
         let _ = tx.send((done, total));
     };
     let progress_cb: Option<&(dyn Fn(u64, u64) + Send + Sync)> = if want_progress { Some(&report) } else { None };
+    // macOS: through the alias, and from the queue while the held write is queued (spec §7.4).
+    // Other unix builds hydrate from the server as before.
+    #[cfg(target_os = "macos")]
+    let hydrate = async {
+        bridge
+            .serve_hydrate(file_id, dest, &allowed_roots, progress_cb)
+            .await
+            .map(|_| ())
+    };
+    #[cfg(not(target_os = "macos"))]
     let hydrate = bridge.hydrate_file_with_progress(file_id, dest, &allowed_roots, progress_cb);
     tokio::pin!(hydrate);
 
@@ -2400,30 +2437,70 @@ fn normalize_parent_id(parent_id: Option<String>) -> Option<String> {
     })
 }
 
-fn write_outcome_response(
+/// The `GetFileStatus` reply: a live row as before; otherwise a provisional id whose create
+/// landed is answered with the server file's item under the provisional id (spec §7.2), so
+/// the system's item keeps its identity until it applies the swap; otherwise "not found".
+pub(crate) fn file_status_response(db: &crate::state_db::StateDb, file_id: &str) -> IpcResponse {
+    if let Ok(Some(entry)) = db.get_file(file_id) {
+        return IpcResponse::FileStatus(file_entry_payload_for_db(db, &entry, FP_ROOT_APPLE));
+    }
+    if let Ok(Some(server_id)) = db.resolve_alias(file_id)
+        && let Ok(Some(entry)) = db.get_file(&server_id)
+    {
+        crate::engine_bridge::log_alias_resolved("item", file_id, &server_id);
+        let mut item = file_entry_payload_for_db(db, &entry, FP_ROOT_APPLE);
+        item.identifier = file_id.to_string();
+        return IpcResponse::FileStatus(item);
+    }
+    IpcResponse::Error {
+        message: "not found".into(),
+    }
+}
+
+/// The reply to a Finder write. A queued write answers with its item, read back from the
+/// row, presented under `present_as` when the write came under a provisional id (spec §7.2).
+pub(crate) fn write_outcome_response(
     op: &'static str,
     db: &crate::state_db::StateDb,
     result: anyhow::Result<crate::engine_bridge::FpWrite>,
 ) -> IpcResponse {
-    match result.map(|write| write.outcome) {
-        Ok(crate::engine_bridge::FinderWriteOutcome::Ignored { message }) => IpcResponse::WriteQueued {
+    match result.map(|write| (write.outcome, write.present_as)) {
+        Ok((crate::engine_bridge::FinderWriteOutcome::Ignored { message }, _)) => IpcResponse::WriteQueued {
             item: None,
             ignored: true,
             message,
         },
-        Ok(crate::engine_bridge::FinderWriteOutcome::Queued {
-            file_id,
-            ignored,
-            message,
-            ..
-        }) => IpcResponse::WriteQueued {
-            item: file_id
+        Ok((
+            crate::engine_bridge::FinderWriteOutcome::Queued {
+                file_id,
+                ignored,
+                message,
+                ..
+            },
+            present_as,
+        )) => {
+            let item = file_id
                 .as_deref()
                 .and_then(|id| db.get_file(id).ok().flatten())
-                .map(|entry| file_entry_payload_for_db(db, &entry, FP_ROOT_APPLE)),
-            ignored,
-            message,
-        },
+                .map(|entry| {
+                    let mut item = file_entry_payload_for_db(db, &entry, FP_ROOT_APPLE);
+                    if let Some(identifier) = present_as {
+                        item.identifier = identifier;
+                    }
+                    item
+                });
+            // §7.3: no write reply carries no item unless the write was ignored. For a modify,
+            // the system reads a nil item as "delete the item on disk" (REPL.h:629-634). The
+            // write is queued and its bytes kept; the system retries and gets the item.
+            #[cfg(target_os = "macos")]
+            if item.is_none() {
+                log_refused_write(op, "row_unreadable");
+                return IpcResponse::Error {
+                    message: "the write was queued but its item could not be read; try again".into(),
+                };
+            }
+            IpcResponse::WriteQueued { item, ignored, message }
+        }
         // Spec §8.4: the staging folder cannot take the copy now. Nothing was staged or
         // queued; the extension reports a transient error, so the system retries the write.
         // The text is the typed error's fixed reason, never a path.
@@ -5218,6 +5295,63 @@ mod tests {
             .collect();
         assert_eq!(lines.len(), 1, "one line per failed read:\n{logs}");
         assert!(lines[0].contains("WARN") && lines[0].contains("half-set"), "{logs}");
+    }
+
+    /// Spec 2026-10-09 §7.3: a queued write whose row cannot be read back is refused, never
+    /// answered without an item (for a modify the system reads a nil item as "delete the item
+    /// on disk"). Only an ignored write is answered without one. macOS only: other unix builds
+    /// keep the item-less reply.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_queued_write_whose_row_cannot_be_read_is_refused() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let queued = |file_id: Option<&str>| {
+            Ok(crate::engine_bridge::FpWrite::plain(
+                crate::engine_bridge::FinderWriteOutcome::Queued {
+                    op_id: "op-1".into(),
+                    file_id: file_id.map(str::to_string),
+                    kind: crate::state_db::OperationKind::UploadVersion,
+                    ignored: false,
+                    message: "queued for encrypted sync".into(),
+                },
+            ))
+        };
+        let logs = capture_logs(|| {
+            for (op, file_id) in [
+                ("create", Some("3f2a9c1e-0000-4000-8000-00000000dead")),
+                ("modify", Some("3f2a9c1e-0000-4000-8000-00000000dead")),
+                ("modify", None),
+            ] {
+                let reply = write_outcome_response(op, &db, queued(file_id));
+                let IpcResponse::Error { message } = &reply else {
+                    panic!("{op} {file_id:?}: an error, never an item-less reply: {reply:?}")
+                };
+                assert!(message.contains("could not be read"), "{message}");
+            }
+            let reply = write_outcome_response(
+                "create",
+                &db,
+                Ok(crate::engine_bridge::FpWrite::plain(
+                    crate::engine_bridge::FinderWriteOutcome::Ignored {
+                        message: "ignored".into(),
+                    },
+                )),
+            );
+            assert!(
+                matches!(
+                    reply,
+                    IpcResponse::WriteQueued {
+                        item: None,
+                        ignored: true,
+                        ..
+                    }
+                ),
+                "an ignored write is still answered without an item: {reply:?}"
+            );
+        });
+        assert_eq!(logs.matches("row_unreadable").count(), 3, "{logs}");
+        assert_eq!(logs.matches("Finder write refused").count(), 3, "{logs}");
     }
 
     #[test]

@@ -388,6 +388,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     struct QueuedWriteCompletion {
         let item: NSFileProviderItem?
         let shouldFetchContent: Bool
+        let error: Error?
     }
 
     /// The completion for a create or modify the app answered with
@@ -405,18 +406,24 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     /// - Queued with an item: the item, as the app describes it.
     /// - Ignored (a temporary Finder item the app does not sync): no item.
     ///   Unchanged behaviour; nothing was queued, so there is nothing to fetch.
-    /// - Queued but no item (the app could not read the row back, a rare
-    ///   race): no item, as before. For a modify, Apple treats a nil item as
-    ///   "delete the item on disk"; that is the existing behaviour, not
-    ///   changed here.
+    /// - Queued but no item (an app from another build, or the app could not
+    ///   read the row back): the transient `serverUnreachable` error, never a
+    ///   nil item. For a modify, Apple treats a nil item as "delete the item on
+    ///   disk" (REPL.h:629-634); with the error the system keeps the file and
+    ///   retries (REPL.h:731-736). Spec 2026-10-09 §7.3.
     static func queuedWriteCompletion(_ result: WriteQueueResult) -> QueuedWriteCompletion {
         if result.ignored {
-            return QueuedWriteCompletion(item: nil, shouldFetchContent: false)
+            return QueuedWriteCompletion(item: nil, shouldFetchContent: false, error: nil)
         }
         if let model = result.item {
-            return QueuedWriteCompletion(item: FileProviderItem(model: model), shouldFetchContent: false)
+            return QueuedWriteCompletion(item: FileProviderItem(model: model), shouldFetchContent: false, error: nil)
         }
-        return QueuedWriteCompletion(item: nil, shouldFetchContent: false)
+        // A nil item would make the system delete the item on disk (REPL.h:629-634).
+        return QueuedWriteCompletion(
+            item: nil,
+            shouldFetchContent: false,
+            error: BeebeebIPCError.invalidResponse("the app queued the write but returned no item")
+        )
     }
 
     /// The server trash / permanent-delete path for one item. The DAEMON
@@ -464,16 +471,28 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                     "Beebeeb cannot create items inside the Trash."
                 )
             }
+            // Spec 2026-10-09 §7.2: the system recreates an item it could not delete because
+            // the person edited it. The template's identifier is the item the delete was for,
+            // and its content version is the base of the edit (REPL.h:462-470).
+            let deletionConflicted = options.contains(.deletionConflicted)
             let result = try ipc.queueCreateItem(
                 parentIdentifier: itemTemplate.parentItemIdentifier,
                 filename: itemTemplate.filename,
                 kind: kind,
                 contentsURL: url,
-                contentType: kind == .file ? contentType?.identifier : nil
+                contentType: kind == .file ? contentType?.identifier : nil,
+                deletionConflicted: deletionConflicted,
+                templateIdentifier: deletionConflicted ? itemTemplate.itemIdentifier.rawValue : nil,
+                templateContentVersion: deletionConflicted ? itemTemplate.itemVersion.flatMap { Self.versionIdentifier($0) } : nil
             )
             let completion = Self.queuedWriteCompletion(result)
-            completionHandler(completion.item, [], completion.shouldFetchContent, nil)
-            signalErrorResolvedIfPending()
+            completionHandler(completion.item, [], completion.shouldFetchContent, completion.error)
+            if let error = completion.error {
+                // Transient: noted like every other, so the next success lifts the throttle.
+                noteFailure(error)
+            } else {
+                signalErrorResolvedIfPending()
+            }
         } catch {
             noteFailure(error)
             completionHandler(nil, [], false, error)
@@ -528,8 +547,13 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                 changedFields: changedFields
             )
             let completion = Self.queuedWriteCompletion(result)
-            completionHandler(completion.item, [], completion.shouldFetchContent, nil)
-            signalErrorResolvedIfPending()
+            completionHandler(completion.item, [], completion.shouldFetchContent, completion.error)
+            if let error = completion.error {
+                // Transient: noted like every other, so the next success lifts the throttle.
+                noteFailure(error)
+            } else {
+                signalErrorResolvedIfPending()
+            }
         } catch {
             noteFailure(error)
             completionHandler(nil, [], false, error)

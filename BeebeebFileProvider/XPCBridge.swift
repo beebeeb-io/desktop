@@ -398,7 +398,10 @@ final class XPCBridge {
         filename: String,
         kind: BeebeebItemKind,
         contentsURL: URL?,
-        contentType: String?
+        contentType: String?,
+        deletionConflicted: Bool = false,
+        templateIdentifier: String? = nil,
+        templateContentVersion: String? = nil
     ) throws -> WriteQueueResult {
         // The app cannot open the system's contents URL (it is outside the
         // app's sandbox), so it gets an App Group copy instead; see
@@ -416,7 +419,10 @@ final class XPCBridge {
             kind: kind.rawValue,
             contentsPath: stagedContents?.path,
             contentType: contentType,
-            contents: contentsURL.flatMap { IPCContentFingerprint.ofFile(at: $0) }
+            contents: contentsURL.flatMap { IPCContentFingerprint.ofFile(at: $0) },
+            deletionConflicted: deletionConflicted,
+            templateIdentifier: templateIdentifier,
+            templateContentVersion: templateContentVersion
         )
         Self.logRequestID(of: request, operation: "create")
         return try Self.decodeWriteResponse(sendRequest(

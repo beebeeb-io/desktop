@@ -318,17 +318,98 @@ pub enum FinderWriteOutcome {
     },
 }
 
-/// A File Provider write's outcome, with the token its reply names (spec §5).
+/// A File Provider write's outcome, with the token its reply names (spec §5) and, for a
+/// write under a provisional id whose create has landed, the identifier the reply is
+/// presented under: the system's own id for the item until it applies the swap (spec §7.2).
 #[derive(Debug, Clone, PartialEq)]
 pub struct FpWrite {
     pub outcome: FinderWriteOutcome,
     pub token: Option<String>,
+    pub present_as: Option<String>,
 }
 
 impl FpWrite {
     pub fn plain(outcome: FinderWriteOutcome) -> Self {
-        Self { outcome, token: None }
+        Self {
+            outcome,
+            token: None,
+            present_as: None,
+        }
     }
+}
+
+/// Where a Finder fetch was served from (spec §7.4, §11: the device plan counts these).
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HydrateSource {
+    /// The staged copy of the held write, still queued: the bytes its token names.
+    Queue,
+    /// The server, as every fetch did before.
+    Server,
+}
+
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+impl HydrateSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HydrateSource::Queue => "queue",
+            HydrateSource::Server => "server",
+        }
+    }
+}
+
+/// A Finder write for an id this Mac never knew and no alias resolves (spec §7.3). The
+/// reply is an error the extension reports as `cannotSynchronize`, so the edit stays on
+/// disk; never "no such item", which would make the system delete it.
+#[derive(Debug)]
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+pub(crate) struct UnknownItem;
+
+impl std::fmt::Display for UnknownItem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("this item is not known to Beebeeb")
+    }
+}
+
+impl std::error::Error for UnknownItem {}
+
+/// §5.6 safe default: no thumbnail is fetched while the item's held write is queued. The
+/// server holds only the previous version's, and the system would cache it under the token.
+#[derive(Debug)]
+#[cfg_attr(not(any(unix, test)), allow(dead_code))]
+pub(crate) struct ThumbnailNotYet;
+
+impl std::fmt::Display for ThumbnailNotYet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the thumbnail is available once the save has uploaded")
+    }
+}
+
+impl std::error::Error for ThumbnailNotYet {}
+
+/// One line per request that reached the server id through an alias (spec §7.2, §11).
+pub(crate) fn log_alias_resolved(request: &'static str, provisional_id: &str, file_id: &str) {
+    tracing::warn!(
+        request,
+        provisional_id = %provisional_id,
+        file_id = %file_id,
+        "provisional id resolved to the server id"
+    );
+}
+
+/// A delete under a provisional id that does not name the server file's held token (m-6).
+fn log_alias_delete_kept(provisional_id: &str, file_id: &str) {
+    tracing::warn!(
+        provisional_id = %provisional_id,
+        file_id = %file_id,
+        "delete of a provisional id not applied to the server file"
+    );
+}
+
+/// The device plan's count of fetches that reached the daemon (spec §11, §14 instrument 2).
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn log_hydrate_served(file_id: &str, source: HydrateSource) {
+    tracing::info!(file_id = %file_id, source = source.as_str(), "Finder hydrate served");
 }
 
 #[cfg(test)]
@@ -2072,7 +2153,138 @@ impl EngineBridge {
                 message: "queued for encrypted sync".to_string(),
             },
             token: Some(token),
+            present_as: None,
         })
+    }
+
+    /// A create with `.deletionConflicted` (spec §7.2, I-1): the system could not apply our
+    /// delete of the template's item because the person edited it. Resolved through the alias
+    /// (P→S), or a live row with the template's id, it is a content modify of that row,
+    /// replied under the provider's identifier, S (`REPL.h:438-443`), so the system's reuse
+    /// rule replaces item S on disk with the edited file. Otherwise an ordinary create.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn queue_file_provider_deletion_conflicted_create(
+        &self,
+        target: FinderWriteTarget,
+        template_identifier: Option<String>,
+        template_content_version: Option<String>,
+        contents: Option<&std::fs::File>,
+    ) -> anyhow::Result<FpWrite> {
+        let resolved = match template_identifier.as_deref() {
+            Some(id) => match self.db.get_file(id)? {
+                Some(row) => Some(row),
+                None => match self.db.resolve_alias(id)? {
+                    Some(server_id) => {
+                        log_alias_resolved("deletion_conflicted_create", id, &server_id);
+                        self.db.get_file(&server_id)?
+                    }
+                    None => None,
+                },
+            },
+            None => None,
+        };
+        match resolved {
+            // A content modify of S. Only a file has content to modify.
+            Some(row)
+                if row.status != FileStatus::Trashing
+                    && row.item_kind == ItemKind::File
+                    && target.kind == FinderWriteItemKind::File =>
+            {
+                self.queue_file_provider_modify_from(
+                    FinderWriteTarget {
+                        file_id: Some(row.file_id),
+                        parent_id: target.parent_id,
+                        filename: target.filename,
+                        rel_path: None,
+                        kind: FinderWriteItemKind::File,
+                        contents_path: target.contents_path,
+                        content_type: target.content_type,
+                        base_version_identifier: template_content_version,
+                    },
+                    contents,
+                )
+            }
+            // No alias and no row (a file deleted elsewhere: the edit becomes a new file), or a
+            // row going to the trash (the edit must not follow it there): an ordinary create.
+            _ => self.queue_file_provider_create_from(target, contents),
+        }
+    }
+
+    /// §7.2: the id a request under `id` acts on, and the id its reply is presented under. A
+    /// live row with `id` is acted on as is; otherwise an alias sends a provisional id to the
+    /// server id its create landed as, presented under `id`. An id with neither is returned
+    /// as is, for the caller to refuse or to let fail.
+    #[cfg_attr(not(any(unix, test)), allow(dead_code))]
+    pub fn resolve_provisional(&self, id: &str, request: &'static str) -> anyhow::Result<(String, Option<String>)> {
+        if self.db.get_file(id)?.is_some() {
+            return Ok((id.to_string(), None));
+        }
+        match self.db.resolve_alias(id)? {
+            Some(server_id) => {
+                log_alias_resolved(request, id, &server_id);
+                Ok((server_id, Some(id.to_string())))
+            }
+            None => Ok((id.to_string(), None)),
+        }
+    }
+
+    /// §7.4: a fetch of an item whose held write is queued is served from that write's
+    /// staged bytes, the bytes its token names, and never reaches the server; otherwise
+    /// from the server, as before.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub async fn serve_hydrate(
+        &self,
+        id: &str,
+        dest: &Path,
+        allowed_roots: &[&Path],
+        progress: Option<&HydrateProgressFn>,
+    ) -> anyhow::Result<HydrateSource> {
+        if !hydrate_dest_is_allowed(dest, allowed_roots) {
+            anyhow::bail!("hydrate destination is not within an allowed root");
+        }
+        let (file_id, _) = self.resolve_provisional(id, "hydrate")?;
+        // Decide once more when the landing unlinked the copy between the read and the open:
+        // the write is then no longer queued, and the server has its bytes (§7.4, 4b).
+        for _ in 0..2 {
+            let Some(path) = self.db.queue_fetch_source(&file_id)? else {
+                break;
+            };
+            match std::fs::File::open(&path) {
+                Ok(mut staged) => {
+                    if let Some(parent) = dest.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    let bytes = write_hydrated_from_reader(dest, allowed_roots, &mut staged)?;
+                    if let Some(progress) = progress {
+                        progress(bytes, bytes);
+                    }
+                    log_hydrate_served(&file_id, HydrateSource::Queue);
+                    return Ok(HydrateSource::Queue);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        self.hydrate_file_with_progress(&file_id, dest, allowed_roots, progress)
+            .await?;
+        log_hydrate_served(&file_id, HydrateSource::Server);
+        Ok(HydrateSource::Server)
+    }
+
+    /// A Finder thumbnail (spec §5.6, §7.2): through the alias, and never while the item's
+    /// held write is queued (the safe default: a per-item error, and nothing asked of the
+    /// server).
+    #[cfg_attr(not(any(unix, test)), allow(dead_code))]
+    pub async fn finder_thumbnail(&self, id: &str, variant: &str) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+        let (file_id, _) = self.resolve_provisional(id, "thumbnail")?;
+        if self
+            .db
+            .item_presentation(&file_id)?
+            .is_some_and(|presentation| presentation.held_write_queued)
+        {
+            return Err(anyhow::Error::new(ThumbnailNotYet));
+        }
+        self.fetch_thumbnail_to_memory(&file_id, variant).await
     }
 
     /// [`Self::queue_file_provider_create_from`] reading the contents by path.
@@ -2237,14 +2449,35 @@ impl EngineBridge {
     /// New contents go through one accept transaction that maps the system's base
     /// through the write token (spec §6.1) and queues the upload. A rename or move
     /// carries no content and gets no token.
+    ///
+    /// The id is resolved first (spec §7.2): a provisional id whose create has landed acts
+    /// on the server file, and the reply is presented under the provisional id. An id with
+    /// no row and no alias is refused with [`UnknownItem`] before anything is staged, for a
+    /// content and a metadata modify alike (§7.3). A name Finder writes for itself stays
+    /// ignored, as before, whatever its id.
     #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
     pub fn queue_file_provider_modify_from(
         &self,
-        target: FinderWriteTarget,
+        mut target: FinderWriteTarget,
         contents: Option<&std::fs::File>,
     ) -> anyhow::Result<FpWrite> {
+        let mut present_as = None;
+        if let Some(requested_id) = target.file_id.clone()
+            && !is_ignored_finder_name(&target.filename)
+        {
+            let (file_id, presented) = self.resolve_provisional(&requested_id, "modify")?;
+            if self.db.get_file(&file_id)?.is_none() {
+                return Err(anyhow::Error::new(UnknownItem));
+            }
+            target.file_id = Some(file_id);
+            present_as = presented;
+        }
         let Some(contents_path) = target.contents_path.clone() else {
-            return self.queue_finder_modify_from(target, contents).map(FpWrite::plain);
+            return self.queue_finder_modify_from(target, contents).map(|outcome| FpWrite {
+                outcome,
+                token: None,
+                present_as,
+            });
         };
         let Some((file_id, item_contract)) = self.start_finder_modify(&target)? else {
             return Ok(FpWrite::plain(ignored_finder_item(&target.filename)));
@@ -2279,22 +2512,9 @@ impl EngineBridge {
                 log_parked(&op_id, Some(&file_id), reason);
                 token
             }
-            crate::state_db::AcceptOutcome::UnknownItem => {
-                // No row: today's behaviour until unknown ids are refused. The staged copy
-                // is queued on the parsed base; the opened contents are never read twice.
-                let outcome = self.enqueue_finder_operation(
-                    OperationKind::UploadVersion,
-                    Some(file_id),
-                    target.parent_id,
-                    Some(target.filename),
-                    prepared.payload,
-                    Some(prepared.staged_path),
-                    parse_base_version_number(target.base_version_identifier.as_deref()),
-                    None,
-                )?;
-                prepared.staged.retain();
-                return Ok(FpWrite::plain(outcome));
-            }
+            // The row went between the check above and the accept: refused the same way
+            // (§7.3). The staged copy is dropped with `prepared`; nothing was queued.
+            crate::state_db::AcceptOutcome::UnknownItem => return Err(anyhow::Error::new(UnknownItem)),
         };
         prepared.staged.retain();
         Ok(FpWrite {
@@ -2306,6 +2526,7 @@ impl EngineBridge {
                 message: "queued for encrypted sync".to_string(),
             },
             token: Some(token),
+            present_as,
         })
     }
 
@@ -2323,6 +2544,26 @@ impl EngineBridge {
         // Task 1538 Codex P1 — see `queue_finder_create`'s identical guard.
         if self.is_stopping() {
             anyhow::bail!("engine is stopping; refusing to enqueue a new local write");
+        }
+        // §7.2 (m-6): a provisional id whose create landed reaches the server file only when
+        // the delete's base is that file's held token, the token the create's reply named.
+        // Any other base keeps the unknown-item answer below: the system's own resolution of
+        // the swap is undocumented, and a delete that does not name our bytes must never
+        // trash the person's file.
+        if let Some(server_id) = self.db.resolve_alias(file_id)? {
+            let held = self
+                .db
+                .item_presentation(&server_id)?
+                .and_then(|presentation| presentation.held)
+                .map(|held| held.token());
+            if held.is_some() && held == base_version_identifier {
+                log_alias_resolved("delete", file_id, &server_id);
+                return self.queue_finder_delete(&server_id, base_version_identifier);
+            }
+            log_alias_delete_kept(file_id, &server_id);
+            return Ok(FinderWriteOutcome::Ignored {
+                message: "the item is already gone from Beebeeb".to_string(),
+            });
         }
         // Task 1698 (trash ruling): an UNKNOWN item is an idempotent success
         // ("unknown items report success") — the item may have been deleted
@@ -3152,12 +3393,28 @@ impl EngineBridge {
             return Err(anyhow::anyhow!("hydrate destination is not within an allowed root"));
         }
         self.ensure_shared_hydrate_path_safe(file_id)?;
+        // Spec §7.4.2: a hydrate never changes the status of a row with a live upload of its
+        // own (a Finder upload that has not parked): no `Downloading`, `Local` or `Error`.
+        // That status is the upload's, and `Error` would make the item read-only.
+        let touch_status = !self
+            .db
+            .item_presentation(file_id)?
+            .is_some_and(|presentation| presentation.unparked_finder_upload);
+        let set_failed = || {
+            if touch_status {
+                // Best-effort status flip; if the DB is broken we still
+                // return the original error.
+                let _ = self.db.set_status(file_id, FileStatus::Error);
+            }
+        };
         // RAII-style: any early return below the status flip should
         // leave the file in `Error`, not `Downloading`. We do that by
         // wrapping the body in an inner async fn whose Err branch we
         // catch.
-        let mut downloading_guard = DownloadingStatusGuard::arm(&self.db, file_id);
-        self.db.set_status(file_id, FileStatus::Downloading)?;
+        let mut downloading_guard = touch_status.then(|| DownloadingStatusGuard::arm(&self.db, file_id));
+        if touch_status {
+            self.db.set_status(file_id, FileStatus::Downloading)?;
+        }
         // Task 1683 slice 2: the popover's per-file bytes. The caller's own progress
         // callback (the IPC handler forwarding to Finder) still gets every report.
         let transfer = self
@@ -3166,7 +3423,9 @@ impl EngineBridge {
         let hydrated = self.do_hydrate(file_id, progress).await;
         // Past the only cancellation point (the download await): every path
         // below sets the final status itself.
-        downloading_guard.disarm();
+        if let Some(guard) = downloading_guard.as_mut() {
+            guard.disarm();
+        }
         match hydrated {
             Ok(mut buf) => {
                 // Write the decrypted bytes to disk (this is the intentional
@@ -3182,7 +3441,7 @@ impl EngineBridge {
                     // failure left the row stuck on `Downloading` forever.
                     // Route it through the same status flip as every other
                     // failure in this function.
-                    let _ = self.db.set_status(file_id, FileStatus::Error);
+                    set_failed();
                     return Err(anyhow::anyhow!("create dest dir {}: {e}", parent.display()));
                 }
                 // Write via an O_NOFOLLOW handle (task 1247): the containment
@@ -3206,7 +3465,7 @@ impl EngineBridge {
                 // error) so the allocation does not linger with plaintext.
                 buf.zeroize();
                 if let Err(e) = write_result {
-                    let _ = self.db.set_status(file_id, FileStatus::Error);
+                    set_failed();
                     return Err(anyhow::anyhow!("write {}: {e}", dest_path.display()));
                 }
 
@@ -3219,8 +3478,10 @@ impl EngineBridge {
                 // completed as `Local` and reparented itself out of the trash
                 // view. `DownloadingStatusGuard::arm` captured exactly that
                 // pre-flip status when it armed above — reuse it.
-                self.db
-                    .set_status(file_id, hydrate_final_status(downloading_guard.restore.clone()))?;
+                if let Some(guard) = &downloading_guard {
+                    self.db
+                        .set_status(file_id, hydrate_final_status(guard.restore.clone()))?;
+                }
                 let downloaded_bytes = self.transfers.get(file_id).map(|t| t.total).unwrap_or(0);
                 transfer.finish();
                 self.record_transfer_done(crate::transfer_progress::Direction::Down, file_id, downloaded_bytes);
@@ -3252,9 +3513,7 @@ impl EngineBridge {
                 Ok(())
             }
             Err(e) => {
-                // Best-effort status flip; if the DB is broken we still
-                // return the original error.
-                let _ = self.db.set_status(file_id, FileStatus::Error);
+                set_failed();
                 Err(e)
             }
         }
@@ -5087,7 +5346,7 @@ fn record_hydration_cache_state(
 /// mode only to a newly created inode, so an attacker-planted pre-existing
 /// `0o644` file would otherwise keep its perms and leak the plaintext.
 ///
-/// Non-unix keeps `std::fs::write` (`openat`/`fchmod`/`O_NOFOLLOW` are Unix-only,
+/// Non-unix writes with `File::create` (`openat`/`fchmod`/`O_NOFOLLOW` are Unix-only,
 /// and the Windows Cloud Files path never writes plaintext to disk via this fn —
 /// it uses `hydrate_file_to_memory`).
 ///
@@ -5120,9 +5379,20 @@ fn record_hydration_cache_state(
 /// HARD link to a file outside all allowed roots bypasses containment (the walk
 /// sees a regular in-root leaf), and `O_TRUNC` would overwrite the linked inode.
 /// Noted in the task file.
-#[cfg(unix)]
 pub(crate) fn write_hydrated_plaintext(dest_path: &Path, allowed_roots: &[&Path], buf: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
+    write_hydrated_from_reader(dest_path, allowed_roots, &mut &buf[..]).map(|_| ())
+}
+
+/// [`write_hydrated_plaintext`]'s core, reading the plaintext from `reader` (spec §7.4: a
+/// fetch served from a queued write's staged copy streams it). Every step is the same:
+/// the anchored descent, the `O_NOFOLLOW` temp file, the atomic rename. Returns the number
+/// of bytes written.
+#[cfg(unix)]
+pub(crate) fn write_hydrated_from_reader(
+    dest_path: &Path,
+    allowed_roots: &[&Path],
+    reader: &mut dyn std::io::Read,
+) -> std::io::Result<u64> {
     use std::os::unix::io::AsRawFd;
     use std::path::Component;
 
@@ -5216,10 +5486,13 @@ pub(crate) fn write_hydrated_plaintext(dest_path: &Path, allowed_roots: &[&Path]
         return Err(err);
     }
 
-    if let Err(e) = std::fs::File::from(file_fd).write_all(buf) {
-        remove_temp();
-        return Err(e);
-    }
+    let written = match std::io::copy(reader, &mut std::fs::File::from(file_fd)) {
+        Ok(written) => written,
+        Err(e) => {
+            remove_temp();
+            return Err(e);
+        }
+    };
 
     // Atomically publish: same `dir_fd` for both sides, so this is anchored to
     // the already-validated directory inode, not a fresh path resolution.
@@ -5239,12 +5512,16 @@ pub(crate) fn write_hydrated_plaintext(dest_path: &Path, allowed_roots: &[&Path]
         return Err(err);
     }
 
-    Ok(())
+    Ok(written)
 }
 
 #[cfg(not(unix))]
-pub(crate) fn write_hydrated_plaintext(dest_path: &Path, _allowed_roots: &[&Path], buf: &[u8]) -> std::io::Result<()> {
-    std::fs::write(dest_path, buf)
+pub(crate) fn write_hydrated_from_reader(
+    dest_path: &Path,
+    _allowed_roots: &[&Path],
+    reader: &mut dyn std::io::Read,
+) -> std::io::Result<u64> {
+    std::io::copy(reader, &mut std::fs::File::create(dest_path)?)
 }
 
 /// Open `dir` as a directory fd, refusing to follow a symlink at its final
@@ -7820,6 +8097,17 @@ mod tests {
             "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         )
+    }
+
+    /// [`http_json`] for a binary body (`application/octet-stream`).
+    fn http_bytes(status: &str, body: &[u8]) -> Vec<u8> {
+        let mut response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(body);
+        response
     }
 
     fn upload_mock_response(request: &RecordedRequest, fail_chunk: bool, fail_thumbnails: bool) -> String {
@@ -14071,13 +14359,22 @@ mod tests {
         /// answers as the server's idempotent retry does, with neither the version nor the
         /// object id (`routes/uploads.rs`, `complete_upload`).
         completed_reply_lost: HashMap<String, String>,
+        /// file id -> the encrypted thumbnail blob `GET /files/{id}/thumbnail/{variant}` answers.
+        thumbnails: HashMap<String, Vec<u8>>,
+        /// Every thumbnail `GET`: the file id.
+        thumbnail_requests: Vec<String>,
+        /// A create mints a UUID-shaped id instead of `server-file-N` (the hydrate and the
+        /// thumbnail fetch parse a UUID before they ask the server).
+        uuid_ids: bool,
     }
 
     /// Upload mock that behaves like the server's version check: a replace
     /// (`file_id` set) whose `base_version_number` is not the file's current
     /// version gets 409; a replace naming an id the server never minted
     /// creates a file under that id, as the server does for a client-chosen
-    /// id. A create (`file_id` absent) mints `server-file-N`.
+    /// id. A create (`file_id` absent) mints `server-file-N` (a UUID-shaped id with
+    /// `uuid_ids`). `GET /files/{id}` has no route: it answers 404, so a hydrate from the
+    /// server fails.
     struct VersionedServerMock {
         base_url: String,
         state: Arc<Mutex<VersionedServerState>>,
@@ -14105,7 +14402,7 @@ mod tests {
                             if let Some(delay) = delay {
                                 std::thread::sleep(delay);
                             }
-                            let _ = stream.write_all(response.as_bytes());
+                            let _ = stream.write_all(&response);
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                             std::thread::sleep(Duration::from_millis(5));
@@ -14174,9 +14471,24 @@ mod tests {
     fn versioned_server_response(
         request: &RecordedRequest,
         state: &Arc<Mutex<VersionedServerState>>,
-    ) -> (Option<Duration>, String) {
+    ) -> (Option<Duration>, Vec<u8>) {
         let mut s = state.lock().unwrap();
         s.requests.push((request.method.clone(), request.path.clone()));
+        // `GET /files/{id}/thumbnail/{variant}`: the blob a test seeded, or 404 (binary body).
+        if request.method == "GET"
+            && let Some(rest) = request.path.strip_prefix("/api/v1/files/")
+            && let Some((file_id, _variant)) = rest.split_once("/thumbnail/")
+        {
+            let file_id = file_id.to_string();
+            s.thumbnail_requests.push(file_id.clone());
+            return match s.thumbnails.get(&file_id) {
+                Some(blob) => (None, http_bytes("200 OK", blob)),
+                None => (
+                    None,
+                    http_json("404 Not Found", serde_json::json!({ "error": "no thumbnail" })).into_bytes(),
+                ),
+            };
+        }
         let delay = if request.method == "POST" && request.path == "/api/v1/uploads/init" {
             s.delay_init
         } else if request.method == "POST" && request.path.ends_with("/complete") {
@@ -14193,7 +14505,7 @@ mod tests {
                 .filter(|_| request.method == "PUT")
                 .and_then(|session| s.delay_chunks.get(session).copied())
         };
-        (delay, versioned_server_answer(request, &mut s))
+        (delay, versioned_server_answer(request, &mut s).into_bytes())
     }
 
     fn versioned_server_answer(request: &RecordedRequest, s: &mut VersionedServerState) -> String {
@@ -14227,7 +14539,11 @@ mod tests {
                 }
                 None => {
                     s.next_file += 1;
-                    let id = format!("server-file-{}", s.next_file);
+                    let id = if s.uuid_ids {
+                        format!("5e7e0000-0000-4000-8000-{:012}", s.next_file)
+                    } else {
+                        format!("server-file-{}", s.next_file)
+                    };
                     s.files.insert(id.clone(), MockServerFile::default());
                     id
                 }
@@ -17874,5 +18190,397 @@ mod tests {
             "landed on the retry"
         );
         assert_eq!(state.inits.len(), 1);
+    }
+
+    // ── Rule 3: provisional ids, fetches from the queue, thumbnails, unknown ids (spec §7, §5.6) ──
+
+    /// A temporary directory with a sync root, a versioned server and a bridge on `master_key`.
+    fn rule3_setup(master_key: [u8; 32]) -> (tempfile::TempDir, PathBuf, VersionedServerMock, EngineBridge) {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        (dir, sync_root, server, bridge)
+    }
+
+    /// A create landed: returns (P, S, the create's token).
+    async fn landed_create(
+        bridge: &EngineBridge,
+        server: &VersionedServerMock,
+        dir: &Path,
+        sync_root: &Path,
+        name: &str,
+    ) -> (String, String, String) {
+        let created = fp_create(bridge, dir, name, b"created bytes");
+        let provisional = created.outcome_file_id();
+        drain_upload_queue(bridge, sync_root).await;
+        let server_id = server.state.lock().unwrap().files_with_content()[0].clone();
+        assert_ne!(provisional, server_id, "the landing swapped the id");
+        (provisional, server_id, created.token.unwrap())
+    }
+
+    /// The encrypted thumbnail blob the server would hold for `file_id`.
+    fn thumbnail_blob(master_key: [u8; 32], file_id: &str, plaintext: &[u8]) -> Vec<u8> {
+        beebeeb_core::encrypt::encrypt_chunk_raw(
+            &beebeeb_core::kdf::derive_file_key(
+                &beebeeb_core::kdf::MasterKey::from_bytes(master_key),
+                file_id.as_bytes(),
+            ),
+            plaintext,
+        )
+        .unwrap()
+    }
+
+    /// T15 (I3): a save under P after its create landed modifies S, replied under P.
+    #[cfg(unix)] // names `crate::ipc_socket::write_outcome_response`
+    #[tokio::test]
+    async fn i3_create_lands_then_a_modify_under_the_provisional_id() {
+        let master_key = [85u8; 32];
+        let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+        let (p, s, create_token) = landed_create(&bridge, &server, dir.path(), &sync_root, "t.txt").await;
+        let reply = fp_save(
+            &bridge,
+            dir.path(),
+            &p,
+            "t.txt",
+            b"created bytes, edited",
+            &create_token,
+        );
+        assert_eq!(reply.present_as.as_deref(), Some(p.as_str()));
+        let ipc = crate::ipc_socket::write_outcome_response("modify", &bridge.db, Ok(reply.clone()));
+        let crate::ipc_socket::IpcResponse::WriteQueued { item: Some(item), .. } = ipc else {
+            panic!("an item, never None: {ipc:?}")
+        };
+        assert_eq!(
+            item.identifier, p,
+            "presented under P until the system applies the swap"
+        );
+        assert_eq!(item.content_version, reply.token, "the new token");
+        drain_upload_queue(&bridge, &sync_root).await;
+        let state = server.finish();
+        assert_eq!(state.files_with_content(), vec![s.clone()], "one server file");
+        assert_eq!(state.files[&s].versions.len(), 2);
+        assert_eq!(state.latest_plaintext(&s, master_key), b"created bytes, edited");
+    }
+
+    /// T16: a delete under P naming P's create token trashes S.
+    #[tokio::test]
+    async fn a_delete_of_the_provisional_id_after_landing_trashes_the_server_file() {
+        let (dir, sync_root, server, bridge) = rule3_setup([86u8; 32]);
+        let (p, s, create_token) = landed_create(&bridge, &server, dir.path(), &sync_root, "gone.txt").await;
+        bridge.queue_finder_delete(&p, Some(create_token)).unwrap();
+        drain_upload_queue(&bridge, &sync_root).await;
+        assert_eq!(server.finish().trashes, vec![s]);
+    }
+
+    /// T58 (m-6): a delete under P that does not name S's held token keeps S.
+    #[tokio::test]
+    async fn a_delete_through_the_alias_needs_the_held_token_as_base() {
+        let (dir, sync_root, server, bridge) = rule3_setup([87u8; 32]);
+        let (p, s, _create_token) = landed_create(&bridge, &server, dir.path(), &sync_root, "kept.txt").await;
+        let logs = capture_logs_async(async {
+            bridge.queue_finder_delete(&p, Some("1".into())).unwrap();
+            drain_upload_queue(&bridge, &sync_root).await;
+        })
+        .await;
+        assert!(server.state.lock().unwrap().trashes.is_empty(), "S kept");
+        assert!(
+            logs.contains("delete of a provisional id not applied to the server file"),
+            "{logs}"
+        );
+        assert!(bridge.db.get_file(&s).unwrap().is_some());
+        drop(server.finish());
+    }
+
+    /// T17 (§7.3): a modify of an id with no row and no alias is refused and queues nothing.
+    #[cfg(unix)] // names `crate::ipc_socket::write_outcome_response`
+    #[tokio::test]
+    async fn an_unknown_id_is_refused_never_answered_without_an_item() {
+        let (dir, _sync_root, server, bridge) = rule3_setup([88u8; 32]);
+        let contents = dir.path().join("orphan.txt");
+        std::fs::write(&contents, b"edit of an item nobody knows").unwrap();
+        let unknown = "3f2a9c1e-0000-4000-8000-00000000dead";
+        let logs = capture_logs_async(async {
+            let result = bridge.queue_file_provider_modify(finder_file_target(
+                Some(unknown),
+                "orphan.txt",
+                &contents,
+                Some("1".into()),
+            ));
+            let reply = crate::ipc_socket::write_outcome_response("modify", &bridge.db, result);
+            assert!(
+                matches!(reply, crate::ipc_socket::IpcResponse::Error { .. }),
+                "{reply:?}"
+            );
+            // A rename or move of the same unknown id is refused the same way.
+            let rename = bridge.queue_file_provider_modify(FinderWriteTarget {
+                file_id: Some(unknown.into()),
+                parent_id: None,
+                filename: "orphan renamed.txt".into(),
+                rel_path: None,
+                kind: FinderWriteItemKind::File,
+                contents_path: None,
+                content_type: None,
+                base_version_identifier: Some("1".into()),
+            });
+            let reply = crate::ipc_socket::write_outcome_response("modify", &bridge.db, rename);
+            assert!(
+                matches!(reply, crate::ipc_socket::IpcResponse::Error { .. }),
+                "{reply:?}"
+            );
+        })
+        .await;
+        assert!(
+            bridge.db.list_due_operations(i64::MAX).unwrap().is_empty(),
+            "nothing queued"
+        );
+        assert!(
+            logs.matches("Finder write refused").count() == 2 && logs.matches("unknown_item").count() == 2,
+            "{logs}"
+        );
+        drop(server.finish());
+    }
+
+    /// T18 (R2a): a fetch of an item whose create is queued is served from the staged bytes.
+    #[tokio::test]
+    async fn r2a_a_fetch_during_the_creates_queue_wait_is_served_locally() {
+        // The mock answers 404 to anything unexpected.
+        let (dir, _sync_root, server, bridge) = rule3_setup([89u8; 32]);
+        let created = fp_create(&bridge, dir.path(), "r2.txt", b"eight million bytes, in spirit");
+        let p = created.outcome_file_id();
+        let dest = dir.path().join("fetch").join("r2.txt");
+        // `hydrate_dest_is_allowed` canonicalizes the parent.
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        let logs = capture_logs_async(async {
+            let source = bridge.serve_hydrate(&p, &dest, &[dir.path()], None).await.unwrap();
+            assert_eq!(source, HydrateSource::Queue);
+        })
+        .await;
+        assert_eq!(
+            std::fs::read(&dest).unwrap(),
+            b"eight million bytes, in spirit",
+            "the staged bytes"
+        );
+        assert_eq!(
+            bridge.db.get_file(&p).unwrap().unwrap().status,
+            FileStatus::Uploading,
+            "still writable"
+        );
+        assert!(
+            logs.contains("Finder hydrate served") && logs.contains("source=\"queue\""),
+            "{logs}"
+        );
+        assert!(server.finish().requests.is_empty(), "nothing reached the server");
+    }
+
+    /// T19 (§7.4.2): a failed hydrate leaves a row with a live upload as it was.
+    #[tokio::test]
+    async fn a_failed_hydrate_never_changes_a_row_with_a_live_upload() {
+        // UUID-shaped: the hydrate parses the id before it asks the server.
+        let live = "3f2a9c1e-0000-4000-8000-0000000000b2";
+        let (dir, _sync_root, server, bridge) = rule3_setup([90u8; 32]);
+        seed_uploaded_row(&bridge, &server, live);
+        fp_save(&bridge, dir.path(), live, "notes.txt", b"queued edit", "1");
+        let op = bridge.db.list_operations_for_file(live).unwrap().remove(0);
+        std::fs::remove_file(op.payload_path.as_deref().unwrap()).unwrap();
+        let dest = dir.path().join("fetch").join("notes.txt");
+        // Without it the guard fails first and the test passes for the wrong reason.
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        assert!(
+            bridge.serve_hydrate(live, &dest, &[dir.path()], None).await.is_err(),
+            "the server has no metadata route"
+        );
+        assert_eq!(bridge.db.get_file(live).unwrap().unwrap().status, FileStatus::Uploading);
+        let state = server.finish();
+        assert!(
+            state
+                .requests
+                .iter()
+                .any(|(m, path)| m == "GET" && path == &format!("/api/v1/files/{live}")),
+            "the hydrate failed at the server, not before it: {:?}",
+            state.requests
+        );
+    }
+
+    /// T43 (I-1): a deletion-conflicted create of P is a content modify of S, replied under S.
+    #[tokio::test]
+    async fn a_deletion_conflicted_create_of_the_provisional_id_modifies_the_server_file() {
+        let master_key = [91u8; 32];
+        let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+        let (p, s, create_token) = landed_create(&bridge, &server, dir.path(), &sync_root, "t2.txt").await;
+        let edited = dir.path().join("t2-edited.txt");
+        std::fs::write(&edited, b"created bytes, edited before the swap").unwrap();
+        let reply = bridge
+            .queue_file_provider_deletion_conflicted_create(
+                finder_file_target(None, "t2.txt", &edited, None),
+                Some(p.clone()),
+                Some(create_token),
+                None,
+            )
+            .unwrap();
+        let crate::engine_bridge::FinderWriteOutcome::Queued { file_id: Some(id), .. } = &reply.outcome else {
+            panic!("{reply:?}")
+        };
+        assert_eq!(id, &s, "a content modify of S");
+        assert!(
+            reply.present_as.is_none(),
+            "a create reply names the provider's identifier, S (REPL.h:438-443)"
+        );
+        // Guard: without an alias it is an ordinary create.
+        let other = dir.path().join("t3.txt");
+        std::fs::write(&other, b"a file deleted elsewhere, edited here").unwrap();
+        bridge
+            .queue_file_provider_deletion_conflicted_create(
+                finder_file_target(None, "t3.txt", &other, None),
+                Some("3f2a9c1e-0000-4000-8000-0000000000aa".into()),
+                Some("0".into()),
+                None,
+            )
+            .unwrap();
+        drain_upload_queue(&bridge, &sync_root).await;
+        let state = server.finish();
+        assert_eq!(state.files[&s].versions.len(), 2, "one new version of S");
+        assert_eq!(
+            state.latest_plaintext(&s, master_key),
+            b"created bytes, edited before the swap"
+        );
+        assert_eq!(
+            state.files_with_content().len(),
+            2,
+            "S and the guard's new file; no second t2"
+        );
+    }
+
+    /// T54: every request kind under P reaches S (one case per kind).
+    #[cfg(unix)] // names `crate::ipc_socket::file_status_response`
+    #[tokio::test]
+    async fn the_alias_resolves_rename_move_item_thumbnail_and_hydrate() {
+        let master_key = [92u8; 32];
+        let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+        // The thumbnail and hydrate paths parse a UUID before they ask the server.
+        server.state.lock().unwrap().uuid_ids = true;
+        let (p, s, create_token) = landed_create(&bridge, &server, dir.path(), &sync_root, "aliased.txt").await;
+        let blob = thumbnail_blob(master_key, &s, b"thumbnail bytes");
+        server.state.lock().unwrap().thumbnails.insert(s.clone(), blob);
+        let rename = |parent: Option<&str>, name: &str| FinderWriteTarget {
+            file_id: Some(p.clone()),
+            parent_id: parent.map(str::to_string),
+            filename: name.into(),
+            rel_path: None,
+            kind: FinderWriteItemKind::File,
+            contents_path: None,
+            content_type: None,
+            base_version_identifier: Some(create_token.clone()),
+        };
+        // rename
+        bridge.queue_file_provider_modify(rename(None, "renamed.txt")).unwrap();
+        // move
+        bridge
+            .queue_file_provider_modify(rename(Some("3f2a9c1e-0000-4000-8000-0000000000f0"), "renamed.txt"))
+            .unwrap();
+        let ops = bridge.db.list_operations_for_file(&s).unwrap();
+        assert_eq!(
+            ops.iter().map(|op| op.kind.clone()).collect::<Vec<_>>(),
+            vec![OperationKind::RenameFile, OperationKind::MoveFile],
+            "rename and move reach S"
+        );
+        // item
+        let crate::ipc_socket::IpcResponse::FileStatus(item) = crate::ipc_socket::file_status_response(&bridge.db, &p)
+        else {
+            panic!("item under P")
+        };
+        assert_eq!(item.identifier, p);
+        // thumbnail
+        assert_eq!(
+            &bridge.finder_thumbnail(&p, "small").await.unwrap()[..],
+            b"thumbnail bytes"
+        );
+        // hydrate (no write queued: the server is asked for S)
+        let dest = dir.path().join("fetch").join("aliased.txt");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        let _ = bridge.serve_hydrate(&p, &dest, &[dir.path()], None).await;
+        let state = server.finish();
+        assert_eq!(state.thumbnail_requests, vec![s.clone()]);
+        assert!(
+            state
+                .requests
+                .iter()
+                .any(|(m, path)| m == "GET" && path == &format!("/api/v1/files/{s}")),
+            "the hydrate asked for S: {:?}",
+            state.requests
+        );
+    }
+
+    /// T55: an alias is kept 30 days; engine start and the daily tick sweep older ones.
+    #[test]
+    fn aliases_older_than_30_days_are_swept() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let now = now_secs();
+        db.insert_alias_for_test("young", "s1", now - 29 * 86_400);
+        db.insert_alias_for_test("old", "s2", now - 31 * 86_400);
+        db.engine_start_repair().unwrap(); // at start
+        assert_eq!(db.resolve_alias("young").unwrap(), Some("s1".into()));
+        assert_eq!(db.resolve_alias("old").unwrap(), None);
+        db.insert_alias_for_test("old-again", "s3", now - 31 * 86_400);
+        assert_eq!(db.sweep_aliases(now, crate::state_db::ALIAS_MAX_AGE_SECS).unwrap(), 1); // daily
+        assert_eq!(
+            db.resolve_alias("young").unwrap(),
+            Some("s1".into()),
+            "the young one stays"
+        );
+    }
+
+    /// T56′ (§5.6, the safe default): no thumbnail is fetched while the write is queued.
+    #[tokio::test]
+    async fn the_thumbnail_of_a_queued_write_is_an_error_without_a_server_request() {
+        // UUID-shaped: the thumbnail fetch parses the id before it asks the server.
+        let photo = "3f2a9c1e-0000-4000-8000-0000000000b1";
+        let master_key = [93u8; 32];
+        let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_row(&bridge, &server, photo);
+        let blob = thumbnail_blob(master_key, photo, b"new thumbnail");
+        server.state.lock().unwrap().thumbnails.insert(photo.into(), blob);
+        fp_save(&bridge, dir.path(), photo, "photo.png", b"new image bytes", "1");
+        assert!(
+            bridge.finder_thumbnail(photo, "small").await.is_err(),
+            "an error while the write is queued"
+        );
+        assert!(
+            server.state.lock().unwrap().thumbnail_requests.is_empty(),
+            "0 requests: never the old version's thumbnail"
+        );
+        drain_upload_queue(&bridge, &sync_root).await;
+        assert_eq!(
+            &bridge.finder_thumbnail(photo, "small").await.unwrap()[..],
+            b"new thumbnail",
+            "served after the landing"
+        );
+        assert_eq!(server.finish().thumbnail_requests, vec![photo.to_string()]);
+    }
+
+    /// Review Focus 3: an empty save lands, and a fetch while it is queued is an empty file.
+    #[tokio::test]
+    async fn an_empty_save_lands_and_is_served_from_the_queue() {
+        let master_key = [94u8; 32];
+        let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_row(&bridge, &server, "empty");
+        fp_save(&bridge, dir.path(), "empty", "notes.txt", b"", "1");
+        let dest = dir.path().join("fetch").join("notes.txt");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        assert_eq!(
+            bridge.serve_hydrate("empty", &dest, &[dir.path()], None).await.unwrap(),
+            HydrateSource::Queue
+        );
+        assert_eq!(
+            std::fs::metadata(&dest).unwrap().len(),
+            0,
+            "an empty file, not an error"
+        );
+        drain_upload_queue(&bridge, &sync_root).await;
+        let state = server.finish();
+        assert_eq!(state.files["empty"].versions.len(), 2);
+        assert!(state.latest_plaintext("empty", master_key).is_empty());
     }
 }

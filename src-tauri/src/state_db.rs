@@ -61,6 +61,8 @@ const FINDER_REMOVAL_OWED_KEY: &str = "finder_removal_owed";
 const FINDER_DOMAIN_GONE_KEY: &str = "finder_domain_gone";
 
 pub const LOCAL_ACTIVITY_MAX_ROWS: usize = 200;
+/// How long a provisional id keeps resolving to the server id its create landed as (spec §7.1).
+pub const ALIAS_MAX_AGE_SECS: i64 = 30 * 86_400;
 /// Cap on `transfer_activity` (task 1683 slice 2). The popover shows five rows.
 pub const TRANSFER_ACTIVITY_MAX_ROWS: usize = 100;
 
@@ -5047,7 +5049,46 @@ impl StateDb {
         Ok(n == 1)
     }
 
-    /// Engine start: no runner survives a restart, so every claim is cleared (S3).
+    /// §7.1–§7.2: the server id a provisional id became, while no live row has it.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn resolve_alias(&self, id: &str) -> Result<Option<String>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row(
+            "SELECT server_id FROM id_aliases
+             WHERE provisional_id = ?1 AND NOT EXISTS (SELECT 1 FROM files WHERE file_id = ?1)",
+            params![id],
+            |row| row.get(0),
+        )
+        .optional()
+    }
+
+    /// §7.1: drop the aliases older than `max_age_secs`. Returns how many went.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn sweep_aliases(&self, now: i64, max_age_secs: i64) -> Result<usize> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "DELETE FROM id_aliases WHERE created_at < ?1",
+            params![now - max_age_secs],
+        )
+    }
+
+    /// §7.4 and S1.8: the held write's staged copy, when that write is still queued. One read:
+    /// the held write and its op are looked up together.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn queue_fetch_source(&self, file_id: &str) -> Result<Option<String>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row(
+            "SELECT q.payload_path FROM files f
+             JOIN operation_queue q ON q.write_id = f.held_write_id
+             WHERE f.file_id = ?1 AND q.payload_path IS NOT NULL",
+            params![file_id],
+            |row| row.get(0),
+        )
+        .optional()
+    }
+
+    /// Engine start: no runner survives a restart, so every claim is cleared (S3), and
+    /// aliases older than [`ALIAS_MAX_AGE_SECS`] are swept (§7.1).
     /// On macOS it also lists the journalled payloads marked released that nothing
     /// references any more, for the caller to unlink (S6).
     pub fn engine_start_repair(&self) -> Result<EngineStartRepair> {
@@ -5056,6 +5097,11 @@ impl StateDb {
         let claims_cleared = tx.execute(
             "UPDATE operation_queue SET claim_id = NULL, claimed_at = NULL WHERE claim_id IS NOT NULL",
             [],
+        )?;
+        // §7.1: an alias is kept 30 days; the daily sweep is the runner's.
+        tx.execute(
+            "DELETE FROM id_aliases WHERE created_at < ?1",
+            params![now_secs() - ALIAS_MAX_AGE_SECS],
         )?;
         // macOS only: the release journal is written only by the macOS landing.
         #[cfg(target_os = "macos")]

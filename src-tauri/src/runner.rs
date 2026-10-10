@@ -1231,6 +1231,8 @@ async fn run(
     let mut hydrate_sweep_tick_count: u64 = 0;
     #[cfg(target_os = "macos")]
     let mut upload_staging_sweep_tick_count: u64 = 1;
+    // Spec §7.1: aliases older than 30 days go once a day (engine start sweeps them too).
+    let mut last_alias_sweep = std::time::Instant::now();
 
     loop {
         tokio::select! {
@@ -1279,6 +1281,13 @@ async fn run(
                         crate::ipc_socket::macos_sweep_upload_staging();
                     }
                     upload_staging_sweep_tick_count = upload_staging_sweep_tick_count.wrapping_add(1);
+                }
+                if last_alias_sweep.elapsed() >= std::time::Duration::from_secs(86_400) {
+                    // A fixed category, never the error text (spec §11).
+                    if db.sweep_aliases(now_secs(), crate::state_db::ALIAS_MAX_AGE_SECS).is_err() {
+                        tracing::warn!(reason = "database", "daily alias sweep failed");
+                    }
+                    last_alias_sweep = std::time::Instant::now();
                 }
 
                 // Skip all sync work while the user has paused sync.

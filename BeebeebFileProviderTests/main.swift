@@ -1770,17 +1770,57 @@ check("a queued create or modify never asks the system to re-fetch its own bytes
     try expect(!queued.shouldFetchContent, "a queued write with an item must complete with shouldFetchContent false")
     try expect(queued.item?.itemIdentifier.rawValue == "1697-item", "the item the app returned must be handed to the system")
 
-    let noItem = FileProviderExtension.queuedWriteCompletion(
-        WriteQueueResult(item: nil, ignored: false, message: "queued")
-    )
-    try expect(!noItem.shouldFetchContent, "a queued write without an item has nothing to fetch")
-    try expect(noItem.item == nil, "no item from the app means no item for the system")
-
     let ignored = FileProviderExtension.queuedWriteCompletion(
         WriteQueueResult(item: nil, ignored: true, message: "ignored temporary item")
     )
     try expect(!ignored.shouldFetchContent, "an ignored temporary item is never fetched")
     try expect(ignored.item == nil, "an ignored item returns no item")
+}
+
+// MARK: - Rule 3: no item-less reply, and the deletion-conflicted create (spec 2026-10-09 §7.2-§7.3)
+
+// For a modify, Apple treats a nil item as "delete the item on disk" (REPL.h:629-634). A
+// queued write the app answered without an item therefore completes with the TRANSIENT
+// serverUnreachable: the system keeps the file and retries (REPL.h:731-736).
+check("a queued write without an item is an error, never a nil item") {
+    let noItem = FileProviderExtension.queuedWriteCompletion(
+        WriteQueueResult(item: nil, ignored: false, message: "queued")
+    )
+    try expect(!noItem.shouldFetchContent, "a queued write without an item has nothing to fetch")
+    try expect(noItem.item == nil, "no item from the app means no item for the system")
+    guard let error = noItem.error as? BeebeebIPCError else {
+        throw TestFailure(description: "a queued write without an item must complete with an error")
+    }
+    try expect((error as NSError).code == NSFileProviderError.serverUnreachable.rawValue,
+               "serverUnreachable: the system retries and keeps the file on disk (REPL.h:731-736)")
+    try expect(error.isTransient, "transient, never definitive")
+    let ignored = FileProviderExtension.queuedWriteCompletion(
+        WriteQueueResult(item: nil, ignored: true, message: "ignored temporary item")
+    )
+    try expect(ignored.error == nil, "an ignored temporary item is not an error")
+    let queued = FileProviderExtension.queuedWriteCompletion(
+        WriteQueueResult(item: item1697(capabilities: BeebeebProviderItem.read), ignored: false, message: "queued")
+    )
+    try expect(queued.error == nil, "a queued write with an item is not an error")
+}
+
+check("createItem passes deletionConflicted, the template id and its content version") {
+    let token = "0:w" + String(repeating: "a", count: 32)
+    let conflicted = IPCWriteRequest.create(
+        parentIdentifier: "NSFileProviderRootContainerItemIdentifier", filename: "t2.txt", kind: "file",
+        contentsPath: "/tmp/staged", contentType: "public.plain-text", contents: sampleContents,
+        deletionConflicted: true, templateIdentifier: "3f2a9c1e-0000-4000-8000-000000000009",
+        templateContentVersion: token
+    )
+    let payload = conflicted["QueueFinderCreate"] as? [String: Any] ?? [:]
+    try expect(payload["deletion_conflicted"] as? Bool == true, "the option is passed")
+    try expect(payload["template_identifier"] as? String == "3f2a9c1e-0000-4000-8000-000000000009", "the template id")
+    try expect(payload["template_content_version"] as? String == token, "the template's content version")
+    let plain = sampleCreateRequest()["QueueFinderCreate"] as? [String: Any] ?? [:]
+    try expect(plain["deletion_conflicted"] as? Bool == false, "without the option: false")
+    try expect(plain["template_identifier"] == nil && plain["template_content_version"] == nil, "no template fields")
+    // The idempotency key is the create's own: the option does not change it.
+    try expect(payload["request_id"] as? String != nil, "a create with contents still carries its key")
 }
 
 // MARK: - WriteRetryLater: the app cannot stage a write now; the system retries it

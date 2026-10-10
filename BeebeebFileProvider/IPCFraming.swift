@@ -571,19 +571,35 @@ enum IPCWriteKey {
 /// dropped by a refactor, and BeebeebFileProviderTests pins that both shapes
 /// carry it.
 enum IPCWriteRequest {
+    /// `deletionConflicted`: the system recreates an item it could not delete because the
+    /// person edited it (`NSFileProviderCreateItemDeletionConflicted`). The template's
+    /// identifier and content version then let the app modify the item the delete was for
+    /// instead of creating a second one (spec 2026-10-09 §7.2). They do not change the key.
     static func create(
         parentIdentifier: String,
         filename: String,
         kind: String,
         contentsPath: String?,
         contentType: String?,
-        contents: IPCContentFingerprint?
+        contents: IPCContentFingerprint?,
+        deletionConflicted: Bool = false,
+        templateIdentifier: String? = nil,
+        templateContentVersion: String? = nil
     ) -> [String: Any] {
         var payload: [String: Any] = [
             "parent_id": parentIdentifier,
             "filename": filename,
             "kind": kind,
+            "deletion_conflicted": deletionConflicted,
         ]
+        if deletionConflicted {
+            if let templateIdentifier = templateIdentifier {
+                payload["template_identifier"] = templateIdentifier
+            }
+            if let templateContentVersion = templateContentVersion {
+                payload["template_content_version"] = templateContentVersion
+            }
+        }
         if let contentsPath = contentsPath {
             payload["contents_path"] = contentsPath
         }
