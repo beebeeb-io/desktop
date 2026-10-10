@@ -1007,11 +1007,7 @@ async fn run(
     match db.engine_start_repair() {
         Ok(repair) => {
             #[cfg(target_os = "macos")]
-            for path in &repair.released_payloads {
-                if let Err(e) = crate::staged_payload::remove(&db, std::path::Path::new(path)) {
-                    tracing::warn!(error = %e, "released upload copy kept; removal is retried at the next start");
-                }
-            }
+            crate::staged_payload::remove_released(&db, &repair.released_payloads);
             if repair.claims_cleared > 0 || !repair.released_payloads.is_empty() {
                 tracing::info!(
                     claims_cleared = repair.claims_cleared,

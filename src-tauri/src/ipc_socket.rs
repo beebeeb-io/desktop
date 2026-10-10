@@ -122,6 +122,17 @@ pub enum IpcResponse {
         ignored: bool,
         message: String,
     },
+    /// A create or modify the app could not take NOW: nothing was staged or
+    /// queued, and the person's file is unchanged on disk (spec
+    /// 2026-10-09 §8.4: the app's staging folder cannot be created or
+    /// written to). The extension reports it as a transient error
+    /// (`uploadStagingFailed`, `serverUnreachable`), so the system keeps the
+    /// change and retries the write; an `Error` would reach the system as
+    /// `cannotSynchronize`, which it does not retry until the item changes
+    /// again. `message` is a fixed reason, never a path.
+    WriteRetryLater {
+        message: String,
+    },
     SyncSummary {
         syncing: u32,
         cloud_only: u32,
@@ -473,12 +484,14 @@ pub(crate) fn macos_ensure_hydrate_cache_dir(dir: &std::path::Path) -> std::io::
     macos_ensure_private_staging_dir(dir)
 }
 
-/// Create (if needed) and harden an App Group staging directory: owner-only
-/// `0o700` and excluded from backups. Shared by the hydrate-cache and the
-/// upload-staging directory ([`macos_upload_staging_dir`]); both only ever
-/// hold short-lived plaintext.
+/// Create (if needed) and harden a staging directory: owner-only `0o700` and
+/// excluded from backups. Shared by the App Group hydrate-cache and
+/// upload-staging directory ([`macos_upload_staging_dir`]), which only ever
+/// hold short-lived plaintext, and the engine's own Finder-write staging root
+/// (`engine_bridge::durable_finder_staging_root`), which holds a save's copy
+/// until it uploads.
 #[cfg(target_os = "macos")]
-fn macos_ensure_private_staging_dir(dir: &std::path::Path) -> std::io::Result<()> {
+pub(crate) fn macos_ensure_private_staging_dir(dir: &std::path::Path) -> std::io::Result<()> {
     macos_open_private_staging_dir(dir)
         .map(|_| ())
         .map_err(StagingDirRefusal::into_io_error)
@@ -1418,6 +1431,9 @@ fn log_refused_write(op: &'static str, reason: &'static str) {
 /// [`log_refused_write`]. The error's text can carry user data (names, paths),
 /// so it is classified, never logged.
 fn write_refusal_category(error: &anyhow::Error) -> &'static str {
+    if error.is::<crate::engine_bridge::FinderStagingUnavailable>() {
+        return "staging_root_unavailable";
+    }
     if error.downcast_ref::<std::io::Error>().is_some() {
         return "io";
     }
@@ -2408,6 +2424,13 @@ fn write_outcome_response(
             ignored,
             message,
         },
+        // Spec §8.4: the staging folder cannot take the copy now. Nothing was staged or
+        // queued; the extension reports a transient error, so the system retries the write.
+        // The text is the typed error's fixed reason, never a path.
+        Err(e) if e.is::<crate::engine_bridge::FinderStagingUnavailable>() => {
+            log_refused_write(op, write_refusal_category(&e));
+            IpcResponse::WriteRetryLater { message: e.to_string() }
+        }
         Err(e) => {
             // The extension turns this reply into a definitive Finder error,
             // so it must leave a trace in the daemon log (it used to leave

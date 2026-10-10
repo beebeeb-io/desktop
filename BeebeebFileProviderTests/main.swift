@@ -1783,5 +1783,42 @@ check("a queued create or modify never asks the system to re-fetch its own bytes
     try expect(ignored.item == nil, "an ignored item returns no item")
 }
 
+// MARK: - WriteRetryLater: the app cannot stage a write now; the system retries it
+
+// Spec 2026-10-09 §8.4: when the app's own staging folder cannot take a save, the
+// daemon answers `WriteRetryLater` (nothing staged, nothing queued). It must reach the
+// system as the TRANSIENT `uploadStagingFailed` (serverUnreachable), so the system keeps
+// the change and retries the write. Never as the DEFINITIVE `cannotSynchronize` an
+// `Error` reply becomes: the system does not retry that until the item changes again.
+check("WriteRetryLater decodes to the transient uploadStagingFailed, never cannotSynchronize") {
+    let reason = "the staging folder is unavailable: not a directory"
+    do {
+        _ = try XPCBridge.decodeWriteResponse(["WriteRetryLater": ["message": reason]])
+        throw TestFailure(description: "a WriteRetryLater reply must throw")
+    } catch let error as BeebeebIPCError {
+        guard case .uploadStagingFailed(let carried) = error else {
+            throw TestFailure(description: "expected uploadStagingFailed, got \(error)")
+        }
+        try expect(carried == reason, "the daemon's reason is carried: \(carried)")
+        let ns = error as NSError
+        try expect(ns.domain == NSFileProviderErrorDomain, "domain \(ns.domain)")
+        try expect(
+            ns.code == NSFileProviderError.serverUnreachable.rawValue,
+            "transient serverUnreachable (-1004), got \(ns.code)"
+        )
+        try expect(error.isTransient, "the system retries it")
+    }
+    // An `Error` reply to a write stays definitive.
+    do {
+        _ = try XPCBridge.decodeWriteResponse(["Error": ["message": "refused"]])
+        throw TestFailure(description: "an Error reply must throw")
+    } catch let error as BeebeebIPCError {
+        try expect(
+            (error as NSError).code == NSFileProviderError.cannotSynchronize.rawValue,
+            "an Error reply stays cannotSynchronize, got \((error as NSError).code)"
+        )
+    }
+}
+
 print("ipc-framing: \(passed) passed, \(failed) failed")
 exit(failed == 0 ? 0 : 1)

@@ -32,6 +32,8 @@ struct IpcFixture {
     _sock_dir: tempfile::TempDir,
     /// Set for a daemon started with `start_staged`.
     staging: Option<tempfile::TempDir>,
+    /// The daemon's engine bridge (a test can point its staging folder elsewhere).
+    bridge: Arc<EngineBridge>,
 }
 
 impl IpcFixture {
@@ -73,7 +75,7 @@ impl IpcFixture {
         let server = rt.spawn(crate::ipc_socket::serve_ipc_at_with_ready(
             sock.clone(),
             db.clone(),
-            bridge,
+            bridge.clone(),
             cancel_rx,
             Some(ready_tx),
             contents,
@@ -93,6 +95,7 @@ impl IpcFixture {
             _state_dir: state_dir,
             _sock_dir: sock_dir,
             staging,
+            bridge,
         }
     }
 
@@ -1396,6 +1399,93 @@ fn staged_create_uploads_from_the_daemons_own_copy_and_deletes_the_handed_over_o
         "nothing may be left in the staging dir"
     );
     assert_uploads_from_own_copy(&fx, b"finder file contents");
+}
+
+/// Spec 2026-10-09 §8.4 (the staging folder, macOS): when the app's own staging folder cannot be
+/// created or written to, a create and a modify are answered `WriteRetryLater` with a fixed reason and
+/// no path. The extension reports that as a transient error, so the system keeps the change and
+/// retries the write. Nothing is staged anywhere, nothing is queued, no row is added, and the
+/// handed-over copy is deleted as after any answer.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_unwritable_staging_folder_answers_write_retry_later_and_stages_and_queues_nothing() {
+    const FILE_ID: &str = "00000000-0000-0000-0000-00000000cccc";
+    let fx = IpcFixture::start_staged(|db| {
+        db.upsert_file(&FileEntry {
+            file_id: FILE_ID.into(),
+            path: "doc.txt".into(),
+            status: FileStatus::Local,
+            size_bytes: 3,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+    });
+    let bases_dir = tempfile::tempdir().unwrap();
+    let data = bases_dir.path().join("data");
+    std::fs::create_dir(&data).unwrap();
+    // A file where the staging folder's parent would be: `beebeeb/finder-writes` cannot be created.
+    std::fs::write(data.join("beebeeb"), b"in the way").unwrap();
+    fx.bridge.seams.stage_under(crate::engine_bridge::FinderStagingBases {
+        data: Some(data.clone()),
+        cache: Some(bases_dir.path().join("cache")),
+        temp: bases_dir.path().join("temp"),
+    });
+    let rows_before = fx.db.list_files().unwrap().len();
+
+    for kind in ["create", "modify"] {
+        let copy = staged_copy(&fx, b"a save the app cannot stage");
+        let contents = copy.to_string_lossy().into_owned();
+        let request = match kind {
+            "create" => create_request("new.txt", &contents, Some("key-retry-create")),
+            _ => modify_request_on_base(FILE_ID, "doc.txt", &contents, "1"),
+        };
+        let reply = fx.rt.block_on(send_one(&fx, request));
+        let message = reply["WriteRetryLater"]["message"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{kind}: expected WriteRetryLater, got {reply}"));
+        assert_eq!(
+            reply,
+            serde_json::json!({ "WriteRetryLater": { "message": message } }),
+            "{kind}: the wire shape"
+        );
+        assert!(
+            message.starts_with("the staging folder is unavailable") && !message.contains('/'),
+            "{kind}: a fixed reason, no path: {message}"
+        );
+        assert!(
+            !copy.exists(),
+            "{kind}: the handed-over copy is deleted after the answer"
+        );
+    }
+
+    assert_eq!(queued_operation_count(&fx), 0, "nothing is queued");
+    assert!(
+        fx.db.staged_payloads_for_signout().unwrap().is_empty(),
+        "nothing is journalled"
+    );
+    assert_eq!(
+        fx.db.list_files().unwrap().len(),
+        rows_before,
+        "the create added no row"
+    );
+    let mut left = Vec::new();
+    let mut stack = vec![bases_dir.path().to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                left.push(path);
+            }
+        }
+    }
+    assert_eq!(left, vec![data.join("beebeeb")], "no copy was written anywhere");
+    assert!(staging_entries(&fx).is_empty(), "nothing is left in upload staging");
 }
 
 #[test]

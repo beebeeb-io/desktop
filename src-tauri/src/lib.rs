@@ -3564,13 +3564,29 @@ async fn stop_engine_for_lock(
 }
 
 /// The App Group upload-staging directory that sign-out and Lock empty.
-/// `None` off macOS, and `None` under `cargo test`: tests never touch the real
-/// App Group container (they hand the functions above a temp dir instead).
+/// `None` off macOS. Under `cargo test` it is never the real App Group
+/// container: `None`, unless the test runs inside
+/// [`with_upload_staging_for_test`] (a folder the test created).
 fn upload_staging_dir_for_session_purge() -> Option<std::path::PathBuf> {
     #[cfg(all(target_os = "macos", not(test)))]
     return Some(crate::ipc_socket::macos_upload_staging_dir());
-    #[cfg(not(all(target_os = "macos", not(test))))]
+    #[cfg(test)]
+    return UPLOAD_STAGING_FOR_TEST.try_with(Clone::clone).ok();
+    #[cfg(not(any(target_os = "macos", test)))]
     None
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Set by [`with_upload_staging_for_test`]: the upload-staging folder this task's sign-out and Lock empty.
+    static UPLOAD_STAGING_FOR_TEST: std::path::PathBuf;
+}
+
+/// Test builds: run `body` with `staging` as the upload-staging folder the session purge empties, so a test drives
+/// the real sign-out or Lock path against a folder it created. Only this task sees it.
+#[cfg(all(test, unix))]
+async fn with_upload_staging_for_test<T>(staging: std::path::PathBuf, body: impl std::future::Future<Output = T>) -> T {
+    UPLOAD_STAGING_FOR_TEST.scope(staging, body).await
 }
 
 /// Empty upload staging at sign-out or Lock, but only after a confirmed
@@ -3992,6 +4008,11 @@ fn disposable_cache_roots() -> Vec<PathBuf> {
     // holding decrypted plaintext as "not ours to remove").
     #[cfg(target_os = "macos")]
     roots.push(crate::ipc_socket::macos_hydrate_cache_dir());
+    // Every folder a Finder write's plaintext copy is staged in, or was staged in by an earlier build (spec
+    // 2026-10-09 §8.4): on macOS the data dir's `beebeeb/finder-writes`, which is under neither root above, so
+    // without it a sign-out would skip those copies and leave plaintext on disk. The folders themselves, never the
+    // whole data dir.
+    roots.extend(engine_bridge::finder_staging_candidates());
     roots
 }
 
@@ -17954,8 +17975,11 @@ mod finder_engine_tests {
 #[cfg(test)]
 mod signout_teardown_tests {
     use super::finder_setup_command_tests::{body_between, production_source};
+    use super::upload_staging_dir_for_session_purge;
     use super::{AppState, clear_session_impl, set_auth_email, set_auth_present};
-    use super::{stop_engine_for_lock, stop_engine_for_sign_out, upload_staging_dir_for_session_purge};
+    // Only the Unix tests (upload staging is a macOS folder; Linux tests drive the same code) use these.
+    #[cfg(unix)]
+    use super::{stop_engine_for_lock, stop_engine_for_sign_out};
     // Only the macOS/Linux assertion in the already-signed-out test names it; on Windows the import would be unused.
     #[cfg(not(target_os = "windows"))]
     use super::UNCONFIRMED_ENGINE_STOP_ERROR;
@@ -17972,10 +17996,12 @@ mod signout_teardown_tests {
 
     // ── Upload staging at sign-out and Lock ─────────────────────────────────
     // A throwaway staging dir in every test: never the real App Group
-    // container (`upload_staging_dir_for_session_purge` is None under test).
+    // container (`upload_staging_dir_for_session_purge` is None under test,
+    // unless the test injects its own folder with `with_upload_staging_for_test`).
 
     /// A staging dir holding a handed-over copy and a stray tree, next to a
     /// file the purge must never reach.
+    #[cfg(unix)]
     fn staging_with_copies() -> (tempfile::TempDir, std::path::PathBuf) {
         let root = tempfile::tempdir().unwrap();
         let staging = root.path().join("upload-staging");
@@ -17987,15 +18013,18 @@ mod signout_teardown_tests {
         (root, staging)
     }
 
+    #[cfg(unix)]
     fn staging_entries(staging: &std::path::Path) -> usize {
         std::fs::read_dir(staging).unwrap().count()
     }
 
+    #[cfg(unix)]
     fn assert_outside_untouched(root: &tempfile::TempDir) {
         assert_eq!(std::fs::read(root.path().join("outside.txt")).unwrap(), b"never purged");
     }
 
     /// An engine whose task already finished: its stop is confirmed at once.
+    #[cfg(unix)]
     fn finished_engine() -> EngineRunner {
         EngineRunner::for_test_with_task(tokio::spawn(async {}))
     }
@@ -18003,6 +18032,7 @@ mod signout_teardown_tests {
     /// An engine whose task has no await point, so even the forced abort
     /// cannot confirm it stopped (3 s graceful + 2 s forced). It ends by
     /// itself after 7 s, so it cannot leak a spinning thread.
+    #[cfg(unix)]
     fn unstoppable_engine() -> EngineRunner {
         let deadline = std::time::Instant::now() + Duration::from_secs(7);
         EngineRunner::for_test_with_task(tokio::task::spawn_blocking(move || {
@@ -18055,6 +18085,72 @@ mod signout_teardown_tests {
             .await
             .expect_err("the retry is refused too");
         assert_eq!(staging_entries(&staging), 2, "and still purges nothing");
+        assert_outside_untouched(&root);
+    }
+
+    /// The sign-out's real path (review of the merge, I1, and spec §8.4): `clear_session_impl` stops the engine
+    /// through `take_slot_and_stop_engine_for_sign_out`, which empties the upload-staging folder, and its purge
+    /// removes the staged Finder-write copies in every staging root the allow-list must accept: the data root
+    /// macOS stages in now and the cache root that earlier builds used. Driven on the already-signed-out path,
+    /// with a real upload-staging folder and the copies' journal rows in the shared scratch state database.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_sign_out_empties_upload_staging_and_the_staged_copies_in_every_staging_root() {
+        let state_dir = crate::state_paths::init_for_test();
+        let state = AppState::default();
+        let acct = test_account(&state, "signout-staging-roots");
+        #[cfg(target_os = "macos")]
+        {
+            let (handle, rx) = crate::finder_setup::driver::FinderSetupHandle::for_test(
+                crate::finder_setup::driver::FinderSetupView::initial(
+                    crate::finder_setup::launch_location::LaunchLocation::Applications,
+                ),
+            );
+            let _ = state.finder_setup.set(handle);
+            tokio::spawn(super::confirm_every_finder_event(rx));
+        }
+        set_auth_present(&state, false);
+        *acct.engine.lock().await = Some(finished_engine());
+        let (root, upload_staging) = staging_with_copies();
+        // The roots of the test sandbox (never the person's real folders, never the shared temp dir).
+        let bases = crate::engine_bridge::FinderStagingBases::current();
+        #[cfg(target_os = "macos")]
+        let staging_roots = [
+            bases.durable_root().expect("the test sandbox has a data dir"),
+            bases.cache_root(),
+        ];
+        #[cfg(not(target_os = "macos"))]
+        let staging_roots = [bases.cache_root()];
+        let copies: Vec<std::path::PathBuf> = staging_roots
+            .iter()
+            .map(|staging_root| {
+                std::fs::create_dir_all(staging_root).unwrap();
+                let copy = staging_root.join(uuid::Uuid::new_v4().to_string());
+                std::fs::write(&copy, b"plaintext").unwrap();
+                copy
+            })
+            .collect();
+
+        let result = super::with_the_shared_state_dir(async {
+            let db = crate::state_db::StateDb::open(state_dir.join(crate::state_paths::STATE_DB_FILENAME)).unwrap();
+            for copy in &copies {
+                db.track_staged_payload(&copy.to_string_lossy(), Some("/source"), false)
+                    .unwrap();
+            }
+            drop(db);
+            super::with_upload_staging_for_test(upload_staging.clone(), clear_session_impl(&state, false)).await
+        })
+        .await;
+
+        assert!(result.is_ok(), "the sign-out completes: {result:?}");
+        assert_eq!(
+            staging_entries(&upload_staging),
+            0,
+            "the sign-out's engine stop empties upload staging"
+        );
+        for copy in &copies {
+            assert!(!copy.exists(), "the staged copy is purged: {copy:?}");
+        }
         assert_outside_untouched(&root);
     }
 
@@ -20023,12 +20119,19 @@ mod finder_setup_wiring_tests {
             );
         }
         // Lock and sign-out stop through their own step (it also empties upload staging after a confirmed stop).
+        // The needle starts with a space: `body_between` starts at the signature, and
+        // `fn take_slot_and_stop_engine_for_sign_out(` itself contains `stop_engine_for_sign_out(` (review of the
+        // merge, I1), so only a call (`= stop_engine_for_sign_out(`) may match.
         for (site, step) in [
-            ("lock_vault", "stop_engine_for_lock("),
-            ("take_slot_and_stop_engine_for_sign_out", "stop_engine_for_sign_out("),
+            ("lock_vault", " stop_engine_for_lock("),
+            ("take_slot_and_stop_engine_for_sign_out", " stop_engine_for_sign_out("),
         ] {
             let body = body_between(&production, &format!("fn {site}("), "\n}\n");
-            assert!(body.contains(step), "{site} stops its engine without {step}");
+            assert!(
+                !format!("fn {site}(").contains(step),
+                "the needle {step:?} must not match {site}'s own signature"
+            );
+            assert!(body.contains(step), "{site} stops its engine without{step}");
         }
         // Sign-out stops through its helper on both paths (Task 12 fix round 2, item 1).
         let clear = body_between(&production, "async fn clear_session_impl(", "\n}\n");
@@ -25660,7 +25763,14 @@ mod account_binding_tests {
     #[test]
     fn a_release_build_sweeps_every_directory_the_engine_stages_into() {
         let candidates = engine_bridge::finder_staging_candidates();
-        assert_eq!(candidates.len(), 2, "the preferred directory and the temp-dir fallback");
+        // macOS: the data root, then the cache root and the temp root that builds before the move used (spec
+        // 2026-10-09 §8.4). Elsewhere: the preferred directory and the temp-dir fallback.
+        let expected = if cfg!(target_os = "macos") { 3 } else { 2 };
+        assert_eq!(
+            candidates.len(),
+            expected,
+            "every directory the engine stages into, now and before"
+        );
         assert_eq!(
             release_staging_dirs(),
             candidates,

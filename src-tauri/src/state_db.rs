@@ -8034,6 +8034,259 @@ mod tests {
         );
     }
 
+    /// Spec §8.4 (the staging folder) and §8.7 S6: engine start unlinks a released copy wherever it was staged,
+    /// by its journalled absolute path: in the data root, and in the old cache root that builds before the move
+    /// used. A copy a queued op still owns stays in each root, with its journal row. (The release journal is
+    /// macOS-only, so the test is too.)
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn engine_start_unlinks_released_copies_in_the_new_and_the_old_root_and_keeps_live_ones() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let bases = crate::engine_bridge::FinderStagingBases::current();
+        let mut released = Vec::new();
+        let mut live = Vec::new();
+        for (label, root) in [
+            ("new", bases.durable_root().expect("the test sandbox has a data dir")),
+            ("old", bases.cache_root()),
+        ] {
+            std::fs::create_dir_all(&root).unwrap();
+            // Landed: marked released in the journal, and no op, resume row or finalization names it.
+            let done = root.join(uuid::Uuid::new_v4().to_string());
+            std::fs::write(&done, b"landed").unwrap();
+            db.track_staged_payload(&done.to_string_lossy(), None, true).unwrap();
+            // Still queued: an upload reads it.
+            let queued_copy = root.join(uuid::Uuid::new_v4().to_string());
+            std::fs::write(&queued_copy, b"waiting").unwrap();
+            db.track_staged_payload(&queued_copy.to_string_lossy(), Some("/source"), false)
+                .unwrap();
+            db.enqueue_operation(&queued(
+                &format!("live-{label}"),
+                OperationKind::UploadVersion,
+                &format!("f-{label}"),
+                Some(&queued_copy.to_string_lossy()),
+            ))
+            .unwrap();
+            released.push(done);
+            live.push(queued_copy);
+        }
+
+        let repair = db.engine_start_repair().unwrap();
+        let removed = crate::staged_payload::remove_released(&db, &repair.released_payloads);
+
+        assert_eq!(removed, 2, "one released copy in each root");
+        for path in &released {
+            assert!(!path.exists(), "a released copy is unlinked: {path:?}");
+        }
+        for path in &live {
+            assert!(path.exists(), "a copy a queued op owns stays: {path:?}");
+        }
+        let mut journalled: Vec<String> = db
+            .staged_payloads_for_signout()
+            .unwrap()
+            .into_iter()
+            .map(|(path, _, _)| path)
+            .collect();
+        journalled.sort();
+        let mut expected: Vec<String> = live.iter().map(|path| path.to_string_lossy().into_owned()).collect();
+        expected.sort();
+        assert_eq!(journalled, expected, "only the live copies keep their journal rows");
+        for path in &live {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    /// Ruling [mm-c5] (the merge of main): F9's auth resume never makes a parked Finder write due again. That holds
+    /// for one its own attempt parked (`stale_base`, `payload_missing`) and for one the snapshot count parked
+    /// (`base_unknown`) while it was paused for `auth`, so a parked write is never resumed as if it were only
+    /// auth-paused. Each keeps its park: attempts used up, and its reason. Only the auth-paused write that never
+    /// parked is due again.
+    #[test]
+    fn the_auth_resume_never_makes_a_parked_finder_write_due() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        for (op_id, reason) in [
+            ("w-stale", ParkReason::StaleBase),
+            ("w-missing", ParkReason::PayloadMissing),
+        ] {
+            db.enqueue_operation(&queued(
+                op_id,
+                OperationKind::UploadVersion,
+                op_id,
+                Some(&format!("/staged/{op_id}")),
+            ))
+            .unwrap();
+            let ClaimOutcome::Claimed(claimed) = db.claim_operation(op_id, 1).unwrap() else {
+                panic!("{op_id} is claimable")
+            };
+            assert!(db.park_claimed(op_id, &claimed.claim_id, reason, 2).unwrap());
+            db.set_write_id_for_test(op_id, &format!("{op_id}-write"));
+        }
+        // Waiting for its base and paused for `auth`; the 10th snapshot without its base parks it.
+        db.enqueue_operation(&queued(
+            "w-base",
+            OperationKind::UploadVersion,
+            "w-base",
+            Some("/staged/w-base"),
+        ))
+        .unwrap();
+        db.0.lock()
+            .unwrap()
+            .execute(
+                "UPDATE operation_queue SET base_pending = 1, write_id = 'w-base-write' WHERE op_id = 'w-base'",
+                [],
+            )
+            .unwrap();
+        db.record_operation_pause("w-base", OperationPauseReason::Auth, Some("HTTP 401 Unauthorized"), 3)
+            .unwrap();
+        for snapshot in 1..10 {
+            assert!(db.note_snapshot_for_base_pending(10 + snapshot).unwrap().is_empty());
+        }
+        assert_eq!(
+            db.note_snapshot_for_base_pending(20).unwrap(),
+            vec![("w-base".to_string(), Some("w-base".to_string()))],
+            "precondition: parked while paused for auth"
+        );
+        // Paused for `auth`, never parked.
+        db.enqueue_operation(&queued(
+            "w-auth",
+            OperationKind::UploadVersion,
+            "w-auth",
+            Some("/staged/w-auth"),
+        ))
+        .unwrap();
+        db.set_write_id_for_test("w-auth", "w-auth-write");
+        db.record_operation_pause("w-auth", OperationPauseReason::Auth, Some("HTTP 401 Unauthorized"), 4)
+            .unwrap();
+        let due = || {
+            db.list_due_operations(i64::MAX)
+                .unwrap()
+                .into_iter()
+                .map(|op| op.op_id)
+                .collect::<Vec<_>>()
+        };
+        assert!(due().is_empty(), "precondition: nothing is due");
+
+        assert_eq!(
+            db.resume_operations_paused_for_auth(500).unwrap(),
+            2,
+            "the two writes paused for auth"
+        );
+
+        assert_eq!(due(), vec!["w-auth".to_string()], "only the write that never parked");
+        for (op_id, reason) in [
+            ("w-stale", ParkReason::StaleBase),
+            ("w-missing", ParkReason::PayloadMissing),
+            ("w-base", ParkReason::BaseUnknown),
+        ] {
+            let op = db.get_operation(op_id).unwrap().expect("a parked write keeps its op");
+            assert_eq!(op.attempts, op.max_attempts, "{op_id} stays parked");
+            assert_eq!(
+                op.last_error.as_deref(),
+                Some(reason.as_str()),
+                "{op_id} keeps its reason"
+            );
+            assert_eq!(
+                op.payload_path.as_deref(),
+                Some(format!("/staged/{op_id}").as_str()),
+                "{op_id} keeps its bytes"
+            );
+        }
+    }
+
+    /// Ruling [mm-c5] (the merge of main): the key-replaced re-mark of an auth-paused Finder write keeps the write
+    /// held. Its token still names the bytes the system holds; its op and its staged copy stay, with the copy's
+    /// journal row; engine start finds nothing to unlink; and the auth resume never makes it due.
+    #[test]
+    fn a_key_replaced_hold_keeps_a_held_finder_write_and_its_staged_copy() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        db.upsert_file(&FileEntry {
+            file_id: "held".into(),
+            path: "a.txt".into(),
+            status: FileStatus::Local,
+            size_bytes: 1,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+        let mut contract = db.get_file_contract_state("held").unwrap().unwrap();
+        contract.current_version = 2;
+        db.set_file_contract_state(&contract).unwrap();
+        let staged = dir.path().join("staged-copy");
+        std::fs::write(&staged, b"the only copy of the save").unwrap();
+        let staged_path = staged.to_string_lossy().into_owned();
+        db.track_staged_payload(&staged_path, Some("/source"), false).unwrap();
+        let AcceptOutcome::Queued { token, .. } = db
+            .accept_finder_write(
+                &FinderAccept {
+                    op_id: "op-held",
+                    file_id: "held",
+                    kind: FinderAcceptKind::Modify {
+                        incoming_base: Some("2"),
+                    },
+                    parent_id: None,
+                    target_path: Some("a.txt"),
+                    metadata_json: "{}",
+                    payload_path: &staged_path,
+                    size_bytes: 25,
+                    modified_at: 2,
+                    backup_source_key: None,
+                    now: 2,
+                },
+                &|_, _| Vec::new(),
+            )
+            .unwrap()
+        else {
+            panic!("the save is queued");
+        };
+        db.record_operation_pause("op-held", OperationPauseReason::Auth, Some("HTTP 401 Unauthorized"), 3)
+            .unwrap();
+
+        assert_eq!(db.hold_operations_paused_for_auth_as_key_replaced(500).unwrap(), 1);
+
+        let presentation = db.item_presentation("held").unwrap().unwrap();
+        assert_eq!(
+            presentation.held.map(|held| held.token()),
+            Some(token),
+            "the write stays held under its token"
+        );
+        assert!(presentation.held_write_queued, "its op still carries the write");
+        let op = db.get_operation("op-held").unwrap().expect("the op is kept");
+        assert_eq!(op.payload_path.as_deref(), Some(staged_path.as_str()), "with its copy");
+        let reason: Option<String> =
+            db.0.lock()
+                .unwrap()
+                .query_row(
+                    "SELECT paused_reason FROM operation_queue WHERE op_id = 'op-held'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+        assert_eq!(reason.as_deref(), Some("key_replaced"));
+        assert_eq!(
+            db.staged_payloads_for_signout().unwrap(),
+            vec![(staged_path.clone(), Some("/source".to_string()), false)],
+            "the copy's journal row stays, not released"
+        );
+        assert!(
+            !db.engine_start_repair()
+                .unwrap()
+                .released_payloads
+                .contains(&staged_path),
+            "engine start finds nothing to unlink"
+        );
+        assert!(staged.exists(), "the staged copy is on disk");
+        assert_eq!(db.resume_operations_paused_for_auth(600).unwrap(), 0);
+        assert!(
+            db.list_due_operations(i64::MAX).unwrap().is_empty(),
+            "never resumed as if auth-paused"
+        );
+    }
+
     /// S2 (parked from Task 2's review): a park or a pause written under an old claim,
     /// on a row that still exists, changes nothing. The claim id, not the op id alone,
     /// is the key.

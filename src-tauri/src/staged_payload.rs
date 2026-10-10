@@ -102,6 +102,21 @@ pub fn remove(db: &StateDb, path: &Path) -> anyhow::Result<()> {
     db.forget_staged_payload(&path.to_string_lossy())?;
     Ok(())
 }
+/// Engine start (spec §8.7 S6): unlink the released copies `StateDb::engine_start_repair` listed,
+/// each by its journalled absolute path, so a copy staged in a folder an earlier build used goes
+/// too (spec §8.4). A copy that cannot be removed keeps its row for the next start. Returns how
+/// many were removed.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+pub fn remove_released(db: &StateDb, paths: &[String]) -> usize {
+    let mut removed = 0;
+    for path in paths {
+        match remove(db, Path::new(path)) {
+            Ok(()) => removed += 1,
+            Err(e) => tracing::warn!(error = %e, "released upload copy kept; removal is retried at the next start"),
+        }
+    }
+    removed
+}
 pub fn same_bytes(a: &Path, b: &Path) -> std::io::Result<bool> {
     same_contents(std::fs::File::open(a)?, std::fs::File::open(b)?)
 }

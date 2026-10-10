@@ -237,6 +237,8 @@ pub struct EngineBridge {
 #[derive(Default)]
 pub(crate) struct Seams {
     hooks: std::sync::Mutex<HashMap<&'static str, SeamHook>>,
+    /// Staging bases this bridge uses instead of the process's ([`Self::stage_under`]).
+    staging_bases: std::sync::Mutex<Option<FinderStagingBases>>,
 }
 
 #[cfg(test)]
@@ -254,6 +256,15 @@ impl Seams {
         if let Some(hook) = hook {
             hook();
         }
+    }
+
+    /// From now on this bridge stages Finder writes under `bases`, not the test sandbox.
+    pub(crate) fn stage_under(&self, bases: FinderStagingBases) {
+        *self.staging_bases.lock().unwrap() = Some(bases);
+    }
+
+    fn staging_bases(&self) -> Option<FinderStagingBases> {
+        self.staging_bases.lock().unwrap().clone()
     }
 }
 
@@ -502,6 +513,16 @@ impl EngineBridge {
         self.seams.fire(name);
         #[cfg(not(test))]
         let _ = name;
+    }
+
+    /// Where this bridge stages a Finder write's plaintext copy ([`default_finder_staging_root`]). A test may
+    /// point one bridge at bases of its own.
+    fn finder_staging_root(&self) -> Result<PathBuf, FinderStagingUnavailable> {
+        #[cfg(test)]
+        if let Some(bases) = self.seams.staging_bases() {
+            return finder_staging_root_from(&bases);
+        }
+        default_finder_staging_root()
     }
 
     /// Report transfer progress to `board` (task 1683 slice 2).
@@ -1960,7 +1981,12 @@ impl EngineBridge {
             .contents_path
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("Finder create file callback did not include contents"))?;
-        let staged = stage_finder_contents(&self.db, Path::new(contents_path), contents)?;
+        let staged = stage_finder_contents(
+            &self.db,
+            self.finder_staging_root()?,
+            Path::new(contents_path),
+            contents,
+        )?;
         let staged_path = staged.path().to_string();
         let size_bytes = std::fs::metadata(&staged_path).map(|m| m.len() as i64).unwrap_or(0);
         let mime = target
@@ -2182,7 +2208,12 @@ impl EngineBridge {
         file_id: &str,
         item_contract: Option<&FileContractState>,
     ) -> anyhow::Result<PreparedFinderModify> {
-        let staged = stage_finder_contents(&self.db, Path::new(contents_path), contents)?;
+        let staged = stage_finder_contents(
+            &self.db,
+            self.finder_staging_root()?,
+            Path::new(contents_path),
+            contents,
+        )?;
         let staged_path = staged.path().to_string();
         let staged_metadata = std::fs::metadata(&staged_path).ok();
         let size_bytes = staged_metadata.as_ref().map(|m| m.len() as i64).unwrap_or(0);
@@ -3716,7 +3747,7 @@ impl EngineBridge {
 
         let local_path = local_file_path_under_sync_root(sync_root, &entry.path)?;
         let staged =
-            crate::staged_payload::StagedPayload::copy(self.db.clone(), &local_path, default_finder_staging_root())?;
+            crate::staged_payload::StagedPayload::copy(self.db.clone(), &local_path, self.finder_staging_root()?)?;
         let staged_path = staged.path().to_string();
         let staged_size = std::fs::metadata(&staged_path).map(|m| m.len()).unwrap_or(0);
 
@@ -5313,28 +5344,173 @@ fn linux_thumbnail_source_path_for_entry(entry: &FileEntry) -> Option<PathBuf> {
     crate::linux_thumbnail::source_path_under_sync_root(&sync_root, &entry.path)
 }
 
-/// The daemon's own copy of a Finder write's contents: from the opened file
-/// when the caller holds one (only `source` is journaled then, as a label),
-/// else from `source` by path.
+/// The daemon's own copy of a Finder write's contents, in `root`: from the
+/// opened file when the caller holds one (only `source` is journaled then, as
+/// a label), else from `source` by path.
 fn stage_finder_contents(
     db: &Arc<StateDb>,
+    root: PathBuf,
     source: &Path,
     opened: Option<&std::fs::File>,
 ) -> anyhow::Result<crate::staged_payload::StagedPayload> {
     match opened {
-        Some(file) => {
-            crate::staged_payload::StagedPayload::copy_from_file(db.clone(), file, source, default_finder_staging_root())
-        }
-        None => crate::staged_payload::StagedPayload::copy(db.clone(), source, default_finder_staging_root()),
+        Some(file) => crate::staged_payload::StagedPayload::copy_from_file(db.clone(), file, source, root),
+        None => crate::staged_payload::StagedPayload::copy(db.clone(), source, root),
     }
 }
 
-fn default_finder_staging_root() -> PathBuf {
-    let primary = finder_staging_cache_base().join("beebeeb").join("finder-writes");
+/// The folders a Finder write's plaintext copy can be staged in, from the bases this process
+/// resolves: the app's data dir, its cache dir and the temp dir. Paths only: nothing is created
+/// or touched until a root is chosen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FinderStagingBases {
+    pub(crate) data: Option<PathBuf>,
+    pub(crate) cache: Option<PathBuf>,
+    pub(crate) temp: PathBuf,
+}
+
+impl FinderStagingBases {
+    /// This process's bases: the OS's data, cache and temp dirs.
+    #[cfg(not(test))]
+    pub(crate) fn current() -> Self {
+        Self {
+            data: dirs::data_dir(),
+            cache: dirs::cache_dir(),
+            temp: std::env::temp_dir(),
+        }
+    }
+
+    /// A test build stages under a per-process sandbox, never the person's real data or cache
+    /// dir: the installed app stages there too, and every test that queues a Finder write
+    /// (engine bridge, IPC socket, watcher) would otherwise add plaintext files to it. A test
+    /// points one bridge at bases of its own with `Seams::stage_under`. Pinned by
+    /// `unit_tests_stage_finder_writes_in_a_sandbox_never_the_real_cache`.
+    #[cfg(test)]
+    pub(crate) fn current() -> Self {
+        Self {
+            data: Some(crate::test_sandbox::dir("data").expect("create the unit-test sandbox")),
+            cache: Some(crate::test_sandbox::dir("cache").expect("create the unit-test sandbox")),
+            temp: std::env::temp_dir(),
+        }
+    }
+
+    /// `<data dir>/beebeeb/finder-writes`, where macOS stages: a folder the system does not
+    /// purge. `None` when the OS gives no data dir.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub(crate) fn durable_root(&self) -> Option<PathBuf> {
+        self.data
+            .as_ref()
+            .map(|data| data.join("beebeeb").join("finder-writes"))
+    }
+
+    /// `<cache dir>/beebeeb/finder-writes` (the temp dir when the OS gives no cache dir): where
+    /// every platform staged before, and where Windows and Linux still stage.
+    pub(crate) fn cache_root(&self) -> PathBuf {
+        self.cache
+            .as_ref()
+            .unwrap_or(&self.temp)
+            .join("beebeeb")
+            .join("finder-writes")
+    }
+
+    /// `<temp dir>/beebeeb/finder-writes`: the fallback when the cache root is not writable
+    /// (Windows and Linux; macOS used it before as well).
+    pub(crate) fn temp_root(&self) -> PathBuf {
+        self.temp.join("beebeeb").join("finder-writes")
+    }
+
+    /// Every folder a staged copy can be in. On macOS: the data root, then the cache root and the
+    /// temp root, which builds before the move staged into, so their copies are still found. Elsewhere:
+    /// the cache root and the temp root.
+    pub(crate) fn candidates(&self) -> Vec<PathBuf> {
+        let mut candidates = Vec::with_capacity(3);
+        #[cfg(target_os = "macos")]
+        candidates.extend(self.durable_root());
+        candidates.extend([self.cache_root(), self.temp_root()]);
+        candidates
+    }
+}
+
+/// A Finder write could not be staged: the staging folder cannot be created or written to, and
+/// on macOS nothing falls back to a folder the system may purge (spec §8.4). The reply is
+/// `WriteRetryLater`, which the extension reports as a transient error, so the system keeps the
+/// change and retries. Path-free on purpose: the text reaches the extension and the person.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+pub(crate) struct FinderStagingUnavailable(Option<std::io::ErrorKind>);
+
+impl std::fmt::Display for FinderStagingUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(kind) => write!(f, "the staging folder is unavailable: {kind}"),
+            None => f.write_str("the staging folder is unavailable: no data directory"),
+        }
+    }
+}
+
+impl std::error::Error for FinderStagingUnavailable {}
+
+/// Where this process stages a Finder write's plaintext copy now.
+fn default_finder_staging_root() -> Result<PathBuf, FinderStagingUnavailable> {
+    finder_staging_root_from(&FinderStagingBases::current())
+}
+
+/// The staging root `bases` give on this platform.
+fn finder_staging_root_from(bases: &FinderStagingBases) -> Result<PathBuf, FinderStagingUnavailable> {
+    #[cfg(target_os = "macos")]
+    {
+        durable_finder_staging_root(bases)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(cache_finder_staging_root(bases))
+    }
+}
+
+/// macOS: the staged copy can be the only copy of a save until it uploads (once the extension
+/// has handed the write over, the system counts the item as synced and may evict its bytes), so
+/// it lives in the app's data dir (`Library/Application Support`), never in the cache or temp
+/// dir, which the system may purge. The folder is private (`0700`, excluded from backups: it
+/// holds plaintext) and must take a file. When it cannot be created or written to, the accept
+/// fails with [`FinderStagingUnavailable`], and nothing falls back.
+#[cfg(any(target_os = "macos", test))]
+fn durable_finder_staging_root(bases: &FinderStagingBases) -> Result<PathBuf, FinderStagingUnavailable> {
+    let root = bases.durable_root().ok_or(FinderStagingUnavailable(None))?;
+    let unavailable = |e: std::io::Error| FinderStagingUnavailable(Some(e.kind()));
+    prepare_private_staging_root(&root).map_err(unavailable)?;
+    verify_staging_root_writable(&root).map_err(unavailable)?;
+    Ok(root)
+}
+
+/// Create (if needed) and harden the staging root: owner-only `0700`, excluded from backups,
+/// a real directory this user owns, never a symlink (the App Group staging folders' hardening).
+#[cfg(target_os = "macos")]
+fn prepare_private_staging_root(root: &Path) -> std::io::Result<()> {
+    crate::ipc_socket::macos_ensure_private_staging_dir(root)
+}
+
+/// Test builds off macOS: the same `0700` folder (there is no backup exclusion to set).
+#[cfg(all(unix, test, not(target_os = "macos")))]
+fn prepare_private_staging_root(root: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(root)?;
+    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))
+}
+
+/// Test builds on Windows: the folder only.
+#[cfg(all(windows, test))]
+fn prepare_private_staging_root(root: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(root)
+}
+
+/// Windows and Linux: the cache root, or the temp root when the cache root is not writable.
+#[cfg(not(target_os = "macos"))]
+fn cache_finder_staging_root(bases: &FinderStagingBases) -> PathBuf {
+    let primary = bases.cache_root();
     match verify_staging_root_writable(&primary) {
         Ok(()) => primary,
         Err(e) => {
-            let fallback = std::env::temp_dir().join("beebeeb").join("finder-writes");
+            let fallback = bases.temp_root();
             tracing::warn!(
                 path = %primary.display(),
                 fallback = %fallback.display(),
@@ -5346,31 +5522,12 @@ fn default_finder_staging_root() -> PathBuf {
     }
 }
 
-/// The directory that holds `beebeeb/finder-writes`: the user's cache dir (the temp dir if the
-/// OS gives none).
-#[cfg(not(test))]
-fn finder_staging_cache_base() -> PathBuf {
-    dirs::cache_dir().unwrap_or_else(std::env::temp_dir)
-}
-
-/// A test build stages under a per-process sandbox, never the person's real
-/// `~/Library/Caches/beebeeb/finder-writes`: the installed app stages there too, and every test
-/// that queues a Finder write (engine bridge, IPC socket, watcher: 17 of them leave a plaintext
-/// copy behind) would otherwise add files to it. Pinned by
-/// `unit_tests_stage_finder_writes_in_a_sandbox_never_the_real_cache`.
-#[cfg(test)]
-fn finder_staging_cache_base() -> PathBuf {
-    crate::test_sandbox::dir("cache").expect("create the unit-test sandbox")
-}
-
-/// Where Finder-write plaintext copies are staged: the preferred directory and the temp-dir fallback
-/// (`default_finder_staging_root` picks one of them). The account reset and the sign-out purge sweep both, so a
-/// copy no row points at any more does not outlive the account. Paths only: nothing is created or touched here.
+/// Where Finder-write plaintext copies are staged, and were staged by earlier builds
+/// ([`FinderStagingBases::candidates`]). The account reset and the sign-out purge sweep every one, so a copy no
+/// row points at any more does not outlive the account, and the sign-out purge's allow-list accepts every one.
+/// Paths only: nothing is created or touched here.
 pub(crate) fn finder_staging_candidates() -> Vec<PathBuf> {
-    vec![
-        finder_staging_cache_base().join("beebeeb").join("finder-writes"),
-        std::env::temp_dir().join("beebeeb").join("finder-writes"),
-    ]
+    FinderStagingBases::current().candidates()
 }
 
 fn verify_staging_root_writable(root: &Path) -> std::io::Result<()> {
@@ -8042,22 +8199,116 @@ mod tests {
         handle.join().unwrap();
     }
 
-    /// R4 (task 1834 fix round 2): the directories the account reset and the sign-out purge sweep are exactly the
-    /// places the engine can stage into: the preferred one and the temp-dir fallback, in that order, and the one
-    /// `default_finder_staging_root()` picks is always among them.
+    /// R4 (task 1834 fix round 2), and the move of the macOS staging root (spec §8.4): the directories the
+    /// account reset and the sign-out purge sweep are exactly the places the engine stages into now and staged
+    /// into before. On macOS: the data root, then the cache root and the temp root that earlier builds used.
+    /// Elsewhere: the cache root and its temp fallback. The one `default_finder_staging_root()` picks is always
+    /// among them.
     #[test]
     fn the_swept_staging_directories_are_the_ones_the_engine_stages_into() {
+        let bases = FinderStagingBases::current();
         let candidates = finder_staging_candidates();
-        assert_eq!(
-            candidates,
-            vec![
-                finder_staging_cache_base().join("beebeeb").join("finder-writes"),
-                std::env::temp_dir().join("beebeeb").join("finder-writes"),
-            ]
-        );
+        #[cfg(target_os = "macos")]
+        let expected = vec![
+            bases.durable_root().expect("the test sandbox has a data dir"),
+            bases.cache_root(),
+            bases.temp_root(),
+        ];
+        #[cfg(not(target_os = "macos"))]
+        let expected = vec![bases.cache_root(), bases.temp_root()];
+        assert_eq!(candidates, expected);
         assert!(
-            candidates.contains(&default_finder_staging_root()),
+            candidates.contains(&default_finder_staging_root().expect("the sandbox root is writable")),
             "the engine stages somewhere the sweep covers"
+        );
+    }
+
+    /// Spec §8.4, the staging root (macOS): `<data dir>/beebeeb/finder-writes`, never under the cache dir or the
+    /// temp dir, the system may purge either. The folder is private: mode 0700, and excluded from backups on
+    /// macOS (it holds plaintext). Without a data dir, or with a root that cannot be created or written to, it is
+    /// the typed refusal, and nothing is created in the cache or temp dir instead.
+    #[test]
+    fn the_staging_root_is_under_the_data_dir_never_the_cache_or_temp_dir() {
+        let base = tempfile::tempdir().unwrap();
+        let (data, cache, temp) = (
+            base.path().join("data"),
+            base.path().join("cache"),
+            base.path().join("temp"),
+        );
+        let bases = FinderStagingBases {
+            data: Some(data.clone()),
+            cache: Some(cache.clone()),
+            temp: temp.clone(),
+        };
+        let root = durable_finder_staging_root(&bases).expect("a writable data dir takes the copy");
+        assert_eq!(root, data.join("beebeeb").join("finder-writes"), "under the data dir");
+        assert!(
+            !root.starts_with(&cache) && !root.starts_with(&temp),
+            "never under the cache or temp dir: {root:?}"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+                0o700,
+                "owner-only: it holds plaintext"
+            );
+        }
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let attr = std::ffi::CString::new("com.apple.metadata:com_apple_backup_excludeItem").unwrap();
+            let path = std::ffi::CString::new(root.as_os_str().as_bytes()).unwrap();
+            let mut buf = vec![0u8; 64];
+            // SAFETY: both strings are NUL-terminated and live for the call; `buf` is ours, with its length.
+            let n = unsafe {
+                libc::getxattr(
+                    path.as_ptr(),
+                    attr.as_ptr(),
+                    buf.as_mut_ptr() as *mut libc::c_void,
+                    buf.len(),
+                    0,
+                    0,
+                )
+            };
+            assert!(n > 0, "excluded from backups (getxattr returned {n})");
+            assert_eq!(&buf[..n as usize], b"com.apple.backupd");
+        }
+        assert_eq!(
+            std::fs::read_dir(&root).unwrap().count(),
+            0,
+            "the write check leaves nothing behind"
+        );
+
+        // No data dir: refused, with no fallback.
+        let no_data = FinderStagingBases {
+            data: None,
+            ..bases.clone()
+        };
+        assert_eq!(
+            durable_finder_staging_root(&no_data),
+            Err(FinderStagingUnavailable(None))
+        );
+
+        // A root that cannot be created: a file where its parent folder would be.
+        let blocked = base.path().join("blocked");
+        std::fs::create_dir(&blocked).unwrap();
+        std::fs::write(blocked.join("beebeeb"), b"in the way").unwrap();
+        let refused = durable_finder_staging_root(&FinderStagingBases {
+            data: Some(blocked),
+            ..bases.clone()
+        })
+        .expect_err("a root that cannot be created is refused");
+        assert!(refused.0.is_some(), "the refusal names the error kind: {refused:?}");
+        assert!(
+            refused.to_string().starts_with("the staging folder is unavailable") && !refused.to_string().contains('/'),
+            "a fixed reason, no path: {refused}"
+        );
+
+        assert!(
+            !cache.exists() && !temp.exists(),
+            "nothing was created in the cache or temp dir"
         );
     }
 
@@ -8068,8 +8319,8 @@ mod tests {
         // on this machine, so a test build must resolve to a per-process sandbox next to the test
         // binary: otherwise every test that queues a Finder write drops plaintext files there.
         // Only paths are computed (and the sandbox dir is created); the real dir is not touched.
-        let root = default_finder_staging_root();
-        // The specific real directory, not the whole cache dir: a `CARGO_TARGET_DIR` under
+        let root = default_finder_staging_root().expect("the sandbox root is writable");
+        // The specific real directories, not the whole cache or data dir: a `CARGO_TARGET_DIR` under
         // `~/Library/Caches` (or `~/.cache`) puts the sandbox inside the cache dir legitimately.
         let real_staging = dirs::cache_dir()
             .expect("a user cache dir exists on a dev machine or CI runner")
@@ -8078,6 +8329,13 @@ mod tests {
             !root.starts_with(&real_staging),
             "{root:?} is inside the real staging dir {real_staging:?}"
         );
+        if let Some(data) = dirs::data_dir() {
+            let real_durable = data.join("beebeeb/finder-writes");
+            assert!(
+                !root.starts_with(&real_durable),
+                "{root:?} is inside the real staging dir {real_durable:?}"
+            );
+        }
         let exe_dir = std::env::current_exe()
             .expect("test binary path")
             .parent()
@@ -16404,6 +16662,84 @@ mod tests {
             base,
             "the last save's name stays after it lands"
         );
+    }
+
+    /// Spec §8.4, the old folders: a save staged before the move names its copy by an absolute path in the old
+    /// cache root (the op and the journal). It still uploads from that copy, and the copy is released and
+    /// unlinked after the landing, with its journal row, as before.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_save_staged_in_the_old_cache_root_still_uploads_and_its_copy_is_released() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [91u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_uploaded_row(&bridge, &server, "old-root");
+        fp_save(
+            &bridge,
+            dir.path(),
+            "old-root",
+            "notes.txt",
+            b"saved before the move",
+            "1",
+        );
+        let ops = bridge.db.list_due_operations(i64::MAX).unwrap();
+        assert_eq!(ops.len(), 1);
+        let staged = PathBuf::from(ops[0].payload_path.clone().expect("a save carries its copy"));
+        let bases = FinderStagingBases::current();
+        assert!(
+            staged.starts_with(bases.durable_root().unwrap()),
+            "a new save stages in the data root: {staged:?}"
+        );
+        // Where a build before the move staged it: the old cache root.
+        let old_root = bases.cache_root();
+        std::fs::create_dir_all(&old_root).unwrap();
+        let old_copy = old_root.join(uuid::Uuid::new_v4().to_string());
+        std::fs::rename(&staged, &old_copy).unwrap();
+        {
+            let conn = bridge.db.hold_lock_for_test();
+            let (old, new) = (
+                old_copy.to_string_lossy().into_owned(),
+                staged.to_string_lossy().into_owned(),
+            );
+            for sql in [
+                "UPDATE operation_queue SET payload_path = ?1 WHERE payload_path = ?2",
+                "UPDATE staged_payloads SET path = ?1 WHERE path = ?2",
+            ] {
+                assert_eq!(conn.execute(sql, rusqlite::params![old, new]).unwrap(), 1, "{sql}");
+            }
+        }
+
+        drain_upload_queue(&bridge, &sync_root).await;
+
+        let state = server.finish();
+        assert_eq!(
+            state.init_summary(),
+            vec![(json!("old-root"), json!(1), 201)],
+            "the save uploads once, on its base"
+        );
+        assert_eq!(
+            state.latest_plaintext("old-root", master_key),
+            b"saved before the move",
+            "from the copy in the old root"
+        );
+        assert!(bridge.db.list_due_operations(i64::MAX).unwrap().is_empty());
+        assert!(
+            !old_copy.exists(),
+            "the copy in the old root is unlinked after the landing"
+        );
+        let journalled: i64 = bridge
+            .db
+            .hold_lock_for_test()
+            .query_row(
+                "SELECT COUNT(*) FROM staged_payloads WHERE path = ?1",
+                [old_copy.to_string_lossy()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(journalled, 0, "and its journal row is gone");
     }
 
     // ── Rule 2, the snapshot side: version 0 and versionless replaces (spec §6.3.2–§6.3.4) ──

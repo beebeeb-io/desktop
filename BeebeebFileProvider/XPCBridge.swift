@@ -419,7 +419,7 @@ final class XPCBridge {
             contents: contentsURL.flatMap { IPCContentFingerprint.ofFile(at: $0) }
         )
         Self.logRequestID(of: request, operation: "create")
-        return try decodeWriteResponse(sendRequest(
+        return try Self.decodeWriteResponse(sendRequest(
             request,
             timeoutSeconds: IPCFraming.writeQueueTimeoutSeconds(hasContents: contentsURL != nil)
         ))
@@ -456,7 +456,7 @@ final class XPCBridge {
             contents: contentsURL.flatMap { IPCContentFingerprint.ofFile(at: $0) }
         )
         Self.logRequestID(of: request, operation: "modify")
-        return try decodeWriteResponse(sendRequest(
+        return try Self.decodeWriteResponse(sendRequest(
             request,
             timeoutSeconds: IPCFraming.writeQueueTimeoutSeconds(hasContents: contentsURL != nil)
         ))
@@ -503,7 +503,7 @@ final class XPCBridge {
         if let baseVersionIdentifier {
             payload["base_version_identifier"] = baseVersionIdentifier
         }
-        return try decodeWriteResponse(sendRequest(["QueueFinderDelete": payload]))
+        return try Self.decodeWriteResponse(sendRequest(["QueueFinderDelete": payload]))
     }
 
     // MARK: - Thumbnails (task 1699)
@@ -685,7 +685,18 @@ final class XPCBridge {
         )
     }
 
-    private func decodeWriteResponse(_ response: [String: Any]) throws -> WriteQueueResult {
+    /// Decode the daemon's answer to a create, modify or delete.
+    /// `static` (not `private`) so the framing harness can pin which error each
+    /// answer becomes (BeebeebFileProviderTests).
+    static func decodeWriteResponse(_ response: [String: Any]) throws -> WriteQueueResult {
+        // The app could not stage the write now (its staging folder cannot take the copy;
+        // nothing was queued). TRANSIENT, like a copy this extension could not stage: the
+        // system keeps the change on disk and retries the write (docs/IPC_PROTOCOL.md).
+        if let retry = response["WriteRetryLater"] as? [String: Any] {
+            throw BeebeebIPCError.uploadStagingFailed(
+                retry["message"] as? String ?? "the app could not stage it now"
+            )
+        }
         if let error = response["Error"] as? [String: Any] {
             throw BeebeebIPCError.daemonRejected(error["message"] as? String ?? "Finder write failed")
         }
