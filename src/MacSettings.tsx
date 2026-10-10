@@ -568,6 +568,10 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
     const result = await command<FinderInstallState>('install_finder_location', { path: null })
     setAttempting(false)
     setFinder((previous) => finderInstallStateAfterAttempt(result, previous, commandUnavailableLabel('install_finder_location')))
+    // 1882 r5: the attempt's own cleanup, or the rollback of a failed one, may have kept files and
+    // saved their folder while it ran, whether it then succeeded or failed. The row read the saved
+    // folder once on open, so read it again here instead of waiting for a tab switch.
+    await loadKept()
   }
 
   // A one-off action that gates nothing: a failure is a toast (house rule).

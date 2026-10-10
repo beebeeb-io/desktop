@@ -716,6 +716,68 @@ describe('Sync tab', () => {
     expect(buttons(m)).not.toContain('Dismiss')
   })
 
+  // 1882 r5 (review thread on `addToFinder`): Add to Finder can save a kept folder while it runs
+  // (its own cleanup, or the rollback of a failed attempt). The open Sync tab read the saved
+  // folder once, on mount, so it would not show that row until the person left and came back.
+  describe('a kept folder saved while Add to Finder ran', () => {
+    const keptReads = (m: Mounted) => m.calls.filter((c) => c.name === 'kept_unsynced_folder')
+
+    test('a failed attempt whose rollback kept files shows the row without leaving the tab', async () => {
+      const { m, st } = await openSync({
+        finder: finder.missing,
+        install: () => { st.kept = KEPT; return finder.failed },
+      })
+      expect(keptNotes(m)).toHaveLength(0)
+      await press(m, 'Add to Finder')
+      expect(keptNotes(m)).toHaveLength(1)
+      // The failed install keeps its own mono line ("reason: timeout"); the row adds the folder.
+      expect(monoLines(m).map((el) => textOf(el.props.children).trim())).toEqual(['reason: timeout', KEPT])
+      expect(visibleErrorSurfaces(m)).toHaveLength(1) // the install failure itself is still ONE inline alert
+      expect(m.toasts).toEqual([])
+    })
+
+    test('a rejected attempt whose rollback kept files shows the row', async () => {
+      const { m, st } = await openSync({
+        finder: finder.missing,
+        install: () => { st.kept = KEPT; throw new Error('Finder location must be absolute: relative/path') },
+      })
+      await press(m, 'Add to Finder')
+      expect(keptNotes(m)).toHaveLength(1)
+      expect(visibleErrorSurfaces(m)).toHaveLength(1)
+    })
+
+    test('a successful attempt that saved a kept folder shows the row too', async () => {
+      const { m, st } = await openSync({
+        finder: finder.missing,
+        install: () => { st.kept = KEPT; return finder.installed },
+      })
+      await press(m, 'Add to Finder')
+      expect(buttons(m)).toContain('Repair…')
+      expect(keptNotes(m)).toHaveLength(1)
+      expect(visibleErrorSurfaces(m)).toEqual([])
+    })
+
+    test('a newer folder replaces the older one the row was showing', async () => {
+      const NEWER = '/Users/sam/Library/CloudStorage/Beebeeb (kept 2)'
+      const { m, st } = await openSync({
+        kept: KEPT,
+        finder: finder.missing,
+        install: () => { st.kept = NEWER; return finder.failed },
+      })
+      await press(m, 'Add to Finder')
+      expect(keptNotes(m)).toHaveLength(1)
+      expect(monoLines(m).map((el) => textOf(el.props.children).trim())).toEqual(['reason: timeout', NEWER])
+    })
+
+    test('an attempt that kept nothing reads the saved folder again and shows no row', async () => {
+      const { m } = await openSync({ finder: finder.missing, install: () => finder.failed })
+      expect(keptReads(m)).toHaveLength(1) // on open
+      await press(m, 'Add to Finder')
+      expect(keptReads(m)).toHaveLength(2) // and once after the attempt
+      expect(keptNotes(m)).toHaveLength(0)
+    })
+  })
+
   test('a repair that kept un-synced files says so in one status note, with the folder in mono', async () => {
     const { m } = await openSync({ repair: () => ({ pending_operations_preserved: 0, warnings: [], preserved_location: KEPT }) })
     await press(m, 'Repair…')
