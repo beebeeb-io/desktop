@@ -18,6 +18,22 @@ answers, for example "(review C1)". The main changes:
 - copies never overwrite (I5);
 - the Rust ↔ webview contract is named (I6);
 - "Show in Finder" and the device steps can fail (I7, I8).
+
+**Revised 2026-10-10 (revision 2):** the re-review of revision 1 (17 of 18 findings addressed, I6 still open for a
+window close, ten Minors N1-N10, one out-of-scope note on U10) is answered in place, marked the same way: old text
+struck, new text beneath, tagged "(re-review I6)", "(re-review N3)" and so on. The main changes:
+- closing the Settings window ends the flow. On macOS a close hides that window and never destroys it, so the phase now
+  ends on `CloseRequested`, the window's ask snapshot is dropped, and the sheet resets (I6; U34, F11, D10);
+- the keep step uses the snapshot the gate accepted, by value, never a newer one (N3);
+- A2's copy sentence follows the number of files that have a copy (N1);
+- no name can fail a sign-out any more: a file and a directory that collide, in either order, and a path too long for
+  macOS each get a free name (N4);
+- a purge failure after the keep step leaves every waiting write's staged copy in place, unless it fails on one of
+  those copies itself, and the next ask names the folder that sign-out made (N8);
+- U10 names what may run between the engine stop, the keep step and the purge (the out-of-scope note);
+- the tests, the device steps and one citation are fixed where they could pass without proving anything (N2, N5, N6,
+  N7, N9, N10).
+
 ~~**Read at:**~~
 ~~- `main:` = desktop `main` at `8f7e91e` (task 1882 merged);~~
 ~~- `1873:` = the 1873 branch at `c4a24f9` (round 4, still being implemented; read only);~~
@@ -34,6 +50,11 @@ answers, for example "(review C1)". The main changes:
   purge order (files first, then rows: `b00adb5:lib.rs:4183-4232`), so every `main:` purge citation here holds for it.
 - Crates, read from the local registry: `tauri-plugin-opener` 2.5.4, `dirs` 6.0.0, `libc` 0.2.189 (the version
   `src-tauri/Cargo.lock` pins).
+- Revision 2 (re-review): `main` is still `af9b351`, read through `git show`. The 1873 branch's head is now `b00adb5`;
+  this revision adds no `1873:` citation. The new `main:` citations are the window handling (`lib.rs`,
+  `surfaces/policy.rs` and `surfaces/registry.rs` under `src-tauri/src/`, `src-tauri/tauri.conf.json`,
+  `src-tauri/capabilities/default.json`) and the public CI (`.github/workflows/ci.yml`). Two macOS SDK headers were read
+  on the authoring Mac: `sys/clonefile.h` and `sys/syslimits.h`.
 
 Paths are short: `lib.rs`, `state_db.rs`, `engine_bridge.rs`, `ipc_socket.rs`, `runner.rs`, `link_health.rs`,
 `finder_removal.rs` and `staged_payload.rs` live in `src-tauri/src/`; `.tsx`/`.ts` files live in `src/`.
@@ -107,7 +128,8 @@ macOS. A plain sign-out has no count anywhere, so the lead's reading ("a plain s
 | **Copied** | Per waiting file: the newest waiting write whose staged copy exists; plus every waiting write of that file with `write_origin = earlier_build` whose staged copy exists (§7.2). (review C1) |
 | **Covered** | A waiting write with `write_origin = minted` that is older than a copied write of the same `file_id`. The newer write holds its bytes (`1873 spec §8.2`, line 661), so a covered write counts as kept for W1, W6 and the purge guard. (review C1) |
 | **Kept** | Copied or covered. (review C1) |
-| **Ask snapshot** | What one ask showed the person, held by the app (never by the webview) under an `ask_id`: the counts, the `file_id` of every waiting file, the op id of every other waiting change, and the op id of every missing write. Only the newest snapshot is valid; a newer count replaces it (§5.1). (review I3) |
+| **File with a copy** | A waiting file with at least one copied write, so the keep step puts a file for it in the kept folder. The ask counts these as `copiedFiles` (c), and A2's second sentence follows c (§11). A file can be missing and have a copy at once: an earlier-build write's copy is gone, a newer write's copy exists. (re-review N1) |
+| **Ask snapshot** | ~~What one ask showed the person, held by the app (never by the webview) under an `ask_id`: the counts, the `file_id` of every waiting file, the op id of every other waiting change, and the op id of every missing write. Only the newest snapshot is valid; a newer count replaces it (§5.1). (review I3)~~ What one ask showed the person, held by the app (never by the webview) under an `ask_id`: the counts (`files`, `copiedFiles`, `others`, `missingFiles`), the earlier folder A3e names (§7.3), the `file_id` of every waiting file, the op id of every other waiting change, the op id of every missing write, and its **owner**, the label of the window it was counted for. The app holds one; a newer count replaces it (§5.1). It leaves the store in three ways: the gate that accepts it takes it out and hands it, by value, to that sign-out's keep step (re-review N3); a close or reload of its owner window drops it (re-review I6); a sign-out that completes empties the store (re-review N3). (review I3) |
 | **Kept folder** | The folder this spec makes for waiting writes (§7) |
 | **macOS's folder** | The folder macOS reports when 1882's preserving removal kept files (1882 §4) |
 
@@ -179,6 +201,11 @@ macOS. A plain sign-out has no count anywhere, so the lead's reading ("a plain s
   - **The purge guard.** The purge takes the `KeptSet`. Its first statement is one `StateDb` read that checks every
     waiting write is in the `KeptSet` and every other waiting change is acknowledged. If not, it refuses before it
     collects or deletes any path (§5.2, step 8).
+  - **Which snapshot** (re-review N3). "The snapshot" in W6, W7 and §5.2 step 7 is the one the gate accepted and handed
+    over by value (§5.2, step 4). The keep step never re-reads the store. Between the gate and the keep step the Finder
+    removal and the engine stop take seconds, and another window can record a newer count then: Settings opening (F9),
+    the switch's sign-in (U19) or a send phase ending. That count cannot change what this sign-out keeps, acknowledges or
+    refuses.
 - ~~**W7, missing copies.** A waiting file whose newest staged copy is already gone cannot be kept in full. The ask says so
   (A3) before the person chooses. A copy found missing only at the copy step is a failed copy (W8).~~
   **W7, missing copies** (review I3). A missing write cannot be kept. The ask says so (A3) before the person chooses, and
@@ -229,6 +256,13 @@ macOS. A plain sign-out has no count anywhere, so the lead's reading ("a plain s
   - The folder is surfaced the way 1882's app-start sweep surfaces macOS's folder.
   - A failed keep fails the reset, and nothing is deleted. The engine then does not start, as spec A §5.6 already does
     for a failed reset.
+- **W13, a sign-out that stops after its keep step** (re-review N8). A purge that fails after a completed keep step may
+  already have removed some waiting writes' staged copies; then the kept folder holds their only copy (§5.3, row 8).
+  - The purge removes a waiting write's staged copy only after every other file it removes is gone (§5.2, step 8). A
+    failure on any other file leaves every waiting write as it was.
+  - When the sign-out stops after a completed keep step, it saves that folder as `kept_unsent_unfinished` (§7.3). The
+    next ask names it (A3e) when that ask shows a missing write, because such a write's bytes may be in that folder.
+  - A sign-out that completes clears it.
 
 ## 4. Every path that purges the queue
 
@@ -312,6 +346,9 @@ flowchart TD
     REST --> AL["One alert: our folder, then macOS's; both rows"]
 ```
 
+Not drawn: closing or reloading the window ends the flow at any step before the gate, with nothing changed (§5.1, "A
+close ends the flow"). (re-review I6)
+
 <details>
 <summary>Struck: the diagram before revision 1 (review C1, I3, I4, I6). Kept for the re-review.</summary>
 
@@ -364,13 +401,18 @@ and the switch step in the sign-in window (entry point 6). Entry points 3 and 4 
 
 **The steps** (review I3, I6):
 
-1. **Count.** `sign_out_count` reads `waiting_changes` once (§6.1) and records an ask snapshot. It answers
-   `{ askId, files, others, missingFiles, canSend, notSending }`. A failed read stops the flow with E3.
+1. **Count.** ~~`sign_out_count` reads `waiting_changes` once (§6.1) and records an ask snapshot. It answers
+   `{ askId, files, others, missingFiles, canSend, notSending }`.~~ `sign_out_count` reads `waiting_changes` once (§6.1)
+   and records an ask snapshot, owned by the window that called it. It answers
+   `{ askId, files, copiedFiles, others, missingFiles, earlierFolder, canSend, notSending }` (re-review N1, N8, I6). A
+   failed read stops the flow with E3.
 2. **Send** (only when `canSend`): `sign_out_send_start({ askId })`, §6. The phase's end event carries a fresh snapshot,
    or none when nothing waits.
 3. **Ask** (only when something waits): §11, A0-A5, from the newest snapshot. "Cancel" ends the flow, and nothing
-   changed. "Sign out" calls `clear_session` with `keepUnsent: { askId }` (and `forgetEmail` for the switch). When the
-   phase ended with nothing waiting, the flow calls `clear_session` without `keepUnsent`.
+   changed. "Sign out" calls `clear_session` with `keepUnsent: { askId }` (and `forgetEmail` for the switch). ~~When the
+   phase ended with nothing waiting, the flow calls `clear_session` without `keepUnsent`.~~ When the phase ended
+   `all_sent`, the flow calls `clear_session` without `keepUnsent`. A phase that ended `closed` ends the flow instead,
+   with no ask and no call (below, "A close ends the flow"). (re-review I6)
 4. **A refusal goes straight to the ask.** `clear_session` may answer `unsent_changes`: a change arrived after the count,
    or the snapshot is no longer the newest. The caller then calls `sign_out_count` and shows the ask from the new
    snapshot.
@@ -381,19 +423,63 @@ and the switch step in the sign-in window (entry point 6). Entry points 3 and 4 
 
 | Name | Kind | Payload | Owner |
 | --- | --- | --- | --- |
-| `sign_out_count` | command | → `{ askId: string, files: number, others: number, missingFiles: number, canSend: boolean, notSending: 'engine_stopped' \| 'session' \| 'offline' \| 'paused' \| 'held' \| null }` | Rust records the snapshot; a newer one replaces it |
+| ~~`sign_out_count`~~ | ~~command~~ | ~~→ `{ askId: string, files: number, others: number, missingFiles: number, canSend: boolean, notSending: 'engine_stopped' \| 'session' \| 'offline' \| 'paused' \| 'held' \| null }`~~ | ~~Rust records the snapshot; a newer one replaces it~~ |
+| `sign_out_count` | command | the calling window (Tauri passes it, as it does to `consume_menu_update_check`, `main:lib.rs:13645`) → `{ askId: string, files: number, copiedFiles: number, others: number, missingFiles: number, earlierFolder: string \| null, canSend: boolean, notSending: 'engine_stopped' \| 'session' \| 'offline' \| 'paused' \| 'held' \| null }` | Rust records the snapshot with that window's label as its owner; a newer one replaces it (re-review I6, N1, N8) |
 | `sign_out_send_start` | command | `{ askId }` → `Ok`, or `Err` starting `unsent_changes:` when `askId` is not the newest snapshot. While a phase runs, a second start changes nothing and answers `Ok` | Rust: the phase, its 60 s deadline (§6.3) and its end |
 | `sign_out_send_stop` | command | none → `Ok`. Ends the phase with `stopped`; nothing happens when no phase runs | Rust |
 | `sign-out-send-progress` | event, to the window that started the phase | `{ changesLeft: number }`, sent when the number changes; never 0 (the phase ends first) | Rust |
-| `sign-out-send-ended` | event, to the same window | `{ reason, ask: { askId, files, others, missingFiles } \| null }`. Rust counts again when the phase ends and records that snapshot | Rust |
+| ~~`sign-out-send-ended`~~ | ~~event, to the same window~~ | ~~`{ reason, ask: { askId, files, others, missingFiles } \| null }`. Rust counts again when the phase ends and records that snapshot~~ | ~~Rust~~ |
+| `sign-out-send-ended` | event, to the same window | `{ reason, ask: { askId, files, copiedFiles, others, missingFiles, earlierFolder } \| null }`. `ask` is null for `all_sent` and for `closed`. For every other reason Rust counts again and records that snapshot. The flow calls `clear_session` only on `all_sent` (re-review I6, N1, N8) | Rust |
+| `sign-out-flow-closed` | event, to the window that was closed or reloaded | none. Sent on every close or reload of a window (below), whether or not a flow runs there | Rust sends it; the Settings flow resets on it (re-review I6) |
 | `clear_session` | command (exists) | adds `keepUnsent?: { askId: string }`; accepted and ignored on Windows and Linux (W5) | Rust: the gate |
 | `request_sign_out_flow` | command | none → `Ok`. For the compact window (entry point 2): stores the flow request and opens Settings | Rust |
 | `menu:sign-out-flow`, `consume_sign_out_flow_request` | event, command | none; → `boolean` | Rust holds one pending request; Settings consumes it |
 
 - **Rust owns the phase.** The 60 s deadline is a Rust timer, so a webview that hangs, reloads or closes cannot keep the
-  phase alive. The phase also ends, with `stopped`, when the window that started it is destroyed
-  (`WindowEvent::Destroyed`) or starts loading a page again (Tauri's `on_page_load`, `PageLoadEvent::Started`). However
-  it ends, the runner goes back to its tick within a second (§6.2).
+  phase alive. ~~The phase also ends, with `stopped`, when the window that started it is destroyed
+  (`WindowEvent::Destroyed`) or starts loading a page again (Tauri's `on_page_load`, `PageLoadEvent::Started`).~~ The
+  phase also ends, with `closed`, when the window that started it is closed or reloads (next bullet; re-review I6).
+  However it ends, the runner goes back to its tick within a second (§6.2).
+- **A close ends the flow** (re-review I6).
+  - **Why `Destroyed` was not enough.** On macOS a close never destroys the Settings window. `MACOS_LABEL_AWARE_CLOSE`
+    is `false` (`main:surfaces/policy.rs:81`), so `close_policy` answers `Hide` for every label on macOS (`:93-100`).
+    The global window-event handler then calls `api.prevent_close()` and `window.hide()` (`main:lib.rs:13159-13165`),
+    and the next open shows the same webview again (`show_macos_settings_window`, `main:lib.rs:12736-12752`). Once
+    slice 6 makes the policy label-aware, `macos-settings` still answers `Hide`: it is not a registry label
+    (`main:surfaces/registry.rs:39`, `:58-60`), and an unknown label falls back to `Hide` (`policy.rs:97-99`). The
+    sign-in window, `onboarding`, will be destroyed then (`registry.rs:62-66`).
+  - **That handler is the only place the Settings window is hidden.** The tray's "Hide" and the tray click hide the
+    compact `settings` window (`main:lib.rs:13955-13967`, `:14037-14054`). The popover's hide on focus loss is
+    registered on the compact window only (`:14218-14229`, inside `show_compact_app_window_with_nav`, `:14117`). The
+    native menu has no Close or Hide item (`setup_native_menu`, `:13517-13612`), so ⌘W and ⌘H do nothing in this app.
+    `MacSettings.tsx` never hides or closes its own window (it does not import `@tauri-apps/api/window`), although the
+    default capability would allow a hide (`src-tauri/capabilities/default.json:11`, `:16`). Any later change that
+    hides the Settings window another way calls the same hook.
+  - **The hook.** The global handler calls `sign_out_flow_window_closed(app, label)` on every
+    `WindowEvent::CloseRequested`, whatever `close_policy` then does with the window, and on `WindowEvent::Destroyed`.
+    Tauri's `on_page_load` calls it on `PageLoadEvent::Started` (a reload). It is macOS only (W5). It does three things:
+    1. a send phase that window started ends with `closed` (§6.4): its `sign-out-send-ended` carries `ask: null`, and
+       no new snapshot is recorded;
+    2. the ask snapshot that window owns is dropped, so a "Sign out" pressed later from that screen answers
+       `unsent_changes`, and the flow counts again (W5);
+    3. `sign-out-flow-closed` is sent to that window.
+
+    A phase or a snapshot owned by another window is left alone. A sign-out already past its gate is not affected: the
+    gate took its snapshot out of the store (§5.2, step 4), so the hook finds nothing of it to drop.
+  - **The flow resets.** On `sign-out-flow-closed`, or a `sign-out-send-ended` with `closed`, the Settings flow ends at
+    whatever step it is on. It closes the sheet and makes no further call (`sign_out_count`, `sign_out_send_start` or
+    `clear_session`), also not from an answer that arrives after the event (F11). When Settings shows again, the Account
+    tab has no sheet, and "Sign out…" starts a new flow at the count.
+  - **The switch step** keeps its screen when the sign-in window closes, as today (the window outlives a close,
+    `main:Onboarding.tsx:104-135`). Its snapshot is dropped, so "Sign out and switch" pressed after the window comes
+    back answers `unsent_changes`, and the step re-renders from a fresh count (W11, F8).
+  - **What is not a close.** Minimizing the window, or another app hiding Beebeeb (Hide Others), leaves the flow
+    running, as a macOS sheet keeps running while its window is out of sight. The phase still ends within 60 s, and the
+    ask then waits in the window. Quitting ends the process and the phase with it; nothing on this Mac changed.
+  - **One race is accepted.** If a phase ends `all_sent` a moment before the window closes, the webview handles
+    `all_sent` first and calls `clear_session` from a window that is already hidden. The sign-out then goes ahead: the
+    person pressed "Sign out", nothing waits, and the gate still runs, so nothing can be lost. Whichever of the two
+    events the webview handles first decides; neither order loses a write.
 - **A flow request survives a window that has not loaded yet.** Entry points 2 and 5 store one pending request (an
   `AtomicBool`) and open Settings (`show_macos_settings_window`, `main:lib.rs:12736`). Then they emit
   `menu:sign-out-flow` to it. Settings calls `consume_sign_out_flow_request` when it mounts and on that event. `true`
@@ -425,7 +511,8 @@ where it is new (W5).
 
 4. **Gate** (W5). It runs first: before the switch forgets the email (`main:lib.rs:2818-2820`), before
    `end_sessions_in_flight` (`:2823`) and before the Finder removal (`:2831`). It is one `waiting_changes` read
-   compared with the snapshot `keepUnsent` names.
+   compared with the snapshot `keepUnsent` names. When it accepts a snapshot, it takes it out of the store and hands it,
+   by value, to step 7; a refusal leaves the store as it was (re-review N3).
 5. **Remove the Finder location**, 1882 mode, as today (spec A §5.3 (5), `main:lib.rs:2831`). From here on,
    `FinderRestoreOnAbort` (`main:lib.rs:2855`, `:6201-6216`) puts Finder back and restarts sync on any return that leaves
    the keys in memory.
@@ -446,15 +533,26 @@ where it is new (W5).
 8. **Purge, guard first.** The first statement of `purge_local_state_files_as` is one `StateDb` read,
    `unkept_waiting_changes(&KeptSet)`, in one transaction. It is empty only when every waiting write is copied, covered
    or acknowledged missing, and every other waiting change is acknowledged. Otherwise the purge returns `Err` (E2)
-   before it collects or deletes any path. Then, as today, it deletes the files (`main:lib.rs:4100-4119`), clears the
-   rows (`purge_all_local_state`, `:4128`) and calls `clear_account_data` (`main:lib.rs:3229`). The R10 reset uses the
-   same guard (W12).
+   before it collects or deletes any path. ~~Then, as today, it deletes the files (`main:lib.rs:4100-4119`), clears the
+   rows (`purge_all_local_state`, `:4128`) and calls `clear_account_data` (`main:lib.rs:3229`).~~ Then it deletes the
+   files in two groups (W13; re-review N8):
+   - first every path except the staged copies of waiting writes: released and orphan copies, cache files. That is
+     today's loop (`main:lib.rs:4103-4118`) over that group. If a removal fails, it returns `Err` as today
+     (`:4119-4125`), and no waiting write's staged copy has been touched;
+   - only then the staged copies of the waiting writes (the `payload_path` of every op the guard read), with the same
+     loop and the same `Err`.
+
+   Then it clears the rows (`purge_all_local_state`, `:4128`) and calls `clear_account_data` (`main:lib.rs:3229`). The
+   same files are removed, each behind the same `is_disposable_cache_path` check (`:4104`); only their order changes.
+   The split applies when the purge is given a `KeptSet` (macOS, W5). Without one the purge is today's. The R10 reset
+   uses the same guard (W12).
 9. **The rest**, as today: the hydrate cache (`main:lib.rs:3043`), the session clear, then the Keychain clear and its
    check (`:3100`).
 10. **The result.** `SignedOut` and `SignOutFailure` (`main:lib.rs:2740`, `:2765`) both carry
     `kept_unsent: Option<{ folder, files }>` next to 1882's `preserved_location`. A sign-out that fails after step 7
     still surfaces the folder, as 1882 review I1 does for macOS's folder. The record was already written in step 7
-    (W9).
+    (W9). A sign-out that returns `Err` after step 7 completed also saves the folder as `kept_unsent_unfinished`; a
+    sign-out that completes clears that key after its purge (W13, §7.3; re-review N8).
 
 ~~**Where the Finder removal sits differs by tree, and both keep every write.**~~
 
@@ -482,7 +580,12 @@ every write:
 - or it was not synced when the domain was removed, and macOS's folder keeps it;
 - a write that reaches the queue after the gate and before the removal is kept as well (U9).
 
-What must hold is **stop → keep → purge with nothing between them**, and the guard before any deletion.
+~~What must hold is **stop → keep → purge with nothing between them**, and the guard before any deletion.~~
+
+What must hold (re-review O1): the keep step runs **after the confirmed engine stop and before the purge**, and
+**nothing between the stop and the purge deletes a file, writes the queue, clears a session or the Keychain, or starts
+an engine**. The guard runs before any deletion. A few statements do run there on `main`; U10 names them and says why
+none can purge or lose a write.
 
 A source pin checks the adjacency, not the removal's position (U10).
 
@@ -509,7 +612,9 @@ half-made folder, and nothing after a completed keep step does.
 | Step | Failure | The person sees | State afterwards |
 | --- | --- | --- | --- |
 | 1. Count | Read fails | E3: a toast in Settings, the menu's dialog, a line in the switch step | Nothing changed |
-| 2. Send | Ends early: link lost, session refused, engine stopped, everything on hold, time limit, "Stop waiting", window closed | The ask, with one reason line (A5) | Nothing changed, except changes that landed |
+| ~~2. Send~~ | ~~Ends early: link lost, session refused, engine stopped, everything on hold, time limit, "Stop waiting", window closed~~ | ~~The ask, with one reason line (A5)~~ | ~~Nothing changed, except changes that landed~~ |
+| 2. Send | Ends early: link lost, session refused, engine stopped, everything on hold, time limit, "Stop waiting" | The ask, with one reason line (A5) | Nothing changed, except changes that landed |
+| 1-3. Count, send or ask | The window the flow runs in is closed (on macOS: hidden) or reloads (re-review I6) | Nothing: the window is out of sight. When Settings shows again, the Account tab has no sheet | Nothing changed, except changes that landed. A phase ended `closed`; the snapshot that window owned is dropped (§5.1, "A close ends the flow") |
 | 3. Ask | "Cancel" | The sheet (or the switch step) closes | Nothing changed |
 | 4. Gate | Read fails | E3 | Nothing changed |
 | 4. Gate | Changes wait and no `keepUnsent`; or the queue holds something the snapshot did not; or the snapshot is not the newest | The ask, from a fresh count (§5.1, step 4) | Nothing changed |
@@ -518,7 +623,9 @@ half-made folder, and nothing after a completed keep step does.
 | 7. Keep | A late other change | The ask, from a fresh count (`unsent_changes`) | Nothing copied, nothing purged; still signed in; sync restarts |
 | 7. Keep | A missing write the snapshot did not hold; a directory, copy, flush or record failure; a staged copy gone between the read and its copy | E2 | The half-made folder is removed (it holds only copies of bytes still in the queue); no record is written (the record is the keep step's last act). Queue and staged copies intact; still signed in; sync restarts |
 | 8. Purge guard | A waiting write that is not kept, or an other change that is not acknowledged. Only a test seam can cause it: with the engine stopped, nothing adds one | E2 | Nothing deleted: the guard runs before any file is touched. The kept folder stays, recorded and surfaced. Still signed in; sync restarts |
-| 8. Purge | A file cannot be removed, or the rows cannot be cleared | `SIGN_OUT_PURGE_FAILED` (`main:lib.rs:3252`), as today | The rows stay (the purge clears them only after every file is gone, `main:lib.rs:4120-4127`); some staged copies may be gone. Every waiting write is in the kept folder, which stays, recorded and surfaced. Sync restarts; a write whose staged copy was removed parks `payload_missing` (`1873 spec §8.4`), and its bytes are in the kept folder |
+| ~~8. Purge~~ | ~~A file cannot be removed, or the rows cannot be cleared~~ | ~~`SIGN_OUT_PURGE_FAILED` (`main:lib.rs:3252`), as today~~ | ~~The rows stay (the purge clears them only after every file is gone, `main:lib.rs:4120-4127`); some staged copies may be gone. Every waiting write is in the kept folder, which stays, recorded and surfaced. Sync restarts; a write whose staged copy was removed parks `payload_missing` (`1873 spec §8.4`), and its bytes are in the kept folder~~ |
+| 8. Purge | A file that is not a waiting write's staged copy cannot be removed (re-review N8) | `SIGN_OUT_PURGE_FAILED` (`main:lib.rs:3252`), as today | Every waiting write's staged copy is still there (step 8's order), and the rows stay. The kept folder stays, recorded and surfaced, and is saved as `kept_unsent_unfinished` (W13). Sync restarts, and the writes upload as before; the folder only duplicates them |
+| 8. Purge | A waiting write's staged copy cannot be removed after other waiting writes' copies were; or every file is gone and the rows cannot be cleared (re-review N8) | `SIGN_OUT_PURGE_FAILED`, as today | The rows stay (the purge clears them only after every file is gone, `main:lib.rs:4119-4128`). The writes whose staged copies were removed park `payload_missing` when sync restarts (`1873 spec §8.4`); their bytes are in the kept folder, which stays, recorded and surfaced, and is saved as `kept_unsent_unfinished`. The next sign-out's ask shows those writes as missing (A3) and names that folder (A3e), so the person reads where they may be before choosing. If that sign-out keeps files, its folder takes over the Settings › Sync row (a newer folder replaces an older one, §9). The earlier folder stays on disk beside it, in `Changes not sent/`, and was named in its own alert and in that ask |
 | 9. The rest | Fails | The alert first, then the error | The kept folder stays, recorded and surfaced |
 
 **Sync restarts after a failed keep.** The sign-out stopped the engine but kept the keys. ~~With spec A, the existing
@@ -611,7 +718,9 @@ Checked at least once a second, and on every landing:
 | `all_sent` | No change waits | `clear_session`, no ask |
 | `held` | Changes wait, none is live | The ask, A5 `held` |
 | `time_limit` | 60 s have passed | The ask, A5 `time_limit` |
-| `stopped` | The person chose "Stop waiting" (or pressed Esc); or the window that started the phase was destroyed or started a new page load (review I6) | The ask, no reason line (none when the window is gone) |
+| ~~`stopped`~~ | ~~The person chose "Stop waiting" (or pressed Esc); or the window that started the phase was destroyed or started a new page load (review I6)~~ | ~~The ask, no reason line (none when the window is gone)~~ |
+| `stopped` | The person chose "Stop waiting" (or pressed Esc) (re-review I6: a window event never ends the phase this way) | The ask, no reason line |
+| `closed` | The window that started the phase was closed (on macOS a close hides it, §5.1), destroyed, or started a new page load (re-review I6) | No ask: `ask: null`, and the flow ends (§5.1, "A close ends the flow") |
 | `offline` | An attempt during the phase fails at the link level (`link_health::classify_error`, `main:link_health.rs:174`), or the link monitor records a failure. The first is needed because chunk requests do not reach the monitor (`main:link_health.rs`, "Known limit") | The ask, A5 `offline` |
 | `session` | The server refuses the session | The ask, A5 `session` |
 | `engine_stopped` | The engine stops (a Lock, a crash) | The ask, A5 `engine_stopped` |
@@ -624,7 +733,8 @@ One `info` line when the phase ends: `sign-out send phase ended`, with `reason`,
 
 One `info` line when a flow counts (review I8): `sign-out flow counted`, with `files`, `others`, `missing_files`,
 `can_send` and `not_sending`. It comes from `sign_out_count` and from the switch's snapshot. Counts only, no names. A
-device step that needs a waiting change reads it to prove one was there (D1).
+device step that needs a waiting change reads it to prove one was there (D1). The line also carries `copied_files` and
+`earlier_folder` (`true` or `false`, never the path). (re-review N1, N8)
 
 ## 7. The kept folder
 
@@ -694,6 +804,17 @@ On a Mac, the app's container is `/Users/<name>/Library/Containers/io.beebeeb.ap
     `disposable_cache_roots` so a row's staged copy under it is deleted, and `finder_staging_candidates` so an orphan
     under it is swept. Otherwise new staged plaintext outlives the sign-out. That is 1873's Task 6b, and U12 fails until
     both lists hold the new root.
+
+    **U12 reads the release lists, never a test build's** (re-review N6). In a test build `finder_staging_cache_base()`
+    is a per-process sandbox (`main:engine_bridge.rs:4505-4508`), so `finder_staging_candidates()` never holds the
+    release layout there, and `disposable_cache_roots()` reads the test machine's own directories
+    (`main:lib.rs:3869-3893`). So both lists get a pure core that takes the directories as arguments:
+    `disposable_cache_roots_in(temp_dir, cache_dir, hydrate_cache_dir)` and
+    `finder_staging_candidates_in(cache_base, data_dir, temp_dir)` (`data_dir` for [staging-durable]'s root). The
+    functions the purge calls become one-line wrappers over them, and a source pin checks that. U12 calls the cores with
+    a release layout and checks both `kept_root` answers against them: the container's `Documents/Changes not sent` and
+    the fallback `<data_dir>/beebeeb/Changes not sent`, which sits beside [staging-durable]'s
+    `<data_dir>/beebeeb/finder-writes`, never under it.
 - ~~**Findable.** The alert and the Settings › Sync row show the full path in mono (1882 §5). The row also has
   **"Show in Finder"**, which reveals the event folder. 1882 left that button out because macOS's folder is outside the
   container and no header says a sandboxed app may reveal such a path (1882 §5). This folder is inside the container, and
@@ -717,6 +838,9 @@ On a Mac, the app's container is `/Users/<name>/Library/Containers/io.beebeeb.ap
     device evidence of it is cited anywhere.
   - **Unverified** on a sandboxed build for this folder. Device step D2 now has a pass/fail for it. If it fails, the
     button is struck from this section with the evidence named, and the path alone remains.
+  - **A line a device check can find** (re-review N7). Before it calls the reveal, `show_kept_unsent_folder` logs one
+    `info` line, `kept folder reveal requested`, with no path (W10). D2 uses it to prove that its log capture holds the
+    presses at all.
 
 **Accepted.** The lead accepted this location as designed. "Show in Finder" stays a device step (D2).
 — lead ruling, 2026-10-10 ([1887-location])
@@ -731,7 +855,8 @@ On a Mac, the app's container is `/Users/<name>/Library/Containers/io.beebeeb.ap
 - **A folder the person picks** (the existing user-selected entitlement). Least privilege, and easy to find. But it adds a
   step and new failures to every sign-out that keeps something, and it cannot run where there is no window (the R10 reset).
   The picker could also be pointed into the Finder location being removed. It is untested on macOS in this app:
-  `pick_sync_root` refuses on macOS (`main:lib.rs:5067-5075`).
+  `pick_sync_root` refuses on macOS (~~`main:lib.rs:5067-5075`~~ `main:lib.rs:8818-8826`; the old range was read at
+  `8f7e91e`, re-review N10).
 - **The App Group container.** The extension shares it, and has no business with these files.
 - **Inside macOS's folder.** It is not ours to write, and it may not exist.
 
@@ -781,7 +906,28 @@ id in its `KeptSet`, and the purge guard checks every waiting write against them
     volume being written.
   - A directory that collides the same way (`Work/` and `work/`) is one directory, so the files land side by side. A
     file collision inside it is then caught by the same `EEXIST`.
-- A row with no path (a bug) gets `Unnamed <first 8 characters of the op id>`.
+- **A directory that collides with a file** (re-review N4). Directories are made one component at a time with
+  `std::fs::create_dir`, never `create_dir_all` (which fails when a file holds the name). When `create_dir` answers
+  `AlreadyExists`:
+  - if `symlink_metadata` finds a directory there (not a link), the step uses it: that is the case-only or
+    normalization-only merge above;
+  - otherwise a file the step copied earlier holds the name (`/Notes`, then `/notes/a.txt`, on a case-insensitive
+    volume). The directory gets " (2)", " (3)" and so on, never split at a dot, and the step tries again.
+
+  The step remembers, for this event, which directory on disk each vault directory went to, so a later `/notes/b.txt`
+  lands next to `a.txt` in `notes (2)`. The other order needs nothing new: with the directory made first, the file's
+  clone meets the directory, gets `EEXIST`, and becomes `Notes (2)`.
+- **Lengths** (re-review N4). The 255-byte cut applies to the final name with its " (n)": the stem is cut, never the
+  suffix or the extension. A destination whose whole path would be longer than `PATH_MAX` (1024 bytes, macOS SDK
+  `sys/syslimits.h:103`) is not tried: that file goes to the top of the event folder under its last component, with
+  the same collision rule. `clonefile` would otherwise fail with `ENAMETOOLONG` (`man 2 clonefile`) on every try.
+- **No name can fail a sign-out** (re-review N4). The event folder is new and empty when the keep step starts, so every
+  entry in it is one the step made. Each " (n)" that fails meets one of those entries, so a free name is found within
+  one try more than the number of entries in that directory. In any order, only a real I/O failure can fail the copy
+  (E2), never a name.
+- ~~A row with no path (a bug) gets `Unnamed <first 8 characters of the op id>`.~~
+- A row with no path (a bug), or a path with no component left once empty ones are dropped, gets
+  `Unnamed <first 8 characters of the op id>`. (re-review N4)
 
 **How.**
 
@@ -789,7 +935,10 @@ id in its `KeptSet`, and the purge guard checks every waiting write against them
 - **No copy can overwrite** (review I5). `std::fs::copy` must not be used. On macOS it tries `fclonefileat`, and on
   `EEXIST` it falls back to opening the destination with create and truncate, so a second write that maps to the same
   file silently replaces the first. Each copy is instead:
-  1. `libc::clonefile(src, dst, CLONE_NOFOLLOW)` (`libc` 0.2.189, already locked; `src/unix/bsd/apple/mod.rs:4919`).
+  1. ~~`libc::clonefile(src, dst, CLONE_NOFOLLOW)` (`libc` 0.2.189, already locked; `src/unix/bsd/apple/mod.rs:4919`).~~
+     `libc::clonefile(src, dst, CLONE_NOFOLLOW)` (`libc` 0.2.189, already locked; `src/unix/bsd/apple/mod.rs:4919`).
+     That `libc` has the function but not the flag, so the keep step defines it: `const CLONE_NOFOLLOW: u32 = 0x0001;`,
+     the value in the macOS SDK's `sys/clonefile.h:33`. U40 pins it (re-review N5).
      It never replaces an existing `dst` and fails with `EEXIST`;
   2. when the clone fails with `ENOTSUP` or `EXDEV`: `OpenOptions::new().write(true).create_new(true)`, then
      `std::io::copy` from the staged copy;
@@ -815,6 +964,16 @@ id in its `KeptSet`, and the purge guard checks every waiting write against them
 - The folder is the person's. Beebeeb never moves, reads, deletes or uploads it (W10).
 - "Dismiss" on the row forgets the folder; it does not delete it.
 - The next sign-in, whatever the account, does not look at it.
+- **A sign-out that stopped after its keep step** (W13; re-review N8). The folder is recorded either way (W9). When the
+  sign-out then returns `Err`, the folder is also saved as `kept_unsent_unfinished`, a key of its own, written as 1882
+  writes its key (one load-change-save under the config-write lock, `main:finder_removal.rs:302-307`).
+  - The next count reads it. When that ask shows a missing write, `earlierFolder` carries the path, and the ask adds
+    A3e under A3. With no missing write, `earlierFolder` is null and nothing is added.
+  - A sign-out that completes clears the key after its purge.
+  - It has no row and no alert of its own. Beebeeb never reads the folder it names (W10); A3e only shows the path.
+  - If saving it fails, the next ask shows A3 without A3e. If clearing it fails, a later ask with a missing write
+    shows A3e once more than needed. A3e says the change "may be there", which stays true in both cases.
+  - The R10 reset does not read it, because it asks nobody.
 
 ## 8. With 1873: write tokens, claims, the hand-over and the release journal
 
@@ -907,6 +1066,8 @@ D2 records it. If macOS keeps it, the same file appears in both folders, which l
       `main:lib.rs:3340`). It does not need to save again.
     - U30 pins it.
   - Saving one key never touches the other (U22).
+  - A third key, `kept_unsent_unfinished`, names a folder whose sign-out stopped after its keep step (W13, §7.3). It
+    has no row; only A3e reads it. (re-review N8)
   - "Show in Finder" (`show_kept_unsent_folder(path)`) reveals a path only when it equals the saved record. The webview
     cannot have the app reveal any other path.
 - **Where they are raised.** In the same two places 1882 raises its alert: the `clear_session` command and the menu
@@ -972,10 +1133,13 @@ test pinning the two equal (as 1882 does). `{n}` is never 0 (W2).
 | A1s | First line (switch, something waits): "This Mac is signed in to another Beebeeb account. Switching signs that account out of this Mac." It is spec A's own sentence for 0 changes (`accountSwitchBody(0)`, `main:accountSwitchCopy.ts:27-29`), reused. With A2s, A3 and A4s it replaces `accountSwitchBody(n)` for n ≥ 1, whose "…and removes it" / "…and removes them" is no longer true on macOS (`:30-33`). (review I1) |
 | — | Switch, nothing waits: spec A's title and `accountSwitchBody(0)` exactly as on `main` (`main:accountSwitchCopy.ts:7`, `:27-29`). No A2-A4. (review I1) |
 | ~~A2~~ | ~~Files (n ≥ 1). n = 1: "1 file you changed in Finder hasn’t reached the server. Before signing out, Beebeeb copies it to a folder on this Mac and shows you where." · n > 1: "{n} files you changed in Finder haven’t reached the server. Before signing out, Beebeeb copies them to a folder on this Mac and shows you where." The second sentence is left out when every one of them is missing (k = n, A3)~~ |
-| A2 | Files (n ≥ 1). n = 1: "1 file you changed in Finder hasn’t reached the server. Before signing out, Beebeeb copies it to a folder on this Mac and shows you where." · n > 1: "{n} files you changed in Finder haven’t reached the server. Before signing out, Beebeeb copies them to a folder on this Mac and shows you where." The second sentence is left out when every one of them is missing (k = n, A3). Unchanged; the switch uses A2s |
-| A2s | Files, switch (n ≥ 1). n = 1: "1 file changed in Finder while that account was signed in hasn’t reached the server. Before switching, Beebeeb copies it to a folder on this Mac and shows you where." · n > 1: "{n} files changed in Finder while that account was signed in haven’t reached the server. Before switching, Beebeeb copies them to a folder on this Mac and shows you where." No "you changed": the changes belong to the account that was signed in before. Second sentence left out as for A2. (review M3) |
+| ~~A2~~ | ~~Files (n ≥ 1). n = 1: "1 file you changed in Finder hasn’t reached the server. Before signing out, Beebeeb copies it to a folder on this Mac and shows you where." · n > 1: "{n} files you changed in Finder haven’t reached the server. Before signing out, Beebeeb copies them to a folder on this Mac and shows you where." The second sentence is left out when every one of them is missing (k = n, A3). Unchanged; the switch uses A2s~~ |
+| A2 | Files (n ≥ 1), and c = files with a copy (§2, `copiedFiles`). First sentence: n = 1: "1 file you changed in Finder hasn’t reached the server." · n > 1: "{n} files you changed in Finder haven’t reached the server." Second sentence: c = n = 1: "Before signing out, Beebeeb copies it to a folder on this Mac and shows you where." · c = n > 1: "Before signing out, Beebeeb copies them to a folder on this Mac and shows you where." · 0 < c < n: "Before signing out, Beebeeb copies {c} of them to a folder on this Mac and shows you where." · c = 0: left out. The rule follows c, not k: a missing file can still have a copy, and then it is copied (§7.2). A3 follows for the missing files. The switch uses A2s. (re-review N1) |
+| ~~A2s~~ | ~~Files, switch (n ≥ 1). n = 1: "1 file changed in Finder while that account was signed in hasn’t reached the server. Before switching, Beebeeb copies it to a folder on this Mac and shows you where." · n > 1: "{n} files changed in Finder while that account was signed in haven’t reached the server. Before switching, Beebeeb copies them to a folder on this Mac and shows you where." No "you changed": the changes belong to the account that was signed in before. Second sentence left out as for A2. (review M3)~~ |
+| A2s | Files, switch (n ≥ 1). First sentence: n = 1: "1 file changed in Finder while that account was signed in hasn’t reached the server." · n > 1: "{n} files changed in Finder while that account was signed in haven’t reached the server." Second sentence by A2's rule on c, with "Before switching" for "Before signing out": "Before switching, Beebeeb copies it / them / {c} of them to a folder on this Mac and shows you where.", left out when c = 0. No "you changed": the changes belong to the account that was signed in before. (review M3, re-review N1) |
 | ~~A3~~ | ~~Missing (k ≥ 1). n = k = 1: "Beebeeb’s copy of that change is missing, so it can’t be kept." · k = 1, n > 1: "Beebeeb’s copy of the latest change to 1 of these files is missing, so that change can’t be kept." · k > 1: "Beebeeb’s copy of the latest change to {k} of these files is missing, so those changes can’t be kept."~~ |
 | A3 | Missing files (k ≥ 1; a missing file has at least one missing write, §2). n = k = 1: "Beebeeb’s copy of a change to that file is missing, so that change can’t be kept." · k = 1, n > 1: "Beebeeb’s copy of a change to 1 of these files is missing, so that change can’t be kept." · k > 1: "Beebeeb’s copies of changes to {k} of these files are missing, so those changes can’t be kept." Not "the latest change": a missing earlier-build write is not the latest (§7.2). Same in the switch. (review I3) |
+| A3e | Under A3, only when the ask carries `earlierFolder` (§7.3): "A sign-out that didn’t finish copied changes to this folder, so a change listed as missing may be there:" then a blank line and the path in mono. Same in the switch. (re-review N8) |
 | ~~A4~~ | ~~Other changes (m ≥ 1). m = 1: "1 other change (a rename, move, deletion, new folder or restore) hasn’t reached the server{ either}. Signing out drops it, and the server keeps that item as it was." · m > 1: "{m} other changes (renames, moves, deletions, new folders or restores) haven’t reached the server{ either}. Signing out drops them, and the server keeps those items as they were." " either" only when A2 is shown~~ |
 | A4 | Other changes (m ≥ 1). m = 1: "1 other change (a rename, move, deletion, new folder or restore) hasn’t reached the server{ either}. Signing out drops it, and that item stays as it is on the server." · m > 1: "{m} other changes (renames, moves, deletions, new folders or restores) haven’t reached the server{ either}. Signing out drops them, and those items stay as they are on the server." " either" only when A2 is shown. "Stays as it is" is true for a new folder that never reached the server too. (review M3) |
 | A4s | Other changes, switch: A4 with "Switching drops it" / "Switching drops them" for "Signing out drops …", and " either" only when A2s is shown. (review M3, I1) |
@@ -1052,11 +1216,14 @@ output go into the task's notes and QA evidence.
 | U8 | `sign_out_keeps_the_kept_set_before_the_purge`: two minted saves of `/Work/report.docx`, a create `/New/notes.txt`, an earlier-build write of `/Old/a.txt` and a later save of it. With `keepUnsent` → the kept folder holds `Work/report.docx` (the newest save's sha256), `New/notes.txt`, `Old/a.txt` and `Old/a (earlier save 1).txt`, each sha256 equal to its staged copy; the queue is empty | Skip the copy; copy every minted save (an extra `report (earlier save 1).docx`); skip earlier-build writes (no `a (earlier save 1).txt`) |
 | U8b | `two_minted_saves_of_one_file_keep_one_file` (review C1): two minted saves of `/Work/report.docx`, `keepUnsent` → the sign-out completes; the folder holds one `Work/report.docx` with the newer save's sha256; the older op is in the `KeptSet` as covered; the queue is empty | Treat covered as not kept (the guard refuses: `Err` starting `unsent_copy_failed:`, nothing purged) |
 | U9 | `a_write_that_arrives_after_the_count_is_kept_too`: the gate reads 0, then a write is enqueued before the engine stop → the sign-out completes and the kept folder has it | Keep only the ops the gate counted |
-| U10 | `stop_keep_purge_are_adjacent`: a source pin. The engine stop, the keep step and the purge run in that order with no other statement between them, wherever the Finder removal is | Swap keep and purge; put the Keychain clear between keep and purge |
+| ~~U10~~ | ~~`stop_keep_purge_are_adjacent`: a source pin. The engine stop, the keep step and the purge run in that order with no other statement between them, wherever the Finder removal is~~ | ~~Swap keep and purge; put the Keychain clear between keep and purge~~ |
+| U10 | `nothing_that_deletes_runs_between_stop_keep_and_purge` (re-review O1), a source pin over `clear_session_impl`. The keep step's call comes after both engine-stop calls (`take_slot_and_stop_engine_for_sign_out(`, `main:lib.rs:2891`, `:2914`) and before `purge_local_data_for_sign_out(` (`:3032`). The text from the second stop call to the purge call holds none of: `remove_file`, `remove_dir`, `purge_all_local_state(`, `purge_macos_hydrate_cache(`, `clear_session_holding_slot(`, `clear_keychain_session(`, `forget_last_signed_in_email(`, `start_engine`, `KeysArrived`. On `main` that stretch holds only: the end of the `already_signed_out` arms (`Some(engine_slot)`, `:2931`); Windows-only blocks that macOS does not compile (`:2918-2930`, `:2934-2992`); a read of the config's `sync_root` (`DesktopConfig::load()`, `:3016`); `owe_removal`, a bool from the reconciler's earlier answer (`:3019-3022`); and a `#[cfg(test)]` lock (`:3026-3031`). None of them deletes a file, writes `state.db`, clears a session or the Keychain, or starts an engine, and the engine slot is held from the stop to the session clear (`:2875-2878`), so none can purge or lose a write | Swap the keep step and the purge (order red); put `purge_macos_hydrate_cache` or `clear_keychain_session` between the keep step and the purge (deny-list red) |
 | ~~U11~~ | ~~`kept_names_follow_the_rule`: plain name; ` (earlier save N)` numbering; a dotfile; `.` and `..` → `_`; a NUL → `_`; a 300-byte name cut with its extension kept; a collision → ` (2)`; no path → `Unnamed …`~~ | ~~Each rule alone (one case red)~~ |
-| U11 | `kept_names_follow_the_rule` (review I3, I5): plain name for the newest copied write, also when a newer write of the file is missing; ` (earlier save N)` numbering; a dotfile; `.` and `..` → `_`; a NUL → `_`; a 300-byte name cut with its extension kept; no path → `Unnamed …`. Collisions, on the test's own temporary directory, which the test first proves is case-insensitive (it creates `a` and finds it as `A`; otherwise it fails with that message, never skips): `/Work/Report.docx` and `/Work/report.docx`, and an NFC and an NFD spelling of `/Café.txt`. For each pair both files are kept, the second as ` (2)`, each sha256 equal to its staged copy | Each naming rule alone (one case red); overwrite on exists (`std::fs::copy`, or `create(true).truncate(true)`): a collision pair keeps one file, so its sha256 assertion is red |
+| ~~U11~~ | ~~`kept_names_follow_the_rule` (review I3, I5): plain name for the newest copied write, also when a newer write of the file is missing; ` (earlier save N)` numbering; a dotfile; `.` and `..` → `_`; a NUL → `_`; a 300-byte name cut with its extension kept; no path → `Unnamed …`. Collisions, on the test's own temporary directory, which the test first proves is case-insensitive (it creates `a` and finds it as `A`; otherwise it fails with that message, never skips): `/Work/Report.docx` and `/Work/report.docx`, and an NFC and an NFD spelling of `/Café.txt`. For each pair both files are kept, the second as ` (2)`, each sha256 equal to its staged copy~~ | ~~Each naming rule alone (one case red); overwrite on exists (`std::fs::copy`, or `create(true).truncate(true)`): a collision pair keeps one file, so its sha256 assertion is red~~ |
+| U11 | `kept_names_follow_the_rule` (review I3, I5, re-review N4): plain name for the newest copied write, also when a newer write of the file is missing; ` (earlier save N)` numbering; a dotfile; `.` and `..` → `_`; a NUL → `_`; a 300-byte name cut with its extension kept; no path, and a path of only `/`, → `Unnamed …`. Collisions, on the test's own temporary directory, which the test first proves is case-insensitive (it creates `a` and finds it as `A`; otherwise it fails with that message, never skips): `/Work/Report.docx` and `/Work/report.docx`, and an NFC and an NFD spelling of `/Café.txt`; for each pair both files are kept, the second as ` (2)`. A file and a directory: `/Notes` (a file) with `/notes/a.txt` and `/notes/b.txt`, in both orders. File first: the directory is `notes (2)` and holds both `a.txt` and `b.txt`. Directory first: the file is `Notes (2)`. A 255-byte name that collides keeps its ` (2)` and its extension, with a shorter stem. A vault path whose destination would pass 1024 bytes lands at the top of the event folder. In every case the sign-out completes and each kept file's sha256 equals its staged copy | Each naming rule alone (one case red); overwrite on exists (`std::fs::copy`, or `create(true).truncate(true)`): a collision pair keeps one file, so its sha256 assertion is red; make directories with `create_dir_all` (the file-first order fails with `unsent_copy_failed:`); cut after adding the suffix (the name passes 255 bytes); try the long path as is (`ENAMETOOLONG`, `unsent_copy_failed:`) |
 | ~~U12~~ | ~~`the_kept_folder_is_out_of_every_purges_reach`: `is_disposable_cache_path(kept root)` is false, and the engine-start repair never lists a kept file. Amend 1: checked against every root the purge accepts, both staging roots included~~ | ~~Put the kept root under the cache directory, or under either staging root~~ |
-| U12 | `the_kept_folder_is_out_of_every_purges_reach` (review M7): the kept root is under no root in `disposable_cache_roots()` and no directory in `finder_staging_candidates()` (the orphan sweep's list, `main:lib.rs:3994-3996`), and the engine-start repair never lists a kept file. Both lists are read from the code, so a root that 1873's Task 6b adds is checked without changing the test. It also asserts that both lists hold the [staging-durable] root once 1873 has it | Put the kept root under the cache directory or under either staging root; leave the new staging root out of `finder_staging_candidates` |
+| ~~U12~~ | ~~`the_kept_folder_is_out_of_every_purges_reach` (review M7): the kept root is under no root in `disposable_cache_roots()` and no directory in `finder_staging_candidates()` (the orphan sweep's list, `main:lib.rs:3994-3996`), and the engine-start repair never lists a kept file. Both lists are read from the code, so a root that 1873's Task 6b adds is checked without changing the test. It also asserts that both lists hold the [staging-durable] root once 1873 has it~~ | ~~Put the kept root under the cache directory or under either staging root; leave the new staging root out of `finder_staging_candidates`~~ |
+| U12 | `the_kept_folder_is_out_of_every_purges_reach` (review M7, re-review N6), on the pure cores of §7.1 with a release layout: `cache_base` = `/Users/a/Library/Containers/io.beebeeb.app/Data/Library/Caches`, `data_dir` = `…/Data/Library/Application Support`, `temp_dir` = `…/Data/tmp`, and an App Group hydrate cache. Both `kept_root` answers (`…/Data/Documents/Changes not sent`, and the fallback `<data_dir>/beebeeb/Changes not sent`) are under no root of `disposable_cache_roots_in` and no directory of `finder_staging_candidates_in`. Once 1873 has [staging-durable], it also asserts that both lists hold `<data_dir>/beebeeb/finder-writes`, and that the staging list still holds the Caches root. A source pin checks that `disposable_cache_roots()` and `finder_staging_candidates()` only call their cores. The engine-start repair never lists a kept file | Put the kept root under the cache directory or under either staging root; move the fallback to `<data_dir>/beebeeb/finder-writes/Changes not sent`; leave the new staging root out of `finder_staging_candidates_in`; let `finder_staging_candidates()` build its own list (the pin is red) |
 | ~~U13~~ | ~~`a_failed_copy_stops_the_sign_out`: an injected copier that fails on the second file → `Err` starting `unsent_copy_failed:`; the half-made folder is gone; queue and staged copies intact; keys in memory; the restart is requested (spec A: `KeysArrived`; without spec A: the engine start)~~ | ~~Ignore the copy error (the queue is purged); keep the half-made folder~~ |
 | U13 | `a_failed_copy_stops_the_sign_out`: an injected copier that fails on the second file → `Err` starting `unsent_copy_failed:`; the half-made folder is gone; no `kept_unsent_folder` record; queue and staged copies intact; keys in memory; the restart is requested (`KeysArrived`, through `FinderRestoreOnAbort`). (review C1, M1: spec A is on every tree now) | Ignore the copy error (the queue is purged); keep the half-made folder; write the record before the copies finish |
 | ~~U14~~ | ~~`the_purge_refuses_a_waiting_write_that_was_not_kept`: an op inserted between keep and purge (test seam) → the purge rolls back, and the sign-out stops with E2~~ | ~~Drop the guard~~ |
@@ -1067,7 +1234,8 @@ output go into the task's notes and QA evidence.
 | U17 | `the_send_phase_makes_live_changes_due_with_a_margin` (review M2): against a stub server, a live write backing off for 10 min lands within the phase. With `max_attempts = 5`, a live write at `attempts = 3` and one at `attempts = 4` are not made due, and keep their `next_retry_at`. Against a stub that answers 500: a write at `attempts = 0` is made due, fails, is tried again when its 30 s backoff ends, and ends at `attempts = 2`; a write at `attempts = 2` is made due, fails once (its next backoff is 120 s) and ends at `attempts = 3`. Across a 60 s phase on the injected clock no op the phase made due is parked | Do not reset `next_retry_at` (it never lands); make due regardless of `attempts` (the `attempts = 4` write parks); reset `next_retry_at` before every run (attempts burn) |
 | U18 | `the_send_phase_never_touches_parked_or_paused_changes` | Reset `attempts` at the start |
 | ~~U19~~ | ~~`the_switch_uses_the_same_count_and_keeps`: `account_mismatch` carries `files`/`others`/`missing` from `waiting_changes`; "Sign out and switch" passes `keepUnsent`; no send is started~~ | ~~Keep `pending_changes_count` (it counts the hydrate); start a send~~ |
-| U19 | `the_switch_carries_a_snapshot_on_macos_only` (review I1, I2): on macOS, `account_mismatch` (both `LoginOutcome::account_mismatch`, `main:lib.rs:1451`, and the browser sign-in's event, `main:browser_login.rs:495-502`) carries `pending_changes` and an `unsent` snapshot (`askId`, `files`, `others`, `missingFiles`) from `waiting_changes`, and the snapshot is recorded as the newest. On every other platform it carries `pending_changes` only, from `pending_changes_count`. No send is started. The frontend half is F8 | Fill the macOS snapshot from `pending_changes_count` (it counts a hydrate and an orphan journal copy); start a send |
+| ~~U19~~ | ~~`the_switch_carries_a_snapshot_on_macos_only` (review I1, I2): on macOS, `account_mismatch` (both `LoginOutcome::account_mismatch`, `main:lib.rs:1451`, and the browser sign-in's event, `main:browser_login.rs:495-502`) carries `pending_changes` and an `unsent` snapshot (`askId`, `files`, `others`, `missingFiles`) from `waiting_changes`, and the snapshot is recorded as the newest. On every other platform it carries `pending_changes` only, from `pending_changes_count`. No send is started. The frontend half is F8~~ | ~~Fill the macOS snapshot from `pending_changes_count` (it counts a hydrate and an orphan journal copy); start a send~~ |
+| U19 | `the_switch_carries_a_snapshot_on_macos_only` (review I1, I2, re-review N1, N8, I6): on macOS, `account_mismatch` (both `LoginOutcome::account_mismatch`, `main:lib.rs:1451`, and the browser sign-in's event, `main:browser_login.rs:495-502`) carries `pending_changes` and an `unsent` snapshot (`askId`, `files`, `copiedFiles`, `others`, `missingFiles`, `earlierFolder`) from `waiting_changes`, and the snapshot is recorded as the newest, owned by `onboarding` (the window the switch step runs in). On every other platform it carries `pending_changes` only, from `pending_changes_count`. No send is started. The frontend half is F8 | Fill the macOS snapshot from `pending_changes_count` (it counts a hydrate and an orphan journal copy); start a send |
 | ~~U20~~ | ~~`the_r10_reset_keeps_before_it_purges`: `StateDbLocalData::reset` with a queued write → kept folder, then purge; a failing copier → the reset fails and nothing is purged~~ | ~~Reset without the keep step~~ |
 | U20 | `the_r10_reset_keeps_before_it_purges` (review C1): `StateDbLocalData::reset` with a queued write and a queued rename → the kept folder holds the write, it is recorded, then the purge runs with the guard, and the rename is dropped with its count logged. A failing copier → the reset fails, nothing is deleted, no record | Reset without the keep step (the guard refuses); purge without passing the `KeptSet` |
 | ~~U21~~ | ~~`the_menu_never_purges_a_waiting_write`: the menu handler with a waiting write → Settings is asked to open the flow; no "Sign-out paused" dialog; the queue is intact~~ | ~~Handle `unsent_changes` as an error~~ |
@@ -1075,20 +1243,28 @@ output go into the task's notes and QA evidence.
 | U22 | `kept_unsent_folder_follows_1882s_rules_and_its_own_key`: newer replaces older; dismiss clears only the shown folder and reports `{cleared, current}`; it survives a settings save; saving it never changes `kept_unsynced_folder`, and the reverse | Store both in one key |
 | ~~U23~~ | ~~`one_alert_names_both_folders_ours_first`: ours only, macOS's only (byte for byte 1882's body), both (K1, a blank line, 1882's body)~~ | ~~Swap the order; change 1882's body~~ |
 | U23 | `one_alert_names_both_folders_ours_first` (lead ruling [1887-two-folders]). Three cases. Ours only: K1, a blank line, our path. macOS's only: byte for byte `finder_removal::preserved_files_message(path)`, 1882's body. Both: the body equals K1 + "\n\n" + our path + "\n\n" + `PRESERVED_FILES_SENTENCE` + "\n\n" + macOS's path, exactly. The test also asserts that `PRESERVED_FILES_SENTENCE` equals the literal "Files that hadn’t reached your vault yet were kept on this Mac, in this folder:", so a reword of the shared constant turns it red too. The title is K0 in every case | Swap the two paragraphs; open 1882's paragraph with "macOS also kept …" (in the constant or in a variant used only after K1); drop the blank line between the paragraphs |
-| U24 | `no_count_string_renders_zero`: every builder (P1, A2, A3, A4, K1) returns nothing for 0 and singular text for 1 | Render "0 files" |
+| ~~U24~~ | ~~`no_count_string_renders_zero`: every builder (P1, A2, A3, A4, K1) returns nothing for 0 and singular text for 1~~ | ~~Render "0 files"~~ |
+| U24 | `no_count_string_renders_zero`: every builder (P1, A2, A3, A4, K1) returns nothing for 0 and singular text for 1; A2's second sentence is left out for c = 0 and never reads "copies 0 of them" (re-review N1) | Render "0 files"; render "copies 0 of them" |
 | U25 | `logs_never_carry_a_kept_path_or_name`: a log capture across a keeping sign-out holds no path component and no file name | Log the folder path |
 | U26 | `show_in_finder_reveals_only_the_saved_folder`: any other path is refused | Reveal the given path |
 | U27 | `the_keep_step_copies_from_either_staging_root` (amend 1, [staging-durable]). A sign-out is made while a pre-ruling journal row and its op still point into `Library/Caches/beebeeb/finder-writes`, and another write's staged copy is under `Application Support/beebeeb/finder-writes`. Both are kept, each sha256 equal to its source, and the purge then removes both sources | Rebuild the source path from the current staging root and the file name (the Caches copy is not found, and the sign-out stops with E2 instead of keeping it) |
 | U28 | `kept_copies_carry_no_backup_exclusion` (amend 1): a staged file that carries `com.apple.metadata:com_apple_backup_excludeItem` → its kept copy does not | Copy the attributes as the clone leaves them |
-| U29 | `a_copy_missing_since_the_ask_stops_the_sign_out` (review I3): the ask's snapshot holds no missing write; the staged copy of a waiting write is deleted after the ask and before the keep → `Err` starting `unsent_copy_failed:`, nothing copied, nothing purged, no record. A copy missing at the ask and in its snapshot → acknowledged, the sign-out completes, and the other writes are kept | Decide missing at keep time only (the first case completes and the write is dropped unasked) |
+| ~~U29~~ | ~~`a_copy_missing_since_the_ask_stops_the_sign_out` (review I3): the ask's snapshot holds no missing write; the staged copy of a waiting write is deleted after the ask and before the keep → `Err` starting `unsent_copy_failed:`, nothing copied, nothing purged, no record. A copy missing at the ask and in its snapshot → acknowledged, the sign-out completes, and the other writes are kept~~ | ~~Decide missing at keep time only (the first case completes and the write is dropped unasked)~~ |
+| U29 | `a_copy_missing_since_the_ask_stops_the_sign_out` (review I3, re-review N2). Three cases; in the first two the ask's snapshot holds no missing write. (a) A test seam between the gate and the keep step deletes a waiting write's staged copy → `Err` starting `unsent_copy_failed:`; nothing copied, nothing purged, no record. (b) The copy is deleted before `clear_session` is called → the gate refuses with `unsent_changes:` (W5, U37); a fresh `sign_out_count` then answers `missingFiles = 1`, and the ask carries A3. (c) A copy missing at the ask and held by its snapshot → acknowledged; the sign-out completes, and the other writes are kept | Decide missing at keep time only (case a completes and drops the write unasked); drop the gate's missing check (case b reaches the keep step and stops with `unsent_copy_failed:` instead of asking again) |
 | U30 | `the_kept_folder_is_recorded_before_the_purge` (review I4): a test seam aborts the sign-out right after the purge → `kept_unsent_folder` names the event folder. A seam that aborts after the copies but before the record → no record, and the half-made folder is gone (W8) | Save the record at surface time, after `clear_session_impl` returns (the first case has no record) |
 | U31 | `show_in_finder_uses_the_opener_reveal` (review I7), a source pin: the body of `show_kept_unsent_folder` calls `reveal_item_in_dir` and contains no `Command::new("open")` and no `"/usr/bin/open"` | Replace the reveal with `Command::new("open").arg("-R")` |
-| U32 | `the_unsent_gate_is_macos_only` (review I2), a source pin: the gate in `clear_session_impl`, the keep step's call and the guard's call each sit under `#[cfg(target_os = "macos")]`. On a non-macOS test build, `clear_session` with a queued rename and no `keepUnsent` behaves as on `main` (Linux: it purges; Windows: the preflight refuses with its own message) | Remove the cfg from the gate |
+| ~~U32~~ | ~~`the_unsent_gate_is_macos_only` (review I2), a source pin: the gate in `clear_session_impl`, the keep step's call and the guard's call each sit under `#[cfg(target_os = "macos")]`. On a non-macOS test build, `clear_session` with a queued rename and no `keepUnsent` behaves as on `main` (Linux: it purges; Windows: the preflight refuses with its own message)~~ | ~~Remove the cfg from the gate~~ |
+| U32 | `the_unsent_gate_is_macos_only` (review I2, re-review N9), a source pin: the gate in `clear_session_impl`, the keep step's call and the guard's call each sit under `#[cfg(target_os = "macos")]`. On a non-macOS test build, `clear_session` with a queued rename and no `keepUnsent` behaves as on `main` (Linux: it purges; Windows: the preflight refuses with its own message). That half compiles only off macOS, so it runs in the public repository's CI (§13.3): the `rust-linux` job and the Windows leg of `rust-check` | Remove the cfg from the gate (the Linux and Windows cases are red in CI) |
 | U33 | `kept_root_is_the_container_or_app_support` (review M5): `kept_root` with `document_dir = /Users/a/Library/Containers/io.beebeeb.app/Data/Documents` → `…/Data/Documents/Changes not sent`; with `/Users/a/Documents` (unsandboxed) → `<data_dir>/beebeeb/Changes not sent`; with another bundle's container → the fallback | Return `document_dir/Changes not sent` unconditionally |
-| U34 | `the_send_phase_is_owned_by_rust` (review I6): with an injected clock and no webview calls, a phase ends `time_limit` at 60 s and disarms; a `Destroyed` event for the starting window ends it `stopped`; a page load `Started` for it ends it `stopped`; a second `sign_out_send_start` while one runs starts nothing; `sign_out_send_start` with a stale `askId` answers `unsent_changes:` | Leave the deadline to the webview (the phase never ends without a stop call); ignore the window events |
+| ~~U34~~ | ~~`the_send_phase_is_owned_by_rust` (review I6): with an injected clock and no webview calls, a phase ends `time_limit` at 60 s and disarms; a `Destroyed` event for the starting window ends it `stopped`; a page load `Started` for it ends it `stopped`; a second `sign_out_send_start` while one runs starts nothing; `sign_out_send_start` with a stale `askId` answers `unsent_changes:`~~ | ~~Leave the deadline to the webview (the phase never ends without a stop call); ignore the window events~~ |
+| U34 | `the_send_phase_is_owned_by_rust_and_a_close_ends_the_flow` (review I6, re-review I6). On the pure flow state, with an injected clock and no webview: (a) a phase ends `time_limit` at 60 s and disarms. (b) `window_closed("macos-settings")` during a phase that window started ends it `closed` with `ask: null`, records no snapshot, drops the snapshot that window owns, and yields `sign-out-flow-closed` for it; `clear_session` with that `askId` then answers `unsent_changes:`. (c) The same close at the ask, with no phase running, drops the snapshot. (d) A close of `settings` or `onboarding` leaves a phase and a snapshot owned by `macos-settings` alone; a close of `macos-settings` leaves a snapshot owned by `onboarding` alone. (e) A page load `Started` acts as (b). (f) A second `sign_out_send_start` while one runs starts nothing; a stale `askId` answers `unsent_changes:`. A source pin on the global `.on_window_event(` handler (the same slice `main:surfaces/policy.rs:259-260` reads): `sign_out_flow_window_closed(` is called in its `WindowEvent::CloseRequested` arm and in a `WindowEvent::Destroyed` arm. The test also asserts its premise: `close_policy(Platform::Macos, "macos-settings")` is `Hide`, so a close never destroys the Settings window | Listen for `Destroyed` only (the pin is red; this is the defect revision 1 had); end the phase `stopped` on a close (case b red: a hidden window would show the ask and could sign out); drop the snapshot whatever its owner (case d red); leave the deadline to the webview (case a never ends) |
 | U35 | `the_send_phase_runs_the_queue_step_alone` (review I6): while armed, the runner's third `select!` arm runs `process_due_operations` at most once a second on the injected clock, never `sync_tick_outcome` or a sweep (counted through test hooks), and not while sync is paused. Once disarmed, the arm never runs | Call `sync_tick_outcome` from the arm; run the arm without the once-a-second limit (more than 61 runs in 60 s) |
 | U36 | `a_late_other_change_stops_the_sign_out_before_any_copy` (review M4, C1): the ask's snapshot holds one rename. A second rename is enqueued after the gate (test seam) → the keep step refuses with `unsent_changes:`, nothing copied, nothing purged, keys in memory, the restart requested. Then a write enqueued after the gate with its staged copy present → kept and counted in K1, no refusal (U9's case, with a snapshot) | Accept any other change at the keep step (the second rename is dropped unasked) |
-| U37 | `the_gate_compares_the_queue_with_the_snapshot` (review I3, I1): `keepUnsent` with a stale `askId` → `unsent_changes:`. With the newest `askId`: a waiting file the snapshot did not hold → refuse; an other change it did not hold → refuse; a missing write it did not hold → refuse; a newer write to a file it held → no refusal (the autosave case) | Compare op ids for files (the autosave case refuses, a loop); skip the comparison (the new file is kept unasked at the gate) |
+| ~~U37~~ | ~~`the_gate_compares_the_queue_with_the_snapshot` (review I3, I1): `keepUnsent` with a stale `askId` → `unsent_changes:`. With the newest `askId`: a waiting file the snapshot did not hold → refuse; an other change it did not hold → refuse; a missing write it did not hold → refuse; a newer write to a file it held → no refusal (the autosave case)~~ | ~~Compare op ids for files (the autosave case refuses, a loop); skip the comparison (the new file is kept unasked at the gate)~~ |
+| U37 | `the_gate_compares_the_queue_with_the_snapshot` (review I3, I1, re-review N3): `keepUnsent` with a stale `askId` → `unsent_changes:`. With the newest `askId`: a waiting file the snapshot did not hold → refuse; an other change it did not hold → refuse; a missing write it did not hold → refuse; a newer write to a file it held → no refusal (the autosave case). **Which snapshot the keep step uses:** the gate accepts snapshot S, which holds one rename, and the store no longer holds S. A test seam between the gate and the keep step enqueues a second rename and records a newer count S′ that holds both. The keep step compares with S: it refuses with `unsent_changes:`, and nothing is copied or purged (W6). In a second run the seam records S′ without changing the queue; the sign-out completes, and the store then holds nothing | Compare op ids for files (the autosave case refuses, a loop); skip the comparison (the new file is kept unasked at the gate); read the store's newest snapshot at the keep step (S′ holds the second rename, so it is dropped unasked and the sign-out completes); leave the store as it is after a completed sign-out (it still holds S′) |
+| U38 | `copied_files_counts_files_with_a_copy` (re-review N1): file X has an earlier-build write whose staged copy is gone and a newer minted write whose copy exists; file Y's only write has lost its copy → `files = 2`, `missingFiles = 2`, `copiedFiles = 1`. The keep step then copies X and not Y, and K1 counts 1 | Compute `copiedFiles` as `files − missingFiles` (it reads 0, and A2 would drop its copy sentence though X is copied) |
+| U39 | `a_purge_failure_after_the_keep_step_spares_waiting_copies_and_is_named_next_time` (re-review N8). (a) An injected remover that fails on an orphan copy → `Err`; every waiting write's staged copy still exists, the rows are intact, the kept folder is recorded, and `kept_unsent_unfinished` names it. (b) An injected remover that fails on the second waiting write's staged copy → `Err`, the first copy is gone; with that write's copy missing, `sign_out_count` answers `missingFiles ≥ 1` and `earlierFolder` = that folder; with no missing write it answers `earlierFolder: null`. (c) A later sign-out that completes clears `kept_unsent_unfinished` and never changes `kept_unsynced_folder` | Remove the files in today's single loop (case a: a waiting write's copy is gone); never save the key (case b: `earlierFolder` is null); never clear it (case c) |
+| U40 | `clone_nofollow_is_the_headers_value` (re-review N5): the keep step's `CLONE_NOFOLLOW` is `0x0001`, the value in `sys/clonefile.h:33`, and the clone call passes it | Define it as `0x0008` (`CLONE_NOFOLLOW_ANY`, line 36 of the same header) |
 
 ### 13.2 Frontend (bun)
 
@@ -1096,17 +1272,21 @@ output go into the task's notes and QA evidence.
 | --- | --- | --- |
 | ~~F1~~ | ~~The Settings flow: confirm → progress (P1 follows the events, P3 present) → ask → "Sign out" calls `clear_session` with `keepUnsent: true`; "Cancel" calls nothing~~ | ~~Call `clear_session` with `keepUnsent` from the progress phase~~ |
 | F1 | The Settings flow: confirm → `sign_out_count` → `sign_out_send_start({ askId })` → progress (P1 follows `sign-out-send-progress`, P3 present) → `sign-out-send-ended` → the ask from its snapshot → "Sign out" calls `clear_session` with `keepUnsent: { askId }` of that snapshot; "Cancel" calls nothing. (review I6) | Call `clear_session` with `keepUnsent` from the progress phase; pass the first snapshot's `askId` after the phase ended |
-| F2 | The ask's copy, exact, for: files only, others only, both, missing, each reason, the switch; singular and plural | Drop " either" |
+| ~~F2~~ | ~~The ask's copy, exact, for: files only, others only, both, missing, each reason, the switch; singular and plural~~ | ~~Drop " either"~~ |
+| F2 | The ask's copy, exact, for: files only, others only, both, missing, each reason, the switch; singular and plural. A2's second sentence for c = n, 0 < c < n and c = 0, including n = k = c = 1 (an earlier-build write missing, a newer one copied: A2 keeps its second sentence, then A3). A3e with and without `earlierFolder`. (re-review N1, N8) | Drop " either"; leave A2's second sentence out when k = n (the n = k = c = 1 case is red); show A3e when `earlierFolder` is null |
 | F3 | Enter on open resolves to Cancel; Esc cancels; Esc in the progress phase is "Stop waiting" | Focus "Sign out" on open |
 | ~~F4~~ | ~~The compact page, the banner and the Version Center open Settings › Account on `unsent_changes` and never call `clear_session` with `keepUnsent` themselves~~ | ~~Show the refusal as a toast~~ |
 | F4 | The compact page calls `request_sign_out_flow` on `unsent_changes` and never calls `clear_session` with `keepUnsent` itself. On macOS `forceReauth` (banner and Version Center) never calls `clear_session` (`main:desktopApi.ts:1162-1165`, pinned as it is). (review I1) | Show the refusal as a toast; call `clear_session` from `forceReauth` on macOS |
 | F5 | Settings › Sync renders both rows, ours first, each with its own Dismiss; ours has "Show in Finder"; neither row says "your" | Render one row |
 | ~~F6~~ | ~~The TypeScript constants equal the Rust ones (P0-P3, A0-A5, K0-K3, E1-E3)~~ | ~~Change one character~~ |
-| F6 | The TypeScript constants equal the Rust ones (P0-P3, A0-A5, A0s, A1s, A2s, A4s, K0-K3, E1-E3). (review I1, M3) | Change one character |
+| ~~F6~~ | ~~The TypeScript constants equal the Rust ones (P0-P3, A0-A5, A0s, A1s, A2s, A4s, K0-K3, E1-E3). (review I1, M3)~~ | ~~Change one character~~ |
+| F6 | The TypeScript constants equal the Rust ones (P0-P3, A0-A5, A0s, A1s, A2s, A3e, A4s, K0-K3, E1-E3). (review I1, M3, re-review N8) | Change one character |
 | F7 | A progress event with 0 never renders | Render the event as is |
-| F8 | The switch step (review I1): with a snapshot holding 1 file and 1 rename, it renders A0s, A1s, A2s and A4s and never "removes it" or "removes them"; with an empty snapshot it renders spec A's title and `accountSwitchBody(0)`; "Sign out and switch" passes `forgetEmail: true` and `keepUnsent: { askId }`; on an `Err` starting `unsent_changes:` it calls `sign_out_count` and re-renders with the new counts, with no toast; on any other `Err` it shows today's toast | Drop `keepUnsent` (the gate refuses and the test sees no re-render); show the refusal as the "Couldn’t sign out" toast; render `accountSwitchBody(n)` |
+| ~~F8~~ | ~~The switch step (review I1): with a snapshot holding 1 file and 1 rename, it renders A0s, A1s, A2s and A4s and never "removes it" or "removes them"; with an empty snapshot it renders spec A's title and `accountSwitchBody(0)`; "Sign out and switch" passes `forgetEmail: true` and `keepUnsent: { askId }`; on an `Err` starting `unsent_changes:` it calls `sign_out_count` and re-renders with the new counts, with no toast; on any other `Err` it shows today's toast~~ | ~~Drop `keepUnsent` (the gate refuses and the test sees no re-render); show the refusal as the "Couldn’t sign out" toast; render `accountSwitchBody(n)`~~ |
+| F8 | The switch step (review I1, re-review N9): with a snapshot holding 1 file and 1 rename, it renders A0s, A1s, A2s and A4s and never "removes it" or "removes them"; with an empty snapshot it renders spec A's title and `accountSwitchBody(0)`; "Sign out and switch" passes `forgetEmail: true` and `keepUnsent: { askId }`; on an `Err` starting `unsent_changes:` it calls `sign_out_count` and re-renders with the new counts, with no toast; on any other `Err` it shows today's toast. With no `unsent` at all and `pending_changes: 2` (Linux, §10), it renders spec A's `accountSwitchBody(2)` and calls `clearSession({ forgetEmail: true })` with no `keepUnsent` | Drop `keepUnsent` (the gate refuses and the test sees no re-render); show the refusal as the "Couldn’t sign out" toast; render `accountSwitchBody(n)` on macOS; read a missing snapshot as nothing waiting (the Linux case renders `accountSwitchBody(0)` and drops the warning) |
 | F9 | Settings consumes a flow request (review I6): on mount, and on `menu:sign-out-flow`, it calls `consume_sign_out_flow_request`; `true` selects the Account tab and starts the flow at the count; `false` changes nothing | Consume only on the event (a window that was not loaded yet misses the request) |
 | F10 | A refusal after a send phase goes straight to the ask (review I6): after `sign-out-send-ended` with `ask: null`, `clear_session` without `keepUnsent` answers `unsent_changes:` → `sign_out_count`, then the ask; `sign_out_send_start` is called once in the whole flow | Re-enter the send phase on the refusal (a second `sign_out_send_start`) |
+| F11 | A close ends the flow (re-review I6). At each step (the count in flight, the progress phase, the ask), `sign-out-flow-closed` closes the sheet, and the flow makes no later `sign_out_count`, `sign_out_send_start` or `clear_session` call, also when a `sign_out_count` answer arrives after the event. A `sign-out-send-ended` with `reason: 'closed'` and `ask: null` shows no ask and calls no `clear_session`. After the event, "Sign out…" starts a new flow at the count. (F10's `ask: null` case is `reason: 'all_sent'`) | Treat any `ask: null` as all sent (`clear_session` is called on `closed`); ignore the event at the ask (the sheet stays); act on a count answer that arrives after the event (`sign_out_send_start` is called) |
 
 ### 13.3 Gates
 
@@ -1114,6 +1294,13 @@ output go into the task's notes and QA evidence.
 - `bun test` with `N pass / 0 fail`;
 - `bunx tsc --noEmit`, eslint, and no new clippy warnings against a `main` baseline;
 - `src-tauri/Cargo.lock` and `bun.lock` unchanged (no new dependency).
+- **Where each half runs** (re-review N9). The macOS gate cannot run code under `#[cfg(not(target_os = "macos"))]`.
+  U32's non-macOS half, and the unchanged Linux and Windows sign-out, run in the public repository's CI: the
+  `rust-linux` job runs `cargo test --locked` on Linux (`main:.github/workflows/ci.yml:51-105`), and the Windows leg of
+  `rust-check` runs it on Windows (`ci.yml:107-118`, `:148-163`). The macOS leg runs `cargo check` only
+  (`ci.yml:138-146`). The evidence is each job's log with U32's name and its `test result` line, as checked by
+  `scripts/assert-cargo-test-counts.py` (`ci.yml:96`, `:163`). If CI cannot run, a Linux build host can stand in for
+  the Linux half; the Windows half then stays open, named.
 
 ### 13.4 Device rung
 
@@ -1126,6 +1313,7 @@ output go into the task's notes and QA evidence.
   (review M1, M6)
 - **No production** (review M6). Before D1, and again before D7 and D8, the operator captures the app's connections
   (`lsof -a -i -p <the app's pid>`). They show only the local API (or D7's proxy). Any other host stops the rung.
+  D10 takes the same capture first (re-review I6).
 - **A container that holds only the test accounts** (review M6). A QA build carries the installed app's bundle id
   (`io.beebeeb.app`). Under the everyday macOS user it would share the container, the Keychain items and `state.db` with
   the installed copy, and with the real account in them. So the rung runs under a macOS user account used only for QA.
@@ -1145,7 +1333,8 @@ output go into the task's notes and QA evidence.
 | ~~D1~~ | ~~**Server reachable.** Copy `d1.bin` in; sign out from Settings › Account within 5 s~~ | ~~The phase ran: the sending sheet ("Sending 1 change before signing out…") in a screenshot, or, if it was too quick to capture, the `sign-out send phase ended` line with `reason = all_sent`. The sign-out then completes with no ask; no K1 paragraph and no `Changes not sent/<this event>` folder; after signing in again, `d1.bin` is listed, and opening it (a download from the server) gives the recorded sha256~~ |
 | D1 | **Server reachable.** Copy `d1.bin` in; sign out from Settings › Account within 5 s | **The step counts only when a change was waiting** (review I8): the `sign-out flow counted` line shows `files ≥ 1` and `can_send = true`, and the `sign-out send phase ended` line shows `changes_at_start ≥ 1` and `reason = all_sent`. If the count reads 0 (the runner's tick sent the file first), the step is repeated; it is never passed on a 0. Then: the sending sheet ("Sending 1 change before signing out…") in a screenshot if it lasted long enough to capture; the sign-out completes with no ask; no K1 paragraph and no `Changes not sent/<this event>` folder; after signing in again, `d1.bin` is listed, and opening it (a download from the server) gives the recorded sha256 |
 | ~~D2~~ | ~~**Server stopped.** Stop the API; copy `d2.bin` in; sign out within 5 s~~ | ~~No sending sheet, or one that ends within seconds (the link monitor may not have seen the stop yet; the first attempt then ends the phase); the ask reads A2 for 1 file plus A5 `offline`; "Sign out" → a `UserNotificationCenter` window titled "Files kept on this Mac" with K1 and a path; `shasum -a 256 "<path>/d2.bin"` equals the recorded sha256. After signing in again: the K2 row; record whether "Show in Finder" reveals the folder (if not, amend §7.1); "Dismiss" removes the row and leaves the folder. Record whether macOS's dated folder exists and whether it holds `d2.bin` (§9)~~ |
-| D2 | **Server stopped.** Stop the API; copy `d2.bin` in; sign out within 5 s | No sending sheet, or one that ends within seconds (the link monitor may not have seen the stop yet; the first attempt then ends the phase). The ask reads A2 for 1 file plus A5 `offline`. "Sign out" → a `UserNotificationCenter` window titled "Files kept on this Mac" with K1 and a path; `shasum -a 256 "<path>/d2.bin"` equals the recorded sha256; `ls -la` of the container's `Data/` shows `Documents` as a real directory, mode `0700` (review M5). After signing in again: the K2 row. **"Show in Finder" has a pass/fail** (review I7): press it 3 times; each press gives a screenshot of a Finder window with the event folder selected (3 of 3), and a `log show` capture covering the presses, filtered to the app's process id and to sandbox reports, holds no `-54` and no sandbox `deny` line. Any miss fails this part: the button is struck from §7.1 with the evidence named, and the path alone remains. Then "Dismiss" removes the row and leaves the folder. Record whether macOS's dated folder exists and whether it holds `d2.bin` (§9) |
+| ~~D2~~ | ~~**Server stopped.** Stop the API; copy `d2.bin` in; sign out within 5 s~~ | ~~No sending sheet, or one that ends within seconds (the link monitor may not have seen the stop yet; the first attempt then ends the phase). The ask reads A2 for 1 file plus A5 `offline`. "Sign out" → a `UserNotificationCenter` window titled "Files kept on this Mac" with K1 and a path; `shasum -a 256 "<path>/d2.bin"` equals the recorded sha256; `ls -la` of the container's `Data/` shows `Documents` as a real directory, mode `0700` (review M5). After signing in again: the K2 row. **"Show in Finder" has a pass/fail** (review I7): press it 3 times; each press gives a screenshot of a Finder window with the event folder selected (3 of 3), and a `log show` capture covering the presses, filtered to the app's process id and to sandbox reports, holds no `-54` and no sandbox `deny` line. Any miss fails this part: the button is struck from §7.1 with the evidence named, and the path alone remains. Then "Dismiss" removes the row and leaves the folder. Record whether macOS's dated folder exists and whether it holds `d2.bin` (§9)~~ |
+| D2 | **Server stopped.** Stop the API; copy `d2.bin` in; sign out within 5 s | No sending sheet, or one that ends within seconds (the link monitor may not have seen the stop yet; the first attempt then ends the phase). The ask reads A2 for 1 file plus A5 `offline`. "Sign out" → a `UserNotificationCenter` window titled "Files kept on this Mac" with K1 and a path; `shasum -a 256 "<path>/d2.bin"` equals the recorded sha256; `ls -la` of the container's `Data/` shows `Documents` as a real directory, mode `0700` (review M5). After signing in again: the K2 row. **"Show in Finder" has a pass/fail** (review I7): press it 3 times; each press gives a screenshot of a Finder window with the event folder selected (3 of 3). **The log capture must prove itself** (re-review N7). It is one `log show --info` over the presses, with a predicate that is an OR: `processID == <the app's pid>`, or `process == "kernel"` with `eventMessage` containing both `Sandbox` and `(<the app's pid>)`. Sandbox refusals are logged by the kernel as `Sandbox: <name>(<pid>) deny…`, not by the app, so a filter on the app's process alone can never see one. The capture counts only if it holds the app's own `kept folder reveal requested` line once per press (3 of 3, §7.1); without them the step fails as not captured. Before the presses, the kernel half is shown to match: the operator runs a scratch command under `sandbox-exec` with a profile that denies one file read, and runs the same kernel clause with that command's pid. A `deny` line found there is recorded; if none is found, the evidence says the kernel half is unproven, and the screenshots and the app's own lines still decide. Then the capture holds no `-54` and no `deny` line for the app. Any miss fails this part: the button is struck from §7.1 with the evidence named, and the path alone remains. Then "Dismiss" removes the row and leaves the folder. Record whether macOS's dated folder exists and whether it holds `d2.bin` (§9) |
 | D3 | **Cancel keeps everything.** API stopped; copy `d3.bin` in; sign out; "Cancel" at the ask | Still signed in; `d3.bin` still in the Finder location; start the API; it reaches the server after its retry backoff (checked as in D1) |
 | D4 | **The menu.** API stopped; copy `d4.bin` in; ⌘⇧L | Settings opens on Account with the ask; no "Sign-out paused" dialog; "Cancel" |
 | D5 | **A failed copy.** API stopped; copy `d5.bin` in; `chmod 500` the container's `Documents/Changes not sent` (make it first if it does not exist); sign out; "Sign out" at the ask | E2 shown; still signed in; no new event folder and no new K2 row (W8, W9); Finder location present (~~with spec A:~~ back within one check of the reconciler, review M1); restore the mode and start the API → `d5.bin` reaches the server with its sha256 |
@@ -1154,19 +1343,25 @@ output go into the task's notes and QA evidence.
 | D7 | **The time limit, required** (review I8). A throttling proxy on `127.0.0.1:3002` forwards to the local API on `:3001`. It is a scratch script in the operator's scratch directory, never committed, run without sudo, with its process id recorded and stopped with `kill <that pid>`. The app is launched with `BB_API_BASE=http://localhost:3002`. Pick the rate so that one upload chunk takes 5-15 s (inside the 30 s request timeout, so the link never reads as lost) and the whole file takes more than 90 s; the evidence records chunk size, rate and file size. Copy the file in, wait for its first chunk to start, then sign out | A screenshot of the sending sheet; the ask with A5 `time_limit` in a screenshot; the `sign-out send phase ended` line with `reason = time_limit` and `elapsed_ms` between 60000 and 63000. "Cancel" → still signed in; the upload finishes through the proxy; after it lands, a download gives the recorded sha256. If no proxy setup can meet the chunk bound, the step is not passed: the task stays open with this rung named, and the lead records a ruling in the task file that accepts U16 for the limit, or not |
 | D8 | **The account switch** (review I1). Two test accounts, A and B, on the local API. Signed in as A: revoke A's session on the local API only (in the local development database; the operator records how), then copy `d8.bin` in. It is queued and cannot be sent. Wait for the auth-expired banner; "Sign in again"; sign in as B | The switch step in a screenshot: A0s, A1s and A2s for 1 file, and no "removes it" or "removes them". "Sign out and switch" → the alert with K1 and a path; `shasum -a 256 "<path>/d8.bin"` equals the recorded sha256; the sign-in then continues as B. The `sign-out flow counted` line shows `files = 1` |
 | D9 | **Two folders from one sign-out** (review M9). With the API up, make `d9b.txt` and let it reach the server. Stop the API; copy `d9a.bin` in (queued); Lock the vault (Settings › Account); in Finder, overwrite `d9b.txt` with another scratch file's bytes (the extension cannot reach a stopped engine, so the save is refused and macOS should keep the item as not synced, **Unverified**); sign out; "Sign out" at the ask (A5 `engine_stopped`) | One alert with K1 first, then a blank line, then 1882's paragraph and macOS's folder. `d9a.bin` in our folder and the new `d9b.txt` in macOS's folder, each with its recorded sha256. After signing in again, two rows, ours first. If macOS kept no folder because the locked save was not kept as not synced, the evidence records it, the step fails as a two-folder rung, and the lead decides |
+| D10 | **Closing Settings during the send phase** (re-review I6). With D7's proxy, so the phase lasts, copy a file in and wait for its first chunk to start; sign out from Settings › Account; while the sending sheet shows, close Settings with its close button | The `sign-out send phase ended` line with `reason = closed`, timestamped within a second of the close. No ask appears anywhere, the app is still signed in, and `sign-out flow counted` appears once. Open Settings again: the Account tab with no sheet, in a screenshot. Press "Sign out…" again: a second `sign-out flow counted` line (a fresh count), and the sending sheet again. "Stop waiting", then "Cancel" at the ask; the upload finishes through the proxy, and a download after it lands gives the recorded sha256 |
 
 ~~The lead's required rung is D1 and D2. D3-D6 are required for this task; D7 is optional, with its reason recorded if it
 is skipped.~~
 
-The lead's required rung is D1 and D2. D3-D9 are required for this task. D7 is never skipped silently: it passes with
-the proxy, or the task stays open until the lead's ruling on U16 is recorded. (review I8)
+~~The lead's required rung is D1 and D2. D3-D9 are required for this task. D7 is never skipped silently: it passes with
+the proxy, or the task stays open until the lead's ruling on U16 is recorded. (review I8)~~
+
+The lead's required rung is D1 and D2. D3-D10 are required for this task. D7 is never skipped silently: it passes with
+the proxy, or the task stays open until the lead's ruling on U16 is recorded (review I8). D10 needs D7's proxy; if no
+proxy setup meets D7's chunk bound, D10 stays open with it. (re-review I6)
 
 ## 14. Docs that change with the code
 
 - This spec, amended in place (struck text kept) if a device step changes it.
 - ~~`docs/specs/2026-10-02-macos-settings-dialogs.md`, Dialog 3: the send phase and the ask (§11), before the frontend merges.~~
 - **First, before any frontend code** (review M8, I1; §11, "The design changes first"):
-  - `docs/specs/2026-10-02-macos-settings-dialogs.md`, Dialog 3: the send phase and the ask (§11);
+  - `docs/specs/2026-10-02-macos-settings-dialogs.md`, Dialog 3: the send phase and the ask (§11); and that closing
+    Settings during the count, the send phase or the ask ends the flow with nothing changed (§5.1; re-review I6);
   - `design/hifi/macos-settings-dialogs.html`: Dialog 3's send phase and ask, drawn; and dialog 4, the onboarding-window
     switch step (line 147, "amended 6 Oct 2026"), redrawn with A0s-A4s in place of "…removes them";
   - spec A, `docs/specs/2026-10-06-macos-finder-setup-reconciler.md` line 80: on macOS the switch's warning is this
