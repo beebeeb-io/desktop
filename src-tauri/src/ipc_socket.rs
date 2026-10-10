@@ -2352,7 +2352,16 @@ fn forget_dedup_for_item(dedup: &std::sync::Arc<WriteDedup<IpcResponse>>, file_i
 /// and finalizing the upload since then changed the item's version and status.
 /// Serving the old `version_identifier` would hand the system a stale base
 /// version for the user's next edit, so the item is rebuilt from the current row.
-fn refresh_cached_write(db: &crate::state_db::StateDb, cached: IpcResponse) -> Option<IpcResponse> {
+///
+/// `through_alias` (a modify's reply): an item named by a provisional id whose create
+/// has landed is rebuilt from the server file and still presented under the provisional
+/// id, as the modify was (spec 2026-10-09 §7.2). A create's reply never resolves through
+/// the alias: its repeat after the landing runs again, as before (§12).
+fn refresh_cached_write(
+    db: &crate::state_db::StateDb,
+    cached: IpcResponse,
+    through_alias: bool,
+) -> Option<IpcResponse> {
     let IpcResponse::WriteQueued {
         item: Some(item),
         ignored,
@@ -2361,8 +2370,19 @@ fn refresh_cached_write(db: &crate::state_db::StateDb, cached: IpcResponse) -> O
     else {
         return Some(cached);
     };
-    let entry = match db.get_file(&item.identifier) {
-        Ok(Some(entry)) => entry,
+    let (entry, presented) = match db.get_file(&item.identifier) {
+        Ok(Some(entry)) => (entry, false),
+        Ok(None) if through_alias => {
+            match db
+                .resolve_alias(&item.identifier)
+                .ok()
+                .flatten()
+                .and_then(|server_id| db.get_file(&server_id).ok().flatten())
+            {
+                Some(entry) => (entry, true),
+                None => return None,
+            }
+        }
         Ok(None) => return None,
         // Cannot tell: prefer returning the stored result over queueing twice.
         Err(_) => {
@@ -2380,12 +2400,15 @@ fn refresh_cached_write(db: &crate::state_db::StateDb, cached: IpcResponse) -> O
     // alternative (re-queueing) is only ever a duplicate, never a lost file, but
     // a lookup that cannot run also cannot prove a delete, and the delete path
     // forgets the entry itself.
-    if db.has_pending_trash(&item.identifier).unwrap_or(false) {
+    if db.has_pending_trash(&entry.file_id).unwrap_or(false) {
         return None;
     }
-    let fresh = file_entry_payload_for_db(db, &entry, FP_ROOT_APPLE);
+    let mut fresh = file_entry_payload_for_db(db, &entry, FP_ROOT_APPLE);
     if fresh.filename != item.filename {
         return None;
+    }
+    if presented {
+        fresh.identifier = item.identifier;
     }
     Some(IpcResponse::WriteQueued {
         item: Some(fresh),
@@ -2411,12 +2434,13 @@ async fn dedup_write(
         };
     }
     let validate_db = db.clone();
+    let through_alias = fingerprint.starts_with("modify|");
     dedup
         .run(
             &key,
             &fingerprint,
             std::time::Instant::now,
-            move |cached: IpcResponse| refresh_cached_write(&validate_db, cached),
+            move |cached: IpcResponse| refresh_cached_write(&validate_db, cached, through_alias),
             |resp: &IpcResponse| matches!(resp, IpcResponse::WriteQueued { .. }),
             work,
             IpcResponse::Error {

@@ -876,6 +876,98 @@ fn a_cached_reply_reports_the_row_as_it_is_now_not_as_it_was() {
     assert_eq!(operations_of_kind(&fx, OperationKind::UploadVersion).len(), 1);
 }
 
+/// Spec 2026-10-09 §7.2: a modify under a provisional id whose create has landed is replied
+/// under that id. The system's retry of the same request (same `request_id`) is answered from
+/// the remembered reply, brought up to date from the server file, and queues nothing again.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_repeated_modify_under_a_provisional_id_queues_one_upload() {
+    const PROVISIONAL: &str = "3f2a9c1e-0000-4000-8000-0000000000d1";
+    const SERVER: &str = "3f2a9c1e-0000-4000-8000-0000000000d2";
+    let fx = IpcFixture::start(|db| {
+        db.upsert_file(&FileEntry {
+            file_id: SERVER.into(),
+            path: "doc.txt".into(),
+            status: FileStatus::Local,
+            size_bytes: 3,
+            modified_at: 1_700_000_100,
+            content_hash: None,
+            remote_updated_at: 1_700_000_100,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+        let mut contract = db.get_file_contract_state(SERVER).unwrap().unwrap();
+        contract.current_version = 1;
+        db.set_file_contract_state(&contract).unwrap();
+        db.insert_alias_for_test(PROVISIONAL, SERVER, 1_700_000_100);
+    });
+    let src = tempfile::tempdir().unwrap();
+    let path = source_file(&src, "doc.txt");
+    let request = || {
+        let line = modify_request(PROVISIONAL, "doc.txt", &path, Some("key-provisional-modify"));
+        let mut request: serde_json::Value = serde_json::from_slice(&line).unwrap();
+        request["QueueFinderModify"]["base_version_identifier"] = serde_json::json!("1");
+        let mut line = serde_json::to_vec(&request).unwrap();
+        line.push(b'\n');
+        line
+    };
+    let first = fx.rt.block_on(send_one(&fx, request()));
+    let repeat = fx.rt.block_on(send_one(&fx, request()));
+    for reply in [&first, &repeat] {
+        assert_eq!(
+            reply["WriteQueued"]["item"]["identifier"],
+            serde_json::json!(PROVISIONAL),
+            "replied under the provisional id: {reply}"
+        );
+    }
+    assert_eq!(
+        repeat["WriteQueued"]["item"]["content_version"], first["WriteQueued"]["item"]["content_version"],
+        "the same write"
+    );
+    let ops = operations_of_kind(&fx, OperationKind::UploadVersion);
+    assert_eq!(ops.len(), 1, "one upload for one save: {ops:?}");
+    assert_eq!(ops[0].file_id.as_deref(), Some(SERVER));
+}
+
+/// Spec 2026-10-09 §12 (4c): a create's repeat after its landing is unchanged, it runs
+/// again. Only a modify's remembered reply is brought up to date through the alias: a create
+/// reply must name the provider's identifier, never the provisional one.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_repeated_create_after_its_landing_runs_again() {
+    const SERVER: &str = "3f2a9c1e-0000-4000-8000-0000000000d3";
+    let fx = IpcFixture::start(|_| {});
+    let src = tempfile::tempdir().unwrap();
+    let path = source_file(&src, "new.txt");
+    let first = fx.rt.block_on(send_one(
+        &fx,
+        create_request("new.txt", &path, Some("key-landed-create")),
+    ));
+    let provisional = first["WriteQueued"]["item"]["identifier"].as_str().unwrap().to_string();
+    // The landing, as the queue leaves it: the provisional row is gone, the server row and
+    // the alias exist.
+    let mut row = fx.db.get_file(&provisional).unwrap().unwrap();
+    fx.db.delete_file(&provisional).unwrap();
+    row.file_id = SERVER.into();
+    row.status = FileStatus::Local;
+    fx.db.upsert_file(&row).unwrap();
+    fx.db.insert_alias_for_test(&provisional, SERVER, 1_700_000_100);
+    let repeat = fx.rt.block_on(send_one(
+        &fx,
+        create_request("new.txt", &path, Some("key-landed-create")),
+    ));
+    let identifier = repeat["WriteQueued"]["item"]["identifier"].as_str().unwrap();
+    assert_ne!(
+        identifier, provisional,
+        "never answered under the provisional id: {repeat}"
+    );
+    assert_ne!(
+        identifier, SERVER,
+        "not answered from the alias either (spec §12): {repeat}"
+    );
+}
+
 /// Spec 2026-10-09 §7.2 (I-1): the create arm hands a deletion-conflicted create's three
 /// fields to the engine, which modifies the template's item instead of creating a second
 /// file. macOS only: the other unix builds ignore the fields (an ordinary create).
