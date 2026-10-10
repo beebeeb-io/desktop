@@ -3974,6 +3974,9 @@ impl StateDb {
                 Some(pred) if pred.completed => return finish_wait(tx, took_over),
                 Some(pred) => {
                     hand_over_conn(&tx, op_id, &current.write_id, &op, &pred)?;
+                    // One per claim: a parked W only names a predecessor that had parked
+                    // unminted, or gone, at W's own claim, so none is left to take over.
+                    debug_assert!(took_over.is_none(), "a second hand-over in one claim");
                     took_over = Some(TookOver {
                         parked_op_id: pred.op_id.clone(),
                         released_payload: pred.payload_path.clone(),

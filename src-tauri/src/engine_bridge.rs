@@ -15041,6 +15041,77 @@ mod tests {
         assert_eq!(logs.matches("queued write took over a parked one").count(), 1, "{logs}");
     }
 
+    #[tokio::test]
+    async fn a_hand_over_that_inherits_a_pending_base_waits_and_releases_the_copy() {
+        // `ClaimOutcome::WaitAfterHandOver`. Not reachable in production today: nothing parks an
+        // op whose base is pending. W is parked by hand here. N takes W's role, inherits the
+        // pending base, and waits: the hand-over is still logged once and W's copy unlinked.
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [76u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        bridge
+            .db
+            .upsert_file(&FileEntry {
+                file_id: "versionless".into(),
+                path: "notes.txt".into(),
+                status: FileStatus::Local,
+                size_bytes: 10,
+                modified_at: 1_700_000_000,
+                content_hash: None,
+                remote_updated_at: 1_700_000_000,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+        assert_eq!(
+            bridge
+                .db
+                .get_file_contract_state("versionless")
+                .unwrap()
+                .unwrap()
+                .current_version,
+            0
+        );
+        let w = fp_save(&bridge, dir.path(), "versionless", "notes.txt", b"W", "0"); // rule 6b
+        let w_op = bridge.db.list_operations_for_file("versionless").unwrap().remove(0);
+        assert_eq!(bridge.db.finder_write(&w_op.op_id).unwrap().unwrap().base_pending, 1);
+        fp_save(
+            &bridge,
+            dir.path(),
+            "versionless",
+            "notes.txt",
+            b"W N",
+            w.token.as_deref().unwrap(),
+        );
+        let n_op = bridge.db.list_operations_for_file("versionless").unwrap().remove(1);
+        bridge.db.park_for_test(&w_op.op_id);
+        let logs = capture_logs_async(async {
+            bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+        })
+        .await;
+        let state = server.finish();
+        assert!(state.requests.is_empty(), "nothing is sent: {:?}", state.requests);
+        let ops = bridge.db.list_operations_for_file("versionless").unwrap();
+        assert_eq!(ops.len(), 1, "W's op is gone; N remains");
+        assert_eq!(ops[0].op_id, n_op.op_id);
+        assert_eq!(ops[0].attempts, 0, "N waits, and waiting is not an attempt");
+        let n_write = bridge.db.finder_write(&n_op.op_id).unwrap().unwrap();
+        assert_eq!(
+            (n_write.base_pending, n_write.after_write_id),
+            (1, None),
+            "N inherited W's pending base"
+        );
+        assert_eq!(logs.matches("queued write took over a parked one").count(), 1, "{logs}");
+        assert!(
+            !std::path::Path::new(w_op.payload_path.as_deref().unwrap()).exists(),
+            "W's copy is released after the commit"
+        );
+        assert!(!logs.contains("upload parked"), "{logs}");
+    }
+
     // ── The accept transaction and the base mapping (spec §6.1, §6.3.1, §8.7 S1.1, S3, S5) ──
 
     #[tokio::test]
