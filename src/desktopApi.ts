@@ -978,8 +978,11 @@ export function desktopFileOverview(
 export function desktopSearchFiles(
   query: string,
   limit?: number,
+  options?: { forFinder?: boolean },
 ): Promise<CommandResult<DesktopSearchResponse>> {
-  return command<DesktopSearchResponse>('desktop_search_files', { query, limit })
+  // `forFinder`: the caller will offer the rows for Finder. A Mac then gets no shared-with-me rows, dropped before the
+  // limit (task 1885 fix round 2, n1), so shared matches cannot crowd out the person's own files.
+  return command<DesktopSearchResponse>('desktop_search_files', { query, limit, forFinder: options?.forFinder })
 }
 
 export async function desktopListFileVersions(fileId: string): Promise<CommandResult<FileVersionListResponse>> {

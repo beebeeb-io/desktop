@@ -223,6 +223,38 @@ mod tests {
         assert_eq!(asking, 2, "the two tests that open through the real NSWorkspace");
     }
 
+    /// Fix round 2 (n1), in the command: `desktop_search_files` drops shared rows before the limit only when the caller
+    /// asked for rows it will show in Finder (`for_finder`) and only on a Mac, and it hands that to the query. Version
+    /// history, which calls the same command without the flag, keeps seeing shared files.
+    #[test]
+    fn test_1885_the_search_command_drops_shared_rows_only_for_finder_on_a_mac() {
+        use crate::finder_setup_command_tests::{body_between, without_items};
+        use crate::source_pin::squeeze;
+        let production = without_items(&read("src/lib.rs"), &["#[cfg(test)]", "#[cfg(all(test"]);
+        let command = squeeze(body_between(&production, "async fn desktop_search_files(", "\n}\n"));
+        assert!(
+            command.contains(&squeeze(
+                "let exclude_shared = for_finder.unwrap_or(false) && cfg!(target_os = \"macos\");"
+            )),
+            "the flag needs the caller's request AND a Mac: {command}"
+        );
+        assert!(
+            command.contains(&squeeze(
+                "desktop_search::query_local_index(&local, &query, max_results, exclude_shared)"
+            )),
+            "and goes into the query, where it is applied before the limit: {command}"
+        );
+        let quick = read("../src/DesktopQuickSearch.tsx");
+        let history = read("../src/DesktopVersionHistory.tsx");
+        assert!(
+            squeeze(&quick).contains(&squeeze(
+                "desktopSearchFiles(trimmedQuery, SEARCH_LIMIT, { forFinder: true })"
+            )),
+            "quick search asks for rows it will show in Finder"
+        );
+        assert!(!history.contains("forFinder"), "version history does not");
+    }
+
     /// Fix round 1 (m4): the two fallbacks that open the Finder location after an upload or a new folder run on the
     /// blocking pool and are not waited for. The open can now wait up to 3 s for the gate and 7 s for LaunchServices; the
     /// new-folder one ran inline on the MAIN thread (the menu handler and a plain `#[tauri::command] fn`) and the upload

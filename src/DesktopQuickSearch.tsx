@@ -70,7 +70,7 @@ export default function DesktopQuickSearch({
   const requestId = useRef(0)
 
   const trimmedQuery = query.trim()
-  const results = finderRevealableResults(platform, response?.results ?? EMPTY_RESULTS)
+  const results = useMemo(() => finderRevealableResults(platform, response?.results ?? EMPTY_RESULTS), [platform, response])
   const indexedFileCount = response?.indexed_file_count ?? 0
   const indexSyncing = response?.index_state === 'syncing'
 
@@ -115,7 +115,7 @@ export default function DesktopQuickSearch({
     let cancelled = false
     setLoading(true)
     const timer = window.setTimeout(() => {
-      void desktopSearchFiles(trimmedQuery, SEARCH_LIMIT).then((result) => {
+      void desktopSearchFiles(trimmedQuery, SEARCH_LIMIT, { forFinder: true }).then((result) => {
         if (cancelled || requestId.current !== currentRequest) return
         if (result.ok) {
           setResponse(result.value)

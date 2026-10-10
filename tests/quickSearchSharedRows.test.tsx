@@ -73,6 +73,13 @@ describe('quick search never offers a shared-with-me row for Finder on a Mac (ta
     })
   }
 
+  test('quick search asks the backend for rows to show in Finder, so a Mac drops shared rows before the limit (n1)', async () => {
+    const m = await search('macos', [mine])
+    const asked = m.calls.filter((call) => call.name === 'desktop_search_files')
+    expect(asked.length).toBeGreaterThan(0)
+    for (const call of asked) expect(call.args).toMatchObject({ query: 'rep', limit: 12, forFinder: true })
+  })
+
   test('the filter is a pure function of the platform and the rows', () => {
     expect(desktopApi.finderRevealableResults('macos', [shared, mine] as any).map((r) => r.file_id)).toEqual(['f-mine'])
     expect(desktopApi.finderRevealableResults('windows', [shared, mine] as any).map((r) => r.file_id)).toEqual(['f-shared', 'f-mine'])

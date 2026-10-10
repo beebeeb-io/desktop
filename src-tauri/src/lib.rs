@@ -11130,6 +11130,7 @@ async fn desktop_search_files(
     state: State<'_, AppState>,
     query: String,
     limit: Option<usize>,
+    for_finder: Option<bool>,
 ) -> Result<desktop_search::DesktopSearchResponse, String> {
     session_command!(async {
         {
@@ -11145,9 +11146,17 @@ async fn desktop_search_files(
         };
 
         let max_results = limit.unwrap_or(12).clamp(1, 50);
+        // Quick search asks for rows it will show in Finder; a Mac's Finder has no shared-with-me rows (ruling 1701), and
+        // they are dropped BEFORE the limit (task 1885 fix round 2, n1). Version history asks for none of this.
+        let exclude_shared = for_finder.unwrap_or(false) && cfg!(target_os = "macos");
         let response = tokio::task::spawn_blocking(move || -> Result<_, String> {
             let local = desktop_search::build_local_index(&db).map_err(|e| format!("build search index: {e}"))?;
-            Ok(desktop_search::query_local_index(&local, &query, max_results))
+            Ok(desktop_search::query_local_index(
+                &local,
+                &query,
+                max_results,
+                exclude_shared,
+            ))
         })
         .await
         .map_err(|e| format!("search task failed: {e}"))??;

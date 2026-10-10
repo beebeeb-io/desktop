@@ -146,7 +146,15 @@ pub(crate) fn build_local_index(db: &StateDb) -> anyhow::Result<LocalSearchIndex
     })
 }
 
-pub(crate) fn query_local_index(local: &LocalSearchIndex, query: &str, limit: usize) -> DesktopSearchResponse {
+/// `exclude_shared` drops shared-with-me rows BEFORE the result limit (task 1885 fix round 2, n1): a Mac's quick search
+/// offers only what Finder has, and a filter applied after `truncate(limit)` would let twelve shared matches ranked above
+/// the person's own files turn into "No matching files.".
+pub(crate) fn query_local_index(
+    local: &LocalSearchIndex,
+    query: &str,
+    limit: usize,
+    exclude_shared: bool,
+) -> DesktopSearchResponse {
     let trimmed = query.trim();
     let mut results: Vec<_> = if trimmed.is_empty() {
         Vec::new()
@@ -156,6 +164,7 @@ pub(crate) fn query_local_index(local: &LocalSearchIndex, query: &str, limit: us
             .query(trimmed)
             .into_iter()
             .filter_map(|file_id| local.records.get(&file_id))
+            .filter(|record| !(exclude_shared && record.shared_with_me))
             .cloned()
             .collect()
     };
@@ -425,7 +434,7 @@ mod tests {
         }
 
         let local = super::build_local_index(&db).expect("local index");
-        let found = super::query_local_index(&local, "report", 10);
+        let found = super::query_local_index(&local, "report", 10, false);
         let flags: std::collections::BTreeMap<_, _> = found
             .results
             .iter()
@@ -443,6 +452,73 @@ mod tests {
         );
     }
 
+    /// Task 1885 fix round 2 (n1): a Mac's quick search drops the shared rows BEFORE it cuts to the limit. With more
+    /// shared matches than the limit, ranked above the person's own file, the own file is still returned. (Without the
+    /// flag the same query returns twelve shared rows and no own file: that is what the old filter-after-the-limit did.)
+    #[test]
+    fn test_1885_shared_rows_are_dropped_before_the_limit_not_after() {
+        use crate::state_db::Namespace;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = StateDb::open(dir.path().join("state.db")).expect("state db");
+        for n in 0..13 {
+            // The names START with the query, so they rank ahead of the own file's later token match.
+            let id = format!("shared-{n:02}");
+            seed_file(&db, &id, &format!("Shared/report-{n:02}.pdf"), ItemKind::File);
+            let mut contract = db.get_file_contract_state(&id).expect("lookup").expect("row");
+            contract.namespace = Namespace::SharedWithMe;
+            db.set_file_contract_state(&contract).expect("mark shared");
+        }
+        seed_file(&db, "mine", "Archive/My old report.pdf", ItemKind::File);
+        let local = super::build_local_index(&db).expect("local index");
+
+        let ids = |response: &super::DesktopSearchResponse| {
+            response.results.iter().map(|r| r.file_id.clone()).collect::<Vec<_>>()
+        };
+        let everything = super::query_local_index(&local, "report", 12, false);
+        assert_eq!(everything.results.len(), 12);
+        assert!(
+            everything.results.iter().all(|r| r.shared_with_me),
+            "setup: twelve shared rows outrank the own file, so a filter after the limit would leave nothing: {:?}",
+            ids(&everything)
+        );
+
+        let for_a_mac = super::query_local_index(&local, "report", 12, true);
+        assert_eq!(ids(&for_a_mac), vec!["mine".to_string()], "the own match is returned");
+        assert!(for_a_mac.results.iter().all(|r| !r.shared_with_me));
+        assert_eq!(
+            for_a_mac.indexed_file_count, everything.indexed_file_count,
+            "the count of indexed files is the index's, not the filtered list's"
+        );
+    }
+
+    /// Fix round 2 (n1): with enough of the person's own matches, a Mac gets a full page of them, none shared.
+    #[test]
+    fn test_1885_a_mac_gets_a_full_page_of_the_persons_own_matches() {
+        use crate::state_db::Namespace;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = StateDb::open(dir.path().join("state.db")).expect("state db");
+        for n in 0..6 {
+            let id = format!("shared-{n}");
+            seed_file(&db, &id, &format!("Shared/note-{n}.txt"), ItemKind::File);
+            let mut contract = db.get_file_contract_state(&id).expect("lookup").expect("row");
+            contract.namespace = Namespace::SharedWithMe;
+            db.set_file_contract_state(&contract).expect("mark shared");
+        }
+        for n in 0..5 {
+            seed_file(&db, &format!("mine-{n}"), &format!("Docs/note-{n}.txt"), ItemKind::File);
+        }
+        let local = super::build_local_index(&db).expect("local index");
+        let page = super::query_local_index(&local, "note", 4, true);
+        assert_eq!(page.results.len(), 4, "a full page");
+        assert!(
+            page.results
+                .iter()
+                .all(|r| r.file_id.starts_with("mine-") && !r.shared_with_me)
+        );
+        let windows = super::query_local_index(&local, "note", 4, false);
+        assert_eq!(windows.results.len(), 4, "without the flag every row is a candidate");
+    }
+
     #[test]
     fn local_query_uses_core_tokenization_and_returns_ranked_results() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -453,21 +529,21 @@ mod tests {
         seed_file(&db, "miss", "Budget.xlsx", ItemKind::File);
         let local = super::build_local_index(&db).expect("local index");
 
-        let cafe = super::query_local_index(&local, "cafe", 10);
+        let cafe = super::query_local_index(&local, "cafe", 10, false);
         assert_eq!(
             cafe.results.iter().map(|r| r.file_id.as_str()).collect::<Vec<_>>(),
             vec!["start", "middle"],
             "a file name starting with the folded query ranks before a later token match"
         );
 
-        let camel = super::query_local_index(&local, "vacation photo", 10);
+        let camel = super::query_local_index(&local, "vacation photo", 10, false);
         assert_eq!(
             camel.results.iter().map(|r| r.file_id.as_str()).collect::<Vec<_>>(),
             vec!["camel"],
             "camelCase names must be searchable through core tokenization"
         );
 
-        let empty = super::query_local_index(&local, "nonexistent", 10);
+        let empty = super::query_local_index(&local, "nonexistent", 10, false);
         assert!(empty.results.is_empty());
         assert_eq!(empty.index_state, super::DesktopSearchIndexState::Ready);
         assert_eq!(empty.indexed_file_count, 4);
