@@ -40,6 +40,18 @@ bound is exact, 1024 bytes and up (Q2); U34 and U10 pin what they claim (Q3, Q4)
 (Q5); D10b proves a close without the proxy (Q6); and a sign-out that fails after its window closed is shown in a
 dialog (Q7).
 
+**Revised 2026-10-10 (revision 4):** the two review threads on PR #121 (lead ruling [1887-pr121]) are answered in
+place, tagged "(PR #121 review 1)" and "(PR #121 review 2)", old text struck:
+- **Review 1.** The "sign-out was interrupted after keeping" marker, `kept_unsent_unfinished`, is saved by the keep
+  step before the purge's first deletion, durably, and cleared only by a purge that cleared the rows. Before, it was
+  saved only when `clear_session_impl` returned `Err`, so a crash or a power loss left nothing. It is now a list a later
+  keep adds to and never replaces, so the ask names every folder (`earlierFolders`). W9, W13, §5.2 steps 7 and 10, §5.3,
+  §7.3, §9, A3e, U30, U39, new U42 and U43.
+- **Review 2.** A sign-out result that came back before its window closed stays pending until that window
+  acknowledges it, and a close, a reload or a destroy of that window shows it in the native dialog. Before, tracking
+  stopped when the call returned, so a result could be shown nowhere. §5.1 "A late result", the contract, F11, new U44
+  and F12.
+
 ~~**Read at:**~~
 ~~- `main:` = desktop `main` at `8f7e91e` (task 1882 merged);~~
 ~~- `1873:` = the 1873 branch at `c4a24f9` (round 4, still being implemented; read only);~~
@@ -138,7 +150,7 @@ macOS. A plain sign-out has no count anywhere, so the lead's reading ("a plain s
 | **Covered** | A waiting write with `write_origin = minted` that is older than a copied write of the same `file_id`. The newer write holds its bytes (`1873 spec §8.2`, line 661), so a covered write counts as kept for W1, W6 and the purge guard. (review C1) |
 | **Kept** | Copied or covered. (review C1) |
 | **File with a copy** | A waiting file with at least one copied write, so the keep step puts a file for it in the kept folder. The ask counts these as `copiedFiles` (c), and A2's second sentence follows c (§11). A file can be missing and have a copy at once: an earlier-build write's copy is gone, a newer write's copy exists. (re-review N1) |
-| **Ask snapshot** | ~~What one ask showed the person, held by the app (never by the webview) under an `ask_id`: the counts, the `file_id` of every waiting file, the op id of every other waiting change, and the op id of every missing write. Only the newest snapshot is valid; a newer count replaces it (§5.1). (review I3)~~ What one ask showed the person, held by the app (never by the webview) under an `ask_id`: the counts (`files`, `copiedFiles`, `others`, `missingFiles`), the earlier folder A3e names (§7.3), the `file_id` of every waiting file, the op id of every other waiting change, the op id of every missing write, and its **owner**, the label of the window it was counted for. The app holds one; a newer count replaces it (§5.1). It leaves the store in three ways: the gate that accepts it takes it out and hands it, by value, to that sign-out's keep step (re-review N3); a close or reload of its owner window drops it (re-review I6); a sign-out that completes empties the store (re-review N3). (review I3) |
+| **Ask snapshot** | ~~What one ask showed the person, held by the app (never by the webview) under an `ask_id`: the counts, the `file_id` of every waiting file, the op id of every other waiting change, and the op id of every missing write. Only the newest snapshot is valid; a newer count replaces it (§5.1). (review I3)~~ What one ask showed the person, held by the app (never by the webview) under an `ask_id`: the counts (`files`, `copiedFiles`, `others`, `missingFiles`), ~~the earlier folder A3e names~~ the earlier folders A3e names (§7.3; PR #121 review 1), the `file_id` of every waiting file, the op id of every other waiting change, the op id of every missing write, and its **owner**, the label of the window it was counted for. The app holds one; a newer count replaces it (§5.1). It leaves the store in three ways: the gate that accepts it takes it out and hands it, by value, to that sign-out's keep step (re-review N3); a close or reload of its owner window drops it (re-review I6); a sign-out that completes empties the store (re-review N3). (review I3) |
 | **Kept folder** | The folder this spec makes for waiting writes (§7) |
 | **macOS's folder** | The folder macOS reports when 1882's preserving removal kept files (1882 §4) |
 
@@ -240,7 +252,8 @@ macOS. A plain sign-out has no count anywhere, so the lead's reading ("a plain s
   purge, records the folder as `kept_unsent_folder` (only when it made one: the folder exists only when a file was
   copied, §7.1). It is one load-change-save under the config-write lock, as
   `remember_kept_folder` does (`main:finder_removal.rs:296-307`, `DesktopConfig::update_at`). A crash after that point
-  still leaves the row. Once the sign-out returns, it raises one alert that names the kept folder and the number of
+  still leaves the row. (PR #121 review 1) That same save also adds the folder to `kept_unsent_unfinished` (W13), and
+  it is durable, which `update_at` is not today (§7.3). Once the sign-out returns, it raises one alert that names the kept folder and the number of
   files in it, and tells the windows the row changed. When macOS also kept files, the same alert names both folders,
   ours first, and each has its own row (§9).
 - ~~**W10, the folder is the person's.** Beebeeb never moves, reads back, deletes or uploads the kept folder. No purge,
@@ -269,9 +282,21 @@ macOS. A plain sign-out has no count anywhere, so the lead's reading ("a plain s
   already have removed some waiting writes' staged copies; then the kept folder holds their only copy (§5.3, row 8).
   - The purge removes a waiting write's staged copy only after every other file it removes is gone (§5.2, step 8). A
     failure on any other file leaves every waiting write as it was.
-  - When the sign-out stops after a completed keep step, it saves that folder as `kept_unsent_unfinished` (§7.3). The
-    next ask names it (A3e) when that ask shows a missing write, because such a write's bytes may be in that folder.
-  - A sign-out that completes clears it.
+  - ~~When the sign-out stops after a completed keep step, it saves that folder as `kept_unsent_unfinished` (§7.3). The
+    next ask names it (A3e) when that ask shows a missing write, because such a write's bytes may be in that folder.~~
+  - ~~A sign-out that completes clears it.~~
+  - **The marker is saved first** (PR #121 review 1). The keep step saves the folder in `kept_unsent_unfinished` as its
+    last act, in the same durable save as `kept_unsent_folder` (§7.3). That is before the purge's first deletion, so a
+    crash, a kill or a power loss at any later point leaves it set, with no `Err` return needed. Saved only when the
+    sign-out returned `Err`, it was never written by a process that died: some waiting writes' staged copies could be
+    gone, their rows still queued, the writes counted missing, no earlier folder named, and the ask would not say where
+    their bytes were.
+  - **A set marker means "a sign-out was interrupted after keeping".** The next count names its folders (A3e) when that
+    ask shows a missing write, because such a write's bytes may be in one of them.
+  - **A later keep never replaces it** (PR #121 review 1). It adds its own folder to the marker, which is a list
+    (§7.3). A retry that replaced a single record would leave the older folder, possibly the only copy of a write,
+    named nowhere.
+  - **Only a purge that cleared the rows clears it.** After that no write can look missing (§7.3).
 
 ## 4. Every path that purges the queue
 
@@ -413,8 +438,8 @@ and the switch step in the sign-in window (entry point 6). Entry points 3 and 4 
 1. **Count.** ~~`sign_out_count` reads `waiting_changes` once (§6.1) and records an ask snapshot. It answers
    `{ askId, files, others, missingFiles, canSend, notSending }`.~~ `sign_out_count` reads `waiting_changes` once (§6.1)
    and records an ask snapshot, owned by the window that called it. It answers
-   `{ askId, files, copiedFiles, others, missingFiles, earlierFolder, canSend, notSending }` (re-review N1, N8, I6). A
-   failed read stops the flow with E3.
+   `{ askId, files, copiedFiles, others, missingFiles, ~~earlierFolder~~ earlierFolders, canSend, notSending }`
+   (re-review N1, N8, I6; `earlierFolders`: PR #121 review 1). A failed read stops the flow with E3.
 2. **Send** (only when `canSend`): `sign_out_send_start({ askId })`, §6. The phase's end event carries a fresh snapshot,
    or none when nothing waits.
 3. **Ask** (only when something waits): §11, A0-A5, from the newest snapshot. "Cancel" ends the flow, and nothing
@@ -433,15 +458,16 @@ and the switch step in the sign-in window (entry point 6). Entry points 3 and 4 
 | Name | Kind | Payload | Owner |
 | --- | --- | --- | --- |
 | ~~`sign_out_count`~~ | ~~command~~ | ~~→ `{ askId: string, files: number, others: number, missingFiles: number, canSend: boolean, notSending: 'engine_stopped' \| 'session' \| 'offline' \| 'paused' \| 'held' \| null }`~~ | ~~Rust records the snapshot; a newer one replaces it~~ |
-| `sign_out_count` | command | the calling window (Tauri passes it, as it does to `consume_menu_update_check`, `main:lib.rs:13645`) → `{ askId: string, files: number, copiedFiles: number, others: number, missingFiles: number, earlierFolder: string \| null, canSend: boolean, notSending: 'engine_stopped' \| 'session' \| 'offline' \| 'paused' \| 'held' \| null }` | Rust records the snapshot with that window's label as its owner; a newer one replaces it (re-review I6, N1, N8) |
+| `sign_out_count` | command | the calling window (Tauri passes it, as it does to `consume_menu_update_check`, `main:lib.rs:13645`) → `{ askId: string, files: number, copiedFiles: number, others: number, missingFiles: number, ~~earlierFolder: string \| null~~ earlierFolders: string[] (oldest first, empty when none; PR #121 review 1), canSend: boolean, notSending: 'engine_stopped' \| 'session' \| 'offline' \| 'paused' \| 'held' \| null }` | Rust records the snapshot with that window's label as its owner; a newer one replaces it (re-review I6, N1, N8) |
 | `sign_out_send_start` | command | `{ askId }` → `Ok`, or `Err` starting `unsent_changes:` when `askId` is not the newest snapshot. While a phase runs, a second start changes nothing and answers `Ok` | Rust: the phase, its 60 s deadline (§6.3) and its end |
 | `sign_out_send_stop` | command | none → `Ok`. Ends the phase with `stopped`; nothing happens when no phase runs | Rust |
 | `sign-out-send-progress` | event, to the window that started the phase | `{ changesLeft: number }`, sent when the number changes; never 0 (the phase ends first) | Rust |
 | ~~`sign-out-send-ended`~~ | ~~event, to the same window~~ | ~~`{ reason, ask: { askId, files, others, missingFiles } \| null }`. Rust counts again when the phase ends and records that snapshot~~ | ~~Rust~~ |
-| `sign-out-send-ended` | event, to the same window | `{ reason, ask: { askId, files, copiedFiles, others, missingFiles, earlierFolder } \| null }`. `ask` is null for `all_sent` and for `closed`. For every other reason Rust counts again and records that snapshot. The flow calls `clear_session` only on `all_sent` (re-review I6, N1, N8) | Rust |
+| `sign-out-send-ended` | event, to the same window | `{ reason, ask: { askId, files, copiedFiles, others, missingFiles, ~~earlierFolder~~ earlierFolders } \| null }` (`earlierFolders`: PR #121 review 1). `ask` is null for `all_sent` and for `closed`. For every other reason Rust counts again and records that snapshot. The flow calls `clear_session` only on `all_sent` (re-review I6, N1, N8) | Rust |
 | `sign-out-flow-closed` | event, to the window that was closed or reloaded | none. Sent on every close or reload of a window (below), whether or not a flow runs there | Rust sends it; the Settings flow resets on it (re-review I6) |
 | ~~`clear_session`~~ | ~~command (exists)~~ | ~~adds `keepUnsent?: { askId: string }`; accepted and ignored on Windows and Linux (W5)~~ | ~~Rust: the gate~~ |
-| `clear_session` | command (exists) | adds `keepUnsent?: { askId: string }`, accepted and ignored on Windows and Linux (W5); and, on macOS, takes the calling window, so a result that returns after that window closed is shown by Rust (below, "A late result"; re-review 2 Q7) | Rust: the gate, and the late result |
+| `clear_session` | command (exists) | adds `keepUnsent?: { askId: string }`, accepted and ignored on Windows and Linux (W5); and, on macOS, takes the calling window, ~~so a result that returns after that window closed is shown by Rust~~ so a result that needs showing stays pending until that window acknowledges it, and Rust shows it if that window closes first (below, "A late result"; re-review 2 Q7, PR #121 review 2) | Rust: the gate, and the late result |
+| `sign_out_result_ack` | command | none (Tauri passes the calling window) → `Ok`. Sent after the window displayed an outcome of its `clear_session` that needed showing (a failure message, or a completed sign-out's warning). It removes that window's pending result. It does nothing when there is none (PR #121 review 2) | Rust |
 | `request_sign_out_flow` | command | none → `Ok`. For the compact window (entry point 2): stores the flow request and opens Settings | Rust |
 | `menu:sign-out-flow`, `consume_sign_out_flow_request` | event, command | none; → `boolean` | Rust holds one pending request; Settings consumes it |
 
@@ -467,12 +493,15 @@ and the switch step in the sign-in window (entry point 6). Entry points 3 and 4 
     hides the Settings window another way calls the same hook.
   - **The hook.** The global handler calls `sign_out_flow_window_closed(app, label)` on every
     `WindowEvent::CloseRequested`, whatever `close_policy` then does with the window, and on `WindowEvent::Destroyed`.
-    Tauri's `on_page_load` calls it on `PageLoadEvent::Started` (a reload). It is macOS only (W5). It does three things:
+    Tauri's `on_page_load` calls it on `PageLoadEvent::Started` (a reload). It is macOS only (W5). It does ~~three~~
+    four things (PR #121 review 2):
     1. a send phase that window started ends with `closed` (§6.4): its `sign-out-send-ended` carries `ask: null`, and
        no new snapshot is recorded;
     2. the ask snapshot that window owns is dropped, so a "Sign out" pressed later from that screen answers
        `unsent_changes`, and the flow counts again (W5);
-    3. `sign-out-flow-closed` is sent to that window.
+    3. `sign-out-flow-closed` is sent to that window;
+    4. the result of that window's `clear_session`, when it is pending, is shown in the native dialog and removed; a
+       `clear_session` still running for that window is marked `closed` (below, "A late result").
 
     A phase or a snapshot owned by another window is left alone. A sign-out already past its gate is not affected: the
     gate took its snapshot out of the store (§5.2, step 4), so the hook finds nothing of it to drop.
@@ -482,17 +511,53 @@ and the switch step in the sign-in window (entry point 6). Entry points 3 and 4 
     tab has no sheet, and "Sign out…" starts a new flow at the count.
   - **A late result** (re-review 2 Q7). A sign-out whose `clear_session` is already running when its window closes goes
     on (above). Its result could then only be shown in a hidden window, so Rust shows it:
-    - while `clear_session` runs, it holds the label of the window that called it (Tauri passes the calling window, as
-      for `sign_out_count`), and the hook marks that record when that window closes;
-    - when the call returns and the record is marked, Rust raises the dialogs the menu's sign-out already uses
+    - ~~while `clear_session` runs, it holds the label of the window that called it (Tauri passes the calling window, as
+      for `sign_out_count`), and the hook marks that record when that window closes;~~
+    - ~~when the call returns and the record is marked, Rust raises the dialogs the menu's sign-out already uses
       (`main:lib.rs:13708-13723`): a failure in the "Sign-out paused" error dialog with its message (E1, E2, E3,
       `SIGN_OUT_PURGE_FAILED`, an unconfirmed engine stop), and a completed sign-out with a warning in the "Signed out"
       dialog with the warning's sentence. With no parent window, macOS draws these in its own UserNotificationCenter
-      process, never in a Beebeeb window (`main:lib.rs:3287-3290`), so they show while Settings is hidden;
-    - a completed sign-out with no warning needs no dialog: a kept folder raises its own alert as always (§9), and the
-      app shows it is signed out the next time a window opens;
-    - the reset flow drops that late result, with no toast, because Rust shows what needs showing (F11);
-    - the menu's sign-out runs no flow and already raises these dialogs, so it does not change.
+      process, never in a Beebeeb window (`main:lib.rs:3287-3290`), so they show while Settings is hidden;~~
+    - ~~a completed sign-out with no warning needs no dialog: a kept folder raises its own alert as always (§9), and the
+      app shows it is signed out the next time a window opens;~~
+    - ~~the reset flow drops that late result, with no toast, because Rust shows what needs showing (F11);~~
+    - ~~the menu's sign-out runs no flow and already raises these dialogs, so it does not change.~~
+    - **The record outlives the call** (PR #121 review 2). Tracking used to stop when `clear_session` returned. A call
+      that returned just before `CloseRequested` then left the hook nothing to mark, while the webview could handle the
+      close first and drop the returned result (F11): a failure or a warning showed in neither the hidden window nor a
+      dialog. Now Rust holds one record for the window that called `clear_session`, keyed by that window's label (Tauri
+      passes the calling window, as for `sign_out_count`), from the call's start until the result is acknowledged or
+      shown. A new `clear_session` from the same window replaces its record: the webview that sent it has handled the
+      earlier answer. The record is:
+      - *running*, while the call runs. The hook marks it `closed` when that window closes;
+      - *pending*, from the call's return, when its result needs showing: a failure (E1, E2, E3,
+        `SIGN_OUT_PURGE_FAILED`, an unconfirmed engine stop) or a completed sign-out with a warning. A failure with the
+        code `unsent_changes` is not pending (nothing changed, and a hidden window cannot show the ask), and a completed
+        sign-out with no warning needs no dialog: a kept folder raises its own alert as always (§9), and the app shows
+        it is signed out the next time a window opens. Neither is kept: the record is dropped when the call returns.
+    - **A pending result leaves in one of two ways** (PR #121 review 2).
+      - The webview acknowledges it. `sign_out_result_ack` (the contract above) is sent after the window displayed the
+        outcome: the toast, the warning, the switch step's line. A window that drops the answer because its flow was
+        reset (F11) displays nothing and does not acknowledge.
+      - Rust shows it, in the dialogs the menu's sign-out already uses (`main:lib.rs:13708-13723`): a failure in the
+        "Sign-out paused" error dialog with its message, and a completed sign-out with a warning in the "Signed out"
+        dialog with the warning's sentence. It does this when the hook runs for that window (a close, a destroy or a
+        reload) while the result is pending, and when a call returns while its record is marked `closed`. It then
+        removes the record. The menu's dialogs use the callback form `.show(|_| {})` (`main:lib.rs:13714`, `:13723`),
+        which does not wait for the person, so the hook can raise one from the window-event handler. With no parent
+        window, macOS draws these in its own UserNotificationCenter process, never in a Beebeeb window
+        (`main:lib.rs:3287-3290`), so they show while Settings is hidden.
+    - **Taking the record out is the one atomic step** (PR #121 review 2). The hook, the acknowledgement and the call's
+      return each take the record out under one lock, and only the one that took a pending result shows it. The hook
+      runs for `CloseRequested` and again for `Destroyed`, and a second run finds nothing. An acknowledgement that loses
+      the race does nothing.
+    - **The failure direction is a duplicate, never a loss** (PR #121 review 2). A webview that displayed the result
+      and could not acknowledge it (it hung or crashed), or that acknowledges just after Rust showed the dialog, can
+      leave the same result shown twice: a toast in a window the person was closing, and the dialog. The case this rule
+      removes is zero times.
+    - The reset flow drops a result that arrives after the event, with no toast and no acknowledgement, because Rust
+      shows what needs showing (F11, F12).
+    - The menu's sign-out runs no flow, has no window and already raises these dialogs, so it does not change.
   - **The switch step** keeps its screen when the sign-in window closes, as today (the window outlives a close,
     `main:Onboarding.tsx:104-135`). Its snapshot is dropped, so "Sign out and switch" pressed after the window comes
     back answers `unsent_changes`, and the step re-renders from a fresh count (W11, F8).
@@ -546,7 +611,10 @@ where it is new (W5).
    - it refuses, before any copy, on a late other change (`unsent_changes`) or on a missing write the snapshot did not
      hold (E2);
    - it copies the copied set and calls `sync_all` on each new file and on every directory it made;
-   - it records `kept_unsent_folder`;
+   - ~~it records `kept_unsent_folder`;~~
+   - it records `kept_unsent_folder` and, in the same durable save, adds the folder to `kept_unsent_unfinished` (W9,
+     W13, §7.3; PR #121 review 1). That save is the keep step's last act and returns before step 8 starts, so the
+     purge's first deletion always comes after the marker is on disk;
    - it returns a `KeptSet`: the op ids copied, covered, and acknowledged missing, the acknowledged other changes, the
      folder and its file count.
 
@@ -574,8 +642,11 @@ where it is new (W5).
 10. **The result.** `SignedOut` and `SignOutFailure` (`main:lib.rs:2740`, `:2765`) both carry
     `kept_unsent: Option<{ folder, files }>` next to 1882's `preserved_location`. A sign-out that fails after step 7
     still surfaces the folder, as 1882 review I1 does for macOS's folder. The record was already written in step 7
-    (W9). A sign-out that returns `Err` after step 7 completed also saves the folder as `kept_unsent_unfinished`; a
-    sign-out that completes clears that key after its purge (W13, §7.3; re-review N8).
+    (W9). ~~A sign-out that returns `Err` after step 7 completed also saves the folder as `kept_unsent_unfinished`; a
+    sign-out that completes clears that key after its purge (W13, §7.3; re-review N8).~~ The marker was saved in step 7
+    too, so a return of `Err` writes nothing more there, and a process that died before any return has still left it
+    (W13). A sign-out whose purge cleared the rows clears the marker then, before step 9 (W13, §7.3; re-review N8, PR
+    #121 review 1).
 
 ~~**Where the Finder removal sits differs by tree, and both keep every write.**~~
 
@@ -644,11 +715,12 @@ half-made folder, and nothing after a completed keep step does.
 | 5. Removal | Not confirmed | Spec A's warning, `finder_removal_unconfirmed` | As spec A |
 | 6. Engine stop | Not confirmed | Today's message (`UNCONFIRMED_ENGINE_STOP_ERROR`) | Keys in memory; nothing copied or purged. `FinderRestoreOnAbort` does not restart sync while a stop is unconfirmed (`main:lib.rs:6212-6215`) |
 | 7. Keep | A late other change | The ask, from a fresh count (`unsent_changes`) | Nothing copied, nothing purged; still signed in; sync restarts |
-| 7. Keep | A missing write the snapshot did not hold; a directory, copy, flush or record failure; a staged copy gone between the read and its copy | E2 | The half-made folder is removed (it holds only copies of bytes still in the queue); no record is written (the record is the keep step's last act). Queue and staged copies intact; still signed in; sync restarts |
+| 7. Keep | A missing write the snapshot did not hold; a directory, copy, flush or record failure; a staged copy gone between the read and its copy | E2 | The half-made folder is removed (it holds only copies of bytes still in the queue); ~~no record is written (the record is the keep step's last act)~~ no record and no marker is written (they are the keep step's last act; when their save fails after its rename, the keep step takes the entries out again before it removes the folder, §7.3; PR #121 review 1). Queue and staged copies intact; still signed in; sync restarts |
 | 8. Purge guard | A waiting write that is not kept, or an other change that is not acknowledged. Only a test seam can cause it: with the engine stopped, nothing adds one | E2 | Nothing deleted: the guard runs before any file is touched. The kept folder stays, recorded and surfaced. Still signed in; sync restarts |
 | ~~8. Purge~~ | ~~A file cannot be removed, or the rows cannot be cleared~~ | ~~`SIGN_OUT_PURGE_FAILED` (`main:lib.rs:3252`), as today~~ | ~~The rows stay (the purge clears them only after every file is gone, `main:lib.rs:4120-4127`); some staged copies may be gone. Every waiting write is in the kept folder, which stays, recorded and surfaced. Sync restarts; a write whose staged copy was removed parks `payload_missing` (`1873 spec §8.4`), and its bytes are in the kept folder~~ |
-| 8. Purge | A file that is not a waiting write's staged copy cannot be removed (re-review N8) | `SIGN_OUT_PURGE_FAILED` (`main:lib.rs:3252`), as today | Every waiting write's staged copy is still there (step 8's order), and the rows stay. The kept folder stays, recorded and surfaced, and is saved as `kept_unsent_unfinished` (W13). Sync restarts, and the writes upload as before; the folder only duplicates them |
-| 8. Purge | A waiting write's staged copy cannot be removed after other waiting writes' copies were; or every file is gone and the rows cannot be cleared (re-review N8) | `SIGN_OUT_PURGE_FAILED`, as today | The rows stay (the purge clears them only after every file is gone, `main:lib.rs:4119-4128`). The writes whose staged copies were removed park `payload_missing` when sync restarts (`1873 spec §8.4`); their bytes are in the kept folder, which stays, recorded and surfaced, and is saved as `kept_unsent_unfinished`. The next sign-out's ask shows those writes as missing (A3) and names that folder (A3e), so the person reads where they may be before choosing. If that sign-out keeps files, its folder takes over the Settings › Sync row (a newer folder replaces an older one, §9). The earlier folder stays on disk beside it, in `Changes not sent/`, and was named in its own alert and in that ask |
+| 8. Purge | A file that is not a waiting write's staged copy cannot be removed (re-review N8) | `SIGN_OUT_PURGE_FAILED` (`main:lib.rs:3252`), as today | Every waiting write's staged copy is still there (step 8's order), and the rows stay. The kept folder stays, recorded and surfaced, ~~and is saved as `kept_unsent_unfinished` (W13)~~ and is already named in `kept_unsent_unfinished`, saved by the keep step before the purge began (W13; PR #121 review 1). Sync restarts, and the writes upload as before; the folder only duplicates them |
+| 8. Purge | A waiting write's staged copy cannot be removed after other waiting writes' copies were; or every file is gone and the rows cannot be cleared (re-review N8) | `SIGN_OUT_PURGE_FAILED`, as today | The rows stay (the purge clears them only after every file is gone, `main:lib.rs:4119-4128`). The writes whose staged copies were removed park `payload_missing` when sync restarts (`1873 spec §8.4`); their bytes are in the kept folder, which stays, recorded and surfaced, ~~and is saved as `kept_unsent_unfinished`~~ and is named in `kept_unsent_unfinished` (saved before the purge began; PR #121 review 1). The next sign-out's ask shows those writes as missing (A3) and names that folder (A3e), so the person reads where they may be before choosing. If that sign-out keeps files, its folder takes over the Settings › Sync row (a newer folder replaces an older one, §9). The earlier folder stays on disk beside it, in `Changes not sent/`, and was named in its own alert and in that ask |
+| 8. Purge | The app is killed, crashes or loses power after the keep step's save, at any point of the purge, before any return (PR #121 review 1) | Nothing: the process is gone | `kept_unsent_folder` and `kept_unsent_unfinished` already name the kept folder (one durable save, before the first deletion). The queue holds every row; some staged copies may be gone. After a restart the next ask shows those writes as missing (A3) and names every unfinished folder (A3e), and a later keep adds its own folder to the list and never replaces it (W13, U42) |
 | 9. The rest | Fails | The alert first, then the error | The kept folder stays, recorded and surfaced |
 
 **Sync restarts after a failed keep.** The sign-out stopped the engine but kept the keys. ~~With spec A, the existing
@@ -1005,16 +1077,50 @@ id in its `KeptSet`, and the purge guard checks every waiting write against them
 - The folder is the person's. Beebeeb never moves, reads, deletes or uploads it (W10).
 - "Dismiss" on the row forgets the folder; it does not delete it.
 - The next sign-in, whatever the account, does not look at it.
-- **A sign-out that stopped after its keep step** (W13; re-review N8). The folder is recorded either way (W9). When the
+- ~~**A sign-out that stopped after its keep step** (W13; re-review N8). The folder is recorded either way (W9). When the
   sign-out then returns `Err`, the folder is also saved as `kept_unsent_unfinished`, a key of its own, written as 1882
-  writes its key (one load-change-save under the config-write lock, `main:finder_removal.rs:302-307`).
-  - The next count reads it. When that ask shows a missing write, `earlierFolder` carries the path, and the ask adds
-    A3e under A3. With no missing write, `earlierFolder` is null and nothing is added.
-  - A sign-out that completes clears the key after its purge.
-  - It has no row and no alert of its own. Beebeeb never reads the folder it names (W10); A3e only shows the path.
-  - If saving it fails, the next ask shows A3 without A3e. If clearing it fails, a later ask with a missing write
-    shows A3e once more than needed. A3e says the change "may be there", which stays true in both cases.
-  - The R10 reset does not read it, because it asks nobody.
+  writes its key (one load-change-save under the config-write lock, `main:finder_removal.rs:302-307`).~~
+  - ~~The next count reads it. When that ask shows a missing write, `earlierFolder` carries the path, and the ask adds
+    A3e under A3. With no missing write, `earlierFolder` is null and nothing is added.~~
+  - ~~A sign-out that completes clears the key after its purge.~~
+  - ~~It has no row and no alert of its own. Beebeeb never reads the folder it names (W10); A3e only shows the path.~~
+  - ~~If saving it fails, the next ask shows A3 without A3e. If clearing it fails, a later ask with a missing write
+    shows A3e once more than needed. A3e says the change "may be there", which stays true in both cases.~~
+  - ~~The R10 reset does not read it, because it asks nobody.~~
+- **A sign-out interrupted after its keep step** (W13; re-review N8; PR #121 review 1). The folder is recorded either way
+  (W9). The key `kept_unsent_unfinished` is a list of the folders such sign-outs made, a key of its own beside
+  `kept_unsent_folder`. It is absent from the file while empty, as `kept_unsynced_folder` is when unset. It is saved
+  before anything is deleted, not after a failure is seen:
+  - **When it is written.** By the keep step, as its last act, in the same save as `kept_unsent_folder` (W9): one
+    load-change-save under the config-write lock (`DesktopConfig::update_at`, `main:config.rs:651-659`), so both keys
+    land or neither does. The folder is added to the list unless it is already there, and the list is never cut.
+    The purge's first deletion comes after that save has returned. A kill, a crash or a power loss at any later point
+    leaves the folder named, and no `Err` return is needed: a process that dies returns nothing. Writing it only on
+    `Err`, as revision 3 did, left a crash with no trace.
+  - **The save is durable.** `DesktopConfig::save_to` is atomic (temp file, then rename) but never calls `sync_all`
+    (`main:config.rs:662-679`), so a power loss can lose a save that already returned. The keep step's save is a variant
+    of `update_at`, `update_at_durable`, that calls `sync_all` on the temp file before the rename and on the config's
+    directory after it, as the keep step already flushes every copy and every directory it made (§7.2). Every other
+    config save stays as it is. When that save fails, the keep step fails (E2, W8): it first takes its entries out again
+    with a plain `update_at` (best effort), then removes the half-made folder, so no key names a folder that was
+    removed.
+  - **What a set key means.** "A sign-out was interrupted after keeping." Nothing scans it at startup. The next count
+    reads it: when that ask shows a missing write, `earlierFolders` carries every path in the list, oldest first, and the
+    ask adds A3e under A3. A half-done purge may have removed a write's staged copy, so that write counts missing, and
+    its bytes may be in any of those folders. With no missing write, `earlierFolders` is empty and nothing is added.
+  - **A later keep never replaces it.** A later keep step adds its own folder to the list, and replaces
+    `kept_unsent_folder` as §9 says a newer folder does. The earlier folder stays named in the list, so a retry cannot
+    leave it unreferenced. When that later sign-out is interrupted too, the next ask names both.
+  - **When it is cleared.** When the purge has cleared the rows (`purge_all_local_state`), by one plain `update_at`: from
+    then on no write can look missing, so nothing is left for A3e to explain. Every completed purge clears it, the R10
+    reset's too. The clear is not durable: a clear a crash loses leaves the list set, and A3e says a missing change "may
+    be there", which stays true. A later failure (step 9) does not bring it back.
+  - It has no row and no alert of its own. Beebeeb never reads the folders it names (W10); A3e only shows the paths.
+  - If the keep step cannot save it, the sign-out never reaches the purge (above). If clearing it fails, a later ask with
+    a missing write shows A3e once more than needed.
+  - The R10 reset does not read it, because it asks nobody. Its keep step adds its own folder through the same save,
+    so a reset interrupted after keeping is named too. One limit stays, and it is 1882's rule (§9): a folder that no ask
+    named, because the reset asked nobody, stays on disk, and its row is replaced by a newer folder.
 
 ## 8. With 1873: write tokens, claims, the hand-over and the release journal
 
@@ -1106,9 +1212,13 @@ D2 records it. If macOS keeps it, the same file appears in both folders, which l
     - The surface step after the return only raises the alert and tells the windows (`kept-folder-changed`,
       `main:lib.rs:3340`). It does not need to save again.
     - U30 pins it.
+    - (PR #121 review 1) The same save writes `kept_unsent_unfinished` (below), and it is durable, which `update_at` is
+      not today (§7.3). U30 pins the order, U42 the crash, U43 the save.
   - Saving one key never touches the other (U22).
-  - A third key, `kept_unsent_unfinished`, names a folder whose sign-out stopped after its keep step (W13, §7.3). It
-    has no row; only A3e reads it. (re-review N8)
+  - A third key, `kept_unsent_unfinished`, ~~names a folder whose sign-out stopped after its keep step~~ lists the
+    folders whose sign-out was interrupted after its keep step (W13, §7.3; PR #121 review 1). It has no row; only A3e
+    reads it. (re-review N8) The keep step saves it with `kept_unsent_folder`, a later keep adds to it, and only a purge
+    that cleared the rows clears it.
   - "Show in Finder" (`show_kept_unsent_folder(path)`) reveals a path only when it equals the saved record. The webview
     cannot have the app reveal any other path.
 - **Where they are raised.** In the same two places 1882 raises its alert: the `clear_session` command and the menu
@@ -1135,7 +1245,8 @@ Neither has this loss, so neither changes.
 
 **What stays exactly as it is on Windows and Linux** (review I2). Everything this spec adds on the shared code path is
 `#[cfg(target_os = "macos")]`: the gate, `keepUnsent` (accepted by `clear_session` and ignored), the flow commands, the
-callers' handling, the keep step, the purge guard and the switch's snapshot.
+callers' handling, the keep step, the purge guard and the switch's snapshot. (PR #121 reviews 1 and 2) So are the
+unfinished-sign-out marker's save and clear, the pending late result and `sign_out_result_ack` (U32's pin covers them).
 - `clear_session_impl` is shared by every platform (`main:lib.rs:2810`). A gate on every platform would replace
   Windows' preflight message. On Linux, which has no Settings › Account window to run the flow in, a sign-out with one
   queued rename would refuse into nothing.
@@ -1180,7 +1291,8 @@ test pinning the two equal (as 1882 does). `{n}` is never 0 (W2).
 | A2s | Files, switch (n ≥ 1). First sentence: n = 1: "1 file changed in Finder while that account was signed in hasn’t reached the server." · n > 1: "{n} files changed in Finder while that account was signed in haven’t reached the server." Second sentence by A2's rule on c, with "Before switching" for "Before signing out": "Before switching, Beebeeb copies it / them / {c} of them to a folder on this Mac and shows you where.", left out when c = 0. No "you changed": the changes belong to the account that was signed in before. (review M3, re-review N1) |
 | ~~A3~~ | ~~Missing (k ≥ 1). n = k = 1: "Beebeeb’s copy of that change is missing, so it can’t be kept." · k = 1, n > 1: "Beebeeb’s copy of the latest change to 1 of these files is missing, so that change can’t be kept." · k > 1: "Beebeeb’s copy of the latest change to {k} of these files is missing, so those changes can’t be kept."~~ |
 | A3 | Missing files (k ≥ 1; a missing file has at least one missing write, §2). n = k = 1: "Beebeeb’s copy of a change to that file is missing, so that change can’t be kept." · k = 1, n > 1: "Beebeeb’s copy of a change to 1 of these files is missing, so that change can’t be kept." · k > 1: "Beebeeb’s copies of changes to {k} of these files are missing, so those changes can’t be kept." Not "the latest change": a missing earlier-build write is not the latest (§7.2). Same in the switch. (review I3) |
-| A3e | Under A3, only when the ask carries `earlierFolder` (§7.3): "A sign-out that didn’t finish copied changes to this folder, so a change listed as missing may be there:" then a blank line and the path in mono. Same in the switch. (re-review N8) |
+| ~~A3e~~ | ~~Under A3, only when the ask carries `earlierFolder` (§7.3): "A sign-out that didn’t finish copied changes to this folder, so a change listed as missing may be there:" then a blank line and the path in mono. Same in the switch. (re-review N8)~~ |
+| A3e | Under A3, only when the ask carries `earlierFolders` (§7.3; PR #121 review 1). One path: "A sign-out that didn’t finish copied changes to this folder, so a change listed as missing may be there:" then a blank line and the path in mono. Several paths: "Sign-outs that didn’t finish copied changes to these folders, so a change listed as missing may be in one of them:" then a blank line and one path per line in mono, oldest first. Same in the switch. (re-review N8) |
 | ~~A4~~ | ~~Other changes (m ≥ 1). m = 1: "1 other change (a rename, move, deletion, new folder or restore) hasn’t reached the server{ either}. Signing out drops it, and the server keeps that item as it was." · m > 1: "{m} other changes (renames, moves, deletions, new folders or restores) haven’t reached the server{ either}. Signing out drops them, and the server keeps those items as they were." " either" only when A2 is shown~~ |
 | A4 | Other changes (m ≥ 1). m = 1: "1 other change (a rename, move, deletion, new folder or restore) hasn’t reached the server{ either}. Signing out drops it, and that item stays as it is on the server." · m > 1: "{m} other changes (renames, moves, deletions, new folders or restores) haven’t reached the server{ either}. Signing out drops them, and those items stay as they are on the server." " either" only when A2 is shown. "Stays as it is" is true for a new folder that never reached the server too. (review M3) |
 | A4s | Other changes, switch: A4 with "Switching drops it" / "Switching drops them" for "Signing out drops …", and " either" only when A2s is shown. (review M3, I1) |
@@ -1277,7 +1389,7 @@ output go into the task's notes and QA evidence.
 | U18 | `the_send_phase_never_touches_parked_or_paused_changes` | Reset `attempts` at the start |
 | ~~U19~~ | ~~`the_switch_uses_the_same_count_and_keeps`: `account_mismatch` carries `files`/`others`/`missing` from `waiting_changes`; "Sign out and switch" passes `keepUnsent`; no send is started~~ | ~~Keep `pending_changes_count` (it counts the hydrate); start a send~~ |
 | ~~U19~~ | ~~`the_switch_carries_a_snapshot_on_macos_only` (review I1, I2): on macOS, `account_mismatch` (both `LoginOutcome::account_mismatch`, `main:lib.rs:1451`, and the browser sign-in's event, `main:browser_login.rs:495-502`) carries `pending_changes` and an `unsent` snapshot (`askId`, `files`, `others`, `missingFiles`) from `waiting_changes`, and the snapshot is recorded as the newest. On every other platform it carries `pending_changes` only, from `pending_changes_count`. No send is started. The frontend half is F8~~ | ~~Fill the macOS snapshot from `pending_changes_count` (it counts a hydrate and an orphan journal copy); start a send~~ |
-| U19 | `the_switch_carries_a_snapshot_on_macos_only` (review I1, I2, re-review N1, N8, I6): on macOS, `account_mismatch` (both `LoginOutcome::account_mismatch`, `main:lib.rs:1451`, and the browser sign-in's event, `main:browser_login.rs:495-502`) carries `pending_changes` and an `unsent` snapshot (`askId`, `files`, `copiedFiles`, `others`, `missingFiles`, `earlierFolder`) from `waiting_changes`, and the snapshot is recorded as the newest, owned by `onboarding` (the window the switch step runs in). On every other platform it carries `pending_changes` only, from `pending_changes_count`. No send is started. The frontend half is F8 | Fill the macOS snapshot from `pending_changes_count` (it counts a hydrate and an orphan journal copy); start a send |
+| U19 | `the_switch_carries_a_snapshot_on_macos_only` (review I1, I2, re-review N1, N8, I6): on macOS, `account_mismatch` (both `LoginOutcome::account_mismatch`, `main:lib.rs:1451`, and the browser sign-in's event, `main:browser_login.rs:495-502`) carries `pending_changes` and an `unsent` snapshot (`askId`, `files`, `copiedFiles`, `others`, `missingFiles`, ~~`earlierFolder`~~ `earlierFolders`, PR #121 review 1) from `waiting_changes`, and the snapshot is recorded as the newest, owned by `onboarding` (the window the switch step runs in). On every other platform it carries `pending_changes` only, from `pending_changes_count`. No send is started. The frontend half is F8 | Fill the macOS snapshot from `pending_changes_count` (it counts a hydrate and an orphan journal copy); start a send |
 | ~~U20~~ | ~~`the_r10_reset_keeps_before_it_purges`: `StateDbLocalData::reset` with a queued write → kept folder, then purge; a failing copier → the reset fails and nothing is purged~~ | ~~Reset without the keep step~~ |
 | U20 | `the_r10_reset_keeps_before_it_purges` (review C1): `StateDbLocalData::reset` with a queued write and a queued rename → the kept folder holds the write, it is recorded, then the purge runs with the guard, and the rename is dropped with its count logged. A failing copier → the reset fails, nothing is deleted, no record | Reset without the keep step (the guard refuses); purge without passing the `KeptSet` |
 | ~~U21~~ | ~~`the_menu_never_purges_a_waiting_write`: the menu handler with a waiting write → Settings is asked to open the flow; no "Sign-out paused" dialog; the queue is intact~~ | ~~Handle `unsent_changes` as an error~~ |
@@ -1293,10 +1405,10 @@ output go into the task's notes and QA evidence.
 | U28 | `kept_copies_carry_no_backup_exclusion` (amend 1): a staged file that carries `com.apple.metadata:com_apple_backup_excludeItem` → its kept copy does not | Copy the attributes as the clone leaves them |
 | ~~U29~~ | ~~`a_copy_missing_since_the_ask_stops_the_sign_out` (review I3): the ask's snapshot holds no missing write; the staged copy of a waiting write is deleted after the ask and before the keep → `Err` starting `unsent_copy_failed:`, nothing copied, nothing purged, no record. A copy missing at the ask and in its snapshot → acknowledged, the sign-out completes, and the other writes are kept~~ | ~~Decide missing at keep time only (the first case completes and the write is dropped unasked)~~ |
 | U29 | `a_copy_missing_since_the_ask_stops_the_sign_out` (review I3, re-review N2). Three cases; in the first two the ask's snapshot holds no missing write. (a) A test seam between the gate and the keep step deletes a waiting write's staged copy → `Err` starting `unsent_copy_failed:`; nothing copied, nothing purged, no record. (b) The copy is deleted before `clear_session` is called → the gate refuses with `unsent_changes:` (W5, U37); a fresh `sign_out_count` then answers `missingFiles = 1`, and the ask carries A3. (c) A copy missing at the ask and held by its snapshot → acknowledged; the sign-out completes, and the other writes are kept | Decide missing at keep time only (case a completes and drops the write unasked); drop the gate's missing check (case b reaches the keep step and stops with `unsent_copy_failed:` instead of asking again) |
-| U30 | `the_kept_folder_is_recorded_before_the_purge` (review I4): a test seam aborts the sign-out right after the purge → `kept_unsent_folder` names the event folder. A seam that aborts after the copies but before the record → no record, and the half-made folder is gone (W8) | Save the record at surface time, after `clear_session_impl` returns (the first case has no record) |
+| U30 | `the_kept_folder_is_recorded_before_the_purge` (review I4): a test seam aborts the sign-out right after the purge → `kept_unsent_folder` names the event folder. A seam that aborts after the copies but before the record → no record, and the half-made folder is gone (W8). (PR #121 review 1) In the first case `kept_unsent_unfinished` also names the event folder, saved in the same write (one rename, U43), and a source pin: the keep step's save sits after its last `sync_all` and before the call of `purge_local_data_for_sign_out(`, and the `Err` arm of `clear_session_impl` writes neither key | Save the record at surface time, after `clear_session_impl` returns (the first case has no record). (PR #121 review 1) Save the marker in the `Err` arm, or just before the purge's second group (the pin is red) |
 | U31 | `show_in_finder_uses_the_opener_reveal` (review I7), a source pin: the body of `show_kept_unsent_folder` calls `reveal_item_in_dir` and contains no `Command::new("open")` and no `"/usr/bin/open"` | Replace the reveal with `Command::new("open").arg("-R")` |
 | ~~U32~~ | ~~`the_unsent_gate_is_macos_only` (review I2), a source pin: the gate in `clear_session_impl`, the keep step's call and the guard's call each sit under `#[cfg(target_os = "macos")]`. On a non-macOS test build, `clear_session` with a queued rename and no `keepUnsent` behaves as on `main` (Linux: it purges; Windows: the preflight refuses with its own message)~~ | ~~Remove the cfg from the gate~~ |
-| U32 | `the_unsent_gate_is_macos_only` (review I2, re-review N9), a source pin: the gate in `clear_session_impl`, the keep step's call and the guard's call each sit under `#[cfg(target_os = "macos")]`. On a non-macOS test build, `clear_session` with a queued rename and no `keepUnsent` behaves as on `main` (Linux: it purges; Windows: the preflight refuses with its own message). That half compiles only off macOS, so it runs in the public repository's CI (§13.3): the `rust-linux` job and the Windows leg of `rust-check` | Remove the cfg from the gate (the Linux and Windows cases are red in CI) |
+| U32 | `the_unsent_gate_is_macos_only` (review I2, re-review N9), a source pin: the gate in `clear_session_impl`, the keep step's call and the guard's call each sit under `#[cfg(target_os = "macos")]`. On a non-macOS test build, `clear_session` with a queued rename and no `keepUnsent` behaves as on `main` (Linux: it purges; Windows: the preflight refuses with its own message). That half compiles only off macOS, so it runs in the public repository's CI (§13.3): the `rust-linux` job and the Windows leg of `rust-check`. (PR #121 reviews 1, 2) The pin also covers the marker's save and clear, the late-result record's calls and `sign_out_result_ack`'s definition and registration | Remove the cfg from the gate (the Linux and Windows cases are red in CI); drop the cfg from `sign_out_result_ack` (the pin is red) |
 | U33 | `kept_root_is_the_container_or_app_support` (review M5): `kept_root` with `document_dir = /Users/a/Library/Containers/io.beebeeb.app/Data/Documents` → `…/Data/Documents/Changes not sent`; with `/Users/a/Documents` (unsandboxed) → `<data_dir>/beebeeb/Changes not sent`; with another bundle's container → the fallback | Return `document_dir/Changes not sent` unconditionally |
 | ~~U34~~ | ~~`the_send_phase_is_owned_by_rust` (review I6): with an injected clock and no webview calls, a phase ends `time_limit` at 60 s and disarms; a `Destroyed` event for the starting window ends it `stopped`; a page load `Started` for it ends it `stopped`; a second `sign_out_send_start` while one runs starts nothing; `sign_out_send_start` with a stale `askId` answers `unsent_changes:`~~ | ~~Leave the deadline to the webview (the phase never ends without a stop call); ignore the window events~~ |
 | U34 | `the_send_phase_is_owned_by_rust_and_a_close_ends_the_flow` (review I6, re-review I6). On the pure flow state, with an injected clock and no webview: (a) a phase ends `time_limit` at 60 s and disarms. (b) `window_closed("macos-settings")` during a phase that window started ends it `closed` with `ask: null`, records no snapshot, drops the snapshot that window owns, and yields `sign-out-flow-closed` for it; `clear_session` with that `askId` then answers `unsent_changes:`. (c) The same close at the ask, with no phase running, drops the snapshot. (d) A close of `settings` or `onboarding` leaves a phase and a snapshot owned by `macos-settings` alone; a close of `macos-settings` leaves a snapshot owned by `onboarding` alone. (e) A page load `Started` acts as (b). (f) A second `sign_out_send_start` while one runs starts nothing; a stale `askId` answers `unsent_changes:`. ~~A source pin on the global `.on_window_event(` handler (the same slice `main:surfaces/policy.rs:259-260` reads): `sign_out_flow_window_closed(` is called in its `WindowEvent::CloseRequested` arm and in a `WindowEvent::Destroyed` arm.~~ (g) A close of `onboarding` drops a snapshot `onboarding` owns (re-review 2 Q3). (h) A `clear_session` from `macos-settings` that is still running when that window closes, and then fails, yields the "Sign-out paused" dialog with its error; the same failure with no close yields none (§5.1, "A late result"; re-review 2 Q7). Source pins (re-review 2 Q3): in the global `.on_window_event(` handler (the same slice `main:surfaces/policy.rs:259-260` reads), `sign_out_flow_window_closed(` is called with `window.label()` in its `WindowEvent::CloseRequested` arm and in a `WindowEvent::Destroyed` arm; and the builder has an `.on_page_load(` registration whose body calls `sign_out_flow_window_closed(` with the webview's `label()` under `PageLoadEvent::Started` (main has no `on_page_load` today, so this pin is red until it is added). The test also asserts its premise: `close_policy(Platform::Macos, "macos-settings")` is `Hide`, so a close never destroys the Settings window | Listen for `Destroyed` only (the pin is red; this is the defect revision 1 had); end the phase `stopped` on a close (case b red: a hidden window would show the ask and could sign out); drop the snapshot whatever its owner (case d red); leave the deadline to the webview (case a never ends); pass a constant `"macos-settings"` as the label (the label pin is red); compare the owner with `"macos-settings"` instead of the closed label (case g red); never register `on_page_load` (its pin is red); raise no dialog for a late failure (case h red) (re-review 2 Q3, Q7) |
@@ -1305,9 +1417,12 @@ output go into the task's notes and QA evidence.
 | ~~U37~~ | ~~`the_gate_compares_the_queue_with_the_snapshot` (review I3, I1): `keepUnsent` with a stale `askId` → `unsent_changes:`. With the newest `askId`: a waiting file the snapshot did not hold → refuse; an other change it did not hold → refuse; a missing write it did not hold → refuse; a newer write to a file it held → no refusal (the autosave case)~~ | ~~Compare op ids for files (the autosave case refuses, a loop); skip the comparison (the new file is kept unasked at the gate)~~ |
 | U37 | `the_gate_compares_the_queue_with_the_snapshot` (review I3, I1, re-review N3): `keepUnsent` with a stale `askId` → `unsent_changes:`. With the newest `askId`: a waiting file the snapshot did not hold → refuse; an other change it did not hold → refuse; a missing write it did not hold → refuse; a newer write to a file it held → no refusal (the autosave case). **Which snapshot the keep step uses:** the gate accepts snapshot S, which holds one rename, and the store no longer holds S. A test seam between the gate and the keep step enqueues a second rename and records a newer count S′ that holds both. The keep step compares with S: it refuses with `unsent_changes:`, and nothing is copied or purged (W6). In a second run the seam records S′ without changing the queue; the sign-out completes, and the store then holds nothing | Compare op ids for files (the autosave case refuses, a loop); skip the comparison (the new file is kept unasked at the gate); read the store's newest snapshot at the keep step (S′ holds the second rename, so it is dropped unasked and the sign-out completes); leave the store as it is after a completed sign-out (it still holds S′) |
 | U38 | `copied_files_counts_files_with_a_copy` (re-review N1): file X has an earlier-build write whose staged copy is gone and a newer minted write whose copy exists; file Y's only write has lost its copy → `files = 2`, `missingFiles = 2`, `copiedFiles = 1`. The keep step then copies X and not Y, and K1 counts 1 | Compute `copiedFiles` as `files − missingFiles` (it reads 0, and A2 would drop its copy sentence though X is copied) |
-| U39 | `a_purge_failure_after_the_keep_step_spares_waiting_copies_and_is_named_next_time` (re-review N8). (a) An injected remover that fails on an orphan copy → `Err`; every waiting write's staged copy still exists, the rows are intact, the kept folder is recorded, and `kept_unsent_unfinished` names it. (b) An injected remover that fails on the second waiting write's staged copy → `Err`, the first copy is gone; with that write's copy missing, `sign_out_count` answers `missingFiles ≥ 1` and `earlierFolder` = that folder; with no missing write it answers `earlierFolder: null`. (c) A later sign-out that completes clears `kept_unsent_unfinished` and never changes `kept_unsynced_folder` | Remove the files in today's single loop (case a: a waiting write's copy is gone); never save the key (case b: `earlierFolder` is null); never clear it (case c) |
+| U39 | `a_purge_failure_after_the_keep_step_spares_waiting_copies_and_is_named_next_time` (re-review N8). (a) An injected remover that fails on an orphan copy → `Err`; every waiting write's staged copy still exists, the rows are intact, the kept folder is recorded, and `kept_unsent_unfinished` names it. (b) An injected remover that fails on the second waiting write's staged copy → `Err`, the first copy is gone; with that write's copy missing, `sign_out_count` answers `missingFiles ≥ 1` and ~~`earlierFolder` = that folder~~ `earlierFolders` = [that folder]; with no missing write it answers ~~`earlierFolder: null`~~ `earlierFolders: []` (PR #121 review 1). (c) A later sign-out that completes clears `kept_unsent_unfinished` and never changes `kept_unsynced_folder`. (PR #121 review 1) The key is the one the keep step saved before the purge, not one written on the `Err` return; U42 covers the case with no return | Remove the files in today's single loop (case a: a waiting write's copy is gone); never save the key (case b: ~~`earlierFolder` is null~~ `earlierFolders` is empty); never clear it (case c) |
 | U40 | `clone_nofollow_is_the_headers_value` (re-review N5): the keep step's `CLONE_NOFOLLOW` is `0x0001`, the value in `sys/clonefile.h:33`, and the clone call passes it | Define it as `0x0008` (`CLONE_NOFOLLOW_ANY`, line 36 of the same header) |
 | U41 | `an_already_signed_out_sign_out_keeps_before_it_purges` (re-review 2 Q4), entry point 7 (§4): no session in memory, no auth flag and no Keychain session, so `clear_session_impl` takes the `already_signed_out` arm (`main:lib.rs:2879-2899`), as the existing `clear_session_when_already_signed_out_skips_the_engine_and_succeeds` test sets it up (`main:lib.rs:17880`). A queued write with its staged copy, a `sign_out_count` snapshot, then `clear_session` with `keepUnsent` → the sign-out completes; the kept folder holds the write with the staged copy's sha256; the queue is empty | Put the keep call inside the `else` arm (the guard finds the write without a `KeptSet` entry, and every try stops with `unsent_copy_failed:`) |
+| U42 | `an_interrupted_sign_out_still_names_its_folder_after_a_restart` (PR #121 review 1). A real process death, not a returned `Err`. The test re-executes its own binary as a child with `BB_TEST_CRASH_AT=<point>` and a scratch `HOME`, `data_dir` and config path. At that point the child writes `reached:<point>` to a file and calls `std::process::abort()`, so no destructor, no `FinderRestoreOnAbort`, no `Err` handling and no later write runs. The parent requires the `reached:` line (a child that died elsewhere proves nothing) and a death by signal. It then restarts: fresh state built from what the child left on disk (`state.db`, the staged copies, `config.toml`, the kept folder), then `sign_out_count`. Three waiting writes, each with a staged copy. The points: (a) `AfterKeepSave`, between the keep step's save and the purge's guard; (b) `AfterFirstGroup`, after the first group of deletions, before any waiting write's staged copy; (c) `BetweenWaitingCopies`, after the first waiting write's staged copy is removed and before the second; (d) `BeforeRowClear`, every file gone, the rows not cleared. After each restart, `config.toml` holds `kept_unsent_unfinished = [F1]` and `kept_unsent_folder = F1`, and F1 holds the kept files. The count: at (a) and (b) `missingFiles = 0` and `earlierFolders = []`; at (c) `missingFiles = 1` and `earlierFolders = [F1]`; at (d) `missingFiles = 3` and `earlierFolders = [F1]`. Then, from the files (c) left: (e) a second sign-out, with that count's `askId`, crashes at (c) again → the list is [F1, F2], `kept_unsent_folder` = F2, the next count names F1 then F2, and F1's files still have their sha256; (f) a second sign-out that completes → the key is absent from `config.toml`, `kept_unsent_folder` = F2, and `kept_unsynced_folder` is unchanged | Save the marker only when `clear_session_impl` returns `Err` (revision 3's rule: the child returns nothing, so (a)-(d) are red on `kept_unsent_unfinished`); move the save to just before the purge's second group ((a) and (b) are red); replace the list with the newest folder instead of adding to it ((e) is red on F1); never clear it ((f) is red) |
+| U43 | `the_marker_save_is_one_durable_write` (PR #121 review 1). Through a recording file-system seam on `update_at_durable`: the keep step's save does, in this order, write the temp file, `sync_all` on it, rename, `sync_all` on the config's directory. It does exactly one rename for both keys, and `kept_unsynced_folder` is unchanged. A failure injected at `sync_all` on the temp file → the keep step fails with `unsent_copy_failed:`, the half-made folder is gone, queue and staged copies are intact, and `config.toml` holds neither key. A failure injected at `sync_all` on the directory, after the rename → the same, and the best-effort take-back leaves neither key naming the removed folder. Every other config save (`save`, `update_at`) records no `sync_all`: it is unchanged | Drop the `sync_all` on the temp file or on the directory (the order assertion is red); write the two keys in two saves (two renames); skip the take-back after the directory failure (a key names a removed folder); make every config save durable (the unchanged-save assertion is red) |
+| U44 | `a_result_that_returned_before_the_close_is_still_shown` (PR #121 review 2). On the pure late-result state, with an injected dialog sink and no webview. (a) The exact race: `begin("macos-settings")`, `complete` with `Err("purge failed")`, then `window_closed("macos-settings")` with no acknowledgement → the sink holds exactly one "Sign-out paused" dialog with that message, and the record is gone. (b) The same with `Ok` and a warning → one "Signed out" dialog with the warning's sentence. (c) An acknowledgement after (a) or (b) → the sink is unchanged, nothing panics, and the call answers that it removed nothing. (d) An acknowledgement first, then the close → no dialog. (e) A result that needs no showing, `Err("unsent_changes: …")` and an `Ok` with no warning, each followed by a close → no dialog and no record. (f) A close while the call runs, then `complete` → one dialog at completion (U34 case h, unchanged). (g) A close of `settings` or `onboarding` leaves a pending record of `macos-settings` alone. (h) A page load `Started` for the window acts as the close. (i) `CloseRequested` then `Destroyed` for the same window → one dialog, not two. (j) A second `begin` from the same window replaces its record. (k) The hook and the acknowledgement raced from a barrier, 200 rounds: the sink holds one dialog when the acknowledgement answered that it removed nothing and none when it removed the record, and never two | Keep tracking only while the call runs, so the record is gone when the close arrives ((a) is red: the result is shown nowhere); have the hook only mark and show nothing for a completed record ((a) is red); drop the record at completion for a failure ((a) is red); let the hook show a result but leave the record ((i) is red); show from the hook and from the acknowledgement without taking the record out under one lock ((k) is red) |
 
 ### 13.2 Frontend (bun)
 
@@ -1316,7 +1431,7 @@ output go into the task's notes and QA evidence.
 | ~~F1~~ | ~~The Settings flow: confirm → progress (P1 follows the events, P3 present) → ask → "Sign out" calls `clear_session` with `keepUnsent: true`; "Cancel" calls nothing~~ | ~~Call `clear_session` with `keepUnsent` from the progress phase~~ |
 | F1 | The Settings flow: confirm → `sign_out_count` → `sign_out_send_start({ askId })` → progress (P1 follows `sign-out-send-progress`, P3 present) → `sign-out-send-ended` → the ask from its snapshot → "Sign out" calls `clear_session` with `keepUnsent: { askId }` of that snapshot; "Cancel" calls nothing. (review I6) | Call `clear_session` with `keepUnsent` from the progress phase; pass the first snapshot's `askId` after the phase ended |
 | ~~F2~~ | ~~The ask's copy, exact, for: files only, others only, both, missing, each reason, the switch; singular and plural~~ | ~~Drop " either"~~ |
-| F2 | The ask's copy, exact, for: files only, others only, both, missing, each reason, the switch; singular and plural. A2's second sentence for c = n, 0 < c < n and c = 0, including n = k = c = 1 (an earlier-build write missing, a newer one copied: A2 keeps its second sentence, then A3). A3e with and without `earlierFolder`. (re-review N1, N8) | Drop " either"; leave A2's second sentence out when k = n (the n = k = c = 1 case is red); show A3e when `earlierFolder` is null |
+| F2 | The ask's copy, exact, for: files only, others only, both, missing, each reason, the switch; singular and plural. A2's second sentence for c = n, 0 < c < n and c = 0, including n = k = c = 1 (an earlier-build write missing, a newer one copied: A2 keeps its second sentence, then A3). ~~A3e with and without `earlierFolder`.~~ A3e with `earlierFolders` empty, with one path and with two (the plural sentence, one path per line, oldest first). (re-review N1, N8; PR #121 review 1) | Drop " either"; leave A2's second sentence out when k = n (the n = k = c = 1 case is red); show A3e when ~~`earlierFolder` is null~~ `earlierFolders` is empty; show only the first path, or the singular sentence, for two paths (PR #121 review 1) |
 | F3 | Enter on open resolves to Cancel; Esc cancels; Esc in the progress phase is "Stop waiting" | Focus "Sign out" on open |
 | ~~F4~~ | ~~The compact page, the banner and the Version Center open Settings › Account on `unsent_changes` and never call `clear_session` with `keepUnsent` themselves~~ | ~~Show the refusal as a toast~~ |
 | F4 | The compact page calls `request_sign_out_flow` on `unsent_changes` and never calls `clear_session` with `keepUnsent` itself. On macOS `forceReauth` (banner and Version Center) never calls `clear_session` (`main:desktopApi.ts:1162-1165`, pinned as it is). (review I1) | Show the refusal as a toast; call `clear_session` from `forceReauth` on macOS |
@@ -1329,7 +1444,8 @@ output go into the task's notes and QA evidence.
 | F8 | The switch step (review I1, re-review N9): with a snapshot holding 1 file and 1 rename, it renders A0s, A1s, A2s and A4s and never "removes it" or "removes them"; with an empty snapshot it renders spec A's title and `accountSwitchBody(0)`; "Sign out and switch" passes `forgetEmail: true` and `keepUnsent: { askId }`; on an `Err` starting `unsent_changes:` it calls `sign_out_count` and re-renders with the new counts, with no toast; on any other `Err` it shows today's toast. With no `unsent` at all and `pending_changes: 2` (Linux, §10), it renders spec A's `accountSwitchBody(2)` and calls `clearSession({ forgetEmail: true })` with no `keepUnsent` | Drop `keepUnsent` (the gate refuses and the test sees no re-render); show the refusal as the "Couldn’t sign out" toast; render `accountSwitchBody(n)` on macOS; read a missing snapshot as nothing waiting (the Linux case renders `accountSwitchBody(0)` and drops the warning) |
 | F9 | Settings consumes a flow request (review I6): on mount, and on `menu:sign-out-flow`, it calls `consume_sign_out_flow_request`; `true` selects the Account tab and starts the flow at the count; `false` changes nothing | Consume only on the event (a window that was not loaded yet misses the request) |
 | F10 | A refusal after a send phase goes straight to the ask (review I6): after `sign-out-send-ended` with `ask: null`, `clear_session` without `keepUnsent` answers `unsent_changes:` → `sign_out_count`, then the ask; `sign_out_send_start` is called once in the whole flow | Re-enter the send phase on the refusal (a second `sign_out_send_start`) |
-| F11 | A close ends the flow (re-review I6). At each step (the count in flight, the progress phase, the ask), `sign-out-flow-closed` closes the sheet, and the flow makes no later `sign_out_count`, `sign_out_send_start` or `clear_session` call, also when a `sign_out_count` answer arrives after the event. A `sign-out-send-ended` with `reason: 'closed'` and `ask: null` shows no ask and calls no `clear_session`. After the event, "Sign out…" starts a new flow at the count. (F10's `ask: null` case is `reason: 'all_sent'`) A `clear_session` answer that arrives after the event, `Ok` or `Err`, shows no toast and no ask: Rust shows what needs showing (§5.1, "A late result"; re-review 2 Q7) | Treat any `ask: null` as all sent (`clear_session` is called on `closed`); ignore the event at the ask (the sheet stays); act on a count answer that arrives after the event (`sign_out_send_start` is called); toast a late `clear_session` error (the toast renders in the hidden window) |
+| F11 | A close ends the flow (re-review I6). At each step (the count in flight, the progress phase, the ask), `sign-out-flow-closed` closes the sheet, and the flow makes no later `sign_out_count`, `sign_out_send_start` or `clear_session` call, also when a `sign_out_count` answer arrives after the event. A `sign-out-send-ended` with `reason: 'closed'` and `ask: null` shows no ask and calls no `clear_session`. After the event, "Sign out…" starts a new flow at the count. (F10's `ask: null` case is `reason: 'all_sent'`) A `clear_session` answer that arrives after the event, `Ok` or `Err`, shows no toast and no ask ~~: Rust shows what needs showing~~ and sends no `sign_out_result_ack`: Rust shows what needs showing, because the result is still pending there (§5.1, "A late result"; re-review 2 Q7; PR #121 review 2) | Treat any `ask: null` as all sent (`clear_session` is called on `closed`); ignore the event at the ask (the sheet stays); act on a count answer that arrives after the event (`sign_out_send_start` is called); toast a late `clear_session` error (the toast renders in the hidden window); acknowledge the answer it dropped (Rust then shows nothing, and the result is shown nowhere: PR #121 review 2) |
+| F12 | The acknowledgement (PR #121 review 2). Each macOS caller of `clear_session` (the Settings flow, the compact Account page, the switch step) calls `sign_out_result_ack` exactly once, after it displayed a failure message or a completed sign-out's warning, and never before it displayed it. It sends none for an answer it dropped because its flow was reset (F11). For `unsent_changes:` it re-renders the ask, and for an `Ok` with no warning it just moves on: a stray acknowledgement there is harmless, because Rust holds nothing pending for either | Acknowledge before displaying, or when dropping a late answer (the dropped result is then shown nowhere); never acknowledge (the dialog repeats a failure the person already saw, at that window's next close or reload); acknowledge from only one caller (the other callers' results repeat in a dialog at their next close) |
 
 ### 13.3 Gates
 
@@ -1419,6 +1535,13 @@ The lead's required rung is D1 and D2. D3-D10 and D10b are required for this tas
 passes with the proxy, or the task stays open until the lead's ruling on U16 is recorded (review I8). D10 needs D7's
 proxy; if no proxy setup meets D7's chunk bound, D10 stays open with it (re-review I6). D10b needs no proxy, so closing
 Settings always has a run on a real window (re-review 2 Q6).
+
+**What no device step proves** (PR #121 reviews 1 and 2). A kill or a power loss in the middle of the purge, and a
+result that returns in the same instant as a close, cannot be driven by hand on a device reliably, so no D step claims
+them. U42 (a real child-process death) and U44 (the pure state with a barrier) carry them. U42's abort does not lose the
+page cache, so it proves the order (the marker is on disk before the first deletion), not that the bytes reach the
+disk. U43 proves the `sync_all` calls are made and in order. A real power loss is not tested, and this spec does not
+claim it.
 
 ## 14. Docs that change with the code
 
