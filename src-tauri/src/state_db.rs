@@ -10974,6 +10974,38 @@ mod tests {
         );
     }
 
+    /// [t9-review] Minor 3 (§9.1, m-8): the settle moves only an `uploading` row. A park never
+    /// takes a `Trashing` row out of the trash, nor a `Conflict` row out of its conflict, and
+    /// records no change for either.
+    #[test]
+    fn a_park_never_moves_a_row_out_of_the_trash_or_a_conflict() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        for (file_id, op_id, status) in [
+            ("in-trash", "t1", FileStatus::Trashing),
+            ("in-conflict", "c1", FileStatus::Conflict),
+        ] {
+            seed_v1_row(&db, file_id);
+            queued_token(accept_save(&db, op_id, file_id, Some("1")));
+            db.set_status(file_id, status.clone()).unwrap();
+            let changes = changes_of(&db, file_id);
+            let ClaimOutcome::Claimed(claimed) = db.claim_operation(op_id, 1).unwrap() else {
+                panic!("{op_id} is claimable")
+            };
+            assert!(
+                db.park_claimed(op_id, &claimed.claim_id, ParkReason::PayloadMissing, 2)
+                    .unwrap(),
+                "precondition: {op_id} parked"
+            );
+            assert_eq!(
+                status_of(&db, file_id),
+                status,
+                "a park leaves a {status:?} row as it is"
+            );
+            assert_eq!(changes_of(&db, file_id), changes, "no change recorded for {file_id}");
+        }
+    }
+
     /// §9.1, step 3.3 (rule 6a′): a save parked at its accept sets `Error` in the accept's
     /// transaction.
     #[test]
