@@ -19674,10 +19674,11 @@ mod finder_setup_wiring_tests {
         );
         assert_eq!(notifications, 3, "the three notification builders");
         // The menu's three sign-out message dialogs, and (task 1882, rebase 2026-10-10) the kept-folder alert,
-        // `show_preserved_files_alert`. None of them is a window: macOS draws a parentless alert itself.
+        // `show_preserved_files_alert`, and (task 1885, I2) the menu's failed-open alert, `show_menu_open_failure`.
+        // None of them is a window: macOS draws a parentless alert itself.
         assert_eq!(
-            dialogs, 4,
-            "the three sign-out message dialogs and the kept-folder alert"
+            dialogs, 5,
+            "the three sign-out message dialogs, the kept-folder alert and the menu's failed-open alert"
         );
     }
 
