@@ -239,25 +239,33 @@ warning).~~
   - Repair: one warning.
 - **A reply that carries an error and a folder:** the folder is checked and surfaced like any
   other. The error is reported as before.
-- **Repair fails after it removed the Finder location** (the config save fails; added 2026-10-10,
+- ~~**Repair fails after it removed the Finder location** (the config save fails; added 2026-10-10,
   1882 r4): the kept folder is shown first (the alert, and saved for the row if the save allows),
-  as for a failed sign-out. ~~The error then read "Nothing was changed that you need to undo", which
+  as for a failed sign-out.~~ ~~The error then read "Nothing was changed that you need to undo", which
   is false: the Finder location is gone.~~ ~~The error now says so: "Beebeeb was removed from
   Finder" / "Repair couldn’t finish, so Beebeeb is no longer in Finder. Choose Add to Finder to add
   it back." (exact copy and the pre-removal case: `docs/specs/2026-10-02-macos-settings-dialogs.md`,
-  Dialog 2).~~ A Repair that fails before the removal, or whose removal itself failed, keeps the old
-  note.
+  Dialog 2).~~ ~~A Repair that fails before the removal, or whose removal itself failed, keeps the old
+  note.~~
 
 — lead ruling, 2026-10-10 (1882 r4)
 
 On a Mac (spec A, `docs/specs/2026-10-06-macos-finder-setup-reconciler.md`) Repair goes through the
 Finder reconciler, saves nothing after its removal, and the reconciler puts Beebeeb back in Finder
 by itself. There is no Add to Finder on a Mac (spec A, R5). So this note never appears on a Mac, and
-no Mac surface names a button for it: a Repair that fails shows the old note. Windows and Linux keep
+no Mac surface names a button for it: a Repair that fails shows the old note. ~~Windows and Linux keep
 the r4 note, which names the page's own button: "Beebeeb was removed from Finder" / "Repair
-couldn’t finish, so Beebeeb is no longer in Finder. Choose Install in Finder to add it back."
+couldn’t finish, so Beebeeb is no longer in Finder. Choose Install in Finder to add it back."~~
 
 — lead ruling, 2026-10-10 (rebase onto spec A, Q1)
+
+**Repair never fails after a removal that worked, on any platform**, so the r4 note is gone
+everywhere. On a Mac, Repair saves nothing after its removal (above). On Windows and Linux there is
+no File Provider domain: `remove_file_provider_domain` always fails there, so the r4 code was never
+sent. The `repair_failed_after_removal` code, the copy above and both surfaces' branches for it are
+removed. A Repair that fails is reported as it was before r4, with the failing step's own error.
+
+— lead ruling, 2026-10-10 (rebase re-review Minor 4)
 
 — lane impl-1882-r2, 2026-10-10, per lead ruling [1882-r2] (device K-F2, review I3, M2, M3)
 

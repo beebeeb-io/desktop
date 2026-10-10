@@ -9,24 +9,6 @@
 //! source pin over the Objective-C and Swift sources are pure, so they run on every OS. Only the
 //! FFI calls live in the macOS-only `macos_file_provider` module.
 
-/// 1882 r4: the code a Repair error starts with when Repair failed AFTER it removed the Finder
-/// location. The frontend (`REPAIR_FAILED_AFTER_REMOVAL_CODE` in `src/macSettingsModel.ts`, pinned
-/// equal by `tests/finderPreservedFiles.test.ts`) tells the two failures apart by it, and shows
-/// its own words, never this text.
-pub const REPAIR_FAILED_AFTER_REMOVAL_CODE: &str = "repair_failed_after_removal";
-
-/// The error Repair returns when its final save fails. If the Finder location was already removed
-/// (`domain_removed`), the error starts with [`REPAIR_FAILED_AFTER_REMOVAL_CODE`], so the person is
-/// not told that nothing changed; the detail follows, for the log. Otherwise (Repair failed before
-/// the removal, or the removal itself failed and the location is still there) the error is as it was.
-pub fn repair_save_error(error: String, domain_removed: bool) -> String {
-    if domain_removed {
-        format!("{REPAIR_FAILED_AFTER_REMOVAL_CODE}: {error}")
-    } else {
-        error
-    }
-}
-
 /// The title of the app's alert (spec §5).
 pub const PRESERVED_FILES_TITLE: &str = "Files kept on this Mac";
 
@@ -854,27 +836,6 @@ mod tests {
             3,
             "the definition, `remove()` and the sweep's `remove_domain`"
         );
-    }
-
-    // ── round 4: Repair's error after a removal tells the truth ──────────────
-
-    #[test]
-    fn test_1882_r4_a_repair_error_after_the_removal_carries_the_code() {
-        let after = repair_save_error("No space left on device".to_string(), true);
-        assert!(
-            after.starts_with(REPAIR_FAILED_AFTER_REMOVAL_CODE),
-            "the frontend tells this failure apart by the code: {after}"
-        );
-        assert!(
-            after.contains("No space left on device"),
-            "the detail stays, for the log"
-        );
-        // Before the removal, or when the removal itself failed, the error is untouched.
-        assert_eq!(
-            repair_save_error("No space left on device".to_string(), false),
-            "No space left on device"
-        );
-        assert!(!"Could not read the config".starts_with(REPAIR_FAILED_AFTER_REMOVAL_CODE));
     }
 
     #[test]
