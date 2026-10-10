@@ -2578,15 +2578,60 @@ fn is_file_provider_root(container_id: &str) -> bool {
         || container_id.to_ascii_lowercase().contains("root")
 }
 
+#[cfg(test)]
+thread_local! {
+    static BUILDER_SEAM: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// T64/T65: fires once, on this thread, right after the builder's one read.
+#[cfg(test)]
+pub(crate) fn arm_builder_seam(hook: impl FnOnce() + 'static) {
+    BUILDER_SEAM.with(|seam| *seam.borrow_mut() = Some(Box::new(hook)));
+}
+
+/// A no-op outside tests.
+fn builder_seam() {
+    #[cfg(test)]
+    {
+        let hook = BUILDER_SEAM.with(|seam| seam.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+}
+
 pub(crate) fn file_entry_payload_for_db(
     db: &crate::state_db::StateDb,
     entry: &crate::state_db::FileEntry,
     parent_identifier: &str,
 ) -> FileProviderItemPayload {
-    let mut payload = match db.get_file_contract_state(&entry.file_id).ok().flatten() {
-        Some(contract) => file_entry_payload(entry, &contract, parent_identifier),
+    // Spec §5.3: the row and the queue come from ONE read, so the predicate never
+    // sees a row from before a landing beside a queue from after it.
+    let presentation = db.item_presentation(&entry.file_id).ok().flatten();
+    builder_seam();
+    let mut payload = match &presentation {
+        Some(p) => file_entry_payload(entry, &p.contract, parent_identifier),
         None => file_entry_payload_without_contract(entry, parent_identifier),
     };
+    if let Some(p) = &presentation {
+        // Rule 1: the bytes the system holds keep the name their write was given,
+        // while that write is queued or is what the server holds now.
+        match crate::write_token::held_token(
+            p.held.as_ref(),
+            p.held_write_queued,
+            p.contract.current_version,
+            p.contract.current_object_version_id.as_deref(),
+        ) {
+            Some(token) => payload.content_version = Some(token),
+            None => {
+                // Housekeeping only; correctness comes from the predicate. Guarded by
+                // the write this read saw, so a token set since is never cleared.
+                if let Some(held) = &p.held {
+                    let _ = db.clear_held_if(&entry.file_id, &held.write_id);
+                }
+            }
+        }
+    }
     // Task 1697: real dates + child count, stamped where the DB is at hand.
     // `modified_at` conflates "server updated_at" and "conflict detected at"
     // (see the FileEntry doc comment) but is the best mtime the daemon has.

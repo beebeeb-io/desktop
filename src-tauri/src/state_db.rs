@@ -2719,6 +2719,53 @@ impl StateDb {
         }))
     }
 
+    /// §5.3: housekeeping only, guarded by the write the caller read, so it never
+    /// clears a token a concurrent save has just set. `true`: it cleared the row.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn clear_held_if(&self, file_id: &str, write_id: &str) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let n = conn.execute(
+            "UPDATE files SET held_write_id = NULL, held_base = NULL, held_version = NULL,
+                              held_object_version_id = NULL
+             WHERE file_id = ?1 AND held_write_id = ?2",
+            params![file_id, write_id],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// §5.4 row 10 (m-9): a restore from this Mac. Its version becomes current, so the
+    /// system re-downloads; the held columns are cleared only when no File Provider
+    /// write of the file is queued (plan Spec issue 5). One transaction.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn apply_restore_response(
+        &self,
+        file_id: &str,
+        version: Option<i64>,
+        object_version_id: Option<&str>,
+    ) -> Result<()> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if let Some(version) = version {
+            tx.execute(
+                "UPDATE files SET current_version = ?2, local_base_version = ?2,
+                                  current_object_version_id = ?3, version_filled = 0
+                 WHERE file_id = ?1",
+                params![file_id, version, object_version_id],
+            )?;
+            record_file_change_conn(&tx, file_id, FpChangeKind::Modified, None)?;
+        }
+        tx.execute(
+            "UPDATE files SET held_write_id = NULL, held_base = NULL, held_version = NULL,
+                              held_object_version_id = NULL
+             WHERE file_id = ?1
+               AND NOT EXISTS (SELECT 1 FROM operation_queue
+                               WHERE file_id = ?1 AND write_id IS NOT NULL
+                                 AND kind IN ('upload_version', 'upload_file'))",
+            params![file_id],
+        )?;
+        tx.commit()
+    }
+
     /// The round-4 columns of one File Provider upload op; `None` when the op
     /// is gone or carries no write id.
     #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
@@ -3406,6 +3453,23 @@ impl StateDb {
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction()?;
 
+        // m-12 (spec §5.4 row 15, §10.5): a File Provider create that never landed has
+        // a provisional row the server never knew. The queue is its only owner, so it
+        // is read before the queue goes; the row would otherwise survive as a ghost.
+        // Write-keyed: a Windows or watcher create (no write id) is kept as before.
+        let provisional: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT DISTINCT q.file_id FROM operation_queue q JOIN files f ON f.file_id = q.file_id
+                 WHERE q.kind IN ('upload_version', 'upload_file')
+                   AND q.write_id IS NOT NULL
+                   AND CASE WHEN json_valid(q.metadata_json)
+                            THEN json_extract(q.metadata_json, '$.operation') END = 'create_file'
+                   AND f.current_version = 0",
+            )?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>>>()?
+        };
+
         let payload_paths: Vec<String> = {
             let mut stmt = tx.prepare("SELECT payload_path FROM operation_queue WHERE payload_path IS NOT NULL")?;
             let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
@@ -3464,6 +3528,21 @@ impl StateDb {
              WHERE cache_path IS NOT NULL OR status = 'local'",
             [],
         )?;
+
+        // The round-4 state goes with the account (spec §5.4 row 15). The provisional
+        // rows are removed after every path above was collected, so a path one of them
+        // held is still handed to the caller.
+        for file_id in &provisional {
+            record_file_change_conn(&tx, file_id, FpChangeKind::Deleted, None)?;
+            tx.execute("DELETE FROM files WHERE file_id = ?1", params![file_id])?;
+        }
+        tx.execute(
+            "UPDATE files SET held_write_id = NULL, held_base = NULL, held_version = NULL,
+                              held_object_version_id = NULL
+             WHERE held_write_id IS NOT NULL",
+            [],
+        )?;
+        tx.execute("DELETE FROM id_aliases", [])?;
 
         tx.commit()?;
         Ok(LocalStatePurge {
@@ -3912,6 +3991,24 @@ impl StateDb {
             params![op_id, base_version],
         )
         .unwrap();
+    }
+
+    /// T6, T62: an alias the id swap would record (spec §7.1); Task 8 writes them for real.
+    #[cfg(test)]
+    pub(crate) fn insert_alias_for_test(&self, provisional_id: &str, server_id: &str, created_at: i64) {
+        let conn = self.0.lock().unwrap();
+        conn.execute(
+            "INSERT INTO id_aliases (provisional_id, server_id, created_at) VALUES (?1, ?2, ?3)",
+            params![provisional_id, server_id, created_at],
+        )
+        .unwrap();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn alias_count_for_test(&self) -> i64 {
+        let conn = self.0.lock().unwrap();
+        conn.query_row("SELECT COUNT(*) FROM id_aliases", [], |row| row.get(0))
+            .unwrap()
     }
 
     /// P2: a Finder write is an op with a write id; the restore/upload wait is keyed on it.

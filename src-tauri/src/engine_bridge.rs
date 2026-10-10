@@ -785,7 +785,21 @@ impl EngineBridge {
                     .as_str()
                     .or(op.base_object_version_id.as_deref())
                     .ok_or_else(|| anyhow::anyhow!("restore operation missing version id"))?;
-                self.api.restore_version(file_id, version_id).await?;
+                // Spec §5.4 row 10: the restore's version becomes current, so the
+                // system re-downloads the restored bytes instead of keeping a token.
+                #[cfg(target_os = "macos")]
+                {
+                    let response = self.api.restore_version(file_id, version_id).await?;
+                    self.db.apply_restore_response(
+                        file_id,
+                        response["version_number"].as_i64(),
+                        response["current_object_version_id"].as_str(),
+                    )?;
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    self.api.restore_version(file_id, version_id).await?;
+                }
                 Ok(None)
             }
             OperationKind::UploadVersion | OperationKind::UploadFile => {
@@ -13178,6 +13192,8 @@ mod tests {
         delay_init: Option<Duration>,
         /// file id -> the status line its `uploads/init` is refused with.
         refuse_init: HashMap<String, &'static str>,
+        /// Every `POST /files/{id}/versions/{vid}/restore`: (file id, object version id).
+        restores: Vec<(String, String)>,
     }
 
     /// Upload mock that behaves like the server's version check: a replace
@@ -13345,6 +13361,34 @@ mod tests {
             });
             s.inits.push((body, 201));
             return http_json("201 Created", response);
+        }
+        // A restore appends a copy of version `vid` (the mock's object ids are
+        // `object-{id}-v{n}`) and answers as the server's first branch does (VER:613-618).
+        if method == "POST"
+            && let Some(rest) = path.strip_prefix("/api/v1/files/")
+            && rest.ends_with("/restore")
+        {
+            let parts: Vec<&str> = rest.split('/').collect(); // [id, "versions", vid, "restore"]
+            let (file_id, object) = (parts[0].to_string(), parts[2].to_string());
+            let index = object
+                .rsplit("-v")
+                .next()
+                .and_then(|n| n.parse::<usize>().ok())
+                .unwrap_or(1)
+                .saturating_sub(1);
+            let file = s.files.entry(file_id.clone()).or_default();
+            let chunks = file.versions.get(index).cloned().unwrap_or_default();
+            file.versions.push(chunks);
+            let version = file.versions.len();
+            s.restores.push((file_id.clone(), object));
+            return http_json(
+                "200 OK",
+                serde_json::json!({
+                    "message": "version restored",
+                    "version_number": version,
+                    "current_object_version_id": format!("object-{file_id}-v{version}"),
+                }),
+            );
         }
         if method == "PATCH"
             && let Some(id) = path.strip_prefix("/api/v1/files/")
@@ -14527,5 +14571,499 @@ mod tests {
         let ops = bridge.db.list_operations_for_file(&provisional).unwrap();
         assert_eq!(ops[1].base_version, Some(0), "after a create, stored as 0");
         drop(server.finish());
+    }
+
+    // ── Rule 1: every surface reports the token (spec §5.3–§5.5, §5.4 rows 5–15) ──
+
+    #[cfg(unix)] // asserts a token through `held_content_version`
+    #[tokio::test]
+    async fn a_landing_keeps_the_content_version_the_reply_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [52u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_uploaded_row(&bridge, &server, "named");
+        let reply = fp_save(&bridge, dir.path(), "named", "notes.txt", b"edit", "1");
+        let token = reply.token.clone().unwrap();
+        assert!(token.starts_with("1:w"), "{token}");
+        assert_eq!(held_content_version(&bridge, "named"), token, "while queued");
+        drain_upload_queue(&bridge, &sync_root).await;
+        assert_eq!(held_content_version(&bridge, "named"), token, "after our own landing");
+        drop(server.finish());
+    }
+
+    /// W landed as v2 on `file_id`; returns W's token. Used by T2, T3, T4, T5, T6, T64.
+    #[cfg(unix)] // asserts a token through `held_content_version`
+    async fn land_one_save(
+        bridge: &EngineBridge,
+        server: &VersionedServerMock,
+        dir: &Path,
+        sync_root: &Path,
+        file_id: &str,
+    ) -> String {
+        seed_uploaded_row(bridge, server, file_id);
+        let token = fp_save(bridge, dir, file_id, "notes.txt", b"landed edit", "1")
+            .token
+            .unwrap();
+        drain_upload_queue(bridge, sync_root).await;
+        assert_eq!(held_content_version(bridge, file_id), token);
+        token
+    }
+
+    #[cfg(unix)] // only the unix token tests call it
+    fn remote_update(bridge: &EngineBridge, sync_root: &Path, file_id: &str, version: i64, object: &str) {
+        let op = crate::api_client::SyncOp {
+            seq_id: 100 + version,
+            op_type: "file_update".into(),
+            payload: serde_json::json!({
+                "id": file_id,
+                "version_number": version,
+                "current_object_version_id": object,
+                "size_bytes": 11
+            }),
+        };
+        apply_sync_op(bridge, sync_root, &op, now_secs(), &mut Vec::new()).unwrap();
+    }
+
+    #[cfg(unix)] // asserts a token through `held_content_version`
+    #[tokio::test]
+    async fn a_remote_change_replaces_the_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [53u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        land_one_save(&bridge, &server, dir.path(), &sync_root, "remote").await;
+        remote_update(&bridge, &sync_root, "remote", 3, "object-elsewhere-v3");
+        assert_eq!(held_content_version(&bridge, "remote"), "3");
+        assert!(
+            bridge.db.item_presentation("remote").unwrap().unwrap().held.is_none(),
+            "the builder cleared it"
+        );
+
+        // A new version under the SAME object id: the legacy one-shot `file_update` carries no
+        // `current_object_version_id`, so the row keeps its own (EB:6169-6174).
+        land_one_save(&bridge, &server, dir.path(), &sync_root, "remote-same-object").await;
+        let replace = crate::api_client::SyncOp {
+            seq_id: 200,
+            op_type: "file_update".into(),
+            payload: serde_json::json!({ "id": "remote-same-object", "version_number": 3, "size_bytes": 11 }),
+        };
+        apply_sync_op(&bridge, &sync_root, &replace, now_secs(), &mut Vec::new()).unwrap();
+        assert_eq!(held_content_version(&bridge, "remote-same-object"), "3");
+        drop(server.finish());
+    }
+
+    #[cfg(unix)] // asserts a token through `held_content_version`
+    #[tokio::test]
+    async fn our_own_echo_keeps_the_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [54u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        let token = land_one_save(&bridge, &server, dir.path(), &sync_root, "echo").await;
+        remote_update(&bridge, &sync_root, "echo", 2, "object-echo-v2");
+        assert_eq!(
+            held_content_version(&bridge, "echo"),
+            token,
+            "the echo of our own landing changes nothing"
+        );
+        drop(server.finish());
+    }
+
+    #[cfg(unix)] // asserts a token through `held_content_version`
+    #[cfg(target_os = "macos")] // tests the restore response, which only macOS applies
+    #[tokio::test]
+    async fn a_restore_from_this_mac_replaces_the_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [55u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        land_one_save(&bridge, &server, dir.path(), &sync_root, "restored").await;
+        bridge
+            .queue_restore_version("restored", "object-restored-v1", None)
+            .unwrap();
+        drain_upload_queue(&bridge, &sync_root).await;
+        assert_eq!(
+            held_content_version(&bridge, "restored"),
+            "3",
+            "the restore's version, so the system re-downloads"
+        );
+        drop(server.finish());
+    }
+
+    #[cfg(unix)] // asserts a token through `held_content_version`
+    #[tokio::test]
+    async fn the_token_survives_rename_move_and_trash() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [56u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        let token = land_one_save(&bridge, &server, dir.path(), &sync_root, "moved").await;
+        let rename = FinderWriteTarget {
+            file_id: Some("moved".into()),
+            parent_id: None,
+            filename: "renamed.txt".into(),
+            rel_path: None,
+            kind: FinderWriteItemKind::File,
+            contents_path: None,
+            content_type: Some("text/plain".into()),
+            base_version_identifier: Some(token.clone()),
+        };
+        bridge.queue_file_provider_modify(rename).unwrap();
+        assert_eq!(held_content_version(&bridge, "moved"), token, "rename");
+        bridge.queue_finder_delete("moved", Some(token.clone())).unwrap();
+        assert_eq!(held_content_version(&bridge, "moved"), token, "trash");
+        drop(server.finish());
+    }
+
+    #[cfg(unix)] // asserts a token through `held_content_version`
+    #[tokio::test]
+    async fn sign_out_clears_tokens_and_aliases() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [57u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        land_one_save(&bridge, &server, dir.path(), &sync_root, "signed-out").await;
+        bridge
+            .db
+            .insert_alias_for_test("provisional-1", "signed-out", now_secs());
+        bridge.db.purge_all_local_state().unwrap();
+        assert!(
+            bridge
+                .db
+                .item_presentation("signed-out")
+                .unwrap()
+                .unwrap()
+                .held
+                .is_none()
+        );
+        assert_eq!(bridge.db.alias_count_for_test(), 0);
+        drop(server.finish());
+    }
+
+    #[tokio::test]
+    async fn sign_out_purges_provisional_rows_without_a_contract() {
+        let dir = tempfile::tempdir().unwrap();
+        let master_key = [58u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_uploaded_row(&bridge, &server, "server-known");
+        let created = fp_create(&bridge, dir.path(), "never-uploaded.txt", b"local only");
+        let provisional = created.outcome_file_id();
+        bridge
+            .db
+            .insert_alias_for_test("older-provisional", "server-known", now_secs());
+        bridge.db.purge_all_local_state().unwrap();
+        assert!(
+            bridge.db.get_file(&provisional).unwrap().is_none(),
+            "no ghost row after sign-out"
+        );
+        assert!(
+            bridge.db.get_file("server-known").unwrap().is_some(),
+            "server-known rows are kept"
+        );
+        assert_eq!(bridge.db.alias_count_for_test(), 0);
+        drop(server.finish());
+    }
+
+    #[cfg(unix)] // asserts a token through `held_content_version`
+    #[tokio::test]
+    async fn c1_a_save_after_the_first_landed_is_based_on_what_it_produced() {
+        // The review's two passes.
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [59u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_uploaded_row(&bridge, &server, "c1");
+        fp_save(&bridge, dir.path(), "c1", "notes.txt", b"A", "1");
+        drain_upload_queue(&bridge, &sync_root).await;
+        let base = held_content_version(&bridge, "c1"); // what the system holds after re-reading
+        fp_save(&bridge, dir.path(), "c1", "notes.txt", b"A B", &base);
+        drain_upload_queue(&bridge, &sync_root).await;
+        let state = server.finish();
+        assert_eq!(
+            state.init_summary(),
+            vec![(json!("c1"), json!(1), 201), (json!("c1"), json!(2), 201)]
+        );
+        assert_eq!(state.latest_plaintext("c1", master_key), b"A B");
+    }
+
+    #[tokio::test]
+    async fn c1_three_saves_in_one_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [60u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        server
+            .state
+            .lock()
+            .unwrap()
+            .delay_chunks
+            .insert("session-1".into(), Duration::from_millis(400));
+        seed_uploaded_row(&bridge, &server, "c3");
+        let a = fp_save(&bridge, dir.path(), "c3", "notes.txt", b"A", "1");
+        let ((), ()) = tokio::join!(
+            async {
+                drain_upload_queue(&bridge, &sync_root).await;
+            },
+            async {
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    while server.state.lock().unwrap().inits.is_empty() {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .expect("init never reached the mock");
+                let b = fp_save(
+                    &bridge,
+                    dir.path(),
+                    "c3",
+                    "notes.txt",
+                    b"A B",
+                    a.token.as_deref().unwrap(),
+                );
+                fp_save(
+                    &bridge,
+                    dir.path(),
+                    "c3",
+                    "notes.txt",
+                    b"A B C",
+                    b.token.as_deref().unwrap(),
+                );
+            }
+        );
+        drain_upload_queue(&bridge, &sync_root).await;
+        let state = server.finish();
+        assert_eq!(
+            state.init_summary(),
+            vec![
+                (json!("c3"), json!(1), 201),
+                (json!("c3"), json!(2), 201),
+                (json!("c3"), json!(3), 201)
+            ]
+        );
+        assert_eq!(state.latest_plaintext("c3", master_key), b"A B C");
+    }
+
+    #[cfg(unix)] // asserts a token through `held_content_version`
+    #[cfg(target_os = "macos")] // tests the restore response, which only macOS applies
+    #[tokio::test]
+    async fn a_restore_with_a_queued_write_runs_after_it_and_keeps_both_versions() {
+        // m-9
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [61u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        // W's first attempt fails, so the runner reaches the restore while W is still
+        // queued: only the content order keeps the restore behind it. Without this,
+        // the runner's insertion order alone would land W first.
+        server
+            .state
+            .lock()
+            .unwrap()
+            .fail_first_chunk_once
+            .insert("session-1".into());
+        seed_uploaded_row(&bridge, &server, "ordered");
+        let w = fp_save(&bridge, dir.path(), "ordered", "notes.txt", b"W", "1");
+        bridge
+            .queue_restore_version("ordered", "object-ordered-v1", None)
+            .unwrap();
+        assert_eq!(
+            held_content_version(&bridge, "ordered"),
+            w.token.clone().unwrap(),
+            "kept while W is queued"
+        );
+        drain_upload_queue(&bridge, &sync_root).await;
+        let state = server.finish();
+        assert_eq!(
+            state.files["ordered"].versions.len(),
+            3,
+            "v1, W as v2, the restore as v3"
+        );
+        let complete_at = state
+            .requests
+            .iter()
+            .position(|(m, p)| m == "POST" && p.ends_with("/complete"))
+            .unwrap();
+        let restore_at = state
+            .requests
+            .iter()
+            .position(|(m, p)| m == "POST" && p.ends_with("/restore"))
+            .unwrap();
+        assert!(complete_at < restore_at, "W lands first: {:?}", state.requests);
+        assert_eq!(
+            state.restores,
+            vec![("ordered".to_string(), "object-ordered-v1".to_string())]
+        );
+        assert_eq!(held_content_version(&bridge, "ordered"), "3");
+    }
+
+    #[cfg(unix)] // names `arm_builder_seam`
+    #[tokio::test]
+    async fn a_builder_clears_held_columns_only_for_the_write_it_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [62u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = Arc::new(test_bridge_with_api(
+            &dir.path().join("state.db"),
+            server.base_url.clone(),
+            master_key,
+        ));
+        land_one_save(&bridge, &server, dir.path(), &sync_root, "guarded").await;
+        remote_update(&bridge, &sync_root, "guarded", 3, "object-elsewhere-v3");
+        // Between the builder's read (W, no longer current) and its clear, a save sets held = N.
+        let saver = Arc::clone(&bridge);
+        let save_dir = dir.path().to_path_buf();
+        let n_token = Arc::new(Mutex::new(None));
+        let n_slot = Arc::clone(&n_token);
+        crate::ipc_socket::arm_builder_seam(move || {
+            let n = fp_save(&saver, &save_dir, "guarded", "notes.txt", b"N", "3");
+            *n_slot.lock().unwrap() = n.token;
+        });
+        let _ = held_content_version(&bridge, "guarded");
+        let n = n_token
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the seam fired and N was accepted");
+        let held = bridge.db.item_presentation("guarded").unwrap().unwrap().held;
+        assert_eq!(
+            held.map(|held| held.token()),
+            Some(n),
+            "the clear matched no row; N's token is kept"
+        );
+        drop(server.finish());
+    }
+
+    #[cfg(unix)] // names `arm_builder_seam`
+    #[tokio::test]
+    async fn the_predicate_reads_row_and_queue_together() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [63u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = Arc::new(test_bridge_with_api(
+            &dir.path().join("state.db"),
+            server.base_url.clone(),
+            master_key,
+        ));
+        seed_uploaded_row(&bridge, &server, "one-read");
+        let w = fp_save(&bridge, dir.path(), "one-read", "notes.txt", b"W", "1")
+            .token
+            .unwrap();
+        let runner = Arc::clone(&bridge);
+        let root = sync_root.clone();
+        crate::ipc_socket::arm_builder_seam(move || {
+            run_competing(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        runner.process_due_operations(&root, now_secs()).await.unwrap();
+                    });
+            });
+        });
+        assert_eq!(
+            held_content_version(&bridge, "one-read"),
+            w,
+            "never the old {{cv}} while W lands"
+        );
+        let state = server.finish();
+        assert_eq!(
+            state.init_summary(),
+            vec![(json!("one-read"), json!(1), 201)],
+            "W landed inside the seam"
+        );
+    }
+
+    #[cfg(unix)] // asserts a token through `held_content_version`
+    #[tokio::test]
+    async fn twenty_rapid_saves_land_in_order_and_the_last_wins() {
+        // Review Focus 1
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [64u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        server
+            .state
+            .lock()
+            .unwrap()
+            .delay_chunks
+            .insert("session-1".into(), Duration::from_millis(400));
+        seed_uploaded_row(&bridge, &server, "autosave");
+        let first = fp_save(&bridge, dir.path(), "autosave", "notes.txt", b"save 1", "1");
+        let mut base = first.token.unwrap();
+        let mut last = b"save 1".to_vec();
+        let ((), ()) = tokio::join!(
+            async {
+                drain_upload_queue(&bridge, &sync_root).await;
+            },
+            async {
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    while server.state.lock().unwrap().inits.is_empty() {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .expect("init never reached the mock");
+                for n in 2..=20 {
+                    let bytes = format!("save {n}").into_bytes();
+                    let reply = fp_save(&bridge, dir.path(), "autosave", "notes.txt", &bytes, &base);
+                    base = reply.token.unwrap();
+                    assert_eq!(
+                        held_content_version(&bridge, "autosave"),
+                        base,
+                        "save {n}: one name for its bytes"
+                    );
+                    last = bytes;
+                }
+            }
+        );
+        drain_upload_queue(&bridge, &sync_root).await;
+        let state = server.finish();
+        let bases: Vec<i64> = state
+            .inits
+            .iter()
+            .map(|(body, status)| {
+                assert_eq!(*status, 201, "{:?}", state.init_summary());
+                body["base_version_number"].as_i64().unwrap()
+            })
+            .collect();
+        assert_eq!(bases, (1..=20).collect::<Vec<i64>>(), "one upload per save, in order");
+        assert_eq!(
+            state.latest_plaintext("autosave", master_key),
+            last,
+            "the last save wins"
+        );
+        assert!(bridge.db.list_due_operations(i64::MAX).unwrap().is_empty());
+        assert_eq!(
+            held_content_version(&bridge, "autosave"),
+            base,
+            "the last save's name stays after it lands"
+        );
     }
 }

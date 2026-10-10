@@ -851,6 +851,16 @@ fn a_cached_reply_reports_the_row_as_it_is_now_not_as_it_was() {
             retry["WriteQueued"]["item"]["version_identifier"], "7:1700000123:20",
             "version must be current: {retry}"
         );
+        // The create's op is still queued, so the item is reported as it is now:
+        // under the create's token (spec §5.4 row 1). Task 9 turns the status to
+        // `uploading`; until then it stays `local` (lead ruling E4.2).
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            retry["WriteQueued"]["item"]["content_version"], first["WriteQueued"]["item"]["content_version"],
+            "the queued create's bytes keep the name the first reply gave them: {retry}"
+        );
+        // The Linux arm does not mint (Task 3 step 5.7): the reply keeps today's content version.
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(
             retry["WriteQueued"]["item"]["content_version"], "7",
             "the write base must be the current server version: {retry}"
@@ -911,10 +921,15 @@ fn a_queued_modify_replies_with_the_size_of_the_bytes_it_was_handed() {
         "the reply's modification time is the write's, not the previous content's: {reply}"
     );
     assert_eq!(item["status"], "uploading", "{reply}");
-    assert_eq!(
-        item["content_version"], "1",
-        "the server version only moves when the upload lands: {reply}"
+    let content_version = item["content_version"].as_str().unwrap();
+    #[cfg(target_os = "macos")]
+    assert!(
+        crate::write_token::parse_token(content_version).is_some_and(|token| token.base == 1),
+        "the reply names the bytes it accepted with a token led by their base: {reply}"
     );
+    // The Linux arm does not mint (Task 3 step 5.7): the reply keeps today's content version.
+    #[cfg(not(target_os = "macos"))]
+    assert_eq!(content_version, "1", "{reply}");
     let row = fx.db.get_file("edited-item").unwrap().unwrap();
     assert_eq!(row.size_bytes, 40, "the row records the staged size too");
 }
