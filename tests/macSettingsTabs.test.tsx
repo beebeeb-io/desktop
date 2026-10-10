@@ -483,7 +483,7 @@ describe('Account tab', () => {
 describe('Sync tab', () => {
   const ready = (over: object = {}) => ({ state: { status: 'ready', config: { ...config, ...over } }, save: async () => {}, reload: async () => {} })
 
-  function syncBackend(opts: { finder?: any; install?: (a: any) => unknown; tree?: any[]; repair?: (a: any) => unknown; pin?: (a: any) => unknown; gate?: Promise<void>; kept?: string | null; dismissFails?: boolean } = {}) {
+  function syncBackend(opts: { finder?: any; install?: (a: any) => unknown; tree?: any[]; repair?: (a: any) => unknown; pin?: (a: any) => unknown; gate?: Promise<void>; kept?: string | null; dismissFails?: boolean; keptReadFails?: boolean } = {}) {
     // `kept` is the folder Rust saved in desktop.toml (task 1882 round 2, review I2).
     const st: { finder: any; kept: string | null } = { finder: opts.finder ?? finder.installed, kept: opts.kept ?? null }
     return {
@@ -501,7 +501,10 @@ describe('Sync tab', () => {
           if (typeof result?.preserved_location === 'string') st.kept = result.preserved_location
           return result
         },
-        kept_unsynced_folder: () => st.kept,
+        kept_unsynced_folder: () => {
+          if (opts.keptReadFails) throw new Error('desktop.toml could not be read')
+          return st.kept
+        },
         dismiss_kept_unsynced_folder: (a: any) => {
           if (opts.dismissFails) throw new Error('disk full')
           if (st.kept === a?.path) st.kept = null
@@ -638,6 +641,23 @@ describe('Sync tab', () => {
     expect(mono.map((el) => textOf(el.props.children).trim())).toEqual([KEPT])
     expect(String(mono[0].props.className).split(' ')).toContain('ms-mono--wrap')
     expect(buttons(m)).toContain('Dismiss')
+    expect(visibleErrorSurfaces(m)).toEqual([])
+  })
+
+  // Re-review D5: the fallback in runRepair covers a failed READ of the saved record, and only that.
+  // A failed SAVE makes Repair return an error instead ("a repair that fails" below, one inline
+  // alert and no row); the folder is then named by the app's own alert, which Rust raises before
+  // it returns the error.
+  test('a repair that kept files shows its folder even when the saved record cannot be read back', async () => {
+    const { m } = await openSync({
+      keptReadFails: true,
+      repair: () => ({ pending_operations_preserved: 0, warnings: [], preserved_location: KEPT }),
+    })
+    expect(keptNotes(m)).toHaveLength(0) // nothing readable on open, so no row
+    await press(m, 'Repair…')
+    await press(m, 'Repair')
+    expect(keptNotes(m)).toHaveLength(1)
+    expect(monoLines(m).map((el) => textOf(el.props.children).trim())).toEqual([KEPT])
     expect(visibleErrorSurfaces(m)).toEqual([])
   })
 
