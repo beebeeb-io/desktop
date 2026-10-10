@@ -12,7 +12,7 @@ import { useCapabilities } from '../capabilities'
 import { finderInstallNotice, finderInstallStateAfterAttempt, finderInstallStateWhileAttempting } from '../finderInstallCard'
 import { finderOpenFailedToast, finderRepairFailedToast, useFinderSetup } from '../finderSetup'
 import { finderActionButtonLabel, finderRepairWarningNote, finderStatusPill, type FinderSetupAction } from '../finderSetupCopy'
-import { preservedFilesLine, repairRemovedNotice } from '../macSettingsModel'
+import { preservedFilesLine } from '../macSettingsModel'
 import { useToast } from '../windows/ui'
 
 // Inline confirm for the destructive Finder reset — no window.confirm(). Three states,
@@ -167,16 +167,6 @@ export default function SyncFolder() {
     setBusy(false)
     setResetPhase('idle')
     if (!result.ok) {
-      // 1882 r4, Windows and Linux only (lead ruling, rebase onto 1882): after the removal, say so (the page's own
-      // button adds it back); the raw detail stays out. A Mac never takes this path: it has no Install button
-      // (spec A, R5), and its Repair saves nothing after the removal.
-      const removed = platform === 'macos' ? null : repairRemovedNotice(result.reason, 'Install in Finder')
-      if (removed) {
-        const finderState = await command<FinderInstallState>('finder_location_state')
-        if (finderState.ok) setInstallState(finderState.value)
-        showToast({ variant: 'error', title: removed.title, message: removed.body })
-        return
-      }
       // A Mac's error is a redacted bridge code, never shown: the toast is the one sentence
       // (task 17b). Windows/Linux keep the error text.
       showToast(

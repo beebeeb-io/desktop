@@ -1103,8 +1103,9 @@ describe('Sync tab', () => {
     expect(visibleText(m)).not.toContain('socket busy')
   })
 
-  // 1882 r4 (lead ruling): after the Finder location was removed, "Nothing was changed that you need
-  // to undo" is false. The two failures read differently; the raw detail is never shown.
+  // A failed Repair shows its one note, word for word, and never the raw detail. (1882 r4 had a second note, for a
+  // Repair that failed after its removal; under spec A no platform can fail there, so it is gone: rebase re-review
+  // Minor 4, lead ruling.)
   const alertText = (m: Mounted) => find(m, (el) => el.props['data-error-surface'] === 'finder-repair').map((el) => readable(expand(el)).join(' '))
 
   test('a repair that fails before the removal keeps the old copy, word for word', async () => {

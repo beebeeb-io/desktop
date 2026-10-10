@@ -183,34 +183,6 @@ export const PRESERVED_FILES_SENTENCE = 'Files that hadn’t reached your vault 
  */
 export const KEPT_FOLDER_ROW_SENTENCE = 'Files that had not reached the server were kept in this folder:'
 
-/**
- * 1882 r4: the code a failed Repair's error starts with when Repair failed AFTER it removed the
- * Finder location. Rust no longer sends it (rebase re-review Minor 4, lead ruling: with the Finder
- * reconciler no platform can fail after a removal that worked), so nothing reaches this code. It goes,
- * with its note, when this frontend moves to the reconciler (spec 2026-10-06).
- */
-export const REPAIR_FAILED_AFTER_REMOVAL_CODE = 'repair_failed_after_removal'
-
-/** The title of the note a Repair that failed after the removal shows (1882 r4, lead ruling). */
-export const REPAIR_REMOVED_TITLE = 'Beebeeb was removed from Finder'
-
-/**
- * 1882 r4: when Repair fails AFTER it removed the Finder location, "Nothing was changed that you
- * need to undo" is false. Rust marks that failure with a code at the start of its error; this turns
- * it into the note to show: Beebeeb is gone from Finder, and the button that adds it back
- * (`button` is that button's own name on the surface that shows the note). The raw detail is never
- * shown. Any other error, a failure before the removal, is not this note: `null`.
- */
-export function repairRemovedNotice(reason: string, button: string): { title: string; body: string } | null {
-  const after = reason === REPAIR_FAILED_AFTER_REMOVAL_CODE || reason.startsWith(`${REPAIR_FAILED_AFTER_REMOVAL_CODE}:`)
-  return after ? { title: REPAIR_REMOVED_TITLE, body: repairRemovedBody(button) } : null
-}
-
-/** The sentence under that title; `button` is the name of the button that adds Beebeeb back. */
-export function repairRemovedBody(button: string): string {
-  return `Repair couldn’t finish, so Beebeeb is no longer in Finder. Choose ${button} to add it back.`
-}
-
 /** The kept-files note for a removal's result: the sentence and the exact folder, or null when macOS kept nothing. */
 export function preservedFilesNote(result: { preserved_location?: string | null }): { sentence: string; path: string } | null {
   const path = result.preserved_location

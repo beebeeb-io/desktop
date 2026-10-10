@@ -85,7 +85,7 @@ function mountSyncFolder(backend: Record<string, any>, opts: { caps?: string | n
     backend,
     hookModules: [useFinderSetupModule(bus)],
     // Task 1882 (rebase onto main): the page also reads the kept folder and the repair-removed code from macSettingsModel.
-    bindings: { ...desktopApi, ...finderInstallCard, finderActionButtonLabel: finderSetupCopy.finderActionButtonLabel, preservedFilesLine: macSettingsModel.preservedFilesLine, repairRemovedNotice: macSettingsModel.repairRemovedNotice, useCapabilities: () => (opts.caps ? { host_os: opts.caps } : null), ...opts.extra },
+    bindings: { ...desktopApi, ...finderInstallCard, finderActionButtonLabel: finderSetupCopy.finderActionButtonLabel, preservedFilesLine: macSettingsModel.preservedFilesLine, useCapabilities: () => (opts.caps ? { host_os: opts.caps } : null), ...opts.extra },
   })
   mounted.push(m)
   return { m, bus }
@@ -210,24 +210,6 @@ describe('SyncFolder on Windows/Linux (unchanged): Finder location pane', () => 
       expect(m.toasts.map((t) => ({ variant: t.variant, title: t.title, message: t.message }))).toEqual([
         { variant: 'error', title: 'Couldn’t reset Finder integration', message: reason },
       ])
-    }
-  })
-
-  // 1882 r4, kept for Windows and Linux (lead ruling, rebase onto 1882): a Repair that failed AFTER its removal says
-  // so, naming this page's own button; the raw detail stays out.
-  test('a reset that fails after its removal says Beebeeb was removed and names Install in Finder (1882 r4)', async () => {
-    for (const platform of ['windows', 'linux']) {
-      const { m } = mountSyncFolder(
-        { ...finderBackend('success', null), desktop_platform: () => platform, reset_macos_integration: () => { throw new Error('repair_failed_after_removal: No space left on device') } },
-        { caps: platform, extra: { finderRepairFailedToast: () => { throw new Error('the macOS helper was reached off a Mac') } } },
-      )
-      await m.flush(); await m.flush()
-      await m.click('Reset Finder integration…')
-      await m.click('Reset Finder integration')
-      expect(m.toasts.map((t) => ({ variant: t.variant, title: t.title, message: t.message }))).toEqual([
-        { variant: 'error', title: 'Beebeeb was removed from Finder', message: 'Repair couldn’t finish, so Beebeeb is no longer in Finder. Choose Install in Finder to add it back.' },
-      ])
-      expect(JSON.stringify(m.toasts)).not.toContain('No space left')
     }
   })
 
@@ -426,20 +408,6 @@ describe('SyncFolder on macOS follows the reconciler (spec §10)', () => {
         expect(rendered).not.toContain('No such file')
       }
     }
-  })
-
-  // 1882 r4 is Windows and Linux only (lead ruling, rebase onto 1882): a Mac has no Install button (spec A, R5), and its
-  // Repair saves nothing after the removal. Whatever the error says, a Mac shows the one sentence.
-  test('a reset error that carries the repair-removed code is still the one sentence on a Mac (1882 r4 is not a Mac path)', async () => {
-    const toastText = (t: any) => [t.title, t.message].filter((part) => part != null).map((part) => textOf(part)).join(' ')
-    const backend = { ...macBackend({ view: finderView({ setup: 'ready' }) }), reset_macos_integration: () => { throw new Error('repair_failed_after_removal: No space left on device') } }
-    const { m } = mountSyncFolder(backend, { caps: 'macos', extra: { finderStatusPill: finderSetupCopy.finderStatusPill, finderRepairFailedToast: finderSetup.finderRepairFailedToast } })
-    await settle(m)
-    await m.click('Reset Finder integration…')
-    await m.click('Reset Finder integration')
-    expect(m.toasts.map(toastText)).toEqual([finderSetupCopy.FINDER_REPAIR_FAILED])
-    expect(JSON.stringify(m.toasts)).not.toContain('Beebeeb was removed from Finder')
-    expect(count(m, 'finder_location_state')).toBe(0)
   })
 
   // Task 17b (lead ruling): the Reset button's failure is a redacted bridge code on a Mac too. It is

@@ -288,8 +288,9 @@ describe('the sweep: every call site of a Finder command, and what it does with 
       'WindowsApp.tsx | open_finder_location': { reason: 1 },
       'pages/Shared.tsx | open_in_finder': { reason: 1 },
       'pages/SyncFolder.tsx | open_finder_location': { reason: 1 },
-      // reason 2: the Reset's error text off a Mac, and (task 1882 r4, Windows and Linux only) its repair-removed check.
-      'pages/SyncFolder.tsx | reset_macos_integration': { reason: 2, warnings: 2 },
+      // reason 1: the Reset's error text off a Mac. (1882 r4's repair-removed check, the second read, is gone: rebase
+      // re-review Minor 4, lead ruling.)
+      'pages/SyncFolder.tsx | reset_macos_integration': { reason: 1, warnings: 2 },
     })
   })
 
