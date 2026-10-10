@@ -157,6 +157,28 @@ export function repairNote(result: { pending_operations_preserved: number; warni
   return parts.length > 0 ? parts.join(' ') : null
 }
 
+/**
+ * Task 1882 (P0, spec docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md §5): the one
+ * sentence shown when removing Beebeeb from Finder kept files that had not reached the server.
+ * The folder's path follows it, in mono. The same string is `PRESERVED_FILES_SENTENCE` in
+ * src-tauri/src/finder_removal.rs, which the app's alert shows after a sign-out;
+ * tests/finderPreservedFiles.test.ts pins the two equal.
+ */
+export const PRESERVED_FILES_SENTENCE = 'Files that hadn’t reached your vault yet were kept on this Mac, in this folder:'
+
+/** The kept-files note for a removal's result: the sentence and the exact folder, or null when macOS kept nothing. */
+export function preservedFilesNote(result: { preserved_location?: string | null }): { sentence: string; path: string } | null {
+  const path = result.preserved_location
+  if (typeof path !== 'string' || path.trim() === '') return null
+  return { sentence: PRESERVED_FILES_SENTENCE, path }
+}
+
+/** The same note as one line, for a surface without a mono line of its own (the compact window). */
+export function preservedFilesLine(result: { preserved_location?: string | null }): string | null {
+  const note = preservedFilesNote(result)
+  return note ? `${note.sentence} ${note.path}` : null
+}
+
 // ── Sync > Keep on this Mac ─────────────────────────────────────────────────
 
 export interface FolderEntry {

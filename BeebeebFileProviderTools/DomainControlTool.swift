@@ -66,15 +66,22 @@ struct DomainControlTool {
         exit(exitCode)
     }
 
+    /// Task 1882 (spec docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md): keeps the
+    /// files that never reached the server, like every removal in the app. Prints `removed`, then
+    /// `preserved: <folder>` when macOS kept any (this is a developer tool, so the path goes to
+    /// its own stdout).
     static func remove() {
         let semaphore = DispatchSemaphore(value: 0)
         var exitCode: Int32 = 1
 
-        NSFileProviderManager.remove(domain) { error in
+        NSFileProviderManager.remove(domain, mode: .preserveDirtyUserData) { preservedLocation, error in
             if let error {
                 fputs("\(error.localizedDescription)\n", stderr)
             } else {
                 print("removed")
+                if let preservedLocation {
+                    print("preserved: \(preservedLocation.path)")
+                }
                 exitCode = 0
             }
             semaphore.signal()

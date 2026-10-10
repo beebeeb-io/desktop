@@ -227,6 +227,8 @@ export interface FinderInstallState {
 
 export interface MacosIntegrationResetResult {
   removed_file_provider_domain: boolean
+  /** Task 1882: where macOS kept the un-synced Finder files the removal found; null = nothing kept. */
+  preserved_location?: string | null
   disabled_autostart: boolean
   removed_socket: boolean
   removed_cache_files: number

@@ -9,6 +9,7 @@ import {
   type SyncStatus,
 } from '../desktopApi'
 import { finderInstallNotice, finderInstallStateAfterAttempt, finderInstallStateWhileAttempting, finderLocationButtonPlan } from '../finderInstallCard'
+import { preservedFilesLine } from '../macSettingsModel'
 import { useToast } from '../windows/ui'
 
 // Inline confirm for the destructive Finder reset — no window.confirm(). Three states,
@@ -151,6 +152,8 @@ export default function SyncFolder() {
       preserved > 0 ? `${preserved} queued operation${preserved === 1 ? '' : 's'} preserved.` : null,
       result.value.removed_cache_files > 0 ? `${result.value.removed_cache_files} disposable cache file${result.value.removed_cache_files === 1 ? '' : 's'} removed.` : null,
       result.value.warnings.length > 0 ? result.value.warnings.join(' ') : null,
+      // Task 1882: where macOS kept the files that had not reached the server.
+      preservedFilesLine(result.value),
     ]
       .filter(Boolean)
       .join(' ')

@@ -29,6 +29,7 @@ mod diagnostic_redaction;
 mod desktop_capabilities;
 mod engine_bridge;
 mod engine_status;
+mod finder_removal;
 #[cfg(test)]
 #[path = "../tests/support/bridge.rs"]
 mod native_parity_tests;
@@ -1607,6 +1608,15 @@ enum SignOutOutcome {
     NotSignedIn,
 }
 
+/// [`clear_session_impl`]'s result: what it did, and (task 1882) the folder where macOS kept the
+/// Finder files that had not reached the server when the sign-out removed the Finder location.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SignOutReport {
+    outcome: SignOutOutcome,
+    /// Shown to the person in the app's alert (`show_preserved_files_alert`), never logged.
+    preserved_location: Option<String>,
+}
+
 /// The unconfirmed-stop refusal (Bug A / task 1538 Codex P1). Shared by the
 /// fresh-abort path and the Bug-A2 retry gate so a retry cannot be
 /// distinguished from a first refusal by its message.
@@ -1618,7 +1628,7 @@ const UNCONFIRMED_ENGINE_STOP_ERROR: &str =
 ///
 /// Shared by the WebView IPC command and the native menu "Sign out" item so
 /// both routes have the exact same security side-effects.
-async fn clear_session_impl(state: &AppState) -> Result<SignOutOutcome, String> {
+async fn clear_session_impl(state: &AppState) -> Result<SignOutReport, String> {
     #[cfg(target_os = "windows")]
     let _transition = SESSION_TRANSITION.lock().await;
     #[cfg(target_os = "windows")]
@@ -1849,12 +1859,14 @@ async fn clear_session_impl(state: &AppState) -> Result<SignOutOutcome, String> 
     // is no longer signed into (finding 2). Best-effort: a failure (incl.
     // "not registered") is logged, not surfaced — logout must always appear
     // to succeed. Re-login re-installs the domain via `install_finder_location`.
+    //
+    // Task 1882 (P0): the removal keeps the files that never reached the
+    // server (`NSFileProviderDomainRemovalModePreserveDirtyUserData`); the
+    // folder macOS kept them in rides the report to the alert.
     #[cfg(target_os = "macos")]
-    {
-        if let Err(error) = remove_file_provider_domain() {
-            tracing::warn!(error = %error, "Finder File Provider domain removal on logout failed (best-effort)");
-        }
-    }
+    let preserved_location = finder_removal::sign_out_kept_location(remove_file_provider_domain());
+    #[cfg(not(target_os = "macos"))]
+    let preserved_location: Option<String> = None;
     // Task 1670 round 2: also the account-switch boundary — this codebase's
     // sign-out IS its account-switch mechanism (single active-account slot,
     // see `AppState::active_account`'s own "Phase 0" comment), so there is no
@@ -1902,20 +1914,48 @@ async fn clear_session_impl(state: &AppState) -> Result<SignOutOutcome, String> 
         }
         set_auth_present(state, false);
         set_auth_email(state, None);
-        return Ok(SignOutOutcome::NotSignedIn);
+        return Ok(SignOutReport {
+            outcome: SignOutOutcome::NotSignedIn,
+            preserved_location,
+        });
     }
     clear_keychain_session(acct.id.as_str())?;
     set_auth_present(state, false);
     set_auth_email(state, None);
-    Ok(SignOutOutcome::Completed)
+    Ok(SignOutReport {
+        outcome: SignOutOutcome::Completed,
+        preserved_location,
+    })
 }
 
 /// Sign out through the shared native-menu/WebView teardown. Windows returns
 /// an error while work, plaintext cleanup or root unregistration is incomplete;
 /// the UI must retain the account and display that error for recovery/retry.
+///
+/// Task 1882: when the sign-out kept Finder files that had not reached the
+/// server, the app's alert names the folder. Every frontend sign-out (Settings,
+/// the compact Account page, "Sign in again") ends here; the menu's sign-out
+/// raises the same alert in its own handler.
 #[tauri::command]
-async fn clear_session(state: State<'_, AppState>) -> Result<(), String> {
-    clear_session_impl(&state).await.map(|_| ())
+async fn clear_session(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let report = clear_session_impl(&state).await?;
+    show_preserved_files_alert(&app, report.preserved_location.as_deref());
+    Ok(())
+}
+
+/// Task 1882 (spec `docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md` §5): the app's
+/// own alert after a removal that kept files — the sentence, a blank line, then the folder. It
+/// is the only place the folder's path is shown for a sign-out, the Add-to-Finder rollback and
+/// the app-start sweep; logs never carry it. Nothing kept → no alert.
+fn show_preserved_files_alert(app: &tauri::AppHandle, preserved_location: Option<&str>) {
+    let Some(location) = preserved_location else {
+        return;
+    };
+    app.dialog()
+        .message(finder_removal::preserved_files_message(location))
+        .title(finder_removal::PRESERVED_FILES_TITLE)
+        .kind(tauri_plugin_dialog::MessageDialogKind::Info)
+        .show(|_| {});
 }
 
 /// Put a session restored from the Keychain into memory. Deliberately no `bump_vault_epoch()`
@@ -2087,6 +2127,9 @@ struct FinderInstallState {
 #[derive(Debug, serde::Serialize)]
 struct MacosIntegrationResetResult {
     removed_file_provider_domain: bool,
+    /// Task 1882: the folder where macOS kept un-synced Finder files when the
+    /// repair removed the Finder location; `None` = nothing kept.
+    preserved_location: Option<String>,
     disabled_autostart: bool,
     removed_socket: bool,
     removed_cache_files: usize,
@@ -2748,13 +2791,15 @@ fn install_file_provider_domain() -> Result<FileProviderInstallOutcome, String> 
     Err("File Provider is only available on macOS.".to_string())
 }
 
+/// Task 1882: keeps the files that never reached the server; the result names the folder macOS
+/// kept them in, if any.
 #[cfg(target_os = "macos")]
-fn remove_file_provider_domain() -> Result<(), String> {
+fn remove_file_provider_domain() -> Result<finder_removal::DomainRemoval, String> {
     macos_file_provider::remove()
 }
 
 #[cfg(not(target_os = "macos"))]
-fn remove_file_provider_domain() -> Result<(), String> {
+fn remove_file_provider_domain() -> Result<finder_removal::DomainRemoval, String> {
     Err("File Provider is only available on macOS.".to_string())
 }
 
@@ -3016,7 +3061,7 @@ async fn install_finder_location(
         Ok(FileProviderInstallOutcome::Installed) => {}
     }
     if let Err(error) = persist_sync_root_and_start_engine(
-        app,
+        app.clone(),
         &state,
         &mut cfg,
         root.clone(),
@@ -3026,7 +3071,12 @@ async fn install_finder_location(
     .await
     {
         stop_pending_finder_install_engine(&state, started_pending_engine).await;
-        let _ = remove_file_provider_domain();
+        // Task 1882: `addDomain` also succeeds on a domain that already existed, so this
+        // rollback can remove one that holds un-synced files. They are kept; the alert names
+        // the folder. A failed rollback stays silent, as before.
+        if let Ok(removal) = remove_file_provider_domain() {
+            show_preserved_files_alert(&app, removal.kept_location("add-to-finder rollback").as_deref());
+        }
         // D1 (task 1683 slice 5): saved OR returned as an error, not both.
         return finder_install_failed(&mut cfg, error);
     }
@@ -3320,13 +3370,10 @@ async fn reset_macos_integration(
         }
     };
 
-    let removed_file_provider_domain = match remove_file_provider_domain() {
-        Ok(()) => true,
-        Err(error) => {
-            warnings.push(format!("Could not remove Finder File Provider domain: {error}"));
-            false
-        }
-    };
+    // Task 1882: the removal keeps un-synced files; their folder rides the
+    // result to the Sync tab's note (spec 2026-10-09 §5).
+    let (removed_file_provider_domain, preserved_location) =
+        finder_removal::repair_removal(remove_file_provider_domain(), &mut warnings);
 
     let disabled_autostart = match app.autolaunch().is_enabled() {
         Ok(true) => match app.autolaunch().disable() {
@@ -3347,6 +3394,7 @@ async fn reset_macos_integration(
 
     Ok(MacosIntegrationResetResult {
         removed_file_provider_domain,
+        preserved_location,
         disabled_autostart,
         removed_socket,
         removed_cache_files,
@@ -8971,6 +9019,7 @@ pub fn run() {
             // a candidate.
             #[cfg(target_os = "macos")]
             {
+                let alert_app = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     match crate::macos_file_provider::cleanup_stale_domains() {
                         Ok(cleanup) => {
@@ -8979,8 +9028,14 @@ pub fn run() {
                                     removed = cleanup.removed_count(),
                                     skipped = cleanup.skipped.len(),
                                     ours_present = cleanup.ours_present,
+                                    preserved = cleanup.preserved_locations.len(),
                                     "stale File Provider domain sweep complete (task 1698)"
                                 );
+                            }
+                            // Task 1882: a removed domain's un-synced files were kept;
+                            // the alert names each folder (the log above only counts them).
+                            for location in &cleanup.preserved_locations {
+                                show_preserved_files_alert(&alert_app, Some(location));
                             }
                         }
                         Err(error) => {
@@ -9589,16 +9644,27 @@ fn handle_desktop_menu_action(app: &tauri::AppHandle, spec: &'static DesktopMenu
             spawn_menu_task(spec.id, async move {
                 let state = app.state::<AppState>();
                 let result = clear_session_impl(&state).await;
+                // Task 1882: the menu's sign-out names the folder of kept
+                // Finder files in the same alert as the `clear_session` command.
+                if let Ok(report) = &result {
+                    show_preserved_files_alert(&app, report.preserved_location.as_deref());
+                }
                 #[cfg(target_os = "windows")]
                 match &result {
                     // Nothing to tear down — tell the user instead of running
                     // (and possibly failing) the full teardown (Bug B).
-                    Ok(SignOutOutcome::NotSignedIn) => {
+                    Ok(SignOutReport {
+                        outcome: SignOutOutcome::NotSignedIn,
+                        ..
+                    }) => {
                         app.dialog().message("You are not signed in on this device.")
                             .title("Sign out")
                             .kind(tauri_plugin_dialog::MessageDialogKind::Info).show(|_| {});
                     }
-                    Ok(SignOutOutcome::Completed) => {}
+                    Ok(SignOutReport {
+                        outcome: SignOutOutcome::Completed,
+                        ..
+                    }) => {}
                     Err(error) => {
                         app.dialog().message(error.clone()).title("Sign-out paused")
                             .kind(tauri_plugin_dialog::MessageDialogKind::Error).show(|_| {});
@@ -12775,6 +12841,97 @@ mod startup_session_tests {
         assert!(
             acct.auth_email.lock().unwrap().is_none(),
             "the mirrored signed-in email must be cleared"
+        );
+    }
+}
+
+/// Task 1882 (spec `docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md` §5): every
+/// removal path in this file hands the folder macOS kept to the person. The pure pieces are
+/// tested in `finder_removal`; these pin the wiring between them, which no unit can see.
+#[cfg(test)]
+mod finder_removal_wiring_tests {
+    use super::MacosIntegrationResetResult;
+
+    fn source() -> String {
+        include_str!("lib.rs").replace("\r\n", "\n")
+    }
+
+    /// The text of the item starting at `start`, up to the next line that is exactly `}`.
+    fn item(source: &str, start: &str) -> String {
+        let at = source.find(start).unwrap_or_else(|| panic!("{start} exists"));
+        let end = source[at..].find("\n}\n").expect("item ends");
+        source[at..at + end].to_string()
+    }
+
+    #[test]
+    fn test_1882_the_repair_result_carries_the_kept_folder_to_the_frontend() {
+        let result = MacosIntegrationResetResult {
+            removed_file_provider_domain: true,
+            preserved_location: Some("/Users/someone/Kept".to_string()),
+            disabled_autostart: false,
+            removed_socket: false,
+            removed_cache_files: 0,
+            skipped_cache_files: 0,
+            pending_operations_preserved: 0,
+            sync_root_preserved: None,
+            warnings: Vec::new(),
+        };
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["preserved_location"], "/Users/someone/Kept");
+
+        let nothing_kept = MacosIntegrationResetResult {
+            preserved_location: None,
+            ..result
+        };
+        assert!(serde_json::to_value(&nothing_kept).unwrap()["preserved_location"].is_null());
+    }
+
+    #[test]
+    fn test_1882_every_removal_path_surfaces_the_kept_folder() {
+        let full = source();
+        // Everything above this module, so the literals below cannot match themselves.
+        let source = full[..full.find("\nmod finder_removal_wiring_tests {").expect("this module")].to_string();
+        let code_only = |text: &str| {
+            text.lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        // Sign-out: the removal's folder rides the report out of `clear_session_impl` ...
+        let sign_out = code_only(&item(&source, "async fn clear_session_impl("));
+        assert!(sign_out.contains(
+            "let preserved_location = finder_removal::sign_out_kept_location(remove_file_provider_domain());"
+        ));
+        assert_eq!(
+            sign_out.matches("preserved_location,\n").count(),
+            2,
+            "both Ok returns carry it"
+        );
+        // ... and both ways out of a sign-out raise the alert.
+        let command = code_only(&item(&source, "async fn clear_session("));
+        assert!(command.contains("show_preserved_files_alert(&app, report.preserved_location.as_deref());"));
+        let menu = &source[source.find("DesktopMenuAction::SignOut => {").expect("menu sign-out")..];
+        let menu = &menu[..menu.find("DesktopMenuAction::Quit").expect("next arm")];
+        assert!(code_only(menu).contains("show_preserved_files_alert(&app, report.preserved_location.as_deref());"));
+
+        // Repair: the folder goes into the result the Sync tab reads.
+        let repair = code_only(&item(&source, "async fn reset_macos_integration("));
+        assert!(repair.contains("finder_removal::repair_removal(remove_file_provider_domain(), &mut warnings);"));
+        assert!(repair.contains("        preserved_location,\n"));
+
+        // The Add-to-Finder rollback and the app-start sweep raise the same alert.
+        let install = code_only(&item(&source, "async fn install_finder_location("));
+        assert!(install.contains(
+            "show_preserved_files_alert(&app, removal.kept_location(\"add-to-finder rollback\").as_deref());"
+        ));
+        assert!(code_only(&source).contains("show_preserved_files_alert(&alert_app, Some(location));"));
+
+        // And there is no other removal: three calls, all of them above.
+        assert_eq!(
+            code_only(&source).matches("remove_file_provider_domain()").count(),
+            3 + 2,
+            "3 calls + 2 definitions"
         );
     }
 }

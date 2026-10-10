@@ -613,6 +613,34 @@ describe('Sync tab', () => {
     expect(dialogs(m)).toHaveLength(0)
   })
 
+  // Task 1882 (spec 2026-10-09 §5): the repair's removal kept files that never reached the server.
+  const KEPT = '/Users/sam/Library/CloudStorage/Beebeeb (kept)'
+  const keptNotes = (m: Mounted) =>
+    statuses(m).filter((el) => readable(expand(el)).join(' ').includes(model.PRESERVED_FILES_SENTENCE))
+
+  test('a repair that kept un-synced files says so in one status note, with the folder in mono', async () => {
+    const { m } = await openSync({ repair: () => ({ pending_operations_preserved: 0, warnings: [], preserved_location: KEPT }) })
+    await press(m, 'Repair…')
+    await press(m, 'Repair')
+    expect(keptNotes(m)).toHaveLength(1)
+    const mono = find(m, (el) => el.props.className === 'ms-mono').map((el) => textOf(el.props.children).trim())
+    expect(mono).toEqual([KEPT])
+    expect(visibleText(m)).toContain(model.PRESERVED_FILES_SENTENCE)
+    expect(visibleErrorSurfaces(m)).toEqual([])
+  })
+
+  test('a repair that kept nothing shows no kept-files sentence and no folder', async () => {
+    for (const preserved_location of [null, undefined]) {
+      const { m } = await openSync({ repair: () => ({ pending_operations_preserved: 2, warnings: [], preserved_location }) })
+      await press(m, 'Repair…')
+      await press(m, 'Repair')
+      expect(keptNotes(m)).toHaveLength(0)
+      expect(visibleText(m)).not.toContain(model.PRESERVED_FILES_SENTENCE)
+      expect(find(m, (el) => el.props.className === 'ms-mono')).toHaveLength(0)
+      expect(statuses(m).map((el) => textOf(el.props.children).trim())).toContain('2 changes waiting to upload were kept.')
+    }
+  })
+
   test('a repair that fails is ONE inline alert (spec section 7), no toast', async () => {
     const { m } = await openSync({ repair: () => { throw new Error('socket busy') } })
     await press(m, 'Repair…')

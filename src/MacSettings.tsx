@@ -47,6 +47,7 @@ import {
   keepOnMac,
   NOTIFICATION_ROWS,
   planLine,
+  preservedFilesNote,
   REPAIR_BODY,
   REPAIR_TITLE,
   repairNote,
@@ -494,6 +495,9 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
   const [repair, setRepair] = useState<RepairPhase>('idle')
   const [repairFailed, setRepairFailed] = useState(false)
   const [repairResult, setRepairResult] = useState<string | null>(null)
+  // Task 1882: where macOS kept the files the repair's removal found un-synced. It stays up
+  // until the next repair: the files stay in that folder whatever happens to the Finder row.
+  const [repairKept, setRepairKept] = useState<{ sentence: string; path: string } | null>(null)
   const [tree, setTree] = useState<VaultItem[] | null>(null)
   const [treeLoadFailed, setTreeLoadFailed] = useState(false)
   const [chooser, setChooser] = useState(false)
@@ -550,6 +554,7 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
     setRepair('busy')
     setRepairFailed(false)
     setRepairResult(null)
+    setRepairKept(null)
     const result = await command<MacosIntegrationResetResult>('reset_macos_integration')
     setRepair('idle')
     if (!result.ok) {
@@ -558,6 +563,7 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
       return
     }
     setRepairResult(repairNote(result.value))
+    setRepairKept(preservedFilesNote(result.value))
     await loadFinder()
   }
 
@@ -661,6 +667,11 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
           </Note>
         ) : null}
         {repairResult ? <Note kind="status">{repairResult}</Note> : null}
+        {repairKept ? (
+          <Note kind="status" reason={repairKept.path}>
+            {repairKept.sentence}
+          </Note>
+        ) : null}
         <SettingRow
           name="keep"
           tall

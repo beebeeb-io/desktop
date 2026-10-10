@@ -17,9 +17,17 @@ unsafe extern "C" {
         error_buffer: *mut c_char,
         error_buffer_len: usize,
     ) -> i32;
-    fn beebeeb_fp_remove(error_buffer: *mut c_char, error_buffer_len: usize) -> i32;
+    fn beebeeb_fp_remove(
+        location_buffer: *mut c_char,
+        location_buffer_len: usize,
+        error_buffer: *mut c_char,
+        error_buffer_len: usize,
+    ) -> i32;
 }
 
+/// Room for the folder macOS reports after a removal that kept files (task 1882). File-system
+/// paths on macOS are limited to `PATH_MAX` (1024) bytes, well under this.
+const PRESERVED_LOCATION_BUFFER_LEN: usize = 4096;
 
 /// How long `install()` waits for a freshly (re-)added domain to stabilize before
 /// giving up with a real timeout. Unchanged from the pre-1524-issue-4 behavior.
@@ -229,9 +237,25 @@ pub fn install() -> Result<InstallOutcome, String> {
     Ok(InstallOutcome::Installed)
 }
 
-#[allow(dead_code)]
-pub fn remove() -> Result<(), String> {
-    call_bridge(beebeeb_fp_remove).map(|_| ())
+/// Removes our Finder location, keeping the files that never reached the server (task 1882,
+/// `NSFileProviderDomainRemovalModePreserveDirtyUserData`). The result names the folder macOS
+/// kept them in, if any.
+pub fn remove() -> Result<crate::finder_removal::DomainRemoval, String> {
+    let mut location_buffer = [0 as c_char; PRESERVED_LOCATION_BUFFER_LEN];
+    let mut error_buffer = [0 as c_char; 1024];
+    let code = unsafe {
+        beebeeb_fp_remove(
+            location_buffer.as_mut_ptr(),
+            location_buffer.len(),
+            error_buffer.as_mut_ptr(),
+            error_buffer.len(),
+        )
+    };
+    crate::finder_removal::removal_from_bridge(
+        code,
+        buffer_to_exact_string(&location_buffer),
+        buffer_to_string(&error_buffer),
+    )
 }
 
 /// Result of a best-effort working-set signal (task 1697).
@@ -277,6 +301,9 @@ pub struct StaleDomainCleanup {
     /// Ok(()) = removed, Err(message) = the system refused (logged, NOT
     /// retried here — the next app start retries the whole sweep).
     pub removals: Vec<(String, Result<(), String>)>,
+    /// Task 1882: the folders where macOS kept un-synced files of a removed
+    /// domain, one per such removal. Shown to the person, never logged.
+    pub preserved_locations: Vec<String>,
     /// Domains found foreign but not attempted (enumeration/other errors).
     pub skipped: Vec<String>,
     /// Our own domain was present (or not) — informational only; it is never
@@ -304,6 +331,8 @@ mod cleanup_ffi {
         ) -> i32;
         fn beebeeb_fp_remove_domain_by_id(
             identifier: *const c_char,
+            location_buffer: *mut c_char,
+            location_buffer_len: usize,
             error_buffer: *mut c_char,
             error_buffer_len: usize,
         ) -> i32;
@@ -335,22 +364,26 @@ mod cleanup_ffi {
             .collect())
     }
 
-    pub fn remove_domain(identifier: &str) -> Result<(), String> {
+    /// Task 1882: keeps the domain's un-synced files, like every removal.
+    pub fn remove_domain(identifier: &str) -> Result<crate::finder_removal::DomainRemoval, String> {
+        let mut location_buffer = [0 as c_char; super::PRESERVED_LOCATION_BUFFER_LEN];
         let mut error_buffer = [0i8; 1024];
         let code = unsafe {
             let c_id = std::ffi::CString::new(identifier)
                 .map_err(|_| "domain identifier contained a NUL byte".to_string())?;
             beebeeb_fp_remove_domain_by_id(
                 c_id.as_ptr(),
+                location_buffer.as_mut_ptr(),
+                location_buffer.len(),
                 error_buffer.as_mut_ptr(),
                 error_buffer.len(),
             )
         };
-        if code < 0 {
-            return Err(super::buffer_to_string(&error_buffer)
-                .unwrap_or_else(|| "remove File Provider domain failed".to_string()));
-        }
-        Ok(())
+        crate::finder_removal::removal_from_bridge(
+            code,
+            super::buffer_to_exact_string(&location_buffer),
+            super::buffer_to_string(&error_buffer),
+        )
     }
 }
 
@@ -374,12 +407,18 @@ pub fn cleanup_stale_domains() -> Result<StaleDomainCleanup, String> {
     let stale = stale_domain_identifiers(&domains, DOMAIN_IDENTIFIER);
     let mut cleanup = StaleDomainCleanup {
         removals: Vec::new(),
+        preserved_locations: Vec::new(),
         skipped: Vec::new(),
         ours_present,
     };
     for identifier in stale {
         match cleanup_ffi::remove_domain(identifier) {
-            Ok(()) => cleanup.removals.push((identifier.to_string(), Ok(()))),
+            Ok(removal) => {
+                if let Some(location) = removal.kept_location("stale-domain sweep") {
+                    cleanup.preserved_locations.push(location);
+                }
+                cleanup.removals.push((identifier.to_string(), Ok(())));
+            }
             Err(error) => {
                 tracing::warn!(identifier = %identifier, error = %error, "stale-domain removal failed; the next app start retries");
                 cleanup.skipped.push(identifier.to_string());
@@ -431,6 +470,15 @@ fn call_bridge(function: unsafe extern "C" fn(*mut c_char, usize) -> i32) -> Res
     } else {
         message
     })
+}
+
+/// Like `buffer_to_string`, but never trims: a folder the system reported is shown byte for byte
+/// (task 1882). `None` when the buffer is empty.
+fn buffer_to_exact_string(buffer: &[c_char]) -> Option<String> {
+    let text = unsafe { CStr::from_ptr(buffer.as_ptr()) }
+        .to_string_lossy()
+        .into_owned();
+    if text.is_empty() { None } else { Some(text) }
 }
 
 fn buffer_to_string(buffer: &[i8]) -> Option<String> {

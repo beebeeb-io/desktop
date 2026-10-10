@@ -75,11 +75,29 @@ static int BeebeebWaitForDomainReady(NSFileProviderDomain *domain,
     return 0;
 }
 
-static int BeebeebRemoveDomain(char *error_buffer, unsigned long error_buffer_len) {
+// Task 1882 (P0, spec docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md): EVERY
+// domain removal keeps the files that never reached the server. The plain
+// `removeDomain:completionHandler:` deleted them with the domain (three Finder-created files on a
+// device, task 1873). `NSFileProviderDomainRemovalModePreserveDirtyUserData` is macOS 12.0+
+// (NSFileProviderManager.h:26, :239; NSFileProviderDefines.h:25); this bridge is built for 14.0
+// (src-tauri/build.rs), so there is no fallback to the remove-all form, on purpose.
+// `src-tauri/src/finder_removal.rs` pins every removal in the repo to this mode.
+//
+// Returns: 1 = removed, and the system kept files that had not synced (their folder's path in
+// `location_buffer`); 0 = removed, nothing kept; -1 = error (`error_buffer` set).
+static int BeebeebRemoveDomainKeepingUnsynced(NSFileProviderDomain *domain,
+                                              char *location_buffer,
+                                              unsigned long location_buffer_len,
+                                              char *error_buffer,
+                                              unsigned long error_buffer_len) {
     dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+    __block NSURL *found_location = nil;
     __block NSError *found_error = nil;
 
-    [NSFileProviderManager removeDomain:BeebeebDomain() completionHandler:^(NSError *error) {
+    [NSFileProviderManager removeDomain:domain
+                                   mode:NSFileProviderDomainRemovalModePreserveDirtyUserData
+                      completionHandler:^(NSURL *preservedLocation, NSError *error) {
+        found_location = preservedLocation;
         found_error = error;
         dispatch_semaphore_signal(semaphore);
     }];
@@ -89,7 +107,15 @@ static int BeebeebRemoveDomain(char *error_buffer, unsigned long error_buffer_le
         BeebeebCopyError(found_error, error_buffer, error_buffer_len);
         return -1;
     }
-    return 0;
+    if (found_location == nil) {
+        return 0;
+    }
+    NSString *path = found_location.path;
+    if (path.length == 0) {
+        path = found_location.absoluteString;
+    }
+    BeebeebCopyMessage(path ?: @"", location_buffer, location_buffer_len);
+    return 1;
 }
 
 static int BeebeebDomainExists(BOOL *exists, char *error_buffer, unsigned long error_buffer_len) {
@@ -278,9 +304,18 @@ int beebeeb_fp_wait_for_domain_ready(double timeout_seconds, char *error_buffer,
     }
 }
 
-int beebeeb_fp_remove(char *error_buffer, unsigned long error_buffer_len) {
+// Returns: 1 = removed and files were kept (`location_buffer` = their folder), 0 = removed and
+// nothing kept, -1 = error (`error_buffer` set). See BeebeebRemoveDomainKeepingUnsynced.
+int beebeeb_fp_remove(char *location_buffer,
+                      unsigned long location_buffer_len,
+                      char *error_buffer,
+                      unsigned long error_buffer_len) {
     @autoreleasepool {
-        return BeebeebRemoveDomain(error_buffer, error_buffer_len);
+        return BeebeebRemoveDomainKeepingUnsynced(BeebeebDomain(),
+                                                  location_buffer,
+                                                  location_buffer_len,
+                                                  error_buffer,
+                                                  error_buffer_len);
     }
 }
 
@@ -363,9 +398,14 @@ int beebeeb_fp_list_domains(char *ids_buffer, unsigned long ids_buffer_len,
 
 // Task 1698 part 3: remove ONE domain by identifier (the sweep's per-domain
 // primitive — the Rust side owns the filtering decision and never passes our
-// own identifier here). Returns: 0 = removed (or already gone), -1 = error
-// (error_buffer set).
-int beebeeb_fp_remove_domain_by_id(const char *identifier, char *error_buffer, unsigned long error_buffer_len) {
+// own identifier here). Task 1882: it keeps un-synced files like every removal.
+// Returns: 1 = removed and files were kept (`location_buffer` = their folder),
+// 0 = removed (or already gone) and nothing kept, -1 = error (error_buffer set).
+int beebeeb_fp_remove_domain_by_id(const char *identifier,
+                                   char *location_buffer,
+                                   unsigned long location_buffer_len,
+                                   char *error_buffer,
+                                   unsigned long error_buffer_len) {
     @autoreleasepool {
         if (identifier == NULL) {
             BeebeebCopyMessage(@"no domain identifier given", error_buffer, error_buffer_len);
@@ -374,19 +414,10 @@ int beebeeb_fp_remove_domain_by_id(const char *identifier, char *error_buffer, u
         NSString *domain_id = [NSString stringWithUTF8String:identifier];
         NSFileProviderDomain *domain = [[NSFileProviderDomain alloc] initWithIdentifier:domain_id
                                                                             displayName:domain_id];
-        dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
-        __block NSError *found_error = nil;
-
-        [NSFileProviderManager removeDomain:domain completionHandler:^(NSError *error) {
-            found_error = error;
-            dispatch_semaphore_signal(semaphore);
-        }];
-        dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
-
-        if (found_error != nil) {
-            BeebeebCopyError(found_error, error_buffer, error_buffer_len);
-            return -1;
-        }
-        return 0;
+        return BeebeebRemoveDomainKeepingUnsynced(domain,
+                                                  location_buffer,
+                                                  location_buffer_len,
+                                                  error_buffer,
+                                                  error_buffer_len);
     }
 }
