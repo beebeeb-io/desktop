@@ -2280,6 +2280,9 @@ fn hydrate_failure_reply(file_id: &str, error: anyhow::Error) -> IpcResponse {
 
 /// Fixed category for a failed hydrate, for [`hydrate_failure_reply`].
 fn hydrate_failure_category(error: &anyhow::Error) -> &'static str {
+    if error.is::<crate::engine_bridge::QueuedCopyMissing>() {
+        return "queued_copy_missing";
+    }
     if let Some(status) = crate::engine_bridge::error_http_status(error) {
         return match status {
             404 => "not_found",
@@ -5485,5 +5488,30 @@ mod tests {
         );
         assert!(!logs.contains("/Users/"), "no path may reach the log:\n{logs}");
         assert!(!logs.contains("/api/v1"), "no URL may reach the log:\n{logs}");
+    }
+
+    /// Spec 2026-10-09 §7.4: a fetch of a still-queued write whose copy is missing fails with
+    /// its own category, and the reply names no path.
+    #[test]
+    fn a_fetch_whose_queued_copy_is_missing_is_logged_by_its_own_category() {
+        let logs = capture_logs(|| {
+            let reply = hydrate_failure_reply(
+                "file-queued",
+                anyhow::Error::new(crate::engine_bridge::QueuedCopyMissing),
+            );
+            let IpcResponse::Error { message } = &reply else {
+                panic!("{reply:?}")
+            };
+            assert!(!message.contains('/'), "{message}");
+        });
+        let failures: Vec<&str> = logs
+            .lines()
+            .filter(|line| line.contains("Finder hydrate failed"))
+            .collect();
+        assert_eq!(failures.len(), 1, "{logs}");
+        assert!(
+            failures[0].contains("file-queued") && failures[0].contains("queued_copy_missing"),
+            "{logs}"
+        );
     }
 }

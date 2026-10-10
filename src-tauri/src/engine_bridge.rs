@@ -373,6 +373,22 @@ impl std::fmt::Display for UnknownItem {
 
 impl std::error::Error for UnknownItem {}
 
+/// A fetch of an item whose held write is still queued, while that write's staged copy is
+/// missing (spec §7.4). The bytes the token names exist nowhere else: the server holds only
+/// the previous version, which is never served under the new token. Path-free on purpose: the
+/// text reaches the extension and the person.
+#[derive(Debug)]
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+pub(crate) struct QueuedCopyMissing;
+
+impl std::fmt::Display for QueuedCopyMissing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the latest save of this file is waiting to upload, and its copy cannot be read")
+    }
+}
+
+impl std::error::Error for QueuedCopyMissing {}
+
 /// §5.6 safe default: no thumbnail is fetched while the item's held write is queued. The
 /// server holds only the previous version's, and the system would cache it under the token.
 #[derive(Debug)]
@@ -2243,12 +2259,17 @@ impl EngineBridge {
             anyhow::bail!("hydrate destination is not within an allowed root");
         }
         let (file_id, _) = self.resolve_provisional(id, "hydrate")?;
-        // Decide once more when the landing unlinked the copy between the read and the open:
-        // the write is then no longer queued, and the server has its bytes (§7.4, 4b).
+        // A copy that is gone at the open is decided once more. If the landing unlinked it, the
+        // write is no longer queued and the server has its bytes (§7.4, 4b). A write that is
+        // still queued is never fetched from the server, which holds only the previous version:
+        // with its copy missing, the fetch fails (`QueuedCopyMissing`).
+        let mut copy_missing = false;
         for _ in 0..2 {
             let Some(path) = self.db.queue_fetch_source(&file_id)? else {
+                copy_missing = false;
                 break;
             };
+            self.seam("hydrate:before_open");
             match std::fs::File::open(&path) {
                 Ok(mut staged) => {
                     if let Some(parent) = dest.parent() {
@@ -2261,9 +2282,15 @@ impl EngineBridge {
                     log_hydrate_served(&file_id, HydrateSource::Queue);
                     return Ok(HydrateSource::Queue);
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    copy_missing = true;
+                    continue;
+                }
                 Err(e) => return Err(e.into()),
             }
+        }
+        if copy_missing {
+            return Err(anyhow::Error::new(QueuedCopyMissing));
         }
         self.hydrate_file_with_progress(&file_id, dest, allowed_roots, progress)
             .await?;
@@ -18374,7 +18401,8 @@ mod tests {
         assert!(server.finish().requests.is_empty(), "nothing reached the server");
     }
 
-    /// T19 (§7.4.2): a failed hydrate leaves a row with a live upload as it was.
+    /// T19 (§7.4.2): a failed hydrate from the server leaves a row with a live upload as it
+    /// was. Called directly: `serve_hydrate` never sends a still-queued write to the server.
     #[tokio::test]
     async fn a_failed_hydrate_never_changes_a_row_with_a_live_upload() {
         // UUID-shaped: the hydrate parses the id before it asks the server.
@@ -18382,13 +18410,14 @@ mod tests {
         let (dir, _sync_root, server, bridge) = rule3_setup([90u8; 32]);
         seed_uploaded_row(&bridge, &server, live);
         fp_save(&bridge, dir.path(), live, "notes.txt", b"queued edit", "1");
-        let op = bridge.db.list_operations_for_file(live).unwrap().remove(0);
-        std::fs::remove_file(op.payload_path.as_deref().unwrap()).unwrap();
         let dest = dir.path().join("fetch").join("notes.txt");
         // Without it the guard fails first and the test passes for the wrong reason.
         std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
         assert!(
-            bridge.serve_hydrate(live, &dest, &[dir.path()], None).await.is_err(),
+            bridge
+                .hydrate_file_with_progress(live, &dest, &[dir.path()], None)
+                .await
+                .is_err(),
             "the server has no metadata route"
         );
         assert_eq!(bridge.db.get_file(live).unwrap().unwrap().status, FileStatus::Uploading);
@@ -18399,6 +18428,68 @@ mod tests {
                 .iter()
                 .any(|(m, path)| m == "GET" && path == &format!("/api/v1/files/{live}")),
             "the hydrate failed at the server, not before it: {:?}",
+            state.requests
+        );
+    }
+
+    /// §7.4: a fetch of an item whose held write is still queued never reaches the server, even
+    /// when the write's staged copy is missing: the server holds only the previous version, and
+    /// the system would store it under the new token. The fetch fails instead, and the row is
+    /// left as it was.
+    #[tokio::test]
+    async fn a_queued_write_whose_copy_is_missing_is_never_fetched_from_the_server() {
+        let live = "3f2a9c1e-0000-4000-8000-0000000000b3";
+        let (dir, _sync_root, server, bridge) = rule3_setup([95u8; 32]);
+        seed_uploaded_row(&bridge, &server, live);
+        fp_save(&bridge, dir.path(), live, "notes.txt", b"queued edit", "1");
+        let op = bridge.db.list_operations_for_file(live).unwrap().remove(0);
+        std::fs::remove_file(op.payload_path.as_deref().unwrap()).unwrap();
+        let dest = dir.path().join("fetch").join("notes.txt");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        let error = bridge
+            .serve_hydrate(live, &dest, &[dir.path()], None)
+            .await
+            .expect_err("the bytes the token names are missing");
+        assert!(error.is::<QueuedCopyMissing>(), "{error:#}");
+        assert!(!dest.exists(), "nothing was written");
+        assert_eq!(bridge.db.get_file(live).unwrap().unwrap().status, FileStatus::Uploading);
+        let state = server.finish();
+        assert!(
+            state.requests.is_empty(),
+            "nothing reached the server: {:?}",
+            state.requests
+        );
+    }
+
+    /// §7.4 (4b): a landing that takes the write off the queue and unlinks its copy between
+    /// the read and the open sends the fetch to the server, which now has those bytes.
+    #[tokio::test]
+    async fn a_copy_unlinked_by_the_landing_sends_the_fetch_to_the_server() {
+        let live = "3f2a9c1e-0000-4000-8000-0000000000b4";
+        let (dir, _sync_root, server, bridge) = rule3_setup([96u8; 32]);
+        seed_uploaded_row(&bridge, &server, live);
+        fp_save(&bridge, dir.path(), live, "notes.txt", b"queued edit", "1");
+        let op = bridge.db.list_operations_for_file(live).unwrap().remove(0);
+        let (db, op_id, copy) = (bridge.db.clone(), op.op_id.clone(), op.payload_path.clone().unwrap());
+        // The landing, as it looks from here: the op leaves the queue, then its copy is unlinked.
+        bridge.seams.arm("hydrate:before_open", move || {
+            db.remove_operation(&op_id).unwrap();
+            std::fs::remove_file(&copy).unwrap();
+        });
+        let dest = dir.path().join("fetch").join("notes.txt");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        let error = bridge
+            .serve_hydrate(live, &dest, &[dir.path()], None)
+            .await
+            .expect_err("the mock has no metadata route");
+        assert!(!error.is::<QueuedCopyMissing>(), "no longer queued: {error:#}");
+        let state = server.finish();
+        assert!(
+            state
+                .requests
+                .iter()
+                .any(|(m, path)| m == "GET" && path == &format!("/api/v1/files/{live}")),
+            "the fetch went to the server: {:?}",
             state.requests
         );
     }
