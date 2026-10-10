@@ -483,8 +483,9 @@ describe('Account tab', () => {
 describe('Sync tab', () => {
   const ready = (over: object = {}) => ({ state: { status: 'ready', config: { ...config, ...over } }, save: async () => {}, reload: async () => {} })
 
-  function syncBackend(opts: { finder?: any; install?: (a: any) => unknown; tree?: any[]; repair?: (a: any) => unknown; pin?: (a: any) => unknown; gate?: Promise<void> } = {}) {
-    const st = { finder: opts.finder ?? finder.installed }
+  function syncBackend(opts: { finder?: any; install?: (a: any) => unknown; tree?: any[]; repair?: (a: any) => unknown; pin?: (a: any) => unknown; gate?: Promise<void>; kept?: string | null; dismissFails?: boolean; keptReadFails?: boolean; removesBeforeFailing?: boolean } = {}) {
+    // `kept` is the folder Rust saved in desktop.toml (task 1882 round 2, review I2).
+    const st: { finder: any; kept: string | null } = { finder: opts.finder ?? finder.installed, kept: opts.kept ?? null }
     return {
       st,
       backend: {
@@ -494,9 +495,25 @@ describe('Sync tab', () => {
           return opts.install ? opts.install(a) : st.finder
         },
         reset_macos_integration: (a: any) => {
-          const result = opts.repair ? opts.repair(a) : { removed_file_provider_domain: true, disabled_autostart: true, removed_socket: true, removed_cache_files: 0, skipped_cache_files: 0, pending_operations_preserved: 0, warnings: [] }
+          // A Repair that fails AFTER it removed the Finder location: the domain is already gone.
+          if (opts.removesBeforeFailing) st.finder = finder.missing
+          const result: any = opts.repair ? opts.repair(a) : { removed_file_provider_domain: true, disabled_autostart: true, removed_socket: true, removed_cache_files: 0, skipped_cache_files: 0, pending_operations_preserved: 0, warnings: [] }
           st.finder = finder.missing
+          // Like Rust: a repair that kept files saves the folder for the row.
+          if (typeof result?.preserved_location === 'string') st.kept = result.preserved_location
           return result
+        },
+        kept_unsynced_folder: () => {
+          if (opts.keptReadFails) throw new Error('desktop.toml could not be read')
+          return st.kept
+        },
+        dismiss_kept_unsynced_folder: (a: any) => {
+          if (opts.dismissFails) throw new Error('disk full')
+          // Like Rust (1882 r5): clears the saved folder only if it is still the one the row
+          // showed, and reports whether it did and which folder is saved now.
+          const cleared = st.kept === a?.path
+          if (cleared) st.kept = null
+          return { cleared, current: st.kept }
         },
         list_remote_tree: () => opts.tree ?? [folder('a', 'Photos', true), folder('b', 'Work', false)],
         set_recursive_pin: opts.pin ?? (() => undefined),
@@ -613,6 +630,212 @@ describe('Sync tab', () => {
     expect(dialogs(m)).toHaveLength(0)
   })
 
+  // Task 1882 (spec 2026-10-09 §5): the repair's removal kept files that never reached the server.
+  const KEPT = '/Users/sam/Library/CloudStorage/Beebeeb (kept)'
+  // Round 3 (re-review D3): the saved row outlives the account that kept the files, so its
+  // sentence is neutral: no "your vault" for files that may belong to another account. The
+  // literal is on purpose: it is what a person reads, not whatever the constant holds.
+  const ROW_SENTENCE = 'Files that had not reached the server were kept in this folder:'
+  const keptNotes = (m: Mounted) =>
+    statuses(m).filter((el) => readable(expand(el)).join(' ').includes(ROW_SENTENCE))
+  const monoLines = (m: Mounted) => find(m, (el) => String(el.props.className ?? '').split(' ').includes('ms-mono'))
+
+  // Round 2 (review I2, lead ruling 2026-10-10): the kept folder is saved by Rust and shown as a
+  // dismissible row until the person dismisses it. A tab switch or closing Settings unmounts
+  // SyncTab, so the row must come from the saved folder, not from this component's state.
+  test('a saved kept folder shows on open, in one status note whose path wraps, with Dismiss', async () => {
+    const { m } = await openSync({ kept: KEPT })
+    expect(keptNotes(m)).toHaveLength(1)
+    const mono = monoLines(m)
+    expect(mono.map((el) => textOf(el.props.children).trim())).toEqual([KEPT])
+    expect(String(mono[0].props.className).split(' ')).toContain('ms-mono--wrap')
+    expect(buttons(m)).toContain('Dismiss')
+    expect(visibleErrorSurfaces(m)).toEqual([])
+  })
+
+  // Re-review D5: the fallback in runRepair covers a failed READ of the saved record, and only that.
+  // A failed SAVE makes Repair return an error instead ("a repair that fails" below, one inline
+  // alert and no row); the folder is then named by the app's own alert, which Rust raises before
+  // it returns the error.
+  test('a repair that kept files shows its folder even when the saved record cannot be read back', async () => {
+    const { m } = await openSync({
+      keptReadFails: true,
+      repair: () => ({ pending_operations_preserved: 0, warnings: [], preserved_location: KEPT }),
+    })
+    expect(keptNotes(m)).toHaveLength(0) // nothing readable on open, so no row
+    await press(m, 'Repair…')
+    await press(m, 'Repair')
+    expect(keptNotes(m)).toHaveLength(1)
+    expect(monoLines(m).map((el) => textOf(el.props.children).trim())).toEqual([KEPT])
+    expect(visibleErrorSurfaces(m)).toEqual([])
+  })
+
+  test('the saved row is neutral, so it reads correctly after an account switch (re-review D3)', async () => {
+    const { m } = await openSync({ kept: KEPT })
+    const [note] = keptNotes(m)
+    const text = readable(expand(note)).join(' ')
+    expect(text).toContain(ROW_SENTENCE)
+    expect(text).not.toMatch(/\byour\b/i) // not "your vault": the files may be another account's
+    expect(visibleText(m)).not.toContain(model.PRESERVED_FILES_SENTENCE)
+    expect(model.KEPT_FOLDER_ROW_SENTENCE).toBe(ROW_SENTENCE)
+  })
+
+  test('the row survives a tab switch: a fresh Sync tab shows the same saved folder', async () => {
+    const { backend, st } = syncBackend({ repair: () => ({ pending_operations_preserved: 0, warnings: [], preserved_location: KEPT }) })
+    const first = open('SyncTab', backend, { props: { settings: ready() } })
+    await first.flush()
+    await press(first, 'Repair…')
+    await press(first, 'Repair')
+    expect(keptNotes(first)).toHaveLength(1)
+    first.close()
+    mounted.splice(mounted.indexOf(first), 1)
+    expect(st.kept).toBe(KEPT)
+    const again = open('SyncTab', backend, { props: { settings: ready() } })
+    await again.flush()
+    expect(keptNotes(again)).toHaveLength(1)
+    expect(monoLines(again).map((el) => textOf(el.props.children).trim())).toEqual([KEPT])
+  })
+
+  test('Dismiss sends the exact folder the row showed and the row goes', async () => {
+    const { m, st } = await openSync({ kept: KEPT })
+    await press(m, 'Dismiss')
+    expect(m.calls.filter((c) => c.name === 'dismiss_kept_unsynced_folder').map((c) => c.args)).toEqual([{ path: KEPT }])
+    expect(st.kept).toBeNull()
+    expect(keptNotes(m)).toHaveLength(0)
+    expect(buttons(m)).not.toContain('Dismiss')
+  })
+
+  // 1882 r5 (review thread on `dismissKept`): the command reports whether it cleared the folder.
+  // A row that showed an older folder while a newer one was saved must not vanish as if the newer
+  // folder had been dismissed unseen.
+  const NEWER = '/Users/sam/Library/CloudStorage/Beebeeb (kept 2)'
+
+  test('a Dismiss on a row that showed an older folder keeps the row and shows the newer folder', async () => {
+    const { m, st } = await openSync({ kept: KEPT })
+    st.kept = NEWER // another removal kept files after this row was drawn
+    await press(m, 'Dismiss')
+    expect(m.calls.filter((c) => c.name === 'dismiss_kept_unsynced_folder').map((c) => c.args)).toEqual([{ path: KEPT }])
+    expect(st.kept).toBe(NEWER) // Rust cleared nothing
+    expect(keptNotes(m)).toHaveLength(1)
+    expect(monoLines(m).map((el) => textOf(el.props.children).trim())).toEqual([NEWER])
+    expect(buttons(m)).toContain('Dismiss')
+    expect(m.toasts).toEqual([])
+    expect(visibleErrorSurfaces(m)).toEqual([])
+    // A second Dismiss now sends the newer folder, and that one clears it.
+    await press(m, 'Dismiss')
+    expect(m.calls.filter((c) => c.name === 'dismiss_kept_unsynced_folder').map((c) => c.args)).toEqual([{ path: KEPT }, { path: NEWER }])
+    expect(st.kept).toBeNull()
+    expect(keptNotes(m)).toHaveLength(0)
+  })
+
+  test('a Dismiss on a folder that was already dismissed elsewhere removes the row without a toast', async () => {
+    const { m, st } = await openSync({ kept: KEPT })
+    st.kept = null // dismissed from another window
+    await press(m, 'Dismiss')
+    expect(keptNotes(m)).toHaveLength(0)
+    expect(buttons(m)).not.toContain('Dismiss')
+    expect(m.toasts).toEqual([])
+  })
+
+  test('a Dismiss that fails keeps the row and says so once, in a toast', async () => {
+    const { m } = await openSync({ kept: KEPT, dismissFails: true })
+    await press(m, 'Dismiss')
+    expect(keptNotes(m)).toHaveLength(1)
+    expect(m.toasts).toHaveLength(1)
+    expect(m.toasts[0]).toMatchObject({ variant: 'error' })
+  })
+
+  test('nothing saved shows no kept-folder row', async () => {
+    const { m } = await openSync({ kept: null })
+    expect(keptNotes(m)).toHaveLength(0)
+    expect(buttons(m)).not.toContain('Dismiss')
+  })
+
+  // 1882 r5 (review thread on `addToFinder`): Add to Finder can save a kept folder while it runs
+  // (its own cleanup, or the rollback of a failed attempt). The open Sync tab read the saved
+  // folder once, on mount, so it would not show that row until the person left and came back.
+  describe('a kept folder saved while Add to Finder ran', () => {
+    const keptReads = (m: Mounted) => m.calls.filter((c) => c.name === 'kept_unsynced_folder')
+
+    test('a failed attempt whose rollback kept files shows the row without leaving the tab', async () => {
+      const { m, st } = await openSync({
+        finder: finder.missing,
+        install: () => { st.kept = KEPT; return finder.failed },
+      })
+      expect(keptNotes(m)).toHaveLength(0)
+      await press(m, 'Add to Finder')
+      expect(keptNotes(m)).toHaveLength(1)
+      // The failed install keeps its own mono line ("reason: timeout"); the row adds the folder.
+      expect(monoLines(m).map((el) => textOf(el.props.children).trim())).toEqual(['reason: timeout', KEPT])
+      expect(visibleErrorSurfaces(m)).toHaveLength(1) // the install failure itself is still ONE inline alert
+      expect(m.toasts).toEqual([])
+    })
+
+    test('a rejected attempt whose rollback kept files shows the row', async () => {
+      const { m, st } = await openSync({
+        finder: finder.missing,
+        install: () => { st.kept = KEPT; throw new Error('Finder location must be absolute: relative/path') },
+      })
+      await press(m, 'Add to Finder')
+      expect(keptNotes(m)).toHaveLength(1)
+      expect(visibleErrorSurfaces(m)).toHaveLength(1)
+    })
+
+    test('a successful attempt that saved a kept folder shows the row too', async () => {
+      const { m, st } = await openSync({
+        finder: finder.missing,
+        install: () => { st.kept = KEPT; return finder.installed },
+      })
+      await press(m, 'Add to Finder')
+      expect(buttons(m)).toContain('Repair…')
+      expect(keptNotes(m)).toHaveLength(1)
+      expect(visibleErrorSurfaces(m)).toEqual([])
+    })
+
+    test('a newer folder replaces the older one the row was showing', async () => {
+      const NEWER = '/Users/sam/Library/CloudStorage/Beebeeb (kept 2)'
+      const { m, st } = await openSync({
+        kept: KEPT,
+        finder: finder.missing,
+        install: () => { st.kept = NEWER; return finder.failed },
+      })
+      await press(m, 'Add to Finder')
+      expect(keptNotes(m)).toHaveLength(1)
+      expect(monoLines(m).map((el) => textOf(el.props.children).trim())).toEqual(['reason: timeout', NEWER])
+    })
+
+    test('an attempt that kept nothing reads the saved folder again and shows no row', async () => {
+      const { m } = await openSync({ finder: finder.missing, install: () => finder.failed })
+      expect(keptReads(m)).toHaveLength(1) // on open
+      await press(m, 'Add to Finder')
+      expect(keptReads(m)).toHaveLength(2) // and once after the attempt
+      expect(keptNotes(m)).toHaveLength(0)
+    })
+  })
+
+  test('a repair that kept un-synced files says so in one status note, with the folder in mono', async () => {
+    const { m } = await openSync({ repair: () => ({ pending_operations_preserved: 0, warnings: [], preserved_location: KEPT }) })
+    await press(m, 'Repair…')
+    await press(m, 'Repair')
+    expect(keptNotes(m)).toHaveLength(1)
+    const mono = monoLines(m).map((el) => textOf(el.props.children).trim())
+    expect(mono).toEqual([KEPT])
+    expect(visibleText(m)).toContain(ROW_SENTENCE)
+    expect(visibleErrorSurfaces(m)).toEqual([])
+  })
+
+  test('a repair that kept nothing shows no kept-files sentence and no folder', async () => {
+    for (const preserved_location of [null, undefined]) {
+      const { m } = await openSync({ repair: () => ({ pending_operations_preserved: 2, warnings: [], preserved_location }) })
+      await press(m, 'Repair…')
+      await press(m, 'Repair')
+      expect(keptNotes(m)).toHaveLength(0)
+      expect(visibleText(m)).not.toContain(ROW_SENTENCE)
+      expect(monoLines(m)).toHaveLength(0)
+      expect(statuses(m).map((el) => textOf(el.props.children).trim())).toContain('2 changes waiting to upload were kept.')
+    }
+  })
+
   test('a repair that fails is ONE inline alert (spec section 7), no toast', async () => {
     const { m } = await openSync({ repair: () => { throw new Error('socket busy') } })
     await press(m, 'Repair…')
@@ -621,6 +844,39 @@ describe('Sync tab', () => {
     expect(visibleErrorSurfaces(m)).toHaveLength(1)
     expect(m.toasts).toEqual([])
     expect(visibleText(m)).not.toContain('socket busy')
+  })
+
+  // 1882 r4 (lead ruling): after the Finder location was removed, "Nothing was changed that you need
+  // to undo" is false. The two failures read differently; the raw detail is never shown.
+  const alertText = (m: Mounted) => find(m, (el) => el.props['data-error-surface'] === 'finder-repair').map((el) => readable(expand(el)).join(' '))
+
+  test('a repair that fails before the removal keeps the old copy, word for word', async () => {
+    const { m } = await openSync({ repair: () => { throw new Error('socket busy') } })
+    await press(m, 'Repair…')
+    await press(m, 'Repair')
+    const [text] = alertText(m)
+    expect(text).toContain('Couldn’t repair Beebeeb in Finder')
+    expect(text).toContain('Nothing was changed that you need to undo. Try again.')
+    expect(text).not.toContain('was removed from Finder')
+  })
+
+  test('a repair that fails after the removal says Beebeeb was removed and how to add it back, in one alert', async () => {
+    const { m } = await openSync({
+      removesBeforeFailing: true,
+      repair: () => { throw new Error(`${model.REPAIR_FAILED_AFTER_REMOVAL_CODE}: No space left on device`) },
+    })
+    await press(m, 'Repair…')
+    await press(m, 'Repair')
+    expect(find(m, (el) => el.props['data-error-surface'] === 'finder-repair')).toHaveLength(1)
+    expect(visibleErrorSurfaces(m)).toHaveLength(1)
+    const [text] = alertText(m)
+    expect(text).toContain('Beebeeb was removed from Finder')
+    expect(text).toContain('Repair couldn’t finish, so Beebeeb is no longer in Finder. Choose Add to Finder to add it back.')
+    expect(visibleText(m)).not.toContain('Nothing was changed that you need to undo')
+    expect(visibleText(m)).not.toContain('Couldn’t repair Beebeeb in Finder')
+    expect(visibleText(m)).not.toContain('No space left')
+    expect(m.toasts).toEqual([])
+    expect(buttons(m)).toContain('Add to Finder') // the sentence is true: the button it names is there
   })
 
   test('a successful repair whose refreshed Finder state cannot be read stops claiming Added and offers Try again', async () => {

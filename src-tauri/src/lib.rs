@@ -29,6 +29,7 @@ mod diagnostic_redaction;
 mod desktop_capabilities;
 mod engine_bridge;
 mod engine_status;
+mod finder_removal;
 #[cfg(test)]
 #[path = "../tests/support/bridge.rs"]
 mod native_parity_tests;
@@ -1607,6 +1608,54 @@ enum SignOutOutcome {
     NotSignedIn,
 }
 
+/// [`clear_session_impl`]'s result: what it did, and (task 1882) the folder where macOS kept the
+/// Finder files that had not reached the server when the sign-out removed the Finder location.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SignOutReport {
+    outcome: SignOutOutcome,
+    /// Shown to the person in the app's alert (`show_preserved_files_alert`), never logged.
+    preserved_location: Option<String>,
+}
+
+/// [`clear_session_impl`]'s failure. Review I1 (round 2): a sign-out can still fail AFTER it
+/// removed the Finder location (the Keychain clear), and the folder macOS kept must not be lost
+/// with it: the error carries it, and the alert is raised before the error is returned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SignOutFailure {
+    message: String,
+    /// The folder macOS kept, when the failure came after the removal. Never logged.
+    preserved_location: Option<String>,
+}
+
+impl From<String> for SignOutFailure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            preserved_location: None,
+        }
+    }
+}
+
+impl From<&str> for SignOutFailure {
+    fn from(message: &str) -> Self {
+        message.to_string().into()
+    }
+}
+
+impl std::fmt::Display for SignOutFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+/// The folder a sign-out kept, whether it succeeded or failed after the removal (review I1).
+fn sign_out_kept_folder(result: &Result<SignOutReport, SignOutFailure>) -> Option<&str> {
+    match result {
+        Ok(report) => report.preserved_location.as_deref(),
+        Err(failure) => failure.preserved_location.as_deref(),
+    }
+}
+
 /// The unconfirmed-stop refusal (Bug A / task 1538 Codex P1). Shared by the
 /// fresh-abort path and the Bug-A2 retry gate so a retry cannot be
 /// distinguished from a first refusal by its message.
@@ -1618,7 +1667,7 @@ const UNCONFIRMED_ENGINE_STOP_ERROR: &str =
 ///
 /// Shared by the WebView IPC command and the native menu "Sign out" item so
 /// both routes have the exact same security side-effects.
-async fn clear_session_impl(state: &AppState) -> Result<SignOutOutcome, String> {
+async fn clear_session_impl(state: &AppState) -> Result<SignOutReport, SignOutFailure> {
     #[cfg(target_os = "windows")]
     let _transition = SESSION_TRANSITION.lock().await;
     #[cfg(target_os = "windows")]
@@ -1678,7 +1727,7 @@ async fn clear_session_impl(state: &AppState) -> Result<SignOutOutcome, String> 
                 "sign-out refused: a previous attempt could not confirm the sync engine \
                  stopped; restart Beebeeb before signing in with a different account"
             );
-            return Err(UNCONFIRMED_ENGINE_STOP_ERROR.to_string());
+            return Err(UNCONFIRMED_ENGINE_STOP_ERROR.into());
         }
         if let Some(prev) = engine_slot.take() {
             match prev.abort().await {
@@ -1695,11 +1744,11 @@ async fn clear_session_impl(state: &AppState) -> Result<SignOutOutcome, String> 
                         %source,
                         "sign-out refused: Cloud Files revocation failed after the engine task itself stopped"
                     );
-                    return Err(format!(
+                    return Err(SignOutFailure::from(format!(
                         "Cloud Files revocation failed ({stage}); the sync engine itself stopped. \
                          Please try signing out again; if this keeps happening, restart Beebeeb \
                          before signing in with a different account. ({source})"
-                    ));
+                    )));
                 }
                 runner::AbortOutcome::TaskUnconfirmed => {
                     acct.engine_stop_unconfirmed
@@ -1708,7 +1757,7 @@ async fn clear_session_impl(state: &AppState) -> Result<SignOutOutcome, String> 
                         "sign-out refused: could not confirm the sync engine stopped; \
                          refusing to purge local state or clear credentials while it may still be running"
                     );
-                    return Err(UNCONFIRMED_ENGINE_STOP_ERROR.to_string());
+                    return Err(UNCONFIRMED_ENGINE_STOP_ERROR.into());
                 }
             }
         }
@@ -1849,18 +1898,40 @@ async fn clear_session_impl(state: &AppState) -> Result<SignOutOutcome, String> 
     // is no longer signed into (finding 2). Best-effort: a failure (incl.
     // "not registered") is logged, not surfaced — logout must always appear
     // to succeed. Re-login re-installs the domain via `install_finder_location`.
+    //
+    // Task 1882 (P0): the removal keeps the files that never reached the
+    // server (`NSFileProviderDomainRemovalModePreserveDirtyUserData`); the
+    // folder macOS kept them in rides the report to the alert.
     #[cfg(target_os = "macos")]
-    {
-        if let Err(error) = remove_file_provider_domain() {
-            tracing::warn!(error = %error, "Finder File Provider domain removal on logout failed (best-effort)");
-        }
-    }
+    let preserved_location = finder_removal::sign_out_kept_location(remove_file_provider_domain_blocking().await);
+    #[cfg(not(target_os = "macos"))]
+    let preserved_location: Option<String> = None;
     // Task 1670 round 2: also the account-switch boundary — this codebase's
     // sign-out IS its account-switch mechanism (single active-account slot,
     // see `AppState::active_account`'s own "Phase 0" comment), so there is no
     // separate switch-account hook to add this to.
     purge_macos_hydrate_cache("sign-out");
 
+    finish_sign_out_after_removal(
+        state,
+        &acct,
+        already_signed_out,
+        preserved_location,
+        clear_keychain_session,
+    )
+}
+
+/// The rest of a sign-out once the Finder location is gone (or was never there): drop the
+/// session from memory and clear the Keychain. Review I1 (round 2): every failure from here on
+/// carries the folder macOS kept, so the alert can still name it. `clear_keychain` is
+/// `clear_keychain_session` in the app; tests pass a fake so they never touch the Keychain.
+fn finish_sign_out_after_removal(
+    state: &AppState,
+    acct: &crate::account::AccountRuntime,
+    already_signed_out: bool,
+    preserved_location: Option<String>,
+    clear_keychain: impl FnOnce(&str) -> Result<(), String>,
+) -> Result<SignOutReport, SignOutFailure> {
     match acct.session.lock() {
         Ok(mut guard) => {
             guard.take();
@@ -1869,7 +1940,10 @@ async fn clear_session_impl(state: &AppState) -> Result<SignOutOutcome, String> 
         }
         Err(_) => {
             #[cfg(target_os = "windows")]
-            return Err("Could not clear the runtime session. The vault is not locked; restart Beebeeb.".into());
+            return Err(SignOutFailure {
+                message: "Could not clear the runtime session. The vault is not locked; restart Beebeeb.".to_string(),
+                preserved_location,
+            });
             #[cfg(not(target_os = "windows"))]
             tracing::warn!("session mutex poisoned during clear_session");
         }
@@ -1894,7 +1968,7 @@ async fn clear_session_impl(state: &AppState) -> Result<SignOutOutcome, String> 
         // idempotent, but on a store that cannot answer (e.g. the Linux
         // fail-closed stub) an error must not turn an already-signed-out
         // no-op into a failure — log it and return success.
-        if let Err(error) = clear_keychain_session(acct.id.as_str()) {
+        if let Err(error) = clear_keychain(acct.id.as_str()) {
             tracing::warn!(
                 %error,
                 "already-signed-out sign-out: keychain session clear failed (nothing should be left); continuing"
@@ -1902,20 +1976,102 @@ async fn clear_session_impl(state: &AppState) -> Result<SignOutOutcome, String> 
         }
         set_auth_present(state, false);
         set_auth_email(state, None);
-        return Ok(SignOutOutcome::NotSignedIn);
+        return Ok(SignOutReport {
+            outcome: SignOutOutcome::NotSignedIn,
+            preserved_location,
+        });
     }
-    clear_keychain_session(acct.id.as_str())?;
+    // Review I1: the Finder location is already gone, so a failure here must keep the folder.
+    if let Err(message) = clear_keychain(acct.id.as_str()) {
+        return Err(SignOutFailure {
+            message,
+            preserved_location,
+        });
+    }
     set_auth_present(state, false);
     set_auth_email(state, None);
-    Ok(SignOutOutcome::Completed)
+    Ok(SignOutReport {
+        outcome: SignOutOutcome::Completed,
+        preserved_location,
+    })
 }
 
 /// Sign out through the shared native-menu/WebView teardown. Windows returns
 /// an error while work, plaintext cleanup or root unregistration is incomplete;
 /// the UI must retain the account and display that error for recovery/retry.
+///
+/// Task 1882: when the sign-out kept Finder files that had not reached the
+/// server, the app's alert names the folder. Every frontend sign-out (Settings,
+/// the compact Account page, "Sign in again") ends here; the menu's sign-out
+/// raises the same alert in its own handler.
 #[tauri::command]
-async fn clear_session(state: State<'_, AppState>) -> Result<(), String> {
-    clear_session_impl(&state).await.map(|_| ())
+async fn clear_session(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let result = clear_session_impl(&state).await;
+    // Review I1: the alert comes first, also when the sign-out failed after the removal.
+    // Review I2: and the folder is saved for the Settings › Sync row.
+    surface_kept_folder(&app, sign_out_kept_folder(&result));
+    result.map(|_| ()).map_err(|failure| failure.message)
+}
+
+/// Task 1882 (spec `docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md` §5): the app's
+/// own alert after a removal that kept files — the sentence, a blank line, then the folder. It
+/// is the only place the folder's path is shown for a sign-out, the Add-to-Finder rollback and
+/// the app-start sweep; logs never carry it. Nothing kept → no alert.
+///
+/// Device K-F1 (round 2): with no parent window, `tauri-plugin-dialog` 2.7 hands this to `rfd`
+/// 0.16, which calls `CFUserNotificationDisplayAlert` on a background thread. macOS draws that
+/// alert in its own UserNotificationCenter process, so it is never a Beebeeb window. The two
+/// debug lines let a device check prove it was raised and closed, without the path.
+fn show_preserved_files_alert(app: &tauri::AppHandle, preserved_location: Option<&str>) {
+    let Some((title, message)) = finder_removal::kept_folder_alert(preserved_location) else {
+        return;
+    };
+    app.dialog()
+        .message(message)
+        .title(title)
+        .kind(tauri_plugin_dialog::MessageDialogKind::Info)
+        .show(|_| {
+            tracing::debug!("kept-folder alert closed");
+        });
+    tracing::debug!("kept-folder alert shown");
+}
+
+/// Review I2 (lead ruling, round 2): hands a kept folder to the person on the paths that have no
+/// config of their own (sign-out, the app-start sweep): saved for the Settings › Sync row first,
+/// then the alert. Nothing kept → nothing.
+fn surface_kept_folder(app: &tauri::AppHandle, preserved_location: Option<&str>) {
+    let Some(location) = preserved_location else {
+        return;
+    };
+    remember_kept_folder(location);
+    show_preserved_files_alert(app, Some(location));
+}
+
+/// Saves the latest kept folder in `desktop.toml` (spec §5, "The kept-folder row"). Best-effort:
+/// a failure is logged without the path, and the alert still names the folder.
+///
+/// Round 5: one load-change-save under the config-write lock (`DesktopConfig::update_at`), because
+/// the app-start sweep runs this while the window may be saving a setting; two unserialized
+/// saves share one `desktop.toml.tmp` and the later could drop the earlier one's change.
+fn remember_kept_folder(location: &str) {
+    if let Err(error) = finder_removal::remember_kept_folder(location) {
+        tracing::warn!(error = %error, "could not save the kept folder for Settings › Sync");
+    }
+}
+
+/// Review I2: the folder Settings › Sync shows until the person dismisses it. `None` = no row.
+#[tauri::command]
+fn kept_unsynced_folder() -> Result<Option<String>, String> {
+    Ok(DesktopConfig::load()?.kept_unsynced_folder)
+}
+
+/// Review I2: the row's "Dismiss". Clears the saved folder only if it is still `path`, the one
+/// the row showed. Round 5: it says whether it cleared it and which folder is saved now, so a row
+/// that showed an older folder shows the newer one instead of vanishing. Under the config-write
+/// lock, like the save above.
+#[tauri::command]
+fn dismiss_kept_unsynced_folder(path: String) -> Result<finder_removal::DismissOutcome, String> {
+    finder_removal::dismiss_saved_kept_folder(&path)
 }
 
 /// Put a session restored from the Keychain into memory. Deliberately no `bump_vault_epoch()`
@@ -2087,6 +2243,9 @@ struct FinderInstallState {
 #[derive(Debug, serde::Serialize)]
 struct MacosIntegrationResetResult {
     removed_file_provider_domain: bool,
+    /// Task 1882: the folder where macOS kept un-synced Finder files when the
+    /// repair removed the Finder location; `None` = nothing kept.
+    preserved_location: Option<String>,
     disabled_autostart: bool,
     removed_socket: bool,
     removed_cache_files: usize,
@@ -2174,6 +2333,28 @@ fn finder_state_path(cfg: &DesktopConfig, installed: bool) -> Option<String> {
     {
         let _ = installed;
         cfg.sync_root.as_ref().map(|p| p.to_string_lossy().into_owned())
+    }
+}
+
+/// The end of Repair, once the Finder location is gone (re-review P1, as review I1 is for
+/// sign-out): saves the config, and if that save fails, shows the folder macOS kept BEFORE the
+/// error goes back. The removal cannot be undone and a retry finds no domain, so without this the
+/// folder would never be named: the error only says Repair failed, and Repair raises no alert of
+/// its own. A save that works shows nothing here: the result carries the folder to the Sync tab.
+/// `surface` is `surface_kept_folder` in the app; the tests pass a recorder.
+fn finish_repair_after_removal(
+    cfg: &mut DesktopConfig,
+    preserved_location: Option<&str>,
+    domain_removed: bool,
+    save: impl FnOnce(&mut DesktopConfig) -> Result<(), String>,
+    surface: impl FnOnce(Option<&str>),
+) -> Result<(), String> {
+    match save(cfg) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            surface(preserved_location);
+            Err(finder_removal::repair_save_error(error, domain_removed))
+        }
     }
 }
 
@@ -2735,8 +2916,9 @@ enum FileProviderInstallOutcome {
 const FINDER_USER_DISABLED_MESSAGE: &str = "Beebeeb is turned off in System Settings. Open Login \
     Items & Extensions, turn on Beebeeb under File Providers, then try again.";
 
+/// Review M1 (round 2): a failure carries the folder kept by the install's own cleanup, if any.
 #[cfg(target_os = "macos")]
-fn install_file_provider_domain() -> Result<FileProviderInstallOutcome, String> {
+fn install_file_provider_domain() -> Result<FileProviderInstallOutcome, finder_removal::InstallFailure> {
     match macos_file_provider::install()? {
         macos_file_provider::InstallOutcome::Installed => Ok(FileProviderInstallOutcome::Installed),
         macos_file_provider::InstallOutcome::UserDisabled => Ok(FileProviderInstallOutcome::UserDisabled),
@@ -2744,18 +2926,53 @@ fn install_file_provider_domain() -> Result<FileProviderInstallOutcome, String> 
 }
 
 #[cfg(not(target_os = "macos"))]
-fn install_file_provider_domain() -> Result<FileProviderInstallOutcome, String> {
-    Err("File Provider is only available on macOS.".to_string())
+fn install_file_provider_domain() -> Result<FileProviderInstallOutcome, finder_removal::InstallFailure> {
+    Err("File Provider is only available on macOS.".to_string().into())
 }
 
+/// Task 1882: keeps the files that never reached the server; the result names the folder macOS
+/// kept them in, if any.
 #[cfg(target_os = "macos")]
-fn remove_file_provider_domain() -> Result<(), String> {
+fn remove_file_provider_domain() -> Result<finder_removal::DomainRemoval, finder_removal::RemovalFailure> {
     macos_file_provider::remove()
 }
 
 #[cfg(not(target_os = "macos"))]
-fn remove_file_provider_domain() -> Result<(), String> {
-    Err("File Provider is only available on macOS.".to_string())
+fn remove_file_provider_domain() -> Result<finder_removal::DomainRemoval, finder_removal::RemovalFailure> {
+    Err("File Provider is only available on macOS.".to_string().into())
+}
+
+/// Runs a blocking File Provider call on the blocking pool, so it never holds the main thread or
+/// an async runtime worker (1882 round 4). The removal blocks on the system's completion handler,
+/// and when a kept folder reads as missing it then sleeps about a second (`settle_kept_state`).
+/// The failure is the pool's own (a panicked or cancelled job); it carries no path.
+async fn on_blocking_pool<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| format!("A File Provider call did not finish: {error}"))
+}
+
+/// The removal, off the runtime (round 4).
+async fn remove_file_provider_domain_blocking() -> Result<finder_removal::DomainRemoval, finder_removal::RemovalFailure>
+{
+    match on_blocking_pool(remove_file_provider_domain).await {
+        Ok(result) => result,
+        Err(message) => Err(message.into()),
+    }
+}
+
+/// The install, off the runtime (round 4): its cleanup is a removal.
+async fn install_file_provider_domain_blocking() -> Result<FileProviderInstallOutcome, finder_removal::InstallFailure> {
+    match on_blocking_pool(install_file_provider_domain).await {
+        Ok(result) => result,
+        Err(message) => Err(message.into()),
+    }
+}
+
+/// The app-start sweep, off the runtime (round 4).
+#[cfg(target_os = "macos")]
+async fn cleanup_stale_domains_blocking() -> Result<macos_file_provider::StaleDomainCleanup, String> {
+    on_blocking_pool(crate::macos_file_provider::cleanup_stale_domains).await?
 }
 
 /// Task 1670 round 2: wipe the macOS hydrate-cache staging directory at every
@@ -2998,11 +3215,18 @@ async fn install_finder_location(
     )
     .await?;
 
-    match install_file_provider_domain() {
-        Err(error) => {
+    match install_file_provider_domain_blocking().await {
+        Err(failure) => {
             stop_pending_finder_install_engine(&state, started_pending_engine).await;
+            // Review M1 (round 2): the install's own cleanup removed a domain this attempt
+            // added; a folder it kept is saved for the row (into `cfg`, saved just below) and
+            // shown, like the rollback's.
+            if let Some(location) = failure.kept_folder.as_deref() {
+                finder_removal::record_kept_folder(&mut cfg, location);
+                show_preserved_files_alert(&app, Some(location));
+            }
             // D1 (task 1683 slice 5): saved OR returned as an error, not both.
-            return finder_install_failed(&mut cfg, error);
+            return finder_install_failed(&mut cfg, failure.message);
         }
         Ok(FileProviderInstallOutcome::UserDisabled) => {
             // Issue 4: do not wait, do not treat this as a "Continue without install"
@@ -3016,7 +3240,7 @@ async fn install_finder_location(
         Ok(FileProviderInstallOutcome::Installed) => {}
     }
     if let Err(error) = persist_sync_root_and_start_engine(
-        app,
+        app.clone(),
         &state,
         &mut cfg,
         root.clone(),
@@ -3026,7 +3250,20 @@ async fn install_finder_location(
     .await
     {
         stop_pending_finder_install_engine(&state, started_pending_engine).await;
-        let _ = remove_file_provider_domain();
+        // Task 1882: `addDomain` also succeeds on a domain that already existed, so this
+        // rollback can remove one that holds un-synced files. They are kept; the alert names
+        // the folder. A failed rollback stays silent, as before.
+        // Review I2: recorded into `cfg`, which `finder_install_failed` saves below, so that
+        // save cannot overwrite the record with a stale copy.
+        // Review M2: a folder kept with a failed removal is surfaced too.
+        let removal = remove_file_provider_domain_blocking().await;
+        if let Some(location) = removal.map_or_else(
+            |failure| failure.kept_location("add-to-finder rollback"),
+            |removal| removal.kept_location("add-to-finder rollback"),
+        ) {
+            finder_removal::record_kept_folder(&mut cfg, &location);
+            show_preserved_files_alert(&app, Some(&location));
+        }
         // D1 (task 1683 slice 5): saved OR returned as an error, not both.
         return finder_install_failed(&mut cfg, error);
     }
@@ -3320,13 +3557,14 @@ async fn reset_macos_integration(
         }
     };
 
-    let removed_file_provider_domain = match remove_file_provider_domain() {
-        Ok(()) => true,
-        Err(error) => {
-            warnings.push(format!("Could not remove Finder File Provider domain: {error}"));
-            false
-        }
-    };
+    // Task 1882: the removal keeps un-synced files; their folder rides the
+    // result to the Sync tab's note (spec 2026-10-09 §5).
+    let (removed_file_provider_domain, preserved_location) =
+        finder_removal::repair_removal(remove_file_provider_domain_blocking().await, &mut warnings);
+    // Review I2: saved for the Settings › Sync row, into the config this command saves below.
+    if let Some(location) = preserved_location.as_deref() {
+        finder_removal::record_kept_folder(&mut cfg, location);
+    }
 
     let disabled_autostart = match app.autolaunch().is_enabled() {
         Ok(true) => match app.autolaunch().disable() {
@@ -3343,10 +3581,18 @@ async fn reset_macos_integration(
         }
     };
 
-    persist_finder_install_result(&mut cfg, false, None)?;
+    // Re-review P1: the removal above cannot be undone, so a failed save still shows the folder.
+    finish_repair_after_removal(
+        &mut cfg,
+        preserved_location.as_deref(),
+        removed_file_provider_domain,
+        |cfg| persist_finder_install_result(cfg, false, None),
+        |location| surface_kept_folder(&app, location),
+    )?;
 
     Ok(MacosIntegrationResetResult {
         removed_file_provider_domain,
+        preserved_location,
         disabled_autostart,
         removed_socket,
         removed_cache_files,
@@ -8787,6 +9033,8 @@ pub fn run() {
             desktop_platform,
             desktop_capabilities,
             finder_location_state,
+            kept_unsynced_folder,
+            dismiss_kept_unsynced_folder,
             install_finder_location,
             continue_without_finder_location,
             // Task 1524 Issue 4 — user-disabled File Provider domain detection
@@ -8971,16 +9219,23 @@ pub fn run() {
             // a candidate.
             #[cfg(target_os = "macos")]
             {
+                let alert_app = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
-                    match crate::macos_file_provider::cleanup_stale_domains() {
+                    match cleanup_stale_domains_blocking().await {
                         Ok(cleanup) => {
                             if cleanup.removed_count() > 0 || !cleanup.skipped.is_empty() || !cleanup.ours_present {
                                 tracing::info!(
                                     removed = cleanup.removed_count(),
                                     skipped = cleanup.skipped.len(),
                                     ours_present = cleanup.ours_present,
+                                    preserved = cleanup.preserved_locations.len(),
                                     "stale File Provider domain sweep complete (task 1698)"
                                 );
+                            }
+                            // Task 1882: a removed domain's un-synced files were kept;
+                            // the alert names each folder (the log above only counts them).
+                            for location in &cleanup.preserved_locations {
+                                surface_kept_folder(&alert_app, Some(location));
                             }
                         }
                         Err(error) => {
@@ -9589,22 +9844,33 @@ fn handle_desktop_menu_action(app: &tauri::AppHandle, spec: &'static DesktopMenu
             spawn_menu_task(spec.id, async move {
                 let state = app.state::<AppState>();
                 let result = clear_session_impl(&state).await;
+                // Task 1882: the menu's sign-out names the folder of kept
+                // Finder files in the same alert as the `clear_session` command,
+                // also when it failed after the removal (review I1), and saves it for
+                // the Settings › Sync row (review I2).
+                surface_kept_folder(&app, sign_out_kept_folder(&result));
                 #[cfg(target_os = "windows")]
                 match &result {
                     // Nothing to tear down — tell the user instead of running
                     // (and possibly failing) the full teardown (Bug B).
-                    Ok(SignOutOutcome::NotSignedIn) => {
+                    Ok(SignOutReport {
+                        outcome: SignOutOutcome::NotSignedIn,
+                        ..
+                    }) => {
                         app.dialog().message("You are not signed in on this device.")
                             .title("Sign out")
                             .kind(tauri_plugin_dialog::MessageDialogKind::Info).show(|_| {});
                     }
-                    Ok(SignOutOutcome::Completed) => {}
+                    Ok(SignOutReport {
+                        outcome: SignOutOutcome::Completed,
+                        ..
+                    }) => {}
                     Err(error) => {
-                        app.dialog().message(error.clone()).title("Sign-out paused")
+                        app.dialog().message(error.message.clone()).title("Sign-out paused")
                             .kind(tauri_plugin_dialog::MessageDialogKind::Error).show(|_| {});
                     }
                 }
-                result.map(|_| ())
+                result.map(|_| ()).map_err(|failure| failure.message)
             });
         }
         DesktopMenuAction::Quit => app.exit(0),
@@ -10714,8 +10980,13 @@ mod tests {
         let engine = body
             .find("start_engine_for_pending_finder_install(")
             .expect("starts the pending engine");
-        let domain = body.find("install_file_provider_domain()").expect("installs the domain");
-        assert!(load < clear && clear < engine && engine < domain, "load, then clear, then the slow work");
+        let domain = body
+            .find("install_file_provider_domain_blocking().await")
+            .expect("installs the domain");
+        assert!(
+            load < clear && clear < engine && engine < domain,
+            "load, then clear, then the slow work"
+        );
     }
 
     #[test]
@@ -12475,7 +12746,7 @@ mod popover_wiring_tests {
         };
         let clear = install.find("begin_finder_install_attempt(&mut cfg)?").unwrap();
         let adding = install.find("finder_adding_guard()").expect("the install marks the attempt for the popover");
-        let slow = install.find("install_file_provider_domain()").unwrap();
+        let slow = install.find("install_file_provider_domain_blocking().await").unwrap();
         assert!(clear < adding && adding < slow, "the marker is set before the slow File Provider work");
     }
 }
@@ -12645,7 +12916,7 @@ mod signout_teardown_tests {
             .await
             .expect_err("the first attempt must fail while the engine stop is unconfirmed");
         assert!(
-            first.contains("Could not stop the sync engine"),
+            first.message.contains("Could not stop the sync engine"),
             "first attempt must be the unconfirmed-stop refusal, got: {first}"
         );
 
@@ -12653,7 +12924,7 @@ mod signout_teardown_tests {
             .await
             .expect_err("the retry must also be refused, not silently proceed past the stop gate");
         assert!(
-            second.contains("Could not stop the sync engine"),
+            second.message.contains("Could not stop the sync engine"),
             "the retry must be gated by the same unconfirmed-stop refusal \
              (Bug A2: it must not skip the stop gate on an empty slot), got: {second}"
         );
@@ -12775,6 +13046,599 @@ mod startup_session_tests {
         assert!(
             acct.auth_email.lock().unwrap().is_none(),
             "the mirrored signed-in email must be cleared"
+        );
+    }
+}
+
+/// Task 1882 (spec `docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md` §5): every
+/// removal path in this file hands the folder macOS kept to the person. The pure pieces are
+/// tested in `finder_removal`; these pin the wiring between them, which no unit can see.
+#[cfg(test)]
+mod finder_removal_wiring_tests {
+    use super::MacosIntegrationResetResult;
+
+    fn source() -> String {
+        include_str!("lib.rs").replace("\r\n", "\n")
+    }
+
+    /// The text of the item starting at `start`, up to the next line that is exactly `}`.
+    fn item(source: &str, start: &str) -> String {
+        let at = source.find(start).unwrap_or_else(|| panic!("{start} exists"));
+        let end = source[at..].find("\n}\n").expect("item ends");
+        source[at..at + end].to_string()
+    }
+
+    #[test]
+    fn test_1882_the_repair_result_carries_the_kept_folder_to_the_frontend() {
+        let result = MacosIntegrationResetResult {
+            removed_file_provider_domain: true,
+            preserved_location: Some("/Users/someone/Kept".to_string()),
+            disabled_autostart: false,
+            removed_socket: false,
+            removed_cache_files: 0,
+            skipped_cache_files: 0,
+            pending_operations_preserved: 0,
+            sync_root_preserved: None,
+            warnings: Vec::new(),
+        };
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["preserved_location"], "/Users/someone/Kept");
+
+        let nothing_kept = MacosIntegrationResetResult {
+            preserved_location: None,
+            ..result
+        };
+        assert!(serde_json::to_value(&nothing_kept).unwrap()["preserved_location"].is_null());
+    }
+
+    /// Device K-F1 (round 2): the alert is drawn by macOS's UserNotificationCenter process, not a
+    /// Beebeeb window, so a device check needs the app's own word that it raised the alert and
+    /// that the person closed it. Both are debug lines without the path.
+    #[test]
+    fn test_1882_the_kept_folder_alert_logs_that_it_was_shown_and_closed() {
+        let full = source();
+        let source = full[..full.find("\nmod finder_removal_wiring_tests {").expect("this module")].to_string();
+        let alert = item(&source, "fn show_preserved_files_alert(");
+        assert!(
+            alert.contains("let Some((title, message)) = finder_removal::kept_folder_alert(preserved_location) else {"),
+            "the alert's one decision is the tested `kept_folder_alert`"
+        );
+        let show = alert.find(".show(").expect("the alert is shown");
+        let closed = alert
+            .find("tracing::debug!(\"kept-folder alert closed\")")
+            .expect("the alert's callback logs that the person closed it");
+        let shown = alert
+            .find("tracing::debug!(\"kept-folder alert shown\")")
+            .expect("the alert logs that it was raised");
+        assert!(show < closed, "\"closed\" is logged inside the alert's callback");
+        assert!(closed < shown, "\"shown\" is logged after show() returns");
+        assert!(
+            !alert[show..].contains("location"),
+            "nothing after show() may carry the folder's path into a log"
+        );
+    }
+
+    /// Review I2 (lead ruling, round 2): every removal path saves the kept folder for the
+    /// Settings › Sync row. Paths that hold a loaded config and save it afterwards record into
+    /// THAT config, so their own save cannot overwrite the record with a stale copy.
+    #[test]
+    fn test_1882_r2_every_removal_path_saves_the_kept_folder_for_the_sync_row() {
+        let full = source();
+        let source = full[..full.find("\nmod finder_removal_wiring_tests {").expect("this module")].to_string();
+        let code_only = |text: &str| {
+            text.lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        // Saved, then shown: one function for the paths without a config of their own.
+        let surface = code_only(&item(&source, "fn surface_kept_folder("));
+        let saved = surface
+            .find("remember_kept_folder(location)")
+            .expect("it saves the folder");
+        let shown = surface
+            .find("show_preserved_files_alert(app, Some(location))")
+            .expect("it raises the alert");
+        assert!(saved < shown);
+        let remember = code_only(&item(&source, "fn remember_kept_folder("));
+        // Round 5: the save is one load-change-save under the config-write lock, not a
+        // `DesktopConfig::load()` + `cfg.save()` of its own.
+        assert!(remember.contains("finder_removal::remember_kept_folder(location)"));
+        assert!(
+            !remember.contains("DesktopConfig::load()") && !remember.contains("cfg.save()"),
+            "no unserialized load-modify-save:\n{remember}"
+        );
+        assert!(!remember.contains("location ="), "the log line never carries the path");
+        let dismiss = code_only(&item(&source, "fn dismiss_kept_unsynced_folder("));
+        assert!(dismiss.contains("finder_removal::dismiss_saved_kept_folder(&path)"));
+        assert!(
+            dismiss.contains("Result<finder_removal::DismissOutcome, String>"),
+            "the command reports whether it cleared the row"
+        );
+        assert!(
+            !dismiss.contains("DesktopConfig::load()") && !dismiss.contains("cfg.save()"),
+            "no unserialized load-modify-save:\n{dismiss}"
+        );
+
+        // Sign-out (command and menu) and the sweep.
+        let command = code_only(&item(&source, "async fn clear_session("));
+        assert!(command.contains("surface_kept_folder(&app, sign_out_kept_folder(&result));"));
+        let menu = &source[source.find("DesktopMenuAction::SignOut => {").expect("menu sign-out")..];
+        let menu = &menu[..menu.find("DesktopMenuAction::Quit").expect("next arm")];
+        assert!(code_only(menu).contains("surface_kept_folder(&app, sign_out_kept_folder(&result));"));
+        assert!(code_only(&source).contains("surface_kept_folder(&alert_app, Some(location));"));
+
+        // Repair and the add rollback record into the config they save afterwards.
+        let repair = code_only(&item(&source, "async fn reset_macos_integration("));
+        let recorded = repair
+            .find("finder_removal::record_kept_folder(&mut cfg, location);")
+            .expect("Repair records the folder into its config");
+        // Round 3 (re-review P1): the save is the step that can fail after the removal, so it goes
+        // through `finish_repair_after_removal`, which still shows the folder before the error.
+        let squashed: String = repair.chars().filter(|c| !c.is_whitespace()).collect();
+        let saved = repair
+            .find("finish_repair_after_removal(")
+            .expect("and saves it, through the step that still shows the folder when the save fails");
+        assert!(recorded < saved);
+        assert!(
+            squashed.contains(
+                "finish_repair_after_removal(&mutcfg,preserved_location.as_deref(),removed_file_provider_domain,|cfg|persist_finder_install_result(cfg,false,None),|location|surface_kept_folder(&app,location),)?;"
+            ),
+            "Repair saves with the real save, and surfaces with the real alert:\n{repair}"
+        );
+        assert!(
+            !repair.contains("persist_finder_install_result(&mut cfg, false, None)?;"),
+            "no bare `?` save is left between the removal and the result"
+        );
+        let install = code_only(&item(&source, "async fn install_finder_location("));
+        let recorded = install
+            .find("finder_removal::record_kept_folder(&mut cfg, &location);")
+            .expect("the rollback records the folder into its config");
+        let saved = install[recorded..]
+            .find("return finder_install_failed(&mut cfg, error);")
+            .expect("which is saved");
+        assert!(saved > 0);
+
+        // The row's two commands are registered.
+        for name in ["kept_unsynced_folder", "dismiss_kept_unsynced_folder"] {
+            assert_eq!(
+                source.matches(&format!("            {name},\n")).count(),
+                1,
+                "{name} in generate_handler!"
+            );
+        }
+    }
+
+    /// Reviews M1 and M2 (round 2): the cleanup inside Add to Finder surfaces its kept folder like
+    /// the rollback does, and a removal that failed but kept files still surfaces them, on the
+    /// rollback and in the sweep.
+    #[test]
+    fn test_1882_r2_the_install_cleanup_and_failed_removals_surface_their_folder() {
+        let full = source();
+        let source = full[..full.find("\nmod finder_removal_wiring_tests {").expect("this module")].to_string();
+        let code_only = |text: &str| {
+            text.lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let install = code_only(&item(&source, "async fn install_finder_location("));
+        let failed = &install[install
+            .find("match install_file_provider_domain_blocking().await {")
+            .expect("the install")..];
+        let failed = &failed[..failed
+            .find("Ok(FileProviderInstallOutcome::UserDisabled)")
+            .expect("next arm")];
+        let recorded = failed
+            .find("finder_removal::record_kept_folder(&mut cfg, location);")
+            .expect("M1: the install cleanup's folder is saved for the row");
+        let shown = failed
+            .find("show_preserved_files_alert(&app, Some(location));")
+            .expect("M1: and shown");
+        let saved = failed
+            .find("return finder_install_failed(&mut cfg, failure.message);")
+            .expect("then saved");
+        assert!(recorded < saved && shown < saved);
+
+        // M1: install() hands the cleanup's removal to the shared decision.
+        let provider = include_str!("macos_file_provider.rs").replace("\r\n", "\n");
+        let install_fn = &provider[provider
+            .find("pub fn install() -> Result<InstallOutcome, crate::finder_removal::InstallFailure> {")
+            .expect("install()")..];
+        let install_fn = &install_fn[..install_fn.find("\n}\n").expect("install() ends")];
+        assert!(
+            install_fn.contains("return Err(crate::finder_removal::install_cleanup_failure(setup_error, remove()));")
+        );
+
+        // M2: the sweep keeps a folder that came back with an error ...
+        let sweep = &provider[provider.find("pub fn cleanup_stale_domains(").expect("the sweep")..];
+        let sweep = &sweep[..sweep.find("\n}\n").expect("the sweep ends")];
+        assert!(sweep.contains("if let Some(location) = failure.kept_location(\"stale-domain sweep\") {"));
+        // ... and the rollback surfaces a folder from a failed removal too.
+        assert!(install.contains("let removal = remove_file_provider_domain_blocking().await;"));
+        let squashed: String = install.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(squashed.contains(
+            "removal.map_or_else(|failure|failure.kept_location(\"add-to-finderrollback\"),|removal|removal.kept_location(\"add-to-finderrollback\"),)"
+        ));
+    }
+
+    #[test]
+    fn test_1882_every_removal_path_surfaces_the_kept_folder() {
+        let full = source();
+        // Everything above this module, so the literals below cannot match themselves.
+        let source = full[..full.find("\nmod finder_removal_wiring_tests {").expect("this module")].to_string();
+        let code_only = |text: &str| {
+            text.lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        // Sign-out: the removal's folder rides the report out of `clear_session_impl` ...
+        let sign_out = code_only(&item(&source, "async fn clear_session_impl("));
+        assert!(sign_out.contains(
+            "let preserved_location = finder_removal::sign_out_kept_location(remove_file_provider_domain_blocking().await);"
+        ));
+        let squash = |text: &str| text.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        assert!(squash(&sign_out).contains(
+            "finish_sign_out_after_removal(state,&acct,already_signed_out,preserved_location,clear_keychain_session,)"
+        ));
+        let tail = code_only(&item(&source, "fn finish_sign_out_after_removal("));
+        assert_eq!(
+            tail.matches("preserved_location,\n").count(),
+            4,
+            "both Ok returns and both failures after the removal (the Windows session lock, the \
+             Keychain clear) carry it"
+        );
+        // ... and both ways out of a sign-out raise the alert, on success and on failure (I1).
+        let command = code_only(&item(&source, "async fn clear_session("));
+        assert!(command.contains("surface_kept_folder(&app, sign_out_kept_folder(&result));"));
+        let menu = &source[source.find("DesktopMenuAction::SignOut => {").expect("menu sign-out")..];
+        let menu = &menu[..menu.find("DesktopMenuAction::Quit").expect("next arm")];
+        assert!(code_only(menu).contains("surface_kept_folder(&app, sign_out_kept_folder(&result));"));
+
+        // Repair: the folder goes into the result the Sync tab reads.
+        let repair = code_only(&item(&source, "async fn reset_macos_integration("));
+        assert!(
+            repair.contains(
+                "finder_removal::repair_removal(remove_file_provider_domain_blocking().await, &mut warnings);"
+            )
+        );
+        assert!(repair.contains("        preserved_location,\n"));
+
+        // The Add-to-Finder rollback and the app-start sweep raise the same alert.
+        let install = code_only(&item(&source, "async fn install_finder_location("));
+        assert!(install.contains("removal.kept_location(\"add-to-finder rollback\")"));
+        assert!(install.contains("show_preserved_files_alert(&app, Some(&location));"));
+        assert!(code_only(&source).contains("surface_kept_folder(&alert_app, Some(location));"));
+
+        // And there is no other removal: three calls, all of them above, all through the wrapper
+        // that moves the blocking removal off the runtime (round 4).
+        assert_eq!(
+            code_only(&source)
+                .matches("remove_file_provider_domain_blocking().await")
+                .count(),
+            3,
+            "3 calls through the blocking wrapper"
+        );
+        assert_eq!(
+            code_only(&source).matches("remove_file_provider_domain()").count(),
+            2,
+            "only the 2 definitions: no inline call is left"
+        );
+    }
+
+    /// 1882 r4 (concern 1): the removal, the install (whose cleanup is a removal) and the
+    /// app-start sweep block for about a second when a folder reads as missing (`settle_kept_state`
+    /// sleeps). None of them may run on the main thread or on an async runtime worker: every call
+    /// goes through `on_blocking_pool`, which is `tokio::task::spawn_blocking`.
+    ///
+    /// Where each one runs (all async, so none is the main thread): the `clear_session` command and
+    /// the menu's sign-out (`spawn_menu_task` -> `tauri::async_runtime::spawn`) call
+    /// `clear_session_impl`; Repair and `install_finder_location` are async commands; the sweep is
+    /// spawned from `setup`. The developer helper blocks its own main thread by design and sleeps on
+    /// the completion handler's queue.
+    #[test]
+    fn test_1882_r4_no_blocking_file_provider_call_runs_on_the_main_thread_or_a_runtime_worker() {
+        let full = source();
+        let source = full[..full.find("\nmod finder_removal_wiring_tests {").expect("this module")].to_string();
+        let code = source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let squash = |text: &str| text.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+
+        // The blocking primitives are called in exactly one place each: inside the pool helper.
+        for (call, definitions) in [
+            ("remove_file_provider_domain()", 2), // the macOS and the other-OS definitions
+            ("install_file_provider_domain()", 2),
+            ("macos_file_provider::remove()", 1),
+            ("macos_file_provider::install()?", 1),
+            ("cleanup_stale_domains()", 0),
+        ] {
+            assert_eq!(
+                code.matches(call).count(),
+                definitions,
+                "`{call}` may appear only in its definition, never as an inline call"
+            );
+        }
+        let pool = squash(&item(&code, "async fn on_blocking_pool"));
+        assert!(
+            pool.contains("tokio::task::spawn_blocking(work).await"),
+            "the helper really uses the blocking pool: {pool}"
+        );
+        for (wrapper, primitive) in [
+            (
+                "async fn remove_file_provider_domain_blocking(",
+                "on_blocking_pool(remove_file_provider_domain).await",
+            ),
+            (
+                "async fn install_file_provider_domain_blocking(",
+                "on_blocking_pool(install_file_provider_domain).await",
+            ),
+            (
+                "async fn cleanup_stale_domains_blocking(",
+                "on_blocking_pool(crate::macos_file_provider::cleanup_stale_domains).await",
+            ),
+        ] {
+            assert!(
+                squash(&item(&code, wrapper)).contains(primitive),
+                "{wrapper} goes through the pool with {primitive}"
+            );
+        }
+
+        // Every caller awaits the wrapper.
+        let sign_out = squash(&item(&code, "async fn clear_session_impl("));
+        assert!(sign_out.contains("sign_out_kept_location(remove_file_provider_domain_blocking().await)"));
+        let repair = squash(&item(&code, "async fn reset_macos_integration("));
+        assert!(repair.contains("repair_removal(remove_file_provider_domain_blocking().await,&mutwarnings)"));
+        let install = squash(&item(&code, "async fn install_finder_location("));
+        assert!(install.contains("matchinstall_file_provider_domain_blocking().await{"));
+        assert!(install.contains("letremoval=remove_file_provider_domain_blocking().await;"));
+        let sweep_at = code
+            .find("match cleanup_stale_domains_blocking().await")
+            .expect("the sweep awaits the wrapper");
+        assert!(
+            squash(&code[sweep_at - 120..sweep_at]).ends_with("tauri::async_runtime::spawn(asyncmove{"),
+            "and runs in a spawned task, off the startup path"
+        );
+
+        // The menu's sign-out is spawned, never run inline on the main thread.
+        let menu = &source[source.find("DesktopMenuAction::SignOut => {").expect("menu sign-out")..];
+        let menu = squash(&menu[..menu.find("DesktopMenuAction::Quit").expect("next arm")]);
+        assert!(menu.contains("spawn_menu_task(spec.id,asyncmove{"));
+        assert!(menu.contains("clear_session_impl(&state).await"));
+        assert!(
+            !menu.contains("remove_file_provider_domain"),
+            "no removal in the menu handler itself"
+        );
+        let spawn = squash(&item(&code, "fn spawn_menu_task"));
+        assert!(spawn.contains("tauri::async_runtime::spawn(asyncmove{"));
+    }
+}
+
+/// 1882 r4: the pool helper really leaves the runtime thread free. A single-threaded runtime
+/// drives both the job and the test: if the job ran inline it would hold the only thread while it
+/// waits for a release that only this test can send, and it would give up after the timeout.
+#[cfg(test)]
+mod blocking_pool_tests {
+    use super::on_blocking_pool;
+    use std::time::Duration;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_1882_r4_blocking_work_does_not_hold_the_runtime_thread() {
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let job = tokio::spawn(on_blocking_pool(move || {
+            released.recv_timeout(Duration::from_secs(2)).is_ok()
+        }));
+        // Let the job start; the runtime thread must still be free to run this and send the release.
+        tokio::task::yield_now().await;
+        release.send(()).expect("the job is waiting");
+        let saw_release = job.await.expect("job task").expect("pool");
+        assert!(
+            saw_release,
+            "the blocking job ran off the runtime thread and saw the release"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_1882_r4_blocking_work_returns_its_value_and_runs_on_another_thread() {
+        let here = std::thread::current().id();
+        let there = on_blocking_pool(|| std::thread::current().id()).await.expect("pool");
+        assert_ne!(
+            here, there,
+            "the work ran on the blocking pool, not the caller's thread"
+        );
+    }
+}
+
+/// Review I1 (round 2): a sign-out that fails AFTER it removed the Finder location still names
+/// the folder macOS kept. Drives the real post-removal step with a fake Keychain clear, so it
+/// never touches the Keychain, the bridge or a window.
+#[cfg(test)]
+mod sign_out_kept_folder_tests {
+    use super::{
+        AppState, SignOutOutcome, finder_removal, finish_sign_out_after_removal, set_auth_present, sign_out_kept_folder,
+    };
+    use crate::account::{AccountId, synthesize_single_account};
+
+    const FOLDER: &str = "/Users/someone/Library/CloudStorage/Beebeeb-Beebeeb (10-10-2026 10:50)";
+
+    fn signed_in(id: &str) -> (AppState, std::sync::Arc<crate::account::AccountRuntime>) {
+        let state = AppState::default();
+        synthesize_single_account(&state, AccountId(id.to_string()));
+        set_auth_present(&state, true);
+        let acct = state.active_account().expect("synthesized account resolves");
+        (state, acct)
+    }
+
+    #[test]
+    fn test_1882_r2_a_sign_out_that_fails_after_the_removal_still_names_the_kept_folder() {
+        let (state, acct) = signed_in("signout-i1-fail");
+        let result = finish_sign_out_after_removal(&state, &acct, false, Some(FOLDER.to_string()), |_| {
+            Err("Could not clear Keychain session: the keychain is locked".to_string())
+        });
+        let failure = result
+            .as_ref()
+            .expect_err("the Keychain clear failed, so the sign-out fails");
+        assert_eq!(
+            failure.message,
+            "Could not clear Keychain session: the keychain is locked"
+        );
+        assert_eq!(
+            sign_out_kept_folder(&result),
+            Some(FOLDER),
+            "the error carries the kept folder"
+        );
+        // The alert text the command and the menu raise before they return the error.
+        assert_eq!(
+            sign_out_kept_folder(&result).map(finder_removal::preserved_files_message),
+            Some(format!("{}\n\n{FOLDER}", finder_removal::PRESERVED_FILES_SENTENCE))
+        );
+    }
+
+    #[test]
+    fn test_1882_r2_the_post_removal_step_carries_the_folder_on_success_and_nothing_when_nothing_was_kept() {
+        let (state, acct) = signed_in("signout-i1-ok");
+        let ok = finish_sign_out_after_removal(&state, &acct, false, Some(FOLDER.to_string()), |_| Ok(()));
+        assert_eq!(ok.as_ref().map(|report| report.outcome), Ok(SignOutOutcome::Completed));
+        assert_eq!(sign_out_kept_folder(&ok), Some(FOLDER));
+
+        let (state, acct) = signed_in("signout-i1-none");
+        let failed = finish_sign_out_after_removal(&state, &acct, false, None, |_| Err("locked".to_string()));
+        assert_eq!(
+            sign_out_kept_folder(&failed),
+            None,
+            "nothing kept → no alert, even on failure"
+        );
+
+        // Already signed out: a failing Keychain clear is only logged, and the folder still rides out.
+        let (state, acct) = signed_in("signout-i1-noop");
+        set_auth_present(&state, false);
+        let noop = finish_sign_out_after_removal(&state, &acct, true, Some(FOLDER.to_string()), |_| {
+            Err("locked".to_string())
+        });
+        assert_eq!(
+            noop.as_ref().map(|report| report.outcome),
+            Ok(SignOutOutcome::NotSignedIn)
+        );
+        assert_eq!(sign_out_kept_folder(&noop), Some(FOLDER));
+    }
+}
+
+/// Re-review P1 (round 3): Repair removes the Finder location, then saves the config. A save that
+/// fails after the removal must still show the kept folder, as a failed sign-out does (review I1):
+/// the removal cannot be undone, and a retry finds no domain, so the folder would never be named.
+#[cfg(test)]
+mod repair_kept_folder_tests {
+    use super::{DesktopConfig, finder_removal, finish_repair_after_removal};
+
+    const FOLDER: &str = "/Users/someone/Library/CloudStorage/Beebeeb-Beebeeb (10-10-2026 10:50)";
+
+    /// What the production surface would raise: `surface_kept_folder` saves the record then shows
+    /// `kept_folder_alert`'s text. The text is the part that must still be produced.
+    type Alert = Option<(&'static str, String)>;
+
+    #[test]
+    fn test_1882_r3_a_repair_whose_save_fails_after_the_removal_still_names_the_kept_folder() {
+        let mut cfg = DesktopConfig::default();
+        let mut alert: Alert = None;
+        let mut raised = 0;
+        let result = finish_repair_after_removal(
+            &mut cfg,
+            Some(FOLDER),
+            true,
+            |_| Err("No space left on device".to_string()),
+            |location| {
+                raised += 1;
+                alert = finder_removal::kept_folder_alert(location);
+            },
+        );
+        let error = result.expect_err("the save failed");
+        assert!(
+            error.starts_with(finder_removal::REPAIR_FAILED_AFTER_REMOVAL_CODE)
+                && error.contains("No space left on device"),
+            "the save error is still the error, now marked as after the removal: {error}"
+        );
+        assert_eq!(raised, 1, "the folder is shown once");
+        assert_eq!(
+            alert,
+            Some((
+                finder_removal::PRESERVED_FILES_TITLE,
+                format!("{}\n\n{FOLDER}", finder_removal::PRESERVED_FILES_SENTENCE)
+            )),
+            "the alert text names the folder before the error returns"
+        );
+    }
+
+    #[test]
+    fn test_1882_r3_a_repair_whose_save_fails_with_nothing_kept_shows_nothing() {
+        let mut cfg = DesktopConfig::default();
+        let mut alert: Alert = None;
+        let result = finish_repair_after_removal(
+            &mut cfg,
+            None,
+            true,
+            |_| Err("No space left on device".to_string()),
+            |location| alert = finder_removal::kept_folder_alert(location),
+        );
+        assert!(
+            result
+                .expect_err("the save failed")
+                .starts_with(finder_removal::REPAIR_FAILED_AFTER_REMOVAL_CODE)
+        );
+        assert_eq!(alert, None, "nothing kept → no alert, even when the save fails");
+    }
+
+    /// 1882 r4: Repair's failure copy says the location is gone only when it IS gone. A removal that
+    /// itself failed (it may still have kept a folder, review M2) leaves the Finder location in
+    /// place, so a failed save there keeps the plain error and the old "nothing to undo" note.
+    #[test]
+    fn test_1882_r4_a_failed_save_after_a_failed_removal_keeps_the_plain_error() {
+        let mut cfg = DesktopConfig::default();
+        let mut alert: Alert = None;
+        let result = finish_repair_after_removal(
+            &mut cfg,
+            Some(FOLDER),
+            false,
+            |_| Err("No space left on device".to_string()),
+            |location| alert = finder_removal::kept_folder_alert(location),
+        );
+        assert_eq!(result, Err("No space left on device".to_string()));
+        assert!(alert.is_some(), "a folder kept with the failed removal is still shown");
+    }
+
+    #[test]
+    fn test_1882_r3_a_repair_that_saves_shows_no_extra_alert() {
+        // The Repair result carries the folder to the Sync tab's row; a second alert would repeat it.
+        let mut cfg = DesktopConfig::default();
+        let mut raised = 0;
+        let result = finish_repair_after_removal(&mut cfg, Some(FOLDER), true, |_| Ok(()), |_| raised += 1);
+        assert_eq!(result, Ok(()));
+        assert_eq!(raised, 0);
+    }
+
+    #[test]
+    fn test_1882_r3_the_save_is_given_the_config_the_repair_recorded_into() {
+        let mut cfg = DesktopConfig::default();
+        assert!(finder_removal::record_kept_folder(&mut cfg, FOLDER));
+        let mut saw = None;
+        let result = finish_repair_after_removal(
+            &mut cfg,
+            Some(FOLDER),
+            true,
+            |cfg| {
+                saw = cfg.kept_unsynced_folder.clone();
+                Ok(())
+            },
+            |_| {},
+        );
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            saw.as_deref(),
+            Some(FOLDER),
+            "the record rides the same save as the install result"
         );
     }
 }

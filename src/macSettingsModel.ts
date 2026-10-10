@@ -157,6 +157,83 @@ export function repairNote(result: { pending_operations_preserved: number; warni
   return parts.length > 0 ? parts.join(' ') : null
 }
 
+/**
+ * Task 1882 (P0, spec docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md §5): the one
+ * sentence shown when removing Beebeeb from Finder kept files that had not reached the server.
+ * The folder's path follows it, in mono. The same string is `PRESERVED_FILES_SENTENCE` in
+ * src-tauri/src/finder_removal.rs, which the app's alert shows after a sign-out;
+ * tests/finderPreservedFiles.test.ts pins the two equal.
+ */
+export const PRESERVED_FILES_SENTENCE = 'Files that hadn’t reached your vault yet were kept on this Mac, in this folder:'
+
+/**
+ * Round 3 (re-review D3): the sentence on the saved kept-folder row in Settings › Sync. The row
+ * outlives the sign-out that kept the files, so after an account switch another account reads it:
+ * it says nothing about "your vault", and names no account or provider. The alert and the Repair
+ * line appear straight after the removal and keep `PRESERVED_FILES_SENTENCE`.
+ */
+export const KEPT_FOLDER_ROW_SENTENCE = 'Files that had not reached the server were kept in this folder:'
+
+/**
+ * 1882 r4: the code a failed Repair's error starts with when Repair failed AFTER it removed the
+ * Finder location. The same string is `REPAIR_FAILED_AFTER_REMOVAL_CODE` in
+ * src-tauri/src/finder_removal.rs; tests/finderPreservedFiles.test.ts pins the two equal.
+ */
+export const REPAIR_FAILED_AFTER_REMOVAL_CODE = 'repair_failed_after_removal'
+
+/** The title of the note a Repair that failed after the removal shows (1882 r4, lead ruling). */
+export const REPAIR_REMOVED_TITLE = 'Beebeeb was removed from Finder'
+
+/**
+ * 1882 r4: when Repair fails AFTER it removed the Finder location, "Nothing was changed that you
+ * need to undo" is false. Rust marks that failure with a code at the start of its error; this turns
+ * it into the note to show: Beebeeb is gone from Finder, and the button that adds it back
+ * (`button` is that button's own name on the surface that shows the note). The raw detail is never
+ * shown. Any other error, a failure before the removal, is not this note: `null`.
+ */
+export function repairRemovedNotice(reason: string, button: string): { title: string; body: string } | null {
+  const after = reason === REPAIR_FAILED_AFTER_REMOVAL_CODE || reason.startsWith(`${REPAIR_FAILED_AFTER_REMOVAL_CODE}:`)
+  return after ? { title: REPAIR_REMOVED_TITLE, body: repairRemovedBody(button) } : null
+}
+
+/** The sentence under that title; `button` is the name of the button that adds Beebeeb back. */
+export function repairRemovedBody(button: string): string {
+  return `Repair couldn’t finish, so Beebeeb is no longer in Finder. Choose ${button} to add it back.`
+}
+
+/** The kept-files note for a removal's result: the sentence and the exact folder, or null when macOS kept nothing. */
+export function preservedFilesNote(result: { preserved_location?: string | null }): { sentence: string; path: string } | null {
+  const path = result.preserved_location
+  if (typeof path !== 'string' || path.trim() === '') return null
+  return { sentence: PRESERVED_FILES_SENTENCE, path }
+}
+
+/** The same note as one line, for a surface without a mono line of its own (the compact window). */
+export function preservedFilesLine(result: { preserved_location?: string | null }): string | null {
+  const note = preservedFilesNote(result)
+  return note ? `${note.sentence} ${note.path}` : null
+}
+
+/**
+ * What the `dismiss_kept_unsynced_folder` command reports (1882 r5): `cleared` is whether the saved
+ * folder was the one the row showed and is now gone; `current` is the folder saved after the
+ * command, null when none is. The same two keys as `DismissOutcome` in `finder_removal.rs`.
+ */
+export interface DismissKeptFolderResult {
+  cleared: boolean
+  current: string | null
+}
+
+/**
+ * The folder the row shows after a Dismiss: none when Rust cleared it, otherwise the folder saved
+ * now. A row that showed an older folder when a newer one was kept is not cleared, so it shows the
+ * newer one instead of vanishing as if the person had dismissed it.
+ */
+export function keptFolderAfterDismiss(result: DismissKeptFolderResult): string | null {
+  if (result.cleared) return null
+  return preservedFilesNote({ preserved_location: result.current })?.path ?? null
+}
+
 // ── Sync > Keep on this Mac ─────────────────────────────────────────────────
 
 export interface FolderEntry {

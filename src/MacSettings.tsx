@@ -45,17 +45,24 @@ import {
   HELP_URL,
   keepCountLabel,
   keepOnMac,
+  KEPT_FOLDER_ROW_SENTENCE,
+  keptFolderAfterDismiss,
   NOTIFICATION_ROWS,
   planLine,
+  preservedFilesNote,
   REPAIR_BODY,
   REPAIR_TITLE,
   repairNote,
+  repairRemovedBody,
+  repairRemovedNotice,
+  REPAIR_REMOVED_TITLE,
   SETTINGS_TABS,
   settingsTabFromLocation,
   speedOptions,
   storageLine,
   tabAfterKey,
   updateRow,
+  type DismissKeptFolderResult,
   type SettingsTab,
 } from './macSettingsModel'
 import { Btn, Note, Select, SettingRow, SettingsGroup, SettingsIcon, Switch, ToggleRow } from './macSettingsParts'
@@ -493,7 +500,14 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
   const [attempting, setAttempting] = useState(false)
   const [repair, setRepair] = useState<RepairPhase>('idle')
   const [repairFailed, setRepairFailed] = useState(false)
+  // 1882 r4: a Repair that failed AFTER it removed the Finder location reads differently.
+  const [repairRemoved, setRepairRemoved] = useState(false)
   const [repairResult, setRepairResult] = useState<string | null>(null)
+  // Task 1882 round 2 (review I2, lead ruling): where macOS last kept Finder files that had not
+  // reached the server, after a sign-out, a Repair, the add rollback or the app-start sweep. Rust
+  // saves it in desktop.toml; this row shows it until the person dismisses it, so a tab switch,
+  // closing Settings or a restart cannot lose it.
+  const [kept, setKept] = useState<string | null>(null)
   const [tree, setTree] = useState<VaultItem[] | null>(null)
   const [treeLoadFailed, setTreeLoadFailed] = useState(false)
   const [chooser, setChooser] = useState(false)
@@ -519,19 +533,49 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
     else setTreeLoadFailed(true)
   }, [])
 
+  // A failed read shows no row: the folder stays saved, and the next open shows it again.
+  const loadKept = useCallback(async () => {
+    const result = await command<string | null>('kept_unsynced_folder')
+    const note = result.ok ? preservedFilesNote({ preserved_location: result.value }) : null
+    setKept(note ? note.path : null)
+  }, [])
+
   useEffect(() => {
     void loadFinder()
     void loadTree()
-  }, [loadFinder, loadTree])
+    void loadKept()
+  }, [loadFinder, loadTree, loadKept])
+
+  // A one-off action that gates nothing: a failure is a toast (house rule), and the row stays.
+  const dismissKept = async () => {
+    if (kept === null) return
+    const result = await command<DismissKeptFolderResult>('dismiss_kept_unsynced_folder', { path: kept })
+    if (!result.ok) {
+      showToast({
+        variant: 'error',
+        title: 'Couldn’t dismiss that note',
+        message: result.unsupported ? commandUnavailableLabel('dismiss_kept_unsynced_folder') : result.reason,
+      })
+      return
+    }
+    // 1882 r5: the row goes only if Rust cleared the folder it showed. If a newer folder was kept
+    // since the row was drawn, nothing was dismissed, and the row shows the newer one.
+    setKept(keptFolderAfterDismiss(result.value))
+  }
 
   const addToFinder = async () => {
     setAttempting(true)
     setRepairFailed(false)
+    setRepairRemoved(false)
     setRepairResult(null)
     setFinder(finderInstallStateWhileAttempting)
     const result = await command<FinderInstallState>('install_finder_location', { path: null })
     setAttempting(false)
     setFinder((previous) => finderInstallStateAfterAttempt(result, previous, commandUnavailableLabel('install_finder_location')))
+    // 1882 r5: the attempt's own cleanup, or the rollback of a failed one, may have kept files and
+    // saved their folder while it ran, whether it then succeeded or failed. The row read the saved
+    // folder once on open, so read it again here instead of waiting for a tab switch.
+    await loadKept()
   }
 
   // A one-off action that gates nothing: a failure is a toast (house rule).
@@ -549,15 +593,26 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
   const runRepair = async () => {
     setRepair('busy')
     setRepairFailed(false)
+    setRepairRemoved(false)
     setRepairResult(null)
     const result = await command<MacosIntegrationResetResult>('reset_macos_integration')
     setRepair('idle')
     if (!result.ok) {
       setRepairFailed(true)
+      const removed = repairRemovedNotice(result.reason, 'Add to Finder') !== null
+      setRepairRemoved(removed)
       await loadFinder()
       return
     }
     setRepairResult(repairNote(result.value))
+    // Rust saved the kept folder (if any) in the same save as the rest of Repair's result, and the
+    // row reads it back. This fallback covers one case only: the saved record cannot be READ back
+    // just now, so the folder this repair reported is still shown. It does not cover a failed
+    // SAVE: then Repair returns an error and takes the `!result.ok` branch above, and this code
+    // never runs. The app's own alert names the folder in that case (re-review P1).
+    await loadKept()
+    const reported = preservedFilesNote(result.value)
+    if (reported) setKept((current) => current ?? reported.path)
     await loadFinder()
   }
 
@@ -655,12 +710,26 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
             {row.message}
           </Note>
         ) : null}
-        {repairFailed ? (
+        {repairFailed && repairRemoved ? (
+          <Note kind="alert" surface="finder-repair" title={REPAIR_REMOVED_TITLE}>
+            {repairRemovedBody('Add to Finder')}
+          </Note>
+        ) : repairFailed ? (
           <Note kind="alert" surface="finder-repair" title="Couldn’t repair Beebeeb in Finder">
             Nothing was changed that you need to undo. Try again.
           </Note>
         ) : null}
         {repairResult ? <Note kind="status">{repairResult}</Note> : null}
+        {kept !== null ? (
+          <Note
+            kind="status"
+            reason={kept}
+            reasonWraps
+            actions={<Btn onClick={() => void dismissKept()}>Dismiss</Btn>}
+          >
+            {KEPT_FOLDER_ROW_SENTENCE}
+          </Note>
+        ) : null}
         <SettingRow
           name="keep"
           tall

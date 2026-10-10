@@ -17,9 +17,19 @@ unsafe extern "C" {
         error_buffer: *mut c_char,
         error_buffer_len: usize,
     ) -> i32;
-    fn beebeeb_fp_remove(error_buffer: *mut c_char, error_buffer_len: usize) -> i32;
+    fn beebeeb_fp_remove(
+        location_buffer: *mut c_char,
+        location_buffer_len: usize,
+        kept_state: *mut i32,
+        error_buffer: *mut c_char,
+        error_buffer_len: usize,
+    ) -> i32;
+    fn beebeeb_fp_kept_folder_state_for_path(path: *const c_char) -> i32;
 }
 
+/// Room for the folder macOS reports after a removal that kept files (task 1882). File-system
+/// paths on macOS are limited to `PATH_MAX` (1024) bytes, well under this.
+const PRESERVED_LOCATION_BUFFER_LEN: usize = 4096;
 
 /// How long `install()` waits for a freshly (re-)added domain to stabilize before
 /// giving up with a real timeout. Unchanged from the pre-1524-issue-4 behavior.
@@ -189,7 +199,7 @@ pub fn domain_user_enabled() -> Result<DomainUserEnabledState, String> {
 /// call, the just-created domain is removed again (unchanged cleanup behavior from
 /// the pre-1524-issue-4 implementation) so a failed install doesn't leave an orphaned
 /// domain registered.
-pub fn install() -> Result<InstallOutcome, String> {
+pub fn install() -> Result<InstallOutcome, crate::finder_removal::InstallFailure> {
     let existed_before_add = domain_exists()?;
 
     if existed_before_add
@@ -218,20 +228,78 @@ pub fn install() -> Result<InstallOutcome, String> {
     if wait_code < 0 {
         let setup_error =
             buffer_to_string(&error_buffer).unwrap_or_else(|| "File Provider operation failed".to_string());
-        if !existed_before_add
-            && let Err(cleanup_error) = remove()
-        {
-            return Err(format!("{setup_error}; cleanup failed: {cleanup_error}"));
+        if !existed_before_add {
+            // Review M1: this cleanup is a removal too; its kept folder rides the error out.
+            return Err(crate::finder_removal::install_cleanup_failure(setup_error, remove()));
         }
-        return Err(setup_error);
+        return Err(setup_error.into());
     }
 
     Ok(InstallOutcome::Installed)
 }
 
-#[allow(dead_code)]
-pub fn remove() -> Result<(), String> {
-    call_bridge(beebeeb_fp_remove).map(|_| ())
+/// The bridge's own folder check on a path (the same function the removal runs on the URL macOS
+/// returned). `stat` always answers in the sandbox, so a folder that appeared since is seen.
+/// A path that cannot be handed over (an interior NUL) is shown, never hidden.
+fn kept_state_for_path(path: &str) -> i32 {
+    match std::ffi::CString::new(path) {
+        Ok(c_path) => unsafe { beebeeb_fp_kept_folder_state_for_path(c_path.as_ptr()) },
+        Err(_) => crate::finder_removal::KEPT_UNCHECKED,
+    }
+}
+
+/// Decodes the bridge's reply to a removal, for EVERY removal (`remove()` and the sweep). A folder
+/// that reads as missing is looked at again first (re-review D1, `settle_kept_state`), so the one
+/// early look inside the completion handler cannot hide files macOS puts there a moment later.
+/// `finder_removal`'s source pin keeps this the only place that decodes a reply.
+fn decode_removal(
+    code: i32,
+    kept_state: i32,
+    location_buffer: &[c_char],
+    error_buffer: &[i8],
+) -> Result<crate::finder_removal::DomainRemoval, crate::finder_removal::RemovalFailure> {
+    decode_removal_with(
+        code,
+        kept_state,
+        location_buffer,
+        error_buffer,
+        kept_state_for_path,
+        std::thread::sleep,
+    )
+}
+
+/// [`decode_removal`] with the look and the wait injected, so a test drives the real decode
+/// without sleeping.
+fn decode_removal_with(
+    code: i32,
+    kept_state: i32,
+    location_buffer: &[c_char],
+    error_buffer: &[i8],
+    check: impl FnMut(&str) -> i32,
+    wait: impl FnMut(std::time::Duration),
+) -> Result<crate::finder_removal::DomainRemoval, crate::finder_removal::RemovalFailure> {
+    let location = buffer_to_exact_string(location_buffer);
+    let kept_state = crate::finder_removal::settle_kept_state(kept_state, location.as_deref(), check, wait);
+    crate::finder_removal::removal_from_bridge(code, kept_state, location, buffer_to_string(error_buffer))
+}
+
+/// Removes our Finder location, keeping the files that never reached the server (task 1882,
+/// `NSFileProviderDomainRemovalModePreserveDirtyUserData`). The result says whether macOS kept
+/// anything, checked on disk (round 2, spec §4), and names the folder if so.
+pub fn remove() -> Result<crate::finder_removal::DomainRemoval, crate::finder_removal::RemovalFailure> {
+    let mut location_buffer = [0 as c_char; PRESERVED_LOCATION_BUFFER_LEN];
+    let mut kept_state: i32 = crate::finder_removal::KEPT_NONE_REPORTED;
+    let mut error_buffer = [0 as c_char; 1024];
+    let code = unsafe {
+        beebeeb_fp_remove(
+            location_buffer.as_mut_ptr(),
+            location_buffer.len(),
+            &mut kept_state,
+            error_buffer.as_mut_ptr(),
+            error_buffer.len(),
+        )
+    };
+    decode_removal(code, kept_state, &location_buffer, &error_buffer)
 }
 
 /// Result of a best-effort working-set signal (task 1697).
@@ -277,6 +345,9 @@ pub struct StaleDomainCleanup {
     /// Ok(()) = removed, Err(message) = the system refused (logged, NOT
     /// retried here — the next app start retries the whole sweep).
     pub removals: Vec<(String, Result<(), String>)>,
+    /// Task 1882: the folders where macOS kept un-synced files of a removed
+    /// domain, one per such removal. Shown to the person, never logged.
+    pub preserved_locations: Vec<String>,
     /// Domains found foreign but not attempted (enumeration/other errors).
     pub skipped: Vec<String>,
     /// Our own domain was present (or not) — informational only; it is never
@@ -304,6 +375,9 @@ mod cleanup_ffi {
         ) -> i32;
         fn beebeeb_fp_remove_domain_by_id(
             identifier: *const c_char,
+            location_buffer: *mut c_char,
+            location_buffer_len: usize,
+            kept_state: *mut i32,
             error_buffer: *mut c_char,
             error_buffer_len: usize,
         ) -> i32;
@@ -335,22 +409,26 @@ mod cleanup_ffi {
             .collect())
     }
 
-    pub fn remove_domain(identifier: &str) -> Result<(), String> {
+    /// Task 1882: keeps the domain's un-synced files, like every removal.
+    pub fn remove_domain(
+        identifier: &str,
+    ) -> Result<crate::finder_removal::DomainRemoval, crate::finder_removal::RemovalFailure> {
+        let mut location_buffer = [0 as c_char; super::PRESERVED_LOCATION_BUFFER_LEN];
+        let mut kept_state: i32 = crate::finder_removal::KEPT_NONE_REPORTED;
         let mut error_buffer = [0i8; 1024];
         let code = unsafe {
             let c_id = std::ffi::CString::new(identifier)
                 .map_err(|_| "domain identifier contained a NUL byte".to_string())?;
             beebeeb_fp_remove_domain_by_id(
                 c_id.as_ptr(),
+                location_buffer.as_mut_ptr(),
+                location_buffer.len(),
+                &mut kept_state,
                 error_buffer.as_mut_ptr(),
                 error_buffer.len(),
             )
         };
-        if code < 0 {
-            return Err(super::buffer_to_string(&error_buffer)
-                .unwrap_or_else(|| "remove File Provider domain failed".to_string()));
-        }
-        Ok(())
+        super::decode_removal(code, kept_state, &location_buffer, &error_buffer)
     }
 }
 
@@ -374,14 +452,24 @@ pub fn cleanup_stale_domains() -> Result<StaleDomainCleanup, String> {
     let stale = stale_domain_identifiers(&domains, DOMAIN_IDENTIFIER);
     let mut cleanup = StaleDomainCleanup {
         removals: Vec::new(),
+        preserved_locations: Vec::new(),
         skipped: Vec::new(),
         ours_present,
     };
     for identifier in stale {
         match cleanup_ffi::remove_domain(identifier) {
-            Ok(()) => cleanup.removals.push((identifier.to_string(), Ok(()))),
-            Err(error) => {
-                tracing::warn!(identifier = %identifier, error = %error, "stale-domain removal failed; the next app start retries");
+            Ok(removal) => {
+                if let Some(location) = removal.kept_location("stale-domain sweep") {
+                    cleanup.preserved_locations.push(location);
+                }
+                cleanup.removals.push((identifier.to_string(), Ok(())));
+            }
+            Err(failure) => {
+                tracing::warn!(identifier = %identifier, error = %failure, "stale-domain removal failed; the next app start retries");
+                // Review M2: a folder kept with the error still reaches the person.
+                if let Some(location) = failure.kept_location("stale-domain sweep") {
+                    cleanup.preserved_locations.push(location);
+                }
                 cleanup.skipped.push(identifier.to_string());
             }
         }
@@ -431,6 +519,15 @@ fn call_bridge(function: unsafe extern "C" fn(*mut c_char, usize) -> i32) -> Res
     } else {
         message
     })
+}
+
+/// Like `buffer_to_string`, but never trims: a folder the system reported is shown byte for byte
+/// (task 1882). `None` when the buffer is empty.
+fn buffer_to_exact_string(buffer: &[c_char]) -> Option<String> {
+    let text = unsafe { CStr::from_ptr(buffer.as_ptr()) }
+        .to_string_lossy()
+        .into_owned();
+    if text.is_empty() { None } else { Some(text) }
 }
 
 fn buffer_to_string(buffer: &[i8]) -> Option<String> {
@@ -580,5 +677,200 @@ mod tests {
             )),
             Err("Timed out waiting for the Beebeeb File Provider domain to become available".to_string())
         );
+    }
+}
+
+/// Task 1882 round 2 (device K-F2, review I3, spec §4/§8): the bridge's own folder check, run on
+/// a real disk through its test-only entry point, which builds the same `NSURL` and calls the
+/// same function the removal calls.
+#[cfg(test)]
+mod kept_folder_check_tests {
+    use crate::finder_removal::{KEPT_EMPTY, KEPT_HAS_ENTRIES, KEPT_MISSING, KEPT_NONE_REPORTED, KEPT_UNCHECKED};
+    use std::ffi::CString;
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::beebeeb_fp_kept_folder_state_for_path;
+
+    fn state_of(path: &std::path::Path) -> i32 {
+        let c_path = CString::new(path.as_os_str().as_encoded_bytes()).expect("no NUL in a temp path");
+        unsafe { beebeeb_fp_kept_folder_state_for_path(c_path.as_ptr()) }
+    }
+
+    #[test]
+    fn test_1882_r2_bridge_check_a_missing_folder_is_missing() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        assert_eq!(
+            state_of(&dir.path().join("Beebeeb-Drive (10-10-2026 10:52)")),
+            KEPT_MISSING
+        );
+        assert_eq!(
+            unsafe { beebeeb_fp_kept_folder_state_for_path(std::ptr::null()) },
+            KEPT_NONE_REPORTED,
+            "no URL is 'none reported'"
+        );
+    }
+
+    #[test]
+    fn test_1882_r2_bridge_check_an_empty_folder_is_empty() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let kept = dir.path().join("Beebeeb-Beebeeb (10-10-2026 10:50)");
+        std::fs::create_dir(&kept).expect("kept folder");
+        assert_eq!(state_of(&kept), KEPT_EMPTY);
+    }
+
+    #[test]
+    fn test_1882_r2_bridge_check_a_folder_with_one_item_has_entries() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let kept = dir.path().join("Beebeeb-Beebeeb (10-10-2026 10:50)");
+        std::fs::create_dir(&kept).expect("kept folder");
+        std::fs::write(kept.join("k1882.txt"), b"never uploaded").expect("kept file");
+        assert_eq!(state_of(&kept), KEPT_HAS_ENTRIES);
+    }
+
+    #[test]
+    fn test_1882_r2_bridge_check_a_hidden_item_or_a_single_file_counts() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let hidden_only = dir.path().join("hidden-only");
+        std::fs::create_dir(&hidden_only).expect("folder");
+        std::fs::write(hidden_only.join(".env"), b"a dotfile is the person's data too").expect("dotfile");
+        assert_eq!(state_of(&hidden_only), KEPT_HAS_ENTRIES);
+
+        let single_file = dir.path().join("kept-file.bin");
+        std::fs::write(&single_file, b"one kept file").expect("file");
+        assert_eq!(state_of(&single_file), KEPT_HAS_ENTRIES);
+    }
+
+    #[test]
+    fn test_1882_r2_bridge_check_a_folder_it_may_not_list_is_unchecked() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).expect("folder");
+        std::fs::write(locked.join("k1882.txt"), b"x").expect("file");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("chmod 000");
+        let state = state_of(&locked);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).expect("chmod back");
+        assert_eq!(
+            state, KEPT_UNCHECKED,
+            "an existing folder the app may not list is shown (spec §4's fallback), never hidden"
+        );
+    }
+
+    // ── round 3 (re-review D1): a missing folder is looked at again, on a real disk ──────────
+
+    /// The production settle, with the real check on a real disk, and a wait that does not sleep:
+    /// it runs `on_wait` (what macOS might do meanwhile) and counts the waits.
+    fn settle_on_disk(path: &std::path::Path, mut on_wait: impl FnMut(usize)) -> (i32, usize) {
+        let mut waits = 0usize;
+        let state =
+            crate::finder_removal::settle_kept_state(KEPT_MISSING, path.to_str(), super::kept_state_for_path, |_| {
+                waits += 1;
+                on_wait(waits);
+            });
+        (state, waits)
+    }
+
+    #[test]
+    fn test_1882_r3_a_folder_filled_after_the_completion_handler_is_seen() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let kept = dir.path().join("Beebeeb-Beebeeb (10-10-2026 10:50)");
+        assert_eq!(state_of(&kept), KEPT_MISSING, "missing when the handler runs");
+        let (state, waits) = settle_on_disk(&kept, |wait| {
+            if wait == 2 {
+                std::fs::create_dir(&kept).expect("kept folder");
+                std::fs::write(kept.join("k1882.txt"), b"never uploaded").expect("kept file");
+            }
+        });
+        assert_eq!(
+            state, KEPT_HAS_ENTRIES,
+            "the files that appeared during the second wait are found"
+        );
+        assert_eq!(waits, 2, "and it stops looking once it has seen them");
+    }
+
+    #[test]
+    fn test_1882_r3_a_folder_that_exists_but_is_still_empty_is_seen() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let kept = dir.path().join("Beebeeb-Beebeeb (10-10-2026 10:50)");
+        let (state, _) = settle_on_disk(&kept, |wait| {
+            if wait == 1 {
+                std::fs::create_dir(&kept).expect("kept folder");
+            }
+        });
+        assert_eq!(state, KEPT_EMPTY, "an existing folder is never reported missing");
+    }
+
+    #[test]
+    fn test_1882_r3_a_folder_missing_throughout_stays_missing_after_a_bounded_look() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (state, waits) = settle_on_disk(&dir.path().join("Beebeeb-Drive (10-10-2026 10:52)"), |_| {});
+        assert_eq!(state, KEPT_MISSING);
+        assert_eq!(waits, crate::finder_removal::KEPT_MISSING_RECHECKS as usize);
+    }
+
+    fn buffer_of(text: &str) -> [std::os::raw::c_char; 4096] {
+        let mut buffer = [0 as std::os::raw::c_char; 4096];
+        for (slot, byte) in buffer.iter_mut().zip(text.bytes()) {
+            *slot = byte as std::os::raw::c_char;
+        }
+        buffer
+    }
+
+    /// The real decode (the one `remove()` and the sweep both call), on a real disk, with the
+    /// wait injected: files that appear after the completion handler reach the person.
+    #[test]
+    fn test_1882_r3_the_decode_uses_what_the_settle_found() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let kept = dir.path().join("Beebeeb-Beebeeb (10-10-2026 10:50)");
+        let location = kept.to_str().expect("utf-8 temp path").to_string();
+        for (code, error) in [(0, ""), (-1, "busy (NSFileProviderErrorDomain -1001)")] {
+            let _ = std::fs::remove_dir_all(&kept);
+            let mut waits = 0;
+            let decoded = super::decode_removal_with(
+                code,
+                KEPT_MISSING,
+                &buffer_of(&location),
+                &buffer_of(error),
+                super::kept_state_for_path,
+                |_| {
+                    waits += 1;
+                    if waits == 3 {
+                        std::fs::create_dir(&kept).expect("kept folder");
+                        std::fs::write(kept.join("k1882.txt"), b"never uploaded").expect("kept file");
+                    }
+                },
+            );
+            let kept_by_it = match decoded {
+                Ok(removal) => removal.kept_location("test"),
+                Err(failure) => {
+                    assert_eq!(failure.message, error, "the error is reported as before");
+                    failure.kept_location("test")
+                }
+            };
+            assert_eq!(
+                kept_by_it,
+                Some(location.clone()),
+                "code {code}: the late files are kept"
+            );
+            assert_eq!(waits, 3, "code {code}: it stopped looking once it saw them");
+        }
+    }
+
+    #[test]
+    fn test_1882_r3_the_decode_reports_nothing_kept_for_a_folder_missing_throughout() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let location = dir.path().join("Beebeeb-Drive (10-10-2026 10:52)");
+        let location = location.to_str().expect("utf-8 temp path");
+        let mut waits = 0;
+        let decoded = super::decode_removal_with(
+            0,
+            KEPT_MISSING,
+            &buffer_of(location),
+            &[0i8; 16],
+            super::kept_state_for_path,
+            |_| waits += 1,
+        )
+        .expect("the removal succeeded");
+        assert_eq!(decoded.kept_location("test"), None);
+        assert_eq!(waits, crate::finder_removal::KEPT_MISSING_RECHECKS as usize);
     }
 }

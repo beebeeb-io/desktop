@@ -2,6 +2,7 @@
 
 **Status:** design approved section by section by Guus on 2026-10-06; written spec awaiting his review.
 **Amended:** 2026-10-06 after the plan review, for rulings R8–R11 and the plan's findings (`docs/superpowers/plans/2026-10-06-macos-finder-setup-reconciler.md`, "Spec issues found"). Each amendment is inline: the original is struck through and kept readable, and the replacement sits beneath it. — lead, 2026-10-06 (plan review)
+**Amended:** 2026-10-10 for task 1882 (P0, on `main` first): every removal this spec names (sign-out, Repair, the reconciler's remove) keeps files that never reached the server, with `NSFileProviderDomainRemovalModePreserveDirtyUserData`, and shows the person the folder macOS reports. Rule, copy and surfaces: `docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md`. The source pin in `src-tauri/src/finder_removal.rs` fails this branch's rebase until its removal calls carry the mode. — lane 1882, 2026-10-10
 **Date:** 6 Oct 2026
 **Repo:** desktop (macOS only; Windows and Linux behaviour is unchanged)
 **Task:** allocated together with the implementation plan.
