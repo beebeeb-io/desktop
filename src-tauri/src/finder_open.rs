@@ -285,6 +285,84 @@ mod tests {
         );
     }
 
+    /// Fix round 1 (m2): the scope is released IN the completion handler, which is the last thing that needs it, not
+    /// somewhere after `openURL:` (before LaunchServices has read the URL). The stop sits between the handler's
+    /// parameter list and the semaphore signal that wakes the waiting call.
+    #[test]
+    fn test_1885_the_scope_is_stopped_inside_the_completion_handler() {
+        let bridge = read("macos/FileProviderBridge.m");
+        let open_url = c_function(&bridge, "static int BeebeebOpenURLAndWait(");
+        let handler = open_url
+            .find("completionHandler:^(NSRunningApplication *application, NSError *error) {")
+            .expect("the open's completion handler");
+        let handler = &open_url[handler..];
+        let handler = &handler[..handler.find("}];").expect("the handler ends")];
+        let stop = handler.find("[scope stop];").expect("the handler stops the scope");
+        let signal = handler
+            .find("dispatch_semaphore_signal(semaphore)")
+            .expect("the handler wakes the waiter");
+        assert!(
+            stop < signal,
+            "the scope is stopped before the waiter is woken:\n{handler}"
+        );
+        let stops: Vec<usize> = open_url.match_indices("[scope stop];").map(|(at, _)| at).collect();
+        let timer = open_url.find("dispatch_after(").expect("the safety timer");
+        assert_eq!(
+            stops.len(),
+            2,
+            "two stops, the handler's and the safety timer's, and none between the open call and the wait:\n{open_url}"
+        );
+        assert!(stops[1] > timer, "the second stop is the safety timer's:\n{open_url}");
+    }
+
+    /// Fix round 1 (m3): a handler that never comes still releases the scope, and the scope is released at most once.
+    /// `NSWorkspace` has no way to cancel an open, so after the wait times out the answer may still arrive; a safety
+    /// timer stops the scope if it does not, and the scope object stops once whichever of the two comes first. (A
+    /// late SUCCESS still opens the window after the caller was told it failed: written in the helper's comment.)
+    #[test]
+    fn test_1885_a_handler_that_never_comes_still_releases_the_scope_exactly_once() {
+        let bridge = read("macos/FileProviderBridge.m");
+        let open_url = c_function(&bridge, "static int BeebeebOpenURLAndWait(");
+        let timer = open_url.find("dispatch_after(").expect("the open has a safety timer");
+        let timer = &open_url[timer..];
+        let timer = &timer[..timer.find("});").expect("the timer block ends")];
+        assert!(
+            timer.contains("BeebeebScopeSafetySeconds") && timer.contains("[scope stop];"),
+            "the safety timer stops the scope after the safety interval:\n{timer}"
+        );
+        assert!(
+            bridge.contains("static const int64_t BeebeebScopeSafetySeconds = 60;"),
+            "the safety interval is a named constant, 60 s"
+        );
+        let scope_class = {
+            let from = bridge.find("@implementation BeebeebScope").expect("the scope class");
+            &bridge[from..from + bridge[from..].find("@end").expect("it ends")]
+        };
+        let stop = scope_class.find("- (void)stop {").expect("the stop method");
+        let stop = &scope_class[stop..];
+        let guard = stop.find("if (_active) {").expect("a stop checks it is still active");
+        let clear = stop.find("_active = NO;").expect("it marks the scope stopped");
+        let release = stop
+            .find("stopAccessingSecurityScopedResource")
+            .expect("it releases the scope");
+        assert!(
+            guard < clear && clear < release,
+            "stop: check, mark, then release (once):\n{stop}"
+        );
+        assert!(
+            stop.contains("@synchronized(self)"),
+            "the check and the mark are one step:\n{stop}"
+        );
+        let comment = &bridge[bridge
+            .find("static int BeebeebOpenURLAndWait(")
+            .unwrap()
+            .saturating_sub(1200)..];
+        assert!(
+            comment.contains("after the caller has already been told it failed"),
+            "the late-success edge is written down where the timeout is"
+        );
+    }
+
     /// Fix round 1 (I1), in the bridge: the RESOLVE (a File Provider call, run under Rust's gate) hands back a retained
     /// handle and opens nothing; the OPEN and the REVEAL (run after the gate is released) take the handle first, make
     /// no File Provider call, and never turn the URL into a path string (a path carries no scope).
