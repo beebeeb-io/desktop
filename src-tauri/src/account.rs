@@ -178,7 +178,8 @@ pub struct AccountRuntime {
     pub(crate) engine_refusal: Mutex<Option<crate::account_binding::Refusal>>,
     /// Lead ruling F9 (spec 2026-10-06 R8): how many sign-ins have asked for the operations paused for `auth` to be due
     /// again. A sign-in on a Mac that puts a session in memory moves it on in its write turn, after the session is
-    /// there. Windows and Linux never move it.
+    /// there, and so does the startup check that confirmed the stored token (F9 review I-2). Windows and Linux never
+    /// move it.
     pub(crate) auth_resume_asked: AtomicU64,
     /// The ask the last engine start served (it made those operations due before the engine existed). Written only
     /// under the engine slot.

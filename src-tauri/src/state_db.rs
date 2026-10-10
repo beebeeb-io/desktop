@@ -718,6 +718,10 @@ pub enum OperationPauseReason {
     Quota,
     Permission,
     Locked,
+    /// Lead ruling, F9 review I-1 (spec 2026-10-06 R8, §5.6): paused for `auth` when the server said the vault key this
+    /// Mac kept was no longer the account's. The names in these operations were encrypted under that key, so they are
+    /// kept and never sent; no resume makes them due again.
+    KeyReplaced,
 }
 
 impl OperationPauseReason {
@@ -727,6 +731,7 @@ impl OperationPauseReason {
             OperationPauseReason::Quota => "quota",
             OperationPauseReason::Permission => "permission",
             OperationPauseReason::Locked => "locked",
+            OperationPauseReason::KeyReplaced => "key_replaced",
         }
     }
 }
@@ -3190,6 +3195,25 @@ impl StateDb {
         )
     }
 
+    /// Lead ruling, F9 review I-1 (spec 2026-10-06 R8, §5.6): the vault key this Mac kept is no longer the account's,
+    /// so every operation paused for `auth` (queued with names encrypted under that key) is paused for `key_replaced`
+    /// instead: kept, never sent, and never made due by [`Self::resume_operations_paused_for_auth`]. Operations paused
+    /// for any other reason are untouched. Returns how many were re-marked.
+    pub fn hold_operations_paused_for_auth_as_key_replaced(&self, now: i64) -> Result<usize> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "UPDATE operation_queue
+             SET paused_reason = ?2,
+                 updated_at = ?1
+             WHERE paused_reason = ?3",
+            params![
+                now,
+                OperationPauseReason::KeyReplaced.as_str(),
+                OperationPauseReason::Auth.as_str()
+            ],
+        )
+    }
+
     pub fn record_operation_pause(
         &self,
         op_id: &str,
@@ -4477,6 +4501,82 @@ mod tests {
             "nothing left to resume"
         );
         assert_eq!(due(500).len(), 2, "and a second call moves nothing");
+    }
+
+    /// Lead ruling, F9 review I-1: after a key replacement, the operations paused for `auth` are re-marked
+    /// `key_replaced`. They stay queued and paused, with their attempts; the auth resume never makes them due again; the
+    /// diagnostics count them under their own reason; every other pause, and an unpaused operation, is untouched.
+    #[test]
+    fn after_a_key_replacement_the_auth_paused_operations_are_kept_and_never_resumed() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let mut auth = queued_op("a1", OperationKind::CreateFolder, "f-a");
+        auth.attempts = 2;
+        auth.next_retry_at = 10_000;
+        db.enqueue_operation(&auth).unwrap();
+        for (id, reason) in [
+            ("a1", OperationPauseReason::Auth),
+            ("a2", OperationPauseReason::Auth),
+            ("q1", OperationPauseReason::Quota),
+            ("p1", OperationPauseReason::Permission),
+            ("l1", OperationPauseReason::Locked),
+        ] {
+            if id != "a1" {
+                db.enqueue_operation(&queued_op(id, OperationKind::UploadFile, id))
+                    .unwrap();
+            }
+            db.record_operation_pause(id, reason, Some("HTTP 401 Unauthorized"), 5)
+                .unwrap();
+        }
+        let mut unpaused = queued_op("d1", OperationKind::UploadFile, "f-d");
+        unpaused.created_at = 2;
+        db.enqueue_operation(&unpaused).unwrap();
+        let due = |now| {
+            db.list_due_operations(now)
+                .unwrap()
+                .into_iter()
+                .map(|op| op.op_id)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            db.hold_operations_paused_for_auth_as_key_replaced(500).unwrap(),
+            2,
+            "both auth-paused operations"
+        );
+        let reasons = BTreeMap::from([
+            ("key_replaced".to_string(), 2),
+            ("locked".to_string(), 1),
+            ("permission".to_string(), 1),
+            ("quota".to_string(), 1),
+        ]);
+        let diagnostics = db.queue_diagnostics(500).unwrap();
+        assert_eq!(
+            diagnostics.paused_by_reason, reasons,
+            "counted under their own reason; every other pause stays"
+        );
+        assert_eq!((diagnostics.queued, diagnostics.paused), (6, 5), "kept, not purged");
+
+        assert_eq!(
+            db.resume_operations_paused_for_auth(600).unwrap(),
+            0,
+            "the auth resume finds none"
+        );
+        assert_eq!(due(700), vec!["d1".to_string()], "never due again");
+        assert_eq!(db.queue_diagnostics(700).unwrap().paused_by_reason, reasons);
+        let attempts: i64 =
+            db.0.lock()
+                .unwrap()
+                .query_row("SELECT attempts FROM operation_queue WHERE op_id = 'a1'", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+        assert_eq!(attempts, 2, "its attempts are kept");
+        assert_eq!(
+            db.hold_operations_paused_for_auth_as_key_replaced(800).unwrap(),
+            0,
+            "a second call moves nothing"
+        );
     }
 
     #[test]

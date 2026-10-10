@@ -124,7 +124,7 @@ pub const QUEUE_KIND_LABELS: &[&str] = &[
     "restore_file",
     "restore_version",
 ];
-pub const PAUSE_REASON_LABELS: &[&str] = &["auth", "quota", "permission", "locked"];
+pub const PAUSE_REASON_LABELS: &[&str] = &["auth", "quota", "permission", "locked", "key_replaced"];
 
 /// `label` if it is one of `allowed`, otherwise `other`.
 pub fn allowed_label(label: &str, allowed: &[&str]) -> String {
@@ -1332,6 +1332,7 @@ mod tests {
         assert_eq!(allowed_label("upload_version", QUEUE_KIND_LABELS), "upload_version");
         assert_eq!(allowed_label("Tax 2025", QUEUE_KIND_LABELS), "other");
         assert_eq!(allowed_label("auth", PAUSE_REASON_LABELS), "auth");
+        assert_eq!(allowed_label("key_replaced", PAUSE_REASON_LABELS), "key_replaced");
         assert_eq!(allowed_label("/Users/guus", PAUSE_REASON_LABELS), "other");
     }
 }
