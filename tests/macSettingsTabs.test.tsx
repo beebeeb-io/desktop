@@ -483,7 +483,7 @@ describe('Account tab', () => {
 describe('Sync tab', () => {
   const ready = (over: object = {}) => ({ state: { status: 'ready', config: { ...config, ...over } }, save: async () => {}, reload: async () => {} })
 
-  function syncBackend(opts: { finder?: any; install?: (a: any) => unknown; tree?: any[]; repair?: (a: any) => unknown; pin?: (a: any) => unknown; gate?: Promise<void>; kept?: string | null; dismissFails?: boolean; keptReadFails?: boolean } = {}) {
+  function syncBackend(opts: { finder?: any; install?: (a: any) => unknown; tree?: any[]; repair?: (a: any) => unknown; pin?: (a: any) => unknown; gate?: Promise<void>; kept?: string | null; dismissFails?: boolean; keptReadFails?: boolean; removesBeforeFailing?: boolean } = {}) {
     // `kept` is the folder Rust saved in desktop.toml (task 1882 round 2, review I2).
     const st: { finder: any; kept: string | null } = { finder: opts.finder ?? finder.installed, kept: opts.kept ?? null }
     return {
@@ -495,6 +495,8 @@ describe('Sync tab', () => {
           return opts.install ? opts.install(a) : st.finder
         },
         reset_macos_integration: (a: any) => {
+          // A Repair that fails AFTER it removed the Finder location: the domain is already gone.
+          if (opts.removesBeforeFailing) st.finder = finder.missing
           const result: any = opts.repair ? opts.repair(a) : { removed_file_provider_domain: true, disabled_autostart: true, removed_socket: true, removed_cache_files: 0, skipped_cache_files: 0, pending_operations_preserved: 0, warnings: [] }
           st.finder = finder.missing
           // Like Rust: a repair that kept files saves the folder for the row.
@@ -745,6 +747,39 @@ describe('Sync tab', () => {
     expect(visibleErrorSurfaces(m)).toHaveLength(1)
     expect(m.toasts).toEqual([])
     expect(visibleText(m)).not.toContain('socket busy')
+  })
+
+  // 1882 r4 (lead ruling): after the Finder location was removed, "Nothing was changed that you need
+  // to undo" is false. The two failures read differently; the raw detail is never shown.
+  const alertText = (m: Mounted) => find(m, (el) => el.props['data-error-surface'] === 'finder-repair').map((el) => readable(expand(el)).join(' '))
+
+  test('a repair that fails before the removal keeps the old copy, word for word', async () => {
+    const { m } = await openSync({ repair: () => { throw new Error('socket busy') } })
+    await press(m, 'Repair…')
+    await press(m, 'Repair')
+    const [text] = alertText(m)
+    expect(text).toContain('Couldn’t repair Beebeeb in Finder')
+    expect(text).toContain('Nothing was changed that you need to undo. Try again.')
+    expect(text).not.toContain('was removed from Finder')
+  })
+
+  test('a repair that fails after the removal says Beebeeb was removed and how to add it back, in one alert', async () => {
+    const { m } = await openSync({
+      removesBeforeFailing: true,
+      repair: () => { throw new Error(`${model.REPAIR_FAILED_AFTER_REMOVAL_CODE}: No space left on device`) },
+    })
+    await press(m, 'Repair…')
+    await press(m, 'Repair')
+    expect(find(m, (el) => el.props['data-error-surface'] === 'finder-repair')).toHaveLength(1)
+    expect(visibleErrorSurfaces(m)).toHaveLength(1)
+    const [text] = alertText(m)
+    expect(text).toContain('Beebeeb was removed from Finder')
+    expect(text).toContain('Repair couldn’t finish, so Beebeeb is no longer in Finder. Choose Add to Finder to add it back.')
+    expect(visibleText(m)).not.toContain('Nothing was changed that you need to undo')
+    expect(visibleText(m)).not.toContain('Couldn’t repair Beebeeb in Finder')
+    expect(visibleText(m)).not.toContain('No space left')
+    expect(m.toasts).toEqual([])
+    expect(buttons(m)).toContain('Add to Finder') // the sentence is true: the button it names is there
   })
 
   test('a successful repair whose refreshed Finder state cannot be read stops claiming Added and offers Try again', async () => {

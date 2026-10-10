@@ -239,6 +239,16 @@ warning).~~
   - Repair: one warning.
 - **A reply that carries an error and a folder:** the folder is checked and surfaced like any
   other. The error is reported as before.
+- **Repair fails after it removed the Finder location** (the config save fails; added 2026-10-10,
+  1882 r4): the kept folder is shown first (the alert, and saved for the row if the save allows),
+  as for a failed sign-out. ~~The error then read "Nothing was changed that you need to undo", which
+  is false: the Finder location is gone.~~ The error now says so: "Beebeeb was removed from
+  Finder" / "Repair couldn’t finish, so Beebeeb is no longer in Finder. Choose Add to Finder to add
+  it back." (exact copy and the pre-removal case: `docs/specs/2026-10-02-macos-settings-dialogs.md`,
+  Dialog 2). A Repair that fails before the removal, or whose removal itself failed, keeps the old
+  note.
+
+— lead ruling, 2026-10-10 (1882 r4)
 
 — lane impl-1882-r2, 2026-10-10, per lead ruling [1882-r2] (device K-F2, review I3, M2, M3)
 

@@ -52,6 +52,9 @@ import {
   REPAIR_BODY,
   REPAIR_TITLE,
   repairNote,
+  repairRemovedBody,
+  repairRemovedNotice,
+  REPAIR_REMOVED_TITLE,
   SETTINGS_TABS,
   settingsTabFromLocation,
   speedOptions,
@@ -495,6 +498,8 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
   const [attempting, setAttempting] = useState(false)
   const [repair, setRepair] = useState<RepairPhase>('idle')
   const [repairFailed, setRepairFailed] = useState(false)
+  // 1882 r4: a Repair that failed AFTER it removed the Finder location reads differently.
+  const [repairRemoved, setRepairRemoved] = useState(false)
   const [repairResult, setRepairResult] = useState<string | null>(null)
   // Task 1882 round 2 (review I2, lead ruling): where macOS last kept Finder files that had not
   // reached the server, after a sign-out, a Repair, the add rollback or the app-start sweep. Rust
@@ -557,6 +562,7 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
   const addToFinder = async () => {
     setAttempting(true)
     setRepairFailed(false)
+    setRepairRemoved(false)
     setRepairResult(null)
     setFinder(finderInstallStateWhileAttempting)
     const result = await command<FinderInstallState>('install_finder_location', { path: null })
@@ -579,11 +585,14 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
   const runRepair = async () => {
     setRepair('busy')
     setRepairFailed(false)
+    setRepairRemoved(false)
     setRepairResult(null)
     const result = await command<MacosIntegrationResetResult>('reset_macos_integration')
     setRepair('idle')
     if (!result.ok) {
       setRepairFailed(true)
+      const removed = repairRemovedNotice(result.reason, 'Add to Finder') !== null
+      setRepairRemoved(removed)
       await loadFinder()
       return
     }
@@ -693,7 +702,11 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
             {row.message}
           </Note>
         ) : null}
-        {repairFailed ? (
+        {repairFailed && repairRemoved ? (
+          <Note kind="alert" surface="finder-repair" title={REPAIR_REMOVED_TITLE}>
+            {repairRemovedBody('Add to Finder')}
+          </Note>
+        ) : repairFailed ? (
           <Note kind="alert" surface="finder-repair" title="Couldn’t repair Beebeeb in Finder">
             Nothing was changed that you need to undo. Try again.
           </Note>

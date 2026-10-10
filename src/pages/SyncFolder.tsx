@@ -9,7 +9,7 @@ import {
   type SyncStatus,
 } from '../desktopApi'
 import { finderInstallNotice, finderInstallStateAfterAttempt, finderInstallStateWhileAttempting, finderLocationButtonPlan } from '../finderInstallCard'
-import { preservedFilesLine } from '../macSettingsModel'
+import { preservedFilesLine, repairRemovedNotice } from '../macSettingsModel'
 import { useToast } from '../windows/ui'
 
 // Inline confirm for the destructive Finder reset — no window.confirm(). Three states,
@@ -136,6 +136,14 @@ export default function SyncFolder() {
     setBusy(false)
     setResetPhase('idle')
     if (!result.ok) {
+      // 1882 r4: after the removal, say so (the page's own button adds it back); the raw detail stays out.
+      const removed = repairRemovedNotice(result.reason, 'Install in Finder')
+      if (removed) {
+        const finderState = await command<FinderInstallState>('finder_location_state')
+        if (finderState.ok) setInstallState(finderState.value)
+        showToast({ variant: 'error', title: removed.title, message: removed.body })
+        return
+      }
       showToast({
         variant: 'error',
         title: 'Couldn’t reset Finder integration',

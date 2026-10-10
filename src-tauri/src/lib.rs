@@ -2352,6 +2352,7 @@ fn finder_state_path(cfg: &DesktopConfig, installed: bool) -> Option<String> {
 fn finish_repair_after_removal(
     cfg: &mut DesktopConfig,
     preserved_location: Option<&str>,
+    domain_removed: bool,
     save: impl FnOnce(&mut DesktopConfig) -> Result<(), String>,
     surface: impl FnOnce(Option<&str>),
 ) -> Result<(), String> {
@@ -2359,7 +2360,7 @@ fn finish_repair_after_removal(
         Ok(()) => Ok(()),
         Err(error) => {
             surface(preserved_location);
-            Err(error)
+            Err(finder_removal::repair_save_error(error, domain_removed))
         }
     }
 }
@@ -3591,6 +3592,7 @@ async fn reset_macos_integration(
     finish_repair_after_removal(
         &mut cfg,
         preserved_location.as_deref(),
+        removed_file_provider_domain,
         |cfg| persist_finder_install_result(cfg, false, None),
         |location| surface_kept_folder(&app, location),
     )?;
@@ -13172,7 +13174,7 @@ mod finder_removal_wiring_tests {
         assert!(recorded < saved);
         assert!(
             squashed.contains(
-                "finish_repair_after_removal(&mutcfg,preserved_location.as_deref(),|cfg|persist_finder_install_result(cfg,false,None),|location|surface_kept_folder(&app,location),)?;"
+                "finish_repair_after_removal(&mutcfg,preserved_location.as_deref(),removed_file_provider_domain,|cfg|persist_finder_install_result(cfg,false,None),|location|surface_kept_folder(&app,location),)?;"
             ),
             "Repair saves with the real save, and surfaces with the real alert:\n{repair}"
         );
@@ -13538,16 +13540,18 @@ mod repair_kept_folder_tests {
         let result = finish_repair_after_removal(
             &mut cfg,
             Some(FOLDER),
+            true,
             |_| Err("No space left on device".to_string()),
             |location| {
                 raised += 1;
                 alert = finder_removal::kept_folder_alert(location);
             },
         );
-        assert_eq!(
-            result,
-            Err("No space left on device".to_string()),
-            "the save error is still the error"
+        let error = result.expect_err("the save failed");
+        assert!(
+            error.starts_with(finder_removal::REPAIR_FAILED_AFTER_REMOVAL_CODE)
+                && error.contains("No space left on device"),
+            "the save error is still the error, now marked as after the removal: {error}"
         );
         assert_eq!(raised, 1, "the folder is shown once");
         assert_eq!(
@@ -13567,11 +13571,34 @@ mod repair_kept_folder_tests {
         let result = finish_repair_after_removal(
             &mut cfg,
             None,
+            true,
+            |_| Err("No space left on device".to_string()),
+            |location| alert = finder_removal::kept_folder_alert(location),
+        );
+        assert!(
+            result
+                .expect_err("the save failed")
+                .starts_with(finder_removal::REPAIR_FAILED_AFTER_REMOVAL_CODE)
+        );
+        assert_eq!(alert, None, "nothing kept → no alert, even when the save fails");
+    }
+
+    /// 1882 r4: Repair's failure copy says the location is gone only when it IS gone. A removal that
+    /// itself failed (it may still have kept a folder, review M2) leaves the Finder location in
+    /// place, so a failed save there keeps the plain error and the old "nothing to undo" note.
+    #[test]
+    fn test_1882_r4_a_failed_save_after_a_failed_removal_keeps_the_plain_error() {
+        let mut cfg = DesktopConfig::default();
+        let mut alert: Alert = None;
+        let result = finish_repair_after_removal(
+            &mut cfg,
+            Some(FOLDER),
+            false,
             |_| Err("No space left on device".to_string()),
             |location| alert = finder_removal::kept_folder_alert(location),
         );
         assert_eq!(result, Err("No space left on device".to_string()));
-        assert_eq!(alert, None, "nothing kept → no alert, even when the save fails");
+        assert!(alert.is_some(), "a folder kept with the failed removal is still shown");
     }
 
     #[test]
@@ -13579,7 +13606,7 @@ mod repair_kept_folder_tests {
         // The Repair result carries the folder to the Sync tab's row; a second alert would repeat it.
         let mut cfg = DesktopConfig::default();
         let mut raised = 0;
-        let result = finish_repair_after_removal(&mut cfg, Some(FOLDER), |_| Ok(()), |_| raised += 1);
+        let result = finish_repair_after_removal(&mut cfg, Some(FOLDER), true, |_| Ok(()), |_| raised += 1);
         assert_eq!(result, Ok(()));
         assert_eq!(raised, 0);
     }
@@ -13592,6 +13619,7 @@ mod repair_kept_folder_tests {
         let result = finish_repair_after_removal(
             &mut cfg,
             Some(FOLDER),
+            true,
             |cfg| {
                 saw = cfg.kept_unsynced_folder.clone();
                 Ok(())

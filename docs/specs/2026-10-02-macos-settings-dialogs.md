@@ -41,7 +41,11 @@ The dialogs reuse the Settings-window system exactly: `design.css` tokens, the 1
   - Title: “Repair Beebeeb in Finder?”
   - Body: “Beebeeb removes its Finder location and turns off Open Beebeeb at login. Files waiting to upload are kept. **You can add it back afterwards.**”
   - Buttons: “Cancel” / “Repair”
-  - Failure note (inline in the Sync pane): “Couldn’t repair Beebeeb in Finder” / “Nothing was changed that you need to undo. Try again.”
+  - ~~Failure note (inline in the Sync pane): “Couldn’t repair Beebeeb in Finder” / “Nothing was changed that you need to undo. Try again.”~~
+  - Failure note (inline in the Sync pane), **when Repair fails before it removes the Finder location** (amended 10 Oct 2026, task 1882 round 4): “Couldn’t repair Beebeeb in Finder” / “Nothing was changed that you need to undo. Try again.” Unchanged.
+  - Failure note, **when Repair fails after it removed the Finder location** (added 10 Oct 2026, task 1882 round 4): “Beebeeb was removed from Finder” / “Repair couldn’t finish, so Beebeeb is no longer in Finder. Choose Add to Finder to add it back.” The compact window's toast says “Install in Finder” instead of “Add to Finder”, its button's name. If files were kept, the app's alert naming the folder still comes first (`docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md` §5). The hifi file does not draw this note; updating it is a design follow-up.
+
+    — lead ruling, 2026-10-10 (1882 r4)
 - **Actions:** primary confirm **Repair**; **Cancel** dismisses. Dismiss-on-confirm already: the dialog closes when Repair runs; the busy state lives on the trigger button.
 - **Destructive-action treatment:** **amber-primary, deliberately.** Repair is reversible — the body says you can add it back — so it is a caution, not a destruction. Red is reserved for irreversible actions. Keep as built.
 - **Keyboard:** Esc cancels (built). Enter triggers the focused Repair confirm (built, PR #104 — handler on the confirm button; Enter on open lands on the close button, so a stray Return cancels).
