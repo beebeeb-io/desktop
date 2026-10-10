@@ -66,6 +66,7 @@ mod link_health;
 mod popover_data;
 mod runner;
 mod state_db;
+mod write_token;
 mod transfer_progress;
 mod staged_payload;
 // Task 1683 slice 1: pure macOS-popover surface logic, compiled and tested on every

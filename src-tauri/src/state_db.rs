@@ -710,6 +710,146 @@ pub struct UploadResume {
     pub is_create: bool,
 }
 
+/// Who queued a File Provider upload (plan Spec issue 2).
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteOrigin {
+    /// Minted by the round-4 accept transaction: its bytes are the ones its token names.
+    Minted,
+    /// Queued by an earlier build, given a write id at engine start (spec §10.2).
+    EarlierBuild,
+}
+
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+impl WriteOrigin {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WriteOrigin::Minted => "minted",
+            WriteOrigin::EarlierBuild => "earlier_build",
+        }
+    }
+
+    pub fn from_db(value: Option<&str>) -> Option<Self> {
+        match value? {
+            "minted" => Some(WriteOrigin::Minted),
+            "earlier_build" => Some(WriteOrigin::EarlierBuild),
+            _ => None,
+        }
+    }
+}
+
+/// The round-4 columns of one File Provider upload op. `PendingOperation` is
+/// deliberately unchanged (52 literal construction sites); these columns are read
+/// and written only by the dedicated round-4 functions.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FinderWrite {
+    pub write_id: String,
+    pub origin: WriteOrigin,
+    pub after_write_id: Option<String>,
+    /// 0: the base is known. n >= 1: waiting for a snapshot, after n - 1
+    /// successful snapshots that did not report the file (plan Spec issue 3).
+    pub base_pending: i64,
+}
+
+/// Everything the payload builder needs, read in one locked call (spec §5.3).
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+#[derive(Debug, Clone)]
+pub struct ItemPresentation {
+    pub contract: FileContractState,
+    pub held: Option<crate::write_token::HeldWrite>,
+    /// An op carries `held.write_id`, in any state, parked included.
+    pub held_write_queued: bool,
+    /// A Finder upload of this file exists that has not parked (spec §9.1).
+    pub unparked_finder_upload: bool,
+    pub version_filled: bool,
+}
+
+fn get_file_contract_state_conn(conn: &Connection, file_id: &str) -> Result<Option<FileContractState>> {
+    let mut stmt = conn.prepare(
+        "SELECT file_id, namespace, parent_id, shared_root_id, share_id, permission_bits,
+                item_kind, content_type, current_version, current_object_version_id,
+                local_base_version, local_hash, cache_path, cache_bytes, pin_state,
+                inherited_pin_state, last_sync_at, owner_email
+         FROM files WHERE file_id = ?1",
+    )?;
+    let mut rows = stmt.query(params![file_id])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(FileContractState {
+            file_id: row.get(0)?,
+            namespace: Namespace::from_str(&row.get::<_, String>(1)?),
+            parent_id: row.get(2)?,
+            shared_root_id: row.get(3)?,
+            share_id: row.get(4)?,
+            owner_email: row.get(17)?,
+            permission_bits: row.get(5)?,
+            item_kind: ItemKind::from_str(&row.get::<_, String>(6)?),
+            content_type: row.get(7)?,
+            current_version: row.get(8)?,
+            current_object_version_id: row.get(9)?,
+            local_base_version: row.get(10)?,
+            local_hash: row.get(11)?,
+            cache_path: row.get(12)?,
+            cache_bytes: row.get(13)?,
+            pin_state: PinState::from_str(&row.get::<_, String>(14)?),
+            inherited_pin_state: PinState::from_str(&row.get::<_, String>(15)?),
+            last_sync_at: row.get(16)?,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn finder_write_conn(conn: &Connection, op_id: &str) -> Result<Option<FinderWrite>> {
+    conn.query_row(
+        "SELECT write_id, write_origin, after_write_id, base_pending FROM operation_queue
+         WHERE op_id = ?1 AND write_id IS NOT NULL",
+        params![op_id],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        },
+    )
+    .optional()
+    .map(|found| {
+        found.map(|(write_id, origin, after_write_id, base_pending)| FinderWrite {
+            write_id,
+            // A write id without an origin can only come from a bug; treat it as
+            // earlier-build so it is never handed over (spec §8.4, m-2).
+            origin: WriteOrigin::from_db(origin.as_deref()).unwrap_or(WriteOrigin::EarlierBuild),
+            after_write_id,
+            base_pending,
+        })
+    })
+}
+
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn held_write_conn(conn: &Connection, file_id: &str) -> Result<(Option<crate::write_token::HeldWrite>, bool)> {
+    conn.query_row(
+        "SELECT held_write_id, held_base, held_version, held_object_version_id, version_filled
+         FROM files WHERE file_id = ?1",
+        params![file_id],
+        |row| {
+            let write_id: Option<String> = row.get(0)?;
+            let held = match write_id {
+                Some(write_id) => Some(crate::write_token::HeldWrite {
+                    write_id,
+                    base: row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                    version: row.get(2)?,
+                    object_version_id: row.get(3)?,
+                }),
+                None => None,
+            };
+            Ok((held, row.get::<_, i64>(4)? != 0))
+        },
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum OperationPauseReason {
     Auth,
@@ -921,6 +1061,19 @@ impl StateDb {
         // Task 1697: which local write created the row (watcher paths set this;
         // Finder-queue paths do not) — the change-log recorder reads it.
         ensure_column(&conn, "files", "creator_for_fp", "TEXT")?;
+        // Task 1873 round 4 (spec 2026-10-09 §5.2): the write token. Additive and
+        // nullable, no backfill; only the dedicated round-4 functions write them.
+        ensure_column(&conn, "files", "held_write_id", "TEXT")?;
+        ensure_column(&conn, "files", "held_base", "INTEGER")?;
+        ensure_column(&conn, "files", "held_version", "INTEGER")?;
+        ensure_column(&conn, "files", "held_object_version_id", "TEXT")?;
+        ensure_column(&conn, "files", "version_filled", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_column(&conn, "operation_queue", "write_id", "TEXT")?;
+        ensure_column(&conn, "operation_queue", "write_origin", "TEXT")?;
+        ensure_column(&conn, "operation_queue", "after_write_id", "TEXT")?;
+        ensure_column(&conn, "operation_queue", "base_pending", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_column(&conn, "operation_queue", "claim_id", "TEXT")?;
+        ensure_column(&conn, "operation_queue", "claimed_at", "INTEGER")?;
         conn.execute_batch(
             "
             CREATE INDEX IF NOT EXISTS idx_files_namespace ON files(namespace);
@@ -960,6 +1113,19 @@ impl StateDb {
                 metadata_applied INTEGER NOT NULL DEFAULT 0,
                 is_create INTEGER NOT NULL DEFAULT 0,
                 updated_at INTEGER NOT NULL DEFAULT 0
+            );
+            ",
+        )?;
+        ensure_column(&conn, "upload_resume", "completed_version", "INTEGER")?;
+        ensure_column(&conn, "upload_resume", "completed_object_version_id", "TEXT")?;
+        conn.execute_batch(
+            "
+            CREATE INDEX IF NOT EXISTS idx_operation_queue_write_id ON operation_queue(write_id);
+            CREATE INDEX IF NOT EXISTS idx_operation_queue_after_write_id ON operation_queue(after_write_id);
+            CREATE TABLE IF NOT EXISTS id_aliases (
+                provisional_id TEXT PRIMARY KEY,
+                server_id TEXT NOT NULL,
+                created_at INTEGER NOT NULL
             );
             ",
         )?;
@@ -2302,38 +2468,51 @@ impl StateDb {
 
     pub fn get_file_contract_state(&self, file_id: &str) -> Result<Option<FileContractState>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        let mut stmt = conn.prepare(
-            "SELECT file_id, namespace, parent_id, shared_root_id, share_id, permission_bits,
-                    item_kind, content_type, current_version, current_object_version_id,
-                    local_base_version, local_hash, cache_path, cache_bytes, pin_state,
-                    inherited_pin_state, last_sync_at, owner_email
-             FROM files WHERE file_id = ?1",
+        get_file_contract_state_conn(&conn, file_id)
+    }
+
+    /// The predicate's inputs and the status override's, from one locked read
+    /// (spec §5.3 "One read", §8.7 S1.9).
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn item_presentation(&self, file_id: &str) -> Result<Option<ItemPresentation>> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+        let Some(contract) = get_file_contract_state_conn(&tx, file_id)? else {
+            return Ok(None);
+        };
+        let (held, version_filled) = held_write_conn(&tx, file_id)?;
+        let held_write_queued = match &held {
+            Some(held) => tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM operation_queue WHERE write_id = ?1)",
+                params![held.write_id],
+                |row| row.get(0),
+            )?,
+            None => false,
+        };
+        let unparked_finder_upload: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM operation_queue
+              WHERE file_id = ?1 AND write_id IS NOT NULL
+                AND kind IN ('upload_version', 'upload_file')
+                AND attempts < max_attempts)",
+            params![file_id],
+            |row| row.get(0),
         )?;
-        let mut rows = stmt.query(params![file_id])?;
-        if let Some(row) = rows.next()? {
-            Ok(Some(FileContractState {
-                file_id: row.get(0)?,
-                namespace: Namespace::from_str(&row.get::<_, String>(1)?),
-                parent_id: row.get(2)?,
-                shared_root_id: row.get(3)?,
-                share_id: row.get(4)?,
-                owner_email: row.get(17)?,
-                permission_bits: row.get(5)?,
-                item_kind: ItemKind::from_str(&row.get::<_, String>(6)?),
-                content_type: row.get(7)?,
-                current_version: row.get(8)?,
-                current_object_version_id: row.get(9)?,
-                local_base_version: row.get(10)?,
-                local_hash: row.get(11)?,
-                cache_path: row.get(12)?,
-                cache_bytes: row.get(13)?,
-                pin_state: PinState::from_str(&row.get::<_, String>(14)?),
-                inherited_pin_state: PinState::from_str(&row.get::<_, String>(15)?),
-                last_sync_at: row.get(16)?,
-            }))
-        } else {
-            Ok(None)
-        }
+        tx.commit()?;
+        Ok(Some(ItemPresentation {
+            contract,
+            held,
+            held_write_queued,
+            unparked_finder_upload,
+            version_filled,
+        }))
+    }
+
+    /// The round-4 columns of one File Provider upload op; `None` when the op
+    /// is gone or carries no write id.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn finder_write(&self, op_id: &str) -> Result<Option<FinderWrite>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        finder_write_conn(&conn, op_id)
     }
 
     // ── File Provider change log + sync anchor (task 1697) ────────────────────
@@ -5369,6 +5548,101 @@ mod tests {
         assert_eq!(db.get_file("conflict").unwrap().unwrap().status, FileStatus::Conflict);
         assert!(db.list_by_status(FileStatus::Uploading).unwrap().is_empty());
         assert!(db.list_by_status(FileStatus::Downloading).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_migration_is_additive_and_idempotent() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        // Build a round-3 database: today's schema without the round-4 columns.
+        drop(StateDb::open(&path).unwrap());
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            for (table, column) in [
+                ("files", "held_write_id"),
+                ("files", "held_base"),
+                ("files", "held_version"),
+                ("files", "held_object_version_id"),
+                ("files", "version_filled"),
+                ("operation_queue", "write_id"),
+                ("operation_queue", "write_origin"),
+                ("operation_queue", "after_write_id"),
+                ("operation_queue", "base_pending"),
+                ("operation_queue", "claim_id"),
+                ("operation_queue", "claimed_at"),
+                ("upload_resume", "completed_version"),
+                ("upload_resume", "completed_object_version_id"),
+            ] {
+                let _ = conn.execute(&format!("DROP INDEX IF EXISTS idx_{table}_{column}"), []);
+                conn.execute(&format!("ALTER TABLE {table} DROP COLUMN {column}"), [])
+                    .unwrap();
+            }
+            conn.execute("DROP TABLE id_aliases", []).unwrap();
+            conn.execute(
+                "INSERT INTO files (file_id, path, status, size_bytes, current_version) VALUES ('f1', 'a.txt', 'local', 7, 3)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO operation_queue (op_id, kind, file_id, base_version) VALUES ('op1', 'upload_version', 'f1', 3)",
+                [],
+            )
+            .unwrap();
+        }
+        // Opened twice: the second open must not fail on an existing column.
+        drop(StateDb::open(&path).unwrap());
+        let db = StateDb::open(&path).unwrap();
+
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let columns = |table: &str| -> Vec<String> {
+            let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})")).unwrap();
+            stmt.query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        for column in [
+            "held_write_id",
+            "held_base",
+            "held_version",
+            "held_object_version_id",
+            "version_filled",
+        ] {
+            assert!(columns("files").contains(&column.to_string()), "files.{column}");
+        }
+        for column in [
+            "write_id",
+            "write_origin",
+            "after_write_id",
+            "base_pending",
+            "claim_id",
+            "claimed_at",
+        ] {
+            assert!(
+                columns("operation_queue").contains(&column.to_string()),
+                "operation_queue.{column}"
+            );
+        }
+        for column in ["completed_version", "completed_object_version_id"] {
+            assert!(
+                columns("upload_resume").contains(&column.to_string()),
+                "upload_resume.{column}"
+            );
+        }
+        assert!(columns("id_aliases").contains(&"provisional_id".to_string()));
+
+        // Rows are unchanged; the new columns read as their defaults.
+        let row = db.get_file("f1").unwrap().unwrap();
+        assert_eq!((row.path.as_str(), row.size_bytes), ("a.txt", 7));
+        let presentation = db.item_presentation("f1").unwrap().unwrap();
+        assert_eq!(presentation.contract.current_version, 3);
+        assert!(presentation.held.is_none());
+        assert!(!presentation.version_filled);
+        assert_eq!(db.get_operation("op1").unwrap().unwrap().base_version, Some(3));
+        assert!(
+            db.finder_write("op1").unwrap().is_none(),
+            "an op without a write id is not a Finder write"
+        );
     }
 
     #[test]
