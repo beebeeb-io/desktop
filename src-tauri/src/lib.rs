@@ -5061,6 +5061,10 @@ async fn settle_sign_in(
 /// Keychain is loaded (a relaunch after a startup 401). The owner record is rewritten first, with the account's user
 /// id and the server's spelling of its email (a legacy record gets both here); if that fails nothing else has
 /// changed. Returns whether the vault is unlocked afterwards; `false` sends the person to the recovery phrase.
+/// `handoff_key`: the vault key a browser sign-in handed over (`None` for a password sign-in). On a Mac, a sign-in
+/// that unlocks asks to resume the edits paused for `auth`, unless the handed-over key replaces the key now in memory:
+/// that is decided here, before the ask, because the edits are then held (`key_replaced`) and never sent (F9 re-review
+/// N-1).
 #[cfg(not(target_os = "windows"))]
 fn reauth_swap_token(
     state: &AppState,
@@ -5068,6 +5072,7 @@ fn reauth_swap_token(
     sources: &LocalSources,
     token: &str,
     profile: &account_dto::AccountProfile,
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] handoff_key: Option<&[u8; 32]>,
     turn: &mut account::SessionGeneration,
 ) -> Result<bool, ReauthError> {
     let email = session_email(Some(profile));
@@ -5105,9 +5110,12 @@ fn reauth_swap_token(
     }
     reauth_settle_flags(&write, state, acct, email.as_deref().unwrap_or_default());
     // Ruling F9: unlocked, so on a Mac sync resumes; Linux keeps today's flow (spec R8). Without keys here the
-    // recovery-phrase unlock asks instead.
+    // recovery-phrase unlock asks instead. F9 re-review N-1: a browser sign-in whose handed-over key replaces the kept
+    // one is decided here, before the ask, and does not ask: `reauth_in_place` holds what is queued under the kept key
+    // as `key_replaced`, and a hold that fails must not leave an open request for a later start to serve with that key.
+    // The handoff's own install (`apply_session`) asks once the new key is in memory.
     #[cfg(target_os = "macos")]
-    if vault_unlocked {
+    if vault_unlocked && !handoff_replaces_kept_key(acct, handoff_key) {
         ask_to_resume_auth_paused(&write, acct);
     }
     drop(write);
@@ -5133,7 +5141,8 @@ fn note_engine_start_failure(acct: &AccountRuntime, error: &str) {
 /// handoff installs its own key (`apply_session`), which starts the engine. On a Mac a browser sign-in swaps the token
 /// while holding the engine slot, and when its key replaces the kept one, the outgoing engine stops and the edits queued
 /// under the kept key are held (`key_replaced`) before the slot is released (F9 review M2, lead ruling I-1). A hold that
-/// cannot be written fails the sign-in, with the new token already stored.
+/// cannot be written fails the sign-in, with the new token already stored. The swap of such a sign-in opened no resume
+/// request (F9 re-review N-1), so a failed hold leaves none open for a start in this process to serve.
 #[cfg(not(target_os = "windows"))]
 #[allow(clippy::too_many_arguments)]
 async fn reauth_in_place(
@@ -5154,7 +5163,7 @@ async fn reauth_in_place(
     } else {
         None
     };
-    let vault_unlocked = reauth_swap_token(state, acct, sources, token, profile, turn)?;
+    let vault_unlocked = reauth_swap_token(state, acct, sources, token, profile, handoff_key, turn)?;
     if vault_unlocked && handoff_replaces_kept_key(acct, handoff_key) {
         tracing::info!("browser sign-in: the vault key this Mac kept is not the one handed over; installing that one");
         // Ruling I-1: nothing queued under the kept key is sent. Held before the slot is released.
@@ -21348,6 +21357,7 @@ mod finder_lock_and_sign_out_tests {
                     &sources,
                     "tok-new",
                     &t12_profile("u-t12", "t12@beebeeb.io"),
+                    None,
                     &mut fx.acct.session_generation(),
                 );
                 server.release();
@@ -21589,7 +21599,7 @@ mod finder_lock_and_sign_out_tests {
                 "nothing decided, nothing stored (the caller revokes)"
             );
             // And a swap that would run on the old decision anyway is refused before it writes.
-            let swapped = reauth_swap_token(&state, &fx.acct, &sources, "tok-new", &sam, &mut turn)
+            let swapped = reauth_swap_token(&state, &fx.acct, &sources, "tok-new", &sam, None, &mut turn)
                 .map_err(|e| (e.message, e.token_stored));
             assert_eq!(swapped, Err((SESSION_CHANGED_WHILE_WAITING.to_string(), false)));
             assert_eq!(
@@ -21637,7 +21647,7 @@ mod finder_lock_and_sign_out_tests {
             assert!(proof.starts_with("POST /api/v1/auth/verify-recovery-check"), "{proof}");
             assert_eq!(locked, Ok(SessionActionOutcome { warning: None }));
             let decided = decided.map_err(|e| (e.message, e.token_stored));
-            let swapped = reauth_swap_token(&state, &fx.acct, &sources, "tok-new", &sam, &mut turn)
+            let swapped = reauth_swap_token(&state, &fx.acct, &sources, "tok-new", &sam, None, &mut turn)
                 .map_err(|e| (e.message, e.token_stored));
             let session_in_memory = fx.acct.session.lock().unwrap().is_some();
             assert_eq!(
@@ -22228,6 +22238,7 @@ mod finder_lock_and_sign_out_tests {
                     &LocalSources::for_test(dir.path()),
                     "tok-new",
                     &sam,
+                    None,
                     &mut turn,
                 )
                 .map_err(|e| e.message);
@@ -26326,6 +26337,11 @@ mod reauth_tests {
         );
 
         let ask = squeeze("ask_to_resume_auth_paused(&write, acct);");
+        // F9 re-review N-1: the re-sign-in in place decides "this key replaces the kept one" before it asks.
+        let asks_when_unlocked = squeeze(
+            "if vault_unlocked && !handoff_replaces_kept_key(acct, handoff_key) { \
+             ask_to_resume_auth_paused(&write, acct); }",
+        );
         assert_eq!(
             squeezed.matches(&ask).count(),
             4,
@@ -26351,10 +26367,8 @@ mod reauth_tests {
             );
         }
         assert!(
-            squeeze(&code_of(&production, "fn reauth_swap_token(")).contains(&squeeze(
-                "if vault_unlocked { ask_to_resume_auth_paused(&write, acct); }"
-            )),
-            "the re-sign-in in place asks only when the vault is unlocked"
+            squeeze(&code_of(&production, "fn reauth_swap_token(")).contains(&asks_when_unlocked),
+            "asks only when unlocked, and not when its handed-over key replaces the kept one"
         );
         for signature in [
             "fn reauth_swap_token_without_key(",
@@ -26413,7 +26427,7 @@ mod reauth_tests {
         let slot_taken = at_in_place(
             "let mut engine_slot = if handoff_key.is_some() { Some(acct.engine.lock().await) } else { None };",
         );
-        let swapped = at_in_place("reauth_swap_token(state, acct, sources, token, profile, turn)?;");
+        let swapped = at_in_place("reauth_swap_token(state, acct, sources, token, profile, handoff_key, turn)?;");
         let replaced = at_in_place("if vault_unlocked && handoff_replaces_kept_key(acct, handoff_key) {");
         let held = at_in_place("stop_the_outgoing_engine_and_hold_auth_paused(acct, sources, slot)");
         let returned = at_in_place("return Ok(false);");
@@ -26454,13 +26468,7 @@ mod reauth_tests {
         for (signature, gated) in [
             ("fn install_new_session(", format!("{macos_only}{ask}")),
             ("fn install_recovered_session(", format!("{macos_only}{ask}")),
-            (
-                "fn reauth_swap_token(",
-                format!(
-                    "{macos_only}{}",
-                    squeeze("if vault_unlocked { ask_to_resume_auth_paused(&write, acct); }")
-                ),
-            ),
+            ("fn reauth_swap_token(", format!("{macos_only}{asks_when_unlocked}")),
             (
                 "async fn restore_stored_session(",
                 format!(
@@ -27521,6 +27529,7 @@ mod reauth_tests {
                 &fx.sources(),
                 "tok-new",
                 &sam(),
+                None,
                 &mut fx.acct.session_generation(),
             )
             .unwrap();
@@ -27599,6 +27608,7 @@ mod reauth_tests {
                 &fx.sources(),
                 "tok-new",
                 &sam(),
+                None,
                 &mut fx.acct.session_generation(),
             )
             .unwrap();
@@ -27627,6 +27637,7 @@ mod reauth_tests {
                 &fx.sources(),
                 "tok-new",
                 &sam(),
+                None,
                 &mut fx.acct.session_generation(),
             )
             .unwrap();
@@ -27658,6 +27669,7 @@ mod reauth_tests {
                     &fx.sources(),
                     "tok-new",
                     &canonical,
+                    None,
                     &mut fx.acct.session_generation(),
                 )
                 .unwrap();
@@ -27936,6 +27948,7 @@ mod reauth_tests {
                 &fx.sources(),
                 "tok-2",
                 &sam(),
+                None,
                 &mut fx.acct.session_generation(),
             )
             .unwrap();
@@ -28050,6 +28063,7 @@ mod reauth_tests {
                 &fx.sources(),
                 "tok-new",
                 &signing_in,
+                None,
                 &mut fx.acct.session_generation(),
             )
             .unwrap();
@@ -28454,6 +28468,7 @@ mod reauth_tests {
                 &fx.sources(),
                 "tok-new",
                 &sam(),
+                None,
                 &mut fx.acct.session_generation(),
             )
             .unwrap();
@@ -28523,6 +28538,7 @@ mod reauth_tests {
                         &fx.sources(),
                         "tok-new",
                         &signing_in,
+                        None,
                         &mut fx.acct.session_generation(),
                     )
                     .unwrap();
@@ -28617,6 +28633,7 @@ mod reauth_tests {
                     &fx.sources(),
                     "tok-2",
                     &signing_in,
+                    None,
                     &mut fx.acct.session_generation(),
                 )
                 .unwrap();
@@ -28645,6 +28662,7 @@ mod reauth_tests {
                 &fx.sources(),
                 "tok-2",
                 &sam(),
+                None,
                 &mut fx.acct.session_generation(),
             )
             .unwrap();
@@ -28841,6 +28859,7 @@ mod reauth_tests {
                 &fx.sources(),
                 "tok-new",
                 &sam(),
+                None,
                 &mut fx.acct.session_generation(),
             )
             .unwrap_err();
@@ -28860,6 +28879,7 @@ mod reauth_tests {
                 &fx.sources(),
                 "tok-new",
                 &sam(),
+                None,
                 &mut fx.acct.session_generation(),
             )
             .unwrap_err();
@@ -29556,6 +29576,7 @@ mod reauth_tests {
                     &fx.sources(),
                     "tok-new",
                     &sam(),
+                    None,
                     &mut fx.acct.session_generation(),
                 )
                 .unwrap();
@@ -29638,6 +29659,7 @@ mod reauth_tests {
                 &fx.sources(),
                 "tok-newer",
                 &sam(),
+                None,
                 &mut fx.acct.session_generation(),
             )
             .unwrap();
@@ -29747,6 +29769,7 @@ mod reauth_tests {
                 &fx.sources(),
                 "tok-new",
                 &sam(),
+                None,
                 &mut fx.acct.session_generation(),
             )
             .unwrap();
@@ -29767,10 +29790,11 @@ mod reauth_tests {
         }
 
         /// F9 review M2 with ruling I-1: a browser sign-in whose handed-over key is not the one this Mac kept. The
-        /// re-sign-in in place swaps the token under the engine slot (so no start runs in between) and asks; it then
-        /// finds the handed-over key replaces the kept one, stops the outgoing engine (which kept pausing edits for
-        /// `auth` with its revoked token) and only then re-marks every `auth` pause `key_replaced`. A start that still
-        /// holds the outgoing key finds nothing to resume, and neither does the handoff's own install with the new key.
+        /// re-sign-in in place swaps the token under the engine slot (so no start runs in between) and, because the
+        /// handed-over key replaces the kept one, does not ask (re-review N-1); it stops the outgoing engine (which kept
+        /// pausing edits for `auth` with its revoked token) and only then re-marks every `auth` pause `key_replaced`. A
+        /// start that still holds the outgoing key finds nothing to resume, and neither does the handoff's own install
+        /// with the new key (which asks).
         #[tokio::test]
         async fn a_browser_key_that_replaces_the_kept_one_holds_the_edits_once_the_outgoing_engine_stopped() {
             let fx = Fixture::new();
@@ -29818,6 +29842,7 @@ mod reauth_tests {
                 &fx.sources(),
                 "tok-new",
                 &sam(),
+                Some(&[9u8; 32]),
                 &mut fx.acct.session_generation(),
             )
             .unwrap();
@@ -29842,7 +29867,7 @@ mod reauth_tests {
             assert_eq!(
                 due_when_the_engine_starts(&fx).await,
                 Some(vec![]),
-                "a start with the outgoing key serves the ask and finds nothing to send"
+                "no ask is open, so a start with the outgoing key finds nothing to send"
             );
             assert_eq!(
                 install_new_session(
@@ -29862,6 +29887,129 @@ mod reauth_tests {
                 "the handed-over key's engine: nothing queued under the replaced key is sent"
             );
             assert_eq!(db.queued_or_staged_count().unwrap(), 3, "kept, not purged");
+        }
+
+        /// A signed-in Mac whose session was revoked: keys in memory (`[7; 32]`), the Keychain holding them, the account's
+        /// owner recorded, and the edits the server refused while revoked paused for `auth`.
+        fn signed_in_with_edits_paused_while_revoked() -> Fixture {
+            let fx = Fixture::new();
+            persist_session_to_keychain(
+                &SessionWrite::for_test(),
+                fx.id(),
+                "tok-old",
+                &[7u8; 32],
+                Some("sam@beebeeb.io"),
+            )
+            .unwrap();
+            fx.install_session("tok-old", [7u8; 32], Some("sam@beebeeb.io"));
+            *fx.acct.cached_profile.lock().unwrap() = Some(sam());
+            let db = fx.db();
+            db.set_owner(&Identity::new(Some("u-1"), Some("sam@beebeeb.io")))
+                .unwrap();
+            edits_paused_while_revoked(&db);
+            fx
+        }
+
+        /// Is a resume request open: asked, and not yet served by an engine start?
+        fn a_resume_request_is_open(acct: &AccountRuntime) -> bool {
+            use std::sync::atomic::Ordering::SeqCst;
+            acct.auth_resume_asked.load(SeqCst) > acct.auth_resume_done.load(SeqCst)
+        }
+
+        /// F9 re-review N-1 (round 4): whether a re-sign-in in place opens a resume request is decided before it is
+        /// made. A browser sign-in whose handed-over key replaces the kept one never opens one (the edits queued under
+        /// the kept key must not be sent); one that hands over the key this Mac holds, and a password sign-in, which hands
+        /// over none, still do.
+        #[tokio::test]
+        async fn a_browser_sign_in_asks_to_resume_unless_its_key_replaces_the_kept_one() {
+            for (handed_over, replaces, asks) in [
+                (Some([9u8; 32]), true, false),
+                (Some([7u8; 32]), false, true),
+                (None, false, true),
+            ] {
+                let fx = signed_in_with_edits_paused_while_revoked();
+                let unlocked = reauth_swap_token(
+                    &fx.state,
+                    &fx.acct,
+                    &fx.sources(),
+                    "tok-new",
+                    &sam(),
+                    handed_over.as_ref(),
+                    &mut fx.acct.session_generation(),
+                )
+                .unwrap();
+                assert!(
+                    unlocked,
+                    "the premise: the vault is unlocked with the kept key ({handed_over:?})"
+                );
+                assert_eq!(
+                    handoff_replaces_kept_key(&fx.acct, handed_over.as_ref()),
+                    replaces,
+                    "the premise ({handed_over:?})"
+                );
+                assert_eq!(
+                    a_resume_request_is_open(&fx.acct),
+                    asks,
+                    "a resume request is open after the swap ({handed_over:?})"
+                );
+            }
+        }
+
+        /// F9 re-review N-1 (round 4): the browser path whose hold fails. The swap has stored the new token and put it in
+        /// memory beside the kept key, the outgoing engine stopped, and the database refused the hold, so the edits the
+        /// server refused while revoked are still paused for `auth` and the sign-in fails. No resume request is open, so
+        /// the next engine start (a Lock and unlock, Finder "Try again") resumes nothing: the edits stay paused and are not
+        /// sent with the replaced key. (The composition is `reauth_in_place`'s own, minus the `AppHandle` it needs.)
+        #[tokio::test]
+        async fn a_browser_sign_in_whose_hold_fails_leaves_no_resume_request_for_a_later_start_to_serve() {
+            let fx = signed_in_with_edits_paused_while_revoked();
+            let db = fx.db();
+            // The database refuses exactly the hold: an update that marks a pause `key_replaced`.
+            db.hold_lock_for_test()
+                .execute_batch(
+                    "CREATE TRIGGER refuse_the_hold BEFORE UPDATE OF paused_reason ON operation_queue \
+                     WHEN NEW.paused_reason = 'key_replaced' BEGIN SELECT RAISE(ABORT, 'refused by the test'); END;",
+                )
+                .unwrap();
+            let handed_over = [9u8; 32];
+            let mut slot = fx.acct.engine.lock().await;
+            let unlocked = reauth_swap_token(
+                &fx.state,
+                &fx.acct,
+                &fx.sources(),
+                "tok-new",
+                &sam(),
+                Some(&handed_over),
+                &mut fx.acct.session_generation(),
+            )
+            .unwrap();
+            assert!(
+                unlocked && handoff_replaces_kept_key(&fx.acct, Some(&handed_over)),
+                "the premise: unlocked with the kept key, which the handed-over one replaces"
+            );
+            let held = stop_the_outgoing_engine_and_hold_auth_paused(&fx.acct, &fx.sources(), &mut slot).await;
+            assert!(held.is_err(), "the premise: the database refused the hold: {held:?}");
+            drop(slot);
+            assert_eq!(
+                paused_by_reason(&db),
+                reasons(&[("auth", 1), ("quota", 1)]),
+                "the premise: the edit refused while revoked is still paused for auth"
+            );
+
+            assert!(
+                !a_resume_request_is_open(&fx.acct),
+                "the failed sign-in left no resume request open"
+            );
+            assert_eq!(
+                due_when_the_engine_starts(&fx).await,
+                Some(vec![]),
+                "a later start resumes nothing: the edit is not sent with the replaced key"
+            );
+            assert_eq!(
+                paused_by_reason(&db),
+                reasons(&[("auth", 1), ("quota", 1)]),
+                "and the edit is still paused"
+            );
         }
 
         /// Lead ruling F9, Minor 4: the ordering race as behaviour. A start reads the ask, then the keys, and is held in
@@ -29946,7 +30094,7 @@ mod reauth_tests {
             edits_paused_while_revoked(&db);
             let mut turn = fx.acct.session_generation();
             drop(claim_session_write(&fx.acct, &mut fx.acct.session_generation()).unwrap());
-            let refused = reauth_swap_token(&fx.state, &fx.acct, &fx.sources(), "tok-new", &sam(), &mut turn);
+            let refused = reauth_swap_token(&fx.state, &fx.acct, &fx.sources(), "tok-new", &sam(), None, &mut turn);
             assert!(matches!(&refused, Err(error) if !error.token_stored), "{refused:?}");
             assert_eq!(
                 due_when_the_engine_starts(&fx).await,
