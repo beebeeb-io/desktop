@@ -32,7 +32,12 @@ describe('the SessionActionOutcome contract', () => {
 
   test('both commands answer it', () => {
     const lib = rustSource('lib.rs')
-    expect(lib).toContain('async fn clear_session(state: State<\'_, AppState>, forget_email: Option<bool>) -> Result<SessionActionOutcome, String> {')
+    // Task 1882 (rebase onto main): the command also takes the app handle, to raise the kept-folder alert; rustfmt
+    // puts its arguments on their own lines, so compare without whitespace.
+    const squeezed = lib.replace(/\s+/g, '')
+    expect(squeezed).toContain(
+      'asyncfnclear_session(app:tauri::AppHandle,state:State<\'_,AppState>,forget_email:Option<bool>,)->Result<SessionActionOutcome,String>{',
+    )
     expect(lib).toContain('async fn lock_vault(state: State<\'_, AppState>) -> Result<SessionActionOutcome, String> {')
   })
 })

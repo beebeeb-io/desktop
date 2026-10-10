@@ -26,6 +26,7 @@ import * as desktopApi from '../src/desktopApi'
 import * as finderInstallCard from '../src/finderInstallCard'
 import * as finderSetup from '../src/finderSetup'
 import * as finderSetupCopy from '../src/finderSetupCopy'
+import * as macSettingsModel from '../src/macSettingsModel'
 import { T } from '../src/windows/ui'
 import { mount, textOf, visibleErrorSurfaces, type Mounted } from './fixtures/componentHarness'
 import { finderBus, finderView, tick, useFinderSetupModule } from './fixtures/finderSetupHarness'
@@ -83,7 +84,8 @@ function mountSyncFolder(backend: Record<string, any>, opts: { caps?: string | n
     expand: true,
     backend,
     hookModules: [useFinderSetupModule(bus)],
-    bindings: { ...desktopApi, ...finderInstallCard, finderActionButtonLabel: finderSetupCopy.finderActionButtonLabel, useCapabilities: () => (opts.caps ? { host_os: opts.caps } : null), ...opts.extra },
+    // Task 1882 (rebase onto main): the page also reads the kept folder and the repair-removed code from macSettingsModel.
+    bindings: { ...desktopApi, ...finderInstallCard, finderActionButtonLabel: finderSetupCopy.finderActionButtonLabel, preservedFilesLine: macSettingsModel.preservedFilesLine, repairRemovedNotice: macSettingsModel.repairRemovedNotice, useCapabilities: () => (opts.caps ? { host_os: opts.caps } : null), ...opts.extra },
   })
   mounted.push(m)
   return { m, bus }
