@@ -237,7 +237,7 @@ pub struct EngineBridge {
 #[derive(Default)]
 pub(crate) struct Seams {
     hooks: std::sync::Mutex<HashMap<&'static str, SeamHook>>,
-    /// Staging bases this bridge uses instead of the process's ([`Self::stage_under`]).
+    /// Staging bases this bridge uses instead of the process's (`stage_under`, macOS tests).
     staging_bases: std::sync::Mutex<Option<FinderStagingBases>>,
 }
 
@@ -259,6 +259,8 @@ impl Seams {
     }
 
     /// From now on this bridge stages Finder writes under `bases`, not the test sandbox.
+    /// macOS only: its one caller is the macOS staging-folder test.
+    #[cfg(target_os = "macos")]
     pub(crate) fn stage_under(&self, bases: FinderStagingBases) {
         *self.staging_bases.lock().unwrap() = Some(bases);
     }

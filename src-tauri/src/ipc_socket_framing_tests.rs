@@ -32,7 +32,9 @@ struct IpcFixture {
     _sock_dir: tempfile::TempDir,
     /// Set for a daemon started with `start_staged`.
     staging: Option<tempfile::TempDir>,
-    /// The daemon's engine bridge (a test can point its staging folder elsewhere).
+    /// The daemon's engine bridge (a test can point its staging folder elsewhere). Only the
+    /// macOS staging-folder test reads it.
+    #[cfg(target_os = "macos")]
     bridge: Arc<EngineBridge>,
 }
 
@@ -95,6 +97,7 @@ impl IpcFixture {
             _state_dir: state_dir,
             _sock_dir: sock_dir,
             staging,
+            #[cfg(target_os = "macos")]
             bridge,
         }
     }
