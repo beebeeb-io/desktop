@@ -17690,7 +17690,8 @@ mod finder_setup_command_tests {
 
     /// `source` without the items, blocks and statements whose `cfg` attribute stands alone on its
     /// line and starts with one of `attrs` (at any indentation). What an attribute covers ends at
-    /// the first line that ends with `;`, or, when a line ending with `{` comes first, at the `}`
+    /// the first line that ends with `;`, or that opens and closes its braces on one line (`fn f() {}`), or, when a
+    /// line ending with `{` comes first, at the `}`
     /// that closes it at the attribute's own indentation (`} else {` continues it). An attribute
     /// on an argument or field (the next line ends with `,`) covers that one line.
     pub(super) fn without_items(source: &str, attrs: &[&str]) -> String {
@@ -17720,6 +17721,13 @@ mod finder_setup_command_tests {
                     if line.ends_with(';') {
                         break;
                     }
+                    // A one-line item (`fn f() {}`): its braces close on the line it starts on (fix round 1, m1).
+                    if line.ends_with('}')
+                        && line.contains('{')
+                        && line.matches('{').count() == line.matches('}').count()
+                    {
+                        break;
+                    }
                     if line.ends_with('{') {
                         let close = format!("{indent}}}");
                         while k < lines.len()
@@ -17740,6 +17748,50 @@ mod finder_setup_command_tests {
             i += 1;
         }
         kept
+    }
+
+    /// Fix round 1 (m1): an item covered by one of the attributes can be ONE line (`fn f() {}`). It used to be read as
+    /// unfinished, because the line ends in `}` and not in `{` or `;`, and the next item was swallowed with it: the
+    /// open's own wrapper was invisible to the spawn pin. The covered item ends at its own line.
+    #[test]
+    fn test_1885_without_items_drops_a_one_line_item_and_keeps_the_next_one() {
+        let source = "\
+fn before() {}
+#[cfg(not(target_os = \"macos\"))]
+pub(crate) fn dropped_one_liner(_context: &str) {}
+
+#[cfg(target_os = \"macos\")]
+fn survivor_after_the_one_liner() -> Result<(), String> {
+    Ok(())
+}
+#[cfg(not(target_os = \"macos\"))]
+fn two_lines() -> u8
+{ 1 }
+fn after() {}
+";
+        let kept = without_items(source, &["#[cfg(not(target_os = \"macos\"))]"]);
+        assert!(
+            !kept.contains("dropped_one_liner"),
+            "the covered one-line item is dropped:\n{kept}"
+        );
+        assert!(
+            kept.contains("survivor_after_the_one_liner"),
+            "the item after a one-line item is kept:\n{kept}"
+        );
+        assert!(kept.contains("fn before()") && kept.contains("fn after()"), "{kept}");
+        assert!(
+            !kept.contains("two_lines"),
+            "a covered item that spans lines is still dropped whole:\n{kept}"
+        );
+        // An item with a body on following lines, and a `;` item, behave as before.
+        let kept = without_items(
+            "#[cfg(test)]\nmod t {\n    fn x() {}\n}\nfn keep() {}\n#[cfg(test)]\nuse a::b;\nfn keep2() {}\n",
+            &["#[cfg(test)]"],
+        );
+        assert!(
+            kept.contains("fn keep()") && kept.contains("fn keep2()") && !kept.contains("mod t"),
+            "{kept}"
+        );
     }
 
     /// `lib.rs` without its test modules, for the tests that read production code.
