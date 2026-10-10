@@ -829,7 +829,7 @@ mod kept_folder_check_tests {
                 code,
                 KEPT_MISSING,
                 &buffer_of(&location),
-                &buffer_of(error).map(|c| c as i8),
+                &buffer_of(error),
                 super::kept_state_for_path,
                 |_| {
                     waits += 1;
