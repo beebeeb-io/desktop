@@ -7,6 +7,8 @@
 **Why a new spec and not a section of spec A:** this fix ships on `main` as a patch (0.8.12) while
 spec A (`2026-10-06-macos-finder-setup-reconciler.md`) is still a branch. Spec A's removal paths
 take the same rule when it rebases onto `main`, so this document is the one place both read.
+**Amended 2026-10-10 (fix round 2):** the device rung and the review changed §2, §3, §4 and §5, and
+added §8. Every change strikes the old text, keeps it visible and is signed under it.
 
 ## 1. Why
 
@@ -62,7 +64,13 @@ typedef NS_ENUM(NSInteger, NSFileProviderDomainRemovalMode) {
 
 - **The mode we use:** `NSFileProviderDomainRemovalModePreserveDirtyUserData` (`:26`).
 - **The preserved-data URL:** the completion's `preservedLocation` (`:239`), `_Nullable_result`:
-  `nil` means the system kept nothing.
+  ~~`nil` means the system kept nothing.~~
+  A URL does not mean that anything was kept. The header gives the type and nothing else (its doc
+  comment is only "Remove a domain with options", `:236-238`). On the device, the helper added an
+  empty domain and removed it again. macOS reported
+  `~/Library/CloudStorage/Beebeeb-Drive (10-10-2026 10:52)`, and that folder did not exist
+  afterwards. So the app checks the folder itself before it says anything (§4, §5).
+  — lane impl-1882-r2, 2026-10-10, per lead ruling [1882-r2] (device K-F2, review I3)
 - **Minimum macOS:** `FILEPROVIDER_API_AVAILABILITY_V4_0` is `API_AVAILABLE(macos(12.0))`
   (`NSFileProviderDefines.h:25`; the `_IOS` variant at `:27` is the same on macOS).
   In Swift the call is `NSFileProviderManager.remove(_:mode:completionHandler:)`; type-checked
@@ -95,6 +103,12 @@ Every call uses `PreserveDirtyUserData`:
 | The rollback when Add to Finder succeeded but the sync engine could not start | `install_finder_location` → `beebeeb_fp_remove` |
 | The app-start sweep of domains that are not ours (task 1698) | `cleanup_stale_domains` → `beebeeb_fp_remove_domain_by_id` |
 | `BeebeebFileProviderCtl remove` | `DomainControlTool.remove()` |
+| The cleanup inside Add to Finder, when a domain this attempt added does not come up in time (added 2026-10-10) | `macos_file_provider::install` → `remove()` → `beebeeb_fp_remove` |
+
+The last row was missing from the first version of this table. That cleanup always used the
+preserving mode (it goes through `remove()`), but it dropped the folder macOS reported. It now
+surfaces it like the add rollback does (§5).
+— lane impl-1882-r2, 2026-10-10, per lead ruling [1882-r2] (review M1)
 
 **What "dirty" covers, and what it does not.** macOS keeps what it still holds as not synced: an
 item whose create or modify the extension failed or never finished. In 0.8.11 every Finder create
@@ -111,9 +125,44 @@ the lead, as a follow-up task; spec A's R8 already removes the worst trigger ("S
 ## 4. Where the kept files end up
 
 macOS chooses the folder and reports it in `preservedLocation`. The header does not say where that
-folder is, and we do not guess: the device rung of task 1882 records the real location. Beebeeb
-never moves, opens, reads or deletes that folder: the files are the person's. The app shows
+folder is, and we do not guess: the device rung of task 1882 records the real location. ~~Beebeeb
+never moves, opens, reads or deletes that folder: the files are the person's.~~ The app shows
 exactly the path the system reported.
+
+**Amended 2026-10-10 (device rung and round 2):**
+
+- **Where it was.** On the device, two files that never uploaded were kept in
+  `~/Library/CloudStorage/Beebeeb-Beebeeb (10-10-2026 10:50)`. That is a dated name next to the
+  domain's own location, not the location itself, so it does not occupy the path a later
+  `addDomain` needs (review I4).
+- **What Beebeeb does with the folder.** Beebeeb never moves, opens, reads or deletes the files
+  in it: they are the person's. Right after the removal, it does two things, and only to decide
+  whether to say anything (§5):
+  - it checks that the folder exists;
+  - it lists the folder until the first entry. It keeps no name and reads no file.
+- **What the sandboxed app can see.**
+  - **Existence:** the App Sandbox profile allows reading metadata everywhere
+    (`/System/Library/Sandbox/Profiles/application.sb:496`, `(allow file-read-metadata)`). So
+    the app can always tell whether the folder exists.
+  - **Contents:** listing needs `file-read-data`. Outside the container, the sandbox grants that
+    only through an extension that a URL carries.
+  - **What the header says about the URL:** nothing. It does not say that `preservedLocation`
+    is security-scoped. Compare `getUserVisibleURLForItemIdentifier`, whose comment says
+    "Return the security scoped URL" and requires `startAccessingSecurityScopedResource`
+    (`NSFileProviderManager.h:103`, `:120-121`).
+  - **Where the check runs:** a path string never carries the scope ("a string-based path
+    obtained from a security-scoped URL _does not_ have security scope", `NSURL.h:103`). So the
+    bridge checks the folder on the `NSURL` macOS returned:
+    `startAccessingSecurityScopedResource`, `stat`, the listing, then
+    `stopAccessingSecurityScopedResource` if access was granted.
+  - **If the listing is refused** for an existing folder, the app cannot tell whether it is empty.
+    It then shows the folder (§5): it points at a folder that exists, never at nothing. It logs
+    `contents_checked = false`, so the device rung shows which case it hit.
+- **Timing.** The check assumes macOS has filled the folder by the time the removal's completion
+  handler runs. On the device, the folder existed afterwards; the rung must also confirm that the
+  app saw it (§7).
+
+— lane impl-1882-r2, 2026-10-10, per lead ruling [1882-r2] (device K-F2, review I3, I4)
 
 ## 5. What the person is told, and where
 
@@ -134,12 +183,14 @@ The folder's path follows on its own line, in mono wherever the surface has mono
 
 | Removal | Where the sentence appears |
 | --- | --- |
-| Sign-out, every entry point | The app's own alert, title "Files kept on this Mac", body = the sentence, a blank line, the path. One alert per sign-out. |
-| Repair in Settings | An inline status note under "Beebeeb in Finder" in the Sync tab: the sentence, then the path in mono. It sits next to the existing Repair note (`repairNote`), which is unchanged. |
+| Sign-out, every entry point | The app's own alert, title "Files kept on this Mac", body = the sentence, a blank line, the path. One alert per sign-out. Also when the sign-out fails after the removal: the alert comes first, then the error as before (added 2026-10-10, review I1). |
+| Repair in Settings | ~~An inline status note under "Beebeeb in Finder" in the Sync tab: the sentence, then the path in mono. It sits next to the existing Repair note (`repairNote`), which is unchanged.~~ The Sync tab's kept-folder row (below), which the Repair refreshes. The existing Repair note (`repairNote`) is unchanged. (2026-10-10, review I2) |
 | Repair in the compact window (Finder location page) | Appended to that page's existing result line: the sentence, then the path. |
 | The Add-to-Finder rollback | The same alert as sign-out. The install failure is reported as before. |
+| The cleanup inside Add to Finder (§3, added 2026-10-10) | The same alert as sign-out. The install failure is reported as before. |
 | The app-start sweep | The same alert, once per folder kept. |
-| `BeebeebFileProviderCtl remove` | Prints `preserved: <path>` on its own stdout, after `removed`. It is a developer tool. |
+| Every removal above (added 2026-10-10, review I2) | Also the kept-folder row in Settings › Sync, until the person dismisses it (below). |
+| `BeebeebFileProviderCtl remove` | Prints `preserved: <path>` on its own stdout, after `removed`. It is a developer tool. Since 2026-10-10 it prints that line only when files were kept by the rule below. When macOS reported a folder that is missing or empty, it prints `nothing kept: macOS reported <path>, which is missing` (or `… empty`). |
 
 Why an alert for sign-out rather than a line in the window: sign-out has four entry points
 (Settings, the compact window's Account page, the menu item, and "Sign in again" from the
@@ -150,10 +201,67 @@ two places and no entry point can miss it. It is also the channel the menu's sig
 for its result on Windows (`DesktopMenuAction::SignOut` in `lib.rs`). Repair always starts from a
 window that already shows Repair's result, so its sentence goes in that result.
 
-**When nothing was kept:** the system reports no folder (`nil`), so there is no alert, no note and
+~~**When nothing was kept:** the system reports no folder (`nil`), so there is no alert, no note and
 no extra line, and every existing result reads exactly as before. A removal that fails is reported
 as before (sign-out: logged, never shown, since sign-out must always complete; Repair: one
-warning).
+warning).~~
+
+**When files count as kept** (amended 2026-10-10; it replaces the paragraph above):
+
+| What the bridge finds | Outcome | What the person sees | Log (never the path) |
+| --- | --- | --- | --- |
+| No URL | Nothing kept | Nothing: no alert, no row, no extra line | debug, `reported = "none"` |
+| A URL whose folder does not exist | Nothing kept | Nothing | debug, `reported = "missing"` |
+| A URL whose folder exists and is empty | Nothing kept | Nothing | debug, `reported = "empty"` |
+| A folder (or a single file) with at least one entry | Kept | The sentence and the path, on every surface above | info, `preserved = true, contents_checked = true` |
+| A folder that exists, but the listing (or the `stat`) is refused | Kept: the fallback in §4 | The sentence and the path | info, `preserved = true, contents_checked = false` |
+| A URL without a path ("removed; folder unknown") | Its own outcome: the domain is removed, but no folder can be named | Nothing: there is no folder to point at. Repair reports the domain as removed, with no warning | warn, "macOS reported kept files without a folder" |
+
+- **A removal that fails** is reported as before:
+  - sign-out: logged and never shown, since sign-out must always complete;
+  - Repair: one warning.
+- **A reply that carries an error and a folder:** the folder is checked and surfaced like any
+  other. The error is reported as before.
+
+— lane impl-1882-r2, 2026-10-10, per lead ruling [1882-r2] (device K-F2, review I3, M2, M3)
+
+**The kept-folder row in Settings › Sync** (2026-10-10):
+
+- **Saved locally, nowhere else.** The latest kept folder is saved in the app's own config
+  (`desktop.toml`, `kept_unsynced_folder`). It is never written to a log and never sent anywhere.
+  It is not part of the settings the Settings window saves, so no settings save can clear it.
+  - A newer kept folder replaces the older one.
+  - Dismissing clears it only if it is still the folder the row showed.
+- **When it appears:** after a sign-out, a Repair, the add rollback, the cleanup inside Add to
+  Finder, or the app-start sweep, whenever files were kept by the rule above.
+- **What it shows:** Settings › Sync, under "Beebeeb in Finder", a status note with the sentence,
+  the path in mono and a "Dismiss" button. The path wraps (`white-space: normal;
+  overflow-wrap: anywhere`) and is never cut off. The row stays until the person dismisses it. A
+  tab switch, closing Settings or a restart does not clear it.
+- **No "Show in Finder".** The headers do not say that a sandboxed app may reveal a path outside
+  its container: `selectFile:inFileViewerRootedAtPath:` and `activateFileViewerSelectingURLs:`
+  (`AppKit.framework/Headers/NSWorkspace.h:50`, `:53`) carry no sandbox statement. The only
+  sandbox sentence in that header is about launch arguments (`:184`). Without that, the button is
+  left out. A device check can add it later.
+- **The design artefact** (`design/hifi/macos-settings-dialogs.html`) does not draw this row yet.
+  Updating it is a design follow-up.
+
+— lead ruling, 2026-10-10 (review I2)
+
+**Who draws the alert** (2026-10-10, device K-F1):
+
+- **Mechanism.** The alert is `tauri-plugin-dialog`'s message dialog with no parent window. In
+  `tauri-plugin-dialog` 2.7.2 with `rfd` 0.16, that path calls `CFUserNotificationDisplayAlert`
+  on a background thread (`rfd` `backend/macos/utils/user_alert.rs`). macOS draws that alert in
+  its own `UserNotificationCenter` process, not in a Beebeeb window.
+- **What the device run showed.** No Beebeeb window held a dialog. But the system log has
+  `UserNotificationCenter` taking the front 93 ms after the sign-out returned, and holding it for
+  24.7 s. That was its only time in front that day.
+- **What a device check must look for:** a window owned by `UserNotificationCenter`, not by
+  Beebeeb. The app logs `kept-folder alert shown` (debug) when it raises the alert, and
+  `kept-folder alert closed` when the person closes it.
+
+— lane impl-1882-r2, 2026-10-10 (device K-F1)
 
 ## 6. Tests
 
@@ -173,3 +281,48 @@ warning).
 On a signed QA build of `main` with this fix: create a file in the Finder location (it fails to
 upload, per 1873), then sign out. The file must still exist at the reported folder with the same
 sha256, and the alert must name that folder. Repeat with Repair (the Sync tab note names it).
+
+## 8. Round 2 tests and device checks (added 2026-10-10)
+
+**Tests** (in addition to §6):
+
+- **Bridge, on a real disk (macOS):** the bridge's own folder check, through a test-only entry
+  point that builds the same `NSURL` and runs the same function. The cases: a missing folder, an
+  empty folder, a folder with one item, a folder with only a hidden item, and a single file.
+- **Rust, every OS:** decoding every folder state into its outcome.
+  - Missing and empty are silent.
+  - One entry, or a refused listing, is kept.
+  - A URL without a path is the "folder unknown" outcome.
+  - An error that carries a folder keeps the folder.
+  - An unknown state with a path never hides that path.
+- **Sign-out:** the step after the removal fails (the Keychain clear) → the error carries the
+  folder → the alert text is still produced.
+- **Kept-folder record:**
+  - a new folder replaces the old one;
+  - dismissing a different path leaves the record alone;
+  - dismissing the shown path clears it;
+  - the record survives a settings save.
+- **Frontend:**
+  - the Sync tab shows the saved row on open, and after a Repair;
+  - it shows nothing when nothing is saved;
+  - "Dismiss" sends the exact path and the row goes;
+  - the path element wraps.
+- **Wiring pins:**
+  - every removal path records the folder;
+  - the alert logs `kept-folder alert shown` and `kept-folder alert closed`;
+  - the cleanup inside Add to Finder surfaces its folder.
+
+**Device checks** (in addition to §7):
+
+1. **Nothing dirty.** Sign out, and separately run Repair, with no local-only file. Expect no
+   alert, no row, and a debug line with `reported = "missing"` or `"empty"`.
+2. **Something dirty.** Sign out with a file that never uploaded. Expect all of these:
+   - a `UserNotificationCenter` window titled "Files kept on this Mac";
+   - `kept-folder alert shown` in the log, then `kept-folder alert closed` after OK;
+   - `contents_checked = true` or `false`. Record which: `false` means the URL carries no sandbox
+     extension and the fallback was taken;
+   - the Settings › Sync row, after signing in again;
+   - the row still there after a tab switch and after a restart, until "Dismiss".
+3. **Timing.** In check 2, the info line must say `preserved = true`. A debug line with
+   `reported = "missing"` while the folder exists afterwards means macOS fills the folder after
+   the completion handler. Stop and report it: the check would then hide kept files.
