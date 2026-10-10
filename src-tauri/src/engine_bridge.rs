@@ -227,6 +227,10 @@ pub struct EngineBridge {
     /// entire in-progress due-operations batch, or a fresh watcher/File-
     /// Provider write landing mid-teardown, through unchecked.
     stopping: Arc<AtomicBool>,
+    /// Files whose landed Finder write still waits for its new thumbnails (spec §5.6). The
+    /// landing takes the op off the queue before they are uploaded, and until they are, the
+    /// server holds the previous version's (one per file): [`Self::finder_thumbnail`] refuses.
+    thumbnails_pending: std::sync::Mutex<HashSet<String>>,
     #[cfg(test)]
     pub(crate) seams: Seams,
 }
@@ -601,9 +605,32 @@ impl EngineBridge {
             wire: WireCounters::new(),
             transfers: crate::transfer_progress::TransferBoard::new(),
             stopping,
+            thumbnails_pending: std::sync::Mutex::new(HashSet::new()),
             #[cfg(test)]
             seams: Seams::default(),
         }
+    }
+
+    /// Mark or clear `file_id`'s landed write as waiting for its new thumbnails (spec §5.6).
+    fn set_thumbnails_pending(&self, file_id: &str, pending: bool) {
+        let mut set = self
+            .thumbnails_pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if pending {
+            set.insert(file_id.to_string());
+        } else {
+            set.remove(file_id);
+        }
+    }
+
+    /// Whether `file_id`'s landed write still waits for its new thumbnails (spec §5.6).
+    #[cfg_attr(not(any(unix, test)), allow(dead_code))]
+    fn thumbnails_pending(&self, file_id: &str) -> bool {
+        self.thumbnails_pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(file_id)
     }
 
     /// A named point for the concurrency tests; nothing outside tests.
@@ -1366,6 +1393,14 @@ impl EngineBridge {
         };
         #[cfg(not(target_os = "windows"))]
         let finalization: Option<crate::state_db::UploadFinalization> = None;
+        // §5.6: a Finder write's thumbnails are uploaded after the landing commits, and the
+        // commit takes the op off the queue. From just before it to the end of that upload the
+        // server holds only the previous version's thumbnail, which the system would cache under
+        // the token: `finder_thumbnail` refuses meanwhile. Keyed on a minted write (macOS).
+        let marks_thumbnails = claim.and_then(|c| c.write.as_ref()).is_some() && payload_path.is_some();
+        if marks_thumbnails {
+            self.set_thumbnails_pending(server_file_id, true);
+        }
         let master_key = self.api.master_key();
         let landed = self.db.apply_landing(
             &crate::state_db::LandingInput {
@@ -1388,10 +1423,23 @@ impl EngineBridge {
                 now: now_secs(),
             },
             &|queued, server_id| metadata_rekeyed_to(master_key, queued, server_id),
-        )?;
-        let Some(landed) = landed else {
-            log_queue_state_moved(&op.op_id, "landing");
-            return Err(anyhow::Error::new(QueueStateMoved));
+        );
+        // Nothing landed: the op is still queued, and the refusal is the queue's again.
+        let landed = match landed {
+            Ok(Some(landed)) => landed,
+            Ok(None) => {
+                if marks_thumbnails {
+                    self.set_thumbnails_pending(server_file_id, false);
+                }
+                log_queue_state_moved(&op.op_id, "landing");
+                return Err(anyhow::Error::new(QueueStateMoved));
+            }
+            Err(e) => {
+                if marks_thumbnails {
+                    self.set_thumbnails_pending(server_file_id, false);
+                }
+                return Err(e.into());
+            }
         };
         for (successor, reason) in &landed.parked_successors {
             log_parked(successor, Some(server_file_id), *reason);
@@ -1401,16 +1449,24 @@ impl EngineBridge {
             // Task 1700: post-complete thumbnail work never fails the upload, but its
             // failure is surfaced on the outcome so a red run names the real error.
             let file_key = file_key_for(self.api.master_key(), server_file_id);
-            if let Err(e) = self
+            match self
                 .finish_completed_upload(op, server_file_id, Path::new(path), content_type, &file_key, sync_root)
                 .await
             {
-                tracing::warn!(
-                    file_id = %server_file_id,
-                    error = %e,
-                    "upload-time thumbnail generation/upload skipped"
-                );
-                post_complete_errors.push(format!("{}: {e}", op.op_id));
+                Ok(()) => {
+                    if marks_thumbnails {
+                        self.set_thumbnails_pending(server_file_id, false);
+                    }
+                }
+                // The refusal stays: the server still holds the previous version's thumbnail.
+                Err(e) => {
+                    tracing::warn!(
+                        file_id = %server_file_id,
+                        error = %e,
+                        "upload-time thumbnail generation/upload skipped"
+                    );
+                    post_complete_errors.push(format!("{}: {e}", op.op_id));
+                }
             }
         }
         Ok(if claim.is_some() {
@@ -2299,15 +2355,16 @@ impl EngineBridge {
     }
 
     /// A Finder thumbnail (spec §5.6, §7.2): through the alias, and never while the item's
-    /// held write is queued (the safe default: a per-item error, and nothing asked of the
-    /// server).
+    /// held write is queued, nor after its landing until that version's thumbnails are
+    /// uploaded (the safe default: a per-item error, and nothing asked of the server).
     #[cfg_attr(not(any(unix, test)), allow(dead_code))]
     pub async fn finder_thumbnail(&self, id: &str, variant: &str) -> anyhow::Result<Zeroizing<Vec<u8>>> {
         let (file_id, _) = self.resolve_provisional(id, "thumbnail")?;
-        if self
-            .db
-            .item_presentation(&file_id)?
-            .is_some_and(|presentation| presentation.held_write_queued)
+        if self.thumbnails_pending(&file_id)
+            || self
+                .db
+                .item_presentation(&file_id)?
+                .is_some_and(|presentation| presentation.held_write_queued)
         {
             return Err(anyhow::Error::new(ThumbnailNotYet));
         }
@@ -14390,6 +14447,12 @@ mod tests {
         thumbnails: HashMap<String, Vec<u8>>,
         /// Every thumbnail `GET`: the file id.
         thumbnail_requests: Vec<String>,
+        /// Every thumbnail `PUT`: the file id. The blob replaces `thumbnails[id]`.
+        thumbnail_puts: Vec<String>,
+        /// Thumbnail `PUT`s answer only after this delay (the server stored the blob first).
+        delay_thumbnail_put: Option<Duration>,
+        /// Thumbnail `PUT`s answer 500 and store nothing.
+        fail_thumbnail_put: bool,
         /// A create mints a UUID-shaped id instead of `server-file-N` (the hydrate and the
         /// thumbnail fetch parse a UUID before they ask the server).
         uuid_ids: bool,
@@ -14501,6 +14564,26 @@ mod tests {
     ) -> (Option<Duration>, Vec<u8>) {
         let mut s = state.lock().unwrap();
         s.requests.push((request.method.clone(), request.path.clone()));
+        // `PUT /files/{id}/thumbnail[/{variant}]` (medium has no variant segment): the blob
+        // replaces the file's thumbnail, as the server stores one per file, not per version.
+        if request.method == "PUT"
+            && let Some(rest) = request.path.strip_prefix("/api/v1/files/")
+            && let Some((file_id, _variant)) = rest.split_once("/thumbnail")
+        {
+            let file_id = file_id.to_string();
+            s.thumbnail_puts.push(file_id.clone());
+            if s.fail_thumbnail_put {
+                return (
+                    None,
+                    http_json("500 Internal Server Error", serde_json::json!({ "error": "boom" })).into_bytes(),
+                );
+            }
+            s.thumbnails.insert(file_id, request.body.clone());
+            return (
+                s.delay_thumbnail_put,
+                http_json("200 OK", serde_json::json!({ "ok": true })).into_bytes(),
+            );
+        }
         // `GET /files/{id}/thumbnail/{variant}`: the blob a test seeded, or 404 (binary body).
         if request.method == "GET"
             && let Some(rest) = request.path.strip_prefix("/api/v1/files/")
@@ -18649,6 +18732,112 @@ mod tests {
             "served after the landing"
         );
         assert_eq!(server.finish().thumbnail_requests, vec![photo.to_string()]);
+    }
+
+    /// §5.6: the landing takes the op off the queue before the new version's thumbnails are
+    /// uploaded. Until they are, the server holds the previous version's (one per file), and the
+    /// system would cache it under the token: the thumbnail is refused, and nothing is asked of
+    /// the server.
+    #[tokio::test]
+    async fn the_thumbnail_waits_for_the_landed_versions_thumbnails() {
+        let photo = "3f2a9c1e-0000-4000-8000-0000000000b5";
+        let master_key = [97u8; 32];
+        let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_row(&bridge, &server, photo);
+        {
+            let mut state = server.state.lock().unwrap();
+            let previous = thumbnail_blob(master_key, photo, b"the previous version's thumbnail");
+            state.thumbnails.insert(photo.into(), previous);
+            state.delay_thumbnail_put = Some(Duration::from_millis(400));
+        }
+        let png = dir.path().join("photo-save.png");
+        write_test_png(&png);
+        bridge
+            .queue_file_provider_modify(FinderWriteTarget {
+                file_id: Some(photo.into()),
+                parent_id: None,
+                filename: "photo.png".into(),
+                rel_path: None,
+                kind: FinderWriteItemKind::File,
+                contents_path: Some(png.to_string_lossy().into_owned()),
+                content_type: Some("image/png".into()),
+                base_version_identifier: Some("1".into()),
+            })
+            .unwrap();
+        let in_the_window = async {
+            // The first thumbnail upload has reached the server: the landing has committed and
+            // the new thumbnails are not all uploaded yet.
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while server.state.lock().unwrap().thumbnail_puts.is_empty() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "no thumbnail upload reached the server: {:?}",
+                    server.state.lock().unwrap().requests
+                );
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert!(
+                bridge.db.list_operations_for_file(photo).unwrap().is_empty(),
+                "the op left the queue at the landing"
+            );
+            bridge.finder_thumbnail(photo, "small").await
+        };
+        let (_, during) = tokio::join!(drain_upload_queue(&bridge, &sync_root), in_the_window);
+        let error = during.expect_err("refused while the landed version's thumbnails upload");
+        assert!(error.is::<ThumbnailNotYet>(), "{error:#}");
+        let served = bridge.finder_thumbnail(photo, "small").await.unwrap();
+        assert_ne!(
+            &served[..],
+            b"the previous version's thumbnail",
+            "served once the landed version's thumbnails are uploaded"
+        );
+        let state = server.finish();
+        assert_eq!(state.thumbnail_puts.len(), 2, "two variants uploaded");
+        assert_eq!(
+            state.thumbnail_requests,
+            vec![photo.to_string()],
+            "one GET, after the upload"
+        );
+    }
+
+    /// §5.6: when the landed version's thumbnails fail to upload, the server still holds the
+    /// previous version's, so the thumbnail stays refused and nothing is asked of the server.
+    #[tokio::test]
+    async fn a_failed_thumbnail_upload_keeps_the_thumbnail_refused() {
+        let photo = "3f2a9c1e-0000-4000-8000-0000000000b6";
+        let master_key = [98u8; 32];
+        let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_row(&bridge, &server, photo);
+        {
+            let mut state = server.state.lock().unwrap();
+            let previous = thumbnail_blob(master_key, photo, b"the previous version's thumbnail");
+            state.thumbnails.insert(photo.into(), previous);
+            state.fail_thumbnail_put = true;
+        }
+        let png = dir.path().join("photo-save.png");
+        write_test_png(&png);
+        bridge
+            .queue_file_provider_modify(FinderWriteTarget {
+                file_id: Some(photo.into()),
+                parent_id: None,
+                filename: "photo.png".into(),
+                rel_path: None,
+                kind: FinderWriteItemKind::File,
+                contents_path: Some(png.to_string_lossy().into_owned()),
+                content_type: Some("image/png".into()),
+                base_version_identifier: Some("1".into()),
+            })
+            .unwrap();
+        drain_upload_queue(&bridge, &sync_root).await;
+        assert!(bridge.db.list_operations_for_file(photo).unwrap().is_empty(), "landed");
+        let error = bridge
+            .finder_thumbnail(photo, "small")
+            .await
+            .expect_err("the server still holds the previous version's thumbnail");
+        assert!(error.is::<ThumbnailNotYet>(), "{error:#}");
+        let state = server.finish();
+        assert!(!state.thumbnail_puts.is_empty(), "the upload was attempted");
+        assert!(state.thumbnail_requests.is_empty(), "nothing asked of the server");
     }
 
     /// Review Focus 3: an empty save lands, and a fetch while it is queued is an empty file.
