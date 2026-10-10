@@ -288,27 +288,6 @@ impl From<String> for InstallFailure {
     }
 }
 
-/// Review M1 (round 2): the cleanup inside Add to Finder removes the domain this attempt added
-/// when it does not come up in time. The install still fails with the setup error (and the
-/// cleanup's error, if that failed too, as before), and the folder that removal kept rides along.
-///
-/// Rebase onto spec 2026-10-06 (2026-10-10): its only caller was macOS `install()`, which spec A
-/// retired (the reconciler adds Beebeeb and never removes a domain it added). Kept, untouched, for
-/// the lead to decide whether it goes; nothing calls it.
-#[allow(dead_code)]
-pub fn install_cleanup_failure(setup_error: String, cleanup: Result<DomainRemoval, RemovalFailure>) -> InstallFailure {
-    match cleanup {
-        Ok(removal) => InstallFailure {
-            message: setup_error,
-            kept_folder: removal.kept_location("install cleanup"),
-        },
-        Err(failure) => InstallFailure {
-            message: format!("{setup_error}; cleanup failed: {}", failure.message),
-            kept_folder: failure.kept_location("install cleanup"),
-        },
-    }
-}
-
 /// Saves `location` as the latest kept folder, for the Settings › Sync row (spec §5, lead ruling
 /// I2). A newer folder replaces an older one. Returns whether the config changed (the caller
 /// saves it).
@@ -707,14 +686,10 @@ mod tests {
             "Repair reports it for the row"
         );
         assert!(warnings.is_empty());
-        // The same on a failed removal (review M2) and in the install cleanup (review M1).
+        // The same on a failed removal (review M2).
         let failure = removal_from_bridge(-1, KEPT_EMPTY, Some(folder.to_string()), Some("busy".to_string()))
             .expect_err("the removal reported an error");
         assert_eq!(failure.kept, kept_empty(folder));
-        assert_eq!(
-            install_cleanup_failure("setup".to_string(), Ok(removal(decoded))).kept_folder,
-            Some(folder.to_string())
-        );
         // An empty folder is told apart from a full one only in the log, never to the person.
         assert_ne!(kept_empty(folder), kept(folder, true));
         // Empty with no path is "folder unknown", as any state without a path.
@@ -1000,7 +975,7 @@ mod tests {
         );
     }
 
-    // ── round 2: an error that carries a folder (M2), the install cleanup (M1) ─
+    // ── round 2: an error that carries a folder (M2) ───────────────────────────
 
     #[test]
     fn test_1882_r2_a_reply_with_an_error_and_a_folder_keeps_the_folder() {
@@ -1058,40 +1033,6 @@ mod tests {
         assert!(
             checked < error && copied < error,
             "folder state and path come before the error return:\n{body}"
-        );
-    }
-
-    #[test]
-    fn test_1882_r2_the_install_cleanup_reports_the_folder_it_kept() {
-        let folder = "/Users/someone/Library/CloudStorage/Beebeeb-Beebeeb (10-10-2026 11:00)";
-        let setup = "Timed out waiting for the Beebeeb File Provider domain to become available".to_string();
-
-        let kept_by_cleanup = install_cleanup_failure(setup.clone(), Ok(removal(kept(folder, true))));
-        assert_eq!(
-            kept_by_cleanup,
-            InstallFailure {
-                message: setup.clone(),
-                kept_folder: Some(folder.to_string())
-            }
-        );
-
-        let nothing = install_cleanup_failure(setup.clone(), Ok(removal(KeptFolder::Nothing(NothingKept::Missing))));
-        assert_eq!(nothing, InstallFailure::from(setup.clone()));
-
-        let failed_cleanup = install_cleanup_failure(
-            setup.clone(),
-            Err(RemovalFailure {
-                message: "busy".to_string(),
-                kept: kept(folder, false),
-            }),
-        );
-        assert_eq!(
-            failed_cleanup,
-            InstallFailure {
-                message: format!("{setup}; cleanup failed: busy"),
-                kept_folder: Some(folder.to_string())
-            },
-            "the error text is as before, and a folder kept with the error still rides along"
         );
     }
 
