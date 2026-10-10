@@ -308,6 +308,7 @@ removed. A Repair that fails is reported as it was before r4, with the failing s
     callers of the config are not converted; they still replace the file with the copy they loaded.
 - **When it appears:** after a sign-out, a Repair, the add rollback, the cleanup inside Add to
   Finder, or the app-start sweep, whenever files were kept by the rule above.
+- **Every save of the row's folder tells the windows** (`kept-folder-changed`, no payload), so an open Sync tab follows a Repair started from another window, such as the compact window's Finder page. Repair still raises no alert; the page's result line carries the folder. — lead ruling, 2026-10-10 (device RB3-F1)
 - **What it shows:** Settings › Sync, under "Beebeeb in Finder", a status note with ~~the sentence~~
   its own sentence (below), the path in mono and a "Dismiss" button. The path wraps (`white-space: normal;
   overflow-wrap: anywhere`) and is never cut off. The row stays until the person dismisses it. A

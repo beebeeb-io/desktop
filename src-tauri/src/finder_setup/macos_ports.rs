@@ -1315,17 +1315,23 @@ mod tests {
     type Alerts = Arc<std::sync::Mutex<Vec<String>>>;
 
     /// The app's late sink, `surface_reconciler_kept`, with its two steps on a test config file and the alert
-    /// recorded: the same function and order (`surface_kept_folder_with`), without a window.
+    /// recorded: the same functions and order (`surface_kept_folder_with`, then `save_kept_folder_for_row_with`),
+    /// without a window.
     fn recording_sink(config: std::path::PathBuf, alerts: Alerts) -> impl FnOnce(KeptFolder) + Send + 'static {
         move |kept| {
             let location = DomainRemoval { kept }.kept_location("test");
             crate::surface_kept_folder_with(
                 location.as_deref(),
                 |location| {
-                    crate::finder_removal::remember_kept_folder_at(&config, location)
-                        .expect("the folder is saved for the row");
+                    crate::save_kept_folder_for_row_with(
+                        location,
+                        |location| {
+                            crate::finder_removal::remember_kept_folder_at(&config, location)
+                                .expect("the folder is saved for the row");
+                        },
+                        || {},
+                    )
                 },
-                || {},
                 |location| alerts.lock().unwrap().push(location.to_string()),
             );
         }

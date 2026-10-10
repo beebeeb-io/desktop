@@ -3304,43 +3304,61 @@ fn show_preserved_files_alert(app: &tauri::AppHandle, preserved_location: Option
 
 /// Review I2 (lead ruling, round 2): hands a kept folder to the person on the paths that have no
 /// config of their own (sign-out, the app-start sweep, a reconciler removal): saved for the Settings › Sync row
-/// first, then the windows are told (rebase re-review I2), then the alert. Nothing kept → nothing.
+/// first, with the windows told (rebase re-review I2: [`save_kept_folder_for_row`]), then the alert. Nothing kept →
+/// nothing.
 fn surface_kept_folder(app: &tauri::AppHandle, preserved_location: Option<&str>) {
     surface_kept_folder_with(
         preserved_location,
-        remember_kept_folder,
-        || emit_kept_folder_changed(app),
+        |location| save_kept_folder_for_row(app, location),
         |location| show_preserved_files_alert(app, Some(location)),
     );
 }
 
 /// [`surface_kept_folder`] with its steps passed in, so a test can run the real order on its own config file and
-/// record the event and the alert: saved for the row first, then `changed`, then the alert. Nothing kept → none runs.
+/// record the event and the alert: `save_for_row` (the save and the telling) first, then the alert. Nothing kept →
+/// none runs.
 fn surface_kept_folder_with(
     preserved_location: Option<&str>,
-    save: impl FnOnce(&str),
-    changed: impl FnOnce(),
+    save_for_row: impl FnOnce(&str),
     alert: impl FnOnce(&str),
 ) {
     let Some(location) = preserved_location else {
         return;
     };
-    save(location);
-    changed();
+    save_for_row(location);
     alert(location);
 }
 
 /// Rebase re-review I2: told to every window once a kept folder was saved for the Settings › Sync row, so a Sync tab
 /// that is open reads the folder again. A removal the reconciler runs in the background (after "Try again", or one
-/// that finished after its time limit) saves the folder long after the tab's own read. No payload: the tab reads the
-/// folder through `kept_unsynced_folder`, so the path is never sent to a window that did not ask for it. The frontend
-/// listens for this name as `KEPT_FOLDER_CHANGED_EVENT`.
+/// that finished after its time limit) saves the folder long after the tab's own read, and so does a Repair that the
+/// compact window's Finder page started (device RB3-F1). No payload: the tab reads the folder through
+/// `kept_unsynced_folder`, so the path is never sent to a window that did not ask for it. The frontend listens for
+/// this name as `KEPT_FOLDER_CHANGED_EVENT`.
 const KEPT_FOLDER_CHANGED_EVENT: &str = "kept-folder-changed";
 
 fn emit_kept_folder_changed<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     if let Err(error) = app.emit(KEPT_FOLDER_CHANGED_EVENT, ()) {
         tracing::warn!(%error, "could not tell the windows that a kept folder was saved");
     }
+}
+
+/// Device RB3-F1 (lead ruling, 2026-10-10): the ONE place a kept folder is saved for the Settings › Sync row, and
+/// every save of it tells the windows once it is saved, so a Sync tab that is open follows a Repair that another
+/// window started (the compact window's Finder page), as it follows a sign-out or a late reconciler removal. The
+/// callers are `surface_kept_folder` (sign-out, the app-start sweep, the reconciler) and macOS Repair, which has no
+/// alert of its own (1882 spec §5: the page's result line carries the folder). A save that failed is logged without
+/// the path and the windows are told anyway; the tab reads the row again and finds what is there. A source pin
+/// (`rb3_f1_every_save_of_the_rows_folder_goes_through_the_one_function_that_tells_the_windows`) fails on any other
+/// route to `remember_kept_folder`.
+fn save_kept_folder_for_row<R: tauri::Runtime>(app: &tauri::AppHandle<R>, location: &str) {
+    save_kept_folder_for_row_with(location, remember_kept_folder, || emit_kept_folder_changed(app));
+}
+
+/// [`save_kept_folder_for_row`] with its two steps passed in: `save` first, then `changed`, once each.
+fn save_kept_folder_for_row_with(location: &str, save: impl FnOnce(&str), changed: impl FnOnce()) {
+    save(location);
+    changed();
 }
 
 /// Saves the latest kept folder in `desktop.toml` (spec §5, "The kept-folder row"). Best-effort:
@@ -7231,7 +7249,7 @@ async fn reset_macos_integration(
     // record it into the config this command saves below.
     if let Some(location) = preserved_location.as_deref() {
         #[cfg(target_os = "macos")]
-        remember_kept_folder(location);
+        save_kept_folder_for_row(&app, location);
         #[cfg(not(target_os = "macos"))]
         finder_removal::record_kept_folder(&mut cfg, location);
     }
@@ -30223,8 +30241,13 @@ mod finder_removal_wiring_tests {
 
         super::surface_kept_folder_with(
             Some(FOLDER),
-            |location| steps.lock().unwrap().push(format!("saved {location}")),
-            || super::emit_kept_folder_changed(app.handle()),
+            |location| {
+                super::save_kept_folder_for_row_with(
+                    location,
+                    |location| steps.lock().unwrap().push(format!("saved {location}")),
+                    || super::emit_kept_folder_changed(app.handle()),
+                )
+            },
             |location| steps.lock().unwrap().push(format!("alert {location}")),
         );
         assert_eq!(
@@ -30240,11 +30263,227 @@ mod finder_removal_wiring_tests {
         steps.lock().unwrap().clear();
         super::surface_kept_folder_with(
             None,
-            |location| steps.lock().unwrap().push(format!("saved {location}")),
-            || super::emit_kept_folder_changed(app.handle()),
+            |location| {
+                super::save_kept_folder_for_row_with(
+                    location,
+                    |location| steps.lock().unwrap().push(format!("saved {location}")),
+                    || super::emit_kept_folder_changed(app.handle()),
+                )
+            },
             |location| steps.lock().unwrap().push(format!("alert {location}")),
         );
         assert!(steps.lock().unwrap().is_empty(), "nothing kept: nothing at all");
+    }
+
+    /// Device RB3-F1 (2026-10-10, signed QA build): Settings › Sync was open on the kept-folder row; a Repair started
+    /// from the compact window's Finder page kept files in a newer folder and saved it, and the open tab went on
+    /// showing the older one until a tab switch. Every save of the row's folder tells the windows, Repair's too: the
+    /// event comes once, after the save (so the tab's read finds the folder), with no path in it. The emit and the
+    /// listener are real (a mock app); the config is this test's own directory, read the way the tab reads it.
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn rb3_f1_a_repair_that_kept_a_folder_tells_the_windows_once_after_the_row_is_saved() {
+        use std::sync::{Arc, Mutex};
+        use tauri::Listener;
+        const FOLDER: &str = "/Users/someone/Library/CloudStorage/Beebeeb-Beebeeb (10-10-2026 17:23)";
+        let dir = tempfile::tempdir().expect("temp dir");
+        let app = tauri::test::mock_app();
+        // Each entry: the payload, and what the Sync tab's own read (`kept_unsynced_folder`) finds when it is told.
+        type Heard = Arc<Mutex<Vec<(String, Option<String>)>>>;
+        let heard: Heard = Arc::default();
+        let into = heard.clone();
+        app.handle().listen(super::KEPT_FOLDER_CHANGED_EVENT, move |event| {
+            let row = super::kept_unsynced_folder().expect("the tab reads the config");
+            into.lock().unwrap().push((event.payload().to_string(), row));
+        });
+
+        crate::config::CONFIG_DIR_OVERRIDE
+            .scope(dir.path().to_path_buf(), async {
+                assert_eq!(super::kept_unsynced_folder(), Ok(None), "no row before the Repair");
+                super::save_kept_folder_for_row(app.handle(), FOLDER);
+                assert_eq!(
+                    super::kept_unsynced_folder(),
+                    Ok(Some(FOLDER.to_string())),
+                    "the Repair's folder is saved for the row"
+                );
+            })
+            .await;
+        assert_eq!(
+            *heard.lock().unwrap(),
+            vec![("null".to_string(), Some(FOLDER.to_string()))],
+            "told exactly once, with no path, and the tab's read already finds the folder"
+        );
+    }
+
+    /// RB3-F1: the row's folder is saved in ONE place, and that place tells the windows, so a future save path cannot
+    /// forget the event. Source pins (the behaviour is `rb3_f1_a_repair_that_kept_a_folder_tells_the_windows_...` and
+    /// `rebase_i2_a_surfaced_folder_...`): the one function saves and then tells; sign-out, the sweep and the
+    /// reconciler (`surface_kept_folder`) and macOS Repair both go through it; and a census of every `.rs` file under
+    /// `src` finds no other writer of the row. `record_kept_folder` into a config that is saved afterwards is the one
+    /// other way in, kept for Windows and Linux (no File Provider there, so nothing is kept, and the row is MacSettings'
+    /// alone): its three sites are counted by name, so a fourth, or a Mac one, fails here until it tells the windows.
+    #[test]
+    fn rb3_f1_every_save_of_the_rows_folder_goes_through_the_one_function_that_tells_the_windows() {
+        let full = source();
+        let source = full[..full.find("\nmod finder_removal_wiring_tests {").expect("this module")].to_string();
+        let code_only = |text: &str| {
+            text.lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let helper = squash_ws(&code_only(&item(&source, "fn save_kept_folder_for_row<")));
+        assert!(
+            helper.contains(&squash_ws(
+                "save_kept_folder_for_row_with(location, remember_kept_folder, || emit_kept_folder_changed(app));"
+            )),
+            "the one function saves with `remember_kept_folder`, then tells the windows:\n{helper}"
+        );
+        let with = code_only(&item(&source, "fn save_kept_folder_for_row_with("));
+        let saved = with.find("save(location);").expect("it saves the folder");
+        let told = with.find("changed();").expect("it tells the windows");
+        assert!(saved < told, "saved first, told after:\n{with}");
+
+        let surface = squash_ws(&code_only(&item(&source, "fn surface_kept_folder(")));
+        assert!(
+            surface.contains(&squash_ws(
+                "surface_kept_folder_with(
+                    preserved_location,
+                    |location| save_kept_folder_for_row(app, location),
+                    |location| show_preserved_files_alert(app, Some(location)),
+                );"
+            )),
+            "sign-out, the sweep and the reconciler save through the one function:\n{surface}"
+        );
+        let repair = code_only(&item(&source, "async fn reset_macos_integration("));
+        assert!(
+            squash_ws(&repair).contains(&squash_ws(
+                "#[cfg(target_os = \"macos\")]
+                save_kept_folder_for_row(&app, location);"
+            )),
+            "macOS Repair saves the row through the one function:\n{repair}"
+        );
+        assert!(
+            !repair.contains("remember_kept_folder"),
+            "Repair never saves the row on its own:\n{repair}"
+        );
+
+        // The census. `src` is read from disk; a file's test module starts at its first column-0 `#[cfg(test)]` before a `mod`, and
+        // `lib.rs` is read up to this module (the test modules before it hold none of these names).
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        let mut stack = vec![src.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display())) {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                    let name = path.strip_prefix(&src).unwrap().to_string_lossy().replace('\\', "/");
+                    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {name}: {e}"));
+                    let text = text.replace("\r\n", "\n");
+                    let production = if name == "lib.rs" {
+                        source.clone()
+                    } else {
+                        let end = text.find("\n#[cfg(test)]\nmod ").unwrap_or(text.len());
+                        text[..end].to_string()
+                    };
+                    files.push((name, code_only(&production)));
+                }
+            }
+        }
+        files.sort();
+        assert!(
+            files.len() >= 20 && files.iter().any(|(name, _)| name == "finder_setup/macos_ports.rs"),
+            "a census that read fewer than 20 files, or not the reconciler's ports, scanned the wrong tree: {:?}",
+            files.iter().map(|(name, _)| name).collect::<Vec<_>>()
+        );
+        // A name as a word: `remember_kept_folder_at` is another name.
+        let words = |text: &str, word: &str| {
+            text.match_indices(word)
+                .filter(|(at, _)| {
+                    let before = text[..*at].chars().next_back();
+                    let after = text[at + word.len()..].chars().next();
+                    let part_of_a_name = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+                    !part_of_a_name(before) && !part_of_a_name(after)
+                })
+                .count()
+        };
+        let count_in = |file: &str, word: &str| {
+            let (_, text) = files
+                .iter()
+                .find(|(name, _)| name == file)
+                .unwrap_or_else(|| panic!("{file}"));
+            words(text, word)
+        };
+
+        // `remember_kept_folder`: defined in `finder_removal.rs`, wrapped once in `lib.rs`, used once, by the one function.
+        assert_eq!(
+            count_in("finder_removal.rs", "remember_kept_folder"),
+            1,
+            "its definition"
+        );
+        let mut lib = source.clone();
+        for own in ["fn remember_kept_folder(", "fn save_kept_folder_for_row<"] {
+            lib = lib.replace(&item(&source, own), "");
+        }
+        assert_eq!(
+            words(&code_only(&lib), "remember_kept_folder"),
+            0,
+            "in lib.rs only the wrapper and the one function name `remember_kept_folder`"
+        );
+        for (name, text) in &files {
+            if name != "lib.rs" && name != "finder_removal.rs" {
+                assert_eq!(
+                    words(text, "remember_kept_folder") + words(text, "save_kept_folder_for_row_with"),
+                    0,
+                    "{name} must save the row through `save_kept_folder_for_row`, not around it"
+                );
+            }
+            if name != "finder_removal.rs" {
+                assert_eq!(
+                    text.matches(".kept_unsynced_folder =").count(),
+                    0,
+                    "{name} writes the row's folder on its own; only finder_removal.rs does, for the functions above"
+                );
+            }
+        }
+
+        // `record_kept_folder` into a config saved afterwards: Windows and Linux only, three sites, by name.
+        let record = "finder_removal::record_kept_folder(&mut cfg";
+        let install = code_only(&item(&source, "async fn install_finder_location("));
+        assert_eq!(
+            install.matches(record).count(),
+            2,
+            "Add to Finder's two cleanups:\n{install}"
+        );
+        assert_eq!(
+            code_only(&repair).matches(record).count(),
+            1,
+            "Repair's, under `#[cfg(not(target_os = \"macos\"))]`:\n{repair}"
+        );
+        assert!(
+            squash_ws(&repair).contains(&squash_ws(
+                "#[cfg(not(target_os = \"macos\"))]
+                finder_removal::record_kept_folder(&mut cfg, location);"
+            )),
+            "Repair's record is Windows and Linux only; on a Mac the row is saved through the one function:\n{repair}"
+        );
+        assert_eq!(
+            words(&code_only(&source), "record_kept_folder"),
+            3,
+            "a new site that records the row's folder must tell the windows after its own save, or be named here"
+        );
+        for (name, text) in &files {
+            if name != "lib.rs" && name != "finder_removal.rs" {
+                assert_eq!(
+                    words(text, "record_kept_folder"),
+                    0,
+                    "{name} records the row's folder around the pin"
+                );
+            }
+        }
     }
 
     #[test]
@@ -30313,24 +30552,23 @@ mod finder_removal_wiring_tests {
         };
         // Saved, then shown: one function for the paths without a config of their own. Rebase re-review I1: its
         // two steps are passed to `surface_kept_folder_with`, so a test can run them on its own file.
-        // Rebase re-review I2: between the two, the windows are told, so an open Sync tab reads the folder again.
+        // Rebase re-review I2 and RB3-F1: the save is `save_kept_folder_for_row`, which tells the windows after it
+        // (its own pin is `rb3_f1_every_save_of_the_rows_folder_...`), so an open Sync tab reads the folder again.
         let surface = squash_ws(&code_only(&item(&source, "fn surface_kept_folder(")));
         assert!(
             surface.contains(&squash_ws(
                 "surface_kept_folder_with(
                     preserved_location,
-                    remember_kept_folder,
-                    || emit_kept_folder_changed(app),
+                    |location| save_kept_folder_for_row(app, location),
                     |location| show_preserved_files_alert(app, Some(location)),
                 );"
             )),
-            "it saves the folder with `remember_kept_folder`, tells the windows and raises the alert:\n{surface}"
+            "it saves the folder for the row (and tells the windows), then raises the alert:\n{surface}"
         );
         let with = code_only(&item(&source, "fn surface_kept_folder_with("));
-        let saved = with.find("save(location);").expect("it saves the folder");
-        let told = with.find("changed();").expect("it tells the windows");
+        let saved = with.find("save_for_row(location);").expect("it saves the folder");
         let shown = with.find("alert(location);").expect("it raises the alert");
-        assert!(saved < told && told < shown, "{with}");
+        assert!(saved < shown, "{with}");
         let remember = code_only(&item(&source, "fn remember_kept_folder("));
         // Round 5: the save is one load-change-save under the config-write lock, not a
         // `DesktopConfig::load()` + `cfg.save()` of its own.
@@ -30361,11 +30599,12 @@ mod finder_removal_wiring_tests {
 
         // Repair and the add rollback record into the config they save afterwards (Windows and Linux). On macOS
         // Repair saves no config (spec 2026-10-06 §6.1), so it saves the row's record on its own, under the
-        // config-write lock, without the alert: its result carries the folder to the Sync tab.
+        // config-write lock, without the alert: its result carries the folder to the Sync tab. RB3-F1: it saves
+        // through `save_kept_folder_for_row`, which also tells the windows, so an open Sync tab follows the Repair.
         let repair = code_only(&item(&source, "async fn reset_macos_integration("));
         assert!(
             squash_ws(&repair).contains(&squash_ws(
-                "if let Some(location) = preserved_location.as_deref() {\n        #[cfg(target_os = \"macos\")]\n        remember_kept_folder(location);"
+                "if let Some(location) = preserved_location.as_deref() {\n        #[cfg(target_os = \"macos\")]\n        save_kept_folder_for_row(&app, location);"
             )),
             "macOS Repair saves the folder for the row:\n{repair}"
         );
