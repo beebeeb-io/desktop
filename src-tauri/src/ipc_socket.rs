@@ -244,7 +244,7 @@ pub(crate) const FP_TRASH_APPLE: &str = "NSFileProviderTrashContainerItemIdentif
 // `normalize_parent_id`. It is never an enumeration surface any more.
 const NAMESPACE_SHARED_WITH_ME: &str = "namespace:shared_with_me";
 const CAP_READ: u32 = 1 << 0;
-const CAP_WRITE: u32 = 1 << 1;
+pub(crate) const CAP_WRITE: u32 = 1 << 1;
 const CAP_RENAME: u32 = 1 << 2;
 const CAP_DELETE: u32 = 1 << 3;
 /// `.allowsAddingSubItems` on the Swift side (task 1694). Bit 4, with the
@@ -2749,6 +2749,19 @@ pub(crate) fn file_entry_payload_for_db(
     // sees a row from before a landing beside a queue from after it.
     let read = db.item_presentation(&entry.file_id);
     builder_seam();
+    // §9.1: a Finder upload that has not parked keeps the item writable and not evictable
+    // (ITEM.h:531-533). A Trashing row keeps its trash presentation (m-8).
+    let shown;
+    let entry = match &read {
+        Ok(Some(p)) if p.unparked_finder_upload && entry.status != crate::state_db::FileStatus::Trashing => {
+            shown = crate::state_db::FileEntry {
+                status: crate::state_db::FileStatus::Uploading,
+                ..entry.clone()
+            };
+            &shown
+        }
+        _ => entry,
+    };
     let mut payload = match &read {
         Ok(Some(p)) => file_entry_payload(entry, &p.contract, parent_identifier),
         Ok(None) => file_entry_payload_without_contract(entry, parent_identifier),

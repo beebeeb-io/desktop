@@ -852,14 +852,24 @@ fn a_cached_reply_reports_the_row_as_it_is_now_not_as_it_was() {
         fx.db.set_file_contract_state(&contract).unwrap();
         let retry = send_one(&fx, create_request("big.bin", &path, Some("key-fresh"))).await;
         assert_eq!(item_id(&retry), id, "it is still the same item (a true retry)");
-        assert_eq!(retry["WriteQueued"]["item"]["status"], "local", "status must be current: {retry}");
+        // The create's op is still queued, so the item is reported as it is now: `uploading`,
+        // the queue's status, not the row's (spec §5.4 row 1, §9.1).
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            retry["WriteQueued"]["item"]["status"], "uploading",
+            "status must be current: {retry}"
+        );
+        // The Linux arm does not mint, so no op carries a write id: the row's status.
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(
+            retry["WriteQueued"]["item"]["status"], "local",
+            "status must be current: {retry}"
+        );
         assert_eq!(
             retry["WriteQueued"]["item"]["version_identifier"], "7:1700000123:20",
             "version must be current: {retry}"
         );
-        // The create's op is still queued, so the item is reported as it is now:
-        // under the create's token (spec §5.4 row 1). Task 9 turns the status to
-        // `uploading`; until then it stays `local` (lead ruling E4.2).
+        // The create's op is still queued: under the create's token (spec §5.4 row 1).
         #[cfg(target_os = "macos")]
         assert_eq!(
             retry["WriteQueued"]["item"]["content_version"], first["WriteQueued"]["item"]["content_version"],

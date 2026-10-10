@@ -863,6 +863,8 @@ pub struct ItemPresentation {
     pub held_write_queued: bool,
     /// A Finder upload of this file exists that has not parked (spec §9.1).
     pub unparked_finder_upload: bool,
+    /// A Finder upload of this file has parked (attempts used up, spec §9.1).
+    pub parked_finder_upload: bool,
     pub version_filled: bool,
 }
 
@@ -1174,6 +1176,28 @@ fn park_unclaimed_conn(conn: &Connection, op_id: &str, reason: ParkReason, now: 
     )
 }
 
+/// §9.1–§9.2, after a park, in the park's own transaction: a parked upload presents `error`
+/// (read-only, still not evictable), unless another Finder upload of the file has not parked
+/// (§8.4: a successor waiting to take over keeps the item `uploading`). Only an `uploading` row
+/// moves: a `Trashing` row keeps its trash presentation (m-8), a `Conflict` row its own.
+/// Write-keyed: only a Finder upload is ever parked, so Windows and Linux never reach it. A flip
+/// is recorded for the system, as every status change is.
+fn settle_status_after_park_conn<C: std::ops::Deref<Target = Connection>>(conn: &C, file_id: &str) -> Result<()> {
+    let flipped = conn.execute(
+        "UPDATE files SET status = 'error'
+         WHERE file_id = ?1 AND status = 'uploading'
+           AND NOT EXISTS (SELECT 1 FROM operation_queue
+                           WHERE file_id = ?1 AND write_id IS NOT NULL
+                             AND kind IN ('upload_version', 'upload_file')
+                             AND attempts < max_attempts)",
+        params![file_id],
+    )?;
+    if flipped == 1 {
+        record_file_change_conn(conn, file_id, FpChangeKind::Modified, None)?;
+    }
+    Ok(())
+}
+
 /// The claim parks the op with its bytes (spec §8.4, S5), in its own transaction.
 fn park_in_claim(
     tx: rusqlite::Transaction<'_>,
@@ -1186,6 +1210,9 @@ fn park_in_claim(
     // were one to reach here, the park refuses it and it waits, which is not an attempt.
     if park_unclaimed_conn(&tx, &op.op_id, reason, now)? != 1 {
         return finish_wait(tx, took_over);
+    }
+    if let Some(file_id) = op.file_id.as_deref() {
+        settle_status_after_park_conn(&tx, file_id)?;
     }
     tx.commit()?;
     Ok(ClaimOutcome::Parked {
@@ -2932,6 +2959,21 @@ impl StateDb {
         Ok(())
     }
 
+    /// §9.1 (m-8): a Finder write's attempt marks its row `Uploading`, except a `Trashing` row,
+    /// which keeps its trash presentation. One statement, so a trash applied meanwhile is never
+    /// overwritten. A flip is recorded for the system, as [`Self::set_status`] does.
+    pub fn set_uploading_unless_trashing(&self, file_id: &str) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let flipped = conn.execute(
+            "UPDATE files SET status = 'uploading' WHERE file_id = ?1 AND status NOT IN ('uploading', 'trashing')",
+            params![file_id],
+        )?;
+        if flipped == 1 {
+            record_file_change_conn(&conn, file_id, FpChangeKind::Modified, None)?;
+        }
+        Ok(())
+    }
+
     /// A local content write was queued: the row is `Uploading` and describes
     /// the bytes the write holds (`size_bytes`, `modified_at`). Path, content
     /// hash and the remote stamp are left alone, so the content version does
@@ -2950,13 +2992,20 @@ impl StateDb {
     /// - `Downloading` falls back to `CloudOnly`; a later open/pin can rehydrate.
     /// - `Uploading` becomes `Error`; the durable operation queue still carries
     ///   any staged upload retry, but the row is not reported as in-flight.
+    /// - Except a row with a Finder upload that has not parked (spec §9.2): it stays
+    ///   `Uploading`, because that upload resumes after the relaunch and the item stays
+    ///   writable and not evictable meanwhile. Only a Finder upload carries a write id.
     pub fn reconcile_stale_in_flight_on_startup(&self) -> Result<usize> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.execute(
             "UPDATE files
              SET status = CASE status
                 WHEN 'downloading' THEN 'cloud_only'
-                WHEN 'uploading' THEN 'error'
+                WHEN 'uploading' THEN CASE WHEN EXISTS (
+                        SELECT 1 FROM operation_queue q
+                        WHERE q.file_id = files.file_id AND q.write_id IS NOT NULL
+                          AND q.kind IN ('upload_version', 'upload_file') AND q.attempts < q.max_attempts)
+                    THEN 'uploading' ELSE 'error' END
                 ELSE status
              END
              WHERE status IN ('downloading', 'uploading')",
@@ -3163,13 +3212,17 @@ impl StateDb {
             )?,
             None => false,
         };
-        let unparked_finder_upload: bool = tx.query_row(
+        let (unparked_finder_upload, parked_finder_upload): (bool, bool) = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM operation_queue
-              WHERE file_id = ?1 AND write_id IS NOT NULL
-                AND kind IN ('upload_version', 'upload_file')
-                AND attempts < max_attempts)",
+                            WHERE file_id = ?1 AND write_id IS NOT NULL
+                              AND kind IN ('upload_version', 'upload_file')
+                              AND attempts < max_attempts),
+                    EXISTS(SELECT 1 FROM operation_queue
+                            WHERE file_id = ?1 AND write_id IS NOT NULL
+                              AND kind IN ('upload_version', 'upload_file')
+                              AND attempts >= max_attempts)",
             params![file_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         tx.commit()?;
         Ok(Some(ItemPresentation {
@@ -3177,6 +3230,7 @@ impl StateDb {
             held,
             held_write_queued,
             unparked_finder_upload,
+            parked_finder_upload,
             version_filled,
         }))
     }
@@ -3372,6 +3426,9 @@ impl StateDb {
             )?;
             // A recorded completion is never parked (§8.6 rule 6).
             if park_unclaimed_conn(&tx, &op_id, ParkReason::BaseUnknown, now)? == 1 {
+                if let Some(file_id) = file_id.as_deref() {
+                    settle_status_after_park_conn(&tx, file_id)?;
+                }
                 parked.push((op_id, file_id));
             }
         }
@@ -3485,6 +3542,9 @@ impl StateDb {
                 base_pending,
             ],
         )?;
+        if parked {
+            settle_status_after_park_conn(&tx, accept.file_id)?;
+        }
         tx.commit()?;
         let token = WriteToken { base: b, write_id }.render();
         Ok(if parked {
@@ -3659,16 +3719,12 @@ impl StateDb {
                 "UPDATE files SET status = ?2, size_bytes = ?3, modified_at = ?4 WHERE file_id = ?1",
                 params![server, FileStatus::Local.as_str(), input.size_bytes, input.now],
             )?;
-        } else if !later_unparked {
-            // Only parked writes remain: a parked upload presents `error` (spec §9.1). Task 9's
-            // `settle_status_after_park_conn` takes this over; until then the `UPDATE` is inline.
-            tx.execute(
-                "UPDATE files SET status = ?2 WHERE file_id = ?1 AND status = ?3",
-                params![server, FileStatus::Error.as_str(), FileStatus::Uploading.as_str()],
-            )?;
         }
-        // Otherwise a later write is still queued and unparked: the status stays `Uploading`,
-        // and the size and mtime stay the newer write's.
+        // Only parked writes remain: a parked upload presents `error` (spec §9.1), settled once
+        // this op is gone (below), because until then it counts as a Finder upload that has not
+        // parked. Otherwise a later write is still queued and unparked: the status stays
+        // `Uploading`, and the size and mtime stay the newer write's.
+        let settle_after_removal = later_parked && !later_unparked;
         if let Some(write_id) = input.write_id {
             // §8.6.2: only WHERE held_write_id = W; a later save's token stays held.
             tx.execute(
@@ -3713,6 +3769,9 @@ impl StateDb {
         };
         if input.claim_id.is_some() && removed != 1 {
             return Ok(None); // dropping `tx` rolls back
+        }
+        if settle_after_removal {
+            settle_status_after_park_conn(&tx, server)?;
         }
         tx.execute("DELETE FROM upload_resume WHERE op_id = ?1", params![input.op_id])?;
         if let Some(path) = input.completed_payload {
@@ -4908,6 +4967,9 @@ impl StateDb {
 
     /// A failed attempt of a claimed op: its retry schedule, and the claim ends.
     /// `false`: the op moved since the claim and nothing was written (S2).
+    /// A Finder upload whose last attempt this was has parked by the queue's own rule
+    /// (`attempts < max_attempts` is "not parked"): its row is settled as after every park
+    /// (spec §9.1–§9.2), in this transaction.
     pub fn record_attempt_claimed(
         &self,
         op_id: &str,
@@ -4916,14 +4978,31 @@ impl StateDb {
         next_retry_at: i64,
         last_error: Option<&str>,
     ) -> Result<bool> {
-        let conn = self.0.lock().expect("state_db mutex poisoned");
-        let n = conn.execute(
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let n = tx.execute(
             "UPDATE operation_queue
              SET attempts = ?3, next_retry_at = ?4, last_error = ?5, last_error_class = NULL,
                  paused_reason = NULL, updated_at = ?4, claim_id = NULL, claimed_at = NULL
              WHERE op_id = ?1 AND claim_id = ?2",
             params![op_id, claim_id, attempts, next_retry_at, last_error],
         )?;
+        if n == 1 {
+            // Write-keyed: an upload without a write id keeps its own rollback.
+            let given_up: Option<Option<String>> = tx
+                .query_row(
+                    "SELECT file_id FROM operation_queue
+                     WHERE op_id = ?1 AND write_id IS NOT NULL AND kind IN ('upload_version', 'upload_file')
+                       AND attempts >= max_attempts",
+                    params![op_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(Some(file_id)) = given_up {
+                settle_status_after_park_conn(&tx, &file_id)?;
+            }
+        }
+        tx.commit()?;
         Ok(n == 1)
     }
 
@@ -4958,8 +5037,17 @@ impl StateDb {
     /// `false`: nothing was written, because the op moved since the claim (S2) or its
     /// completion is recorded (§8.6 rule 6: the runner retries such an op instead).
     pub fn park_claimed(&self, op_id: &str, claim_id: &str, reason: ParkReason, now: i64) -> Result<bool> {
-        let conn = self.0.lock().expect("state_db mutex poisoned");
-        let n = conn.execute(
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let file_id: Option<String> = tx
+            .query_row(
+                "SELECT file_id FROM operation_queue WHERE op_id = ?1",
+                params![op_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        let n = tx.execute(
             "UPDATE operation_queue
              SET attempts = max_attempts, last_error = ?3, last_error_class = ?3, updated_at = ?4,
                  claim_id = NULL, claimed_at = NULL
@@ -4967,6 +5055,12 @@ impl StateDb {
                AND NOT EXISTS (SELECT 1 FROM upload_resume WHERE op_id = ?1 AND completed_version IS NOT NULL)",
             params![op_id, claim_id, reason.as_str(), now],
         )?;
+        if n == 1
+            && let Some(file_id) = file_id.as_deref()
+        {
+            settle_status_after_park_conn(&tx, file_id)?;
+        }
+        tx.commit()?;
         Ok(n == 1)
     }
 
@@ -5072,17 +5166,18 @@ impl StateDb {
         )
     }
 
-    /// §7.4 and S1.8: the held write's staged copy, when that write is still queued. One read:
-    /// the held write and its op are looked up together.
+    /// §7.4 and S1.8: the held write's staged copy, when that write is still queued, and
+    /// whether that write has parked (attempts used up). One read: the held write and its op
+    /// are looked up together.
     #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
-    pub fn queue_fetch_source(&self, file_id: &str) -> Result<Option<String>> {
+    pub fn queue_fetch_source(&self, file_id: &str) -> Result<Option<(String, bool)>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.query_row(
-            "SELECT q.payload_path FROM files f
+            "SELECT q.payload_path, q.attempts >= q.max_attempts FROM files f
              JOIN operation_queue q ON q.write_id = f.held_write_id
              WHERE f.file_id = ?1 AND q.payload_path IS NOT NULL",
             params![file_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
     }
@@ -10722,6 +10817,268 @@ mod tests {
             db.queued_or_staged_count().unwrap(),
             2,
             "a queued change and a staged payload both count"
+        );
+    }
+
+    // ── Rule 5: the item's status follows the queue (spec §9.1–§9.2) ──────────
+
+    /// T31 (§9.2): the startup reconcile leaves a row whose Finder upload has not parked
+    /// `Uploading`. A row with no Finder upload is reset to `Error`, as before.
+    #[test]
+    fn startup_keeps_a_row_with_a_live_upload_uploading() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_own_row(&db, "with-save", FileStatus::Local, 10);
+        let mut contract = db.get_file_contract_state("with-save").unwrap().unwrap();
+        contract.current_version = 1;
+        db.set_file_contract_state(&contract).unwrap();
+        let accepted = db
+            .accept_finder_write(
+                &FinderAccept {
+                    op_id: "op-with-save",
+                    file_id: "with-save",
+                    kind: FinderAcceptKind::Modify {
+                        incoming_base: Some("1"),
+                    },
+                    parent_id: None,
+                    target_path: Some("with-save.txt"),
+                    metadata_json: "{}",
+                    payload_path: "/staged/with-save",
+                    size_bytes: 3,
+                    modified_at: 100,
+                    backup_source_key: None,
+                    now: 100,
+                },
+                &|_, _| Vec::new(),
+            )
+            .unwrap();
+        assert!(matches!(accepted, AcceptOutcome::Queued { .. }));
+        seed_own_row(&db, "stale-upload", FileStatus::Uploading, 20);
+
+        db.reconcile_stale_in_flight_on_startup().unwrap();
+
+        assert_eq!(
+            db.get_file("with-save").unwrap().unwrap().status,
+            FileStatus::Uploading,
+            "its save still uploads"
+        );
+        assert_eq!(
+            db.get_file("stale-upload").unwrap().unwrap().status,
+            FileStatus::Error,
+            "unchanged for a row with no Finder upload"
+        );
+    }
+
+    /// A row the server holds at version 1.
+    fn seed_v1_row(db: &StateDb, file_id: &str) {
+        seed_own_row(db, file_id, FileStatus::Local, 10);
+        let mut contract = db.get_file_contract_state(file_id).unwrap().unwrap();
+        contract.current_version = 1;
+        db.set_file_contract_state(&contract).unwrap();
+    }
+
+    /// One File Provider save of `file_id` on `base`, through the accept transaction.
+    fn accept_save(db: &StateDb, op_id: &str, file_id: &str, base: Option<&str>) -> AcceptOutcome {
+        let payload_path = format!("/staged/{op_id}");
+        db.accept_finder_write(
+            &FinderAccept {
+                op_id,
+                file_id,
+                kind: FinderAcceptKind::Modify { incoming_base: base },
+                parent_id: None,
+                target_path: Some("a.txt"),
+                metadata_json: "{}",
+                payload_path: &payload_path,
+                size_bytes: 3,
+                modified_at: 100,
+                backup_source_key: None,
+                now: 100,
+            },
+            &|_, _| Vec::new(),
+        )
+        .unwrap()
+    }
+
+    fn queued_token(outcome: AcceptOutcome) -> String {
+        match outcome {
+            AcceptOutcome::Queued { token, .. } => token,
+            other => panic!("the save is queued: {other:?}"),
+        }
+    }
+
+    fn status_of(db: &StateDb, file_id: &str) -> FileStatus {
+        db.get_file(file_id).unwrap().unwrap().status
+    }
+
+    fn changes_of(db: &StateDb, file_id: &str) -> usize {
+        db.list_file_changes(None)
+            .unwrap()
+            .map(|(changes, _)| changes.into_iter().filter(|change| change.file_id == file_id).count())
+            .unwrap_or(0)
+    }
+
+    /// §9.1, step 3.3: the runner's park of a claimed Finder upload sets `Error` in its own
+    /// transaction, and records the change for the system. A file whose later save is still
+    /// queued stays `Uploading`.
+    #[test]
+    fn a_claimed_park_settles_the_row_to_error() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_v1_row(&db, "parked");
+        queued_token(accept_save(&db, "w1", "parked", Some("1")));
+        assert_eq!(status_of(&db, "parked"), FileStatus::Uploading, "precondition");
+        let changes = changes_of(&db, "parked");
+        let ClaimOutcome::Claimed(claimed) = db.claim_operation("w1", 1).unwrap() else {
+            panic!("w1 is claimable")
+        };
+        assert!(
+            db.park_claimed("w1", &claimed.claim_id, ParkReason::PayloadMissing, 2)
+                .unwrap()
+        );
+        assert_eq!(
+            status_of(&db, "parked"),
+            FileStatus::Error,
+            "a parked upload presents error"
+        );
+        assert_eq!(
+            changes_of(&db, "parked"),
+            changes + 1,
+            "the flip is recorded for the system"
+        );
+
+        seed_v1_row(&db, "live");
+        let first = queued_token(accept_save(&db, "l1", "live", Some("1")));
+        queued_token(accept_save(&db, "l2", "live", Some(&first)));
+        let ClaimOutcome::Claimed(claimed) = db.claim_operation("l1", 1).unwrap() else {
+            panic!("l1 is claimable")
+        };
+        assert!(
+            db.park_claimed("l1", &claimed.claim_id, ParkReason::PayloadMissing, 2)
+                .unwrap()
+        );
+        assert_eq!(
+            status_of(&db, "live"),
+            FileStatus::Uploading,
+            "its successor has not parked: still uploading"
+        );
+    }
+
+    /// §9.1, step 3.3 (rule 6a′): a save parked at its accept sets `Error` in the accept's
+    /// transaction.
+    #[test]
+    fn a_park_at_accept_settles_the_row_to_error() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_v1_row(&db, "unknown-base");
+        let outcome = accept_save(&db, "w1", "unknown-base", None);
+        assert!(
+            matches!(outcome, AcceptOutcome::ParkedAtOnce { .. }),
+            "precondition: {outcome:?}"
+        );
+        assert_eq!(status_of(&db, "unknown-base"), FileStatus::Error);
+    }
+
+    /// §9.1, step 3.3: a park inside the claim (here `predecessor_lost`) sets `Error` in the
+    /// claim's transaction.
+    #[test]
+    fn a_park_in_the_claim_settles_the_row_to_error() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_v1_row(&db, "orphan");
+        let first = queued_token(accept_save(&db, "w1", "orphan", Some("1")));
+        queued_token(accept_save(&db, "w2", "orphan", Some(&first)));
+        db.0.lock()
+            .unwrap()
+            .execute("DELETE FROM operation_queue WHERE op_id = 'w1'", [])
+            .unwrap();
+        let outcome = db.claim_operation("w2", 1).unwrap();
+        assert!(
+            matches!(
+                outcome,
+                ClaimOutcome::Parked {
+                    reason: ParkReason::PredecessorLost,
+                    ..
+                }
+            ),
+            "precondition: parked in the claim"
+        );
+        assert_eq!(status_of(&db, "orphan"), FileStatus::Error);
+    }
+
+    /// §9.1, step 3.3: the snapshot count's park (`base_unknown`) sets `Error` for each file it
+    /// parked, in its transaction.
+    #[test]
+    fn the_snapshot_counts_park_settles_the_row_to_error() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        // Version 0 and no base: the save waits for a snapshot (6b).
+        seed_own_row(&db, "no-version", FileStatus::Local, 10);
+        queued_token(accept_save(&db, "w1", "no-version", None));
+        assert_eq!(db.finder_write("w1").unwrap().unwrap().base_pending, 1, "precondition");
+        let mut parked = Vec::new();
+        for snapshot in 0..BASE_PENDING_PARK_AT {
+            parked = db.note_snapshot_for_base_pending(10 + snapshot).unwrap();
+            if !parked.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(
+            parked,
+            vec![("w1".to_string(), Some("no-version".to_string()))],
+            "precondition"
+        );
+        assert_eq!(status_of(&db, "no-version"), FileStatus::Error);
+    }
+
+    /// §9.1–§9.2: a Finder upload whose last attempt used up its attempts has parked by the
+    /// queue's own rule (`attempts < max_attempts` is "not parked"), so it presents `Error`.
+    /// An earlier failed attempt leaves `Uploading`. An upload without a write id (Windows, the
+    /// watcher) is not touched: its rollback keeps its status.
+    #[test]
+    fn a_finder_upload_that_uses_up_its_attempts_settles_the_row_to_error() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        for (file_id, op_id) in [("retried", "r1"), ("given-up", "g1")] {
+            seed_v1_row(&db, file_id);
+            queued_token(accept_save(&db, op_id, file_id, Some("1")));
+        }
+        let ClaimOutcome::Claimed(claimed) = db.claim_operation("r1", 1).unwrap() else {
+            panic!("r1 is claimable")
+        };
+        assert!(
+            db.record_attempt_claimed("r1", &claimed.claim_id, 1, 60, Some("HTTP 500"))
+                .unwrap()
+        );
+        assert_eq!(status_of(&db, "retried"), FileStatus::Uploading, "it will retry");
+        let ClaimOutcome::Claimed(claimed) = db.claim_operation("g1", 1).unwrap() else {
+            panic!("g1 is claimable")
+        };
+        let last = claimed.op.max_attempts;
+        assert!(
+            db.record_attempt_claimed("g1", &claimed.claim_id, last, 60, Some("HTTP 500"))
+                .unwrap()
+        );
+        assert_eq!(status_of(&db, "given-up"), FileStatus::Error, "it will not retry");
+
+        seed_own_row(&db, "watcher", FileStatus::Uploading, 10);
+        db.enqueue_operation(&queued(
+            "u1",
+            OperationKind::UploadVersion,
+            "watcher",
+            Some("/staged/u1"),
+        ))
+        .unwrap();
+        let ClaimOutcome::Claimed(claimed) = db.claim_operation("u1", 1).unwrap() else {
+            panic!("u1 is claimable")
+        };
+        assert!(
+            db.record_attempt_claimed("u1", &claimed.claim_id, 25, 60, Some("HTTP 500"))
+                .unwrap()
+        );
+        assert_eq!(
+            status_of(&db, "watcher"),
+            FileStatus::Uploading,
+            "write-keyed: no write id, not touched here"
         );
     }
 }

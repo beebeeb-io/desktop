@@ -1072,15 +1072,30 @@ impl EngineBridge {
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("upload operation missing file_id"))?;
         let previous_status = self.db.get_file(local_file_id)?.map(|entry| entry.status);
-        self.db.set_status(local_file_id, FileStatus::Uploading)?;
+        // Write-keyed: a File Provider write (spec §9.1–§9.2). Keep Mine (`claim: None`) and
+        // Windows and watcher uploads keep today's status handling.
+        let finder_write = claim.and_then(|c| c.write.as_ref()).is_some();
+        // §9.1 (m-8): an item in the trash never looks writable. A Finder write's attempt
+        // leaves a `Trashing` row in the trash; its `init` meets the server's refusal and retries.
+        if finder_write {
+            self.db.set_uploading_unless_trashing(local_file_id)?;
+        } else {
+            self.db.set_status(local_file_id, FileStatus::Uploading)?;
+        }
 
         struct Rollback<'a> {
             db: &'a StateDb,
             id: &'a str,
             previous: Option<FileStatus>,
+            finder_write: bool,
         }
         impl Drop for Rollback<'_> {
             fn drop(&mut self) {
+                // §9.2: a Finder write's row stays `Uploading` while its op will retry; a park
+                // sets `Error` in the park's own transaction (`settle_status_after_park_conn`).
+                if self.finder_write {
+                    return;
+                }
                 // A server-completed upload has already committed Local; don't
                 // undo that if cancellation happens during thumbnail work.
                 if self
@@ -1103,6 +1118,7 @@ impl EngineBridge {
             db: &self.db,
             id: local_file_id,
             previous: previous_status,
+            finder_write,
         };
         self.do_upload_version(local_file_id, op, claim, sync_root, post_complete_errors)
             .await
@@ -2302,7 +2318,8 @@ impl EngineBridge {
 
     /// §7.4: a fetch of an item whose held write is queued is served from that write's
     /// staged bytes, the bytes its token names, and never reaches the server; otherwise
-    /// from the server, as before.
+    /// from the server, as before. A write that has parked with its copy gone is the one
+    /// exception: nothing local can serve it, so the server's version is fetched.
     #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
     pub async fn serve_hydrate(
         &self,
@@ -2318,10 +2335,13 @@ impl EngineBridge {
         // A copy that is gone at the open is decided once more. If the landing unlinked it, the
         // write is no longer queued and the server has its bytes (§7.4, 4b). A write that is
         // still queued is never fetched from the server, which holds only the previous version:
-        // with its copy missing, the fetch fails (`QueuedCopyMissing`).
+        // with its copy missing, the fetch fails (`QueuedCopyMissing`), and the system retries.
+        // Ruling [t8-parked-fetch]: a write that has parked never leaves the queue by itself and
+        // its copy cannot come back, so that retry would never end. Its fetch goes to the
+        // server for the current version, and the item keeps the parked status (§9.1).
         let mut copy_missing = false;
         for _ in 0..2 {
-            let Some(path) = self.db.queue_fetch_source(&file_id)? else {
+            let Some((path, parked)) = self.db.queue_fetch_source(&file_id)? else {
                 copy_missing = false;
                 break;
             };
@@ -2337,6 +2357,10 @@ impl EngineBridge {
                     }
                     log_hydrate_served(&file_id, HydrateSource::Queue);
                     return Ok(HydrateSource::Queue);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound && parked => {
+                    copy_missing = false;
+                    break;
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     copy_missing = true;
@@ -3479,11 +3503,13 @@ impl EngineBridge {
         self.ensure_shared_hydrate_path_safe(file_id)?;
         // Spec §7.4.2: a hydrate never changes the status of a row with a live upload of its
         // own (a Finder upload that has not parked): no `Downloading`, `Local` or `Error`.
-        // That status is the upload's, and `Error` would make the item read-only.
+        // That status is the upload's, and `Error` would make the item read-only. Ruling
+        // [t8-parked-fetch]: nor of a row whose Finder upload has parked. Its status is the
+        // parked one (§9.1), and `Local` would make it writable and evictable.
         let touch_status = !self
             .db
             .item_presentation(file_id)?
-            .is_some_and(|presentation| presentation.unparked_finder_upload);
+            .is_some_and(|presentation| presentation.unparked_finder_upload || presentation.parked_finder_upload);
         let set_failed = || {
             if touch_status {
                 // Best-effort status flip; if the DB is broken we still
@@ -14456,6 +14482,14 @@ mod tests {
         /// A create mints a UUID-shaped id instead of `server-file-N` (the hydrate and the
         /// thumbnail fetch parse a UUID before they ask the server).
         uuid_ids: bool,
+        /// Sessions whose next `complete` answers 500 and completes nothing; the session stays.
+        fail_complete_once: HashSet<String>,
+        /// Files trashed on the server: every `uploads/init` naming one answers
+        /// `409 {"error": "file is in trash"}` (spec §9.1, m-8).
+        trashed_files: HashSet<String>,
+        /// `GET /files/{id}` and `GET /files/{id}/chunks/{i}` answer with the file's latest
+        /// version. Off: `GET /files/{id}` answers 404, as before.
+        serve_downloads: bool,
     }
 
     /// Upload mock that behaves like the server's version check: a replace
@@ -14599,6 +14633,37 @@ mod tests {
                 ),
             };
         }
+        // `GET /files/{id}` and `GET /files/{id}/chunks/{i}`: the file's latest version, as the
+        // client uploaded it (binary chunk bodies).
+        if s.serve_downloads
+            && request.method == "GET"
+            && let Some(rest) = request.path.strip_prefix("/api/v1/files/")
+        {
+            let (file_id, chunk) = match rest.split_once("/chunks/") {
+                Some((file_id, index)) => (file_id.to_string(), index.parse::<usize>().ok()),
+                None => (rest.to_string(), None),
+            };
+            let latest = s.files.get(&file_id).and_then(|file| file.versions.last()).cloned();
+            return match (latest, chunk) {
+                (Some(chunks), None) => {
+                    // nonce (12) + tag (16) per chunk.
+                    let size: usize = chunks.iter().map(|chunk| chunk.len().saturating_sub(28)).sum();
+                    (
+                        None,
+                        http_json(
+                            "200 OK",
+                            serde_json::json!({ "id": file_id, "chunk_count": chunks.len(), "size_bytes": size }),
+                        )
+                        .into_bytes(),
+                    )
+                }
+                (Some(chunks), Some(index)) if index < chunks.len() => (None, http_bytes("200 OK", &chunks[index])),
+                _ => (
+                    None,
+                    http_json("404 Not Found", serde_json::json!({ "error": "no such file" })).into_bytes(),
+                ),
+            };
+        }
         let delay = if request.method == "POST" && request.path == "/api/v1/uploads/init" {
             s.delay_init
         } else if request.method == "POST" && request.path.ends_with("/complete") {
@@ -14627,6 +14692,10 @@ mod tests {
                 let code = status.split(' ').next().and_then(|code| code.parse().ok()).unwrap_or(0);
                 s.inits.push((body, code));
                 return http_json(status, serde_json::json!({ "error": "refused" }));
+            }
+            if body["file_id"].as_str().is_some_and(|id| s.trashed_files.contains(id)) {
+                s.inits.push((body, 409));
+                return http_json("409 Conflict", serde_json::json!({ "error": "file is in trash" }));
             }
             if let Some(message) = body["file_id"].as_str().and_then(|id| s.conflict_init_once.remove(id)) {
                 s.inits.push((body, 409));
@@ -14738,6 +14807,9 @@ mod tests {
                 );
             }
             if method == "POST" && action == "complete" {
+                if s.fail_complete_once.remove(&session) {
+                    return http_json("500 Internal Server Error", serde_json::json!({ "error": "boom" }));
+                }
                 if let Some(file_id) = s.completed_reply_lost.get(&session).cloned() {
                     return http_json(
                         "200 OK",
@@ -18862,5 +18934,408 @@ mod tests {
         let state = server.finish();
         assert_eq!(state.files["empty"].versions.len(), 2);
         assert!(state.latest_plaintext("empty", master_key).is_empty());
+    }
+
+    // ── Rule 5: the item's status follows the queue (spec §9.1–§9.2) ──────────
+
+    /// T33 (§9.2): a Finder upload that failed once and will retry keeps the row `Uploading`, so
+    /// the item stays writable and is never evicted.
+    #[cfg(unix)] // names `crate::ipc_socket::file_entry_payload_for_db`
+    #[tokio::test]
+    async fn a_retrying_upload_keeps_the_item_writable() {
+        let (dir, sync_root, server, bridge) = rule3_setup([95u8; 32]);
+        seed_uploaded_row(&bridge, &server, "retrying");
+        fp_save(&bridge, dir.path(), "retrying", "notes.txt", b"edit", "1");
+        server
+            .state
+            .lock()
+            .unwrap()
+            .fail_first_chunk_once
+            .insert("session-1".into());
+        bridge.process_due_operations(&sync_root, now_secs()).await.unwrap(); // one transient failure
+        let op = bridge.db.list_operations_for_file("retrying").unwrap().remove(0);
+        assert_eq!(op.attempts, 1, "precondition: one failed attempt, to be retried");
+        assert_eq!(
+            bridge.db.get_file("retrying").unwrap().unwrap().status,
+            FileStatus::Uploading,
+            "the row is not rolled back to Error"
+        );
+        let entry = bridge.db.get_file("retrying").unwrap().unwrap();
+        let payload = crate::ipc_socket::file_entry_payload_for_db(&bridge.db, &entry, "root");
+        assert_eq!(payload.status, "uploading");
+        assert_ne!(payload.capabilities & crate::ipc_socket::CAP_WRITE, 0, "writable");
+        drop(server.finish());
+    }
+
+    /// T60 (§9.1, m-8): a `Trashing` row keeps its trash presentation while its Finder upload is
+    /// queued: never `uploading`, no write capability, under the trash container.
+    #[cfg(unix)] // names `crate::ipc_socket::file_entry_payload_for_db`
+    #[tokio::test]
+    async fn a_trashing_row_is_never_presented_uploading() {
+        let (dir, _sync_root, server, bridge) = rule3_setup([96u8; 32]);
+        seed_uploaded_row(&bridge, &server, "trashed-here");
+        let w = fp_save(&bridge, dir.path(), "trashed-here", "notes.txt", b"edit", "1");
+        bridge.queue_finder_delete("trashed-here", w.token).unwrap();
+        let entry = bridge.db.get_file("trashed-here").unwrap().unwrap();
+        assert_eq!(entry.status, FileStatus::Trashing, "precondition: in the trash");
+        assert!(
+            bridge
+                .db
+                .item_presentation("trashed-here")
+                .unwrap()
+                .unwrap()
+                .unparked_finder_upload,
+            "precondition: its save is still queued"
+        );
+        let payload = crate::ipc_socket::file_entry_payload_for_db(&bridge.db, &entry, "root");
+        assert_ne!(payload.status, "uploading");
+        assert_eq!(
+            payload.capabilities & crate::ipc_socket::CAP_WRITE,
+            0,
+            "no write capability in the trash"
+        );
+        assert_eq!(
+            payload.parent_identifier,
+            crate::ipc_socket::FP_TRASH_APPLE,
+            "under the trash container"
+        );
+        drop(server.finish());
+    }
+
+    /// T31 / Review Focus 2: a restart in the middle of a save's upload. Every chunk was
+    /// acknowledged and the completion was lost when the process died holding its claim. After the
+    /// relaunch the item is still writable, it keeps the token it had (no re-download), and the
+    /// upload resumes its session.
+    #[cfg(unix)] // asserts a token through `held_content_version`
+    #[tokio::test]
+    async fn a_restart_mid_upload_resumes_and_keeps_the_token() {
+        let master_key = [97u8; 32];
+        let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+        let db_path = dir.path().join("state.db");
+        seed_uploaded_row(&bridge, &server, "restart");
+        let token = fp_save(
+            &bridge,
+            dir.path(),
+            "restart",
+            "notes.txt",
+            b"saved before the restart",
+            "1",
+        )
+        .token
+        .unwrap();
+        server
+            .state
+            .lock()
+            .unwrap()
+            .fail_complete_once
+            .insert("session-1".into());
+        bridge.process_due_operations(&sync_root, now_secs()).await.unwrap(); // every chunk acknowledged, no completion
+        let op_id = bridge.db.list_operations_for_file("restart").unwrap().remove(0).op_id;
+        let resume = bridge
+            .db
+            .get_upload_resume(&op_id)
+            .unwrap()
+            .expect("its session is kept");
+        assert_eq!(
+            resume.acked_chunks, resume.chunk_count,
+            "precondition: every chunk acknowledged"
+        );
+        assert!(resume.completed_version.is_none(), "precondition: no completion");
+        let _crashed_runner = bridge.db.claim_operation(&op_id, now_secs()).unwrap(); // the process dies holding a claim
+        drop(bridge);
+
+        // Relaunch: a new process opens the same state.db.
+        let bridge = test_bridge_with_api(&db_path, server.base_url.clone(), master_key);
+        assert_eq!(bridge.db.engine_start_repair().unwrap().claims_cleared, 1);
+        bridge.db.reconcile_stale_in_flight_on_startup().unwrap();
+        assert_eq!(
+            bridge.db.get_file("restart").unwrap().unwrap().status,
+            FileStatus::Uploading,
+            "still writable"
+        );
+        assert_eq!(
+            held_content_version(&bridge, "restart"),
+            token,
+            "same name: no re-download"
+        );
+        drain_upload_queue(&bridge, &sync_root).await;
+        let state = server.finish();
+        assert_eq!(state.inits.len(), 1, "the session resumed: {:?}", state.init_summary());
+        assert_eq!(
+            state.latest_plaintext("restart", master_key),
+            b"saved before the restart"
+        );
+        assert_eq!(held_content_version(&bridge, "restart"), token);
+    }
+
+    /// RF5 / Review Focus 5 (§9.1, m-8): a save of a file that was trashed on the web while the
+    /// save was queued. The server refuses its `init` with "file is in trash", class `other`: the
+    /// save retries with its bytes kept, and the item in the trash never looks writable.
+    #[cfg(unix)] // names `crate::ipc_socket::file_entry_payload_for_db`
+    #[tokio::test]
+    async fn a_save_to_a_file_trashed_elsewhere_keeps_its_bytes() {
+        let (dir, sync_root, server, bridge) = rule3_setup([98u8; 32]);
+        seed_uploaded_row(&bridge, &server, "trashed-on-web");
+        fp_save(
+            &bridge,
+            dir.path(),
+            "trashed-on-web",
+            "notes.txt",
+            b"an edit the person made",
+            "1",
+        );
+        let trash = crate::api_client::SyncOp {
+            seq_id: 7,
+            op_type: "file_trash".into(),
+            payload: serde_json::json!({ "id": "trashed-on-web" }),
+        };
+        apply_sync_op(&bridge, &sync_root, &trash, now_secs(), &mut Vec::new()).unwrap();
+        server
+            .state
+            .lock()
+            .unwrap()
+            .trashed_files
+            .insert("trashed-on-web".into());
+        drain_upload_queue(&bridge, &sync_root).await;
+        let op = bridge.db.list_operations_for_file("trashed-on-web").unwrap().remove(0);
+        assert!(
+            op.attempts < op.max_attempts,
+            "class other: retried, not parked at once"
+        );
+        assert_eq!(
+            std::fs::read(op.payload_path.as_deref().unwrap()).unwrap(),
+            b"an edit the person made",
+            "the bytes are kept"
+        );
+        let entry = bridge.db.get_file("trashed-on-web").unwrap().unwrap();
+        let payload = crate::ipc_socket::file_entry_payload_for_db(&bridge.db, &entry, "root");
+        assert_ne!(payload.status, "uploading", "an item in the trash never looks writable");
+        assert_eq!(
+            payload.capabilities & crate::ipc_socket::CAP_WRITE,
+            0,
+            "no write capability in the trash"
+        );
+        let state = server.finish();
+        assert!(
+            !state.inits.is_empty() && state.inits.iter().all(|(_, status)| *status == 409),
+            "precondition: the server refused every attempt: {:?}",
+            state.init_summary()
+        );
+    }
+
+    /// T30 (§9.1–§9.2), moved here from Task 7: it needs step 3.4. A lands while B is queued and
+    /// B's first attempt fails: the item is `uploading`, with B's size and B's token.
+    #[cfg(unix)] // names `crate::ipc_socket::file_entry_payload_for_db`
+    #[tokio::test]
+    async fn i1_a_landing_with_a_later_write_queued_keeps_it_uploading() {
+        let (dir, sync_root, server, bridge) = rule3_setup([80u8; 32]);
+        seed_uploaded_row(&bridge, &server, "kept-up");
+        let a = fp_save(&bridge, dir.path(), "kept-up", "notes.txt", b"A", "1");
+        let b = fp_save(
+            &bridge,
+            dir.path(),
+            "kept-up",
+            "notes.txt",
+            b"A, and B's longer bytes",
+            a.token.as_deref().unwrap(),
+        );
+        server
+            .state
+            .lock()
+            .unwrap()
+            .fail_first_chunk_once
+            .insert("session-2".into()); // B backs off
+        bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+        let entry = bridge.db.get_file("kept-up").unwrap().unwrap();
+        let payload = crate::ipc_socket::file_entry_payload_for_db(&bridge.db, &entry, "root");
+        assert_eq!(payload.status, "uploading");
+        assert_eq!(
+            payload.size_bytes,
+            b"A, and B's longer bytes".len() as i64,
+            "the newer write's size"
+        );
+        assert_eq!(payload.content_version, b.token, "the newer write's token");
+        let state = server.finish();
+        assert_eq!(
+            state.init_summary(),
+            vec![(json!("kept-up"), json!(1), 201), (json!("kept-up"), json!(2), 201)],
+            "precondition: A landed and B's attempt began"
+        );
+    }
+
+    /// [t7-review] Minor 1 (b): A lands while B is queued. When the runner records A's outcome
+    /// (`outcome:before_tx`), the row is `Uploading`: the landing left it so for B (§9.2), and the
+    /// attempt no longer reads that as a failure and rolls it back to `Error`.
+    #[tokio::test]
+    async fn a_landing_with_a_later_write_queued_is_uploading_when_its_outcome_is_recorded() {
+        let (dir, sync_root, server, bridge) = rule3_setup([99u8; 32]);
+        seed_uploaded_row(&bridge, &server, "outcome");
+        let a = fp_save(&bridge, dir.path(), "outcome", "notes.txt", b"A", "1");
+        fp_save(
+            &bridge,
+            dir.path(),
+            "outcome",
+            "notes.txt",
+            b"A B",
+            a.token.as_deref().unwrap(),
+        );
+        let seen = Arc::new(Mutex::new(None));
+        let (db, seen_in_seam) = (bridge.db.clone(), Arc::clone(&seen));
+        bridge.seams.arm("outcome:before_tx", move || {
+            let ops_left = db.list_operations_for_file("outcome").unwrap().len();
+            let status = db.get_file("outcome").unwrap().unwrap().status;
+            *seen_in_seam.lock().unwrap() = Some((ops_left, status));
+        });
+        bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+        let (ops_left, status) = seen.lock().unwrap().take().expect("the seam fired");
+        assert_eq!(
+            ops_left, 1,
+            "precondition: A's outcome, after its landing, with B queued"
+        );
+        assert_eq!(
+            status,
+            FileStatus::Uploading,
+            "not rolled back to Error after A's landing"
+        );
+        drop(server.finish());
+    }
+
+    /// [t8-parked-fetch] (§7.4, §9.1): a write that parked because its staged copy is gone never
+    /// leaves the queue, and nothing local can serve it. Its fetch goes to the server for the version
+    /// the server has, and the item keeps the parked status: read-only, not evictable. A write still
+    /// queued with its copy missing keeps its error
+    /// (`a_queued_write_whose_copy_is_missing_is_never_fetched_from_the_server`).
+    #[cfg(unix)] // names `crate::ipc_socket::file_entry_payload_for_db`
+    #[tokio::test]
+    async fn a_parked_write_whose_copy_is_gone_is_fetched_from_the_server() {
+        // UUID-shaped: the hydrate parses the id before it asks the server.
+        let live = "3f2a9c1e-0000-4000-8000-0000000000b5";
+        let (dir, sync_root, server, bridge) = rule3_setup([100u8; 32]);
+        seed_uploaded_row(&bridge, &server, live);
+        fp_save(
+            &bridge,
+            dir.path(),
+            live,
+            "notes.txt",
+            b"the version the server has",
+            "1",
+        );
+        drain_upload_queue(&bridge, &sync_root).await;
+        let landed = held_content_version(&bridge, live);
+        fp_save(
+            &bridge,
+            dir.path(),
+            live,
+            "notes.txt",
+            b"a save whose copy is gone",
+            &landed,
+        );
+        let op = bridge.db.list_operations_for_file(live).unwrap().remove(0);
+        std::fs::remove_file(op.payload_path.as_deref().unwrap()).unwrap();
+        bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+        let parked = bridge
+            .db
+            .get_operation(&op.op_id)
+            .unwrap()
+            .expect("a parked write stays queued");
+        assert_eq!(parked.attempts, parked.max_attempts, "precondition: parked");
+        assert_eq!(parked.last_error.as_deref(), Some("payload_missing"));
+        let before = {
+            let mut state = server.state.lock().unwrap();
+            state.serve_downloads = true;
+            state.requests.len()
+        };
+        let dest = dir.path().join("fetch").join("notes.txt");
+        // `hydrate_dest_is_allowed` canonicalizes the parent.
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        let source = bridge
+            .serve_hydrate(live, &dest, &[dir.path()], None)
+            .await
+            .expect("nothing local can serve it: the server's version");
+        assert_eq!(source, HydrateSource::Server);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"the version the server has");
+        let entry = bridge.db.get_file(live).unwrap().unwrap();
+        assert_eq!(entry.status, FileStatus::Error, "the parked status");
+        let payload = crate::ipc_socket::file_entry_payload_for_db(&bridge.db, &entry, "root");
+        assert_eq!(payload.status, "error", "presented parked: read-only, not evictable");
+        assert_eq!(payload.capabilities & crate::ipc_socket::CAP_WRITE, 0, "read-only");
+        let state = server.finish();
+        let fetch = &state.requests[before..];
+        let metadata = format!("/api/v1/files/{live}");
+        assert_eq!(
+            fetch.iter().filter(|(m, path)| m == "GET" && path == &metadata).count(),
+            1,
+            "one fetch reached the server: {fetch:?}"
+        );
+        assert!(
+            fetch.iter().all(|(m, path)| m == "GET" && path.starts_with(&metadata)),
+            "nothing but that fetch: {fetch:?}"
+        );
+    }
+
+    /// §9.1 (step 3.3): a landing whose only later write parked leaves the parked status, through
+    /// the same settle as every park: a create's successor it could not re-key, and a modify's
+    /// successor parked at its accept. The modify's own op is keyed on the same file, so the settle
+    /// runs once that op is gone.
+    #[tokio::test]
+    async fn a_landing_whose_only_later_write_parked_leaves_the_parked_status() {
+        let (dir, sync_root, server, bridge) = rule3_setup([101u8; 32]);
+        seed_uploaded_row(&bridge, &server, "modified");
+        fp_save(&bridge, dir.path(), "modified", "notes.txt", b"A", "1");
+        let no_base = dir.path().join("no-base.txt");
+        std::fs::write(&no_base, b"A, and B").unwrap();
+        bridge
+            .queue_file_provider_modify(finder_file_target(Some("modified"), "notes.txt", &no_base, None))
+            .unwrap();
+        let ops = bridge.db.list_operations_for_file("modified").unwrap();
+        assert_eq!(
+            ops[1].attempts, ops[1].max_attempts,
+            "precondition: B parked at its accept"
+        );
+        assert_eq!(
+            bridge.db.get_file("modified").unwrap().unwrap().status,
+            FileStatus::Uploading,
+            "precondition: A still uploads"
+        );
+        let created = fp_create(&bridge, dir.path(), "new.txt", b"created");
+        let provisional = created.outcome_file_id();
+        fp_save(
+            &bridge,
+            dir.path(),
+            &provisional,
+            "new.txt",
+            b"created, edited",
+            created.token.as_deref().unwrap(),
+        );
+        // The successor's name cannot be re-encrypted for the server id: no display name, no path.
+        let successor = bridge.db.list_operations_for_file(&provisional).unwrap().remove(1);
+        bridge.db.set_target_path_for_test(&successor.op_id, None);
+        drain_upload_queue(&bridge, &sync_root).await;
+        let state = server.finish();
+        let server_id = state
+            .files_with_content()
+            .into_iter()
+            .find(|id| id != "modified")
+            .expect("the create landed");
+        let parked = bridge.db.get_operation(&successor.op_id).unwrap().unwrap();
+        assert_eq!(
+            parked.attempts, parked.max_attempts,
+            "precondition: the successor parked"
+        );
+        assert_eq!(
+            bridge.db.get_file(&server_id).unwrap().unwrap().status,
+            FileStatus::Error,
+            "a parked upload presents error"
+        );
+        assert_eq!(
+            state.latest_plaintext("modified", [101u8; 32]),
+            b"A",
+            "precondition: A landed"
+        );
+        assert_eq!(
+            bridge.db.get_file("modified").unwrap().unwrap().status,
+            FileStatus::Error,
+            "after a modify's landing, its parked successor presents error"
+        );
     }
 }
