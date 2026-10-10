@@ -17459,6 +17459,12 @@ mod tests {
             }
         })
         .await;
+        // Never trashed first: with the attempts cap gone, the give-up guard alone keeps it.
+        assert!(
+            server.state.lock().unwrap().trashes.is_empty(),
+            "the completed server file is never trashed"
+        );
+        assert_eq!(server.state.lock().unwrap().inits.len(), 1, "no second upload");
         let op = bridge.db.list_operations_for_file(&provisional).unwrap().remove(0);
         assert!(op.attempts < op.max_attempts, "never parked");
         assert!(
@@ -17471,11 +17477,6 @@ mod tests {
                 .is_some(),
             "the resume row is kept"
         );
-        assert!(
-            server.state.lock().unwrap().trashes.is_empty(),
-            "the completed server file is never trashed"
-        );
-        assert_eq!(server.state.lock().unwrap().inits.len(), 1, "no second upload");
         assert!(logs.matches("local landing will be retried").count() >= 25, "{logs}");
         crate::state_db::fail_next_landings_for_test(0);
         bridge.process_due_operations(&sync_root, now).await.unwrap();
