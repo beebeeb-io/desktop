@@ -1826,11 +1826,14 @@ async fn handle_connection(
                         dedup_write(&write_dedup, &db, request_id, fingerprint, move || {
                             // The engine reads the opened file, never the path.
                             let opened = staged.as_ref().map(StagedContents::file);
-                            let response = write_outcome_response(
-                                "create",
-                                &work_db,
-                                work_bridge.queue_finder_create_from(target, opened),
-                            );
+                            // Only the macOS File Provider path mints write tokens (spec §8.8).
+                            #[cfg(target_os = "macos")]
+                            let result = work_bridge.queue_file_provider_create_from(target, opened);
+                            #[cfg(not(target_os = "macos"))]
+                            let result = work_bridge
+                                .queue_finder_create_from(target, opened)
+                                .map(crate::engine_bridge::FpWrite::plain);
+                            let response = write_outcome_response("create", &work_db, result);
                             drop(staged);
                             response
                         })
@@ -1871,11 +1874,14 @@ async fn handle_connection(
                     // See the create arm for when `staged` is dropped.
                     dedup_write(&write_dedup, &db, request_id, fingerprint, move || {
                         let opened = staged.as_ref().map(StagedContents::file);
-                        let response = write_outcome_response(
-                            "modify",
-                            &work_db,
-                            work_bridge.queue_finder_modify_from(target, opened),
-                        );
+                        // Only the macOS File Provider path mints write tokens (spec §8.8).
+                        #[cfg(target_os = "macos")]
+                        let result = work_bridge.queue_file_provider_modify_from(target, opened);
+                        #[cfg(not(target_os = "macos"))]
+                        let result = work_bridge
+                            .queue_finder_modify_from(target, opened)
+                            .map(crate::engine_bridge::FpWrite::plain);
+                        let response = write_outcome_response("modify", &work_db, result);
                         drop(staged);
                         response
                     })
@@ -1896,7 +1902,9 @@ async fn handle_connection(
                 write_outcome_response(
                     "delete",
                     &db,
-                    bridge.queue_finder_delete(&file_id, base_version_identifier),
+                    bridge
+                        .queue_finder_delete(&file_id, base_version_identifier)
+                        .map(crate::engine_bridge::FpWrite::plain),
                 )
             }
             // Task 1698: the `SetRecursivePin` IPC RPC is RETIRED — it had no
@@ -2364,9 +2372,9 @@ fn normalize_parent_id(parent_id: Option<String>) -> Option<String> {
 fn write_outcome_response(
     op: &'static str,
     db: &crate::state_db::StateDb,
-    result: anyhow::Result<crate::engine_bridge::FinderWriteOutcome>,
+    result: anyhow::Result<crate::engine_bridge::FpWrite>,
 ) -> IpcResponse {
-    match result {
+    match result.map(|write| write.outcome) {
         Ok(crate::engine_bridge::FinderWriteOutcome::Ignored { message }) => IpcResponse::WriteQueued {
             item: None,
             ignored: true,
@@ -5046,9 +5054,11 @@ mod tests {
             let reply = write_outcome_response(
                 "create",
                 &db,
-                Ok(crate::engine_bridge::FinderWriteOutcome::Ignored {
-                    message: "ignored".into(),
-                }),
+                Ok(crate::engine_bridge::FpWrite::plain(
+                    crate::engine_bridge::FinderWriteOutcome::Ignored {
+                        message: "ignored".into(),
+                    },
+                )),
             );
             assert!(matches!(reply, IpcResponse::WriteQueued { .. }));
             let policy = WriteContentsPolicy::StagingDir(staging.clone());

@@ -48,7 +48,7 @@ use crate::conflict::{VersionInfo, is_conflict, is_text_file};
 use crate::state_db::{
     ClaimOutcome, ClaimedOp, FileContractState, FileEntry, FileStatus, ItemKind, LocalActivityEventInput,
     LocalActivityKind, Namespace, OperationKind, OperationPauseReason, PERMISSION_OWNER, PERMISSION_READ,
-    PERMISSION_SHARE, PERMISSION_WRITE, PendingOperation, QueueDiagnostics, StateDb, UploadResume,
+    PERMISSION_SHARE, PERMISSION_WRITE, ParkReason, PendingOperation, QueueDiagnostics, StateDb, UploadResume,
 };
 
 // ── Wire-byte counters (P1 — live throughput) ────────────────────────────────
@@ -304,6 +304,66 @@ pub enum FinderWriteOutcome {
     },
 }
 
+/// A File Provider write's outcome, with the token its reply names (spec §5).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FpWrite {
+    pub outcome: FinderWriteOutcome,
+    pub token: Option<String>,
+}
+
+impl FpWrite {
+    pub fn plain(outcome: FinderWriteOutcome) -> Self {
+        Self { outcome, token: None }
+    }
+}
+
+#[cfg(test)]
+impl FpWrite {
+    /// The file id of a queued write.
+    fn outcome_file_id(&self) -> String {
+        match &self.outcome {
+            FinderWriteOutcome::Queued {
+                file_id: Some(file_id), ..
+            } => file_id.clone(),
+            other => panic!("not a queued write with a file id: {other:?}"),
+        }
+    }
+}
+
+/// What every Finder create checks first, and the ids it gets (`start_finder_create`).
+struct FinderCreateStart {
+    parent_contract: Option<FileContractState>,
+    file_id: String,
+    rel_path: String,
+}
+
+/// A Finder file create, staged and described, before it is queued.
+struct PreparedFinderCreate {
+    file_id: String,
+    rel_path: String,
+    staged: crate::staged_payload::StagedPayload,
+    staged_path: String,
+    size_bytes: i64,
+    row: FileEntry,
+    payload: serde_json::Value,
+}
+
+/// A Finder content modify, staged and described, before it is queued.
+struct PreparedFinderModify {
+    staged: crate::staged_payload::StagedPayload,
+    staged_path: String,
+    size_bytes: i64,
+    modified_at: i64,
+    payload: serde_json::Value,
+}
+
+/// The reply to a write of a name Finder writes for itself.
+fn ignored_finder_item(filename: &str) -> FinderWriteOutcome {
+    FinderWriteOutcome::Ignored {
+        message: format!("ignored temporary Finder item {filename}"),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CachePolicy {
     pub max_unpinned_cache_bytes: i64,
@@ -532,6 +592,11 @@ impl EngineBridge {
                 // Waiting for an earlier content op of its file is not an attempt.
                 ClaimOutcome::Gone | ClaimOutcome::Wait => continue,
                 ClaimOutcome::Claimed(claimed) => *claimed,
+                ClaimOutcome::Parked { op_id, file_id, reason } => {
+                    log_parked(&op_id, file_id.as_deref(), reason);
+                    outcome.retried_op_ids.push(op_id);
+                    continue;
+                }
             };
             let op = claimed.op.clone();
             let result = self
@@ -560,6 +625,18 @@ impl EngineBridge {
                 }
                 // The attempt already logged the step that found the op gone.
                 Err(error) if error.downcast_ref::<QueueStateMoved>().is_some() => continue,
+                Err(error) if error.downcast_ref::<ParkNow>().is_some() => {
+                    let reason = error
+                        .downcast_ref::<ParkNow>()
+                        .map(|park| park.0)
+                        .unwrap_or(ParkReason::BaseUnknown);
+                    if !self.db.park_claimed(&op.op_id, &claimed.claim_id, reason, now)? {
+                        log_queue_state_moved(&op.op_id, "park");
+                        continue;
+                    }
+                    log_parked(&op.op_id, op.file_id.as_deref(), reason);
+                    outcome.retried_op_ids.push(op.op_id);
+                }
                 Err(error) => {
                     let class = classify_operation_error(&error.to_string());
                     if let Some(reason) = class.pause_reason() {
@@ -841,6 +918,11 @@ impl EngineBridge {
         let session = match session {
             Some(session) => session,
             None => {
+                guard_init_base(
+                    op.base_version,
+                    is_create,
+                    claim.and_then(|claim| claim.write.as_ref()).is_some(),
+                )?;
                 let init_request = upload_init_request_for_operation(
                     local_file_id,
                     name_encrypted,
@@ -899,6 +981,7 @@ impl EngineBridge {
             .await;
         match body {
             Ok(completed) => {
+                self.seam("landing:after_complete");
                 let server_file_id = session.server_file_id.clone();
                 let file_key = file_key_for(self.api.master_key(), &server_file_id);
                 let thumbnail_content_type = content_type.clone();
@@ -911,7 +994,20 @@ impl EngineBridge {
                     content_type,
                     Some(session.object_version_id.clone()),
                 )?;
-                self.chain_queued_ops_after_upload(op, local_file_id, &server_file_id)?;
+                let write = claim.and_then(|claim| claim.write.as_ref());
+                self.chain_queued_ops_after_upload(op, write.is_some(), local_file_id, &server_file_id)?;
+                // A File Provider write: the held columns name the version it produced,
+                // and every save queued after it takes that version as its base (spec
+                // §8.1, §8.6.2). Task 7 folds these into one landing transaction.
+                if let Some(write) = write
+                    && let Some(contract) = self.db.get_file_contract_state(&server_file_id)?
+                {
+                    let object = contract.current_object_version_id.as_deref();
+                    self.db
+                        .set_held_landed(&server_file_id, &write.write_id, contract.current_version, object)?;
+                    self.db
+                        .resolve_successors(&write.write_id, contract.current_version, object)?;
+                }
                 self.record_transfer_done(crate::transfer_progress::Direction::Up, &server_file_id, plaintext_size);
                 #[cfg(target_os = "windows")]
                 self.defer_local_upload_finalization(op, &server_file_id, sync_root, payload_path)?;
@@ -1289,6 +1385,8 @@ impl EngineBridge {
         contract.last_sync_at = now;
         self.db.set_file_contract_state(&contract)?;
         if local_file_id != server_file_id {
+            // The server row keeps the token the system holds for the provisional one.
+            self.db.carry_held_write(local_file_id, server_file_id)?;
             self.db.delete_file(local_file_id)?;
         }
         Ok(())
@@ -1312,9 +1410,14 @@ impl EngineBridge {
     /// file also run in queue order (`StateDb::claim_operation`), so a
     /// rebased upload never runs before the one it follows, and the newest
     /// bytes land last.
+    ///
+    /// File Provider writes (an op with a write id) are only re-keyed here:
+    /// their bases move by write id (`StateDb::resolve_successors`), never by
+    /// equal numbers. `completed_is_finder_write`: the op that landed is one.
     fn chain_queued_ops_after_upload(
         &self,
         completed: &PendingOperation,
+        completed_is_finder_write: bool,
         local_file_id: &str,
         server_file_id: &str,
     ) -> anyhow::Result<()> {
@@ -1339,6 +1442,8 @@ impl EngineBridge {
             if matches!(op.kind, OperationKind::UploadVersion | OperationKind::UploadFile)
                 && same_base
                 && produced_version.is_some()
+                && !completed_is_finder_write
+                && self.db.finder_write(&op.op_id)?.is_none()
             {
                 next.base_version = produced_version;
                 next.base_object_version_id = produced_object_version_id.clone();
@@ -1597,40 +1702,16 @@ impl EngineBridge {
         target: FinderWriteTarget,
         contents: Option<&std::fs::File>,
     ) -> anyhow::Result<FinderWriteOutcome> {
-        // Task 1538 Codex P1 (PR #49, lib.rs:1087 thread): refuse a brand-new
-        // enqueue once this engine has been asked to stop. Both the Windows
-        // upload watcher (`watcher::spawn`'s debounce/scan loops) and the
-        // macOS/Linux File Provider extension (via `ipc_socket::handle_connection`'s
-        // `QueueFinderCreate` dispatch) call this directly, so this single
-        // check covers "the watcher" on every platform without needing a
-        // separate flag check duplicated in each caller.
-        if self.is_stopping() {
-            anyhow::bail!("engine is stopping; refusing to enqueue a new local write");
-        }
-        if is_ignored_finder_name(&target.filename) {
-            return Ok(FinderWriteOutcome::Ignored {
-                message: format!("ignored temporary Finder item {}", target.filename),
-            });
-        }
-
-        let parent_contract = self.ensure_shared_parent_allows_write(target.parent_id.as_deref())?;
-        // Honour a caller-supplied id (task 0811 folder scaffolding writes the
-        // local row under a known id and needs the server CreateFolder to reuse
-        // it — the server accepts a client `folder_id`). The file path and the
-        // legacy IPC always pass `None`, getting a fresh uuid as before.
-        let file_id = target
-            .file_id
-            .clone()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        // Full server-relative key for this item: the FULL nested path when the
-        // caller supplied one (`docs/a.txt`), else the leaf filename (top-level /
-        // legacy IPC). This is stored as the row's `path` AND threaded as the
-        // upload's `target_path`, so filter-3, finalize, and delete all key off
-        // the same path. `clone` because `filename` is still needed for the
-        // server `name` (always the leaf).
-        let rel_path = target.rel_path.clone().unwrap_or_else(|| target.filename.clone());
+        let Some(start) = self.start_finder_create(&target)? else {
+            return Ok(ignored_finder_item(&target.filename));
+        };
         match target.kind {
             FinderWriteItemKind::Folder => {
+                let FinderCreateStart {
+                    parent_contract,
+                    file_id,
+                    rel_path,
+                } = start;
                 let metadata = encrypted_metadata_for_name(self.api.master_key(), &file_id, &target.filename, None)?;
                 // Write the local folder row + contract synchronously, the same
                 // way the File branch writes its `Uploading` row, so a nested
@@ -1672,42 +1753,16 @@ impl EngineBridge {
                 )
             }
             FinderWriteItemKind::File => {
-                let contents_path = target
-                    .contents_path
-                    .as_deref()
-                    .ok_or_else(|| anyhow::anyhow!("Finder create file callback did not include contents"))?;
-                let staged = stage_finder_contents(&self.db, Path::new(contents_path), contents)?;
-                let staged_path = staged.path().to_string();
-                let size_bytes = std::fs::metadata(&staged_path).map(|m| m.len() as i64).unwrap_or(0);
-                let mime = target
-                    .content_type
-                    .as_deref()
-                    .or_else(|| beebeeb_core::media::guess_mime_type(&target.filename));
-                let name_encrypted =
-                    encrypted_metadata_for_name(self.api.master_key(), &file_id, &target.filename, mime)?;
-                self.db.upsert_file(&FileEntry {
-                    file_id: file_id.clone(),
-                    // FULL relative key (e.g. `docs/a.txt`), so a nested file's
-                    // row is found by `get_file_by_path(full_key)` immediately —
-                    // not keyed by the leaf, which classify_local_path's filter-3
-                    // would miss for a nested file → spurious re-upload.
-                    path: rel_path.clone(),
-                    status: FileStatus::Uploading,
-                    size_bytes,
-                    modified_at: now_secs(),
-                    content_hash: None,
-                    remote_updated_at: 0,
-                    // Not persisted by upsert_file; contract owns these.
-                    parent_id: None,
-                    item_kind: ItemKind::File,
-                })?;
-                let mut payload = serde_json::json!({
-                    "operation": "create_file",
-                    "name_encrypted": name_encrypted,
-                    "content_type": target.content_type,
-                    "uploaded_by": "authenticated_desktop_user",
-                });
-                apply_shared_context(&mut payload, parent_contract.as_ref());
+                let PreparedFinderCreate {
+                    file_id,
+                    rel_path,
+                    staged,
+                    staged_path,
+                    row,
+                    payload,
+                    ..
+                } = self.prepare_finder_create(&target, contents, start)?;
+                self.db.upsert_file(&row)?;
                 let outcome = self.enqueue_finder_operation(
                     OperationKind::UploadVersion,
                     Some(file_id),
@@ -1727,6 +1782,170 @@ impl EngineBridge {
         }
     }
 
+    /// What every Finder create checks first, and the ids it gets. `None`: the name is
+    /// one Finder writes for itself, which is ignored.
+    fn start_finder_create(&self, target: &FinderWriteTarget) -> anyhow::Result<Option<FinderCreateStart>> {
+        // Task 1538 Codex P1 (PR #49, lib.rs:1087 thread): refuse a brand-new
+        // enqueue once this engine has been asked to stop. Both the Windows
+        // upload watcher (`watcher::spawn`'s debounce/scan loops) and the
+        // macOS/Linux File Provider extension (via `ipc_socket::handle_connection`'s
+        // `QueueFinderCreate` dispatch) call this directly, so this single
+        // check covers "the watcher" on every platform without needing a
+        // separate flag check duplicated in each caller.
+        if self.is_stopping() {
+            anyhow::bail!("engine is stopping; refusing to enqueue a new local write");
+        }
+        if is_ignored_finder_name(&target.filename) {
+            return Ok(None);
+        }
+
+        let parent_contract = self.ensure_shared_parent_allows_write(target.parent_id.as_deref())?;
+        // Honour a caller-supplied id (task 0811 folder scaffolding writes the
+        // local row under a known id and needs the server CreateFolder to reuse
+        // it — the server accepts a client `folder_id`). The file path and the
+        // legacy IPC always pass `None`, getting a fresh uuid as before.
+        let file_id = target
+            .file_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        // Full server-relative key for this item: the FULL nested path when the
+        // caller supplied one (`docs/a.txt`), else the leaf filename (top-level /
+        // legacy IPC). This is stored as the row's `path` AND threaded as the
+        // upload's `target_path`, so filter-3, finalize, and delete all key off
+        // the same path. `clone` because `filename` is still needed for the
+        // server `name` (always the leaf).
+        let rel_path = target.rel_path.clone().unwrap_or_else(|| target.filename.clone());
+        Ok(Some(FinderCreateStart {
+            parent_contract,
+            file_id,
+            rel_path,
+        }))
+    }
+
+    /// A Finder file create, staged and described: the daemon's own copy of the bytes,
+    /// the row it inserts and the upload's metadata. Shared by both create entry points.
+    fn prepare_finder_create(
+        &self,
+        target: &FinderWriteTarget,
+        contents: Option<&std::fs::File>,
+        start: FinderCreateStart,
+    ) -> anyhow::Result<PreparedFinderCreate> {
+        let FinderCreateStart {
+            parent_contract,
+            file_id,
+            rel_path,
+        } = start;
+        let contents_path = target
+            .contents_path
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("Finder create file callback did not include contents"))?;
+        let staged = stage_finder_contents(&self.db, Path::new(contents_path), contents)?;
+        let staged_path = staged.path().to_string();
+        let size_bytes = std::fs::metadata(&staged_path).map(|m| m.len() as i64).unwrap_or(0);
+        let mime = target
+            .content_type
+            .as_deref()
+            .or_else(|| beebeeb_core::media::guess_mime_type(&target.filename));
+        let name_encrypted = encrypted_metadata_for_name(self.api.master_key(), &file_id, &target.filename, mime)?;
+        let row = FileEntry {
+            file_id: file_id.clone(),
+            // FULL relative key (e.g. `docs/a.txt`), so a nested file's
+            // row is found by `get_file_by_path(full_key)` immediately —
+            // not keyed by the leaf, which classify_local_path's filter-3
+            // would miss for a nested file → spurious re-upload.
+            path: rel_path.clone(),
+            status: FileStatus::Uploading,
+            size_bytes,
+            modified_at: now_secs(),
+            content_hash: None,
+            remote_updated_at: 0,
+            // Not persisted by upsert_file; contract owns these.
+            parent_id: None,
+            item_kind: ItemKind::File,
+        };
+        let mut payload = serde_json::json!({
+            "operation": "create_file",
+            "name_encrypted": name_encrypted,
+            "content_type": target.content_type,
+            "uploaded_by": "authenticated_desktop_user",
+        });
+        apply_shared_context(&mut payload, parent_contract.as_ref());
+        Ok(PreparedFinderCreate {
+            file_id,
+            rel_path,
+            staged,
+            staged_path,
+            size_bytes,
+            row,
+            payload,
+        })
+    }
+
+    /// The File Provider create (spec §8.8: minting is keyed on the IPC entries, never on
+    /// the shared `queue_finder_*`, which the watcher and the upload driver call too).
+    /// One accept transaction inserts the row, mints the write token and queues the
+    /// upload (spec §8.7 S1.1). A folder carries no content and gets no token.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn queue_file_provider_create_from(
+        &self,
+        target: FinderWriteTarget,
+        contents: Option<&std::fs::File>,
+    ) -> anyhow::Result<FpWrite> {
+        if target.kind == FinderWriteItemKind::Folder {
+            return self.queue_finder_create_from(target, contents).map(FpWrite::plain);
+        }
+        let Some(start) = self.start_finder_create(&target)? else {
+            return Ok(FpWrite::plain(ignored_finder_item(&target.filename)));
+        };
+        let prepared = self.prepare_finder_create(&target, contents, start)?;
+        let op_id = uuid::Uuid::new_v4().to_string();
+        let metadata_json = serde_json::to_string(&prepared.payload)?;
+        let backup_source_key = crate::known_folder::backup_source_key_for_this_device(&prepared.rel_path);
+        self.seam("accept:before_tx");
+        let accepted = self.db.accept_finder_write(
+            &crate::state_db::FinderAccept {
+                op_id: &op_id,
+                file_id: &prepared.file_id,
+                kind: crate::state_db::FinderAcceptKind::Create { row: &prepared.row },
+                parent_id: target.parent_id.as_deref(),
+                // The FULL relative key, as the Finder create queues it.
+                target_path: Some(&prepared.rel_path),
+                metadata_json: &metadata_json,
+                payload_path: &prepared.staged_path,
+                size_bytes: prepared.size_bytes,
+                modified_at: prepared.row.modified_at,
+                backup_source_key: backup_source_key.as_deref(),
+                now: now_secs(),
+            },
+            &|entry, contract| legacy_item_identifiers(entry, contract).to_vec(),
+        )?;
+        let token = match accepted {
+            crate::state_db::AcceptOutcome::Queued { token, .. } => token,
+            crate::state_db::AcceptOutcome::ParkedAtOnce { token, reason } => {
+                log_parked(&op_id, Some(&prepared.file_id), reason);
+                token
+            }
+            crate::state_db::AcceptOutcome::UnknownItem => anyhow::bail!("a create always inserts its row"),
+        };
+        prepared.staged.retain();
+        Ok(FpWrite {
+            outcome: FinderWriteOutcome::Queued {
+                op_id,
+                file_id: Some(prepared.file_id),
+                kind: OperationKind::UploadVersion,
+                ignored: false,
+                message: "queued for encrypted sync".to_string(),
+            },
+            token: Some(token),
+        })
+    }
+
+    /// [`Self::queue_file_provider_create_from`] reading the contents by path.
+    #[cfg(test)]
+    pub fn queue_file_provider_create(&self, target: FinderWriteTarget) -> anyhow::Result<FpWrite> {
+        self.queue_file_provider_create_from(target, None)
+    }
+
     pub fn queue_finder_modify(&self, target: FinderWriteTarget) -> anyhow::Result<FinderWriteOutcome> {
         self.queue_finder_modify_from(target, None)
     }
@@ -1738,37 +1957,18 @@ impl EngineBridge {
         target: FinderWriteTarget,
         contents: Option<&std::fs::File>,
     ) -> anyhow::Result<FinderWriteOutcome> {
-        // Task 1538 Codex P1 — see `queue_finder_create`'s identical guard.
-        if self.is_stopping() {
-            anyhow::bail!("engine is stopping; refusing to enqueue a new local write");
-        }
-        if is_ignored_finder_name(&target.filename) {
-            return Ok(FinderWriteOutcome::Ignored {
-                message: format!("ignored temporary Finder item {}", target.filename),
-            });
-        }
-
-        let file_id = target
-            .file_id
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("Finder modify callback did not include a file id"))?;
-        let item_contract = self.ensure_item_allows_shared_write(&file_id, "modify")?;
+        let Some((file_id, item_contract)) = self.start_finder_modify(&target)? else {
+            return Ok(ignored_finder_item(&target.filename));
+        };
 
         if let Some(contents_path) = target.contents_path.as_deref() {
-            let staged = stage_finder_contents(&self.db, Path::new(contents_path), contents)?;
-            let staged_path = staged.path().to_string();
-            let staged_metadata = std::fs::metadata(&staged_path).ok();
-            let size_bytes = staged_metadata.as_ref().map(|m| m.len() as i64).unwrap_or(0);
-            let staged_modified_at = staged_metadata
-                .and_then(|m| m.modified().ok())
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or_else(now_secs);
-            let mime = target
-                .content_type
-                .as_deref()
-                .or_else(|| beebeeb_core::media::guess_mime_type(&target.filename));
-            let name_encrypted = encrypted_metadata_for_name(self.api.master_key(), &file_id, &target.filename, mime)?;
+            let PreparedFinderModify {
+                staged,
+                staged_path,
+                size_bytes,
+                modified_at,
+                payload,
+            } = self.prepare_finder_modify(&target, contents_path, contents, &file_id, item_contract.as_ref())?;
             // Decided from the row BEFORE this write changes it.
             let current_row = self.db.get_file(&file_id)?;
             let current_contract = self.db.get_file_contract_state(&file_id)?;
@@ -1780,16 +1980,7 @@ impl EngineBridge {
             // fetch them back, so the item in the reply must describe them:
             // the row takes the staged copy's size and modification time. The
             // content version is untouched until the upload lands.
-            self.db.record_local_write(&file_id, size_bytes, staged_modified_at)?;
-            let mut payload = serde_json::json!({
-                "operation": "upload_version",
-                "name_encrypted": name_encrypted,
-                "content_type": target.content_type,
-                "size_bytes": size_bytes,
-                "base_version_identifier": target.base_version_identifier,
-                "uploaded_by": "authenticated_desktop_user",
-            });
-            apply_shared_context(&mut payload, item_contract.as_ref());
+            self.db.record_local_write(&file_id, size_bytes, modified_at)?;
             let outcome = self.enqueue_finder_operation(
                 OperationKind::UploadVersion,
                 Some(file_id),
@@ -1835,6 +2026,153 @@ impl EngineBridge {
                     .and_then(|contract| contract.current_object_version_id.clone()),
             )
         }
+    }
+
+    /// What every Finder modify checks first: the file id, and the item's contract when it
+    /// is shared. `None`: the name is one Finder writes for itself, which is ignored.
+    fn start_finder_modify(
+        &self,
+        target: &FinderWriteTarget,
+    ) -> anyhow::Result<Option<(String, Option<FileContractState>)>> {
+        // Task 1538 Codex P1 — see `queue_finder_create`'s identical guard.
+        if self.is_stopping() {
+            anyhow::bail!("engine is stopping; refusing to enqueue a new local write");
+        }
+        if is_ignored_finder_name(&target.filename) {
+            return Ok(None);
+        }
+
+        let file_id = target
+            .file_id
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("Finder modify callback did not include a file id"))?;
+        let item_contract = self.ensure_item_allows_shared_write(&file_id, "modify")?;
+        Ok(Some((file_id, item_contract)))
+    }
+
+    /// A Finder content modify, staged and described: the daemon's own copy of the new
+    /// bytes, its size and time, and the upload's metadata. It reads and writes no row:
+    /// each entry point decides the base itself. Shared by both modify entry points.
+    fn prepare_finder_modify(
+        &self,
+        target: &FinderWriteTarget,
+        contents_path: &str,
+        contents: Option<&std::fs::File>,
+        file_id: &str,
+        item_contract: Option<&FileContractState>,
+    ) -> anyhow::Result<PreparedFinderModify> {
+        let staged = stage_finder_contents(&self.db, Path::new(contents_path), contents)?;
+        let staged_path = staged.path().to_string();
+        let staged_metadata = std::fs::metadata(&staged_path).ok();
+        let size_bytes = staged_metadata.as_ref().map(|m| m.len() as i64).unwrap_or(0);
+        let modified_at = staged_metadata
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or_else(now_secs);
+        let mime = target
+            .content_type
+            .as_deref()
+            .or_else(|| beebeeb_core::media::guess_mime_type(&target.filename));
+        let name_encrypted = encrypted_metadata_for_name(self.api.master_key(), file_id, &target.filename, mime)?;
+        let mut payload = serde_json::json!({
+            "operation": "upload_version",
+            "name_encrypted": name_encrypted,
+            "content_type": target.content_type,
+            "size_bytes": size_bytes,
+            "base_version_identifier": target.base_version_identifier,
+            "uploaded_by": "authenticated_desktop_user",
+        });
+        apply_shared_context(&mut payload, item_contract);
+        Ok(PreparedFinderModify {
+            staged,
+            staged_path,
+            size_bytes,
+            modified_at,
+            payload,
+        })
+    }
+
+    /// The File Provider modify (spec §8.8; see [`Self::queue_file_provider_create_from`]).
+    /// New contents go through one accept transaction that maps the system's base
+    /// through the write token (spec §6.1) and queues the upload. A rename or move
+    /// carries no content and gets no token.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn queue_file_provider_modify_from(
+        &self,
+        target: FinderWriteTarget,
+        contents: Option<&std::fs::File>,
+    ) -> anyhow::Result<FpWrite> {
+        let Some(contents_path) = target.contents_path.clone() else {
+            return self.queue_finder_modify_from(target, contents).map(FpWrite::plain);
+        };
+        let Some((file_id, item_contract)) = self.start_finder_modify(&target)? else {
+            return Ok(FpWrite::plain(ignored_finder_item(&target.filename)));
+        };
+        let prepared =
+            self.prepare_finder_modify(&target, &contents_path, contents, &file_id, item_contract.as_ref())?;
+        let op_id = uuid::Uuid::new_v4().to_string();
+        let metadata_json = serde_json::to_string(&prepared.payload)?;
+        let backup_source_key = crate::known_folder::backup_source_key_for_this_device(&target.filename);
+        self.seam("accept:before_tx");
+        let accepted = self.db.accept_finder_write(
+            &crate::state_db::FinderAccept {
+                op_id: &op_id,
+                file_id: &file_id,
+                kind: crate::state_db::FinderAcceptKind::Modify {
+                    incoming_base: target.base_version_identifier.as_deref(),
+                },
+                parent_id: target.parent_id.as_deref(),
+                target_path: Some(&target.filename),
+                metadata_json: &metadata_json,
+                payload_path: &prepared.staged_path,
+                size_bytes: prepared.size_bytes,
+                modified_at: prepared.modified_at,
+                backup_source_key: backup_source_key.as_deref(),
+                now: now_secs(),
+            },
+            &|entry, contract| legacy_item_identifiers(entry, contract).to_vec(),
+        )?;
+        let token = match accepted {
+            crate::state_db::AcceptOutcome::Queued { token, .. } => token,
+            crate::state_db::AcceptOutcome::ParkedAtOnce { token, reason } => {
+                log_parked(&op_id, Some(&file_id), reason);
+                token
+            }
+            crate::state_db::AcceptOutcome::UnknownItem => {
+                // No row: today's behaviour until unknown ids are refused. The staged copy
+                // is queued on the parsed base; the opened contents are never read twice.
+                let outcome = self.enqueue_finder_operation(
+                    OperationKind::UploadVersion,
+                    Some(file_id),
+                    target.parent_id,
+                    Some(target.filename),
+                    prepared.payload,
+                    Some(prepared.staged_path),
+                    parse_base_version_number(target.base_version_identifier.as_deref()),
+                    None,
+                )?;
+                prepared.staged.retain();
+                return Ok(FpWrite::plain(outcome));
+            }
+        };
+        prepared.staged.retain();
+        Ok(FpWrite {
+            outcome: FinderWriteOutcome::Queued {
+                op_id,
+                file_id: Some(file_id),
+                kind: OperationKind::UploadVersion,
+                ignored: false,
+                message: "queued for encrypted sync".to_string(),
+            },
+            token: Some(token),
+        })
+    }
+
+    /// [`Self::queue_file_provider_modify_from`] reading the contents by path.
+    #[cfg(test)]
+    pub fn queue_file_provider_modify(&self, target: FinderWriteTarget) -> anyhow::Result<FpWrite> {
+        self.queue_file_provider_modify_from(target, None)
     }
 
     pub fn queue_finder_delete(
@@ -3746,6 +4084,22 @@ fn encrypted_metadata_for_name(
         .map_err(|e| anyhow::anyhow!("encrypt Finder metadata: {e}"))
 }
 
+/// The `init` guard (spec §6.3.1), checked where the request is built: a File Provider
+/// write (`has_write_id`) that replaces a file is never sent without a base. A missing
+/// base, or one that does not fit the server's `i32` (which
+/// [`upload_init_request_for_operation`] would drop as "no base"), parks it as
+/// `base_unknown`. A create sends no base, and uploads without a write id (Windows, the
+/// watcher) keep today's bases.
+fn guard_init_base(base_version: Option<i64>, is_new_file: bool, has_write_id: bool) -> anyhow::Result<()> {
+    if !has_write_id || is_new_file {
+        return Ok(());
+    }
+    match base_version.map(i32::try_from) {
+        Some(Ok(_)) => Ok(()),
+        _ => Err(anyhow::Error::new(ParkNow(ParkReason::BaseUnknown))),
+    }
+}
+
 fn upload_init_request_for_operation(
     file_id: &str,
     name_encrypted: &str,
@@ -4149,6 +4503,28 @@ impl std::error::Error for QueueStateMoved {}
 /// step only (spec §11).
 fn log_queue_state_moved(op_id: &str, step: &'static str) {
     tracing::warn!(op_id = %op_id, step, "queue state moved");
+}
+
+/// Park the claimed op now, with its bytes kept (spec §8.4, §6.3.1).
+#[derive(Debug)]
+pub(crate) struct ParkNow(pub ParkReason);
+
+impl std::fmt::Display for ParkNow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "upload parked: {}", self.0.as_str())
+    }
+}
+
+impl std::error::Error for ParkNow {}
+
+/// One line when an upload parks: ids and the reason only (spec §11).
+fn log_parked(op_id: &str, file_id: Option<&str>, reason: ParkReason) {
+    tracing::warn!(
+        op_id = %op_id,
+        file_id = file_id.unwrap_or_default(),
+        reason = reason.as_str(),
+        "upload parked with its bytes kept in the queue"
+    );
 }
 
 /// Windows: a create's own success hands its op to the upload finalization
@@ -6544,6 +6920,7 @@ fn process_metadata_row(
 mod tests {
     use super::*;
     use base64::Engine;
+    use serde_json::json;
     use std::io::Write as _;
     use std::net::TcpListener;
     use std::sync::Mutex;
@@ -13100,7 +13477,7 @@ mod tests {
         let created = dir.path().join("created.txt");
         std::fs::write(&created, b"twenty-eight bytes of text.\n").unwrap();
         bridge
-            .queue_finder_create(finder_file_target(None, "t.txt", &created, None))
+            .queue_file_provider_create(finder_file_target(None, "t.txt", &created, None))
             .unwrap();
         drain_upload_queue(&bridge, &sync_root).await;
         let rows = bridge.db.list_files().unwrap();
@@ -13119,7 +13496,7 @@ mod tests {
         let edited = dir.path().join("edited.txt");
         std::fs::write(&edited, b"twenty-eight bytes of text.\nmore-bytes12").unwrap();
         bridge
-            .queue_finder_modify(finder_file_target(
+            .queue_file_provider_modify(finder_file_target(
                 Some(&server_id),
                 "t.txt",
                 &edited,
@@ -13270,7 +13647,7 @@ mod tests {
         let contents = dir.path().join("edit.txt");
         std::fs::write(&contents, b"edited bytes").unwrap();
         bridge
-            .queue_finder_modify(finder_file_target(
+            .queue_file_provider_modify(finder_file_target(
                 Some("legacy-3"),
                 "d2-fixture.txt",
                 &contents,
@@ -13344,16 +13721,30 @@ mod tests {
     }
 
     fn queue_save(bridge: &EngineBridge, dir: &Path, file_id: &str, filename: &str, bytes: &[u8], base: &str) {
+        fp_save(bridge, dir, file_id, filename, bytes, base);
+    }
+
+    /// A File Provider save of `bytes` to `file_id` on `base`, as the extension sends it.
+    fn fp_save(bridge: &EngineBridge, dir: &Path, file_id: &str, filename: &str, bytes: &[u8], base: &str) -> FpWrite {
         let contents = dir.join(format!("save-{}.txt", uuid::Uuid::new_v4()));
         std::fs::write(&contents, bytes).unwrap();
         bridge
-            .queue_finder_modify(finder_file_target(
+            .queue_file_provider_modify(finder_file_target(
                 Some(file_id),
                 filename,
                 &contents,
                 Some(base.to_string()),
             ))
-            .unwrap();
+            .unwrap()
+    }
+
+    /// A File Provider create of a new file holding `bytes`.
+    fn fp_create(bridge: &EngineBridge, dir: &Path, filename: &str, bytes: &[u8]) -> FpWrite {
+        let contents = dir.join(format!("create-{}.txt", uuid::Uuid::new_v4()));
+        std::fs::write(&contents, bytes).unwrap();
+        bridge
+            .queue_file_provider_create(finder_file_target(None, filename, &contents, None))
+            .unwrap()
     }
 
     #[tokio::test]
@@ -13672,7 +14063,7 @@ mod tests {
         let created = dir.path().join("created.txt");
         std::fs::write(&created, b"created bytes").unwrap();
         bridge
-            .queue_finder_create(finder_file_target(None, "t.txt", &created, None))
+            .queue_file_provider_create(finder_file_target(None, "t.txt", &created, None))
             .unwrap();
         let local_id = bridge.db.list_files().unwrap()[0].file_id.clone();
 
@@ -13852,5 +14243,289 @@ mod tests {
                 .all(|line| !line.contains("notes.txt") && !line.contains("/api/v1") && !line.contains("127.0.0.1")),
             "no name, path or URL may reach the log:\n{logs}"
         );
+    }
+
+    // ── The accept transaction and the base mapping (spec §6.1, §6.3.1, §8.7 S1.1, S3, S5) ──
+
+    #[tokio::test]
+    async fn i2_a_zero_base_on_a_versioned_row_parks() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [44u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_uploaded_row(&bridge, &server, "zero-base");
+        fp_save(&bridge, dir.path(), "zero-base", "notes.txt", b"edit on a stale 0", "0");
+        drain_upload_queue(&bridge, &sync_root).await;
+        let state = server.finish();
+        assert!(state.inits.is_empty(), "nothing is sent: {:?}", state.init_summary());
+        let op = bridge.db.list_operations_for_file("zero-base").unwrap().remove(0);
+        assert_eq!(op.attempts, op.max_attempts, "parked at once");
+        assert!(
+            std::path::Path::new(op.payload_path.as_deref().unwrap()).is_file(),
+            "the bytes are kept"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_init_guard_refuses_a_finder_replace_without_a_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [45u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_uploaded_row(&bridge, &server, "too-big");
+        fp_save(
+            &bridge,
+            dir.path(),
+            "too-big",
+            "notes.txt",
+            b"a base beyond i32",
+            "3000000000",
+        );
+        seed_uploaded_row(&bridge, &server, "no-base");
+        fp_save(
+            &bridge,
+            dir.path(),
+            "no-base",
+            "notes.txt",
+            b"a base that went missing",
+            "1",
+        );
+        let op = bridge.db.list_operations_for_file("no-base").unwrap().remove(0);
+        bridge.db.set_base_version_for_test(&op.op_id, None);
+        drain_upload_queue(&bridge, &sync_root).await;
+        let state = server.finish();
+        assert!(
+            state.inits.is_empty(),
+            "no replace without a base: {:?}",
+            state.init_summary()
+        );
+        for file in ["too-big", "no-base"] {
+            let op = bridge.db.list_operations_for_file(file).unwrap().remove(0);
+            assert_eq!(op.attempts, op.max_attempts, "{file} parked");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_newer_save_queues_behind_a_write_without_a_session_and_both_land() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [46u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_uploaded_row(&bridge, &server, "two");
+        let first = fp_save(&bridge, dir.path(), "two", "notes.txt", b"first", "1");
+        fp_save(
+            &bridge,
+            dir.path(),
+            "two",
+            "notes.txt",
+            b"first, second",
+            first.token.as_deref().unwrap_or("1"),
+        );
+        drain_upload_queue(&bridge, &sync_root).await;
+        let state = server.finish();
+        assert_eq!(
+            state.init_summary(),
+            vec![(json!("two"), json!(1), 201), (json!("two"), json!(2), 201)],
+            "one upload per save, in order"
+        );
+        assert_eq!(
+            state.files["two"].versions.len(),
+            3,
+            "both saves are versions in the history"
+        );
+        assert_eq!(state.latest_plaintext("two", master_key), b"first, second");
+    }
+
+    #[tokio::test]
+    async fn a_newer_save_waits_behind_a_live_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [47u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        server
+            .state
+            .lock()
+            .unwrap()
+            .delay_chunks
+            .insert("session-1".into(), Duration::from_millis(400));
+        seed_uploaded_row(&bridge, &server, "live");
+        let first = fp_save(&bridge, dir.path(), "live", "notes.txt", b"first", "1");
+        let first_token = first.token.clone().unwrap();
+        let ((), ()) = tokio::join!(
+            async {
+                drain_upload_queue(&bridge, &sync_root).await;
+            },
+            async {
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    while server.state.lock().unwrap().inits.is_empty() {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .expect("init never reached the mock");
+                fp_save(&bridge, dir.path(), "live", "notes.txt", b"first, second", &first_token);
+            }
+        );
+        drain_upload_queue(&bridge, &sync_root).await;
+        let state = server.finish();
+        assert_eq!(
+            state.init_summary(),
+            vec![(json!("live"), json!(1), 201), (json!("live"), json!(2), 201)],
+            "the second save is based on what the first produced"
+        );
+        assert_eq!(state.latest_plaintext("live", master_key), b"first, second");
+    }
+
+    #[tokio::test]
+    async fn enqueue_vs_runner_a_save_accepted_while_its_predecessor_lands_is_never_orphaned() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [48u8; 32];
+        let server = VersionedServerMock::start();
+        // The bridge is shared with the competing thread.
+        let bridge = Arc::new(test_bridge_with_api(
+            &dir.path().join("state.db"),
+            server.base_url.clone(),
+            master_key,
+        ));
+        seed_uploaded_row(&bridge, &server, "race");
+        let w = fp_save(&bridge, dir.path(), "race", "notes.txt", b"W", "1");
+        let w_token = w.token.clone().unwrap();
+        // N's accept stops at its seam; W's landing commits meanwhile (review sequence C).
+        let runner = Arc::clone(&bridge);
+        let root = sync_root.clone();
+        bridge.seams.arm("accept:before_tx", move || {
+            run_competing(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        runner.process_due_operations(&root, now_secs()).await.unwrap();
+                    });
+            });
+        });
+        let logs = capture_logs_async(async {
+            fp_save(&bridge, dir.path(), "race", "notes.txt", b"W, then N", &w_token);
+            drain_upload_queue(&bridge, &sync_root).await;
+        })
+        .await;
+        let state = server.finish();
+        assert_eq!(
+            state.init_summary(),
+            vec![(json!("race"), json!(1), 201), (json!("race"), json!(2), 201)],
+            "N is based on W's produced version"
+        );
+        assert_eq!(state.latest_plaintext("race", master_key), b"W, then N");
+        assert!(!logs.contains("predecessor_lost"), "{logs}");
+        assert!(
+            bridge.db.list_due_operations(i64::MAX).unwrap().is_empty(),
+            "0 ops left"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_numeric_base_while_a_minted_write_is_queued_follows_the_newest_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [49u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_uploaded_row(&bridge, &server, "chain");
+        let w1 = fp_save(&bridge, dir.path(), "chain", "notes.txt", b"1", "1");
+        fp_save(
+            &bridge,
+            dir.path(),
+            "chain",
+            "notes.txt",
+            b"1 2",
+            w1.token.as_deref().unwrap(),
+        );
+        // The system sent this save before it recorded either reply.
+        fp_save(&bridge, dir.path(), "chain", "notes.txt", b"1 2 3", "1");
+        drain_upload_queue(&bridge, &sync_root).await;
+        let state = server.finish();
+        assert_eq!(
+            state.init_summary(),
+            vec![
+                (json!("chain"), json!(1), 201),
+                (json!("chain"), json!(2), 201),
+                (json!("chain"), json!(3), 201)
+            ],
+            "the third save follows the newest write of the chain"
+        );
+        assert_eq!(state.latest_plaintext("chain", master_key), b"1 2 3");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_token_is_sent_as_its_b() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [50u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_uploaded_row(&bridge, &server, "unknown-token");
+        server.seed_file("unknown-token", 3);
+        let mut contract = bridge.db.get_file_contract_state("unknown-token").unwrap().unwrap();
+        contract.current_version = 3;
+        bridge.db.set_file_contract_state(&contract).unwrap();
+        fp_save(
+            &bridge,
+            dir.path(),
+            "unknown-token",
+            "notes.txt",
+            b"edit",
+            &format!("3:w{}", "c".repeat(32)),
+        );
+        drain_upload_queue(&bridge, &sync_root).await;
+        let state = server.finish();
+        assert_eq!(state.init_summary(), vec![(json!("unknown-token"), json!(3), 201)]);
+    }
+
+    #[tokio::test]
+    async fn a_waiting_op_stores_its_b_as_base_version() {
+        // m-4a: an older build would send this, and the server refuses it.
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [51u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_uploaded_row(&bridge, &server, "stores-b");
+        let w1 = fp_save(&bridge, dir.path(), "stores-b", "notes.txt", b"1", "1");
+        fp_save(
+            &bridge,
+            dir.path(),
+            "stores-b",
+            "notes.txt",
+            b"1 2",
+            w1.token.as_deref().unwrap(),
+        );
+        let ops = bridge.db.list_operations_for_file("stores-b").unwrap();
+        assert_eq!(ops[1].base_version, Some(1), "after W1, stored as W1's b");
+        let created = fp_create(&bridge, dir.path(), "new.txt", b"created");
+        let provisional = created.outcome_file_id();
+        fp_save(
+            &bridge,
+            dir.path(),
+            &provisional,
+            "new.txt",
+            b"created, edited",
+            created.token.as_deref().unwrap(),
+        );
+        let ops = bridge.db.list_operations_for_file(&provisional).unwrap();
+        assert_eq!(ops[1].base_version, Some(0), "after a create, stored as 0");
+        drop(server.finish());
     }
 }

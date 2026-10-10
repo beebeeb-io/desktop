@@ -84,6 +84,114 @@ pub fn held_token(
     landed_here.then(|| held.token())
 }
 
+/// What the accept transaction knows before this write changes the row (spec §6.1).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BaseFacts {
+    pub current_version: i64,
+    /// Rule 6a: the version was filled by a snapshot and nothing has touched the row since.
+    pub version_filled: bool,
+    pub held: Option<HeldWrite>,
+    /// An op carries `held.write_id`, in any state.
+    pub held_write_queued: bool,
+    /// A create of this file is queued, in any state, and the server has no version of
+    /// it yet: the row is provisional (plan Spec issue 4).
+    pub create_queued: bool,
+    /// Resolved bases of this file's queued uploads minted by this code.
+    pub minted_resolved_bases: Vec<i64>,
+    /// What a build before the server-version-led format reported for the row now.
+    pub legacy_identifiers: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BaseDecision {
+    /// Rules 1a, 2, 3: the successor of the queued write `write_id`; `b` is that write's `b`.
+    After { write_id: String, b: i64 },
+    /// Rules 1b, 4, 5, 6a: the server version this upload replaces.
+    Resolved { base: i64 },
+    /// Rule 6b: wait for a snapshot to learn the version.
+    Pending,
+    /// Rule 6a′: queued and parked at once, bytes kept.
+    ParkUnknown,
+}
+
+impl BaseDecision {
+    /// `b` of the new write's token (spec §5.1).
+    pub fn token_base(&self) -> i64 {
+        match self {
+            BaseDecision::After { b, .. } => *b,
+            BaseDecision::Resolved { base } => *base,
+            BaseDecision::Pending | BaseDecision::ParkUnknown => 0,
+        }
+    }
+}
+
+/// `{v}` or `{v}:{hash}` with `v > 0`; never a token or a three-segment identifier (rule 3).
+fn content_version_number(identifier: &str) -> Option<i64> {
+    if parse_token(identifier).is_some() {
+        return None;
+    }
+    let mut parts = identifier.split(':');
+    let version = parts.next()?.parse::<i64>().ok().filter(|v| *v > 0)?;
+    let _hash = parts.next();
+    parts.next().is_none().then_some(version)
+}
+
+/// The base of a File Provider write (spec §6.1): the first matching rule wins. Rule 1c
+/// is split off (§12): a token that is not the held one falls to rule 5.
+pub fn decide_base(facts: &BaseFacts, incoming: Option<&str>) -> BaseDecision {
+    // "The newest write of the file's chain": the held write, while it is queued.
+    let newest = facts.held.as_ref().filter(|_| facts.held_write_queued);
+    let after = |held: &HeldWrite| BaseDecision::After {
+        write_id: held.write_id.clone(),
+        b: held.base,
+    };
+    if let (Some(held), Some(incoming)) = (facts.held.as_ref(), incoming)
+        && incoming == held.token()
+    {
+        if facts.held_write_queued {
+            return after(held); // 1a
+        }
+        if let Some(version) = held.version {
+            return BaseDecision::Resolved { base: version }; // 1b
+        }
+    }
+    if facts.create_queued
+        && let Some(held) = newest
+    {
+        return after(held); // 2
+    }
+    if let (Some(v), Some(held)) = (incoming.and_then(content_version_number), newest)
+        && facts.minted_resolved_bases.contains(&v)
+    {
+        return after(held); // 3
+    }
+    if let Some(incoming) = incoming
+        && facts.current_version > 0
+        && facts.legacy_identifiers.iter().any(|legacy| legacy == incoming)
+    {
+        if let Some(held) = newest.filter(|_| facts.minted_resolved_bases.contains(&facts.current_version)) {
+            return after(held); // 4, then 3
+        }
+        return BaseDecision::Resolved {
+            base: facts.current_version,
+        }; // 4
+    }
+    if let Some(v) = crate::engine_bridge::parse_base_version_number(incoming) {
+        return BaseDecision::Resolved { base: v }; // 5
+    }
+    if facts.current_version > 0 {
+        if facts.version_filled {
+            BaseDecision::Resolved {
+                base: facts.current_version,
+            } // 6a
+        } else {
+            BaseDecision::ParkUnknown // 6a′
+        }
+    } else {
+        BaseDecision::Pending // 6b
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -780,6 +780,130 @@ pub struct ItemPresentation {
     pub version_filled: bool,
 }
 
+/// [`StateDb::upsert_file`] on an open connection or transaction.
+fn upsert_file_conn<C: std::ops::Deref<Target = Connection>>(conn: &C, e: &FileEntry) -> Result<()> {
+    // Task 1697: capture the OLD row before the upsert so the change log
+    // can (a) tell created from modified, (b) skip no-op re-upserts — the
+    // metadata sweeps re-upsert every row every tick, and recording every
+    // one would advance the anchor with no real change — and (c) carry
+    // the old parent for reparent detection.
+    let old: Option<(String, String, i64, i64, i64, Option<String>)> = conn
+        .query_row(
+            "SELECT path, status, size_bytes, modified_at, remote_updated_at, parent_id
+             FROM files WHERE file_id = ?1",
+            params![e.file_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    conn.execute(
+        "INSERT INTO files (file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(file_id) DO UPDATE SET
+           path=excluded.path, status=excluded.status,
+           size_bytes=excluded.size_bytes, modified_at=excluded.modified_at,
+           content_hash=excluded.content_hash,
+           remote_updated_at=excluded.remote_updated_at",
+        params![
+            e.file_id,
+            e.path,
+            e.status.as_str(),
+            e.size_bytes,
+            e.modified_at,
+            e.content_hash,
+            e.remote_updated_at
+        ],
+    )?;
+    let changed = match &old {
+        None => true,
+        Some((path, status, size, modified_at, remote_updated_at, _)) => {
+            path != &e.path
+                || status != e.status.as_str()
+                || *size != e.size_bytes
+                || *modified_at != e.modified_at
+                || *remote_updated_at != e.remote_updated_at
+        }
+    };
+    if changed {
+        // A path change is a rename OR a move; Reparented carries the old
+        // parent so the materialized-set filter can test old-OR-new
+        // (Apple's Replicated contract). Created/Modified need no old
+        // parent.
+        let (kind, old_parent): (FpChangeKind, Option<String>) = match &old {
+            None => (FpChangeKind::Created, None),
+            Some((old_path, _, _, _, _, old_parent)) => {
+                if old_path != &e.path {
+                    (FpChangeKind::Reparented, old_parent.clone())
+                } else {
+                    (FpChangeKind::Modified, None)
+                }
+            }
+        };
+        record_file_change_conn(conn, &e.file_id, kind, old_parent)?;
+    }
+    Ok(())
+}
+
+/// [`StateDb::get_file`] on an open connection or transaction.
+fn get_file_conn<C: std::ops::Deref<Target = Connection>>(conn: &C, file_id: &str) -> Result<Option<FileEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at,
+                parent_id, item_kind
+         FROM files WHERE file_id = ?1",
+    )?;
+    let mut rows = stmt.query(params![file_id])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(FileEntry {
+            file_id: row.get(0)?,
+            path: row.get(1)?,
+            status: FileStatus::from_str(&row.get::<_, String>(2)?),
+            size_bytes: row.get(3)?,
+            modified_at: row.get(4)?,
+            content_hash: row.get(5)?,
+            remote_updated_at: row.get(6)?,
+            parent_id: row.get(7)?,
+            item_kind: ItemKind::from_str(&row.get::<_, String>(8)?),
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+/// [`StateDb::record_local_write`] on an open connection or transaction.
+fn record_local_write_conn<C: std::ops::Deref<Target = Connection>>(
+    conn: &C,
+    file_id: &str,
+    size_bytes: i64,
+    modified_at: i64,
+) -> Result<()> {
+    let old: Option<(String, i64, i64)> = conn
+        .query_row(
+            "SELECT status, size_bytes, modified_at FROM files WHERE file_id = ?1",
+            params![file_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((status, old_size, old_modified_at)) = old else {
+        return Ok(());
+    };
+    conn.execute(
+        "UPDATE files SET status = ?1, size_bytes = ?2, modified_at = ?3 WHERE file_id = ?4",
+        params![FileStatus::Uploading.as_str(), size_bytes, modified_at, file_id],
+    )?;
+    if status != FileStatus::Uploading.as_str() || old_size != size_bytes || old_modified_at != modified_at {
+        record_file_change_conn(conn, file_id, FpChangeKind::Modified, None)?;
+    }
+    Ok(())
+}
+
 fn get_file_contract_state_conn(conn: &Connection, file_id: &str) -> Result<Option<FileContractState>> {
     let mut stmt = conn.prepare(
         "SELECT file_id, namespace, parent_id, shared_root_id, share_id, permission_bits,
@@ -854,7 +978,10 @@ fn held_write_conn(conn: &Connection, file_id: &str) -> Result<(Option<crate::wr
             let held = match write_id {
                 Some(write_id) => Some(crate::write_token::HeldWrite {
                     write_id,
-                    base: row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                    // The two are written together (`set_held_write_conn`). A NULL
+                    // `held_base` beside a write id is a bug, and reading it fails
+                    // rather than map a base through `b = 0`.
+                    base: row.get::<_, i64>(1)?,
                     version: row.get(2)?,
                     object_version_id: row.get(3)?,
                 }),
@@ -863,6 +990,112 @@ fn held_write_conn(conn: &Connection, file_id: &str) -> Result<(Option<crate::wr
             Ok((held, row.get::<_, i64>(4)? != 0))
         },
     )
+}
+
+/// The one writer of a new held write: `held_write_id` and `held_base` are set together,
+/// in one statement, and the landing columns are cleared. Exactly one row must match.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn set_held_write_conn(conn: &Connection, file_id: &str, write_id: &str, base: i64) -> Result<()> {
+    let n = conn.execute(
+        "UPDATE files SET held_write_id = ?2, held_base = ?3, held_version = NULL,
+                          held_object_version_id = NULL
+         WHERE file_id = ?1",
+        params![file_id, write_id, base],
+    )?;
+    if n == 1 {
+        Ok(())
+    } else {
+        Err(rusqlite::Error::QueryReturnedNoRows)
+    }
+}
+
+/// The §6.1 facts of `file_id`, read inside the caller's transaction (spec §8.7 S1.1).
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn base_facts_conn(
+    conn: &Connection,
+    file_id: &str,
+    contract: &FileContractState,
+    legacy_identifiers: Vec<String>,
+) -> Result<crate::write_token::BaseFacts> {
+    let (held, version_filled) = held_write_conn(conn, file_id)?;
+    let held_write_queued = match &held {
+        Some(held) => conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM operation_queue WHERE write_id = ?1)",
+            params![held.write_id],
+            |row| row.get(0),
+        )?,
+        None => false,
+    };
+    // The CASE keeps a malformed metadata row from failing every save of the file.
+    let create_queued: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM operation_queue
+          WHERE file_id = ?1 AND kind IN ('upload_version', 'upload_file')
+            AND CASE WHEN json_valid(metadata_json)
+                     THEN json_extract(metadata_json, '$.operation') END = 'create_file')",
+        params![file_id],
+        |row| row.get(0),
+    )?;
+    let minted_resolved_bases = {
+        let mut stmt = conn.prepare(
+            "SELECT base_version FROM operation_queue
+             WHERE file_id = ?1 AND write_origin = ?2 AND after_write_id IS NULL
+               AND base_pending = 0 AND base_version IS NOT NULL",
+        )?;
+        let rows = stmt.query_map(params![file_id, WriteOrigin::Minted.as_str()], |row| {
+            row.get::<_, i64>(0)
+        })?;
+        rows.collect::<Result<Vec<_>>>()?
+    };
+    Ok(crate::write_token::BaseFacts {
+        current_version: contract.current_version,
+        version_filled,
+        held,
+        held_write_queued,
+        create_queued: create_queued && contract.current_version == 0,
+        minted_resolved_bases,
+        legacy_identifiers,
+    })
+}
+
+/// One File Provider content write, staged and described, for [`StateDb::accept_finder_write`].
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+#[derive(Debug)]
+pub struct FinderAccept<'a> {
+    pub op_id: &'a str,
+    pub file_id: &'a str,
+    pub kind: FinderAcceptKind<'a>,
+    pub parent_id: Option<&'a str>,
+    pub target_path: Option<&'a str>,
+    pub metadata_json: &'a str,
+    pub payload_path: &'a str,
+    /// The staged copy's size and modification time (a modify's row takes them).
+    pub size_bytes: i64,
+    pub modified_at: i64,
+    pub backup_source_key: Option<&'a str>,
+    pub now: i64,
+}
+
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+#[derive(Debug)]
+pub enum FinderAcceptKind<'a> {
+    /// A new file: `row` is inserted in the same transaction.
+    Create { row: &'a FileEntry },
+    /// New bytes for an existing file, on the base identifier the system sent.
+    Modify { incoming_base: Option<&'a str> },
+}
+
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AcceptOutcome {
+    /// Queued. `decision` is `None` for a create.
+    Queued {
+        token: String,
+        decision: Option<crate::write_token::BaseDecision>,
+    },
+    /// Queued and parked at once with its bytes (rule 6a′).
+    ParkedAtOnce { token: String, reason: ParkReason },
+    /// A modify of a file this database has no row for: nothing was written.
+    UnknownItem,
 }
 
 /// Why a File Provider upload parked with its bytes kept (spec §11, "Parked").
@@ -906,6 +1139,12 @@ pub enum ClaimOutcome {
     Wait,
     /// Boxed: the op is large and the other outcomes carry nothing.
     Claimed(Box<ClaimedOp>),
+    /// Not an attempt: the claim parked the op with its bytes (spec §8.4, S5).
+    Parked {
+        op_id: String,
+        file_id: Option<String>,
+        reason: ParkReason,
+    },
 }
 
 /// What engine start repaired (spec §8.7 S3, S6; §10.2).
@@ -1216,100 +1455,13 @@ impl StateDb {
     /// the entire row except the primary key.
     pub fn upsert_file(&self, e: &FileEntry) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        // Task 1697: capture the OLD row before the upsert so the change log
-        // can (a) tell created from modified, (b) skip no-op re-upserts — the
-        // metadata sweeps re-upsert every row every tick, and recording every
-        // one would advance the anchor with no real change — and (c) carry
-        // the old parent for reparent detection.
-        let old: Option<(String, String, i64, i64, i64, Option<String>)> = conn
-            .query_row(
-                "SELECT path, status, size_bytes, modified_at, remote_updated_at, parent_id
-                 FROM files WHERE file_id = ?1",
-                params![e.file_id],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get::<_, Option<String>>(5)?,
-                    ))
-                },
-            )
-            .optional()?;
-        conn.execute(
-            "INSERT INTO files (file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(file_id) DO UPDATE SET
-               path=excluded.path, status=excluded.status,
-               size_bytes=excluded.size_bytes, modified_at=excluded.modified_at,
-               content_hash=excluded.content_hash,
-               remote_updated_at=excluded.remote_updated_at",
-            params![
-                e.file_id,
-                e.path,
-                e.status.as_str(),
-                e.size_bytes,
-                e.modified_at,
-                e.content_hash,
-                e.remote_updated_at
-            ],
-        )?;
-        let changed = match &old {
-            None => true,
-            Some((path, status, size, modified_at, remote_updated_at, _)) => {
-                path != &e.path
-                    || status != e.status.as_str()
-                    || *size != e.size_bytes
-                    || *modified_at != e.modified_at
-                    || *remote_updated_at != e.remote_updated_at
-            }
-        };
-        if changed {
-            // A path change is a rename OR a move; Reparented carries the old
-            // parent so the materialized-set filter can test old-OR-new
-            // (Apple's Replicated contract). Created/Modified need no old
-            // parent.
-            let (kind, old_parent): (FpChangeKind, Option<String>) = match &old {
-                None => (FpChangeKind::Created, None),
-                Some((old_path, _, _, _, _, old_parent)) => {
-                    if old_path != &e.path {
-                        (FpChangeKind::Reparented, old_parent.clone())
-                    } else {
-                        (FpChangeKind::Modified, None)
-                    }
-                }
-            };
-            record_file_change_conn(&conn, &e.file_id, kind, old_parent)?;
-        }
-        Ok(())
+        upsert_file_conn(&conn, e)
     }
 
     /// Fetch a single row by `file_id`. `Ok(None)` if absent.
     pub fn get_file(&self, file_id: &str) -> Result<Option<FileEntry>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        let mut stmt = conn.prepare(
-            "SELECT file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at,
-                    parent_id, item_kind
-             FROM files WHERE file_id = ?1",
-        )?;
-        let mut rows = stmt.query(params![file_id])?;
-        if let Some(row) = rows.next()? {
-            Ok(Some(FileEntry {
-                file_id: row.get(0)?,
-                path: row.get(1)?,
-                status: FileStatus::from_str(&row.get::<_, String>(2)?),
-                size_bytes: row.get(3)?,
-                modified_at: row.get(4)?,
-                content_hash: row.get(5)?,
-                remote_updated_at: row.get(6)?,
-                parent_id: row.get(7)?,
-                item_kind: ItemKind::from_str(&row.get::<_, String>(8)?),
-            }))
-        } else {
-            Ok(None)
-        }
+        get_file_conn(&conn, file_id)
     }
 
     /// Fetch a single row by its path inside the sync root. `Ok(None)`
@@ -2252,24 +2404,7 @@ impl StateDb {
     /// not move until the upload lands. A missing row is left missing.
     pub fn record_local_write(&self, file_id: &str, size_bytes: i64, modified_at: i64) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        let old: Option<(String, i64, i64)> = conn
-            .query_row(
-                "SELECT status, size_bytes, modified_at FROM files WHERE file_id = ?1",
-                params![file_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()?;
-        let Some((status, old_size, old_modified_at)) = old else {
-            return Ok(());
-        };
-        conn.execute(
-            "UPDATE files SET status = ?1, size_bytes = ?2, modified_at = ?3 WHERE file_id = ?4",
-            params![FileStatus::Uploading.as_str(), size_bytes, modified_at, file_id],
-        )?;
-        if status != FileStatus::Uploading.as_str() || old_size != size_bytes || old_modified_at != modified_at {
-            record_file_change_conn(&conn, file_id, FpChangeKind::Modified, None)?;
-        }
-        Ok(())
+        record_local_write_conn(&conn, file_id, size_bytes, modified_at)
     }
 
     /// Clear transient transfer states left behind by a previous process.
@@ -2590,6 +2725,146 @@ impl StateDb {
     pub fn finder_write(&self, op_id: &str) -> Result<Option<FinderWrite>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         finder_write_conn(&conn, op_id)
+    }
+
+    /// S1.1: accept one File Provider content write in ONE transaction. The §6.1
+    /// decision is read from the row as it is inside it; the write id is minted and
+    /// held; a modify's row takes the staged copy's size and time; and the op is queued
+    /// (or parked at once, rule 6a′). Nothing inside awaits or touches the network.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn accept_finder_write(
+        &self,
+        accept: &FinderAccept<'_>,
+        legacy_identifiers: &dyn Fn(&FileEntry, &FileContractState) -> Vec<String>,
+    ) -> Result<AcceptOutcome> {
+        use crate::write_token::{BaseDecision, WriteToken, decide_base, mint_write_id};
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let (decision, object_version_id) = match &accept.kind {
+            FinderAcceptKind::Create { row } => {
+                debug_assert_eq!(row.file_id, accept.file_id);
+                upsert_file_conn(&tx, row)?;
+                (None, None)
+            }
+            FinderAcceptKind::Modify { incoming_base } => {
+                let (Some(entry), Some(contract)) = (
+                    get_file_conn(&tx, accept.file_id)?,
+                    get_file_contract_state_conn(&tx, accept.file_id)?,
+                ) else {
+                    return Ok(AcceptOutcome::UnknownItem);
+                };
+                let facts = base_facts_conn(&tx, accept.file_id, &contract, legacy_identifiers(&entry, &contract))?;
+                let decision = decide_base(&facts, *incoming_base);
+                record_local_write_conn(&tx, accept.file_id, accept.size_bytes, accept.modified_at)?;
+                (Some(decision), contract.current_object_version_id.clone())
+            }
+        };
+        let write_id = mint_write_id();
+        let b = decision.as_ref().map_or(0, BaseDecision::token_base);
+        set_held_write_conn(&tx, accept.file_id, &write_id, b)?;
+        // m-4a: a waiting op stores its token's `b`, so an older build sends a base the
+        // server refuses, never none. This code never sends it (the claim skips the op).
+        let (base_version, after_write_id, base_pending, parked) = match &decision {
+            None => (None, None, 0_i64, false),
+            Some(BaseDecision::After { write_id, b }) => (Some(*b), Some(write_id.clone()), 0, false),
+            Some(BaseDecision::Resolved { base }) => (Some(*base), None, 0, false),
+            Some(BaseDecision::Pending) => (Some(0), None, 1, false),
+            Some(BaseDecision::ParkUnknown) => (Some(0), None, 0, true),
+        };
+        const MAX_ATTEMPTS: i64 = 25;
+        let park = ParkReason::BaseUnknown.as_str();
+        tx.execute(
+            "INSERT INTO operation_queue (
+                op_id, kind, file_id, parent_id, target_path, metadata_json, payload_path,
+                base_version, base_object_version_id, attempts, max_attempts, next_retry_at,
+                last_error, last_error_class, paused_reason, backup_source_key, created_at, updated_at,
+                write_id, write_origin, after_write_id, base_pending
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, NULL, ?15,
+                       ?12, ?12, ?16, ?17, ?18, ?19)",
+            params![
+                accept.op_id,
+                OperationKind::UploadVersion.as_str(),
+                accept.file_id,
+                accept.parent_id,
+                accept.target_path,
+                accept.metadata_json,
+                accept.payload_path,
+                base_version,
+                object_version_id,
+                if parked { MAX_ATTEMPTS } else { 0 },
+                MAX_ATTEMPTS,
+                accept.now,
+                if parked {
+                    park
+                } else {
+                    "queued from Finder; upload worker not yet attached"
+                },
+                parked.then_some(park),
+                accept.backup_source_key,
+                write_id,
+                WriteOrigin::Minted.as_str(),
+                after_write_id,
+                base_pending,
+            ],
+        )?;
+        tx.commit()?;
+        let token = WriteToken { base: b, write_id }.render();
+        Ok(if parked {
+            AcceptOutcome::ParkedAtOnce {
+                token,
+                reason: ParkReason::BaseUnknown,
+            }
+        } else {
+            AcceptOutcome::Queued { token, decision }
+        })
+    }
+
+    /// A create's id swap: the server row takes the provisional row's held columns, all
+    /// four in one statement (spec §5.4 row 14). Task 7 folds this into the landing
+    /// transaction.
+    pub fn carry_held_write(&self, from_file_id: &str, to_file_id: &str) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "UPDATE files SET
+                held_write_id = (SELECT held_write_id FROM files WHERE file_id = ?1),
+                held_base = (SELECT held_base FROM files WHERE file_id = ?1),
+                held_version = (SELECT held_version FROM files WHERE file_id = ?1),
+                held_object_version_id = (SELECT held_object_version_id FROM files WHERE file_id = ?1)
+             WHERE file_id = ?2
+               AND EXISTS (SELECT 1 FROM files WHERE file_id = ?1 AND held_write_id IS NOT NULL)",
+            params![from_file_id, to_file_id],
+        )?;
+        Ok(())
+    }
+
+    /// The write `write_id` landed as `version` (spec §8.6.2): only while it is still the
+    /// held one, so a later save's token stays held (§5.4 row 6). `false`: it is not.
+    pub fn set_held_landed(
+        &self,
+        file_id: &str,
+        write_id: &str,
+        version: i64,
+        object_version_id: Option<&str>,
+    ) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let n = conn.execute(
+            "UPDATE files SET held_version = ?3, held_object_version_id = ?4
+             WHERE file_id = ?1 AND held_write_id = ?2",
+            params![file_id, write_id, version, object_version_id],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// The chain step by write id (spec §8.1): every op waiting on `write_id` gets the
+    /// version it produced. Returns how many ops it resolved.
+    pub fn resolve_successors(&self, write_id: &str, version: i64, object_version_id: Option<&str>) -> Result<usize> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "UPDATE operation_queue
+             SET base_version = ?2, base_object_version_id = ?3, after_write_id = NULL
+             WHERE after_write_id = ?1",
+            params![write_id, version, object_version_id],
+        )
     }
 
     // ── File Provider change log + sync anchor (task 1697) ────────────────────
@@ -3358,7 +3633,9 @@ impl StateDb {
 
     /// S3: re-read the op, enforce the file's content order, and claim it, in one
     /// transaction. Replaces `get_operation` + the earlier-upload check the runner
-    /// made in two separate calls.
+    /// made in two separate calls. A Finder write also waits while its base is
+    /// pending or its predecessor is queued, and parks when that predecessor parked
+    /// or no op carries it any more (S5).
     pub fn claim_operation(&self, op_id: &str, now: i64) -> Result<ClaimOutcome> {
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -3398,12 +3675,46 @@ impl StateDb {
                 return Ok(ClaimOutcome::Wait);
             }
         }
+        let write = finder_write_conn(&tx, op_id)?;
+        if let Some(write) = &write {
+            if write.base_pending > 0 {
+                return Ok(ClaimOutcome::Wait); // step 3, not an attempt
+            }
+            if let Some(predecessor) = &write.after_write_id {
+                let state: Option<(i64, i64)> = tx
+                    .query_row(
+                        "SELECT attempts, max_attempts FROM operation_queue WHERE write_id = ?1",
+                        params![predecessor],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()?;
+                let reason = match state {
+                    // Step 4: the predecessor is queued and has not parked.
+                    Some((attempts, max)) if attempts < max => return Ok(ClaimOutcome::Wait),
+                    // Task 5 replaces this arm with the hand-over for a minted predecessor.
+                    Some(_) => ParkReason::PredecessorParked,
+                    // S5: only a bug can orphan a successor; it shows as a parked file.
+                    None => ParkReason::PredecessorLost,
+                };
+                tx.execute(
+                    "UPDATE operation_queue
+                     SET attempts = max_attempts, last_error = ?2, last_error_class = ?2, updated_at = ?3
+                     WHERE op_id = ?1",
+                    params![op_id, reason.as_str(), now],
+                )?;
+                tx.commit()?;
+                return Ok(ClaimOutcome::Parked {
+                    op_id: op_id.to_string(),
+                    file_id: op.file_id.clone(),
+                    reason,
+                });
+            }
+        }
         let claim_id = uuid::Uuid::new_v4().simple().to_string();
         tx.execute(
             "UPDATE operation_queue SET claim_id = ?2, claimed_at = ?3 WHERE op_id = ?1",
             params![op_id, claim_id, now],
         )?;
-        let write = finder_write_conn(&tx, op_id)?;
         tx.commit()?;
         Ok(ClaimOutcome::Claimed(Box::new(ClaimedOp { op, claim_id, write })))
     }
@@ -3588,6 +3899,17 @@ impl StateDb {
         conn.execute(
             "UPDATE operation_queue SET created_at = ?2 WHERE op_id = ?1",
             params![op_id, created_at],
+        )
+        .unwrap();
+    }
+
+    /// T14: an op whose base went missing after it was queued.
+    #[cfg(test)]
+    pub(crate) fn set_base_version_for_test(&self, op_id: &str, base_version: Option<i64>) {
+        let conn = self.0.lock().unwrap();
+        conn.execute(
+            "UPDATE operation_queue SET base_version = ?2 WHERE op_id = ?1",
+            params![op_id, base_version],
         )
         .unwrap();
     }
@@ -5990,6 +6312,110 @@ mod tests {
         assert!(
             db.finder_write("op1").unwrap().is_none(),
             "an op without a write id is not a Finder write"
+        );
+    }
+
+    /// The held columns are written together (Task 1 review, Minor 2): the accept sets
+    /// `held_write_id` and `held_base` in one statement, and a row with a write id but no
+    /// base is an error, never read as a base of 0.
+    #[test]
+    fn held_columns_are_written_together_and_a_half_set_row_is_an_error() {
+        fn accept(db: &StateDb, op_id: &str, file_id: &str, kind: FinderAcceptKind<'_>) -> Result<AcceptOutcome> {
+            db.accept_finder_write(
+                &FinderAccept {
+                    op_id,
+                    file_id,
+                    kind,
+                    parent_id: None,
+                    target_path: Some("a.txt"),
+                    metadata_json: "{}",
+                    payload_path: "/staged/x",
+                    size_bytes: 1,
+                    modified_at: 1,
+                    backup_source_key: None,
+                    now: 1,
+                },
+                &|_, _| Vec::new(),
+            )
+        }
+        fn held_pair(db: &StateDb, file_id: &str) -> (Option<String>, Option<i64>) {
+            db.0.lock()
+                .unwrap()
+                .query_row(
+                    "SELECT held_write_id, held_base FROM files WHERE file_id = ?1",
+                    params![file_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap()
+        }
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let row = |file_id: &str| FileEntry {
+            file_id: file_id.into(),
+            path: "a.txt".into(),
+            status: FileStatus::Local,
+            size_bytes: 1,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 0,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        };
+
+        let created = row("created");
+        let AcceptOutcome::Queued { token, .. } =
+            accept(&db, "op-create", "created", FinderAcceptKind::Create { row: &created }).unwrap()
+        else {
+            panic!("a create is queued");
+        };
+        let (write_id, base) = held_pair(&db, "created");
+        assert_eq!(base, Some(0), "a create holds b = 0, set with its write id");
+        assert_eq!(format!("0:w{}", write_id.unwrap()), token);
+
+        db.upsert_file(&row("versioned")).unwrap();
+        let mut contract = db.get_file_contract_state("versioned").unwrap().unwrap();
+        contract.current_version = 2;
+        db.set_file_contract_state(&contract).unwrap();
+        let AcceptOutcome::Queued { token, .. } = accept(
+            &db,
+            "op-modify",
+            "versioned",
+            FinderAcceptKind::Modify {
+                incoming_base: Some("2"),
+            },
+        )
+        .unwrap() else {
+            panic!("a modify on a known base is queued");
+        };
+        let (write_id, base) = held_pair(&db, "versioned");
+        assert_eq!(base, Some(2), "a modify holds its decided base, set with its write id");
+        assert_eq!(format!("2:w{}", write_id.unwrap()), token);
+
+        // A write id without its base can only come from a bug: reading it fails.
+        db.0.lock()
+            .unwrap()
+            .execute("UPDATE files SET held_base = NULL WHERE file_id = 'versioned'", [])
+            .unwrap();
+        assert!(
+            db.item_presentation("versioned").is_err(),
+            "a NULL held_base is never read as a base of 0"
+        );
+        assert!(
+            accept(
+                &db,
+                "op-after-bug",
+                "versioned",
+                FinderAcceptKind::Modify {
+                    incoming_base: Some("2"),
+                },
+            )
+            .is_err(),
+            "no save is mapped through a half-set row"
+        );
+        assert_eq!(
+            db.list_operations_for_file("versioned").unwrap().len(),
+            1,
+            "the refused accept queued nothing"
         );
     }
 

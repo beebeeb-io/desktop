@@ -429,6 +429,17 @@ fn modify_request(file_id: &str, filename: &str, contents_path: &str, request_id
     line
 }
 
+/// [`modify_request`] carrying a base, as the extension always sends one: the content
+/// version it holds for the item (`contentVersion`).
+fn modify_request_on_base(file_id: &str, filename: &str, contents_path: &str, base: &str) -> Vec<u8> {
+    let line = modify_request(file_id, filename, contents_path, None);
+    let mut request: serde_json::Value = serde_json::from_slice(&line).unwrap();
+    request["QueueFinderModify"]["base_version_identifier"] = serde_json::json!(base);
+    let mut line = serde_json::to_vec(&request).unwrap();
+    line.push(b'\n');
+    line
+}
+
 async fn send_one(fx: &IpcFixture, request: Vec<u8>) -> serde_json::Value {
     let mut client = fx.connect().await;
     client.write_all(&request).await.unwrap();
@@ -879,9 +890,10 @@ fn a_queued_modify_replies_with_the_size_of_the_bytes_it_was_handed() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
-    let reply = fx
-        .rt
-        .block_on(send_one(&fx, modify_request("edited-item", "t.txt", &path, None)));
+    let reply = fx.rt.block_on(send_one(
+        &fx,
+        modify_request_on_base("edited-item", "t.txt", &path, "1"),
+    ));
     let item = &reply["WriteQueued"]["item"];
     let ops = operations_of_kind(&fx, OperationKind::UploadVersion);
     assert_eq!(ops.len(), 1, "{reply}");
