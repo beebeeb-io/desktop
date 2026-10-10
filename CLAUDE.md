@@ -181,8 +181,9 @@ identifier unless Guus creates a new macOS App Store Connect record and chooses
 to migrate. Expo is unrelated to desktop builds; it only applies to mobile.
 
 **Removing the Finder location keeps un-synced files (task 1882, P0).** Every
-`NSFileProviderManager` domain removal (sign-out, Repair, the Add-to-Finder
-rollback, the app-start sweep, `BeebeebFileProviderCtl remove`) passes
+`NSFileProviderManager` domain removal (sign-out, Repair, ~~the Add-to-Finder
+rollback,~~ every other removal the Finder reconciler makes, the app-start sweep,
+`BeebeebFileProviderCtl remove`) passes
 `NSFileProviderDomainRemovalModePreserveDirtyUserData`; never add a plain
 `removeDomain:`/`remove(domain)` or `removeAllDomains`. The source pin
 `test_1882_every_domain_removal_in_the_repo_keeps_unsynced_files`
@@ -190,14 +191,18 @@ rollback, the app-start sweep, `BeebeebFileProviderCtl remove`) passes
 one. macOS reports a folder even when it kept nothing (device, 2026-10-10), so
 the bridge checks it on the returned URL (`BeebeebKeptFolderState`): only a folder
 that exists and holds at least one entry (or that the sandbox will not let it
-list) reaches the person, and never the logs: an alert (sign-out, add rollback,
-sweep; drawn by macOS's UserNotificationCenter, not a Beebeeb window) plus a row in
+list) reaches the person, and never the logs: an alert (sign-out, ~~add rollback,~~
+a reconciler removal nobody waits for, sweep; drawn by macOS's UserNotificationCenter, not a
+Beebeeb window) plus a row in
 Settings → Sync until dismissed (`kept_unsynced_folder` in `desktop.toml`; commands
 `kept_unsynced_folder` / `dismiss_kept_unsynced_folder`, which returns
 `{ cleared, current }`). Writes to `desktop.toml` take the one config-write lock in
 `config.rs` (`DesktopConfig::update_at` is a load-change-save under it). The 1882 source pins
 read through `lf()`/`slash()` in `finder_removal.rs`, so they run on a Windows checkout
 (CRLF text, `\` paths). Spec: `docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md`.
+Correction: a Mac has no Add-to-Finder rollback. Since spec A (R5) the reconciler adds Beebeeb and
+never removes a domain it added. Windows and Linux keep `install_finder_location`'s rollback, where
+there is no File Provider and nothing is kept. — lead ruling, 2026-10-10 (rebase onto spec A, Q1)
 
 ## Browser sign-in (`src-tauri/src/browser_login.rs`, task 1734)
 

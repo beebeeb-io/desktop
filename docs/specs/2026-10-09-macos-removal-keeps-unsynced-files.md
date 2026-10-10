@@ -242,13 +242,22 @@ warning).~~
 - **Repair fails after it removed the Finder location** (the config save fails; added 2026-10-10,
   1882 r4): the kept folder is shown first (the alert, and saved for the row if the save allows),
   as for a failed sign-out. ~~The error then read "Nothing was changed that you need to undo", which
-  is false: the Finder location is gone.~~ The error now says so: "Beebeeb was removed from
+  is false: the Finder location is gone.~~ ~~The error now says so: "Beebeeb was removed from
   Finder" / "Repair couldn’t finish, so Beebeeb is no longer in Finder. Choose Add to Finder to add
   it back." (exact copy and the pre-removal case: `docs/specs/2026-10-02-macos-settings-dialogs.md`,
-  Dialog 2). A Repair that fails before the removal, or whose removal itself failed, keeps the old
+  Dialog 2).~~ A Repair that fails before the removal, or whose removal itself failed, keeps the old
   note.
 
 — lead ruling, 2026-10-10 (1882 r4)
+
+On a Mac (spec A, `docs/specs/2026-10-06-macos-finder-setup-reconciler.md`) Repair goes through the
+Finder reconciler, saves nothing after its removal, and the reconciler puts Beebeeb back in Finder
+by itself. There is no Add to Finder on a Mac (spec A, R5). So this note never appears on a Mac, and
+no Mac surface names a button for it: a Repair that fails shows the old note. Windows and Linux keep
+the r4 note, which names the page's own button: "Beebeeb was removed from Finder" / "Repair
+couldn’t finish, so Beebeeb is no longer in Finder. Choose Install in Finder to add it back."
+
+— lead ruling, 2026-10-10 (rebase onto spec A, Q1)
 
 — lane impl-1882-r2, 2026-10-10, per lead ruling [1882-r2] (device K-F2, review I3, M2, M3)
 
