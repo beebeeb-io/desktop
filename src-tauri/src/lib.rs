@@ -2017,12 +2017,12 @@ async fn clear_session(app: tauri::AppHandle, state: State<'_, AppState>) -> Res
 /// alert in its own UserNotificationCenter process, so it is never a Beebeeb window. The two
 /// debug lines let a device check prove it was raised and closed, without the path.
 fn show_preserved_files_alert(app: &tauri::AppHandle, preserved_location: Option<&str>) {
-    let Some(location) = preserved_location else {
+    let Some((title, message)) = finder_removal::kept_folder_alert(preserved_location) else {
         return;
     };
     app.dialog()
-        .message(finder_removal::preserved_files_message(location))
-        .title(finder_removal::PRESERVED_FILES_TITLE)
+        .message(message)
+        .title(title)
         .kind(tauri_plugin_dialog::MessageDialogKind::Info)
         .show(|_| {
             tracing::debug!("kept-folder alert closed");
@@ -2895,8 +2895,9 @@ enum FileProviderInstallOutcome {
 const FINDER_USER_DISABLED_MESSAGE: &str = "Beebeeb is turned off in System Settings. Open Login \
     Items & Extensions, turn on Beebeeb under File Providers, then try again.";
 
+/// Review M1 (round 2): a failure carries the folder kept by the install's own cleanup, if any.
 #[cfg(target_os = "macos")]
-fn install_file_provider_domain() -> Result<FileProviderInstallOutcome, String> {
+fn install_file_provider_domain() -> Result<FileProviderInstallOutcome, finder_removal::InstallFailure> {
     match macos_file_provider::install()? {
         macos_file_provider::InstallOutcome::Installed => Ok(FileProviderInstallOutcome::Installed),
         macos_file_provider::InstallOutcome::UserDisabled => Ok(FileProviderInstallOutcome::UserDisabled),
@@ -2904,20 +2905,20 @@ fn install_file_provider_domain() -> Result<FileProviderInstallOutcome, String> 
 }
 
 #[cfg(not(target_os = "macos"))]
-fn install_file_provider_domain() -> Result<FileProviderInstallOutcome, String> {
-    Err("File Provider is only available on macOS.".to_string())
+fn install_file_provider_domain() -> Result<FileProviderInstallOutcome, finder_removal::InstallFailure> {
+    Err("File Provider is only available on macOS.".to_string().into())
 }
 
 /// Task 1882: keeps the files that never reached the server; the result names the folder macOS
 /// kept them in, if any.
 #[cfg(target_os = "macos")]
-fn remove_file_provider_domain() -> Result<finder_removal::DomainRemoval, String> {
+fn remove_file_provider_domain() -> Result<finder_removal::DomainRemoval, finder_removal::RemovalFailure> {
     macos_file_provider::remove()
 }
 
 #[cfg(not(target_os = "macos"))]
-fn remove_file_provider_domain() -> Result<finder_removal::DomainRemoval, String> {
-    Err("File Provider is only available on macOS.".to_string())
+fn remove_file_provider_domain() -> Result<finder_removal::DomainRemoval, finder_removal::RemovalFailure> {
+    Err("File Provider is only available on macOS.".to_string().into())
 }
 
 /// Task 1670 round 2: wipe the macOS hydrate-cache staging directory at every
@@ -3161,10 +3162,17 @@ async fn install_finder_location(
     .await?;
 
     match install_file_provider_domain() {
-        Err(error) => {
+        Err(failure) => {
             stop_pending_finder_install_engine(&state, started_pending_engine).await;
+            // Review M1 (round 2): the install's own cleanup removed a domain this attempt
+            // added; a folder it kept is saved for the row (into `cfg`, saved just below) and
+            // shown, like the rollback's.
+            if let Some(location) = failure.kept_folder.as_deref() {
+                finder_removal::record_kept_folder(&mut cfg, location);
+                show_preserved_files_alert(&app, Some(location));
+            }
             // D1 (task 1683 slice 5): saved OR returned as an error, not both.
-            return finder_install_failed(&mut cfg, error);
+            return finder_install_failed(&mut cfg, failure.message);
         }
         Ok(FileProviderInstallOutcome::UserDisabled) => {
             // Issue 4: do not wait, do not treat this as a "Continue without install"
@@ -3193,8 +3201,9 @@ async fn install_finder_location(
         // the folder. A failed rollback stays silent, as before.
         // Review I2: recorded into `cfg`, which `finder_install_failed` saves below, so that
         // save cannot overwrite the record with a stale copy.
-        if let Ok(removal) = remove_file_provider_domain()
-            && let Some(location) = removal.kept_location("add-to-finder rollback")
+        // Review M2: a folder kept with a failed removal is surfaced too.
+        let removal = remove_file_provider_domain();
+        if let Some(location) = removal.map_or_else(|failure| failure.kept_location("add-to-finder rollback"), |removal| removal.kept_location("add-to-finder rollback"))
         {
             finder_removal::record_kept_folder(&mut cfg, &location);
             show_preserved_files_alert(&app, Some(&location));
@@ -13022,6 +13031,10 @@ mod finder_removal_wiring_tests {
         let full = source();
         let source = full[..full.find("\nmod finder_removal_wiring_tests {").expect("this module")].to_string();
         let alert = item(&source, "fn show_preserved_files_alert(");
+        assert!(
+            alert.contains("let Some((title, message)) = finder_removal::kept_folder_alert(preserved_location) else {"),
+            "the alert's one decision is the tested `kept_folder_alert`"
+        );
         let show = alert.find(".show(").expect("the alert is shown");
         let closed = alert
             .find("tracing::debug!(\"kept-folder alert closed\")")
@@ -13088,6 +13101,46 @@ mod finder_removal_wiring_tests {
         }
     }
 
+    /// Reviews M1 and M2 (round 2): the cleanup inside Add to Finder surfaces its kept folder like
+    /// the rollback does, and a removal that failed but kept files still surfaces them, on the
+    /// rollback and in the sweep.
+    #[test]
+    fn test_1882_r2_the_install_cleanup_and_failed_removals_surface_their_folder() {
+        let full = source();
+        let source = full[..full.find("\nmod finder_removal_wiring_tests {").expect("this module")].to_string();
+        let code_only = |text: &str| {
+            text.lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let install = code_only(&item(&source, "async fn install_finder_location("));
+        let failed = &install[install.find("match install_file_provider_domain() {").expect("the install")..];
+        let failed = &failed[..failed.find("Ok(FileProviderInstallOutcome::UserDisabled)").expect("next arm")];
+        let recorded = failed
+            .find("finder_removal::record_kept_folder(&mut cfg, location);")
+            .expect("M1: the install cleanup's folder is saved for the row");
+        let shown = failed.find("show_preserved_files_alert(&app, Some(location));").expect("M1: and shown");
+        let saved = failed.find("return finder_install_failed(&mut cfg, failure.message);").expect("then saved");
+        assert!(recorded < saved && shown < saved);
+
+        // M1: install() hands the cleanup's removal to the shared decision.
+        let provider = include_str!("macos_file_provider.rs").replace("\r\n", "\n");
+        let install_fn = &provider[provider.find("pub fn install() -> Result<InstallOutcome, crate::finder_removal::InstallFailure> {").expect("install()")..];
+        let install_fn = &install_fn[..install_fn.find("\n}\n").expect("install() ends")];
+        assert!(install_fn.contains("return Err(crate::finder_removal::install_cleanup_failure(setup_error, remove()));"));
+
+        // M2: the sweep keeps a folder that came back with an error ...
+        let sweep = &provider[provider.find("pub fn cleanup_stale_domains(").expect("the sweep")..];
+        let sweep = &sweep[..sweep.find("\n}\n").expect("the sweep ends")];
+        assert!(sweep.contains("if let Some(location) = failure.kept_location(\"stale-domain sweep\") {"));
+        // ... and the rollback surfaces a folder from a failed removal too.
+        assert!(install.contains("let removal = remove_file_provider_domain();"));
+        assert!(install.contains(
+            "removal.map_or_else(|failure| failure.kept_location(\"add-to-finder rollback\"), |removal| removal.kept_location(\"add-to-finder rollback\"))"
+        ));
+    }
+
     #[test]
     fn test_1882_every_removal_path_surfaces_the_kept_folder() {
         let full = source();
@@ -13129,7 +13182,7 @@ mod finder_removal_wiring_tests {
 
         // The Add-to-Finder rollback and the app-start sweep raise the same alert.
         let install = code_only(&item(&source, "async fn install_finder_location("));
-        assert!(install.contains("&& let Some(location) = removal.kept_location(\"add-to-finder rollback\")"));
+        assert!(install.contains("removal.kept_location(\"add-to-finder rollback\")"));
         assert!(install.contains("show_preserved_files_alert(&app, Some(&location));"));
         assert!(code_only(&source).contains("surface_kept_folder(&alert_app, Some(location));"));
 

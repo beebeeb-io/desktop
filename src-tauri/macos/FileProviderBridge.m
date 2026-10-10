@@ -155,7 +155,8 @@ static int BeebeebKeptFolderState(NSURL *location) {
 // `src-tauri/src/finder_removal.rs` pins every removal in the repo to this mode.
 //
 // Returns: 0 = removed (`kept_state` says what the reported folder holds; `location_buffer` holds
-// its path whenever it has one); -1 = error (`error_buffer` set).
+// its path whenever it has one); -1 = error (`error_buffer` set; `kept_state` and
+// `location_buffer` are still filled, review M2).
 static int BeebeebRemoveDomainKeepingUnsynced(NSFileProviderDomain *domain,
                                               char *location_buffer,
                                               unsigned long location_buffer_len,
@@ -178,10 +179,8 @@ static int BeebeebRemoveDomainKeepingUnsynced(NSFileProviderDomain *domain,
     }];
     dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
 
-    if (found_error != nil) {
-        BeebeebCopyError(found_error, error_buffer, error_buffer_len);
-        return -1;
-    }
+    // Review M2: the folder is checked first, so a reply that carries both an error and a folder
+    // still reaches the person with that folder.
     int state = BeebeebKeptFolderState(found_location);
     if (kept_state != NULL) {
         *kept_state = state;
@@ -189,6 +188,10 @@ static int BeebeebRemoveDomainKeepingUnsynced(NSFileProviderDomain *domain,
     NSString *path = found_location.path;
     if (path.length > 0) {
         BeebeebCopyMessage(path, location_buffer, location_buffer_len);
+    }
+    if (found_error != nil) {
+        BeebeebCopyError(found_error, error_buffer, error_buffer_len);
+        return -1;
     }
     return 0;
 }

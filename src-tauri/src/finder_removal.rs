@@ -130,8 +130,39 @@ impl DomainRemoval {
     }
 }
 
+/// A removal that failed. Review M2 (round 2): macOS may report a kept folder together with an
+/// error; the folder is kept with the error, so it still reaches the person.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemovalFailure {
+    pub message: String,
+    pub kept: KeptFolder,
+}
+
+impl RemovalFailure {
+    /// Like [`DomainRemoval::kept_location`]: the folder to show, if any; logs never carry it.
+    pub fn kept_location(self, context: &'static str) -> Option<String> {
+        DomainRemoval { kept: self.kept }.kept_location(context)
+    }
+}
+
+impl From<String> for RemovalFailure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            kept: KeptFolder::default(),
+        }
+    }
+}
+
+impl std::fmt::Display for RemovalFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 /// Decodes `beebeeb_fp_remove` / `beebeeb_fp_remove_domain_by_id`: `0` = removed (`kept_state`
-/// says what the reported folder holds), `-1` = error (`error` set).
+/// says what the reported folder holds), `-1` = error (`error` set; `kept_state` still says what
+/// the reported folder holds, review M2).
 // Called from the macOS-only bridge and sign-out paths; tested on every OS.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn removal_from_bridge(
@@ -139,15 +170,55 @@ pub fn removal_from_bridge(
     kept_state: i32,
     location: Option<String>,
     error: Option<String>,
-) -> Result<DomainRemoval, String> {
+) -> Result<DomainRemoval, RemovalFailure> {
     match code {
         0 => Ok(DomainRemoval {
             kept: kept_folder_from_bridge(kept_state, location),
         }),
-        code if code < 0 => Err(error
-            .filter(|message| !message.trim().is_empty())
-            .unwrap_or_else(|| "File Provider domain removal failed".to_string())),
-        other => Err(format!("File Provider domain removal returned unexpected code {other}")),
+        code if code < 0 => Err(RemovalFailure {
+            message: error
+                .filter(|message| !message.trim().is_empty())
+                .unwrap_or_else(|| "File Provider domain removal failed".to_string()),
+            kept: kept_folder_from_bridge(kept_state, location),
+        }),
+        other => Err(RemovalFailure {
+            message: format!("File Provider domain removal returned unexpected code {other}"),
+            kept: kept_folder_from_bridge(kept_state, location),
+        }),
+    }
+}
+
+/// Add to Finder's own cleanup failed the install (review M1): the error as before, and the folder
+/// the cleanup's removal kept, if any.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallFailure {
+    pub message: String,
+    pub kept_folder: Option<String>,
+}
+
+impl From<String> for InstallFailure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            kept_folder: None,
+        }
+    }
+}
+
+/// Review M1 (round 2): the cleanup inside Add to Finder removes the domain this attempt added
+/// when it does not come up in time. The install still fails with the setup error (and the
+/// cleanup's error, if that failed too, as before), and the folder that removal kept rides along.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn install_cleanup_failure(setup_error: String, cleanup: Result<DomainRemoval, RemovalFailure>) -> InstallFailure {
+    match cleanup {
+        Ok(removal) => InstallFailure {
+            message: setup_error,
+            kept_folder: removal.kept_location("install cleanup"),
+        },
+        Err(failure) => InstallFailure {
+            message: format!("{setup_error}; cleanup failed: {}", failure.message),
+            kept_folder: failure.kept_location("install cleanup"),
+        },
     }
 }
 
@@ -172,6 +243,12 @@ pub fn dismiss_kept_folder(cfg: &mut crate::config::DesktopConfig, shown: &str) 
     true
 }
 
+/// The alert after a removal that kept files: `(title, body)`, or nothing at all when nothing was
+/// kept (spec §5). The one decision `show_preserved_files_alert` makes, so it can be tested.
+pub fn kept_folder_alert(preserved_location: Option<&str>) -> Option<(&'static str, String)> {
+    preserved_location.map(|location| (PRESERVED_FILES_TITLE, preserved_files_message(location)))
+}
+
 /// The alert's body: the sentence, a blank line, then the folder (spec §5).
 pub fn preserved_files_message(location: &str) -> String {
     format!("{PRESERVED_FILES_SENTENCE}\n\n{location}")
@@ -181,23 +258,28 @@ pub fn preserved_files_message(location: &str) -> String {
 /// kept folder is returned for the alert.
 // Called from the macOS-only bridge and sign-out paths; tested on every OS.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub fn sign_out_kept_location(removal: Result<DomainRemoval, String>) -> Option<String> {
+pub fn sign_out_kept_location(removal: Result<DomainRemoval, RemovalFailure>) -> Option<String> {
     match removal {
         Ok(removal) => removal.kept_location("sign-out"),
-        Err(error) => {
-            tracing::warn!(error = %error, "Finder File Provider domain removal on logout failed (best-effort)");
-            None
+        Err(failure) => {
+            tracing::warn!(error = %failure, "Finder File Provider domain removal on logout failed (best-effort)");
+            // Review M2: a folder kept with the error still reaches the person.
+            failure.kept_location("sign-out")
         }
     }
 }
 
 /// Repair's removal (spec §3): `(removed, kept folder)`. A failure becomes one warning, as before.
-pub fn repair_removal(removal: Result<DomainRemoval, String>, warnings: &mut Vec<String>) -> (bool, Option<String>) {
+pub fn repair_removal(
+    removal: Result<DomainRemoval, RemovalFailure>,
+    warnings: &mut Vec<String>,
+) -> (bool, Option<String>) {
     match removal {
         Ok(removal) => (true, removal.kept_location("repair")),
-        Err(error) => {
-            warnings.push(format!("Could not remove Finder File Provider domain: {error}"));
-            (false, None)
+        Err(failure) => {
+            warnings.push(format!("Could not remove Finder File Provider domain: {}", failure.message));
+            // Review M2: a folder kept with the error still reaches the person.
+            (false, failure.kept_location("repair"))
         }
     }
 }
@@ -370,7 +452,7 @@ mod tests {
                 Some("/leftover".to_string()),
                 Some("no provider (NSFileProviderErrorDomain -2001)".to_string())
             ),
-            Err("no provider (NSFileProviderErrorDomain -2001)".to_string())
+            Err(RemovalFailure::from("no provider (NSFileProviderErrorDomain -2001)".to_string()))
         );
         assert!(removal_from_bridge(-1, KEPT_NONE_REPORTED, None, None).is_err());
         assert!(
@@ -464,6 +546,75 @@ mod tests {
         assert!(check.contains("startAccessingSecurityScopedResource()"), "it looks through the URL's own scope");
     }
 
+    // ── round 2: an error that carries a folder (M2), the install cleanup (M1) ─
+
+    #[test]
+    fn test_1882_r2_a_reply_with_an_error_and_a_folder_keeps_the_folder() {
+        let folder = "/Users/someone/Library/CloudStorage/Beebeeb-Beebeeb (10-10-2026 10:50)";
+        let failure = removal_from_bridge(-1, KEPT_HAS_ENTRIES, Some(folder.to_string()), Some("busy (NSFileProviderErrorDomain -1001)".to_string()))
+            .expect_err("the removal reported an error");
+        assert_eq!(failure.message, "busy (NSFileProviderErrorDomain -1001)");
+        assert_eq!(failure.kept, kept(folder, true), "the folder rides with the error");
+
+        // Sign-out: the failure is still only logged, but the folder reaches the alert.
+        assert_eq!(sign_out_kept_location(Err(failure.clone())), Some(folder.to_string()));
+        // Repair: one warning, as before, and the folder for the row.
+        let mut warnings = Vec::new();
+        assert_eq!(repair_removal(Err(failure), &mut warnings), (false, Some(folder.to_string())));
+        assert_eq!(warnings, vec!["Could not remove Finder File Provider domain: busy (NSFileProviderErrorDomain -1001)".to_string()]);
+
+        // An error with a missing or empty folder is still "nothing kept".
+        let failure = removal_from_bridge(-1, KEPT_MISSING, Some(folder.to_string()), Some("busy".to_string())).unwrap_err();
+        assert_eq!(failure.kept, KeptFolder::Nothing(NothingKept::Missing));
+    }
+
+    /// Review M2: the bridge checks the reported folder BEFORE it looks at the error, so a reply
+    /// that carries both reaches Rust with the folder's state.
+    #[test]
+    fn test_1882_r2_the_bridge_checks_the_folder_before_the_error() {
+        let bridge = without_comments(include_str!("../macos/FileProviderBridge.m"));
+        let start = bridge.find("static int BeebeebRemoveDomainKeepingUnsynced(").expect("the shared removal");
+        let body = &bridge[start..start + bridge[start..].find("\n}\n").expect("function ends")];
+        let checked = body.find("BeebeebKeptFolderState(found_location)").expect("the folder is checked");
+        let copied = body.find("BeebeebCopyMessage(path, location_buffer").expect("its path is copied");
+        let error = body.find("if (found_error != nil)").expect("the error is handled");
+        assert!(checked < error && copied < error, "folder state and path come before the error return:\n{body}");
+    }
+
+    #[test]
+    fn test_1882_r2_the_install_cleanup_reports_the_folder_it_kept() {
+        let folder = "/Users/someone/Library/CloudStorage/Beebeeb-Beebeeb (10-10-2026 11:00)";
+        let setup = "Timed out waiting for the Beebeeb File Provider domain to become available".to_string();
+
+        let kept_by_cleanup = install_cleanup_failure(setup.clone(), Ok(removal(kept(folder, true))));
+        assert_eq!(
+            kept_by_cleanup,
+            InstallFailure {
+                message: setup.clone(),
+                kept_folder: Some(folder.to_string())
+            }
+        );
+
+        let nothing = install_cleanup_failure(setup.clone(), Ok(removal(KeptFolder::Nothing(NothingKept::Missing))));
+        assert_eq!(nothing, InstallFailure::from(setup.clone()));
+
+        let failed_cleanup = install_cleanup_failure(
+            setup.clone(),
+            Err(RemovalFailure {
+                message: "busy".to_string(),
+                kept: kept(folder, false),
+            }),
+        );
+        assert_eq!(
+            failed_cleanup,
+            InstallFailure {
+                message: format!("{setup}; cleanup failed: busy"),
+                kept_folder: Some(folder.to_string())
+            },
+            "the error text is as before, and a folder kept with the error still rides along"
+        );
+    }
+
     // ── round 2: the saved kept folder (review I2, lead ruling) ──────────────
 
     #[test]
@@ -542,6 +693,17 @@ mod tests {
         );
     }
 
+    /// Review M4: the nothing-kept side of the alert, as a decision a mutation can turn red.
+    #[test]
+    fn test_1882_r2_nothing_kept_raises_no_alert() {
+        assert_eq!(kept_folder_alert(None), None);
+        let folder = "/Users/someone/Library/CloudStorage/Beebeeb-Beebeeb (10-10-2026 10:50)";
+        assert_eq!(
+            kept_folder_alert(Some(folder)),
+            Some((PRESERVED_FILES_TITLE, format!("{PRESERVED_FILES_SENTENCE}\n\n{folder}")))
+        );
+    }
+
     #[test]
     fn test_1882_the_sentence_names_no_provider_and_holds_no_path() {
         for text in [PRESERVED_FILES_SENTENCE, PRESERVED_FILES_TITLE] {
@@ -577,7 +739,7 @@ mod tests {
             Some(folder)
         );
         assert_eq!(sign_out_kept_location(Ok(DomainRemoval::default())), None);
-        assert_eq!(sign_out_kept_location(Err("not registered".to_string())), None);
+        assert_eq!(sign_out_kept_location(Err("not registered".to_string().into())), None);
     }
 
     #[test]
@@ -599,7 +761,7 @@ mod tests {
         assert!(warnings.is_empty());
 
         let mut warnings = Vec::new();
-        assert_eq!(repair_removal(Err("busy".to_string()), &mut warnings), (false, None));
+        assert_eq!(repair_removal(Err("busy".to_string().into()), &mut warnings), (false, None));
         assert_eq!(
             warnings,
             vec!["Could not remove Finder File Provider domain: busy".to_string()]

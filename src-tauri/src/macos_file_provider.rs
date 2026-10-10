@@ -198,7 +198,7 @@ pub fn domain_user_enabled() -> Result<DomainUserEnabledState, String> {
 /// call, the just-created domain is removed again (unchanged cleanup behavior from
 /// the pre-1524-issue-4 implementation) so a failed install doesn't leave an orphaned
 /// domain registered.
-pub fn install() -> Result<InstallOutcome, String> {
+pub fn install() -> Result<InstallOutcome, crate::finder_removal::InstallFailure> {
     let existed_before_add = domain_exists()?;
 
     if existed_before_add
@@ -227,12 +227,11 @@ pub fn install() -> Result<InstallOutcome, String> {
     if wait_code < 0 {
         let setup_error =
             buffer_to_string(&error_buffer).unwrap_or_else(|| "File Provider operation failed".to_string());
-        if !existed_before_add
-            && let Err(cleanup_error) = remove()
-        {
-            return Err(format!("{setup_error}; cleanup failed: {cleanup_error}"));
+        if !existed_before_add {
+            // Review M1: this cleanup is a removal too; its kept folder rides the error out.
+            return Err(crate::finder_removal::install_cleanup_failure(setup_error, remove()));
         }
-        return Err(setup_error);
+        return Err(setup_error.into());
     }
 
     Ok(InstallOutcome::Installed)
@@ -241,7 +240,7 @@ pub fn install() -> Result<InstallOutcome, String> {
 /// Removes our Finder location, keeping the files that never reached the server (task 1882,
 /// `NSFileProviderDomainRemovalModePreserveDirtyUserData`). The result says whether macOS kept
 /// anything, checked on disk (round 2, spec §4), and names the folder if so.
-pub fn remove() -> Result<crate::finder_removal::DomainRemoval, String> {
+pub fn remove() -> Result<crate::finder_removal::DomainRemoval, crate::finder_removal::RemovalFailure> {
     let mut location_buffer = [0 as c_char; PRESERVED_LOCATION_BUFFER_LEN];
     let mut kept_state: i32 = crate::finder_removal::KEPT_NONE_REPORTED;
     let mut error_buffer = [0 as c_char; 1024];
@@ -370,7 +369,9 @@ mod cleanup_ffi {
     }
 
     /// Task 1882: keeps the domain's un-synced files, like every removal.
-    pub fn remove_domain(identifier: &str) -> Result<crate::finder_removal::DomainRemoval, String> {
+    pub fn remove_domain(
+        identifier: &str,
+    ) -> Result<crate::finder_removal::DomainRemoval, crate::finder_removal::RemovalFailure> {
         let mut location_buffer = [0 as c_char; super::PRESERVED_LOCATION_BUFFER_LEN];
         let mut kept_state: i32 = crate::finder_removal::KEPT_NONE_REPORTED;
         let mut error_buffer = [0i8; 1024];
@@ -427,8 +428,12 @@ pub fn cleanup_stale_domains() -> Result<StaleDomainCleanup, String> {
                 }
                 cleanup.removals.push((identifier.to_string(), Ok(())));
             }
-            Err(error) => {
-                tracing::warn!(identifier = %identifier, error = %error, "stale-domain removal failed; the next app start retries");
+            Err(failure) => {
+                tracing::warn!(identifier = %identifier, error = %failure, "stale-domain removal failed; the next app start retries");
+                // Review M2: a folder kept with the error still reaches the person.
+                if let Some(location) = failure.kept_location("stale-domain sweep") {
+                    cleanup.preserved_locations.push(location);
+                }
                 cleanup.skipped.push(identifier.to_string());
             }
         }
