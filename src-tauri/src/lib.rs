@@ -3278,9 +3278,11 @@ async fn clear_session(
 }
 
 /// Task 1882 (spec `docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md` §5): the app's
-/// own alert after a removal that kept files — the sentence, a blank line, then the folder. It
-/// is the only place the folder's path is shown for a sign-out, the Add-to-Finder rollback and
-/// the app-start sweep; logs never carry it. Nothing kept → no alert.
+/// own alert after a removal that kept files — the sentence, a blank line, then the folder. A sign-out, the
+/// app-start sweep and a reconciler removal nobody waits for (an owed removal, the account binding's Repair, or one
+/// that finished after the reconciler's time limit) raise it through `surface_kept_folder`, which first saves the
+/// folder for the Settings › Sync row. `install_finder_location`'s rollback calls it too, but only Windows and Linux
+/// have that path, and nothing is kept there. Logs never carry the folder. Nothing kept → no alert.
 ///
 /// Device K-F1 (round 2): with no parent window, `tauri-plugin-dialog` 2.7 hands this to `rfd`
 /// 0.16, which calls `CFUserNotificationDisplayAlert` on a background thread. macOS draws that
