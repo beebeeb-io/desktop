@@ -509,8 +509,11 @@ describe('Sync tab', () => {
         },
         dismiss_kept_unsynced_folder: (a: any) => {
           if (opts.dismissFails) throw new Error('disk full')
-          if (st.kept === a?.path) st.kept = null
-          return undefined
+          // Like Rust (1882 r5): clears the saved folder only if it is still the one the row
+          // showed, and reports whether it did and which folder is saved now.
+          const cleared = st.kept === a?.path
+          if (cleared) st.kept = null
+          return { cleared, current: st.kept }
         },
         list_remote_tree: () => opts.tree ?? [folder('a', 'Photos', true), folder('b', 'Work', false)],
         set_recursive_pin: opts.pin ?? (() => undefined),
@@ -700,6 +703,38 @@ describe('Sync tab', () => {
     expect(st.kept).toBeNull()
     expect(keptNotes(m)).toHaveLength(0)
     expect(buttons(m)).not.toContain('Dismiss')
+  })
+
+  // 1882 r5 (review thread on `dismissKept`): the command reports whether it cleared the folder.
+  // A row that showed an older folder while a newer one was saved must not vanish as if the newer
+  // folder had been dismissed unseen.
+  const NEWER = '/Users/sam/Library/CloudStorage/Beebeeb (kept 2)'
+
+  test('a Dismiss on a row that showed an older folder keeps the row and shows the newer folder', async () => {
+    const { m, st } = await openSync({ kept: KEPT })
+    st.kept = NEWER // another removal kept files after this row was drawn
+    await press(m, 'Dismiss')
+    expect(m.calls.filter((c) => c.name === 'dismiss_kept_unsynced_folder').map((c) => c.args)).toEqual([{ path: KEPT }])
+    expect(st.kept).toBe(NEWER) // Rust cleared nothing
+    expect(keptNotes(m)).toHaveLength(1)
+    expect(monoLines(m).map((el) => textOf(el.props.children).trim())).toEqual([NEWER])
+    expect(buttons(m)).toContain('Dismiss')
+    expect(m.toasts).toEqual([])
+    expect(visibleErrorSurfaces(m)).toEqual([])
+    // A second Dismiss now sends the newer folder, and that one clears it.
+    await press(m, 'Dismiss')
+    expect(m.calls.filter((c) => c.name === 'dismiss_kept_unsynced_folder').map((c) => c.args)).toEqual([{ path: KEPT }, { path: NEWER }])
+    expect(st.kept).toBeNull()
+    expect(keptNotes(m)).toHaveLength(0)
+  })
+
+  test('a Dismiss on a folder that was already dismissed elsewhere removes the row without a toast', async () => {
+    const { m, st } = await openSync({ kept: KEPT })
+    st.kept = null // dismissed from another window
+    await press(m, 'Dismiss')
+    expect(keptNotes(m)).toHaveLength(0)
+    expect(buttons(m)).not.toContain('Dismiss')
+    expect(m.toasts).toEqual([])
   })
 
   test('a Dismiss that fails keeps the row and says so once, in a toast', async () => {

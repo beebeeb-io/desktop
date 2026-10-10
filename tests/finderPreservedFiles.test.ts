@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   KEPT_FOLDER_ROW_SENTENCE,
+  keptFolderAfterDismiss,
   PRESERVED_FILES_SENTENCE,
   preservedFilesLine,
   preservedFilesNote,
@@ -28,6 +29,26 @@ describe('kept-files note (1882)', () => {
     expect(preservedFilesNote({ preserved_location: null })).toBeNull()
     expect(preservedFilesNote({})).toBeNull()
     expect(preservedFilesNote({ preserved_location: '   ' })).toBeNull()
+  })
+
+  test('1882 r5: after a Dismiss the row is gone only if Rust cleared it, else it shows the folder saved now', () => {
+    const NEWER = '/Users/sam/Library/CloudStorage/Beebeeb (kept 2)'
+    expect(keptFolderAfterDismiss({ cleared: true, current: null })).toBeNull()
+    // A stale dismiss: nothing cleared, the newer folder is what the row shows.
+    expect(keptFolderAfterDismiss({ cleared: false, current: NEWER })).toBe(NEWER)
+    // Nothing is saved any more (dismissed elsewhere): no row.
+    expect(keptFolderAfterDismiss({ cleared: false, current: null })).toBeNull()
+    expect(keptFolderAfterDismiss({ cleared: false, current: '  ' })).toBeNull()
+    // `cleared` wins: a row Rust cleared never reappears from a stray `current`.
+    expect(keptFolderAfterDismiss({ cleared: true, current: NEWER })).toBeNull()
+  })
+
+  test('1882 r5: the dismiss result has the two keys Rust sends, in its struct', () => {
+    const rust = readFileSync(join(import.meta.dir, '..', 'src-tauri', 'src', 'finder_removal.rs'), 'utf8').replace(/\r\n/g, '\n')
+    const match = rust.match(/pub struct DismissOutcome \{\s*pub cleared: bool,\s*pub current: Option<String>,\s*\}/)
+    expect(match).not.toBeNull()
+    const lib = readFileSync(join(import.meta.dir, '..', 'src-tauri', 'src', 'lib.rs'), 'utf8').replace(/\r\n/g, '\n')
+    expect(lib).toContain('fn dismiss_kept_unsynced_folder(path: String) -> Result<finder_removal::DismissOutcome, String>')
   })
 
   test('the compact window gets one line: the sentence, then the folder', () => {

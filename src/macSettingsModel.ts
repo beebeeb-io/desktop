@@ -214,6 +214,26 @@ export function preservedFilesLine(result: { preserved_location?: string | null 
   return note ? `${note.sentence} ${note.path}` : null
 }
 
+/**
+ * What the `dismiss_kept_unsynced_folder` command reports (1882 r5): `cleared` is whether the saved
+ * folder was the one the row showed and is now gone; `current` is the folder saved after the
+ * command, null when none is. The same two keys as `DismissOutcome` in `finder_removal.rs`.
+ */
+export interface DismissKeptFolderResult {
+  cleared: boolean
+  current: string | null
+}
+
+/**
+ * The folder the row shows after a Dismiss: none when Rust cleared it, otherwise the folder saved
+ * now. A row that showed an older folder when a newer one was kept is not cleared, so it shows the
+ * newer one instead of vanishing as if the person had dismissed it.
+ */
+export function keptFolderAfterDismiss(result: DismissKeptFolderResult): string | null {
+  if (result.cleared) return null
+  return preservedFilesNote({ preserved_location: result.current })?.path ?? null
+}
+
 // ── Sync > Keep on this Mac ─────────────────────────────────────────────────
 
 export interface FolderEntry {

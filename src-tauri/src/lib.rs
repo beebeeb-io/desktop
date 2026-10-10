@@ -2066,12 +2066,12 @@ fn kept_unsynced_folder() -> Result<Option<String>, String> {
 }
 
 /// Review I2: the row's "Dismiss". Clears the saved folder only if it is still `path`, the one
-/// the row showed.
+/// the row showed. Round 5: it says whether it cleared it and which folder is saved now, so a row
+/// that showed an older folder shows the newer one instead of vanishing. Under the config-write
+/// lock, like the save above.
 #[tauri::command]
-fn dismiss_kept_unsynced_folder(path: String) -> Result<(), String> {
-    // Round 5: under the config-write lock, like the save above.
-    finder_removal::dismiss_saved_kept_folder(&path)?;
-    Ok(())
+fn dismiss_kept_unsynced_folder(path: String) -> Result<finder_removal::DismissOutcome, String> {
+    finder_removal::dismiss_saved_kept_folder(&path)
 }
 
 /// Put a session restored from the Keychain into memory. Deliberately no `bump_vault_epoch()`
@@ -13151,6 +13151,10 @@ mod finder_removal_wiring_tests {
         assert!(!remember.contains("location ="), "the log line never carries the path");
         let dismiss = code_only(&item(&source, "fn dismiss_kept_unsynced_folder("));
         assert!(dismiss.contains("finder_removal::dismiss_saved_kept_folder(&path)"));
+        assert!(
+            dismiss.contains("Result<finder_removal::DismissOutcome, String>"),
+            "the command reports whether it cleared the row"
+        );
         assert!(
             !dismiss.contains("DesktopConfig::load()") && !dismiss.contains("cfg.save()"),
             "no unserialized load-modify-save:\n{dismiss}"

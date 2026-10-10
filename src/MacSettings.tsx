@@ -46,6 +46,7 @@ import {
   keepCountLabel,
   keepOnMac,
   KEPT_FOLDER_ROW_SENTENCE,
+  keptFolderAfterDismiss,
   NOTIFICATION_ROWS,
   planLine,
   preservedFilesNote,
@@ -61,6 +62,7 @@ import {
   storageLine,
   tabAfterKey,
   updateRow,
+  type DismissKeptFolderResult,
   type SettingsTab,
 } from './macSettingsModel'
 import { Btn, Note, Select, SettingRow, SettingsGroup, SettingsIcon, Switch, ToggleRow } from './macSettingsParts'
@@ -547,7 +549,7 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
   // A one-off action that gates nothing: a failure is a toast (house rule), and the row stays.
   const dismissKept = async () => {
     if (kept === null) return
-    const result = await command<void>('dismiss_kept_unsynced_folder', { path: kept })
+    const result = await command<DismissKeptFolderResult>('dismiss_kept_unsynced_folder', { path: kept })
     if (!result.ok) {
       showToast({
         variant: 'error',
@@ -556,7 +558,9 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
       })
       return
     }
-    setKept(null)
+    // 1882 r5: the row goes only if Rust cleared the folder it showed. If a newer folder was kept
+    // since the row was drawn, nothing was dismissed, and the row shows the newer one.
+    setKept(keptFolderAfterDismiss(result.value))
   }
 
   const addToFinder = async () => {

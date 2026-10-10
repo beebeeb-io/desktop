@@ -339,17 +339,34 @@ pub(crate) fn remember_kept_folder_at(path: &std::path::Path, location: &str) ->
     })
 }
 
+/// What the row's "Dismiss" did, as the frontend reads it (r5, review thread on the dismiss
+/// command): `cleared` says whether the saved folder was the one the row showed and is now gone;
+/// `current` is the folder saved after the command, which is `None` when nothing is saved. A
+/// dismiss that carries an older folder than the saved one clears nothing and reports the newer
+/// path, so the row can show it instead of vanishing. The field names are the command's JSON.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DismissOutcome {
+    pub cleared: bool,
+    pub current: Option<String>,
+}
+
 /// The row's "Dismiss" in `desktop.toml`, as one load-change-save under the config-write lock.
-/// Returns whether it cleared the folder (see [`dismiss_kept_folder`]).
-pub fn dismiss_saved_kept_folder(shown: &str) -> Result<bool, String> {
+/// See [`DismissOutcome`] and [`dismiss_kept_folder`].
+pub fn dismiss_saved_kept_folder(shown: &str) -> Result<DismissOutcome, String> {
     dismiss_saved_kept_folder_at(&crate::config::DesktopConfig::path()?, shown)
 }
 
 /// [`dismiss_saved_kept_folder`] on the config file at `path` (a seam for the tests).
-pub(crate) fn dismiss_saved_kept_folder_at(path: &std::path::Path, shown: &str) -> Result<bool, String> {
+pub(crate) fn dismiss_saved_kept_folder_at(path: &std::path::Path, shown: &str) -> Result<DismissOutcome, String> {
     crate::config::DesktopConfig::update_at(path, |cfg| {
         let cleared = dismiss_kept_folder(cfg, shown);
-        (cleared, cleared)
+        (
+            cleared,
+            DismissOutcome {
+                cleared,
+                current: cfg.kept_unsynced_folder.clone(),
+            },
+        )
     })
 }
 
@@ -1591,7 +1608,13 @@ NSFileProviderManager.removeAllDomains { error in }
             |cfg| cfg.last_signed_in_email = Some("someone@beebeeb.io".to_string()),
             || dismiss_saved_kept_folder_at(&path, folder).expect("the dismiss was saved"),
         );
-        assert!(cleared);
+        assert_eq!(
+            cleared,
+            DismissOutcome {
+                cleared: true,
+                current: None
+            }
+        );
         let on_disk = crate::config::DesktopConfig::load_from(&path).expect("the config reads back");
         assert_eq!(on_disk.kept_unsynced_folder, None, "the row is dismissed");
         assert_eq!(
@@ -1617,7 +1640,9 @@ NSFileProviderManager.removeAllDomains { error in }
             "and writes nothing"
         );
         assert!(
-            !dismiss_saved_kept_folder_at(&path, "/Users/someone/Other").expect("stale row"),
+            !dismiss_saved_kept_folder_at(&path, "/Users/someone/Other")
+                .expect("stale row")
+                .cleared,
             "a row showing another folder dismisses nothing"
         );
         assert_eq!(
@@ -1626,5 +1651,81 @@ NSFileProviderManager.removeAllDomains { error in }
             "and writes nothing"
         );
         assert!(!path.with_extension("toml.tmp").exists(), "no temp file is left behind");
+    }
+
+    // ── r5: Dismiss says whether it cleared the row, and what is saved now ────
+
+    #[test]
+    fn test_1882_r5_a_dismiss_with_a_stale_path_leaves_the_newer_folder_and_reports_it() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("desktop.toml");
+        let older = "/Users/someone/Library/CloudStorage/Beebeeb-Beebeeb (10-10-2026 10:50)";
+        let newer = "/Users/someone/Library/CloudStorage/Beebeeb-Beebeeb (10-10-2026 11:20)";
+        assert!(remember_kept_folder_at(&path, older).expect("saved"));
+        assert!(remember_kept_folder_at(&path, newer).expect("a newer folder replaces it"));
+        let written = std::fs::read(&path).expect("the file exists");
+
+        // The row still showed the older folder when the person pressed Dismiss.
+        let outcome = dismiss_saved_kept_folder_at(&path, older).expect("the command ran");
+        assert_eq!(
+            outcome,
+            DismissOutcome {
+                cleared: false,
+                current: Some(newer.to_string())
+            },
+            "it clears nothing, says so, and names the newer folder"
+        );
+        assert_eq!(
+            crate::config::DesktopConfig::load_from(&path)
+                .expect("reads back")
+                .kept_unsynced_folder
+                .as_deref(),
+            Some(newer),
+            "the newer folder is still saved"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("exists"),
+            written,
+            "and nothing was written"
+        );
+
+        // Dismissing the folder that is saved clears it and reports that.
+        assert_eq!(
+            dismiss_saved_kept_folder_at(&path, newer).expect("the command ran"),
+            DismissOutcome {
+                cleared: true,
+                current: None
+            }
+        );
+        // Nothing saved at all (dismissed elsewhere): not cleared by this call, and nothing to show.
+        assert_eq!(
+            dismiss_saved_kept_folder_at(&path, newer).expect("the command ran"),
+            DismissOutcome {
+                cleared: false,
+                current: None
+            }
+        );
+    }
+
+    /// The frontend reads exactly these two keys (`DismissKeptFolderResult` in
+    /// `src/macSettingsModel.ts`).
+    #[test]
+    fn test_1882_r5_the_dismiss_outcome_is_the_json_the_frontend_reads() {
+        assert_eq!(
+            serde_json::to_value(DismissOutcome {
+                cleared: false,
+                current: Some("/Users/someone/Kept".to_string())
+            })
+            .expect("serializes"),
+            serde_json::json!({ "cleared": false, "current": "/Users/someone/Kept" })
+        );
+        assert_eq!(
+            serde_json::to_value(DismissOutcome {
+                cleared: true,
+                current: None
+            })
+            .expect("serializes"),
+            serde_json::json!({ "cleared": true, "current": null })
+        );
     }
 }
