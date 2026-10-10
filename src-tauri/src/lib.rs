@@ -2343,6 +2343,27 @@ fn finder_state_path(cfg: &DesktopConfig, installed: bool) -> Option<String> {
     }
 }
 
+/// The end of Repair, once the Finder location is gone (re-review P1, as review I1 is for
+/// sign-out): saves the config, and if that save fails, shows the folder macOS kept BEFORE the
+/// error goes back. The removal cannot be undone and a retry finds no domain, so without this the
+/// folder would never be named: the error only says Repair failed, and Repair raises no alert of
+/// its own. A save that works shows nothing here: the result carries the folder to the Sync tab.
+/// `surface` is `surface_kept_folder` in the app; the tests pass a recorder.
+fn finish_repair_after_removal(
+    cfg: &mut DesktopConfig,
+    preserved_location: Option<&str>,
+    save: impl FnOnce(&mut DesktopConfig) -> Result<(), String>,
+    surface: impl FnOnce(Option<&str>),
+) -> Result<(), String> {
+    match save(cfg) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            surface(preserved_location);
+            Err(error)
+        }
+    }
+}
+
 fn persist_finder_install_result(
     cfg: &mut DesktopConfig,
     installed: bool,
@@ -3533,7 +3554,13 @@ async fn reset_macos_integration(
         }
     };
 
-    persist_finder_install_result(&mut cfg, false, None)?;
+    // Re-review P1: the removal above cannot be undone, so a failed save still shows the folder.
+    finish_repair_after_removal(
+        &mut cfg,
+        preserved_location.as_deref(),
+        |cfg| persist_finder_install_result(cfg, false, None),
+        |location| surface_kept_folder(&app, location),
+    )?;
 
     Ok(MacosIntegrationResetResult {
         removed_file_provider_domain,
@@ -13098,10 +13125,23 @@ mod finder_removal_wiring_tests {
         let recorded = repair
             .find("finder_removal::record_kept_folder(&mut cfg, location);")
             .expect("Repair records the folder into its config");
+        // Round 3 (re-review P1): the save is the step that can fail after the removal, so it goes
+        // through `finish_repair_after_removal`, which still shows the folder before the error.
+        let squashed: String = repair.chars().filter(|c| !c.is_whitespace()).collect();
         let saved = repair
-            .find("persist_finder_install_result(&mut cfg, false, None)?;")
-            .expect("and saves it");
+            .find("finish_repair_after_removal(")
+            .expect("and saves it, through the step that still shows the folder when the save fails");
         assert!(recorded < saved);
+        assert!(
+            squashed.contains(
+                "finish_repair_after_removal(&mutcfg,preserved_location.as_deref(),|cfg|persist_finder_install_result(cfg,false,None),|location|surface_kept_folder(&app,location),)?;"
+            ),
+            "Repair saves with the real save, and surfaces with the real alert:\n{repair}"
+        );
+        assert!(
+            !repair.contains("persist_finder_install_result(&mut cfg, false, None)?;"),
+            "no bare `?` save is left between the removal and the result"
+        );
         let install = code_only(&item(&source, "async fn install_finder_location("));
         let recorded = install
             .find("finder_removal::record_kept_folder(&mut cfg, &location);")
@@ -13300,5 +13340,95 @@ mod sign_out_kept_folder_tests {
             Ok(SignOutOutcome::NotSignedIn)
         );
         assert_eq!(sign_out_kept_folder(&noop), Some(FOLDER));
+    }
+}
+
+/// Re-review P1 (round 3): Repair removes the Finder location, then saves the config. A save that
+/// fails after the removal must still show the kept folder, as a failed sign-out does (review I1):
+/// the removal cannot be undone, and a retry finds no domain, so the folder would never be named.
+#[cfg(test)]
+mod repair_kept_folder_tests {
+    use super::{DesktopConfig, finder_removal, finish_repair_after_removal};
+
+    const FOLDER: &str = "/Users/someone/Library/CloudStorage/Beebeeb-Beebeeb (10-10-2026 10:50)";
+
+    /// What the production surface would raise: `surface_kept_folder` saves the record then shows
+    /// `kept_folder_alert`'s text. The text is the part that must still be produced.
+    type Alert = Option<(&'static str, String)>;
+
+    #[test]
+    fn test_1882_r3_a_repair_whose_save_fails_after_the_removal_still_names_the_kept_folder() {
+        let mut cfg = DesktopConfig::default();
+        let mut alert: Alert = None;
+        let mut raised = 0;
+        let result = finish_repair_after_removal(
+            &mut cfg,
+            Some(FOLDER),
+            |_| Err("No space left on device".to_string()),
+            |location| {
+                raised += 1;
+                alert = finder_removal::kept_folder_alert(location);
+            },
+        );
+        assert_eq!(
+            result,
+            Err("No space left on device".to_string()),
+            "the save error is still the error"
+        );
+        assert_eq!(raised, 1, "the folder is shown once");
+        assert_eq!(
+            alert,
+            Some((
+                finder_removal::PRESERVED_FILES_TITLE,
+                format!("{}\n\n{FOLDER}", finder_removal::PRESERVED_FILES_SENTENCE)
+            )),
+            "the alert text names the folder before the error returns"
+        );
+    }
+
+    #[test]
+    fn test_1882_r3_a_repair_whose_save_fails_with_nothing_kept_shows_nothing() {
+        let mut cfg = DesktopConfig::default();
+        let mut alert: Alert = None;
+        let result = finish_repair_after_removal(
+            &mut cfg,
+            None,
+            |_| Err("No space left on device".to_string()),
+            |location| alert = finder_removal::kept_folder_alert(location),
+        );
+        assert_eq!(result, Err("No space left on device".to_string()));
+        assert_eq!(alert, None, "nothing kept → no alert, even when the save fails");
+    }
+
+    #[test]
+    fn test_1882_r3_a_repair_that_saves_shows_no_extra_alert() {
+        // The Repair result carries the folder to the Sync tab's row; a second alert would repeat it.
+        let mut cfg = DesktopConfig::default();
+        let mut raised = 0;
+        let result = finish_repair_after_removal(&mut cfg, Some(FOLDER), |_| Ok(()), |_| raised += 1);
+        assert_eq!(result, Ok(()));
+        assert_eq!(raised, 0);
+    }
+
+    #[test]
+    fn test_1882_r3_the_save_is_given_the_config_the_repair_recorded_into() {
+        let mut cfg = DesktopConfig::default();
+        assert!(finder_removal::record_kept_folder(&mut cfg, FOLDER));
+        let mut saw = None;
+        let result = finish_repair_after_removal(
+            &mut cfg,
+            Some(FOLDER),
+            |cfg| {
+                saw = cfg.kept_unsynced_folder.clone();
+                Ok(())
+            },
+            |_| {},
+        );
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            saw.as_deref(),
+            Some(FOLDER),
+            "the record rides the same save as the install result"
+        );
     }
 }
