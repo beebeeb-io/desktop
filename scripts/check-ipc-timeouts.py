@@ -219,6 +219,13 @@ def self_test(src):
     assert src.count(staged_path) == 2 and src.count(stage) == 2 and src.count(discard) == 2, \
         "self-test: expected staging text not found"
     assert src.count("IPCWriteRequest.create(") == 1 and src.count("IPCWriteRequest.modify(") == 1
+    # The create and modify send lines the request_id mutations anchor on. Asserted like every
+    # anchor above, so a reshaped call site fails here, loudly, instead of leaving a mutation
+    # that changes nothing (or only half of what it means to change).
+    send = "        return try Self.decodeWriteResponse(sendRequest(\n            request,"
+    assert src.count(send) == 2, "self-test: expected write send text not found"
+    let_create = "        let request = IPCWriteRequest.create("
+    assert src.count(let_create) == 1, "self-test: expected create builder text not found"
 
     def first(s, old, new):
         return s.replace(old, new, 1)
@@ -239,14 +246,11 @@ def self_test(src):
         "Modify no longer passes the changed-fields mask": first(
             src, "changedFields: UInt64(truncatingIfNeeded: changedFields.rawValue)", "changedFields: 0"),
         "Create request_id replaced by a random UUID": first(
-            src, "        let request = IPCWriteRequest.create(",
-            '        var request = IPCWriteRequest.create('
-        ).replace(
-            "        return try decodeWriteResponse(sendRequest(\n            request,",
-            '        _ = UUID().uuidString\n        return try decodeWriteResponse(sendRequest(\n            request,', 1),
+            first(src, let_create, let_create.replace("let request", "var request")),
+            send, "        _ = UUID().uuidString\n" + send),
         "Create request_id set by hand": first(
-            src, "        return try decodeWriteResponse(sendRequest(\n            request,",
-            '        request["request_id"] = "x"\n        return try decodeWriteResponse(sendRequest(\n            request,'),
+            first(src, let_create, let_create.replace("let request", "var request")),
+            send, '        request["request_id"] = "x"\n' + send),
         "Create request hand-built instead of via IPCWriteRequest": first(
             src, "IPCWriteRequest.create(", '["QueueFinderCreate": payload] ?? IPCWriteRequest.create('),
         "Modify builder call removed": first(src, "IPCWriteRequest.modify(", "IPCWriteRequestModifyRemoved("),
