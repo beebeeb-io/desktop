@@ -4,6 +4,9 @@
 **Date:** 10 Oct 2026
 **Repo:** desktop. macOS only; Windows and Linux do not have this loss (§10).
 **Task:** 1887. It gates the release of task 1873: 1873 may merge, but it is not released until this ships.
+**Amended 2026-10-10 (amend 1):** the lead accepted the kept folder's location ([1887-location], §7.1) and answered the
+open question with a 1873 ruling ([staging-durable]): staged copies move out of `Library/Caches` before 1873 releases.
+§1, §2, §7.1, §7.2, §8, §12, §13.1 and §15 change. Old text is struck and kept, and the new text is signed beneath it.
 **Read at:**
 - `main:` = desktop `main` at `8f7e91e` (task 1882 merged);
 - `1873:` = the 1873 branch at `c4a24f9` (round 4, still being implemented; read only);
@@ -23,8 +26,12 @@ Paths are short: `lib.rs`, `state_db.rs`, `engine_bridge.rs`, `ipc_socket.rs`, `
 
 Once 1873 ships, a save in the Finder location is finished for macOS as soon as the app has queued it: the extension
 replies `WriteQueued` and macOS counts the item as synced (1882 §3, "A limit this fix does not change"). The bytes then
-live in one place only: the daemon's staged copy of the write, under the app's cache directory
-(`1873:engine_bridge.rs:5264-5281`, `…/beebeeb/finder-writes/<uuid>`).
+live in one place only: the daemon's staged copy of the write, ~~under the app's cache directory
+(`1873:engine_bridge.rs:5264-5281`, `…/beebeeb/finder-writes/<uuid>`).~~ in the app's container. At `1873:` that is the
+cache directory (`1873:engine_bridge.rs:5264-5281`, `dirs::cache_dir()/beebeeb/finder-writes/<uuid>`). Before 1873
+releases it is `dirs::data_dir()/beebeeb/finder-writes/<uuid>`, under `Library/Application Support` (ruling
+[staging-durable], §7.1).
+— lead ruling, 2026-10-10 ([staging-durable])
 
 A sign-out by choice then:
 
@@ -55,7 +62,7 @@ does not show a count") is right.
 | **Other waiting change** | An op of kind `create_folder`, `rename_file`, `move_file`, `trash_file`, `restore_file` or `restore_version` (`1873:state_db.rs` `OperationKind`). `hydrate_file` and `pin_tree` are downloads, not changes the person made, and are never counted |
 | **Waiting change** | A waiting file, or one other waiting change. The unit of the progress line |
 | **Live** | Not parked (`attempts < max_attempts`; a park sets `attempts = max_attempts`, `1873:state_db.rs:986`) and not paused (`paused_reason IS NULL`). A successor waiting on its predecessor or on a snapshot is live |
-| **Staged copy** | A waiting write's `payload_path`: the daemon's own copy (`1873:engine_bridge.rs:5264-5281`). Not the App Group `upload-staging` hand-over copies (`1873:ipc_socket.rs:686`, `:702-706`), see §8 |
+| **Staged copy** | A waiting write's `payload_path`: the daemon's own copy (`1873:engine_bridge.rs:5264-5281`). It is an absolute path, so a copy staged before [staging-durable] still points into `Library/Caches`, and a later one into `Library/Application Support` (§7.1; amend 1). Not the App Group `upload-staging` hand-over copies (`1873:ipc_socket.rs:686`, `:702-706`), see §8 |
 | **Missing** | A waiting file whose newest waiting write's staged copy does not exist (`metadata()` is `NotFound`, the test 1873 uses for `payload_missing`, `1873 spec §8.4` line 676) |
 | **Kept folder** | The folder this spec makes for waiting writes (§7) |
 | **macOS's folder** | The folder macOS reports when 1882's preserving removal kept files (1882 §4) |
@@ -323,18 +330,38 @@ On a Mac, the app's container is `/Users/<name>/Library/Containers/io.beebeeb.ap
   owned by the user (checked with `ls -la` on the QA Mac). `Downloads`, `Desktop` and the others there are symbolic
   links out of the container, and those need entitlements the app does not have (`src-tauri/entitlements.plist:38-49`:
   sandbox, app group, user-selected files, network).
-- **On the same volume as the staged copies** (`Data/Library/Caches/beebeeb/finder-writes`). `std::fs::copy` on macOS first
+- ~~**On the same volume as the staged copies** (`Data/Library/Caches/beebeeb/finder-writes`). `std::fs::copy` on macOS first
   tries an APFS clone (`fclonefileat`), as `1873:staged_payload.rs:118-119` notes. A clone uses no new data blocks, so a
-  full disk rarely fails it.
+  full disk rarely fails it.~~
+  **On the same volume as the staged copies.** Ruling [staging-durable] (1873, before it releases) moves the staged copies
+  to `dirs::data_dir()/beebeeb/finder-writes`, which is `Data/Library/Application Support/beebeeb/finder-writes` in the
+  container, excluded from backup and mode `0700`.
+  - The ruling drops the temp-directory fallback: if that root is not writable, the accept fails, so macOS keeps the item
+    as not synced.
+  - Old journal rows keep their absolute paths under `Data/Library/Caches/beebeeb/finder-writes`, and the orphan purge
+    scans both roots.
+  - All three places are in the same container: Application Support, the old Caches root and `Data/Documents`. So the
+    copy is on one volume whichever root a write's staged copy is in. `std::fs::copy` on macOS first tries an APFS clone
+    (`fclonefileat`), as `1873:staged_payload.rs:118-119` notes, and a clone uses no new data blocks, so a full disk
+    rarely fails it.
+  - The keep step copies from the op's stored `payload_path` as it is. It never rebuilds the path from the current root
+    (U27).
+  — lead ruling, 2026-10-10 ([staging-durable])
 - **Out of reach of every purge.** It is under none of the roots the sign-out purge may delete (`disposable_cache_roots`:
   the temp directory, the cache directory, the hydrate cache, `1873:lib.rs:2402-2426`), and it is never written to the
   `staged_payloads` journal, which the engine-start repair sweeps (`1873:state_db.rs:4386`). U12 pins both.
+  Under [staging-durable] the purge also has to delete staged copies under the new root, so its roots grow by that root.
+  `Data/Documents` is under neither staging root, and U12 checks the kept root against every root the purge accepts,
+  whatever that list is. — lead ruling, 2026-10-10 ([staging-durable])
 - **Findable.** The alert and the Settings › Sync row show the full path in mono (1882 §5). The row also has
   **"Show in Finder"**, which reveals the event folder. 1882 left that button out because macOS's folder is outside the
   container and no header says a sandboxed app may reveal such a path (1882 §5). This folder is inside the container, and
   the app already reveals a file in its own container: the support bundle in the state directory (`main:lib.rs:5542-5550`,
   revealed at `:5581`). **Unverified** on a sandboxed build for this folder; device step D2 checks it. If it does not work,
   the button is struck from this section and the path alone remains.
+
+**Accepted.** The lead accepted this location as designed. "Show in Finder" stays a device step (D2).
+— lead ruling, 2026-10-10 ([1887-location])
 - **It outlives the app.** macOS does not remove a container when the app is deleted. **Unverified**, as the 1873 spec
   also says (`1873 spec §10.4`).
 
@@ -380,6 +407,14 @@ for the hand-over: when the newer save was made, the system held the older write
 - Each copy is `std::fs::copy` from the staged copy, then `sync_all` on the new file.
 - Every directory the step made is fsynced before the purge starts.
 - Modification times come from the copy (the staged copy's own).
+- Kept files are the person's, so they are backed up.
+  - A clone has "its own copy of attributes and extended attributes which are identical to those of" the source
+    (`man 2 clonefile`).
+  - Today the backup exclusion is set on a staging directory, not on its files (`macos_exclude_from_backups`,
+    `1873:ipc_socket.rs:523-551`), so a copy carries none.
+  - If a staged file itself ever carries `com.apple.metadata:com_apple_backup_excludeItem`, the keep step removes that
+    attribute from the copy.
+  — lead ruling, 2026-10-10 ([staging-durable]: the new root is excluded from backup)
 - Nothing is read back, and nothing is decrypted: staged copies are plaintext on this Mac already.
 - One `info` line: `kept unsent changes`, with `files`, `missing` and `kept` counts only. No path and no name (W10; the
   1873 spec §11 and 1882 §5 logging rules).
@@ -421,7 +456,10 @@ for the hand-over: when the newer save was made, the system held the older write
    engine stop and Lock empty that directory (`1873:lib.rs:1933`, `:2060`). The extension never got `WriteQueued` for
    them, so macOS still holds those items as not synced, and 1882's removal keeps them (§5.2).
 10. **A staged copy that vanished before the sign-out** (a write parked `payload_missing`, `1873 spec §8.4`). It counts as
-    missing (W7). Whether macOS can purge an app container's `Library/Caches`, where these copies live, is open (§15).
+    missing (W7). ~~Whether macOS can purge an app container's `Library/Caches`, where these copies live, is open (§15).~~
+    The question of macOS purging `Library/Caches` is answered by moving the copies out of it ([staging-durable], §7.1,
+    §15). A copy can still go missing by other means, and W7 still covers it.
+    — lead ruling, 2026-10-10 ([staging-durable])
 
 ## 9. With 1882: two folders from one sign-out
 
@@ -531,7 +569,9 @@ ask with this copy before the frontend change merges. The hifi drawing is a desi
 - **Lock, a same-account re-sign-in, Repair** keep the queue (§4).
 - **What a person is offered for a parked save** (task 1881). This spec keeps the bytes and says so; it does not resolve
   conflicts.
-- **Moving the staged copies out of `Library/Caches`.** That is 1873's design; see §15.
+- ~~**Moving the staged copies out of `Library/Caches`.** That is 1873's design; see §15.~~
+  **Moving the staged copies out of `Library/Caches`** is 1873's work, under its ruling [staging-durable]. This spec only
+  has to work with both roots (§7.1, U27). — lead ruling, 2026-10-10 ([staging-durable])
 - **A "Delete" for the kept folder.** "Dismiss" forgets it; the files are the person's.
 
 ## 13. Verification (written before the code)
@@ -554,7 +594,7 @@ output go into the task's notes and QA evidence.
 | U9 | `a_write_that_arrives_after_the_count_is_kept_too`: the gate reads 0, then a write is enqueued before the engine stop → the sign-out completes and the kept folder has it | Keep only the ops the gate counted |
 | U10 | `stop_keep_purge_are_adjacent`: a source pin. The engine stop, the keep step and the purge run in that order with no other statement between them, wherever the Finder removal is | Swap keep and purge; put the Keychain clear between keep and purge |
 | U11 | `kept_names_follow_the_rule`: plain name; ` (earlier save N)` numbering; a dotfile; `.` and `..` → `_`; a NUL → `_`; a 300-byte name cut with its extension kept; a collision → ` (2)`; no path → `Unnamed …` | Each rule alone (one case red) |
-| U12 | `the_kept_folder_is_out_of_every_purges_reach`: `is_disposable_cache_path(kept root)` is false, and the engine-start repair never lists a kept file | Put the kept root under the cache directory |
+| U12 | `the_kept_folder_is_out_of_every_purges_reach`: `is_disposable_cache_path(kept root)` is false, and the engine-start repair never lists a kept file. Amend 1: checked against every root the purge accepts, both staging roots included | Put the kept root under the cache directory, or under either staging root |
 | U13 | `a_failed_copy_stops_the_sign_out`: an injected copier that fails on the second file → `Err` starting `unsent_copy_failed:`; the half-made folder is gone; queue and staged copies intact; keys in memory; the restart is requested (spec A: `KeysArrived`; without spec A: the engine start) | Ignore the copy error (the queue is purged); keep the half-made folder |
 | U14 | `the_purge_refuses_a_waiting_write_that_was_not_kept`: an op inserted between keep and purge (test seam) → the purge rolls back, and the sign-out stops with E2 | Drop the guard |
 | U15 | `completed_and_released_payloads_are_never_sources`: a completed upload, a released journal path and an orphan journal copy → none copied, none counted | Read sources from `staged_payloads` |
@@ -569,6 +609,8 @@ output go into the task's notes and QA evidence.
 | U24 | `no_count_string_renders_zero`: every builder (P1, A2, A3, A4, K1) returns nothing for 0 and singular text for 1 | Render "0 files" |
 | U25 | `logs_never_carry_a_kept_path_or_name`: a log capture across a keeping sign-out holds no path component and no file name | Log the folder path |
 | U26 | `show_in_finder_reveals_only_the_saved_folder`: any other path is refused | Reveal the given path |
+| U27 | `the_keep_step_copies_from_either_staging_root` (amend 1, [staging-durable]). A sign-out is made while a pre-ruling journal row and its op still point into `Library/Caches/beebeeb/finder-writes`, and another write's staged copy is under `Application Support/beebeeb/finder-writes`. Both are kept, each sha256 equal to its source, and the purge then removes both sources | Rebuild the source path from the current staging root and the file name (the Caches copy is not found, and the sign-out stops with E2 instead of keeping it) |
+| U28 | `kept_copies_carry_no_backup_exclusion` (amend 1): a staged file that carries `com.apple.metadata:com_apple_backup_excludeItem` → its kept copy does not | Copy the attributes as the clone leaves them |
 
 ### 13.2 Frontend (bun)
 
@@ -630,11 +672,19 @@ is skipped.
 
 ## 15. Open questions
 
-1. **Can macOS empty an app container's `Library/Caches` under storage pressure?** 1873 keeps every waiting write's only
+None remain.
+
+1. ~~**Can macOS empty an app container's `Library/Caches` under storage pressure?** 1873 keeps every waiting write's only
    copy there (`1873:engine_bridge.rs:5277-5281`: `dirs::cache_dir()/beebeeb/finder-writes`). No header or code read
-   here settles it.
-   - If it can, a write's bytes can vanish before any sign-out. 1873 then parks the write `payload_missing`, and this
-     spec can only report it as missing (W7).
-   - This spec does not depend on the answer.
-   - Owner: the lead, for 1873 or its follow-ups (1879). A staged-copy root under `Library/Application Support` would
-     close it.
+   here settles it.~~
+   - ~~If it can, a write's bytes can vanish before any sign-out. 1873 then parks the write `payload_missing`, and this
+     spec can only report it as missing (W7).~~
+   - ~~This spec does not depend on the answer.~~
+   - ~~Owner: the lead, for 1873 or its follow-ups (1879). A staged-copy root under `Library/Application Support` would
+     close it.~~
+
+   **Answered by [staging-durable]:** before 1873 releases, staged copies live in
+   `dirs::data_dir()/beebeeb/finder-writes`, excluded from backup and mode `0700`, with no temp-directory fallback. Old
+   journal rows keep their Caches paths, and the orphan purge scans both roots. This spec's consequences are in §7.1,
+   §7.2 and U27-U28.
+   — lead ruling, 2026-10-10 ([staging-durable])
