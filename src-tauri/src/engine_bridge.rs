@@ -14922,6 +14922,59 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_parked_create_hands_over_and_the_save_lands_as_the_create() {
+        // The create branch of the hand-over (spec §8.4): a Finder create W whose staged copy
+        // is gone parks; the save N on W's token takes W's create at its claim and lands as
+        // the new file's first version, with N's bytes (they contain W's).
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [75u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        let created = fp_create(&bridge, dir.path(), "made.txt", b"created");
+        let provisional = created.outcome_file_id();
+        let w_op = bridge.db.list_operations_for_file(&provisional).unwrap().remove(0);
+        std::fs::remove_file(w_op.payload_path.as_deref().unwrap()).unwrap();
+        fp_save(
+            &bridge,
+            dir.path(),
+            &provisional,
+            "made.txt",
+            b"created, edited",
+            created.token.as_deref().unwrap(),
+        );
+        let logs = capture_logs_async(async {
+            drain_upload_queue(&bridge, &sync_root).await;
+        })
+        .await;
+        let state = server.finish();
+        assert_eq!(
+            state.init_summary(),
+            vec![(json!(null), json!(null), 201)],
+            "one create, without a base"
+        );
+        let server_id = {
+            let files = state.files_with_content();
+            assert_eq!(files.len(), 1, "exactly one file on the server: {files:?}");
+            files[0].clone()
+        };
+        assert!(
+            !state.files.contains_key(&provisional),
+            "no file is created under the provisional id"
+        );
+        assert_eq!(state.files[&server_id].versions.len(), 1, "N's bytes are version 1");
+        assert_eq!(state.latest_plaintext(&server_id, master_key), b"created, edited");
+        let rows = bridge.db.list_files().unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].file_id, server_id, "the provisional id was swapped");
+        assert_eq!(rows[0].status, FileStatus::Local);
+        assert!(bridge.db.list_operations_for_file(&provisional).unwrap().is_empty());
+        assert!(bridge.db.list_operations_for_file(&server_id).unwrap().is_empty());
+        assert_eq!(logs.matches("queued write took over a parked one").count(), 1, "{logs}");
+    }
+
     // ── The accept transaction and the base mapping (spec §6.1, §6.3.1, §8.7 S1.1, S3, S5) ──
 
     #[tokio::test]
