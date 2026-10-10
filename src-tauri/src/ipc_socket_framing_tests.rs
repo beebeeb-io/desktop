@@ -1408,7 +1408,8 @@ fn staged_create_uploads_from_the_daemons_own_copy_and_deletes_the_handed_over_o
 /// created or written to, a create and a modify are answered `WriteRetryLater` with a fixed reason and
 /// no path. The extension reports that as a transient error, so the system keeps the change and
 /// retries the write. Nothing is staged anywhere, nothing is queued, no row is added, and the
-/// handed-over copy is deleted as after any answer.
+/// handed-over copy is deleted as after any answer. Once the folder can take a copy again, the
+/// system's retry with the same request id is queued, exactly once.
 #[cfg(target_os = "macos")]
 #[test]
 fn an_unwritable_staging_folder_answers_write_retry_later_and_stages_and_queues_nothing() {
@@ -1489,6 +1490,33 @@ fn an_unwritable_staging_folder_answers_write_retry_later_and_stages_and_queues_
     }
     assert_eq!(left, vec![data.join("beebeeb")], "no copy was written anywhere");
     assert!(staging_entries(&fx).is_empty(), "nothing is left in upload staging");
+
+    // The folder can take a copy again. The system's retry carries the SAME request id: the
+    // refusal was not remembered, so the retry is accepted and queued, and a repeat of it is
+    // answered from that result, so the save is queued exactly once.
+    std::fs::remove_file(data.join("beebeeb")).unwrap();
+    for attempt in ["the retry", "a repeat of the retry"] {
+        let copy = staged_copy(&fx, b"a save the app could not stage before");
+        let reply = fx.rt.block_on(send_one(
+            &fx,
+            create_request("new.txt", &copy.to_string_lossy(), Some("key-retry-create")),
+        ));
+        assert!(
+            reply.get("WriteQueued").is_some(),
+            "{attempt}: expected WriteQueued, got {reply}"
+        );
+        assert_eq!(
+            queued_operation_count(&fx),
+            1,
+            "{attempt}: the save is queued exactly once"
+        );
+    }
+    let ops = fx.db.list_due_operations(i64::MAX).unwrap();
+    let own = ops[0].payload_path.as_deref().expect("the upload carries its copy");
+    assert!(
+        std::path::Path::new(own).starts_with(data.join("beebeeb").join("finder-writes")),
+        "the copy is staged in the data root: {own}"
+    );
 }
 
 #[test]
