@@ -95,13 +95,6 @@ describe('kept-files note (1882)', () => {
 describe('Repair failed after the removal (1882 r4)', () => {
   const AFTER = `${REPAIR_FAILED_AFTER_REMOVAL_CODE}: No space left on device`
 
-  test('the code is the same string Rust puts at the start of that error', () => {
-    const rust = readFileSync(join(import.meta.dir, '..', 'src-tauri', 'src', 'finder_removal.rs'), 'utf8')
-    const match = rust.match(/pub const REPAIR_FAILED_AFTER_REMOVAL_CODE: &str = "([^"]*)";/)
-    expect(match?.[1]).toBe(REPAIR_FAILED_AFTER_REMOVAL_CODE)
-    expect(REPAIR_FAILED_AFTER_REMOVAL_CODE).toBe('repair_failed_after_removal')
-  })
-
   test('an error that starts with the code says Beebeeb was removed and how to add it back, never the raw detail', () => {
     expect(repairRemovedNotice(AFTER, 'Add to Finder')).toEqual({
       title: 'Beebeeb was removed from Finder',

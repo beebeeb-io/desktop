@@ -176,8 +176,9 @@ export const KEPT_FOLDER_ROW_SENTENCE = 'Files that had not reached the server w
 
 /**
  * 1882 r4: the code a failed Repair's error starts with when Repair failed AFTER it removed the
- * Finder location. The same string is `REPAIR_FAILED_AFTER_REMOVAL_CODE` in
- * src-tauri/src/finder_removal.rs; tests/finderPreservedFiles.test.ts pins the two equal.
+ * Finder location. Rust no longer sends it (rebase re-review Minor 4, lead ruling: with the Finder
+ * reconciler no platform can fail after a removal that worked), so nothing reaches this code. It goes,
+ * with its note, when this frontend moves to the reconciler (spec 2026-10-06).
  */
 export const REPAIR_FAILED_AFTER_REMOVAL_CODE = 'repair_failed_after_removal'
 
