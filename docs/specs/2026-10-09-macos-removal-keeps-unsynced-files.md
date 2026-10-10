@@ -258,7 +258,13 @@ warning).~~
   (`desktop.toml`, `kept_unsynced_folder`). It is never written to a log and never sent anywhere.
   It is not part of the settings the Settings window saves, so no settings save can clear it.
   - A newer kept folder replaces the older one.
-  - Dismissing clears it only if it is still the folder the row showed.
+  - Dismissing clears it only if it is still the folder the row showed. The command says whether
+    it did and which folder is saved now (`{ cleared, current }`), so a row that showed an older
+    folder keeps showing the newer one instead of vanishing (round 5).
+  - Every write to `desktop.toml` takes one process-wide lock: the sweep's save and the row's
+    dismiss are a single load-change-save under it, so a settings save at the same moment cannot
+    drop either change or tear the shared `desktop.toml.tmp` (round 5). Other load-modify-save
+    callers of the config are not converted; they still replace the file with the copy they loaded.
 - **When it appears:** after a sign-out, a Repair, the add rollback, the cleanup inside Add to
   Finder, or the app-start sweep, whenever files were kept by the rule above.
 - **What it shows:** Settings › Sync, under "Beebeeb in Finder", a status note with ~~the sentence~~
@@ -343,13 +349,15 @@ sha256, and the alert must name that folder. Repeat with Repair (the Sync tab no
   - dismissing the shown path clears it;
   - the record survives a settings save.
 - **Frontend:**
-  - the Sync tab shows the saved row on open, and after a Repair;
+  - the Sync tab shows the saved row on open, after a Repair, and after every Add to Finder
+    attempt, whether it succeeded or failed (its cleanup or rollback may have kept files);
   - the row's sentence is neutral: it has no "your" (re-review D3, lead ruling, 2026-10-10);
   - a Repair that reported a folder shows it even when the saved record cannot be read back. A
     failed save is not this case: Repair then returns an error and the app's alert names the
     folder (re-review D5, P1);
   - it shows nothing when nothing is saved;
-  - "Dismiss" sends the exact path and the row goes;
+  - "Dismiss" sends the exact path; the row goes only if Rust cleared that folder, otherwise it
+    shows the folder saved now (round 5);
   - the path element wraps.
 - **Wiring pins:**
   - every removal path records the folder;
