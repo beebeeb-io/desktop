@@ -600,7 +600,8 @@ For the content-modify row of the table: presenting S under P keeps the system's
 - Why fileproviderd fetches in that case is not documented.
 
 **Removal, whatever the trigger:**
-1. **Fetch from the queue.** A fetch of an item whose held write is still queued is served from that write's staged bytes, the bytes the token names. It never goes to the server, and the returned item names the token.
+1. **Fetch from the queue.** A fetch of an item whose held write is still queued is served from that write's staged bytes, the bytes the token names. ~~It never goes to the server, and the returned item names the token.~~
+   It never goes to the server while that write has not parked, and the returned item names the token. A parked write whose staged copy is gone is the one exception (below). — lead ruling, 2026-10-10 ([t8-parked-fetch])
    - ~~Apple: "Except for the error case, the version of the returned item is assumed to be identical to what was requested" (`REPL.h:330-332`).~~
      Apple: "A nil value means that the latest known version should be returned … requestedVersion is currently always set to nil" (`REPL.h:330-334`). For a file with a queued write, the latest version this provider knows is that write's bytes, and the returned item names them with the token. The earlier citation was about a requested version, which the system never sends (m-13). — lead ruling, 2026-10-10 (spec review)
    - **(4b) Serialization with the landing.** The fetch reads the op's payload path and the predicate in one `StateDb` call (§8.7 S1), then opens the file.
@@ -608,7 +609,9 @@ For the content-modify row of the table: presenting S under P keeps the system's
        If the landing commits and unlinks the payload between that read and the open, the open fails with `NotFound`. The fetch then decides once more: the write is no longer queued, so it goes to the server for the current version (not pinned, §12). Unless a remote change landed in that same instant, those are the same bytes. — lead ruling, 2026-10-10 (spec r4b)
      - An open that succeeded keeps reading after an unlink, by POSIX semantics.
    - The staged payload is the plaintext copy the queue already holds for upload. The hydrate handover through the App Group and the system's temporary directory is unchanged (`FPE:75-213`).
-2. **No status change.** A hydrate never changes the status of a row that has a live upload of its own: no `Downloading`, `Local` or `Error` (`EB:2584`, `EB:2609`, `EB:2633`, `EB:2647`, `EB:2681` today).
+   - **A parked write whose staged copy is gone.** A parked write keeps its op in the queue: nothing retries it and nothing removes it. When its staged copy is gone (it parked `payload_missing`, or the copy was lost after it parked), nothing local can serve its bytes, and a fetch that failed would be retried by the system without end. Its fetch goes to the server for the current version, and the hydrate leaves the row's parked status (2 below, §9.1): read-only, and still not evictable. The returned item still names the parked write's token, so the system holds the server's version under that token until the parked write is resolved; a stale but real version is preferred to an endless retry. A write that has not parked keeps the rule above: with its copy missing, its fetch fails and is retried, and it never reaches the server. — lead ruling, 2026-10-10 ([t8-parked-fetch])
+2. **No status change.** ~~A hydrate never changes the status of a row that has a live upload of its own: no `Downloading`, `Local` or `Error` (`EB:2584`, `EB:2609`, `EB:2633`, `EB:2647`, `EB:2681` today).~~
+   A hydrate never changes the status of a row that has a Finder upload of its own in the queue, live or parked: no `Downloading`, `Local` or `Error` (`EB:2584`, `EB:2609`, `EB:2633`, `EB:2647`, `EB:2681` today). A live upload keeps `uploading`; a parked one keeps its parked status (§9.1). — lead ruling, 2026-10-10 ([t8-parked-fetch])
 3. **No more shared `"0"`.** A provisional item reports its write token.
 
 In R2's sequence, the fetch, if it still happens, gets the same 8,388,618 bytes. The item stays writable, and nothing reaches the server. D4 and D4b (§14) record whether the fetch still happens.
@@ -900,6 +903,7 @@ sequenceDiagram
    - Apple: "If you choose to finish uploading items after calling the completion handler of creteItem/modifyItem, you must set the uploaded flag to false, in order for the item to be excluded from eviction." (`ITEM.h:531-533`)
    - A parked upload presents `error`: read-only, and still not evictable.
      - (4b) When a successor is waiting to take over a parked predecessor (§8.4), the file has an unparked upload, so it presents `uploading`.
+     - A fetch of a parked write whose staged copy is gone is served from the server (§7.4), and the hydrate leaves the parked status. — lead ruling, 2026-10-10 ([t8-parked-fetch])
 2. **The writers of `files.status` change:**
    - the landing sets `Local` only when no later upload of the file is queued (`EB:1149`), read inside the landing transaction (§8.7 S1.2);
    - the rollback guard keeps `Uploading` while the op will retry, and sets `Error` only when it parks (`EB:662-690`);
