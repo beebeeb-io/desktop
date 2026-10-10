@@ -18,16 +18,16 @@ use std::future::Future;
 use std::sync::Arc;
 
 use tauri::{Emitter, Manager};
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, oneshot};
 
 use super::core::{Observation, Op, OpResult, SessionFacts};
 use super::driver::{FINDER_SETUP_CHANGED_EVENT, FinderSetupView, Ports, op_limit, within};
 use super::error::{FailureRecord, FpError, app_code};
 use crate::AppState;
 use crate::config::DesktopConfig;
-use crate::finder_removal::KeptFolder;
+use crate::finder_removal::{DomainRemoval, KeptFolder};
 use crate::lifecycle_log::{self, LifecycleEvent};
-use crate::macos_file_provider;
+use crate::macos_file_provider::{self, BridgeRemovalFailure};
 
 pub struct MacosPorts {
     app: tauri::AppHandle,
@@ -260,6 +260,69 @@ pub(crate) async fn cleanup_stale_domains() -> Result<macos_file_provider::Stale
         .await
 }
 
+/// What `macos_file_provider::remove` answers.
+type Removal = Result<DomainRemoval, BridgeRemovalFailure>;
+
+/// The removal's call for the gate (rebase re-review I1): it runs `remove` and sends the answer on `answer`.
+///
+/// The reconciler stops waiting for a removal at its op limit (`within`), but the OS call cannot be cut off: it goes
+/// on, and when it returns, macOS may have kept files. The blocking task's return value is read by nobody after a
+/// cut-off, so the answer goes on a channel instead:
+/// - while the reconciler still listens, it gets the answer, and the driver hands the folder to the waiter or to
+///   `Ports::kept_folder`, as before;
+/// - once it has stopped listening, the send fails, and the blocking thread hands the folder to `late` itself.
+///
+/// Exactly one of the two gets it: [`removal_answer`] closes the channel before it reads it. The late sink runs before
+/// the gate is freed, for a few milliseconds: one config save under the config-write lock, whose holders never wait
+/// for the gate, and an alert that does not block.
+fn answering(
+    answer: oneshot::Sender<Removal>,
+    remove: impl FnOnce() -> Removal + Send + 'static,
+    late: impl FnOnce(KeptFolder) + Send + 'static,
+) -> impl FnOnce() -> Result<(), FpError> + Send + 'static {
+    move || {
+        if let Err(unheard) = answer.send(remove()) {
+            late(match unheard {
+                Ok(removal) => removal.kept,
+                Err(failure) => failure.kept,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// What the reconciler makes of a removal run with [`answering`], once `within` returned `cut`.
+///
+/// The channel is closed first. A removal that finishes from then on cannot send, so it goes to its late sink. An
+/// answer that is already there is read, also when `within` cut the call off just after it sent: the domain is gone,
+/// and saying so is the truth (`tokio::time::timeout` itself prefers a ready answer to its deadline).
+fn removal_answer(cut: Result<(), FpError>, mut answered: oneshot::Receiver<Removal>) -> OpResult {
+    answered.close();
+    match (answered.try_recv(), cut) {
+        (Ok(Ok(removal)), _) => OpResult::Removed(Ok(()), removal.kept),
+        (Ok(Err(failure)), _) => OpResult::Removed(Err(failure.error), failure.kept),
+        // Cut off (if the OS call keeps files later, they go to the late sink), a busy gate, or a failed task.
+        (Err(_), Err(error)) => OpResult::Removed(Err(error), KeptFolder::default()),
+        // The call returned without an answer, which `answering`'s call never does.
+        (Err(_), Ok(())) => OpResult::Removed(
+            Err(FpError::app(
+                app_code::UNEXPECTED_BRIDGE_RETURN,
+                "the removal returned no answer",
+            )),
+            KeptFolder::default(),
+        ),
+    }
+}
+
+/// A folder a reconciler removal kept, shown to the person the way the app-start sweep shows one: saved for the
+/// Settings › Sync row, then the alert (task 1882). Used by the port for a removal nobody took the answer of, and by
+/// the removal itself when it finished after the reconciler stopped waiting (rebase re-review I1). Logs never carry
+/// the folder.
+fn surface_reconciler_kept(app: &tauri::AppHandle, kept: KeptFolder, context: &'static str) {
+    let location = DomainRemoval { kept }.kept_location(context);
+    crate::surface_kept_folder(app, location.as_deref());
+}
+
 /// §5.1's facts. Fail safe: an unreadable config never counts as "signed out by choice", so it
 /// never removes the domain.
 fn facts_from(
@@ -393,17 +456,21 @@ impl Ports for MacosPorts {
                 // failed to a bridge call merely in flight would leave the domain and its replica in Finder
                 // after sign-out. Task 1882: the removal keeps the files that never reached the server, and
                 // the answer carries the folder macOS kept them in, also when the removal failed (review M2).
-                Op::RemoveDomain => match within(
-                    op,
-                    limit,
-                    gate.run_waiting(BRIDGE_GATE_WAIT, || Ok(macos_file_provider::remove())),
-                )
-                .await
-                {
-                    Ok(Ok(removal)) => OpResult::Removed(Ok(()), removal.kept),
-                    Ok(Err(failure)) => OpResult::Removed(Err(failure.error), failure.kept),
-                    Err(error) => OpResult::Removed(Err(error), KeptFolder::default()),
-                },
+                // Rebase re-review I1: a removal that finishes after `limit` still shows its folder, from the
+                // blocking thread (`answering`).
+                Op::RemoveDomain => {
+                    let late_app = app.clone();
+                    let late =
+                        move |kept| surface_reconciler_kept(&late_app, kept, "finder reconciler, after its time limit");
+                    let (answer, answered) = oneshot::channel();
+                    let cut = within(
+                        op,
+                        limit,
+                        gate.run_waiting(BRIDGE_GATE_WAIT, answering(answer, macos_file_provider::remove, late)),
+                    )
+                    .await;
+                    removal_answer(cut, answered)
+                }
             }
         }
     }
@@ -437,8 +504,7 @@ impl Ports for MacosPorts {
     /// Task 1882: a removal nobody waited for (or a waiter that gave up) is shown like the app-start sweep's:
     /// saved for the Settings › Sync row, then the alert. Logs never carry the folder.
     fn kept_folder(&mut self, kept: KeptFolder) {
-        let location = crate::finder_removal::DomainRemoval { kept }.kept_location("finder reconciler");
-        crate::surface_kept_folder(&self.app, location.as_deref());
+        surface_reconciler_kept(&self.app, kept, "finder reconciler");
     }
 
     fn window_visible(&self) -> bool {
@@ -1104,7 +1170,11 @@ mod tests {
         let source = production();
         for (pattern, call) in [
             ("Op::Observe =>", "macos_file_provider::domain_state"),
-            ("Op::RemoveDomain =>", "|| Ok(macos_file_provider::remove())"),
+            // Rebase re-review I1: the removal's answer travels on a channel (`answering`).
+            (
+                "Op::RemoveDomain =>",
+                "answering(answer, macos_file_provider::remove, late)",
+            ),
         ] {
             let run = &source[source.find("fn run(&mut self, op: Op)").unwrap()..];
             let body = arm(&run[..run.find("fn publish(").unwrap()], pattern);
@@ -1224,5 +1294,197 @@ mod tests {
         assert!(cfg.finder_signed_out_by_choice);
         assert!(!set_signed_out_by_choice(&mut cfg, true));
         assert!(set_signed_out_by_choice(&mut cfg, false));
+    }
+
+    // ── Rebase re-review I1: a removal that outlives the op limit still shows its folder ──────────
+
+    const KEPT_AT: &str = "/Users/someone/Library/CloudStorage/Beebeeb-Beebeeb (10-10-2026 10:50)";
+
+    fn kept_at(path: &str) -> KeptFolder {
+        KeptFolder::Kept {
+            path: path.to_string(),
+            contents_checked: true,
+            empty: false,
+        }
+    }
+
+    type Alerts = Arc<std::sync::Mutex<Vec<String>>>;
+
+    /// The app's late sink, `surface_reconciler_kept`, with its two steps on a test config file and the alert
+    /// recorded: the same function and order (`surface_kept_folder_with`), without a window.
+    fn recording_sink(config: std::path::PathBuf, alerts: Alerts) -> impl FnOnce(KeptFolder) + Send + 'static {
+        move |kept| {
+            let location = DomainRemoval { kept }.kept_location("test");
+            crate::surface_kept_folder_with(
+                location.as_deref(),
+                |location| {
+                    crate::finder_removal::remember_kept_folder_at(&config, location)
+                        .expect("the folder is saved for the row");
+                },
+                |location| alerts.lock().unwrap().push(location.to_string()),
+            );
+        }
+    }
+
+    /// The removal arm's two halves: the gate's call (`answering`) and the channel `removal_answer` reads.
+    fn removal_with_late_sink(
+        remove: impl FnOnce() -> Removal + Send + 'static,
+        late: impl FnOnce(KeptFolder) + Send + 'static,
+    ) -> (
+        impl FnOnce() -> Result<(), FpError> + Send + 'static,
+        oneshot::Receiver<Removal>,
+    ) {
+        let (answer, answered) = oneshot::channel();
+        (answering(answer, remove, late), answered)
+    }
+
+    fn saved_folder(config: &std::path::Path) -> Option<String> {
+        if !config.exists() {
+            return None;
+        }
+        DesktopConfig::load_from(config)
+            .expect("the test config reads back")
+            .kept_unsynced_folder
+    }
+
+    /// The reviewer's case: `fileproviderd` is slow, the reconciler gives up at its limit and answers `OP_TIMEOUT`
+    /// with no folder, and the OS call then returns having kept files. The folder still reaches the person, once:
+    /// saved for the Settings › Sync row, then the alert. The limit is injected (30 ms, not 15 s).
+    #[tokio::test]
+    async fn a_removal_that_finishes_after_the_op_limit_still_saves_the_row_and_raises_the_alert() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config = dir.path().join("desktop.toml");
+        let alerts = Alerts::default();
+        let gate = BridgeGate::new();
+        let (release, hold) = std::sync::mpsc::channel::<()>();
+        let (call, answered) = removal_with_late_sink(
+            move || {
+                let _ = hold.recv();
+                Ok(DomainRemoval { kept: kept_at(KEPT_AT) })
+            },
+            recording_sink(config.clone(), alerts.clone()),
+        );
+        let cut = within(
+            Op::RemoveDomain,
+            Duration::from_millis(30),
+            gate.run_waiting(BRIDGE_GATE_WAIT, call),
+        )
+        .await;
+        match removal_answer(cut, answered) {
+            OpResult::Removed(Err(error), kept) => {
+                assert_eq!(error.message, "RemoveDomain did not answer within 30ms");
+                assert_eq!(kept, KeptFolder::default(), "the reconciler has no folder yet");
+            }
+            other => panic!("the reconciler gives up at its limit, as before: {other:?}"),
+        }
+        assert!(alerts.lock().unwrap().is_empty(), "nothing kept yet, nothing shown");
+        assert_eq!(saved_folder(&config), None);
+
+        release.send(()).expect("the OS call is still running");
+        until("the gate to be released by the returning OS call", || gate.is_idle()).await;
+        assert_eq!(
+            *alerts.lock().unwrap(),
+            vec![KEPT_AT.to_string()],
+            "the late folder raises one alert, naming it"
+        );
+        assert_eq!(
+            saved_folder(&config).as_deref(),
+            Some(KEPT_AT),
+            "and is saved for the Settings › Sync row"
+        );
+    }
+
+    /// The other side of "exactly once": a removal that answers inside the limit gives the reconciler its folder
+    /// (the driver hands it to the waiter or the port), and nothing goes to the late sink. Also for a removal that
+    /// failed and still kept a folder (review M2).
+    #[tokio::test]
+    async fn a_removal_that_answers_in_time_gives_the_reconciler_its_folder_and_nothing_goes_to_the_late_sink() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config = dir.path().join("desktop.toml");
+        let alerts = Alerts::default();
+        let gate = BridgeGate::new();
+        let (call, answered) = removal_with_late_sink(
+            || Ok(DomainRemoval { kept: kept_at(KEPT_AT) }),
+            recording_sink(config.clone(), alerts.clone()),
+        );
+        let cut = within(
+            Op::RemoveDomain,
+            Duration::from_secs(5),
+            gate.run_waiting(BRIDGE_GATE_WAIT, call),
+        )
+        .await;
+        assert_eq!(
+            removal_answer(cut, answered),
+            OpResult::Removed(Ok(()), kept_at(KEPT_AT))
+        );
+
+        let os_error = FpError::new("NSFileProviderErrorDomain", -2001, "the provider is not running");
+        let (call, answered) = removal_with_late_sink(
+            {
+                let os_error = os_error.clone();
+                move || {
+                    Err(BridgeRemovalFailure {
+                        error: os_error,
+                        kept: kept_at(KEPT_AT),
+                    })
+                }
+            },
+            recording_sink(config.clone(), alerts.clone()),
+        );
+        let cut = within(
+            Op::RemoveDomain,
+            Duration::from_secs(5),
+            gate.run_waiting(BRIDGE_GATE_WAIT, call),
+        )
+        .await;
+        assert_eq!(
+            removal_answer(cut, answered),
+            OpResult::Removed(Err(os_error), kept_at(KEPT_AT))
+        );
+        until("the gate to be idle", || gate.is_idle()).await;
+        assert!(alerts.lock().unwrap().is_empty(), "the late sink saw nothing");
+        assert_eq!(saved_folder(&config), None);
+    }
+
+    /// The moment of the cut-off, both orders, without a clock: an answer sent before the reconciler reads it is
+    /// the reconciler's (and the late sink sees nothing); a call that returns after the reconciler gave up hands its
+    /// folder to the late sink (and the reconciler has none). A failed removal's folder counts too (review M2).
+    #[test]
+    fn at_the_cut_off_the_folder_goes_to_the_reconciler_or_to_the_late_sink_never_both_never_neither() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config = dir.path().join("desktop.toml");
+        let alerts = Alerts::default();
+        let timeout = || FpError::app(app_code::OP_TIMEOUT, "RemoveDomain did not answer within 30ms");
+
+        let (call, answered) = removal_with_late_sink(
+            || Ok(DomainRemoval { kept: kept_at(KEPT_AT) }),
+            recording_sink(config.clone(), alerts.clone()),
+        );
+        assert_eq!(call(), Ok(()), "the OS call returned and sent");
+        assert_eq!(
+            removal_answer(Err(timeout()), answered),
+            OpResult::Removed(Ok(()), kept_at(KEPT_AT)),
+            "an answer already sent is read, though `within` fired"
+        );
+        assert!(alerts.lock().unwrap().is_empty());
+
+        let later = "/Users/someone/Library/CloudStorage/Beebeeb-Beebeeb (10-10-2026 11:05)";
+        let (call, answered) = removal_with_late_sink(
+            move || {
+                Err(BridgeRemovalFailure {
+                    error: FpError::new("NSFileProviderErrorDomain", -2001, "the provider is not running"),
+                    kept: kept_at(later),
+                })
+            },
+            recording_sink(config.clone(), alerts.clone()),
+        );
+        assert_eq!(
+            removal_answer(Err(timeout()), answered),
+            OpResult::Removed(Err(timeout()), KeptFolder::default()),
+            "the reconciler gave up first: it has no folder"
+        );
+        assert_eq!(call(), Ok(()), "the OS call returns after that");
+        assert_eq!(*alerts.lock().unwrap(), vec![later.to_string()], "the late sink has it");
+        assert_eq!(saved_folder(&config).as_deref(), Some(later));
     }
 }

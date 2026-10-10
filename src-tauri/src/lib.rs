@@ -3304,11 +3304,19 @@ fn show_preserved_files_alert(app: &tauri::AppHandle, preserved_location: Option
 /// config of their own (sign-out, the app-start sweep): saved for the Settings › Sync row first,
 /// then the alert. Nothing kept → nothing.
 fn surface_kept_folder(app: &tauri::AppHandle, preserved_location: Option<&str>) {
+    surface_kept_folder_with(preserved_location, remember_kept_folder, |location| {
+        show_preserved_files_alert(app, Some(location))
+    });
+}
+
+/// [`surface_kept_folder`] with its two steps passed in, so a test can run the real order on its own config file and
+/// record the alert instead of raising one: saved for the row first, then the alert. Nothing kept → neither runs.
+fn surface_kept_folder_with(preserved_location: Option<&str>, save: impl FnOnce(&str), alert: impl FnOnce(&str)) {
     let Some(location) = preserved_location else {
         return;
     };
-    remember_kept_folder(location);
-    show_preserved_files_alert(app, Some(location));
+    save(location);
+    alert(location);
 }
 
 /// Saves the latest kept folder in `desktop.toml` (spec §5, "The kept-folder row"). Best-effort:
@@ -30232,14 +30240,18 @@ mod finder_removal_wiring_tests {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        // Saved, then shown: one function for the paths without a config of their own.
-        let surface = code_only(&item(&source, "fn surface_kept_folder("));
-        let saved = surface
-            .find("remember_kept_folder(location)")
-            .expect("it saves the folder");
-        let shown = surface
-            .find("show_preserved_files_alert(app, Some(location))")
-            .expect("it raises the alert");
+        // Saved, then shown: one function for the paths without a config of their own. Rebase re-review I1: its
+        // two steps are passed to `surface_kept_folder_with`, so a test can run them on its own file.
+        let surface = squash_ws(&code_only(&item(&source, "fn surface_kept_folder(")));
+        assert!(
+            surface.contains(&squash_ws(
+                "surface_kept_folder_with(preserved_location, remember_kept_folder, |location| {\n        show_preserved_files_alert(app, Some(location))"
+            )),
+            "it saves the folder with `remember_kept_folder` and raises the alert:\n{surface}"
+        );
+        let with = code_only(&item(&source, "fn surface_kept_folder_with("));
+        let saved = with.find("save(location);").expect("it saves the folder");
+        let shown = with.find("alert(location);").expect("it raises the alert");
         assert!(saved < shown);
         let remember = code_only(&item(&source, "fn remember_kept_folder("));
         // Round 5: the save is one load-change-save under the config-write lock, not a
@@ -30317,20 +30329,43 @@ mod finder_removal_wiring_tests {
             "\n    }\n",
         ));
         assert!(
-            kept.contains("crate::surface_kept_folder(&self.app, location.as_deref());"),
+            kept.contains("surface_reconciler_kept(&self.app, kept, \"finder reconciler\");"),
             "the port saves and shows it:\n{kept}"
         );
+        let surface = code_only(&item(&ports, "fn surface_reconciler_kept("));
+        assert!(
+            surface.contains("crate::surface_kept_folder(app, location.as_deref());"),
+            "through the one function that saves, then shows:\n{surface}"
+        );
         // And the port's removal hands on what macOS kept, with a removal that worked and one that failed (M2).
-        let removal = &ports[ports
-            .find("Op::RemoveDomain => match within(")
-            .expect("the removal arm")..];
-        let removal = squash_ws(&removal[..removal.find("fn publish(").expect("publish follows run")]);
-        for answer in [
-            "Ok(Ok(removal)) => OpResult::Removed(Ok(()), removal.kept),",
-            "Ok(Err(failure)) => OpResult::Removed(Err(failure.error), failure.kept),",
+        let answer = squash_ws(&code_only(&item(&ports, "fn removal_answer(")));
+        for answer_of in [
+            "(Ok(Ok(removal)), _) => OpResult::Removed(Ok(()), removal.kept),",
+            "(Ok(Err(failure)), _) => OpResult::Removed(Err(failure.error), failure.kept),",
         ] {
-            assert!(removal.contains(&squash_ws(answer)), "{answer}");
+            assert!(answer.contains(&squash_ws(answer_of)), "{answer_of}");
         }
+        // Rebase re-review I1: a removal that finishes after the reconciler stopped waiting surfaces its folder
+        // from the blocking thread, through the same function as the port.
+        let removal = &ports[ports.find("Op::RemoveDomain => {").expect("the removal arm")..];
+        let removal = squash_ws(&removal[..removal.find("fn publish(").expect("publish follows run")]);
+        assert!(
+            removal.contains(&squash_ws(
+                "surface_reconciler_kept(&late_app, kept, \"finder reconciler, after its time limit\")"
+            )),
+            "the late sink:\n{removal}"
+        );
+        assert!(
+            removal.contains(&squash_ws("removal_answer(cut, answered)")),
+            "{removal}"
+        );
+        let late = squash_ws(&code_only(&item(&ports, "fn answering(")));
+        assert!(
+            late.contains(&squash_ws(
+                "if let Err(unheard) = answer.send(remove()) {\n            late("
+            )),
+            "an answer nobody listens for any more goes to the late sink:\n{late}"
+        );
 
         // The row's two commands are registered.
         for name in ["kept_unsynced_folder", "dismiss_kept_unsynced_folder"] {
@@ -30550,9 +30585,9 @@ mod finder_removal_wiring_tests {
         );
         let run = &ports[ports.find("fn run(&mut self, op: Op)").expect("run")..];
         let run = &run[..run.find("fn publish(").expect("publish follows run")];
+        let removal = squash(&run[run.find("Op::RemoveDomain =>").expect("the removal")..]);
         assert!(
-            squash(&run[run.find("Op::RemoveDomain =>").expect("the removal")..])
-                .contains("gate.run_waiting(BRIDGE_GATE_WAIT,||Ok(macos_file_provider::remove()))"),
+            removal.contains("gate.run_waiting(BRIDGE_GATE_WAIT,answering(answer,macos_file_provider::remove,late))"),
             "the reconciler's removal goes through the gate"
         );
         assert!(
