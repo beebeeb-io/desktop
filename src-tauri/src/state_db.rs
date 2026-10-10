@@ -1122,6 +1122,8 @@ impl StateDb {
             "
             CREATE INDEX IF NOT EXISTS idx_operation_queue_write_id ON operation_queue(write_id);
             CREATE INDEX IF NOT EXISTS idx_operation_queue_after_write_id ON operation_queue(after_write_id);
+            -- The one-read presentation looks up a file's queued uploads on every item.
+            CREATE INDEX IF NOT EXISTS idx_operation_queue_file_id ON operation_queue(file_id);
             CREATE TABLE IF NOT EXISTS id_aliases (
                 provisional_id TEXT PRIMARY KEY,
                 server_id TEXT NOT NULL,
@@ -5578,6 +5580,9 @@ mod tests {
                     .unwrap();
             }
             conn.execute("DROP TABLE id_aliases", []).unwrap();
+            // Round 3 had no index on operation_queue.file_id either.
+            conn.execute("DROP INDEX IF EXISTS idx_operation_queue_file_id", [])
+                .unwrap();
             conn.execute(
                 "INSERT INTO files (file_id, path, status, size_bytes, current_version) VALUES ('f1', 'a.txt', 'local', 7, 3)",
                 [],
@@ -5630,6 +5635,28 @@ mod tests {
             );
         }
         assert!(columns("id_aliases").contains(&"provisional_id".to_string()));
+        let indexes: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA index_list(operation_queue)").unwrap();
+            stmt.query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        let index_columns = |index: &str| -> Vec<String> {
+            let mut stmt = conn.prepare(&format!("PRAGMA index_info({index})")).unwrap();
+            stmt.query_map([], |row| row.get::<_, String>(2))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        for (index, column) in [
+            ("idx_operation_queue_write_id", "write_id"),
+            ("idx_operation_queue_after_write_id", "after_write_id"),
+            ("idx_operation_queue_file_id", "file_id"),
+        ] {
+            assert!(indexes.contains(&index.to_string()), "{index} missing from {indexes:?}");
+            assert_eq!(index_columns(index), vec![column.to_string()], "{index}");
+        }
 
         // Rows are unchanged; the new columns read as their defaults.
         let row = db.get_file("f1").unwrap().unwrap();
@@ -5639,10 +5666,209 @@ mod tests {
         assert!(presentation.held.is_none());
         assert!(!presentation.version_filled);
         assert_eq!(db.get_operation("op1").unwrap().unwrap().base_version, Some(3));
+        let (base_pending, write_id): (i64, Option<String>) = conn
+            .query_row(
+                "SELECT base_pending, write_id FROM operation_queue WHERE op_id = 'op1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (base_pending, write_id),
+            (0, None),
+            "the earlier op's base is known and it carries no write"
+        );
         assert!(
             db.finder_write("op1").unwrap().is_none(),
             "an op without a write id is not a Finder write"
         );
+    }
+
+    #[test]
+    fn item_presentation_reads_the_held_write_and_the_queue_facts() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let held = "a".repeat(32);
+        let other = "b".repeat(32);
+        db.0.lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO files (file_id, path, status, current_version, current_object_version_id,
+                                    held_write_id, held_base, held_version, held_object_version_id, version_filled)
+                 VALUES ('f1', 'a.txt', 'local', 4, 'o4', ?1, 3, 4, 'o4', 1)",
+                params![held],
+            )
+            .unwrap();
+        assert!(
+            db.item_presentation("missing").unwrap().is_none(),
+            "no row, no presentation"
+        );
+
+        let presentation = db.item_presentation("f1").unwrap().unwrap();
+        assert_eq!(presentation.contract.current_version, 4);
+        assert_eq!(
+            presentation.held,
+            Some(crate::write_token::HeldWrite {
+                write_id: held.clone(),
+                base: 3,
+                version: Some(4),
+                object_version_id: Some("o4".into()),
+            }),
+            "the held columns map one to one"
+        );
+        assert!(presentation.version_filled);
+
+        // (op_id, kind, file_id, write_id, attempts, max_attempts)
+        type Op<'a> = (&'a str, &'a str, &'a str, Option<&'a str>, i64, i64);
+        let check = |ops: &[Op<'_>], queued: bool, unparked: bool, why: &str| {
+            {
+                let conn = db.0.lock().unwrap();
+                conn.execute("DELETE FROM operation_queue", []).unwrap();
+                for (op_id, kind, file_id, write_id, attempts, max_attempts) in ops {
+                    conn.execute(
+                        "INSERT INTO operation_queue (op_id, kind, file_id, write_id, attempts, max_attempts)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        params![op_id, kind, file_id, write_id, attempts, max_attempts],
+                    )
+                    .unwrap();
+                }
+            }
+            let presentation = db.item_presentation("f1").unwrap().unwrap();
+            assert_eq!(presentation.held_write_queued, queued, "held_write_queued: {why}");
+            assert_eq!(
+                presentation.unparked_finder_upload, unparked,
+                "unparked_finder_upload: {why}"
+            );
+        };
+        let h = Some(held.as_str());
+        let o = Some(other.as_str());
+
+        check(&[], false, false, "an empty queue");
+        check(
+            &[("op", "upload_version", "f1", h, 0, 5)],
+            true,
+            true,
+            "a queued Finder upload of the held write",
+        );
+        check(
+            &[("op", "upload_version", "f1", h, 4, 5)],
+            true,
+            true,
+            "one attempt left is not parked",
+        );
+        check(
+            &[("op", "upload_version", "f1", h, 5, 5)],
+            true,
+            false,
+            "attempts = max_attempts is parked, and still queued",
+        );
+        check(
+            &[("op", "upload_version", "f1", h, 6, 5)],
+            true,
+            false,
+            "attempts past max_attempts is parked",
+        );
+        check(
+            &[("op", "upload_file", "f1", o, 0, 5)],
+            false,
+            true,
+            "another write's create counts as a Finder upload",
+        );
+        check(
+            &[("op", "rename_file", "f1", o, 0, 5)],
+            false,
+            false,
+            "only upload kinds are Finder uploads",
+        );
+        check(
+            &[("op", "upload_version", "f1", None, 0, 5)],
+            false,
+            false,
+            "an upload without a write id is not a Finder upload",
+        );
+        check(
+            &[("op", "upload_version", "f2", o, 0, 5)],
+            false,
+            false,
+            "another file's upload",
+        );
+
+        db.0.lock()
+            .unwrap()
+            .execute("UPDATE files SET held_write_id = NULL WHERE file_id = 'f1'", [])
+            .unwrap();
+        check(
+            &[("op", "upload_version", "f1", h, 0, 5)],
+            false,
+            true,
+            "no held write, nothing to find",
+        );
+        assert!(db.item_presentation("f1").unwrap().unwrap().held.is_none());
+    }
+
+    #[test]
+    fn finder_write_maps_its_columns_and_reads_an_unknown_origin_as_earlier_build() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        db.0.lock()
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO operation_queue (op_id, kind, file_id, write_id, write_origin, after_write_id, base_pending)
+                 VALUES ('minted', 'upload_version', 'f1', 'w1', 'minted', 'w0', 2),
+                        ('earlier', 'upload_file', 'f1', 'w2', 'earlier_build', NULL, 0),
+                        ('no-origin', 'upload_version', 'f1', 'w3', NULL, NULL, 0),
+                        ('odd-origin', 'upload_version', 'f1', 'w4', 'Minted', NULL, 0),
+                        ('plain', 'upload_version', 'f1', NULL, 'minted', 'w0', 1);",
+            )
+            .unwrap();
+
+        assert_eq!(
+            db.finder_write("minted").unwrap(),
+            Some(FinderWrite {
+                write_id: "w1".into(),
+                origin: WriteOrigin::Minted,
+                after_write_id: Some("w0".into()),
+                base_pending: 2,
+            })
+        );
+        assert_eq!(
+            db.finder_write("earlier").unwrap(),
+            Some(FinderWrite {
+                write_id: "w2".into(),
+                origin: WriteOrigin::EarlierBuild,
+                after_write_id: None,
+                base_pending: 0,
+            })
+        );
+        assert_eq!(
+            db.finder_write("no-origin").unwrap().unwrap().origin,
+            WriteOrigin::EarlierBuild,
+            "a write id without an origin is never treated as minted"
+        );
+        assert_eq!(
+            db.finder_write("odd-origin").unwrap().unwrap().origin,
+            WriteOrigin::EarlierBuild,
+            "an origin this build does not know reads as earlier-build"
+        );
+        assert_eq!(
+            db.finder_write("plain").unwrap(),
+            None,
+            "no write id, not a Finder write"
+        );
+        assert_eq!(db.finder_write("missing").unwrap(), None, "no op");
+    }
+
+    #[test]
+    fn write_origin_round_trips_through_its_stored_form() {
+        for origin in [WriteOrigin::Minted, WriteOrigin::EarlierBuild] {
+            assert_eq!(WriteOrigin::from_db(Some(origin.as_str())), Some(origin), "{origin:?}");
+        }
+        // The stored strings are schema: a row one build writes, the next build reads.
+        assert_eq!(WriteOrigin::Minted.as_str(), "minted");
+        assert_eq!(WriteOrigin::EarlierBuild.as_str(), "earlier_build");
+        assert_eq!(WriteOrigin::from_db(None), None);
+        assert_eq!(WriteOrigin::from_db(Some("")), None);
+        assert_eq!(WriteOrigin::from_db(Some("Minted")), None);
     }
 
     #[test]
