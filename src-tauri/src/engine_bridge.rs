@@ -14861,6 +14861,67 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_base_unknown_predecessor_hands_over_and_the_successor_parks_without_a_request() {
+        // Ruling [t5-c2]: W parked at accept under rule 6a′, because its base cannot be known.
+        // N, saved on W's token, takes W's role at its claim and parks `base_unknown` there:
+        // no request goes out with a base the client knows is unknown.
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [74u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_uploaded_row(&bridge, &server, "unknown-base"); // version 1, its version not filled
+        let w = fp_save(&bridge, dir.path(), "unknown-base", "notes.txt", b"W", "0");
+        let w_op = bridge.db.list_operations_for_file("unknown-base").unwrap().remove(0);
+        assert_eq!(w_op.attempts, w_op.max_attempts, "rule 6a′ parked W at accept");
+        fp_save(
+            &bridge,
+            dir.path(),
+            "unknown-base",
+            "notes.txt",
+            b"W N",
+            w.token.as_deref().unwrap(),
+        );
+        let n_op = bridge.db.list_operations_for_file("unknown-base").unwrap().remove(1);
+        let logs = capture_logs_async(async {
+            bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+        })
+        .await;
+        let state = server.finish();
+        assert_eq!(
+            state.requests.len(),
+            0,
+            "no request with a base the client knows is unknown: {:?}",
+            state.init_summary()
+        );
+        let ops = bridge.db.list_operations_for_file("unknown-base").unwrap();
+        assert_eq!(ops.len(), 1, "W's op is gone; N remains");
+        assert_eq!(ops[0].op_id, n_op.op_id);
+        assert_eq!(ops[0].attempts, ops[0].max_attempts, "N parked at its claim");
+        assert_eq!(ops[0].last_error.as_deref(), Some("base_unknown"));
+        assert_eq!(
+            std::fs::read(ops[0].payload_path.as_deref().unwrap()).unwrap(),
+            b"W N",
+            "its bytes are kept"
+        );
+        assert!(
+            !std::path::Path::new(w_op.payload_path.as_deref().unwrap()).exists(),
+            "W's copy is released after the commit"
+        );
+        assert_eq!(logs.matches("queued write took over a parked one").count(), 1, "{logs}");
+        assert_eq!(
+            logs.lines()
+                .filter(|line| line.contains("upload parked")
+                    && line.contains(&n_op.op_id)
+                    && line.contains("base_unknown"))
+                .count(),
+            1,
+            "{logs}"
+        );
+    }
+
     // ── The accept transaction and the base mapping (spec §6.1, §6.3.1, §8.7 S1.1, S3, S5) ──
 
     #[tokio::test]

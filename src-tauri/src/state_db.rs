@@ -1017,6 +1017,8 @@ struct Predecessor {
     origin: Option<WriteOrigin>,
     /// Its `complete` answered and the resume row recorded it (§8.6 rule 1).
     completed: bool,
+    /// Why it parked, as the park recorded it (`last_error_class`).
+    park_reason: Option<String>,
 }
 
 fn predecessor_conn(conn: &Connection, write_id: &str) -> Result<Option<Predecessor>> {
@@ -1025,7 +1027,8 @@ fn predecessor_conn(conn: &Connection, write_id: &str) -> Result<Option<Predeces
                 q.base_version, q.base_object_version_id, q.after_write_id, q.base_pending,
                 q.attempts, q.max_attempts, q.write_origin,
                 EXISTS (SELECT 1 FROM upload_resume r
-                        WHERE r.op_id = q.op_id AND r.completed_version IS NOT NULL)
+                        WHERE r.op_id = q.op_id AND r.completed_version IS NOT NULL),
+                q.last_error_class
          FROM operation_queue q WHERE q.write_id = ?1",
         params![write_id],
         |row| {
@@ -1044,6 +1047,7 @@ fn predecessor_conn(conn: &Connection, write_id: &str) -> Result<Option<Predeces
                 max_attempts: row.get(11)?,
                 origin: WriteOrigin::from_db(row.get::<_, Option<String>>(12)?.as_deref()),
                 completed: row.get(13)?,
+                park_reason: row.get(14)?,
             })
         },
     )
@@ -3979,6 +3983,12 @@ impl StateDb {
                         params![op_id],
                         pending_operation_from_row,
                     )?;
+                    // Ruling [t5-c2]: W parked because its base cannot be known. This op now
+                    // carries that base, so it parks the same way here, and no request goes
+                    // out with it. Keyed on W's recorded reason, never on an inherited 0.
+                    if pred.park_reason.as_deref() == Some(ParkReason::BaseUnknown.as_str()) {
+                        return park_in_claim(tx, &op, ParkReason::BaseUnknown, took_over, now);
+                    }
                     write = finder_write_conn(&tx, op_id)?;
                 }
             }
