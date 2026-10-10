@@ -33,6 +33,28 @@ pub(crate) fn finder_open_outcome(answer: Result<bool, FpError>, nothing_there: 
     }
 }
 
+/// The sentence a failed "Open in Finder" says on a Mac: the same words as the button's toast
+/// (`FINDER_OPEN_FAILED` in `src/finderSetupCopy.ts`; a test keeps the two equal). The error behind it is a bare domain
+/// and code and is never shown.
+pub(crate) const OPEN_FAILED_SENTENCE: &str = "Beebeeb couldn’t open its Finder location.";
+
+/// The title of the alert the menu's "Open in Finder" raises when it fails.
+pub(crate) const MENU_OPEN_FAILED_TITLE: &str = "Open in Finder";
+
+/// What the menu's "Open in Finder" shows the person when its work ended in `result` (task 1885 fix round 1, I2): on a
+/// Mac an `Err` is an alert with the title and the one sentence; success shows nothing, and so does Windows or Linux,
+/// whose menu keeps logging its failure as before. The menu has no window to put a toast in (it works with every window
+/// closed), so the alert is native, like the Sign-out menu action's.
+pub(crate) fn menu_open_failure_alert(
+    result: &Result<(), String>,
+    on_a_mac: bool,
+) -> Option<(&'static str, &'static str)> {
+    match result {
+        Err(_) if on_a_mac => Some((MENU_OPEN_FAILED_TITLE, OPEN_FAILED_SENTENCE)),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,6 +102,81 @@ mod tests {
         assert_eq!(
             finder_open_outcome(Err(FpError::app(app_code::OP_TIMEOUT, OS_TEXT)), NOTHING_TO_OPEN),
             Err(format!("{APP_DOMAIN} {}", app_code::OP_TIMEOUT))
+        );
+    }
+
+    /// Fix round 1 (I2): a failed menu open is shown, on a Mac, with the button's sentence; a success and the other
+    /// platforms show nothing.
+    #[test]
+    fn test_1885_a_failed_menu_open_on_a_mac_is_an_alert_with_the_one_sentence() {
+        assert_eq!(
+            menu_open_failure_alert(&Err("io.beebeeb.bridge 6".to_string()), true),
+            Some((MENU_OPEN_FAILED_TITLE, OPEN_FAILED_SENTENCE))
+        );
+        assert_eq!(
+            menu_open_failure_alert(&Err(NOTHING_TO_OPEN.to_string()), true),
+            Some((MENU_OPEN_FAILED_TITLE, OPEN_FAILED_SENTENCE)),
+            "also when macOS reports no location"
+        );
+        assert_eq!(menu_open_failure_alert(&Ok(()), true), None, "a success says nothing");
+        assert_eq!(
+            menu_open_failure_alert(&Err("Not configured on this PC yet".to_string()), false),
+            None,
+            "Windows and Linux keep logging"
+        );
+        let shown = format!("{OPEN_FAILED_SENTENCE}{MENU_OPEN_FAILED_TITLE}");
+        assert!(
+            !shown.contains("bridge") && !shown.contains("NS") && !shown.contains('/'),
+            "the alert never carries an error code or a path: {shown}"
+        );
+    }
+
+    /// Fix round 1 (I2): the Rust sentence is the frontend's `FINDER_OPEN_FAILED`, character for character.
+    #[test]
+    fn test_1885_the_menu_alert_says_what_the_buttons_toast_says() {
+        let copy = read("../src/finderSetupCopy.ts");
+        let line = copy
+            .lines()
+            .find(|line| line.starts_with("export const FINDER_OPEN_FAILED"))
+            .expect("the frontend's constant");
+        let sentence = line.split('\'').nth(1).expect("a quoted sentence");
+        assert_eq!(sentence, OPEN_FAILED_SENTENCE);
+    }
+
+    /// Fix round 1 (I2), in the menu: the OpenFolder arm runs the open on the blocking pool, then hands the result to
+    /// `show_menu_open_failure` before returning it to the logger, and that function raises the native alert for the
+    /// alert `menu_open_failure_alert` describes.
+    #[test]
+    fn test_1885_the_menus_open_folder_shows_a_failure_before_it_logs_it() {
+        use crate::finder_setup_command_tests::{body_between, without_items};
+        use crate::source_pin::squeeze;
+        let production = without_items(&read("src/lib.rs"), &["#[cfg(test)]", "#[cfg(all(test"]);
+        let arm = squeeze(body_between(
+            &production,
+            "DesktopMenuAction::OpenFolder =>",
+            "DesktopMenuAction::UploadFiles",
+        ));
+        let open = arm
+            .find(&squeeze(
+                "on_the_blocking_pool(OPEN_FOLDER_FAILED, open_current_finder_location).await",
+            ))
+            .expect("the open runs on the blocking pool, and the arm waits for it");
+        let show = arm
+            .find(&squeeze("show_menu_open_failure(&app, &result);"))
+            .expect("the arm shows a failure");
+        let give_back = arm.rfind("result").expect("the arm returns the result");
+        assert!(open < show, "the failure is shown after the open ended: {arm}");
+        assert!(
+            show < give_back,
+            "the result goes on to the logger after it is shown: {arm}"
+        );
+        let shower = squeeze(body_between(&production, "fn show_menu_open_failure(", "\n}\n"));
+        assert!(
+            shower.contains(&squeeze(
+                "finder_open::menu_open_failure_alert(result, cfg!(target_os = \"macos\"))"
+            )) && shower.contains(".dialog()")
+                && shower.contains(&squeeze("MessageDialogKind::Error")),
+            "the alert is native, an error dialog, for exactly what the pure function says: {shower}"
         );
     }
 

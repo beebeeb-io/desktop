@@ -13774,11 +13774,14 @@ fn handle_desktop_menu_action(app: &tauri::AppHandle, spec: &'static DesktopMenu
         }
         DesktopMenuAction::Quit => app.exit(0),
         DesktopMenuAction::OpenFolder => {
-            // Off the main thread: on macOS the read waits up to 3 s for the bridge gate.
-            spawn_menu_task(
-                spec.id,
-                on_the_blocking_pool(OPEN_FOLDER_FAILED, open_current_finder_location),
-            );
+            let app = app.clone();
+            // Off the main thread: on macOS the open waits up to 3 s for the bridge gate and 5 s for LaunchServices.
+            // A failure is shown (task 1885, I2) before it is logged: the menu has no window to put it in.
+            spawn_menu_task(spec.id, async move {
+                let result = on_the_blocking_pool(OPEN_FOLDER_FAILED, open_current_finder_location).await;
+                show_menu_open_failure(&app, &result);
+                result
+            });
         }
         DesktopMenuAction::UploadFiles => {
             let app = app.clone();
@@ -13804,6 +13807,20 @@ where
     tauri::async_runtime::spawn(async move {
         log_menu_result(menu_id, fut.await);
     });
+}
+
+/// A failed "Open in Finder" from the menu, shown to the person (task 1885, I2): a native alert, because the menu works
+/// with every window closed and so has no window to put a toast in. It is the Sign-out menu action's kind of alert, and
+/// carries the button's one sentence, never the error behind it (which is logged by the caller).
+fn show_menu_open_failure(app: &tauri::AppHandle, result: &Result<(), String>) {
+    let Some((title, message)) = finder_open::menu_open_failure_alert(result, cfg!(target_os = "macos")) else {
+        return;
+    };
+    app.dialog()
+        .message(message)
+        .title(title)
+        .kind(tauri_plugin_dialog::MessageDialogKind::Error)
+        .show(|_| {});
 }
 
 fn log_menu_result(menu_id: &str, result: Result<(), String>) {
@@ -17613,8 +17630,10 @@ mod finder_setup_command_tests {
             "the menu's \"Open in Finder\" does not run inline on the main thread:\n{open_folder}"
         );
         assert!(
-            squeeze(open_folder).contains(&squeeze("spawn_menu_task(spec.id, on_the_blocking_pool("))
-                && open_folder.contains("open_current_finder_location"),
+            squeeze(open_folder).contains(&squeeze("spawn_menu_task(spec.id, async move {"))
+                && squeeze(open_folder).contains(&squeeze(
+                    "on_the_blocking_pool(OPEN_FOLDER_FAILED, open_current_finder_location).await"
+                )),
             "the menu's \"Open in Finder\" is spawned onto the blocking pool:\n{open_folder}"
         );
         assert_eq!(
