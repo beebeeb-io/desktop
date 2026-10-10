@@ -64,6 +64,18 @@ impl SessionToken {
     }
 }
 
+impl zeroize::Zeroize for SessionToken {
+    fn zeroize(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl Drop for SessionToken {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(self);
+    }
+}
+
 impl fmt::Debug for SessionToken {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("SessionToken(<redacted>)")
@@ -82,7 +94,9 @@ impl SecretBytes {
         Ok(Self(bytes))
     }
 
-    pub fn new_master_key(bytes: [u8; MASTER_KEY_BYTES]) -> Self {
+    /// The vault key, copied once into the wiped buffer (`Drop` zeroizes it). Borrowed, so the caller's array is the
+    /// only other copy and stays the caller's to wipe: no by-value copy is left on this function's stack.
+    pub fn new_master_key(bytes: &[u8; MASTER_KEY_BYTES]) -> Self {
         Self(bytes.to_vec())
     }
 
@@ -91,9 +105,16 @@ impl SecretBytes {
     }
 }
 
+impl zeroize::Zeroize for SecretBytes {
+    fn zeroize(&mut self) {
+        self.0.zeroize();
+    }
+}
+
 impl Drop for SecretBytes {
     fn drop(&mut self) {
-        self.0.fill(0);
+        // Volatile writes (`zeroize`): a plain fill before the free may be removed as a dead store.
+        zeroize::Zeroize::zeroize(self);
     }
 }
 
@@ -115,7 +136,9 @@ pub trait AuthSecretStore: Send + Sync {
     /// recovered on the auto-unlock path. Default impls below provide
     /// backward-compatible behaviour for any store that predates this entry.
     fn save_account_email(&self, _email: &str) -> AuthResult<()> {
-        Err(AuthStoreError::Unsupported("account email storage not supported by this store"))
+        Err(AuthStoreError::Unsupported(
+            "account email storage not supported by this store",
+        ))
     }
     /// Read the persisted account email. Returns `Ok(None)` when none was ever
     /// stored (an existing session created before this entry existed), so the
@@ -128,6 +151,46 @@ pub trait AuthSecretStore: Send + Sync {
     fn delete_account_email(&self) -> AuthResult<()> {
         Ok(())
     }
+    /// Is a session token stored? A store that can answer without reading the secret does (the real macOS Keychain
+    /// asks the item's attributes); the default reads it and drops it at once (`SessionToken` wipes itself).
+    fn holds_session_token(&self) -> AuthResult<bool> {
+        self.load_session_token().map(|token| token.is_some())
+    }
+    /// Is a vault key stored? Same contract as [`Self::holds_session_token`] (`SecretBytes` wipes itself).
+    fn holds_wrapped_master_key(&self) -> AuthResult<bool> {
+        self.load_wrapped_master_key().map(|key| key.is_some())
+    }
+    /// Is an account email stored? Same contract as [`Self::holds_session_token`].
+    fn holds_account_email(&self) -> AuthResult<bool> {
+        self.load_account_email().map(|email| email.is_some())
+    }
+}
+
+/// One rule for every "is anything of an account left?" probe: present is present; a store that cannot hold secrets
+/// (`Unsupported`) or has none (`NotFound`) holds none; any other answer counts as present, so a caller fails closed.
+fn presence(answer: AuthResult<bool>) -> bool {
+    match answer {
+        Ok(present) => present,
+        Err(AuthStoreError::Unsupported(_) | AuthStoreError::NotFound) => false,
+        Err(_) => true,
+    }
+}
+
+/// Does this store still hold a session token? Never reads the token where the store can avoid it; fails closed.
+pub fn holds_session_token<S: AuthSecretStore>(store: &S) -> bool {
+    presence(store.holds_session_token())
+}
+
+/// Does this store still hold an account email? Fails closed like [`holds_session_token`].
+pub fn holds_account_email<S: AuthSecretStore>(store: &S) -> bool {
+    presence(store.holds_account_email())
+}
+
+/// Does this store still hold a vault key? It never unlocks and never reads the key where the store can avoid it. A
+/// store that cannot hold secrets (`Unsupported`) or has none (`NotFound`) holds none. Any other answer counts as
+/// present, so a caller that asks whether anything of an account is left fails closed.
+pub fn holds_vault_key<S: AuthSecretStore>(store: &S) -> bool {
+    presence(store.holds_wrapped_master_key())
 }
 
 pub struct AuthVault<S: AuthSecretStore> {
@@ -202,6 +265,12 @@ impl<S: AuthSecretStore> AuthVault<S> {
         self.state = VaultLockState::Locked;
     }
 
+    /// Remove only the session token: R8, a token the server rejected, found at startup. The wrapped vault key and the
+    /// account email stay; [`Self::clear_session`] remains the full sign-out.
+    pub fn clear_session_token(&mut self) -> AuthResult<()> {
+        self.store.delete_session_token()
+    }
+
     pub fn clear_session(&mut self) -> AuthResult<()> {
         self.lock();
         self.store.delete_session_token()?;
@@ -264,12 +333,15 @@ fn account_path(prefix: Option<&str>, leaf: &str) -> String {
     }
 }
 
-#[cfg(target_os = "macos")]
+// The real Keychain store does not EXIST in a macOS test build (Task 9 fix round 2): a test that names it
+// fails to compile, instead of reaching the developer's own Keychain items. `TestKeychainStore` takes its
+// place (see `PlatformKeychainStore`).
+#[cfg(all(target_os = "macos", not(test)))]
 pub struct MacOsKeychainStore {
     account_prefix: Option<String>,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 impl MacOsKeychainStore {
     /// Legacy flat store (no account segmentation). Prefer `with_account`.
     pub fn new() -> Self {
@@ -288,17 +360,20 @@ impl MacOsKeychainStore {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 impl Default for MacOsKeychainStore {
     fn default() -> Self {
         Self::new()
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 impl AuthSecretStore for MacOsKeychainStore {
     fn save_session_token(&self, token: &SessionToken) -> AuthResult<()> {
-        macos_keychain::save(&self.account_path(SESSION_TOKEN_ACCOUNT), token.expose_for_request().as_bytes())
+        macos_keychain::save(
+            &self.account_path(SESSION_TOKEN_ACCOUNT),
+            token.expose_for_request().as_bytes(),
+        )
     }
 
     fn load_session_token(&self) -> AuthResult<Option<SessionToken>> {
@@ -316,7 +391,10 @@ impl AuthSecretStore for MacOsKeychainStore {
     }
 
     fn save_wrapped_master_key(&self, wrapped: SecretBytes) -> AuthResult<()> {
-        macos_keychain::save(&self.account_path(WRAPPED_MASTER_KEY_ACCOUNT), wrapped.expose_for_crypto())
+        macos_keychain::save(
+            &self.account_path(WRAPPED_MASTER_KEY_ACCOUNT),
+            wrapped.expose_for_crypto(),
+        )
     }
 
     fn load_wrapped_master_key(&self) -> AuthResult<Option<SecretBytes>> {
@@ -335,12 +413,26 @@ impl AuthSecretStore for MacOsKeychainStore {
 
     fn load_account_email(&self) -> AuthResult<Option<String>> {
         macos_keychain::load(&self.account_path(ACCOUNT_EMAIL_ACCOUNT))?
-            .map(|bytes| String::from_utf8(bytes).map_err(|_| AuthStoreError::InvalidSecret("account email is not UTF-8")))
+            .map(|bytes| {
+                String::from_utf8(bytes).map_err(|_| AuthStoreError::InvalidSecret("account email is not UTF-8"))
+            })
             .transpose()
     }
 
     fn delete_account_email(&self) -> AuthResult<()> {
         macos_keychain::delete(&self.account_path(ACCOUNT_EMAIL_ACCOUNT))
+    }
+
+    fn holds_session_token(&self) -> AuthResult<bool> {
+        macos_keychain::exists(&self.account_path(SESSION_TOKEN_ACCOUNT))
+    }
+
+    fn holds_wrapped_master_key(&self) -> AuthResult<bool> {
+        macos_keychain::exists(&self.account_path(WRAPPED_MASTER_KEY_ACCOUNT))
+    }
+
+    fn holds_account_email(&self) -> AuthResult<bool> {
+        macos_keychain::exists(&self.account_path(ACCOUNT_EMAIL_ACCOUNT))
     }
 }
 
@@ -459,7 +551,10 @@ impl Default for WindowsCredentialStore {
 #[cfg(target_os = "windows")]
 impl AuthSecretStore for WindowsCredentialStore {
     fn save_session_token(&self, token: &SessionToken) -> AuthResult<()> {
-        windows_credentials::save(&self.account_path(SESSION_TOKEN_ACCOUNT), token.expose_for_request().as_bytes())
+        windows_credentials::save(
+            &self.account_path(SESSION_TOKEN_ACCOUNT),
+            token.expose_for_request().as_bytes(),
+        )
     }
 
     fn load_session_token(&self) -> AuthResult<Option<SessionToken>> {
@@ -469,9 +564,11 @@ impl AuthSecretStore for WindowsCredentialStore {
                     .map_err(|e| {
                         // Bearer-token hygiene: the raw blob is the (malformed)
                         // session token. Recover the bytes from the error and
-                        // zero them before discarding so the secret doesn't
-                        // linger in a freed allocation.
-                        e.into_bytes().fill(0);
+                        // zero them (with `zeroize`, not a plain fill the
+                        // compiler may drop) before discarding so the secret
+                        // doesn't linger in a freed allocation.
+                        let mut raw = e.into_bytes();
+                        zeroize::Zeroize::zeroize(&mut raw);
                         AuthStoreError::InvalidSecret("session token is not UTF-8")
                     })
                     .and_then(SessionToken::new)
@@ -484,7 +581,10 @@ impl AuthSecretStore for WindowsCredentialStore {
     }
 
     fn save_wrapped_master_key(&self, wrapped: SecretBytes) -> AuthResult<()> {
-        windows_credentials::save(&self.account_path(WRAPPED_MASTER_KEY_ACCOUNT), wrapped.expose_for_crypto())
+        windows_credentials::save(
+            &self.account_path(WRAPPED_MASTER_KEY_ACCOUNT),
+            wrapped.expose_for_crypto(),
+        )
     }
 
     fn load_wrapped_master_key(&self) -> AuthResult<Option<SecretBytes>> {
@@ -503,7 +603,9 @@ impl AuthSecretStore for WindowsCredentialStore {
 
     fn load_account_email(&self) -> AuthResult<Option<String>> {
         windows_credentials::load(&self.account_path(ACCOUNT_EMAIL_ACCOUNT))?
-            .map(|bytes| String::from_utf8(bytes).map_err(|_| AuthStoreError::InvalidSecret("account email is not UTF-8")))
+            .map(|bytes| {
+                String::from_utf8(bytes).map_err(|_| AuthStoreError::InvalidSecret("account email is not UTF-8"))
+            })
             .transpose()
     }
 
@@ -578,6 +680,165 @@ impl AuthSecretStore for WindowsCredentialStore {
     }
 }
 
+// ── In-memory store for unit tests (macOS test builds) ───────────────────────
+
+/// Every item a test-build store holds, keyed `<service>/<account path>`, shared by the whole test
+/// process like the real Keychain is shared by the whole machine (but never touching it).
+#[cfg(all(test, target_os = "macos"))]
+static TEST_KEYCHAIN: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Which account ids a test-build store was asked about (`None` prefix: the legacy flat layout).
+/// Lets a test prove that the code it ran went through THIS store: `test_store_touched`.
+#[cfg(all(test, target_os = "macos"))]
+static TEST_KEYCHAIN_TOUCHED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<Option<String>>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Account prefixes whose email writes fail, as a locked Keychain's would (Task 12 fix round 2, item 3). Tests only.
+#[cfg(all(test, target_os = "macos"))]
+static TEST_KEYCHAIN_EMAIL_WRITES_FAIL: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<Option<String>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Make the test-build store's email writes for this account prefix fail (`true`) or work again (`false`).
+#[cfg(all(test, target_os = "macos"))]
+#[allow(dead_code)] // used by the lib's tests; `tests/keychain.rs` includes this file and does not
+pub fn test_fail_account_email_writes(account_prefix: Option<&str>, fail: bool) {
+    let mut failing = TEST_KEYCHAIN_EMAIL_WRITES_FAIL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if fail {
+        failing.insert(account_prefix.map(str::to_string));
+    } else {
+        failing.remove(&account_prefix.map(str::to_string));
+    }
+}
+
+/// Whether any test-build store with this account prefix has been read, written or cleared.
+#[cfg(all(test, target_os = "macos"))]
+#[allow(dead_code)] // used by the lib's tests; `tests/keychain.rs` includes this file and does not
+pub fn test_store_touched(account_prefix: Option<&str>) -> bool {
+    TEST_KEYCHAIN_TOUCHED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(&account_prefix.map(str::to_string))
+}
+
+/// The in-memory stand-in for `MacOsKeychainStore` (which does not exist in a test build), with the same semantics (absent → `None`, a
+/// delete of an absent item succeeds) and the same item layout.
+#[cfg(all(test, target_os = "macos"))]
+#[allow(dead_code)] // `tests/keychain.rs` includes this file and never uses it
+pub struct TestKeychainStore {
+    account_prefix: Option<String>,
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[allow(dead_code)]
+impl TestKeychainStore {
+    pub fn new() -> Self {
+        Self { account_prefix: None }
+    }
+
+    pub fn with_account(account_id: impl Into<String>) -> Self {
+        Self {
+            account_prefix: Some(account_id.into()),
+        }
+    }
+
+    fn key(&self, leaf: &str) -> String {
+        TEST_KEYCHAIN_TOUCHED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(self.account_prefix.clone());
+        format!(
+            "{KEYCHAIN_SERVICE}/{}",
+            account_path(self.account_prefix.as_deref(), leaf)
+        )
+    }
+
+    fn save(&self, leaf: &str, bytes: &[u8]) -> AuthResult<()> {
+        TEST_KEYCHAIN
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(self.key(leaf), bytes.to_vec());
+        Ok(())
+    }
+
+    fn load(&self, leaf: &str) -> Option<Vec<u8>> {
+        TEST_KEYCHAIN
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&self.key(leaf))
+            .cloned()
+    }
+
+    fn delete(&self, leaf: &str) -> AuthResult<()> {
+        TEST_KEYCHAIN
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.key(leaf));
+        Ok(())
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+impl AuthSecretStore for TestKeychainStore {
+    fn save_session_token(&self, token: &SessionToken) -> AuthResult<()> {
+        self.save(SESSION_TOKEN_ACCOUNT, token.expose_for_request().as_bytes())
+    }
+
+    fn load_session_token(&self) -> AuthResult<Option<SessionToken>> {
+        self.load(SESSION_TOKEN_ACCOUNT)
+            .map(|bytes| {
+                String::from_utf8(bytes)
+                    .map_err(|_| AuthStoreError::InvalidSecret("session token is not UTF-8"))
+                    .and_then(SessionToken::new)
+            })
+            .transpose()
+    }
+
+    fn delete_session_token(&self) -> AuthResult<()> {
+        self.delete(SESSION_TOKEN_ACCOUNT)
+    }
+
+    fn save_wrapped_master_key(&self, wrapped: SecretBytes) -> AuthResult<()> {
+        self.save(WRAPPED_MASTER_KEY_ACCOUNT, wrapped.expose_for_crypto())
+    }
+
+    fn load_wrapped_master_key(&self) -> AuthResult<Option<SecretBytes>> {
+        self.load(WRAPPED_MASTER_KEY_ACCOUNT).map(SecretBytes::new).transpose()
+    }
+
+    fn delete_wrapped_master_key(&self) -> AuthResult<()> {
+        self.delete(WRAPPED_MASTER_KEY_ACCOUNT)
+    }
+
+    fn save_account_email(&self, email: &str) -> AuthResult<()> {
+        if TEST_KEYCHAIN_EMAIL_WRITES_FAIL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&self.account_prefix)
+        {
+            return Err(AuthStoreError::Backend(
+                "the test Keychain refuses this write".to_string(),
+            ));
+        }
+        self.save(ACCOUNT_EMAIL_ACCOUNT, email.as_bytes())
+    }
+
+    fn load_account_email(&self) -> AuthResult<Option<String>> {
+        self.load(ACCOUNT_EMAIL_ACCOUNT)
+            .map(|bytes| {
+                String::from_utf8(bytes).map_err(|_| AuthStoreError::InvalidSecret("account email is not UTF-8"))
+            })
+            .transpose()
+    }
+
+    fn delete_account_email(&self) -> AuthResult<()> {
+        self.delete(ACCOUNT_EMAIL_ACCOUNT)
+    }
+}
+
 // ── Per-OS store selection ────────────────────────────────────────────────────
 //
 // `PlatformKeychainStore` is the concrete store the Tauri runner constructs.
@@ -591,8 +852,17 @@ impl AuthSecretStore for WindowsCredentialStore {
 // yet and stays fail-closed (no persistence, no silent plaintext fallback);
 // its behaviour is unchanged by the Windows work.
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 pub type PlatformKeychainStore = MacOsKeychainStore;
+
+/// A unit-test build of the lib never reaches the real Keychain: `PlatformKeychainStore` is an
+/// in-memory store, so no test can read, write or clear the developer's own items (the installed app
+/// uses the same service name; a full sign-out also clears the legacy flat items). Task 9 fix round 1:
+/// the sign-out tests wrote to the real Keychain through `clear_keychain_session`. Pinned by
+/// `keychain_isolation_tests` in `lib.rs`. Windows and Linux are unchanged.
+#[cfg(all(target_os = "macos", test))]
+#[allow(dead_code)] // `tests/keychain.rs` includes this file and never uses the alias
+pub type PlatformKeychainStore = TestKeychainStore;
 
 #[cfg(target_os = "windows")]
 pub type PlatformKeychainStore = WindowsCredentialStore;
@@ -665,18 +935,16 @@ pub fn migrate_legacy_keychain_to_account(account_id: &str) -> AuthResult<()> {
 ///      key while a recoverable legacy key still exists).
 /// 3.   Read the legacy token. `None` → nothing to migrate (fresh/clean) → Ok.
 ///      Read legacy key + email (each `Option`).
-/// 4.   WRITE new: token always; key/email only if legacy had them. `SecretBytes`
-///      is `!Clone`, so the loaded key is MOVED straight into the save (never
-///      bound + reused). `SessionToken` IS `Clone`.
+/// 4.   WRITE new: first remove any email the new store holds (it is not the
+///      legacy session's), then token always; key/email only if legacy had them.
+///      `SecretBytes` is `!Clone`, so the loaded key is MOVED straight into the
+///      save (never bound + reused). `SessionToken` IS `Clone`.
 /// 5.   VERIFY readback BEFORE any delete: new token present; if legacy had a
 ///      key → new key present; if legacy had email → new email present. ANY
 ///      failure → return `Err` WITHOUT deleting (vault still usable via the
 ///      legacy fallback).
 /// 6.   ONLY now delete the legacy trio (each delete idempotent; NotFound → Ok).
-pub fn migrate_legacy_keychain_between<N: AuthSecretStore, L: AuthSecretStore>(
-    new: &N,
-    legacy: &L,
-) -> AuthResult<()> {
+pub fn migrate_legacy_keychain_between<N: AuthSecretStore, L: AuthSecretStore>(new: &N, legacy: &L) -> AuthResult<()> {
     // ── Steps 1-2: short-circuit if already (effectively) migrated ──────────
     let new_token_present = new.load_session_token()?.is_some();
     if new_token_present {
@@ -705,6 +973,16 @@ pub fn migrate_legacy_keychain_between<N: AuthSecretStore, L: AuthSecretStore>(
     let email_existed = legacy_email.is_some();
 
     // ── Step 4: write the new (segmented) trio ──────────────────────────────
+    // An email the segmented store already holds belongs to whatever it held before, not to the legacy session:
+    // it is removed BEFORE the legacy token is written, so the token is never kept next to another account's email
+    // (the restore knows a stored session by its email). The legacy email, if any, is written below.
+    new.delete_account_email()?;
+    // A vault key the segmented store kept (a startup 401 keeps the key and drops the token) belongs to the session
+    // stored there before, not to the legacy one: with no legacy key it is removed BEFORE the legacy token is written,
+    // so the two are never paired (spec §5.6). A legacy key of its own replaces it below.
+    if !key_existed {
+        new.delete_wrapped_master_key()?;
+    }
     // Token: SessionToken is Clone, but we own `legacy_token` here so pass by ref.
     new.save_session_token(&legacy_token)?;
     // Key: SecretBytes is !Clone → MOVE the loaded value straight into save.
@@ -761,8 +1039,7 @@ mod windows_credentials {
 
     use super::{AuthResult, AuthStoreError, KEYCHAIN_SERVICE};
     use windows::Win32::Security::Credentials::{
-        CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_PERSIST_ENTERPRISE,
-        CRED_TYPE_GENERIC,
+        CRED_PERSIST_ENTERPRISE, CRED_TYPE_GENERIC, CREDENTIALW, CredDeleteW, CredFree, CredReadW, CredWriteW,
     };
     use windows::core::{HRESULT, PCWSTR, PWSTR};
 
@@ -816,14 +1093,7 @@ mod windows_credentials {
 
         // SAFETY: `target` is a valid NUL-terminated UTF-16 string that outlives
         // the call; `credential` receives an owned pointer we must `CredFree`.
-        let result = unsafe {
-            CredReadW(
-                PCWSTR(target.as_ptr()),
-                CRED_TYPE_GENERIC,
-                0,
-                &mut credential,
-            )
-        };
+        let result = unsafe { CredReadW(PCWSTR(target.as_ptr()), CRED_TYPE_GENERIC, 0, &mut credential) };
 
         if let Err(e) = result {
             // The windows 0.58 `CredReadW` wrapper already captured the failing
@@ -970,7 +1240,7 @@ mod tests {
         let mut vault = AuthVault::new(MemoryStore::default());
         vault.install_session(SessionToken::new("token").unwrap()).unwrap();
         vault
-            .store_wrapped_master_key(SecretBytes::new_master_key([7u8; MASTER_KEY_BYTES]))
+            .store_wrapped_master_key(SecretBytes::new_master_key(&[7u8; MASTER_KEY_BYTES]))
             .unwrap();
 
         assert_eq!(vault.lock_state(), VaultLockState::Locked);
@@ -1025,7 +1295,7 @@ mod tests {
         let vault = AuthVault::new(MemoryStore::default());
         vault.install_session(SessionToken::new("token").unwrap()).unwrap();
         vault
-            .store_wrapped_master_key(SecretBytes::new_master_key([7u8; MASTER_KEY_BYTES]))
+            .store_wrapped_master_key(SecretBytes::new_master_key(&[7u8; MASTER_KEY_BYTES]))
             .unwrap();
         // No email was ever stored.
         assert_eq!(vault.account_email().unwrap(), None);
@@ -1047,7 +1317,7 @@ mod tests {
         let mut vault = AuthVault::new(MemoryStore::default());
         vault.install_session(SessionToken::new("token").unwrap()).unwrap();
         vault
-            .store_wrapped_master_key(SecretBytes::new_master_key([7u8; MASTER_KEY_BYTES]))
+            .store_wrapped_master_key(SecretBytes::new_master_key(&[7u8; MASTER_KEY_BYTES]))
             .unwrap();
         vault.store_account_email("user@example.com").unwrap();
         assert_eq!(vault.account_email().unwrap().as_deref(), Some("user@example.com"));
@@ -1096,10 +1366,10 @@ mod tests {
 
     impl AuthSecretStore for KeyedMemoryStore {
         fn save_session_token(&self, token: &SessionToken) -> AuthResult<()> {
-            self.vault
-                .lock()
-                .unwrap()
-                .insert(self.key(SESSION_TOKEN_ACCOUNT), token.expose_for_request().as_bytes().to_vec());
+            self.vault.lock().unwrap().insert(
+                self.key(SESSION_TOKEN_ACCOUNT),
+                token.expose_for_request().as_bytes().to_vec(),
+            );
             Ok(())
         }
         fn load_session_token(&self) -> AuthResult<Option<SessionToken>> {
@@ -1116,10 +1386,10 @@ mod tests {
             Ok(())
         }
         fn save_wrapped_master_key(&self, wrapped: SecretBytes) -> AuthResult<()> {
-            self.vault
-                .lock()
-                .unwrap()
-                .insert(self.key(WRAPPED_MASTER_KEY_ACCOUNT), wrapped.expose_for_crypto().to_vec());
+            self.vault.lock().unwrap().insert(
+                self.key(WRAPPED_MASTER_KEY_ACCOUNT),
+                wrapped.expose_for_crypto().to_vec(),
+            );
             Ok(())
         }
         fn load_wrapped_master_key(&self) -> AuthResult<Option<SecretBytes>> {
@@ -1200,7 +1470,7 @@ mod tests {
         let legacy = KeyedMemoryStore::legacy(vault.clone());
         legacy.save_session_token(&SessionToken::new(token).unwrap()).unwrap();
         if let Some(k) = key {
-            legacy.save_wrapped_master_key(SecretBytes::new_master_key(k)).unwrap();
+            legacy.save_wrapped_master_key(SecretBytes::new_master_key(&k)).unwrap();
         }
         if let Some(e) = email {
             legacy.save_account_email(e).unwrap();
@@ -1226,17 +1496,17 @@ mod tests {
         migrate_legacy_keychain_between(&new, &legacy).expect("happy migration");
 
         // Segmented copies present + correct.
-        assert_eq!(
-            new.load_session_token().unwrap().unwrap().expose_for_request(),
-            "tok"
-        );
+        assert_eq!(new.load_session_token().unwrap().unwrap().expose_for_request(), "tok");
         assert_eq!(
             new.load_wrapped_master_key().unwrap().unwrap().expose_for_crypto(),
             &[9u8; 32]
         );
         assert_eq!(new.load_account_email().unwrap().as_deref(), Some("u@example.com"));
         // Legacy trio gone.
-        assert!(!legacy_present(&vault), "legacy entries must be deleted after migration");
+        assert!(
+            !legacy_present(&vault),
+            "legacy entries must be deleted after migration"
+        );
     }
 
     /// Idempotent: re-running after a complete migration is a no-op that leaves
@@ -1252,10 +1522,7 @@ mod tests {
         // Second run: short-circuits (new token + new key present) → no-op.
         migrate_legacy_keychain_between(&new, &legacy).expect("idempotent re-run");
 
-        assert_eq!(
-            new.load_session_token().unwrap().unwrap().expose_for_request(),
-            "tok"
-        );
+        assert_eq!(new.load_session_token().unwrap().unwrap().expose_for_request(), "tok");
         assert_eq!(
             new.load_wrapped_master_key().unwrap().unwrap().expose_for_crypto(),
             &[9u8; 32]
@@ -1275,7 +1542,8 @@ mod tests {
         {
             let new = KeyedMemoryStore::with_account(vault.clone(), TEST_ID);
             new.save_session_token(&SessionToken::new("tok").unwrap()).unwrap();
-            new.save_wrapped_master_key(SecretBytes::new_master_key([9u8; 32])).unwrap();
+            new.save_wrapped_master_key(SecretBytes::new_master_key(&[9u8; 32]))
+                .unwrap();
             new.save_account_email("u@example.com").unwrap();
         }
         assert!(legacy_present(&vault), "precondition: legacy still present pre-rerun");
@@ -1285,10 +1553,7 @@ mod tests {
         migrate_legacy_keychain_between(&new, &legacy).expect("re-run converges");
 
         assert!(!legacy_present(&vault), "leftover legacy swept on re-run");
-        assert_eq!(
-            new.load_session_token().unwrap().unwrap().expose_for_request(),
-            "tok"
-        );
+        assert_eq!(new.load_session_token().unwrap().unwrap().expose_for_request(), "tok");
     }
 
     /// Interrupted at step 6 (partway through deleting the legacy trio): some
@@ -1302,13 +1567,16 @@ mod tests {
         {
             let new = KeyedMemoryStore::with_account(vault.clone(), TEST_ID);
             new.save_session_token(&SessionToken::new("tok").unwrap()).unwrap();
-            new.save_wrapped_master_key(SecretBytes::new_master_key([9u8; 32])).unwrap();
+            new.save_wrapped_master_key(SecretBytes::new_master_key(&[9u8; 32]))
+                .unwrap();
             new.save_account_email("u@example.com").unwrap();
         }
         {
             let legacy = KeyedMemoryStore::legacy(vault.clone());
             // Only key + email remain (token was deleted before the crash).
-            legacy.save_wrapped_master_key(SecretBytes::new_master_key([9u8; 32])).unwrap();
+            legacy
+                .save_wrapped_master_key(SecretBytes::new_master_key(&[9u8; 32]))
+                .unwrap();
             legacy.save_account_email("u@example.com").unwrap();
         }
 
@@ -1398,10 +1666,7 @@ mod tests {
         let legacy = KeyedMemoryStore::legacy(vault.clone());
         migrate_legacy_keychain_between(&new, &legacy).expect("token-only migration");
 
-        assert_eq!(
-            new.load_session_token().unwrap().unwrap().expose_for_request(),
-            "tok"
-        );
+        assert_eq!(new.load_session_token().unwrap().unwrap().expose_for_request(), "tok");
         assert!(new.load_wrapped_master_key().unwrap().is_none());
         assert!(!legacy_present(&vault), "legacy token swept after token-only migration");
 
@@ -1418,9 +1683,453 @@ mod tests {
             "legacy-tok"
         );
     }
+
+    /// The segmented store keeps an email only next to the token it names. A legacy session migrates with its own
+    /// email, or with none when it has none: an email the segmented store already held (next to a token of its own,
+    /// or alone) is removed, never kept next to the legacy token.
+    #[test]
+    fn migration_never_keeps_another_email_next_to_the_legacy_token() {
+        for (name, new_token) in [
+            ("a segmented token without a key", Some("tok-new")),
+            ("an email alone", None),
+        ] {
+            let vault: SharedVault = Arc::new(Mutex::new(HashMap::new()));
+            seed_legacy(&vault, "tok-legacy", Some([9u8; 32]), None);
+            {
+                let new = KeyedMemoryStore::with_account(vault.clone(), TEST_ID);
+                if let Some(token) = new_token {
+                    new.save_session_token(&SessionToken::new(token).unwrap()).unwrap();
+                }
+                new.save_account_email("someone-else@beebeeb.io").unwrap();
+            }
+            let new = KeyedMemoryStore::with_account(vault.clone(), TEST_ID);
+            let legacy = KeyedMemoryStore::legacy(vault.clone());
+            migrate_legacy_keychain_between(&new, &legacy).expect("migrates");
+            assert_eq!(
+                new.load_session_token().unwrap().unwrap().expose_for_request(),
+                "tok-legacy",
+                "{name}"
+            );
+            assert_eq!(
+                new.load_account_email().unwrap(),
+                None,
+                "{name}: no email is kept next to the legacy token"
+            );
+            assert!(!legacy_present(&vault), "{name}");
+        }
+        // With an email of its own, the legacy session takes it along (the email that was there is replaced).
+        let vault: SharedVault = Arc::new(Mutex::new(HashMap::new()));
+        seed_legacy(&vault, "tok-legacy", Some([9u8; 32]), Some("u@beebeeb.io"));
+        KeyedMemoryStore::with_account(vault.clone(), TEST_ID)
+            .save_account_email("someone-else@beebeeb.io")
+            .unwrap();
+        let new = KeyedMemoryStore::with_account(vault.clone(), TEST_ID);
+        migrate_legacy_keychain_between(&new, &KeyedMemoryStore::legacy(vault.clone())).expect("migrates");
+        assert_eq!(new.load_account_email().unwrap().as_deref(), Some("u@beebeeb.io"));
+    }
+
+    /// A keyless legacy session never lands next to a vault key the segmented store kept (a startup 401 keeps the key
+    /// and drops only the token, R9): that key belonged to the segmented session, so it is removed before the legacy
+    /// token is written, and the restore can never pair the two (spec §5.6: a key is never left next to another
+    /// session). A legacy session with its own key replaces the kept one as before.
+    #[test]
+    fn a_keyless_legacy_token_never_lands_next_to_a_kept_vault_key() {
+        let vault: SharedVault = Arc::new(Mutex::new(HashMap::new()));
+        seed_legacy(&vault, "tok-legacy", None, None);
+        let new = KeyedMemoryStore::with_account(vault.clone(), TEST_ID);
+        new.save_wrapped_master_key(SecretBytes::new_master_key(&[4u8; 32]))
+            .unwrap();
+        migrate_legacy_keychain_between(&new, &KeyedMemoryStore::legacy(vault.clone())).expect("migrates");
+        assert_eq!(
+            new.load_session_token().unwrap().unwrap().expose_for_request(),
+            "tok-legacy"
+        );
+        assert!(
+            new.load_wrapped_master_key().unwrap().is_none(),
+            "the kept key is gone: it is never paired with the legacy token"
+        );
+        assert!(!legacy_present(&vault));
+
+        let vault: SharedVault = Arc::new(Mutex::new(HashMap::new()));
+        seed_legacy(&vault, "tok-legacy", Some([9u8; 32]), None);
+        let new = KeyedMemoryStore::with_account(vault.clone(), TEST_ID);
+        new.save_wrapped_master_key(SecretBytes::new_master_key(&[4u8; 32]))
+            .unwrap();
+        migrate_legacy_keychain_between(&new, &KeyedMemoryStore::legacy(vault.clone())).expect("migrates");
+        assert_eq!(
+            new.load_wrapped_master_key().unwrap().unwrap().expose_for_crypto(),
+            &[9u8; 32],
+            "a legacy key of its own replaces it"
+        );
+    }
+
+    /// R8: a token the server rejected at startup is removed alone; the vault key and the email stay.
+    #[test]
+    fn clearing_the_session_token_keeps_the_key_and_the_email() {
+        let mut vault = AuthVault::new(MemoryStore::default());
+        vault.install_session(SessionToken::new("tok").unwrap()).unwrap();
+        vault
+            .store_wrapped_master_key(SecretBytes::new_master_key(&[9u8; 32]))
+            .unwrap();
+        vault.store_account_email("sam@beebeeb.io").unwrap();
+        vault.clear_session_token().unwrap();
+        assert!(vault.session_token().unwrap().is_none(), "the revoked token is gone");
+        assert_eq!(vault.account_email().unwrap().as_deref(), Some("sam@beebeeb.io"));
+        assert!(
+            vault.store.load_wrapped_master_key().unwrap().is_some(),
+            "R8: the vault key stays"
+        );
+    }
+
+    /// After the token-only clear of a startup 401, the full clear of "Sign out and switch" leaves no vault key and no
+    /// email for the next account.
+    #[test]
+    fn a_full_clear_after_a_token_only_clear_leaves_no_vault_key() {
+        let mut vault = AuthVault::new(MemoryStore::default());
+        vault.install_session(SessionToken::new("tok-a").unwrap()).unwrap();
+        vault
+            .store_wrapped_master_key(SecretBytes::new_master_key(&[7u8; 32]))
+            .unwrap();
+        vault.store_account_email("sam@beebeeb.io").unwrap();
+        vault.clear_session_token().unwrap();
+        assert!(
+            holds_vault_key(&vault.store),
+            "R9: the revoked token goes, the key stays"
+        );
+        vault.clear_session().unwrap();
+        assert!(!holds_vault_key(&vault.store), "after the switch the old key is gone");
+        assert_eq!(vault.account_email().unwrap(), None);
+    }
+
+    /// Lead ruling 13 (Task 12): the vault key is BORROWED by the constructor that copies it into the wiped buffer, so
+    /// no by-value copy of the key is left behind in a frame that nobody wipes.
+    #[test]
+    fn the_master_key_constructor_borrows_the_key() {
+        let source = include_str!("keychain.rs").replace("\r\n", "\n");
+        let at = source
+            .find("pub fn new_master_key(bytes: &[u8; MASTER_KEY_BYTES]) -> Self {")
+            .expect("the constructor borrows");
+        let body = &source[at..];
+        let body = &body[body.find('{').unwrap() + 1..body.find("\n    }").unwrap()];
+        assert_eq!(
+            body.trim(),
+            "Self(bytes.to_vec())",
+            "the borrowed key goes straight into the wiped buffer, through no local copy"
+        );
+        // Read without whitespace: a by-value signature with more parameters is wrapped by rustfmt, which puts
+        // `bytes:` on a line of its own. (This file is also compiled into `tests/keychain.rs`, where the crate's
+        // `source_pin` helper does not exist.)
+        let squeezed: String = source.split_whitespace().collect();
+        assert!(
+            !squeezed.contains(concat!("new_master_key(bytes:[u8", ";")),
+            "no by-value constructor"
+        );
+    }
+
+    /// A retained vault key is seen without unlocking; a store that cannot hold secrets holds none; any other
+    /// read error counts as present, so a caller that asks "is anything of an account left?" fails closed.
+    #[test]
+    fn holds_vault_key_sees_a_retained_key_and_fails_closed() {
+        let vault = AuthVault::new(MemoryStore::default());
+        assert!(!holds_vault_key(&vault.store));
+        vault
+            .store_wrapped_master_key(SecretBytes::new_master_key(&[7u8; 32]))
+            .unwrap();
+        assert!(holds_vault_key(&vault.store));
+
+        struct Answers(fn() -> AuthStoreError);
+        impl AuthSecretStore for Answers {
+            fn save_session_token(&self, _: &SessionToken) -> AuthResult<()> {
+                Err((self.0)())
+            }
+            fn load_session_token(&self) -> AuthResult<Option<SessionToken>> {
+                Err((self.0)())
+            }
+            fn delete_session_token(&self) -> AuthResult<()> {
+                Err((self.0)())
+            }
+            fn save_wrapped_master_key(&self, _: SecretBytes) -> AuthResult<()> {
+                Err((self.0)())
+            }
+            fn load_wrapped_master_key(&self) -> AuthResult<Option<SecretBytes>> {
+                Err((self.0)())
+            }
+            fn delete_wrapped_master_key(&self) -> AuthResult<()> {
+                Err((self.0)())
+            }
+            fn save_account_email(&self, _: &str) -> AuthResult<()> {
+                Err((self.0)())
+            }
+            fn load_account_email(&self) -> AuthResult<Option<String>> {
+                Err((self.0)())
+            }
+            fn delete_account_email(&self) -> AuthResult<()> {
+                Err((self.0)())
+            }
+        }
+        assert!(!holds_vault_key(&Answers(|| AuthStoreError::Unsupported(
+            "no keychain here"
+        ))));
+        assert!(!holds_vault_key(&Answers(|| AuthStoreError::NotFound)));
+        assert!(
+            holds_vault_key(&Answers(|| AuthStoreError::Backend("keychain locked".into()))),
+            "fail closed"
+        );
+    }
+
+    /// A store that answers the three presence questions and PANICS on any read of the secret itself: a presence check
+    /// that reads key or token bytes would fail the test that uses it.
+    struct PresenceOnly {
+        token: fn() -> AuthResult<bool>,
+        key: fn() -> AuthResult<bool>,
+        email: fn() -> AuthResult<bool>,
+    }
+
+    impl PresenceOnly {
+        const ABSENT: fn() -> AuthResult<bool> = || Ok(false);
+    }
+
+    impl AuthSecretStore for PresenceOnly {
+        fn save_session_token(&self, _: &SessionToken) -> AuthResult<()> {
+            unreachable!("no write")
+        }
+        fn load_session_token(&self) -> AuthResult<Option<SessionToken>> {
+            panic!("a presence check must not read the token")
+        }
+        fn delete_session_token(&self) -> AuthResult<()> {
+            unreachable!("no write")
+        }
+        fn save_wrapped_master_key(&self, _: SecretBytes) -> AuthResult<()> {
+            unreachable!("no write")
+        }
+        fn load_wrapped_master_key(&self) -> AuthResult<Option<SecretBytes>> {
+            panic!("a presence check must not read the key")
+        }
+        fn delete_wrapped_master_key(&self) -> AuthResult<()> {
+            unreachable!("no write")
+        }
+        fn load_account_email(&self) -> AuthResult<Option<String>> {
+            panic!("a presence check must not read the email")
+        }
+        fn holds_session_token(&self) -> AuthResult<bool> {
+            (self.token)()
+        }
+        fn holds_wrapped_master_key(&self) -> AuthResult<bool> {
+            (self.key)()
+        }
+        fn holds_account_email(&self) -> AuthResult<bool> {
+            (self.email)()
+        }
+    }
+
+    /// The three presence probes behind a sign-in's "is anything of an account left?" share one rule: present is
+    /// present, a store that cannot hold secrets or has none holds none, and ANY other answer counts as present
+    /// (fail closed). Each probe is checked on its own, so a probe that fails open is seen.
+    #[test]
+    fn every_presence_probe_sees_a_retained_item_and_fails_closed() {
+        type Probe = fn(&PresenceOnly) -> bool;
+        type Answer = fn() -> AuthResult<bool>;
+        type Build = fn(Answer) -> PresenceOnly;
+        let probes: [(&str, Probe, Build); 3] = [
+            (
+                "the session token",
+                |s| holds_session_token(s),
+                |answer| PresenceOnly {
+                    token: answer,
+                    key: PresenceOnly::ABSENT,
+                    email: PresenceOnly::ABSENT,
+                },
+            ),
+            (
+                "the vault key",
+                |s| holds_vault_key(s),
+                |answer| PresenceOnly {
+                    token: PresenceOnly::ABSENT,
+                    key: answer,
+                    email: PresenceOnly::ABSENT,
+                },
+            ),
+            (
+                "the account email",
+                |s| holds_account_email(s),
+                |answer| PresenceOnly {
+                    token: PresenceOnly::ABSENT,
+                    key: PresenceOnly::ABSENT,
+                    email: answer,
+                },
+            ),
+        ];
+        for (name, probe, store_with) in probes {
+            assert!(probe(&store_with(|| Ok(true))), "{name}: present is present");
+            assert!(!probe(&store_with(|| Ok(false))), "{name}: absent is absent");
+            assert!(
+                !probe(&store_with(|| Err(AuthStoreError::Unsupported("no keychain here")))),
+                "{name}: a store that cannot hold it holds none"
+            );
+            assert!(
+                !probe(&store_with(|| Err(AuthStoreError::NotFound))),
+                "{name}: not found is absent"
+            );
+            assert!(
+                probe(&store_with(|| Err(AuthStoreError::Backend("keychain locked".into())))),
+                "{name}: a locked store fails closed"
+            );
+            assert!(
+                probe(&store_with(|| Err(AuthStoreError::InvalidSecret("not UTF-8")))),
+                "{name}: an unreadable item fails closed"
+            );
+        }
+    }
+
+    /// A store that implements only the reads (every older store) gets presence from the default, which reads the
+    /// item and drops it at once: its answers follow the read's, errors included.
+    #[test]
+    fn the_default_presence_answers_follow_the_reads_and_fail_closed() {
+        let vault = AuthVault::new(MemoryStore::default());
+        assert!(
+            !holds_session_token(&vault.store) && !holds_vault_key(&vault.store) && !holds_account_email(&vault.store)
+        );
+        vault.install_session(SessionToken::new("tok").unwrap()).unwrap();
+        vault.store_account_email("sam@beebeeb.io").unwrap();
+        assert!(
+            holds_session_token(&vault.store) && holds_account_email(&vault.store) && !holds_vault_key(&vault.store)
+        );
+
+        struct Reads(fn() -> AuthStoreError);
+        impl AuthSecretStore for Reads {
+            fn save_session_token(&self, _: &SessionToken) -> AuthResult<()> {
+                Err((self.0)())
+            }
+            fn load_session_token(&self) -> AuthResult<Option<SessionToken>> {
+                Err((self.0)())
+            }
+            fn delete_session_token(&self) -> AuthResult<()> {
+                Err((self.0)())
+            }
+            fn save_wrapped_master_key(&self, _: SecretBytes) -> AuthResult<()> {
+                Err((self.0)())
+            }
+            fn load_wrapped_master_key(&self) -> AuthResult<Option<SecretBytes>> {
+                Err((self.0)())
+            }
+            fn delete_wrapped_master_key(&self) -> AuthResult<()> {
+                Err((self.0)())
+            }
+            fn save_account_email(&self, _: &str) -> AuthResult<()> {
+                Err((self.0)())
+            }
+            fn load_account_email(&self) -> AuthResult<Option<String>> {
+                Err((self.0)())
+            }
+            fn delete_account_email(&self) -> AuthResult<()> {
+                Err((self.0)())
+            }
+        }
+        let locked = Reads(|| AuthStoreError::Backend("keychain locked".into()));
+        assert!(
+            holds_session_token(&locked) && holds_vault_key(&locked) && holds_account_email(&locked),
+            "a read error counts as present"
+        );
+        let nothing = Reads(|| AuthStoreError::NotFound);
+        assert!(!holds_session_token(&nothing) && !holds_vault_key(&nothing) && !holds_account_email(&nothing));
+    }
+
+    /// The session token wipes itself: `zeroize` empties its text, and its `Drop` calls it.
+    #[test]
+    fn a_session_token_is_wiped_when_it_goes() {
+        use zeroize::Zeroize as _;
+        let mut token = SessionToken::new("a-secret-session-token").unwrap();
+        token.zeroize();
+        assert_eq!(token.expose_for_request(), "", "the text is gone");
+        let source = include_str!("keychain.rs").replace("\r\n", "\n");
+        let drop_impl = &source[source
+            .find("impl Drop for SessionToken {")
+            .expect("the token wipes on drop")..];
+        let drop_impl = &drop_impl[..drop_impl.find("\n}\n").unwrap()];
+        assert!(drop_impl.contains("zeroize::Zeroize::zeroize(self)"), "{drop_impl}");
+    }
+
+    /// A secret is wiped with the `zeroize` crate (volatile writes the optimizer may not drop), never with a plain fill
+    /// before the free, which a compiler may remove as a dead store: `SecretBytes` wipes itself on drop, the macOS read
+    /// that fails to free, and the Windows read that fails to decode. No plain fill is left in this file.
+    #[test]
+    fn secrets_are_wiped_with_zeroize_never_a_plain_fill() {
+        use zeroize::Zeroize as _;
+        let mut key = SecretBytes::new_master_key(&[7u8; MASTER_KEY_BYTES]);
+        key.zeroize();
+        assert!(key.expose_for_crypto().is_empty(), "the bytes are gone");
+        let source = include_str!("keychain.rs").replace("\r\n", "\n");
+        let plain_fill = concat!(".fill", "(0)");
+        assert_eq!(
+            source.matches(plain_fill).count(),
+            0,
+            "a plain fill is still used to wipe a secret"
+        );
+        let secret_bytes_drop = &source[source
+            .find("impl Drop for SecretBytes {")
+            .expect("SecretBytes wipes on drop")..];
+        let secret_bytes_drop = &secret_bytes_drop[..secret_bytes_drop.find("\n}\n").unwrap()];
+        assert!(
+            secret_bytes_drop.contains("zeroize::Zeroize::zeroize(self)"),
+            "{secret_bytes_drop}"
+        );
+        let windows = &source[source
+            .find("impl AuthSecretStore for WindowsCredentialStore {")
+            .expect("the Windows store")..];
+        let windows = &windows[..windows.find("\n}\n").unwrap()];
+        assert!(
+            windows.contains("zeroize::Zeroize::zeroize(&mut raw)"),
+            "the Windows read that fails to decode wipes with zeroize:\n{windows}"
+        );
+    }
+
+    /// The real macOS Keychain answers "is it there?" from the item's attributes (`find_item`), never by reading the
+    /// secret, and a free that fails after a read wipes what it copied before it reports the error.
+    #[test]
+    fn the_real_macos_store_answers_presence_without_reading_the_secret() {
+        let source = include_str!("keychain.rs").replace("\r\n", "\n");
+        let store = &source[source
+            .find("impl AuthSecretStore for MacOsKeychainStore {")
+            .expect("the real store")..];
+        let store = &store[..store.find("\n}\n").unwrap()];
+        for presence in [
+            "fn holds_session_token(",
+            "fn holds_wrapped_master_key(",
+            "fn holds_account_email(",
+        ] {
+            let body = &store[store
+                .find(presence)
+                .unwrap_or_else(|| panic!("the real store answers {presence}"))..];
+            let body = &body[..body.find("\n    }").unwrap_or(body.len())];
+            assert!(
+                body.contains("macos_keychain::exists("),
+                "{presence} asks the item's attributes:\n{body}"
+            );
+            assert!(
+                !body.contains("::load("),
+                "{presence} must not read the secret:\n{body}"
+            );
+        }
+        // The FFI module is the last thing in the file, after this test, so the LAST match is the real one.
+        let macos = &source[source.rfind("mod macos_keychain {").expect("the macOS FFI module")..];
+        let ffi = &macos[macos
+            .find("pub fn exists(account: &str)")
+            .expect("the attribute-only query")..];
+        let exists = &ffi[..ffi.find("\n    }\n").unwrap()];
+        assert!(
+            exists.contains("find_item(") && !exists.contains("password_data"),
+            "{exists}"
+        );
+        let load = &macos[macos.find("pub fn load(account: &str)").unwrap()..];
+        let load = &load[..load.find("\n    }\n").unwrap()];
+        assert!(
+            load.contains("zeroize::Zeroize::zeroize(&mut bytes)"),
+            "a failed free wipes the copy before the error is returned:\n{load}"
+        );
+    }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 mod macos_keychain {
     use super::{AuthResult, AuthStoreError, KEYCHAIN_SERVICE};
     use std::ffi::c_void;
@@ -1504,6 +2213,18 @@ mod macos_keychain {
         status_ok("update generic password", update_status)
     }
 
+    /// Is there an item for `account`? Asks the item's attributes only: no password out-parameter, so no secret is
+    /// read (the same lookup `delete` and `save` use to find the item).
+    pub fn exists(account: &str) -> AuthResult<bool> {
+        match find_item(account.as_bytes())? {
+            Some(item) => {
+                unsafe { CFRelease(item.cast()) };
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
     pub fn load(account: &str) -> AuthResult<Option<Vec<u8>>> {
         let service = KEYCHAIN_SERVICE.as_bytes();
         let account = account.as_bytes();
@@ -1525,9 +2246,15 @@ mod macos_keychain {
             return Ok(None);
         }
         status_ok("find generic password", status)?;
-        let bytes = unsafe { std::slice::from_raw_parts(password_data.cast::<u8>(), password_len as usize).to_vec() };
+        let mut bytes =
+            unsafe { std::slice::from_raw_parts(password_data.cast::<u8>(), password_len as usize).to_vec() };
         let free_status = unsafe { SecKeychainItemFreeContent(ptr::null_mut(), password_data) };
-        status_ok("free keychain content", free_status)?;
+        if let Err(error) = status_ok("free keychain content", free_status) {
+            // The copy is a secret: it is wiped (with `zeroize`, not a plain fill the compiler may drop before the
+            // free) before the error leaves, not dropped as it is.
+            zeroize::Zeroize::zeroize(&mut bytes);
+            return Err(error);
+        }
         Ok(Some(bytes))
     }
 

@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 import { command, commandUnavailableLabel, type SharedRoot } from '../desktopApi'
+import { finderShowFileFailedToast } from '../finderSetup'
+import { usePlatformName } from '../platform'
 import { useToast } from '../windows/ui'
 
 function permissionLabel(permission: SharedRoot['permission']): string {
@@ -14,6 +16,7 @@ function kindLabel(kind: SharedRoot['kind']): string {
 
 export default function Shared() {
   const { showToast } = useToast()
+  const platform = usePlatformName()
   const [roots, setRoots] = useState<SharedRoot[]>([])
   const [loading, setLoading] = useState(true)
   // Survives the split: still carries the LOAD failure, which must persist because the
@@ -40,11 +43,16 @@ export default function Shared() {
       path: root.finder_path,
     })
     if (!result.ok) {
-      showToast({
-        variant: 'error',
-        title: 'Couldn’t open in Finder',
-        message: result.unsupported ? commandUnavailableLabel('open_in_finder') : result.reason,
-      })
+      // A Mac's error is never shown: the toast is the one sentence (task 17b, fix round 1).
+      showToast(
+        platform === 'macos'
+          ? finderShowFileFailedToast()
+          : {
+              variant: 'error',
+              title: 'Couldn’t open in Finder',
+              message: result.unsupported ? commandUnavailableLabel('open_in_finder') : result.reason,
+            },
+      )
     }
   }
 

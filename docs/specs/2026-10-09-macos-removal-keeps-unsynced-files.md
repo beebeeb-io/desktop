@@ -98,17 +98,37 @@ Every call uses `PreserveDirtyUserData`:
 
 | Removal | Code path |
 | --- | --- |
-| Sign-out: Settings → Account, the compact window's Account page, the menu's "Sign out", and "Sign in again" after a session ended (`forceReauth`). On `main` an account switch is a sign-out followed by a sign-in, so it takes this path too | `clear_session_impl` → `remove_file_provider_domain` → `beebeeb_fp_remove` |
-| Repair: Settings → Sync → "Repair…", and the compact window's Finder location page | `reset_macos_integration` → `beebeeb_fp_remove` |
-| The rollback when Add to Finder succeeded but the sync engine could not start | `install_finder_location` → `beebeeb_fp_remove` |
+| ~~Sign-out: Settings → Account, the compact window's Account page, the menu's "Sign out", and "Sign in again" after a session ended (`forceReauth`). On `main` an account switch is a sign-out followed by a sign-in, so it takes this path too~~ | ~~`clear_session_impl` → `remove_file_provider_domain` → `beebeeb_fp_remove`~~ |
+| ~~Repair: Settings → Sync → "Repair…", and the compact window's Finder location page~~ | ~~`reset_macos_integration` → `beebeeb_fp_remove`~~ |
+| ~~The rollback when Add to Finder succeeded but the sync engine could not start~~ | ~~`install_finder_location` → `beebeeb_fp_remove`~~ |
 | The app-start sweep of domains that are not ours (task 1698) | `cleanup_stale_domains` → `beebeeb_fp_remove_domain_by_id` |
 | `BeebeebFileProviderCtl remove` | `DomainControlTool.remove()` |
-| The cleanup inside Add to Finder, when a domain this attempt added does not come up in time (added 2026-10-10) | `macos_file_provider::install` → `remove()` → `beebeeb_fp_remove` |
+| ~~The cleanup inside Add to Finder, when a domain this attempt added does not come up in time (added 2026-10-10)~~ | ~~`macos_file_provider::install` → `remove()` → `beebeeb_fp_remove`~~ |
 
-The last row was missing from the first version of this table. That cleanup always used the
+~~The last row was missing from the first version of this table. That cleanup always used the
 preserving mode (it goes through `remove()`), but it dropped the folder macOS reported. It now
-surfaces it like the add rollback does (§5).
+surfaces it like the add rollback does (§5).~~
 — lane impl-1882-r2, 2026-10-10, per lead ruling [1882-r2] (review M1)
+
+**With the Finder reconciler** (`docs/specs/2026-10-06-macos-finder-setup-reconciler.md`, spec A),
+a Mac has no Add to Finder (spec A, R5), so the struck rollback and cleanup rows have no code
+on a Mac: `macos_file_provider::install` is gone, and `install_finder_location` refuses there.
+Windows and Linux keep `install_finder_location` and its rollback, but they have no File Provider,
+so nothing is kept. Sign-out and Repair now remove through the reconciler, and the reconciler also
+removes on its own. Every removal the reconciler makes ends in its one operation, `Op::RemoveDomain`
+→ `macos_file_provider::remove()` → `beebeeb_fp_remove`, with the preserving mode:
+
+| Removal (macOS) | Code path |
+| --- | --- |
+| Sign-out, every entry point above, the account switch included | `clear_session_impl` → `finder_remove_for(SignOut)` → the reconciler |
+| Repair, both entry points above | `reset_macos_integration` → `finder_remove_for(Repair)` → the reconciler |
+| A check (at launch or later) that finds Beebeeb in Finder while the person signed out by choice | the reconciler's `Op::Observe` → `Op::RemoveDomain` |
+| A check that finds the previous domain still there while a removal is owed (a sign-out whose removal was not confirmed): removed first, then a fresh check adds Beebeeb back | the reconciler's `Op::Observe` → `Op::RemoveDomain` |
+| The Repair the account binding asks for when the local data belongs to another account (spec A §5.6) | `bind_data_to_session` → `Trigger::Repair` → the reconciler |
+
+The app-start sweep and `BeebeebFileProviderCtl remove` are unchanged.
+
+— lane rebase-1882-fix, 2026-10-10, per lead brief (rebase re-review Minor 5)
 
 **What "dirty" covers, and what it does not.** macOS keeps what it still holds as not synced: an
 item whose create or modify the extension failed or never finished. In 0.8.11 every Finder create
@@ -199,8 +219,9 @@ The folder's path follows on its own line, in mono wherever the surface has mono
 | Sign-out, every entry point | The app's own alert, title "Files kept on this Mac", body = the sentence, a blank line, the path. One alert per sign-out. Also when the sign-out fails after the removal: the alert comes first, then the error as before (added 2026-10-10, review I1). |
 | Repair in Settings | ~~An inline status note under "Beebeeb in Finder" in the Sync tab: the sentence, then the path in mono. It sits next to the existing Repair note (`repairNote`), which is unchanged.~~ The Sync tab's kept-folder row (below), which the Repair refreshes. The existing Repair note (`repairNote`) is unchanged. (2026-10-10, review I2) |
 | Repair in the compact window (Finder location page) | Appended to that page's existing result line: the sentence, then the path. |
-| The Add-to-Finder rollback | The same alert as sign-out. The install failure is reported as before. |
-| The cleanup inside Add to Finder (§3, added 2026-10-10) | The same alert as sign-out. The install failure is reported as before. |
+| ~~The Add-to-Finder rollback~~ | ~~The same alert as sign-out. The install failure is reported as before.~~ |
+| ~~The cleanup inside Add to Finder (§3, added 2026-10-10)~~ | ~~The same alert as sign-out. The install failure is reported as before.~~ |
+| A reconciler removal nobody waits for: a check's own removal, an owed one, the account binding's Repair, or a sign-out or Repair whose wait ended before the removal did (§3; added 2026-10-10, rebase re-review Minor 5) | The same alert as sign-out, once. A removal that finishes after the reconciler's time limit raises it too, when it finishes (rebase re-review I1). |
 | The app-start sweep | The same alert, once per folder kept. |
 | Every removal above (added 2026-10-10, review I2) | Also the kept-folder row in Settings › Sync, until the person dismisses it (below). |
 | `BeebeebFileProviderCtl remove` | Prints `preserved: <path>` on its own stdout, after `removed`. It is a developer tool. Since 2026-10-10 it prints that line only when files were kept by the rule below. ~~When macOS reported a folder that is missing or empty, it prints `nothing kept: macOS reported <path>, which is missing` (or `… empty`).~~ When macOS reported a folder that is still missing after the re-checks, it prints `nothing kept: macOS reported <path>, which is missing`. A folder that exists, empty or not, is `preserved:` like the app (re-review D1, lead ruling, 2026-10-10). |
@@ -239,18 +260,38 @@ warning).~~
   - Repair: one warning.
 - **A reply that carries an error and a folder:** the folder is checked and surfaced like any
   other. The error is reported as before.
-- **Repair fails after it removed the Finder location** (the config save fails; added 2026-10-10,
+
+— lane impl-1882-r2, 2026-10-10, per lead ruling [1882-r2] (device K-F2, review I3, M2, M3)
+(moved here from below the r4 and Q1 notes, which it never signed — lane rebase-1882-fix,
+2026-10-10, per lead brief, rebase re-review Minor 5)
+
+- ~~**Repair fails after it removed the Finder location** (the config save fails; added 2026-10-10,
   1882 r4): the kept folder is shown first (the alert, and saved for the row if the save allows),
-  as for a failed sign-out. ~~The error then read "Nothing was changed that you need to undo", which
-  is false: the Finder location is gone.~~ The error now says so: "Beebeeb was removed from
+  as for a failed sign-out.~~ ~~The error then read "Nothing was changed that you need to undo", which
+  is false: the Finder location is gone.~~ ~~The error now says so: "Beebeeb was removed from
   Finder" / "Repair couldn’t finish, so Beebeeb is no longer in Finder. Choose Add to Finder to add
   it back." (exact copy and the pre-removal case: `docs/specs/2026-10-02-macos-settings-dialogs.md`,
-  Dialog 2). A Repair that fails before the removal, or whose removal itself failed, keeps the old
-  note.
+  Dialog 2).~~ ~~A Repair that fails before the removal, or whose removal itself failed, keeps the old
+  note.~~
 
 — lead ruling, 2026-10-10 (1882 r4)
 
-— lane impl-1882-r2, 2026-10-10, per lead ruling [1882-r2] (device K-F2, review I3, M2, M3)
+On a Mac (spec A, `docs/specs/2026-10-06-macos-finder-setup-reconciler.md`) Repair goes through the
+Finder reconciler, saves nothing after its removal, and the reconciler puts Beebeeb back in Finder
+by itself. There is no Add to Finder on a Mac (spec A, R5). So this note never appears on a Mac, and
+no Mac surface names a button for it: a Repair that fails shows the old note. ~~Windows and Linux keep
+the r4 note, which names the page's own button: "Beebeeb was removed from Finder" / "Repair
+couldn’t finish, so Beebeeb is no longer in Finder. Choose Install in Finder to add it back."~~
+
+— lead ruling, 2026-10-10 (rebase onto spec A, Q1)
+
+**Repair never fails after a removal that worked, on any platform**, so the r4 note is gone
+everywhere. On a Mac, Repair saves nothing after its removal (above). On Windows and Linux there is
+no File Provider domain: `remove_file_provider_domain` always fails there, so the r4 code was never
+sent. The `repair_failed_after_removal` code, the copy above and both surfaces' branches for it are
+removed. A Repair that fails is reported as it was before r4, with the failing step's own error.
+
+— lead ruling, 2026-10-10 (rebase re-review Minor 4)
 
 **The kept-folder row in Settings › Sync** (2026-10-10):
 
@@ -267,6 +308,7 @@ warning).~~
     callers of the config are not converted; they still replace the file with the copy they loaded.
 - **When it appears:** after a sign-out, a Repair, the add rollback, the cleanup inside Add to
   Finder, or the app-start sweep, whenever files were kept by the rule above.
+- **Every save of the row's folder tells the windows** (`kept-folder-changed`, no payload), so an open Sync tab follows a Repair started from another window, such as the compact window's Finder page. Repair still raises no alert; the page's result line carries the folder. — lead ruling, 2026-10-10 (device RB3-F1)
 - **What it shows:** Settings › Sync, under "Beebeeb in Finder", a status note with ~~the sentence~~
   its own sentence (below), the path in mono and a "Dismiss" button. The path wraps (`white-space: normal;
   overflow-wrap: anywhere`) and is never cut off. The row stays until the person dismisses it. A

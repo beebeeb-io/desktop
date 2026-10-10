@@ -39,6 +39,62 @@ pub enum FinderSetup {
     UserDisabled,
 }
 
+impl FinderSetup {
+    /// The snake_case name serde writes, for the lifecycle log.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Missing => "missing",
+            Self::Adding => "adding",
+            Self::Failed => "failed",
+            Self::UserDisabled => "user_disabled",
+        }
+    }
+}
+
+/// Why Finder setup failed (spec 2026-10-06 §6.2). One closed vocabulary shared by the
+/// reconciler, the popover snapshot, the lifecycle log, "Copy details" and the frontend
+/// copy module (`src/finderSetupCopy.ts`). `UserDisabled` becomes the
+/// `FinderSetup::UserDisabled` state, never `Failed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FinderFailureReason {
+    ExtensionLoading,
+    UserDisabled,
+    NotInApplications,
+    FolderTaken,
+    Signing,
+    Timeout,
+    /// Also what a reason this build does not know reads as (one a later build wrote, read after a downgrade): one
+    /// unknown reason must never make all of `desktop.toml` unreadable.
+    #[serde(other)]
+    Unknown,
+}
+
+impl FinderFailureReason {
+    pub const ALL: [Self; 7] = [
+        Self::ExtensionLoading,
+        Self::UserDisabled,
+        Self::NotInApplications,
+        Self::FolderTaken,
+        Self::Signing,
+        Self::Timeout,
+        Self::Unknown,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ExtensionLoading => "extension_loading",
+            Self::UserDisabled => "user_disabled",
+            Self::NotInApplications => "not_in_applications",
+            Self::FolderTaken => "folder_taken",
+            Self::Signing => "signing",
+            Self::Timeout => "timeout",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// Why the engine cannot reach Beebeeb, when it cannot (spec section 9: NEW in
 /// slice 2). `ServerDidNotAnswer` covers timeouts and 5xx; `Offline` is a
 /// connection-level failure.
@@ -56,6 +112,8 @@ pub struct PopoverSnapshot {
     pub auth_expired: bool,
     pub vault_unlocked: bool,
     pub finder: FinderSetup,
+    /// Why setup failed, alongside `finder` (spec 2026-10-06 §5.2); `PopoverSnapshot` stays `Copy`.
+    pub finder_reason: Option<FinderFailureReason>,
     pub paused: bool,
     pub storage_full: bool,
     pub connectivity: Connectivity,
@@ -78,6 +136,7 @@ impl PopoverSnapshot {
             auth_expired: false,
             vault_unlocked: true,
             finder: FinderSetup::Ready,
+            finder_reason: None,
             paused: false,
             storage_full: false,
             connectivity: Connectivity::Online,
@@ -383,5 +442,30 @@ mod tests {
             assert!(seen.insert(format!("{p:?}")), "{p:?} listed twice");
         }
         assert_eq!(seen.len(), 13);
+    }
+
+    #[test]
+    fn finder_names_match_what_serde_writes() {
+        for setup in [
+            FinderSetup::Ready,
+            FinderSetup::Missing,
+            FinderSetup::Adding,
+            FinderSetup::Failed,
+            FinderSetup::UserDisabled,
+        ] {
+            assert_eq!(
+                serde_json::to_value(setup).unwrap(),
+                serde_json::Value::String(setup.as_str().into())
+            );
+        }
+        for reason in FinderFailureReason::ALL {
+            assert_eq!(
+                serde_json::to_value(reason).unwrap(),
+                serde_json::Value::String(reason.as_str().into())
+            );
+            let back: FinderFailureReason =
+                serde_json::from_value(serde_json::Value::String(reason.as_str().into())).unwrap();
+            assert_eq!(back, reason);
+        }
     }
 }

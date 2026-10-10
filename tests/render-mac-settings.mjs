@@ -58,13 +58,18 @@ assert.equal(FAKE_PATH.length, 60)
 assert.equal(FAKE_TOKEN.length, 60)
 const LONG_EMAIL = `${'x'.repeat(48)}@example.eu` // 60 characters, no break opportunity before the @
 
-const finderMissing = { installed: false, path: FAKE_PATH, status: 'missing', last_error: null, last_attempt_at: null, reason_category: null }
+// The reconciler's `FinderSetupView` (finder_setup_state), one per state a person can meet. There
+// is no "missing" fixture: on macOS nothing is added by hand, so the instant before the first
+// check reads as Adding (spec 2026-10-06, R5).
+const finderView = (over = {}) => ({ setup: 'missing', reason: null, launch_location: 'applications', attempt: 1, max_attempts: 1, last_failure: null, ...over })
 const FINDERS = {
-  installed: { installed: true, path: FAKE_PATH, status: 'installed', last_error: null, last_attempt_at: 3, reason_category: null },
-  missing: finderMissing,
-  failed: { installed: false, path: FAKE_PATH, status: 'error', last_error: `Timed out waiting for the Beebeeb File Provider domain at ${FAKE_PATH}`, last_attempt_at: 2, reason_category: 'timeout' },
-  failedLongCategory: { installed: false, path: FAKE_PATH, status: 'error', last_error: FAKE_PATH, last_attempt_at: 2, reason_category: FAKE_TOKEN },
-  userDisabled: { installed: false, path: FAKE_PATH, status: 'error', last_error: 'Beebeeb is turned off in System Settings. Open Login Items & Extensions, turn on Beebeeb under File Providers, then try again.', last_attempt_at: 4, reason_category: 'user_disabled' },
+  installed: finderView({ setup: 'ready' }),
+  adding: finderView({ setup: 'adding' }),
+  failed: finderView({ setup: 'failed', reason: 'timeout', attempt: 4, max_attempts: 4 }),
+  failedLongCategory: finderView({ setup: 'failed', reason: 'not_in_applications' }),
+  folderTaken: finderView({ setup: 'failed', reason: 'folder_taken' }),
+  userDisabled: finderView({ setup: 'user_disabled', reason: 'user_disabled' }),
+  unreadable: 'unreadable', // finder_setup_state rejects: "Couldn’t check Finder." with one Try again
 }
 const tree = (n) => [
   { id: 'f1', name: FAKE_TOKEN, is_folder: true, excluded: false, size_bytes: 1, file_count: 1, on_disk_bytes: 0, pinned: true, children: [
@@ -94,13 +99,15 @@ const SCENARIOS = [
   { name: 'account', tab: 'Account', shot: 'account', has: [LONG_EMAIL, 'Basic plan · renews 14 Oct 2026', 'Vault is unlocked', 'Sign out…'] },
   { name: 'account-locked', tab: 'Account', fx: { snapshot: snapshot({ account: { vault_unlocked: false }, storage: null }) }, has: ['Vault is locked', 'Unlock'] },
   { name: 'sync', tab: 'Sync', shot: 'sync', has: ['Beebeeb in Finder', 'Added', 'Repair…', '2 folders', 'Choose folders…', 'Speed'], hasNot: [FAKE_PATH] },
-  { name: 'sync-failed', tab: 'Sync', fx: { finder: FINDERS.failed }, has: ['Couldn’t add Beebeeb to Finder', 'macOS didn’t respond in time.', 'reason: timeout', 'Try again'], hasNot: [FAKE_PATH, 'File Provider'], errorSurfaces: 1 },
-  { name: 'sync-failed-long-category', tab: 'Sync', fx: { finder: FINDERS.failedLongCategory }, has: ['Couldn’t add Beebeeb to Finder', 'macOS couldn’t finish setting it up.'], hasNot: [FAKE_PATH], errorSurfaces: 1 },
-  { name: 'sync-user-disabled', tab: 'Sync', fx: { finder: FINDERS.userDisabled }, has: ['Open Login Items & Extensions'], errorSurfaces: 0 },
-  { name: 'sync-missing', tab: 'Sync', fx: { finder: FINDERS.missing }, has: ['Add to Finder'], errorSurfaces: 0 },
-  { name: 'sync-repaired', tab: 'Sync', fx: { repair: { ...baseFixture.repair, warnings: [`Could not remove ${FAKE_PATH}`] } }, act: async (p) => { await p.getByRole('button', { name: 'Repair…' }).click(); await p.getByRole('button', { name: 'Repair', exact: true }).click(); await p.getByText('3 changes waiting to upload were kept.').waitFor() }, has: [FAKE_PATH, 'Add to Finder'] },
+  { name: 'sync-failed', tab: 'Sync', fx: { finder: FINDERS.failed }, has: ['macOS didn’t finish adding Beebeeb to Finder.', 'reason: timeout', 'Try again'], hasNot: [FAKE_PATH, 'File Provider', 'Couldn’t add Beebeeb to Finder', 'Add to Finder'], errorSurfaces: 1 },
+  { name: 'sync-failed-long-reason', tab: 'Sync', fx: { finder: FINDERS.failedLongCategory }, has: ['Beebeeb is running from the disk image. Move it to Applications, then open it again.', 'reason: not_in_applications', 'Show in Finder'], hasNot: [FAKE_PATH, 'Add to Finder'], errorSurfaces: 1 },
+  { name: 'sync-folder-taken', tab: 'Sync', fx: { finder: FINDERS.folderTaken }, has: ['An older Beebeeb installation still holds Beebeeb’s place in Finder. Contact support and we’ll help you clear it.', 'reason: folder_taken', 'Copy details'], hasNot: [FAKE_PATH, 'Try again', 'Add to Finder'], errorSurfaces: 1 },
+  { name: 'sync-user-disabled', tab: 'Sync', fx: { finder: FINDERS.userDisabled }, has: ['Beebeeb is turned off in System Settings.', 'Open System Settings'], hasNot: ['Add to Finder', 'Login Items'], errorSurfaces: 0 },
+  { name: 'sync-adding', tab: 'Sync', fx: { finder: FINDERS.adding }, has: ['Adding Beebeeb to Finder…', 'Adding…'], hasNot: ['Add to Finder', 'Try again'], errorSurfaces: 0 },
+  { name: 'sync-unavailable', tab: 'Sync', fx: { finder: FINDERS.unreadable }, has: ['Couldn’t check Finder.', 'Try again'], hasNot: ['Adding', 'Add to Finder'], errorSurfaces: 0 },
+  { name: 'sync-repaired', tab: 'Sync', fx: { repair: { ...baseFixture.repair, warnings: [`Could not remove ${FAKE_PATH}`] } }, act: async (p) => { await p.getByRole('button', { name: 'Repair…' }).click(); await p.getByRole('button', { name: 'Repair', exact: true }).click(); await p.getByText('3 changes waiting to upload were kept.').waitFor() }, has: [FAKE_PATH, 'Adding…'], hasNot: ['Add to Finder'] },
   { name: 'sync-chooser', tab: 'Sync', fx: { tree: tree(12) }, act: async (p) => { await p.getByRole('button', { name: 'Choose folders…' }).click(); await p.getByRole('dialog').waitFor() }, has: ['Keep on this Mac', FAKE_TOKEN] },
-  { name: 'sync-repair-confirm', tab: 'Sync', act: async (p) => { await p.getByRole('button', { name: 'Repair…' }).click(); await p.getByRole('dialog').waitFor() }, has: ['Repair Beebeeb in Finder?', 'turns off Open Beebeeb at login'] },
+  { name: 'sync-repair-confirm', tab: 'Sync', act: async (p) => { await p.getByRole('button', { name: 'Repair…' }).click(); await p.getByRole('dialog').waitFor() }, has: ['Repair Beebeeb in Finder?', 'turns off Open Beebeeb at login, then adds itself back to Finder. Files waiting to upload are kept.'], hasNot: ['You can add it back afterwards'] },
   { name: 'about', tab: 'About', shot: 'about', has: ['Beebeeb for Mac', 'Version 0.8.6', 'Get help', 'Export a support bundle', 'Paths, file and folder names and sign-in tokens are removed'] },
   { name: 'about-update', tab: 'About', fx: { update: { status: 'update_available', current_version: '0.8.6', channel: 'stable', version: '0.8.7', body: '', release_notes_url: 'https://example.invalid' } }, act: async (p) => { await p.getByRole('button', { name: 'Check for updates' }).click(); await p.getByText('Version 0.8.7 is available.').waitFor() }, has: ['Restart to update'] },
 ]
@@ -128,9 +135,8 @@ function installBackend({ caps, fx }) {
         case 'set_desktop_config': f.config = a.config; return null
         case 'autostart_enabled': return true
         case 'toggle_autostart': return false
-        case 'finder_location_state': return f.finder
-        case 'install_finder_location': return f.finder
-        case 'reset_macos_integration': f.finder = { installed: false, path: null, status: 'missing', last_error: null, last_attempt_at: null, reason_category: null }; return f.repair
+        case 'finder_setup_state': if (f.finder === 'unreadable') throw new Error('no reconciler'); return f.finder
+        case 'reset_macos_integration': f.finder = { setup: 'adding', reason: null, launch_location: 'applications', attempt: 1, max_attempts: 1, last_failure: null }; return f.repair // the reconciler adds Beebeeb back by itself
         case 'list_remote_tree': return f.tree
         case 'set_recursive_pin': return null
         case 'popover_snapshot': return f.snapshot

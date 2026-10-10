@@ -65,6 +65,7 @@ import SecurityView from './windows/views/SecurityView'
 import ActivityView from './windows/views/ActivityView'
 import SettingsView from './windows/views/SettingsView'
 import { usePlatformName, thisDeviceNoun } from './platform'
+import { finderOpenFailedToast } from './finderSetup'
 
 // ── Nav structure ───────────────────────────────────────────────────────────
 
@@ -504,6 +505,14 @@ function HomeView({ status, usage, storage }: { status: SyncStatus | null; usage
             <div style={{ fontSize: 16, fontWeight: 600, fontFamily: T.fontMono, color: T.ink }}>{v}</div>
           </div>
         ))}
+        {/* Must-render row 10 (lead ruling FT-row10): why sync did not start, when the engine start
+            was refused (on Windows: another account's local files on this PC). Rust's sentence,
+            verbatim, and no action. */}
+        {status?.engine_refusal && (
+          <div role="status" data-engine-refusal={status.engine_refusal.code} style={{ gridColumn: '1 / -1', fontSize: 12.5, lineHeight: 1.5, color: T.ink }}>
+            {status.engine_refusal.sentence}
+          </div>
+        )}
       </div>
 
       {/* Storage line (live when available) */}
@@ -640,11 +649,17 @@ function SyncFolderCard({ status: polledStatus }: { status: SyncStatus | null })
     const r = await command<void>('open_finder_location', isMacos ? undefined : { path: current!.sync_root })
     setOpening(false)
     if (!r.ok) {
-      showToast({
-        variant: 'error',
-        title: 'Couldn’t open folder',
-        message: r.unsupported ? commandUnavailableLabel('open_finder_location') : r.reason,
-      })
+      // A Mac's error is a redacted bridge code, never shown: the toast is the one sentence
+      // (task 17b). Windows/Linux keep the error text, which names a folder.
+      showToast(
+        isMacos
+          ? finderOpenFailedToast()
+          : {
+              variant: 'error',
+              title: 'Couldn’t open folder',
+              message: r.unsupported ? commandUnavailableLabel('open_finder_location') : r.reason,
+            },
+      )
     }
   }
 

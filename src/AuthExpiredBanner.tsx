@@ -12,11 +12,13 @@
  * Mirrors `UpdateBanner`'s pattern: no bar of its own, just a persistent
  * (non-dismissible, `durationMs: null`) toast via the shared toast system —
  * driven by the parent's already-polled `sync_status`, not its own poll.
- * The action button uses `forceReauth`, the EXACT SAME forced sign-in flow
- * as VersionCenter's "Sign in again" review action: clear the expired
- * session first, then open onboarding — never open onboarding on its own,
- * which would fast-forward an "unlocked, configured" user past the sign-in
- * form.
+ * The action button uses `forceReauth`, the EXACT SAME sign-in flow as
+ * VersionCenter's "Sign in again" review action. On macOS (R8, spec
+ * 2026-10-06) it opens sign-in in place and clears nothing: the same account
+ * keeps Finder, keys, cache and pending edits, and another account gets the
+ * switch warning. On Windows and Linux it clears the expired session first,
+ * then opens onboarding — never onboarding on its own, which would
+ * fast-forward an "unlocked, configured" user past the sign-in form.
  */
 
 import { useEffect } from 'react'
@@ -44,18 +46,22 @@ export default function AuthExpiredBanner({ authExpired }: { authExpired: boolea
         label: 'Sign in again',
         onClick: () => {
           void forceReauth().then((result) => {
-            if (!result.ok) {
-              // Surface the failure — the old handler ignored the result, so
-              // a failed clearSession (e.g. "Could not stop the sync
-              // engine…") left the user stuck with no feedback. The
-              // persistent banner itself stays up either way.
-              showToast({
-                id: AUTH_EXPIRED_REAUTH_ERROR_TOAST_ID,
-                variant: 'error',
-                title: "Couldn't start sign-in again",
-                message: result.reason,
-              })
+            if (result.ok) {
+              // FB-24: the expired session was cleared, but a step could not be confirmed. Said
+              // neutrally, never as "Couldn't …".
+              if (result.value.warning) showToast({ variant: 'info', message: result.value.warning.sentence })
+              return
             }
+            // Surface the failure — the old handler ignored the result, so
+            // a sign-out that did not happen (e.g. "Could not stop the sync
+            // engine…") left the user stuck with no feedback. The
+            // persistent banner itself stays up either way.
+            showToast({
+              id: AUTH_EXPIRED_REAUTH_ERROR_TOAST_ID,
+              variant: 'error',
+              title: "Couldn't start sign-in again",
+              message: result.reason,
+            })
           })
         },
       },

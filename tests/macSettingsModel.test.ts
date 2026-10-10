@@ -3,14 +3,15 @@
  * Each test pins one thing the window says or does; the mutation list in the task Notes names
  * the assertion that went red for each.
  */
+import { readFileSync } from 'node:fs'
 import { describe, expect, test } from 'bun:test'
-import type { FinderInstallState, VaultItem } from '../src/desktopApi'
+import type { VaultItem } from '../src/desktopApi'
+import type { FinderSetupView } from '../src/finderSetup'
+import { FINDER_REASON_COPY, FINDER_REPAIR_PARTIAL, FINDER_RESTING_LINE } from '../src/finderSetupCopy'
 import { DESKTOP_NOTIFICATION_PREF_META } from '../src/windows/notificationPreferenceMeta'
 import {
   accountInitial,
   DEFAULT_SETTINGS_TAB,
-  FINDER_FAILURE_TITLE,
-  finderFailureCopy,
   finderHint,
   finderRow,
   HELP_URL,
@@ -22,6 +23,7 @@ import {
   parseSettingsTab,
   planLine,
   REPAIR_BODY,
+  REPAIR_TITLE,
   repairNote,
   SETTINGS_TABS,
   settingsTabFromSearch,
@@ -33,16 +35,6 @@ import {
   tabAfterKey,
   updateRow,
 } from '../src/macSettingsModel'
-
-const state = (over: Partial<FinderInstallState> = {}): FinderInstallState => ({
-  installed: false,
-  path: '/Users/sam/Library/CloudStorage/Beebeeb',
-  status: 'missing',
-  last_error: null,
-  last_attempt_at: null,
-  reason_category: null,
-  ...over,
-})
 
 describe('tabs', () => {
   test('the window has exactly the four tabs of the spec, in order', () => {
@@ -90,64 +82,96 @@ describe('the mono reason line', () => {
   })
 })
 
-describe('Beebeeb in Finder', () => {
-  test('a timeout says what spec state f2 says, every other category one neutral sentence, both with the mono line', () => {
-    expect(FINDER_FAILURE_TITLE).toBe('Couldn’t add Beebeeb to Finder')
-    expect(finderFailureCopy('timeout')).toEqual({ sentence: 'macOS didn’t respond in time.', reason: 'reason: timeout' })
-    expect(finderFailureCopy('provisioning')).toEqual({ sentence: 'macOS couldn’t finish setting it up.', reason: 'reason: provisioning' })
-    expect(finderFailureCopy(null)).toEqual({ sentence: 'macOS couldn’t finish setting it up.', reason: null })
+describe('Beebeeb in Finder (spec 2026-10-06)', () => {
+  const v = (over: Partial<FinderSetupView> = {}): FinderSetupView => ({
+    setup: 'missing', reason: null, launch_location: 'applications', attempt: 1, max_attempts: 1, last_failure: null, ...over,
   })
 
-  test('one state per row, by precedence', () => {
-    expect(finderRow(null, false)).toEqual({ kind: 'loading' })
-    expect(finderRow(null, false, true)).toEqual({ kind: 'unavailable' })
-    expect(finderRow(state({ installed: true, status: 'installed' }), false)).toEqual({ kind: 'added' })
-    expect(finderRow(state(), false)).toEqual({ kind: 'missing' })
-    // An attempt in flight wins over whatever the last state said, even a saved failure.
-    expect(finderRow(state({ status: 'error', last_error: 'x', reason_category: 'timeout' }), true)).toEqual({ kind: 'adding' })
-    expect(finderRow(null, true)).toEqual({ kind: 'adding' })
+  test('one row per reconciler state, and never a "missing" row with an add button (R5)', () => {
+    expect(finderRow(null)).toEqual({ kind: 'loading' })
+    expect(finderRow(null, true)).toEqual({ kind: 'unavailable' })
+    expect(finderRow(v({ setup: 'ready' }))).toEqual({ kind: 'added' })
+    expect(finderRow(v({ setup: 'adding' }))).toEqual({ kind: 'adding' })
+    // FA-I2: a loaded Missing is a resting state (after a sign-out, a Lock, or with no keys here),
+    // so it is a quiet row with its one sentence and no button, never "Adding".
+    expect(finderRow(v({ setup: 'missing' }))).toEqual({ kind: 'resting' })
+    expect(finderHint(finderRow(v({ setup: 'missing' })))).toBe(FINDER_RESTING_LINE)
+    expect(finderRow(v({ setup: 'failed', reason: 'folder_taken' }))).toEqual({
+      kind: 'notice', tone: 'alert', reason: 'folder_taken',
+      sentence: FINDER_REASON_COPY.folder_taken.sentence, action: 'copy_details', actionLabel: 'Copy details',
+    })
+    expect(finderRow(v({ setup: 'user_disabled', reason: 'user_disabled' }))).toMatchObject({ kind: 'notice', tone: 'status', action: 'open_system_settings' })
   })
 
-  test('a saved failure becomes the failed row with its copy and never carries the raw error', () => {
-    const row = finderRow(
-      state({ status: 'error', last_error: 'Timed out waiting for the Beebeeb File Provider domain to become available', reason_category: 'timeout' }),
-      false,
-    )
-    expect(row).toEqual({ kind: 'failed', title: FINDER_FAILURE_TITLE, sentence: 'macOS didn’t respond in time.', reason: 'reason: timeout' })
-    expect(JSON.stringify(row)).not.toContain('File Provider')
+  test('a failure without a reason is the "unknown" notice, not a silent row', () => {
+    expect(finderRow(v({ setup: 'failed', reason: null }))).toMatchObject({ kind: 'notice', tone: 'alert', reason: 'unknown', action: 'try_again' })
   })
 
-  test('an error status with no saved message is still a failure, not "missing"', () => {
-    expect(finderRow(state({ status: 'error' }), false)).toMatchObject({ kind: 'failed', sentence: 'macOS couldn’t finish setting it up.' })
-  })
-
-  test('a user-disabled extension is its own fixable state, not a failure', () => {
-    const message = 'Beebeeb is turned off in System Settings.'
-    expect(finderRow(state({ status: 'error', last_error: message, reason_category: 'user_disabled' }), false)).toEqual({ kind: 'user_disabled', message })
+  test('a view that is there is always shown: loadFailed only speaks for "no view"', () => {
+    expect(finderRow(v({ setup: 'ready' }), true)).toEqual({ kind: 'added' })
   })
 
   test('the hint claims the vault is in Finder only once it is', () => {
     expect(finderHint({ kind: 'added' })).toBe('Your vault appears under Locations in Finder.')
-    expect(finderHint({ kind: 'missing' })).toBe('Add it to see your files in Finder like any other folder.')
-    expect(finderHint({ kind: 'adding' })).toBe('Add it to see your files in Finder like any other folder.')
-    expect(finderHint({ kind: 'failed', title: '', sentence: '', reason: null })).toBe('Add it to see your files in Finder like any other folder.')
+    expect(finderHint({ kind: 'adding' })).toBe('Adding Beebeeb to Finder…')
     expect(finderHint({ kind: 'loading' })).toBe('')
     expect(finderHint({ kind: 'unavailable' })).toBe('Couldn’t check Finder.')
+    expect(finderHint(finderRow(v({ setup: 'failed', reason: 'timeout' })))).toBe('')
   })
 
-  test('the Repair confirmation names the login item it turns off, and the kept uploads', () => {
-    expect(REPAIR_BODY).toContain('turns off Open Beebeeb at login')
-    expect(REPAIR_BODY).toContain('Files waiting to upload are kept')
+  test('no row, hint or notice ever offers to add or install by hand (R5)', () => {
+    const views = [v(), v({ setup: 'adding' }), v({ setup: 'ready' }), ...Object.keys(FINDER_REASON_COPY).map((reason) => v({ setup: 'failed', reason: reason as never }))]
+    for (const view of views) {
+      const row = finderRow(view)
+      expect(JSON.stringify(row)).not.toMatch(/Add to Finder|Install/)
+      expect(finderHint(row)).not.toMatch(/Add it|Add to Finder|Install/)
+    }
   })
 
-  test('after a repair: one neutral line, singular and plural, warnings appended, nothing when empty', () => {
+  test('the row carries no title and no raw error: one sentence and one action (spec §6.2)', () => {
+    const row = finderRow(v({ setup: 'failed', reason: 'timeout', last_failure: { reason: 'timeout', domain: 'NSFileProviderErrorDomain', code: -1001, at: 5 } }))
+    expect(Object.keys(row).sort()).toEqual(['action', 'actionLabel', 'kind', 'reason', 'sentence', 'tone'])
+    expect(JSON.stringify(row)).not.toContain('NSFileProviderErrorDomain')
+  })
+
+  test('Repair says what it does, names the login item, and that Beebeeb comes back by itself', () => {
+    expect(REPAIR_TITLE).toBe('Repair Beebeeb in Finder?')
+    expect(REPAIR_BODY).toBe(
+      'Beebeeb removes its Finder location and turns off Open Beebeeb at login, then adds itself back to Finder. Files waiting to upload are kept.',
+    )
+  })
+
+  test('the Repair body is the one the design artefact draws, byte for byte (design before code)', () => {
+    const html = readFileSync(new URL('../design/hifi/macos-settings-dialogs.html', import.meta.url), 'utf8')
+    expect(html).toContain(`<p class="sheet-copy">${REPAIR_BODY}</p>`)
+    expect(html).toContain(`body “${REPAIR_BODY}”`)
+    // The old promise (a manual add-back) is gone from the code and from the drawing.
+    expect(REPAIR_BODY).not.toContain('You can add it back afterwards')
+  })
+
+  test('after a repair: one neutral line, singular and plural, nothing when empty', () => {
     expect(repairNote({ pending_operations_preserved: 0, warnings: [] })).toBeNull()
     expect(repairNote({ pending_operations_preserved: 1, warnings: [] })).toBe('1 change waiting to upload was kept.')
     expect(repairNote({ pending_operations_preserved: 3, warnings: [] })).toBe('3 changes waiting to upload were kept.')
-    expect(repairNote({ pending_operations_preserved: 0, warnings: ['  ', 'Could not remove a file.'] })).toBe('Could not remove a file.')
-    expect(repairNote({ pending_operations_preserved: 2, warnings: ['Could not remove a file.'] })).toBe(
-      '2 changes waiting to upload were kept. Could not remove a file.',
+    expect(repairNote({ pending_operations_preserved: 0, warnings: ['  ', ''] })).toBeNull()
+  })
+
+  // Task 17b, fix round 1: Rust puts a bridge code and a cache path in `warnings` (lib.rs:3326, 3265).
+  // A Mac never shows them: any warning turns the line into one fixed sentence.
+  test('after a repair whose engine stop is unconfirmed: quit and reopen comes first (row 11)', () => {
+    expect(repairNote({ pending_operations_preserved: 2, warnings: [], engine_stop_unconfirmed: true })).toBe(
+      'Beebeeb’s sync didn’t confirm it stopped. Quit and reopen Beebeeb before syncing again.',
     )
+    expect(repairNote({ pending_operations_preserved: 0, warnings: ['x'], engine_stop_unconfirmed: true })).toBe(
+      `Beebeeb’s sync didn’t confirm it stopped. Quit and reopen Beebeeb before syncing again. ${FINDER_REPAIR_PARTIAL}`,
+    )
+  })
+
+  test('after a repair with warnings: the one fixed sentence, and none of the warning text', () => {
+    const leaks = ['io.beebeeb.bridge 3', '/Users/sam/Library/x.db']
+    expect(repairNote({ pending_operations_preserved: 0, warnings: leaks })).toBe(FINDER_REPAIR_PARTIAL)
+    expect(repairNote({ pending_operations_preserved: 2, warnings: ['  ', leaks[0]] })).toBe(FINDER_REPAIR_PARTIAL)
+    for (const leak of leaks) expect(repairNote({ pending_operations_preserved: 2, warnings: leaks })).not.toContain(leak)
   })
 })
 

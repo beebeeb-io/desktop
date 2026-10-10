@@ -314,7 +314,8 @@ describe('onboarding error boundary', () => {
       const Root = component(source, name, {
         React: { createElement }, OnboardingErrorBoundary, [`${name}View`]: View,
       })
-      const tree = Root()
+      // React always hands a component a props object; Onboarding reads `mode` from it (R8).
+      const tree = Root({})
       expect(tree.type).toBe(OnboardingErrorBoundary)
       expect(tree.props.children.type).toBe(View)
     })

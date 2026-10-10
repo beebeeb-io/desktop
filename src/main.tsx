@@ -57,7 +57,7 @@ void initializeDesktopThemeFromConfig()
 
 function HostOnboarding() {
   const caps = useCapabilities()
-  return <CapabilityGate route="onboarding">{caps?.host_os === 'windows' ? <WindowsFirstRun /> : <Onboarding />}</CapabilityGate>
+  return <CapabilityGate route="onboarding">{caps?.host_os === 'windows' ? <WindowsFirstRun /> : <Onboarding mode={params.get('mode') === 'reauth' ? 'reauth' : 'setup'} />}</CapabilityGate>
 }
 
 let component: ReactElement

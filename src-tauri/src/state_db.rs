@@ -20,14 +20,43 @@
 //! daemon's writes.
 
 use crate::diagnostic_redaction::{
-    allowed_label, classify_error_code, redact_for_export, redact_secrets_only, DiagnosticErrorCode, KnownNames,
-    PAUSE_REASON_LABELS, QUEUE_KIND_LABELS,
+    DiagnosticErrorCode, KnownNames, PAUSE_REASON_LABELS, QUEUE_KIND_LABELS, allowed_label, classify_error_code,
+    redact_for_export, redact_secrets_only,
 };
 use rusqlite::{Connection, OptionalExtension, Result, params};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
+
+/// R10 (spec 2026-10-06 §5.6): every table holding one account's data. `has_account_data` counts
+/// them and `clear_account_data` empties them. `every_table_is_classified_for_the_account_binding`
+/// fails when a new table is not listed here or in `DEVICE_TABLES`.
+const ACCOUNT_TABLES: [&str; 10] = [
+    "files",
+    "operation_queue",
+    "local_activity",
+    "transfer_activity",
+    "fp_changes",
+    "fp_sync_anchor",
+    "fp_materialized",
+    "upload_finalizations",
+    "staged_payloads",
+    "upload_resume",
+];
+/// Per-device tables: not counted as account data, emptied by a reset anyway.
+const DEVICE_TABLES: [&str; 1] = ["bandwidth_samples"];
+const OWNER_USER_ID_KEY: &str = "owner_user_id";
+const OWNER_EMAIL_KEY: &str = "owner_email";
+/// `PRAGMA user_version` once the one-time adoption window is over (see `adopt_owner_once`). It lives in the
+/// database header, not in a table, so no purge or reset can clear it. 0 is every database from before R10.
+const ADOPTION_CLOSED: i64 = 1;
+/// A Finder domain removal is owed before any engine may start (macOS; task 1834 fix round 1, F3). A `sync_state`
+/// row like the owner record: not account data, written in the same transaction as the reset that creates the debt.
+const FINDER_REMOVAL_OWED_KEY: &str = "finder_removal_owed";
+/// A clear that owed no removal (a sign-out whose Finder removal was confirmed) leaves this mark: the domain is
+/// known gone, so the next account's first start, onto an empty and unowned database, owes nothing. Not account data.
+const FINDER_DOMAIN_GONE_KEY: &str = "finder_domain_gone";
 
 pub const LOCAL_ACTIVITY_MAX_ROWS: usize = 200;
 /// Cap on `transfer_activity` (task 1683 slice 2). The popover shows five rows.
@@ -44,7 +73,6 @@ pub struct UploadFinalization {
     pub payload_path: String,
     pub stamped: bool,
 }
-
 
 /// High-level sync status for a single file. Maps 1:1 to the icon
 /// overlays rendered by the platform extensions.
@@ -690,6 +718,14 @@ pub enum OperationPauseReason {
     Quota,
     Permission,
     Locked,
+    /// Lead ruling, F9 review I-1 (spec 2026-10-06 R8, §5.6): paused for `auth` when the server said the vault key this
+    /// Mac kept was no longer the account's. The names in these operations were encrypted under that key, so they are
+    /// kept and never sent; no resume makes them due again.
+    ///
+    /// Built only by the macOS-only hold ([`StateDb::hold_operations_paused_for_auth_as_key_replaced`]); the `as_str`
+    /// arm does not count as building it, so other platforms would report it never constructed.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    KeyReplaced,
 }
 
 impl OperationPauseReason {
@@ -699,6 +735,7 @@ impl OperationPauseReason {
             OperationPauseReason::Quota => "quota",
             OperationPauseReason::Permission => "permission",
             OperationPauseReason::Locked => "locked",
+            OperationPauseReason::KeyReplaced => "key_replaced",
         }
     }
 }
@@ -939,7 +976,10 @@ impl StateDb {
         )?;
         // Upgrade inventory: old one-shot Keep Mine rows may have no queue
         // owner. Preserve their plaintext reference before any resume purge.
-        conn.execute("INSERT OR IGNORE INTO staged_payloads(path, completed) SELECT payload_path, 0 FROM upload_resume", [])?;
+        conn.execute(
+            "INSERT OR IGNORE INTO staged_payloads(path, completed) SELECT payload_path, 0 FROM upload_resume",
+            [],
+        )?;
         Ok(Self(Mutex::new(conn)))
     }
 
@@ -1315,7 +1355,8 @@ impl StateDb {
         Ok(flipped)
     }
 
-    pub fn delete_file_subtree(&self, file_id: &str) -> Result<Vec<PrunedRow>> {        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+    pub fn delete_file_subtree(&self, file_id: &str) -> Result<Vec<PrunedRow>> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction()?;
 
         // Look up the row to delete (its path + kind drives the subtree prune).
@@ -1593,9 +1634,8 @@ impl StateDb {
         // trash's content (each has its own `file_trash` op converging it
         // into the trash view); deleting them would erase trash-view rows.
         let direct_children: Vec<PrunedRow> = {
-            let mut stmt = tx.prepare(
-                "SELECT file_id, path, item_kind FROM files WHERE parent_id = ?1 AND status != 'trashing'",
-            )?;
+            let mut stmt =
+                tx.prepare("SELECT file_id, path, item_kind FROM files WHERE parent_id = ?1 AND status != 'trashing'")?;
             let rows = stmt.query_map(params![folder_id], |r| {
                 Ok(PrunedRow {
                     file_id: r.get(0)?,
@@ -1961,11 +2001,9 @@ impl StateDb {
         // gating etc.) — record it so the replica's metadata version moves.
         // A no-op flip records nothing (compare first).
         let old_status: Option<String> = conn
-            .query_row(
-                "SELECT status FROM files WHERE file_id = ?1",
-                params![file_id],
-                |row| row.get(0),
-            )
+            .query_row("SELECT status FROM files WHERE file_id = ?1", params![file_id], |row| {
+                row.get(0)
+            })
             .optional()?;
         conn.execute(
             "UPDATE files SET status = ?1 WHERE file_id = ?2",
@@ -2327,12 +2365,9 @@ impl StateDb {
                     )
                 })?,
         };
-        let tip: i64 = conn
-            .query_row(
-                "SELECT COALESCE((SELECT MAX(seq) FROM fp_changes), 0)",
-                [],
-                |row| row.get(0),
-            )?;
+        let tip: i64 = conn.query_row("SELECT COALESCE((SELECT MAX(seq) FROM fp_changes), 0)", [], |row| {
+            row.get(0)
+        })?;
         if tip <= since {
             // Up to date: echo the caller's anchor (or nil at genesis) and
             // deliver nothing. The anchor must not move — a stable anchor on a
@@ -2348,14 +2383,9 @@ impl StateDb {
                 Ok(FileChange {
                     seq: row.get(0)?,
                     file_id: row.get(1)?,
-                    kind: FpChangeKind::from_str(&row.get::<_, String>(2)?)
-                        .ok_or_else(|| {
-                            rusqlite::Error::InvalidColumnType(
-                                2,
-                                "kind".to_string(),
-                                rusqlite::types::Type::Text,
-                            )
-                        })?,
+                    kind: FpChangeKind::from_str(&row.get::<_, String>(2)?).ok_or_else(|| {
+                        rusqlite::Error::InvalidColumnType(2, "kind".to_string(), rusqlite::types::Type::Text)
+                    })?,
                     old_parent_id: row.get(3)?,
                     new_parent_id: row.get(4)?,
                 })
@@ -2399,14 +2429,9 @@ impl StateDb {
                 Ok(FileChange {
                     seq: row.get(0)?,
                     file_id: row.get(1)?,
-                    kind: FpChangeKind::from_str(&row.get::<_, String>(2)?)
-                        .ok_or_else(|| {
-                            rusqlite::Error::InvalidColumnType(
-                                2,
-                                "kind".to_string(),
-                                rusqlite::types::Type::Text,
-                            )
-                        })?,
+                    kind: FpChangeKind::from_str(&row.get::<_, String>(2)?).ok_or_else(|| {
+                        rusqlite::Error::InvalidColumnType(2, "kind".to_string(), rusqlite::types::Type::Text)
+                    })?,
                     old_parent_id: row.get(3)?,
                     new_parent_id: row.get(4)?,
                 })
@@ -2416,20 +2441,19 @@ impl StateDb {
             // Short page. It is a COMPLETED batch when it reaches the log tip
             // (or the tip is at/below the caller's cursor) — otherwise the
             // caller still needs a resume token to fetch the rest.
-            let tip: i64 = conn.query_row(
-                "SELECT COALESCE((SELECT MAX(seq) FROM fp_changes), 0)",
-                [],
-                |row| row.get(0),
-            )?;
-            let reached_tip = changes
-                .last()
-                .map(|change| change.seq >= tip)
-                .unwrap_or(tip <= since);
+            let tip: i64 = conn.query_row("SELECT COALESCE((SELECT MAX(seq) FROM fp_changes), 0)", [], |row| {
+                row.get(0)
+            })?;
+            let reached_tip = changes.last().map(|change| change.seq >= tip).unwrap_or(tip <= since);
             if reached_tip {
                 // Up to date AND the batch ends here: the anchor is the log
                 // tip — "you are now current as of tip". Only a completely
                 // empty log (no anchor ever minted) reports None.
-                let anchor = if tip > 0 { Some(anchor_bytes(tip)) } else { since_anchor.map(|bytes| bytes.to_vec()) };
+                let anchor = if tip > 0 {
+                    Some(anchor_bytes(tip))
+                } else {
+                    since_anchor.map(|bytes| bytes.to_vec())
+                };
                 return Ok(Some((changes, anchor)));
             }
             let next = changes.last().map(|change| change.seq).unwrap_or(since);
@@ -2709,10 +2733,22 @@ impl StateDb {
     pub fn put_upload_finalization(&self, pending: &UploadFinalization) -> Result<()> {
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
-        tx.execute("INSERT INTO upload_finalizations(op_id,local_file_id,server_file_id,target_path,payload_path,stamped)
-            VALUES(?1,?2,?3,?4,?5,0)", params![pending.op_id,pending.local_file_id,pending.server_file_id,pending.target_path,pending.payload_path])?;
-        tx.execute("INSERT INTO staged_payloads(path,completed) VALUES(?1,1)
-            ON CONFLICT(path) DO UPDATE SET completed=1", params![pending.payload_path])?;
+        tx.execute(
+            "INSERT INTO upload_finalizations(op_id,local_file_id,server_file_id,target_path,payload_path,stamped)
+            VALUES(?1,?2,?3,?4,?5,0)",
+            params![
+                pending.op_id,
+                pending.local_file_id,
+                pending.server_file_id,
+                pending.target_path,
+                pending.payload_path
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO staged_payloads(path,completed) VALUES(?1,1)
+            ON CONFLICT(path) DO UPDATE SET completed=1",
+            params![pending.payload_path],
+        )?;
         // Once the server completed, only local finalization may be retried.
         // Remove the upload before the next cancellable thumbnail await.
         tx.execute("DELETE FROM operation_queue WHERE op_id=?1", params![pending.op_id])?;
@@ -2722,17 +2758,35 @@ impl StateDb {
     #[cfg(any(target_os = "windows", test))]
     pub fn upload_finalizations(&self) -> Result<Vec<UploadFinalization>> {
         let conn = self.0.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT op_id,local_file_id,server_file_id,target_path,payload_path,stamped FROM upload_finalizations")?;
-        stmt.query_map([], |r| Ok(UploadFinalization { op_id:r.get(0)?,local_file_id:r.get(1)?,server_file_id:r.get(2)?,target_path:r.get(3)?,payload_path:r.get(4)?,stamped:r.get(5)? }))?.collect()
+        let mut stmt = conn.prepare(
+            "SELECT op_id,local_file_id,server_file_id,target_path,payload_path,stamped FROM upload_finalizations",
+        )?;
+        stmt.query_map([], |r| {
+            Ok(UploadFinalization {
+                op_id: r.get(0)?,
+                local_file_id: r.get(1)?,
+                server_file_id: r.get(2)?,
+                target_path: r.get(3)?,
+                payload_path: r.get(4)?,
+                stamped: r.get(5)?,
+            })
+        })?
+        .collect()
     }
     #[cfg(any(target_os = "windows", test))]
     pub fn mark_upload_finalization_stamped(&self, op_id: &str) -> Result<()> {
-        self.0.lock().unwrap().execute("UPDATE upload_finalizations SET stamped=1 WHERE op_id=?1",params![op_id])?;
+        self.0.lock().unwrap().execute(
+            "UPDATE upload_finalizations SET stamped=1 WHERE op_id=?1",
+            params![op_id],
+        )?;
         Ok(())
     }
     #[cfg(any(target_os = "windows", test))]
     pub fn forget_upload_finalization(&self, op_id: &str) -> Result<()> {
-        self.0.lock().unwrap().execute("DELETE FROM upload_finalizations WHERE op_id=?1 AND stamped=1",params![op_id])?;
+        self.0.lock().unwrap().execute(
+            "DELETE FROM upload_finalizations WHERE op_id=?1 AND stamped=1",
+            params![op_id],
+        )?;
         Ok(())
     }
 
@@ -2788,10 +2842,209 @@ impl StateDb {
         if pending != 0 {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        let remaining: i64 = tx.query_row("SELECT (SELECT COUNT(*) FROM staged_payloads) + (SELECT COUNT(*) FROM upload_finalizations)", [], |r| r.get(0))?;
-        if remaining != 0 { return Err(rusqlite::Error::InvalidQuery); }
-        tx.execute_batch("DELETE FROM upload_resume; DELETE FROM files; DELETE FROM sync_state; DELETE FROM local_activity; DELETE FROM transfer_activity; DELETE FROM bandwidth_samples;")?;
+        let remaining: i64 = tx.query_row(
+            "SELECT (SELECT COUNT(*) FROM staged_payloads) + (SELECT COUNT(*) FROM upload_finalizations)",
+            [],
+            |r| r.get(0),
+        )?;
+        if remaining != 0 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        // Every table the binding counts as account data (the one list, `ACCOUNT_TABLES`; the checks above found the
+        // three it refuses on empty), the device tables, and `sync_state` (the owner record and the sync cursors), so the
+        // next sign-in on this PC finds no account data and no owner. The device tables are cleared on purpose, the same
+        // as `clear_account_data` does: a sign-out starts this PC's statistics afresh for the next account.
+        for table in ACCOUNT_TABLES.iter().chain(DEVICE_TABLES.iter()) {
+            tx.execute(&format!("DELETE FROM {table}"), [])?;
+        }
+        tx.execute("DELETE FROM sync_state", [])?;
         tx.commit()
+    }
+
+    /// R10: the account this local data belongs to, if one is recorded.
+    pub fn owner(&self) -> Result<Option<crate::account_binding::Identity>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        read_owner(&conn)
+    }
+
+    /// R10: record the owner (both fields at once; an unknown field is removed).
+    pub fn set_owner(&self, owner: &crate::account_binding::Identity) -> Result<()> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+        write_owner(&tx, owner)?;
+        tx.commit()
+    }
+
+    /// Changes waiting to upload, plus the staged copies of them. Anything of either is a trace of an account:
+    /// a sign-in checks it before it decides the Mac holds nothing of a previous one.
+    pub fn queued_or_staged_count(&self) -> Result<u64> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let rows: i64 = conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM operation_queue) + (SELECT COUNT(*) FROM staged_payloads)",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(u64::try_from(rows).unwrap_or(0))
+    }
+
+    /// Changes on this computer that have not uploaded: every queued operation, plus every staged copy that no queued
+    /// operation points at (a staged copy outlives its queue row, and can be the only unsynced copy of an edit). Each
+    /// change is counted once. The number an account switch warns with.
+    pub fn pending_changes_count(&self) -> Result<u64> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let rows: i64 = conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM operation_queue)
+                  + (SELECT COUNT(*) FROM staged_payloads
+                     WHERE path NOT IN (SELECT payload_path FROM operation_queue WHERE payload_path IS NOT NULL))",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(u64::try_from(rows).unwrap_or(0))
+    }
+
+    /// R10: does anything of an account live here, apart from the owner record itself?
+    pub fn has_account_data(&self) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        Ok(account_rows(&conn)? > 0)
+    }
+
+    /// R10, the upgrade path (fix round 1 of Task 10): record `candidate` as the owner of local data that has
+    /// no owner, AT MOST ONCE per database, in one transaction. Once means the first startup after the upgrade:
+    /// whatever this call finds, it shuts the window (`ADOPTION_CLOSED`), so a later startup, however it looks,
+    /// never adopts, and neither does data an R10 build has already bound or purged. `candidate` is the account
+    /// whose vault key the Keychain holds, or `None` when it holds none (then nothing is adopted and the window
+    /// still closes). A recorded owner is never replaced. Returns whether anybody was adopted.
+    pub fn adopt_owner_once(&self, candidate: Option<&crate::account_binding::Identity>) -> Result<bool> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+        let version: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if version >= ADOPTION_CLOSED {
+            return Ok(false);
+        }
+        let adopted = match candidate.filter(|candidate| candidate.is_known()) {
+            Some(candidate) if read_owner(&tx)?.is_none() && account_rows(&tx)? > 0 => {
+                write_owner(&tx, candidate)?;
+                true
+            }
+            _ => false,
+        };
+        tx.pragma_update(None, "user_version", ADOPTION_CLOSED)?;
+        tx.commit()?;
+        Ok(adopted)
+    }
+
+    /// Shut the upgrade's adoption window (a no-op, and no write, when it is already shut): a database this build
+    /// creates has no pre-R10 data to adopt, and every engine start shuts it.
+    pub fn close_adoption_window(&self) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if version >= ADOPTION_CLOSED {
+            return Ok(());
+        }
+        conn.pragma_update(None, "user_version", ADOPTION_CLOSED)
+    }
+
+    /// R10 reset, after `purge_all_local_state` has handed back the files to delete: every row of the
+    /// previous account, the sync cursor and the owner record included, in one transaction.
+    ///
+    /// `owe_finder_removal` is written in the SAME transaction: a Mac whose previous account's Finder domain is
+    /// still registered owes a removal, and no engine may start until it is confirmed (`finder_removal_owed`).
+    /// `false` also clears a debt that was already recorded, because the caller only passes it once a removal
+    /// was confirmed or none is needed.
+    pub fn clear_account_data(&self, owe_finder_removal: bool) -> Result<()> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+        for table in ACCOUNT_TABLES.iter().chain(DEVICE_TABLES.iter()) {
+            tx.execute(&format!("DELETE FROM {table}"), [])?;
+        }
+        tx.execute("DELETE FROM sync_state", [])?;
+        let mark = if owe_finder_removal {
+            FINDER_REMOVAL_OWED_KEY
+        } else {
+            FINDER_DOMAIN_GONE_KEY
+        };
+        tx.execute("INSERT INTO sync_state (key, value) VALUES (?1, '1')", params![mark])?;
+        tx.commit()
+    }
+
+    /// Did the last clear leave the Finder domain known gone (a sign-out whose removal was confirmed)?
+    pub fn finder_domain_gone(&self) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let gone: Option<String> = conn
+            .query_row(
+                "SELECT value FROM sync_state WHERE key = ?1",
+                params![FINDER_DOMAIN_GONE_KEY],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(gone.is_some())
+    }
+
+    /// The Finder domain was registered again (`addDomain` succeeded), so it is no longer known gone. Clears only
+    /// the mark: no account row, owner or removal debt is touched. Only the macOS reconciler registers a domain.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn clear_finder_domain_gone(&self) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute("DELETE FROM sync_state WHERE key = ?1", params![FINDER_DOMAIN_GONE_KEY])?;
+        Ok(())
+    }
+
+    /// Is a Finder domain removal owed before any engine may start?
+    pub fn finder_removal_owed(&self) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let owed: Option<String> = conn
+            .query_row(
+                "SELECT value FROM sync_state WHERE key = ?1",
+                params![FINDER_REMOVAL_OWED_KEY],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(owed.is_some())
+    }
+
+    /// Record (or release) the debt on its own: a sign-out whose removal was not confirmed owes it after the
+    /// rows were cleared; a confirmed removal releases it.
+    pub fn set_finder_removal_owed(&self, owed: bool) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        if owed {
+            conn.execute(
+                "INSERT INTO sync_state (key, value) VALUES (?1, '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![FINDER_REMOVAL_OWED_KEY],
+            )?;
+            // A domain may be registered again: it is no longer known gone.
+            conn.execute("DELETE FROM sync_state WHERE key = ?1", params![FINDER_DOMAIN_GONE_KEY])?;
+        } else {
+            conn.execute(
+                "DELETE FROM sync_state WHERE key = ?1",
+                params![FINDER_REMOVAL_OWED_KEY],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Every file the rows of this database point at (queued and staged payloads, upload sessions, cached
+    /// copies), each path once. Read-only: the purge deletes these files FIRST and clears the rows only when
+    /// every one is gone, so a file that cannot be removed leaves the rows in place for a retry.
+    pub fn local_state_file_paths(&self) -> Result<Vec<String>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut seen = HashSet::new();
+        let mut paths = Vec::new();
+        for sql in [
+            "SELECT payload_path FROM operation_queue WHERE payload_path IS NOT NULL",
+            "SELECT path FROM staged_payloads",
+            "SELECT payload_path FROM upload_resume",
+            "SELECT payload_path FROM upload_finalizations",
+            "SELECT cache_path FROM files WHERE cache_path IS NOT NULL",
+        ] {
+            let mut stmt = conn.prepare(sql)?;
+            for path in stmt.query_map([], |row| row.get::<_, String>(0))? {
+                let path = path?;
+                if seen.insert(path.clone()) {
+                    paths.push(path);
+                }
+            }
+        }
+        Ok(paths)
     }
 
     /// Task 1538 findings 1+2: unconditional local-state wipe for sign-out /
@@ -2823,7 +3076,7 @@ impl StateDb {
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction()?;
 
-        let payload_paths: Vec<String> = {
+        let mut payload_paths: Vec<String> = {
             let mut stmt = tx.prepare("SELECT payload_path FROM operation_queue WHERE payload_path IS NOT NULL")?;
             let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
             rows.collect::<Result<Vec<_>>>()?
@@ -2835,6 +3088,24 @@ impl StateDb {
         // Task 1683 slice 2: the leaving account's recent-transfer names go too, so the
         // next account's popover never lists them.
         tx.execute("DELETE FROM transfer_activity", [])?;
+        // R10 (spec 2026-10-06 §5.6): staged payloads go with the queue. Their files are returned
+        // with the other payloads, so the caller deletes them through the same safety gate.
+        let staged_paths: Vec<String> = {
+            let mut stmt = tx.prepare("SELECT path FROM staged_payloads")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>>>()?
+        };
+        tx.execute("DELETE FROM staged_payloads", [])?;
+        for path in staged_paths {
+            if !payload_paths.contains(&path) {
+                payload_paths.push(path);
+            }
+        }
+        // R10: a sign-out forgets which account this local data belonged to.
+        tx.execute(
+            "DELETE FROM sync_state WHERE key IN (?1, ?2)",
+            params![OWNER_USER_ID_KEY, OWNER_EMAIL_KEY],
+        )?;
 
         let cache_paths: Vec<String> = {
             let mut stmt = tx.prepare("SELECT cache_path FROM files WHERE cache_path IS NOT NULL")?;
@@ -2913,6 +3184,42 @@ impl StateDb {
         Ok(())
     }
 
+    /// Lead ruling F9 (spec 2026-10-06 R8): make every operation paused because the server refused the session
+    /// (`auth`) due again at `now`, keeping its attempts. Operations paused for any other reason stay paused. Returns how
+    /// many were resumed.
+    pub fn resume_operations_paused_for_auth(&self, now: i64) -> Result<usize> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "UPDATE operation_queue
+             SET paused_reason = NULL,
+                 next_retry_at = ?1,
+                 updated_at = ?1
+             WHERE paused_reason = ?2",
+            params![now, OperationPauseReason::Auth.as_str()],
+        )
+    }
+
+    /// Lead ruling, F9 review I-1 (spec 2026-10-06 R8, §5.6): the vault key this Mac kept is no longer the account's,
+    /// so every operation paused for `auth` (queued with names encrypted under that key) is paused for `key_replaced`
+    /// instead: kept, never sent, and never made due by [`Self::resume_operations_paused_for_auth`]. Operations paused
+    /// for any other reason are untouched. Returns how many were re-marked. Only the macOS reconciler's re-sign-in
+    /// path holds them; Windows and Linux keep today's flow (spec R8).
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn hold_operations_paused_for_auth_as_key_replaced(&self, now: i64) -> Result<usize> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "UPDATE operation_queue
+             SET paused_reason = ?2,
+                 updated_at = ?1
+             WHERE paused_reason = ?3",
+            params![
+                now,
+                OperationPauseReason::KeyReplaced.as_str(),
+                OperationPauseReason::Auth.as_str()
+            ],
+        )
+    }
+
     pub fn record_operation_pause(
         &self,
         op_id: &str,
@@ -2939,6 +3246,13 @@ impl StateDb {
         self.queue_diagnostics_with_paths(now, &[])
     }
 
+    /// Every plaintext name this daemon knows locally, for redacting the lifecycle log
+    /// (spec 2026-10-06 §8). Same source as the support bundle's redaction.
+    pub fn known_names(&self, extra_paths: &[String]) -> Result<KnownNames> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        collect_known_names(&conn, extra_paths)
+    }
+
     /// Like [`Self::queue_diagnostics`], additionally treating every component
     /// of `extra_paths` (for example the sync root) as a name to scrub.
     pub fn queue_diagnostics_with_paths(&self, now: i64, extra_paths: &[String]) -> Result<QueueDiagnostics> {
@@ -2956,8 +3270,7 @@ impl StateDb {
         )?;
 
         let by_kind = allowed_group_labels(count_queue_groups(&conn, "kind")?, QUEUE_KIND_LABELS);
-        let paused_by_reason =
-            allowed_group_labels(count_queue_groups(&conn, "paused_reason")?, PAUSE_REASON_LABELS);
+        let paused_by_reason = allowed_group_labels(count_queue_groups(&conn, "paused_reason")?, PAUSE_REASON_LABELS);
         let (last_error, last_error_class) = conn
             .query_row(
                 "SELECT last_error, last_error_class
@@ -3627,6 +3940,52 @@ fn collect_known_names(conn: &Connection, extra_paths: &[String]) -> Result<Know
     Ok(names.finish())
 }
 
+/// The owner record in `sync_state`, if any field of it is there.
+fn read_owner(conn: &Connection) -> Result<Option<crate::account_binding::Identity>> {
+    let read = |key: &str| {
+        conn.query_row("SELECT value FROM sync_state WHERE key = ?1", params![key], |row| {
+            row.get::<_, String>(0)
+        })
+        .optional()
+    };
+    let owner =
+        crate::account_binding::Identity::new(read(OWNER_USER_ID_KEY)?.as_deref(), read(OWNER_EMAIL_KEY)?.as_deref());
+    Ok(owner.is_known().then_some(owner))
+}
+
+/// Both owner fields at once; an unknown field is removed.
+fn write_owner(conn: &Connection, owner: &crate::account_binding::Identity) -> Result<()> {
+    for (key, value) in [(OWNER_USER_ID_KEY, &owner.user_id), (OWNER_EMAIL_KEY, &owner.email)] {
+        match value {
+            Some(value) => conn.execute(
+                "INSERT INTO sync_state (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![key, value],
+            )?,
+            None => conn.execute("DELETE FROM sync_state WHERE key = ?1", params![key])?,
+        };
+    }
+    Ok(())
+}
+
+/// How many rows of an account live here: every `ACCOUNT_TABLES` row and every `sync_state` row except the
+/// owner record.
+fn account_rows(conn: &Connection) -> Result<i64> {
+    let mut rows: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sync_state WHERE key NOT IN (?1, ?2, ?3, ?4)",
+        params![
+            OWNER_USER_ID_KEY,
+            OWNER_EMAIL_KEY,
+            FINDER_REMOVAL_OWED_KEY,
+            FINDER_DOMAIN_GONE_KEY
+        ],
+        |row| row.get(0),
+    )?;
+    for table in ACCOUNT_TABLES {
+        rows += conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get::<_, i64>(0))?;
+    }
+    Ok(rows)
+}
+
 #[cfg(test)]
 fn has_table(conn: &Connection, table: &str) -> Result<bool> {
     let mut stmt = conn.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1")?;
@@ -3636,18 +3995,108 @@ fn has_table(conn: &Connection, table: &str) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    /// The Windows sign-out leaves no account data behind, whatever `ACCOUNT_TABLES` and `DEVICE_TABLES` list: one row
+    /// goes into every listed table it does not refuse on (a dummy value per column, from the schema), and after
+    /// `finish_windows_signout` every listed table is empty and `has_account_data` is false. A table added to either list
+    /// and not cleared, or listed but missing from the schema, fails here. The three tables it refuses on (an unsent
+    /// change is never discarded) must already be empty; the tests above cover each refusal.
+    #[test]
+    fn a_windows_sign_out_empties_every_account_table() {
+        const REFUSED_ON: [&str; 3] = ["operation_queue", "staged_payloads", "upload_finalizations"];
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let db = StateDb::open(&path).unwrap();
+        {
+            let conn = Connection::open(&path).unwrap();
+            for table in ACCOUNT_TABLES.iter().chain(DEVICE_TABLES.iter()) {
+                let columns: Vec<String> = conn
+                    .prepare(&format!("PRAGMA table_info({table})"))
+                    .unwrap()
+                    .query_map([], |row| {
+                        Ok(format!(
+                            "{}|{}",
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?.to_ascii_uppercase()
+                        ))
+                    })
+                    .unwrap()
+                    .collect::<std::result::Result<_, _>>()
+                    .unwrap();
+                assert!(
+                    !columns.is_empty(),
+                    "{table} is listed in ACCOUNT_TABLES or DEVICE_TABLES but the schema has no such table"
+                );
+                if REFUSED_ON.contains(table) {
+                    continue;
+                }
+                let (names, values): (Vec<&str>, Vec<&str>) = columns
+                    .iter()
+                    .map(|column| {
+                        let (name, kind) = column.split_once('|').unwrap();
+                        let value = if kind.contains("INT") {
+                            "1"
+                        } else if kind.contains("REAL") {
+                            "1.0"
+                        } else if kind.contains("BLOB") {
+                            "x'00'"
+                        } else {
+                            "'x'"
+                        };
+                        (name, value)
+                    })
+                    .unzip();
+                conn.execute(
+                    &format!(
+                        "INSERT INTO {table} ({}) VALUES ({})",
+                        names.join(", "),
+                        values.join(", ")
+                    ),
+                    [],
+                )
+                .unwrap();
+            }
+        }
+        assert!(
+            db.has_account_data().unwrap(),
+            "the premise: the account tables hold rows"
+        );
+        db.finish_windows_signout().expect("nothing waits to upload");
+        let conn = Connection::open(&path).unwrap();
+        for table in ACCOUNT_TABLES.iter().chain(DEVICE_TABLES.iter()) {
+            let rows: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(rows, 0, "the Windows sign-out left rows in {table}");
+        }
+        assert!(!db.has_account_data().unwrap(), "no account data is left");
+    }
+
     #[test]
     fn round7_finalization_survives_restart_and_blocks_unfinished_signout() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.db");
         let db = StateDb::open(&path).unwrap();
-        let row = UploadFinalization { op_id: "op".into(), local_file_id:"local".into(), server_file_id:"server".into(), target_path:"file".into(), payload_path:"proof".into(), stamped:false };
+        let row = UploadFinalization {
+            op_id: "op".into(),
+            local_file_id: "local".into(),
+            server_file_id: "server".into(),
+            target_path: "file".into(),
+            payload_path: "proof".into(),
+            stamped: false,
+        };
         db.put_upload_finalization(&row).unwrap();
         assert_eq!(db.upload_finalizations().unwrap(), vec![row.clone()]);
         db.forget_upload_finalization("op").unwrap();
-        assert_eq!(db.upload_finalizations().unwrap().len(), 1, "unstamped proof must not be forgotten");
+        assert_eq!(
+            db.upload_finalizations().unwrap().len(),
+            1,
+            "unstamped proof must not be forgotten"
+        );
         db.forget_staged_payload("proof").unwrap();
-        assert!(db.finish_windows_signout().is_err(), "finalization owns its proof independently of staging");
+        assert!(
+            db.finish_windows_signout().is_err(),
+            "finalization owns its proof independently of staging"
+        );
         db.mark_upload_finalization_stamped("op").unwrap();
         drop(db);
         let db = StateDb::open(&path).unwrap();
@@ -3657,8 +4106,15 @@ mod tests {
         assert_eq!(db.upload_finalizations().unwrap().len(), 0);
     }
 
+    // 2026-10-07 (task 1834, R10): renamed from `round5_legacy_resume_inventory_survives_operation_purge`
+    // and its assertion changed. It used to require that `purge_all_local_state` KEEP the staged-payload
+    // journal row. R10 (spec 2026-10-06 §5.6, lead ruling 4 "staged_payloads rows are included in the
+    // purge") makes the purge forget the row in the same transaction and hand the file back for deletion
+    // instead. What the test protects is unchanged: a legacy payload whose only durable owner is the
+    // resume row is never silently lost. It now holds because the purge RETURNS that path, which the
+    // caller (`purge_local_state_files`) deletes through the one disposable-path gate.
     #[test]
-    fn round5_legacy_resume_inventory_survives_operation_purge() {
+    fn round5_legacy_resume_inventory_is_handed_back_by_the_operation_purge() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("state.db");
         let db = StateDb::open(&path).unwrap();
@@ -3668,10 +4124,22 @@ mod tests {
             VALUES ('old','only-copy',1,0,'session','file','version',1,1)").unwrap();
         drop(db);
         let db = StateDb::open(&path).unwrap();
-        db.purge_all_local_state().unwrap();
+        assert_eq!(
+            db.staged_payloads_for_signout().unwrap(),
+            vec![("only-copy".into(), None, false)],
+            "the journal owns it after the upgrade"
+        );
+        let purge = db.purge_all_local_state().unwrap();
         assert!(db.get_upload_resume("old").unwrap().is_none());
-        assert_eq!(db.staged_payloads_for_signout().unwrap(), vec![("only-copy".into(), None, false)],
-            "old payload lost its only durable owner on resume purge");
+        assert!(
+            purge.payload_paths.contains(&"only-copy".to_string()),
+            "old payload lost its only durable owner on resume purge without being handed back: {:?}",
+            purge.payload_paths
+        );
+        assert!(
+            db.staged_payloads_for_signout().unwrap().is_empty(),
+            "and the journal row goes with it"
+        );
     }
 
     #[test]
@@ -3853,8 +4321,14 @@ mod tests {
         db.record_transfer_activity(transfer("down", "b.txt", 20)).unwrap();
         let rows = db.list_recent_transfer_activity(10).unwrap();
         assert_eq!(rows.len(), 2);
-        assert_eq!((rows[0].file_name.as_str(), rows[0].direction.as_str()), ("b.txt", "down"));
-        assert_eq!((rows[1].file_name.as_str(), rows[1].direction.as_str()), ("a.txt", "up"));
+        assert_eq!(
+            (rows[0].file_name.as_str(), rows[0].direction.as_str()),
+            ("b.txt", "down")
+        );
+        assert_eq!(
+            (rows[1].file_name.as_str(), rows[1].direction.as_str()),
+            ("a.txt", "up")
+        );
         assert_eq!(rows[0].rel_path.as_deref(), Some("Work/b.txt"));
         assert_eq!(db.list_recent_transfer_activity(1).unwrap().len(), 1);
         assert!(db.list_recent_transfer_activity(0).unwrap().is_empty());
@@ -3873,18 +4347,20 @@ mod tests {
         })
         .unwrap();
         for i in 0..(TRANSFER_ACTIVITY_MAX_ROWS + 7) {
-            db.record_transfer_activity(transfer("up", &format!("f{i}.txt"), i as i64)).unwrap();
+            db.record_transfer_activity(transfer("up", &format!("f{i}.txt"), i as i64))
+                .unwrap();
         }
         // Count the table itself: the read path also caps its own result, which would hide a
         // write path that forgot to prune.
-        let stored: i64 = db
-            .0
-            .lock()
-            .unwrap()
-            .query_row("SELECT COUNT(*) FROM transfer_activity", [], |row| row.get(0))
-            .unwrap();
+        let stored: i64 =
+            db.0.lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM transfer_activity", [], |row| row.get(0))
+                .unwrap();
         assert_eq!(stored, TRANSFER_ACTIVITY_MAX_ROWS as i64, "107 written, 100 kept");
-        let rows = db.list_recent_transfer_activity(TRANSFER_ACTIVITY_MAX_ROWS + 50).unwrap();
+        let rows = db
+            .list_recent_transfer_activity(TRANSFER_ACTIVITY_MAX_ROWS + 50)
+            .unwrap();
         assert_eq!(rows.len(), TRANSFER_ACTIVITY_MAX_ROWS);
         assert_eq!(rows[0].occurred_at, (TRANSFER_ACTIVITY_MAX_ROWS + 6) as i64);
         assert_eq!(rows.last().unwrap().occurred_at, 7);
@@ -3901,14 +4377,22 @@ mod tests {
         seed_contract_row(&db, "f3", "A/three.bin", None, FileStatus::Local, 300);
         seed_contract_row(&db, "f4", "A/four.bin", None, FileStatus::Downloading, 50);
         seed_contract_row(&db, "f5", "A/five.bin", None, FileStatus::Local, 7);
-        db.enqueue_operation(&queued_op("u1", OperationKind::UploadFile, "f1")).unwrap();
-        db.enqueue_operation(&queued_op("u2", OperationKind::UploadVersion, "f2")).unwrap();
-        db.enqueue_operation(&queued_op("u3", OperationKind::UploadFile, "f3")).unwrap();
-        db.enqueue_operation(&queued_op("r1", OperationKind::RenameFile, "f5")).unwrap();
-        db.record_operation_pause("u3", OperationPauseReason::Quota, Some("quota exceeded"), 5).unwrap();
+        db.enqueue_operation(&queued_op("u1", OperationKind::UploadFile, "f1"))
+            .unwrap();
+        db.enqueue_operation(&queued_op("u2", OperationKind::UploadVersion, "f2"))
+            .unwrap();
+        db.enqueue_operation(&queued_op("u3", OperationKind::UploadFile, "f3"))
+            .unwrap();
+        db.enqueue_operation(&queued_op("r1", OperationKind::RenameFile, "f5"))
+            .unwrap();
+        db.record_operation_pause("u3", OperationPauseReason::Quota, Some("quota exceeded"), 5)
+            .unwrap();
 
         let backlog = db.transfer_backlog(100).unwrap();
-        assert_eq!(backlog.upload_files, 2, "u1 and u2 are due; u3 is paused; r1 is a rename");
+        assert_eq!(
+            backlog.upload_files, 2,
+            "u1 and u2 are due; u3 is paused; r1 is a rename"
+        );
         assert_eq!(backlog.upload_bytes, 300, "100 + 200");
         assert_eq!((backlog.download_files, backlog.download_bytes), (1, 50));
         assert_eq!(backlog.queued_ops, 4, "every queued operation, paused or not");
@@ -3921,7 +4405,8 @@ mod tests {
         let db = StateDb::open(dir.path().join("state.db")).unwrap();
         seed_contract_row(&db, "f1", "one.bin", None, FileStatus::Uploading, 100);
         seed_contract_row(&db, "f2", "two.bin", None, FileStatus::Local, 5_000);
-        db.enqueue_operation(&queued_op("u1", OperationKind::UploadFile, "f1")).unwrap();
+        db.enqueue_operation(&queued_op("u1", OperationKind::UploadFile, "f1"))
+            .unwrap();
         // Failed once and backed off for ten minutes (from t=1000 to t=1600).
         let mut backing_off = queued_op("u2", OperationKind::UploadFile, "f2");
         backing_off.attempts = 1;
@@ -3930,7 +4415,10 @@ mod tests {
 
         let during = db.transfer_backlog(1_000).unwrap();
         assert_eq!(during.upload_files, 1, "only u1 is due; u2 waits for t=1600");
-        assert_eq!(during.upload_bytes, 100, "the backed-off file's 5000 bytes are not in the total");
+        assert_eq!(
+            during.upload_bytes, 100,
+            "the backed-off file's 5000 bytes are not in the total"
+        );
         assert_eq!(during.queued_ops, 2, "it is still a queued operation");
 
         let at_the_retry_time = db.transfer_backlog(1_600).unwrap();
@@ -3947,12 +4435,154 @@ mod tests {
         let mut exhausted = queued_op("u1", OperationKind::UploadFile, "f1");
         exhausted.attempts = 5;
         db.enqueue_operation(&exhausted).unwrap();
-        db.enqueue_operation(&queued_op("u2", OperationKind::UploadFile, "f2")).unwrap();
-        db.record_operation_pause("u2", OperationPauseReason::Auth, None, 5).unwrap();
+        db.enqueue_operation(&queued_op("u2", OperationKind::UploadFile, "f2"))
+            .unwrap();
+        db.record_operation_pause("u2", OperationPauseReason::Auth, None, 5)
+            .unwrap();
         let backlog = db.transfer_backlog(100).unwrap();
         assert_eq!(backlog.upload_files, 0);
         assert_eq!(backlog.paused_for_quota, 0);
         assert_eq!(backlog.queued_ops, 2);
+    }
+
+    /// Lead ruling F9: after a sign-in, the operations paused for `auth` are due again at once with their attempts kept,
+    /// and the ones paused for quota, permission or a lock stay paused.
+    #[test]
+    fn only_the_operations_paused_for_auth_are_due_again_with_their_attempts_kept() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let mut auth = queued_op("a1", OperationKind::CreateFolder, "f-a");
+        auth.attempts = 2;
+        auth.next_retry_at = 10_000;
+        db.enqueue_operation(&auth).unwrap();
+        for (id, reason) in [
+            ("a1", OperationPauseReason::Auth),
+            ("q1", OperationPauseReason::Quota),
+            ("p1", OperationPauseReason::Permission),
+            ("l1", OperationPauseReason::Locked),
+        ] {
+            if id != "a1" {
+                db.enqueue_operation(&queued_op(id, OperationKind::UploadFile, id))
+                    .unwrap();
+            }
+            db.record_operation_pause(id, reason, Some("HTTP 401 Unauthorized"), 5)
+                .unwrap();
+        }
+        let mut unpaused = queued_op("d1", OperationKind::UploadFile, "f-d");
+        unpaused.created_at = 2; // listed after a1, which was queued first
+        db.enqueue_operation(&unpaused).unwrap();
+        let due = |now| {
+            db.list_due_operations(now)
+                .unwrap()
+                .into_iter()
+                .map(|op| (op.op_id, op.attempts, op.next_retry_at))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            due(500),
+            vec![("d1".to_string(), 0, 0)],
+            "precondition: only the unpaused one is due"
+        );
+
+        assert_eq!(db.resume_operations_paused_for_auth(500).unwrap(), 1);
+
+        assert_eq!(
+            due(500),
+            vec![("a1".to_string(), 2, 500), ("d1".to_string(), 0, 0)],
+            "the auth-paused one is due now, its attempts kept"
+        );
+        let diagnostics = db.queue_diagnostics(500).unwrap();
+        assert_eq!(
+            diagnostics.paused_by_reason,
+            BTreeMap::from([
+                ("locked".to_string(), 1),
+                ("permission".to_string(), 1),
+                ("quota".to_string(), 1)
+            ]),
+            "every other pause stays"
+        );
+        assert_eq!(
+            db.resume_operations_paused_for_auth(600).unwrap(),
+            0,
+            "nothing left to resume"
+        );
+        assert_eq!(due(500).len(), 2, "and a second call moves nothing");
+    }
+
+    /// Lead ruling, F9 review I-1: after a key replacement, the operations paused for `auth` are re-marked
+    /// `key_replaced`. They stay queued and paused, with their attempts; the auth resume never makes them due again; the
+    /// diagnostics count them under their own reason; every other pause, and an unpaused operation, is untouched.
+    #[test]
+    fn after_a_key_replacement_the_auth_paused_operations_are_kept_and_never_resumed() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let mut auth = queued_op("a1", OperationKind::CreateFolder, "f-a");
+        auth.attempts = 2;
+        auth.next_retry_at = 10_000;
+        db.enqueue_operation(&auth).unwrap();
+        for (id, reason) in [
+            ("a1", OperationPauseReason::Auth),
+            ("a2", OperationPauseReason::Auth),
+            ("q1", OperationPauseReason::Quota),
+            ("p1", OperationPauseReason::Permission),
+            ("l1", OperationPauseReason::Locked),
+        ] {
+            if id != "a1" {
+                db.enqueue_operation(&queued_op(id, OperationKind::UploadFile, id))
+                    .unwrap();
+            }
+            db.record_operation_pause(id, reason, Some("HTTP 401 Unauthorized"), 5)
+                .unwrap();
+        }
+        let mut unpaused = queued_op("d1", OperationKind::UploadFile, "f-d");
+        unpaused.created_at = 2;
+        db.enqueue_operation(&unpaused).unwrap();
+        let due = |now| {
+            db.list_due_operations(now)
+                .unwrap()
+                .into_iter()
+                .map(|op| op.op_id)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            db.hold_operations_paused_for_auth_as_key_replaced(500).unwrap(),
+            2,
+            "both auth-paused operations"
+        );
+        let reasons = BTreeMap::from([
+            ("key_replaced".to_string(), 2),
+            ("locked".to_string(), 1),
+            ("permission".to_string(), 1),
+            ("quota".to_string(), 1),
+        ]);
+        let diagnostics = db.queue_diagnostics(500).unwrap();
+        assert_eq!(
+            diagnostics.paused_by_reason, reasons,
+            "counted under their own reason; every other pause stays"
+        );
+        assert_eq!((diagnostics.queued, diagnostics.paused), (6, 5), "kept, not purged");
+
+        assert_eq!(
+            db.resume_operations_paused_for_auth(600).unwrap(),
+            0,
+            "the auth resume finds none"
+        );
+        assert_eq!(due(700), vec!["d1".to_string()], "never due again");
+        assert_eq!(db.queue_diagnostics(700).unwrap().paused_by_reason, reasons);
+        let attempts: i64 =
+            db.0.lock()
+                .unwrap()
+                .query_row("SELECT attempts FROM operation_queue WHERE op_id = 'a1'", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+        assert_eq!(attempts, 2, "its attempts are kept");
+        assert_eq!(
+            db.hold_operations_paused_for_auth_as_key_replaced(800).unwrap(),
+            0,
+            "a second call moves nothing"
+        );
     }
 
     #[test]
@@ -3971,12 +4601,57 @@ mod tests {
             occurred_at: 1,
         })
         .unwrap();
-        db.enqueue_operation(&queued_op("op-1", OperationKind::UploadFile, "x")).unwrap();
-        db.record_operation_attempt("op-1", 1, 10, Some("copy of Board minutes 2026 failed")).unwrap();
+        db.enqueue_operation(&queued_op("op-1", OperationKind::UploadFile, "x"))
+            .unwrap();
+        db.record_operation_attempt("op-1", 1, 10, Some("copy of Board minutes 2026 failed"))
+            .unwrap();
         let exported = serde_json::to_string(&db.queue_diagnostics(200).unwrap()).unwrap();
         assert!(!exported.contains("2026"), "{exported}");
         assert!(!exported.contains("Board"), "{exported}");
         assert!(exported.contains("failed"), "{exported}");
+    }
+
+    #[test]
+    fn known_names_include_synced_paths_for_the_lifecycle_log() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        db.upsert_file(&FileEntry {
+            file_id: "f1".into(),
+            path: "Tax 2025/aangifte.pdf".into(),
+            status: FileStatus::Local,
+            size_bytes: 1,
+            modified_at: 0,
+            content_hash: None,
+            remote_updated_at: 0,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+        // `redact_for_export` turns any unknown word into `[name]` by itself, so `aangifte` going
+        // missing proves nothing. `2025` is a bare number its allow-list keeps: only the known-name
+        // scan removes it. The control proves it survives without the names, so this can go red.
+        let message = "could not open Tax 2025";
+        let control = crate::diagnostic_redaction::redact_for_export(message, &KnownNames::new());
+        assert!(
+            control.text.contains("2025"),
+            "control: a bare number must survive without names: {}",
+            control.text
+        );
+        let names = db.known_names(&[]).unwrap();
+        let out = crate::diagnostic_redaction::redact_for_export(message, &names);
+        assert!(
+            !out.text.contains("2025"),
+            "the synced path was not a known name: {}",
+            out.text
+        );
+        // The extra paths (the sync root) are known names too.
+        let with_root = db.known_names(&["Beebeeb Sync 4417".to_string()]).unwrap();
+        let out = crate::diagnostic_redaction::redact_for_export("could not open Beebeeb Sync 4417", &with_root);
+        assert!(
+            !out.text.contains("4417"),
+            "an extra path was not a known name: {}",
+            out.text
+        );
     }
 
     #[test]
@@ -4629,9 +5304,16 @@ mod tests {
         assert!(!exported.contains("Tax 2025"), "known folder name leaked: {exported}");
         assert!(!exported.contains("aangifte"), "known file name leaked: {exported}");
         // The failure itself is still reported, and the removal is counted.
-        assert!(diagnostics.last_error.as_deref().unwrap().contains("failed"), "{exported}");
+        assert!(
+            diagnostics.last_error.as_deref().unwrap().contains("failed"),
+            "{exported}"
+        );
         assert!(diagnostics.last_error_redactions >= 1, "{exported}");
-        assert_eq!(diagnostics.last_error_code, Some(DiagnosticErrorCode::Other), "{exported}");
+        assert_eq!(
+            diagnostics.last_error_code,
+            Some(DiagnosticErrorCode::Other),
+            "{exported}"
+        );
     }
 
     /// Task 1685: a name that exists only in a queued op's staged payload path
@@ -4660,7 +5342,8 @@ mod tests {
             updated_at: 1,
         })
         .unwrap();
-        db.record_operation_attempt("op-1", 1, 10, Some("copy of Q3 2026 failed")).unwrap();
+        db.record_operation_attempt("op-1", 1, 10, Some("copy of Q3 2026 failed"))
+            .unwrap();
         let exported = serde_json::to_string(&db.queue_diagnostics(200).unwrap()).unwrap();
         assert!(!exported.contains("2026"), "{exported}");
         assert!(!exported.contains("Q3"), "{exported}");
@@ -5868,10 +6551,18 @@ mod tests {
             created_at: 0,
             updated_at: 0,
         };
-        db.enqueue_operation(&op("t1", OperationKind::TrashFile, "trashed")).unwrap();
-        db.enqueue_operation(&op("u1", OperationKind::UploadVersion, "uploaded")).unwrap();
-        assert!(db.has_pending_trash("trashed").unwrap(), "a queued trash, even out of retries");
-        assert!(!db.has_pending_trash("uploaded").unwrap(), "another kind of op is not a delete");
+        db.enqueue_operation(&op("t1", OperationKind::TrashFile, "trashed"))
+            .unwrap();
+        db.enqueue_operation(&op("u1", OperationKind::UploadVersion, "uploaded"))
+            .unwrap();
+        assert!(
+            db.has_pending_trash("trashed").unwrap(),
+            "a queued trash, even out of retries"
+        );
+        assert!(
+            !db.has_pending_trash("uploaded").unwrap(),
+            "another kind of op is not a delete"
+        );
         assert!(!db.has_pending_trash("never-seen").unwrap());
         db.remove_operation("t1").unwrap();
         assert!(!db.has_pending_trash("trashed").unwrap(), "gone once the op is removed");
@@ -5903,13 +6594,7 @@ mod tests {
         seed_child_under(db, file_id, path, kind, None);
     }
 
-    fn seed_child_under(
-        db: &StateDb,
-        file_id: &str,
-        path: &str,
-        kind: ItemKind,
-        parent_id: Option<&str>,
-    ) {
+    fn seed_child_under(db: &StateDb, file_id: &str, path: &str, kind: ItemKind, parent_id: Option<&str>) {
         db.upsert_file(&FileEntry {
             file_id: file_id.into(),
             path: path.into(),
@@ -5964,7 +6649,10 @@ mod tests {
         assert!(!anchor_1.is_empty(), "the anchor after changes must not be empty");
 
         db.record_file_change("f-1", FpChangeKind::Modified, None).unwrap();
-        let (_, anchor_2) = db.list_file_changes(Some(&anchor_1)).unwrap().expect("changes since anchor 1");
+        let (_, anchor_2) = db
+            .list_file_changes(Some(&anchor_1))
+            .unwrap()
+            .expect("changes since anchor 1");
         let anchor_2 = anchor_2.expect("an anchor after further changes");
         assert!(
             anchor_2 > anchor_1,
@@ -5984,7 +6672,11 @@ mod tests {
         // Nothing happened since: the anchor must be stable and the batch empty.
         let (changes, anchor_2) = db.list_file_changes(Some(&anchor_1)).unwrap().unwrap();
         assert!(changes.is_empty(), "no changes since the fresh anchor: {changes:?}");
-        assert_eq!(anchor_2.as_deref(), Some(anchor_1.as_ref()), "a no-op poll must not move the anchor");
+        assert_eq!(
+            anchor_2.as_deref(),
+            Some(anchor_1.as_ref()),
+            "a no-op poll must not move the anchor"
+        );
     }
 
     #[test]
@@ -6010,8 +6702,16 @@ mod tests {
                     && change.old_parent_id.as_deref() == Some("old-parent")
             })
             .expect("the real reparent (old parent = old-parent) must come back");
-        assert_eq!(reparent.old_parent_id.as_deref(), Some("old-parent"), "old parent for materialized-set filtering");
-        assert_eq!(reparent.new_parent_id.as_deref(), Some("new-parent"), "new parent read from the files row at record time");
+        assert_eq!(
+            reparent.old_parent_id.as_deref(),
+            Some("old-parent"),
+            "old parent for materialized-set filtering"
+        );
+        assert_eq!(
+            reparent.new_parent_id.as_deref(),
+            Some("new-parent"),
+            "new parent read from the files row at record time"
+        );
     }
 
     #[test]
@@ -6025,13 +6725,18 @@ mod tests {
         // (from the files row) BEFORE the delete — the caller passes it as
         // old_parent_id and record_file_change pins it as the change's parent
         // when the row no longer exists.
-        db.record_file_change("child-1", FpChangeKind::Deleted, Some("parent-1".into())).unwrap();
+        db.record_file_change("child-1", FpChangeKind::Deleted, Some("parent-1".into()))
+            .unwrap();
         let (changes, _) = db.list_file_changes(None).unwrap().unwrap();
         let deletion = changes
             .iter()
             .find(|change| change.file_id == "child-1" && change.kind == FpChangeKind::Deleted)
             .expect("the deleted change must come back");
-        assert_eq!(deletion.new_parent_id.as_deref(), Some("parent-1"), "deleted items report their old parent as new_parent_id");
+        assert_eq!(
+            deletion.new_parent_id.as_deref(),
+            Some("parent-1"),
+            "deleted items report their old parent as new_parent_id"
+        );
     }
     #[test]
     fn change_log_paging_returns_every_change_exactly_once() {
@@ -6058,9 +6763,17 @@ mod tests {
         let mut cursor: Option<Vec<u8>> = None;
         loop {
             let (changes, anchor) = db.list_file_changes_paged(cursor.as_deref(), 100).unwrap().unwrap();
-            assert!(changes.len() <= 100, "a page must honor the limit, got {}", changes.len());
+            assert!(
+                changes.len() <= 100,
+                "a page must honor the limit, got {}",
+                changes.len()
+            );
             for change in &changes {
-                assert!(seen.insert((change.file_id.clone(), change.kind)), "a change came back twice: {:?}", change);
+                assert!(
+                    seen.insert((change.file_id.clone(), change.kind)),
+                    "a change came back twice: {:?}",
+                    change
+                );
             }
             pages += 1;
             match anchor {
@@ -6070,12 +6783,18 @@ mod tests {
                     break;
                 }
                 Some(a) => {
-                    assert!(a > cursor.clone().unwrap_or_default(), "paging anchors must strictly increase");
+                    assert!(
+                        a > cursor.clone().unwrap_or_default(),
+                        "paging anchors must strictly increase"
+                    );
                     cursor = Some(a);
                 }
                 None => break,
             }
-            assert!(pages < 10, "250 changes at 100/page must take 3 pages, not spin forever");
+            assert!(
+                pages < 10,
+                "250 changes at 100/page must take 3 pages, not spin forever"
+            );
         }
         assert_eq!(seen.len(), 250, "every change must be delivered exactly once");
         // 3 delivery pages + 1 final round trip whose echoed anchor breaks
@@ -6094,14 +6813,24 @@ mod tests {
         // must never touch the anchor row (the replica's cursor survives).
         db.sweep_file_changes(2_000_000_000).unwrap();
         let (changes, anchor_after) = db.list_file_changes(Some(&anchor)).unwrap().unwrap();
-        assert!(changes.is_empty(), "swept changes are no longer deliverable: {changes:?}");
-        assert_eq!(anchor_after.as_deref(), Some(anchor.as_ref()), "the anchor survives the sweep");
+        assert!(
+            changes.is_empty(),
+            "swept changes are no longer deliverable: {changes:?}"
+        );
+        assert_eq!(
+            anchor_after.as_deref(),
+            Some(anchor.as_ref()),
+            "the anchor survives the sweep"
+        );
         // After the sweep the log is empty (tip = 0), so a from-nil listing
         // starts a FRESH enumeration — the sweep means "history older than the
         // cutoff is gone", not "the anchor resets". The persistent anchor ROW
         // (fp_last_anchor) is what must survive for currentSyncAnchor:
-        assert_eq!(db.fp_last_anchor().unwrap().as_deref(), Some(anchor.as_ref()),
-            "the persistent anchor survives the sweep (crash recovery reads it)");
+        assert_eq!(
+            db.fp_last_anchor().unwrap().as_deref(),
+            Some(anchor.as_ref()),
+            "the persistent anchor survives the sweep (crash recovery reads it)"
+        );
     }
 
     #[test]
@@ -6116,7 +6845,11 @@ mod tests {
         drop(db);
         let db = StateDb::open(&path).unwrap();
         let (_, reopened) = db.list_file_changes(Some(&anchor)).unwrap().unwrap();
-        assert_eq!(reopened.as_deref(), Some(anchor.as_ref()), "the anchor and consumed state must survive process death");
+        assert_eq!(
+            reopened.as_deref(),
+            Some(anchor.as_ref()),
+            "the anchor and consumed state must survive process death"
+        );
     }
 
     // ------------------------------------------------------------------
@@ -6130,11 +6863,14 @@ mod tests {
     // ------------------------------------------------------------------
 
     fn recorded_at_of(db: &StateDb, file_id: &str) -> i64 {
-        db.0.lock().expect("state_db mutex poisoned").query_row(
-            "SELECT recorded_at FROM fp_changes WHERE file_id = ?1",
-            params![file_id],
-            |row| row.get::<_, i64>(0),
-        ).unwrap()
+        db.0.lock()
+            .expect("state_db mutex poisoned")
+            .query_row(
+                "SELECT recorded_at FROM fp_changes WHERE file_id = ?1",
+                params![file_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
     }
 
     #[test]
@@ -6147,7 +6883,10 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        assert!(recorded_at > 0, "a recorded change must carry its real insertion time, got recorded_at={recorded_at}");
+        assert!(
+            recorded_at > 0,
+            "a recorded change must carry its real insertion time, got recorded_at={recorded_at}"
+        );
         assert!(
             recorded_at >= now - 60 && recorded_at <= now + 60,
             "recorded_at={recorded_at} must be wall-clock now (~{now}), not the 0 sentinel"
@@ -6162,18 +6901,23 @@ mod tests {
         let db = StateDb::open(":memory:").unwrap();
         seed_child(&db, "f-1", "/a.txt", ItemKind::File);
         db.record_file_change("f-1", FpChangeKind::Created, None).unwrap();
-        let fresh_rows: i64 = db.0.lock().expect("state_db mutex poisoned").query_row(
-            "SELECT COUNT(*) FROM fp_changes WHERE file_id = 'f-1'",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let fresh_rows: i64 =
+            db.0.lock()
+                .expect("state_db mutex poisoned")
+                .query_row("SELECT COUNT(*) FROM fp_changes WHERE file_id = 'f-1'", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
         assert!(fresh_rows > 0, "the seed must have written change rows");
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         let deleted = db.sweep_file_changes(now - 7 * 24 * 3600).unwrap();
-        assert_eq!(deleted, 0, "fresh rows must NEVER be swept (was: every row, recorded_at=0 < cutoff)");
+        assert_eq!(
+            deleted, 0,
+            "fresh rows must NEVER be swept (was: every row, recorded_at=0 < cutoff)"
+        );
         // The change is still deliverable AFTER the sweep (no pre-consume:
         // a from-nil listing must still see it).
         let (changes, _) = db.list_file_changes(None).unwrap().unwrap();
@@ -6182,7 +6926,10 @@ mod tests {
             "the fresh changes are still deliverable after the sweep: {changes:?}"
         );
         // Invariant: the sweep never touches the anchor row.
-        assert!(db.fp_last_anchor().unwrap().is_some(), "the persistent anchor survives the sweep (crash recovery reads it)");
+        assert!(
+            db.fp_last_anchor().unwrap().is_some(),
+            "the persistent anchor survives the sweep (crash recovery reads it)"
+        );
     }
 
     #[test]
@@ -6203,27 +6950,290 @@ mod tests {
             conn.execute(
                 "UPDATE fp_changes SET recorded_at = ?1 WHERE file_id = 'old-1'",
                 params![cutoff - 1],
-            ).unwrap();
+            )
+            .unwrap();
             conn.execute(
                 "UPDATE fp_changes SET recorded_at = ?1 WHERE file_id = 'edge-1'",
                 params![cutoff],
-            ).unwrap();
+            )
+            .unwrap();
         }
         let count = |file_id: &str| -> i64 {
-            db.0.lock().expect("state_db mutex poisoned").query_row(
-                "SELECT COUNT(*) FROM fp_changes WHERE file_id = ?1",
-                params![file_id],
-                |row| row.get(0),
-            ).unwrap()
+            db.0.lock()
+                .expect("state_db mutex poisoned")
+                .query_row(
+                    "SELECT COUNT(*) FROM fp_changes WHERE file_id = ?1",
+                    params![file_id],
+                    |row| row.get(0),
+                )
+                .unwrap()
         };
         let old_rows = count("old-1");
         let edge_rows = count("edge-1");
-        assert!(old_rows > 0 && edge_rows > 0, "both files must have backdated change rows");
+        assert!(
+            old_rows > 0 && edge_rows > 0,
+            "both files must have backdated change rows"
+        );
         let deleted = db.sweep_file_changes(cutoff).unwrap();
-        assert_eq!(deleted as i64, old_rows, "strict <: only the rows strictly OLDER than the cutoff are swept");
+        assert_eq!(
+            deleted as i64, old_rows,
+            "strict <: only the rows strictly OLDER than the cutoff are swept"
+        );
         assert_eq!(count("old-1"), 0, "aged-out rows are gone");
-        assert_eq!(count("edge-1"), edge_rows, "a row recorded exactly AT the cutoff survives (strict <)");
+        assert_eq!(
+            count("edge-1"),
+            edge_rows,
+            "a row recorded exactly AT the cutoff survives (strict <)"
+        );
         // Invariant: the sweep never touches the anchor row.
-        assert!(db.fp_last_anchor().unwrap().is_some(), "the anchor cursor outlives swept history");
+        assert!(
+            db.fp_last_anchor().unwrap().is_some(),
+            "the anchor cursor outlives swept history"
+        );
+    }
+
+    // ── R10 (spec 2026-10-06 §5.6): local data is bound to the account that created it ──
+
+    #[test]
+    fn the_owner_round_trips_and_a_sign_out_purge_forgets_it_with_the_staged_payloads() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        assert_eq!(db.owner().unwrap(), None);
+        assert!(!db.has_account_data().unwrap(), "a new database holds no account data");
+        let owner = crate::account_binding::Identity::new(Some("u-a"), Some("a@beebeeb.io"));
+        db.set_owner(&owner).unwrap();
+        assert_eq!(db.owner().unwrap(), Some(owner));
+        assert!(
+            !db.has_account_data().unwrap(),
+            "the owner record alone is not account data"
+        );
+        db.track_staged_payload("/tmp/bb-r10-staged-1.bin", None, false)
+            .unwrap();
+        assert!(db.has_account_data().unwrap());
+        let purge = db.purge_all_local_state().unwrap();
+        assert!(
+            purge.payload_paths.contains(&"/tmp/bb-r10-staged-1.bin".to_string()),
+            "staged files are returned for deletion"
+        );
+        let staged: i64 =
+            db.0.lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM staged_payloads", [], |r| r.get(0))
+                .unwrap();
+        assert_eq!(staged, 0, "staged payload rows are gone");
+        assert_eq!(db.owner().unwrap(), None, "a sign-out forgets the owner");
+    }
+
+    #[test]
+    fn clearing_account_data_leaves_no_row_and_no_owner() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        db.0.lock()
+            .unwrap()
+            .execute("INSERT INTO sync_state(key, value) VALUES ('cursor', '12')", [])
+            .unwrap();
+        db.track_staged_payload("/tmp/bb-r10-staged-2.bin", None, true).unwrap();
+        db.set_owner(&crate::account_binding::Identity::new(Some("u-a"), None))
+            .unwrap();
+        assert!(db.has_account_data().unwrap(), "a sync cursor is account data");
+        db.clear_account_data(false).unwrap();
+        assert!(!db.has_account_data().unwrap());
+        assert_eq!(db.owner().unwrap(), None);
+    }
+
+    /// Added after a mutation survived (task 1834, M20): the sync cursor is account data on its own, and the
+    /// owner record, which lives in the same table, is not. Nothing else is in the database here, so this
+    /// is the only row `has_account_data` can be counting.
+    #[test]
+    fn a_sync_cursor_alone_is_account_data_and_the_owner_record_alone_is_not() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        db.set_owner(&crate::account_binding::Identity::new(
+            Some("u-a"),
+            Some("a@beebeeb.io"),
+        ))
+        .unwrap();
+        assert!(!db.has_account_data().unwrap(), "the owner record is not account data");
+        db.0.lock()
+            .unwrap()
+            .execute("INSERT INTO sync_state(key, value) VALUES ('cursor', '12')", [])
+            .unwrap();
+        assert!(db.has_account_data().unwrap(), "a sync cursor is");
+    }
+
+    /// F2 (fix round 1 of Task 10): adopting unowned local data is ONE conditional step, once per database, and
+    /// the "already done" mark is not a row, so no purge or reset can clear it and re-open the window.
+    #[test]
+    fn adoption_is_one_conditional_step_that_happens_at_most_once() {
+        use crate::account_binding::Identity;
+        let dir = tempdir().unwrap();
+        let a = Identity::new(None, Some("a@beebeeb.io"));
+        let b = Identity::new(None, Some("b@beebeeb.io"));
+        let seed = |db: &StateDb| {
+            db.0.lock()
+                .unwrap()
+                .execute("INSERT INTO sync_state(key, value) VALUES ('cursor', '1')", [])
+                .unwrap();
+        };
+
+        // Unowned data and a candidate: adopted, and the window is shut behind it.
+        let db = StateDb::open(dir.path().join("one.db")).unwrap();
+        seed(&db);
+        assert!(db.adopt_owner_once(Some(&a)).unwrap());
+        assert_eq!(db.owner().unwrap(), Some(a.clone()));
+        assert!(
+            !db.adopt_owner_once(Some(&b)).unwrap(),
+            "the window is shut: a second candidate is refused"
+        );
+        assert_eq!(db.owner().unwrap(), Some(a.clone()), "and the owner is never replaced");
+
+        // A first look with no candidate (no vault key) also shuts the window: later candidates are too late.
+        let db = StateDb::open(dir.path().join("two.db")).unwrap();
+        seed(&db);
+        assert!(!db.adopt_owner_once(None).unwrap());
+        assert!(!db.adopt_owner_once(Some(&a)).unwrap(), "the first startup has passed");
+        assert_eq!(db.owner().unwrap(), None);
+
+        // Nothing to adopt (no account data) shuts the window without recording anybody.
+        let db = StateDb::open(dir.path().join("three.db")).unwrap();
+        assert!(!db.adopt_owner_once(Some(&a)).unwrap());
+        seed(&db);
+        assert!(
+            !db.adopt_owner_once(Some(&a)).unwrap(),
+            "data that appears later is not the upgrade's"
+        );
+        assert_eq!(db.owner().unwrap(), None);
+
+        // The mark survives a purge and a reset: it is a header value, not a row.
+        let db = StateDb::open(dir.path().join("four.db")).unwrap();
+        seed(&db);
+        db.close_adoption_window().unwrap();
+        db.purge_all_local_state().unwrap();
+        db.clear_account_data(false).unwrap();
+        seed(&db);
+        assert!(
+            !db.adopt_owner_once(Some(&a)).unwrap(),
+            "a reset does not re-open the window"
+        );
+        assert!(!db.has_account_data().unwrap_or(false) || db.owner().unwrap().is_none());
+    }
+
+    /// An owner that is already recorded is never replaced by an adoption, and shuts the window too.
+    #[test]
+    fn adoption_never_replaces_a_recorded_owner() {
+        use crate::account_binding::Identity;
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        db.0.lock()
+            .unwrap()
+            .execute("INSERT INTO sync_state(key, value) VALUES ('cursor', '1')", [])
+            .unwrap();
+        db.set_owner(&Identity::new(Some("u-a"), None)).unwrap();
+        assert!(
+            !db.adopt_owner_once(Some(&Identity::new(None, Some("b@beebeeb.io"))))
+                .unwrap()
+        );
+        assert_eq!(db.owner().unwrap(), Some(Identity::new(Some("u-a"), None)));
+    }
+
+    /// R3 (fix round 2): a clear that owes no removal leaves the "domain gone" mark; one that owes it leaves the debt
+    /// and no mark; a debt recorded later wipes the mark (a domain may be registered again). Neither is account data.
+    #[test]
+    fn the_domain_gone_mark_and_the_removal_debt_exclude_each_other_and_are_not_account_data() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        db.clear_account_data(false).unwrap();
+        assert!(db.finder_domain_gone().unwrap() && !db.finder_removal_owed().unwrap());
+        assert!(!db.has_account_data().unwrap(), "the mark is not account data");
+        db.clear_account_data(true).unwrap();
+        assert!(
+            !db.finder_domain_gone().unwrap() && db.finder_removal_owed().unwrap(),
+            "owing a removal leaves no mark"
+        );
+        assert!(!db.has_account_data().unwrap(), "the debt is not account data");
+        db.clear_account_data(false).unwrap();
+        db.set_finder_removal_owed(true).unwrap();
+        assert!(
+            !db.finder_domain_gone().unwrap(),
+            "a debt recorded later wipes the mark"
+        );
+        db.set_finder_removal_owed(false).unwrap();
+        assert!(!db.finder_removal_owed().unwrap());
+    }
+
+    /// Fix round 3: a domain registered again is no longer known gone. Clearing the mark touches nothing else: the
+    /// owner, a removal debt and the account rows stay.
+    #[test]
+    fn a_domain_registered_again_clears_the_gone_mark_and_nothing_else() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        db.clear_account_data(false).unwrap();
+        assert!(db.finder_domain_gone().unwrap());
+        db.clear_finder_domain_gone().unwrap();
+        assert!(!db.finder_domain_gone().unwrap(), "the mark is gone");
+        db.clear_finder_domain_gone().unwrap(); // nothing to clear is not an error
+        let owner = crate::account_binding::Identity::new(Some("u-a"), Some("a@beebeeb.io"));
+        db.set_owner(&owner).unwrap();
+        db.set_finder_removal_owed(true).unwrap();
+        db.clear_finder_domain_gone().unwrap();
+        assert_eq!(db.owner().unwrap(), Some(owner), "the owner stays");
+        assert!(db.finder_removal_owed().unwrap(), "a removal debt stays");
+    }
+
+    #[test]
+    fn every_table_is_classified_for_the_account_binding() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let conn = db.0.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
+            .unwrap();
+        let tables: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_>>()
+            .unwrap();
+        assert!(tables.len() >= 12, "{tables:?}");
+        for table in &tables {
+            assert!(
+                ACCOUNT_TABLES.contains(&table.as_str())
+                    || DEVICE_TABLES.contains(&table.as_str())
+                    || table == "sync_state",
+                "{table}: list it in ACCOUNT_TABLES (R10), or in DEVICE_TABLES if it holds no account data"
+            );
+        }
+    }
+
+    #[test]
+    fn queued_or_staged_counts_the_queue_and_the_staged_payloads() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        assert_eq!(db.queued_or_staged_count().unwrap(), 0);
+        db.track_staged_payload("/tmp/bb-p1-staged.bin", None, false).unwrap();
+        assert_eq!(db.queued_or_staged_count().unwrap(), 1);
+        db.enqueue_operation(&PendingOperation {
+            op_id: "op-p1".into(),
+            kind: OperationKind::UploadVersion,
+            file_id: Some("file-p1".into()),
+            parent_id: None,
+            target_path: Some("/P1.txt".into()),
+            metadata_json: None,
+            payload_path: None,
+            base_version: None,
+            base_object_version_id: None,
+            attempts: 0,
+            max_attempts: 5,
+            next_retry_at: 0,
+            last_error: None,
+            backup_source_key: None,
+            created_at: 0,
+            updated_at: 0,
+        })
+        .unwrap();
+        assert_eq!(
+            db.queued_or_staged_count().unwrap(),
+            2,
+            "a queued change and a staged payload both count"
+        );
     }
 }

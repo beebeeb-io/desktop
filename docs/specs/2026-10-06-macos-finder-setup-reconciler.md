@@ -26,7 +26,7 @@ Guus, 2026-10-06, on desktop 0.8.11:
 5. **Why nothing cleaned it up.** `NSFileProviderManager.getDomains` returns only the calling provider's own domains, so the 1698 stale-domain sweep can never see `io.beebeeb.desktop.FileProvider`. `fileproviderctl` has no remove command.
 6. **No way to diagnose it on a user's Mac.** The app logs only to stdout (`tracing_subscriber::fmt()`, lib.rs ~8736), which is lost when macOS launches the app. The evidence above came from the system log, which only reaches back about four hours.
 7. **A revoked session plus "Sign in again" throws away edits that have not uploaded (data loss, exists today).** `forceReauth` (`src/desktopApi.ts:1030`) calls `clearSession()` and then opens onboarding. `clear_session` is the full sign-out: it purges the operation queue and the decrypted cache (`lib.rs` ~1793–1844) and removes the Finder domain. Verified in code by the lead. Ruling R8 replaces this path. — lead, 2026-10-06 (plan review)
-8. **Local data on this computer is not yet bound to the account that created it (hardening).** `state.db` and the files it points at carry no record of their account. Ruling R10 adds that binding: a different account never reuses this data (§5.6). Background: private workspace task 1835. — lead, 2026-10-06 (plan review)
+8. **Local data on this computer is not yet bound to the account that created it (hardening).** `state.db` and the files it points at carry no record of their account. Ruling R10 adds that binding: a different account never reuses this data (§5.6). Background: the private workspace task. — lead, 2026-10-06 (plan review)
 
 ### Correction: tasks 1696 and 1698
 
@@ -50,7 +50,7 @@ The 1696 forensics line "we registered 'Drive' while the system showed 'Beebeeb'
 - **R7: device check D8 may sign a test account into production** to exercise the real alpha update path. This was approved with Section 6 ("perfect"). It is the only production action this spec authorizes.
 - **R8: re-sign-in in place** (2026-10-06, after the plan review). Question: "Sign in again" after a revoked session currently signs you out fully (Finder entry removed, edits not yet uploaded thrown away); how should it work? Answer: **"Re-sign-in in place, in spec A (Recommended)"**. The option he chose: "Sign in again as the same account and only the session token is replaced. Finder, keys, cache and pending edits all stay, and the edits upload afterwards. Signing in as a different account is an account switch: full sign-out, with a warning if edits haven't uploaded yet. Adds auth code to A, with a security review." — lead, 2026-10-06 (plan review)
 - **R9: the vault key stays after a remote revocation** (2026-10-06). Question: keep the vault key on this Mac after its session is revoked, so the same account signs in again without its recovery phrase? Answer: **"Keep the key, review decides (Recommended)"**. The Mac keeps its key. The change merges only if the security review agrees; if the review disagrees, the decision returns to Guus. — lead, 2026-10-06 (plan review)
-- **R10: local data is bound to the account that created it** (2026-10-06). Answer: **"Fold into 1834"**: this spec also owns that binding. A different account never reuses this computer's local data. Behaviour in §5.6; background in private workspace task 1835. — lead, 2026-10-06 (plan review)
+- **R10: local data is bound to the account that created it** (2026-10-06). Answer: **"Fold into 1834"**: this spec also owns that binding. A different account never reuses this computer's local data. Behaviour in §5.6; background in the private workspace task. — lead, 2026-10-06 (plan review)
 - **R11: Windows stays fail-closed** (2026-10-06), on the Windows gap of R10. Answer: **"Refuse now, escape hatch as its own task (Recommended)"**. This spec keeps Windows refusing (§5.6). An explicit "Discard and switch" escape hatch is private workspace task 1837, verified on Windows CI and a Windows PC. — lead, 2026-10-06 (plan review)
 
 ## 4. Goal and non-goals
@@ -76,7 +76,7 @@ The 1696 forensics line "we registered 'Drive' while the system showed 'Beebeeb'
 | Signed out by choice | **absent** |
 | "Repair…" in Settings (`reset_macos_integration`) | **absent, then wanted again**: remove, then one fresh check, so a signed-in Mac ends with Beebeeb back in Finder |
 | Signed out without choosing it: the startup probe got a 401 for a revoked token (— lead, 2026-10-06 (plan review)) | **no action**: Beebeeb stays in Finder (R2). A persisted `finder_signed_out_by_choice` tells this apart from a sign-out by choice; only that one means absent |
-| Signed in again as the **same** account after a revoked session, R8 (— lead, 2026-10-06 (plan review)) | **present, nothing removed**: only the session token is replaced. Keys, cache, queue and Finder stay, and the queue uploads afterwards |
+| Signed in again as the **same** account after a revoked session, R8 (— lead, 2026-10-06 (plan review)) | **present, nothing removed**: only the session token is replaced. Keys, cache, queue and Finder stay, and the queue uploads afterwards<br>A kept vault key stays only once the server confirms it is still the account's key. A key that was changed on another device is removed instead, and the recovery phrase is asked; cache, queue and Finder still stay (§5.6). — lead, 2026-10-08 (final review) |
 | Signing in as a **different** account, R8 (— lead, 2026-10-06 (plan review)) | an account switch: the pending-edits warning first, then a full sign-out (**absent**, queue and cache purged), then a fresh sign-in (**present**) |
 | Vault locked (`lock_vault`) (— lead, 2026-10-06 (plan review)) | **no action**: a check in flight is cancelled before the engine stops, and nothing starts again until keys arrive |
 
@@ -90,7 +90,22 @@ It reuses the existing `surfaces::phase::FinderSetup` the popover reducer alread
 | `Ready` | registered, enabled and stable |
 | `UserDisabled` | turned off in System Settings; add is never called while it is off |
 | `Failed(reason)` | retry budget spent or not retryable; one sentence and one action |
-| `Missing` | only the instant before the first check, or while the wanted state is "no action"; never a state a person waits in |
+| `Missing` | ~~only the instant before the first check, or while the wanted state is "no action"; never a state a person waits in~~ no check owns Finder right now; Beebeeb may or may not still be registered. A resting state that claims nothing about presence (see "Where `Missing` rests" below) — lead, 2026-10-08 (final review) |
+
+**Where `Missing` rests.** The first version of this table said a person never waits in `Missing`. That was false: `Missing` is where the reconciler rests whenever no check owns Finder, and Beebeeb can still be registered then. A loaded `Missing` therefore means "no check owns Finder right now; Beebeeb may or may not still be registered", never "absent". The cases: — lead, 2026-10-08 (final review)
+
+| Case | Is Beebeeb still registered? |
+|---|---|
+| Signed out by choice, removal confirmed | No |
+| Signed out by choice, removal not confirmed (it failed, or the read before it failed) | Can be; the next launch removes it again |
+| A revoked session found at startup (R2): the token is dropped, the keys stay in the Keychain, the wanted state is "no action" | Yes, by design |
+| Keys absent (the recovery-phrase step) | Can be |
+| A Lock that interrupted a check, possibly after `addDomain` | Can be |
+| A Repair while the reconciler is held (signed out or locked) | No |
+| A reconciler that never received its launch trigger, because the startup restore never finished | Either |
+| A removal the check owed (the previous domain) that failed while signed in and unlocked | Yes. Since the final review this case lands `Failed` with "Try again" instead (§13.1), so `Missing` no longer rests here |
+
+So a surface shows a loaded `Missing` as a quiet row: no pill, no activity, and no claim that Beebeeb is or is not in Finder. Where a slot must show text (the Status line), it shows one sentence: "Beebeeb adds itself to Finder when you’re signed in and the vault is unlocked." (the wording is for Guus to confirm). `Missing` is still never a resting state while the wanted state is present (§13.1). — lead, 2026-10-08 (final review)
 
 ### 5.3 What starts a check
 
@@ -106,6 +121,9 @@ It reuses the existing `surfaces::phase::FinderSetup` the popover reducer alread
 
 A revoked session is deliberately **not** a trigger.
 Neither is a same-account re-sign-in (R8): it replaces only the session token, so the reconciler has nothing to add or remove. Keys that the re-sign-in loads from the Keychain count as trigger 2, which confirms a domain that is already there. — lead, 2026-10-06 (plan review)
+When the server says the vault key this Mac kept is no longer the account's (§5.6), the re-sign-in first ends the session in memory the way Lock does (trigger 7: the check is cancelled and held, then the engine stops), then removes the key. It never removes the domain. The recovery phrase brings the keys back (trigger 2). — lead, 2026-10-08 (final review)
+
+Every removal the reconciler makes (sign-out, Repair, an owed removal, and the Repair that §5.6's reset asks for) keeps the files that never reached the server and reports the folder macOS kept them in, as `docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md` describes: the removal's answer carries the folder to the sign-out's alert and to Repair's result, and a removal that nobody waits for shows it the way the app-start sweep does. — lead, 2026-10-10 (rebase onto 1882)
 
 ### 5.4 One check at a time
 
@@ -143,15 +161,32 @@ Steps:
 Added for ruling R10. — lead, 2026-10-06 (plan review)
 
 - The local data on this computer is `state.db` (the queue, staged uploads, upload sessions, file rows, Finder anchors, activity) plus the files it points at (staged payloads, the decrypted cache). Its owner is recorded inside `state.db`: the server user id and the account email.
-- Before any sync engine starts, the session's account is compared with that owner. The user id decides when both sides know it; otherwise the email decides, ignoring case.
-  - **Same account:** everything is kept (R8).
-  - **A different account, or local data with no recorded owner:** the local data is reset before anything starts (the sign-out purge, then every remaining row), and the new account becomes the owner. On a Mac, Beebeeb is then repaired in Finder so that Finder lists only the new account's files.
-  - **An owner that cannot be compared with the session:** nothing starts and nothing is deleted.
-  - **Windows:** a reset is refused instead. Sync does not start, and the person signs out and in again, because Windows sign-out never discards unsent changes silently.
+- Before any sync engine starts, the session's account is compared with that owner, in this order, on every platform:
+  1. **A session that does not know who it is** (its account record could not be fetched): nothing starts and nothing is deleted, whatever the data (`IDENTITY_UNKNOWN`).
+  2. **The user ids decide** when both sides know one.
+  3. Otherwise **two emails that are equal after trimming surrounding whitespace and Unicode lower-casing, the server's canonical form,** are the same account: everything is kept (R8). This covers an exact match and any letter-case variant, ASCII or not.
+  4. Otherwise **another account, or local data with no recorded owner:** on macOS and Linux the local data is reset before anything starts (the sign-out purge, then every remaining row), and the new account becomes the owner. On a Mac, Beebeeb is then repaired in Finder so that Finder lists only the new account's files. On Windows a reset is refused instead (`OTHER_ACCOUNT_ON_WINDOWS`): sync does not start, and the person signs out and in again, because Windows sign-out never discards unsent changes silently.
+  - **An owner that cannot be compared with the session** (nothing in common to compare): nothing starts and nothing is deleted.
+  - ~~Revision: this order replaces "otherwise the email decides, ignoring case" for the engine start (rulings A and A′). Sign-in's identity order (R8: the key proof, then the ASCII-folded email) is a different step and is unchanged. — lead, 2026-10-07 (rulings A and A′)~~
+  - Revision: ruling A″ supersedes rulings A and A′ (which refused a difference in letter case only). Production keeps one account per canonical address: a unique index on the lower-cased email since the 2026-10-04 deploy, built with no duplicates. So emails equal in canonical form name the same account, at the engine start, in the owner backfill and in sign-in's email rule alike. — lead, 2026-10-08 (ruling A″)
+    A production count on 2026-10-08 found no account with a non-ASCII address, so the server's case-folding and the canonical form cannot disagree for any existing account; the server aligns the two before the first such address registers. — lead, 2026-10-08 (count)
+- A start the binding refuses is exposed as `engine_refusal` on `sync_status` (`{code, sentence}`, code `identity_unknown` or `other_account_on_windows`, on every platform); the reconciler's reason stays `unknown` (§6.2). — lead, 2026-10-07 (fix round 2)
+  A third code, `engine_stop_unconfirmed`, is recorded where any engine start refuses because an earlier engine stop was never confirmed (every start refuses until Beebeeb restarts), with the sentence “Beebeeb’s sync didn’t confirm it stopped. Quit and reopen Beebeeb before syncing again.” It is cleared like the other two. Repair (`reset_macos_integration`) also returns `engine_stop_unconfirmed: bool`, read from the account after its engine stop, so it covers an earlier unconfirmed stop as well as its own; its warning string stays for Windows and Linux. — lead, 2026-10-08 (final review)
 - A failed reset, or a failed sign-out purge on macOS or Linux, stops: no engine starts, and sign-out reports the failure instead of completing.
-- Upgrade: local data from before this binding is adopted at startup by the account this computer's Keychain still names. A same-account re-sign-in (R8) records the owner too.
+  On a Mac, a sign-out that stops this way while the keys are still in memory leaves the person signed in: the reconciler is told the keys are here, puts Finder back, and its check starts the engine again. That is safe because it is the same account and its owner record is untouched; the purge that failed is tried again by the next sign-out. A sign-out that stops while an earlier engine stop is unconfirmed does not ask for Finder back, because every start refuses until Beebeeb restarts. — lead, 2026-10-08 (final review)
+- ~~Upgrade: local data from before this binding is adopted at startup by the account this computer's Keychain still names.~~ Upgrade: local data from before this binding is adopted at startup, once, only by a complete stored session: a token and a vault key that the Keychain returns together, named by that session's email. With no complete stored session (a token alone, a key alone, or only an email) nothing is adopted, and the adoption window closes all the same. — lead, 2026-10-08 (final review) A same-account re-sign-in (R8) records the owner too.
 - A sign-out by choice forgets the owner and also deletes staged uploads.
 - A sign-in counts as a first sign-in only when nothing of a previous account remains: no recorded owner, no Keychain email, no vault key, no cached profile, and no queued or staged data. Anything else is compared, and an account that does not match takes the switch (R8). The switch leaves no vault key and no account email behind, or it stops. The previous account's key is never used for, or left next to, another account. (Codex review of the plan, PR #113.) — lead, 2026-10-06 (plan review)
+  That includes the sign-in prefill (`last_signed_in_email` in `desktop.toml`), which an ordinary sign-out and a startup 401 keep: the switch's sign-out (`clear_session` with `forget_email`) removes it before anything else is torn down, never saves it again, and stops if `desktop.toml` cannot be written. A sign-out without `forget_email` keeps the prefill as before. — lead, 2026-10-08 (final review)
+- A kept vault key is used only after the server confirms it is still the account's key, for the same account too. An account's key can be changed on another device (a new password that derives a new key, or a recovery with a new phrase), and that change signs out every device, so a re-sign-in after a revoked session cannot assume the key it kept is current. When the user ids match and a key is stored or in memory, the server is asked first, with the same check the recovery phrase goes through:
+  - it confirms the key: the re-sign-in is in place (R8), keys included;
+  - it says the key is no longer the account's: the new session token is stored without the key, the kept key is removed from this Mac (both Keychain layouts, and memory, ended the way Lock ends it), and the recovery phrase is asked, with a sentence that says why. The queue, the cache and Finder stay;
+  - it cannot say (network, server error): nothing changes, and the new session is revoked;
+    A `400` decides only with one of two exact codes: `invalid_recovery_phrase` (the key is no longer the account's) or `recovery_check_missing` (below). Any other `400` (no JSON, another code, a body the server rejected before reading it, an intermediary's page) is "it cannot say". — lead, 2026-10-09 (security re-check)
+  - ~~the account has no recovery check on file, so no key can be checked: the matching user ids decide, as before.~~
+  - the account has no recovery check on file, so no key can be checked. Once the server answers that with its own code (`recovery_check_missing`), the matching user ids decide, as before. A server that answers it with `invalid_recovery_phrase`, the code for a key that is no longer the account's, cannot be told apart from that case: against such a server the kept key is treated as outdated and removed, and the recovery step then refuses the correct phrase too, because the phrase is checked against the same missing check (a browser sign-in, which hands over the key, still signs the person in). So a build with this proof is released only once the server sends the distinct code, or once no account without a recovery check exists. — lead, 2026-10-09 (security re-check)
+  - With a session in memory, the key that is checked is the key in memory, because a same-account re-sign-in keeps it; otherwise it is the key stored on this Mac. The same check runs when this Mac's account has no user id and a key is stored or in memory: a key the server confirms is the same account, a key it rejects is a switch, and with no check on file the email decides. Against a server that answers a missing check with `invalid_recovery_phrase`, such an account with no check on file is treated as a switch here too, under the same release condition as the case above. — lead, 2026-10-09 (security re-check)
+  The browser sign-in hands over the account's current key itself: when it differs from the key this Mac kept, the handed-over key replaces it. — lead, 2026-10-08 (final review)
 
 ## 6. Failure reasons, copy and actions
 
@@ -182,7 +217,8 @@ Rules:
 - "Show in Finder" reveals the running app bundle through a new command, `finder_setup_show_app`. — lead, 2026-10-06 (plan review)
 - **The launch-location check** (`launch_location(bundle_path)`) is pure:
   - bundle under `/Applications` or `~/Applications` → OK
-  - a path containing `/AppTranslocation/`, or starting with `/Volumes/` → not OK
+  - ~~a path containing `/AppTranslocation/`, or starting with `/Volumes/` → not OK~~
+    a path containing `/AppTranslocation/` → not OK (translocated). A bundle sitting directly at a volume's root, that is, whose parent directory is exactly `/Volumes/<one name>` (for example `/Volumes/Beebeeb/Beebeeb.app`), → not OK (the mounted disk image). Nothing deeper under `/Volumes` is refused: `/Volumes/<disk>/Applications/…`, and the `~/Applications` of a home that itself lives on an external disk, count as Applications folders, and any other place on a disk is "anywhere else". The check stays pure, with no filesystem calls. — lead, 2026-10-06 (execution ruling: only a bundle at a volume's root is a disk image; an Applications folder or a home on an external disk is a real install)
   - anywhere else → proceed and let macOS decide (a -2002 is still classified)
   It runs at launch and is exposed in `finder_setup_state` before sign-in, so spec C can show it before anyone types a password. Spec A only provides the detection and the copy.
 
@@ -193,6 +229,7 @@ Rules:
 - **Not retryable** (`folder_taken`, `signing`, `not_in_applications`): `Failed` straight away.
 - **After `Failed`**, nothing retries automatically until the next launch, keys arriving, or "Try again". Bringing the app to the front does not retry.
 - **`UserDisabled` poll:** a read-only `userEnabled` check every 3 s, only while a Beebeeb window is visible, plus once when the app becomes active. It never calls add. The flip to true triggers exactly one check.
+  While `Ready` and not held, the same read-only check runs on the same bound, and a read of `false` moves `Ready` to `UserDisabled` without a check, an add or an engine stop, so Beebeeb turned off in System Settings while it runs is noticed without a relaunch. — lead, 2026-10-09 (device run F7)
 - **The schedule and the clock live in one place** (the reconciler's policy struct) and are injected in tests.
 
 ## 8. Lifecycle log
@@ -234,6 +271,7 @@ Each unit has one purpose and can be tested on its own.
 - `finder_setup_show_app` ("Show in Finder" for `not_in_applications`) — lead, 2026-10-06 (plan review)
 - `open_reauth_window` (R8: "Sign in again" opens sign-in in place; nothing is cleared first) — lead, 2026-10-06 (plan review)
 - `desktop_login` / `desktop_login_2fa` return what the sign-in became: a fresh sign-in, a re-sign-in in place, or `account_mismatch` with the pending-edit count. On a mismatch nothing local changes. — lead, 2026-10-06 (plan review)
+- `clear_session` and `lock_vault` answer `Ok({warning})` when the sign-out or the Lock happened. `warning` is `null`, or `{code, sentence}` for a step that could not be confirmed: `finder_removal_unconfirmed` (sign-out), `finder_lock_unconfirmed` or `engine_stop_unconfirmed` (Lock; the engine one comes first). The surfaces show it as a neutral status line and refresh; an account switch goes on to sign-in. An error keeps meaning the action did not happen (an engine stop that refuses, a purge or Keychain clear that fails, every Windows Lock failure). `clear_session` takes `forget_email` for an account switch (§5.6). The native menu's Sign out shows the error or the warning in a dialog on every platform. — lead, 2026-10-08 (final review)
 
 The macOS frontend no longer calls `install_finder_location`, `continue_without_finder_location` or `finder_domain_user_enabled`; the poll moves into the driver. The commands stay registered for Windows and Linux. `PopoverRuntime`'s `finder_adding_guard` is replaced by the driver's published state.
 
@@ -260,7 +298,11 @@ Kept to what makes A shippable on its own. Spec C later deletes the onboarding s
   - `finderInstallCard.ts`'s macOS classifiers are replaced by the one reason-keyed copy module
 - Subscribe to `finder-setup-changed` instead of polling `finder_location_state` every 3 s.
 - The macOS main window's integration panel (`windows/views/SettingsView.tsx`, which called `install_finder_location` on macOS) reads `finder_setup_state` too. — lead, 2026-10-06 (plan review)
-- **R8:** on macOS, "Sign in again" (`AuthExpiredBanner`, VersionCenter) opens sign-in in place and never calls `clear_session`. A same-account sign-in closes the window and sync resumes. A different account gets the warning, with the pending-edit count, and "Sign out and switch" / "Cancel". Windows and Linux keep today's flow. — lead, 2026-10-06 (plan review)
+- **R8:** on macOS, "Sign in again" (`AuthExpiredBanner`, VersionCenter) opens sign-in in place and never calls `clear_session`. ~~A same-account sign-in closes the window and sync resumes.~~ A same-account sign-in whose kept vault key the server confirms closes the window, and sync resumes. When the server says the key was changed on another device, the key is removed and the recovery-phrase step follows, with a sentence that says why (`key_replaced`, §5.6). — lead, 2026-10-08 (final review) A different account gets the warning, with the pending-edit count, and "Sign out and switch" / "Cancel". Windows and Linux keep today's flow. — lead, 2026-10-06 (plan review)
+  ~~On macOS, "sync resumes" includes the changes the server refused while the session was revoked: once a same-account sign-in has the vault unlocked (after the recovery phrase, when the key was replaced), every queued operation paused because the session was refused (`auth`) is due again, with its attempts kept, before the engine's first tick. Operations paused for any other reason stay paused, and an account switch resumes nothing (its operations were reset first). — lead, 2026-10-10 (device run F9)~~
+  On macOS, "sync resumes" includes the changes the server refused while the session was revoked: once a same-account sign-in has the vault unlocked, or the startup check confirms the stored token and the Keychain unlocks the vault, every queued operation paused because the session was refused (`auth`) is due again, with its attempts kept, before the engine's first tick. A resume that fails is tried again at the next engine start. Operations paused for any other reason stay paused, and an account switch resumes nothing (its operations were reset first). — lead ruling, 2026-10-10 (F9 review I-2, M3)
+  ~~After a key replacement (§5.6: the server says the kept key is no longer the account's, or a browser sign-in hands over a key that differs from it), every operation paused for `auth` is re-marked `key_replaced` before the new key can reach an engine, and no resume makes it due: these edits are kept but not sent, because their names were encrypted under a key the server no longer accepts. Re-encrypting them, or telling the person, is a follow-up. — lead ruling, 2026-10-10 (F9 review I-1)~~
+  After a key replacement (§5.6: the server says the kept key is no longer the account's, or a browser sign-in hands over a key that differs from it), every operation paused for `auth` is re-marked `key_replaced` before the new key can reach an engine, and no resume makes it due: these edits are kept but not sent, because their names were encrypted under a key the server no longer accepts. One exception: if the hold itself fails on the browser re-sign-in, the sign-in fails with the new token already stored and the edits still paused for `auth`. No resume request is open then, so a start in the same process sends nothing, but a later restart can still send them under the replaced key: its startup check confirms the stored token and resumes them. This is a tracked follow-up; no production flow replaces the key today. Re-encrypting them, or telling the person, is a follow-up. — lead ruling, 2026-10-10 (F9 round 4)
 
 ## 11. Clearing the orphan (dev Macs only, R6)
 
@@ -299,7 +341,7 @@ Every new test is seen failing before it passes, and the failure output is paste
   - a known file name planted inside an NSError message comes out as `[name]`, and a path as `[path]`
   - an ordinary `tracing::warn!` with a path never appears in the file
 - **Config**: a 0.8.11 `desktop.toml` with the old keys loads.
-- **Re-sign-in (R8)**, tests seen failing first and mutation-checked: a re-sign-in never purges the queue, never removes the domain and never touches the keys; a mismatch changes nothing local; every sign-in method (password, 2FA, browser) goes through the same account check; Windows keeps today's flow. — lead, 2026-10-06 (plan review)
+- **Re-sign-in (R8)**, tests seen failing first and mutation-checked: a re-sign-in never purges the queue, never removes the domain and never touches the keys (except a kept key the server says is no longer the account's, which is removed and never installed: §5.6, added by the lead on 2026-10-08 in the final review); a mismatch changes nothing local; every sign-in method (password, 2FA, browser) goes through the same account check; Windows keeps today's flow. — lead, 2026-10-06 (plan review)
 - **Security review (R8):** the `crypto-security-reviewer` agent reviews the re-sign-in diff before it merges, and its findings go into the task Notes. — lead, 2026-10-06 (plan review)
 - **Account binding (R10)**, tests seen failing first and mutation-checked:
   - a different account never reuses local data
@@ -309,11 +351,12 @@ Every new test is seen failing before it passes, and the failure output is paste
   - a failed sign-out purge stops the sign-out on macOS and Linux
   - every engine start goes through the binding
   - Windows refuses, tested on CI's Windows job
-  The same security review covers R9 and R10; its R10 findings also go to private task 1835. — lead, 2026-10-06 (plan review)
+  The same security review covers R9 and R10; its R10 findings also go to the private task. — lead, 2026-10-06 (plan review)
 - **Every retained trace counts**, tests seen failing first and mutation-checked. After a revoked token, with nothing queued, on an install from before R10:
   - another account is a switch, never a first sign-in
   - after "Sign out and switch", no vault key or email of the first account remains
   - the same account signs in again in place and keeps its keys (R8, R9)
+  - the same account whose key the server no longer accepts gets no key installed, is asked for the recovery phrase, and keeps its queue (§5.6) — lead, 2026-10-08 (final review)
   — lead, 2026-10-06 (plan review)
 - **Frontend (bun)**:
   - the Finder step advances on a `Ready` event
@@ -348,7 +391,7 @@ Evidence for every check goes under `.claude/tasks/_qa-evidence/<task>/`:
 | D5b | Session revoked, then sign in as a **different** account (R8) (— lead, 2026-10-06 (plan review)) | the warning names the pending-edit count; "Cancel" changes nothing; "Sign out and switch" does the full sign-out (domain removed, queue purged), then the new account signs in fresh |
 | D6 | Turned off in System Settings, then back on | the `user_disabled` notice; then `Ready` with no click in Beebeeb; ~~exactly 1 add attempt after the flip~~ at most 1 add attempt after the flip: turning it back on leaves the domain registered, so §5.5 step 3 only confirms it (— lead, 2026-10-06 (plan review)) |
 | D7 | Opened from the mounted dmg | `not_in_applications` reported by `finder_setup_state` before sign-in |
-| D9 | Account binding (R10), with two local test accounts: the device check in private task 1835, first on a build of `origin/main`, then on the QA build (— lead, 2026-10-06 (plan review)) | as recorded in private task 1835; its evidence stays in the private workspace |
+| D9 | Account binding (R10), with two local test accounts: the device check in the private task, first on a build of `origin/main`, then on the QA build (— lead, 2026-10-06 (plan review)) | as recorded in the private task; its evidence stays in the private workspace |
 | D8 | Update 0.8.11 → the alpha carrying this spec, while signed in | `Ready` after the relaunch; nothing asked; ≤4 add attempts |
 
 **Environment:**
@@ -376,7 +419,8 @@ Evidence for every check goes under `.claude/tasks/_qa-evidence/<task>/`:
 - R8 keeps the keys on this Mac after a revoked session, including across a relaunch. Today a startup 401 deletes them, so revoking a lost device from the web effectively wipes it at its next launch; after R8 it does not. The security review and Guus confirm this trade-off. — lead, 2026-10-06 (plan review)
   Ruled R9 (§3): the key stays, and the security review decides. — lead, 2026-10-06 (plan review)
 - ~~Identity for installs that predate `signed_in_user_id`: the plan falls back to the account email recorded on this Mac (case-insensitive), and an unknown identity counts as a different account (fail closed). The security review confirms this.~~ — lead, 2026-10-06 (plan review)
-  Identity for installs from before R10: their local data is adopted at startup by the account email this Mac's Keychain still holds. Elsewhere R8 falls back to the recorded email (case-insensitive). An identity that cannot be compared is never treated as the same account. The security review confirms this. — lead, 2026-10-06 (plan review)
+  Identity for installs from before R10: their local data is adopted at startup ~~by the account email this Mac's Keychain still holds~~ only by a complete stored session (token and vault key), by its email (§5.6; lead, 2026-10-08 (final review)). Elsewhere R8 falls back to the recorded email ~~(case-insensitive)~~ in its canonical form (ruling A″, 2026-10-08). An identity that cannot be compared is never treated as the same account. The security review confirms this. — lead, 2026-10-06 (plan review)
 - ~~Windows and R10: the binding refuses instead of resetting, and Windows sign-out refuses while unsent changes exist. A Windows PC that holds another account's unsent changes therefore has no in-app way forward. Owner Guus (decision).~~ — lead, 2026-10-06 (plan review)
   Ruled R11 (§3): Windows stays fail-closed in this spec. The "Discard and switch" escape hatch is private workspace task 1837. — lead, 2026-10-06 (plan review)
-- An app on an external disk's Applications folder (`/Volumes/<disk>/Applications`) is refused by the 6.2 rule. Is that intended? Owner Guus. — lead, 2026-10-06 (plan review)
+- ~~An app on an external disk's Applications folder (`/Volumes/<disk>/Applications`) is refused by the 6.2 rule. Is that intended? Owner Guus.~~ — lead, 2026-10-06 (plan review)
+  Answered 2026-10-06 by the execution ruling in §6.2: only a bundle at a volume's root is a disk image; an Applications folder or a home on an external disk is a real install. — lead, 2026-10-06 (execution ruling)

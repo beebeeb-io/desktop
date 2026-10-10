@@ -9,24 +9,6 @@
 //! source pin over the Objective-C and Swift sources are pure, so they run on every OS. Only the
 //! FFI calls live in the macOS-only `macos_file_provider` module.
 
-/// 1882 r4: the code a Repair error starts with when Repair failed AFTER it removed the Finder
-/// location. The frontend (`REPAIR_FAILED_AFTER_REMOVAL_CODE` in `src/macSettingsModel.ts`, pinned
-/// equal by `tests/finderPreservedFiles.test.ts`) tells the two failures apart by it, and shows
-/// its own words, never this text.
-pub const REPAIR_FAILED_AFTER_REMOVAL_CODE: &str = "repair_failed_after_removal";
-
-/// The error Repair returns when its final save fails. If the Finder location was already removed
-/// (`domain_removed`), the error starts with [`REPAIR_FAILED_AFTER_REMOVAL_CODE`], so the person is
-/// not told that nothing changed; the detail follows, for the log. Otherwise (Repair failed before
-/// the removal, or the removal itself failed and the location is still there) the error is as it was.
-pub fn repair_save_error(error: String, domain_removed: bool) -> String {
-    if domain_removed {
-        format!("{REPAIR_FAILED_AFTER_REMOVAL_CODE}: {error}")
-    } else {
-        error
-    }
-}
-
 /// The title of the app's alert (spec §5).
 pub const PRESERVED_FILES_TITLE: &str = "Files kept on this Mac";
 
@@ -270,7 +252,9 @@ pub fn removal_from_bridge(
 }
 
 /// Add to Finder's own cleanup failed the install (review M1): the error as before, and the folder
-/// the cleanup's removal kept, if any.
+/// the cleanup's removal kept, if any. Since spec 2026-10-06 only Windows and Linux build it (macOS has
+/// no install path; the reconciler adds Beebeeb and never removes a domain it added).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallFailure {
     pub message: String,
@@ -283,23 +267,6 @@ impl From<String> for InstallFailure {
             message,
             kept_folder: None,
         }
-    }
-}
-
-/// Review M1 (round 2): the cleanup inside Add to Finder removes the domain this attempt added
-/// when it does not come up in time. The install still fails with the setup error (and the
-/// cleanup's error, if that failed too, as before), and the folder that removal kept rides along.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub fn install_cleanup_failure(setup_error: String, cleanup: Result<DomainRemoval, RemovalFailure>) -> InstallFailure {
-    match cleanup {
-        Ok(removal) => InstallFailure {
-            message: setup_error,
-            kept_folder: removal.kept_location("install cleanup"),
-        },
-        Err(failure) => InstallFailure {
-            message: format!("{setup_error}; cleanup failed: {}", failure.message),
-            kept_folder: failure.kept_location("install cleanup"),
-        },
     }
 }
 
@@ -701,14 +668,10 @@ mod tests {
             "Repair reports it for the row"
         );
         assert!(warnings.is_empty());
-        // The same on a failed removal (review M2) and in the install cleanup (review M1).
+        // The same on a failed removal (review M2).
         let failure = removal_from_bridge(-1, KEPT_EMPTY, Some(folder.to_string()), Some("busy".to_string()))
             .expect_err("the removal reported an error");
         assert_eq!(failure.kept, kept_empty(folder));
-        assert_eq!(
-            install_cleanup_failure("setup".to_string(), Ok(removal(decoded))).kept_folder,
-            Some(folder.to_string())
-        );
         // An empty folder is told apart from a full one only in the log, never to the person.
         assert_ne!(kept_empty(folder), kept(folder, true));
         // Empty with no path is "folder unknown", as any state without a path.
@@ -875,27 +838,6 @@ mod tests {
         );
     }
 
-    // ── round 4: Repair's error after a removal tells the truth ──────────────
-
-    #[test]
-    fn test_1882_r4_a_repair_error_after_the_removal_carries_the_code() {
-        let after = repair_save_error("No space left on device".to_string(), true);
-        assert!(
-            after.starts_with(REPAIR_FAILED_AFTER_REMOVAL_CODE),
-            "the frontend tells this failure apart by the code: {after}"
-        );
-        assert!(
-            after.contains("No space left on device"),
-            "the detail stays, for the log"
-        );
-        // Before the removal, or when the removal itself failed, the error is untouched.
-        assert_eq!(
-            repair_save_error("No space left on device".to_string(), false),
-            "No space left on device"
-        );
-        assert!(!"Could not read the config".starts_with(REPAIR_FAILED_AFTER_REMOVAL_CODE));
-    }
-
     #[test]
     fn test_1882_r2_a_url_without_a_path_is_removed_with_the_folder_unknown() {
         assert_eq!(kept_folder_from_bridge(KEPT_NO_PATH, None), KeptFolder::Unknown);
@@ -994,7 +936,7 @@ mod tests {
         );
     }
 
-    // ── round 2: an error that carries a folder (M2), the install cleanup (M1) ─
+    // ── round 2: an error that carries a folder (M2) ───────────────────────────
 
     #[test]
     fn test_1882_r2_a_reply_with_an_error_and_a_folder_keeps_the_folder() {
@@ -1044,47 +986,14 @@ mod tests {
         let checked = body
             .find("BeebeebKeptFolderState(found_location)")
             .expect("the folder is checked");
+        // Spec 2026-10-06 renamed the bridge's bounded copy to `BeebeebCopyString` (rebase, 2026-10-10).
         let copied = body
-            .find("BeebeebCopyMessage(path, location_buffer")
+            .find("BeebeebCopyString(path, location_buffer")
             .expect("its path is copied");
         let error = body.find("if (found_error != nil)").expect("the error is handled");
         assert!(
             checked < error && copied < error,
             "folder state and path come before the error return:\n{body}"
-        );
-    }
-
-    #[test]
-    fn test_1882_r2_the_install_cleanup_reports_the_folder_it_kept() {
-        let folder = "/Users/someone/Library/CloudStorage/Beebeeb-Beebeeb (10-10-2026 11:00)";
-        let setup = "Timed out waiting for the Beebeeb File Provider domain to become available".to_string();
-
-        let kept_by_cleanup = install_cleanup_failure(setup.clone(), Ok(removal(kept(folder, true))));
-        assert_eq!(
-            kept_by_cleanup,
-            InstallFailure {
-                message: setup.clone(),
-                kept_folder: Some(folder.to_string())
-            }
-        );
-
-        let nothing = install_cleanup_failure(setup.clone(), Ok(removal(KeptFolder::Nothing(NothingKept::Missing))));
-        assert_eq!(nothing, InstallFailure::from(setup.clone()));
-
-        let failed_cleanup = install_cleanup_failure(
-            setup.clone(),
-            Err(RemovalFailure {
-                message: "busy".to_string(),
-                kept: kept(folder, false),
-            }),
-        );
-        assert_eq!(
-            failed_cleanup,
-            InstallFailure {
-                message: format!("{setup}; cleanup failed: busy"),
-                kept_folder: Some(folder.to_string())
-            },
-            "the error text is as before, and a folder kept with the error still rides along"
         );
     }
 
