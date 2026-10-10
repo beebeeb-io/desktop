@@ -582,7 +582,7 @@ describe('Sync tab', () => {
   const pressFinder = async (m: Mounted, label: string) => { await button(m, label).props.onClick(); await settleFinder(m) }
   const calls = (m: Mounted, name: string) => m.calls.filter((c) => c.name === name).length
 
-  function syncBackend(opts: { finder?: any; unreadable?: boolean; tree?: any[]; repair?: (a: any) => unknown; pin?: (a: any) => unknown; retry?: () => unknown; refusal?: unknown; kept?: string | null; dismissFails?: boolean; keptReadFails?: boolean; removesBeforeFailing?: boolean } = {}) {
+  function syncBackend(opts: { finder?: any; unreadable?: boolean; tree?: any[]; repair?: (a: any) => unknown; pin?: (a: any) => unknown; retry?: () => unknown; refusal?: unknown; kept?: string | null; dismissFails?: boolean; keptReadFails?: boolean } = {}) {
     // `kept` is the folder Rust saved in desktop.toml (task 1882 round 2, review I2).
     const st: { finder: any; unreadable: boolean; kept: string | null } = { finder: opts.finder ?? finder.installed, unreadable: opts.unreadable ?? false, kept: opts.kept ?? null }
     return {
@@ -594,8 +594,6 @@ describe('Sync tab', () => {
         finder_setup_copy_details: () => 'details',
         finder_setup_show_app: () => undefined,
         reset_macos_integration: (a: any) => {
-          // A Repair that fails AFTER it removed the Finder location: the domain is already gone.
-          if (opts.removesBeforeFailing) st.finder = finder.adding
           const result: any = opts.repair ? opts.repair(a) : { removed_file_provider_domain: true, disabled_autostart: true, removed_socket: true, removed_cache_files: 0, skipped_cache_files: 0, pending_operations_preserved: 0, warnings: [] }
           st.finder = finder.adding // the reconciler adds Beebeeb back by itself
           // Like Rust: a repair that kept files saves the folder for the row.
@@ -968,64 +966,29 @@ describe('Sync tab', () => {
     expect(buttons(m)).not.toContain('Dismiss')
   })
 
-  // 1882 r5 (review thread on `addToFinder`): Add to Finder can save a kept folder while it runs
-  // (its own cleanup, or the rollback of a failed attempt). The open Sync tab read the saved
-  // folder once, on mount, so it would not show that row until the person left and came back.
-  describe('a kept folder saved while Add to Finder ran', () => {
+  // 1882 r5, inside spec A (lead ruling, rebase onto 1882): a Finder action (the reconciler's Try again) can run a
+  // removal that keeps files, an owed one, and Rust saves the folder while it runs. The open Sync tab read the saved
+  // folder once, on mount, so it reads it again after the action. (On main this was Add to Finder, which spec A's R5
+  // removed from the Mac.)
+  describe('a kept folder saved while a Finder action ran', () => {
     const keptReads = (m: Mounted) => m.calls.filter((c) => c.name === 'kept_unsynced_folder')
 
-    test('a failed attempt whose rollback kept files shows the row without leaving the tab', async () => {
-      const { m, st } = await openSync({
-        finder: finder.missing,
-        install: () => { st.kept = KEPT; return finder.failed },
-      })
+    test('a Try again whose removal kept files shows the row without leaving the tab', async () => {
+      const held: { st?: { kept: string | null } } = {}
+      const { m, st } = await openSync({ finder: finder.failed, retry: () => { held.st!.kept = KEPT } })
+      held.st = st
       expect(keptNotes(m)).toHaveLength(0)
-      await press(m, 'Add to Finder')
+      await pressFinder(m, 'Try again')
       expect(keptNotes(m)).toHaveLength(1)
-      // The failed install keeps its own mono line ("reason: timeout"); the row adds the folder.
-      expect(monoLines(m).map((el) => textOf(el.props.children).trim())).toEqual(['reason: timeout', KEPT])
-      expect(visibleErrorSurfaces(m)).toHaveLength(1) // the install failure itself is still ONE inline alert
+      expect(monoLines(m).map((el) => textOf(el.props.children).trim())).toContain(KEPT)
       expect(m.toasts).toEqual([])
     })
 
-    test('a rejected attempt whose rollback kept files shows the row', async () => {
-      const { m, st } = await openSync({
-        finder: finder.missing,
-        install: () => { st.kept = KEPT; throw new Error('Finder location must be absolute: relative/path') },
-      })
-      await press(m, 'Add to Finder')
-      expect(keptNotes(m)).toHaveLength(1)
-      expect(visibleErrorSurfaces(m)).toHaveLength(1)
-    })
-
-    test('a successful attempt that saved a kept folder shows the row too', async () => {
-      const { m, st } = await openSync({
-        finder: finder.missing,
-        install: () => { st.kept = KEPT; return finder.installed },
-      })
-      await press(m, 'Add to Finder')
-      expect(buttons(m)).toContain('Repair…')
-      expect(keptNotes(m)).toHaveLength(1)
-      expect(visibleErrorSurfaces(m)).toEqual([])
-    })
-
-    test('a newer folder replaces the older one the row was showing', async () => {
-      const NEWER = '/Users/sam/Library/CloudStorage/Beebeeb (kept 2)'
-      const { m, st } = await openSync({
-        kept: KEPT,
-        finder: finder.missing,
-        install: () => { st.kept = NEWER; return finder.failed },
-      })
-      await press(m, 'Add to Finder')
-      expect(keptNotes(m)).toHaveLength(1)
-      expect(monoLines(m).map((el) => textOf(el.props.children).trim())).toEqual(['reason: timeout', NEWER])
-    })
-
-    test('an attempt that kept nothing reads the saved folder again and shows no row', async () => {
-      const { m } = await openSync({ finder: finder.missing, install: () => finder.failed })
+    test('a Finder action that kept nothing reads the saved folder again and shows no row', async () => {
+      const { m } = await openSync({ finder: finder.failed })
       expect(keptReads(m)).toHaveLength(1) // on open
-      await press(m, 'Add to Finder')
-      expect(keptReads(m)).toHaveLength(2) // and once after the attempt
+      await pressFinder(m, 'Try again')
+      expect(keptReads(m)).toHaveLength(2) // and once after the action
       expect(keptNotes(m)).toHaveLength(0)
     })
   })
@@ -1114,25 +1077,6 @@ describe('Sync tab', () => {
     expect(text).toContain('Couldn’t repair Beebeeb in Finder')
     expect(text).toContain('Nothing was changed that you need to undo. Try again.')
     expect(text).not.toContain('was removed from Finder')
-  })
-
-  test('a repair that fails after the removal says Beebeeb was removed and how to add it back, in one alert', async () => {
-    const { m } = await openSync({
-      removesBeforeFailing: true,
-      repair: () => { throw new Error(`${model.REPAIR_FAILED_AFTER_REMOVAL_CODE}: No space left on device`) },
-    })
-    await press(m, 'Repair…')
-    await press(m, 'Repair')
-    expect(find(m, (el) => el.props['data-error-surface'] === 'finder-repair')).toHaveLength(1)
-    expect(visibleErrorSurfaces(m)).toHaveLength(1)
-    const [text] = alertText(m)
-    expect(text).toContain('Beebeeb was removed from Finder')
-    expect(text).toContain('Repair couldn’t finish, so Beebeeb is no longer in Finder. Choose Add to Finder to add it back.')
-    expect(visibleText(m)).not.toContain('Nothing was changed that you need to undo')
-    expect(visibleText(m)).not.toContain('Couldn’t repair Beebeeb in Finder')
-    expect(visibleText(m)).not.toContain('No space left')
-    expect(m.toasts).toEqual([])
-    expect(buttons(m)).toContain('Add to Finder') // the sentence is true: the button it names is there
   })
 
   test('a successful repair whose refreshed Finder state cannot be read stops claiming Added and offers Try again', async () => {

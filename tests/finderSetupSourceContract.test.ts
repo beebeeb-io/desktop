@@ -14,7 +14,7 @@ import { describe, expect, test } from 'bun:test'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import ts from 'typescript'
-import { censusOfSource, familyLiterals, type Site, type Violation, type ViolationKind } from './fixtures/finderResultCensus'
+import { censusOfSource, familyLiterals, KEPT_FOLDER_READERS, type Site, type Violation, type ViolationKind } from './fixtures/finderResultCensus'
 
 const SRC = new URL('../src/', import.meta.url).pathname
 const FORBIDDEN_ON_MACOS = ['install_finder_location', 'continue_without_finder_location', 'finder_location_state', 'finder_domain_user_enabled']
@@ -288,8 +288,46 @@ describe('the sweep: every call site of a Finder command, and what it does with 
       'WindowsApp.tsx | open_finder_location': { reason: 1 },
       'pages/Shared.tsx | open_in_finder': { reason: 1 },
       'pages/SyncFolder.tsx | open_finder_location': { reason: 1 },
-      'pages/SyncFolder.tsx | reset_macos_integration': { reason: 1, warnings: 2 },
+      // reason 2: the Reset's error text off a Mac, and (task 1882 r4, Windows and Linux only) its repair-removed check.
+      'pages/SyncFolder.tsx | reset_macos_integration': { reason: 2, warnings: 2 },
     })
+  })
+
+  /**
+   * Exemption 4 (task 1882, rebase onto main, lead ruling): MacSettings' Repair and SyncFolder's Reset hand the
+   * repair's `.value` to the kept-folder readers, which show the folder macOS kept and nothing else. The census lets
+   * them through by name, so this pins what they read: every use of their parameter is its `preserved_location`, or a
+   * hand-off to another reader. A reader that starts reading `.reason` or `.warnings`, or passes its argument anywhere
+   * else, turns this red.
+   */
+  test('exemption 4, the kept-folder readers: each reads only preserved_location, never a reason or the warnings', () => {
+    expect([...KEPT_FOLDER_READERS].sort()).toEqual(['preservedFilesLine', 'preservedFilesNote'])
+    const source = readFileSync(join(SRC, 'macSettingsModel.ts'), 'utf8')
+    const ast = ts.createSourceFile('macSettingsModel.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+    for (const name of KEPT_FOLDER_READERS) {
+      const fn = ast.statements.find((n): n is ts.FunctionDeclaration => ts.isFunctionDeclaration(n) && n.name?.text === name)
+      if (!fn || !fn.body) throw new Error(`${name} not found in macSettingsModel.ts`)
+      expect(fn.parameters).toHaveLength(1)
+      const param = fn.parameters[0].name
+      if (!ts.isIdentifier(param)) throw new Error(`${name} destructures its parameter`)
+      const uses: string[] = []
+      const visit = (node: ts.Node) => {
+        if (ts.isIdentifier(node) && node.text === param.text && node !== param) {
+          const parent = node.parent
+          if (ts.isPropertyAccessExpression(parent) && parent.expression === node) uses.push(`.${parent.name.text}`)
+          else if (ts.isCallExpression(parent) && parent.arguments.includes(node)) uses.push(`call:${parent.expression.getText(ast)}`)
+          else uses.push(`other:${parent.getText(ast)}`)
+        }
+        ts.forEachChild(node, visit)
+      }
+      visit(fn.body)
+      expect(uses.length).toBeGreaterThan(0)
+      for (const use of uses) {
+        const allowed = use === '.preserved_location' || KEPT_FOLDER_READERS.some((reader) => use === `call:${reader}`)
+        expect({ reader: name, use, allowed }).toEqual({ reader: name, use, allowed: true })
+      }
+      expect(fn.body.getText(ast)).not.toMatch(/\.reason|\.warnings|\[['"](reason|warnings)['"]\]/)
+    }
   })
 
   test('nothing reads the result of finder.run: it is discarded or handed to an event handler that discards it', () => {

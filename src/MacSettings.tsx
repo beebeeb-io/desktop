@@ -41,7 +41,7 @@ import {
 import type { PopoverSnapshot } from './popoverContract'
 import { clearSignOutWarning, heldSignOutWarning, holdSignOutWarning, subscribeSignOutWarning } from './accountSession'
 import { useFinderSetup } from './finderSetup'
-import { finderActionButtonLabel } from './finderSetupCopy'
+import { finderActionButtonLabel, type FinderSetupAction } from './finderSetupCopy'
 import { SUPPORT_BUNDLE_DETAIL, SUPPORT_BUNDLE_SAVED_TITLE, supportBundleSavedMessage, type ProblemReportResult } from './diagnosticsCopy'
 import {
   accountInitial,
@@ -59,9 +59,6 @@ import {
   REPAIR_BODY,
   REPAIR_TITLE,
   repairNote,
-  repairRemovedBody,
-  repairRemovedNotice,
-  REPAIR_REMOVED_TITLE,
   SETTINGS_TABS,
   settingsTabFromLocation,
   speedOptions,
@@ -548,11 +545,9 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
   const finder = useFinderSetup()
   const [repair, setRepair] = useState<RepairPhase>('idle')
   const [repairFailed, setRepairFailed] = useState(false)
-  // 1882 r4: a Repair that failed AFTER it removed the Finder location reads differently.
-  const [repairRemoved, setRepairRemoved] = useState(false)
   const [repairResult, setRepairResult] = useState<string | null>(null)
   // Task 1882 round 2 (review I2, lead ruling): where macOS last kept Finder files that had not
-  // reached the server, after a sign-out, a Repair, the add rollback or the app-start sweep. Rust
+  // reached the server, after a sign-out, a Repair, another reconciler removal or the app-start sweep. Rust
   // saves it in desktop.toml; this row shows it until the person dismisses it, so a tab switch,
   // closing Settings or a restart cannot lose it.
   const [kept, setKept] = useState<string | null>(null)
@@ -597,17 +592,22 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
     setKept(keptFolderAfterDismiss(result.value))
   }
 
+  // 1882 r5, inside spec A (lead ruling, rebase onto 1882): a Finder action (the reconciler's Try again) can run a
+  // removal that keeps files (an owed one), and Rust saves the folder while it runs. The row read the saved folder
+  // once, on open, so it reads it again after the action instead of waiting for a tab switch.
+  const runFinderAction = async (action: FinderSetupAction) => {
+    await finder.run(action)
+    await loadKept()
+  }
+
   const runRepair = async () => {
     setRepair('busy')
     setRepairFailed(false)
-    setRepairRemoved(false)
     setRepairResult(null)
     const result = await command<MacosIntegrationResetResult>('reset_macos_integration')
     setRepair('idle')
     if (!result.ok) {
       setRepairFailed(true)
-      const removed = repairRemovedNotice(result.reason, 'Add to Finder') !== null
-      setRepairRemoved(removed)
       await finder.retry()
       return
     }
@@ -705,17 +705,13 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
             kind={row.tone}
             surface="finder-setup"
             reason={row.tone === 'alert' ? monoReason(row.reason) : null}
-            actions={row.action ? <Btn onClick={() => void finder.run(row.action!)}>{finderActionButtonLabel(row.action, row.actionLabel, finder.copied)}</Btn> : null}
+            actions={row.action ? <Btn onClick={() => void runFinderAction(row.action!)}>{finderActionButtonLabel(row.action, row.actionLabel, finder.copied)}</Btn> : null}
           >
             {row.sentence}
           </Note>
         ) : null}
         {finder.actionNote ? <Note kind="status">{finder.actionNote}</Note> : null}
-        {repairFailed && repairRemoved ? (
-          <Note kind="alert" surface="finder-repair" title={REPAIR_REMOVED_TITLE}>
-            {repairRemovedBody('Add to Finder')}
-          </Note>
-        ) : repairFailed ? (
+        {repairFailed ? (
           <Note kind="alert" surface="finder-repair" title="Couldn’t repair Beebeeb in Finder">
             Nothing was changed that you need to undo. Try again.
           </Note>

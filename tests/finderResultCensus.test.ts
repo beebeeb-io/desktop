@@ -78,6 +78,13 @@ describe('the census engine passes what is safe, and understands the guards of t
     expect(allLeaks(wrap('if (result.ok) show(finderRepairWarningNote(result.value))', 'reset_macos_integration'))).toEqual([])
   })
 
+  test('task 1882: a kept-folder reader may be handed a repair\'s value; any other function may not', () => {
+    for (const reader of ['preservedFilesNote', 'preservedFilesLine']) {
+      expect(allLeaks(wrap(`if (result.ok) show(${reader}(result.value))`, 'reset_macos_integration'))).toEqual([])
+    }
+    expect(allLeaks(wrap('if (result.ok) show(preservedFiles(result.value))', 'reset_macos_integration'))).toEqual(['mac:passed-on'])
+  })
+
   test('a reason on the non-macOS side of a ternary is seen and excluded, in every spelling of the guard', () => {
     for (const guard of ["platform === 'macos'", "'macos' === platform", 'isMacos', 'isMac', 'mac']) {
       expect(allLeaks(wrap(`if (!result.ok) show(${guard} ? sentence() : result.reason)`))).toEqual(['nonmac:reason'])

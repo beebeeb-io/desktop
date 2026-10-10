@@ -113,16 +113,6 @@ describe('Repair failed after the removal (1882 r4)', () => {
     }
   })
 
-  test('both surfaces show it: Settings names Add to Finder, the compact window names its own button', () => {
-    const settings = readFileSync(join(import.meta.dir, '..', 'src', 'MacSettings.tsx'), 'utf8')
-    expect(settings).toContain("repairRemovedNotice(result.reason, 'Add to Finder')")
-    expect(settings).toMatch(/>\s*Add to Finder\s*</) // the button the sentence names exists
-    const compact = readFileSync(join(import.meta.dir, '..', 'src', 'pages', 'SyncFolder.tsx'), 'utf8')
-    expect(compact).toContain("repairRemovedNotice(result.reason, 'Install in Finder')")
-    expect(compact).toContain('showToast({ variant: \'error\', title: removed.title, message: removed.body })')
-    expect(compact).toMatch(/>\s*Install in Finder\s*</) // and so does its own
-  })
-
   test('the notice is in the house voice: plain, names no provider, no emoji', () => {
     const notice = repairRemovedNotice(AFTER, 'Add to Finder')!
     const text = `${notice.title} ${notice.body}`.toLowerCase()

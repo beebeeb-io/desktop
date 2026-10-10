@@ -39,6 +39,14 @@ export const WRAPPERS = ['loadFinderSetup', 'copyFinderSetupDetails', 'runFinder
  */
 export const SANITISERS = ['repairNote', 'finderRepairWarningNote', 'parseFinderSetupView'] as const
 
+/**
+ * Task 1882 (rebase onto main, lead ruling): functions that may be handed a repair's result `.value` because they read
+ * only its `preserved_location`, the folder where macOS kept files that had not reached the server, and return that
+ * path, never the reason or the warnings. They are not sanitisers (the folder IS shown, on purpose), so they have their
+ * own list. `tests/finderSetupSourceContract.test.ts` (exemption 4) pins that each reads nothing else.
+ */
+export const KEPT_FOLDER_READERS = ['preservedFilesNote', 'preservedFilesLine'] as const
+
 /** The families whose SUCCESS payload carries free text (a repair's `warnings`): `.value` is strict. */
 const STRICT_VALUE_FAMILIES = new Set(['reset_macos_integration'])
 
@@ -215,7 +223,8 @@ function classify(id: ts.Identifier, family: string): { kind: ViolationKind; nod
   if (ts.isArrowFunction(parent) && parent.body === outer) return null
   if (ts.isCallExpression(parent) && parent.arguments.includes(outer as ts.Expression)) {
     const callee = calleeName(parent)
-    return callee && (SANITISERS as readonly string[]).includes(callee) ? null : { kind: 'passed-on', node: parent }
+    const allowed = [...SANITISERS, ...KEPT_FOLDER_READERS] as readonly string[]
+    return callee && allowed.includes(callee) ? null : { kind: 'passed-on', node: parent }
   }
   // An alias, a spread, a field, an argument position we do not know: the reason travels with it.
   return { kind: ts.isVariableDeclaration(parent) ? 'alias' : 'passed-on', node: parent }
