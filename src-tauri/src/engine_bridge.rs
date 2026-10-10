@@ -663,7 +663,6 @@ impl EngineBridge {
                             if !self
                                 .db
                                 .finish_claimed(&op.op_id, &claimed.claim_id, release.as_deref())?
-                                && !handed_to_local_finalization(&op)
                             {
                                 log_queue_state_moved(&op.op_id, "landing");
                                 continue;
@@ -4736,27 +4735,6 @@ fn log_parked(op_id: &str, file_id: Option<&str>, reason: ParkReason) {
         reason = reason.as_str(),
         "upload parked with its bytes kept in the queue"
     );
-}
-
-/// Windows: a create's own success hands its op to the upload finalization
-/// journal, which removes the op before the thumbnail work
-/// (`StateDb::put_upload_finalization`). The landing then matches no row. That
-/// is the attempt's own hand-over, not a moved queue, so the op counts as
-/// completed, as it did before claims existed. The test is the same one
-/// `defer_local_upload_finalization` starts with.
-#[cfg(target_os = "windows")]
-fn handed_to_local_finalization(op: &PendingOperation) -> bool {
-    matches!(op.kind, OperationKind::UploadVersion | OperationKind::UploadFile)
-        && op
-            .metadata_json
-            .as_deref()
-            .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
-            .is_some_and(|m| m["operation"].as_str() == Some("create_file"))
-}
-
-#[cfg(not(target_os = "windows"))]
-fn handed_to_local_finalization(_op: &PendingOperation) -> bool {
-    false
 }
 
 /// `op`'s metadata with its encrypted name (if it carries one) re-encrypted
