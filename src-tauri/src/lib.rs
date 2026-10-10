@@ -1912,7 +1912,13 @@ async fn clear_session_impl(state: &AppState) -> Result<SignOutReport, SignOutFa
     // separate switch-account hook to add this to.
     purge_macos_hydrate_cache("sign-out");
 
-    finish_sign_out_after_removal(state, &acct, already_signed_out, preserved_location, clear_keychain_session)
+    finish_sign_out_after_removal(
+        state,
+        &acct,
+        already_signed_out,
+        preserved_location,
+        clear_keychain_session,
+    )
 }
 
 /// The rest of a sign-out once the Finder location is gone (or was never there): drop the
@@ -3203,8 +3209,10 @@ async fn install_finder_location(
         // save cannot overwrite the record with a stale copy.
         // Review M2: a folder kept with a failed removal is surfaced too.
         let removal = remove_file_provider_domain();
-        if let Some(location) = removal.map_or_else(|failure| failure.kept_location("add-to-finder rollback"), |removal| removal.kept_location("add-to-finder rollback"))
-        {
+        if let Some(location) = removal.map_or_else(
+            |failure| failure.kept_location("add-to-finder rollback"),
+            |removal| removal.kept_location("add-to-finder rollback"),
+        ) {
             finder_removal::record_kept_folder(&mut cfg, &location);
             show_preserved_files_alert(&app, Some(&location));
         }
@@ -13065,8 +13073,12 @@ mod finder_removal_wiring_tests {
         };
         // Saved, then shown: one function for the paths without a config of their own.
         let surface = code_only(&item(&source, "fn surface_kept_folder("));
-        let saved = surface.find("remember_kept_folder(location)").expect("it saves the folder");
-        let shown = surface.find("show_preserved_files_alert(app, Some(location))").expect("it raises the alert");
+        let saved = surface
+            .find("remember_kept_folder(location)")
+            .expect("it saves the folder");
+        let shown = surface
+            .find("show_preserved_files_alert(app, Some(location))")
+            .expect("it raises the alert");
         assert!(saved < shown);
         let remember = code_only(&item(&source, "fn remember_kept_folder("));
         assert!(remember.contains("finder_removal::record_kept_folder(&mut cfg, location)"));
@@ -13086,18 +13098,26 @@ mod finder_removal_wiring_tests {
         let recorded = repair
             .find("finder_removal::record_kept_folder(&mut cfg, location);")
             .expect("Repair records the folder into its config");
-        let saved = repair.find("persist_finder_install_result(&mut cfg, false, None)?;").expect("and saves it");
+        let saved = repair
+            .find("persist_finder_install_result(&mut cfg, false, None)?;")
+            .expect("and saves it");
         assert!(recorded < saved);
         let install = code_only(&item(&source, "async fn install_finder_location("));
         let recorded = install
             .find("finder_removal::record_kept_folder(&mut cfg, &location);")
             .expect("the rollback records the folder into its config");
-        let saved = install[recorded..].find("return finder_install_failed(&mut cfg, error);").expect("which is saved");
+        let saved = install[recorded..]
+            .find("return finder_install_failed(&mut cfg, error);")
+            .expect("which is saved");
         assert!(saved > 0);
 
         // The row's two commands are registered.
         for name in ["kept_unsynced_folder", "dismiss_kept_unsynced_folder"] {
-            assert_eq!(source.matches(&format!("            {name},\n")).count(), 1, "{name} in generate_handler!");
+            assert_eq!(
+                source.matches(&format!("            {name},\n")).count(),
+                1,
+                "{name} in generate_handler!"
+            );
         }
     }
 
@@ -13115,20 +13135,32 @@ mod finder_removal_wiring_tests {
                 .join("\n")
         };
         let install = code_only(&item(&source, "async fn install_finder_location("));
-        let failed = &install[install.find("match install_file_provider_domain() {").expect("the install")..];
-        let failed = &failed[..failed.find("Ok(FileProviderInstallOutcome::UserDisabled)").expect("next arm")];
+        let failed = &install[install
+            .find("match install_file_provider_domain() {")
+            .expect("the install")..];
+        let failed = &failed[..failed
+            .find("Ok(FileProviderInstallOutcome::UserDisabled)")
+            .expect("next arm")];
         let recorded = failed
             .find("finder_removal::record_kept_folder(&mut cfg, location);")
             .expect("M1: the install cleanup's folder is saved for the row");
-        let shown = failed.find("show_preserved_files_alert(&app, Some(location));").expect("M1: and shown");
-        let saved = failed.find("return finder_install_failed(&mut cfg, failure.message);").expect("then saved");
+        let shown = failed
+            .find("show_preserved_files_alert(&app, Some(location));")
+            .expect("M1: and shown");
+        let saved = failed
+            .find("return finder_install_failed(&mut cfg, failure.message);")
+            .expect("then saved");
         assert!(recorded < saved && shown < saved);
 
         // M1: install() hands the cleanup's removal to the shared decision.
         let provider = include_str!("macos_file_provider.rs").replace("\r\n", "\n");
-        let install_fn = &provider[provider.find("pub fn install() -> Result<InstallOutcome, crate::finder_removal::InstallFailure> {").expect("install()")..];
+        let install_fn = &provider[provider
+            .find("pub fn install() -> Result<InstallOutcome, crate::finder_removal::InstallFailure> {")
+            .expect("install()")..];
         let install_fn = &install_fn[..install_fn.find("\n}\n").expect("install() ends")];
-        assert!(install_fn.contains("return Err(crate::finder_removal::install_cleanup_failure(setup_error, remove()));"));
+        assert!(
+            install_fn.contains("return Err(crate::finder_removal::install_cleanup_failure(setup_error, remove()));")
+        );
 
         // M2: the sweep keeps a folder that came back with an error ...
         let sweep = &provider[provider.find("pub fn cleanup_stale_domains(").expect("the sweep")..];
@@ -13136,8 +13168,9 @@ mod finder_removal_wiring_tests {
         assert!(sweep.contains("if let Some(location) = failure.kept_location(\"stale-domain sweep\") {"));
         // ... and the rollback surfaces a folder from a failed removal too.
         assert!(install.contains("let removal = remove_file_provider_domain();"));
-        assert!(install.contains(
-            "removal.map_or_else(|failure| failure.kept_location(\"add-to-finder rollback\"), |removal| removal.kept_location(\"add-to-finder rollback\"))"
+        let squashed: String = install.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(squashed.contains(
+            "removal.map_or_else(|failure|failure.kept_location(\"add-to-finderrollback\"),|removal|removal.kept_location(\"add-to-finderrollback\"),)"
         ));
     }
 
@@ -13158,8 +13191,9 @@ mod finder_removal_wiring_tests {
         assert!(sign_out.contains(
             "let preserved_location = finder_removal::sign_out_kept_location(remove_file_provider_domain());"
         ));
-        assert!(sign_out.contains(
-            "finish_sign_out_after_removal(state, &acct, already_signed_out, preserved_location, clear_keychain_session)"
+        let squash = |text: &str| text.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        assert!(squash(&sign_out).contains(
+            "finish_sign_out_after_removal(state,&acct,already_signed_out,preserved_location,clear_keychain_session,)"
         ));
         let tail = code_only(&item(&source, "fn finish_sign_out_after_removal("));
         assert_eq!(
@@ -13201,8 +13235,7 @@ mod finder_removal_wiring_tests {
 #[cfg(test)]
 mod sign_out_kept_folder_tests {
     use super::{
-        AppState, SignOutOutcome, finish_sign_out_after_removal, finder_removal, set_auth_present,
-        sign_out_kept_folder,
+        AppState, SignOutOutcome, finder_removal, finish_sign_out_after_removal, set_auth_present, sign_out_kept_folder,
     };
     use crate::account::{AccountId, synthesize_single_account};
 
@@ -13222,9 +13255,18 @@ mod sign_out_kept_folder_tests {
         let result = finish_sign_out_after_removal(&state, &acct, false, Some(FOLDER.to_string()), |_| {
             Err("Could not clear Keychain session: the keychain is locked".to_string())
         });
-        let failure = result.as_ref().expect_err("the Keychain clear failed, so the sign-out fails");
-        assert_eq!(failure.message, "Could not clear Keychain session: the keychain is locked");
-        assert_eq!(sign_out_kept_folder(&result), Some(FOLDER), "the error carries the kept folder");
+        let failure = result
+            .as_ref()
+            .expect_err("the Keychain clear failed, so the sign-out fails");
+        assert_eq!(
+            failure.message,
+            "Could not clear Keychain session: the keychain is locked"
+        );
+        assert_eq!(
+            sign_out_kept_folder(&result),
+            Some(FOLDER),
+            "the error carries the kept folder"
+        );
         // The alert text the command and the menu raise before they return the error.
         assert_eq!(
             sign_out_kept_folder(&result).map(finder_removal::preserved_files_message),
@@ -13241,13 +13283,22 @@ mod sign_out_kept_folder_tests {
 
         let (state, acct) = signed_in("signout-i1-none");
         let failed = finish_sign_out_after_removal(&state, &acct, false, None, |_| Err("locked".to_string()));
-        assert_eq!(sign_out_kept_folder(&failed), None, "nothing kept → no alert, even on failure");
+        assert_eq!(
+            sign_out_kept_folder(&failed),
+            None,
+            "nothing kept → no alert, even on failure"
+        );
 
         // Already signed out: a failing Keychain clear is only logged, and the folder still rides out.
         let (state, acct) = signed_in("signout-i1-noop");
         set_auth_present(&state, false);
-        let noop = finish_sign_out_after_removal(&state, &acct, true, Some(FOLDER.to_string()), |_| Err("locked".to_string()));
-        assert_eq!(noop.as_ref().map(|report| report.outcome), Ok(SignOutOutcome::NotSignedIn));
+        let noop = finish_sign_out_after_removal(&state, &acct, true, Some(FOLDER.to_string()), |_| {
+            Err("locked".to_string())
+        });
+        assert_eq!(
+            noop.as_ref().map(|report| report.outcome),
+            Ok(SignOutOutcome::NotSignedIn)
+        );
         assert_eq!(sign_out_kept_folder(&noop), Some(FOLDER));
     }
 }

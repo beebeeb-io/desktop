@@ -665,7 +665,10 @@ mod kept_folder_check_tests {
     #[test]
     fn test_1882_r2_bridge_check_a_missing_folder_is_missing() {
         let dir = tempfile::tempdir().expect("temp dir");
-        assert_eq!(state_of(&dir.path().join("Beebeeb-Drive (10-10-2026 10:52)")), KEPT_MISSING);
+        assert_eq!(
+            state_of(&dir.path().join("Beebeeb-Drive (10-10-2026 10:52)")),
+            KEPT_MISSING
+        );
         assert_eq!(
             unsafe { beebeeb_fp_kept_folder_state_for_path(std::ptr::null()) },
             KEPT_NONE_REPORTED,

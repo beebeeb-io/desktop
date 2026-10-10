@@ -107,10 +107,7 @@ impl DomainRemoval {
     /// was), never where: the path is shown only in the app's UI (spec §5).
     pub fn kept_location(self, context: &'static str) -> Option<String> {
         match self.kept {
-            KeptFolder::Kept {
-                path,
-                contents_checked,
-            } => {
+            KeptFolder::Kept { path, contents_checked } => {
                 tracing::info!(
                     context,
                     preserved = true,
@@ -120,7 +117,11 @@ impl DomainRemoval {
                 Some(path)
             }
             KeptFolder::Nothing(reason) => {
-                tracing::debug!(context, reported = reason.as_str(), "Finder location removed; nothing kept");
+                tracing::debug!(
+                    context,
+                    reported = reason.as_str(),
+                    "Finder location removed; nothing kept"
+                );
                 None
             }
             KeptFolder::Unknown => {
@@ -281,7 +282,10 @@ pub fn repair_removal(
     match removal {
         Ok(removal) => (true, removal.kept_location("repair")),
         Err(failure) => {
-            warnings.push(format!("Could not remove Finder File Provider domain: {}", failure.message));
+            warnings.push(format!(
+                "Could not remove Finder File Provider domain: {}",
+                failure.message
+            ));
             // Review M2: a folder kept with the error still reaches the person.
             (false, failure.kept_location("repair"))
         }
@@ -456,7 +460,9 @@ mod tests {
                 Some("/leftover".to_string()),
                 Some("no provider (NSFileProviderErrorDomain -2001)".to_string())
             ),
-            Err(RemovalFailure::from("no provider (NSFileProviderErrorDomain -2001)".to_string()))
+            Err(RemovalFailure::from(
+                "no provider (NSFileProviderErrorDomain -2001)".to_string()
+            ))
         );
         assert!(removal_from_bridge(-1, KEPT_NONE_REPORTED, None, None).is_err());
         assert!(
@@ -481,11 +487,18 @@ mod tests {
         ] {
             let decoded = kept_folder_from_bridge(state, Some(folder.to_string()));
             assert_eq!(decoded, KeptFolder::Nothing(reason), "state {state}");
-            assert_eq!(removal(decoded).kept_location("sign-out"), None, "state {state}: no alert, no row");
+            assert_eq!(
+                removal(decoded).kept_location("sign-out"),
+                None,
+                "state {state}: no alert, no row"
+            );
         }
         let mut warnings = Vec::new();
         assert_eq!(
-            repair_removal(Ok(removal(kept_folder_from_bridge(KEPT_MISSING, Some(folder.to_string())))), &mut warnings),
+            repair_removal(
+                Ok(removal(kept_folder_from_bridge(KEPT_MISSING, Some(folder.to_string())))),
+                &mut warnings
+            ),
             (true, None)
         );
         assert!(warnings.is_empty());
@@ -494,7 +507,10 @@ mod tests {
     #[test]
     fn test_1882_r2_a_folder_with_an_entry_or_that_cannot_be_checked_is_kept() {
         let folder = "/Users/someone/Library/CloudStorage/Beebeeb-Beebeeb (10-10-2026 10:50)";
-        assert_eq!(kept_folder_from_bridge(KEPT_HAS_ENTRIES, Some(folder.to_string())), kept(folder, true));
+        assert_eq!(
+            kept_folder_from_bridge(KEPT_HAS_ENTRIES, Some(folder.to_string())),
+            kept(folder, true)
+        );
         assert_eq!(
             kept_folder_from_bridge(KEPT_UNCHECKED, Some(folder.to_string())),
             kept(folder, false),
@@ -512,20 +528,35 @@ mod tests {
     fn test_1882_r2_a_url_without_a_path_is_removed_with_the_folder_unknown() {
         assert_eq!(kept_folder_from_bridge(KEPT_NO_PATH, None), KeptFolder::Unknown);
         for blank in [None, Some(String::new()), Some("   ".to_string())] {
-            assert_eq!(kept_folder_from_bridge(KEPT_HAS_ENTRIES, blank.clone()), KeptFolder::Unknown);
+            assert_eq!(
+                kept_folder_from_bridge(KEPT_HAS_ENTRIES, blank.clone()),
+                KeptFolder::Unknown
+            );
             assert_eq!(kept_folder_from_bridge(KEPT_UNCHECKED, blank), KeptFolder::Unknown);
         }
         // Its own outcome: the domain IS removed, so Repair says so, with no warning and no folder.
         let mut warnings = Vec::new();
-        assert_eq!(repair_removal(Ok(removal(KeptFolder::Unknown)), &mut warnings), (true, None));
-        assert!(warnings.is_empty(), "removed; folder unknown is not a failed removal: {warnings:?}");
+        assert_eq!(
+            repair_removal(Ok(removal(KeptFolder::Unknown)), &mut warnings),
+            (true, None)
+        );
+        assert!(
+            warnings.is_empty(),
+            "removed; folder unknown is not a failed removal: {warnings:?}"
+        );
         assert_eq!(sign_out_kept_location(Ok(removal(KeptFolder::Unknown))), None);
     }
 
     #[test]
     fn test_1882_r2_an_unknown_state_never_hides_a_path() {
-        assert_eq!(kept_folder_from_bridge(9, Some("/Users/someone/Kept".to_string())), kept("/Users/someone/Kept", false));
-        assert_eq!(kept_folder_from_bridge(-4, Some("/Users/someone/Kept".to_string())), kept("/Users/someone/Kept", false));
+        assert_eq!(
+            kept_folder_from_bridge(9, Some("/Users/someone/Kept".to_string())),
+            kept("/Users/someone/Kept", false)
+        );
+        assert_eq!(
+            kept_folder_from_bridge(-4, Some("/Users/someone/Kept".to_string())),
+            kept("/Users/someone/Kept", false)
+        );
         assert_eq!(kept_folder_from_bridge(9, None), KeptFolder::Unknown);
     }
 
@@ -539,15 +570,24 @@ mod tests {
         let remove = &remove[..remove.find("static func signalRoot()").expect("next function")];
         let squashed: String = remove.chars().filter(|c| !c.is_whitespace()).collect();
         assert!(
-            squashed.contains("switchkeptFolder(preservedLocation){case.hasEntries,.unchecked:print(\"preserved:\\(path)\")"),
+            squashed.contains(
+                "switchkeptFolder(preservedLocation){case.hasEntries,.unchecked:print(\"preserved:\\(path)\")"
+            ),
             "`preserved:` is printed only for a folder that holds something or could not be checked:\n{remove}"
         );
-        assert_eq!(remove.matches("print(\"preserved:").count(), 1, "one `preserved:` line, in the kept arm");
+        assert_eq!(
+            remove.matches("print(\"preserved:").count(),
+            1,
+            "one `preserved:` line, in the kept arm"
+        );
         for line in ["which is missing", "which is empty"] {
             assert!(remove.contains(line), "the helper says {line:?} when nothing was kept");
         }
         let check = &helper[helper.find("static func keptFolder(").expect("keptFolder()")..];
-        assert!(check.contains("startAccessingSecurityScopedResource()"), "it looks through the URL's own scope");
+        assert!(
+            check.contains("startAccessingSecurityScopedResource()"),
+            "it looks through the URL's own scope"
+        );
     }
 
     // ── round 2: an error that carries a folder (M2), the install cleanup (M1) ─
@@ -555,8 +595,13 @@ mod tests {
     #[test]
     fn test_1882_r2_a_reply_with_an_error_and_a_folder_keeps_the_folder() {
         let folder = "/Users/someone/Library/CloudStorage/Beebeeb-Beebeeb (10-10-2026 10:50)";
-        let failure = removal_from_bridge(-1, KEPT_HAS_ENTRIES, Some(folder.to_string()), Some("busy (NSFileProviderErrorDomain -1001)".to_string()))
-            .expect_err("the removal reported an error");
+        let failure = removal_from_bridge(
+            -1,
+            KEPT_HAS_ENTRIES,
+            Some(folder.to_string()),
+            Some("busy (NSFileProviderErrorDomain -1001)".to_string()),
+        )
+        .expect_err("the removal reported an error");
         assert_eq!(failure.message, "busy (NSFileProviderErrorDomain -1001)");
         assert_eq!(failure.kept, kept(folder, true), "the folder rides with the error");
 
@@ -564,11 +609,18 @@ mod tests {
         assert_eq!(sign_out_kept_location(Err(failure.clone())), Some(folder.to_string()));
         // Repair: one warning, as before, and the folder for the row.
         let mut warnings = Vec::new();
-        assert_eq!(repair_removal(Err(failure), &mut warnings), (false, Some(folder.to_string())));
-        assert_eq!(warnings, vec!["Could not remove Finder File Provider domain: busy (NSFileProviderErrorDomain -1001)".to_string()]);
+        assert_eq!(
+            repair_removal(Err(failure), &mut warnings),
+            (false, Some(folder.to_string()))
+        );
+        assert_eq!(
+            warnings,
+            vec!["Could not remove Finder File Provider domain: busy (NSFileProviderErrorDomain -1001)".to_string()]
+        );
 
         // An error with a missing or empty folder is still "nothing kept".
-        let failure = removal_from_bridge(-1, KEPT_MISSING, Some(folder.to_string()), Some("busy".to_string())).unwrap_err();
+        let failure =
+            removal_from_bridge(-1, KEPT_MISSING, Some(folder.to_string()), Some("busy".to_string())).unwrap_err();
         assert_eq!(failure.kept, KeptFolder::Nothing(NothingKept::Missing));
     }
 
@@ -577,12 +629,21 @@ mod tests {
     #[test]
     fn test_1882_r2_the_bridge_checks_the_folder_before_the_error() {
         let bridge = without_comments(include_str!("../macos/FileProviderBridge.m"));
-        let start = bridge.find("static int BeebeebRemoveDomainKeepingUnsynced(").expect("the shared removal");
+        let start = bridge
+            .find("static int BeebeebRemoveDomainKeepingUnsynced(")
+            .expect("the shared removal");
         let body = &bridge[start..start + bridge[start..].find("\n}\n").expect("function ends")];
-        let checked = body.find("BeebeebKeptFolderState(found_location)").expect("the folder is checked");
-        let copied = body.find("BeebeebCopyMessage(path, location_buffer").expect("its path is copied");
+        let checked = body
+            .find("BeebeebKeptFolderState(found_location)")
+            .expect("the folder is checked");
+        let copied = body
+            .find("BeebeebCopyMessage(path, location_buffer")
+            .expect("its path is copied");
         let error = body.find("if (found_error != nil)").expect("the error is handled");
-        assert!(checked < error && copied < error, "folder state and path come before the error return:\n{body}");
+        assert!(
+            checked < error && copied < error,
+            "folder state and path come before the error return:\n{body}"
+        );
     }
 
     #[test]
@@ -628,7 +689,10 @@ mod tests {
         assert_eq!(cfg.kept_unsynced_folder.as_deref(), Some("/Users/someone/Kept (1)"));
         assert!(record_kept_folder(&mut cfg, "/Users/someone/Kept (2)"));
         assert_eq!(cfg.kept_unsynced_folder.as_deref(), Some("/Users/someone/Kept (2)"));
-        assert!(!record_kept_folder(&mut cfg, "/Users/someone/Kept (2)"), "the same folder again changes nothing");
+        assert!(
+            !record_kept_folder(&mut cfg, "/Users/someone/Kept (2)"),
+            "the same folder again changes nothing"
+        );
     }
 
     #[test]
@@ -642,13 +706,19 @@ mod tests {
         assert_eq!(cfg.kept_unsynced_folder.as_deref(), Some("/Users/someone/Kept (2)"));
         assert!(dismiss_kept_folder(&mut cfg, "/Users/someone/Kept (2)"));
         assert_eq!(cfg.kept_unsynced_folder, None);
-        assert!(!dismiss_kept_folder(&mut cfg, "/Users/someone/Kept (2)"), "nothing left to dismiss");
+        assert!(
+            !dismiss_kept_folder(&mut cfg, "/Users/someone/Kept (2)"),
+            "nothing left to dismiss"
+        );
     }
 
     #[test]
     fn test_1882_r2_the_saved_folder_survives_a_settings_save_and_a_restart() {
         let mut cfg = crate::config::DesktopConfig::default();
-        record_kept_folder(&mut cfg, "/Users/someone/Library/CloudStorage/Beebeeb-Beebeeb (10-10-2026 10:50)");
+        record_kept_folder(
+            &mut cfg,
+            "/Users/someone/Library/CloudStorage/Beebeeb-Beebeeb (10-10-2026 10:50)",
+        );
         let settings = crate::config::DesktopSettings::from(&crate::config::DesktopConfig::default());
         cfg.apply_settings(settings);
         assert_eq!(
@@ -658,9 +728,15 @@ mod tests {
         );
         let toml = toml::to_string(&cfg).expect("serialize");
         let back: crate::config::DesktopConfig = toml::from_str(&toml).expect("parse");
-        assert_eq!(back.kept_unsynced_folder, cfg.kept_unsynced_folder, "it survives a restart");
+        assert_eq!(
+            back.kept_unsynced_folder, cfg.kept_unsynced_folder,
+            "it survives a restart"
+        );
         let fresh = toml::to_string(&crate::config::DesktopConfig::default()).expect("serialize");
-        assert!(!fresh.contains("kept_unsynced_folder"), "absent until something was kept");
+        assert!(
+            !fresh.contains("kept_unsynced_folder"),
+            "absent until something was kept"
+        );
     }
 
     #[test]
@@ -732,16 +808,16 @@ mod tests {
     fn test_1882_kept_location_returns_the_folder_and_nothing_when_nothing_was_kept() {
         let folder = "/Users/someone/Kept".to_string();
         assert_eq!(removal(kept(&folder, true)).kept_location("sign-out"), Some(folder));
-        assert_eq!(removal(KeptFolder::Nothing(NothingKept::NotReported)).kept_location("sign-out"), None);
+        assert_eq!(
+            removal(KeptFolder::Nothing(NothingKept::NotReported)).kept_location("sign-out"),
+            None
+        );
     }
 
     #[test]
     fn test_1882_sign_out_carries_a_kept_folder_and_survives_a_failed_removal() {
         let folder = "/Users/someone/Kept".to_string();
-        assert_eq!(
-            sign_out_kept_location(Ok(removal(kept(&folder, true)))),
-            Some(folder)
-        );
+        assert_eq!(sign_out_kept_location(Ok(removal(kept(&folder, true)))), Some(folder));
         assert_eq!(sign_out_kept_location(Ok(DomainRemoval::default())), None);
         assert_eq!(sign_out_kept_location(Err("not registered".to_string().into())), None);
     }
@@ -765,7 +841,10 @@ mod tests {
         assert!(warnings.is_empty());
 
         let mut warnings = Vec::new();
-        assert_eq!(repair_removal(Err("busy".to_string().into()), &mut warnings), (false, None));
+        assert_eq!(
+            repair_removal(Err("busy".to_string().into()), &mut warnings),
+            (false, None)
+        );
         assert_eq!(
             warnings,
             vec!["Could not remove Finder File Provider domain: busy".to_string()]
