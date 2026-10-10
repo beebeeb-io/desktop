@@ -1610,5 +1610,255 @@ check("1699-P1: pendingItemsDidChange hands control back promptly (a system→ex
     try expect(calledBack, "the completion handler must have run")
 }
 
+// MARK: - Upload staging (write contents handed to the app via the App Group)
+//
+// The app cannot read the system's contents URL, so the extension copies a
+// write's contents into <App Group>/upload-staging/ and sends that copy's
+// path. Each test uses a throwaway directory as the "container": never the
+// real App Group container.
+
+func withScratchContainer(_ body: (URL) throws -> Void) throws {
+    let container = FileManager.default.temporaryDirectory
+        .appendingPathComponent("upload-staging-test-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: container, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: container) }
+    try body(container)
+}
+
+func posixMode(_ url: URL) throws -> Int {
+    let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+    return ((attributes[.posixPermissions] as? NSNumber)?.intValue ?? -1) & 0o777
+}
+
+func stagingEntries(_ container: URL) -> [String] {
+    let dir = container.appendingPathComponent(UploadStaging.directoryName, isDirectory: true)
+    return (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+}
+
+check("upload-staging-S1: the directory is <container>/upload-staging, owner-only even if it existed looser") {
+    try withScratchContainer { container in
+        let expected = container.appendingPathComponent("upload-staging", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: expected, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o755]
+        )
+        let dir = try UploadStaging.directory(in: container)
+        try expect(dir.standardizedFileURL.path == expected.standardizedFileURL.path, "got \(dir.path)")
+        var isDirectory: ObjCBool = false
+        try expect(FileManager.default.fileExists(atPath: dir.path, isDirectory: &isDirectory) && isDirectory.boolValue,
+                   "the directory must exist")
+        let mode = try posixMode(dir)
+        try expect(mode == 0o700, "upload-staging must be 0700, got \(String(mode, radix: 8))")
+    }
+}
+
+check("upload-staging-S2: each copy gets a fresh UUID name, never the user's file name") {
+    try withScratchContainer { container in
+        let source = container.appendingPathComponent("Quarterly report.pdf")
+        try Data("x".utf8).write(to: source)
+        let first = try UploadStaging.stage(contentsOf: source, in: container)
+        let second = try UploadStaging.stage(contentsOf: source, in: container)
+        try expect(first != second, "two stagings must never share a copy")
+        for copy in [first, second] {
+            try expect(UUID(uuidString: copy.lastPathComponent) != nil, "copy name must be a UUID, got \(copy.lastPathComponent)")
+            try expect(!copy.lastPathComponent.contains("Quarterly"), "copy name must not carry the user's file name")
+            try expect(copy.deletingLastPathComponent().lastPathComponent == "upload-staging",
+                       "the copy must sit directly in upload-staging, got \(copy.path)")
+        }
+    }
+}
+
+check("upload-staging-S3: the copy holds the exact bytes, is owner-only (0600) and stamped now, the source untouched") {
+    try withScratchContainer { container in
+        let source = container.appendingPathComponent("photo.jpg")
+        let bytes = Data((0..<4096).map { UInt8($0 % 251) })
+        try bytes.write(to: source)
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: source.path)
+        let old = Date(timeIntervalSince1970: 1_000_000_000) // 2001: a copy that kept this would look orphaned
+        try FileManager.default.setAttributes([.modificationDate: old], ofItemAtPath: source.path)
+        let copy = try UploadStaging.stage(contentsOf: source, in: container)
+        try expect(copy != source, "the app must get a copy, not the system's URL")
+        try expect(try Data(contentsOf: copy) == bytes, "the copy must hold the exact bytes")
+        let mode = try posixMode(copy)
+        try expect(mode == 0o600, "the copy must be 0600, got \(String(mode, radix: 8))")
+        let stamped = try FileManager.default.attributesOfItem(atPath: copy.path)[.modificationDate] as? Date
+        try expect(stamped.map { abs($0.timeIntervalSinceNow) < 60 } == true,
+                   "the copy's mtime must be the staging time, got \(String(describing: stamped))")
+        try expect(try Data(contentsOf: source) == bytes, "the system's file must be left as it was")
+        let sourceDate = try FileManager.default.attributesOfItem(atPath: source.path)[.modificationDate] as? Date
+        try expect(sourceDate == old, "the system's file must keep its own mtime")
+    }
+}
+
+check("upload-staging-S4: a failed copy is a TRANSIENT serverUnreachable error and leaves nothing behind") {
+    try withScratchContainer { container in
+        let missing = container.appendingPathComponent("secret-name.txt") // never created
+        do {
+            _ = try UploadStaging.stage(contentsOf: missing, in: container)
+            throw TestFailure(description: "staging a missing file must throw")
+        } catch let error as BeebeebIPCError {
+            guard case .uploadStagingFailed = error else {
+                throw TestFailure(description: "expected uploadStagingFailed, got \(error)")
+            }
+            let ns = error as NSError
+            try expect(ns.domain == NSFileProviderErrorDomain, "domain \(ns.domain)")
+            try expect(ns.code == NSFileProviderError.serverUnreachable.rawValue,
+                       "a staging failure must be transient serverUnreachable (-1004), got \(ns.code)")
+            try expect(error.isTransient, "a staging failure must arm the resolved-signal bookkeeping")
+            try expect(!ns.localizedDescription.contains("secret-name"),
+                       "the error text must not carry the file name: \(ns.localizedDescription)")
+        }
+        try expect(stagingEntries(container).isEmpty, "a failed copy must leave nothing: \(stagingEntries(container))")
+    }
+}
+
+check("upload-staging-S5: discard deletes the copy and tolerates one the app already deleted") {
+    try withScratchContainer { container in
+        let source = container.appendingPathComponent("a.txt")
+        try Data("a".utf8).write(to: source)
+        let copy = try UploadStaging.stage(contentsOf: source, in: container)
+        try expect(FileManager.default.fileExists(atPath: copy.path), "staged")
+        UploadStaging.discard(copy)
+        try expect(!FileManager.default.fileExists(atPath: copy.path), "discard must delete the copy")
+        UploadStaging.discard(copy) // the app deleted it first: must not crash
+        try expect(FileManager.default.fileExists(atPath: source.path), "discard never touches the system's file")
+    }
+}
+
+check("upload-staging-S6: a package or any other non-regular item is refused before anything is copied, definitively") {
+    try withScratchContainer { container in
+        // A package (a folder macOS shows as one file) arrives as a directory URL.
+        let package = container.appendingPathComponent("Holiday notes.rtfd", isDirectory: true)
+        try FileManager.default.createDirectory(at: package, withIntermediateDirectories: true)
+        try Data("text".utf8).write(to: package.appendingPathComponent("TXT.rtf"))
+        let target = container.appendingPathComponent("target.txt")
+        try Data("t".utf8).write(to: target)
+        let link = container.appendingPathComponent("Holiday link.txt")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+        for source in [package, link] {
+            do {
+                _ = try UploadStaging.stage(contentsOf: source, in: container)
+                throw TestFailure(description: "staging \(source.lastPathComponent) must be refused")
+            } catch let error as BeebeebIPCError {
+                guard case .daemonRejected = error else {
+                    throw TestFailure(description: "expected daemonRejected, got \(error)")
+                }
+                let ns = error as NSError
+                try expect(ns.code == NSFileProviderError.cannotSynchronize.rawValue,
+                           "a non-regular item must be definitive cannotSynchronize (-2005), got \(ns.code)")
+                try expect(!error.isTransient, "retrying cannot turn a package into a file")
+                try expect(!ns.localizedDescription.contains("Holiday"),
+                           "the error text must not carry the file name: \(ns.localizedDescription)")
+            }
+        }
+        try expect(stagingEntries(container).isEmpty,
+                   "nothing may be copied into upload-staging: \(stagingEntries(container))")
+    }
+}
+
+// MARK: - A queued write never asks the system to fetch its own bytes back
+
+// Apple's createItem/modifyItem contract: `shouldFetchContent` is for a
+// provider that CHANGED the content; the system then fetches the provider's
+// copy and writes it over the file on disk. The app uploads exactly the
+// system's bytes, so asking for a fetch made the system write the server's
+// previous version over the user's edit (and, after a create, fetch an
+// identifier the server never knew).
+check("a queued create or modify never asks the system to re-fetch its own bytes") {
+    let queued = FileProviderExtension.queuedWriteCompletion(
+        WriteQueueResult(item: item1697(capabilities: BeebeebProviderItem.read), ignored: false, message: "queued")
+    )
+    try expect(!queued.shouldFetchContent, "a queued write with an item must complete with shouldFetchContent false")
+    try expect(queued.item?.itemIdentifier.rawValue == "1697-item", "the item the app returned must be handed to the system")
+
+    let ignored = FileProviderExtension.queuedWriteCompletion(
+        WriteQueueResult(item: nil, ignored: true, message: "ignored temporary item")
+    )
+    try expect(!ignored.shouldFetchContent, "an ignored temporary item is never fetched")
+    try expect(ignored.item == nil, "an ignored item returns no item")
+}
+
+// MARK: - Rule 3: no item-less reply, and the deletion-conflicted create (spec 2026-10-09 §7.2-§7.3)
+
+// For a modify, Apple treats a nil item as "delete the item on disk" (REPL.h:629-634). A
+// queued write the app answered without an item therefore completes with the TRANSIENT
+// serverUnreachable: the system keeps the file and retries (REPL.h:731-736).
+check("a queued write without an item is an error, never a nil item") {
+    let noItem = FileProviderExtension.queuedWriteCompletion(
+        WriteQueueResult(item: nil, ignored: false, message: "queued")
+    )
+    try expect(!noItem.shouldFetchContent, "a queued write without an item has nothing to fetch")
+    try expect(noItem.item == nil, "no item from the app means no item for the system")
+    guard let error = noItem.error as? BeebeebIPCError else {
+        throw TestFailure(description: "a queued write without an item must complete with an error")
+    }
+    try expect((error as NSError).code == NSFileProviderError.serverUnreachable.rawValue,
+               "serverUnreachable: the system retries and keeps the file on disk (REPL.h:731-736)")
+    try expect(error.isTransient, "transient, never definitive")
+    let ignored = FileProviderExtension.queuedWriteCompletion(
+        WriteQueueResult(item: nil, ignored: true, message: "ignored temporary item")
+    )
+    try expect(ignored.error == nil, "an ignored temporary item is not an error")
+    let queued = FileProviderExtension.queuedWriteCompletion(
+        WriteQueueResult(item: item1697(capabilities: BeebeebProviderItem.read), ignored: false, message: "queued")
+    )
+    try expect(queued.error == nil, "a queued write with an item is not an error")
+}
+
+check("createItem passes deletionConflicted, the template id and its content version") {
+    let token = "0:w" + String(repeating: "a", count: 32)
+    let conflicted = IPCWriteRequest.create(
+        parentIdentifier: "NSFileProviderRootContainerItemIdentifier", filename: "t2.txt", kind: "file",
+        contentsPath: "/tmp/staged", contentType: "public.plain-text", contents: sampleContents,
+        deletionConflicted: true, templateIdentifier: "3f2a9c1e-0000-4000-8000-000000000009",
+        templateContentVersion: token
+    )
+    let payload = conflicted["QueueFinderCreate"] as? [String: Any] ?? [:]
+    try expect(payload["deletion_conflicted"] as? Bool == true, "the option is passed")
+    try expect(payload["template_identifier"] as? String == "3f2a9c1e-0000-4000-8000-000000000009", "the template id")
+    try expect(payload["template_content_version"] as? String == token, "the template's content version")
+    let plain = sampleCreateRequest()["QueueFinderCreate"] as? [String: Any] ?? [:]
+    try expect(plain["deletion_conflicted"] as? Bool == false, "without the option: false")
+    try expect(plain["template_identifier"] == nil && plain["template_content_version"] == nil, "no template fields")
+    // The idempotency key is the create's own: the option does not change it.
+    try expect(payload["request_id"] as? String != nil, "a create with contents still carries its key")
+}
+
+// MARK: - WriteRetryLater: the app cannot stage a write now; the system retries it
+
+// Spec 2026-10-09 §8.4: when the app's own staging folder cannot take a save, the
+// daemon answers `WriteRetryLater` (nothing staged, nothing queued). It must reach the
+// system as the TRANSIENT `uploadStagingFailed` (serverUnreachable), so the system keeps
+// the change and retries the write. Never as the DEFINITIVE `cannotSynchronize` an
+// `Error` reply becomes: the system does not retry that until the item changes again.
+check("WriteRetryLater decodes to the transient uploadStagingFailed, never cannotSynchronize") {
+    let reason = "the staging folder is unavailable: not a directory"
+    do {
+        _ = try XPCBridge.decodeWriteResponse(["WriteRetryLater": ["message": reason]])
+        throw TestFailure(description: "a WriteRetryLater reply must throw")
+    } catch let error as BeebeebIPCError {
+        guard case .uploadStagingFailed(let carried) = error else {
+            throw TestFailure(description: "expected uploadStagingFailed, got \(error)")
+        }
+        try expect(carried == reason, "the daemon's reason is carried: \(carried)")
+        let ns = error as NSError
+        try expect(ns.domain == NSFileProviderErrorDomain, "domain \(ns.domain)")
+        try expect(
+            ns.code == NSFileProviderError.serverUnreachable.rawValue,
+            "transient serverUnreachable (-1004), got \(ns.code)"
+        )
+        try expect(error.isTransient, "the system retries it")
+    }
+    // An `Error` reply to a write stays definitive.
+    do {
+        _ = try XPCBridge.decodeWriteResponse(["Error": ["message": "refused"]])
+        throw TestFailure(description: "an Error reply must throw")
+    } catch let error as BeebeebIPCError {
+        try expect(
+            (error as NSError).code == NSFileProviderError.cannotSynchronize.rawValue,
+            "an Error reply stays cannotSynchronize, got \((error as NSError).code)"
+        )
+    }
+}
+
 print("ipc-framing: \(passed) passed, \(failed) failed")
 exit(failed == 0 ? 0 : 1)

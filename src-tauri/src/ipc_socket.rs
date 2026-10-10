@@ -63,6 +63,17 @@ pub enum IpcRequest {
         /// and docs/IPC_PROTOCOL.md.
         #[serde(default)]
         request_id: Option<String>,
+        /// The system recreates an item it could not delete because the person edited it
+        /// (`NSFileProviderCreateItemDeletionConflicted`, spec 2026-10-09 §7.2). Absent from
+        /// an older extension, which then gets an ordinary create.
+        #[serde(default)]
+        deletion_conflicted: bool,
+        /// With `deletion_conflicted`: the template's identifier, the item the delete was for.
+        #[serde(default)]
+        template_identifier: Option<String>,
+        /// With `deletion_conflicted`: the template's content version, the base of the edit.
+        #[serde(default)]
+        template_content_version: Option<String>,
     },
     QueueFinderModify {
         file_id: String,
@@ -120,6 +131,17 @@ pub enum IpcResponse {
     WriteQueued {
         item: Option<FileProviderItemPayload>,
         ignored: bool,
+        message: String,
+    },
+    /// A create or modify the app could not take NOW: nothing was staged or
+    /// queued, and the person's file is unchanged on disk (spec
+    /// 2026-10-09 §8.4: the app's staging folder cannot be created or
+    /// written to). The extension reports it as a transient error
+    /// (`uploadStagingFailed`, `serverUnreachable`), so the system keeps the
+    /// change and retries the write; an `Error` would reach the system as
+    /// `cannotSynchronize`, which it does not retry until the item changes
+    /// again. `message` is a fixed reason, never a path.
+    WriteRetryLater {
         message: String,
     },
     SyncSummary {
@@ -222,7 +244,7 @@ pub(crate) const FP_TRASH_APPLE: &str = "NSFileProviderTrashContainerItemIdentif
 // `normalize_parent_id`. It is never an enumeration surface any more.
 const NAMESPACE_SHARED_WITH_ME: &str = "namespace:shared_with_me";
 const CAP_READ: u32 = 1 << 0;
-const CAP_WRITE: u32 = 1 << 1;
+pub(crate) const CAP_WRITE: u32 = 1 << 1;
 const CAP_RENAME: u32 = 1 << 2;
 const CAP_DELETE: u32 = 1 << 3;
 /// `.allowsAddingSubItems` on the Swift side (task 1694). Bit 4, with the
@@ -470,19 +492,62 @@ pub(crate) fn macos_validate_hydrate_item_identifier(identifier: &str) -> Result
 /// hydration, not just the first.
 #[cfg(target_os = "macos")]
 pub(crate) fn macos_ensure_hydrate_cache_dir(dir: &std::path::Path) -> std::io::Result<()> {
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    macos_ensure_private_staging_dir(dir)
+}
 
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+/// Create (if needed) and harden a staging directory: owner-only `0o700` and
+/// excluded from backups. Shared by the App Group hydrate-cache and
+/// upload-staging directory ([`macos_upload_staging_dir`]), which only ever
+/// hold short-lived plaintext, and the engine's own Finder-write staging root
+/// (`engine_bridge::durable_finder_staging_root`), which holds a save's copy
+/// until it uploads.
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_ensure_private_staging_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    macos_open_private_staging_dir(dir)
+        .map(|_| ())
+        .map_err(StagingDirRefusal::into_io_error)
+}
+
+/// [`macos_ensure_private_staging_dir`], returning the directory held open.
+///
+/// The directory is opened once, without following a symlink, and must be a
+/// real directory owned by this user ([`StagingDir::open`]). The mode and
+/// the backup exclusion are then set through that descriptor, so a symlink
+/// put in the directory's place can never redirect them to another folder.
+#[cfg(target_os = "macos")]
+fn macos_open_private_staging_dir(dir: &std::path::Path) -> Result<StagingDir, StagingDirRefusal> {
+    macos_open_private_staging_dir_with(dir, macos_exclude_from_backups)
+}
+
+/// [`macos_open_private_staging_dir`] with the backup exclusion as a
+/// parameter, so a test can make it fail.
+#[cfg(target_os = "macos")]
+fn macos_open_private_staging_dir_with(
+    dir: &std::path::Path,
+    exclude_from_backups: impl FnOnce(&StagingDir) -> std::io::Result<()>,
+) -> Result<StagingDir, StagingDirRefusal> {
+    use std::os::unix::fs::DirBuilderExt;
+
+    // `recursive` returns Ok when `dir` already exists, including as a
+    // symlink to a directory: the open below is what refuses that.
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .map_err(|e| StagingDirRefusal::Unavailable(e.kind()))?;
+    let staging = StagingDir::open(dir)?;
     // Belt-and-braces: `DirBuilder::mode` is subject to `mkdir`'s normal
     // umask handling like any other creation call, and a directory left over
-    // from an older build (before this fix) may already exist with looser
-    // permissions. Force it down explicitly rather than trusting creation
-    // alone.
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-    if let Err(e) = macos_exclude_from_backups(dir) {
-        tracing::warn!(error = %e, dir = %dir.display(), "could not exclude macOS hydrate-cache dir from backups");
+    // from an older build may already exist with looser permissions. Force it
+    // down explicitly rather than trusting creation alone.
+    staging
+        .restrict_to_owner()
+        .map_err(|e| StagingDirRefusal::Unavailable(e.kind()))?;
+    if let Err(e) = exclude_from_backups(&staging) {
+        // No path: it holds the home directory, and so the account name.
+        tracing::warn!(error_kind = ?e.kind(), "could not exclude a macOS staging dir from backups");
     }
-    Ok(())
+    Ok(staging)
 }
 
 /// Exclude the macOS hydrate-cache directory from Time Machine / iCloud
@@ -503,20 +568,22 @@ pub(crate) fn macos_ensure_hydrate_cache_dir(dir: &std::path::Path) -> std::io::
 /// Recursive by macOS's own backup semantics — an excluded directory's entire
 /// contents are skipped — so this only needs to run once, on the directory
 /// itself, not per hydrated file.
+///
+/// Set on the held descriptor (`fsetxattr`), never by path, so it cannot be
+/// redirected through a symlink.
 #[cfg(target_os = "macos")]
-fn macos_exclude_from_backups(dir: &std::path::Path) -> std::io::Result<()> {
-    use std::os::unix::ffi::OsStrExt;
+fn macos_exclude_from_backups(dir: &StagingDir) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
 
-    let path_c = std::ffi::CString::new(dir.as_os_str().as_bytes())
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path contains a NUL byte"))?;
     let attr_name = std::ffi::CString::new("com.apple.metadata:com_apple_backup_excludeItem")
         .expect("static attribute name has no interior NUL");
     let value = b"com.apple.backupd";
-    // SAFETY: `path_c`/`attr_name` are NUL-terminated and live for the call;
-    // `value` is a plain byte slice we own and pass with its exact length.
+    // SAFETY: the descriptor is open for the call; `attr_name` is
+    // NUL-terminated and lives for the call; `value` is a plain byte slice we
+    // own and pass with its exact length.
     let rc = unsafe {
-        libc::setxattr(
-            path_c.as_ptr(),
+        libc::fsetxattr(
+            dir.fd.as_raw_fd(),
             attr_name.as_ptr(),
             value.as_ptr() as *const libc::c_void,
             value.len(),
@@ -630,6 +697,775 @@ pub(crate) fn macos_sweep_stale_hydrate_cache_entries(
         }
     }
     Ok(removed)
+}
+
+// ── Upload staging: write contents handed over by the File Provider extension ──
+//
+// The system gives the extension's `createItem` / `modifyItem` a contents URL
+// that only the extension's sandbox can read. The daemon is a different
+// sandboxed process and cannot open it, so every Finder file create used to
+// fail with "Upload source is not a file". The extension now copies the
+// contents into this App Group directory first and sends that copy's path
+// (`UploadStaging` in `BeebeebFileProvider/UploadStaging.swift`). The daemon
+// accepts write contents from this directory only, copies them into its own
+// staging (`StagedPayload::copy`), and deletes the handed-over copy once the
+// request is answered.
+
+/// Subdirectory of the App Group container that holds write contents handed
+/// over by the extension. Mirrors `UploadStaging.directoryName` on the Swift
+/// side; keep both in sync.
+#[cfg(target_os = "macos")]
+const MACOS_UPLOAD_STAGING_DIRNAME: &str = "upload-staging";
+
+#[cfg(target_os = "macos")]
+fn macos_upload_staging_dir_in(home_dir: &std::path::Path) -> std::path::PathBuf {
+    home_dir
+        .join("Library")
+        .join("Group Containers")
+        .join(MACOS_APP_GROUP_ID)
+        .join(MACOS_UPLOAD_STAGING_DIRNAME)
+}
+
+#[cfg(target_os = "macos")]
+pub fn macos_upload_staging_dir() -> std::path::PathBuf {
+    macos_upload_staging_dir_in(&macos_real_home_dir())
+}
+
+/// How old a handed-over copy must be before the purge removes it. Each copy
+/// is deleted by both sides as soon as its request is answered, so anything
+/// left here was orphaned by a crash. The bound must exceed the longest a
+/// request can legitimately be in flight: the extension's write timeout is
+/// 600 s (`IPCFraming.stagedCopyTimeoutSeconds`). An hour is six times that.
+///
+/// Age-bound rather than "purge everything at startup": the extension runs
+/// independently of the daemon and can stage a copy at any moment, including
+/// while the daemon is starting, so the daemon cannot know that nothing is in
+/// flight. Age is measured from each copy's ctime, which the kernel sets
+/// when the copy is made and no process can set back.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) const UPLOAD_STAGING_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Why a staging directory itself was refused. Logged as this fixed
+/// category, never with the directory's path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StagingDirRefusal {
+    /// Nothing at the path.
+    Missing,
+    /// A symlink, not a directory, or owned by another user.
+    NotPrivate,
+    /// It could not be opened or inspected.
+    Unavailable(std::io::ErrorKind),
+}
+
+impl StagingDirRefusal {
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub(crate) fn category(self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::NotPrivate => "not_private",
+            Self::Unavailable(_) => "unavailable",
+        }
+    }
+
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    fn into_io_error(self) -> std::io::Error {
+        match self {
+            Self::Missing => std::io::ErrorKind::NotFound.into(),
+            Self::NotPrivate => std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "staging directory is not a private directory",
+            ),
+            Self::Unavailable(kind) => kind.into(),
+        }
+    }
+}
+
+/// A staging directory opened once, without following a symlink, and checked
+/// to be a real directory owned by this user. Listing and deleting its
+/// entries goes through this descriptor (`fstatat`, `unlinkat`), so renaming
+/// the directory away and putting a symlink in its place cannot redirect
+/// them to another folder.
+pub(crate) struct StagingDir {
+    fd: std::os::fd::OwnedFd,
+    /// Device and inode of the opened directory, to recognise it by.
+    dev: u64,
+    ino: u64,
+}
+
+impl StagingDir {
+    /// Open `path` as a staging directory owned by this process's user.
+    pub(crate) fn open(path: &std::path::Path) -> Result<Self, StagingDirRefusal> {
+        // SAFETY: `geteuid` has no preconditions and cannot fail.
+        Self::open_owned_by(path, unsafe { libc::geteuid() })
+    }
+
+    /// [`StagingDir::open`] with the expected owner as a parameter, so the
+    /// owner check is testable without a second account.
+    fn open_owned_by(path: &std::path::Path, owner: libc::uid_t) -> Result<Self, StagingDirRefusal> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::ffi::OsStrExt;
+
+        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| StagingDirRefusal::Unavailable(std::io::ErrorKind::InvalidInput))?;
+        // SAFETY: `c_path` is NUL-terminated and lives for the call.
+        let raw = unsafe {
+            libc::open(
+                c_path.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if raw < 0 {
+            let error = std::io::Error::last_os_error();
+            return Err(match error.raw_os_error() {
+                Some(libc::ENOENT) => StagingDirRefusal::Missing,
+                // ELOOP: the final component is a symlink (O_NOFOLLOW).
+                // ENOTDIR: it is not a directory.
+                Some(libc::ELOOP) | Some(libc::ENOTDIR) => StagingDirRefusal::NotPrivate,
+                _ => StagingDirRefusal::Unavailable(error.kind()),
+            });
+        }
+        // SAFETY: `raw` is a descriptor we just opened and own.
+        let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) };
+        let stat = fstat_fd(fd.as_raw_fd()).map_err(|e| StagingDirRefusal::Unavailable(e.kind()))?;
+        if !is_dir_mode(stat.st_mode) || stat.st_uid != owner {
+            return Err(StagingDirRefusal::NotPrivate);
+        }
+        // `as u64` matches `MetadataExt::dev()` / `ino()` on every unix.
+        #[allow(clippy::unnecessary_cast)]
+        Ok(Self {
+            fd,
+            dev: stat.st_dev as u64,
+            ino: stat.st_ino as u64,
+        })
+    }
+
+    /// Force the directory to owner-only `0o700`, through the descriptor.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    fn restrict_to_owner(&self) -> std::io::Result<()> {
+        use std::os::fd::AsRawFd;
+        // SAFETY: the descriptor is open for the call.
+        if unsafe { libc::fchmod(self.fd.as_raw_fd(), 0o700) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// The names directly inside, without `.` and `..`.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    fn entry_names(&self) -> std::io::Result<Vec<std::ffi::OsString>> {
+        use std::os::fd::AsRawFd;
+        list_dir_fd(self.fd.as_raw_fd())
+    }
+
+    /// `lstat` of one entry: a symlink is described, never followed.
+    fn stat_entry(&self, name: &std::ffi::OsStr) -> std::io::Result<libc::stat> {
+        use std::os::fd::AsRawFd;
+        fstatat_nofollow(self.fd.as_raw_fd(), name)
+    }
+
+    /// Unlink one non-directory entry (a symlink itself, never its target).
+    fn unlink_entry(&self, name: &std::ffi::OsStr) -> std::io::Result<()> {
+        use std::os::fd::AsRawFd;
+        unlink_at(self.fd.as_raw_fd(), name, 0)
+    }
+
+    /// Remove one entry: a file or a symlink is unlinked (a symlink itself,
+    /// never its target); a directory is removed with everything below it,
+    /// through descriptors only ([`remove_tree_at`]).
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    fn remove_entry(&self, name: &std::ffi::OsStr, stat: &libc::stat) -> std::io::Result<()> {
+        use std::os::fd::AsRawFd;
+        if is_dir_mode(stat.st_mode) {
+            remove_tree_at(self.fd.as_raw_fd(), name, 0)
+        } else {
+            unlink_at(self.fd.as_raw_fd(), name, 0)
+        }
+    }
+}
+
+/// How deep [`remove_tree_at`] descends before it gives up on a tree. The
+/// extension only ever stages single files; this only bounds a stray tree.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+const STAGING_TREE_MAX_DEPTH: usize = 32;
+
+fn is_dir_mode(mode: libc::mode_t) -> bool {
+    mode & libc::S_IFMT == libc::S_IFDIR
+}
+
+fn fstat_fd(fd: std::os::fd::RawFd) -> std::io::Result<libc::stat> {
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `stat` is writable storage of the right type; the descriptor is
+    // open for the call.
+    if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `fstat` returned 0, so it filled `stat` in.
+    Ok(unsafe { stat.assume_init() })
+}
+
+fn entry_cstring(name: &std::ffi::OsStr) -> std::io::Result<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::CString::new(name.as_bytes())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "name contains a NUL byte"))
+}
+
+fn fstatat_nofollow(dir_fd: std::os::fd::RawFd, name: &std::ffi::OsStr) -> std::io::Result<libc::stat> {
+    let c_name = entry_cstring(name)?;
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `c_name` is NUL-terminated and lives for the call; `stat` is
+    // writable storage of the right type; the descriptor is open.
+    if unsafe { libc::fstatat(dir_fd, c_name.as_ptr(), stat.as_mut_ptr(), libc::AT_SYMLINK_NOFOLLOW) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `fstatat` returned 0, so it filled `stat` in.
+    Ok(unsafe { stat.assume_init() })
+}
+
+fn unlink_at(dir_fd: std::os::fd::RawFd, name: &std::ffi::OsStr, flags: libc::c_int) -> std::io::Result<()> {
+    let c_name = entry_cstring(name)?;
+    // SAFETY: `c_name` is NUL-terminated and lives for the call; the
+    // descriptor is open.
+    if unsafe { libc::unlinkat(dir_fd, c_name.as_ptr(), flags) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// The names directly inside the directory open at `dir_fd`, without `.`
+/// and `..`. Reads a duplicate of the descriptor, so `dir_fd` stays usable.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn list_dir_fd(dir_fd: std::os::fd::RawFd) -> std::io::Result<Vec<std::ffi::OsString>> {
+    use std::os::unix::ffi::OsStrExt;
+
+    // SAFETY: duplicating an open descriptor has no other preconditions.
+    let dup = unsafe { libc::fcntl(dir_fd, libc::F_DUPFD_CLOEXEC, 0) };
+    if dup < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `dup` is an open directory descriptor we own; on success
+    // `fdopendir` takes it over and `closedir` below closes it.
+    let dirp = unsafe { libc::fdopendir(dup) };
+    if dirp.is_null() {
+        let error = std::io::Error::last_os_error();
+        // SAFETY: `fdopendir` failed, so `dup` is still ours to close.
+        unsafe { libc::close(dup) };
+        return Err(error);
+    }
+    // The duplicate shares the read position with `dir_fd`: start over.
+    // SAFETY: `dirp` is a valid stream until `closedir`.
+    unsafe { libc::rewinddir(dirp) };
+    let mut names = Vec::new();
+    loop {
+        // SAFETY: `dirp` is a valid stream; the entry it returns stays valid
+        // until the next `readdir` on it, and is copied out before that.
+        let entry = unsafe { libc::readdir(dirp) };
+        if entry.is_null() {
+            break;
+        }
+        // SAFETY: `d_name` is NUL-terminated within the entry.
+        let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+        if name != b"." && name != b".." {
+            names.push(std::ffi::OsStr::from_bytes(name).to_os_string());
+        }
+    }
+    // SAFETY: `dirp` came from `fdopendir` and is closed exactly once.
+    unsafe { libc::closedir(dirp) };
+    Ok(names)
+}
+
+/// Remove the directory `name` inside `parent_fd` and everything below it,
+/// through descriptors only: each level is opened with `O_NOFOLLOW`, and a
+/// symlink anywhere in the tree is unlinked, never followed.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn remove_tree_at(parent_fd: std::os::fd::RawFd, name: &std::ffi::OsStr, depth: usize) -> std::io::Result<()> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    if depth >= STAGING_TREE_MAX_DEPTH {
+        return Err(std::io::Error::other("staging tree too deep"));
+    }
+    let c_name = entry_cstring(name)?;
+    // SAFETY: `c_name` is NUL-terminated and lives for the call; the parent
+    // descriptor is open.
+    let raw = unsafe {
+        libc::openat(
+            parent_fd,
+            c_name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if raw < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `raw` is a descriptor we just opened and own.
+    let dir = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) };
+    // A directory without its search bit (an older extension set a copied
+    // package to 0600) lets nothing inside it be inspected or unlinked. We
+    // own it, so give it back to ourselves first.
+    // SAFETY: the descriptor is open for the call.
+    if unsafe { libc::fchmod(dir.as_raw_fd(), 0o700) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    for child in list_dir_fd(dir.as_raw_fd())? {
+        let stat = fstatat_nofollow(dir.as_raw_fd(), &child)?;
+        if is_dir_mode(stat.st_mode) {
+            remove_tree_at(dir.as_raw_fd(), &child, depth + 1)?;
+        } else {
+            unlink_at(dir.as_raw_fd(), &child, 0)?;
+        }
+    }
+    drop(dir);
+    unlink_at(parent_fd, name, libc::AT_REMOVEDIR)
+}
+
+/// `SystemTime` of a `stat` timestamp; `None` before the epoch.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn stat_time(secs: libc::time_t, nanos: libc::c_long) -> Option<std::time::SystemTime> {
+    let secs = u64::try_from(secs).ok()?;
+    let nanos = u32::try_from(nanos).ok()?;
+    std::time::UNIX_EPOCH.checked_add(std::time::Duration::new(secs, nanos))
+}
+
+/// Where `QueueFinderCreate` / `QueueFinderModify` may take file contents from.
+#[derive(Debug, Clone)]
+pub(crate) enum WriteContentsPolicy {
+    /// Any path the daemon can read, left in place. Linux (the daemon is not
+    /// sandboxed and no client sends writes over this socket) and tests that
+    /// predate the staging directory.
+    #[cfg_attr(all(target_os = "macos", not(test)), allow(dead_code))]
+    AnyPath,
+    /// Only a regular file directly inside this directory, deleted by the
+    /// daemon once the request is answered. macOS (and the socket tests on
+    /// every platform).
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    StagingDir(std::path::PathBuf),
+}
+
+impl WriteContentsPolicy {
+    pub(crate) fn platform_default() -> Self {
+        #[cfg(target_os = "macos")]
+        {
+            Self::StagingDir(macos_upload_staging_dir())
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Self::AnyPath
+        }
+    }
+}
+
+/// Why a write's `contents_path` was refused. Logged and returned by
+/// [`ContentsRefusal::category`] only: never the path itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ContentsRefusal {
+    /// Empty, relative, or containing a NUL byte.
+    MalformedPath,
+    /// Contains a `..` or `.` segment.
+    Traversal,
+    /// The staging directory is missing, is a symlink, or cannot be resolved.
+    StagingUnavailable,
+    /// Resolves outside the staging directory, or below a subdirectory of it.
+    OutsideStaging,
+    /// Nothing at the path.
+    Missing,
+    /// The path is a symbolic link.
+    Symlink,
+    /// Not a regular file (a directory, FIFO, socket, ...).
+    NotAFile,
+    /// A regular file with more than one link: a hard link to a file
+    /// elsewhere, not a copy the extension made.
+    HardLinked,
+    /// A regular file owned by another user.
+    ForeignOwner,
+    /// The entry could not be inspected.
+    Unreadable,
+}
+
+impl ContentsRefusal {
+    pub(crate) fn category(self) -> &'static str {
+        match self {
+            Self::MalformedPath => "malformed_path",
+            Self::Traversal => "traversal",
+            Self::StagingUnavailable => "staging_unavailable",
+            Self::OutsideStaging => "outside_staging",
+            Self::Missing => "missing",
+            Self::Symlink => "symlink",
+            Self::NotAFile => "not_a_file",
+            Self::HardLinked => "hard_linked",
+            Self::ForeignOwner => "foreign_owner",
+            Self::Unreadable => "unreadable",
+        }
+    }
+}
+
+/// Open `candidate` only if it names a regular file directly inside
+/// `staging_dir`, and hold it open.
+///
+/// The staging directory is opened first ([`StagingDir::open`]: never
+/// through a symlink, owned by this user). The candidate's parent must be
+/// that same directory (device and inode), and the leaf is then opened
+/// RELATIVE to the held descriptor with `O_NOFOLLOW | O_NONBLOCK`: a symlink
+/// is refused at the open itself and a FIFO cannot block it. Every check that
+/// decides acceptance runs on the opened descriptor
+/// ([`check_staged_contents_stat`]), and the daemon reads the contents from
+/// that descriptor only. Swapping the entry after this returns therefore
+/// changes nothing the daemon reads.
+pub(crate) fn open_staged_contents(
+    staging_dir: &std::path::Path,
+    candidate: &str,
+) -> Result<OpenedContents, ContentsRefusal> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::fs::MetadataExt;
+
+    let path = std::path::Path::new(candidate);
+    if candidate.is_empty() || candidate.contains('\0') || !path.is_absolute() {
+        return Err(ContentsRefusal::MalformedPath);
+    }
+    // Checked on the raw text: `Path::components` silently drops interior
+    // `.` segments, and the extension never sends either.
+    if candidate.split('/').any(|segment| segment == ".." || segment == ".") {
+        return Err(ContentsRefusal::Traversal);
+    }
+    // The configured directory itself must be a real directory owned by this
+    // user: if it were replaced by a symlink, another folder's files would
+    // become acceptable, and the daemon deletes what it accepts.
+    let dir = StagingDir::open(staging_dir).map_err(|_| ContentsRefusal::StagingUnavailable)?;
+    let (Some(parent), Some(leaf)) = (path.parent(), path.file_name()) else {
+        return Err(ContentsRefusal::OutsideStaging);
+    };
+    // Directly inside only: the parent must be the held directory itself.
+    match std::fs::metadata(parent) {
+        Ok(meta) if meta.dev() == dir.dev && meta.ino() == dir.ino => {}
+        _ => return Err(ContentsRefusal::OutsideStaging),
+    }
+    let c_leaf = entry_cstring(leaf).map_err(|_| ContentsRefusal::MalformedPath)?;
+    // SAFETY: `c_leaf` is NUL-terminated and lives for the call; the
+    // directory descriptor is open.
+    let raw = unsafe {
+        libc::openat(
+            dir.fd.as_raw_fd(),
+            c_leaf.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        )
+    };
+    if raw < 0 {
+        let error = std::io::Error::last_os_error();
+        return Err(match error.raw_os_error() {
+            Some(libc::ENOENT) => ContentsRefusal::Missing,
+            // O_NOFOLLOW on a symlink.
+            Some(libc::ELOOP) => ContentsRefusal::Symlink,
+            // A socket cannot be opened.
+            Some(libc::ENXIO) | Some(libc::EOPNOTSUPP) => ContentsRefusal::NotAFile,
+            _ => ContentsRefusal::Unreadable,
+        });
+    }
+    // SAFETY: `raw` is a descriptor we just opened and own.
+    let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) };
+    let stat = fstat_fd(fd.as_raw_fd()).map_err(|_| ContentsRefusal::Unreadable)?;
+    // SAFETY: `geteuid` has no preconditions and cannot fail.
+    check_staged_contents_stat(&stat, unsafe { libc::geteuid() })?;
+    // A label for the engine's journal, rebuilt from the canonical staging
+    // dir: the daemon never reads through it.
+    let label = std::fs::canonicalize(staging_dir)
+        .map_err(|_| ContentsRefusal::StagingUnavailable)?
+        .join(leaf);
+    #[allow(clippy::unnecessary_cast)]
+    let identity = (stat.st_dev as u64, stat.st_ino as u64);
+    Ok(OpenedContents {
+        path: label,
+        file: std::fs::File::from(fd),
+        dir,
+        leaf: leaf.to_os_string(),
+        identity,
+    })
+}
+
+/// A handed-over contents file accepted by [`open_staged_contents`], held
+/// open. Opening it changes nothing on disk.
+pub(crate) struct OpenedContents {
+    /// A label for the engine's journal; the daemon never reads through it.
+    path: std::path::PathBuf,
+    /// The opened file: what the engine reads.
+    file: std::fs::File,
+    /// The staging directory it was opened in, and its name there: the
+    /// deletion goes through these, never through a path.
+    dir: StagingDir,
+    leaf: std::ffi::OsString,
+    /// Device and inode of the opened file.
+    identity: (u64, u64),
+}
+
+/// The checks on an opened handed-over file: a regular file with exactly one
+/// link (the extension's copy is always a fresh file with one), owned by
+/// `owner`. A hard link to another file, a FIFO, a device or a directory is
+/// refused. Split out so the checks are testable on a constructed `stat`.
+fn check_staged_contents_stat(stat: &libc::stat, owner: libc::uid_t) -> Result<(), ContentsRefusal> {
+    if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
+        return Err(ContentsRefusal::NotAFile);
+    }
+    if stat.st_nlink != 1 {
+        return Err(ContentsRefusal::HardLinked);
+    }
+    if stat.st_uid != owner {
+        return Err(ContentsRefusal::ForeignOwner);
+    }
+    Ok(())
+}
+
+/// An admitted handed-over contents file. The engine copies from
+/// [`StagedContents::file`], never by path. Dropping it deletes the file: by
+/// then the daemon holds its own copy (`StagedPayload::copy_from_file`), or
+/// the request failed and the extension's retry stages a fresh one.
+///
+/// The deletion is `unlinkat` on the held staging-directory descriptor, and
+/// only while the name still refers to the file that was handed over (same
+/// device and inode, checked with `fstatat` without following a link).
+/// Renaming the staging directory away and putting a symlink in its place,
+/// or putting another file under the copy's name, therefore deletes
+/// nothing else; a name left behind is the age-bound purge's.
+pub(crate) struct StagedContents {
+    contents: OpenedContents,
+}
+
+impl StagedContents {
+    fn path_string(&self) -> String {
+        self.contents.path.to_string_lossy().into_owned()
+    }
+
+    /// The opened file: what the engine reads.
+    pub(crate) fn file(&self) -> &std::fs::File {
+        &self.contents.file
+    }
+}
+
+impl Drop for StagedContents {
+    fn drop(&mut self) {
+        let contents = &self.contents;
+        let result = match contents.dir.stat_entry(&contents.leaf) {
+            #[allow(clippy::unnecessary_cast)]
+            Ok(stat) if (stat.st_dev as u64, stat.st_ino as u64) == contents.identity => {
+                contents.dir.unlink_entry(&contents.leaf)
+            }
+            // The name now refers to something else: not ours to delete.
+            Ok(_) => Ok(()),
+            Err(e) => Err(e),
+        };
+        match result {
+            Ok(()) => {}
+            // The extension deletes its copy after the reply too; either side may be first.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!(
+                error_kind = ?e.kind(),
+                "could not delete a handed-over upload copy; the age-bound purge will"
+            ),
+        }
+    }
+}
+
+/// Apply `policy` to one write request's `contents_path`. `Ok` carries the
+/// path to hand the engine and, under [`WriteContentsPolicy::StagingDir`],
+/// the guard that deletes the handed-over copy when dropped. `Err` is the
+/// refusal, already logged; [`contents_refusal_response`] is its reply.
+fn admit_write_contents(
+    policy: &WriteContentsPolicy,
+    op: &'static str,
+    contents_path: Option<String>,
+) -> Result<(Option<String>, Option<StagedContents>), ContentsRefusal> {
+    let (WriteContentsPolicy::StagingDir(staging_dir), Some(candidate)) = (policy, contents_path.as_deref()) else {
+        return Ok((contents_path, None));
+    };
+    match open_staged_contents(staging_dir, candidate) {
+        Ok(contents) => {
+            let staged = StagedContents { contents };
+            Ok((Some(staged.path_string()), Some(staged)))
+        }
+        Err(refusal) => {
+            log_refused_write(op, refusal.category());
+            Err(refusal)
+        }
+    }
+}
+
+/// The reply for a refused `contents_path`: the category, never the path.
+fn contents_refusal_response(refusal: ContentsRefusal) -> IpcResponse {
+    IpcResponse::Error {
+        message: format!("Upload contents refused ({})", refusal.category()),
+    }
+}
+
+/// Remove upload-staging entries that have existed for at least `max_age`
+/// before `now`, by their ctime (see the loop). A missing directory is not an error. `now` / `max_age` are
+/// parameters so this is testable without a clock.
+///
+/// The directory is opened once ([`StagingDir::open`]) and refused unless it
+/// is a real directory owned by this user: through a symlink, this purge
+/// would delete another folder's files. Every entry is inspected and removed
+/// through that descriptor.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn purge_stale_upload_staging(
+    dir: &std::path::Path,
+    max_age: std::time::Duration,
+    now: std::time::SystemTime,
+) -> Result<usize, StagingDirRefusal> {
+    purge_upload_staging(dir, UploadStagingPurge::OlderThan { max_age, now })
+}
+
+/// Which upload-staging entries a purge removes.
+#[derive(Debug, Clone, Copy)]
+#[cfg(any(target_os = "macos", test))]
+pub(crate) enum UploadStagingPurge {
+    /// Entries that have existed for at least `max_age` before `now`: daemon
+    /// startup and the periodic sweep, while the extension may be staging.
+    OlderThan {
+        max_age: std::time::Duration,
+        now: std::time::SystemTime,
+    },
+    /// Every entry: sign-out and Lock, once no IPC listener can still be
+    /// serving (the engine is gone, or its stop is confirmed). A request
+    /// that then reaches no daemon fails transiently and the extension
+    /// stages a fresh copy for the system's retry.
+    Everything,
+}
+
+/// [`purge_stale_upload_staging`] with the scope as a parameter.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn purge_upload_staging(
+    dir: &std::path::Path,
+    scope: UploadStagingPurge,
+) -> Result<usize, StagingDirRefusal> {
+    match StagingDir::open(dir) {
+        Ok(staging) => purge_upload_staging_in(&staging, scope),
+        Err(StagingDirRefusal::Missing) => Ok(0),
+        Err(refusal) => Err(refusal),
+    }
+}
+
+/// [`purge_upload_staging`] on a directory already held open.
+#[cfg(any(target_os = "macos", test))]
+fn purge_upload_staging_in(staging: &StagingDir, scope: UploadStagingPurge) -> Result<usize, StagingDirRefusal> {
+    let names = staging
+        .entry_names()
+        .map_err(|e| StagingDirRefusal::Unavailable(e.kind()))?;
+    let mut removed = 0usize;
+    for name in names {
+        // `lstat` of the entry itself: a symlink is described, not followed.
+        let Ok(stat) = staging.stat_entry(&name) else {
+            continue;
+        };
+        let stale = match scope {
+            UploadStagingPurge::Everything => true,
+            // Aged by the status-change time (ctime), never the mtime: the
+            // kernel sets ctime when the copy is made (an APFS clone keeps
+            // the source's mtime), and no process can set it back. A future
+            // ctime (clock change) counts as fresh; a later sweep gets it.
+            UploadStagingPurge::OlderThan { max_age, now } => stat_time(stat.st_ctime, stat.st_ctime_nsec)
+                .and_then(|changed| now.duration_since(changed).ok())
+                .is_some_and(|age| age >= max_age),
+        };
+        if !stale {
+            continue;
+        }
+        match staging.remove_entry(&name, &stat) {
+            Ok(()) => removed += 1,
+            Err(e) => tracing::warn!(error_kind = ?e.kind(), "upload-staging purge: could not remove an entry"),
+        }
+    }
+    Ok(removed)
+}
+
+/// Daemon startup: create and harden the upload-staging directory, then purge
+/// copies orphaned by a crash (see [`UPLOAD_STAGING_MAX_AGE`]).
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_prepare_upload_staging_dir(
+    dir: &std::path::Path,
+    max_age: std::time::Duration,
+    now: std::time::SystemTime,
+) -> Result<usize, StagingDirRefusal> {
+    let staging = macos_open_private_staging_dir(dir)?;
+    purge_upload_staging_in(&staging, UploadStagingPurge::OlderThan { max_age, now })
+}
+
+/// Runner startup: prepare the real directory and purge it. Best-effort.
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_prepare_upload_staging() {
+    let dir = macos_upload_staging_dir();
+    let result = macos_prepare_upload_staging_dir(&dir, UPLOAD_STAGING_MAX_AGE, std::time::SystemTime::now());
+    log_upload_staging_purge("daemon-startup", result);
+}
+
+/// Runner tick: purge the real directory. Best-effort.
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_sweep_upload_staging() {
+    sweep_upload_staging_at(&macos_upload_staging_dir(), "periodic", std::time::SystemTime::now());
+}
+
+/// Age-bound purge of `dir`, logged. Split from the real-directory caller so a
+/// test can run it on a temp dir.
+#[cfg(any(target_os = "macos", test))]
+fn sweep_upload_staging_at(dir: &std::path::Path, context: &'static str, now: std::time::SystemTime) {
+    let result = purge_stale_upload_staging(dir, UPLOAD_STAGING_MAX_AGE, now);
+    log_upload_staging_purge(context, result);
+}
+
+/// Sign-out and Lock: remove every entry of `dir`, logged. The caller
+/// guarantees that no IPC listener can still be serving (see
+/// [`UploadStagingPurge::Everything`]).
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn purge_all_upload_staging_at(dir: &std::path::Path, context: &'static str) {
+    log_upload_staging_purge(context, purge_upload_staging(dir, UploadStagingPurge::Everything));
+}
+
+/// Log a purge: a count, or the refusal's fixed category. Never a path.
+#[cfg(any(target_os = "macos", test))]
+fn log_upload_staging_purge(context: &'static str, result: Result<usize, StagingDirRefusal>) {
+    match result {
+        Ok(removed) if removed > 0 => {
+            tracing::info!(removed, context, "purged upload-staging copies");
+        }
+        Ok(_) => {}
+        Err(refusal) => {
+            tracing::warn!(
+                reason = refusal.category(),
+                context,
+                "upload-staging purge refused or failed; nothing was removed"
+            );
+        }
+    }
+}
+
+/// Log one refused Finder write: the operation and a fixed reason category,
+/// never a file name, path or contents.
+fn log_refused_write(op: &'static str, reason: &'static str) {
+    tracing::warn!(op, reason, "Finder write refused");
+}
+
+/// Fixed category for an engine error on the write path, for
+/// [`log_refused_write`]. The error's text can carry user data (names, paths),
+/// so it is classified, never logged.
+fn write_refusal_category(error: &anyhow::Error) -> &'static str {
+    if error.downcast_ref::<crate::engine_bridge::UnknownItem>().is_some() {
+        return "unknown_item";
+    }
+    if error.is::<crate::engine_bridge::FinderStagingUnavailable>() {
+        return "staging_root_unavailable";
+    }
+    if error.downcast_ref::<std::io::Error>().is_some() {
+        return "io";
+    }
+    if error.downcast_ref::<rusqlite::Error>().is_some() {
+        return "database";
+    }
+    let text = error.to_string();
+    if text.contains("engine is stopping") {
+        "engine_stopping"
+    } else if text.contains("Upload source is not a file") {
+        "contents_not_a_file"
+    } else if text.contains("read-only") {
+        "write_policy"
+    } else if text.contains("did not include") {
+        "malformed_request"
+    } else {
+        "other"
+    }
 }
 
 /// Task 1524 follow-up: resolve the real user home directory from the OS
@@ -770,23 +1606,28 @@ pub async fn serve_ipc(
 /// caller is responsible for logging/surfacing the error (`runner.rs` logs
 /// it and records it for `wait_for_file_provider_ipc_ready` to report
 /// verbatim instead of just timing out).
+///
+/// Write contents follow [`WriteContentsPolicy::platform_default`]: on macOS
+/// only the App Group upload-staging directory is accepted.
 pub async fn serve_ipc_at(
     path: std::path::PathBuf,
     db: std::sync::Arc<crate::state_db::StateDb>,
     bridge: std::sync::Arc<crate::engine_bridge::EngineBridge>,
     cancel: oneshot::Receiver<()>,
 ) -> std::io::Result<()> {
-    serve_ipc_at_with_ready(path, db, bridge, cancel, None).await
+    serve_ipc_at_with_ready(path, db, bridge, cancel, None, WriteContentsPolicy::platform_default()).await
 }
 
 /// Readiness means the listener is bound, hardened and published. On startup
 /// failure the sender is dropped and the server returns the original error.
+/// `contents` decides where write requests may take file contents from.
 pub(crate) async fn serve_ipc_at_with_ready(
     path: std::path::PathBuf,
     db: std::sync::Arc<crate::state_db::StateDb>,
     bridge: std::sync::Arc<crate::engine_bridge::EngineBridge>,
     mut cancel: oneshot::Receiver<()>,
     ready: Option<oneshot::Sender<()>>,
+    contents: WriteContentsPolicy,
 ) -> std::io::Result<()> {
     let listener = bind_ipc_listener(&path)?;
     if let Some(ready) = ready {
@@ -808,7 +1649,8 @@ pub(crate) async fn serve_ipc_at_with_ready(
                     let db = db.clone();
                     let bridge = bridge.clone();
                     let write_dedup = write_dedup.clone();
-                    connections.push(tokio::spawn(handle_connection(stream, db, bridge, write_dedup)));
+                    let contents = contents.clone();
+                    connections.push(tokio::spawn(handle_connection(stream, db, bridge, write_dedup, contents)));
                 }
                 Err(e) => tracing::warn!("IPC accept error: {e}"),
             }
@@ -894,6 +1736,7 @@ async fn handle_connection(
     db: std::sync::Arc<crate::state_db::StateDb>,
     bridge: std::sync::Arc<crate::engine_bridge::EngineBridge>,
     write_dedup: std::sync::Arc<WriteDedup<IpcResponse>>,
+    contents_policy: WriteContentsPolicy,
 ) {
     // Authenticate the peer BEFORE reading or dispatching anything. The daemon
     // holds vault keys in memory and `hydrate_file` is a decrypt oracle, so a
@@ -956,12 +1799,7 @@ async fn handle_connection(
             }
         };
         let resp = match req {
-            IpcRequest::GetFileStatus { file_id } => match db.get_file(&file_id) {
-                Ok(Some(e)) => IpcResponse::FileStatus(file_entry_payload_for_db(&db, &e, FP_ROOT_APPLE)),
-                _ => IpcResponse::Error {
-                    message: "not found".into(),
-                },
-            },
+            IpcRequest::GetFileStatus { file_id } => file_status_response(&db, &file_id),
             IpcRequest::ListFileProviderItems { container_id } => IpcResponse::FileProviderItems {
                 items: list_file_provider_items(&db, &container_id),
             },
@@ -983,48 +1821,78 @@ async fn handle_connection(
                 contents_path,
                 content_type,
                 request_id,
+                deletion_conflicted,
+                template_identifier,
+                template_content_version,
             } => {
-                if parent_id.as_deref() == Some(NAMESPACE_SHARED_WITH_ME) {
-                    // Answer and keep serving the connection (this used to
-                    // `return`, silently dropping the connection).
-                    if write_frame(
-                        &mut write_half,
-                        &IpcResponse::Error {
+                match admit_write_contents(&contents_policy, "create", contents_path) {
+                    Err(refusal) => contents_refusal_response(refusal),
+                    Ok((_, staged)) if parent_id.as_deref() == Some(NAMESPACE_SHARED_WITH_ME) => {
+                        // Refused: the copy it handed over is deleted now.
+                        drop(staged);
+                        log_refused_write("create", "read_only_namespace");
+                        // Answer and keep serving the connection (this used to
+                        // `return`, silently dropping the connection).
+                        IpcResponse::Error {
                             message: "Shared with me is read-only at the namespace root".into(),
-                        },
-                    )
-                    .await
-                    .is_err()
-                    {
-                        break;
+                        }
                     }
-                    continue;
+                    Ok((contents_path, staged)) => {
+                        let target = crate::engine_bridge::FinderWriteTarget {
+                            file_id: None,
+                            parent_id: normalize_parent_id(parent_id),
+                            filename,
+                            // OS-extension IPC supplies the leaf name only; keep the
+                            // leaf-as-path fallback (queue_finder_create defaults
+                            // rel_path → filename). The macOS/Linux extensions thread
+                            // their own nesting via parent_id, not a relative path.
+                            rel_path: None,
+                            kind: parse_write_kind(&kind),
+                            contents_path,
+                            content_type,
+                            base_version_identifier: None,
+                        };
+                        let fingerprint = format!(
+                            "create|{}|{}|{}",
+                            target.parent_id.as_deref().unwrap_or(""),
+                            target.filename,
+                            parse_write_kind_name(&target.kind)
+                        );
+                        let (work_db, work_bridge) = (db.clone(), bridge.clone());
+                        // `staged` rides in the work closure: it is dropped (the
+                        // handed-over copy deleted) once the engine has its own
+                        // copy or refused, or unrun when a repeat is answered
+                        // from the first attempt's result.
+                        dedup_write(&write_dedup, &db, request_id, fingerprint, move || {
+                            // The engine reads the opened file, never the path.
+                            let opened = staged.as_ref().map(StagedContents::file);
+                            // Only the macOS File Provider path mints write tokens (spec §8.8),
+                            // and only it resolves a deletion-conflicted create (§7.2).
+                            #[cfg(target_os = "macos")]
+                            let result = if deletion_conflicted {
+                                work_bridge.queue_file_provider_deletion_conflicted_create(
+                                    target,
+                                    template_identifier,
+                                    template_content_version,
+                                    opened,
+                                )
+                            } else {
+                                work_bridge.queue_file_provider_create_from(target, opened)
+                            };
+                            #[cfg(not(target_os = "macos"))]
+                            let result = {
+                                let _ = (deletion_conflicted, template_identifier, template_content_version);
+                                work_bridge
+                                    .queue_finder_create_from(target, opened)
+                                    .map(crate::engine_bridge::FpWrite::plain)
+                            };
+                            let response = write_outcome_response("create", &work_db, result);
+                            drop(staged);
+                            response
+                        })
+                        .await
+                    }
                 }
-                let target = crate::engine_bridge::FinderWriteTarget {
-                    file_id: None,
-                    parent_id: normalize_parent_id(parent_id),
-                    filename,
-                    // OS-extension IPC supplies the leaf name only; keep the
-                    // leaf-as-path fallback (queue_finder_create defaults
-                    // rel_path → filename). The macOS/Linux extensions thread
-                    // their own nesting via parent_id, not a relative path.
-                    rel_path: None,
-                    kind: parse_write_kind(&kind),
-                    contents_path,
-                    content_type,
-                    base_version_identifier: None,
-                };
-                let fingerprint = format!(
-                    "create|{}|{}|{}",
-                    target.parent_id.as_deref().unwrap_or(""),
-                    target.filename,
-                    parse_write_kind_name(&target.kind)
-                );
-                let (work_db, work_bridge) = (db.clone(), bridge.clone());
-                dedup_write(&write_dedup, &db, request_id, fingerprint, move || {
-                    write_outcome_response(&work_db, work_bridge.queue_finder_create(target))
-                })
-                .await
             }
             IpcRequest::QueueFinderModify {
                 file_id,
@@ -1035,30 +1903,44 @@ async fn handle_connection(
                 content_type,
                 base_version_identifier,
                 request_id,
-            } => {
-                let target = crate::engine_bridge::FinderWriteTarget {
-                    file_id: Some(file_id),
-                    parent_id: normalize_parent_id(parent_id),
-                    filename,
-                    // Modify is metadata/version only; no new-file path key.
-                    rel_path: None,
-                    kind: parse_write_kind(&kind),
-                    contents_path,
-                    content_type,
-                    base_version_identifier,
-                };
-                let fingerprint = format!(
-                    "modify|{}|{}|{}",
-                    target.file_id.as_deref().unwrap_or(""),
-                    target.filename,
-                    parse_write_kind_name(&target.kind)
-                );
-                let (work_db, work_bridge) = (db.clone(), bridge.clone());
-                dedup_write(&write_dedup, &db, request_id, fingerprint, move || {
-                    write_outcome_response(&work_db, work_bridge.queue_finder_modify(target))
-                })
-                .await
-            }
+            } => match admit_write_contents(&contents_policy, "modify", contents_path) {
+                Err(refusal) => contents_refusal_response(refusal),
+                Ok((contents_path, staged)) => {
+                    let target = crate::engine_bridge::FinderWriteTarget {
+                        file_id: Some(file_id),
+                        parent_id: normalize_parent_id(parent_id),
+                        filename,
+                        // Modify is metadata/version only; no new-file path key.
+                        rel_path: None,
+                        kind: parse_write_kind(&kind),
+                        contents_path,
+                        content_type,
+                        base_version_identifier,
+                    };
+                    let fingerprint = format!(
+                        "modify|{}|{}|{}",
+                        target.file_id.as_deref().unwrap_or(""),
+                        target.filename,
+                        parse_write_kind_name(&target.kind)
+                    );
+                    let (work_db, work_bridge) = (db.clone(), bridge.clone());
+                    // See the create arm for when `staged` is dropped.
+                    dedup_write(&write_dedup, &db, request_id, fingerprint, move || {
+                        let opened = staged.as_ref().map(StagedContents::file);
+                        // Only the macOS File Provider path mints write tokens (spec §8.8).
+                        #[cfg(target_os = "macos")]
+                        let result = work_bridge.queue_file_provider_modify_from(target, opened);
+                        #[cfg(not(target_os = "macos"))]
+                        let result = work_bridge
+                            .queue_finder_modify_from(target, opened)
+                            .map(crate::engine_bridge::FpWrite::plain);
+                        let response = write_outcome_response("modify", &work_db, result);
+                        drop(staged);
+                        response
+                    })
+                    .await
+                }
+            },
             IpcRequest::QueueFinderDelete {
                 file_id,
                 base_version_identifier,
@@ -1070,7 +1952,13 @@ async fn handle_connection(
                 // create. The row stays in place until the server trash
                 // converges, so the row alone cannot say "deleted" (task 1684).
                 forget_dedup_for_item(&write_dedup, &file_id);
-                write_outcome_response(&db, bridge.queue_finder_delete(&file_id, base_version_identifier))
+                write_outcome_response(
+                    "delete",
+                    &db,
+                    bridge
+                        .queue_finder_delete(&file_id, base_version_identifier)
+                        .map(crate::engine_bridge::FpWrite::plain),
+                )
             }
             // Task 1698: the `SetRecursivePin` IPC RPC is RETIRED — it had no
             // caller (audit G13): the File Provider extension never sent it
@@ -1120,12 +2008,14 @@ async fn handle_connection(
                         match thumbnail_destination_error(&dest, &allowed_roots) {
                             Some(message) => Err(IpcResponse::Error { message }),
                             None => {
-                                // `fetch_thumbnail_to_memory` is async (HTTP
-                                // + decrypt); the staging write that follows
-                                // is a small blocking file write, which the
-                                // other dispatch arms also do inline.
+                                // `finder_thumbnail` is async (HTTP + decrypt;
+                                // through the alias, and an error while the
+                                // item's write is queued, spec §5.6); the
+                                // staging write that follows is a small
+                                // blocking file write, which the other
+                                // dispatch arms also do inline.
                                 let fetched = bridge
-                                    .fetch_thumbnail_to_memory(&file_id, thumbnail_variant(max_dimension))
+                                    .finder_thumbnail(&file_id, thumbnail_variant(max_dimension))
                                     .await;
                                 match fetched {
                                     Ok(plaintext) => {
@@ -1239,6 +2129,8 @@ async fn hydrate_over_ipc(
     let identifier_check: Result<(), &'static str> = Ok(());
 
     if let Err(msg) = identifier_check {
+        // The identifier is untrusted wire input: never logged.
+        tracing::warn!(reason = "invalid_identifier", "Finder hydrate failed");
         return HydrateOutcome::Reply(IpcResponse::Error {
             message: msg.to_string(),
         });
@@ -1300,6 +2192,16 @@ async fn hydrate_over_ipc(
         let _ = tx.send((done, total));
     };
     let progress_cb: Option<&(dyn Fn(u64, u64) + Send + Sync)> = if want_progress { Some(&report) } else { None };
+    // macOS: through the alias, and from the queue while the held write is queued (spec §7.4).
+    // Other unix builds hydrate from the server as before.
+    #[cfg(target_os = "macos")]
+    let hydrate = async {
+        bridge
+            .serve_hydrate(file_id, dest, &allowed_roots, progress_cb)
+            .await
+            .map(|_| ())
+    };
+    #[cfg(not(target_os = "macos"))]
     let hydrate = bridge.hydrate_file_with_progress(file_id, dest, &allowed_roots, progress_cb);
     tokio::pin!(hydrate);
 
@@ -1350,7 +2252,7 @@ async fn hydrate_over_ipc(
             }
             match outcome {
                 Ok(()) => HydrateOutcome::Reply(IpcResponse::Ok {}),
-                Err(e) => HydrateOutcome::Reply(IpcResponse::Error { message: e.to_string() }),
+                Err(e) => HydrateOutcome::Reply(hydrate_failure_reply(file_id, e)),
             }
         }
         None => {
@@ -1359,6 +2261,57 @@ async fn hydrate_over_ipc(
             HydrateOutcome::ClientGone
         }
     }
+}
+
+/// The reply to a hydrate that failed: the extension's `fetchContents` fails
+/// with it, and the system shows the item as failing to download. It leaves
+/// one warning in the daemon log with the item id and a fixed category; the
+/// error's text can carry a path or a URL, so it is classified, never logged.
+fn hydrate_failure_reply(file_id: &str, error: anyhow::Error) -> IpcResponse {
+    tracing::warn!(
+        file_id,
+        reason = hydrate_failure_category(&error),
+        "Finder hydrate failed"
+    );
+    IpcResponse::Error {
+        message: error.to_string(),
+    }
+}
+
+/// Fixed category for a failed hydrate, for [`hydrate_failure_reply`].
+fn hydrate_failure_category(error: &anyhow::Error) -> &'static str {
+    if error.is::<crate::engine_bridge::QueuedCopyMissing>() {
+        return "queued_copy_missing";
+    }
+    if let Some(status) = crate::engine_bridge::error_http_status(error) {
+        return match status {
+            404 => "not_found",
+            401 => "unauthorized",
+            403 => "forbidden",
+            409 => "conflict",
+            500..=599 => "server_error",
+            _ => "http_other",
+        };
+    }
+    if error
+        .chain()
+        .any(|cause| cause.downcast_ref::<reqwest::Error>().is_some())
+    {
+        return "network";
+    }
+    if error
+        .chain()
+        .any(|cause| cause.downcast_ref::<std::io::Error>().is_some())
+    {
+        return "io";
+    }
+    if error
+        .chain()
+        .any(|cause| cause.downcast_ref::<rusqlite::Error>().is_some())
+    {
+        return "database";
+    }
+    "other"
 }
 
 fn parse_write_kind(kind: &str) -> crate::engine_bridge::FinderWriteItemKind {
@@ -1402,7 +2355,16 @@ fn forget_dedup_for_item(dedup: &std::sync::Arc<WriteDedup<IpcResponse>>, file_i
 /// and finalizing the upload since then changed the item's version and status.
 /// Serving the old `version_identifier` would hand the system a stale base
 /// version for the user's next edit, so the item is rebuilt from the current row.
-fn refresh_cached_write(db: &crate::state_db::StateDb, cached: IpcResponse) -> Option<IpcResponse> {
+///
+/// `through_alias` (a modify's reply): an item named by a provisional id whose create
+/// has landed is rebuilt from the server file and still presented under the provisional
+/// id, as the modify was (spec 2026-10-09 §7.2). A create's reply never resolves through
+/// the alias: its repeat after the landing runs again, as before (§12).
+fn refresh_cached_write(
+    db: &crate::state_db::StateDb,
+    cached: IpcResponse,
+    through_alias: bool,
+) -> Option<IpcResponse> {
     let IpcResponse::WriteQueued {
         item: Some(item),
         ignored,
@@ -1411,8 +2373,19 @@ fn refresh_cached_write(db: &crate::state_db::StateDb, cached: IpcResponse) -> O
     else {
         return Some(cached);
     };
-    let entry = match db.get_file(&item.identifier) {
-        Ok(Some(entry)) => entry,
+    let (entry, presented) = match db.get_file(&item.identifier) {
+        Ok(Some(entry)) => (entry, false),
+        Ok(None) if through_alias => {
+            match db
+                .resolve_alias(&item.identifier)
+                .ok()
+                .flatten()
+                .and_then(|server_id| db.get_file(&server_id).ok().flatten())
+            {
+                Some(entry) => (entry, true),
+                None => return None,
+            }
+        }
         Ok(None) => return None,
         // Cannot tell: prefer returning the stored result over queueing twice.
         Err(_) => {
@@ -1430,12 +2403,15 @@ fn refresh_cached_write(db: &crate::state_db::StateDb, cached: IpcResponse) -> O
     // alternative (re-queueing) is only ever a duplicate, never a lost file, but
     // a lookup that cannot run also cannot prove a delete, and the delete path
     // forgets the entry itself.
-    if db.has_pending_trash(&item.identifier).unwrap_or(false) {
+    if db.has_pending_trash(&entry.file_id).unwrap_or(false) {
         return None;
     }
-    let fresh = file_entry_payload_for_db(db, &entry, FP_ROOT_APPLE);
+    let mut fresh = file_entry_payload_for_db(db, &entry, FP_ROOT_APPLE);
     if fresh.filename != item.filename {
         return None;
+    }
+    if presented {
+        fresh.identifier = item.identifier;
     }
     Some(IpcResponse::WriteQueued {
         item: Some(fresh),
@@ -1455,17 +2431,19 @@ async fn dedup_write(
         return work();
     };
     if key.is_empty() || key.len() > MAX_KEY_BYTES || key.chars().any(|c| c.is_control()) {
+        log_refused_write("write", "invalid_request_id");
         return IpcResponse::Error {
             message: format!("request_id must be 1 to {MAX_KEY_BYTES} printable bytes"),
         };
     }
     let validate_db = db.clone();
+    let through_alias = fingerprint.starts_with("modify|");
     dedup
         .run(
             &key,
             &fingerprint,
             std::time::Instant::now,
-            move |cached: IpcResponse| refresh_cached_write(&validate_db, cached),
+            move |cached: IpcResponse| refresh_cached_write(&validate_db, cached, through_alias),
             |resp: &IpcResponse| matches!(resp, IpcResponse::WriteQueued { .. }),
             work,
             IpcResponse::Error {
@@ -1486,30 +2464,93 @@ fn normalize_parent_id(parent_id: Option<String>) -> Option<String> {
     })
 }
 
-fn write_outcome_response(
+/// The `GetFileStatus` reply: a live row as before; otherwise a provisional id whose create
+/// landed is answered with the server file's item under the provisional id (spec §7.2), so
+/// the system's item keeps its identity until it applies the swap; otherwise "not found".
+pub(crate) fn file_status_response(db: &crate::state_db::StateDb, file_id: &str) -> IpcResponse {
+    if let Ok(Some(entry)) = db.get_file(file_id) {
+        return IpcResponse::FileStatus(file_entry_payload_for_db(db, &entry, FP_ROOT_APPLE));
+    }
+    if let Ok(Some(server_id)) = db.resolve_alias(file_id)
+        && let Ok(Some(entry)) = db.get_file(&server_id)
+    {
+        crate::engine_bridge::log_alias_resolved("item", file_id, &server_id);
+        let mut item = file_entry_payload_for_db(db, &entry, FP_ROOT_APPLE);
+        item.identifier = file_id.to_string();
+        return IpcResponse::FileStatus(item);
+    }
+    IpcResponse::Error {
+        message: "not found".into(),
+    }
+}
+
+/// The reply to a Finder write. A queued write answers with its item, read back from the
+/// row, presented under `present_as` when the write came under a provisional id (spec §7.2).
+pub(crate) fn write_outcome_response(
+    op: &'static str,
     db: &crate::state_db::StateDb,
-    result: anyhow::Result<crate::engine_bridge::FinderWriteOutcome>,
+    result: anyhow::Result<crate::engine_bridge::FpWrite>,
 ) -> IpcResponse {
-    match result {
-        Ok(crate::engine_bridge::FinderWriteOutcome::Ignored { message }) => IpcResponse::WriteQueued {
+    match result.map(|write| (write.outcome, write.present_as)) {
+        Ok((crate::engine_bridge::FinderWriteOutcome::Ignored { message }, _)) => IpcResponse::WriteQueued {
             item: None,
             ignored: true,
             message,
         },
-        Ok(crate::engine_bridge::FinderWriteOutcome::Queued {
-            file_id,
-            ignored,
-            message,
-            ..
-        }) => IpcResponse::WriteQueued {
-            item: file_id
+        Ok((
+            crate::engine_bridge::FinderWriteOutcome::Queued {
+                file_id,
+                ignored,
+                message,
+                ..
+            },
+            present_as,
+        )) => {
+            let item = file_id
                 .as_deref()
                 .and_then(|id| db.get_file(id).ok().flatten())
-                .map(|entry| file_entry_payload_for_db(db, &entry, FP_ROOT_APPLE)),
-            ignored,
-            message,
-        },
-        Err(e) => IpcResponse::Error { message: e.to_string() },
+                .map(|entry| {
+                    let mut item = file_entry_payload_for_db(db, &entry, FP_ROOT_APPLE);
+                    if let Some(identifier) = present_as {
+                        item.identifier = identifier;
+                    }
+                    item
+                });
+            // §7.3: a create or modify reply always carries an item unless the write was ignored:
+            // for a modify, the system reads a nil item as "delete the item on disk"
+            // (REPL.h:629-634). When the row cannot be read back, the write is still queued and
+            // uploads with its bytes kept. The reply is an `Error`, which the extension reports as
+            // `cannotSynchronize`: the system presents an error and does not retry the item until
+            // it changes on disk (NSFileProviderReplicatedExtension.h on modifyItem;
+            // NSFileProviderError.h on `CannotSynchronize`; the extension never signals it
+            // resolved). A transient error would be worse: the system's retry would run the write
+            // again (an `Error` is not remembered by the dedup) and queue it a second time. A
+            // delete's reply item is never read, so a delete is not refused.
+            #[cfg(target_os = "macos")]
+            if item.is_none() && matches!(op, "create" | "modify") {
+                log_refused_write(op, "row_unreadable");
+                return IpcResponse::Error {
+                    message: "Beebeeb saved this change and will upload it, but could not describe the file to \
+                              Finder. Finder shows an error on it until the file changes again."
+                        .into(),
+                };
+            }
+            IpcResponse::WriteQueued { item, ignored, message }
+        }
+        // Spec §8.4: the staging folder cannot take the copy now. Nothing was staged or
+        // queued; the extension reports a transient error, so the system retries the write.
+        // The text is the typed error's fixed reason, never a path.
+        Err(e) if e.is::<crate::engine_bridge::FinderStagingUnavailable>() => {
+            log_refused_write(op, write_refusal_category(&e));
+            IpcResponse::WriteRetryLater { message: e.to_string() }
+        }
+        Err(e) => {
+            // The extension turns this reply into a definitive Finder error,
+            // so it must leave a trace in the daemon log (it used to leave
+            // none). The category only: the error text can name the file.
+            log_refused_write(op, write_refusal_category(&e));
+            IpcResponse::Error { message: e.to_string() }
+        }
     }
 }
 
@@ -1677,15 +2718,88 @@ fn is_file_provider_root(container_id: &str) -> bool {
         || container_id.to_ascii_lowercase().contains("root")
 }
 
-fn file_entry_payload_for_db(
+#[cfg(test)]
+thread_local! {
+    static BUILDER_SEAM: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// T64/T65: fires once, on this thread, right after the builder's one read.
+#[cfg(test)]
+pub(crate) fn arm_builder_seam(hook: impl FnOnce() + 'static) {
+    BUILDER_SEAM.with(|seam| *seam.borrow_mut() = Some(Box::new(hook)));
+}
+
+/// A no-op outside tests.
+fn builder_seam() {
+    #[cfg(test)]
+    {
+        let hook = BUILDER_SEAM.with(|seam| seam.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+}
+
+pub(crate) fn file_entry_payload_for_db(
     db: &crate::state_db::StateDb,
     entry: &crate::state_db::FileEntry,
     parent_identifier: &str,
 ) -> FileProviderItemPayload {
-    let mut payload = match db.get_file_contract_state(&entry.file_id).ok().flatten() {
-        Some(contract) => file_entry_payload(entry, &contract, parent_identifier),
-        None => file_entry_payload_without_contract(entry, parent_identifier),
+    // Spec §5.3: the row and the queue come from ONE read, so the predicate never
+    // sees a row from before a landing beside a queue from after it.
+    let read = db.item_presentation(&entry.file_id);
+    builder_seam();
+    // §9.1: a Finder upload that has not parked keeps the item writable and not evictable
+    // (ITEM.h:531-533). A Trashing row keeps its trash presentation (m-8).
+    let shown;
+    let entry = match &read {
+        Ok(Some(p)) if p.unparked_finder_upload && entry.status != crate::state_db::FileStatus::Trashing => {
+            shown = crate::state_db::FileEntry {
+                status: crate::state_db::FileStatus::Uploading,
+                ..entry.clone()
+            };
+            &shown
+        }
+        _ => entry,
     };
+    let mut payload = match &read {
+        Ok(Some(p)) => file_entry_payload(entry, &p.contract, parent_identifier),
+        Ok(None) => file_entry_payload_without_contract(entry, parent_identifier),
+        Err(_) => {
+            // A failed read (a SQLite error, or a held write without its base) is
+            // presented as round 3 did, from the contract alone: the system never
+            // sees a spurious content change, and the capabilities are kept. A fixed
+            // category only: the error can carry a path (spec §11).
+            tracing::warn!(
+                file_id = %entry.file_id,
+                category = "presentation_read_failed",
+                "item presented from its contract alone"
+            );
+            match db.get_file_contract_state(&entry.file_id).ok().flatten() {
+                Some(contract) => file_entry_payload(entry, &contract, parent_identifier),
+                None => file_entry_payload_without_contract(entry, parent_identifier),
+            }
+        }
+    };
+    if let Ok(Some(p)) = &read {
+        // Rule 1: the bytes the system holds keep the name their write was given,
+        // while that write is queued or is what the server holds now.
+        match crate::write_token::held_token(
+            p.held.as_ref(),
+            p.held_write_queued,
+            p.contract.current_version,
+            p.contract.current_object_version_id.as_deref(),
+        ) {
+            Some(token) => payload.content_version = Some(token),
+            None => {
+                // Housekeeping only; correctness comes from the predicate. Guarded by
+                // the write this read saw, so a token set since is never cleared.
+                if let Some(held) = &p.held {
+                    let _ = db.clear_held_if(&entry.file_id, &held.write_id);
+                }
+            }
+        }
+    }
     // Task 1697: real dates + child count, stamped where the DB is at hand.
     // `modified_at` conflates "server updated_at" and "conflict detected at"
     // (see the FileEntry doc comment) but is the best mtime the daemon has.
@@ -1743,11 +2857,11 @@ fn file_entry_payload(
     // Task 1697: version split. contentVersion changes only when the content
     // identity changes (server version + content hash when present);
     // metadataVersion tracks mtime/size/parent/name so a rename no longer
-    // forces a content re-download.
-    let content_version = match &entry.content_hash {
-        Some(hash) => format!("{}:{}", contract.current_version.max(entry.remote_updated_at), hash),
-        None => format!("{}", contract.current_version.max(entry.remote_updated_at)),
-    };
+    // forces a content re-download. Both identifiers lead with the server
+    // version and never with `remote_updated_at`: the extension sends the
+    // content version back as the base of its next write.
+    let content_version =
+        crate::engine_bridge::item_content_version(contract.current_version, entry.content_hash.as_deref());
     let metadata_version = format!(
         "{}:{}:{}:{}:{}",
         entry.modified_at,
@@ -1766,11 +2880,10 @@ fn file_entry_payload(
         content_type: contract.content_type.clone(),
         status: file_status_string(&entry.status).to_string(),
         capabilities,
-        version_identifier: Some(format!(
-            "{}:{}:{}",
-            contract.current_version.max(entry.remote_updated_at),
+        version_identifier: Some(crate::engine_bridge::item_version_identifier(
+            contract.current_version,
             entry.modified_at,
-            entry.size_bytes
+            entry.size_bytes,
         )),
         // Dates/child count are stamped by `file_entry_payload_for_db`, where
         // the DB handle is available.
@@ -1799,10 +2912,11 @@ fn file_entry_payload_without_contract(
     };
     let capabilities = with_folder_add_subitems(kind, &entry.status, capabilities_for_status(&entry.status));
 
-    // Task 1697: version split without a contract — content identity falls
-    // back to the row's remote clock (no hash available), metadata to
-    // mtime/size/parent/name.
-    let content_version = format!("{}", entry.remote_updated_at);
+    // Task 1697: version split without a contract. With no contract there is
+    // no known server version, so both identifiers lead with 0, which the
+    // write path reads as "no base" (`parse_base_version_number` ignores 0).
+    // The row's wall-clock stamp is not a version and is never used as one.
+    let content_version = crate::engine_bridge::item_content_version(0, None);
     let metadata_version = format!(
         "{}:{}:{}:{}:{}",
         entry.modified_at,
@@ -1821,9 +2935,10 @@ fn file_entry_payload_without_contract(
         content_type: None,
         status: status.to_string(),
         capabilities,
-        version_identifier: Some(format!(
-            "{}:{}:{}",
-            entry.remote_updated_at, entry.modified_at, entry.size_bytes
+        version_identifier: Some(crate::engine_bridge::item_version_identifier(
+            0,
+            entry.modified_at,
+            entry.size_bytes,
         )),
         created_at: None,
         modified_at: None,
@@ -2646,7 +3761,8 @@ mod tests {
         use std::os::unix::ffi::OsStrExt;
 
         let dir = tempdir().unwrap();
-        macos_exclude_from_backups(dir.path()).expect("setxattr must succeed on a writable dir");
+        let staging = StagingDir::open(dir.path()).expect("a temp dir is a private directory");
+        macos_exclude_from_backups(&staging).expect("setxattr must succeed on a writable dir");
 
         let attr_name = std::ffi::CString::new("com.apple.metadata:com_apple_backup_excludeItem").unwrap();
         let path_c = std::ffi::CString::new(dir.path().as_os_str().as_bytes()).unwrap();
@@ -2897,6 +4013,7 @@ mod tests {
             bridge,
             cancel_rx,
             Some(ready_tx),
+            WriteContentsPolicy::AnyPath,
         )
         .await;
         assert!(result.is_err(), "startup must fail for a nonexistent parent");
@@ -3172,6 +4289,94 @@ mod tests {
         );
     }
 
+    /// A row as a completed desktop upload leaves it: server version 1, and
+    /// `remote_updated_at` / `modified_at` set to the wall-clock second of
+    /// the upload.
+    fn uploaded_row() -> (FileEntry, crate::state_db::FileContractState) {
+        let entry = FileEntry {
+            file_id: "uploaded-item".into(),
+            path: "/t.txt".into(),
+            status: FileStatus::Local,
+            size_bytes: 28,
+            modified_at: 1_791_550_250,
+            content_hash: None,
+            remote_updated_at: 1_791_550_250,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        };
+        let contract = crate::state_db::FileContractState {
+            file_id: "uploaded-item".into(),
+            current_version: 1,
+            ..live_contract()
+        };
+        (entry, contract)
+    }
+
+    #[test]
+    fn version_identifiers_lead_with_the_server_version_after_an_upload() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let (entry, contract) = uploaded_row();
+        db.upsert_file(&entry).unwrap();
+        db.set_file_contract_state(&contract).unwrap();
+
+        let payload = file_entry_payload_for_db(&db, &entry, FP_ROOT_APPLE);
+        assert_eq!(
+            payload.content_version.as_deref(),
+            Some("1"),
+            "the content version (the extension's write base) must be the server version"
+        );
+        assert_eq!(payload.version_identifier.as_deref(), Some("1:1791550250:28"));
+        assert_eq!(
+            crate::engine_bridge::parse_base_version_number(payload.content_version.as_deref()),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn an_op_echo_leaves_the_content_version_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let (entry, contract) = uploaded_row();
+        for hash in [None, Some("abc123".to_string())] {
+            let mut entry = entry.clone();
+            entry.content_hash = hash.clone();
+            db.upsert_file(&entry).unwrap();
+            db.set_file_contract_state(&contract).unwrap();
+            let before = file_entry_payload_for_db(&db, &entry, FP_ROOT_APPLE);
+
+            // The `/sync/ops` echo of the same upload: a later wall-clock
+            // second, the same server version.
+            let mut echoed = entry.clone();
+            echoed.remote_updated_at += 30;
+            echoed.modified_at = echoed.remote_updated_at;
+            db.upsert_file(&echoed).unwrap();
+            let after = file_entry_payload_for_db(&db, &echoed, FP_ROOT_APPLE);
+            assert_eq!(
+                after.content_version, before.content_version,
+                "an op echo is not a content change (hash {hash:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn the_payload_without_a_contract_carries_no_base_version() {
+        let (entry, _) = uploaded_row();
+        let payload = file_entry_payload_without_contract(&entry, FP_ROOT_APPLE);
+        assert_eq!(
+            crate::engine_bridge::parse_base_version_number(payload.content_version.as_deref()),
+            None,
+            "no contract means no known server version: {:?}",
+            payload.content_version
+        );
+        assert_eq!(
+            crate::engine_bridge::parse_base_version_number(payload.version_identifier.as_deref()),
+            None,
+            "{:?}",
+            payload.version_identifier
+        );
+    }
+
     // ── Task 1698 part 1: contentPolicy pin mapping ─────────────────────────
 
     #[test]
@@ -3372,5 +4577,1004 @@ mod tests {
             "the change feed must present a Trashing item under the trash container"
         );
         assert_eq!(payload.identifier, "1697-item");
+    }
+
+    // ── Upload staging: contents validation, cleanup, purge ──────────────
+    //
+    // Pure functions over injected temp dirs: never the real App Group
+    // container. Not macOS-gated, so they also run on the Linux CI job.
+
+    /// A staging dir that is a CHILD of a temp dir, so a file can sit right
+    /// next to it (outside it).
+    fn upload_staging_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
+        let root = tempdir().unwrap();
+        let staging = root.path().join("upload-staging");
+        std::fs::create_dir(&staging).unwrap();
+        (root, staging)
+    }
+
+    /// What [`open_staged_contents`] accepted (its journal label) or refused.
+    fn validate(staging: &std::path::Path, candidate: &str) -> Result<std::path::PathBuf, ContentsRefusal> {
+        open_staged_contents(staging, candidate).map(|contents| contents.path)
+    }
+
+    fn write_file(path: &std::path::Path, bytes: &[u8]) -> String {
+        std::fs::write(path, bytes).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn staged_contents_directly_inside_the_staging_dir_are_accepted_and_left_intact() {
+        let (_root, staging) = upload_staging_fixture();
+        let candidate = write_file(&staging.join("6f1c0d1e-copy"), b"contents");
+        let accepted = validate(&staging, &candidate).expect("a staged regular file is accepted");
+        assert_eq!(
+            accepted,
+            std::fs::canonicalize(&staging).unwrap().join("6f1c0d1e-copy"),
+            "the accepted path is rebuilt from the canonical staging dir"
+        );
+        assert_eq!(
+            std::fs::read(&candidate).unwrap(),
+            b"contents",
+            "validation must not touch the file"
+        );
+    }
+
+    #[test]
+    fn staged_contents_outside_the_staging_dir_are_refused() {
+        let (root, staging) = upload_staging_fixture();
+        let outside = write_file(&root.path().join("outside.txt"), b"x");
+        assert_eq!(
+            validate(&staging, &outside),
+            Err(ContentsRefusal::OutsideStaging)
+        );
+        // A subdirectory of the staging dir is outside it too: the extension
+        // only ever writes directly into it.
+        std::fs::create_dir(staging.join("sub")).unwrap();
+        let nested = write_file(&staging.join("sub").join("copy"), b"x");
+        assert_eq!(
+            validate(&staging, &nested),
+            Err(ContentsRefusal::OutsideStaging)
+        );
+        // A parent directory that does not exist is outside too.
+        let ghost = root.path().join("ghost").join("copy").to_string_lossy().into_owned();
+        assert_eq!(
+            validate(&staging, &ghost),
+            Err(ContentsRefusal::OutsideStaging)
+        );
+        assert!(
+            std::path::Path::new(&outside).exists(),
+            "a refused path is never deleted"
+        );
+    }
+
+    #[test]
+    fn staged_contents_with_dot_segments_are_refused_even_when_they_resolve_inside() {
+        let (root, staging) = upload_staging_fixture();
+        write_file(&root.path().join("outside.txt"), b"x");
+        write_file(&staging.join("copy"), b"x");
+        let escape = format!("{}/../outside.txt", staging.display());
+        let loops_back = format!("{}/../upload-staging/copy", staging.display());
+        let dot = format!("{}/./copy", staging.display());
+        for candidate in [escape, loops_back, dot] {
+            assert_eq!(
+                validate(&staging, &candidate),
+                Err(ContentsRefusal::Traversal),
+                "{candidate}"
+            );
+        }
+    }
+
+    #[test]
+    fn staged_contents_that_are_a_symlink_are_refused_and_the_target_is_untouched() {
+        let (root, staging) = upload_staging_fixture();
+        let target = root.path().join("target.txt");
+        write_file(&target, b"target");
+        let link = staging.join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert_eq!(
+            validate(&staging, &link.to_string_lossy()),
+            Err(ContentsRefusal::Symlink)
+        );
+        // A symlink to a file INSIDE the staging dir is refused as well.
+        write_file(&staging.join("real"), b"x");
+        let inner = staging.join("inner-link");
+        std::os::unix::fs::symlink(staging.join("real"), &inner).unwrap();
+        assert_eq!(
+            validate(&staging, &inner.to_string_lossy()),
+            Err(ContentsRefusal::Symlink)
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"target");
+    }
+
+    #[test]
+    fn staged_contents_that_are_missing_or_not_a_file_or_malformed_are_refused() {
+        let (_root, staging) = upload_staging_fixture();
+        let missing = staging.join("never-staged").to_string_lossy().into_owned();
+        assert_eq!(
+            validate(&staging, &missing),
+            Err(ContentsRefusal::Missing)
+        );
+        std::fs::create_dir(staging.join("a-dir")).unwrap();
+        let dir = staging.join("a-dir").to_string_lossy().into_owned();
+        assert_eq!(
+            validate(&staging, &dir),
+            Err(ContentsRefusal::NotAFile)
+        );
+        for malformed in ["", "relative/copy", "copy", "/tmp/with\0nul"] {
+            assert_eq!(
+                validate(&staging, malformed),
+                Err(ContentsRefusal::MalformedPath),
+                "{malformed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn staged_contents_are_refused_when_the_staging_dir_is_missing_or_a_symlink() {
+        let (root, staging) = upload_staging_fixture();
+        let elsewhere = root.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        let candidate = write_file(&elsewhere.join("copy"), b"x");
+        // The configured staging dir replaced by a symlink to another folder:
+        // its files must NOT become acceptable (the daemon deletes what it accepts).
+        std::fs::remove_dir(&staging).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &staging).unwrap();
+        let through_link = staging.join("copy").to_string_lossy().into_owned();
+        assert_eq!(
+            validate(&staging, &through_link),
+            Err(ContentsRefusal::StagingUnavailable)
+        );
+        assert_eq!(
+            validate(&staging, &candidate),
+            Err(ContentsRefusal::StagingUnavailable)
+        );
+        let gone = root.path().join("gone");
+        assert_eq!(
+            validate(&gone, &gone.join("copy").to_string_lossy()),
+            Err(ContentsRefusal::StagingUnavailable)
+        );
+    }
+
+    #[test]
+    fn a_hard_link_in_the_staging_dir_is_refused() {
+        // A hard link names the same file as an entry elsewhere: reading it
+        // would read a file the extension never copied.
+        let (root, staging) = upload_staging_fixture();
+        let elsewhere = root.path().join("private.db");
+        write_file(&elsewhere, b"private");
+        let link = staging.join("hard-link");
+        std::fs::hard_link(&elsewhere, &link).unwrap();
+        assert_eq!(
+            validate(&staging, &link.to_string_lossy()),
+            Err(ContentsRefusal::HardLinked)
+        );
+        assert_eq!(std::fs::read(&elsewhere).unwrap(), b"private");
+    }
+
+    #[test]
+    fn the_checks_on_the_opened_file_refuse_anything_but_a_single_link_regular_file_of_ours() {
+        // SAFETY: `stat` is plain old data; all-zero is a valid value.
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: no preconditions.
+        let me = unsafe { libc::geteuid() };
+        stat.st_mode = libc::S_IFREG | 0o600;
+        stat.st_nlink = 1;
+        stat.st_uid = me;
+        assert_eq!(check_staged_contents_stat(&stat, me), Ok(()));
+        stat.st_nlink = 2;
+        assert_eq!(check_staged_contents_stat(&stat, me), Err(ContentsRefusal::HardLinked));
+        stat.st_nlink = 1;
+        stat.st_uid = me.wrapping_add(1);
+        assert_eq!(check_staged_contents_stat(&stat, me), Err(ContentsRefusal::ForeignOwner));
+        stat.st_uid = me;
+        for kind in [libc::S_IFIFO, libc::S_IFDIR, libc::S_IFCHR, libc::S_IFSOCK, libc::S_IFLNK] {
+            stat.st_mode = kind | 0o600;
+            assert_eq!(
+                check_staged_contents_stat(&stat, me),
+                Err(ContentsRefusal::NotAFile),
+                "mode {kind:o}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fifo_in_the_staging_dir_is_refused_without_blocking() {
+        use std::os::unix::ffi::OsStrExt;
+        let (_root, staging) = upload_staging_fixture();
+        let fifo = staging.join("fifo");
+        let c_fifo = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: NUL-terminated path that lives for the call.
+        assert_eq!(unsafe { libc::mkfifo(c_fifo.as_ptr(), 0o600) }, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let candidate = fifo.to_string_lossy().into_owned();
+        std::thread::spawn(move || {
+            let _ = tx.send(validate(&staging, &candidate));
+        });
+        // A blocking open would wait here for a writer that never comes.
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("opening a FIFO must not block");
+        assert_eq!(result, Err(ContentsRefusal::NotAFile));
+    }
+
+    #[test]
+    fn contents_refusal_categories_are_fixed_and_distinct() {
+        let all = [
+            ContentsRefusal::MalformedPath,
+            ContentsRefusal::Traversal,
+            ContentsRefusal::StagingUnavailable,
+            ContentsRefusal::OutsideStaging,
+            ContentsRefusal::Missing,
+            ContentsRefusal::Symlink,
+            ContentsRefusal::NotAFile,
+            ContentsRefusal::HardLinked,
+            ContentsRefusal::ForeignOwner,
+            ContentsRefusal::Unreadable,
+        ];
+        let categories: std::collections::HashSet<&str> = all.iter().map(|r| r.category()).collect();
+        assert_eq!(categories.len(), all.len(), "every refusal has its own category");
+        assert!(
+            categories
+                .iter()
+                .all(|c| c.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'))
+        );
+    }
+
+    #[test]
+    fn dropping_admitted_staged_contents_deletes_exactly_that_copy() {
+        let (_root, staging) = upload_staging_fixture();
+        let keep = write_file(&staging.join("other-request"), b"other");
+        let candidate = write_file(&staging.join("this-request"), b"mine");
+        let policy = WriteContentsPolicy::StagingDir(staging.clone());
+        let (path, guard) = match admit_write_contents(&policy, "create", Some(candidate.clone())) {
+            Ok(admitted) => admitted,
+            Err(refusal) => panic!("a staged copy must be admitted, got {refusal:?}"),
+        };
+        let path = path.expect("the engine gets a contents path");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"mine",
+            "the engine reads the handed-over copy"
+        );
+        drop(guard);
+        assert!(
+            !std::path::Path::new(&candidate).exists(),
+            "the copy is deleted once the request is answered"
+        );
+        assert_eq!(
+            std::fs::read(&keep).unwrap(),
+            b"other",
+            "another request's copy is untouched"
+        );
+    }
+
+    #[test]
+    fn any_path_policy_passes_contents_through_and_deletes_nothing() {
+        let dir = tempdir().unwrap();
+        let candidate = write_file(&dir.path().join("a.txt"), b"x");
+        let (path, guard) = match admit_write_contents(&WriteContentsPolicy::AnyPath, "create", Some(candidate.clone()))
+        {
+            Ok(admitted) => admitted,
+            Err(refusal) => panic!("AnyPath refuses nothing, got {refusal:?}"),
+        };
+        assert_eq!(path.as_deref(), Some(candidate.as_str()));
+        assert!(guard.is_none());
+        assert!(std::path::Path::new(&candidate).exists());
+    }
+
+    #[test]
+    fn a_refused_staged_contents_path_is_an_error_reply_with_the_category() {
+        let (root, staging) = upload_staging_fixture();
+        let outside = write_file(&root.path().join("outside.txt"), b"x");
+        let policy = WriteContentsPolicy::StagingDir(staging);
+        let refusal = match admit_write_contents(&policy, "modify", Some(outside.clone())) {
+            Err(refusal) => refusal,
+            Ok((path, _)) => panic!("expected a refusal, got {path:?}"),
+        };
+        assert_eq!(refusal, ContentsRefusal::OutsideStaging);
+        match contents_refusal_response(refusal) {
+            IpcResponse::Error { message } => {
+                assert!(message.contains("outside_staging"), "got {message}");
+                assert!(
+                    !message.contains("outside.txt"),
+                    "the reply must not echo the path: {message}"
+                );
+            }
+            other => panic!("expected an Error reply, got {other:?}"),
+        }
+        assert!(std::path::Path::new(&outside).exists());
+    }
+
+    fn set_mtime(path: &std::path::Path, when: std::time::SystemTime) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+    }
+
+    #[test]
+    fn upload_staging_purge_removes_entries_older_than_the_bound_and_never_leaves_the_dir() {
+        // Age comes from each entry's ctime, which a test cannot set back:
+        // entries are made now and the sweeps pass a `now` of their own.
+        let (root, staging) = upload_staging_fixture();
+        let now = std::time::SystemTime::now();
+        let hour = std::time::Duration::from_secs(60 * 60);
+        let file = staging.join("orphan");
+        write_file(&file, b"orphan");
+        let tree = staging.join("stale-dir");
+        std::fs::create_dir(&tree).unwrap();
+        write_file(&tree.join("inside"), b"x");
+        let outside = root.path().join("outside.txt");
+        write_file(&outside, b"never purged");
+        set_mtime(&outside, now - 10 * hour);
+
+        assert_eq!(
+            purge_stale_upload_staging(&staging, UPLOAD_STAGING_MAX_AGE, now),
+            Ok(0),
+            "nothing has existed for an hour yet"
+        );
+        assert!(file.exists() && tree.exists());
+
+        let later = now + 3 * hour;
+        assert_eq!(
+            purge_stale_upload_staging(&staging, UPLOAD_STAGING_MAX_AGE, later),
+            Ok(2),
+            "the file and the directory are stale three hours later"
+        );
+        assert!(!file.exists() && !tree.exists());
+        assert_eq!(
+            std::fs::read(&outside).unwrap(),
+            b"never purged",
+            "the purge never leaves the dir"
+        );
+        assert!(staging.exists(), "the staging dir itself remains");
+    }
+
+    #[test]
+    fn upload_staging_purge_removes_a_stale_symlink_without_touching_its_target() {
+        let (root, staging) = upload_staging_fixture();
+        let target = root.path().join("target.txt");
+        write_file(&target, b"target");
+        std::os::unix::fs::symlink(&target, staging.join("link")).unwrap();
+        let later = std::time::SystemTime::now() + 3 * UPLOAD_STAGING_MAX_AGE;
+        assert_eq!(
+            purge_stale_upload_staging(&staging, UPLOAD_STAGING_MAX_AGE, later).unwrap(),
+            1
+        );
+        assert!(
+            std::fs::symlink_metadata(staging.join("link")).is_err(),
+            "the link itself is removed"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"target", "its target is not");
+    }
+
+    #[test]
+    fn upload_staging_purge_of_a_missing_dir_is_a_no_op() {
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("upload-staging");
+        assert_eq!(
+            purge_stale_upload_staging(&missing, UPLOAD_STAGING_MAX_AGE, std::time::SystemTime::now()).unwrap(),
+            0
+        );
+    }
+
+    /// The configured staging dir replaced by a symlink to another folder that
+    /// holds files the daemon must never lose (its own queued uploads, say).
+    fn symlinked_staging_fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let (root, staging) = upload_staging_fixture();
+        std::fs::remove_dir(&staging).unwrap();
+        let elsewhere = root.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        write_file(&elsewhere.join("queued-upload"), b"the only copy");
+        std::fs::create_dir(elsewhere.join("a-folder")).unwrap();
+        write_file(&elsewhere.join("a-folder").join("inside"), b"x");
+        std::os::unix::fs::symlink(&elsewhere, &staging).unwrap();
+        (root, staging, elsewhere)
+    }
+
+    fn assert_elsewhere_untouched(elsewhere: &std::path::Path) {
+        assert_eq!(
+            std::fs::read(elsewhere.join("queued-upload")).unwrap(),
+            b"the only copy",
+            "a purge through a symlinked staging dir must delete nothing"
+        );
+        assert_eq!(std::fs::read(elsewhere.join("a-folder").join("inside")).unwrap(), b"x");
+    }
+
+    #[test]
+    fn upload_staging_purge_refuses_a_symlinked_staging_dir_and_deletes_nothing() {
+        let (_root, staging, elsewhere) = symlinked_staging_fixture();
+        let later = std::time::SystemTime::now() + 3 * UPLOAD_STAGING_MAX_AGE;
+        assert_eq!(
+            purge_stale_upload_staging(&staging, UPLOAD_STAGING_MAX_AGE, later),
+            Err(StagingDirRefusal::NotPrivate),
+            "a symlinked staging dir must be refused, not followed"
+        );
+        assert_elsewhere_untouched(&elsewhere);
+    }
+
+    #[test]
+    fn a_staging_dir_must_be_a_real_directory_owned_by_this_user() {
+        let (root, staging) = upload_staging_fixture();
+        // SAFETY: no preconditions.
+        let me = unsafe { libc::geteuid() };
+        assert!(StagingDir::open_owned_by(&staging, me).is_ok(), "our own dir is accepted");
+        let refusal = |result: Result<StagingDir, StagingDirRefusal>| result.err();
+        assert_eq!(
+            refusal(StagingDir::open_owned_by(&staging, me.wrapping_add(1))),
+            Some(StagingDirRefusal::NotPrivate),
+            "a dir owned by another user must be refused"
+        );
+        let file = root.path().join("a-file");
+        write_file(&file, b"x");
+        assert_eq!(refusal(StagingDir::open(&file)), Some(StagingDirRefusal::NotPrivate));
+        let link = root.path().join("link-to-staging");
+        std::os::unix::fs::symlink(&staging, &link).unwrap();
+        assert_eq!(
+            refusal(StagingDir::open(&link)),
+            Some(StagingDirRefusal::NotPrivate),
+            "a symlink to a real staging dir is refused too"
+        );
+        assert_eq!(
+            refusal(StagingDir::open(&root.path().join("gone"))),
+            Some(StagingDirRefusal::Missing)
+        );
+    }
+
+    #[test]
+    fn upload_staging_purge_removes_a_stale_tree_without_following_links_inside_it() {
+        let (root, staging) = upload_staging_fixture();
+        let outside_file = root.path().join("outside.txt");
+        write_file(&outside_file, b"never purged");
+        let outside_dir = root.path().join("outside-dir");
+        std::fs::create_dir(&outside_dir).unwrap();
+        write_file(&outside_dir.join("kept"), b"kept");
+        let tree = staging.join("stray-tree");
+        std::fs::create_dir_all(tree.join("sub")).unwrap();
+        write_file(&tree.join("file"), b"x");
+        write_file(&tree.join("sub").join("deeper"), b"x");
+        std::os::unix::fs::symlink(&outside_file, tree.join("link-to-file")).unwrap();
+        std::os::unix::fs::symlink(&outside_dir, tree.join("sub").join("link-to-dir")).unwrap();
+        let later = std::time::SystemTime::now() + 3 * UPLOAD_STAGING_MAX_AGE;
+        assert_eq!(purge_stale_upload_staging(&staging, UPLOAD_STAGING_MAX_AGE, later), Ok(1));
+        assert!(std::fs::symlink_metadata(&tree).is_err(), "the whole tree is removed");
+        assert_eq!(std::fs::read(&outside_file).unwrap(), b"never purged");
+        assert_eq!(
+            std::fs::read(outside_dir.join("kept")).unwrap(),
+            b"kept",
+            "a link inside the tree is unlinked, never followed"
+        );
+        assert!(staging.is_dir(), "the staging dir itself remains");
+    }
+
+    #[test]
+    fn upload_staging_purge_removes_a_stale_tree_whose_directory_lost_its_search_bit() {
+        // An older extension copied a package as a directory and then set it
+        // to 0600: no search bit, so its children could not be unlinked and
+        // the tree stayed forever. The purge must still remove it.
+        use std::os::unix::fs::PermissionsExt;
+        let (_root, staging) = upload_staging_fixture();
+        let tree = staging.join("package-copy");
+        std::fs::create_dir_all(tree.join("Contents")).unwrap();
+        write_file(&tree.join("TXT.rtf"), b"plaintext");
+        write_file(&tree.join("Contents").join("image.png"), b"plaintext");
+        std::fs::set_permissions(tree.join("Contents"), std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::set_permissions(&tree, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let later = std::time::SystemTime::now() + 3 * UPLOAD_STAGING_MAX_AGE;
+        let removed = purge_stale_upload_staging(&staging, UPLOAD_STAGING_MAX_AGE, later);
+        // Leave nothing undeletable behind for the temp dir's own cleanup.
+        let _ = std::fs::set_permissions(&tree, std::fs::Permissions::from_mode(0o700));
+        let _ = std::fs::set_permissions(tree.join("Contents"), std::fs::Permissions::from_mode(0o700));
+        assert_eq!(removed, Ok(1), "a 0600 tree must still be purged");
+        assert!(std::fs::symlink_metadata(&tree).is_err(), "the whole tree is gone");
+    }
+
+    #[test]
+    fn a_fresh_copy_that_kept_an_old_mtime_is_not_purged() {
+        // `copyItem` keeps the source's mtime, and anyone who can write the
+        // directory can set an mtime back. Neither may make a copy that was
+        // just made look orphaned.
+        let (_root, staging) = upload_staging_fixture();
+        let now = std::time::SystemTime::now();
+        let copy = staging.join("just-staged");
+        write_file(&copy, b"in flight");
+        set_mtime(&copy, now - 10 * UPLOAD_STAGING_MAX_AGE);
+        assert_eq!(purge_stale_upload_staging(&staging, UPLOAD_STAGING_MAX_AGE, now), Ok(0));
+        assert!(copy.exists(), "a copy made just now is in flight, whatever its mtime says");
+    }
+
+    #[test]
+    fn a_copy_is_purged_once_it_has_existed_for_the_bound() {
+        let (_root, staging) = upload_staging_fixture();
+        let made = std::time::SystemTime::now();
+        let copy = staging.join("orphan");
+        write_file(&copy, b"orphan");
+        let minute = std::time::Duration::from_secs(60);
+        assert_eq!(
+            purge_stale_upload_staging(&staging, UPLOAD_STAGING_MAX_AGE, made + UPLOAD_STAGING_MAX_AGE - minute),
+            Ok(0),
+            "younger than the bound: kept"
+        );
+        assert!(copy.exists());
+        assert_eq!(
+            purge_stale_upload_staging(&staging, UPLOAD_STAGING_MAX_AGE, made + UPLOAD_STAGING_MAX_AGE + minute),
+            Ok(1),
+            "older than the bound: purged"
+        );
+        assert!(!copy.exists());
+    }
+
+    #[test]
+    fn dropping_the_guard_after_the_staging_dir_was_swapped_for_a_symlink_deletes_nothing_outside() {
+        let (root, staging) = upload_staging_fixture();
+        let candidate = write_file(&staging.join("handed-over"), b"mine");
+        let policy = WriteContentsPolicy::StagingDir(staging.clone());
+        let Ok((_, guard)) = admit_write_contents(&policy, "create", Some(candidate)) else {
+            panic!("a staged copy must be admitted");
+        };
+        // After admission, upload-staging is renamed away and a symlink to a
+        // folder holding a file of the same name is put in its place.
+        let moved = root.path().join("moved-staging");
+        std::fs::rename(&staging, &moved).unwrap();
+        let elsewhere = root.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        write_file(&elsewhere.join("handed-over"), b"not ours to delete");
+        std::os::unix::fs::symlink(&elsewhere, &staging).unwrap();
+        drop(guard);
+        assert_eq!(
+            std::fs::read(elsewhere.join("handed-over")).unwrap(),
+            b"not ours to delete",
+            "the deletion must not follow a symlink put in the staging dir's place"
+        );
+        assert!(
+            !moved.join("handed-over").exists(),
+            "the handed-over copy itself is deleted, through the directory that was checked"
+        );
+    }
+
+    #[test]
+    fn dropping_the_guard_leaves_a_different_file_that_took_the_copys_name() {
+        let (_root, staging) = upload_staging_fixture();
+        let candidate = write_file(&staging.join("handed-over"), b"mine");
+        let policy = WriteContentsPolicy::StagingDir(staging.clone());
+        let Ok((_, guard)) = admit_write_contents(&policy, "create", Some(candidate.clone())) else {
+            panic!("a staged copy must be admitted");
+        };
+        std::fs::rename(&candidate, staging.join("moved-away")).unwrap();
+        write_file(&staging.join("handed-over"), b"another file");
+        drop(guard);
+        assert_eq!(
+            std::fs::read(staging.join("handed-over")).unwrap(),
+            b"another file",
+            "only the file that was handed over is deleted"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_failed_backup_exclusion_is_logged_without_the_path() {
+        let parent = tempdir().unwrap();
+        let dir = parent.path().join("upload-staging");
+        let logs = capture_logs(|| {
+            let result = macos_open_private_staging_dir_with(&dir, |_| {
+                Err(std::io::Error::from_raw_os_error(libc::EPERM))
+            });
+            assert!(result.is_ok(), "a failed exclusion is best-effort");
+        });
+        let warns: Vec<&str> = logs
+            .lines()
+            .filter(|line| line.contains("could not exclude a macOS staging dir from backups"))
+            .collect();
+        assert_eq!(warns.len(), 1, "one warning, got:\n{logs}");
+        let parent_text = parent.path().to_string_lossy();
+        assert!(
+            !logs.contains(parent_text.as_ref()) && !logs.contains("upload-staging"),
+            "the warning must not carry the path:\n{logs}"
+        );
+    }
+
+    #[test]
+    fn a_refused_upload_staging_purge_is_logged_by_category_without_the_path() {
+        let (root, staging, elsewhere) = symlinked_staging_fixture();
+        let later = std::time::SystemTime::now() + 3 * UPLOAD_STAGING_MAX_AGE;
+        let logs = capture_logs(|| sweep_upload_staging_at(&staging, "periodic", later));
+        let warns: Vec<&str> = logs
+            .lines()
+            .filter(|line| line.contains("upload-staging purge refused"))
+            .collect();
+        assert_eq!(warns.len(), 1, "one warning for the refused purge, got:\n{logs}");
+        assert!(warns[0].contains("not_private"), "the warning names the category: {}", warns[0]);
+        let root_text = root.path().to_string_lossy();
+        assert!(
+            !logs.contains(root_text.as_ref()),
+            "the warning must not carry the path:\n{logs}"
+        );
+        assert_elsewhere_untouched(&elsewhere);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_prepare_upload_staging_dir_refuses_a_symlink_and_never_touches_its_target() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::PermissionsExt;
+        let (_root, staging, elsewhere) = symlinked_staging_fixture();
+        std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let later = std::time::SystemTime::now() + 3 * UPLOAD_STAGING_MAX_AGE;
+        assert_eq!(
+            macos_prepare_upload_staging_dir(&staging, UPLOAD_STAGING_MAX_AGE, later),
+            Err(StagingDirRefusal::NotPrivate)
+        );
+        let mode = std::fs::metadata(&elsewhere).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "the hardening must not chmod the symlink's target, got {mode:o}");
+        let attr_name = std::ffi::CString::new("com.apple.metadata:com_apple_backup_excludeItem").unwrap();
+        let path_c = std::ffi::CString::new(elsewhere.as_os_str().as_bytes()).unwrap();
+        // SAFETY: NUL-terminated strings that live for the call; a NULL buffer asks for the size.
+        let n = unsafe { libc::getxattr(path_c.as_ptr(), attr_name.as_ptr(), std::ptr::null_mut(), 0, 0, 0) };
+        assert!(n < 0, "the backup exclusion must not land on the symlink's target");
+        assert_elsewhere_untouched(&elsewhere);
+    }
+
+    #[test]
+    fn write_refusal_categories_classify_without_the_error_text() {
+        let io: anyhow::Error = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "/Users/x/secret.txt").into();
+        assert_eq!(write_refusal_category(&io), "io");
+        let stopping = anyhow::anyhow!("engine is stopping; refusing to enqueue a new local write");
+        assert_eq!(write_refusal_category(&stopping), "engine_stopping");
+        let not_a_file = anyhow::anyhow!("Upload source is not a file");
+        assert_eq!(write_refusal_category(&not_a_file), "contents_not_a_file");
+        let policy = anyhow::anyhow!("read-only shared folder cannot accept new Finder items");
+        assert_eq!(write_refusal_category(&policy), "write_policy");
+        let db: anyhow::Error = rusqlite::Error::QueryReturnedNoRows.into();
+        assert_eq!(write_refusal_category(&db), "database");
+        let other = anyhow::anyhow!("something else about notes.txt");
+        assert_eq!(write_refusal_category(&other), "other");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_upload_staging_dir_is_inside_the_group_container() {
+        let home = std::path::Path::new("/Users/someone");
+        assert_eq!(
+            macos_upload_staging_dir_in(home),
+            std::path::PathBuf::from(
+                "/Users/someone/Library/Group Containers/R8352WDJJR.io.beebeeb.app.fileprovider/upload-staging"
+            )
+        );
+        assert_ne!(
+            macos_upload_staging_dir_in(home),
+            macos_hydrate_cache_dir_in(home),
+            "upload staging and hydrate staging are different directories"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_prepare_upload_staging_dir_hardens_it_and_purges_stale_copies() {
+        use std::os::unix::fs::PermissionsExt;
+        let parent = tempdir().unwrap();
+        let dir = parent.path().join("upload-staging");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let stale = dir.join("stale");
+        write_file(&stale, b"orphan");
+        let now = std::time::SystemTime::now();
+        let later = now + 2 * UPLOAD_STAGING_MAX_AGE;
+        let removed = macos_prepare_upload_staging_dir(&dir, UPLOAD_STAGING_MAX_AGE, later).unwrap();
+        assert_eq!(removed, 1);
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "upload-staging must be owner-only, got {mode:o}");
+        // Created when missing, too.
+        let fresh = parent.path().join("fresh-staging");
+        assert_eq!(
+            macos_prepare_upload_staging_dir(&fresh, UPLOAD_STAGING_MAX_AGE, now).unwrap(),
+            0
+        );
+        assert!(fresh.is_dir());
+    }
+
+    /// Everything `tracing` emits on this thread while `body` runs, as text.
+    fn capture_logs(body: impl FnOnce()) -> String {
+        #[derive(Clone)]
+        struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buffer = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer = Capture(buffer.clone());
+        // tracing caches each callsite's interest for the whole process. While
+        // only ONE dispatcher is alive, tracing-core takes that interest from
+        // the registering thread's own default (`has_just_one`), so a
+        // callsite first hit by another test thread, which has no subscriber,
+        // is cached as "never" and this capture misses its events. A second
+        // live dispatcher keeps registration on the all-dispatchers path.
+        let _second_dispatcher = tracing::Dispatch::new(tracing_subscriber::registry());
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .finish();
+        tracing::subscriber::with_default(subscriber, body);
+        let bytes = buffer.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    /// Review Minor 4: a presentation read that fails (here the one bug row, a held
+    /// write id without its base) presents the item from its contract, as round 3
+    /// did: never a spurious "0", and the contract's capabilities are kept.
+    #[test]
+    fn a_failed_presentation_read_presents_the_contract_and_logs_it() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_1694_item(
+            &db,
+            "half-set",
+            FileStatus::Local,
+            PERMISSION_READ | PERMISSION_WRITE,
+            ItemKind::File,
+        );
+        let mut contract = db.get_file_contract_state("half-set").unwrap().unwrap();
+        contract.current_version = 4;
+        db.set_file_contract_state(&contract).unwrap();
+        let entry = db.get_file("half-set").unwrap().unwrap();
+        let healthy = file_entry_payload_for_db(&db, &entry, FP_ROOT_APPLE);
+        assert_eq!(healthy.content_version.as_deref(), Some("4"));
+
+        db.set_held_pair_for_test("half-set", Some(&"a".repeat(32)), None);
+        assert!(db.item_presentation("half-set").is_err(), "the bug row is a read error");
+        let mut presented = None;
+        let logs = capture_logs(|| presented = Some(file_entry_payload_for_db(&db, &entry, FP_ROOT_APPLE)));
+        let presented = presented.unwrap();
+        assert_eq!(
+            serde_json::to_value(&presented).unwrap(),
+            serde_json::to_value(&healthy).unwrap(),
+            "the item is presented from its contract, never as \"0\""
+        );
+        let lines: Vec<&str> = logs
+            .lines()
+            .filter(|line| line.contains("presentation_read_failed"))
+            .collect();
+        assert_eq!(lines.len(), 1, "one line per failed read:\n{logs}");
+        assert!(lines[0].contains("WARN") && lines[0].contains("half-set"), "{logs}");
+    }
+
+    /// Spec 2026-10-09 §7.3: a queued write whose row cannot be read back is refused, never
+    /// answered without an item (for a modify the system reads a nil item as "delete the item
+    /// on disk"). Only an ignored write is answered without one. macOS only: other unix builds
+    /// keep the item-less reply.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_queued_write_whose_row_cannot_be_read_is_refused() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let queued = |file_id: Option<&str>| {
+            Ok(crate::engine_bridge::FpWrite::plain(
+                crate::engine_bridge::FinderWriteOutcome::Queued {
+                    op_id: "op-1".into(),
+                    file_id: file_id.map(str::to_string),
+                    kind: crate::state_db::OperationKind::UploadVersion,
+                    ignored: false,
+                    message: "queued for encrypted sync".into(),
+                },
+            ))
+        };
+        let logs = capture_logs(|| {
+            for (op, file_id) in [
+                ("create", Some("3f2a9c1e-0000-4000-8000-00000000dead")),
+                ("modify", Some("3f2a9c1e-0000-4000-8000-00000000dead")),
+                ("modify", None),
+            ] {
+                let reply = write_outcome_response(op, &db, queued(file_id));
+                let IpcResponse::Error { message } = &reply else {
+                    panic!("{op} {file_id:?}: an error, never an item-less reply: {reply:?}")
+                };
+                // What really happens: the write stays queued and uploads; the system does not
+                // retry the reply (`cannotSynchronize`) until the item changes again.
+                assert!(message.contains("will upload"), "{message}");
+                assert!(message.contains("until the file changes again"), "{message}");
+                assert!(!message.contains("try again"), "no retry is promised: {message}");
+            }
+            let reply = write_outcome_response(
+                "create",
+                &db,
+                Ok(crate::engine_bridge::FpWrite::plain(
+                    crate::engine_bridge::FinderWriteOutcome::Ignored {
+                        message: "ignored".into(),
+                    },
+                )),
+            );
+            assert!(
+                matches!(
+                    reply,
+                    IpcResponse::WriteQueued {
+                        item: None,
+                        ignored: true,
+                        ..
+                    }
+                ),
+                "an ignored write is still answered without an item: {reply:?}"
+            );
+        });
+        assert_eq!(logs.matches("row_unreadable").count(), 3, "{logs}");
+        assert_eq!(logs.matches("Finder write refused").count(), 3, "{logs}");
+    }
+
+    /// Spec 2026-10-09 §7.3 covers creates and modifies: a nil item there deletes the item on
+    /// disk. A delete's reply item is never read (the extension discards it), so a trash whose
+    /// row is gone when the reply is built (the queue finished it meanwhile) stays a success.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_delete_whose_row_is_gone_at_the_reply_is_not_refused() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let logs = capture_logs(|| {
+            let reply = write_outcome_response(
+                "delete",
+                &db,
+                Ok(crate::engine_bridge::FpWrite::plain(
+                    crate::engine_bridge::FinderWriteOutcome::Queued {
+                        op_id: "op-trash".into(),
+                        file_id: Some("3f2a9c1e-0000-4000-8000-00000000dead".into()),
+                        kind: crate::state_db::OperationKind::TrashFile,
+                        ignored: false,
+                        message: "queued for encrypted sync".into(),
+                    },
+                )),
+            );
+            assert!(
+                matches!(
+                    reply,
+                    IpcResponse::WriteQueued {
+                        item: None,
+                        ignored: false,
+                        ..
+                    }
+                ),
+                "a queued delete is a success: {reply:?}"
+            );
+        });
+        assert!(!logs.contains("Finder write refused"), "{logs}");
+    }
+
+    #[test]
+    fn every_refused_write_is_logged_once_with_its_category_and_never_the_path() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let (root, staging) = upload_staging_fixture();
+        let outside = write_file(&root.path().join("secret-report.txt"), b"x");
+        let logs = capture_logs(|| {
+            let reply = write_outcome_response(
+                "create",
+                &db,
+                Err(anyhow::anyhow!(
+                    "Upload source is not a file: /Users/someone/secret-report.txt"
+                )),
+            );
+            assert!(matches!(reply, IpcResponse::Error { .. }));
+            let reply = write_outcome_response(
+                "modify",
+                &db,
+                Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "secret-report.txt").into()),
+            );
+            assert!(matches!(reply, IpcResponse::Error { .. }));
+            // Not a refusal: must not be logged as one.
+            let reply = write_outcome_response(
+                "create",
+                &db,
+                Ok(crate::engine_bridge::FpWrite::plain(
+                    crate::engine_bridge::FinderWriteOutcome::Ignored {
+                        message: "ignored".into(),
+                    },
+                )),
+            );
+            assert!(matches!(reply, IpcResponse::WriteQueued { .. }));
+            let policy = WriteContentsPolicy::StagingDir(staging.clone());
+            assert!(admit_write_contents(&policy, "create", Some(outside.clone())).is_err());
+        });
+        let refusals: Vec<&str> = logs
+            .lines()
+            .filter(|line| line.contains("Finder write refused"))
+            .collect();
+        assert_eq!(refusals.len(), 3, "one warning per refused write, got:\n{logs}");
+        assert!(refusals.iter().all(|line| line.contains("WARN")), "{logs}");
+        assert!(
+            refusals[0].contains("create") && refusals[0].contains("contents_not_a_file"),
+            "{logs}"
+        );
+        assert!(
+            refusals[1].contains("modify") && refusals[1].contains("\"io\""),
+            "{logs}"
+        );
+        assert!(refusals[2].contains("outside_staging"), "{logs}");
+        assert!(
+            !logs.contains("secret-report"),
+            "no file name or path may reach the log:\n{logs}"
+        );
+        assert!(!logs.contains("/Users/"), "no path may reach the log:\n{logs}");
+    }
+
+    /// A real `reqwest` error carrying `status`, from a one-shot local server.
+    fn http_status_error(status: &str) -> anyhow::Error {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/api/v1/files/file-404", listener.local_addr().unwrap());
+        let reply = format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = std::io::Read::read(&mut stream, &mut request);
+            std::io::Write::write_all(&mut stream, reply.as_bytes()).unwrap();
+        });
+        let error = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async { reqwest::get(&url).await.unwrap().error_for_status().unwrap_err() });
+        server.join().unwrap();
+        anyhow::Error::new(error)
+    }
+
+    #[test]
+    fn a_failed_hydrate_is_logged_with_its_category_and_never_the_path() {
+        let not_found = http_status_error("404 Not Found");
+        let logs = capture_logs(|| {
+            let reply = hydrate_failure_reply("file-404", not_found);
+            assert!(matches!(reply, IpcResponse::Error { .. }));
+            let reply = hydrate_failure_reply(
+                "file-io",
+                std::io::Error::new(std::io::ErrorKind::PermissionDenied, "/Users/someone/secret-report.txt").into(),
+            );
+            assert!(matches!(reply, IpcResponse::Error { .. }));
+        });
+        let failures: Vec<&str> = logs
+            .lines()
+            .filter(|line| line.contains("Finder hydrate failed"))
+            .collect();
+        assert_eq!(failures.len(), 2, "one warning per failed hydrate, got:\n{logs}");
+        assert!(failures.iter().all(|line| line.contains("WARN")), "{logs}");
+        assert!(
+            failures[0].contains("file-404") && failures[0].contains("not_found"),
+            "{logs}"
+        );
+        assert!(
+            failures[1].contains("file-io") && failures[1].contains("\"io\""),
+            "{logs}"
+        );
+        assert!(
+            !logs.contains("secret-report"),
+            "no file name may reach the log:\n{logs}"
+        );
+        assert!(!logs.contains("/Users/"), "no path may reach the log:\n{logs}");
+        assert!(!logs.contains("/api/v1"), "no URL may reach the log:\n{logs}");
+    }
+
+    /// Spec 2026-10-09 §7.4: a fetch of a still-queued write whose copy is missing fails with
+    /// its own category, and the reply names no path.
+    #[test]
+    fn a_fetch_whose_queued_copy_is_missing_is_logged_by_its_own_category() {
+        let logs = capture_logs(|| {
+            let reply = hydrate_failure_reply(
+                "file-queued",
+                anyhow::Error::new(crate::engine_bridge::QueuedCopyMissing),
+            );
+            let IpcResponse::Error { message } = &reply else {
+                panic!("{reply:?}")
+            };
+            assert!(!message.contains('/'), "{message}");
+        });
+        let failures: Vec<&str> = logs
+            .lines()
+            .filter(|line| line.contains("Finder hydrate failed"))
+            .collect();
+        assert_eq!(failures.len(), 1, "{logs}");
+        assert!(
+            failures[0].contains("file-queued") && failures[0].contains("queued_copy_missing"),
+            "{logs}"
+        );
     }
 }

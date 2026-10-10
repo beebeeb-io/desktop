@@ -90,6 +90,7 @@ mod staged_payload;
 mod state_db;
 mod state_paths;
 mod transfer_progress;
+mod write_token;
 // Task 1683 slice 1: pure macOS-popover surface logic, compiled and tested on every
 // platform. Slices 2-6 wire the rest of it; until then only `policy` has callers,
 // so dead-code is allowed for the module (remove the allow when slice 6 lands).
@@ -3123,12 +3124,42 @@ async fn clear_session_impl(state: &AppState, forget_email: bool) -> Result<Sign
 }
 
 /// Sign-out's engine stop: take the engine slot and stop whatever engine holds it, through the one stop helper
-/// (`stop_engine_in_slot`). Returns the slot, still held, so the session is cleared before any start can take it.
-/// Refuses (with the slot released and nothing cleared) when an earlier stop was never confirmed, when this stop cannot
-/// be confirmed, or when the Windows Cloud Files revocation failed. Both sign-out paths use it (Task 12 fix round 2).
+/// (`stop_engine_in_slot`, called by [`stop_engine_for_sign_out`]). Returns the slot, still held, so the session is
+/// cleared before any start can take it. Refuses (with the slot released and nothing cleared) when an earlier stop was
+/// never confirmed, when this stop cannot be confirmed, or when the Windows Cloud Files revocation failed. Both
+/// sign-out paths use it (Task 12 fix round 2).
 async fn take_slot_and_stop_engine_for_sign_out(
     acct: &AccountRuntime,
 ) -> Result<tokio::sync::MutexGuard<'_, Option<EngineRunner>>, String> {
+    let mut engine_slot = acct.engine.lock().await;
+    if let Err(refusal) = stop_engine_for_sign_out(
+        acct,
+        &mut engine_slot,
+        upload_staging_dir_for_session_purge().as_deref(),
+    )
+    .await
+    {
+        drop(engine_slot);
+        return Err(refusal);
+    }
+    Ok(engine_slot)
+}
+
+/// Sign-out's engine stop on the held slot: the gate in front of every purge sign-out runs.
+/// Refuses (Bug A / A2) unless the engine task is CONFIRMED terminated, or no
+/// engine is running and no earlier attempt left an unconfirmed one behind.
+///
+/// Then upload staging: every handed-over copy is removed. Safe exactly here:
+/// the IPC listener runs inside the engine's task, so once the stop is
+/// confirmed no request can still be served, and a request that arrives
+/// later reaches no daemon, fails transiently, and the extension stages a
+/// fresh copy for the system's retry. The caller holds the engine slot, so no
+/// new engine can start in between.
+async fn stop_engine_for_sign_out(
+    acct: &crate::account::AccountRuntime,
+    engine_slot: &mut Option<runner::EngineRunner>,
+    upload_staging: Option<&std::path::Path>,
+) -> Result<(), String> {
     // Stop the engine before dropping memory so the IPC listener cannot accept
     // new File Provider operations with a cloned master key.
     //
@@ -3148,9 +3179,7 @@ async fn take_slot_and_stop_engine_for_sign_out(
     // while the old engine may still be running. The flag (per-account,
     // in-memory) keeps the gate closed until the process restarts, which
     // is exactly what the error message tells the user to do.
-    let mut engine_slot = acct.engine.lock().await;
     if acct.engine_stop_unconfirmed.load(std::sync::atomic::Ordering::SeqCst) {
-        drop(engine_slot);
         tracing::error!(
             "sign-out refused: a previous attempt could not confirm the sync engine \
              stopped; restart Beebeeb before signing in with a different account"
@@ -3188,7 +3217,10 @@ async fn take_slot_and_stop_engine_for_sign_out(
             }
         }
     }
-    Ok(engine_slot)
+    // Every unconfirmed or failed stop returned above: no engine, and so no
+    // IPC listener, is left.
+    purge_upload_staging_after_engine_stop("sign-out", true, upload_staging);
+    Ok(())
 }
 
 /// The turn-taking for the purge in the sign-out tests (see `clear_session_impl`). Test builds only.
@@ -3483,6 +3515,117 @@ async fn unlock_vault(app: tauri::AppHandle, state: State<'_, AppState>) -> Resu
     }
 }
 
+/// Lock's engine stop, then the upload-staging purge it allows. Returns whether an engine stop on this account is
+/// unconfirmed after it: this one, or an earlier one that left the slot empty (lead ruling T8-lockflag). Windows
+/// refuses the lock instead, so there it is always `false`.
+///
+/// Task 1538 Codex P1: lock, like sign-out, clears the in-memory
+/// session/master key right after this — an unconfirmed stop means the old
+/// engine could still be alive and using it. No general local-file purge is
+/// gated on this (lock keeps the account's Keychain session AND the regular
+/// local file cache, so re-unlocking stays fast — there's nothing
+/// cross-account to protect here), but it's still worth a loud warning rather
+/// than a silent "we waited 3s and moved on". Windows refuses the lock.
+///
+/// Upload staging is emptied only when no engine can still be running: none
+/// was, or its stop is confirmed, and no earlier stop is unconfirmed. The IPC
+/// listener runs inside the engine's task; one that might still be serving
+/// could take a request whose copy the purge just removed and refuse it as
+/// `missing`, a definitive failure for the user's file. On an unconfirmed stop
+/// the lock still goes ahead and the copies are left for the age-bound purge.
+/// The caller holds the engine slot, so no new engine can start in between.
+async fn stop_engine_for_lock(
+    acct: &AccountRuntime,
+    engine_slot: &mut Option<runner::EngineRunner>,
+    upload_staging: Option<&std::path::Path>,
+) -> Result<bool, String> {
+    // Lead ruling T8-lockflag: like sign-out, lock honours an earlier stop that was never confirmed.
+    // It still clears the session, and it says to restart instead of reporting success.
+    #[cfg(not(target_os = "windows"))]
+    let mut engine_unconfirmed = acct.engine_stop_unconfirmed.load(Ordering::SeqCst);
+    #[cfg(target_os = "windows")]
+    let engine_unconfirmed = false;
+    #[cfg(not(target_os = "windows"))]
+    if engine_unconfirmed {
+        tracing::error!("vault lock: an earlier sync engine stop was never confirmed; restart Beebeeb");
+    }
+    if let Some(prev) = engine_slot.take() {
+        if !stop_engine_in_slot(acct, prev).await.is_stopped() {
+            #[cfg(target_os = "windows")]
+            return Err("Vault lock failed: sync is still stopping. The vault is not locked. Retry locking; if it persists, restart Beebeeb.".into());
+            // Lead ruling T8-lockflag: the consumed handle leaves an empty slot, so the flag (set by
+            // `stop_engine_in_slot`) is what keeps every engine start refused (and sign-out) until a restart.
+            #[cfg(not(target_os = "windows"))]
+            {
+                engine_unconfirmed = true;
+                tracing::error!(
+                    "engine did not confirm termination before vault lock cleared the in-memory session; restart Beebeeb"
+                );
+            }
+        } else {
+            tracing::info!("engine aborted on vault lock");
+        }
+    }
+    purge_upload_staging_after_engine_stop("lock", !engine_unconfirmed, upload_staging);
+    Ok(engine_unconfirmed)
+}
+
+/// The App Group upload-staging directory that sign-out and Lock empty.
+/// `None` off macOS. Under `cargo test` it is never the real App Group
+/// container: `None`, unless the test runs inside
+/// [`with_upload_staging_for_test`] (a folder the test created).
+fn upload_staging_dir_for_session_purge() -> Option<std::path::PathBuf> {
+    #[cfg(all(target_os = "macos", not(test)))]
+    return Some(crate::ipc_socket::macos_upload_staging_dir());
+    #[cfg(test)]
+    return UPLOAD_STAGING_FOR_TEST.try_with(Clone::clone).ok();
+    #[cfg(not(any(target_os = "macos", test)))]
+    None
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Set by [`with_upload_staging_for_test`]: the upload-staging folder this task's sign-out and Lock empty.
+    static UPLOAD_STAGING_FOR_TEST: std::path::PathBuf;
+}
+
+/// Test builds: run `body` with `staging` as the upload-staging folder the session purge empties, so a test drives
+/// the real sign-out or Lock path against a folder it created. Only this task sees it.
+#[cfg(all(test, unix))]
+async fn with_upload_staging_for_test<T>(staging: std::path::PathBuf, body: impl std::future::Future<Output = T>) -> T {
+    UPLOAD_STAGING_FOR_TEST.scope(staging, body).await
+}
+
+/// Empty upload staging at sign-out or Lock, but only after a confirmed
+/// engine stop (`engine_stopped`); otherwise leave it, logged, for the
+/// age-bound purge. Best-effort: a failure is logged, never surfaced.
+#[cfg(all(unix, any(target_os = "macos", test)))]
+fn purge_upload_staging_after_engine_stop(
+    context: &'static str,
+    engine_stopped: bool,
+    upload_staging: Option<&std::path::Path>,
+) {
+    let Some(dir) = upload_staging else {
+        return;
+    };
+    if !engine_stopped {
+        tracing::warn!(
+            context,
+            "engine stop unconfirmed: upload-staging copies are left for the age-bound purge"
+        );
+        return;
+    }
+    crate::ipc_socket::purge_all_upload_staging_at(dir, context);
+}
+
+#[cfg(not(all(unix, any(target_os = "macos", test))))]
+fn purge_upload_staging_after_engine_stop(
+    _context: &'static str,
+    _engine_stopped: bool,
+    _upload_staging: Option<&std::path::Path>,
+) {
+}
+
 /// Lock clears all runtime key material and stops the sync daemon, but keeps
 /// the Keychain session so the user can unlock again without re-entering their
 /// recovery phrase. `Ok` means the lock happened; its `warning` says what of it could not be confirmed (FB-24).
@@ -3507,39 +3650,15 @@ async fn lock_vault(state: State<'_, AppState>) -> Result<SessionActionOutcome, 
         tracing::warn!(%error, "the Finder reconciler did not acknowledge the lock; locking anyway");
     }
     let mut engine_slot = acct.engine.lock().await;
-    // Lead ruling T8-lockflag: like sign-out, lock honours an earlier stop that was never confirmed.
-    // It still clears the session, and it says to restart instead of reporting success.
-    #[cfg(not(target_os = "windows"))]
-    let mut engine_unconfirmed = acct.engine_stop_unconfirmed.load(Ordering::SeqCst);
-    #[cfg(not(target_os = "windows"))]
-    if engine_unconfirmed {
-        tracing::error!("vault lock: an earlier sync engine stop was never confirmed; restart Beebeeb");
-    }
-    if let Some(prev) = engine_slot.take() {
-        // Task 1538 Codex P1: lock, like sign-out, clears the in-memory
-        // session/master key right after this — an unconfirmed stop means
-        // the old engine could still be alive and using it. No general
-        // local-file purge is gated on this (lock keeps the account's
-        // Keychain session AND the regular local file cache, so re-unlocking
-        // stays fast — there's nothing cross-account to protect here), but
-        // it's still worth a loud warning rather than a silent "we waited 3s
-        // and moved on".
-        if !stop_engine_in_slot(&acct, prev).await.is_stopped() {
-            #[cfg(target_os = "windows")]
-            return Err("Vault lock failed: sync is still stopping. The vault is not locked. Retry locking; if it persists, restart Beebeeb.".into());
-            // Lead ruling T8-lockflag: the consumed handle leaves an empty slot, so the flag (set by
-            // `stop_engine_in_slot`) is what keeps every engine start refused (and sign-out) until a restart.
-            #[cfg(not(target_os = "windows"))]
-            {
-                engine_unconfirmed = true;
-                tracing::error!(
-                    "engine did not confirm termination before vault lock cleared the in-memory session; restart Beebeeb"
-                );
-            }
-        } else {
-            tracing::info!("engine aborted on vault lock");
-        }
-    }
+    // The stop (and the upload-staging purge it allows) is `stop_engine_for_lock`'s; it says whether a stop on this
+    // account is unconfirmed (lead ruling T8-lockflag), for the warning below.
+    #[cfg_attr(target_os = "windows", allow(unused_variables))]
+    let engine_unconfirmed = stop_engine_for_lock(
+        &acct,
+        &mut engine_slot,
+        upload_staging_dir_for_session_purge().as_deref(),
+    )
+    .await?;
     // Task 1670 round 2: UNLIKE the general local-file cache above, the macOS
     // hydrate-cache holds nothing but ephemeral per-Finder-open staging
     // copies (never the user's regular offline files), so purging it on
@@ -3896,6 +4015,11 @@ fn disposable_cache_roots() -> Vec<PathBuf> {
     // holding decrypted plaintext as "not ours to remove").
     #[cfg(target_os = "macos")]
     roots.push(crate::ipc_socket::macos_hydrate_cache_dir());
+    // Every folder a Finder write's plaintext copy is staged in, or was staged in by an earlier build (spec
+    // 2026-10-09 §8.4): on macOS the data dir's `beebeeb/finder-writes`, which is under neither root above, so
+    // without it a sign-out would skip those copies and leave plaintext on disk. The folders themselves, never the
+    // whole data dir.
+    roots.extend(engine_bridge::finder_staging_candidates());
     roots
 }
 
@@ -17988,7 +18112,11 @@ mod finder_engine_tests {
 #[cfg(test)]
 mod signout_teardown_tests {
     use super::finder_setup_command_tests::{body_between, production_source};
+    use super::upload_staging_dir_for_session_purge;
     use super::{AppState, clear_session_impl, set_auth_email, set_auth_present};
+    // Only the Unix tests (upload staging is a macOS folder; Linux tests drive the same code) use these.
+    #[cfg(unix)]
+    use super::{stop_engine_for_lock, stop_engine_for_sign_out};
     // Only the macOS/Linux assertion in the already-signed-out test names it; on Windows the import would be unused.
     #[cfg(not(target_os = "windows"))]
     use super::UNCONFIRMED_ENGINE_STOP_ERROR;
@@ -18001,6 +18129,214 @@ mod signout_teardown_tests {
     fn test_account(state: &AppState, id: &str) -> Arc<crate::account::AccountRuntime> {
         synthesize_single_account(state, AccountId(id.to_string()));
         state.active_account().expect("synthesized account resolves")
+    }
+
+    // ── Upload staging at sign-out and Lock ─────────────────────────────────
+    // A throwaway staging dir in every test: never the real App Group
+    // container (`upload_staging_dir_for_session_purge` is None under test,
+    // unless the test injects its own folder with `with_upload_staging_for_test`).
+
+    /// A staging dir holding a handed-over copy and a stray tree, next to a
+    /// file the purge must never reach.
+    #[cfg(unix)]
+    fn staging_with_copies() -> (tempfile::TempDir, std::path::PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let staging = root.path().join("upload-staging");
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::write(staging.join("copy"), b"plaintext").unwrap();
+        std::fs::create_dir(staging.join("stray-tree")).unwrap();
+        std::fs::write(staging.join("stray-tree").join("inside"), b"plaintext").unwrap();
+        std::fs::write(root.path().join("outside.txt"), b"never purged").unwrap();
+        (root, staging)
+    }
+
+    #[cfg(unix)]
+    fn staging_entries(staging: &std::path::Path) -> usize {
+        std::fs::read_dir(staging).unwrap().count()
+    }
+
+    #[cfg(unix)]
+    fn assert_outside_untouched(root: &tempfile::TempDir) {
+        assert_eq!(std::fs::read(root.path().join("outside.txt")).unwrap(), b"never purged");
+    }
+
+    /// An engine whose task already finished: its stop is confirmed at once.
+    #[cfg(unix)]
+    fn finished_engine() -> EngineRunner {
+        EngineRunner::for_test_with_task(tokio::spawn(async {}))
+    }
+
+    /// An engine whose task has no await point, so even the forced abort
+    /// cannot confirm it stopped (3 s graceful + 2 s forced). It ends by
+    /// itself after 7 s, so it cannot leak a spinning thread.
+    #[cfg(unix)]
+    fn unstoppable_engine() -> EngineRunner {
+        let deadline = std::time::Instant::now() + Duration::from_secs(7);
+        EngineRunner::for_test_with_task(tokio::task::spawn_blocking(move || {
+            while std::time::Instant::now() < deadline {
+                std::hint::black_box(());
+            }
+        }))
+    }
+
+    #[test]
+    fn the_session_purge_never_targets_the_real_app_group_directory_under_test() {
+        assert_eq!(upload_staging_dir_for_session_purge(), None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sign_out_after_a_confirmed_engine_stop_empties_upload_staging() {
+        let state = AppState::default();
+        let acct = test_account(&state, "signout-staging-confirmed");
+        let (root, staging) = staging_with_copies();
+        let mut slot = Some(finished_engine());
+        stop_engine_for_sign_out(&acct, &mut slot, Some(&staging))
+            .await
+            .expect("a confirmed stop lets sign-out continue");
+        assert!(slot.is_none(), "the engine is consumed");
+        assert_eq!(staging_entries(&staging), 0, "sign-out removes every handed-over copy");
+        assert!(staging.is_dir(), "the directory itself stays");
+        assert_outside_untouched(&root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sign_out_with_an_unconfirmed_engine_stop_purges_no_upload_staging() {
+        let state = AppState::default();
+        let acct = test_account(&state, "signout-staging-unconfirmed");
+        let (root, staging) = staging_with_copies();
+        let mut slot = Some(unstoppable_engine());
+        let error = stop_engine_for_sign_out(&acct, &mut slot, Some(&staging))
+            .await
+            .expect_err("an unconfirmed stop refuses sign-out");
+        assert!(error.contains("Could not stop the sync engine"), "got: {error}");
+        assert_eq!(
+            staging_entries(&staging),
+            2,
+            "nothing is purged while the engine may still be serving requests"
+        );
+        // The retry finds an empty slot; the unconfirmed-stop flag still refuses it.
+        let mut empty = None;
+        stop_engine_for_sign_out(&acct, &mut empty, Some(&staging))
+            .await
+            .expect_err("the retry is refused too");
+        assert_eq!(staging_entries(&staging), 2, "and still purges nothing");
+        assert_outside_untouched(&root);
+    }
+
+    /// The sign-out's real path (review of the merge, I1, and spec §8.4): `clear_session_impl` stops the engine
+    /// through `take_slot_and_stop_engine_for_sign_out`, which empties the upload-staging folder, and its purge
+    /// removes the staged Finder-write copies in every staging root the allow-list must accept: the data root
+    /// macOS stages in now and the cache root that earlier builds used. Driven on the already-signed-out path,
+    /// with a real upload-staging folder and the copies' journal rows in the shared scratch state database.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_sign_out_empties_upload_staging_and_the_staged_copies_in_every_staging_root() {
+        let state_dir = crate::state_paths::init_for_test();
+        let state = AppState::default();
+        let acct = test_account(&state, "signout-staging-roots");
+        #[cfg(target_os = "macos")]
+        {
+            let (handle, rx) = crate::finder_setup::driver::FinderSetupHandle::for_test(
+                crate::finder_setup::driver::FinderSetupView::initial(
+                    crate::finder_setup::launch_location::LaunchLocation::Applications,
+                ),
+            );
+            let _ = state.finder_setup.set(handle);
+            tokio::spawn(super::confirm_every_finder_event(rx));
+        }
+        set_auth_present(&state, false);
+        *acct.engine.lock().await = Some(finished_engine());
+        let (root, upload_staging) = staging_with_copies();
+        // The roots of the test sandbox (never the person's real folders, never the shared temp dir).
+        let bases = crate::engine_bridge::FinderStagingBases::current();
+        #[cfg(target_os = "macos")]
+        let staging_roots = [
+            bases.durable_root().expect("the test sandbox has a data dir"),
+            bases.cache_root(),
+        ];
+        #[cfg(not(target_os = "macos"))]
+        let staging_roots = [bases.cache_root()];
+        let copies: Vec<std::path::PathBuf> = staging_roots
+            .iter()
+            .map(|staging_root| {
+                std::fs::create_dir_all(staging_root).unwrap();
+                let copy = staging_root.join(uuid::Uuid::new_v4().to_string());
+                std::fs::write(&copy, b"plaintext").unwrap();
+                copy
+            })
+            .collect();
+
+        let result = super::with_the_shared_state_dir(async {
+            let db = crate::state_db::StateDb::open(state_dir.join(crate::state_paths::STATE_DB_FILENAME)).unwrap();
+            for copy in &copies {
+                db.track_staged_payload(&copy.to_string_lossy(), Some("/source"), false)
+                    .unwrap();
+            }
+            drop(db);
+            super::with_upload_staging_for_test(upload_staging.clone(), clear_session_impl(&state, false)).await
+        })
+        .await;
+
+        assert!(result.is_ok(), "the sign-out completes: {result:?}");
+        assert_eq!(
+            staging_entries(&upload_staging),
+            0,
+            "the sign-out's engine stop empties upload staging"
+        );
+        for copy in &copies {
+            assert!(!copy.exists(), "the staged copy is purged: {copy:?}");
+        }
+        assert_outside_untouched(&root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lock_after_a_confirmed_engine_stop_empties_upload_staging() {
+        let state = AppState::default();
+        let acct = test_account(&state, "lock-staging-confirmed");
+        let (root, staging) = staging_with_copies();
+        let mut slot = Some(finished_engine());
+        stop_engine_for_lock(&acct, &mut slot, Some(&staging))
+            .await
+            .expect("the lock continues");
+        assert!(slot.is_none());
+        assert_eq!(staging_entries(&staging), 0, "Lock removes every handed-over copy");
+        assert_outside_untouched(&root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lock_with_no_engine_running_empties_upload_staging() {
+        // No engine, so no IPC listener: nothing can still be using a copy.
+        let state = AppState::default();
+        let acct = test_account(&state, "lock-staging-no-engine");
+        let (root, staging) = staging_with_copies();
+        let mut slot = None;
+        stop_engine_for_lock(&acct, &mut slot, Some(&staging))
+            .await
+            .expect("the lock continues");
+        assert_eq!(staging_entries(&staging), 0);
+        assert_outside_untouched(&root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lock_with_an_unconfirmed_engine_stop_does_not_purge_upload_staging() {
+        let state = AppState::default();
+        let acct = test_account(&state, "lock-staging-unconfirmed");
+        let (root, staging) = staging_with_copies();
+        let mut slot = Some(unstoppable_engine());
+        stop_engine_for_lock(&acct, &mut slot, Some(&staging))
+            .await
+            .expect("off Windows the lock goes ahead on an unconfirmed stop");
+        assert_eq!(
+            staging_entries(&staging),
+            2,
+            "an IPC listener that may still be serving could be handed a copy the purge just removed"
+        );
+        assert_outside_untouched(&root);
     }
 
     /// Bug B: sign-out while already signed out (no auth flag, no in-memory
@@ -19937,8 +20273,8 @@ mod finder_setup_wiring_tests {
             "persist_sync_root_and_start_engine",
             "pick_sync_root",
             "stop_pending_finder_install_engine",
-            "lock_vault",
-            "take_slot_and_stop_engine_for_sign_out",
+            "stop_engine_for_lock",
+            "stop_engine_for_sign_out",
             "stop_engine_for_repair",
             "stop_check_engine",
         ] {
@@ -19947,6 +20283,21 @@ mod finder_setup_wiring_tests {
                 body.contains("stop_engine_in_slot("),
                 "{site} stops an engine without the helper"
             );
+        }
+        // Lock and sign-out stop through their own step (it also empties upload staging after a confirmed stop).
+        // The needle starts with a space: `body_between` starts at the signature, and
+        // `fn take_slot_and_stop_engine_for_sign_out(` itself contains `stop_engine_for_sign_out(` (review of the
+        // merge, I1), so only a call (`= stop_engine_for_sign_out(`) may match.
+        for (site, step) in [
+            ("lock_vault", " stop_engine_for_lock("),
+            ("take_slot_and_stop_engine_for_sign_out", " stop_engine_for_sign_out("),
+        ] {
+            let body = body_between(&production, &format!("fn {site}("), "\n}\n");
+            assert!(
+                !format!("fn {site}(").contains(step),
+                "the needle {step:?} must not match {site}'s own signature"
+            );
+            assert!(body.contains(step), "{site} stops its engine without{step}");
         }
         // Sign-out stops through its helper on both paths (Task 12 fix round 2, item 1).
         let clear = body_between(&production, "async fn clear_session_impl(", "\n}\n");
@@ -25578,7 +25929,14 @@ mod account_binding_tests {
     #[test]
     fn a_release_build_sweeps_every_directory_the_engine_stages_into() {
         let candidates = engine_bridge::finder_staging_candidates();
-        assert_eq!(candidates.len(), 2, "the preferred directory and the temp-dir fallback");
+        // macOS: the data root, then the cache root and the temp root that builds before the move used (spec
+        // 2026-10-09 §8.4). Elsewhere: the preferred directory and the temp-dir fallback.
+        let expected = if cfg!(target_os = "macos") { 3 } else { 2 };
+        assert_eq!(
+            candidates.len(),
+            expected,
+            "every directory the engine stages into, now and before"
+        );
         assert_eq!(
             release_staging_dirs(),
             candidates,

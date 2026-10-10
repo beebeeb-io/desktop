@@ -18,7 +18,7 @@ use tokio::net::UnixStream;
 
 use crate::api_client::ApiClient;
 use crate::engine_bridge::EngineBridge;
-use crate::state_db::{FileEntry, FileStatus, ItemKind, OperationKind, StateDb};
+use crate::state_db::{FileEntry, FileStatus, ItemKind, Namespace, OperationKind, PERMISSION_READ, StateDb};
 
 const READ_DEADLINE: Duration = Duration::from_secs(5);
 
@@ -30,10 +30,39 @@ struct IpcFixture {
     server: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
     _state_dir: tempfile::TempDir,
     _sock_dir: tempfile::TempDir,
+    /// Set for a daemon started with `start_staged`.
+    staging: Option<tempfile::TempDir>,
+    /// The daemon's engine bridge (a test can point its staging folder elsewhere). Only the
+    /// macOS staging-folder test reads it.
+    #[cfg(target_os = "macos")]
+    bridge: Arc<EngineBridge>,
 }
 
 impl IpcFixture {
+    /// A daemon that takes write contents from any path (the Linux
+    /// behaviour, and the shape before the upload-staging directory).
     fn start(seed: impl FnOnce(&StateDb)) -> Self {
+        Self::start_with(seed, None)
+    }
+
+    /// A daemon that takes write contents ONLY from a throwaway
+    /// upload-staging directory and deletes each copy once answered, as the
+    /// macOS daemon does with the App Group directory.
+    fn start_staged(seed: impl FnOnce(&StateDb)) -> Self {
+        Self::start_with(seed, Some(tempfile::tempdir().unwrap()))
+    }
+
+    fn start_with(seed: impl FnOnce(&StateDb), staging: Option<tempfile::TempDir>) -> Self {
+        // The staging directory is a CHILD of the temp dir, so a test can put a
+        // file right next to it (outside it) and reach it with `..`.
+        let contents = match &staging {
+            Some(root) => {
+                let dir = root.path().join("upload-staging");
+                std::fs::create_dir(&dir).unwrap();
+                crate::ipc_socket::WriteContentsPolicy::StagingDir(dir)
+            }
+            None => crate::ipc_socket::WriteContentsPolicy::AnyPath,
+        };
         let state_dir = tempfile::tempdir().unwrap();
         let sock_dir = tempfile::tempdir().unwrap();
         let sock = sock_dir.path().join("ipc.sock");
@@ -48,9 +77,10 @@ impl IpcFixture {
         let server = rt.spawn(crate::ipc_socket::serve_ipc_at_with_ready(
             sock.clone(),
             db.clone(),
-            bridge,
+            bridge.clone(),
             cancel_rx,
             Some(ready_tx),
+            contents,
         ));
         rt.block_on(async {
             tokio::time::timeout(Duration::from_secs(5), ready_rx)
@@ -66,7 +96,23 @@ impl IpcFixture {
             server: Some(server),
             _state_dir: state_dir,
             _sock_dir: sock_dir,
+            staging,
+            #[cfg(target_os = "macos")]
+            bridge,
         }
+    }
+
+    fn staging_dir(&self) -> std::path::PathBuf {
+        self.staging
+            .as_ref()
+            .expect("started with start_staged")
+            .path()
+            .join("upload-staging")
+    }
+
+    /// The temp dir that CONTAINS the staging directory (outside it).
+    fn staging_parent(&self) -> &std::path::Path {
+        self.staging.as_ref().expect("started with start_staged").path()
     }
 
     async fn connect(&self) -> UnixStream {
@@ -385,6 +431,17 @@ fn modify_request(file_id: &str, filename: &str, contents_path: &str, request_id
         body["request_id"] = serde_json::json!(id);
     }
     let mut line = serde_json::to_vec(&serde_json::json!({ "QueueFinderModify": body })).unwrap();
+    line.push(b'\n');
+    line
+}
+
+/// [`modify_request`] carrying a base, as the extension always sends one: the content
+/// version it holds for the item (`contentVersion`).
+fn modify_request_on_base(file_id: &str, filename: &str, contents_path: &str, base: &str) -> Vec<u8> {
+    let line = modify_request(file_id, filename, contents_path, None);
+    let mut request: serde_json::Value = serde_json::from_slice(&line).unwrap();
+    request["QueueFinderModify"]["base_version_identifier"] = serde_json::json!(base);
+    let mut line = serde_json::to_vec(&request).unwrap();
     line.push(b'\n');
     line
 }
@@ -774,7 +831,9 @@ fn a_cached_reply_reports_the_row_as_it_is_now_not_as_it_was() {
         let first = send_one(&fx, create_request("big.bin", &path, Some("key-fresh"))).await;
         let id = item_id(&first);
         assert_eq!(first["WriteQueued"]["item"]["status"], "uploading");
-        // Upload finalization: the row becomes Local at a real server version.
+        // Upload finalization: the row becomes Local at a real server version,
+        // stamped with the wall-clock second of the upload, as
+        // `apply_completed_upload` leaves it.
         fx.db
             .upsert_file(&FileEntry {
                 file_id: id.clone(),
@@ -783,21 +842,252 @@ fn a_cached_reply_reports_the_row_as_it_is_now_not_as_it_was() {
                 size_bytes: 20,
                 modified_at: 1_700_000_123,
                 content_hash: None,
-                remote_updated_at: 7,
+                remote_updated_at: 1_700_000_123,
                 parent_id: None,
                 item_kind: ItemKind::File,
             })
             .unwrap();
+        let mut contract = fx.db.get_file_contract_state(&id).unwrap().unwrap();
+        contract.current_version = 7;
+        fx.db.set_file_contract_state(&contract).unwrap();
         let retry = send_one(&fx, create_request("big.bin", &path, Some("key-fresh"))).await;
         assert_eq!(item_id(&retry), id, "it is still the same item (a true retry)");
-        assert_eq!(retry["WriteQueued"]["item"]["status"], "local", "status must be current: {retry}");
+        // The create's op is still queued, so the item is reported as it is now: `uploading`,
+        // the queue's status, not the row's (spec §5.4 row 1, §9.1).
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            retry["WriteQueued"]["item"]["status"], "uploading",
+            "status must be current: {retry}"
+        );
+        // The Linux arm does not mint, so no op carries a write id: the row's status.
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(
+            retry["WriteQueued"]["item"]["status"], "local",
+            "status must be current: {retry}"
+        );
         assert_eq!(
             retry["WriteQueued"]["item"]["version_identifier"], "7:1700000123:20",
             "version must be current: {retry}"
         );
+        // The create's op is still queued: under the create's token (spec §5.4 row 1).
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            retry["WriteQueued"]["item"]["content_version"], first["WriteQueued"]["item"]["content_version"],
+            "the queued create's bytes keep the name the first reply gave them: {retry}"
+        );
+        // The Linux arm does not mint (Task 3 step 5.7): the reply keeps today's content version.
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(
+            retry["WriteQueued"]["item"]["content_version"], "7",
+            "the write base must be the current server version: {retry}"
+        );
         assert_ne!(retry, first);
     });
     assert_eq!(operations_of_kind(&fx, OperationKind::UploadVersion).len(), 1);
+}
+
+/// Spec 2026-10-09 §7.2: a modify under a provisional id whose create has landed is replied
+/// under that id. The system's retry of the same request (same `request_id`) is answered from
+/// the remembered reply, brought up to date from the server file, and queues nothing again.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_repeated_modify_under_a_provisional_id_queues_one_upload() {
+    const PROVISIONAL: &str = "3f2a9c1e-0000-4000-8000-0000000000d1";
+    const SERVER: &str = "3f2a9c1e-0000-4000-8000-0000000000d2";
+    let fx = IpcFixture::start(|db| {
+        db.upsert_file(&FileEntry {
+            file_id: SERVER.into(),
+            path: "doc.txt".into(),
+            status: FileStatus::Local,
+            size_bytes: 3,
+            modified_at: 1_700_000_100,
+            content_hash: None,
+            remote_updated_at: 1_700_000_100,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+        let mut contract = db.get_file_contract_state(SERVER).unwrap().unwrap();
+        contract.current_version = 1;
+        db.set_file_contract_state(&contract).unwrap();
+        db.insert_alias_for_test(PROVISIONAL, SERVER, 1_700_000_100);
+    });
+    let src = tempfile::tempdir().unwrap();
+    let path = source_file(&src, "doc.txt");
+    let request = || {
+        let line = modify_request(PROVISIONAL, "doc.txt", &path, Some("key-provisional-modify"));
+        let mut request: serde_json::Value = serde_json::from_slice(&line).unwrap();
+        request["QueueFinderModify"]["base_version_identifier"] = serde_json::json!("1");
+        let mut line = serde_json::to_vec(&request).unwrap();
+        line.push(b'\n');
+        line
+    };
+    let first = fx.rt.block_on(send_one(&fx, request()));
+    let repeat = fx.rt.block_on(send_one(&fx, request()));
+    for reply in [&first, &repeat] {
+        assert_eq!(
+            reply["WriteQueued"]["item"]["identifier"],
+            serde_json::json!(PROVISIONAL),
+            "replied under the provisional id: {reply}"
+        );
+    }
+    assert_eq!(
+        repeat["WriteQueued"]["item"]["content_version"], first["WriteQueued"]["item"]["content_version"],
+        "the same write"
+    );
+    let ops = operations_of_kind(&fx, OperationKind::UploadVersion);
+    assert_eq!(ops.len(), 1, "one upload for one save: {ops:?}");
+    assert_eq!(ops[0].file_id.as_deref(), Some(SERVER));
+}
+
+/// Spec 2026-10-09 §12 (4c): a create's repeat after its landing is unchanged, it runs
+/// again. Only a modify's remembered reply is brought up to date through the alias: a create
+/// reply must name the provider's identifier, never the provisional one.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_repeated_create_after_its_landing_runs_again() {
+    const SERVER: &str = "3f2a9c1e-0000-4000-8000-0000000000d3";
+    let fx = IpcFixture::start(|_| {});
+    let src = tempfile::tempdir().unwrap();
+    let path = source_file(&src, "new.txt");
+    let first = fx.rt.block_on(send_one(
+        &fx,
+        create_request("new.txt", &path, Some("key-landed-create")),
+    ));
+    let provisional = first["WriteQueued"]["item"]["identifier"].as_str().unwrap().to_string();
+    // The landing, as the queue leaves it: the provisional row is gone, the server row and
+    // the alias exist.
+    let mut row = fx.db.get_file(&provisional).unwrap().unwrap();
+    fx.db.delete_file(&provisional).unwrap();
+    row.file_id = SERVER.into();
+    row.status = FileStatus::Local;
+    fx.db.upsert_file(&row).unwrap();
+    fx.db.insert_alias_for_test(&provisional, SERVER, 1_700_000_100);
+    let repeat = fx.rt.block_on(send_one(
+        &fx,
+        create_request("new.txt", &path, Some("key-landed-create")),
+    ));
+    let identifier = repeat["WriteQueued"]["item"]["identifier"].as_str().unwrap();
+    assert_ne!(
+        identifier, provisional,
+        "never answered under the provisional id: {repeat}"
+    );
+    assert_ne!(
+        identifier, SERVER,
+        "not answered from the alias either (spec §12): {repeat}"
+    );
+}
+
+/// Spec 2026-10-09 §7.2 (I-1): the create arm hands a deletion-conflicted create's three
+/// fields to the engine, which modifies the template's item instead of creating a second
+/// file. macOS only: the other unix builds ignore the fields (an ordinary create).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_deletion_conflicted_create_over_the_socket_modifies_the_template_item() {
+    const TEMPLATE: &str = "3f2a9c1e-0000-4000-8000-0000000000c1";
+    let fx = IpcFixture::start(|db| {
+        db.upsert_file(&FileEntry {
+            file_id: TEMPLATE.into(),
+            path: "t2.txt".into(),
+            status: FileStatus::Local,
+            size_bytes: 28,
+            modified_at: 1_700_000_100,
+            content_hash: None,
+            remote_updated_at: 1_700_000_100,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+        let mut contract = db.get_file_contract_state(TEMPLATE).unwrap().unwrap();
+        contract.current_version = 1;
+        db.set_file_contract_state(&contract).unwrap();
+    });
+    let src = tempfile::tempdir().unwrap();
+    let path = source_file(&src, "t2.txt");
+    let mut request: serde_json::Value = serde_json::from_slice(&create_request("t2.txt", &path, None)).unwrap();
+    request["QueueFinderCreate"]["deletion_conflicted"] = serde_json::json!(true);
+    request["QueueFinderCreate"]["template_identifier"] = serde_json::json!(TEMPLATE);
+    request["QueueFinderCreate"]["template_content_version"] = serde_json::json!("1");
+    let mut line = serde_json::to_vec(&request).unwrap();
+    line.push(b'\n');
+    let reply = fx.rt.block_on(send_one(&fx, line));
+    assert_eq!(
+        reply["WriteQueued"]["item"]["identifier"],
+        serde_json::json!(TEMPLATE),
+        "the reply names the template's item: {reply}"
+    );
+    let ops = operations_of_kind(&fx, OperationKind::UploadVersion);
+    assert_eq!(ops.len(), 1, "{reply}");
+    assert_eq!(
+        ops[0].file_id.as_deref(),
+        Some(TEMPLATE),
+        "a content modify of the template's item"
+    );
+    assert_eq!(fx.db.list_files().unwrap().len(), 1, "no second file");
+}
+
+#[test]
+fn a_queued_modify_replies_with_the_size_of_the_bytes_it_was_handed() {
+    // The system keeps the bytes it handed over and does not fetch them back,
+    // so the item in the reply must describe THOSE bytes, not the row's
+    // previous content (28 bytes here; the edit is 40).
+    let fx = IpcFixture::start(|db| {
+        db.upsert_file(&FileEntry {
+            file_id: "edited-item".into(),
+            path: "t.txt".into(),
+            status: FileStatus::Local,
+            size_bytes: 28,
+            modified_at: 1_700_000_100,
+            content_hash: None,
+            remote_updated_at: 1_700_000_100,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+        let mut contract = db.get_file_contract_state("edited-item").unwrap().unwrap();
+        contract.current_version = 1;
+        db.set_file_contract_state(&contract).unwrap();
+    });
+    let src = tempfile::tempdir().unwrap();
+    let path = src.path().join("t.txt");
+    std::fs::write(&path, b"twenty-eight bytes of text.\nmore-bytes12").unwrap();
+    let path = path.to_string_lossy().into_owned();
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let reply = fx.rt.block_on(send_one(
+        &fx,
+        modify_request_on_base("edited-item", "t.txt", &path, "1"),
+    ));
+    let item = &reply["WriteQueued"]["item"];
+    let ops = operations_of_kind(&fx, OperationKind::UploadVersion);
+    assert_eq!(ops.len(), 1, "{reply}");
+    let staged = std::fs::metadata(ops[0].payload_path.as_deref().unwrap())
+        .unwrap()
+        .len() as i64;
+    assert_eq!(staged, 40);
+    assert_eq!(
+        item["size_bytes"],
+        serde_json::json!(staged),
+        "the reply must describe the staged bytes: {reply}"
+    );
+    assert!(
+        item["modified_at"].as_i64().unwrap() >= before,
+        "the reply's modification time is the write's, not the previous content's: {reply}"
+    );
+    assert_eq!(item["status"], "uploading", "{reply}");
+    let content_version = item["content_version"].as_str().unwrap();
+    #[cfg(target_os = "macos")]
+    assert!(
+        crate::write_token::parse_token(content_version).is_some_and(|token| token.base == 1),
+        "the reply names the bytes it accepted with a token led by their base: {reply}"
+    );
+    // The Linux arm does not mint (Task 3 step 5.7): the reply keeps today's content version.
+    #[cfg(not(target_os = "macos"))]
+    assert_eq!(content_version, "1", "{reply}");
+    let row = fx.db.get_file("edited-item").unwrap().unwrap();
+    assert_eq!(row.size_bytes, 40, "the row records the staged size too");
 }
 
 // ---------------------------------------------------------------------------
@@ -1156,4 +1446,465 @@ fn list_changes_ride_along_full_item_payloads_for_updates() {
         let deleted = changes.iter().find(|c| c["kind"] == "deleted").expect("the deleted change");
         assert!(deleted["item"].is_null(), "deletions carry no item payload");
     });
+}
+
+// ---------------------------------------------------------------------------
+// Upload staging: on macOS the extension hands write contents over as a copy in the
+// App Group upload-staging directory (the daemon cannot read the system's own
+// contents URL). The daemon must take contents from there ONLY, upload from
+// its OWN copy, and delete the handed-over copy once the request is answered,
+// including when the request is refused after the contents were accepted.
+// ---------------------------------------------------------------------------
+
+/// A handed-over copy, named the way the extension names it (a random UUID,
+/// never the user's file name).
+fn staged_copy(fx: &IpcFixture, bytes: &[u8]) -> std::path::PathBuf {
+    let path = fx.staging_dir().join(uuid::Uuid::new_v4().to_string());
+    std::fs::write(&path, bytes).unwrap();
+    path
+}
+
+fn staging_entries(fx: &IpcFixture) -> Vec<std::path::PathBuf> {
+    std::fs::read_dir(fx.staging_dir())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect()
+}
+
+fn create_request_in(parent_id: &str, filename: &str, contents_path: &str, request_id: Option<&str>) -> Vec<u8> {
+    let mut body = serde_json::json!({
+        "parent_id": parent_id,
+        "filename": filename,
+        "kind": "file",
+        "contents_path": contents_path,
+        "content_type": null,
+    });
+    if let Some(id) = request_id {
+        body["request_id"] = serde_json::json!(id);
+    }
+    let mut line = serde_json::to_vec(&serde_json::json!({ "QueueFinderCreate": body })).unwrap();
+    line.push(b'\n');
+    line
+}
+
+/// The daemon's own copy behind the one queued upload: it must exist, hold the
+/// handed-over bytes, and live outside the staging directory.
+fn assert_uploads_from_own_copy(fx: &IpcFixture, expected: &[u8]) {
+    let uploads = operations_of_kind(fx, OperationKind::UploadVersion);
+    assert_eq!(uploads.len(), 1, "exactly one upload must be queued");
+    let own = uploads[0]
+        .payload_path
+        .as_deref()
+        .expect("the upload carries the daemon's own copy");
+    let own_parent = std::fs::canonicalize(std::path::Path::new(own).parent().unwrap()).unwrap();
+    assert_ne!(
+        own_parent,
+        std::fs::canonicalize(fx.staging_dir()).unwrap(),
+        "the upload must read the daemon's own copy, not the handed-over one"
+    );
+    assert_eq!(
+        std::fs::read(own).unwrap(),
+        expected,
+        "the daemon's copy holds the handed-over bytes"
+    );
+}
+
+fn seed_read_only_shared_folder(db: &StateDb, file_id: &str) {
+    db.upsert_file(&FileEntry {
+        file_id: file_id.into(),
+        path: "Read-only share".into(),
+        status: FileStatus::Local,
+        size_bytes: 0,
+        modified_at: 1,
+        content_hash: None,
+        remote_updated_at: 1,
+        parent_id: None,
+        item_kind: ItemKind::Folder,
+    })
+    .unwrap();
+    let mut contract = db.get_file_contract_state(file_id).unwrap().unwrap();
+    contract.namespace = Namespace::SharedWithMe;
+    contract.shared_root_id = Some(file_id.into());
+    contract.share_id = Some(format!("invite-{file_id}"));
+    contract.permission_bits = PERMISSION_READ;
+    contract.item_kind = ItemKind::Folder;
+    db.set_file_contract_state(&contract).unwrap();
+}
+
+#[test]
+fn staged_create_uploads_from_the_daemons_own_copy_and_deletes_the_handed_over_one() {
+    let fx = IpcFixture::start_staged(|_| {});
+    let copy = staged_copy(&fx, b"finder file contents");
+    fx.rt.block_on(async {
+        let reply = send_one(
+            &fx,
+            create_request("notes.txt", &copy.to_string_lossy(), Some("key-staged")),
+        )
+        .await;
+        assert_write_queued(&reply);
+    });
+    assert!(
+        !copy.exists(),
+        "the handed-over copy must be deleted once the daemon has its own"
+    );
+    assert!(
+        staging_entries(&fx).is_empty(),
+        "nothing may be left in the staging dir"
+    );
+    assert_uploads_from_own_copy(&fx, b"finder file contents");
+}
+
+/// Spec 2026-10-09 §8.4 (the staging folder, macOS): when the app's own staging folder cannot be
+/// created or written to, a create and a modify are answered `WriteRetryLater` with a fixed reason and
+/// no path. The extension reports that as a transient error, so the system keeps the change and
+/// retries the write. Nothing is staged anywhere, nothing is queued, no row is added, and the
+/// handed-over copy is deleted as after any answer. Once the folder can take a copy again, the
+/// system's retry with the same request id is queued, exactly once.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_unwritable_staging_folder_answers_write_retry_later_and_stages_and_queues_nothing() {
+    const FILE_ID: &str = "00000000-0000-0000-0000-00000000cccc";
+    let fx = IpcFixture::start_staged(|db| {
+        db.upsert_file(&FileEntry {
+            file_id: FILE_ID.into(),
+            path: "doc.txt".into(),
+            status: FileStatus::Local,
+            size_bytes: 3,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+    });
+    let bases_dir = tempfile::tempdir().unwrap();
+    let data = bases_dir.path().join("data");
+    std::fs::create_dir(&data).unwrap();
+    // A file where the staging folder's parent would be: `beebeeb/finder-writes` cannot be created.
+    std::fs::write(data.join("beebeeb"), b"in the way").unwrap();
+    fx.bridge.seams.stage_under(crate::engine_bridge::FinderStagingBases {
+        data: Some(data.clone()),
+        cache: Some(bases_dir.path().join("cache")),
+        temp: bases_dir.path().join("temp"),
+    });
+    let rows_before = fx.db.list_files().unwrap().len();
+
+    for kind in ["create", "modify"] {
+        let copy = staged_copy(&fx, b"a save the app cannot stage");
+        let contents = copy.to_string_lossy().into_owned();
+        let request = match kind {
+            "create" => create_request("new.txt", &contents, Some("key-retry-create")),
+            _ => modify_request_on_base(FILE_ID, "doc.txt", &contents, "1"),
+        };
+        let reply = fx.rt.block_on(send_one(&fx, request));
+        let message = reply["WriteRetryLater"]["message"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{kind}: expected WriteRetryLater, got {reply}"));
+        assert_eq!(
+            reply,
+            serde_json::json!({ "WriteRetryLater": { "message": message } }),
+            "{kind}: the wire shape"
+        );
+        assert!(
+            message.starts_with("the staging folder is unavailable") && !message.contains('/'),
+            "{kind}: a fixed reason, no path: {message}"
+        );
+        assert!(
+            !copy.exists(),
+            "{kind}: the handed-over copy is deleted after the answer"
+        );
+    }
+
+    assert_eq!(queued_operation_count(&fx), 0, "nothing is queued");
+    assert!(
+        fx.db.staged_payloads_for_signout().unwrap().is_empty(),
+        "nothing is journalled"
+    );
+    assert_eq!(
+        fx.db.list_files().unwrap().len(),
+        rows_before,
+        "the create added no row"
+    );
+    let mut left = Vec::new();
+    let mut stack = vec![bases_dir.path().to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                left.push(path);
+            }
+        }
+    }
+    assert_eq!(left, vec![data.join("beebeeb")], "no copy was written anywhere");
+    assert!(staging_entries(&fx).is_empty(), "nothing is left in upload staging");
+
+    // The folder can take a copy again. The system's retry carries the SAME request id: the
+    // refusal was not remembered, so the retry is accepted and queued, and a repeat of it is
+    // answered from that result, so the save is queued exactly once.
+    std::fs::remove_file(data.join("beebeeb")).unwrap();
+    for attempt in ["the retry", "a repeat of the retry"] {
+        let copy = staged_copy(&fx, b"a save the app could not stage before");
+        let reply = fx.rt.block_on(send_one(
+            &fx,
+            create_request("new.txt", &copy.to_string_lossy(), Some("key-retry-create")),
+        ));
+        assert!(
+            reply.get("WriteQueued").is_some(),
+            "{attempt}: expected WriteQueued, got {reply}"
+        );
+        assert_eq!(
+            queued_operation_count(&fx),
+            1,
+            "{attempt}: the save is queued exactly once"
+        );
+    }
+    let ops = fx.db.list_due_operations(i64::MAX).unwrap();
+    let own = ops[0].payload_path.as_deref().expect("the upload carries its copy");
+    assert!(
+        std::path::Path::new(own).starts_with(data.join("beebeeb").join("finder-writes")),
+        "the copy is staged in the data root: {own}"
+    );
+}
+
+#[test]
+fn staged_modify_uploads_from_the_daemons_own_copy_and_deletes_the_handed_over_one() {
+    let fx = IpcFixture::start_staged(|db| {
+        db.upsert_file(&FileEntry {
+            file_id: "00000000-0000-0000-0000-00000000bbbb".into(),
+            path: "doc.txt".into(),
+            status: FileStatus::Local,
+            size_bytes: 3,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+    });
+    let copy = staged_copy(&fx, b"edited contents");
+    fx.rt.block_on(async {
+        let reply = send_one(
+            &fx,
+            modify_request(
+                "00000000-0000-0000-0000-00000000bbbb",
+                "doc.txt",
+                &copy.to_string_lossy(),
+                Some("key-staged-modify"),
+            ),
+        )
+        .await;
+        assert!(reply.get("WriteQueued").is_some(), "expected WriteQueued, got {reply}");
+    });
+    assert!(
+        !copy.exists(),
+        "the handed-over copy must be deleted once the daemon has its own"
+    );
+    assert!(staging_entries(&fx).is_empty());
+    assert_uploads_from_own_copy(&fx, b"edited contents");
+}
+
+#[test]
+fn contents_not_directly_in_the_staging_dir_are_refused_with_their_category_and_never_deleted() {
+    let fx = IpcFixture::start_staged(|_| {});
+    // A real file right next to the staging dir: outside it, reachable by `..`.
+    let outside = fx.staging_parent().join("outside.txt");
+    std::fs::write(&outside, b"not handed over").unwrap();
+    let traversal = fx.staging_dir().join("..").join("outside.txt");
+    let link = fx.staging_dir().join("link");
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+    let missing = fx.staging_dir().join("never-staged");
+    let cases = [
+        (outside.clone(), "outside_staging"),
+        (traversal, "traversal"),
+        (link.clone(), "symlink"),
+        (missing, "missing"),
+    ];
+    fx.rt.block_on(async {
+        for (path, category) in &cases {
+            let reply = send_one(&fx, create_request("a.txt", &path.to_string_lossy(), None)).await;
+            let message = reply["Error"]["message"].as_str().unwrap_or_default();
+            assert!(
+                message.contains(category),
+                "{category}: the refusal must name its category, got {reply}"
+            );
+            assert!(
+                !message.contains("outside.txt"),
+                "a refusal must not echo the path, got {reply}"
+            );
+        }
+    });
+    assert_eq!(
+        std::fs::read(&outside).unwrap(),
+        b"not handed over",
+        "a refused path is never deleted"
+    );
+    assert!(
+        std::fs::symlink_metadata(&link).is_ok(),
+        "a refused entry is left for the age-bound purge, not deleted on the request path"
+    );
+    assert_eq!(queued_operation_count(&fx), 0, "a refused request must queue nothing");
+}
+
+#[test]
+fn a_write_refused_after_its_contents_were_accepted_still_deletes_the_handed_over_copy() {
+    let fx = IpcFixture::start_staged(|db| seed_read_only_shared_folder(db, "shared-read-only"));
+    // 1. The engine refuses: a new file in a read-only shared folder.
+    let engine_refused = staged_copy(&fx, b"a");
+    // 2. The socket refuses: the "Shared with me" namespace root.
+    let namespace_refused = staged_copy(&fx, b"b");
+    // 3. The idempotency key is unusable.
+    let key_refused = staged_copy(&fx, b"c");
+    fx.rt.block_on(async {
+        let reply = send_one(
+            &fx,
+            create_request_in(
+                "shared-read-only",
+                "a.txt",
+                &engine_refused.to_string_lossy(),
+                Some("key-ro"),
+            ),
+        )
+        .await;
+        assert!(reply.get("Error").is_some(), "the engine must refuse, got {reply}");
+        let reply = send_one(
+            &fx,
+            create_request_in(
+                "namespace:shared_with_me",
+                "b.txt",
+                &namespace_refused.to_string_lossy(),
+                None,
+            ),
+        )
+        .await;
+        assert!(
+            reply.get("Error").is_some(),
+            "the namespace root must refuse, got {reply}"
+        );
+        let reply = send_one(&fx, create_request("c.txt", &key_refused.to_string_lossy(), Some(""))).await;
+        assert!(
+            reply.get("Error").is_some(),
+            "an empty key must be refused, got {reply}"
+        );
+    });
+    for copy in [&engine_refused, &namespace_refused, &key_refused] {
+        assert!(
+            !copy.exists(),
+            "a refused request's handed-over copy must be deleted: {}",
+            copy.display()
+        );
+    }
+    assert_eq!(queued_operation_count(&fx), 0);
+}
+
+#[test]
+fn concurrent_staged_creates_with_one_request_id_queue_one_upload_and_delete_every_copy() {
+    // Each retry of a timed-out create hands over its OWN copy. Only the first
+    // is read; every copy, read or not, must be gone once its request is
+    // answered.
+    let fx = IpcFixture::start_staged(|_| {});
+    let staging = fx.staging_dir();
+    let replies = send_overlapping(&fx, 6, || {
+        let copy = staging.join(uuid::Uuid::new_v4().to_string());
+        std::fs::write(&copy, b"big file").unwrap();
+        create_request("big.bin", &copy.to_string_lossy(), Some("key-staged-concurrent"))
+    });
+    assert_eq!(replies.len(), 6);
+    for r in &replies {
+        assert_write_queued(r);
+        assert_eq!(r, &replies[0], "every repeat must get the SAME WriteQueued reply");
+    }
+    assert!(
+        staging_entries(&fx).is_empty(),
+        "every handed-over copy must be deleted"
+    );
+    assert_uploads_from_own_copy(&fx, b"big file");
+}
+
+#[test]
+fn a_create_still_in_flight_when_the_socket_stops_keeps_its_copy_until_the_engine_has_read_it() {
+    // The first attempt of a keyed write runs detached from its connection (the
+    // engine finishes it even if the client is gone). When the socket stops,
+    // every connection task is aborted; the handed-over copy must stay until
+    // that detached work has read it, or the create fails after the fact.
+    let mut fx = IpcFixture::start_staged(|_| {});
+    let copy = staged_copy(&fx, b"in flight");
+    let (release, holder) = hold_database(&fx);
+    fx.rt.block_on(async {
+        let mut client = fx.connect().await;
+        client
+            .write_all(&create_request(
+                "late.txt",
+                &copy.to_string_lossy(),
+                Some("key-in-flight"),
+            ))
+            .await
+            .unwrap();
+        // Blocking on purpose (see `send_overlapping`): let the work reach the held lock.
+        std::thread::sleep(Duration::from_millis(300));
+    });
+    let _ = fx.cancel.take().expect("server running").send(());
+    let server = fx.server.take().expect("server running");
+    fx.rt.block_on(async {
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("the socket stops")
+            .expect("server task")
+            .expect("server result");
+        // Let the aborted connection tasks be dropped.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    });
+    assert!(
+        copy.exists(),
+        "the copy must outlive the stopped connection while the engine still needs it"
+    );
+    release.send(()).unwrap();
+    holder.join().unwrap();
+    let deadline = std::time::Instant::now() + READ_DEADLINE;
+    while (copy.exists() || queued_operation_count(&fx) == 0) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_uploads_from_own_copy(&fx, b"in flight");
+    assert!(
+        !copy.exists(),
+        "once the engine has its own copy the handed-over one is deleted"
+    );
+}
+
+#[test]
+fn a_staged_copy_swapped_for_a_symlink_after_validation_uploads_what_was_handed_over() {
+    // The daemon validates the handed-over copy, then the engine reads it,
+    // later and on another thread. Whatever happens to the entry in between
+    // (here: renamed away and replaced by a symlink to a file the requester
+    // never handed over), the engine must read the file that was validated.
+    let fx = IpcFixture::start_staged(|_| {});
+    let copy = staged_copy(&fx, b"handed over");
+    let secret = fx.staging_parent().join("not-handed-over.txt");
+    std::fs::write(&secret, b"never handed over").unwrap();
+    let (release, holder) = hold_database(&fx);
+    let reply = fx.rt.block_on(async {
+        let mut client = fx.connect().await;
+        client
+            .write_all(&create_request("swapped.txt", &copy.to_string_lossy(), Some("key-swapped")))
+            .await
+            .unwrap();
+        // Blocking on purpose (see `send_overlapping`): the request is
+        // validated, and its work then waits behind the held database.
+        std::thread::sleep(Duration::from_millis(300));
+        std::fs::rename(&copy, fx.staging_dir().join("moved-away")).unwrap();
+        std::os::unix::fs::symlink(&secret, &copy).unwrap();
+        release.send(()).unwrap();
+        parse(&read_line(&mut client).await)
+    });
+    holder.join().unwrap();
+    assert_write_queued(&reply);
+    assert_uploads_from_own_copy(&fx, b"handed over");
+    assert_eq!(
+        std::fs::read(&secret).unwrap(),
+        b"never handed over",
+        "the symlink's target is never touched"
+    );
 }

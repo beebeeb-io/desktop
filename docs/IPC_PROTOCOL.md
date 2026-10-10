@@ -86,6 +86,185 @@ While a hydrate runs the daemon also watches the socket. If the client hangs up
 socket) the daemon drops the download, writes nothing to disk, and restores the
 file's status (`DownloadingStatusGuard` in `engine_bridge.rs`).
 
+## Write contents on macOS (`contents_path` → App Group upload staging)
+
+The system hands `createItem` / `modifyItem` a contents URL that only the
+extension's sandbox can read. The app (the daemon) is a different sandboxed
+process and cannot open it: before this section existed every Finder file
+create ended in `"Upload source is not a file"` and a definitive -2005, while
+folder creates (no contents) worked. So on macOS `contents_path` is never the
+system's URL; it is a copy the extension makes in the shared App Group
+container.
+
+```mermaid
+sequenceDiagram
+    participant S as File Provider system
+    participant X as Extension (XPCBridge + UploadStaging)
+    participant D as Daemon (ipc_socket.rs)
+    S->>X: createItem(template, contents URL)
+    X->>X: refuse unless the source is a regular file (definitive)
+    X->>X: copy into <group>/upload-staging/<uuid> (0600)
+    X->>D: QueueFinderCreate{contents_path: <group>/upload-staging/<uuid>, request_id}
+    D->>D: open upload-staging (O_NOFOLLOW, ours), openat the leaf (O_NOFOLLOW, O_NONBLOCK)
+    D->>D: fstat the opened file: regular, one link, ours
+    D->>D: StagedPayload::copy_from_file from that descriptor, enqueue
+    D->>D: unlinkat the copy on the held directory (same device and inode only)
+    D-->>X: WriteQueued / WriteRetryLater / Error
+    X->>X: delete the copy (defer; already gone is fine)
+    X-->>S: completion
+```
+
+| Rule | Where |
+| --- | --- |
+| Directory: `<App Group container>/upload-staging/`, owner-only `0700`, excluded from backups. Created by whichever side gets there first; the daemon forces the mode at startup. The daemon opens it once with `O_NOFOLLOW \| O_DIRECTORY` and refuses it unless it is a real directory owned by this user (`not_private`); the mode and the backup exclusion are set on that descriptor (`fchmod`, `fsetxattr`). A symlink in its place is never followed: not by the hardening, the reads, the deletions or the purges. | `UploadStaging.directory(in:)`, `StagingDir::open`, `macos_prepare_upload_staging_dir` |
+| Only a regular file is staged. A package (a folder macOS shows as one file, such as `.rtfd`) arrives as a directory URL with kind `file`; it and any other non-regular item (a symlink) are refused before anything is copied, with the DEFINITIVE `daemonRejected` (`cannotSynchronize`, -2005), the same answer the daemon gives for such an item. The person sees the item fail to sync with "Beebeeb can only upload regular files, and this item is a package or another special item. It was not uploaded." | `UploadStaging.stage` |
+| One file per request, named by a random UUID (never the user's file name), copied with `copyItem` (an APFS clone), then `0600` and mtime set to now. The `request_id` fingerprint is still taken from the system's file, so retries keep their key. | `UploadStaging.stage`, `XPCBridge.queueCreateItem/queueModifyItem` |
+| A failed copy (or a source whose attributes cannot be read) is `uploadStagingFailed`, TRANSIENT (`serverUnreachable`): the system retries; nothing is left behind. | `BeebeebIPCError` |
+| The daemon accepts `contents_path` only if it is absolute, has no `.`/`..` segment, and its parent is the held staging directory itself (same device and inode). The leaf is then opened relative to the held directory with `O_RDONLY \| O_NOFOLLOW \| O_NONBLOCK \| O_CLOEXEC`, so a symlink is refused at the open and a FIFO cannot block it, and the OPENED descriptor must be a regular file with exactly one link, owned by this user. Otherwise `Error {"Upload contents refused (<category>)"}` with `malformed_path`, `traversal`, `staging_unavailable`, `outside_staging`, `missing`, `symlink`, `not_a_file`, `hard_linked`, `foreign_owner` or `unreadable`. A refused path is never deleted. There is no size limit on this path. | `open_staged_contents`, `check_staged_contents_stat` |
+| The engine reads the contents from the descriptor that passed those checks, never by path (`StagedPayload::copy_from_file`, an APFS clone via `fclonefileat` where possible). Swapping the entry after validation changes nothing the daemon reads. The path is only the journal's label. | `queue_finder_create_from` / `queue_finder_modify_from` |
+| The daemon's own copy goes to its staging folder. On macOS that is `<container>/Library/Application Support/beebeeb/finder-writes` (owner-only `0700`, excluded from backups), never the cache or temp dir, which the system may purge: until the upload lands it can be the only copy of the save. Copies an earlier build staged in `Library/Caches/beebeeb/finder-writes` (or the temp dir) are still read, uploaded and removed by their journalled paths, and the sign-out purge sweeps all three folders. If the folder cannot be created or written to, nothing is staged or queued and the reply is `WriteRetryLater {"message"}`, a fixed reason with no path. The extension reports it as `uploadStagingFailed`, TRANSIENT (`serverUnreachable`), so the system keeps the change and retries the write; an `Error` would reach the system as `cannotSynchronize`, which it does not retry until the item changes again. | `durable_finder_staging_root`, `write_outcome_response`, `XPCBridge.decodeWriteResponse` |
+| An accepted copy is deleted once the request is answered: queued, refused by the engine or the namespace guard, a bad `request_id`, or a repeat answered from the first attempt's result. The deletion is `unlinkat` on the held staging-directory descriptor, and only while the name still refers to the handed-over file (`fstatat` without following a link, same device and inode); a name that now refers to anything else is left for the purge. It rides in the dedup work closure, so a socket shutdown cannot delete a copy that detached work still reads. The extension deletes it after the reply too. | `StagedContents`, `handle_connection` |
+| Orphans (a crash on either side) are purged at daemon startup and every 5 minutes once they have existed for 1 hour, measured from the entry's ctime: the kernel sets it when the copy is made (an APFS clone keeps the source's mtime) and no process can set it back. Age-bound, not "everything": the extension may be staging a copy at that moment. 1 hour is six times the 600 s write timeout. | `UPLOAD_STAGING_MAX_AGE`, `purge_stale_upload_staging`, `runner.rs` |
+| Sign-out and Lock remove EVERY entry, but only once no engine can still be running (none was, or its stop is confirmed): the IPC listener runs inside the engine's task, and a listener still serving could take a request whose copy was just removed (`missing`, definitive). After a confirmed stop a request reaches no daemon, fails transiently, and the extension stages afresh for the system's retry; the system keeps its own file throughout. Sign-out's existing stop gate returns before the purge on an unconfirmed stop; Lock goes ahead on an unconfirmed stop (off Windows) and leaves the copies to the age-bound purge. Both run while the engine slot is held. | `stop_engine_for_sign_out`, `stop_engine_for_lock`, `purge_all_upload_staging_at` |
+| Every purge works through the held directory descriptor: entries are inspected with `fstatat(AT_SYMLINK_NOFOLLOW)`, a file or symlink is `unlinkat`-ed (a symlink itself, never its target), and a stray tree is removed level by level with `O_NOFOLLOW` opens, each level first given back its search bit (`fchmod 0700`) so a tree an older extension left at `0600` can still go. | `purge_upload_staging_in`, `remove_tree_at` |
+| Every refused create/modify/delete logs `warn!("Finder write refused", op, reason)` with a fixed category; never a name, path or contents. A refused purge logs its fixed category (`not_private`, ...), and the hardening's backup-exclusion warning logs the error kind only: neither logs the directory, which holds the home directory and so the account name. | `log_refused_write`, `write_outcome_response`, `log_upload_staging_purge` |
+
+Linux keeps the unconfined behaviour (`WriteContentsPolicy::AnyPath`): the
+daemon is not sandboxed and no client sends writes over its socket.
+
+Plaintext at rest: the copy is plaintext, as is the system's own staged file
+and the daemon's `StagedPayload` copy. It lives from the extension's copy until
+the reply (both sides delete it), in an owner-only, backup-excluded directory.
+A crash can leave it for at most about an hour plus one purge interval while
+the daemon runs. Sign-out and Lock remove it (after a confirmed engine stop).
+Across a restart while locked nothing purges it until the next unlock: the
+startup purge runs when the vault is unlocked, and only removes copies that
+have existed for an hour.
+
+## Versions and queued writes
+
+The extension hands an item's `contentVersion` back as the base of its next
+write, and the daemon turns that into the `base_version_number` the server
+checks: the server refuses a replacement whose base is not the file's current
+version with 409. So the version identifiers carry the server's version number,
+and a write the extension has queued must leave the user's bytes where they are.
+
+### Version identifiers
+
+| Field | Format | Changes when |
+| --- | --- | --- |
+| `content_version` (the extension's `contentVersion`, the write base) | `{current_version}`, or `{current_version}:{content_hash}` when the row has a hash | the server version changes (every content change on the server bumps it; the snapshot, the file listings and every content-changing `/sync/ops` op carry `version_number`) or the hash changes |
+| `version_identifier` (older extensions fall back to it) | `{current_version}:{modified_at}:{size_bytes}` | as above, plus the row's time and size |
+| `metadata_version` | `{modified_at}:{size_bytes}:{parent}:{name}:{status}` | any metadata change; never forces a re-download |
+| no contract (the row's contract could not be read) | `content_version` `0`, `version_identifier` `0:{modified_at}:{size_bytes}` | no known server version, so no base |
+
+`current_version` is the contract's server version. The write path reads the
+first segment as the base (`parse_base_version_number`; `0` or anything that is
+not a positive number means no base). The wall clock never appears in
+`content_version`: a finished upload and the `/sync/ops` echo of a change
+re-stamp the row's `remote_updated_at`, and that is not a content change. Builders:
+`item_content_version` and `item_version_identifier` in `engine_bridge.rs`,
+used by `file_entry_payload` in `ipc_socket.rs`.
+
+Rollout: builds before this format led both identifiers with
+`max(current_version, remote_updated_at)`. Rows whose `remote_updated_at` is
+above their server version (anything this device uploaded, or touched by an op
+echo) get a different `content_version` once; for a materialized file the system
+downloads it once more when it next reads the item.
+
+### Identifiers from earlier builds (legacy acceptance)
+
+The system keeps the identifier it was given for an item until it reads the item
+again, and sends it as the base of the next write, also when it re-sends a write
+that failed before. After an upgrade that can be an old, timestamp-led identifier.
+
+Rule (`modify_base_version`): a content modify whose base identifier is EXACTLY
+what the old formula gives for the row as it is now (the old `content_version`
+`{max(current_version, remote_updated_at)}`, with the row's hash when it has
+one, or the old `version_identifier`
+`{max(current_version, remote_updated_at)}:{modified_at}:{size_bytes}`)
+describes the row's current content, so it is based on `current_version`. Every
+other identifier is parsed as before: its first segment is the base, and a base
+the server does not hold is refused as stale. An old identifier of older content
+cannot equal the row's current one: a content change moves `current_version`,
+and every re-stamp moves `remote_updated_at`. The decision is made from the row
+before the write changes it. Limit: if an op echo re-stamps the row after the
+upgrade but before the system has read the item again, the old identifier no
+longer matches and the write is refused as stale.
+
+### Queued creates and modifies never ask the system to fetch
+
+`createItem` and `modifyItem` complete a queued write with
+`shouldFetchContent: false` in every branch (`FileProviderExtension.queuedWriteCompletion`).
+Apple reserves that flag for a provider that changed the content: the system then
+fetches the provider's copy and writes it to disk. The daemon uploads exactly the
+bytes the system handed over, so a fetch could only write the server's previous
+version over the user's edit (and, after a create, fetch an identifier the server
+never knew).
+
+| Branch | Item returned | `shouldFetchContent` |
+| --- | --- | --- |
+| queued, with an item | the item as the daemon describes it | false |
+| ignored (a temporary Finder item the daemon does not sync) | none | false |
+| queued, no item (the daemon could not read the row back) | none; for a modify Apple treats this as "delete the item on disk", unchanged existing behaviour | false |
+
+The item in a modify's reply describes the bytes the system holds: the daemon
+records the staged copy's size and modification time on the row with the
+`Uploading` status before it replies (`StateDb::record_local_write`). The content
+hash and `remote_updated_at` are untouched, so `content_version` stays until the
+upload lands. A create writes its new row from the staged copy already.
+
+### This device's queued uploads of one file form a chain
+
+```mermaid
+sequenceDiagram
+    participant S as File Provider system
+    participant D as Daemon queue
+    participant A as Server
+    S->>D: createItem t.txt -> op1 create under provisional id P
+    D->>A: op1 uploads/init (no file_id)
+    S->>D: modifyItem P (base "0") -> op2 under P, no base
+    Note over D: op2 waits: an earlier upload of P can still run
+    A-->>D: op1 complete: file S, version 1
+    D->>D: row P becomes S; op2 re-keyed to S, name re-encrypted for S, base 1
+    D->>A: op2 uploads/init (file_id S, base 1)
+    A-->>D: version 2 holds the edit
+```
+
+- **Order.** An upload waits while an earlier upload of the same file can still
+  run, paused or backing off included (`StateDb::has_earlier_live_upload`;
+  queue order is `created_at`, then insertion order). Waiting is not an attempt.
+  An op whose attempts are used up no longer blocks.
+- **Rebase.** When an upload lands (`chain_queued_ops_after_upload`), each upload
+  queued after it for the same file whose base equals the landed op's base is
+  rebased onto the version it produced: the system holds that base until it
+  reads the item again, so a quick second save carries it. An upload with no
+  base keeps none, except across a create's id swap.
+- **Create's id swap.** A create runs under a provisional id; the server mints
+  the file's id. When it lands, every op still queued under the provisional id
+  is re-keyed to the server id, and an encrypted name it carries is
+  re-encrypted under that id (the name key derives from the file id). An upload
+  with no base gets the created version. Run under the provisional id, a replace
+  would make the server create a second file under it.
+- Each op is re-read from the queue before it runs: a pass reads its list once,
+  and a landed upload can move later ops of its file.
+- Chosen over superseding a not-yet-started upload with the newer bytes:
+  superseding cannot help once the first upload is in flight, and the id swap
+  needs the re-key either way. Either way the newest bytes land last.
+- Not covered: a modify that reaches the daemon for the provisional id AFTER the
+  create landed (the row is gone, the system has not yet applied the swap) still
+  runs under the provisional id.
+
+### Logging
+
+| Event | Line (`warn!`) | Fields |
+| --- | --- | --- |
+| An upload attempt refused with 409 | `upload refused by the server (409 Conflict); will retry` | `op_id`, `file_id`, `attempt`, `max_attempts`, `base_version` |
+| The refused attempt that uses up the op's attempts | `upload refused by the server (409 Conflict); attempts used up, parked with its bytes kept in the queue` | same |
+| A hydrate over the socket answered with an error | `Finder hydrate failed` | `file_id`, `reason` (`not_found`, `unauthorized`, `forbidden`, `conflict`, `server_error`, `http_other`, `network`, `io`, `database`, `other`); a refused identifier logs `reason="invalid_identifier"` only |
+
+No name, path or URL reaches these lines: errors are classified, never printed.
+
 ## Timeouts (Swift client)
 
 Applied as `SO_RCVTIMEO`/`SO_SNDTIMEO`, i.e. per `read()`/`write()` call:
@@ -93,7 +272,7 @@ Applied as `SO_RCVTIMEO`/`SO_SNDTIMEO`, i.e. per `read()`/`write()` call:
 | Call | Timeout | Reason |
 | --- | --- | --- |
 | list / item / queue delete / queue create+modify without contents | 30 s | Database work in the daemon; answers in milliseconds. |
-| queue create / modify WITH contents | 600 s | The daemon copies the whole file into staging (`StagedPayload::copy`, synchronous) before replying and sends nothing meanwhile. A timeout here is a duplicate hazard: the extension reports failure, the daemon still queues the upload, Finder retries and queues it again under a fresh id. 600 s covers 15 GB at 25 MB/s (a same-volume APFS copy is a clone, near-instant). A copy longer than that still times out; task 1684 closes that with a stable `request_id` the daemon dedups on (next section). |
+| queue create / modify WITH contents | 600 s | The daemon copies the whole file into staging (`StagedPayload::copy_from_file`, synchronous) before replying and sends nothing meanwhile. A timeout here is a duplicate hazard: the extension reports failure, the daemon still queues the upload, Finder retries and queues it again under a fresh id. 600 s covers 15 GB at 25 MB/s (a same-volume APFS copy is a clone, near-instant). A copy longer than that still times out; task 1684 closes that with a stable `request_id` the daemon dedups on (next section). |
 | hydrate | 600 s idle | Each progress frame restarts it. The daemon's HTTP client allows 30 s per request (`api_client.rs`) and a hydrate makes one metadata request plus one per chunk; an older daemon sends no progress and is silent for the whole download. 20x the per-request ceiling also covers `download_kbps_limit` pacing sleeps. |
 | thumbnail | 60 s | One small encrypted variant + decrypt + atomic staging (`IPCFraming.thumbnailTimeoutSeconds`, task 1699). 2x the metadata ceiling; far below hydrate because it is never a whole-file download. |
 
@@ -172,7 +351,7 @@ shared by all connections, bounded to 4096 entries and a 30 minute TTL.
 | no `request_id` (0.8.6 extension) | exactly the pre-1684 path: the work runs inline, nothing is remembered |
 | `request_id` empty, over 128 bytes or containing a control character | `Error{"request_id must be 1 to 128 printable bytes"}`; nothing is queued |
 
-Only `WriteQueued` replies are remembered. An `Error` is delivered to requests that were
+Only `WriteQueued` replies are remembered. An `Error` or `WriteRetryLater` is delivered to requests that were
 already waiting on that run, but a later retry runs the work again (a failed attempt must not
 poison the key).
 
@@ -425,6 +604,11 @@ so no plaintext ever crosses the socket.
 | new | old (before 1697) | The old daemon answers `ListChanges` with `unknown variant` — an `Error` reply the replica surfaces as `finishEnumeratingWithError`, and `currentSyncAnchor` falls back to the persisted App Group copy. The old daemon ignores the new payload fields (`created_at`, `modified_at`, `child_item_count`, `content_version`, `metadata_version`), so listings work with no dates/counts. |
 | new | old (before 1698) | The old daemon ignores the `pinned` field (`#[serde(default)]`). It has no trash-container arm: a `ListFileProviderItems` for the trash container falls through to the real-folder branch (empty), `Trashing` rows still enumerate at the root (pre-1698 shape), and `QueueFinderDelete` for an unknown id queues a doomed op. The extension treats an unknown trash container as an empty listing — honest degradation, no crash. |
 | new | old (before 1699) | The old daemon replies `unknown variant` to `FetchThumbnail`; the extension surfaces a per-thumbnail error and Finder falls back to generic icons. Browsing, hydrate and writes are unaffected. The old extension never sends `FetchThumbnail` and never sent the now-retired `SetFileStatus`/`RecordOpenedFile`/`EnforceSmartCache`, so a new daemon plus old extension is a no-change pair for 1699. |
+| new | old (before upload staging) | The extension sends an App Group copy. The App Group is shared with the app, so the old daemon can read it by construction (not device-tested); the old daemon does not delete the copy, the extension's `defer` does. |
+| old (before upload staging) | new | The old extension sends the system's contents URL; the daemon refuses it (`outside_staging`, logged) instead of failing to read it. Same user-visible failure as before; both halves ship in one app bundle, so this only lasts until the update completes. |
+| new (server-version identifiers) | old | The old daemon keeps sending timestamp-led identifiers and parsing them as bases: the refusals this section describes continue until the update completes. The new extension no longer asks for a fetch after a queued write, so the user's bytes stay on disk. Not device-tested. |
+| old (fetches after a queued write) | new | The old extension still completes queued writes with `shouldFetchContent: true`, so the system writes the server's current version over the edit; the new daemon queues the edit with the right base, and the system shows the edit again once the upload lands (inferred, not device-tested). Both halves ship in one app bundle. |
+| any | new, system holds an identifier from an earlier build | The legacy acceptance rule above: an old identifier of the row's current content is based on `current_version`; any other is parsed as before. |
 | old | new | The old extension writes its request with no delimiter and does not close: `FrameReader` accepts a buffer that is already one complete JSON value. It requests no progress, so it gets one reply, now `{"Ok":{}}\n` (which its parser accepts). It sends no `request_id`, so its write-queue requests take the pre-1684 path. |
 
 ## Tests
@@ -441,4 +625,14 @@ so no plaintext ever crosses the socket.
 | Swift badge mapping (status→decoration identifier, one badge per item, unknown status → none), thumbnail variant/max-dimension/eligibility helpers, `FetchThumbnail` request shape + reply decoding, thumbnail timeout constant, `pendingItemsDidChange` completes | same file (`1699-D*`, `1699-T*`, `1699-P1`) | same |
 | Daemon table: concurrent same key runs once, repeat after completion, different keys, TTL expiry, key reused for another request shape, stale result, refreshed cache hit, `forget_where`, failed result not remembered, panicking leader, capacity | `ipc_write_dedup_tests.rs` | `cargo test` counts |
 | Daemon over the real socket, counting REAL queued operations in the state DB | `ipc_socket_framing_tests.rs` (`concurrent_creates_with_one_request_id_...`, `a_repeat_after_completion_...`, `different_request_ids_...`, `a_request_without_a_request_id_...`, `a_cached_create_is_not_returned_...`, `concurrent_modifies_...`, real-delete-then-recreate, trash op finished, trash op pending, `Trashing` row, refreshed reply). The two concurrency tests hold the state DB lock so the leader is parked and every request provably overlaps it; with a tiny source file they would otherwise finish serially and exercise the cached path instead of the in-flight wait | `cargo test` counts |
-| XPCBridge call sites still use the builder and pass the key inputs (XPCBridge is not compiled into the Swift harness) | `scripts/check-ipc-timeouts.py` (+ `--self-test`, 14 mutations) | `ipc-timeout guard: 3/3 call sites correct` |
+| XPCBridge call sites still use the builder and pass the key inputs, stage the contents, send the staged path and discard the copy | `scripts/check-ipc-timeouts.py` (+ `--self-test`, 20 mutations) | `ipc-timeout guard: 3/3 call sites correct` |
+| Upload staging, daemon: contents validation (inside / outside / `..` / `.` / symlink / missing / not a file / FIFO without blocking / hard link / malformed / staging dir missing, a symlink, or another user's), the checks on the opened descriptor, the engine reading the validated file after the entry was swapped for a symlink, the copy deleted on success and on every refusal (through the held directory, never through a swapped-in symlink, never a file that took its name), never for a refused path, kept while detached work still reads it at socket shutdown, the age-bound purge by ctime (an old mtime never makes a copy stale), the purge refusing a symlinked staging dir, removing trees without following links and `0600` trees, refusal and hardening logging (category only, no path) | `ipc_socket.rs` tests (`staged_contents_*`, `upload_staging_*`, `a_staging_dir_*`, `a_hard_link_*`, `a_fifo_*`, `the_checks_on_the_opened_file_*`, `dropping_*`, `a_fresh_copy_*`, `a_copy_is_purged_*`, `a_refused_upload_staging_purge_*`, `a_failed_backup_exclusion_*`, `macos_prepare_upload_staging_dir_*`, `every_refused_write_*`), `staged_payload.rs` (`copy_from_file_*`), `ipc_socket_framing_tests.rs` (`staged_*`, `contents_not_directly_*`, `a_write_refused_*`, `concurrent_staged_*`, `a_create_still_in_flight_*`, `a_staged_copy_swapped_*`) | `cargo test` counts |
+| Upload staging, sign-out and Lock: every copy removed after a confirmed stop or with no engine; nothing removed on an unconfirmed stop (sign-out refuses, also on the retry; Lock goes ahead); the real App Group directory is never resolved under test | `lib.rs` `signout_teardown_tests` (`sign_out_*_upload_staging`, `lock_*_upload_staging`, `the_session_purge_never_targets_*`) | `cargo test` counts |
+| Upload staging, extension: directory path and `0700`, UUID names, exact bytes + `0600` + fresh mtime, a failed copy is transient with no file left and no path in the text, discard, a package or symlink refused definitively before anything is copied | `BeebeebFileProviderTests/main.swift` (`upload-staging-S1`..`S6`) | `ipc-framing: N passed, 0 failed` |
+| Queued writes never ask for a fetch (all three completion branches) | `BeebeebFileProviderTests/main.swift` ("a queued create or modify never asks the system to re-fetch its own bytes") | `ipc-framing: N passed, 0 failed` |
+| Version identifiers lead with the server version; an op echo leaves `content_version` unchanged; no contract carries no base; a cached reply carries the current version | `ipc_socket.rs` tests (`version_identifiers_lead_with_*`, `an_op_echo_leaves_*`, `the_payload_without_a_contract_*`), `ipc_socket_framing_tests.rs` (`a_cached_reply_reports_*`) | `cargo test` counts |
+| A modify after a desktop upload sends the server version as its base, against a server mock that refuses a wrong base with 409 | `engine_bridge.rs` (`a_modify_after_a_desktop_upload_*`, `VersionedServerMock`) | `cargo test` counts |
+| Legacy identifiers: the current content's old identifier is based on `current_version`; older content stays a stale base (also refused by the mock); new-format identifiers parse as before | `engine_bridge.rs` (`a_legacy_identifier_*`, `a_current_format_identifier_*`) | `cargo test` counts |
+| A queued modify's reply carries the staged size and time | `ipc_socket_framing_tests.rs` (`a_queued_modify_replies_with_the_size_*`) | `cargo test` counts |
+| The chain: a second save rebases after the first lands; a later save waits for an earlier one in backoff; a modify queued while its create uploads lands on the one created file, with its name encrypted under the server id | `engine_bridge.rs` (`a_second_queued_save_*`, `a_later_save_waits_*`, `a_modify_queued_while_its_create_*`) | `cargo test` counts |
+| Logging: 409 refusals per retry and at the park, failed hydrates by category, no name, path or URL | `engine_bridge.rs` (`an_upload_refused_with_409_*`), `ipc_socket.rs` (`a_failed_hydrate_is_logged_*`) | `cargo test` counts |
