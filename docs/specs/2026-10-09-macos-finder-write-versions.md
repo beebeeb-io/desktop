@@ -674,7 +674,16 @@ N is queued with `after_write_id = W` whatever W's state: running, waiting, back
   - ~~With no session, N supersedes it (§8.2).~~ (no supersede, §8.2) — lead ruling, 2026-10-10 (spec review)
   - **A stale-base 409 at `init` parks the op at once,** not after 25 attempts, about 5.6 h (`EB:4933-4936`). A stale base never becomes valid again: the server's version only grows (`UP:782-787`).
   - **(4b) A missing staged payload parks the op at once** (`payload_missing`).
-    - "Missing" means `metadata()` on the payload path returns `NotFound`. The staged copy lives in the app's own container and cannot come back.
+    - ~~"Missing" means `metadata()` on the payload path returns `NotFound`. The staged copy lives in the app's own container and cannot come back.~~
+    - "Missing" means `metadata()` on the payload path returns `NotFound`. A staged copy that is gone cannot come back.
+    - **Where the staged copy lives (macOS).** The app stages its own copy of an accepted save in `dirs::data_dir()/beebeeb/finder-writes`, which is the container's `Library/Application Support/beebeeb/finder-writes`. The folder is mode `0700` and excluded from backups, because it holds plaintext.
+      - Why: once the extension has handed a write to the app, macOS counts the item as synced and may evict its local bytes under disk pressure. Until the upload lands, the staged copy can be the only copy of the save. The copy used to live in `dirs::cache_dir()/beebeeb/finder-writes` (the container's `Library/Caches`), with a fallback to `std::env::temp_dir()`. The system may delete either to free space.
+      - No fallback. If the folder cannot be created or written to, the accept stages nothing and queues nothing. The app replies `WriteRetryLater`, with a fixed reason and no path. The extension reports `NSFileProviderErrorServerUnreachable` (`uploadStagingFailed`), so macOS keeps the item's changes on disk and retries the write.
+        - An `Error` reply would reach macOS as `NSFileProviderErrorCannotSynchronize`, and the system does not retry that until the item changes again (`NSFileProviderError.h:93-98`).
+        - Not covered: the copy itself failing after the folder passed its check (for example, a disk that fills during the copy) is an `Error` reply, as today.
+      - The old folders: a journal row written before the move names its copy by an absolute path in the old folder. That copy is read, uploaded, released and unlinked as before; engine start unlinks a released copy wherever it is (§8.7 S6). The sign-out purge and the account reset sweep the new folder and both old ones, and the sign-out purge's path allow-list accepts all three.
+      - Windows and Linux keep today's folder and its fallback.
+      - — lead ruling, 2026-10-10 ([staging-durable]; the retry reply: [t6b-q])
     - Any other error reading it (permission, I/O) retries as today.
     - Today a missing payload is an ordinary failure (`EB:709-713`), retried 25 times (`EB:517-533`). That is I4's own case.
   - ~~**A predecessor that parks for any reason** (stale base, missing payload, another 4xx) hands its place, base and position to its direct successor, as in §8.2. A successor that inherits a stale base meets 409 and parks too. Its bytes contain the predecessor's, so keeping them is enough.~~
@@ -1051,6 +1060,7 @@ Every test is seen RED before it passes, and its mutation is seen RED on the int
 - log capture with the second dispatcher (`EB:13352`, `IPC:4993`).
 
 **Swift style:** `check(…)` in `BeebeebFileProviderTests/main.swift`. `EXPECTED_TESTS` goes from 94 to ~~95~~ 96 (`scripts/test-ipc-framing.sh:20`): T20 and T44. — lead ruling, 2026-10-10 (spec review)
+  `EXPECTED_TESTS` goes from 94 to ~~96~~ 97: T20, T44, and the `WriteRetryLater` decode check (§8.4, the staging folder), which lands first and takes the count to 95. — lead ruling, 2026-10-10 ([t6b-q])
 
 **Concurrency tests (4b, §8.7).** Each one forces its interleaving deterministically with a test-only hook, a `#[cfg(test)]` callback in `EngineBridge` at a named seam:
 - `accept:before_tx`: the accept path, just before its one `StateDb` call;
