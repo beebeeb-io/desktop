@@ -29,8 +29,14 @@ Each item has file:line evidence. None blocks a task; each is resolved in this p
 11. **Keep Mine runs `upload_version` inline, outside the queue** (`EB:3172-3200`, `max_attempts: 1`). The guarded resume write of §8.7 S4 (`INSERT … WHERE EXISTS (the op)`) would match no row for it. **Plan:** the upload path takes an optional claim; with none (Keep Mine) it keeps today's unguarded writes (Task 2).
 12. **Minting must stay off the shared `queue_finder_*` entry points** (§8.8): the upload driver (`EB:2050`) and the watcher (`watcher.rs:727`, `:865`) call them too. **Plan:** two new entry points, `queue_file_provider_create_from` and `queue_file_provider_modify_from`, used by the IPC arms (`IPC:1832`, `IPC:1877`) and by the Finder tests. `queue_finder_*` keep today's behaviour (Task 3).
 
-13. **The IPC socket is not macOS-only.** `serve_ipc` runs on every unix build (`RUN:1115-1128`), and the spec's scope is "the macOS File Provider path only … Linux behaviour is unchanged". The Windows engine also runs engine start. **Plan:** the IPC arms reach the minting entry points only on macOS (`#[cfg(target_os = "macos")]`, Task 3), and the earlier-build marking runs at engine start only on macOS (Task 10; on Windows it would hand write ids to Cloud Files uploads, whose `None` bases the `init` guard would then park). The snapshot fill and raise (Task 6) stay cross-platform: with no held token they only make a row's version more accurate. The lead may rule otherwise.
+13. **The IPC socket is not macOS-only.** `serve_ipc` runs on every unix build (`RUN:1115-1128`), and the spec's scope is "the macOS File Provider path only … Linux behaviour is unchanged". The Windows engine also runs engine start. **Plan:** the IPC arms reach the minting entry points only on macOS (`#[cfg(target_os = "macos")]`, Task 3), and the earlier-build marking runs at engine start only on macOS (Task 10; on Windows it would hand write ids to Cloud Files uploads, whose `None` bases the `init` guard would then park). Lead ruling 2026-10-10 (plan review): resolution 13 is overruled. Everything in this P0 is gated to macOS, the snapshot fill and raise included. Windows and Linux are unchanged, and task 1879 decides whether they have the same gap. The gate forms are in Conventions. One exception, by a second ruling of the same date: M5 (Task 11) runs on every platform, because it bounds what a log line may contain and changes no behaviour.
 14. **D1 expects two log lines where the logger writes one.** D1's pass reads "one 409 line with `class=stale_base`, then one `parked …` line". The existing logger writes one line per attempt, the parked form of `upload refused …` (`EB:4004-4027`), and §11 caps it at "at most one line per write or per attempt". **Plan:** D1 accepts one line that carries `409`, `class=stale_base`, `parked` and the op id (Task 13).
+15. **Log lines this plan adds that §11 does not list** (plan review). No ruling covers them; each can be rejected on its own.
+    - `row_unreadable`: a second reason of `Finder write refused` (Task 8 step 5.2). **Plan:** kept, and added to Task 12's log table as a plan addition. It replaces an item-less reply, which §7.3 forbids.
+    - Two `info!` lines at engine start (Task 2 step 6 and Task 10 step 3): the repair count and the earlier-build count.
+    - `warn!` lines that carry `error = %e`, where §11 allows no error text: Task 2 step 5.3 (`staged upload cleanup deferred`) and step 6, Task 10 step 3. The first mirrors a line the engine already has (`EB:1028`); the others are start-up diagnostics, not Finder writes, in the style of the runner's existing start-up warnings (`RUN:1006`).
+    - **Plan:** the last two are kept as written and listed here, not decided: the lead keeps or strikes each.
+16. **The accept clears `version_filled`** (plan review). Spec §6.1 clears the flag only on a content op, a landing or a restore. Task 6 step 4 also clears it in the accept transaction, after a content write. Effect: after a Finder write is accepted, a save with an unknown base parks (rule 6a′) until a snapshot fills the version again, instead of resolving to the current version. **Plan:** kept and disclosed here; to reject it, delete the `version_filled = 0` sentence at Task 6 step 4 (the paragraph that begins "`accept_finder_write`'s `Modify` branch adds").
 
 ## Global Constraints
 
@@ -109,7 +115,12 @@ grep "test result:" $EVID/r4-t<N>-cargo-test.log
 ```
 
   Expected: `check rc=0`; the count guard passes; the first `test result:` line (the lib) reads `ok. <L> passed; 0 failed; 4 ignored`; `keychain` 20, `windows_session_wiring` 8, `windows_signout_cleanup` 3 (the round-3 gate, `QA/lead-gate-r3-cargo-test.log`).
-- **Unix-only tests.** `ipc_socket` is compiled only on unix (`lib.rs:40-41`). Every new test that names `crate::ipc_socket` (directly, or through `arm_builder_seam`, `write_outcome_response`, `file_status_response`, `file_entry_payload_for_db`, `hydrate_failure_reply` or `CAP_WRITE`) carries `#[cfg(unix)]`, as `held_content_version` already splits (`EB:12898-12911`). Windows CI then compiles without them.
+- **Unix-only tests.** `ipc_socket` is compiled only on unix (`lib.rs:40-41`). Every new test that names `crate::ipc_socket` (directly, or through `arm_builder_seam`, `write_outcome_response`, `file_status_response`, `file_entry_payload_for_db`, `hydrate_failure_reply` or `CAP_WRITE`), **and every test that asserts a write token through `held_content_version` or `land_one_save`** (off unix, `held_content_version` returns `item_content_version(cv)`, never a token, `EB:12898-12911`), carries `#[cfg(unix)]`, as `held_content_version` already splits (`EB:12898-12911`). Windows CI then compiles without them. A helper that only such tests call (`land_one_save`, `remote_update`) carries `#[cfg(unix)]` too, so a Windows test build has no unused helper.
+- **Gate forms (lead ruling 2026-10-10, plan review; resolution 13 overruled: everything in this P0 is gated to macOS).** A behaviour that only a File Provider write can reach is data-gated: it applies only when the op has a write id (`claimed.write.is_some()` in the engine, `write_id IS NOT NULL` in SQL). Only macOS mints write ids (Task 3 step 5.7) or marks them (Task 10), so other platforms are unchanged and the tests still run on Linux CI. A behaviour with no write id to key on is gated with `#[cfg(target_os = "macos")]`, and its tests carry `#[cfg(target_os = "macos")]`. CI runs Rust tests only on Linux and Windows (`ci.yml:51-104`, `:150-160`), so those tests run only in the lane's and the lead's macOS gates. Lib counts stay macOS counts.
+  - **Where the gate sits (lead choice, 2026-10-10).** Behaviour is gated at its call sites, in macOS-only code (`#[cfg(target_os = "macos")]`), or in a step keyed on the write id. The shared `StateDb` helpers (the columns, `claim_operation`, `accept_finder_write`, `apply_landing`, the readers) compile on every target; a helper that only macOS code (or a test) calls carries the crate's existing `#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]` (`ipc_socket.rs:729`, `:856`), so Windows and Linux builds stay free of dead-code warnings.
+  - **Tests run on every target where they can.** A test of a shared helper or of a write-keyed step carries no `cfg` and runs on Linux and Windows CI too. A test of a macOS-gated behaviour carries `#[cfg(target_os = "macos")]`. A test that names `crate::ipc_socket`, or asserts a token through `held_content_version` or `land_one_save`, carries `#[cfg(unix)]` (the bullet above).
+  - **Each task has a Gate line** saying which of these applies to it.
+  - **The one exception is M5 (Task 11), by the lead's second ruling:** it runs on every platform, Linux included. It bounds what a log line may contain: log hygiene, not a behaviour change.
 - **Lib counts.** `L0` is the lib count measured in Task 1 step 0 (959 at the round-3 gate, `QA/lead-gate-r3-cargo-test.log`; re-measured, not assumed). Each task names its expected count as `L0 + k`, where `k` counts only new test functions. A test changed in place keeps the count. All counts are on macOS; `#[cfg(unix)]` IPC tests do not run on Windows CI.
 - **Mutation step (every new test).** Apply the named mutation, run the test's filter, confirm RED on the named assertion, revert, run it green. Paste the RED line and the green line into the task file's Notes, with the log paths.
 - **Commits:** one commit per task, explicit pathspec, the lane's own trailer. Lanes never commit `graphify-out/` and never push; the lead pushes.
@@ -119,6 +130,8 @@ grep "test result:" $EVID/r4-t<N>-cargo-test.log
 ## Task 1: Schema, the token module, the one-read presentation (spec §5.1–§5.3, §5.2; commit 1)
 
 No behaviour changes: the columns are added and nothing writes them yet.
+
+**Gate:** nothing to gate, because nothing behaves differently. The migration runs on every platform (it is additive and nullable). `write_token.rs` and the new `StateDb` readers compile on every target; until macOS code calls them they carry `#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]`. All three tests carry no `cfg` and run on every target (none names `crate::ipc_socket`).
 
 **Files:**
 - Create: `src-tauri/src/write_token.rs`
@@ -204,6 +217,7 @@ mod tests {
         let landed = HeldWrite { version: Some(2), object_version_id: Some("o2".into()), ..queued.clone() };
         assert_eq!(held_token(Some(&landed), false, 2, Some("o2")), Some(landed.token()), "our own landing");
         assert_eq!(held_token(Some(&landed), false, 3, Some("o3")), None, "a remote change");
+        assert_eq!(held_token(Some(&landed), false, 3, Some("o2")), None, "a new version under the same object id (a legacy one-shot replace keeps the object id, EB:6169-6174)");
         assert_eq!(held_token(Some(&landed), false, 2, Some("o9")), None, "same number, other object");
         assert_eq!(held_token(Some(&landed), false, 2, None), None, "m-3: the row's NULL never matches");
         let no_object = HeldWrite { object_version_id: None, ..landed.clone() };
@@ -557,6 +571,7 @@ cd $WT/src-tauri && $LOCK cargo-build -- cargo test --locked -p beebeeb-desktop 
 Expected: `ok. 3 passed; 0 failed`. Mutations, each RED then reverted:
 - T7: `render` emits `self.base + 1` → `token_format_and_older_parse` fails at `parse_base_version_number(...) == Some(2)` (`$EVID/r4-t1-mut-T7.log`).
 - P1: `matches!` arm also accepts `(None, _) | (_, None)` → `held_token_is_some_exactly_in_the_predicate_cases` fails at "m-3: the row's NULL never matches" (`$EVID/r4-t1-mut-P1.log`).
+- P1b: `landed_here` ignores `held.version` (drop `held.version == Some(current_version) &&`) → `held_token_is_some_exactly_in_the_predicate_cases` fails at "a new version under the same object id" (`$EVID/r4-t1-mut-P1b.log`).
 - T36: replace one `ensure_column(&conn, "files", "held_base", "INTEGER")?` with `conn.execute("ALTER TABLE files ADD COLUMN held_base INTEGER", [])?;` → the second `StateDb::open` fails with "duplicate column name" (`$EVID/r4-t1-mut-T36.log`).
 
 - [ ] **Step 6: Gate and commit**
@@ -576,6 +591,14 @@ git commit -m "feat(desktop): the write-token columns, the token helpers and a o
 
 Every later rule uses these. Behaviour visible to a person changes in one way only: uploads of one file run in insertion order even when the clock steps back (M2).
 
+**Gate:** the claim, the guarded writes, the seams and `QueueStateMoved` are plumbing on the runner path of every platform. They are shared `StateDb` and engine code that compiles and runs everywhere, and the round-3 queue tests exercise them on every target. Four behaviours are `#[cfg(target_os = "macos")]`, because they have no write id to key on:
+- queue order by `rowid` (other platforms keep `created_at`, then `rowid`);
+- restores joining the content order (keyed on the write id: a restore waits only for Finder writes, and only Finder writes wait for a restore);
+- the post-commit release of the staged copy (elsewhere `finish_completed_upload` unlinks it, as today);
+- the engine-start unlink of released copies.
+
+Tests: P2 and T42 carry no `cfg`; the engine-start test carries no `cfg` and splits its released-payload assertion by platform; T29 carries `#[cfg(target_os = "macos")]`.
+
 **Files:**
 - Modify: `src-tauri/src/state_db.rs`: queue order (`SD:2677`, `SD:3091`); remove `has_earlier_live_upload` (`SD:3097-3118`); add `ParkReason`, `ClaimOutcome`, `ClaimedOp`, `claim_operation`, the guarded writes, `finish_claimed`, `EngineStartRepair`, `engine_start_repair`, `set_created_at_for_test`
 - Modify: `src-tauri/src/engine_bridge.rs`: `EngineBridge` (`EB:207-229`) and `new_with_stop_flag` (`EB:398-406`) gain `seams`; `process_due_operations` (`EB:462-539`); `execute_operation` (`EB:542-650`); `upload_version` / `do_upload_version` (`EB:651-890`); `finish_completed_upload` (`EB:998-1032`); Keep Mine's inline call (`EB:3193-3201`); the `VersionedServerMock` (`EB:12631-12863`)
@@ -594,8 +617,8 @@ Every later rule uses these. Behaviour visible to a person changes in one way on
   - `StateDb::park_claimed(&self, op_id: &str, claim_id: &str, reason: ParkReason, now: i64) -> Result<bool>`
   - `StateDb::put_upload_resume_claimed(&self, resume: &UploadResume, claim_id: &str) -> Result<bool>`
   - `StateDb::finish_claimed(&self, op_id: &str, claim_id: &str, release_payload: Option<&str>) -> Result<bool>`
-  - `pub struct EngineStartRepair { pub claims_cleared: usize, pub released_payloads: Vec<String> }`; `StateDb::engine_start_repair(&self) -> Result<EngineStartRepair>` (Tasks 6, 8, 9, 10 extend it)
-  - `#[cfg(test)] StateDb::set_created_at_for_test(&self, op_id: &str, created_at: i64)`
+  - `pub struct EngineStartRepair { pub claims_cleared: usize, pub released_payloads: Vec<String> }`; `StateDb::engine_start_repair(&self) -> Result<EngineStartRepair>` (Tasks 6 and 8 extend it)
+  - `#[cfg(test)] StateDb::set_created_at_for_test(&self, op_id: &str, created_at: i64)`, `#[cfg(test)] StateDb::set_write_id_for_test(&self, op_id: &str, write_id: &str)`
   - every `bool` above: `true` = exactly one row matched; `false` = the op moved since the claim, nothing was written (S2)
   - engine: `pub(crate) struct QueueStateMoved` (an error type), `fn log_queue_state_moved(op_id: &str, step: &'static str)`; `#[cfg(test)] pub(crate) struct Seams` with `arm(&self, name: &'static str, hook: impl FnOnce() + Send + 'static)`; `fn seam(&self, name: &'static str)` on `EngineBridge` (a no-op outside tests). Seam names used in this plan: `"claim:before_tx"`, `"accept:before_tx"`, `"landing:after_complete"`.
   - `execute_operation(&self, claimed: &ClaimedOp, …) -> anyhow::Result<Option<String>>`: `Some(path)` is the staged payload to release after the op's removal commits (non-Windows uploads).
@@ -607,6 +630,7 @@ Every later rule uses these. Behaviour visible to a person changes in one way on
 In `engine_bridge.rs` tests:
 
 ```rust
+    #[cfg(target_os = "macos")] // other platforms keep created_at order
     #[tokio::test]
     async fn m2_order_is_insertion_order_when_the_clock_steps_back() {
         let dir = tempfile::tempdir().unwrap();
@@ -662,9 +686,13 @@ In `engine_bridge.rs` tests:
                     bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
                 },
                 async {
-                    while server.state.lock().unwrap().inits.is_empty() {
-                        tokio::time::sleep(Duration::from_millis(5)).await;
-                    }
+                    tokio::time::timeout(Duration::from_secs(10), async {
+                        while server.state.lock().unwrap().inits.is_empty() {
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                        }
+                    })
+                    .await
+                    .expect("init never reached the mock");
                     // The revoked-share purge path (SD:2587-2620): a bulk delete by file id.
                     bridge.db.purge_revoked_shared_content(&[]).unwrap();
                 }
@@ -717,6 +745,9 @@ In `state_db.rs` tests:
         db.enqueue_operation(&queued("u1", OperationKind::UploadVersion, "f", None)).unwrap();
         db.enqueue_operation(&queued("r", OperationKind::RestoreVersion, "f", None)).unwrap();
         db.enqueue_operation(&queued("u2", OperationKind::UploadVersion, "f", None)).unwrap();
+        // A restore and an upload wait for each other only when the upload is a Finder write.
+        db.set_write_id_for_test("u1", &"1".repeat(32));
+        db.set_write_id_for_test("u2", &"2".repeat(32));
 
         assert!(matches!(db.claim_operation("r", 1).unwrap(), ClaimOutcome::Wait), "a restore waits for an earlier upload");
         let ClaimOutcome::Claimed(u1) = db.claim_operation("u1", 1).unwrap() else { panic!("u1 is first") };
@@ -739,7 +770,11 @@ In `state_db.rs` tests:
         let repair = db.engine_start_repair().unwrap();
 
         assert_eq!(repair.claims_cleared, 1);
+        // The release journal is macOS-only: elsewhere nothing is released at engine start.
+        #[cfg(target_os = "macos")]
         assert_eq!(repair.released_payloads, vec!["/staged/free".to_string()]);
+        #[cfg(not(target_os = "macos"))]
+        assert!(repair.released_payloads.is_empty(), "{:?}", repair.released_payloads);
         assert!(
             !db.record_attempt_claimed("u1", &stale.claim_id, 1, 0, None).unwrap(),
             "a claim from before the restart guards nothing"
@@ -753,13 +788,27 @@ In `state_db.rs` tests:
 cd $WT/src-tauri && $LOCK cargo-build -- cargo test --locked -p beebeeb-desktop --lib -- m2_order_is_insertion_order the_runners_copy_never_resurrects a_restore_and_an_upload_of_one_file engine_start_clears_claims > $EVID/r4-t2-red.log 2>&1; echo "rc=$?"; grep -E "error\[|FAILED|panicked|test result" $EVID/r4-t2-red.log | head
 ```
 
-Expected: compile errors for `set_created_at_for_test`, `delay_init`, `claim_operation`, `ClaimOutcome`, `finish_claimed`, `engine_start_repair`, `record_attempt_claimed`. Add those as `todo!()`-free stubs only if needed to reach a behavioural RED: T29 then fails "the newest bytes land last" (created_at order runs the newer save first) and T42 fails "no resume row for a purged op" (`put_upload_resume`, `SD:3152-3160`, upserts a row for the deleted op).
+Expected: compile errors for `set_created_at_for_test`, `set_write_id_for_test`, `delay_init`, `claim_operation`, `ClaimOutcome`, `finish_claimed`, `engine_start_repair`, `record_attempt_claimed`. Add those as `todo!()`-free stubs only if needed to reach a behavioural RED: T29 then fails "the newest bytes land last" (created_at order runs the newer save first) and T42 fails "no resume row for a purged op" (`put_upload_resume`, `SD:3152-3160`, upserts a row for the deleted op).
 
 - [ ] **Step 3: The queue order (M2)**
 
-- `list_due_operations` (`SD:2677`): `ORDER BY created_at ASC, rowid ASC` → `ORDER BY rowid ASC`.
-- `list_operations_for_file` (`SD:3091`): the same change.
-- Delete `has_earlier_live_upload` (`SD:3097-3118`); its only caller (`EB:494`) moves into the claim. Update the doc comment that names it (`EB:1213`) to name `StateDb::claim_operation`.
+- `list_due_operations` (`SD:2677`) and `list_operations_for_file` (`SD:3091`): `ORDER BY rowid ASC` and `earlier.rowid < this.rowid` under `#[cfg(target_os = "macos")]`. Other platforms keep `ORDER BY created_at ASC, rowid ASC` and `has_earlier_live_upload`'s `created_at`-then-`rowid` comparison (`SD:3112-3113`). Use two `const` SQL strings each (both pairs are `cfg` variants of the same name):
+
+```rust
+#[cfg(target_os = "macos")]
+const DUE_ORDER_SQL: &str = "ORDER BY rowid ASC";
+#[cfg(not(target_os = "macos"))]
+const DUE_ORDER_SQL: &str = "ORDER BY created_at ASC, rowid ASC";
+
+#[cfg(target_os = "macos")]
+const EARLIER_IN_QUEUE_SQL: &str = "earlier.rowid < this.rowid";
+#[cfg(not(target_os = "macos"))]
+const EARLIER_IN_QUEUE_SQL: &str =
+    "earlier.created_at < this.created_at OR (earlier.created_at = this.created_at AND earlier.rowid < this.rowid)";
+```
+
+  Both queries splice `DUE_ORDER_SQL` in with `format!`. T29 carries `#[cfg(target_os = "macos")]`.
+- Delete the function `has_earlier_live_upload` (`SD:3097-3118`); its only caller (`EB:494`) moves into the claim, which keeps its comparison as `EARLIER_IN_QUEUE_SQL`. Update the doc comment that names it (`EB:1213`) to name `StateDb::claim_operation`.
 
 - [ ] **Step 4: The claim and the guarded writes in `state_db.rs`**
 
@@ -840,15 +889,22 @@ On `impl StateDb`:
             return Ok(ClaimOutcome::Gone);
         };
         if is_content_kind(&op.kind) {
+            // A restore waits only for Finder writes, and only Finder writes wait for a restore
+            //: Windows and the watcher keep round 3's upload-only order. The order itself
+            // is `EARLIER_IN_QUEUE_SQL` (Step 3).
             let earlier: bool = tx.query_row(
-                "SELECT EXISTS(
-                    SELECT 1 FROM operation_queue AS this
-                    JOIN operation_queue AS earlier
-                      ON earlier.file_id = this.file_id AND earlier.op_id != this.op_id
-                    WHERE this.op_id = ?1
-                      AND earlier.kind IN ('upload_version', 'upload_file', 'restore_version')
-                      AND earlier.attempts < earlier.max_attempts
-                      AND earlier.rowid < this.rowid)",
+                &format!(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM operation_queue AS this
+                        JOIN operation_queue AS earlier
+                          ON earlier.file_id = this.file_id AND earlier.op_id != this.op_id
+                        WHERE this.op_id = ?1
+                          AND earlier.kind IN ('upload_version', 'upload_file', 'restore_version')
+                          AND earlier.attempts < earlier.max_attempts
+                          AND ({EARLIER_IN_QUEUE_SQL})
+                          AND (this.kind != 'restore_version' OR earlier.write_id IS NOT NULL)
+                          AND (earlier.kind != 'restore_version' OR this.write_id IS NOT NULL))"
+                ),
                 params![op_id],
                 |row| row.get(0),
             )?;
@@ -991,6 +1047,8 @@ On `impl StateDb`:
             "UPDATE operation_queue SET claim_id = NULL, claimed_at = NULL WHERE claim_id IS NOT NULL",
             [],
         )?;
+        // macOS only: the release journal is written only by the macOS landing.
+        #[cfg(target_os = "macos")]
         let released_payloads = {
             let mut stmt = tx.prepare(
                 "SELECT path FROM staged_payloads
@@ -1003,6 +1061,8 @@ On `impl StateDb`:
             let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
             rows.collect::<Result<Vec<_>>>()?
         };
+        #[cfg(not(target_os = "macos"))]
+        let released_payloads: Vec<String> = Vec::new();
         tx.commit()?;
         Ok(EngineStartRepair { claims_cleared, released_payloads })
     }
@@ -1011,6 +1071,13 @@ On `impl StateDb`:
     pub(crate) fn set_created_at_for_test(&self, op_id: &str, created_at: i64) {
         let conn = self.0.lock().unwrap();
         conn.execute("UPDATE operation_queue SET created_at = ?2 WHERE op_id = ?1", params![op_id, created_at]).unwrap();
+    }
+
+    /// P2: a Finder write is an op with a write id; the restore/upload wait is keyed on it.
+    #[cfg(test)]
+    pub(crate) fn set_write_id_for_test(&self, op_id: &str, write_id: &str) {
+        let conn = self.0.lock().unwrap();
+        conn.execute("UPDATE operation_queue SET write_id = ?2 WHERE op_id = ?1", params![op_id, write_id]).unwrap();
     }
 ```
 
@@ -1055,15 +1122,17 @@ Field on `EngineBridge`: `#[cfg(test)] pub(crate) seams: Seams,`; in `new_with_s
 Test helper in the tests module, used by Tasks 3, 4, 5 and 7:
 
 ```rust
-    /// Run `action` on its own thread and wait for it, at most 500 ms (spec §13: a
-    /// correct implementation may block the action on the state-db mutex).
+    /// Run `action` on its own thread and wait for it, at most 5 s, and fail the test if it
+    /// has not finished. Every seam sits outside every transaction and every lock, so a
+    /// correct implementation never blocks the action: a hang is a defect, not a timing
+    /// artefact, and a silent timeout would let the action race the rest of the test.
     fn run_competing(action: impl FnOnce() + Send + 'static) {
         let (done, wait) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             action();
             let _ = done.send(());
         });
-        let _ = wait.recv_timeout(Duration::from_millis(500));
+        wait.recv_timeout(Duration::from_secs(5)).expect("the competing action did not finish");
     }
 ```
 
@@ -1162,9 +1231,9 @@ fn log_queue_state_moved(op_id: &str, step: &'static str) {
                 }
 ```
 
-The success arm's final `Ok(())` (`EB:856`) becomes `Ok(released)` where `let released = if cfg!(target_os = "windows") { None } else { Some(payload_path_str.clone()) };`.
+The success arm's final `Ok(())` (`EB:856`) becomes `Ok(released)` where `let released = if cfg!(target_os = "macos") { Some(payload_path_str.clone()) } else { None };`.
 
-5.6 `finish_completed_upload` (`EB:1028-1030`): wrap the `crate::staged_payload::remove` call in `#[cfg(target_os = "windows")] { … }`. On Windows nothing changes; elsewhere the payload is released by `finish_claimed` and unlinked after it commits (5.3).
+5.6 `finish_completed_upload` (`EB:1028-1030`): wrap the `crate::staged_payload::remove` call in `#[cfg(not(target_os = "macos"))] { … }`. On Windows and Linux nothing changes; on macOS the payload is released by `finish_claimed` and unlinked after it commits (5.3).
 
 5.7 Keep Mine (`EB:3193-3201`): `self.upload_version(&op, None, sync_root, &mut post_complete_errors).await` returns `Ok(released)`; on `Ok(Some(path))` call `crate::staged_payload::remove(&self.db, Path::new(&path))` with the same warn on failure (today `finish_completed_upload` unlinked it).
 
@@ -1172,11 +1241,14 @@ The success arm's final `Ok(())` (`EB:856`) becomes `Ok(released)` where `let re
 
 - [ ] **Step 6: Engine start (`runner.rs:997`)**
 
+Claims are cleared on every platform (a claim only exists while an attempt runs). `released_payloads` is computed and unlinked only under `#[cfg(target_os = "macos")]`, and is empty elsewhere: in `engine_start_repair` the release query sits in a `#[cfg(target_os = "macos")] let released_payloads = { … };` with `#[cfg(not(target_os = "macos"))] let released_payloads = Vec::new();` beside it, and the unlink loop below is `#[cfg(target_os = "macos")]`.
+
 Before `match db.reconcile_stale_in_flight_on_startup() {`:
 
 ```rust
     match db.engine_start_repair() {
         Ok(repair) => {
+            #[cfg(target_os = "macos")]
             for path in &repair.released_payloads {
                 if let Err(e) = crate::staged_payload::remove(&db, std::path::Path::new(path)) {
                     tracing::warn!(error = %e, "released upload copy kept; removal is retried at the next start");
@@ -1201,10 +1273,10 @@ cd $WT/src-tauri && $LOCK cargo-build -- cargo test --locked -p beebeeb-desktop 
 ```
 
 Expected `ok. 4 passed`. Mutations:
-- T29: `list_due_operations` back to `ORDER BY created_at ASC, rowid ASC` and the claim's `earlier.rowid < this.rowid` to `earlier.created_at < this.created_at` → "the newest bytes land last" fails (`$EVID/r4-t2-mut-T29.log`).
+- T29 (macOS): `DUE_ORDER_SQL` back to `ORDER BY created_at ASC, rowid ASC` and `EARLIER_IN_QUEUE_SQL` to `earlier.created_at < this.created_at` → "the newest bytes land last" fails (`$EVID/r4-t2-mut-T29.log`).
 - T42: at 5.5, call `self.db.put_upload_resume(&session)?` for every claim → "no resume row for a purged op" fails (`$EVID/r4-t2-mut-T42.log`).
 - P2: drop `'restore_version'` from the claim's `IN` list and `RestoreVersion` from `is_content_kind` → "a restore waits for an earlier upload" fails (`$EVID/r4-t2-mut-P2.log`).
-- P3: drop the `operation_queue` line from the released-payload query → the `released_payloads` assertion fails with `/staged/referenced` included (`$EVID/r4-t2-mut-P3.log`).
+- P3 (macOS): drop the `operation_queue` line from the released-payload query → the `released_payloads` assertion fails with `/staged/referenced` included (`$EVID/r4-t2-mut-P3.log`).
 
 - [ ] **Step 8: Gate and commit**
 
@@ -1221,6 +1293,11 @@ cd $WT && git commit -m "feat(desktop): claim queue ops in one transaction, guar
 ## Task 3: The accept transaction and the base mapping (spec §6.1, §6.3.1, §8.1, §8.3, §8.7 S1.1, S3, S5; commit 3)
 
 The token is minted and the base is mapped through it, but replies still report `{cv}` (Task 4 switches them). Every existing round-3 test stays green, because the mapping handles `{cv}` bases through rules 3–5.
+
+**Gate:** the whole task is gated at one call site: the IPC arms reach the minting entry points only under `#[cfg(target_os = "macos")]` (step 5.7). Below that:
+- `decide_base`, `BaseFacts`, `accept_finder_write` and the held-column writers are shared helpers that compile on every target. They carry `#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]` where only the macOS arm (or a test) calls them, and so do `queue_file_provider_create_from` and `queue_file_provider_modify_from`.
+- Write-keyed steps: the claim's steps 3–4, the `init` guard (5.4, which takes `has_write_id`), and the landing's held-column writes (5.6). Windows and Linux never mint a write id, so they never reach these.
+- Tests: all eight carry no `cfg` and run on every target (none names `crate::ipc_socket` or asserts a token through `held_content_version`).
 
 **Files:**
 - Modify: `src-tauri/src/write_token.rs`: `BaseFacts`, `BaseDecision`, `decide_base`
@@ -1267,6 +1344,8 @@ The token is minted and the base is mapped through it, but replies still report 
 ```
 
 and make `queue_save` (`EB:13168-13179`) call `fp_save(...)` and drop the result.
+
+Leave `queued_modify_base` (`EB:13010-13036`) and its callers on `queue_finder_modify`. They pin round 3's shared parse, which Windows and the watcher keep (spec §6.3.1). Under the File Provider entry the `"0"` row parks at once (rule 6a′), `list_due_operations` (`SD:2676`) never lists it, and `.expect("the modify was queued")` panics. The File Provider form of `"0"` is T12.
 
 1.2 The new tests (`json!` is `serde_json::json!`; add `use serde_json::json;` to the tests module if it is missing). All are `#[tokio::test]`, each with `let dir = tempfile::tempdir().unwrap(); let sync_root = dir.path().join("sync-root"); std::fs::create_dir_all(&sync_root).unwrap();`, its own `master_key` byte and a `VersionedServerMock`; shown from the first line that differs):
 
@@ -1329,9 +1408,13 @@ and make `queue_save` (`EB:13168-13179`) call `fp_save(...)` and drop the result
         let ((), ()) = tokio::join!(
             async { drain_upload_queue(&bridge, &sync_root).await; },
             async {
-                while server.state.lock().unwrap().inits.is_empty() {
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                }
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    while server.state.lock().unwrap().inits.is_empty() {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .expect("init never reached the mock");
                 fp_save(&bridge, dir.path(), "live", "notes.txt", b"first, second", &first_token);
             }
         );
@@ -1434,7 +1517,7 @@ and make `queue_save` (`EB:13168-13179`) call `fp_save(...)` and drop the result
 - [ ] **Step 2: Run them; expect RED**
 
 ```bash
-cd $WT/src-tauri && $LOCK cargo-build -- cargo test --locked -p beebeeb-desktop --lib -- i2_a_zero_base_on_a_versioned_row_parks the_init_guard_refuses a_newer_save_queues_behind a_newer_save_waits_behind enqueue_vs_runner a_numeric_base_while a_minted an_unknown_token_is_sent a_waiting_op_stores > $EVID/r4-t3-red.log 2>&1; echo "rc=$?"; grep -E "error\[|FAILED|panicked|test result" $EVID/r4-t3-red.log | head -20
+cd $WT/src-tauri && $LOCK cargo-build -- cargo test --locked -p beebeeb-desktop --lib -- i2_a_zero_base_on_a_versioned_row_parks the_init_guard_refuses a_newer_save_queues_behind a_newer_save_waits_behind enqueue_vs_runner a_numeric_base_while an_unknown_token_is_sent a_waiting_op_stores > $EVID/r4-t3-red.log 2>&1; echo "rc=$?"; grep -E "error\[|FAILED|panicked|test result" $EVID/r4-t3-red.log | head -20
 ```
 
 Expected first: compile errors (`queue_file_provider_modify`, `FpWrite`, `set_base_version_for_test`). With the entry points stubbed to call today's `queue_finder_*` and return `token: None`, the behavioural REDs are: T12 sends a replace without a base; T14 sends both; T39 sends N on base 1 after W made v2, `(race,1,409)`; T49 sends the third save on base 1, `409`. T21, T22 and T50 are guards and may already pass (spec T21, T50); T22's RED comes from its mutation.
@@ -1801,7 +1884,7 @@ fn log_parked(op_id: &str, file_id: Option<&str>, reason: ParkReason) {
 
 5.2 `queue_file_provider_create_from(target, contents)`:
 - A folder (`FinderWriteItemKind::Folder`) carries no content: `return self.queue_finder_create_from(target, contents).map(FpWrite::plain);`.
-- Otherwise repeat `queue_finder_create_from`'s file branch (`EB:1500-1531`, `EB:1577-1627`): the stop check, the ignored-name check, `ensure_shared_parent_allows_write`, a fresh `file_id`, `rel_path`, `stage_finder_contents`, size, MIME, `name_encrypted`, the `FileEntry` (`EB:1588-1601`) and the `create_file` metadata with `apply_shared_context`. Then, instead of `upsert_file` + `enqueue_finder_operation`:
+- Otherwise extract the file branch of `queue_finder_create_from` (`EB:1500-1531`, `EB:1577-1627`) into `prepare_finder_create` (staging, size, MIME, `name_encrypted`, metadata with `apply_shared_context`, backup key), used by both entry points: the stop check, the ignored-name check, `ensure_shared_parent_allows_write`, a fresh `file_id`, `rel_path`, `stage_finder_contents`, size, MIME, `name_encrypted`, the `FileEntry` (`EB:1588-1601`) and the `create_file` metadata with `apply_shared_context`. Then, instead of `upsert_file` + `enqueue_finder_operation`:
 
 ```rust
         let op_id = uuid::Uuid::new_v4().to_string();
@@ -1845,7 +1928,7 @@ fn log_parked(op_id: &str, file_id: Option<&str>, reason: ParkReason) {
         })
 ```
 
-5.3 `queue_file_provider_modify_from(target, contents)`: without `contents_path` (a rename or move) it is `self.queue_finder_modify_from(target, contents).map(FpWrite::plain)`. With contents, repeat `EB:1641-1694` up to the payload, with no `get_file` / `modify_base_version` / `record_local_write` calls (the accept does those inside its transaction), then `accept_finder_write` with `FinderAcceptKind::Modify { incoming_base: target.base_version_identifier.as_deref() }`, `target_path: Some(&target.filename)` and `parent_id: target.parent_id.as_deref()`. `UnknownItem` keeps today's behaviour until Task 8 refuses it: enqueue the already-staged copy with `self.enqueue_finder_operation(OperationKind::UploadVersion, Some(file_id), target.parent_id, Some(target.filename), payload, Some(staged_path), parse_base_version_number(target.base_version_identifier.as_deref()), None)?`, `staged.retain()`, `Ok(FpWrite::plain(outcome))`. (The opened `contents` file was already read by the staging copy; it is never read twice.)
+5.3 `queue_file_provider_modify_from(target, contents)`: without `contents_path` (a rename or move) it is `self.queue_finder_modify_from(target, contents).map(FpWrite::plain)`. With contents, extract the content branch of `queue_finder_modify_from` (`EB:1641-1694`, up to the payload) into `prepare_finder_modify` (staging, size, MIME, `name_encrypted`, metadata with `apply_shared_context`, backup key), used by both entry points, with no `get_file` / `modify_base_version` / `record_local_write` calls in it (the accept does those inside its transaction), then `accept_finder_write` with `FinderAcceptKind::Modify { incoming_base: target.base_version_identifier.as_deref() }`, `target_path: Some(&target.filename)` and `parent_id: target.parent_id.as_deref()`. `UnknownItem` keeps today's behaviour until Task 8 refuses it: enqueue the already-staged copy with `self.enqueue_finder_operation(OperationKind::UploadVersion, Some(file_id), target.parent_id, Some(target.filename), payload, Some(staged_path), parse_base_version_number(target.base_version_identifier.as_deref()), None)?`, `staged.retain()`, `Ok(FpWrite::plain(outcome))`. (The opened `contents` file was already read by the staging copy; it is never read twice.)
 
 5.4 The `init` guard (§6.3.1). `upload_init_request_for_operation` (`EB:3640-3662`) gains `has_write_id: bool` and returns `anyhow::Result<DesktopUploadInitRequest>`:
 
@@ -1908,7 +1991,7 @@ Run the step-2 command into `$EVID/r4-t3-green.log`. Expected `ok. 8 passed`, an
 - T22: in `decide_base`, rule 1a returns `Resolved { base: held.base }` → the second init carries base 1 and gets 409 (`…-T22.log`).
 - T39: compute the decision from `self.db.get_file` / `get_file_contract_state` / a separate facts read before `self.seam("accept:before_tx")` and pass it into the accept → N waits on a write that is gone, parks `predecessor_lost`, and "N is based on W's produced version" fails (`…-T39.log`).
 - T49: rule 3 picks the newest write whose base is resolved instead of `held` (the old rule 3 text, m-1) → the third save gets 409 (`…-T49.log`).
-- T50: rule 5 treats any token (`parse_token(..).is_some()`) as no base → the guard parks it and the init summary is empty (`…-T50.log`).
+- T50: rule 5 treats any token (`parse_token(..).is_some()`) as no base → rule 6a′ parks it (`current_version` 3, `version_filled` 0) and the init summary is empty (`…-T50.log`).
 - P5: store `None` as `base_version` for `After` → "after W1, stored as W1's b" fails (`…-P5.log`).
 
 - [ ] **Step 7: Gate and commit**
@@ -1927,11 +2010,20 @@ cd $WT && git commit -m "feat(desktop): accept File Provider writes in one trans
 
 From here the reply, enumeration, the change feed and item lookups name the accepted bytes with the token, and keep it through our own landing.
 
+**Gate:**
+- The builder (`file_entry_payload_for_db`) and `clear_held_if` are shared: with no held columns they change nothing, and only a File Provider write sets them. They compile on every unix target.
+- The sign-out purge of provisional rows is write-keyed (`q.write_id IS NOT NULL`), so a Windows create (no write id) is purged as before.
+- The restore response is applied only under `#[cfg(target_os = "macos")]`; elsewhere the restore keeps `self.api.restore_version(…).await?; Ok(None)`.
+- Tests:
+  - `#[cfg(unix)]` (they assert a token through `held_content_version` or `land_one_save`, or name `arm_builder_seam`): T1–T6, T8, T57, T64, T65, RF1, and the helpers `land_one_save` and `remote_update`.
+  - T4 and T57 also carry `#[cfg(target_os = "macos")]`, because they test the restore response.
+  - T9 and T62 name neither, and run on every target.
+
 **Files:**
 - Modify: `src-tauri/src/ipc_socket.rs`: `file_entry_payload_for_db` (`IPC:2573-2600`); a test-only builder seam
 - Modify: `src-tauri/src/state_db.rs`: `clear_held_if`, `apply_restore_response`; `purge_all_local_state` (`SD:2874-2944`); test-only `insert_alias_for_test`
 - Modify: `src-tauri/src/engine_bridge.rs`: the `RestoreVersion` arm (`EB:632-643`); the mock gains the restore route
-- Modify: `src-tauri/src/ipc_socket_framing_tests.rs`: `a_queued_modify_replies_with_the_size_of_the_bytes_it_was_handed` (`:853-905`) asserts the token
+- Modify: `src-tauri/src/ipc_socket_framing_tests.rs`: `a_queued_modify_replies_with_the_size_of_the_bytes_it_was_handed` (`:853-905`) asserts the token (and sends base `"1"`); `a_cached_reply_reports_the_row_as_it_is_now_not_as_it_was` (`:806-849`) asserts the create's token on macOS
 - Test: `engine_bridge.rs` tests
 
 **Interfaces:**
@@ -1945,19 +2037,26 @@ From here the reply, enumeration, the change feed and item lookups name the acce
 
 - [ ] **Step 1: Write the failing tests**
 
-Change the framing assertion at `ipc_socket_framing_tests.rs:900-905` to:
+In `a_queued_modify_replies_with_the_size_of_the_bytes_it_was_handed`, send base `"1"`: add a `modify_request_with_base(file_id, filename, contents_path, base)` helper, because `modify_request` always sends `null` (`:414-423`) and rule 6a′ would park it. Then change the assertion at `ipc_socket_framing_tests.rs:900-905` to:
 
 ```rust
     let content_version = item["content_version"].as_str().unwrap();
+    #[cfg(target_os = "macos")]
     assert!(
         crate::write_token::parse_token(content_version).is_some_and(|token| token.base == 1),
         "the reply names the bytes it accepted with a token led by their base: {reply}"
     );
+    // The Linux arm does not mint (Task 3 step 5.7): the reply keeps today's content version.
+    #[cfg(not(target_os = "macos"))]
+    assert_eq!(content_version, "1", "{reply}");
 ```
+
+Add a second framing change: `a_cached_reply_reports_the_row_as_it_is_now_not_as_it_was` (`ipc_socket_framing_tests.rs:806-849`) leaves the create's op queued. On macOS the cached reply then reports the create's token and, from Task 9, `uploading`: the row as it is now, spec §5.4 row 1. Under `#[cfg(target_os = "macos")]` assert `content_version == first["WriteQueued"]["item"]["content_version"]` (the create's token) in place of `"7"`; the `status == "local"` assertion stays until Task 9, which changes it to `"uploading"` (Task 9 step 3.1). Keep today's `"7"` and `"local"` under `#[cfg(not(target_os = "macos"))]`. `version_identifier` keeps its round-3 value `"7:1700000123:20"`. Re-check this test at Task 9's gate.
 
 Add to `engine_bridge.rs` tests (setup as in Task 3; the master-key byte is given in each):
 
 ```rust
+    #[cfg(unix)] // asserts a token through `held_content_version`
     #[tokio::test]
     async fn a_landing_keeps_the_content_version_the_reply_named() {
         // master_key [52u8; 32]
@@ -1972,6 +2071,7 @@ Add to `engine_bridge.rs` tests (setup as in Task 3; the master-key byte is give
     }
 
     /// W landed as v2 on `file_id`; returns W's token. Used by T2, T3, T4, T5, T6, T64.
+    #[cfg(unix)] // asserts a token through `held_content_version`
     async fn land_one_save(bridge: &EngineBridge, server: &VersionedServerMock, dir: &Path, sync_root: &Path, file_id: &str) -> String {
         seed_uploaded_row(bridge, server, file_id);
         let token = fp_save(bridge, dir, file_id, "notes.txt", b"landed edit", "1").token.unwrap();
@@ -1980,6 +2080,7 @@ Add to `engine_bridge.rs` tests (setup as in Task 3; the master-key byte is give
         token
     }
 
+    #[cfg(unix)] // only the unix token tests call it
     fn remote_update(bridge: &EngineBridge, sync_root: &Path, file_id: &str, version: i64, object: &str) {
         let op = crate::api_client::SyncOp {
             seq_id: 100 + version,
@@ -1989,6 +2090,7 @@ Add to `engine_bridge.rs` tests (setup as in Task 3; the master-key byte is give
         apply_sync_op(bridge, sync_root, &op, now_secs(), &mut Vec::new()).unwrap();
     }
 
+    #[cfg(unix)] // asserts a token through `held_content_version`
     #[tokio::test]
     async fn a_remote_change_replaces_the_token() {
         // master_key [53u8; 32]
@@ -1996,9 +2098,21 @@ Add to `engine_bridge.rs` tests (setup as in Task 3; the master-key byte is give
         remote_update(&bridge, &sync_root, "remote", 3, "object-elsewhere-v3");
         assert_eq!(held_content_version(&bridge, "remote"), "3");
         assert!(bridge.db.item_presentation("remote").unwrap().unwrap().held.is_none(), "the builder cleared it");
+
+        // A new version under the SAME object id: the legacy one-shot `file_update` carries no
+        // `current_object_version_id`, so the row keeps its own (EB:6169-6174).
+        land_one_save(&bridge, &server, dir.path(), &sync_root, "remote-same-object").await;
+        let replace = crate::api_client::SyncOp {
+            seq_id: 200,
+            op_type: "file_update".into(),
+            payload: serde_json::json!({ "id": "remote-same-object", "version_number": 3, "size_bytes": 11 }),
+        };
+        apply_sync_op(&bridge, &sync_root, &replace, now_secs(), &mut Vec::new()).unwrap();
+        assert_eq!(held_content_version(&bridge, "remote-same-object"), "3");
         drop(server.finish());
     }
 
+    #[cfg(unix)] // asserts a token through `held_content_version`
     #[tokio::test]
     async fn our_own_echo_keeps_the_token() {
         // master_key [54u8; 32]
@@ -2008,6 +2122,8 @@ Add to `engine_bridge.rs` tests (setup as in Task 3; the master-key byte is give
         drop(server.finish());
     }
 
+    #[cfg(unix)] // asserts a token through `held_content_version`
+    #[cfg(target_os = "macos")] // tests the restore response, which only macOS applies
     #[tokio::test]
     async fn a_restore_from_this_mac_replaces_the_token() {
         // master_key [55u8; 32]
@@ -2018,6 +2134,7 @@ Add to `engine_bridge.rs` tests (setup as in Task 3; the master-key byte is give
         drop(server.finish());
     }
 
+    #[cfg(unix)] // asserts a token through `held_content_version`
     #[tokio::test]
     async fn the_token_survives_rename_move_and_trash() {
         // master_key [56u8; 32]
@@ -2039,6 +2156,7 @@ Add to `engine_bridge.rs` tests (setup as in Task 3; the master-key byte is give
         drop(server.finish());
     }
 
+    #[cfg(unix)] // asserts a token through `held_content_version`
     #[tokio::test]
     async fn sign_out_clears_tokens_and_aliases() {
         // master_key [57u8; 32]
@@ -2064,6 +2182,7 @@ Add to `engine_bridge.rs` tests (setup as in Task 3; the master-key byte is give
         drop(server.finish());
     }
 
+    #[cfg(unix)] // asserts a token through `held_content_version`
     #[tokio::test]
     async fn c1_a_save_after_the_first_landed_is_based_on_what_it_produced() {
         // master_key [59u8; 32]; the review's two passes
@@ -2087,9 +2206,13 @@ Add to `engine_bridge.rs` tests (setup as in Task 3; the master-key byte is give
         let ((), ()) = tokio::join!(
             async { drain_upload_queue(&bridge, &sync_root).await; },
             async {
-                while server.state.lock().unwrap().inits.is_empty() {
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                }
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    while server.state.lock().unwrap().inits.is_empty() {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .expect("init never reached the mock");
                 let b = fp_save(&bridge, dir.path(), "c3", "notes.txt", b"A B", a.token.as_deref().unwrap());
                 fp_save(&bridge, dir.path(), "c3", "notes.txt", b"A B C", b.token.as_deref().unwrap());
             }
@@ -2103,6 +2226,8 @@ Add to `engine_bridge.rs` tests (setup as in Task 3; the master-key byte is give
         assert_eq!(state.latest_plaintext("c3", master_key), b"A B C");
     }
 
+    #[cfg(unix)] // asserts a token through `held_content_version`
+    #[cfg(target_os = "macos")] // tests the restore response, which only macOS applies
     #[tokio::test]
     async fn a_restore_with_a_queued_write_runs_after_it_and_keeps_both_versions() {
         // master_key [61u8; 32]; m-9
@@ -2119,6 +2244,7 @@ Add to `engine_bridge.rs` tests (setup as in Task 3; the master-key byte is give
         assert_eq!(held_content_version(&bridge, "ordered"), "3");
     }
 
+    #[cfg(unix)] // names `arm_builder_seam`
     #[tokio::test]
     async fn a_builder_clears_held_columns_only_for_the_write_it_read() {
         // master_key [62u8; 32]
@@ -2141,6 +2267,7 @@ Add to `engine_bridge.rs` tests (setup as in Task 3; the master-key byte is give
         drop(server.finish());
     }
 
+    #[cfg(unix)] // names `arm_builder_seam`
     #[tokio::test]
     async fn the_predicate_reads_row_and_queue_together() {
         // master_key [63u8; 32]
@@ -2162,6 +2289,7 @@ Add to `engine_bridge.rs` tests (setup as in Task 3; the master-key byte is give
         drop(server.finish());
     }
 
+    #[cfg(unix)] // asserts a token through `held_content_version`
     #[tokio::test]
     async fn twenty_rapid_saves_land_in_order_and_the_last_wins() {
         // master_key [64u8; 32]; Review Focus 1
@@ -2173,9 +2301,13 @@ Add to `engine_bridge.rs` tests (setup as in Task 3; the master-key byte is give
         let ((), ()) = tokio::join!(
             async { drain_upload_queue(&bridge, &sync_root).await; },
             async {
-                while server.state.lock().unwrap().inits.is_empty() {
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                }
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    while server.state.lock().unwrap().inits.is_empty() {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .expect("init never reached the mock");
                 for n in 2..=20 {
                     let bytes = format!("save {n}").into_bytes();
                     let reply = fp_save(&bridge, dir.path(), "autosave", "notes.txt", &bytes, &base);
@@ -2207,10 +2339,10 @@ Add to `engine_bridge.rs` tests (setup as in Task 3; the master-key byte is give
 - [ ] **Step 2: Run them; expect RED**
 
 ```bash
-cd $WT/src-tauri && $LOCK cargo-build -- cargo test --locked -p beebeeb-desktop --lib -- a_landing_keeps_the_content_version a_remote_change_replaces our_own_echo_keeps a_restore_from_this_mac the_token_survives sign_out_clears_tokens sign_out_purges_provisional c1_a_save_after c1_three_saves a_restore_with_a_queued_write a_builder_clears_held the_predicate_reads_row twenty_rapid_saves a_queued_modify_replies_with_the_size > $EVID/r4-t4-red.log 2>&1; echo "rc=$?"; grep -E "error\[|FAILED|panicked|test result" $EVID/r4-t4-red.log | head -30
+cd $WT/src-tauri && $LOCK cargo-build -- cargo test --locked -p beebeeb-desktop --lib -- a_landing_keeps_the_content_version a_remote_change_replaces our_own_echo_keeps a_restore_from_this_mac the_token_survives sign_out_clears_tokens sign_out_purges_provisional c1_a_save_after c1_three_saves a_restore_with_a_queued_write a_builder_clears_held the_predicate_reads_row twenty_rapid_saves a_queued_modify_replies_with_the_size a_cached_reply_reports_the_row > $EVID/r4-t4-red.log 2>&1; echo "rc=$?"; grep -E "error\[|FAILED|panicked|test result" $EVID/r4-t4-red.log | head -30
 ```
 
-Expected REDs (after the test-only helpers compile): T1 `"1"` ≠ the token; T3 and T5 the same; T8 the second save on `"1"` gets `(c1,1,409)`; T9 `(c3,1,409)`; T4 `"1"` (the response is discarded, `EB:632-642`); T57 the restore is not reported (`"1"`); T6, T62 held columns, aliases and the provisional row survive the purge; T64, T65 `arm_builder_seam` missing; RF1 409s from save 2 on; the framing test gets `"1"`. T2 is a guard (spec T2: "green today").
+Expected REDs (after the test-only helpers compile): T1 `"1"` ≠ the token; T3 and T5 the same; T8 the second save on `"1"` gets `(c1,1,409)`; T9 `(c3,1,409)`; T4 `"1"` (the response is discarded, `EB:632-642`); T57 the restore is not reported (`"1"`); T6, T62 held columns, aliases and the provisional row survive the purge; T64, T65 `arm_builder_seam` missing; RF1 409s from save 2 on; the framing test gets `"1"`; the cached-reply framing test reads `"7"` where the create's token is expected. T2 is a guard (spec T2: "green today"); its `"remote-same-object"` case goes red by the mutation below.
 
 - [ ] **Step 3: Implement**
 
@@ -2264,6 +2396,7 @@ In `purge_all_local_state` (`SD:2874`), right after `let tx = conn.transaction()
             let mut stmt = tx.prepare(
                 "SELECT DISTINCT q.file_id FROM operation_queue q JOIN files f ON f.file_id = q.file_id
                  WHERE q.kind IN ('upload_version', 'upload_file')
+                   AND q.write_id IS NOT NULL
                    AND json_extract(q.metadata_json, '$.operation') = 'create_file'
                    AND f.current_version = 0",
             )?;
@@ -2345,17 +2478,24 @@ pub(crate) fn file_entry_payload_for_db(
 
 `version_identifier` keeps its round-3 meaning (§5.3).
 
-3.3 `engine_bridge.rs` `RestoreVersion` arm (`EB:632-643`): keep the response and apply it:
+3.3 `engine_bridge.rs` `RestoreVersion` arm (`EB:632-643`): on macOS keep the response and apply it; elsewhere keep today's behaviour:
 
 ```rust
-                let response = self.api.restore_version(file_id, version_id).await?;
-                self.db.apply_restore_response(
-                    file_id,
-                    response["version_number"].as_i64(),
-                    response["current_object_version_id"].as_str(),
-                )?;
+                #[cfg(target_os = "macos")]
+                {
+                    let response = self.api.restore_version(file_id, version_id).await?;
+                    self.db.apply_restore_response(
+                        file_id,
+                        response["version_number"].as_i64(),
+                        response["current_object_version_id"].as_str(),
+                    )?;
+                }
+                #[cfg(not(target_os = "macos"))]
+                self.api.restore_version(file_id, version_id).await?;
                 Ok(None)
 ```
+
+(`apply_restore_response` carries `#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]`.)
 
 3.4 The mock's restore route, in `versioned_server_answer` before the `PATCH` branch:
 
@@ -2385,9 +2525,9 @@ pub(crate) fn file_entry_payload_for_db(
 
 - [ ] **Step 4: GREEN, mutations**
 
-Step-2 command into `$EVID/r4-t4-green.log`; expected `ok. 14 passed` (13 new and the changed framing test). Mutations (one log each, `$EVID/r4-t4-mut-<T>.log`):
+Step-2 command into `$EVID/r4-t4-green.log`; expected `ok. 15 passed` (13 new and the two changed framing tests). Mutations (one log each, `$EVID/r4-t4-mut-<T>.log`):
 - T1: `file_entry_payload_for_db` reports the token only while `held_write_queued` → "after our own landing" fails.
-- T2: `held_token` ignores `current_version` when the object ids match → `"3"` assertion fails.
+- T2: `held_token` ignores `current_version` when the object ids match → the `"remote-same-object"` assertion fails (the first file's version and object id both change, so the first assertion still answers `"3"`).
 - T3: clear the held columns on every applied op (`apply_sync_op`) → the token is lost.
 - T4: drop the `apply_restore_response` call → `"1"`.
 - T5: clear the held columns in `queue_finder_delete` → "trash" fails.
@@ -2416,6 +2556,12 @@ cd $WT && git commit -m "feat(desktop): every File Provider surface reports the 
 
 A doomed earlier write no longer blocks the newest save for hours (I4): a stale base or a missing payload parks at once, and the next claim of its successor takes over.
 
+**Gate:** the 409 reading in `init_upload` is error plumbing that every upload shares. `error_http_status` still answers 409 for an `InitConflict`, and `classify_operation_error` of its text (`upload init refused with 409 Conflict (<class>)`) is `Retryable`, as reqwest's was: none of the classifier's keywords (`401`, `unauthorized`, `invalid token`, `quota`, `insufficient storage`, `storage limit`, `403`, `forbidden`, `permission`, `read-only`, `vault locked`, `locked`, `unlock`; `EB:4901-4924`) appears in it. Everything that acts on a class is write-keyed:
+- the payload-missing park (4.3) and the immediate stale-base park (4.4) apply only to an op that carries a write id (`claimed.write.is_some()`); every other op keeps today's retry and today's error text;
+- the hand-over (step 5) applies only to a successor with `after_write_id`.
+
+Windows and watcher uploads are unchanged. The log line gains a `class` field on every platform (a log field, not a behaviour). Tests carry no `cfg` and run on every target.
+
 **Files:**
 - Modify: `src-tauri/src/api_client.rs`: `init_upload` (`api_client.rs:731-741`); new `InitConflictClass`, `InitConflict`, `classify_init_conflict`, the two message constants
 - Modify: `src-tauri/src/engine_bridge.rs`: `error_http_status` (`EB:3992-3999`); `log_refused_upload` (`EB:4004-4027`) gains `class` and, when parking, `reason`; the payload check (`EB:709-713`); `process_due_operations` handles stale-base parks and the claim's hand-over outcomes; the mock gains `conflict_init_once`
@@ -2434,7 +2580,7 @@ A doomed earlier write no longer blocks the newest save for hours (I4): a stale 
 
 - [ ] **Step 1: Write the failing tests**
 
-Rewrite the existing 409 test in place as `an_upload_refused_with_a_stale_base_is_logged_once_and_parks`: drop the `stale.max_attempts = 3` re-enqueue; assert one `409` init for `stale-file`; exactly one `upload refused` line, which contains `parked`, `stale_base`, the op id and `stale-file`; no line for the flaky op; no `notes.txt`, `/api/v1` or `127.0.0.1` in any line. Then add (setup as in Task 3):
+Rewrite the existing 409 test in place as `an_upload_refused_with_a_stale_base_is_logged_once_and_parks`: queue the stale save with `fp_save` (only a Finder write parks at once); drop the `stale.max_attempts = 3` re-enqueue; assert one `409` init for `stale-file`; exactly one `upload refused` line, which contains `parked`, `stale_base`, the op id and `stale-file`; no line for the flaky op; no `notes.txt`, `/api/v1` or `127.0.0.1` in any line. Then add (setup as in Task 3):
 
 ```rust
     #[test]
@@ -2609,7 +2755,7 @@ Rewrite the existing 409 test in place as `an_upload_refused_with_a_stale_base_i
 cd $WT/src-tauri && $LOCK cargo-build -- cargo test --locked -p beebeeb-desktop --lib -- the_409_messages_are_pinned a_stale_base_409_parks an_in_progress_409 i4_a_doomed a_stale_base_predecessor an_earlier_builds_op handover_vs_new_save a_lost_reply_base an_upload_refused_with_a_stale_base > $EVID/r4-t5-red.log 2>&1; echo "rc=$?"; grep -E "error\[|FAILED|panicked|test result" $EVID/r4-t5-red.log | head -20
 ```
 
-Expected REDs: T24 and the rewritten test retry (attempts 1 of 25); T23 W retries its missing payload and N parks `predecessor_parked` (Task 3's arm); T67 likewise; T41 N parks; RF4 retries C instead of parking; P8, T25 do not compile until the `api_client` items exist (T25 is a guard). T26 is green on (b) already (Task 3 parks `predecessor_parked`); its RED comes from its mutation.
+Expected REDs: T24 and the rewritten test retry (attempts 1 of 25); T23: W retries its missing payload (attempt 1 of 25 each pass) and N waits; the init summary is empty; T67 likewise; T41 N parks; RF4 retries C instead of parking; P8, T25 do not compile until the `api_client` items exist (T25 is a guard). T26 is green on (b) already (Task 3 parks `predecessor_parked`); its RED comes from its mutation.
 
 - [ ] **Step 3: The 409 classes (`api_client.rs`)**
 
@@ -2697,8 +2843,15 @@ pub(crate) fn init_conflict_class(error: &anyhow::Error) -> Option<crate::api_cl
 ```rust
         match std::fs::metadata(payload_path) {
             // The staged copy lives in the app's own container and cannot come back (§8.4).
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Only a File Provider write parks on it.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && claim.and_then(|c| c.write.as_ref()).is_some() => {
                 return Err(anyhow::Error::new(ParkNow(ParkReason::PayloadMissing)));
+            }
+            // Every other op keeps today's retry and today's text, so
+            // `test_process_due_operations_records_retry_for_upload_worker_handoff`
+            // (`EB:8330-8376`: no write id, a missing payload, retried with `attempts == 1`) stays green.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(anyhow::anyhow!("staged upload payload is missing: {}", payload_path.display()));
             }
             Err(e) => return Err(anyhow::anyhow!("staged upload payload could not be read: {e}")),
             Ok(meta) if !meta.is_file() => return Err(anyhow::anyhow!("staged upload payload is not a file")),
@@ -2709,7 +2862,10 @@ pub(crate) fn init_conflict_class(error: &anyhow::Error) -> Option<crate::api_cl
 4.4 In `process_due_operations`, a stale-base 409 parks at once. Before the generic `Err(error) =>` arm:
 
 ```rust
-                Err(error) if init_conflict_class(&error) == Some(crate::api_client::InitConflictClass::StaleBase) => {
+                Err(error)
+                    if init_conflict_class(&error) == Some(crate::api_client::InitConflictClass::StaleBase)
+                        && claimed.write.is_some() =>
+                {
                     // A stale base never becomes valid again: the server's version only grows (UP:782-787).
                     if self.db.park_claimed(&op.op_id, &claimed.claim_id, ParkReason::StaleBase, now)? {
                         log_refused_upload(&op, op.max_attempts, crate::api_client::InitConflictClass::StaleBase);
@@ -2897,7 +3053,7 @@ Step-2 command into `$EVID/r4-t5-green.log`; expected `ok. 9 passed` (8 new and 
 - T25: treat every 409 as `StaleBase` → the op parks, the init summary has one entry.
 - T23: treat a missing payload as an ordinary failure (today's `anyhow!`) → N waits through backoff; the pass-count assertion fails.
 - T26: drop the `origin != Minted` arm → (b) N takes C's create and uploads.
-- T41: implement the hand-over as two separate locked calls (delete N's op, then rewrite W's op with N's write id and payload), with `self.seam("claim:before_tx")` between them → N2 resolves to a numeric base, meets 409 and parks; the latest bytes are N's.
+- T41: implement the hand-over as two separate locked calls (delete N's op, then rewrite W's op with N's write id and payload), with `self.seam("claim:before_tx")` **moved** (not copied) from the top of the runner loop to between the two calls; the hook fires once, so a copy left at the loop top consumes it first → N2 resolves to a numeric base, meets 409 and parks; the latest bytes are N's.
 - T67: replace the hand-over arm with Task 3's `PredecessorParked` park → N never attempts; the init summary has one entry.
 - P8: swap the two constants → the first assertion fails.
 - RF4: rule 5 returns `Pending` for a token → nothing parks; the init summary differs.
@@ -2918,6 +3074,11 @@ cd $WT && git commit -m "feat(desktop): stale bases and missing staged copies pa
 
 No replace of a known file is sent without a base, a version the server left out is learned from a snapshot, and a phone's versionless replace reaches this Mac's disk.
 
+**Gate:** all of the behaviour is `#[cfg(target_os = "macos")]` (Spec issue 13), at these call sites: the fill/raise call in `process_metadata_row`, the versionless request and `clear_version_filled` in `apply_sync_op`, the per-pass request and the peek/clear pair in `sync_tick_outcome`, the `note_snapshot_for_base_pending` loop in `bootstrap_from_snapshot`, the engine-start version-0 request, and the request counter. On other platforms `request_resnapshot` and `take_needs_resnapshot` keep today's take-once semantics (`SD:1733-1764`), and `sync_tick_outcome` keeps its call at `EB:5605`.
+- The new `StateDb` methods (`apply_snapshot_version`, `has_base_pending_uploads`, `note_snapshot_for_base_pending`, `clear_version_filled`, the peek/clear pair) compile on every target and carry `#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]`.
+- The landing's `version_filled = 0` write (step 5.5, then Task 7's transaction) is a no-op wherever the flag is never set, so it is not gated.
+- Every Task 6 test, the rewritten flag test included, carries `#[cfg(target_os = "macos")]`. The original `needs_resnapshot_flag_is_take_once` stays, under `#[cfg(not(target_os = "macos"))]`, because the take-once flag still exists there. The tests that assert a token through `held_content_version` or `land_one_save` (T48) also carry `#[cfg(unix)]`, which `target_os = "macos"` already implies.
+
 **Files:**
 - Modify: `src-tauri/src/state_db.rs`: `request_resnapshot` (`SD:1733-1741`) becomes a counter; `take_needs_resnapshot` (`SD:1748-1764`) is replaced by `peek_resnapshot_request` + `clear_resnapshot_request`; new `SnapshotVersion`, `apply_snapshot_version`, `has_base_pending_uploads`, `note_snapshot_for_base_pending`, `clear_version_filled`; `engine_start_repair` gains the version-0 request; `accept_finder_write` clears `version_filled`; the test `needs_resnapshot_flag_is_take_once` (`SD:5636-5650`) is rewritten in place
 - Modify: `src-tauri/src/engine_bridge.rs`: `sync_tick_outcome` (`EB:5603-5619`); `bootstrap_from_snapshot` (`EB:5701-5713`); `process_metadata_row` (`EB:6261-6400`); `apply_sync_op`'s content arm (`EB:6074-6091`); the landing clears `version_filled` (in `apply_completed_upload`, `EB:1121-1194`); the test at `EB:10529-10532` reads `peek_resnapshot_request`; the mock answers `/api/v1/sync/snapshot` and `/api/v1/sync/ops`
@@ -2935,9 +3096,10 @@ No replace of a known file is sent without a base, a version the server left out
 
 - [ ] **Step 1: Write the failing tests**
 
-Rewrite `needs_resnapshot_flag_is_take_once` (`SD:5636-5650`) in place as `a_resnapshot_request_survives_a_request_made_while_it_runs`:
+Rewrite `needs_resnapshot_flag_is_take_once` (`SD:5636-5650`) in place as `a_resnapshot_request_survives_a_request_made_while_it_runs`, under `#[cfg(target_os = "macos")]`; the original body stays as `needs_resnapshot_flag_is_take_once` under `#[cfg(not(target_os = "macos"))]`:
 
 ```rust
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_resnapshot_request_survives_a_request_made_while_it_runs() {
         let dir = tempdir().unwrap();
@@ -2956,6 +3118,7 @@ Rewrite `needs_resnapshot_flag_is_take_once` (`SD:5636-5650`) in place as `a_res
 Add T52 to `state_db.rs` tests:
 
 ```rust
+    #[cfg(target_os = "macos")]
     #[test]
     fn engine_start_requests_a_snapshot_for_version_zero_rows() {
         let dir = tempdir().unwrap();
@@ -2977,6 +3140,8 @@ In `engine_bridge.rs` tests, two helpers, then the tests (setup as in Task 3):
 
 ```rust
     /// A row this Mac learned from a legacy `file_create` op: at version 0 (FILES:2286-2297).
+    /// (Both helpers carry `#[cfg(target_os = "macos")]`: only the Task 6 tests call them.)
+    #[cfg(target_os = "macos")]
     fn seed_version_zero_row(bridge: &EngineBridge, server: &VersionedServerMock, file_id: &str, status: FileStatus) {
         seed_uploaded_row(bridge, server, file_id);
         let mut contract = bridge.db.get_file_contract_state(file_id).unwrap().unwrap();
@@ -2985,13 +3150,17 @@ In `engine_bridge.rs` tests, two helpers, then the tests (setup as in Task 3):
         bridge.db.set_status(file_id, status).unwrap();
     }
 
-    fn node(master_key: &[u8; 32], id: &str, version: i64, is_uploading: bool) -> serde_json::Value {
-        let mut node = snap_node(master_key, id, "notes.txt", None, false, 0);
+    /// `name` is the file's display name: Task 11's log tests pass `PLANTED` here, so a line
+    /// that logged the name would leak it. Every other caller passes `"notes.txt"`.
+    #[cfg(target_os = "macos")]
+    fn node(master_key: &[u8; 32], id: &str, name: &str, version: i64, is_uploading: bool) -> serde_json::Value {
+        let mut node = snap_node(master_key, id, name, None, false, 0);
         node["version_number"] = serde_json::json!(version);
         node["is_uploading"] = serde_json::json!(is_uploading);
         node
     }
 
+    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn i2_a_row_without_a_version_never_uploads_without_a_base() {
         // master_key [72u8; 32]
@@ -3000,7 +3169,7 @@ In `engine_bridge.rs` tests, two helpers, then the tests (setup as in Task 3):
         fp_save(&bridge, dir.path(), "legacy", "notes.txt", b"edit", "0");
         drain_upload_queue(&bridge, &sync_root).await;
         assert!(server.state.lock().unwrap().inits.is_empty(), "no init until the version is known");
-        server.state.lock().unwrap().snapshots.push_back(("200 OK".into(), serde_json::json!({ "seq_id": 1, "nodes": [node(&master_key, "legacy", 1, false)] })));
+        server.state.lock().unwrap().snapshots.push_back(("200 OK".into(), serde_json::json!({ "seq_id": 1, "nodes": [node(&master_key, "legacy", "notes.txt", 1, false)] })));
         let logs = capture_logs_async(async {
             sync_tick_outcome(&bridge, &sync_root).await.unwrap();
             drain_upload_queue(&bridge, &sync_root).await;
@@ -3011,6 +3180,7 @@ In `engine_bridge.rs` tests, two helpers, then the tests (setup as in Task 3):
         assert!(logs.contains("queued write based on the version the snapshot reported"), "{logs}");
     }
 
+    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn a_versionless_create_op_requests_a_snapshot_that_fills_local_rows() {
         // master_key [73u8; 32]
@@ -3022,7 +3192,7 @@ In `engine_bridge.rs` tests, two helpers, then the tests (setup as in Task 3):
         apply_sync_op(&bridge, &sync_root, &create, now_secs(), &mut Vec::new()).unwrap();
         assert!(bridge.db.peek_resnapshot_request().unwrap().is_some(), "a versionless op asks for a snapshot");
         bridge.db.set_status("phone-file", FileStatus::Local).unwrap();
-        let snapshot = crate::api_client::SyncSnapshot { seq_id: 6, nodes: vec![node(&master_key, "phone-file", 1, false)] };
+        let snapshot = crate::api_client::SyncSnapshot { seq_id: 6, nodes: vec![node(&master_key, "phone-file", "notes.txt", 1, false)] };
         apply_snapshot(&bridge, &sync_root, &snapshot, now_secs(), now_secs(), &mut Vec::new()).unwrap();
         let presentation = bridge.db.item_presentation("phone-file").unwrap().unwrap();
         assert_eq!(presentation.contract.current_version, 1, "filled although the row is Local");
@@ -3031,11 +3201,12 @@ In `engine_bridge.rs` tests, two helpers, then the tests (setup as in Task 3):
         drop(server.finish());
     }
 
+    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn i2_a_zero_base_save_after_the_fill_lands_on_the_filled_version() {
         // master_key [74u8; 32]; rule 6a
         seed_version_zero_row(&bridge, &server, "filled", FileStatus::Local);
-        let snapshot = crate::api_client::SyncSnapshot { seq_id: 2, nodes: vec![node(&master_key, "filled", 1, false)] };
+        let snapshot = crate::api_client::SyncSnapshot { seq_id: 2, nodes: vec![node(&master_key, "filled", "notes.txt", 1, false)] };
         apply_snapshot(&bridge, &sync_root, &snapshot, now_secs(), now_secs(), &mut Vec::new()).unwrap();
         fp_save(&bridge, dir.path(), "filled", "notes.txt", b"saved before the re-read", "0");
         drain_upload_queue(&bridge, &sync_root).await;
@@ -3044,6 +3215,7 @@ In `engine_bridge.rs` tests, two helpers, then the tests (setup as in Task 3):
         assert!(bridge.db.list_operations_for_file("filled").unwrap().is_empty(), "nothing parks");
     }
 
+    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn i2_a_failed_snapshot_keeps_the_request_and_base_pending_resolves_on_the_next_success() {
         // master_key [75u8; 32]
@@ -3053,7 +3225,7 @@ In `engine_bridge.rs` tests, two helpers, then the tests (setup as in Task 3):
         {
             let mut s = server.state.lock().unwrap();
             s.snapshots.push_back(("503 Service Unavailable".into(), serde_json::json!({ "error": "busy" })));
-            s.snapshots.push_back(("200 OK".into(), serde_json::json!({ "seq_id": 3, "nodes": [node(&master_key, "flaky-snapshot", 1, false)] })));
+            s.snapshots.push_back(("200 OK".into(), serde_json::json!({ "seq_id": 3, "nodes": [node(&master_key, "flaky-snapshot", "notes.txt", 1, false)] })));
         }
         // The runner runs the queue only after an Ok tick (RUN:1293-1315).
         assert!(sync_tick_outcome(&bridge, &sync_root).await.is_err(), "the failed snapshot fails the tick");
@@ -3065,13 +3237,14 @@ In `engine_bridge.rs` tests, two helpers, then the tests (setup as in Task 3):
         assert_eq!(bridge.db.peek_resnapshot_request().unwrap(), None);
     }
 
+    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn i2_the_fill_reaches_an_uploading_row() {
         // master_key [76u8; 32]
         seed_version_zero_row(&bridge, &server, "uploading-zero", FileStatus::Local);
         fp_save(&bridge, dir.path(), "uploading-zero", "notes.txt", b"edit", "0");
         assert_eq!(bridge.db.get_file("uploading-zero").unwrap().unwrap().status, FileStatus::Uploading);
-        let snapshot = crate::api_client::SyncSnapshot { seq_id: 2, nodes: vec![node(&master_key, "uploading-zero", 1, false)] };
+        let snapshot = crate::api_client::SyncSnapshot { seq_id: 2, nodes: vec![node(&master_key, "uploading-zero", "notes.txt", 1, false)] };
         apply_snapshot(&bridge, &sync_root, &snapshot, now_secs(), now_secs(), &mut Vec::new()).unwrap();
         assert_eq!(bridge.db.get_file_contract_state("uploading-zero").unwrap().unwrap().current_version, 1);
         let op = bridge.db.list_operations_for_file("uploading-zero").unwrap().remove(0);
@@ -3080,6 +3253,7 @@ In `engine_bridge.rs` tests, two helpers, then the tests (setup as in Task 3):
         drop(server.finish());
     }
 
+    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn i3_a_versionless_replace_from_another_device_reaches_the_disk() {
         // master_key [77u8; 32]
@@ -3093,11 +3267,11 @@ In `engine_bridge.rs` tests, two helpers, then the tests (setup as in Task 3):
         let seen = bridge.db.peek_resnapshot_request().unwrap().expect("requested");
         assert_eq!(held_content_version(&bridge, "replaced"), token, "the op alone cannot tell a replace");
         // The legacy init bumped the version before the bytes exist: skipped, the request stays.
-        let mid = crate::api_client::SyncSnapshot { seq_id: 10, nodes: vec![node(&master_key, "replaced", 3, true)] };
+        let mid = crate::api_client::SyncSnapshot { seq_id: 10, nodes: vec![node(&master_key, "replaced", "notes.txt", 3, true)] };
         apply_snapshot(&bridge, &sync_root, &mid, now_secs(), now_secs(), &mut Vec::new()).unwrap();
         assert_eq!(held_content_version(&bridge, "replaced"), token);
         assert!(!bridge.db.clear_resnapshot_request(seen).unwrap(), "the skip kept the request");
-        let done = crate::api_client::SyncSnapshot { seq_id: 11, nodes: vec![node(&master_key, "replaced", 3, false)] };
+        let done = crate::api_client::SyncSnapshot { seq_id: 11, nodes: vec![node(&master_key, "replaced", "notes.txt", 3, false)] };
         let logs = capture_logs_async(async {
             apply_snapshot(&bridge, &sync_root, &done, now_secs(), now_secs(), &mut Vec::new()).unwrap();
         })
@@ -3107,6 +3281,7 @@ In `engine_bridge.rs` tests, two helpers, then the tests (setup as in Task 3):
         drop(server.finish());
     }
 
+    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn base_pending_parks_after_ten_successful_snapshots_without_the_file() {
         // master_key [78u8; 32]
@@ -3114,7 +3289,7 @@ In `engine_bridge.rs` tests, two helpers, then the tests (setup as in Task 3):
         seed_uploaded_row(&bridge, &server, "listed");
         bridge.db.set_sync_cursor(0).unwrap();
         fp_save(&bridge, dir.path(), "never-listed", "notes.txt", b"edit", "0");
-        let listed = serde_json::json!({ "seq_id": 1, "nodes": [node(&master_key, "listed", 1, false)] });
+        let listed = serde_json::json!({ "seq_id": 1, "nodes": [node(&master_key, "listed", "notes.txt", 1, false)] });
         let op_id = bridge.db.list_operations_for_file("never-listed").unwrap().remove(0).op_id;
         for success in 1..=10 {
             {
@@ -3188,7 +3363,7 @@ fn request_resnapshot_conn<C: std::ops::Deref<Target = Connection>>(conn: &C) ->
 }
 ```
 
-Delete `take_needs_resnapshot`; its callers become `peek_resnapshot_request` (`EB:5605`, and the test at `EB:10529-10532`, which asserts `.is_some()`).
+All of step 3 is `#[cfg(target_os = "macos")]`. On other platforms `request_resnapshot` and `take_needs_resnapshot` stay as they are today (`SD:1733-1764`), with `request_resnapshot_conn` and `take_needs_resnapshot` under `#[cfg(not(target_os = "macos"))]`. On macOS delete `take_needs_resnapshot`; its macOS callers become `peek_resnapshot_request` (`EB:5605`, and the test at `EB:10529-10532`, which asserts `.is_some()` on macOS and keeps its `take_needs_resnapshot` assertion elsewhere).
 
 - [ ] **Step 4: Fill, raise and `base_pending` (`state_db.rs`, S1.5)**
 
@@ -3231,14 +3406,24 @@ pub enum SnapshotVersion {
             params![file_id],
             |r| r.get(0),
         )?;
-        // On a row with a queued write only the version changes: the size is that write's (§6.3.2).
+        // §6.3.2 sets `current_version` and the size, and writes `local_base_version` in neither
+        // branch: it is the stale marker (`EB:11034-11040`). On a row with a queued write
+        // the raise changes `current_version` only: the size is that write's, and the object id
+        // and `version_filled` stay.
         if write_queued {
-            tx.execute("UPDATE files SET current_version = ?2, local_base_version = ?2 WHERE file_id = ?1", params![file_id, node_version])?;
+            tx.execute("UPDATE files SET current_version = ?2 WHERE file_id = ?1", params![file_id, node_version])?;
         } else {
             tx.execute(
-                "UPDATE files SET current_version = ?2, local_base_version = ?2, size_bytes = ?3 WHERE file_id = ?1",
+                "UPDATE files SET current_version = ?2, size_bytes = ?3 WHERE file_id = ?1",
                 params![file_id, node_version, node_size],
             )?;
+            if raise {
+                // The snapshot carries no object version id (SY:197); the old one is no longer current.
+                tx.execute(
+                    "UPDATE files SET current_object_version_id = NULL, version_filled = 0 WHERE file_id = ?1",
+                    params![file_id],
+                )?;
+            }
         }
         let outcome = if fill {
             tx.execute("UPDATE files SET version_filled = 1 WHERE file_id = ?1", params![file_id])?;
@@ -3253,11 +3438,6 @@ pub enum SnapshotVersion {
             )?;
             SnapshotVersion::Filled { resolved_ops }
         } else {
-            // The snapshot carries no object version id (SY:197); the old one is no longer current.
-            tx.execute(
-                "UPDATE files SET current_object_version_id = NULL, version_filled = 0 WHERE file_id = ?1",
-                params![file_id],
-            )?;
             SnapshotVersion::Raised { old: current, new: node_version }
         };
         record_file_change_conn(&tx, file_id, FpChangeKind::Modified, None)?;
@@ -3299,7 +3479,7 @@ pub enum SnapshotVersion {
     }
 ```
 
-`accept_finder_write`'s `Modify` branch adds `UPDATE files SET version_filled = 0 WHERE file_id = ?1` after `record_local_write_conn` (a content write touches the row). `engine_start_repair` adds, inside its transaction:
+`accept_finder_write`'s `Modify` branch adds `UPDATE files SET version_filled = 0 WHERE file_id = ?1` after `record_local_write_conn` (a content write touches the row). This is a plan deviation, disclosed as Spec issue 16: spec §6.1 clears the flag only on a content op, a landing or a restore. `engine_start_repair` adds, inside its transaction and under `#[cfg(target_os = "macos")]` (elsewhere `resnapshot_requested` is `false` and nothing is requested):
 
 ```rust
         let version_zero: bool = tx.query_row(
@@ -3320,6 +3500,8 @@ pub enum SnapshotVersion {
 and returns `resnapshot_requested: version_zero`.
 
 - [ ] **Step 5: The engine hooks (`engine_bridge.rs`)**
+
+Every hook in 5.1–5.4 sits in a `#[cfg(target_os = "macos")]` block; the `#[cfg(not(target_os = "macos"))]` arm keeps today's code (`take_needs_resnapshot` at `EB:5605`, no fill or raise in `process_metadata_row`, no versionless request in `apply_sync_op`).
 
 5.1 `sync_tick_outcome` (`EB:5605`):
 
@@ -3401,6 +3583,17 @@ cd $WT && git commit -m "feat(desktop): learn a missing or raised version from t
 
 A landing can no longer half-apply. A failure after `complete` is retried locally without the network, never duplicates the file, and never trashes a completed one.
 
+**Gate:** `apply_landing` is one shared `StateDb` helper, compiled on every target, called by the landing of every upload. Its new behaviour is write-keyed on `input.write_id.is_some()`, so a Windows or watcher landing behaves as in round 3:
+- the alias insert;
+- the rekey park (a non-Finder landing propagates the rekey error, as today);
+- the recorded-completion record and its shortcut (`do_upload_version`);
+- the never-abandon at give-up (4.3);
+- the status settle, which counts only Finder uploads (`write_id IS NOT NULL`): a landing with none sets `Local`, the server's size and mtime, as today.
+
+Two things hold on every platform, because round 3 already did them: the payload is marked `completed = 1` at the landing (Windows keeps it until finalization), and a later upload that follows a create's id swap is rebased only when its own base is `None`. The unlink of the released copy after the commit is `#[cfg(target_os = "macos")]` (`land()` sets `release` only on macOS); elsewhere `finish_completed_upload` unlinks it as today.
+
+Tests: T27, P9 and T61 are write-keyed and carry no `cfg`. T40 and P10 assert a token through `held_content_version`, so they carry `#[cfg(unix)]`.
+
 **Files:**
 - Modify: `src-tauri/src/state_db.rs`: `UploadResume` (`SD:694-711`) gains the completion fields and `get_upload_resume` (`SD:3192-3217`) reads them; connection-level twins `set_file_contract_state_conn` (`SD:2226-2300`) and `delete_file_conn` (`SD:1127-1142`); new `record_completion_claimed`, `LandingInput`, `LandingOutcome`, `apply_landing`; test-only `fail_next_landings_for_test`, `alias_target_for_test`, `set_target_path_for_test`
 - Modify: `src-tauri/src/engine_bridge.rs`: `do_upload_version` (`EB:697-890`) records the completion, lands through `apply_landing`, and lands a recorded completion without the network; `apply_completed_upload` (`EB:1121-1194`), `chain_queued_ops_after_upload` (`EB:1216-1258`) and Task 3's interim calls are folded into `apply_landing`; `execute_operation` returns `OpDone`; `process_due_operations`' give-up for a recorded completion; the mock gains `delay_complete` and `DELETE /api/v1/files/{id}`
@@ -3411,7 +3604,7 @@ A landing can no longer half-apply. A failure after `complete` is retried locall
 - Produces:
   - `UploadResume { …, completed_version: Option<i64>, completed_object_version_id: Option<String> }` (the 5 `UploadResume {` literals gain `None, None`)
   - `StateDb::record_completion_claimed(&self, op_id: &str, claim_id: &str, version: i64, object_version_id: &str) -> Result<bool>`
-  - `state_db::LandingInput<'a> { op_id, claim_id: Option<&'a str>, write_id: Option<&'a str>, local_file_id, server_file_id, target_path: Option<&'a str>, parent_id: Option<&'a str>, landed_base: Option<i64>, produced_version: i64, produced_object_version_id: &'a str, size_bytes: i64, content_type: Option<&'a str>, release_payload: Option<&'a str>, now: i64 }` (`&'a str` where not marked)
+  - `state_db::LandingInput<'a> { op_id, claim_id: Option<&'a str>, write_id: Option<&'a str>, local_file_id, server_file_id, target_path: Option<&'a str>, parent_id: Option<&'a str>, landed_base: Option<i64>, produced_version: i64, produced_object_version_id: &'a str, size_bytes: i64, content_type: Option<&'a str>, mime_type: Option<&'a str>, completed_payload: Option<&'a str>, now: i64 }` (`&'a str` where not marked). `completed_payload` is always the op's payload path; the landing marks it `completed = 1` on every platform, as today (`EB:832`). `mime_type` is the server's `completed["mime_type"]`, the fallback for `content_type` that `EB:1180-1181` applies today. What the caller unlinks after the commit is no longer an input: `land()` keeps it as `release`, which only says what to unlink.
   - `state_db::LandingOutcome { pub parked_successors: Vec<(String, ParkReason)>, pub resolved_successors: usize }`
   - `StateDb::apply_landing(&self, input: &LandingInput<'_>, rekey: &dyn Fn(&PendingOperation, &str) -> anyhow::Result<Option<String>>) -> Result<Option<LandingOutcome>>` (`None`: the op moved since the claim; nothing was written)
   - `engine_bridge::OpDone { Remove { release: Option<String> }, Removed { release: Option<String> } }`; `execute_operation` returns `anyhow::Result<OpDone>`: `Removed` when the landing transaction already deleted the op
@@ -3443,22 +3636,11 @@ A landing can no longer half-apply. A failure after `complete` is retried locall
         assert!(logs.contains("rekey_failed"), "{logs}");
     }
 
-    #[tokio::test]
-    async fn i1_a_landing_with_a_later_write_queued_keeps_it_uploading() {
-        // master_key [80u8; 32]
-        seed_uploaded_row(&bridge, &server, "kept-up");
-        let a = fp_save(&bridge, dir.path(), "kept-up", "notes.txt", b"A", "1");
-        let b = fp_save(&bridge, dir.path(), "kept-up", "notes.txt", b"A, and B's longer bytes", a.token.as_deref().unwrap());
-        server.state.lock().unwrap().fail_first_chunk_once.insert("session-2".into()); // B backs off
-        bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
-        let entry = bridge.db.get_file("kept-up").unwrap().unwrap();
-        let payload = crate::ipc_socket::file_entry_payload_for_db(&bridge.db, &entry, "root");
-        assert_eq!(payload.status, "uploading");
-        assert_eq!(payload.size_bytes, b"A, and B's longer bytes".len() as i64, "the newer write's size");
-        assert_eq!(payload.content_version, b.token, "the newer write's token");
-        drop(server.finish());
-    }
+    // T30 (`i1_a_landing_with_a_later_write_queued_keeps_it_uploading`) moved to Task 9:
+    // it needs Task 9 step 3.4, because until then the `Rollback` guard sets `Error` on
+    // any failed attempt (`EB:669-690`).
 
+    #[cfg(unix)] // asserts tokens through `held_content_version`
     #[tokio::test]
     async fn landing_vs_new_save_the_chain_step_sees_every_successor() {
         // master_key [81u8; 32]
@@ -3531,6 +3713,7 @@ A landing can no longer half-apply. A failure after `complete` is retried locall
         assert_eq!(bridge.db.get_file_contract_state("recorded").unwrap().unwrap().current_version, 2);
     }
 
+    #[cfg(unix)] // asserts a token through `held_content_version`
     #[tokio::test]
     async fn the_create_landing_writes_the_alias_in_its_transaction() {
         // master_key [84u8; 32]
@@ -3548,10 +3731,10 @@ A landing can no longer half-apply. A failure after `complete` is retried locall
 - [ ] **Step 2: Run them; expect RED**
 
 ```bash
-cd $WT/src-tauri && $LOCK cargo-build -- cargo test --locked -p beebeeb-desktop --lib -- m1_a_chain_failure i1_a_landing_with_a_later landing_vs_new_save a_completed_session_is_never a_recorded_completion_is_applied the_create_landing_writes_the_alias > $EVID/r4-t7-red.log 2>&1; echo "rc=$?"; grep -E "error\[|FAILED|panicked|test result" $EVID/r4-t7-red.log | head -20
+cd $WT/src-tauri && $LOCK cargo-build -- cargo test --locked -p beebeeb-desktop --lib -- m1_a_chain_failure landing_vs_new_save a_completed_session_is_never a_recorded_completion_is_applied the_create_landing_writes_the_alias > $EVID/r4-t7-red.log 2>&1; echo "rc=$?"; grep -E "error\[|FAILED|panicked|test result" $EVID/r4-t7-red.log | head -20
 ```
 
-Expected: compile errors for `fail_next_landings_for_test`, `delay_complete`, `trashes`, `alias_target_for_test`, `set_target_path_for_test`; then T27 two inits and two server files (the chain's `?`, `EB:828`, fails the landing after `complete`; the retry's `complete` is gone, and the abandon trashes and re-creates, `EB:859-866`); T30 `local` and A's size; T61 a trash request at give-up (`EB:1040-1055`); P9 the retry re-runs the upload; P10 no alias. T40 may already pass, because Task 3's interim landing resolves by write id after the seam; its RED comes from its mutation.
+Expected: compile errors for `fail_next_landings_for_test`, `delay_complete`, `trashes`, `alias_target_for_test`, `set_target_path_for_test`; then T27 two inits and two server files (the chain's `?`, `EB:828`, fails the landing after `complete`; the retry's `complete` is gone, and the abandon trashes and re-creates, `EB:859-866`); T61 a trash request at give-up (`EB:1040-1055`); P9 the retry re-runs the upload; P10 no alias. T40 may already pass, because Task 3's interim landing resolves by write id after the seam; its RED comes from its mutation.
 
 - [ ] **Step 3: Implement `apply_landing` (`state_db.rs`)**
 
@@ -3598,7 +3781,13 @@ pub(crate) fn fail_next_landings_for_test(n: u32) {
             left.set(n.saturating_sub(1));
             n > 0
         }) {
-            return Err(rusqlite::Error::InvalidQuery);
+            // Not `InvalidQuery`: it displays as "Query is not read-only", which
+            // `classify_operation_error` pauses as Permission (`EB:4920-4925`), and a paused op is
+            // never listed again (`SD:2676`). This one classifies as a retryable failure.
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL),
+                Some("injected landing failure".into()),
+            ));
         }
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -3613,15 +3802,9 @@ pub(crate) fn fail_next_landings_for_test(n: u32) {
                 return Ok(None);
             }
         }
-        // §9.2: Local only when no later write of the file is queued.
-        let later_write_queued: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM operation_queue WHERE file_id = ?1 AND op_id != ?2
-                            AND write_id IS NOT NULL AND kind IN ('upload_version', 'upload_file'))",
-            params![local, input.op_id],
-            |r| r.get(0),
-        )?;
-
-        // The row and contract (today's apply_completed_upload, EB:1131-1188).
+        // The row and contract (today's apply_completed_upload, EB:1131-1188). The row's status,
+        // size and mtime are settled below, after the chain step, because that step can park a
+        // later write (spec §9.1–§9.2).
         let mut entry = get_file_conn(&tx, local)?.unwrap_or_else(|| FileEntry {
             file_id: server.to_string(),
             path: input.target_path.unwrap_or(server).to_string(),
@@ -3638,18 +3821,12 @@ pub(crate) fn fail_next_landings_for_test(n: u32) {
             entry.path = target_path.to_string();
         }
         entry.remote_updated_at = input.now;
-        if !later_write_queued {
-            entry.status = FileStatus::Local;
-            entry.size_bytes = input.size_bytes;
-            entry.modified_at = input.now; // the save-time presentation is split off (spec §12)
-        }
         upsert_file_conn(&tx, &entry)?;
         let mut contract = get_file_contract_state_conn(&tx, local)?.unwrap_or_else(|| default_contract(server));
         contract.file_id = server.to_string();
         contract.item_kind = ItemKind::File;
-        if input.content_type.is_some() {
-            contract.content_type = input.content_type.map(str::to_string);
-        }
+        // As `EB:1180-1181` does today: the metadata's content type, else the server's `mime_type`.
+        contract.content_type = input.content_type.or(input.mime_type).map(str::to_string);
         contract.parent_id = input.parent_id.map(str::to_string);
         contract.current_version = input.produced_version;
         contract.local_base_version = input.produced_version;
@@ -3670,11 +3847,14 @@ pub(crate) fn fail_next_landings_for_test(n: u32) {
                  WHERE file_id = ?2",
                 params![local, server],
             )?;
-            tx.execute(
-                "INSERT INTO id_aliases (provisional_id, server_id, created_at) VALUES (?1, ?2, ?3)
-                 ON CONFLICT(provisional_id) DO UPDATE SET server_id = excluded.server_id",
-                params![local, server, input.now],
-            )?;
+            if input.write_id.is_some() {
+                // Write-keyed: a Windows create leaves no alias.
+                tx.execute(
+                    "INSERT INTO id_aliases (provisional_id, server_id, created_at) VALUES (?1, ?2, ?3)
+                     ON CONFLICT(provisional_id) DO UPDATE SET server_id = excluded.server_id",
+                    params![local, server, input.now],
+                )?;
+            }
             let successors = {
                 let mut stmt = tx.prepare(&format!(
                     "SELECT {PENDING_OPERATION_COLUMNS} FROM operation_queue WHERE file_id = ?1 AND op_id != ?2 ORDER BY rowid"
@@ -3690,8 +3870,8 @@ pub(crate) fn fail_next_landings_for_test(n: u32) {
                             params![op.op_id, server, metadata_json, input.now],
                         )?;
                     }
-                    // §8.6 rule 3: the chain step never fails the landing.
-                    Err(_) => {
+                    // §8.6 rule 3: a Finder landing's chain step never fails the landing.
+                    Err(_) if input.write_id.is_some() => {
                         tx.execute(
                             "UPDATE operation_queue SET file_id = ?2, attempts = max_attempts, last_error = 'rekey_failed',
                                                         last_error_class = 'rekey_failed', updated_at = ?3
@@ -3700,10 +3880,46 @@ pub(crate) fn fail_next_landings_for_test(n: u32) {
                         )?;
                         outcome.parked_successors.push((op.op_id, ParkReason::RekeyFailed));
                     }
+                    // Windows and watcher landings propagate the rekey error as today: the
+                    // transaction rolls back and the op is retried.
+                    Err(error) => return Err(rusqlite::Error::ToSqlConversionFailure(error.into())),
                 }
             }
             delete_file_conn(&tx, local)?;
         }
+        // §9.1–§9.2: computed after the rekey loop, which can park a successor.
+        // `later_unparked`: other Finder uploads of the file that have not parked;
+        // `later_parked`: the rest.
+        let later_unparked: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM operation_queue WHERE file_id = ?1 AND op_id != ?2
+                            AND write_id IS NOT NULL AND kind IN ('upload_version', 'upload_file')
+                            AND attempts < max_attempts)",
+            params![server, input.op_id],
+            |r| r.get(0),
+        )?;
+        let later_parked: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM operation_queue WHERE file_id = ?1 AND op_id != ?2
+                            AND write_id IS NOT NULL AND kind IN ('upload_version', 'upload_file')
+                            AND attempts >= max_attempts)",
+            params![server, input.op_id],
+            |r| r.get(0),
+        )?;
+        if !later_unparked && !later_parked {
+            // `Local`: no later write. The save-time presentation is split off (spec §12).
+            tx.execute(
+                "UPDATE files SET status = ?2, size_bytes = ?3, modified_at = ?4 WHERE file_id = ?1",
+                params![server, FileStatus::Local.as_str(), input.size_bytes, input.now],
+            )?;
+        } else if !later_unparked {
+            // Only parked writes remain: a parked upload presents `error` (spec §9.1). Task 9's
+            // `settle_status_after_park_conn` takes this over; until then the `UPDATE` is inline.
+            tx.execute(
+                "UPDATE files SET status = ?2 WHERE file_id = ?1 AND status = ?3",
+                params![server, FileStatus::Error.as_str(), FileStatus::Uploading.as_str()],
+            )?;
+        }
+        // Otherwise a later write is still queued and unparked: the status stays `Uploading`,
+        // and the size and mtime stay the newer write's.
         if let Some(write_id) = input.write_id {
             // §8.6.2: only WHERE held_write_id = W; a later save's token stays held.
             tx.execute(
@@ -3717,16 +3933,21 @@ pub(crate) fn fail_next_landings_for_test(n: u32) {
                 params![write_id, input.produced_version, input.produced_object_version_id],
             )?;
         } else {
-            // Windows and watcher uploads keep round 3's equal-base rule (spec §6.3.1).
+            // Windows and watcher uploads keep round 3's equal-base rule (spec §6.3.1). For a
+            // create (`?6`) the moved op's own base must be `None`, as `same_base` has it today
+            // (`EB:1239`); without `base_version IS NULL` a create's id swap would rebase every
+            // non-Finder upload of the file, including ones with a base.
             outcome.resolved_successors = tx.execute(
                 "UPDATE operation_queue SET base_version = ?3, base_object_version_id = ?4
                  WHERE file_id = ?1 AND op_id != ?2 AND write_id IS NULL
                    AND kind IN ('upload_version', 'upload_file')
-                   AND ((?5 IS NOT NULL AND base_version = ?5) OR (?5 IS NULL AND ?6))",
+                   AND ((?5 IS NOT NULL AND base_version = ?5) OR (?5 IS NULL AND base_version IS NULL AND ?6))",
                 params![server, input.op_id, input.produced_version, input.produced_object_version_id, input.landed_base, local != server],
             )?;
         }
-        // The op and its resume row; the payload is marked for release, unlinked after the commit (S6).
+        // The op and its resume row; the payload is marked completed on every platform (today's
+        // `EB:832`: Windows keeps it until finalization, and its sign-out reads the flag), and the
+        // caller unlinks the released copy after the commit (S6).
         let removed = match input.claim_id {
             Some(claim_id) => tx.execute(
                 "DELETE FROM operation_queue WHERE op_id = ?1 AND claim_id = ?2",
@@ -3738,7 +3959,7 @@ pub(crate) fn fail_next_landings_for_test(n: u32) {
             return Ok(None); // dropping `tx` rolls back
         }
         tx.execute("DELETE FROM upload_resume WHERE op_id = ?1", params![input.op_id])?;
-        if let Some(path) = input.release_payload {
+        if let Some(path) = input.completed_payload {
             tx.execute(
                 "INSERT INTO staged_payloads(path, completed) VALUES (?1, 1) ON CONFLICT(path) DO UPDATE SET completed = 1",
                 params![path],
@@ -3770,10 +3991,13 @@ pub(crate) enum OpDone {
 4.2 `do_upload_version` (`EB:697`). Before the payload check (`EB:705`), a recorded completion lands without the network (§8.6 rule 4); it must come first, because a recorded completion never parks, not even on a missing payload (rule 6):
 
 ```rust
-        if let Some(previous) = self.db.get_upload_resume(&op.op_id)?
+        // Write-keyed: a completion is recorded only for a File Provider write, so only
+        // one can be found here; Windows and watcher uploads never take this shortcut.
+        if claim.is_some_and(|claim| claim.write.is_some())
+            && let Some(previous) = self.db.get_upload_resume(&op.op_id)?
             && let (Some(version), Some(object)) = (previous.completed_version, previous.completed_object_version_id.clone())
         {
-            return self.land(local_file_id, op, claim, &previous.server_file_id, version, &object, previous.payload_size as u64, None, post_complete_errors, sync_root).await;
+            return self.land(local_file_id, op, claim, &previous.server_file_id, version, &object, previous.payload_size as u64, None, None, post_complete_errors, sync_root).await;
         }
 ```
 
@@ -3791,13 +4015,15 @@ In the `Ok(completed)` arm (`EB:815`), replace everything up to `Ok(released)` w
                     .map(str::to_string)
                     .unwrap_or_else(|| session.object_version_id.clone());
                 if let Some(claim) = claim
+                    && claim.write.is_some() // write-keyed
                     && !self.db.record_completion_claimed(&op.op_id, &claim.claim_id, produced_version, &produced_object)?
                 {
                     log_queue_state_moved(&op.op_id, "completion");
                     return Err(anyhow::Error::new(QueueStateMoved));
                 }
                 let size = completed["size_bytes"].as_u64().unwrap_or(plaintext_size);
-                self.land(local_file_id, op, claim, &session.server_file_id, produced_version, &produced_object, size, content_type, post_complete_errors, sync_root).await
+                let mime_type = completed["mime_type"].as_str().map(str::to_string);
+                self.land(local_file_id, op, claim, &session.server_file_id, produced_version, &produced_object, size, content_type, mime_type, post_complete_errors, sync_root).await
             }
 ```
 
@@ -3815,12 +4041,15 @@ and add:
         produced_object: &str,
         size: u64,
         content_type: Option<String>,
+        mime_type: Option<String>,
         post_complete_errors: &mut Vec<String>,
         #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
     ) -> anyhow::Result<OpDone> {
         self.seam("landing:after_complete");
         let payload_path = op.payload_path.clone();
-        let release = if cfg!(target_os = "windows") { None } else { payload_path.clone() };
+        // macOS only: `release` says only what the caller unlinks after the commit.
+        // Elsewhere `finish_completed_upload` unlinks the copy, as today.
+        let release = if cfg!(target_os = "macos") { payload_path.clone() } else { None };
         let master_key = self.api.master_key();
         let landed = self.db.apply_landing(
             &crate::state_db::LandingInput {
@@ -3836,7 +4065,9 @@ and add:
                 produced_object_version_id: produced_object,
                 size_bytes: size as i64,
                 content_type: content_type.as_deref(),
-                release_payload: release.as_deref(),
+                mime_type: mime_type.as_deref(),
+                // Always the op's payload path, whatever `release` is.
+                completed_payload: payload_path.as_deref(),
                 now: now_secs(),
             },
             &|queued, server_id| metadata_rekeyed_to(master_key, queued, server_id),
@@ -3867,10 +4098,11 @@ and add:
 
 (Keep Mine passes `claim: None`: `apply_landing` removes nothing it does not own. `upload_version` now returns `anyhow::Result<OpDone>`, so Keep Mine's match from Task 2 step 5.7 becomes `Ok(OpDone::Remove { release } | OpDone::Removed { release })` and unlinks `release` itself.) Delete `apply_completed_upload`, `chain_queued_ops_after_upload` and Task 3's interim `carry_held_write` / `set_held_landed` / `resolve_successors` calls (and those three `StateDb` methods, now unused). Delete Task 6's `clear_version_filled` call in the landing (the transaction does it).
 
-4.3 m-11, give-up. In `process_due_operations`' generic error arm, before computing `attempts`:
+4.3 m-11, give-up. In `process_due_operations`' generic error arm, move the first statement of the snippet below (`let completed = …`) to the top of the arm, above `let class = …`, and filter the pause with it: `if let Some(reason) = class.pause_reason().filter(|_| !completed)`. When `completed` is true, the op takes the retry arm whatever `classify_operation_error` says: a recorded completion is never paused (m-11; SQLite's `database is locked` would classify as Locked, `EB:4926`). It is write-keyed: only a File Provider write records a completion. The arm's `completed` and `attempts` then read:
 
 ```rust
-                        let completed = matches!(op.kind, OperationKind::UploadVersion | OperationKind::UploadFile)
+                        let completed = claimed.write.is_some()
+                            && matches!(op.kind, OperationKind::UploadVersion | OperationKind::UploadFile)
                             && self.db.get_upload_resume(&op.op_id)?.and_then(|r| r.completed_version).is_some();
                         // §8.6 rule 6: a recorded completion never parks and is never abandoned.
                         let attempts = if completed {
@@ -3889,17 +4121,16 @@ and guard the give-up: `if attempts >= op.max_attempts && !completed { self.aban
 
 - [ ] **Step 5: GREEN, mutations**
 
-Step-2 command into `$EVID/r4-t7-green.log`; expected `ok. 6 passed`. Mutations (`$EVID/r4-t7-mut-<T>.log`):
-- T27: propagate the rekey error (`?` instead of the park arm) → the landing rolls back and the retry re-creates: two inits.
-- T30: set `entry.status = Local` and the server's size at every landing → `local`.
-- T40: split `apply_landing` into two transactions, the chain step in the first and the op removal in the second, with `self.seam("landing:after_complete")` between them → N is accepted after the chain step, waits on a write that is then removed, and parks `predecessor_lost`; the init summary has one entry.
+Step-2 command into `$EVID/r4-t7-green.log`; expected `ok. 5 passed` (T30 moved to Task 9). Mutations (`$EVID/r4-t7-mut-<T>.log`):
+- T27: propagate the rekey error (`?` instead of the park arm) → the landing rolls back and the retry repeats the recorded completion (no second init); "the landing was applied" fails.
+- T40: split `apply_landing` into two transactions, the chain step in the first and the op removal in the second, with `self.seam("landing:after_complete")` **moved** from the top of `land()` to between the two transactions (the hook fires once, and a copy left at the top of `land()` would consume it first) → N is accepted after the chain step, waits on a write that is then removed, and parks `predecessor_lost`; the init summary has one entry.
 - T61: abandon at give-up regardless of `completed` → a trash request.
 - P9: drop the recorded-completion shortcut → the retry re-runs the session (requests grow).
 - P10: drop the `id_aliases` insert → `alias_target_for_test` is `None`.
 
 - [ ] **Step 6: Gate and commit**
 
-Task gate; expected lib count **`L0 + 50`**. Every Keep Mine, Windows-finalization and round-3 chain test stays green.
+Task gate; expected lib count **`L0 + 49`** (T30 moved to Task 9). Every Keep Mine, Windows-finalization and round-3 chain test stays green.
 
 ```bash
 cd $WT && git commit -m "feat(desktop): land an upload in one transaction after recording the server's completion" -- src-tauri/src/state_db.rs src-tauri/src/engine_bridge.rs
@@ -3912,6 +4143,8 @@ cd $WT && git commit -m "feat(desktop): land an upload in one transaction after 
 ## Task 8: Rule 3: provisional ids, fetches from the queue, thumbnails, unknown ids (spec §7, §5.6 thumbnail safe default; commit 8)
 
 After a create lands, every request under its provisional id reaches the server file. A fetch of an item whose write is queued is served from the queued bytes. An unknown id is refused, never answered "no item".
+
+**Gate:** three call sites are macOS-only (`#[cfg(target_os = "macos")]`): the `QueueFinderCreate` dispatch (Task 3's split is kept), the `row_unreadable` refusal, and the `serve_hydrate` call in `hydrate_over_ipc` (step 5.5: other unix builds keep their call to `hydrate_file_with_progress`, so they get neither the alias lookup nor the new `info!` line). The rest is keyed on alias rows, held columns or Finder uploads, which exist only where macOS made them, and is inert elsewhere: `resolve_provisional`, the alias sweeps (engine start and the daily tick), `queue_fetch_source`, `finder_thumbnail`'s queued-write refusal, the `unparked_finder_upload` check in `hydrate_file_with_progress`, and the `GetFileStatus` alias. The new `StateDb` helpers (`resolve_alias`, `sweep_aliases`, `queue_fetch_source`) compile on every target and carry `#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]`. Tests: T15, T17 and T54 name `crate::ipc_socket` and carry `#[cfg(unix)]`; the other Rust tests carry no `cfg`. The Swift changes are the macOS extension.
 
 **Files:**
 - Modify: `src-tauri/src/state_db.rs`: `resolve_alias`, `sweep_aliases`, `queue_fetch_source`; `engine_start_repair` sweeps aliases older than 30 days
@@ -3989,6 +4222,7 @@ Rust, in `engine_bridge.rs` tests (setup as in Task 3):
         (provisional, server_id, created.token.unwrap())
     }
 
+    #[cfg(unix)] // names `crate::ipc_socket::write_outcome_response`
     #[tokio::test]
     async fn i3_create_lands_then_a_modify_under_the_provisional_id() {
         // master_key [85u8; 32]
@@ -4030,6 +4264,7 @@ Rust, in `engine_bridge.rs` tests (setup as in Task 3):
         drop(server.finish());
     }
 
+    #[cfg(unix)] // names `crate::ipc_socket::write_outcome_response`
     #[tokio::test]
     async fn an_unknown_id_is_refused_never_answered_without_an_item() {
         // master_key [88u8; 32]
@@ -4053,6 +4288,7 @@ Rust, in `engine_bridge.rs` tests (setup as in Task 3):
         let created = fp_create(&bridge, dir.path(), "r2.txt", b"eight million bytes, in spirit");
         let p = created.outcome_file_id();
         let dest = dir.path().join("fetch").join("r2.txt");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap(); // `hydrate_dest_is_allowed` canonicalizes the parent
         let source = bridge.serve_hydrate(&p, &dest, &[dir.path()], None).await.unwrap();
         assert_eq!(source, HydrateSource::Queue);
         assert_eq!(std::fs::read(&dest).unwrap(), b"eight million bytes, in spirit", "the staged bytes");
@@ -4068,6 +4304,7 @@ Rust, in `engine_bridge.rs` tests (setup as in Task 3):
         let op = bridge.db.list_operations_for_file("live-row").unwrap().remove(0);
         std::fs::remove_file(op.payload_path.as_deref().unwrap()).unwrap();
         let dest = dir.path().join("fetch").join("notes.txt");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap(); // without it the guard fails first and the test passes for the wrong reason
         assert!(bridge.serve_hydrate("live-row", &dest, &[dir.path()], None).await.is_err(), "the server has no metadata route");
         assert_eq!(bridge.db.get_file("live-row").unwrap().unwrap().status, FileStatus::Uploading);
         drop(server.finish());
@@ -4098,6 +4335,7 @@ Rust, in `engine_bridge.rs` tests (setup as in Task 3):
         assert_eq!(state.files_with_content().len(), 2, "S and the guard's new file; no second t2");
     }
 
+    #[cfg(unix)] // names `crate::ipc_socket::file_status_response`
     #[tokio::test]
     async fn the_alias_resolves_rename_move_item_thumbnail_and_hydrate() {
         // master_key [92u8; 32]; one case per request kind
@@ -4125,6 +4363,7 @@ Rust, in `engine_bridge.rs` tests (setup as in Task 3):
         assert_eq!(&bridge.finder_thumbnail(&p, "small").await.unwrap()[..], b"thumbnail bytes");
         // hydrate (no write queued: the server is asked for S)
         let dest = dir.path().join("fetch").join("aliased.txt");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
         let _ = bridge.serve_hydrate(&p, &dest, &[dir.path()], None).await;
         let state = server.finish();
         assert_eq!(state.thumbnail_requests, vec![s.clone()]);
@@ -4169,6 +4408,7 @@ Rust, in `engine_bridge.rs` tests (setup as in Task 3):
         seed_uploaded_row(&bridge, &server, "empty");
         fp_save(&bridge, dir.path(), "empty", "notes.txt", b"", "1");
         let dest = dir.path().join("fetch").join("notes.txt");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
         assert_eq!(bridge.serve_hydrate("empty", &dest, &[dir.path()], None).await.unwrap(), HydrateSource::Queue);
         assert_eq!(std::fs::metadata(&dest).unwrap().len(), 0, "an empty file, not an error");
         drain_upload_queue(&bridge, &sync_root).await;
@@ -4416,15 +4656,15 @@ fn log_hydrate_served(file_id: &str, source: HydrateSource) {
 
 - [ ] **Step 5: `ipc_socket.rs`**
 
-5.1 `QueueFinderCreate` gains `#[serde(default)] deletion_conflicted: bool, #[serde(default)] template_identifier: Option<String>, #[serde(default)] template_content_version: Option<String>`. In its arm, inside the `dedup_write` closure: `if deletion_conflicted { work_bridge.queue_file_provider_deletion_conflicted_create(target, template_identifier, template_content_version, opened) } else { work_bridge.queue_file_provider_create_from(target, opened) }`. An older extension sends none of them and gets today's create.
+5.1 `QueueFinderCreate` gains `#[serde(default)] deletion_conflicted: bool, #[serde(default)] template_identifier: Option<String>, #[serde(default)] template_content_version: Option<String>`. In its arm, inside the `dedup_write` closure: `if deletion_conflicted { work_bridge.queue_file_provider_deletion_conflicted_create(target, template_identifier, template_content_version, opened) } else { work_bridge.queue_file_provider_create_from(target, opened) }`. An older extension sends none of them and gets today's create. Keep Task 3's split: under `#[cfg(target_os = "macos")]` the arm dispatches as above; under `#[cfg(not(target_os = "macos"))]` it calls `queue_finder_create_from(target, opened).map(FpWrite::plain)` and ignores the three fields.
 
-5.2 `write_outcome_response` becomes `pub(crate)`. For `Queued { file_id: Some(id), .. }`: read the row; if it is missing, `log_refused_write(op, "row_unreadable")` and answer `IpcResponse::Error { message: "the write was queued but its item could not be read; try again".into() }` (§7.3: no item-less reply unless ignored). Otherwise build the payload and, when `present_as` is `Some(p)`, set `item.identifier = p`.
+5.2 `write_outcome_response` becomes `pub(crate)`. The `row_unreadable` refusal below applies under `#[cfg(target_os = "macos")]`, and it is added to Task 12's log table as a plan addition (Spec issue 15; spec §11 lists only `unknown_item`). For `Queued { file_id: Some(id), .. }`: read the row; if it is missing, `log_refused_write(op, "row_unreadable")` and answer `IpcResponse::Error { message: "the write was queued but its item could not be read; try again".into() }` (§7.3: no item-less reply unless ignored). Otherwise build the payload and, when `present_as` is `Some(p)`, set `item.identifier = p`.
 
 5.3 `write_refusal_category` (`IPC:1412`): first `if error.downcast_ref::<crate::engine_bridge::UnknownItem>().is_some() { return "unknown_item"; }`.
 
 5.4 Extract the `GetFileStatus` arm into `pub(crate) fn file_status_response(db: &StateDb, file_id: &str) -> IpcResponse`: a live row as today; otherwise `db.resolve_alias(file_id)` → `log_alias_resolved` (make that helper `pub(crate)`), the payload of S with `identifier = file_id`; otherwise `Error { "not found" }`.
 
-5.5 `hydrate_over_ipc` (`IPC:2128`): `bridge.serve_hydrate(file_id, dest, &allowed_roots, progress_cb)`; `Ok(_)` answers `IpcResponse::Ok {}`. The `Finder hydrate served` line is logged inside `serve_hydrate` (4.7), so engine tests can capture it.
+5.5 `hydrate_over_ipc` (`IPC:2128`): under `#[cfg(target_os = "macos")]`, `bridge.serve_hydrate(file_id, dest, &allowed_roots, progress_cb)`; `Ok(_)` answers `IpcResponse::Ok {}`. Under `#[cfg(not(target_os = "macos"))]` it keeps its call to `hydrate_file_with_progress` as today, so Linux gets neither the alias lookup nor the new `info!` line. The `Finder hydrate served` line is logged inside `serve_hydrate` (4.7), so engine tests can capture it. (`serve_hydrate`, and the items only it uses such as `HydrateSource` and `log_hydrate_served`, carry `#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]`, because only the macOS arm calls them.)
 
 5.6 The `FetchThumbnail` arm (`IPC:1949-1951`): `bridge.finder_thumbnail(&file_id, thumbnail_variant(max_dimension)).await`. Its error already becomes `IpcResponse::Error`, which the extension turns into a per-item error (`XPC:534-535`, `FPE:1019`): no Swift change.
 
@@ -4505,7 +4745,7 @@ Expected: `ok. 11 passed`; Swift `ipc-framing: 96 passed, 0 failed`; both self-t
 - T18: skip the queue in `serve_hydrate` → a server request and `Error`.
 - T19: keep today's `set_status` calls → `Error`.
 - T43: make `queue_file_provider_deletion_conflicted_create` always call `queue_file_provider_create_from` (the option ignored, today's behaviour) → a second `t2` file; "a content modify of S" fails.
-- T54: skip the alias for one kind at a time (five runs, each red on its own case).
+- T54: skip the alias for one request kind at a time: modify (rename and move share one `resolve_provisional` call, in `queue_file_provider_modify_from`, so this one mutation turns both red, on the one `ops` assertion that checks both), item, thumbnail, hydrate. That is four runs, each red on its own case.
 - T55: drop the sweep from `engine_start_repair` → "old" still resolves.
 - T56′: drop the `held_write_queued` check → the server is asked while queued.
 - RF3: treat a 0-byte staged copy as missing (`metadata().len() == 0` → `NotFound`) → the hydrate goes to the server and fails.
@@ -4514,7 +4754,7 @@ Expected: `ok. 11 passed`; Swift `ipc-framing: 96 passed, 0 failed`; both self-t
 
 - [ ] **Step 9: Gate and commit**
 
-Task gate; expected lib count **`L0 + 61`**; Swift 96.
+Task gate; expected lib count **`L0 + 60`** (T30 moved from Task 7 to Task 9); Swift 96.
 
 ```bash
 cd $WT && git commit -m "feat(desktop): provisional ids resolve to the server file, fetches of queued writes are served locally, unknown ids are refused" -- src-tauri/src/state_db.rs src-tauri/src/engine_bridge.rs src-tauri/src/ipc_socket.rs src-tauri/src/runner.rs BeebeebFileProvider/IPCFraming.swift BeebeebFileProvider/XPCBridge.swift BeebeebFileProvider/FileProviderExtension.swift BeebeebFileProviderTests/main.swift scripts/test-ipc-framing.sh
@@ -4527,6 +4767,8 @@ cd $WT && git commit -m "feat(desktop): provisional ids resolve to the server fi
 ## Task 9: Rule 5: the item's status follows the queue (spec §9.1–§9.2, m-8; commit 9)
 
 An item with a Finder upload that has not parked is presented `uploading`: writable and not evictable, through retries and relaunches. A parked one is read-only and still not evictable. An item in the trash never looks writable.
+
+**Gate:** every step is write-keyed, so it is inert on Windows and Linux, where no op carries a write id: the status override in `file_entry_payload_for_db` (`unparked_finder_upload`), the `EXISTS` on a Finder upload in the startup reconcile, `settle_status_after_park_conn` after a park, and the `Rollback` guard's `finder_write` flag (Keep Mine and Windows uploads keep today's rollback). The helper and the changed SQL compile and run on every target. Tests: T31 (`state_db` only) carries no `cfg`; T30, T33, T60, RF2 and RF5 name `crate::ipc_socket` or assert a token through `held_content_version`, and carry `#[cfg(unix)]`.
 
 **Files:**
 - Modify: `src-tauri/src/ipc_socket.rs`: `file_entry_payload_for_db` presents the queue's status; `CAP_WRITE` (`IPC:225`) becomes `pub(crate)` for the tests
@@ -4584,6 +4826,7 @@ An item with a Finder upload that has not parked is presented `uploading`: writa
 `engine_bridge.rs` tests (setup as in Task 3):
 
 ```rust
+    #[cfg(unix)] // names `crate::ipc_socket::file_entry_payload_for_db`
     #[tokio::test]
     async fn a_retrying_upload_keeps_the_item_writable() {
         // master_key [95u8; 32]
@@ -4599,6 +4842,7 @@ An item with a Finder upload that has not parked is presented `uploading`: writa
         drop(server.finish());
     }
 
+    #[cfg(unix)] // names `crate::ipc_socket::file_entry_payload_for_db`
     #[tokio::test]
     async fn a_trashing_row_is_never_presented_uploading() {
         // master_key [96u8; 32]; m-8
@@ -4613,6 +4857,7 @@ An item with a Finder upload that has not parked is presented `uploading`: writa
         drop(server.finish());
     }
 
+    #[cfg(unix)] // asserts a token through `held_content_version`
     #[tokio::test]
     async fn a_restart_mid_upload_resumes_and_keeps_the_token() {
         // master_key [97u8; 32]; Review Focus 2
@@ -4638,6 +4883,7 @@ An item with a Finder upload that has not parked is presented `uploading`: writa
         assert_eq!(held_content_version(&bridge, "restart"), token);
     }
 
+    #[cfg(unix)] // names `crate::ipc_socket::file_entry_payload_for_db`
     #[tokio::test]
     async fn a_save_to_a_file_trashed_elsewhere_keeps_its_bytes() {
         // master_key [98u8; 32]; Review Focus 5
@@ -4655,15 +4901,34 @@ An item with a Finder upload that has not parked is presented `uploading`: writa
         assert_ne!(payload.status, "uploading", "an item in the trash never looks writable");
         drop(server.finish());
     }
+
+    /// Moved here from Task 7: it needs step 3.4. Until then the `Rollback` guard sets
+    /// `Error` on any failed attempt (`EB:669-690`), so B's first failed chunk would flip the row.
+    #[cfg(unix)] // names `crate::ipc_socket::file_entry_payload_for_db`
+    #[tokio::test]
+    async fn i1_a_landing_with_a_later_write_queued_keeps_it_uploading() {
+        // master_key [80u8; 32]
+        seed_uploaded_row(&bridge, &server, "kept-up");
+        let a = fp_save(&bridge, dir.path(), "kept-up", "notes.txt", b"A", "1");
+        let b = fp_save(&bridge, dir.path(), "kept-up", "notes.txt", b"A, and B's longer bytes", a.token.as_deref().unwrap());
+        server.state.lock().unwrap().fail_first_chunk_once.insert("session-2".into()); // B backs off
+        bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+        let entry = bridge.db.get_file("kept-up").unwrap().unwrap();
+        let payload = crate::ipc_socket::file_entry_payload_for_db(&bridge.db, &entry, "root");
+        assert_eq!(payload.status, "uploading");
+        assert_eq!(payload.size_bytes, b"A, and B's longer bytes".len() as i64, "the newer write's size");
+        assert_eq!(payload.content_version, b.token, "the newer write's token");
+        drop(server.finish());
+    }
 ```
 
 - [ ] **Step 2: Run them; expect RED**
 
 ```bash
-cd $WT/src-tauri && $LOCK cargo-build -- cargo test --locked -p beebeeb-desktop --lib -- startup_keeps_a_row_with a_retrying_upload_keeps a_trashing_row_is_never a_restart_mid_upload a_save_to_a_file_trashed_elsewhere > $EVID/r4-t9-red.log 2>&1; echo "rc=$?"; grep -E "error\[|FAILED|panicked|test result" $EVID/r4-t9-red.log | head -20
+cd $WT/src-tauri && $LOCK cargo-build -- cargo test --locked -p beebeeb-desktop --lib -- startup_keeps_a_row_with i1_a_landing_with_a_later a_retrying_upload_keeps a_trashing_row_is_never a_restart_mid_upload a_save_to_a_file_trashed_elsewhere > $EVID/r4-t9-red.log 2>&1; echo "rc=$?"; grep -E "error\[|FAILED|panicked|test result" $EVID/r4-t9-red.log | head -20
 ```
 
-Expected REDs: T31 `Error` (`SD:2041-2053`); T33 the row rolled back to `Error` (`EB:681-694`); RF2 `Error` after the reconcile; T60 and RF5 are guards against the override reaching `Trashing` rows, and go red by their mutation.
+Expected REDs: T31 `Error` (`SD:2041-2053`); T30 `error`, not `uploading` (the `Rollback` guard, `EB:669-690`, sets `Error` on B's failed chunk), and A's size; T33 the row rolled back to `Error` (`EB:681-694`); RF2 `Error` after the reconcile; T60 and RF5 are guards against the override reaching `Trashing` rows, and go red by their mutation.
 
 - [ ] **Step 3: Implement**
 
@@ -4682,7 +4947,7 @@ Expected REDs: T31 `Error` (`SD:2041-2053`); T33 the row rolled back to `Error` 
     };
 ```
 
-and build the payload from this `entry`. Make `CAP_WRITE` `pub(crate)`.
+and build the payload from this `entry`. Make `CAP_WRITE` `pub(crate)`. Change the macOS assertion of `a_cached_reply_reports_the_row_as_it_is_now_not_as_it_was` (`ipc_socket_framing_tests.rs`, Task 4 step 1) from `status == "local"` to `status == "uploading"`: the create's op is still queued, so the row as it is now is `uploading` (spec §5.4 row 1). The `#[cfg(not(target_os = "macos"))]` arm keeps `"local"`.
 
 3.2 `reconcile_stale_in_flight_on_startup` (`SD:2041-2053`):
 
@@ -4702,7 +4967,7 @@ WHERE status IN ('downloading', 'uploading')
 
 Update its doc comment (`SD:2033-2040`): a row with a Finder upload that has not parked stays `Uploading`.
 
-3.3 `settle_status_after_park_conn` and its callers. Each park runs in a transaction and calls it for the parked op's file after the op's `UPDATE`: `park_claimed` (wrap its statement in a transaction, read the op's `file_id`), the claim's park (Task 3 `park_in_claim`), the accept's park (rule 6a′, after the `INSERT`), and `note_snapshot_for_base_pending` (for each parked file).
+3.3 `settle_status_after_park_conn` and its callers. Each park runs in a transaction and calls it for the parked op's file after the op's `UPDATE`: `park_claimed` (wrap its statement in a transaction, read the op's `file_id`), the claim's park (Task 3 `park_in_claim`), the accept's park (rule 6a′, after the `INSERT`), `note_snapshot_for_base_pending` (for each parked file), and Task 7's `apply_landing` (the `rekey_failed` park, and a landing whose only later writes are parked: replace its inline `UPDATE … SET status = 'error'` with the helper).
 
 3.4 The `Rollback` guard (`EB:664-695`): add `finder_write: bool` (`claim.and_then(|c| c.write.as_ref()).is_some()`); its `drop` returns at once when `finder_write` is true. The row stays `Uploading` while the op will retry; a park sets `Error` (3.3). Keep Mine (`claim: None`) and Windows uploads keep today's rollback.
 
@@ -4710,7 +4975,8 @@ Update its doc comment (`SD:2033-2040`): a row with a Finder upload that has not
 
 - [ ] **Step 4: GREEN, mutations**
 
-Step-2 command into `$EVID/r4-t9-green.log`; expected `ok. 5 passed`. Mutations (`$EVID/r4-t9-mut-<T>.log`):
+Step-2 command into `$EVID/r4-t9-green.log`; expected `ok. 6 passed` (T30 arrived from Task 7). Mutations (`$EVID/r4-t9-mut-<T>.log`):
+- T30: make `apply_landing`'s status `UPDATE` unconditional (`Local`, the server's size and mtime, whether or not a later write remains) → `local`, and A's size.
 - T31: today's reconcile SQL → `Error`.
 - T33: keep the rollback to `Error` for Finder writes → "the row is not rolled back to Error" fails.
 - T60: apply the override to `Trashing` rows → `uploading`.
@@ -4719,7 +4985,7 @@ Step-2 command into `$EVID/r4-t9-green.log`; expected `ok. 5 passed`. Mutations 
 
 - [ ] **Step 5: Gate and commit**
 
-Task gate; expected lib count **`L0 + 66`**. The existing reconcile test (`SD:5352-5372`) stays green: its rows have no Finder upload.
+Task gate; expected lib count **`L0 + 66`** (6 new tests on top of Task 8's `L0 + 60`). The existing reconcile test (`SD:5352-5372`) stays green: its rows have no Finder upload. The two changed framing tests of Task 4 are re-checked here: both must be green with the override in place.
 
 ```bash
 cd $WT && git commit -m "feat(desktop): an item with a queued Finder save stays writable and is never evicted" -- src-tauri/src/ipc_socket.rs src-tauri/src/state_db.rs src-tauri/src/engine_bridge.rs
@@ -4732,6 +4998,8 @@ cd $WT && git commit -m "feat(desktop): an item with a queued Finder save stays 
 ## Task 10: Rule 6: the upgrade path (spec §10.1–§10.3, m-4c; commit 10)
 
 Ops an earlier build queued get a write id and are marked earlier-build, so they are never handed over and never treated as minted. Their bases are left alone: a timestamp base meets 409 and parks with its bytes (ruling 2).
+
+**Gate:** the one call site is `#[cfg(target_os = "macos")]` (`runner.rs`, step 3; Spec issue 13): on Windows it would hand write ids to Cloud Files uploads, whose `None` bases the `init` guard would then park. `mark_earlier_build_uploads` is a shared `StateDb` helper that compiles on every target and carries `#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]`. Both tests call the helper directly and are write-keyed, so they carry no `cfg` and run on every target.
 
 **Files:**
 - Modify: `src-tauri/src/state_db.rs`: new `mark_earlier_build_uploads`
@@ -4778,7 +5046,9 @@ Ops an earlier build queued get a write id and are marked earlier-build, so they
         let mut contract = db.get_file_contract_state("downgraded").unwrap().unwrap();
         contract.current_version = 2;
         db.set_file_contract_state(&contract).unwrap();
-        let accept = |op_id: &'static str, base: &'static str| {
+        // Borrowed parameters, not `&'static str`: the token below is an owned `String`, and
+        // leaking it with `Box::leak` just to satisfy the lifetime is not needed.
+        let accept = |op_id: &str, base: &str| {
             db.accept_finder_write(
                 &FinderAccept {
                     op_id, file_id: "downgraded", kind: FinderAcceptKind::Modify { incoming_base: Some(base) },
@@ -4790,7 +5060,7 @@ Ops an earlier build queued get a write id and are marked earlier-build, so they
             .unwrap()
         };
         let AcceptOutcome::Queued { token, .. } = accept("w1", "2") else { panic!("queued") };
-        let AcceptOutcome::Queued { .. } = accept("w2", Box::leak(token.into_boxed_str())) else { panic!("queued") };
+        let AcceptOutcome::Queued { .. } = accept("w2", &token) else { panic!("queued") };
         assert_eq!(db.get_operation("w2").unwrap().unwrap().base_version, Some(2), "m-4a: the waiting op stores its b");
         // A downgraded build then queued an upload of the same file without a write id.
         db.enqueue_operation(&queued("older-build", OperationKind::UploadVersion, "downgraded", None)).unwrap();
@@ -4876,6 +5146,13 @@ cd $WT && git commit -m "feat(desktop): mark uploads from an earlier build at en
 
 Each line of §11 is already emitted by the task that added its event. This task proves each one: the message, its fields, and that a planted file name and path never appear.
 
+**Gate:** `loggable_id` (M5) is the one exception to the macOS gate, by the lead's second ruling: it runs on every platform, Linux included, the existing hydrate warning (`IPC:2194-2203`) among its call sites. Every other line is emitted by a gated or write-keyed behaviour of an earlier task, and its test carries that behaviour's `cfg`:
+- `log_base_from_snapshot` and `log_version_raised` reuse Task 6's scenarios and carry `#[cfg(target_os = "macos")]`;
+- `log_finder_write_refused_unknown_item` and T38 name `crate::ipc_socket` and carry `#[cfg(unix)]`;
+- the other rows carry no `cfg`.
+
+The options line is the macOS extension (Swift).
+
 **Files:**
 - Modify: `src-tauri/src/engine_bridge.rs` and `src-tauri/src/ipc_socket.rs`: `loggable_id` (M5) used by every line that logs an id taken from the wire, including the existing hydrate warning (`IPC:2194-2203`)
 - Modify: `BeebeebFileProvider/FileProviderExtension.swift`: the options line in `createItem` and `modifyItem`
@@ -4913,14 +5190,14 @@ T37, one test per new line. Each reuses the scenario of the test named in the mi
 
 | Test | Scenario (from) | Message | Fields |
 |---|---|---|---|
-| `log_finder_write_refused_unknown_item` | T17 | `Finder write refused` | `op`, `reason` (= `unknown_item`) |
+| `log_finder_write_refused_unknown_item` | T17 | `Finder write refused` | `op`, `reason` (= `unknown_item`), `id` (spec §11) |
 | `log_upload_refused_with_its_class` | T25 | `upload refused by the server (409 Conflict); will retry` | `op_id`, `file_id`, `attempt`, `max_attempts`, `class` (= `in_progress`) |
 | `log_parked_with_its_reason` | T23 (the predecessor's park) | `upload parked with its bytes kept in the queue` | `op_id`, `file_id`, `reason` (= `payload_missing`) |
 | `log_took_over` | T23 | `queued write took over a parked one` | `op_id`, `file_id`, `parked_op_id` |
 | `log_alias_resolved` | T15 | `provisional id resolved to the server id` | `request` (= `modify`), `provisional_id`, `file_id` |
 | `log_alias_delete_kept` | T58 | `delete of a provisional id not applied to the server file` | `provisional_id`, `file_id` |
-| `log_base_from_snapshot` | T11 (with `apply_snapshot` called directly) | `queued write based on the version the snapshot reported` | `op_id`, `file_id`, `base_version` |
-| `log_version_raised` | T48 | `file version raised from the snapshot` | `file_id`, `old_version`, `new_version` |
+| `log_base_from_snapshot` | T11 (with `apply_snapshot` called directly); the snapshot node is `node(&master_key, id, PLANTED, 1, false)`, so a line that logged the name would leak it | `queued write based on the version the snapshot reported` | `op_id`, `file_id`, `base_version` |
+| `log_version_raised` | T48; the raising node is `node(&master_key, id, PLANTED, 3, false)` | `file version raised from the snapshot` | `file_id`, `old_version`, `new_version` |
 | `log_queue_state_moved` | T42 | `queue state moved` | `op_id`, `step` |
 | `log_completed_landing_retried` | P9 (one injected failure) | `upload completed on the server; local landing will be retried` | `op_id`, `file_id`, `attempt` |
 | `log_hydrate_served` | T18 (`source=queue`) and RF3 | `Finder hydrate served` (`INFO`) | `file_id`, `source` |
@@ -4928,6 +5205,7 @@ T37, one test per new line. Each reuses the scenario of the test named in the mi
 Example, the first row in full:
 
 ```rust
+    #[cfg(unix)] // names `crate::ipc_socket::write_outcome_response`
     #[tokio::test]
     async fn log_finder_write_refused_unknown_item() {
         // master_key [100u8; 32]
@@ -4938,7 +5216,7 @@ Example, the first row in full:
             let _ = crate::ipc_socket::write_outcome_response("modify", &bridge.db, result);
         })
         .await;
-        let line = assert_clean_line(&logs, "Finder write refused", &["op", "reason"], dir.path());
+        let line = assert_clean_line(&logs, "Finder write refused", &["op", "reason", "id"], dir.path());
         assert!(line.contains("unknown_item"), "{line}");
         drop(server.finish());
     }
@@ -4980,7 +5258,7 @@ Expected: `loggable_id` not found; T38 then fails with the raw id in the refused
 
 - [ ] **Step 3: Implement**
 
-3.1 M5 (`engine_bridge.rs`):
+3.1 M5 (`engine_bridge.rs`). **M5 runs on every platform, Linux included (lead ruling 2026-10-10: the one exception to the macOS gate).** It bounds what a log line may contain: log hygiene, not a behaviour change. Spec §11 asks for it explicitly, "also applies to the existing hydrate warning on Linux" (`IPC:2194-2203`), and the macOS-only gate does not reach it.
 
 ```rust
 /// Spec §11 M5: an id taken from the wire is logged only when it parses as a UUID.
@@ -5026,6 +5304,8 @@ cd $WT && git commit -m "test(desktop): every new log line carries ids and categ
 
 ## Task 12: Docs that change with the code (spec §17; commit 12)
 
+**Gate:** none: documentation only. It describes the macOS behaviour, and states that Windows and Linux are unchanged (M5 aside).
+
 **Files:**
 - Modify: `docs/IPC_PROTOCOL.md`: "Versions and queued writes" (`IPC_PROTOCOL.md:143-266`), "Write-queue idempotency" (`:282-408`, the `QueueFinderCreate` fields), "Thumbnails" (`:568-596`), "Version skew" (`:597-612`), "Tests" (`:613-`)
 - Check: `CLAUDE.md` ("Current macOS integration state"): `grep -n "content version\|contentVersion\|version identifier" CLAUDE.md` printed nothing at `e7e3dff`. If it still prints nothing, no change; write the empty grep result into Notes.
@@ -5041,7 +5321,7 @@ cd $WT && git commit -m "test(desktop): every new log line carries ids and categ
   6. Serialization (§8.7 S1–S6) as a short list, with the Mermaid sequence of S5.
   7. Provisional ids: the alias, what resolves through it, the gated delete, the deletion-conflicted create, unknown ids (§7.1–§7.3); fetches served from the queue (§7.4).
   8. Status follows the queue (§9).
-  9. The log table (§11, without `pinned` and `create_replay`).
+  9. The log table (§11, without `pinned` and `create_replay`), plus the `row_unreadable` reason of `Finder write refused` (Task 8 step 5.2), marked as a plan addition that §11 does not list (Spec issue 15).
   Replace the three passages the spec says it replaces (its "Replaces" line): the "rebase on an equal base" chain, the "queued, no item" reply row, and the "Not covered" note on provisional ids.
 - [ ] **Step 2: `QueueFinderCreate`**: document `deletion_conflicted` (bool, default `false`), `template_identifier` and `template_content_version` (both optional, sent only when `deletion_conflicted` is true); an older daemon ignores them and keeps today's create.
 - [ ] **Step 3: "Thumbnails"**: while a held write is queued, `FetchThumbnail` answers `Error` with no server request (the safe default; the render from staged bytes is task 1879).
@@ -5050,7 +5330,7 @@ cd $WT && git commit -m "test(desktop): every new log line carries ids and categ
 - [ ] **Step 6: Check and commit**
 
 ```bash
-cd $WT && grep -c "pinned=\|create_replay\|minted_writes\|held_mtime" docs/IPC_PROTOCOL.md   # expected 0, except in the "split off" lines
+cd $WT && grep -c "pinned=\|create_replay\|minted_writes\|held_mtime" docs/IPC_PROTOCOL.md   # expected 0: write the split-off lines without those identifiers
 grep -n '```mermaid' docs/IPC_PROTOCOL.md | wc -l                                               # at least 2 (state, S5)
 git diff --stat 9eced4a -- src-tauri/Cargo.lock bun.lock                                        # empty: no new dependency
 git commit -m "docs(ipc): versions and queued writes after round 4: the write token, the claim, the hand-over, aliases" -- docs/IPC_PROTOCOL.md
@@ -5065,6 +5345,8 @@ git commit -m "docs(ipc): versions and queued writes after round 4: the write to
 **Lead only, on the lead's Mac, by the lead.** No lane runs, quits or drives `/Applications/Beebeeb.app`, Finder, System Settings, CloudStorage or the containers. Everything runs against the local API with a test account. Nothing touches production. Evidence goes to `$EVID` as `R5-*`.
 
 D1's log check follows plan Spec issue 14.
+
+**Gate:** none: this task runs the macOS build on the lead's Mac and writes no code. The app is launched from the shell with `BB_API_BASE=http://localhost:3001` on the command itself, and a precondition (step 4) checks that the log shows the local API and never production before any D-step is read.
 
 - [ ] **Step 1: Gates at the head, in a fresh tree carrying only this branch**
 
@@ -5089,7 +5371,7 @@ git diff --stat 9eced4a -- src-tauri/Cargo.lock bun.lock                   # emp
 security find-identity -v -p codesigning | grep "Apple Development"
 export APPLE_SIGNING_IDENTITY="<the Apple Development identity printed above>"
 export MACOS_APP_PROVISION_PROFILE=~/Downloads/beebeeb-qa-app.provisionprofile          # the QA profiles used for 1834/1873
-export MACOS_FILE_PROVIDER_PROVISION_PROFILE=~/Downloads/beebeeb-qa-fileprovider.provisionprofile
+export MACOS_FILE_PROVIDER_PROVISION_PROFILE=~/Downloads/beebeeb-qa-ext.provisionprofile
 cd $G && bun install --frozen-lockfile
 $LOCK cargo-build -- bunx tauri build --debug --target aarch64-apple-darwin --bundles app --config '{"bundle":{"createUpdaterArtifacts":false}}' -- --locked > $EVID/R5-qa-build.log 2>&1; echo "rc=$?"
 APPQA=$G/src-tauri/target/aarch64-apple-darwin/debug/bundle/macos/Beebeeb.app
@@ -5102,12 +5384,15 @@ ls "$APPQA/Contents/PlugIns/"                                             # Beeb
 
 - [ ] **Step 3: Environment, captures and helpers**
 
-Precondition: the installed app is the `931b885` QA build (round 3's rung), its Finder location is kept, and the two old ops are still in its queue (D1). Do not reset anything before D1.
+Preconditions:
+- The installed app is the `931b885` QA build (round 3's rung), its Finder location is kept, and the two old ops are still in its queue (D1). Do not reset anything before D1.
+- The local web app runs (the CLI login approval, D8 and the D8b dry run need it; `cd /Users/guuslangelaar/Development/Beebeeb/beebeeb.io/repos/web && bun dev`, in its own terminal).
+- `t.txt` and `d2-fixture.txt` exist and are materialized in `$ROOT` (from rounds 1834/1873). If not, create `t.txt` in step 4's setup and drop `d2-fixture.txt` from D7.
 
 ```bash
 cd /Users/guuslangelaar/Development/Beebeeb/beebeeb.io/repos/server && cargo run -p beebeeb-api --bin beebeeb-api   # its own terminal; `make dev-native` cannot start the API (progress ledger, 2026-10-09 09:13)
 curl -sf localhost:3001/health
-launchctl setenv BB_API_BASE http://localhost:3001                         # unset in step 16
+launchctl setenv BB_API_BASE http://localhost:3001                         # for launchd-started helpers only; unset in step 16. The app itself is launched with the variable on its own command line (step 4): setenv does not reach a process started from the shell
 EVID=/Users/guuslangelaar/Development/Beebeeb/beebeeb.io/.claude/tasks/_qa-evidence/1873
 ROOT="$HOME/Library/CloudStorage/Beebeeb-Beebeeb"
 PSQL="psql postgresql://beebeeb:beebeeb_dev@localhost:5434/beebeeb -At"
@@ -5118,6 +5403,7 @@ dd if=/dev/urandom of=$QA_TMP/big-250m.bin bs=1m count=250 2>/dev/null
 
 start_step() {   # $1 = step; instrument 1, captured live (spec §14)
   date '+%Y-%m-%d %H:%M:%S' > $EVID/R5-$1.start
+  date +%s > $EVID/R5-$1.epoch   # a UTC instant: compare it to the dev DB's TIMESTAMPTZ columns with `to_timestamp(...)`, never with the local-time string above
   /usr/bin/log stream --style compact --predicate 'process == "fileproviderd" AND eventMessage CONTAINS "fetch-content("' > $EVID/R5-$1-fetch.log 2>&1 &
   echo $! > $EVID/R5-$1-fetch.pid
 }
@@ -5137,6 +5423,16 @@ sample()  {      # $1 = file, $2 = step: ls -l, size and the last 16 bytes, ever
   echo $! > $EVID/R5-$2-samples.pid
 }
 stop_sample() { kill "$(cat $EVID/R5-$1-samples.pid)"; }
+canary() {       # $1 = step. No info line marks a pass (runner.rs:1324-1330), so a pass boundary is a canary: a new file the dev DB gains when a pass uploads it.
+  printf 'canary %s\n' "$1" > "$ROOT/canary-$1.txt"
+  local size; size=$(wc -c < "$ROOT/canary-$1.txt" | tr -d ' ')
+  local i
+  for i in $(seq 1 600); do
+    [ "$($PSQL -c "SELECT count(*) FROM files WHERE size_bytes = $size AND created_at > to_timestamp($(cat $EVID/R5-$1.epoch))")" -ge 1 ] && return 0
+    sleep 0.5
+  done
+  echo "VOID: timeout waiting for the canary of $1"; return 1
+}
 ```
 
 ```bash
@@ -5150,7 +5446,7 @@ ls -l "$STATE_DB"     # confirm; after step 4, also confirm the new build logged
 **The CLI session for D4b and D8b**, signed in once here with an isolated `HOME`, so the CLI never reads or writes the operator's own config (it holds a live session and master key):
 
 ```bash
-BB="$(command -v bb || echo cargo run --quiet --manifest-path /Users/guuslangelaar/Development/Beebeeb/beebeeb.io/repos/cli/Cargo.toml --)"
+$LOCK cargo-build -- cargo build --release --manifest-path /Users/guuslangelaar/Development/Beebeeb/beebeeb.io/repos/cli/Cargo.toml && BB=/Users/guuslangelaar/Development/Beebeeb/beebeeb.io/repos/cli/target/release/bb   # built with the real HOME; never `cargo run` under the isolated one: cargo and rustup would find no toolchain
 HOME=$QA_TMP $BB --api http://localhost:3001 login        # approve in the local web app, signed in as the test account
 CFG="$QA_TMP/Library/Application Support/beebeeb/config.json"   # dirs::config_dir under the isolated HOME (repos/cli/src/config.rs:30-33)
 TOKEN=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["session_token"])' "$CFG")
@@ -5162,14 +5458,16 @@ MK=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["master_key
 ```bash
 control() {      # $1 = step. ctl-<step>.txt was created in step 4 and has landed (materialized, untouched).
   CTL_ID=$(id_of "ctl-$1.txt" $EVID/R5-setup-state.db)
+  [ -n "$CTL_ID" ] || { echo "VOID: id not found"; return 1; }     # an empty id would grep every line
   # In Finder: right-click ctl-<step>.txt → Remove Download. Then:
   cat "$ROOT/ctl-$1.txt" > /dev/null
   sleep 3
-  echo "control $1: instrument1=$(fetches $CTL_ID $1) instrument2=$(grep -c "Finder hydrate served file_id=$CTL_ID source=server" $EVID/R5-app-stdout.log)"
+  # The logger quotes a string field: `source="server"`.
+  echo "control $1: instrument1=$(fetches $CTL_ID $1) instrument2=$(grep -c "Finder hydrate served file_id=$CTL_ID source=\"server\"" $EVID/R5-app-stdout.log)"
 }
 ```
 
-Pass: exactly `instrument1=1 instrument2=1`. A void control changes the instrument; it is never repeated as is: (1) the live stream above; (2) the same predicate with `/usr/bin/log stream --level debug`; (3) instrument 2 alone, and the step's result is then written "no fetch reached the daemon", with the system-side gap stated in the evidence. Queue-served fetches have no control (an item with a queued write is not evictable, §9.1): for them, instrument 1 plus the `source=queue` field (T37) is the evidence.
+Pass: exactly `instrument1=1 instrument2=1`. A void control changes the instrument; it is never repeated as is: (1) the live stream above; (2) the same predicate with `/usr/bin/log stream --level debug`; (3) instrument 2 alone, and the step's result is then written "no fetch reached the daemon", with the system-side gap stated in the evidence. Queue-served fetches have no control (an item with a queued write is not evictable, §9.1): for them, instrument 1 plus the `source="queue"` field (T37; a string field prints quoted) is the evidence.
 
 **Greps used in every step** (`<id>` the item, `<step>` the step):
 
@@ -5198,9 +5496,23 @@ start_step D1
 osascript -e 'quit app "Beebeeb"'; sleep 5
 mkdir -p ~/bb-qa/1873-r5 && ditto /Applications/Beebeeb.app ~/bb-qa/1873-r5/Beebeeb-931b885.app
 ditto "$APPQA" /Applications/Beebeeb.app
-RUST_LOG=info /Applications/Beebeeb.app/Contents/MacOS/beebeeb-desktop >> $EVID/R5-app-stdout.log 2>&1 &
+# The three variables go on the command itself (lead ruling): `launchctl setenv` does not reach a process
+# started from the shell, and `api_base_url()` falls back to https://api.beebeeb.io (`runner.rs:189-195`). NO_COLOR
+# keeps ANSI codes out of the redirected log, which would split every `field=value` (`QA/R0-app-stdout.log`).
+BB_API_BASE=http://localhost:3001 NO_COLOR=1 RUST_LOG=beebeeb=debug,info /Applications/Beebeeb.app/Contents/MacOS/beebeeb-desktop >> $EVID/R5-app-stdout.log 2>&1 &
 echo $! > $EVID/R5-app.pid
-sleep 75                                                                   # two passes (RUN:117)
+sleep 10
+# PRECONDITION for every D-step (lead ruling): the app talks to the local API and to nothing else.
+# Run these before reading anything from D1. If any check fails, stop the step, kill the recorded PID, and write
+# the failure into the evidence: a launch that reached production is void, and it may already have used up D1's
+# one-time fixture (the two old ops), so D1 is not rerun as it stands.
+ps eww "$(cat $EVID/R5-app.pid)" | grep -c 'BB_API_BASE=http://localhost:3001'   # 1: the process has the local base
+grep -cE 'localhost:3001|127\.0\.0\.1:3001|\[::1\]:3001' $EVID/R5-app-stdout.log    # >= 1: the log shows requests going to the local API
+# (If this build's log names no URL at this level, add `hyper_util=debug` to RUST_LOG for the launch: hyper-util's
+# `connecting to <addr>` debug line, `connect/http.rs:786` in 0.1.21, names the peer, `127.0.0.1:3001` or `[::1]:3001`.)
+grep -c 'api.beebeeb.io' $EVID/R5-app-stdout.log                                    # 0: and none to production
+grep -c $'\x1b' $EVID/R5-app-stdout.log                                             # 0: no colour codes in the log
+sleep 65                                                                   # two passes in all (RUN:117)
 end_step D1
 grep -E "905b6d55|e5cec976" $EVID/R5-app-stdout.log > $EVID/R5-D1-lines.txt
 sqlite3 $EVID/R5-D1-state.db "SELECT op_id, attempts, max_attempts, write_id IS NOT NULL, write_origin, base_version, payload_path FROM operation_queue WHERE op_id LIKE '905b6d55%' OR op_id LIKE 'e5cec976%'" > $EVID/R5-D1-ops-after.txt
@@ -5216,50 +5528,58 @@ Then the setup for the controls: create `ctl-D2.txt`, `ctl-D3.txt`, `ctl-D4.txt`
 start_step D2; control D2
 printf 'D2 created\n' > "$ROOT/d2.txt"; sleep 0.5
 sqlite3 "$STATE_DB" ".backup '$EVID/R5-D2-p.db'"; P=$(id_of d2.txt $EVID/R5-D2-p.db)   # the provisional id
+[ -n "$P" ] || echo "VOID: id not found"      # an empty id would count every `fetch-content()` line as a match
 sample "$ROOT/d2.txt" D2
 printf 'save one\n' >> "$ROOT/d2.txt"; sleep 1; printf 'save two\n' >> "$ROOT/d2.txt"
 printf 'D2 created\nsave one\nsave two\n' > $EVID/R5-D2-expected.txt
 sleep 100; stop_sample D2; end_step D2
 S=$(id_of d2.txt $EVID/R5-D2-state.db)
+[ -n "$S" ] || echo "VOID: id not found"
 ```
 
-Pass: every sample 29 B and `-rw-`; the dev DB has S at v3, 29 B (three uploads: the create and one per save; the last wins); `shasum -a 256 "$ROOT/d2.txt"` equals `R5-D2-expected.txt`'s; the "one name" and "no refusal" checks pass from the first save on; instruments 1 and 2: `fetches $P D2` = 0 and `served $P` = 0 after the first save; `fetches $S D2` ≤ 1 and `served $S` ≤ 1 (the swap's materialization, recorded for D10); any other fetch fails the step. (The `stat` check and the PNG step moved to 1879.)
+Pass: sizes never decrease; every sample after `save two` is 29 B; every sample `-rw-` (sampling starts after the create, so the first samples read 11 B, then 20 B after `save one`); the dev DB has S at v3, 29 B (three uploads: the create and one per save; the last wins); `shasum -a 256 "$ROOT/d2.txt"` equals `R5-D2-expected.txt`'s; the "one name" and "no refusal" checks pass from the first save on; instruments 1 and 2: `fetches $P D2` = 0 and `served $P` = 0 after the first save; `fetches $S D2` ≤ 1 and `served $S` ≤ 1 (the swap's materialization, recorded for D10); any other fetch fails the step. (The `stat` check and the PNG step moved to 1879.)
 
 - [ ] **Step 6: D3, C1 forced**
 
 ```bash
 start_step D3; control D3
 T=$(id_of t.txt $EVID/R5-setup-state.db); V=$($PSQL -c "SELECT version_number FROM files WHERE id = '$T'")
+[ -n "$T" ] || echo "VOID: id not found"
 sample "$ROOT/t.txt" D3
 printf 'D3 first\n' >> "$ROOT/t.txt"; cp $QA_TMP/big-1200m.bin "$ROOT/d3-big.bin"
-until [ "$($PSQL -c "SELECT version_number FROM files WHERE id = '$T'")" = "$((V+1))" ]; do sleep 1; done
+ok=0; for i in $(seq 1 600); do      # bounded: 300 s
+  [ "$($PSQL -c "SELECT version_number FROM files WHERE id = '$T'")" = "$((V+1))" ] && { ok=1; break; }; sleep 0.5; done
+[ $ok = 1 ] || echo "VOID: timeout (D3: the first save never landed)"
 $PSQL -c "SELECT is_uploading FROM files WHERE size_bytes > 1000000000 ORDER BY updated_at DESC LIMIT 1" > $EVID/R5-D3-big-uploading.txt   # t
 printf 'D3 second\n' >> "$ROOT/t.txt"; cp "$ROOT/t.txt" $EVID/R5-D3-expected.txt
 sleep 80; stop_sample D3; end_step D3
 ```
 
-Pass: within two passes `t.txt` is at v+2; `shasum` of the local file equals `R5-D3-expected.txt`'s; no 409 line for `$T`; every sample `-rw-`; one name for its bytes after each save; no fetch of `$T` (both instruments, control passed). `R5-D3-big-uploading.txt` reads `t` (the second save landed while the big upload ran).
+Pass: within two passes `t.txt` is at v+2; `shasum` of the local file equals `R5-D3-expected.txt`'s; no 409 line for `$T`; every sample `-rw-`; one name for its bytes after each save; no fetch of `$T` (both instruments, control passed). `R5-D3-big-uploading.txt` reads `t` (the big upload was still running when the second save was made).
 
 - [ ] **Step 7: D4, a save during the create's upload**
 
 ```bash
 start_step D4; control D4
 cp $QA_TMP/big-600m.bin "$ROOT/d4-big.bin"
-until [ "$($PSQL -c "SELECT count(*) FROM files WHERE size_bytes = 629145600 AND is_uploading")" = "1" ]; do sleep 1; done
+ok=0; for i in $(seq 1 600); do      # bounded: 300 s
+  [ "$($PSQL -c "SELECT count(*) FROM files WHERE size_bytes = 629145600 AND is_uploading")" = "1" ] && { ok=1; break; }; sleep 0.5; done
+[ $ok = 1 ] || echo "VOID: timeout (D4: the create's upload never started)"
 printf 'D4 tail\n' >> "$ROOT/d4-big.bin"; shasum -a 256 "$ROOT/d4-big.bin" | cut -d' ' -f1 > $EVID/R5-D4-expected.sha
 sleep 150; end_step D4
 ```
 
-Pass: exactly one new server file (`$PSQL -c "SELECT count(*) FROM files WHERE size_bytes IN (629145600, 629145608)"` = 1), at v2, 629145608 B; never `r--` or `deco:error` for its ids; no `Finder hydrate failed`; the latest version's bytes are checked after D7's read-back. Record whether the system fetched the provisional id (both instruments); if it did, the fetch succeeded and the app logged `Finder hydrate served … source=queue`.
+Pass: exactly one new server file (`$PSQL -c "SELECT count(*) FROM files WHERE size_bytes IN (629145600, 629145608)"` = 1), at v2, 629145608 B; never `r--` or `deco:error` for its ids; no `Finder hydrate failed`; the latest version's bytes are checked after D7's read-back. Record whether the system fetched the provisional id (both instruments); if it did, the fetch succeeded and the app logged `Finder hydrate served … source="queue"` (a string field prints quoted).
 
 - [ ] **Step 8: D4b, a save during the create's queue wait** (R2 again)
 
 ```bash
 start_step D4b; control D4b
-grep "sync operation queue processed\|completed_sync_work" $EVID/R5-app-stdout.log | tail -1      # the last pass; start right after one
+canary D4b || echo "VOID: no pass boundary"      # a pass has just uploaded the canary; act within the next 25 s
 printf 'D4b created\n' > "$ROOT/d4b.txt"; sleep 1; printf 'D4b appended\n' >> "$ROOT/d4b.txt"
 sleep 100; end_step D4b
 S=$(id_of d4b.txt $EVID/R5-D4b-state.db)
+[ -n "$S" ] || echo "VOID: id not found"
 curl -sf -H "Authorization: Bearer $TOKEN" http://localhost:3001/api/v1/files/$S/versions > $EVID/R5-D4b-versions.json   # $TOKEN: step 3's CLI session
 ```
 
@@ -5271,7 +5591,9 @@ Pass (ruling 1, m-15): two `init`s for the file in order: one server row; versio
 start_step D5; control D5
 ( while :; do ls "$ROOT" | grep -c '^t2\.txt$'; sleep 0.2; done ) > $EVID/R5-D5-presence.txt 2>&1 & echo $! > $EVID/R5-D5-presence.pid
 printf 't2\n' > "$ROOT/t2.txt"; cp $QA_TMP/big-1200m.bin "$ROOT/d5-big.bin"
-until [ "$($PSQL -c "SELECT count(*) FROM files WHERE size_bytes = 3 AND NOT is_uploading AND created_at > '$(cat $EVID/R5-D5.start)'")" = "1" ]; do sleep 0.2; done
+ok=0; for i in $(seq 1 1500); do     # bounded: 300 s. The epoch is a UTC instant; `created_at` is a TIMESTAMPTZ.
+  [ "$($PSQL -c "SELECT count(*) FROM files WHERE size_bytes = 3 AND NOT is_uploading AND created_at > to_timestamp($(cat $EVID/R5-D5.epoch))")" = "1" ] && { ok=1; break; }; sleep 0.2; done
+[ $ok = 1 ] || echo "VOID: timeout (D5: t2 never landed)"
 printf 't2 edited\n' >> "$ROOT/t2.txt"
 sleep 100; kill "$(cat $EVID/R5-D5-presence.pid)"; end_step D5
 ```
@@ -5283,11 +5605,17 @@ Pass: `R5-D5-presence.txt` never reads 0; `ls "$ROOT" | grep -c '^t2 2'` = 0 and
 ```bash
 cp $QA_TMP/big-250m.bin "$ROOT/d6.bin"; sleep 120                                  # landed and materialized
 start_step D6; control D6
-F=$(sqlite3 "$STATE_DB" "SELECT file_id FROM files WHERE path = 'd6.bin'")
+sqlite3 "$STATE_DB" ".backup '$EVID/R5-D6-p.db'"; F=$(id_of d6.bin $EVID/R5-D6-p.db)   # from a copy, never the live state.db (spec §14)
+[ -n "$F" ] || echo "VOID: id not found"
 sample "$ROOT/d6.bin" D6
-# Save A two seconds before a pass: read the last pass's time from the log, wait until 28 s after it.
+# Save A a few seconds before a pass. No info line marks a pass (runner.rs:1324-1330), so the canary does: a pass
+# has just uploaded it, and the next pass is about 30 s later (RUN:117).
+canary D6 || echo "VOID: no pass boundary"
+sleep 25
 printf 'save A marker...\n' >> "$ROOT/d6.bin"
-until [ "$($PSQL -c "SELECT is_uploading FROM files WHERE id = '$F'")" = "t" ]; do sleep 0.5; done
+ok=0; for i in $(seq 1 600); do      # bounded: 300 s
+  [ "$($PSQL -c "SELECT is_uploading FROM files WHERE id = '$F'")" = "t" ] && { ok=1; break; }; sleep 0.5; done
+[ $ok = 1 ] || echo "VOID: timeout (D6: A's upload never started)"
 printf 'save B marker...\n' >> "$ROOT/d6.bin"
 sleep 150; stop_sample D6; end_step D6
 ```
@@ -5352,15 +5680,16 @@ The session (`$TOKEN`, `$MK`) is step 3's. The replace (endpoints as the spec's 
 legacy_replace() {   # $1 = server id, $2 = plaintext file
   local S=$1 PLAIN=$2
   local META NAME PARENT SIZE
-  META=$(curl -sf -H "Authorization: Bearer $TOKEN" http://localhost:3001/api/v1/files/$S)
-  NAME=$(python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["name_encrypted"]))' <<< "$META")
-  PARENT=$(python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin).get("parent_id")))' <<< "$META")
+  # `-sSf … || return 1` on every request: `-f` alone fails silently and the function would carry on.
+  META=$(curl -sSf -H "Authorization: Bearer $TOKEN" http://localhost:3001/api/v1/files/$S) || return 1
+  NAME=$(python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["name_encrypted"]))' <<< "$META") || return 1
+  PARENT=$(python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin).get("parent_id")))' <<< "$META") || return 1
   SIZE=$(wc -c < "$PLAIN" | tr -d ' ')
-  cargo run --quiet --manifest-path $QA_TMP/d8b-legacy-replace/Cargo.toml -- "$MK" "$S" "$PLAIN" $QA_TMP/chunk0.bin
-  curl -sf -X POST http://localhost:3001/api/v1/files/upload/init -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-    -d "{\"file_id\":\"$S\",\"name_encrypted\":$NAME,\"parent_id\":$PARENT,\"is_media\":false,\"size_bytes\":$SIZE,\"chunk_count\":1,\"created_at\":null}"
-  curl -sf -X PUT http://localhost:3001/api/v1/files/$S/chunks/0 -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/octet-stream' --data-binary @$QA_TMP/chunk0.bin
-  curl -sf -X POST http://localhost:3001/api/v1/files/$S/upload/complete -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{}'
+  cargo run --quiet --manifest-path $QA_TMP/d8b-legacy-replace/Cargo.toml -- "$MK" "$S" "$PLAIN" $QA_TMP/chunk0.bin || return 1
+  curl -sSf -X POST http://localhost:3001/api/v1/files/upload/init -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -d "{\"file_id\":\"$S\",\"name_encrypted\":$NAME,\"parent_id\":$PARENT,\"is_media\":false,\"size_bytes\":$SIZE,\"chunk_count\":1,\"created_at\":null}" || return 1
+  curl -sSf -X PUT http://localhost:3001/api/v1/files/$S/chunks/0 -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/octet-stream' --data-binary @$QA_TMP/chunk0.bin || return 1
+  curl -sSf -X POST http://localhost:3001/api/v1/files/$S/upload/complete -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{}' || return 1
 }
 ```
 
@@ -5369,9 +5698,10 @@ Dry-run first on a throwaway file created in the web app (`d8b-dry.txt`): `legac
 ```bash
 start_step D8b
 S=$(id_of t.txt $EVID/R5-setup-state.db)
+[ -n "$S" ] || echo "VOID: id not found"
 printf 'D8b: replaced from another device\n' > $QA_TMP/d8b.txt
 V=$($PSQL -c "SELECT version_number FROM files WHERE id = '$S'")
-legacy_replace "$S" $QA_TMP/d8b.txt
+legacy_replace "$S" $QA_TMP/d8b.txt || echo "VOID: the legacy replace failed"
 $PSQL -c "SELECT version_number, is_uploading FROM files WHERE id = '$S'" > $EVID/R5-D8b-devdb.txt   # V+1, f
 sleep 80; end_step D8b
 ```
@@ -5408,7 +5738,7 @@ Reinstall whichever app the lead wants on the Mac (`~/bb-qa/1873-r5/Beebeeb-931b
 
 ## Merge and release preconditions
 
-- **Merge** (the lane's branch into `main`) only when: every task's gate is green at the branch head in a fresh tree (Task 13 step 1); D1–D9, D8b included, passed with their evidence and every "no fetch" claim has its positive control in the same folder; the PR body names the split pieces and their task (1879). Recommended before merge, not decided here: a `crypto-security-reviewer` pass on Task 8's queue-served hydrate (`serve_hydrate`, `write_hydrated_from_reader`), because it writes plaintext to a destination that arrives over the socket (the task 1247 hardening).
+- **Merge** (the lane's branch into `main`) only when: every task's gate is green at the branch head in a fresh tree (Task 13 step 1); D1–D9, D8b included, passed with their evidence and every "no fetch" claim has its positive control in the same folder; the PR body names the split pieces and their task (1879). Recommended before merge, not decided here: a `crypto-security-reviewer` pass on Task 8's queue-served hydrate (`serve_hydrate`, `write_hydrated_from_reader`), because it writes plaintext to a destination that arrives over the socket (the task 1247 hardening); and because the queue path of `serve_hydrate` skips `ensure_shared_hydrate_path_safe` (`EB:2578`), which the server path runs.
 - **Release:** 1873 is not RELEASED until **task 1887** is fixed: a sign-out by choice purges queued Finder saves (spec §10.5), and 1873 is what makes such saves exist.
 - **Release notes (0.8.12):** an authored `RELEASE_NOTES.md` per `docs/RELEASING.md`, and it must state:
   - **the one-time re-download** (spec §10.1): after the update, a materialized file whose old identifier was led by an upload's timestamp, and a materialized server-known file at version 0, is downloaded once more when the system first re-reads it; nothing is lost;
@@ -5421,15 +5751,15 @@ Reinstall whichever app the lead wants on the Mac (`~/bb-qa/1873-r5/Beebeeb-931b
 
 | Task | Commit (spec §15, 4c) | Spec tests | Plan tests | Lib count after |
 |---|---|---|---|---|
-| 1 | schema, token helpers, one read | T7, T36 | P1 | `L0 + 3` |
+| 1 | schema, token helpers, one read | T7, T36 | P1, P1b | `L0 + 3` |
 | 2 | serialization primitives | T29, T42 | P2, P3 | `L0 + 7` |
 | 3 | accept transaction, base mapping | T12, T14, T21, T22, T39, T49, T50 | P5 | `L0 + 15` |
-| 4 | Rule 1 reporting | T1–T6, T8, T9, T57, T62, T64, T65 (+ the framing test changed in place) | RF1 | `L0 + 28` |
+| 4 | Rule 1 reporting | T1–T6, T8, T9, T57, T62, T64, T65 (+ the two framing tests changed in place) | RF1 | `L0 + 28` |
 | 5 | Rule 4: 409 classes, parks, hand-over | T23–T26, T41, T67 (+ the 409 test rewritten) | P8, RF4 | `L0 + 36` |
 | 6 | Rule 2 snapshot side | T11, T13, T45–T48, T52, T53 (+ the flag test rewritten) | — | `L0 + 44` |
-| 7 | M1 landing transaction | T27, T30, T40, T61 | P9, P10 | `L0 + 50` |
-| 8 | Rule 3 | T15–T19, T43, T54, T55, T56′, T58; Swift T20, T44 | RF3 | `L0 + 61`; Swift 96 |
-| 9 | Rule 5 | T31, T33, T60 | RF2, RF5 | `L0 + 66` |
+| 7 | M1 landing transaction | T27, T40, T61 | P9, P10 | `L0 + 49` |
+| 8 | Rule 3 | T15–T19, T43, T54, T55, T56′, T58; Swift T20, T44 | RF3 | `L0 + 60`; Swift 96 |
+| 9 | Rule 5 | T30 (from Task 7), T31, T33, T60 | RF2, RF5 | `L0 + 66` |
 | 10 | Rule 6 | T34, T66 | — | `L0 + 68` |
 | 11 | Rule 7 | T37 (11 tests), T38 | — | `L0 + 80` |
 | 12 | docs | — | — | `L0 + 80` |
@@ -5446,7 +5776,12 @@ T10 (the round-3 old-identifier tests) stays green at every gate. The spec's T28
   - Task 8's Swift change must keep `check-ipc-timeouts.py`'s call-site text (`contents: contentsURL.flatMap { IPCContentFingerprint.ofFile(at: $0) }`) intact.
   - The concurrency tests (T39, T40, T41, T64, T65) depend on the seams firing once; a seam left armed by a failing test does not leak (each test has its own bridge, and the builder seam is thread-local).
   - Task 13's D3–D6 depend on timing around the 30 s pass; a step that misses its window is rerun, not passed.
-- **Decisions for the lead:** Spec issues 1–14 (each resolved here as stated); whether 1879 takes the six split pieces or a new task does; the merge-time security review (recommended above).
+- **Rules no unit test in this plan pins** (plan review), recorded so that nobody reads silence as coverage:
+  - Spec §9.1, "a parked upload presents `error`": the unit tests pin the unparked override only. The parked case is read on the device in D1, where the two parked ops must show `r--` and the error badge.
+  - Spec §8.4, "W has a recorded completion: N waits": the `pred.completed` arm of the claim's hand-over loop (Task 5 step 5) has no test.
+  - Spec §8.7 S4, steps `completion` and `landing`: only `step=resume` is tested (T42).
+  - Adding tests for them would change every `L0 + k` count above, so that is the lead's call, not an edit made here.
+- **Decisions for the lead:** Spec issues 1–16 (each resolved here as stated; 15 and 16 are plan additions that spec §11 and §6.1 do not list, kept so the reviewer can reject them); whether 1879 takes the six split pieces or a new task does; the merge-time security review (recommended above).
 
 ### Spec coverage map
 
