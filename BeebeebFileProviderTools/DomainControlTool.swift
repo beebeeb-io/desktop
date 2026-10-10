@@ -69,7 +69,8 @@ struct DomainControlTool {
     /// Task 1882 (spec docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md): keeps the
     /// files that never reached the server, like every removal in the app. Prints `removed`, then
     /// `preserved: <folder>` when macOS kept any (this is a developer tool, so the path goes to
-    /// its own stdout).
+    /// its own stdout). Round 2 (device K-F2): macOS reports a folder even when it kept nothing,
+    /// so `preserved:` is printed only when the folder holds something, by the app's own rule.
     static func remove() {
         let semaphore = DispatchSemaphore(value: 0)
         var exitCode: Int32 = 1
@@ -79,8 +80,18 @@ struct DomainControlTool {
                 fputs("\(error.localizedDescription)\n", stderr)
             } else {
                 print("removed")
-                if let preservedLocation {
-                    print("preserved: \(preservedLocation.path)")
+                let path = preservedLocation?.path ?? ""
+                switch keptFolder(preservedLocation) {
+                case .hasEntries, .unchecked:
+                    print("preserved: \(path)")
+                case .missing:
+                    print("nothing kept: macOS reported \(path), which is missing")
+                case .empty:
+                    print("nothing kept: macOS reported \(path), which is empty")
+                case .noPath:
+                    print("removed; macOS reported kept files without a folder")
+                case .notReported:
+                    break
                 }
                 exitCode = 0
             }
@@ -89,6 +100,32 @@ struct DomainControlTool {
 
         semaphore.wait()
         exit(exitCode)
+    }
+
+    /// What the folder macOS reported holds. The same rule as `BeebeebKeptFolderState` in
+    /// src-tauri/macos/FileProviderBridge.m (spec §4, §5): it looks through the URL's own scope,
+    /// stops at "something is there", and never opens a file.
+    enum KeptFolder {
+        case notReported, missing, empty, hasEntries, unchecked, noPath
+    }
+
+    static func keptFolder(_ location: URL?) -> KeptFolder {
+        guard let location else { return .notReported }
+        let path = location.path
+        guard !path.isEmpty else { return .noPath }
+        let scoped = location.startAccessingSecurityScopedResource()
+        defer {
+            if scoped { location.stopAccessingSecurityScopedResource() }
+        }
+        var info = stat()
+        guard lstat(path, &info) == 0 else {
+            return errno == ENOENT || errno == ENOTDIR ? .missing : .unchecked
+        }
+        guard info.st_mode & S_IFMT == S_IFDIR else { return .hasEntries }
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: path) else {
+            return .unchecked
+        }
+        return entries.isEmpty ? .empty : .hasEntries
     }
 
     static func signalRoot() {

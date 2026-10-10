@@ -1,7 +1,10 @@
 #import <Foundation/Foundation.h>
 #import <FileProvider/FileProvider.h>
 #import <dispatch/dispatch.h>
+#include <dirent.h>
+#include <errno.h>
 #include <string.h>
+#include <sys/stat.h>
 
 static NSString *BeebeebDomainIdentifier = @"io.beebeeb.app.domain";
 // Task 1698 part 3 (1696 G8): the domain's display name is "Beebeeb" — the
@@ -75,6 +78,74 @@ static int BeebeebWaitForDomainReady(NSFileProviderDomain *domain,
     return 0;
 }
 
+// Task 1882 round 2 (spec docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md §4, §5):
+// what the folder macOS reported after a removal holds. A reported URL does not mean anything was
+// kept (device K-F2: an empty domain's removal reported a folder that never existed), so the
+// person is told only when something is there. The same numbers as `KEPT_*` in
+// src-tauri/src/finder_removal.rs; a test pins them.
+enum {
+    BeebeebKeptNoneReported = 0,
+    BeebeebKeptMissing = 1,
+    BeebeebKeptEmpty = 2,
+    BeebeebKeptHasEntries = 3,
+    BeebeebKeptUnchecked = 4,
+    BeebeebKeptNoPath = 5,
+};
+
+// Checks the folder on the URL macOS returned. The header does not say that URL is
+// security-scoped (contrast NSFileProviderManager.h:103, :120-121), and a path string never
+// carries a scope (NSURL.h:103), so the check runs here, on the URL itself. The App Sandbox
+// allows `stat` everywhere (application.sb:496, `(allow file-read-metadata)`); listing needs the
+// URL's extension. If the listing is refused, the folder is reported unchecked: it exists, so the
+// person is pointed at a real folder, never at nothing. It stops at the first entry and keeps no
+// name; it never opens a file.
+static int BeebeebKeptFolderState(NSURL *location) {
+    if (location == nil) {
+        return BeebeebKeptNoneReported;
+    }
+    if (location.path.length == 0) {
+        return BeebeebKeptNoPath;
+    }
+    const char *fs_path = location.fileSystemRepresentation;
+    if (fs_path == NULL || fs_path[0] == '\0') {
+        return BeebeebKeptNoPath;
+    }
+
+    BOOL scoped = [location startAccessingSecurityScopedResource];
+    int state;
+    struct stat info;
+    if (lstat(fs_path, &info) != 0) {
+        state = (errno == ENOENT || errno == ENOTDIR) ? BeebeebKeptMissing : BeebeebKeptUnchecked;
+    } else if (!S_ISDIR(info.st_mode)) {
+        // macOS kept a single item rather than a folder: that is something kept.
+        state = BeebeebKeptHasEntries;
+    } else {
+        DIR *dir = opendir(fs_path);
+        if (dir == NULL) {
+            state = (errno == ENOENT || errno == ENOTDIR) ? BeebeebKeptMissing : BeebeebKeptUnchecked;
+        } else {
+            state = BeebeebKeptEmpty;
+            errno = 0;
+            struct dirent *entry;
+            while ((entry = readdir(dir)) != NULL) {
+                if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+                    continue;
+                }
+                state = BeebeebKeptHasEntries;
+                break;
+            }
+            if (entry == NULL && errno != 0) {
+                state = BeebeebKeptUnchecked;
+            }
+            closedir(dir);
+        }
+    }
+    if (scoped) {
+        [location stopAccessingSecurityScopedResource];
+    }
+    return state;
+}
+
 // Task 1882 (P0, spec docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md): EVERY
 // domain removal keeps the files that never reached the server. The plain
 // `removeDomain:completionHandler:` deleted them with the domain (three Finder-created files on a
@@ -83,16 +154,20 @@ static int BeebeebWaitForDomainReady(NSFileProviderDomain *domain,
 // (src-tauri/build.rs), so there is no fallback to the remove-all form, on purpose.
 // `src-tauri/src/finder_removal.rs` pins every removal in the repo to this mode.
 //
-// Returns: 1 = removed, and the system kept files that had not synced (their folder's path in
-// `location_buffer`); 0 = removed, nothing kept; -1 = error (`error_buffer` set).
+// Returns: 0 = removed (`kept_state` says what the reported folder holds; `location_buffer` holds
+// its path whenever it has one); -1 = error (`error_buffer` set).
 static int BeebeebRemoveDomainKeepingUnsynced(NSFileProviderDomain *domain,
                                               char *location_buffer,
                                               unsigned long location_buffer_len,
+                                              int *kept_state,
                                               char *error_buffer,
                                               unsigned long error_buffer_len) {
     dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
     __block NSURL *found_location = nil;
     __block NSError *found_error = nil;
+    if (kept_state != NULL) {
+        *kept_state = BeebeebKeptNoneReported;
+    }
 
     [NSFileProviderManager removeDomain:domain
                                    mode:NSFileProviderDomainRemovalModePreserveDirtyUserData
@@ -107,15 +182,27 @@ static int BeebeebRemoveDomainKeepingUnsynced(NSFileProviderDomain *domain,
         BeebeebCopyError(found_error, error_buffer, error_buffer_len);
         return -1;
     }
-    if (found_location == nil) {
-        return 0;
+    int state = BeebeebKeptFolderState(found_location);
+    if (kept_state != NULL) {
+        *kept_state = state;
     }
     NSString *path = found_location.path;
-    if (path.length == 0) {
-        path = found_location.absoluteString;
+    if (path.length > 0) {
+        BeebeebCopyMessage(path, location_buffer, location_buffer_len);
     }
-    BeebeebCopyMessage(path ?: @"", location_buffer, location_buffer_len);
-    return 1;
+    return 0;
+}
+
+// Test-only entry point (src-tauri/src/macos_file_provider.rs tests): runs the same folder check
+// on a file URL built from `path`, so the check is tested on a real disk. Nothing else calls it.
+int beebeeb_fp_kept_folder_state_for_path(const char *path) {
+    @autoreleasepool {
+        if (path == NULL) {
+            return BeebeebKeptFolderState(nil);
+        }
+        NSURL *url = [NSURL fileURLWithFileSystemRepresentation:path isDirectory:NO relativeToURL:nil];
+        return BeebeebKeptFolderState(url);
+    }
 }
 
 static int BeebeebDomainExists(BOOL *exists, char *error_buffer, unsigned long error_buffer_len) {
@@ -304,16 +391,18 @@ int beebeeb_fp_wait_for_domain_ready(double timeout_seconds, char *error_buffer,
     }
 }
 
-// Returns: 1 = removed and files were kept (`location_buffer` = their folder), 0 = removed and
-// nothing kept, -1 = error (`error_buffer` set). See BeebeebRemoveDomainKeepingUnsynced.
+// Returns: 0 = removed (`kept_state` and `location_buffer` say what was kept), -1 = error
+// (`error_buffer` set). See BeebeebRemoveDomainKeepingUnsynced.
 int beebeeb_fp_remove(char *location_buffer,
                       unsigned long location_buffer_len,
+                      int *kept_state,
                       char *error_buffer,
                       unsigned long error_buffer_len) {
     @autoreleasepool {
         return BeebeebRemoveDomainKeepingUnsynced(BeebeebDomain(),
                                                   location_buffer,
                                                   location_buffer_len,
+                                                  kept_state,
                                                   error_buffer,
                                                   error_buffer_len);
     }
@@ -399,11 +488,12 @@ int beebeeb_fp_list_domains(char *ids_buffer, unsigned long ids_buffer_len,
 // Task 1698 part 3: remove ONE domain by identifier (the sweep's per-domain
 // primitive — the Rust side owns the filtering decision and never passes our
 // own identifier here). Task 1882: it keeps un-synced files like every removal.
-// Returns: 1 = removed and files were kept (`location_buffer` = their folder),
-// 0 = removed (or already gone) and nothing kept, -1 = error (error_buffer set).
+// Returns: 0 = removed (or already gone; `kept_state` and `location_buffer`
+// say what was kept), -1 = error (error_buffer set).
 int beebeeb_fp_remove_domain_by_id(const char *identifier,
                                    char *location_buffer,
                                    unsigned long location_buffer_len,
+                                   int *kept_state,
                                    char *error_buffer,
                                    unsigned long error_buffer_len) {
     @autoreleasepool {
@@ -417,6 +507,7 @@ int beebeeb_fp_remove_domain_by_id(const char *identifier,
         return BeebeebRemoveDomainKeepingUnsynced(domain,
                                                   location_buffer,
                                                   location_buffer_len,
+                                                  kept_state,
                                                   error_buffer,
                                                   error_buffer_len);
     }

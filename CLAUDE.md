@@ -187,8 +187,11 @@ rollback, the app-start sweep, `BeebeebFileProviderCtl remove`) passes
 `removeDomain:`/`remove(domain)` or `removeAllDomains`. The source pin
 `test_1882_every_domain_removal_in_the_repo_keeps_unsynced_files`
 (`src-tauri/src/finder_removal.rs`) scans every `.m`/`.swift` file and fails on
-one. The folder macOS reports reaches the person (an alert for sign-out, a note
-in Settings → Sync for Repair) and never the logs. Spec:
+one. macOS reports a folder even when it kept nothing (device, 2026-10-10), so
+the bridge checks it on the returned URL (`BeebeebKeptFolderState`): only a folder
+that exists and holds at least one entry (or that the sandbox will not let it
+list) reaches the person (an alert for sign-out, a note in Settings → Sync for
+Repair), and never the logs. Spec:
 `docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md`.
 
 ## Browser sign-in (`src-tauri/src/browser_login.rs`, task 1734)

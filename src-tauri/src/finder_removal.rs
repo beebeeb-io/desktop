@@ -17,48 +17,133 @@ pub const PRESERVED_FILES_TITLE: &str = "Files kept on this Mac";
 pub const PRESERVED_FILES_SENTENCE: &str =
     "Files that hadn’t reached your vault yet were kept on this Mac, in this folder:";
 
-/// What one domain removal left behind.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct DomainRemoval {
-    /// The folder where macOS kept files that had not synced, exactly as the system reported it.
-    /// `None` = the system kept nothing.
-    pub preserved_location: Option<String>,
+/// What the bridge found at the folder macOS reported after a removal (round 2, spec §4 and §5).
+/// The same numbers as `BeebeebKept*` in `src-tauri/macos/FileProviderBridge.m`; a test pins them.
+///
+/// No URL came back.
+pub const KEPT_NONE_REPORTED: i32 = 0;
+/// A URL came back, but nothing exists there (device K-F2: macOS reports a folder even when it
+/// kept nothing).
+pub const KEPT_MISSING: i32 = 1;
+/// The folder exists and is empty.
+pub const KEPT_EMPTY: i32 = 2;
+/// The folder (or a single kept file) holds at least one entry.
+pub const KEPT_HAS_ENTRIES: i32 = 3;
+/// Something may be there, but the sandbox refused the look (spec §4's fallback).
+pub const KEPT_UNCHECKED: i32 = 4;
+/// A URL without a path: the domain is removed, and no folder can be named (review M3).
+pub const KEPT_NO_PATH: i32 = 5;
+
+/// Why a removal kept nothing. Logged (debug), never shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NothingKept {
+    NotReported,
+    Missing,
+    Empty,
 }
 
-impl DomainRemoval {
-    /// The kept folder to show the person, if any. Logs THAT files were kept, never where: the
-    /// path is shown only in the app's UI (spec §5).
-    pub fn kept_location(self, context: &'static str) -> Option<String> {
-        if self.preserved_location.is_some() {
-            tracing::info!(
-                context,
-                preserved = true,
-                "Finder location removed; macOS kept the files that had not reached the server"
-            );
+impl NothingKept {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NotReported => "none",
+            Self::Missing => "missing",
+            Self::Empty => "empty",
         }
-        self.preserved_location
     }
 }
 
-/// Decodes `beebeeb_fp_remove` / `beebeeb_fp_remove_domain_by_id`: `1` = removed and the system
-/// kept files (`location` set), `0` = removed and nothing kept, `-1` = error (`error` set).
+/// What one removal left on this Mac (spec §5, "When files count as kept").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeptFolder {
+    /// Nothing to tell the person.
+    Nothing(NothingKept),
+    /// Files were kept in this folder, exactly as the system reported it. `contents_checked` is
+    /// `false` when the folder exists but the app could not look inside (spec §4).
+    Kept { path: String, contents_checked: bool },
+    /// macOS reported kept files without a folder: removed; folder unknown (review M3).
+    Unknown,
+}
+
+impl Default for KeptFolder {
+    fn default() -> Self {
+        Self::Nothing(NothingKept::NotReported)
+    }
+}
+
+/// Decodes the bridge's folder state. An unknown state with a path never hides that path: it
+/// is shown as kept, unchecked.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn kept_folder_from_bridge(state: i32, location: Option<String>) -> KeptFolder {
+    let path = location.filter(|path| !path.trim().is_empty());
+    match (state, path) {
+        (KEPT_NONE_REPORTED, _) => KeptFolder::Nothing(NothingKept::NotReported),
+        (KEPT_MISSING, _) => KeptFolder::Nothing(NothingKept::Missing),
+        (KEPT_EMPTY, _) => KeptFolder::Nothing(NothingKept::Empty),
+        (KEPT_HAS_ENTRIES, Some(path)) => KeptFolder::Kept {
+            path,
+            contents_checked: true,
+        },
+        (KEPT_NO_PATH, _) | (_, None) => KeptFolder::Unknown,
+        // KEPT_UNCHECKED, and any state this build does not know: the folder is shown.
+        (_, Some(path)) => KeptFolder::Kept {
+            path,
+            contents_checked: false,
+        },
+    }
+}
+
+/// What one domain removal left behind.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DomainRemoval {
+    pub kept: KeptFolder,
+}
+
+impl DomainRemoval {
+    /// The kept folder to show the person, if any. Logs THAT files were kept (or why nothing
+    /// was), never where: the path is shown only in the app's UI (spec §5).
+    pub fn kept_location(self, context: &'static str) -> Option<String> {
+        match self.kept {
+            KeptFolder::Kept {
+                path,
+                contents_checked,
+            } => {
+                tracing::info!(
+                    context,
+                    preserved = true,
+                    contents_checked,
+                    "Finder location removed; macOS kept the files that had not reached the server"
+                );
+                Some(path)
+            }
+            KeptFolder::Nothing(reason) => {
+                tracing::debug!(context, reported = reason.as_str(), "Finder location removed; nothing kept");
+                None
+            }
+            KeptFolder::Unknown => {
+                tracing::warn!(
+                    context,
+                    "Finder location removed; macOS reported kept files without a folder"
+                );
+                None
+            }
+        }
+    }
+}
+
+/// Decodes `beebeeb_fp_remove` / `beebeeb_fp_remove_domain_by_id`: `0` = removed (`kept_state`
+/// says what the reported folder holds), `-1` = error (`error` set).
 // Called from the macOS-only bridge and sign-out paths; tested on every OS.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn removal_from_bridge(
     code: i32,
+    kept_state: i32,
     location: Option<String>,
     error: Option<String>,
 ) -> Result<DomainRemoval, String> {
     match code {
         0 => Ok(DomainRemoval {
-            preserved_location: None,
+            kept: kept_folder_from_bridge(kept_state, location),
         }),
-        1 => match location {
-            Some(path) if !path.trim().is_empty() => Ok(DomainRemoval {
-                preserved_location: Some(path),
-            }),
-            _ => Err("macOS kept files that had not synced but did not report the folder".to_string()),
-        },
         code if code < 0 => Err(error
             .filter(|message| !message.trim().is_empty())
             .unwrap_or_else(|| "File Provider domain removal failed".to_string())),
@@ -221,14 +306,23 @@ mod tests {
 
     // ── the bridge's reply ───────────────────────────────────────────────────
 
+    fn kept(path: &str, contents_checked: bool) -> KeptFolder {
+        KeptFolder::Kept {
+            path: path.to_string(),
+            contents_checked,
+        }
+    }
+
+    fn removal(kept: KeptFolder) -> DomainRemoval {
+        DomainRemoval { kept }
+    }
+
     #[test]
     fn test_1882_bridge_reply_with_a_kept_folder_reports_that_exact_folder() {
         let folder = "/Users/someone/Library/CloudStorage/Beebeeb (kept) /Notes ";
         assert_eq!(
-            removal_from_bridge(1, Some(folder.to_string()), None),
-            Ok(DomainRemoval {
-                preserved_location: Some(folder.to_string())
-            }),
+            removal_from_bridge(0, KEPT_HAS_ENTRIES, Some(folder.to_string()), None),
+            Ok(removal(kept(folder, true))),
             "the folder is reported byte for byte, trailing space included"
         );
     }
@@ -236,17 +330,13 @@ mod tests {
     #[test]
     fn test_1882_bridge_reply_with_nothing_kept_reports_no_folder() {
         assert_eq!(
-            removal_from_bridge(0, None, None),
-            Ok(DomainRemoval {
-                preserved_location: None
-            })
+            removal_from_bridge(0, KEPT_NONE_REPORTED, None, None),
+            Ok(removal(KeptFolder::Nothing(NothingKept::NotReported)))
         );
         // A stale buffer never turns "nothing kept" into a folder.
         assert_eq!(
-            removal_from_bridge(0, Some("/leftover".to_string()), None),
-            Ok(DomainRemoval {
-                preserved_location: None
-            })
+            removal_from_bridge(0, KEPT_NONE_REPORTED, Some("/leftover".to_string()), None),
+            Ok(removal(KeptFolder::Nothing(NothingKept::NotReported)))
         );
     }
 
@@ -255,21 +345,120 @@ mod tests {
         assert_eq!(
             removal_from_bridge(
                 -1,
+                KEPT_NONE_REPORTED,
                 Some("/leftover".to_string()),
                 Some("no provider (NSFileProviderErrorDomain -2001)".to_string())
             ),
             Err("no provider (NSFileProviderErrorDomain -2001)".to_string())
         );
-        assert!(removal_from_bridge(-1, None, None).is_err());
+        assert!(removal_from_bridge(-1, KEPT_NONE_REPORTED, None, None).is_err());
         assert!(
-            removal_from_bridge(1, None, None).is_err(),
-            "kept, but no folder: an error, not a silent 'nothing kept'"
+            removal_from_bridge(1, KEPT_HAS_ENTRIES, Some("/x".to_string()), None).is_err(),
+            "round 1's reply 1 is gone: the bridge answers 0 or -1"
         );
-        assert!(removal_from_bridge(1, Some("   ".to_string()), None).is_err());
         assert!(
-            removal_from_bridge(7, None, None).is_err(),
+            removal_from_bridge(7, KEPT_NONE_REPORTED, None, None).is_err(),
             "an unknown reply is an error"
         );
+    }
+
+    // ── round 2: is anything actually there? (device K-F2, review I3, M3) ───
+
+    #[test]
+    fn test_1882_r2_a_reported_folder_that_is_missing_or_empty_keeps_nothing() {
+        let folder = "/Users/someone/Library/CloudStorage/Beebeeb-Drive (10-10-2026 10:52)";
+        for (state, reason) in [
+            (KEPT_NONE_REPORTED, NothingKept::NotReported),
+            (KEPT_MISSING, NothingKept::Missing),
+            (KEPT_EMPTY, NothingKept::Empty),
+        ] {
+            let decoded = kept_folder_from_bridge(state, Some(folder.to_string()));
+            assert_eq!(decoded, KeptFolder::Nothing(reason), "state {state}");
+            assert_eq!(removal(decoded).kept_location("sign-out"), None, "state {state}: no alert, no row");
+        }
+        let mut warnings = Vec::new();
+        assert_eq!(
+            repair_removal(Ok(removal(kept_folder_from_bridge(KEPT_MISSING, Some(folder.to_string())))), &mut warnings),
+            (true, None)
+        );
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn test_1882_r2_a_folder_with_an_entry_or_that_cannot_be_checked_is_kept() {
+        let folder = "/Users/someone/Library/CloudStorage/Beebeeb-Beebeeb (10-10-2026 10:50)";
+        assert_eq!(kept_folder_from_bridge(KEPT_HAS_ENTRIES, Some(folder.to_string())), kept(folder, true));
+        assert_eq!(
+            kept_folder_from_bridge(KEPT_UNCHECKED, Some(folder.to_string())),
+            kept(folder, false),
+            "spec §4's fallback: an existing folder the sandbox would not list is shown"
+        );
+        for state in [KEPT_HAS_ENTRIES, KEPT_UNCHECKED] {
+            assert_eq!(
+                removal(kept_folder_from_bridge(state, Some(folder.to_string()))).kept_location("sign-out"),
+                Some(folder.to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn test_1882_r2_a_url_without_a_path_is_removed_with_the_folder_unknown() {
+        assert_eq!(kept_folder_from_bridge(KEPT_NO_PATH, None), KeptFolder::Unknown);
+        for blank in [None, Some(String::new()), Some("   ".to_string())] {
+            assert_eq!(kept_folder_from_bridge(KEPT_HAS_ENTRIES, blank.clone()), KeptFolder::Unknown);
+            assert_eq!(kept_folder_from_bridge(KEPT_UNCHECKED, blank), KeptFolder::Unknown);
+        }
+        // Its own outcome: the domain IS removed, so Repair says so, with no warning and no folder.
+        let mut warnings = Vec::new();
+        assert_eq!(repair_removal(Ok(removal(KeptFolder::Unknown)), &mut warnings), (true, None));
+        assert!(warnings.is_empty(), "removed; folder unknown is not a failed removal: {warnings:?}");
+        assert_eq!(sign_out_kept_location(Ok(removal(KeptFolder::Unknown))), None);
+    }
+
+    #[test]
+    fn test_1882_r2_an_unknown_state_never_hides_a_path() {
+        assert_eq!(kept_folder_from_bridge(9, Some("/Users/someone/Kept".to_string())), kept("/Users/someone/Kept", false));
+        assert_eq!(kept_folder_from_bridge(-4, Some("/Users/someone/Kept".to_string())), kept("/Users/someone/Kept", false));
+        assert_eq!(kept_folder_from_bridge(9, None), KeptFolder::Unknown);
+    }
+
+    /// The developer helper follows the same rule (spec §5): `preserved:` only when the folder
+    /// holds something or could not be checked, and a plain "nothing kept" line otherwise. The
+    /// helper has no test harness of its own, so its source is pinned here.
+    #[test]
+    fn test_1882_r2_the_helper_prints_preserved_only_when_something_was_kept() {
+        let helper = without_comments(include_str!("../../BeebeebFileProviderTools/DomainControlTool.swift"));
+        let remove = &helper[helper.find("static func remove()").expect("remove()")..];
+        let remove = &remove[..remove.find("static func signalRoot()").expect("next function")];
+        let squashed: String = remove.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            squashed.contains("switchkeptFolder(preservedLocation){case.hasEntries,.unchecked:print(\"preserved:\\(path)\")"),
+            "`preserved:` is printed only for a folder that holds something or could not be checked:\n{remove}"
+        );
+        assert_eq!(remove.matches("print(\"preserved:").count(), 1, "one `preserved:` line, in the kept arm");
+        for line in ["which is missing", "which is empty"] {
+            assert!(remove.contains(line), "the helper says {line:?} when nothing was kept");
+        }
+        let check = &helper[helper.find("static func keptFolder(").expect("keptFolder()")..];
+        assert!(check.contains("startAccessingSecurityScopedResource()"), "it looks through the URL's own scope");
+    }
+
+    #[test]
+    fn test_1882_r2_the_folder_states_match_the_bridge() {
+        let bridge = include_str!("../macos/FileProviderBridge.m");
+        for (name, value) in [
+            ("BeebeebKeptNoneReported", KEPT_NONE_REPORTED),
+            ("BeebeebKeptMissing", KEPT_MISSING),
+            ("BeebeebKeptEmpty", KEPT_EMPTY),
+            ("BeebeebKeptHasEntries", KEPT_HAS_ENTRIES),
+            ("BeebeebKeptUnchecked", KEPT_UNCHECKED),
+            ("BeebeebKeptNoPath", KEPT_NO_PATH),
+        ] {
+            assert!(
+                bridge.contains(&format!("{name} = {value},")),
+                "FileProviderBridge.m must define {name} = {value}"
+            );
+        }
     }
 
     // ── the sentence and the alert ───────────────────────────────────────────
@@ -311,29 +500,15 @@ mod tests {
     #[test]
     fn test_1882_kept_location_returns_the_folder_and_nothing_when_nothing_was_kept() {
         let folder = "/Users/someone/Kept".to_string();
-        assert_eq!(
-            DomainRemoval {
-                preserved_location: Some(folder.clone())
-            }
-            .kept_location("sign-out"),
-            Some(folder)
-        );
-        assert_eq!(
-            DomainRemoval {
-                preserved_location: None
-            }
-            .kept_location("sign-out"),
-            None
-        );
+        assert_eq!(removal(kept(&folder, true)).kept_location("sign-out"), Some(folder));
+        assert_eq!(removal(KeptFolder::Nothing(NothingKept::NotReported)).kept_location("sign-out"), None);
     }
 
     #[test]
     fn test_1882_sign_out_carries_a_kept_folder_and_survives_a_failed_removal() {
         let folder = "/Users/someone/Kept".to_string();
         assert_eq!(
-            sign_out_kept_location(Ok(DomainRemoval {
-                preserved_location: Some(folder.clone())
-            })),
+            sign_out_kept_location(Ok(removal(kept(&folder, true)))),
             Some(folder)
         );
         assert_eq!(sign_out_kept_location(Ok(DomainRemoval::default())), None);
@@ -346,12 +521,7 @@ mod tests {
 
         let mut warnings = Vec::new();
         assert_eq!(
-            repair_removal(
-                Ok(DomainRemoval {
-                    preserved_location: Some(folder.clone())
-                }),
-                &mut warnings
-            ),
+            repair_removal(Ok(removal(kept(&folder, true))), &mut warnings),
             (true, Some(folder))
         );
         assert!(warnings.is_empty());

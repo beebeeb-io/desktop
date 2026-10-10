@@ -20,6 +20,7 @@ unsafe extern "C" {
     fn beebeeb_fp_remove(
         location_buffer: *mut c_char,
         location_buffer_len: usize,
+        kept_state: *mut i32,
         error_buffer: *mut c_char,
         error_buffer_len: usize,
     ) -> i32;
@@ -238,21 +239,24 @@ pub fn install() -> Result<InstallOutcome, String> {
 }
 
 /// Removes our Finder location, keeping the files that never reached the server (task 1882,
-/// `NSFileProviderDomainRemovalModePreserveDirtyUserData`). The result names the folder macOS
-/// kept them in, if any.
+/// `NSFileProviderDomainRemovalModePreserveDirtyUserData`). The result says whether macOS kept
+/// anything, checked on disk (round 2, spec §4), and names the folder if so.
 pub fn remove() -> Result<crate::finder_removal::DomainRemoval, String> {
     let mut location_buffer = [0 as c_char; PRESERVED_LOCATION_BUFFER_LEN];
+    let mut kept_state: i32 = crate::finder_removal::KEPT_NONE_REPORTED;
     let mut error_buffer = [0 as c_char; 1024];
     let code = unsafe {
         beebeeb_fp_remove(
             location_buffer.as_mut_ptr(),
             location_buffer.len(),
+            &mut kept_state,
             error_buffer.as_mut_ptr(),
             error_buffer.len(),
         )
     };
     crate::finder_removal::removal_from_bridge(
         code,
+        kept_state,
         buffer_to_exact_string(&location_buffer),
         buffer_to_string(&error_buffer),
     )
@@ -333,6 +337,7 @@ mod cleanup_ffi {
             identifier: *const c_char,
             location_buffer: *mut c_char,
             location_buffer_len: usize,
+            kept_state: *mut i32,
             error_buffer: *mut c_char,
             error_buffer_len: usize,
         ) -> i32;
@@ -367,6 +372,7 @@ mod cleanup_ffi {
     /// Task 1882: keeps the domain's un-synced files, like every removal.
     pub fn remove_domain(identifier: &str) -> Result<crate::finder_removal::DomainRemoval, String> {
         let mut location_buffer = [0 as c_char; super::PRESERVED_LOCATION_BUFFER_LEN];
+        let mut kept_state: i32 = crate::finder_removal::KEPT_NONE_REPORTED;
         let mut error_buffer = [0i8; 1024];
         let code = unsafe {
             let c_id = std::ffi::CString::new(identifier)
@@ -375,12 +381,14 @@ mod cleanup_ffi {
                 c_id.as_ptr(),
                 location_buffer.as_mut_ptr(),
                 location_buffer.len(),
+                &mut kept_state,
                 error_buffer.as_mut_ptr(),
                 error_buffer.len(),
             )
         };
         crate::finder_removal::removal_from_bridge(
             code,
+            kept_state,
             super::buffer_to_exact_string(&location_buffer),
             super::buffer_to_string(&error_buffer),
         )
@@ -627,6 +635,81 @@ mod tests {
                 "Timed out waiting for the Beebeeb File Provider domain to become available".to_string()
             )),
             Err("Timed out waiting for the Beebeeb File Provider domain to become available".to_string())
+        );
+    }
+}
+
+/// Task 1882 round 2 (device K-F2, review I3, spec §4/§8): the bridge's own folder check, run on
+/// a real disk through its test-only entry point, which builds the same `NSURL` and calls the
+/// same function the removal calls.
+#[cfg(test)]
+mod kept_folder_check_tests {
+    use crate::finder_removal::{KEPT_EMPTY, KEPT_HAS_ENTRIES, KEPT_MISSING, KEPT_NONE_REPORTED, KEPT_UNCHECKED};
+    use std::ffi::CString;
+    use std::os::unix::fs::PermissionsExt;
+
+    unsafe extern "C" {
+        fn beebeeb_fp_kept_folder_state_for_path(path: *const std::os::raw::c_char) -> i32;
+    }
+
+    fn state_of(path: &std::path::Path) -> i32 {
+        let c_path = CString::new(path.as_os_str().as_encoded_bytes()).expect("no NUL in a temp path");
+        unsafe { beebeeb_fp_kept_folder_state_for_path(c_path.as_ptr()) }
+    }
+
+    #[test]
+    fn test_1882_r2_bridge_check_a_missing_folder_is_missing() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        assert_eq!(state_of(&dir.path().join("Beebeeb-Drive (10-10-2026 10:52)")), KEPT_MISSING);
+        assert_eq!(
+            unsafe { beebeeb_fp_kept_folder_state_for_path(std::ptr::null()) },
+            KEPT_NONE_REPORTED,
+            "no URL is 'none reported'"
+        );
+    }
+
+    #[test]
+    fn test_1882_r2_bridge_check_an_empty_folder_is_empty() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let kept = dir.path().join("Beebeeb-Beebeeb (10-10-2026 10:50)");
+        std::fs::create_dir(&kept).expect("kept folder");
+        assert_eq!(state_of(&kept), KEPT_EMPTY);
+    }
+
+    #[test]
+    fn test_1882_r2_bridge_check_a_folder_with_one_item_has_entries() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let kept = dir.path().join("Beebeeb-Beebeeb (10-10-2026 10:50)");
+        std::fs::create_dir(&kept).expect("kept folder");
+        std::fs::write(kept.join("k1882.txt"), b"never uploaded").expect("kept file");
+        assert_eq!(state_of(&kept), KEPT_HAS_ENTRIES);
+    }
+
+    #[test]
+    fn test_1882_r2_bridge_check_a_hidden_item_or_a_single_file_counts() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let hidden_only = dir.path().join("hidden-only");
+        std::fs::create_dir(&hidden_only).expect("folder");
+        std::fs::write(hidden_only.join(".env"), b"a dotfile is the person's data too").expect("dotfile");
+        assert_eq!(state_of(&hidden_only), KEPT_HAS_ENTRIES);
+
+        let single_file = dir.path().join("kept-file.bin");
+        std::fs::write(&single_file, b"one kept file").expect("file");
+        assert_eq!(state_of(&single_file), KEPT_HAS_ENTRIES);
+    }
+
+    #[test]
+    fn test_1882_r2_bridge_check_a_folder_it_may_not_list_is_unchecked() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).expect("folder");
+        std::fs::write(locked.join("k1882.txt"), b"x").expect("file");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("chmod 000");
+        let state = state_of(&locked);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).expect("chmod back");
+        assert_eq!(
+            state, KEPT_UNCHECKED,
+            "an existing folder the app may not list is shown (spec §4's fallback), never hidden"
         );
     }
 }

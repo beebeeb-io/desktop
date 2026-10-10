@@ -340,7 +340,8 @@ Required cleanup sequence for the product UI or a future uninstall helper:
 4. Remove the File Provider domain with `NSFileProviderManager.remove(_:mode:)` and
    `.preserveDirtyUserData`, never the plain form, which deletes files that never
    reached the server (task 1882; `docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md`).
-   Show the person the folder macOS reports.
+   Show the person the folder macOS reports, but only when it exists and holds
+   something: macOS reports a folder even when it kept nothing.
 5. Stop the daemon/control center.
 6. Remove the local IPC socket and stale lock file.
 7. Remove local state/cache/log directories owned by Beebeeb.
