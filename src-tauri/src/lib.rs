@@ -3301,22 +3301,44 @@ fn show_preserved_files_alert(app: &tauri::AppHandle, preserved_location: Option
 }
 
 /// Review I2 (lead ruling, round 2): hands a kept folder to the person on the paths that have no
-/// config of their own (sign-out, the app-start sweep): saved for the Settings › Sync row first,
-/// then the alert. Nothing kept → nothing.
+/// config of their own (sign-out, the app-start sweep, a reconciler removal): saved for the Settings › Sync row
+/// first, then the windows are told (rebase re-review I2), then the alert. Nothing kept → nothing.
 fn surface_kept_folder(app: &tauri::AppHandle, preserved_location: Option<&str>) {
-    surface_kept_folder_with(preserved_location, remember_kept_folder, |location| {
-        show_preserved_files_alert(app, Some(location))
-    });
+    surface_kept_folder_with(
+        preserved_location,
+        remember_kept_folder,
+        || emit_kept_folder_changed(app),
+        |location| show_preserved_files_alert(app, Some(location)),
+    );
 }
 
-/// [`surface_kept_folder`] with its two steps passed in, so a test can run the real order on its own config file and
-/// record the alert instead of raising one: saved for the row first, then the alert. Nothing kept → neither runs.
-fn surface_kept_folder_with(preserved_location: Option<&str>, save: impl FnOnce(&str), alert: impl FnOnce(&str)) {
+/// [`surface_kept_folder`] with its steps passed in, so a test can run the real order on its own config file and
+/// record the event and the alert: saved for the row first, then `changed`, then the alert. Nothing kept → none runs.
+fn surface_kept_folder_with(
+    preserved_location: Option<&str>,
+    save: impl FnOnce(&str),
+    changed: impl FnOnce(),
+    alert: impl FnOnce(&str),
+) {
     let Some(location) = preserved_location else {
         return;
     };
     save(location);
+    changed();
     alert(location);
+}
+
+/// Rebase re-review I2: told to every window once a kept folder was saved for the Settings › Sync row, so a Sync tab
+/// that is open reads the folder again. A removal the reconciler runs in the background (after "Try again", or one
+/// that finished after its time limit) saves the folder long after the tab's own read. No payload: the tab reads the
+/// folder through `kept_unsynced_folder`, so the path is never sent to a window that did not ask for it. The frontend
+/// listens for this name as `KEPT_FOLDER_CHANGED_EVENT`.
+const KEPT_FOLDER_CHANGED_EVENT: &str = "kept-folder-changed";
+
+fn emit_kept_folder_changed<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    if let Err(error) = app.emit(KEPT_FOLDER_CHANGED_EVENT, ()) {
+        tracing::warn!(%error, "could not tell the windows that a kept folder was saved");
+    }
 }
 
 /// Saves the latest kept folder in `desktop.toml` (spec §5, "The kept-folder row"). Best-effort:
@@ -30176,6 +30198,50 @@ mod finder_removal_wiring_tests {
         crate::source_pin::squeeze(text)
     }
 
+    /// Rebase re-review I2: once a kept folder is saved for the Settings › Sync row, every window is told with
+    /// `kept-folder-changed` (no payload), so a Sync tab that is open reads the folder again. The event comes after
+    /// the save, so that read finds it, and before the alert. Nothing kept: no save, no event, no alert. The emit and
+    /// the listener are real (a mock app); the save and the alert are recorded.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn rebase_i2_a_surfaced_folder_tells_the_windows_after_it_is_saved() {
+        use std::sync::{Arc, Mutex};
+        use tauri::Listener;
+        const FOLDER: &str = "/Users/someone/Library/CloudStorage/Beebeeb-Beebeeb (10-10-2026 10:50)";
+        assert_eq!(super::KEPT_FOLDER_CHANGED_EVENT, "kept-folder-changed");
+        let app = tauri::test::mock_app();
+        let steps: Arc<Mutex<Vec<String>>> = Arc::default();
+        let heard = steps.clone();
+        app.handle().listen(super::KEPT_FOLDER_CHANGED_EVENT, move |event| {
+            heard.lock().unwrap().push(format!("told {}", event.payload()));
+        });
+
+        super::surface_kept_folder_with(
+            Some(FOLDER),
+            |location| steps.lock().unwrap().push(format!("saved {location}")),
+            || super::emit_kept_folder_changed(app.handle()),
+            |location| steps.lock().unwrap().push(format!("alert {location}")),
+        );
+        assert_eq!(
+            *steps.lock().unwrap(),
+            vec![
+                format!("saved {FOLDER}"),
+                "told null".to_string(),
+                format!("alert {FOLDER}")
+            ],
+            "saved, then the windows are told (no path in the event), then the alert"
+        );
+
+        steps.lock().unwrap().clear();
+        super::surface_kept_folder_with(
+            None,
+            |location| steps.lock().unwrap().push(format!("saved {location}")),
+            || super::emit_kept_folder_changed(app.handle()),
+            |location| steps.lock().unwrap().push(format!("alert {location}")),
+        );
+        assert!(steps.lock().unwrap().is_empty(), "nothing kept: nothing at all");
+    }
+
     #[test]
     fn test_1882_the_repair_result_carries_the_kept_folder_to_the_frontend() {
         let result = MacosIntegrationResetResult {
@@ -30242,17 +30308,24 @@ mod finder_removal_wiring_tests {
         };
         // Saved, then shown: one function for the paths without a config of their own. Rebase re-review I1: its
         // two steps are passed to `surface_kept_folder_with`, so a test can run them on its own file.
+        // Rebase re-review I2: between the two, the windows are told, so an open Sync tab reads the folder again.
         let surface = squash_ws(&code_only(&item(&source, "fn surface_kept_folder(")));
         assert!(
             surface.contains(&squash_ws(
-                "surface_kept_folder_with(preserved_location, remember_kept_folder, |location| {\n        show_preserved_files_alert(app, Some(location))"
+                "surface_kept_folder_with(
+                    preserved_location,
+                    remember_kept_folder,
+                    || emit_kept_folder_changed(app),
+                    |location| show_preserved_files_alert(app, Some(location)),
+                );"
             )),
-            "it saves the folder with `remember_kept_folder` and raises the alert:\n{surface}"
+            "it saves the folder with `remember_kept_folder`, tells the windows and raises the alert:\n{surface}"
         );
         let with = code_only(&item(&source, "fn surface_kept_folder_with("));
         let saved = with.find("save(location);").expect("it saves the folder");
+        let told = with.find("changed();").expect("it tells the windows");
         let shown = with.find("alert(location);").expect("it raises the alert");
-        assert!(saved < shown);
+        assert!(saved < told && told < shown, "{with}");
         let remember = code_only(&item(&source, "fn remember_kept_folder("));
         // Round 5: the save is one load-change-save under the config-write lock, not a
         // `DesktopConfig::load()` + `cfg.save()` of its own.

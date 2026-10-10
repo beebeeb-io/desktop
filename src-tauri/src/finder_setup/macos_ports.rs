@@ -1321,6 +1321,7 @@ mod tests {
                     crate::finder_removal::remember_kept_folder_at(&config, location)
                         .expect("the folder is saved for the row");
                 },
+                || {},
                 |location| alerts.lock().unwrap().push(location.to_string()),
             );
         }
