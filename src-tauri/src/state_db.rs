@@ -7799,9 +7799,88 @@ mod tests {
         assert!(db.peek_resnapshot_request().unwrap().is_some());
     }
 
+    /// The tick clears exactly the request value it read (spec §6.3.2). A shared helper, on
+    /// every target: one request reads 1 from the counter (macOS) and from the flag (elsewhere).
+    #[test]
+    fn a_resnapshot_request_is_cleared_only_by_the_value_read() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        assert_eq!(db.peek_resnapshot_request().unwrap(), None);
+        assert!(!db.clear_resnapshot_request(1).unwrap(), "nothing to clear");
+        db.request_resnapshot().unwrap();
+        assert_eq!(db.peek_resnapshot_request().unwrap(), Some(1));
+        assert!(!db.clear_resnapshot_request(2).unwrap(), "another value clears nothing");
+        assert_eq!(db.peek_resnapshot_request().unwrap(), Some(1));
+        assert!(db.clear_resnapshot_request(1).unwrap());
+        assert_eq!(db.peek_resnapshot_request().unwrap(), None);
+    }
+
+    /// §6.3.3: `base_pending` is 1 + the successful snapshots that did not give the op its
+    /// base; the 10th parks it `base_unknown` through the claim's park statement, and it
+    /// asks for no more. A shared helper: it runs on every target.
+    #[test]
+    fn base_pending_counts_snapshots_and_parks_at_the_tenth() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        assert!(!db.has_base_pending_uploads().unwrap());
+        db.0.lock()
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO operation_queue (op_id, kind, file_id, write_id, write_origin, base_version,
+                                              base_pending, attempts, max_attempts)
+                 VALUES ('waiting', 'upload_version', 'f1', 'w1', 'minted', 0, 1, 0, 25),
+                        ('known', 'upload_version', 'f2', 'w2', 'minted', 3, 0, 0, 25);",
+            )
+            .unwrap();
+        assert!(db.has_base_pending_uploads().unwrap());
+        for snapshot in 1..10 {
+            assert!(
+                db.note_snapshot_for_base_pending(100 + snapshot).unwrap().is_empty(),
+                "not parked after {snapshot} snapshots"
+            );
+        }
+        assert_eq!(
+            db.finder_write("waiting").unwrap().unwrap().base_pending,
+            10,
+            "1 + nine misses"
+        );
+        assert_eq!(
+            db.note_snapshot_for_base_pending(200).unwrap(),
+            vec![("waiting".to_string(), Some("f1".to_string()))]
+        );
+        let parked = db.get_operation("waiting").unwrap().unwrap();
+        assert_eq!(parked.attempts, parked.max_attempts, "parked at the 10th");
+        assert_eq!(parked.last_error.as_deref(), Some("base_unknown"));
+        let class: Option<String> =
+            db.0.lock()
+                .unwrap()
+                .query_row(
+                    "SELECT last_error_class FROM operation_queue WHERE op_id = 'waiting'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+        assert_eq!(
+            class.as_deref(),
+            Some("base_unknown"),
+            "the claim's park statement: a save on its token takes over and parks the same way"
+        );
+        assert_eq!(db.finder_write("waiting").unwrap().unwrap().base_pending, 0);
+        assert!(
+            !db.has_base_pending_uploads().unwrap(),
+            "a parked op asks for no more snapshots"
+        );
+        assert_eq!(
+            db.get_operation("known").unwrap().unwrap().attempts,
+            0,
+            "an op with a known base is not counted"
+        );
+        assert!(db.note_snapshot_for_base_pending(300).unwrap().is_empty());
+    }
+
     /// §6.3.2: the fill and the raise leave Conflict and Trashing rows alone, and on a row
     /// with a queued write the raise changes the version only (the size is that write's).
-    #[cfg(target_os = "macos")]
+    /// A shared helper: it runs on every target.
     #[test]
     fn the_snapshot_version_skips_conflict_and_trashing_rows_and_keeps_a_queued_writes_size() {
         let dir = tempdir().unwrap();
