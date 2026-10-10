@@ -197,7 +197,13 @@ Beebeeb window) plus a row in
 Settings → Sync until dismissed (`kept_unsynced_folder` in `desktop.toml`; commands
 `kept_unsynced_folder` / `dismiss_kept_unsynced_folder`, which returns
 `{ cleared, current }`). Writes to `desktop.toml` take the one config-write lock in
-`config.rs` (`DesktopConfig::update_at` is a load-change-save under it). The 1882 source pins
+`config.rs`. Task 1889: `DesktopConfig` has no `save()`; the only way to write the file is
+`update_at` (or `update`, `try_update_at`, `update_held`, `ensure_account_id`, which are `update_at`): the
+read, the change and the write under the lock, so a writer cannot put back a copy it loaded earlier. A flow
+that keeps a copy to READ across slow work (the Windows and Linux install and Repair commands) writes through
+`copy.update_held(|held| …)`, which applies the change to the file as it is now and then refreshes the copy.
+Nothing inside an update closure may call another update (the lock is not re-entrant). The pins are
+`test_1889_*` in `config.rs`, `finder_removal.rs` and `lib.rs` (`config_write_pin_tests`). The 1882 source pins
 read through `lf()`/`slash()` in `finder_removal.rs`, so they run on a Windows checkout
 (CRLF text, `\` paths). Spec: `docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md`.
 Correction: a Mac has no Add-to-Finder rollback. Since spec A (R5) the reconciler adds Beebeeb and
