@@ -236,14 +236,23 @@ pub(crate) fn with_shared_gate_held<T>(f: impl FnOnce() -> T) -> T {
         .expect("the shared gate is free at the start of the test")
 }
 
-/// The URL of the Beebeeb folder in Finder, for "Open in Finder". A person clicked and waits for it, so it waits a
-/// little for the gate: the `Ready` poll reads the domain every 3 s, and a click that meets that read must not fail.
-pub(crate) fn visible_url() -> Result<Option<String>, FpError> {
-    BridgeGate::shared().run_sync_waiting(BRIDGE_GATE_WAIT, macos_file_provider::visible_url)
+/// "Open in Finder" (task 1885): opens the Beebeeb folder in Finder through `NSWorkspace`, with the scoped URL macOS
+/// returned for it, and returns when LaunchServices has answered. `Ok(false)` is "macOS reports no location". A person
+/// clicked and waits for it, so it waits a little for the gate: the `Ready` poll reads the domain every 3 s, and a
+/// click that meets that read must not fail. It holds the gate for the open's whole length (at most the bridge's 2 s
+/// resolve plus its 5 s open), so a poll that meets the open fails fast as busy, as it does for any held call.
+pub(crate) fn open_location() -> Result<bool, FpError> {
+    BridgeGate::shared().run_sync_waiting(BRIDGE_GATE_WAIT, macos_file_provider::open_location)
+}
+
+/// "Show in Finder" for one item (task 1885): selects the item, by its File Provider identifier, in a Finder window.
+/// Waits a little for the gate, for the same reason as [`open_location`].
+pub(crate) fn reveal_item(item_id: &str) -> Result<bool, FpError> {
+    BridgeGate::shared().run_sync_waiting(BRIDGE_GATE_WAIT, || macos_file_provider::reveal_item(item_id))
 }
 
 /// The domain's state, read from the OS (the `finder_domain_user_enabled` command). Waits a little for the gate,
-/// for the same reason as [`visible_url`].
+/// for the same reason as [`open_location`].
 pub(crate) fn domain_state() -> Result<super::core::DomainState, FpError> {
     BridgeGate::shared().run_sync_waiting(BRIDGE_GATE_WAIT, macos_file_provider::domain_state)
 }
@@ -847,7 +856,8 @@ mod tests {
             "{new}"
         );
         for wrapper in [
-            "fn visible_url(",
+            "fn open_location(",
+            "fn reveal_item(",
             "fn domain_state(",
             "fn signal_working_set(",
             "fn cleanup_stale_domains(",
@@ -967,7 +977,7 @@ mod tests {
     /// Lead ruling (fix round 2): the removal and the launch read wait. The working-set signal, the
     /// reconciler's other reads, the poll and the startup sweep keep failing fast, so a busy gate never
     /// stalls them and the engine's tick never waits. Since the F7 follow-up the two reads a person waits on
-    /// wait as well (`the_two_reads_a_person_waits_on_wait_a_little_for_the_gate`).
+    /// wait as well (`the_calls_a_person_waits_on_wait_a_little_for_the_gate`).
     #[tokio::test]
     async fn the_signal_the_poll_and_the_sweep_still_fail_fast() {
         // The signal: `run_sync` on the shared gate, held. It answers at once.
@@ -1013,16 +1023,17 @@ mod tests {
         }
     }
 
-    /// F7 follow-up (review minor 1): "Open in Finder" (`visible_url`) and the onboarding card's
+    /// F7 follow-up (review minor 1): "Open in Finder" (`open_location`, `reveal_item`) and the onboarding card's
     /// `finder_domain_user_enabled` (`domain_state`) are what a person clicked and waits on. Since the `Ready` poll
     /// reads the domain every 3 s, a click can meet the gate held by that read: they wait for it, on the same bound
     /// as the removal, instead of failing at once. The engine's working-set signal does not (it owes the signal to
     /// its next tick instead).
     #[test]
-    fn the_two_reads_a_person_waits_on_wait_a_little_for_the_gate() {
+    fn the_calls_a_person_waits_on_wait_a_little_for_the_gate() {
         let source = production();
         for (wrapper, call) in [
-            ("fn visible_url(", "macos_file_provider::visible_url"),
+            ("fn open_location(", "macos_file_provider::open_location"),
+            ("fn reveal_item(", "|| macos_file_provider::reveal_item(item_id)"),
             ("fn domain_state(", "macos_file_provider::domain_state"),
         ] {
             let body = &source[source.find(wrapper).unwrap_or_else(|| panic!("{wrapper}"))..];

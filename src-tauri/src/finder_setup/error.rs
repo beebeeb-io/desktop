@@ -21,6 +21,13 @@ pub mod bridge_code {
     pub const RESOLVE_URL_TIMEOUT: i64 = 3;
     pub const SIGNAL_TIMEOUT: i64 = 4;
     pub const NO_IDENTIFIER: i64 = 5;
+    /// `NSWorkspace` did not answer an open within the bridge's limit (task 1885).
+    pub const OPEN_TIMEOUT: i64 = 6;
+    /// A URL the bridge was asked to open is not one it may open: it does not parse, or it is a
+    /// file URL (those open only through the scoped URL macOS returned for a Finder item).
+    pub const INVALID_URL: i64 = 7;
+    /// The Finder location macOS returned for an item is not on disk.
+    pub const ITEM_MISSING: i64 = 8;
 }
 
 pub mod app_code {

@@ -3,7 +3,7 @@ use std::os::raw::c_char;
 use std::time::Duration;
 
 use crate::finder_setup::core::DomainState;
-use crate::finder_setup::error::{FpError, FpErrorCode, app_code};
+use crate::finder_setup::error::{BRIDGE_DOMAIN, FpError, FpErrorCode, app_code, bridge_code};
 
 /// Mirror of `BeebeebFpError` in `src-tauri/macos/FileProviderBridge.m` (spec §6.1). The C side
 /// `_Static_assert`s the same size and field offsets, and the `bridge_error_tests` module compares
@@ -62,7 +62,8 @@ fn c_array_to_string(array: &[c_char]) -> String {
 }
 
 unsafe extern "C" {
-    fn beebeeb_fp_visible_url(url_buffer: *mut c_char, url_buffer_len: usize, out_error: *mut BeebeebFpErrorC) -> i32;
+    fn beebeeb_fp_open_location(out_error: *mut BeebeebFpErrorC) -> i32;
+    fn beebeeb_fp_reveal_item(identifier: *const c_char, out_error: *mut BeebeebFpErrorC) -> i32;
     fn beebeeb_fp_domain_user_enabled(out_error: *mut BeebeebFpErrorC) -> i32;
     fn beebeeb_fp_add_domain(out_error: *mut BeebeebFpErrorC) -> i32;
     fn beebeeb_fp_wait_for_domain_ready(timeout_seconds: f64, out_error: *mut BeebeebFpErrorC) -> i32;
@@ -114,14 +115,45 @@ pub fn wait_for_domain_ready(timeout: Duration) -> Result<(), FpError> {
     if code < 0 { Err(out.into_fp_error()) } else { Ok(()) }
 }
 
-pub fn visible_url() -> Result<Option<String>, FpError> {
-    let mut url_buffer = [0 as c_char; 2048];
+/// "Open in Finder" (task 1885): opens the Beebeeb domain's root in Finder through `NSWorkspace`, with the
+/// security-scoped URL macOS returned for it, and returns when LaunchServices has answered. `Ok(true)` it
+/// opened it, `Ok(false)` macOS reported no location (the domain is not added), `Err` it failed or did not
+/// answer in time. There is no path string anywhere in this call: a path carries no sandbox extension.
+pub fn open_location() -> Result<bool, FpError> {
+    bridge_answer("beebeeb_fp_open_location", call(beebeeb_fp_open_location)?)
+}
+
+/// "Show in Finder" for one item (task 1885): `item_id` is the item's File Provider identifier, which is the
+/// state database's file id. Resolves its scoped Finder URL, checks that it is on disk, and selects it in a
+/// Finder window. `Ok(true)` handed to Finder, `Ok(false)` macOS reported no location. Finder's own answer
+/// cannot be waited for (`activateFileViewerSelectingURLs:` is `void`), so `Ok(true)` means the item resolved
+/// and exists, not that a window was seen: the device check owns that.
+pub fn reveal_item(item_id: &str) -> Result<bool, FpError> {
+    let Ok(identifier) = std::ffi::CString::new(item_id) else {
+        return Err(FpError::new(
+            BRIDGE_DOMAIN,
+            bridge_code::NO_IDENTIFIER,
+            "the item identifier holds a NUL byte",
+        ));
+    };
     let mut out = BeebeebFpErrorC::zeroed();
-    let code = unsafe { beebeeb_fp_visible_url(url_buffer.as_mut_ptr(), url_buffer.len(), &mut out) };
+    let code = unsafe { beebeeb_fp_reveal_item(identifier.as_ptr(), &mut out) };
+    if code < 0 {
+        return Err(out.into_fp_error());
+    }
+    bridge_answer("beebeeb_fp_reveal_item", code)
+}
+
+/// The bridge's `1` / `0` answer of an open or a reveal. Any other non-negative return is a bridge that
+/// does not follow its own contract, which is an app error, never a guess at success.
+fn bridge_answer(function: &str, code: i32) -> Result<bool, FpError> {
     match code {
-        c if c < 0 => Err(out.into_fp_error()),
-        0 => Ok(None),
-        _ => Ok(Some(c_array_to_string(&url_buffer)).filter(|s| !s.is_empty())),
+        1 => Ok(true),
+        0 => Ok(false),
+        other => Err(FpError::app(
+            app_code::UNEXPECTED_BRIDGE_RETURN,
+            format!("{function} returned {other}"),
+        )),
     }
 }
 
@@ -496,7 +528,8 @@ mod bridge_error_tests {
         fn beebeeb_fp_test_error_align() -> usize;
         /// code, underlying_code, has_underlying, domain, underlying_domain, message.
         fn beebeeb_fp_test_error_offsets(out: *mut usize);
-        /// ManagerUnavailable, StabilizationTimeout, ResolveUrlTimeout, SignalTimeout, NoIdentifier.
+        /// ManagerUnavailable, StabilizationTimeout, ResolveUrlTimeout, SignalTimeout, NoIdentifier,
+        /// OpenTimeout, InvalidURL, ItemMissing.
         fn beebeeb_fp_test_bridge_codes(out: *mut i64);
         // The one real bridge entry point that fails before it touches the system (task 1882: its
         // removal reply carries the kept folder too).
@@ -556,7 +589,7 @@ mod bridge_error_tests {
 
     #[test]
     fn the_bridge_error_codes_are_the_rust_constants() {
-        let mut c_codes = [i64::MIN; 5];
+        let mut c_codes = [i64::MIN; 8];
         unsafe { beebeeb_fp_test_bridge_codes(c_codes.as_mut_ptr()) };
         assert_eq!(
             c_codes,
@@ -566,10 +599,43 @@ mod bridge_error_tests {
                 bridge_code::RESOLVE_URL_TIMEOUT,
                 bridge_code::SIGNAL_TIMEOUT,
                 bridge_code::NO_IDENTIFIER,
+                bridge_code::OPEN_TIMEOUT,
+                bridge_code::INVALID_URL,
+                bridge_code::ITEM_MISSING,
             ],
             "BeebeebBridge* enum in FileProviderBridge.m vs finder_setup::error::bridge_code"
         );
-        assert_eq!(c_codes, [1, 2, 3, 4, 5]);
+        assert_eq!(c_codes, [1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    /// Task 1885: a reveal with no usable identifier fails in the bridge before it touches the system, with the
+    /// bridge's own `NoIdentifier` error. It is an `Err`, never `Ok(false)` ("macOS has no location"), which would
+    /// read as a quiet nothing.
+    #[test]
+    fn test_1885_a_reveal_without_an_identifier_is_a_bridge_error_not_a_quiet_nothing() {
+        for identifier in ["", "has\0a-nul"] {
+            let error = reveal_item(identifier).expect_err("no identifier is an error");
+            assert_eq!(
+                (error.domain.as_str(), error.code),
+                (BRIDGE_DOMAIN, bridge_code::NO_IDENTIFIER),
+                "{identifier:?}"
+            );
+        }
+    }
+
+    /// Task 1885: the bridge's open and reveal return only `1` (done) or `0` (no location). Any other
+    /// non-negative return is an app error, never read as one of them.
+    #[test]
+    fn test_1885_only_one_and_zero_are_answers() {
+        assert_eq!(bridge_answer("f", 1), Ok(true));
+        assert_eq!(bridge_answer("f", 0), Ok(false));
+        for other in [2, 7, i32::MAX] {
+            let error = bridge_answer("f", other).expect_err("an undocumented return is an error");
+            assert_eq!(
+                (error.domain.as_str(), error.code),
+                (APP_DOMAIN, app_code::UNEXPECTED_BRIDGE_RETURN)
+            );
+        }
     }
 
     #[test]

@@ -245,6 +245,24 @@ domain to "Beebeeb" made it collide with that folder. A pre-rename `io.beebeeb.d
 Mac (any Mac that ran a build from before 18 May) is cleared once by a one-off helper (spec §11), not
 by the app.
 
+### Opening Finder from the sandboxed app (task 1885)
+
+Nothing a Mac compiles starts `/usr/bin/open`. A child process inherits the App Sandbox but not the extension on
+the URL macOS handed the app, so LaunchServices refused `~/Library/CloudStorage/Beebeeb-Beebeeb` with -54 while
+`spawn()` had already answered `Ok`: "Open in Finder" did nothing and reported success. The bridge now keeps the
+security-scoped URL from `getUserVisibleURLForItemIdentifier` (NSFileProviderManager.h:103-128, :120-121 for the
+scope) and opens it in this process: `beebeeb_fp_open_location` (Open in Finder) waits for
+`NSWorkspace openURL:configuration:completionHandler:` (NSWorkspace.h:40) and returns its error;
+`beebeeb_fp_reveal_item` (Show in Finder, the item's File Provider identifier is its state-db file id) selects
+the item with `activateFileViewerSelectingURLs:` (NSWorkspace.h:53, `void`: the bridge proves the item resolved
+and exists, not that Finder drew a window); `beebeeb_open_url` opens System Settings (no gate: it must work when the
+File Provider is stuck). Each answer is the command's result (`finder_open::finder_open_outcome`, domain and
+code only), so a failure is the existing one-sentence toast. The commands are `async` on the blocking pool
+(an open waits up to 2 s to resolve the URL and 5 s for LaunchServices). The pins are `test_1885_*` in
+`src/finder_open.rs`, `macos_workspace.rs` and `macos_file_provider.rs`. Windows and Linux keep `explorer` and
+`xdg-open`. The device rung (5 of 5 opens, button and menu, during the Ready poll, on a signed QA build) is the
+lead's.
+
 ### Re-sign-in in place (ruling R8)
 
 "Sign in again" on macOS opens sign-in in place (`open_reauth_window`); nothing is cleared first.
