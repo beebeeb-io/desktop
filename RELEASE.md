@@ -337,7 +337,10 @@ Required cleanup sequence for the product UI or a future uninstall helper:
 2. If the user chooses "remove local data", delete only local cache/state after
    pending uploads are resolved or abandoned with confirmation.
 3. Disable the login item.
-4. Remove the File Provider domain with `NSFileProviderManager.remove`.
+4. Remove the File Provider domain with `NSFileProviderManager.remove(_:mode:)` and
+   `.preserveDirtyUserData`, never the plain form, which deletes files that never
+   reached the server (task 1882; `docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md`).
+   Show the person the folder macOS reports.
 5. Stop the daemon/control center.
 6. Remove the local IPC socket and stale lock file.
 7. Remove local state/cache/log directories owned by Beebeeb.

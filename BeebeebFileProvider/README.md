@@ -112,7 +112,7 @@ Verbs (default `status`):
 | --- | --- | --- |
 | `status` | Print `installed` or `missing` for domain `io.beebeeb.app.domain` ("Drive"). | 0 always (informational); 1 on FileProvider error |
 | `install` | `NSFileProviderManager.add` for the domain. | 0 installed; 1 error |
-| `remove` | `NSFileProviderManager.remove` for the domain. | 0 removed; 1 error |
+| `remove` | `NSFileProviderManager.remove(_:mode: .preserveDirtyUserData)` for the domain: files that never reached the server are kept (task 1882). Prints `removed`, then `preserved: <folder>` when macOS kept any. | 0 removed; 1 error |
 | `signal-root` | `signalEnumerator(.rootContainer)` for the installed domain. | 0 signaled; 1 not installed or error |
 
 Unknown verbs exit 2. `scripts/qa-fileprovider.sh` wraps the SYSTEM
@@ -210,10 +210,25 @@ log show --predicate 'subsystem CONTAINS "fileprovider" OR process CONTAINS "Bee
 Uninstall removes local integration state only. It must never delete remote
 vault data.
 
+**Every domain removal keeps what has not synced (task 1882, P0).** Sign-out,
+Repair, the Add-to-Finder rollback, the app-start sweep of other domains and
+`BeebeebFileProviderCtl remove` all call
+`removeDomain:mode:NSFileProviderDomainRemovalModePreserveDirtyUserData`
+(macOS 12+; the app requires 14), never the plain `removeDomain:` (which deleted
+Finder-created files that had not uploaded). macOS reports the folder it kept
+them in; the app shows the person that folder (an alert after a sign-out, a note
+in Settings → Sync after a Repair) and logs only that files were kept, never the
+path. `src-tauri/src/finder_removal.rs` pins every removal in the repo to this
+mode. Limit: macOS counts a create or modify as synced once the extension has
+handed it to the app's upload queue, and sign-out purges that queue, so a file
+still queued at sign-out is not kept. Spec:
+`docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md`.
+
 Safe order:
 
 1. Pause sync and surface pending uploads.
-2. Remove the File Provider domain with `BeebeebFileProviderDomain.remove`.
+2. Remove the File Provider domain with `BeebeebFileProviderDomain.remove`
+   (today: the preserving removal above).
 3. Disable the login item in the containing app.
 4. Stop the daemon/control center.
 5. Remove stale IPC socket and lock files.

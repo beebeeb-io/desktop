@@ -180,6 +180,17 @@ The Tauri warning that `io.beebeeb.app` ends in `.app` is known. Keep this
 identifier unless Guus creates a new macOS App Store Connect record and chooses
 to migrate. Expo is unrelated to desktop builds; it only applies to mobile.
 
+**Removing the Finder location keeps un-synced files (task 1882, P0).** Every
+`NSFileProviderManager` domain removal (sign-out, Repair, the Add-to-Finder
+rollback, the app-start sweep, `BeebeebFileProviderCtl remove`) passes
+`NSFileProviderDomainRemovalModePreserveDirtyUserData`; never add a plain
+`removeDomain:`/`remove(domain)` or `removeAllDomains`. The source pin
+`test_1882_every_domain_removal_in_the_repo_keeps_unsynced_files`
+(`src-tauri/src/finder_removal.rs`) scans every `.m`/`.swift` file and fails on
+one. The folder macOS reports reaches the person (an alert for sign-out, a note
+in Settings → Sync for Repair) and never the logs. Spec:
+`docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md`.
+
 ## Browser sign-in (`src-tauri/src/browser_login.rs`, task 1734)
 
 The first-run "Sign in with browser" handoff opens `<APP_URL>/cli-auth` and shows the device code in the app. The link carries NO code: the person TYPES the code on the page and confirms with their password, so a link someone else sends them has nothing to approve (security review 2026-10-04, finding 9). The WS init frame (`init_frame`) adds `client: "desktop"`, the release version, `os` and the hostname for the page to show as "reported by the device"; the screen copy lives in `src/browserLoginCopy.ts` (tested by `tests/browserLoginCopy.test.ts`). The decrypt path is unchanged.
