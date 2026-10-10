@@ -31,6 +31,10 @@ mod diagnostic_redaction;
 mod engine_bridge;
 mod engine_status;
 mod finder_removal;
+// Task 1885: how the bridge's answer to "open this in Finder" becomes a command's result, and the pins that keep
+// the macOS code from spawning `open` again. Only macOS calls it.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod finder_open;
 // Spec 2026-10-06 (macOS Finder setup reconciler). Only macOS runs the reconciler; on
 // Windows/Linux these types exist for `AppState` and the commands.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -73,6 +77,9 @@ mod link_health;
 mod lockfile;
 #[cfg(target_os = "macos")]
 mod macos_file_provider;
+// Task 1885: NSWorkspace for the URLs that are not Finder items (System Settings), with no child `open`.
+#[cfg(target_os = "macos")]
+mod macos_workspace;
 mod popover_data;
 // Ruling R8 (spec 2026-10-06): the pure decision between a first sign-in, the same account signing in again and
 // an account switch. Windows keeps its refusal while a session exists and never asks.
@@ -4515,23 +4522,30 @@ pub(crate) fn purge_macos_hydrate_cache(context: &str) {
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn purge_macos_hydrate_cache(_context: &str) {}
 
+/// "Open in Finder" on a Mac (task 1885): the bridge opens the Beebeeb folder through `NSWorkspace` and answers
+/// when LaunchServices has. `Ok` only if it opened; an `Err` is what the frontend turns into the toast.
 #[cfg(target_os = "macos")]
-fn file_provider_visible_location() -> Result<Option<String>, String> {
-    user_facing_fp(finder_setup::macos_ports::visible_url())
+fn file_provider_open_location() -> Result<(), String> {
+    finder_open::finder_open_outcome(finder_setup::macos_ports::open_location(), finder_open::NOTHING_TO_OPEN)
+}
+
+/// "Show in Finder" for one item on a Mac (task 1885): the item's File Provider identifier is its file id.
+#[cfg(target_os = "macos")]
+fn file_provider_reveal_item(item_id: &str) -> Result<(), String> {
+    finder_open::finder_open_outcome(
+        finder_setup::macos_ports::reveal_item(item_id),
+        finder_open::NOTHING_TO_SHOW,
+    )
 }
 
 /// The one conversion from a bridge error to text that can leave the bridge's callers: it
-/// reaches Repair's `warnings` and `open_finder_location`'s returned error, both shown to a
+/// reaches Repair's `warnings` and `finder_domain_user_enabled`'s returned error, both shown to a
 /// person. Domain and code only, never the OS's message (lead ruling T1-4). `tracing` sites log
-/// the `FpError` itself, which keeps the message for stdout.
+/// the `FpError` itself, which keeps the message for stdout. (`finder_open::finder_open_outcome`
+/// is the same conversion for the open and the reveal.)
 #[cfg(target_os = "macos")]
 fn user_facing_fp<T>(result: Result<T, crate::finder_setup::error::FpError>) -> Result<T, String> {
     result.map_err(|e| e.redacted())
-}
-
-#[cfg(not(target_os = "macos"))]
-fn file_provider_visible_location() -> Result<Option<String>, String> {
-    Ok(None)
 }
 
 /// `Some(true)` = the Beebeeb domain is user-enabled, `Some(false)` = the user (or
@@ -6776,27 +6790,33 @@ const MACOS_LOGIN_ITEMS_SETTINGS_URL: &str = "x-apple.systempreferences:com.appl
 /// renames or removes that pane id) -- opens System Settings at its default pane.
 const MACOS_SYSTEM_SETTINGS_FALLBACK_URL: &str = "x-apple.systempreferences:";
 
+/// `async`, with the open on the blocking pool: it waits up to 5 s for LaunchServices' answer, which a plain
+/// `#[tauri::command]` fn would do on the main thread (see [`on_the_blocking_pool`]).
 #[tauri::command]
-fn open_login_items_and_extensions_settings() -> Result<(), String> {
+async fn open_login_items_and_extensions_settings() -> Result<(), String> {
+    on_the_blocking_pool(
+        "Could not open System Settings.",
+        open_login_items_and_extensions_settings_blocking,
+    )
+    .await
+}
+
+fn open_login_items_and_extensions_settings_blocking() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        let primary = std::process::Command::new("open")
-            .arg(MACOS_LOGIN_ITEMS_SETTINGS_URL)
-            .status();
-        if matches!(&primary, Ok(status) if status.success()) {
-            return Ok(());
+        // Through NSWorkspace, in this process (task 1885), and the answer is LaunchServices': a refusal is the
+        // command's error, not a discarded one. No bridge gate: this touches no File Provider state, and it must
+        // work exactly when the File Provider is stuck.
+        match macos_workspace::open_url(MACOS_LOGIN_ITEMS_SETTINGS_URL) {
+            Ok(()) => Ok(()),
+            Err(primary) => {
+                tracing::warn!(%primary, "could not open the Login Items pane; opening System Settings itself");
+                macos_workspace::open_url(MACOS_SYSTEM_SETTINGS_FALLBACK_URL).map_err(|fallback| {
+                    tracing::warn!(%fallback, "could not open System Settings");
+                    fallback.redacted()
+                })
+            }
         }
-        std::process::Command::new("open")
-            .arg(MACOS_SYSTEM_SETTINGS_FALLBACK_URL)
-            .status()
-            .map_err(|e| format!("open System Settings: {e}"))
-            .and_then(|status| {
-                if status.success() {
-                    Ok(())
-                } else {
-                    Err(format!("open System Settings exited with status {status}"))
-                }
-            })
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -7374,14 +7394,11 @@ async fn open_finder_location(path: Option<String>) -> Result<(), String> {
 fn open_finder_location_blocking(path: Option<String>) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
+        // Task 1885: never `open <path>` as a child. The child inherited the sandbox but not the extension on the
+        // URL macOS returned, LaunchServices refused with -54, and `spawn()` had answered Ok. The bridge opens the
+        // scoped URL itself and this returns what it answered.
         let _ = path;
-        let visible = file_provider_visible_location()?
-            .ok_or_else(|| "Beebeeb isn’t in Finder right now, so there is nothing to open there.".to_string())?;
-        std::process::Command::new("open")
-            .arg(&visible)
-            .spawn()
-            .map_err(|e| format!("open Finder: {e}"))?;
-        return Ok(());
+        return file_provider_open_location();
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -7409,56 +7426,79 @@ fn open_finder_location_blocking(path: Option<String>) -> Result<(), String> {
     }
 }
 
-#[tauri::command]
-fn open_in_finder(item_id: String, path: Option<String>) -> Result<(), String> {
-    let _ = path;
-    let cfg = DesktopConfig::load()?;
-    let sync_root = cfg
-        .sync_root
-        .clone()
-        .ok_or_else(|| "sync root not configured".to_string())?;
-    let db =
-        state_db_for_config(&cfg)?.ok_or_else(|| "The local sync database has not been created yet.".to_string())?;
-    let entry = db
-        .get_file(&item_id)
-        .map_err(|e| format!("read shared item: {e}"))?
-        .ok_or_else(|| "shared item is not available locally yet".to_string())?;
+/// What "Show in Finder" answers when its work stopped before it answered (see [`on_the_blocking_pool`]).
+const SHOW_IN_FINDER_FAILED: &str = "Could not show the file in your file manager.";
 
-    reject_unsafe_rel_path(&entry.path)?;
-    let local_path = sync_root.join(entry.path.replace('/', std::path::MAIN_SEPARATOR_STR));
+/// `async`, with the work on the blocking pool: on macOS it resolves the item's Finder location through the bridge
+/// gate (up to 3 s of wait) and waits for the bridge's answer, which a plain `#[tauri::command]` fn would do on the
+/// main thread.
+#[tauri::command]
+async fn open_in_finder(item_id: String, path: Option<String>) -> Result<(), String> {
+    on_the_blocking_pool(SHOW_IN_FINDER_FAILED, move || open_in_finder_blocking(item_id, path)).await
+}
+
+fn open_in_finder_blocking(item_id: String, path: Option<String>) -> Result<(), String> {
+    let _ = path;
 
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open")
-            .arg("-R")
-            .arg(&local_path)
-            .spawn()
-            .map_err(|e| format!("open Finder: {e}"))?;
-        Ok(())
+        // Task 1885: the item's Finder location is the URL macOS returns for its File Provider identifier (the
+        // state database's file id), revealed through NSWorkspace. It used to be `sync_root/<path>`, which on a Mac
+        // is the app's private state folder and not a Finder location, opened with a child `open -R` whose failure
+        // `spawn()` could not see. The identifier is checked the way every identifier off the wire is.
+        ipc_socket::macos_validate_hydrate_item_identifier(&item_id).map_err(str::to_string)?;
+        // Shared content is webapp-only by ruling 1701: it is not in Finder, so the File Provider is never asked about it
+        // (macOS might fail the lookup, or place it under "Beebeeb"). Refused before any bridge call (task 1885, I3).
+        let db =
+            state_db_for_config(&DesktopConfig::load()?)?.ok_or_else(|| finder_open::ITEM_NOT_KNOWN.to_string())?;
+        finder_open::finder_may_show(&item_id, |id| {
+            db.get_file_contract_state(id)
+                .map(|state| state.map(|state| state.namespace))
+                .map_err(|error| format!("read item: {error}"))
+        })?;
+        file_provider_reveal_item(&item_id)
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(not(target_os = "macos"))]
     {
-        std::process::Command::new("explorer")
-            .arg("/select,")
-            .arg(&local_path)
-            .spawn()
-            .map_err(|e| format!("open Explorer: {e}"))?;
-        Ok(())
-    }
+        let cfg = DesktopConfig::load()?;
+        let sync_root = cfg
+            .sync_root
+            .clone()
+            .ok_or_else(|| "sync root not configured".to_string())?;
+        let db = state_db_for_config(&cfg)?
+            .ok_or_else(|| "The local sync database has not been created yet.".to_string())?;
+        let entry = db
+            .get_file(&item_id)
+            .map_err(|e| format!("read shared item: {e}"))?
+            .ok_or_else(|| "shared item is not available locally yet".to_string())?;
 
-    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-    {
-        let open_path = if local_path.is_file() {
-            local_path.parent().unwrap_or(&sync_root)
-        } else {
-            local_path.as_path()
-        };
-        std::process::Command::new("xdg-open")
-            .arg(open_path)
-            .spawn()
-            .map_err(|e| format!("open file manager: {e}"))?;
-        Ok(())
+        reject_unsafe_rel_path(&entry.path)?;
+        let local_path = sync_root.join(entry.path.replace('/', std::path::MAIN_SEPARATOR_STR));
+
+        #[cfg(target_os = "windows")]
+        {
+            std::process::Command::new("explorer")
+                .arg("/select,")
+                .arg(&local_path)
+                .spawn()
+                .map_err(|e| format!("open Explorer: {e}"))?;
+            Ok(())
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            let open_path = if local_path.is_file() {
+                local_path.parent().unwrap_or(&sync_root)
+            } else {
+                local_path.as_path()
+            };
+            std::process::Command::new("xdg-open")
+                .arg(open_path)
+                .spawn()
+                .map_err(|e| format!("open file manager: {e}"))?;
+            Ok(())
+        }
     }
 }
 
@@ -9231,6 +9271,18 @@ fn sync_root_for_menu_file_action() -> Result<PathBuf, String> {
     Ok(root)
 }
 
+/// Opens the Finder location after an upload or a new folder, WITHOUT making the caller wait (task 1885 fix round 1, m4).
+/// The open can wait up to 3 s for the bridge gate and 7 s for LaunchServices. Its callers are the menu handler and a plain
+/// command (the main thread), and a runtime worker, none of which may sit in that wait; and nobody needs its answer, so it
+/// runs on the blocking pool and a failure is logged.
+fn open_finder_location_in_background(sync_root: String) {
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Err(error) = open_finder_location_blocking(Some(sync_root)) {
+            tracing::warn!(%error, "could not open the Beebeeb folder after the menu action");
+        }
+    });
+}
+
 fn upload_files_to_sync_root_impl(app: &tauri::AppHandle) -> Result<usize, String> {
     let sync_root = sync_root_for_menu_file_action()?;
     let selected = app
@@ -9264,7 +9316,7 @@ fn upload_files_to_sync_root_impl(app: &tauri::AppHandle) -> Result<usize, Strin
 
     if copied > 0 {
         let _ = app.emit("menu:files-added", serde_json::json!({ "count": copied }));
-        let _ = open_finder_location_blocking(Some(sync_root.to_string_lossy().into_owned()));
+        open_finder_location_in_background(sync_root.to_string_lossy().into_owned());
     }
 
     Ok(copied)
@@ -9280,7 +9332,7 @@ fn create_folder_in_sync_root_impl(app: &tauri::AppHandle) -> Result<PathBuf, St
     );
     if let Err(error) = app.opener().reveal_item_in_dir(&path) {
         tracing::warn!(%error, path = %path.display(), "could not reveal new folder; opening sync root instead");
-        let _ = open_finder_location_blocking(Some(sync_root.to_string_lossy().into_owned()));
+        open_finder_location_in_background(sync_root.to_string_lossy().into_owned());
     }
     Ok(path)
 }
@@ -11078,6 +11130,7 @@ async fn desktop_search_files(
     state: State<'_, AppState>,
     query: String,
     limit: Option<usize>,
+    for_finder: Option<bool>,
 ) -> Result<desktop_search::DesktopSearchResponse, String> {
     session_command!(async {
         {
@@ -11093,9 +11146,17 @@ async fn desktop_search_files(
         };
 
         let max_results = limit.unwrap_or(12).clamp(1, 50);
+        // Quick search asks for rows it will show in Finder; a Mac's Finder has no shared-with-me rows (ruling 1701), and
+        // they are dropped BEFORE the limit (task 1885 fix round 2, n1). Version history asks for none of this.
+        let exclude_shared = for_finder.unwrap_or(false) && cfg!(target_os = "macos");
         let response = tokio::task::spawn_blocking(move || -> Result<_, String> {
             let local = desktop_search::build_local_index(&db).map_err(|e| format!("build search index: {e}"))?;
-            Ok(desktop_search::query_local_index(&local, &query, max_results))
+            Ok(desktop_search::query_local_index(
+                &local,
+                &query,
+                max_results,
+                exclude_shared,
+            ))
         })
         .await
         .map_err(|e| format!("search task failed: {e}"))??;
@@ -13743,11 +13804,14 @@ fn handle_desktop_menu_action(app: &tauri::AppHandle, spec: &'static DesktopMenu
         }
         DesktopMenuAction::Quit => app.exit(0),
         DesktopMenuAction::OpenFolder => {
-            // Off the main thread: on macOS the read waits up to 3 s for the bridge gate.
-            spawn_menu_task(
-                spec.id,
-                on_the_blocking_pool(OPEN_FOLDER_FAILED, open_current_finder_location),
-            );
+            let app = app.clone();
+            // Off the main thread: on macOS the open waits up to 3 s for the bridge gate and 5 s for LaunchServices.
+            // A failure is shown (task 1885, I2) before it is logged: the menu has no window to put it in.
+            spawn_menu_task(spec.id, async move {
+                let result = on_the_blocking_pool(OPEN_FOLDER_FAILED, open_current_finder_location).await;
+                show_menu_open_failure(&app, &result);
+                result
+            });
         }
         DesktopMenuAction::UploadFiles => {
             let app = app.clone();
@@ -13773,6 +13837,20 @@ where
     tauri::async_runtime::spawn(async move {
         log_menu_result(menu_id, fut.await);
     });
+}
+
+/// A failed "Open in Finder" from the menu, shown to the person (task 1885, I2): a native alert, because the menu works
+/// with every window closed and so has no window to put a toast in. It is the Sign-out menu action's kind of alert, and
+/// carries the button's one sentence, never the error behind it (which is logged by the caller).
+fn show_menu_open_failure(app: &tauri::AppHandle, result: &Result<(), String>) {
+    let Some((title, message)) = finder_open::menu_open_failure_alert(result, cfg!(target_os = "macos")) else {
+        return;
+    };
+    app.dialog()
+        .message(message)
+        .title(title)
+        .kind(tauri_plugin_dialog::MessageDialogKind::Error)
+        .show(|_| {});
 }
 
 fn log_menu_result(menu_id: &str, result: Result<(), String>) {
@@ -17545,6 +17623,11 @@ mod finder_setup_command_tests {
         let production = production_source();
         for (command, work) in [
             ("open_finder_location", "move || open_finder_location_blocking(path)"),
+            ("open_in_finder", "move || open_in_finder_blocking(item_id, path)"),
+            (
+                "open_login_items_and_extensions_settings",
+                "open_login_items_and_extensions_settings_blocking",
+            ),
             ("finder_domain_user_enabled", "file_provider_domain_user_enabled"),
         ] {
             assert_eq!(
@@ -17577,8 +17660,10 @@ mod finder_setup_command_tests {
             "the menu's \"Open in Finder\" does not run inline on the main thread:\n{open_folder}"
         );
         assert!(
-            squeeze(open_folder).contains(&squeeze("spawn_menu_task(spec.id, on_the_blocking_pool("))
-                && open_folder.contains("open_current_finder_location"),
+            squeeze(open_folder).contains(&squeeze("spawn_menu_task(spec.id, async move {"))
+                && squeeze(open_folder).contains(&squeeze(
+                    "on_the_blocking_pool(OPEN_FOLDER_FAILED, open_current_finder_location).await"
+                )),
             "the menu's \"Open in Finder\" is spawned onto the blocking pool:\n{open_folder}"
         );
         assert_eq!(
@@ -17626,7 +17711,8 @@ mod finder_setup_command_tests {
 
     /// `source` without the items, blocks and statements whose `cfg` attribute stands alone on its
     /// line and starts with one of `attrs` (at any indentation). What an attribute covers ends at
-    /// the first line that ends with `;`, or, when a line ending with `{` comes first, at the `}`
+    /// the first line that ends with `;`, or that opens and closes its braces on one line (`fn f() {}`), or, when a
+    /// line ending with `{` comes first, at the `}`
     /// that closes it at the attribute's own indentation (`} else {` continues it). An attribute
     /// on an argument or field (the next line ends with `,`) covers that one line.
     pub(super) fn without_items(source: &str, attrs: &[&str]) -> String {
@@ -17656,6 +17742,13 @@ mod finder_setup_command_tests {
                     if line.ends_with(';') {
                         break;
                     }
+                    // A one-line item (`fn f() {}`): its braces close on the line it starts on (fix round 1, m1).
+                    if line.ends_with('}')
+                        && line.contains('{')
+                        && line.matches('{').count() == line.matches('}').count()
+                    {
+                        break;
+                    }
                     if line.ends_with('{') {
                         let close = format!("{indent}}}");
                         while k < lines.len()
@@ -17676,6 +17769,50 @@ mod finder_setup_command_tests {
             i += 1;
         }
         kept
+    }
+
+    /// Fix round 1 (m1): an item covered by one of the attributes can be ONE line (`fn f() {}`). It used to be read as
+    /// unfinished, because the line ends in `}` and not in `{` or `;`, and the next item was swallowed with it: the
+    /// open's own wrapper was invisible to the spawn pin. The covered item ends at its own line.
+    #[test]
+    fn test_1885_without_items_drops_a_one_line_item_and_keeps_the_next_one() {
+        let source = "\
+fn before() {}
+#[cfg(not(target_os = \"macos\"))]
+pub(crate) fn dropped_one_liner(_context: &str) {}
+
+#[cfg(target_os = \"macos\")]
+fn survivor_after_the_one_liner() -> Result<(), String> {
+    Ok(())
+}
+#[cfg(not(target_os = \"macos\"))]
+fn two_lines() -> u8
+{ 1 }
+fn after() {}
+";
+        let kept = without_items(source, &["#[cfg(not(target_os = \"macos\"))]"]);
+        assert!(
+            !kept.contains("dropped_one_liner"),
+            "the covered one-line item is dropped:\n{kept}"
+        );
+        assert!(
+            kept.contains("survivor_after_the_one_liner"),
+            "the item after a one-line item is kept:\n{kept}"
+        );
+        assert!(kept.contains("fn before()") && kept.contains("fn after()"), "{kept}");
+        assert!(
+            !kept.contains("two_lines"),
+            "a covered item that spans lines is still dropped whole:\n{kept}"
+        );
+        // An item with a body on following lines, and a `;` item, behave as before.
+        let kept = without_items(
+            "#[cfg(test)]\nmod t {\n    fn x() {}\n}\nfn keep() {}\n#[cfg(test)]\nuse a::b;\nfn keep2() {}\n",
+            &["#[cfg(test)]"],
+        );
+        assert!(
+            kept.contains("fn keep()") && kept.contains("fn keep2()") && !kept.contains("mod t"),
+            "{kept}"
+        );
     }
 
     /// `lib.rs` without its test modules, for the tests that read production code.
@@ -18913,14 +19050,30 @@ mod finder_error_redaction_tests {
         );
     }
 
-    /// Lead ruling T8-gate-all (4) moved the removal into the reconciler and the other two reads
-    /// behind the gate: no macOS `remove_file_provider_domain` is left to redact, and the visible-URL
-    /// read goes through the gated wrapper and the one redacting conversion.
+    /// Lead ruling T8-gate-all (4) moved the removal into the reconciler and the other reads behind the
+    /// gate: no macOS `remove_file_provider_domain` is left to redact, and (task 1885) the open and the
+    /// reveal go through their gated wrappers and `finder_open_outcome`, which is the one redacting
+    /// conversion for them (`finder_open`'s tests pin that it carries domain and code only).
     #[test]
-    fn the_visible_location_goes_through_the_gate_and_the_one_redacting_conversion() {
-        let body = shim_body("fn file_provider_visible_location() -> Result<Option<String>, String>");
-        assert_eq!(body.trim(), "user_facing_fp(finder_setup::macos_ports::visible_url())");
-        assert!(!body.contains("to_string"), "builds text from Display: {body}");
+    fn the_open_and_the_reveal_go_through_the_gate_and_the_one_redacting_conversion() {
+        use crate::source_pin::squeeze;
+        let open = shim_body("fn file_provider_open_location() -> Result<(), String>");
+        assert_eq!(
+            squeeze(&open),
+            squeeze(
+                "finder_open::finder_open_outcome(finder_setup::macos_ports::open_location(), finder_open::NOTHING_TO_OPEN,)"
+            )
+        );
+        let reveal = shim_body("fn file_provider_reveal_item(item_id: &str) -> Result<(), String>");
+        assert_eq!(
+            squeeze(&reveal),
+            squeeze(
+                "finder_open::finder_open_outcome(finder_setup::macos_ports::reveal_item(item_id), finder_open::NOTHING_TO_SHOW,)"
+            )
+        );
+        for body in [&open, &reveal] {
+            assert!(!body.contains("to_string"), "builds text from Display: {body}");
+        }
         let source = include_str!("lib.rs").replace("\r\n", "\n");
         assert!(
             !source.contains("#[cfg(target_os = \"macos\")]\nfn remove_file_provider_domain()"),
@@ -19438,12 +19591,13 @@ mod finder_setup_wiring_tests {
     /// everything else calls a gated wrapper in `macos_ports`.
     #[test]
     fn no_file_provider_bridge_call_is_made_outside_the_bridge_gate() {
-        const BRIDGE: [&str; 7] = [
+        const BRIDGE: [&str; 8] = [
             "remove",
             "add_domain",
             "domain_state",
             "wait_for_domain_ready",
-            "visible_url",
+            "resolve_location",
+            "resolve_item",
             "cleanup_stale_domains",
             "signal_working_set",
         ];
@@ -19475,6 +19629,7 @@ mod finder_setup_wiring_tests {
                 .expect("read a source file")
                 .replace("\r\n", "\n");
             let production = without_items(&text, &["#[cfg(test)]", "#[cfg(all(test"]);
+            let production_lines: Vec<&str> = production.lines().collect();
             for (number, line) in production.lines().enumerate() {
                 if line.trim_start().starts_with("//") {
                     continue;
@@ -19493,11 +19648,20 @@ mod finder_setup_wiring_tests {
                         "{name}:{}: calls the bridge outside the gate: {line}",
                         number + 1
                     );
+                    // The open and the reveal pass their resolve to `resolve_then` together with the shared gate (task 1885
+                    // fix round 1, I1); `resolve_then` takes the gate for it (pinned in `macos_ports`), and the open that
+                    // follows is not a File Provider call.
+                    let given_to_resolve_then_with_the_shared_gate = line
+                        .contains("resolve_then(&BridgeGate::shared(),")
+                        || (number >= 2
+                            && production_lines[number - 1].trim() == "&BridgeGate::shared(),"
+                            && production_lines[number - 2].trim_end().ends_with("resolve_then("));
                     assert!(
                         line.contains(".run(")
                             || line.contains(".run_sync(")
                             || line.contains(".run_waiting(")
-                            || line.contains(".run_sync_waiting("),
+                            || line.contains(".run_sync_waiting(")
+                            || given_to_resolve_then_with_the_shared_gate,
                         "{name}:{}: a bridge call that does not take the gate: {line}",
                         number + 1
                     );
@@ -19510,8 +19674,9 @@ mod finder_setup_wiring_tests {
             "the census read the production code: {checked_lines} lines"
         );
         assert_eq!(
-            gated, 9,
-            "the gate's callers: the reconciler's five bridge operations and the four wrappers for everyone else"
+            gated, 10,
+            "the gate's callers: the reconciler's five bridge operations and the five wrappers for everyone else \
+             (open, reveal, domain state, working-set signal, stale-domain sweep)"
         );
     }
 
@@ -19591,10 +19756,11 @@ mod finder_setup_wiring_tests {
         );
         assert_eq!(notifications, 3, "the three notification builders");
         // The menu's three sign-out message dialogs, and (task 1882, rebase 2026-10-10) the kept-folder alert,
-        // `show_preserved_files_alert`. None of them is a window: macOS draws a parentless alert itself.
+        // `show_preserved_files_alert`, and (task 1885, I2) the menu's failed-open alert, `show_menu_open_failure`.
+        // None of them is a window: macOS draws a parentless alert itself.
         assert_eq!(
-            dialogs, 4,
-            "the three sign-out message dialogs and the kept-folder alert"
+            dialogs, 5,
+            "the three sign-out message dialogs, the kept-folder alert and the menu's failed-open alert"
         );
     }
 

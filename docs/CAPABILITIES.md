@@ -270,7 +270,7 @@ placeholder default is unreachable for a validated NavId.
 | `install_finder_location` | `Onboarding.tsx` (Windows/Linux step), `pages/SyncFolder.tsx` (non-macOS branch) | Not called on macOS (ruling R5); on macOS it returns an error |
 | `continue_without_finder_location` | `Onboarding.tsx` (Windows/Linux step) | Windows/Linux escape hatch |
 | `finder_domain_user_enabled` | none | Registered, unused: the poll moved into the Rust reconciler |
-| `open_login_items_and_extensions_settings` | `finderSetup.ts`, `pages/SyncFolder.tsx` (non-macOS `user_disabled` branch) | macOS "Open System Settings" for `user_disabled` |
+| `open_login_items_and_extensions_settings` | `finderSetup.ts`, `pages/SyncFolder.tsx` (non-macOS `user_disabled` branch) | macOS "Open System Settings" for `user_disabled`; opened through `NSWorkspace` (task 1885), a refusal is the command's error |
 | `finder_setup_state` | `finderSetup.ts` (Onboarding, MacSettings, SyncFolder, Status, SettingsView on macOS) | macOS reconciler state; `finder-setup-changed` carries the same view |
 | `finder_setup_retry` | `finderSetup.ts` | macOS "Try again", only inside a failure |
 | `finder_setup_copy_details` | `finderSetup.ts` | macOS "Copy details" (no paths, names or email) |
@@ -279,8 +279,8 @@ placeholder default is unreachable for a validated NavId.
 | `windows_shell_integration_state` | `WindowsFirstRun.tsx`, `windows/views/SettingsView.tsx` | Wired (surface table above) |
 | `install_windows_shell_integration` | `WindowsFirstRun.tsx`, `windows/views/SettingsView.tsx` | Wired (surface table above) |
 | `reset_macos_integration` | `pages/SyncFolder.tsx`, `MacSettings.tsx` | Mac-only; absent from Windows surface; Repair removes the Finder domain, then the reconciler checks once and adds it back |
-| `open_finder_location` | `WindowsTray.tsx`, `WindowsApp.tsx`, `pages/SyncFolder.tsx` | Wired (surface table above) |
-| `open_in_finder` | `DesktopQuickSearch.tsx`, `pages/Shared.tsx` | Wired (surface table above) |
+| `open_finder_location` | `WindowsTray.tsx`, `WindowsApp.tsx`, `pages/SyncFolder.tsx` | Wired (surface table above). macOS (task 1885): `NSWorkspace` opens the File Provider URL macOS returns, inside the bridge, and the command answers when LaunchServices has; never a child `open` |
+| `open_in_finder` | `DesktopQuickSearch.tsx` (`pages/Shared.tsx` also calls it but is unmounted, see U62) | Wired (surface table above). macOS (task 1885): the item's File Provider URL (identifier = state-db file id) is revealed through `NSWorkspace`; a missing location or item is an error, and a shared-with-me row is refused before the File Provider is asked (quick search does not offer those rows on a Mac) |
 | `get_desktop_config` | `pages/Bandwidth.tsx`, `pages/Notifications.tsx` | Compact-only; no Windows view action |
 | `set_desktop_config` | `pages/Bandwidth.tsx`, `pages/Notifications.tsx`, `windows/views/SettingsView.tsx` | Wired (surface table above) |
 | `account_email` | `pages/Account.tsx` | Compact-only; no Windows view action |
