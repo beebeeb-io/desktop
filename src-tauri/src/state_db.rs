@@ -977,6 +977,18 @@ fn finish_wait(tx: rusqlite::Transaction<'_>, took_over: Option<TookOver>) -> Re
     })
 }
 
+/// The park of an op that holds no claim (spec §8.4): attempts used up, the reason
+/// recorded, the bytes kept. The claim's parks and the snapshot count's both use it, so
+/// a later save on the parked write's token takes its role the same way at its claim.
+fn park_unclaimed_conn(conn: &Connection, op_id: &str, reason: ParkReason, now: i64) -> Result<usize> {
+    conn.execute(
+        "UPDATE operation_queue
+         SET attempts = max_attempts, last_error = ?2, last_error_class = ?2, updated_at = ?3
+         WHERE op_id = ?1",
+        params![op_id, reason.as_str(), now],
+    )
+}
+
 /// The claim parks the op with its bytes (spec §8.4, S5), in its own transaction.
 fn park_in_claim(
     tx: rusqlite::Transaction<'_>,
@@ -985,12 +997,7 @@ fn park_in_claim(
     took_over: Option<TookOver>,
     now: i64,
 ) -> Result<ClaimOutcome> {
-    tx.execute(
-        "UPDATE operation_queue
-         SET attempts = max_attempts, last_error = ?2, last_error_class = ?2, updated_at = ?3
-         WHERE op_id = ?1",
-        params![op.op_id, reason.as_str(), now],
-    )?;
+    park_unclaimed_conn(&tx, &op.op_id, reason, now)?;
     tx.commit()?;
     Ok(ClaimOutcome::Parked {
         op_id: op.op_id.clone(),
@@ -1286,6 +1293,29 @@ impl ParkReason {
     }
 }
 
+/// What a snapshot node's version did to the row (spec §6.3.2, the fill and the raise).
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SnapshotVersion {
+    Unchanged,
+    /// The row was at 0: filled, `version_filled = 1`, and these ops got their base.
+    Filled {
+        resolved_ops: Vec<String>,
+    },
+    /// A newer version than the row's (I-3): the token clears through the predicate.
+    Raised {
+        old: i64,
+        new: i64,
+    },
+    /// The node is mid-upload: the legacy init bumps the version first (FILES:2814-2830).
+    SkippedUploading,
+}
+
+/// `base_pending` is 1 + the successful snapshots that did not report the file (plan Spec
+/// issue 3). The op parks when the count would pass 10 (spec §6.3.3).
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+const BASE_PENDING_PARK_AT: i64 = 11;
+
 /// One op the runner may run now. Every later write for this attempt names `claim_id`
 /// (spec §8.7 S2–S4).
 #[derive(Debug, Clone)]
@@ -1334,6 +1364,9 @@ pub struct EngineStartRepair {
     /// Journalled payloads marked released that no op, resume row or Windows
     /// finalization references: the caller unlinks them.
     pub released_payloads: Vec<String>,
+    /// A server-known file row is at version 0, so a snapshot was requested to learn
+    /// its version (spec §6.3.2). Always `false` off macOS.
+    pub resnapshot_requested: bool,
 }
 
 /// Uploads and restores of one file run in insertion order (spec §8.5, m-9).
@@ -2304,13 +2337,28 @@ impl StateDb {
     /// delta path cannot reconcile from the op alone — notably `file_restore`,
     /// whose op payload is only `{ id }`, so the row it un-trashes cannot be
     /// rebuilt without the authoritative snapshot. Persisted so the request
-    /// survives a restart between ticks; idempotent.
+    /// survives a restart between ticks. On macOS each call increments a request
+    /// counter (spec §6.3.2, I-2(b)); elsewhere it sets a take-once flag.
     pub fn request_resnapshot(&self) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         Self::request_resnapshot_conn(&conn)
     }
 
     /// [`Self::request_resnapshot`] inside the caller's connection or transaction.
+    /// The value counts the requests, so a request made while a snapshot runs is
+    /// still pending after that snapshot clears the one it read.
+    #[cfg(target_os = "macos")]
+    fn request_resnapshot_conn(conn: &Connection) -> Result<()> {
+        conn.execute(
+            "INSERT INTO sync_state (key, value) VALUES (?1, '1')
+             ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)",
+            params![Self::NEEDS_RESNAPSHOT_KEY],
+        )?;
+        Ok(())
+    }
+
+    /// [`Self::request_resnapshot`] inside the caller's connection or transaction.
+    #[cfg(not(target_os = "macos"))]
     fn request_resnapshot_conn(conn: &Connection) -> Result<()> {
         conn.execute(
             "INSERT INTO sync_state (key, value) VALUES (?1, '1')
@@ -2324,7 +2372,9 @@ impl StateDb {
     /// exactly once per [`Self::request_resnapshot`] call, so the bootstrap runs
     /// on the very next tick and not on every subsequent tick. The DELETE in the
     /// same locked critical section makes the take-and-clear race-free against a
-    /// concurrent `request_resnapshot`.
+    /// concurrent `request_resnapshot`. Not on macOS: there the request is read with
+    /// [`Self::peek_resnapshot_request`] and cleared only after the snapshot succeeded.
+    #[cfg(not(target_os = "macos"))]
     pub fn take_needs_resnapshot(&self) -> Result<bool> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let present: Option<String> = conn
@@ -2341,6 +2391,30 @@ impl StateDb {
             )?;
         }
         Ok(present.is_some())
+    }
+
+    /// The pending request's counter, or `None`. Read at the start of a tick; the
+    /// request is cleared only after the snapshot succeeded (§6.3.2, I-2(b)).
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn peek_resnapshot_request(&self) -> Result<Option<i64>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row(
+            "SELECT CAST(value AS INTEGER) FROM sync_state WHERE key = ?1",
+            params![Self::NEEDS_RESNAPSHOT_KEY],
+            |row| row.get(0),
+        )
+        .optional()
+    }
+
+    /// Clear the request the tick read; a request made meanwhile survives.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn clear_resnapshot_request(&self, seen: i64) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let n = conn.execute(
+            "DELETE FROM sync_state WHERE key = ?1 AND CAST(value AS INTEGER) = ?2",
+            params![Self::NEEDS_RESNAPSHOT_KEY, seen],
+        )?;
+        Ok(n == 1)
     }
 
     /// Reconcile a fresh `/sync/snapshot` against the local mirror: delete every
@@ -2960,6 +3034,156 @@ impl StateDb {
         tx.commit()
     }
 
+    /// §6.3.2: a snapshot node's version, applied to the row in one transaction (S1.5).
+    /// The fill (the row is at 0) and the raise (the node is newer) set `current_version`
+    /// in any status but `Trashing` and `Conflict`; a node still uploading is skipped and
+    /// the snapshot request stays. Nothing else of the row changes here.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn apply_snapshot_version(
+        &self,
+        file_id: &str,
+        node_version: i64,
+        node_size: i64,
+        node_is_uploading: bool,
+    ) -> Result<SnapshotVersion> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let row: Option<(String, i64)> = tx
+            .query_row(
+                "SELECT status, current_version FROM files WHERE file_id = ?1",
+                params![file_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((status, current)) = row else {
+            return Ok(SnapshotVersion::Unchanged);
+        };
+        // A Conflict row owns its transitions; a Trashing row is leaving.
+        if status == FileStatus::Trashing.as_str() || status == FileStatus::Conflict.as_str() {
+            return Ok(SnapshotVersion::Unchanged);
+        }
+        let fill = current == 0 && node_version > 0;
+        let raise = current > 0 && node_version > current;
+        if !fill && !raise {
+            return Ok(SnapshotVersion::Unchanged);
+        }
+        if node_is_uploading {
+            // The clear at the end of this tick then matches no row: the request stays.
+            Self::request_resnapshot_conn(&tx)?;
+            tx.commit()?;
+            return Ok(SnapshotVersion::SkippedUploading);
+        }
+        let write_queued: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM operation_queue WHERE file_id = ?1 AND write_id IS NOT NULL
+                            AND kind IN ('upload_version', 'upload_file'))",
+            params![file_id],
+            |r| r.get(0),
+        )?;
+        // §6.3.2 sets `current_version` and the size, and writes `local_base_version` in
+        // neither branch: it is the stale marker. On a row with a queued write the raise
+        // changes `current_version` only: the size is that write's, and the object id and
+        // `version_filled` stay.
+        if write_queued {
+            tx.execute(
+                "UPDATE files SET current_version = ?2 WHERE file_id = ?1",
+                params![file_id, node_version],
+            )?;
+        } else {
+            tx.execute(
+                "UPDATE files SET current_version = ?2, size_bytes = ?3 WHERE file_id = ?1",
+                params![file_id, node_version, node_size],
+            )?;
+            if raise {
+                // The snapshot carries no object version id; the old one is no longer current.
+                tx.execute(
+                    "UPDATE files SET current_object_version_id = NULL, version_filled = 0 WHERE file_id = ?1",
+                    params![file_id],
+                )?;
+            }
+        }
+        let outcome = if fill {
+            tx.execute(
+                "UPDATE files SET version_filled = 1 WHERE file_id = ?1",
+                params![file_id],
+            )?;
+            let resolved_ops = {
+                let mut stmt = tx.prepare(
+                    "SELECT op_id FROM operation_queue WHERE file_id = ?1 AND base_pending > 0 ORDER BY rowid",
+                )?;
+                let rows = stmt.query_map(params![file_id], |r| r.get::<_, String>(0))?;
+                rows.collect::<Result<Vec<_>>>()?
+            };
+            tx.execute(
+                "UPDATE operation_queue SET base_version = ?2, base_pending = 0
+                 WHERE file_id = ?1 AND base_pending > 0",
+                params![file_id, node_version],
+            )?;
+            SnapshotVersion::Filled { resolved_ops }
+        } else {
+            SnapshotVersion::Raised {
+                old: current,
+                new: node_version,
+            }
+        };
+        record_file_change_conn(&tx, file_id, FpChangeKind::Modified, None)?;
+        tx.commit()?;
+        Ok(outcome)
+    }
+
+    /// An upload waits for a snapshot to learn its base (spec §6.3.3).
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn has_base_pending_uploads(&self) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM operation_queue WHERE base_pending > 0)",
+            [],
+            |r| r.get(0),
+        )
+    }
+
+    /// After a successful snapshot: one more miss for every op still waiting for its base;
+    /// at the 10th it parks `base_unknown` with its bytes (§6.3.3), through the same park
+    /// statement the claim uses. Returns the ops it parked: `(op_id, file_id)`.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn note_snapshot_for_base_pending(&self, now: i64) -> Result<Vec<(String, Option<String>)>> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
+            "UPDATE operation_queue SET base_pending = base_pending + 1 WHERE base_pending > 0",
+            [],
+        )?;
+        let parked = {
+            let mut stmt =
+                tx.prepare("SELECT op_id, file_id FROM operation_queue WHERE base_pending >= ?1 ORDER BY rowid")?;
+            let rows = stmt.query_map(params![BASE_PENDING_PARK_AT], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            })?;
+            rows.collect::<Result<Vec<_>>>()?
+        };
+        for (op_id, _) in &parked {
+            // No longer waiting, so no pass asks a snapshot for it any more.
+            tx.execute(
+                "UPDATE operation_queue SET base_pending = 0 WHERE op_id = ?1",
+                params![op_id],
+            )?;
+            park_unclaimed_conn(&tx, op_id, ParkReason::BaseUnknown, now)?;
+        }
+        tx.commit()?;
+        Ok(parked)
+    }
+
+    /// A content op, a landing or a restore touched the row: its version no longer came
+    /// from a snapshot fill (spec §6.1, `version_filled`).
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn clear_version_filled(&self, file_id: &str) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "UPDATE files SET version_filled = 0 WHERE file_id = ?1",
+            params![file_id],
+        )?;
+        Ok(())
+    }
+
     /// The round-4 columns of one File Provider upload op; `None` when the op
     /// is gone or carries no write id.
     #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
@@ -2997,6 +3221,11 @@ impl StateDb {
                 let facts = base_facts_conn(&tx, accept.file_id, &contract, legacy_identifiers(&entry, &contract))?;
                 let decision = decide_base(&facts, *incoming_base);
                 record_local_write_conn(&tx, accept.file_id, accept.size_bytes, accept.modified_at)?;
+                // A content write touched the row: its version is no longer a snapshot fill.
+                tx.execute(
+                    "UPDATE files SET version_filled = 0 WHERE file_id = ?1",
+                    params![accept.file_id],
+                )?;
                 (Some(decision), contract.current_object_version_id.clone())
             }
         };
@@ -4177,10 +4406,35 @@ impl StateDb {
         };
         #[cfg(not(target_os = "macos"))]
         let released_payloads: Vec<String> = Vec::new();
+        // §6.3.2: a server-known file row at version 0 asks for a snapshot to learn its
+        // version. A provisional row (its create is queued) has no server version yet. A
+        // malformed metadata row must not fail the start, so it is read as no create.
+        #[cfg(target_os = "macos")]
+        let resnapshot_requested = {
+            let version_zero: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM files f
+                  WHERE f.current_version = 0 AND f.item_kind = 'file' AND f.namespace = 'my_files'
+                    AND f.status != 'trashing'
+                    AND NOT EXISTS (SELECT 1 FROM operation_queue q
+                                    WHERE q.file_id = f.file_id
+                                      AND CASE WHEN json_valid(q.metadata_json)
+                                               THEN json_extract(q.metadata_json, '$.operation')
+                                          END = 'create_file'))",
+                [],
+                |r| r.get(0),
+            )?;
+            if version_zero {
+                Self::request_resnapshot_conn(&tx)?;
+            }
+            version_zero
+        };
+        #[cfg(not(target_os = "macos"))]
+        let resnapshot_requested = false;
         tx.commit()?;
         Ok(EngineStartRepair {
             claims_cleared,
             released_payloads,
+            resnapshot_requested,
         })
     }
 
@@ -7434,6 +7688,13 @@ mod tests {
         let dir = tempdir().unwrap();
         let db = StateDb::open(dir.path().join("state.db")).unwrap();
         seed_restorable_row(&db, "restored", 2, "object-v2");
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            db.peek_resnapshot_request().unwrap(),
+            None,
+            "no snapshot is pending before"
+        );
+        #[cfg(not(target_os = "macos"))]
         assert!(!db.take_needs_resnapshot().unwrap(), "no snapshot is pending before");
         let (_, anchor) = db.list_file_changes(None).unwrap().unwrap();
 
@@ -7445,6 +7706,12 @@ mod tests {
             .filter(|change| change.file_id == "restored" && change.kind == FpChangeKind::Modified)
             .count();
         assert_eq!(modified, 1, "the system is told the content changed: {changes:?}");
+        #[cfg(target_os = "macos")]
+        assert!(
+            db.peek_resnapshot_request().unwrap().is_some(),
+            "a snapshot fills the version the reply left out"
+        );
+        #[cfg(not(target_os = "macos"))]
         assert!(
             db.take_needs_resnapshot().unwrap(),
             "a snapshot fills the version the reply left out"
@@ -7479,6 +7746,25 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_resnapshot_request_survives_a_request_made_while_it_runs() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        assert_eq!(db.peek_resnapshot_request().unwrap(), None);
+        db.request_resnapshot().unwrap();
+        let seen = db.peek_resnapshot_request().unwrap().expect("requested");
+        db.request_resnapshot().unwrap(); // a request made during the bootstrap
+        assert!(
+            !db.clear_resnapshot_request(seen).unwrap(),
+            "the newer request survives"
+        );
+        let again = db.peek_resnapshot_request().unwrap().expect("still requested");
+        assert!(db.clear_resnapshot_request(again).unwrap());
+        assert_eq!(db.peek_resnapshot_request().unwrap(), None);
+    }
+
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn needs_resnapshot_flag_is_take_once() {
         let dir = tempdir().unwrap();
@@ -7494,6 +7780,137 @@ mod tests {
         db.request_resnapshot().unwrap();
         assert!(db.take_needs_resnapshot().unwrap());
         assert!(!db.take_needs_resnapshot().unwrap());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn engine_start_requests_a_snapshot_for_version_zero_rows() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_own_row(&db, "versioned", FileStatus::Local, 10);
+        let mut contract = db.get_file_contract_state("versioned").unwrap().unwrap();
+        contract.current_version = 4;
+        db.set_file_contract_state(&contract).unwrap();
+        assert!(!db.engine_start_repair().unwrap().resnapshot_requested);
+        assert_eq!(db.peek_resnapshot_request().unwrap(), None);
+
+        seed_own_row(&db, "version-zero", FileStatus::Local, 20); // learned from a legacy file_create op
+        assert!(db.engine_start_repair().unwrap().resnapshot_requested);
+        assert!(db.peek_resnapshot_request().unwrap().is_some());
+    }
+
+    /// §6.3.2: the fill and the raise leave Conflict and Trashing rows alone, and on a row
+    /// with a queued write the raise changes the version only (the size is that write's).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_snapshot_version_skips_conflict_and_trashing_rows_and_keeps_a_queued_writes_size() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let at = |file_id: &str, status: FileStatus, version: i64| {
+            seed_own_row(&db, file_id, status, 10);
+            let mut contract = db.get_file_contract_state(file_id).unwrap().unwrap();
+            contract.current_version = version;
+            contract.current_object_version_id = Some(format!("object-{file_id}"));
+            db.set_file_contract_state(&contract).unwrap();
+        };
+        at("conflicted", FileStatus::Conflict, 1);
+        at("trashing", FileStatus::Trashing, 0);
+        at("queued", FileStatus::Uploading, 1);
+        at("plain", FileStatus::Local, 1);
+        db.enqueue_operation(&PendingOperation {
+            op_id: "op-queued".into(),
+            kind: OperationKind::UploadVersion,
+            file_id: Some("queued".into()),
+            parent_id: None,
+            target_path: Some("queued.txt".into()),
+            metadata_json: Some("{}".into()),
+            payload_path: None,
+            base_version: Some(1),
+            base_object_version_id: None,
+            attempts: 0,
+            max_attempts: 25,
+            next_retry_at: 0,
+            last_error: None,
+            backup_source_key: None,
+            created_at: 0,
+            updated_at: 0,
+        })
+        .unwrap();
+        db.set_write_id_for_test("op-queued", "w-queued");
+
+        let version = |file_id: &str| {
+            let contract = db.get_file_contract_state(file_id).unwrap().unwrap();
+            let size = db.get_file(file_id).unwrap().unwrap().size_bytes;
+            (contract.current_version, size, contract.current_object_version_id)
+        };
+        assert_eq!(
+            db.apply_snapshot_version("conflicted", 3, 99, false).unwrap(),
+            SnapshotVersion::Unchanged
+        );
+        assert_eq!(
+            version("conflicted"),
+            (1, 1, Some("object-conflicted".into())),
+            "a Conflict row keeps its own"
+        );
+        assert_eq!(
+            db.apply_snapshot_version("trashing", 1, 99, false).unwrap(),
+            SnapshotVersion::Unchanged
+        );
+        assert_eq!(version("trashing").0, 0, "a Trashing row is leaving");
+        assert_eq!(
+            db.apply_snapshot_version("queued", 3, 99, false).unwrap(),
+            SnapshotVersion::Raised { old: 1, new: 3 }
+        );
+        assert_eq!(
+            version("queued"),
+            (3, 1, Some("object-queued".into())),
+            "the queued write keeps its size and object id"
+        );
+        assert_eq!(
+            db.apply_snapshot_version("plain", 3, 99, false).unwrap(),
+            SnapshotVersion::Raised { old: 1, new: 3 }
+        );
+        assert_eq!(
+            version("plain"),
+            (3, 99, None),
+            "the node's size; the old object id is not current"
+        );
+    }
+
+    /// The engine-start check reads op metadata as JSON: one malformed row must not
+    /// fail the start repair (its claims would stay set), as the accept's read does not.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn engine_start_survives_an_op_with_malformed_metadata() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_own_row(&db, "version-zero", FileStatus::Local, 20);
+        db.enqueue_operation(&PendingOperation {
+            op_id: "op-malformed".into(),
+            kind: OperationKind::UploadVersion,
+            file_id: Some("version-zero".into()),
+            parent_id: None,
+            target_path: Some("version-zero.txt".into()),
+            metadata_json: Some("{not json".into()),
+            payload_path: None,
+            base_version: None,
+            base_object_version_id: None,
+            attempts: 0,
+            max_attempts: 25,
+            next_retry_at: 0,
+            last_error: None,
+            backup_source_key: None,
+            created_at: 0,
+            updated_at: 0,
+        })
+        .unwrap();
+        let repair = db
+            .engine_start_repair()
+            .expect("a malformed op never fails engine start");
+        assert!(
+            repair.resnapshot_requested,
+            "the version-0 row still asks for a snapshot"
+        );
     }
 
     // ── bandwidth_samples (task 0810 — P3) ───────────────────────────────────

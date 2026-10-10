@@ -1484,6 +1484,9 @@ impl EngineBridge {
             .or(object_version_id);
         contract.last_sync_at = now;
         self.db.set_file_contract_state(&contract)?;
+        // A landing: the row's version is the one the server answered, not a snapshot fill
+        // (spec §6.1). Task 7 folds this into the landing transaction.
+        self.db.clear_version_filled(server_file_id)?;
         if local_file_id != server_file_id {
             // The server row keeps the token the system holds for the provisional one.
             self.db.carry_held_write(local_file_id, server_file_id)?;
@@ -6253,7 +6256,21 @@ pub async fn sync_tick_outcome(
 
     // A pending re-snapshot request (e.g. a `file_restore` op the previous tick
     // couldn't materialise from its `{id}`-only payload) forces a bootstrap this
-    // tick regardless of the cursor, then clears the flag.
+    // tick regardless of the cursor. On macOS the request is read here and cleared
+    // only after the bootstrap succeeded (spec §6.3.2, I-2(b)): a failed snapshot
+    // keeps it, and a request made while the snapshot ran survives the clear.
+    // Elsewhere the flag is taken here, once.
+    #[cfg(target_os = "macos")]
+    let resnapshot_request = {
+        // §6.3.2: while any upload waits for its base, every pass asks for a snapshot.
+        if bridge.db().has_base_pending_uploads()? {
+            bridge.db().request_resnapshot()?;
+        }
+        bridge.db().peek_resnapshot_request()?
+    };
+    #[cfg(target_os = "macos")]
+    let needs_resnapshot = resnapshot_request.is_some();
+    #[cfg(not(target_os = "macos"))]
     let needs_resnapshot = bridge.db().take_needs_resnapshot()?;
 
     let cursor = match bridge.db().get_sync_cursor()? {
@@ -6261,12 +6278,20 @@ pub async fn sync_tick_outcome(
         // snapshot. (Some(0) is a real cursor and does NOT bootstrap here.)
         None => {
             let applied = bootstrap_from_snapshot(bridge, sync_root, now_secs, &mut conflicts).await?;
+            #[cfg(target_os = "macos")]
+            if let Some(seen) = resnapshot_request {
+                bridge.db().clear_resnapshot_request(seen)?;
+            }
             applied_item_ids.extend(applied);
             return Ok(SyncTickOutcome { conflicts, applied_item_ids: dedupe(applied_item_ids) });
         }
         Some(_) if needs_resnapshot => {
             tracing::info!("sync_tick: re-snapshot requested (gap recovery); bootstrapping");
             let applied = bootstrap_from_snapshot(bridge, sync_root, now_secs, &mut conflicts).await?;
+            #[cfg(target_os = "macos")]
+            if let Some(seen) = resnapshot_request {
+                bridge.db().clear_resnapshot_request(seen)?;
+            }
             applied_item_ids.extend(applied);
             return Ok(SyncTickOutcome { conflicts, applied_item_ids: dedupe(applied_item_ids) });
         }
@@ -6361,7 +6386,14 @@ async fn bootstrap_from_snapshot(
     // completion stamps while this snapshot is in flight (see `prune_absent`).
     let fetched_at = now_secs;
     let snapshot = bridge.api().sync_snapshot().await?;
-    apply_snapshot(bridge, sync_root, &snapshot, now_secs, fetched_at, conflicts)
+    let applied = apply_snapshot(bridge, sync_root, &snapshot, now_secs, fetched_at, conflicts)?;
+    // §6.3.3: an upload still waiting for its base after this successful snapshot counts
+    // one more; at the 10th it parks with its bytes.
+    #[cfg(target_os = "macos")]
+    for (op_id, file_id) in bridge.db().note_snapshot_for_base_pending(now_secs)? {
+        log_parked(&op_id, file_id.as_deref(), ParkReason::BaseUnknown);
+    }
+    Ok(applied)
 }
 
 /// Reconcile the local mirror against an already-fetched snapshot:
@@ -6724,6 +6756,14 @@ fn apply_sync_op(
             }
         }
         "file_create" | "folder_create" | "file_update" => {
+            // §6.3.2 (I-3, plan Spec issue 9): a file op without `version_number` cannot say
+            // which version it made (a legacy chunked replace looks like a create), so the
+            // snapshot settles it. A file op on a row this Mac already holds is a content op:
+            // the row's version is no longer a snapshot fill (§6.1).
+            #[cfg(target_os = "macos")]
+            let versionless = op.op_type != "folder_create" && payload["version_number"].as_i64().is_none();
+            #[cfg(target_os = "macos")]
+            let touches_existing_row = op.op_type != "folder_create" && bridge.db().get_file(id)?.is_some();
             let row = synthesize_op_row(bridge, id, op, payload["name_encrypted"].as_str());
             // For a CREATE there is no existing local row, so the parent path must
             // come from the op's `parent_id` resolved against the local mirror —
@@ -6740,6 +6780,15 @@ fn apply_sync_op(
             };
             if process_metadata_row(bridge, &row, &parent_rel, now_secs, RowSource::Op, conflicts)?.is_some() {
                 applied.push(id.to_string());
+            }
+            #[cfg(target_os = "macos")]
+            {
+                if touches_existing_row {
+                    bridge.db().clear_version_filled(id)?;
+                }
+                if versionless {
+                    bridge.db().request_resnapshot()?;
+                }
             }
         }
         other => {
@@ -6924,6 +6973,38 @@ fn process_metadata_row(
     }
     let size = f["size_bytes"].as_i64().unwrap_or(0);
     let remote_updated = f["updated_at"].as_i64().unwrap_or(0);
+
+    // §6.3.2: a snapshot node fills a row at version 0, or raises an older one, in any
+    // status but Trashing and Conflict. Only the version (and the size) changes here; the
+    // short-circuit below still holds for every other field.
+    #[cfg(target_os = "macos")]
+    if source == RowSource::Snapshot
+        && let Some(node_version) = f["version_number"].as_i64()
+    {
+        let is_uploading = f["is_uploading"].as_bool() == Some(true);
+        match bridge
+            .db()
+            .apply_snapshot_version(file_id, node_version, size, is_uploading)?
+        {
+            crate::state_db::SnapshotVersion::Raised { old, new } => tracing::warn!(
+                file_id = %file_id,
+                old_version = old,
+                new_version = new,
+                "file version raised from the snapshot"
+            ),
+            crate::state_db::SnapshotVersion::Filled { resolved_ops } => {
+                for op_id in resolved_ops {
+                    tracing::warn!(
+                        op_id = %op_id,
+                        file_id = %file_id,
+                        base_version = node_version,
+                        "queued write based on the version the snapshot reported"
+                    );
+                }
+            }
+            crate::state_db::SnapshotVersion::Unchanged | crate::state_db::SnapshotVersion::SkippedUploading => {}
+        }
+    }
 
     // Helper to refresh metadata + return the resolved path/kind. The single
     // place that writes the row's nested path and folder/file classification.
@@ -11242,6 +11323,12 @@ mod tests {
             FileStatus::CloudOnly,
             "the last restore in the batch un-trashed the row"
         );
+        #[cfg(target_os = "macos")]
+        assert!(
+            bridge.db().peek_resnapshot_request().unwrap().is_some(),
+            "at least one restore in the batch must force the next tick to snapshot"
+        );
+        #[cfg(not(target_os = "macos"))]
         assert!(
             bridge.db().take_needs_resnapshot().unwrap(),
             "at least one restore in the batch must force the next tick to snapshot"
@@ -13373,6 +13460,9 @@ mod tests {
         conflict_init_once: HashMap<String, String>,
         /// Every `POST /files/{id}/versions/{vid}/restore`: (file id, object version id).
         restores: Vec<(String, String)>,
+        /// `GET /api/v1/sync/snapshot` answers these in order: (status line, body). Empty:
+        /// `503 Service Unavailable`.
+        snapshots: VecDeque<(String, serde_json::Value)>,
     }
 
     /// Upload mock that behaves like the server's version check: a replace
@@ -13621,6 +13711,24 @@ mod tests {
                     }),
                 );
             }
+        }
+        if method == "GET" && path == "/api/v1/sync/snapshot" {
+            return match s.snapshots.pop_front() {
+                Some((status, body)) => http_json(&status, body),
+                None => http_json(
+                    "503 Service Unavailable",
+                    serde_json::json!({ "error": "no snapshot queued" }),
+                ),
+            };
+        }
+        if method == "GET"
+            && let Some(query) = path.strip_prefix("/api/v1/sync/ops")
+        {
+            let since = query
+                .strip_prefix("?since=")
+                .and_then(|since| since.parse::<i64>().ok())
+                .unwrap_or(0);
+            return http_json("200 OK", serde_json::json!({ "ops": [], "since": since }));
         }
         http_json(
             "404 Not Found",
@@ -15755,8 +15863,9 @@ mod tests {
         bridge
             .queue_restore_version("restore-once", "object-restore-once-v1", None)
             .unwrap();
-        assert!(
-            !bridge.db.take_needs_resnapshot().unwrap(),
+        assert_eq!(
+            bridge.db.peek_resnapshot_request().unwrap(),
+            None,
             "no snapshot is pending before"
         );
         // The server restores; then the local record fails: the change log is gone.
@@ -15782,7 +15891,7 @@ mod tests {
             "the op is done, not retried"
         );
         assert!(
-            bridge.db.take_needs_resnapshot().unwrap(),
+            bridge.db.peek_resnapshot_request().unwrap().is_some(),
             "a snapshot repairs what the reply could not record"
         );
         let lines: Vec<&str> = logs
@@ -15946,5 +16055,426 @@ mod tests {
             base,
             "the last save's name stays after it lands"
         );
+    }
+
+    // ── Rule 2, the snapshot side: version 0 and versionless replaces (spec §6.3.2–§6.3.4) ──
+
+    /// A row this Mac learned from a legacy `file_create` op: at version 0 (FILES:2286-2297).
+    /// (Both helpers carry `#[cfg(target_os = "macos")]`: only the Task 6 tests call them.)
+    #[cfg(target_os = "macos")]
+    fn seed_version_zero_row(bridge: &EngineBridge, server: &VersionedServerMock, file_id: &str, status: FileStatus) {
+        seed_uploaded_row(bridge, server, file_id);
+        let mut contract = bridge.db.get_file_contract_state(file_id).unwrap().unwrap();
+        contract.current_version = 0;
+        bridge.db.set_file_contract_state(&contract).unwrap();
+        bridge.db.set_status(file_id, status).unwrap();
+    }
+
+    /// `name` is the file's display name: Task 11's log tests pass `PLANTED` here, so a line
+    /// that logged the name would leak it. Every other caller passes `"notes.txt"`.
+    #[cfg(target_os = "macos")]
+    fn node(master_key: &[u8; 32], id: &str, name: &str, version: i64, is_uploading: bool) -> serde_json::Value {
+        let mut node = snap_node(master_key, id, name, None, false, 0);
+        node["version_number"] = serde_json::json!(version);
+        node["is_uploading"] = serde_json::json!(is_uploading);
+        node
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn i2_a_row_without_a_version_never_uploads_without_a_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [72u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_version_zero_row(&bridge, &server, "legacy", FileStatus::Local);
+        bridge.db.set_sync_cursor(0).unwrap();
+        fp_save(&bridge, dir.path(), "legacy", "notes.txt", b"edit", "0");
+        drain_upload_queue(&bridge, &sync_root).await;
+        assert!(
+            server.state.lock().unwrap().inits.is_empty(),
+            "no init until the version is known"
+        );
+        server.state.lock().unwrap().snapshots.push_back((
+            "200 OK".into(),
+            serde_json::json!({ "seq_id": 1, "nodes": [node(&master_key, "legacy", "notes.txt", 1, false)] }),
+        ));
+        let logs = capture_logs_async(async {
+            sync_tick_outcome(&bridge, &sync_root).await.unwrap();
+            drain_upload_queue(&bridge, &sync_root).await;
+        })
+        .await;
+        let state = server.finish();
+        assert_eq!(state.init_summary(), vec![(json!("legacy"), json!(1), 201)]);
+        assert!(
+            logs.contains("queued write based on the version the snapshot reported"),
+            "{logs}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_versionless_create_op_requests_a_snapshot_that_fills_local_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [73u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        let create = crate::api_client::SyncOp {
+            seq_id: 5,
+            op_type: "file_create".into(),
+            payload: serde_json::json!({
+                "id": "phone-file",
+                "name_encrypted": enc_name(&master_key, "phone-file", "notes.txt"),
+                "parent_id": null,
+                "size_bytes": 10
+            }),
+        };
+        apply_sync_op(&bridge, &sync_root, &create, now_secs(), &mut Vec::new()).unwrap();
+        assert!(
+            bridge.db.peek_resnapshot_request().unwrap().is_some(),
+            "a versionless op asks for a snapshot"
+        );
+        bridge.db.set_status("phone-file", FileStatus::Local).unwrap();
+        let snapshot = crate::api_client::SyncSnapshot {
+            seq_id: 6,
+            nodes: vec![node(&master_key, "phone-file", "notes.txt", 1, false)],
+        };
+        apply_snapshot(&bridge, &sync_root, &snapshot, now_secs(), now_secs(), &mut Vec::new()).unwrap();
+        let presentation = bridge.db.item_presentation("phone-file").unwrap().unwrap();
+        assert_eq!(
+            presentation.contract.current_version, 1,
+            "filled although the row is Local"
+        );
+        assert!(presentation.version_filled);
+        assert_eq!(
+            bridge.db.get_file("phone-file").unwrap().unwrap().status,
+            FileStatus::Local,
+            "content untouched"
+        );
+        drop(server.finish());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn i2_a_zero_base_save_after_the_fill_lands_on_the_filled_version() {
+        // Rule 6a.
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [74u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_version_zero_row(&bridge, &server, "filled", FileStatus::Local);
+        let snapshot = crate::api_client::SyncSnapshot {
+            seq_id: 2,
+            nodes: vec![node(&master_key, "filled", "notes.txt", 1, false)],
+        };
+        apply_snapshot(&bridge, &sync_root, &snapshot, now_secs(), now_secs(), &mut Vec::new()).unwrap();
+        fp_save(
+            &bridge,
+            dir.path(),
+            "filled",
+            "notes.txt",
+            b"saved before the re-read",
+            "0",
+        );
+        drain_upload_queue(&bridge, &sync_root).await;
+        let state = server.finish();
+        assert_eq!(state.init_summary(), vec![(json!("filled"), json!(1), 201)]);
+        assert!(
+            bridge.db.list_operations_for_file("filled").unwrap().is_empty(),
+            "nothing parks"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn i2_a_failed_snapshot_keeps_the_request_and_base_pending_resolves_on_the_next_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [75u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_version_zero_row(&bridge, &server, "flaky-snapshot", FileStatus::Local);
+        bridge.db.set_sync_cursor(0).unwrap();
+        fp_save(&bridge, dir.path(), "flaky-snapshot", "notes.txt", b"edit", "0");
+        {
+            let mut s = server.state.lock().unwrap();
+            s.snapshots
+                .push_back(("503 Service Unavailable".into(), serde_json::json!({ "error": "busy" })));
+            s.snapshots.push_back((
+                "200 OK".into(),
+                serde_json::json!({
+                    "seq_id": 3,
+                    "nodes": [node(&master_key, "flaky-snapshot", "notes.txt", 1, false)]
+                }),
+            ));
+        }
+        // The runner runs the queue only after an Ok tick (RUN:1293-1315).
+        assert!(
+            sync_tick_outcome(&bridge, &sync_root).await.is_err(),
+            "the failed snapshot fails the tick"
+        );
+        assert!(
+            bridge.db.peek_resnapshot_request().unwrap().is_some(),
+            "the request survives a failed snapshot"
+        );
+        sync_tick_outcome(&bridge, &sync_root).await.unwrap();
+        drain_upload_queue(&bridge, &sync_root).await;
+        let state = server.finish();
+        assert_eq!(state.init_summary(), vec![(json!("flaky-snapshot"), json!(1), 201)]);
+        assert_eq!(bridge.db.peek_resnapshot_request().unwrap(), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn i2_the_fill_reaches_an_uploading_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [76u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_version_zero_row(&bridge, &server, "uploading-zero", FileStatus::Local);
+        fp_save(&bridge, dir.path(), "uploading-zero", "notes.txt", b"edit", "0");
+        assert_eq!(
+            bridge.db.get_file("uploading-zero").unwrap().unwrap().status,
+            FileStatus::Uploading
+        );
+        let snapshot = crate::api_client::SyncSnapshot {
+            seq_id: 2,
+            nodes: vec![node(&master_key, "uploading-zero", "notes.txt", 1, false)],
+        };
+        apply_snapshot(&bridge, &sync_root, &snapshot, now_secs(), now_secs(), &mut Vec::new()).unwrap();
+        assert_eq!(
+            bridge
+                .db
+                .get_file_contract_state("uploading-zero")
+                .unwrap()
+                .unwrap()
+                .current_version,
+            1
+        );
+        let op = bridge.db.list_operations_for_file("uploading-zero").unwrap().remove(0);
+        assert_eq!(op.base_version, Some(1), "the op is based on the filled version");
+        assert_eq!(bridge.db.finder_write(&op.op_id).unwrap().unwrap().base_pending, 0);
+        drop(server.finish());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[cfg(unix)] // asserts a token through `held_content_version` and `land_one_save`
+    #[tokio::test]
+    async fn i3_a_versionless_replace_from_another_device_reaches_the_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [77u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        let token = land_one_save(&bridge, &server, dir.path(), &sync_root, "replaced").await;
+        let replace = crate::api_client::SyncOp {
+            seq_id: 9,
+            op_type: "file_create".into(),
+            payload: serde_json::json!({
+                "id": "replaced",
+                "name_encrypted": enc_name(&master_key, "replaced", "notes.txt"),
+                "parent_id": null,
+                "size_bytes": 12
+            }),
+        };
+        apply_sync_op(&bridge, &sync_root, &replace, now_secs(), &mut Vec::new()).unwrap();
+        let seen = bridge.db.peek_resnapshot_request().unwrap().expect("requested");
+        assert_eq!(
+            held_content_version(&bridge, "replaced"),
+            token,
+            "the op alone cannot tell a replace"
+        );
+        // The legacy init bumped the version before the bytes exist: skipped, the request stays.
+        let mid = crate::api_client::SyncSnapshot {
+            seq_id: 10,
+            nodes: vec![node(&master_key, "replaced", "notes.txt", 3, true)],
+        };
+        apply_snapshot(&bridge, &sync_root, &mid, now_secs(), now_secs(), &mut Vec::new()).unwrap();
+        assert_eq!(held_content_version(&bridge, "replaced"), token);
+        assert!(
+            !bridge.db.clear_resnapshot_request(seen).unwrap(),
+            "the skip kept the request"
+        );
+        let done = crate::api_client::SyncSnapshot {
+            seq_id: 11,
+            nodes: vec![node(&master_key, "replaced", "notes.txt", 3, false)],
+        };
+        let logs = capture_logs_async(async {
+            apply_snapshot(&bridge, &sync_root, &done, now_secs(), now_secs(), &mut Vec::new()).unwrap();
+        })
+        .await;
+        assert_eq!(
+            held_content_version(&bridge, "replaced"),
+            "3",
+            "the system re-downloads the phone's bytes"
+        );
+        assert!(logs.contains("file version raised from the snapshot"), "{logs}");
+        drop(server.finish());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn base_pending_parks_after_ten_successful_snapshots_without_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [78u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_version_zero_row(&bridge, &server, "never-listed", FileStatus::Local);
+        seed_uploaded_row(&bridge, &server, "listed");
+        bridge.db.set_sync_cursor(0).unwrap();
+        fp_save(&bridge, dir.path(), "never-listed", "notes.txt", b"edit", "0");
+        let listed = serde_json::json!({ "seq_id": 1, "nodes": [node(&master_key, "listed", "notes.txt", 1, false)] });
+        let op_id = bridge
+            .db
+            .list_operations_for_file("never-listed")
+            .unwrap()
+            .remove(0)
+            .op_id;
+        for success in 1..=10 {
+            {
+                let mut s = server.state.lock().unwrap();
+                s.snapshots
+                    .push_back(("503 Service Unavailable".into(), serde_json::json!({ "error": "busy" })));
+                s.snapshots.push_back(("200 OK".into(), listed.clone()));
+            }
+            assert!(
+                sync_tick_outcome(&bridge, &sync_root).await.is_err(),
+                "a failed snapshot costs nothing"
+            );
+            sync_tick_outcome(&bridge, &sync_root).await.unwrap();
+            let op = bridge.db.get_operation(&op_id).unwrap().unwrap();
+            if success < 10 {
+                assert!(
+                    op.attempts < op.max_attempts,
+                    "not parked after {success} successful snapshots"
+                );
+            } else {
+                assert_eq!(op.attempts, op.max_attempts, "parked base_unknown after the 10th");
+            }
+        }
+        let state = server.finish();
+        assert!(state.inits.is_empty());
+    }
+
+    /// A write the snapshot count parked is parked like any other (spec §8.4): it asks for no
+    /// more snapshots, and a save on its token takes its role at the claim and parks the
+    /// same way, without a request on a base the client knows is unknown.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_save_after_a_snapshot_count_park_takes_over_and_parks_without_a_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [79u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_version_zero_row(&bridge, &server, "unlisted", FileStatus::Local);
+        seed_uploaded_row(&bridge, &server, "listed");
+        bridge.db.set_sync_cursor(0).unwrap();
+        let w = fp_save(&bridge, dir.path(), "unlisted", "notes.txt", b"first edit", "0");
+        let w_op = bridge.db.list_operations_for_file("unlisted").unwrap().remove(0).op_id;
+        let listed = serde_json::json!({ "seq_id": 1, "nodes": [node(&master_key, "listed", "notes.txt", 1, false)] });
+        for _ in 0..10 {
+            server
+                .state
+                .lock()
+                .unwrap()
+                .snapshots
+                .push_back(("200 OK".into(), listed.clone()));
+            sync_tick_outcome(&bridge, &sync_root).await.unwrap();
+        }
+        let parked = bridge.db.get_operation(&w_op).unwrap().unwrap();
+        assert_eq!(parked.attempts, parked.max_attempts, "parked after the 10th snapshot");
+        assert_eq!(parked.last_error.as_deref(), Some("base_unknown"));
+        // No snapshot is queued on the mock now: a tick that asked for one would fail. The
+        // ops path, with nothing to apply, succeeds.
+        assert!(
+            sync_tick_outcome(&bridge, &sync_root).await.is_ok(),
+            "a parked write asks for no more snapshots"
+        );
+        assert_eq!(bridge.db.peek_resnapshot_request().unwrap(), None);
+
+        let n = fp_save(
+            &bridge,
+            dir.path(),
+            "unlisted",
+            "notes.txt",
+            b"first edit, second edit",
+            &w.token.unwrap(),
+        );
+        assert!(n.token.is_some());
+        drain_upload_queue(&bridge, &sync_root).await;
+        let state = server.finish();
+        assert!(
+            state.init_summary().is_empty(),
+            "no request with a base the client knows is unknown: {:?}",
+            state.init_summary()
+        );
+        let ops = bridge.db.list_operations_for_file("unlisted").unwrap();
+        assert_eq!(ops.len(), 1, "the save took the parked write's role: {ops:?}");
+        assert_ne!(ops[0].op_id, w_op);
+        assert_eq!(ops[0].attempts, ops[0].max_attempts, "and parked the same way");
+        assert_eq!(ops[0].last_error.as_deref(), Some("base_unknown"));
+    }
+
+    /// §6.1: `version_filled` is cleared by a landing, by a content op on the row and (plan
+    /// Spec issue 16) by an accepted Finder write.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn version_filled_is_cleared_by_a_landing_a_content_op_and_an_accepted_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [80u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        let filled = |file_id: &str| bridge.db.item_presentation(file_id).unwrap().unwrap().version_filled;
+        let fill = |file_id: &str| {
+            let snapshot = crate::api_client::SyncSnapshot {
+                seq_id: 2,
+                nodes: vec![node(&master_key, file_id, "notes.txt", 1, false)],
+            };
+            apply_snapshot(&bridge, &sync_root, &snapshot, now_secs(), now_secs(), &mut Vec::new()).unwrap();
+        };
+
+        // A landing: the fill reaches the waiting write's row, then the write lands.
+        seed_version_zero_row(&bridge, &server, "landing", FileStatus::Local);
+        fp_save(&bridge, dir.path(), "landing", "notes.txt", b"edit", "0");
+        fill("landing");
+        assert!(filled("landing"));
+        drain_upload_queue(&bridge, &sync_root).await;
+        assert!(!filled("landing"), "a landing clears it");
+
+        // A content op from another device.
+        seed_version_zero_row(&bridge, &server, "content-op", FileStatus::Local);
+        fill("content-op");
+        assert!(filled("content-op"));
+        let update = crate::api_client::SyncOp {
+            seq_id: 3,
+            op_type: "file_update".into(),
+            payload: serde_json::json!({ "id": "content-op", "version_number": 2, "size_bytes": 11 }),
+        };
+        apply_sync_op(&bridge, &sync_root, &update, now_secs(), &mut Vec::new()).unwrap();
+        assert!(!filled("content-op"), "a content op clears it");
+
+        // An accepted Finder write, before it lands.
+        seed_version_zero_row(&bridge, &server, "accepted", FileStatus::Local);
+        fill("accepted");
+        assert!(filled("accepted"));
+        fp_save(&bridge, dir.path(), "accepted", "notes.txt", b"edit", "1");
+        assert!(!filled("accepted"), "an accepted write clears it");
+        drop(server.finish());
     }
 }
