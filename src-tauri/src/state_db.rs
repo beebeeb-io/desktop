@@ -8167,18 +8167,25 @@ mod tests {
         };
         assert!(due().is_empty(), "precondition: nothing is due");
 
-        assert_eq!(
-            db.resume_operations_paused_for_auth(500).unwrap(),
-            2,
-            "the two writes paused for auth"
-        );
+        db.resume_operations_paused_for_auth(500).unwrap();
 
+        let still_paused_for_auth: i64 =
+            db.0.lock()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM operation_queue WHERE paused_reason = 'auth'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+        assert_eq!(still_paused_for_auth, 0, "nothing paused for auth remains");
         assert_eq!(due(), vec!["w-auth".to_string()], "only the write that never parked");
         for (op_id, reason) in [
             ("w-stale", ParkReason::StaleBase),
             ("w-missing", ParkReason::PayloadMissing),
             ("w-base", ParkReason::BaseUnknown),
         ] {
+            assert!(!due().contains(&op_id.to_string()), "{op_id} is not due");
             let op = db.get_operation(op_id).unwrap().expect("a parked write keeps its op");
             assert_eq!(op.attempts, op.max_attempts, "{op_id} stays parked");
             assert_eq!(
