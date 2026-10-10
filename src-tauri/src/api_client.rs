@@ -226,6 +226,54 @@ pub struct DesktopUploadInitResponse {
     pub region: String,
 }
 
+/// The server's 409 messages at `init` (spec §8.4); a test pins both.
+pub const STALE_BASE_MESSAGE: &str = "stale base version for replacement upload";
+pub const IN_PROGRESS_MESSAGE: &str = "upload is already in progress for this file";
+
+/// Why `init` answered 409 (spec §8.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InitConflictClass {
+    /// The base is not the file's current version; it never becomes valid again.
+    StaleBase,
+    /// Another upload of the file is in progress.
+    InProgress,
+    /// Anything else, a changed message included: retried, as before.
+    Other,
+}
+
+impl InitConflictClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            InitConflictClass::StaleBase => "stale_base",
+            InitConflictClass::InProgress => "in_progress",
+            InitConflictClass::Other => "other",
+        }
+    }
+}
+
+/// A changed server message falls back to `Other` (retry), today's behaviour.
+pub fn classify_init_conflict(message: &str) -> InitConflictClass {
+    match message {
+        STALE_BASE_MESSAGE => InitConflictClass::StaleBase,
+        IN_PROGRESS_MESSAGE => InitConflictClass::InProgress,
+        _ => InitConflictClass::Other,
+    }
+}
+
+/// `init` answered 409. Carries the class only: the server's text never reaches a log.
+#[derive(Debug)]
+pub struct InitConflict {
+    pub class: InitConflictClass,
+}
+
+impl std::fmt::Display for InitConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "upload init refused with 409 Conflict ({})", self.class.as_str())
+    }
+}
+
+impl std::error::Error for InitConflict {}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct UploadChunkResponse {
     pub index: u32,
@@ -735,9 +783,16 @@ impl ApiClient {
             .header("Authorization", format!("Bearer {}", self.token))
             .json(body)
             .send()
-            .await?
-            .error_for_status()?;
-        Ok(resp.json().await?)
+            .await?;
+        if resp.status() == reqwest::StatusCode::CONFLICT {
+            // `error_for_status` would drop the message the class is read from (spec §8.4).
+            let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+            let message = body.get("error").and_then(|value| value.as_str()).unwrap_or_default();
+            return Err(anyhow::Error::new(InitConflict {
+                class: classify_init_conflict(message),
+            }));
+        }
+        Ok(resp.error_for_status()?.json().await?)
     }
 
     pub async fn upload_session_chunk(

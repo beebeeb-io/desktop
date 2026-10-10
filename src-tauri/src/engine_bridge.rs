@@ -48,7 +48,8 @@ use crate::conflict::{VersionInfo, is_conflict, is_text_file};
 use crate::state_db::{
     ClaimOutcome, ClaimedOp, FileContractState, FileEntry, FileStatus, ItemKind, LocalActivityEventInput,
     LocalActivityKind, Namespace, OperationKind, OperationPauseReason, PERMISSION_OWNER, PERMISSION_READ,
-    PERMISSION_SHARE, PERMISSION_WRITE, ParkReason, PendingOperation, QueueDiagnostics, StateDb, UploadResume,
+    PERMISSION_SHARE, PERMISSION_WRITE, ParkReason, PendingOperation, QueueDiagnostics, StateDb, TookOver,
+    UploadResume,
 };
 
 // ── Wire-byte counters (P1 — live throughput) ────────────────────────────────
@@ -591,8 +592,26 @@ impl EngineBridge {
             let claimed = match self.db.claim_operation(&op.op_id, now)? {
                 // Waiting for an earlier content op of its file is not an attempt.
                 ClaimOutcome::Gone | ClaimOutcome::Wait => continue,
-                ClaimOutcome::Claimed(claimed) => *claimed,
-                ClaimOutcome::Parked { op_id, file_id, reason } => {
+                // The hand-over committed (spec §8.4); the successor itself still waits.
+                ClaimOutcome::WaitAfterHandOver(took_over) => {
+                    self.after_hand_over(&op, &took_over);
+                    continue;
+                }
+                ClaimOutcome::Claimed(claimed) => {
+                    if let Some(took_over) = &claimed.took_over {
+                        self.after_hand_over(&claimed.op, took_over);
+                    }
+                    *claimed
+                }
+                ClaimOutcome::Parked {
+                    op_id,
+                    file_id,
+                    reason,
+                    took_over,
+                } => {
+                    if let Some(took_over) = &took_over {
+                        self.after_hand_over(&op, took_over);
+                    }
                     log_parked(&op_id, file_id.as_deref(), reason);
                     outcome.retried_op_ids.push(op_id);
                     continue;
@@ -637,6 +656,23 @@ impl EngineBridge {
                     log_parked(&op.op_id, op.file_id.as_deref(), reason);
                     outcome.retried_op_ids.push(op.op_id);
                 }
+                // A stale base never becomes valid again: the server's version only grows
+                // (spec §8.4). Only a File Provider write parks at once; every other upload
+                // keeps today's retries.
+                Err(error)
+                    if init_conflict_class(&error) == Some(crate::api_client::InitConflictClass::StaleBase)
+                        && claimed.write.is_some() =>
+                {
+                    if !self
+                        .db
+                        .park_claimed(&op.op_id, &claimed.claim_id, ParkReason::StaleBase, now)?
+                    {
+                        log_queue_state_moved(&op.op_id, "park");
+                        continue;
+                    }
+                    log_refused_upload(&op, op.max_attempts, crate::api_client::InitConflictClass::StaleBase);
+                    outcome.retried_op_ids.push(op.op_id);
+                }
                 Err(error) => {
                     let class = classify_operation_error(&error.to_string());
                     if let Some(reason) = class.pause_reason() {
@@ -656,7 +692,9 @@ impl EngineBridge {
                         if matches!(op.kind, OperationKind::UploadVersion | OperationKind::UploadFile)
                             && error_http_status(&error) == Some(409)
                         {
-                            log_refused_upload(&op, attempts);
+                            let class =
+                                init_conflict_class(&error).unwrap_or(crate::api_client::InitConflictClass::Other);
+                            log_refused_upload(&op, attempts, class);
                         }
                         let next_retry_at = now.saturating_add(retry_delay_seconds(attempts));
                         if !self.db.record_attempt_claimed(
@@ -679,6 +717,17 @@ impl EngineBridge {
         }
 
         Ok(outcome)
+    }
+
+    /// The hand-over committed (spec §8.4): one line, then the retired copy is unlinked,
+    /// after the commit (S6).
+    fn after_hand_over(&self, successor: &PendingOperation, took_over: &TookOver) {
+        log_took_over(&successor.op_id, successor.file_id.as_deref(), &took_over.parked_op_id);
+        if let Some(path) = took_over.released_payload.as_deref()
+            && let Err(e) = crate::staged_payload::remove(&self.db, Path::new(path))
+        {
+            tracing::warn!(error = %e, "staged upload cleanup deferred; journal retained");
+        }
     }
 
     /// Run one claimed op. `Ok(Some(path))`: the op's staged payload, to release
@@ -896,11 +945,23 @@ impl EngineBridge {
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("upload operation missing staged payload"))?;
         let payload_path = Path::new(payload_path);
-        if !payload_path.is_file() {
-            return Err(anyhow::anyhow!(
-                "staged upload payload is missing: {}",
-                payload_path.display()
-            ));
+        match std::fs::metadata(payload_path) {
+            Ok(meta) if meta.is_file() => {}
+            // The staged copy lives in the app's own container and cannot come back
+            // (spec §8.4). Only a File Provider write parks on it.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && claim.and_then(|c| c.write.as_ref()).is_some() => {
+                return Err(anyhow::Error::new(ParkNow(ParkReason::PayloadMissing)));
+            }
+            // Everything else keeps today's retry and today's text: an op without a
+            // write id, and any other error reading the copy (permission, I/O). A
+            // new text naming the I/O error would carry "permission" into
+            // `classify_operation_error` and pause the op instead.
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "staged upload payload is missing: {}",
+                    payload_path.display()
+                ));
+            }
         }
 
         let metadata = operation_metadata(op)?;
@@ -4487,8 +4548,12 @@ fn upload_session_is_gone(error: &anyhow::Error) -> bool {
 }
 
 /// The HTTP status of the request that failed somewhere in `error`'s chain,
-/// if it was an HTTP error.
+/// if it was an HTTP error. An `init` refused with 409 carries its class instead
+/// of reqwest's error (spec §8.4), and still answers 409 here.
 pub(crate) fn error_http_status(error: &anyhow::Error) -> Option<u16> {
+    if init_conflict_class(error).is_some() {
+        return Some(409);
+    }
     error
         .chain()
         .find_map(|cause| cause.downcast_ref::<reqwest::Error>())
@@ -4496,19 +4561,31 @@ pub(crate) fn error_http_status(error: &anyhow::Error) -> Option<u16> {
         .map(|status| status.as_u16())
 }
 
-/// One warning per upload attempt the server refused with 409 (a stale base,
-/// or another upload of the file in progress), and a distinct one when that
-/// attempt used up the op's attempts and parks it. Ids and counts only: the
-/// file's name and the request URL never reach the log.
-fn log_refused_upload(op: &PendingOperation, attempt: i64) {
+/// The class of an `init` 409 somewhere in `error`'s chain (spec §8.4).
+pub(crate) fn init_conflict_class(error: &anyhow::Error) -> Option<crate::api_client::InitConflictClass> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<crate::api_client::InitConflict>())
+        .map(|conflict| conflict.class)
+}
+
+/// One warning per upload attempt the server refused with 409, with its class
+/// (a stale base, another upload of the file in progress, or other), and a
+/// distinct one when that attempt parks the op: its attempts are used up, or a
+/// stale base parked it at once (spec §8.4). Ids, counts and the class only: the
+/// file's name, the request URL and the server's text never reach the log.
+fn log_refused_upload(op: &PendingOperation, attempt: i64, class: crate::api_client::InitConflictClass) {
     let file_id = op.file_id.as_deref().unwrap_or_default();
     if attempt >= op.max_attempts {
+        let reason = (class == crate::api_client::InitConflictClass::StaleBase).then(|| ParkReason::StaleBase.as_str());
         tracing::warn!(
             op_id = %op.op_id,
             file_id,
             attempt,
             max_attempts = op.max_attempts,
             base_version = ?op.base_version,
+            class = class.as_str(),
+            reason,
             "upload refused by the server (409 Conflict); attempts used up, parked with its bytes kept in the queue"
         );
     } else {
@@ -4518,6 +4595,7 @@ fn log_refused_upload(op: &PendingOperation, attempt: i64) {
             attempt,
             max_attempts = op.max_attempts,
             base_version = ?op.base_version,
+            class = class.as_str(),
             "upload refused by the server (409 Conflict); will retry"
         );
     }
@@ -4552,6 +4630,17 @@ impl std::fmt::Display for ParkNow {
 }
 
 impl std::error::Error for ParkNow {}
+
+/// One line when a queued write takes over a parked predecessor at its claim
+/// (spec §8.4): ids only.
+fn log_took_over(op_id: &str, file_id: Option<&str>, parked_op_id: &str) {
+    tracing::warn!(
+        op_id = %op_id,
+        file_id = file_id.unwrap_or_default(),
+        parked_op_id = %parked_op_id,
+        "queued write took over a parked one"
+    );
+}
 
 /// One line when an upload parks: ids and the reason only (spec §11).
 fn log_parked(op_id: &str, file_id: Option<&str>, reason: ParkReason) {
@@ -13214,6 +13303,8 @@ mod tests {
         delay_init: Option<Duration>,
         /// file id -> the status line its `uploads/init` is refused with.
         refuse_init: HashMap<String, &'static str>,
+        /// file id -> the 409 message its next `uploads/init` gets, once (spec §8.4).
+        conflict_init_once: HashMap<String, String>,
         /// Every `POST /files/{id}/versions/{vid}/restore`: (file id, object version id).
         restores: Vec<(String, String)>,
     }
@@ -13344,6 +13435,10 @@ mod tests {
                 let code = status.split(' ').next().and_then(|code| code.parse().ok()).unwrap_or(0);
                 s.inits.push((body, code));
                 return http_json(status, serde_json::json!({ "error": "refused" }));
+            }
+            if let Some(message) = body["file_id"].as_str().and_then(|id| s.conflict_init_once.remove(id)) {
+                s.inits.push((body, 409));
+                return http_json("409 Conflict", serde_json::json!({ "error": message }));
             }
             let file_id = match body["file_id"].as_str() {
                 Some(id) => {
@@ -14232,16 +14327,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_upload_refused_with_409_is_logged_on_every_retry_and_when_it_parks() {
+    async fn an_upload_refused_with_a_stale_base_is_logged_once_and_parks() {
         let dir = tempfile::tempdir().unwrap();
         let sync_root = dir.path().join("sync-root");
         std::fs::create_dir_all(&sync_root).unwrap();
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [26u8; 32]);
-        // The server is at version 2; this save is based on 1 (stale).
+        // The server is at version 2; this File Provider save is based on 1 (stale).
+        // Only a Finder write parks at once (spec §8.4).
         seed_uploaded_row(&bridge, &server, "stale-file");
         server.seed_file("stale-file", 2);
-        queue_save(
+        fp_save(
             &bridge,
             dir.path(),
             "stale-file",
@@ -14249,9 +14345,7 @@ mod tests {
             b"stale save",
             "1",
         );
-        let mut stale = bridge.db.list_due_operations(i64::MAX).unwrap().remove(0);
-        stale.max_attempts = 3;
-        bridge.db.enqueue_operation(&stale).unwrap();
+        let stale = bridge.db.list_operations_for_file("stale-file").unwrap().remove(0);
         // Another upload fails once for a different reason (500): not a 409.
         seed_uploaded_row(&bridge, &server, "flaky-file");
         server
@@ -14260,43 +14354,34 @@ mod tests {
             .unwrap()
             .fail_first_chunk_once
             .insert("session-1".into());
-        queue_save(&bridge, dir.path(), "flaky-file", "other-notes.txt", b"flaky save", "1");
-        let flaky = bridge
-            .db
-            .list_due_operations(i64::MAX)
-            .unwrap()
-            .into_iter()
-            .find(|op| op.file_id.as_deref() == Some("flaky-file"))
-            .unwrap();
+        fp_save(&bridge, dir.path(), "flaky-file", "other-notes.txt", b"flaky save", "1");
+        let flaky = bridge.db.list_operations_for_file("flaky-file").unwrap().remove(0);
 
         let logs = capture_logs_async(async {
             drain_upload_queue(&bridge, &sync_root).await;
         })
         .await;
         let state = server.finish();
+        let stale_inits: Vec<_> = state
+            .init_summary()
+            .into_iter()
+            .filter(|(file, _, _)| *file == json!("stale-file"))
+            .collect();
         assert_eq!(
-            state.inits.iter().filter(|(_, status)| *status == 409).count(),
-            3,
-            "three refused attempts: {:?}",
+            stale_inits,
+            vec![(json!("stale-file"), json!(1), 409)],
+            "one refused attempt, then parked: {:?}",
             state.init_summary()
         );
         let refused: Vec<&str> = logs.lines().filter(|line| line.contains("upload refused")).collect();
-        assert_eq!(refused.len(), 3, "one line per refused attempt, got:\n{logs}");
-        assert!(refused.iter().all(|line| line.contains("WARN")), "{logs}");
-        assert_eq!(
-            refused.iter().filter(|line| line.contains("will retry")).count(),
-            2,
-            "{logs}"
-        );
-        assert_eq!(
-            refused.iter().filter(|line| line.contains("parked")).count(),
-            1,
-            "the final refusal says the op is parked:\n{logs}"
+        assert_eq!(refused.len(), 1, "one line for the one refused attempt, got:\n{logs}");
+        assert!(refused[0].contains("WARN"), "{logs}");
+        assert!(
+            refused[0].contains("parked") && refused[0].contains("stale_base"),
+            "the refusal says the op parked, and why:\n{logs}"
         );
         assert!(
-            refused
-                .iter()
-                .all(|line| line.contains(&stale.op_id) && line.contains("stale-file") && line.contains("409")),
+            refused[0].contains(&stale.op_id) && refused[0].contains("stale-file") && refused[0].contains("409"),
             "{logs}"
         );
         assert!(
@@ -14304,10 +14389,475 @@ mod tests {
             "a failure other than 409 is not logged as one:\n{logs}"
         );
         assert!(
-            refused
-                .iter()
+            logs.lines()
                 .all(|line| !line.contains("notes.txt") && !line.contains("/api/v1") && !line.contains("127.0.0.1")),
-            "no name, path or URL may reach the log:\n{logs}"
+            "no name, path or URL may reach any log line:\n{logs}"
+        );
+        assert!(
+            !logs.contains(crate::api_client::STALE_BASE_MESSAGE),
+            "the server's text never reaches the log, only the class:\n{logs}"
+        );
+        let parked = bridge.db.list_operations_for_file("stale-file").unwrap().remove(0);
+        assert_eq!(parked.attempts, parked.max_attempts, "parked after one attempt");
+    }
+
+    // ── Rule 4: the 409 classes, the immediate parks and the hand-over (spec §8.4) ──
+
+    #[test]
+    fn the_409_messages_are_pinned() {
+        use crate::api_client::{InitConflictClass, classify_init_conflict};
+        assert_eq!(
+            classify_init_conflict("stale base version for replacement upload"),
+            InitConflictClass::StaleBase
+        );
+        assert_eq!(
+            classify_init_conflict("upload is already in progress for this file"),
+            InitConflictClass::InProgress
+        );
+        assert_eq!(classify_init_conflict("file is in trash"), InitConflictClass::Other);
+        assert_eq!(
+            classify_init_conflict(""),
+            InitConflictClass::Other,
+            "a changed message falls back to retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stale_base_409_parks_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [65u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_uploaded_row(&bridge, &server, "stale");
+        server.seed_file("stale", 2); // the server moved on
+        fp_save(&bridge, dir.path(), "stale", "notes.txt", b"edit on v1", "1");
+        let logs = capture_logs_async(async {
+            bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+        })
+        .await;
+        let op = bridge.db.list_operations_for_file("stale").unwrap().remove(0);
+        assert_eq!(op.attempts, op.max_attempts, "parked after one attempt");
+        let refused: Vec<&str> = logs.lines().filter(|l| l.contains("upload refused")).collect();
+        assert_eq!(refused.len(), 1, "{logs}");
+        assert!(
+            refused[0].contains("stale_base") && refused[0].contains("parked"),
+            "{logs}"
+        );
+        drop(server.finish());
+    }
+
+    #[tokio::test]
+    async fn an_in_progress_409_is_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [66u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_uploaded_row(&bridge, &server, "busy");
+        server
+            .state
+            .lock()
+            .unwrap()
+            .conflict_init_once
+            .insert("busy".into(), crate::api_client::IN_PROGRESS_MESSAGE.into());
+        fp_save(&bridge, dir.path(), "busy", "notes.txt", b"edit", "1");
+        drain_upload_queue(&bridge, &sync_root).await;
+        let state = server.finish();
+        assert_eq!(
+            state.init_summary(),
+            vec![(json!("busy"), json!(1), 409), (json!("busy"), json!(1), 201)]
+        );
+        assert_eq!(state.latest_plaintext("busy", master_key), b"edit");
+    }
+
+    #[tokio::test]
+    async fn i4_a_doomed_earlier_write_never_blocks_hours() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [67u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_uploaded_row(&bridge, &server, "doomed");
+        let w = fp_save(&bridge, dir.path(), "doomed", "notes.txt", b"W", "1");
+        fp_save(
+            &bridge,
+            dir.path(),
+            "doomed",
+            "notes.txt",
+            b"W N",
+            w.token.as_deref().unwrap(),
+        );
+        let w_op = bridge.db.list_operations_for_file("doomed").unwrap().remove(0);
+        std::fs::remove_file(w_op.payload_path.as_deref().unwrap()).unwrap();
+        let (passes, logs) = {
+            let mut passes = 0;
+            let logs = capture_logs_async(async {
+                passes = drain_upload_queue(&bridge, &sync_root).await;
+            })
+            .await;
+            (passes, logs)
+        };
+        let state = server.finish();
+        assert!(
+            passes <= 2,
+            "the successor lands in the same or the next pass: {passes}"
+        );
+        assert_eq!(
+            state.init_summary(),
+            vec![(json!("doomed"), json!(1), 201)],
+            "N took W's base"
+        );
+        assert_eq!(state.latest_plaintext("doomed", master_key), b"W N");
+        assert_eq!(logs.matches("queued write took over a parked one").count(), 1, "{logs}");
+        assert!(bridge.db.list_operations_for_file("doomed").unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_stale_base_predecessor_hands_over_and_the_successor_parks_with_the_newest_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [68u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_uploaded_row(&bridge, &server, "stale-chain");
+        server.seed_file("stale-chain", 2);
+        let w = fp_save(&bridge, dir.path(), "stale-chain", "notes.txt", b"W", "1");
+        fp_save(
+            &bridge,
+            dir.path(),
+            "stale-chain",
+            "notes.txt",
+            b"W N",
+            w.token.as_deref().unwrap(),
+        );
+        let logs = capture_logs_async(async {
+            drain_upload_queue(&bridge, &sync_root).await;
+        })
+        .await;
+        let state = server.finish();
+        assert_eq!(
+            state.init_summary(),
+            vec![
+                (json!("stale-chain"), json!(1), 409),
+                (json!("stale-chain"), json!(1), 409)
+            ],
+            "W and then N, on W's base"
+        );
+        let ops = bridge.db.list_operations_for_file("stale-chain").unwrap();
+        assert_eq!(ops.len(), 1, "W's op is gone; one parked op remains");
+        assert_eq!(ops[0].attempts, ops[0].max_attempts);
+        assert_eq!(
+            std::fs::read(ops[0].payload_path.as_deref().unwrap()).unwrap(),
+            b"W N",
+            "the newest bytes are kept"
+        );
+        assert_eq!(logs.matches("queued write took over a parked one").count(), 1, "{logs}");
+    }
+
+    #[tokio::test]
+    async fn an_earlier_builds_op_is_never_handed_over() {
+        // m-2: an earlier build's bytes may not be contained in a newer save's (spec §3).
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [69u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        // (a) an earlier-build op and a newer save on "1": both sets of bytes kept.
+        seed_uploaded_row(&bridge, &server, "earlier");
+        fp_save(
+            &bridge,
+            dir.path(),
+            "earlier",
+            "notes.txt",
+            b"earlier build's bytes",
+            "1",
+        );
+        let e = bridge.db.list_operations_for_file("earlier").unwrap().remove(0);
+        bridge
+            .db
+            .set_write_origin_for_test(&e.op_id, crate::state_db::WriteOrigin::EarlierBuild);
+        fp_save(&bridge, dir.path(), "earlier", "notes.txt", b"a newer save", "1");
+        // (b) a provisional row whose earlier-build create parks with a save queued after it.
+        let created = fp_create(&bridge, dir.path(), "made-earlier.txt", b"created");
+        let provisional = created.outcome_file_id();
+        fp_save(
+            &bridge,
+            dir.path(),
+            &provisional,
+            "made-earlier.txt",
+            b"created, edited",
+            created.token.as_deref().unwrap(),
+        );
+        let c = bridge.db.list_operations_for_file(&provisional).unwrap().remove(0);
+        bridge
+            .db
+            .set_write_origin_for_test(&c.op_id, crate::state_db::WriteOrigin::EarlierBuild);
+        bridge.db.park_for_test(&c.op_id);
+        let logs = capture_logs_async(async {
+            drain_upload_queue(&bridge, &sync_root).await;
+        })
+        .await;
+        let state = server.finish();
+        assert_eq!(
+            state.latest_plaintext("earlier", master_key),
+            b"earlier build's bytes",
+            "(a) E landed"
+        );
+        let newer = bridge.db.list_operations_for_file("earlier").unwrap().remove(0);
+        assert_eq!(
+            newer.attempts, newer.max_attempts,
+            "(a) the newer save parked, not dropped"
+        );
+        assert!(std::path::Path::new(newer.payload_path.as_deref().unwrap()).is_file());
+        let ops = bridge.db.list_operations_for_file(&provisional).unwrap();
+        assert_eq!(ops.len(), 2, "(b) no hand-over: C and N both remain");
+        assert!(ops.iter().all(|op| op.attempts == op.max_attempts));
+        assert!(logs.contains("predecessor_parked"), "{logs}");
+        assert!(!logs.contains("took over"), "{logs}");
+        assert!(
+            state
+                .inits
+                .iter()
+                .all(|(body, _)| body["file_id"] != json!(provisional)),
+            "(b) nothing uploaded"
+        );
+    }
+
+    #[tokio::test]
+    async fn handover_vs_new_save_the_newest_bytes_land_last() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [70u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = Arc::new(test_bridge_with_api(
+            &dir.path().join("state.db"),
+            server.base_url.clone(),
+            master_key,
+        ));
+        seed_uploaded_row(&bridge, &server, "handover");
+        let w = fp_save(&bridge, dir.path(), "handover", "notes.txt", b"W", "1");
+        let w_op = bridge.db.list_operations_for_file("handover").unwrap().remove(0);
+        std::fs::remove_file(w_op.payload_path.as_deref().unwrap()).unwrap();
+        bridge.process_due_operations(&sync_root, now_secs()).await.unwrap(); // W parks payload_missing
+        let n = fp_save(
+            &bridge,
+            dir.path(),
+            "handover",
+            "notes.txt",
+            b"W N",
+            w.token.as_deref().unwrap(),
+        );
+        // At N's claim, a newer save N2 is accepted on N's token.
+        let saver = Arc::clone(&bridge);
+        let save_dir = dir.path().to_path_buf();
+        let n_token = n.token.clone().unwrap();
+        let fired = Arc::new(AtomicBool::new(false));
+        let fired_in_seam = Arc::clone(&fired);
+        bridge.seams.arm("claim:before_tx", move || {
+            run_competing(move || {
+                fp_save(&saver, &save_dir, "handover", "notes.txt", b"W N N2", &n_token);
+            });
+            fired_in_seam.store(true, Ordering::SeqCst);
+        });
+        let logs = capture_logs_async(async {
+            drain_upload_queue(&bridge, &sync_root).await;
+        })
+        .await;
+        let state = server.finish();
+        assert!(fired.load(Ordering::SeqCst), "the seam fired and N2 was accepted");
+        assert_eq!(
+            state.init_summary(),
+            vec![(json!("handover"), json!(1), 201), (json!("handover"), json!(2), 201)],
+            "N on W's base, then N2"
+        );
+        assert_eq!(
+            state.latest_plaintext("handover", master_key),
+            b"W N N2",
+            "the newest bytes land last"
+        );
+        assert_eq!(logs.matches("queued write took over a parked one").count(), 1, "{logs}");
+    }
+
+    #[tokio::test]
+    async fn a_lost_reply_base_parks_with_its_bytes() {
+        // Review Focus 4: the shipped fallback of the split rule 1c.
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [71u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_uploaded_row(&bridge, &server, "lost-reply");
+        let a = fp_save(&bridge, dir.path(), "lost-reply", "notes.txt", b"A", "1");
+        drain_upload_queue(&bridge, &sync_root).await;
+        let a_token = a.token.unwrap();
+        let _b_reply_lost = fp_save(&bridge, dir.path(), "lost-reply", "notes.txt", b"A B", &a_token);
+        fp_save(&bridge, dir.path(), "lost-reply", "notes.txt", b"A B C", &a_token); // still A's token
+        let logs = capture_logs_async(async {
+            drain_upload_queue(&bridge, &sync_root).await;
+        })
+        .await;
+        let state = server.finish();
+        assert_eq!(
+            state.init_summary(),
+            vec![
+                (json!("lost-reply"), json!(1), 201),
+                (json!("lost-reply"), json!(2), 201),
+                (json!("lost-reply"), json!(1), 409)
+            ]
+        );
+        assert_eq!(state.latest_plaintext("lost-reply", master_key), b"A B");
+        let parked = bridge.db.list_operations_for_file("lost-reply").unwrap().remove(0);
+        assert_eq!(parked.attempts, parked.max_attempts, "a visible park");
+        assert_eq!(
+            std::fs::read(parked.payload_path.as_deref().unwrap()).unwrap(),
+            b"A B C",
+            "its bytes are kept"
+        );
+        assert!(
+            logs.lines()
+                .any(|l| l.contains("upload refused") && l.contains("parked")),
+            "{logs}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_parked_predecessor_with_a_recorded_completion_is_waited_for_never_taken_over() {
+        // M19, spec §8.4: "W has a recorded completion: W never parks (§8.6 rule 6). N waits,
+        // and the chain step resolves it when W's local landing succeeds." W stands for an op
+        // parked before that rule existed (Task 7 records the completion).
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [72u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_uploaded_row(&bridge, &server, "completed");
+        let w = fp_save(&bridge, dir.path(), "completed", "notes.txt", b"W", "1");
+        fp_save(
+            &bridge,
+            dir.path(),
+            "completed",
+            "notes.txt",
+            b"W N",
+            w.token.as_deref().unwrap(),
+        );
+        let ops = bridge.db.list_operations_for_file("completed").unwrap();
+        let (w_op, n_op) = (ops[0].clone(), ops[1].clone());
+        bridge
+            .db
+            .put_upload_resume(&UploadResume {
+                op_id: w_op.op_id.clone(),
+                payload_path: w_op.payload_path.clone().unwrap(),
+                payload_size: 1,
+                payload_mtime_ns: 1,
+                upload_session_id: "session-w".into(),
+                server_file_id: "completed".into(),
+                object_version_id: "object-w".into(),
+                chunk_size_bytes: 1,
+                chunk_count: 1,
+                acked_chunks: 1,
+                metadata_applied: true,
+                is_create: false,
+            })
+            .unwrap();
+        bridge.db.set_completed_for_test(&w_op.op_id, 2);
+        bridge.db.park_for_test(&w_op.op_id);
+        let logs = capture_logs_async(async {
+            bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+        })
+        .await;
+        let state = server.finish();
+        assert!(
+            state.inits.is_empty(),
+            "nothing is sent while W's landing is pending: {:?}",
+            state.init_summary()
+        );
+        let ops = bridge.db.list_operations_for_file("completed").unwrap();
+        assert_eq!(ops.len(), 2, "W is never taken over: both ops remain");
+        assert_eq!(ops[1].op_id, n_op.op_id);
+        assert_eq!(ops[1].attempts, 0, "N waits, and waiting is not an attempt");
+        assert_eq!(
+            bridge.db.finder_write(&n_op.op_id).unwrap().unwrap().after_write_id,
+            bridge.db.finder_write(&w_op.op_id).unwrap().map(|write| write.write_id),
+            "N still waits after W"
+        );
+        assert!(!logs.contains("took over"), "{logs}");
+        assert!(std::path::Path::new(w_op.payload_path.as_deref().unwrap()).is_file());
+    }
+
+    #[tokio::test]
+    async fn a_hand_over_that_inherits_an_earlier_builds_predecessor_parks_and_releases_the_copy() {
+        // X (an earlier build's op, parked) <- W <- N. W parks behind X at its claim (m-2); at
+        // N's claim N takes W's role, inherits X, and parks too. The hand-over is still
+        // logged, and W's copy is unlinked after the commit (S6).
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [73u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_uploaded_row(&bridge, &server, "chain-park");
+        let x = fp_save(&bridge, dir.path(), "chain-park", "notes.txt", b"X", "1");
+        let x_op = bridge.db.list_operations_for_file("chain-park").unwrap().remove(0);
+        bridge
+            .db
+            .set_write_origin_for_test(&x_op.op_id, crate::state_db::WriteOrigin::EarlierBuild);
+        bridge.db.park_for_test(&x_op.op_id);
+        let w = fp_save(
+            &bridge,
+            dir.path(),
+            "chain-park",
+            "notes.txt",
+            b"X W",
+            x.token.as_deref().unwrap(),
+        );
+        fp_save(
+            &bridge,
+            dir.path(),
+            "chain-park",
+            "notes.txt",
+            b"X W N",
+            w.token.as_deref().unwrap(),
+        );
+        let ops = bridge.db.list_operations_for_file("chain-park").unwrap();
+        let (w_op, n_op) = (ops[1].clone(), ops[2].clone());
+        let logs = capture_logs_async(async {
+            bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+        })
+        .await;
+        let state = server.finish();
+        assert!(state.inits.is_empty(), "nothing is sent: {:?}", state.init_summary());
+        let ops = bridge.db.list_operations_for_file("chain-park").unwrap();
+        assert_eq!(
+            ops.iter().map(|op| op.op_id.clone()).collect::<Vec<_>>(),
+            vec![x_op.op_id.clone(), n_op.op_id.clone()],
+            "W's op is gone; X and N remain"
+        );
+        assert!(
+            ops.iter().all(|op| op.attempts == op.max_attempts),
+            "both parked with their bytes"
+        );
+        assert_eq!(
+            std::fs::read(ops[1].payload_path.as_deref().unwrap()).unwrap(),
+            b"X W N"
+        );
+        assert_eq!(logs.matches("queued write took over a parked one").count(), 1, "{logs}");
+        assert!(
+            !std::path::Path::new(w_op.payload_path.as_deref().unwrap()).exists(),
+            "W's copy is released after the commit"
+        );
+        assert!(
+            logs.lines()
+                .any(|line| line.contains("predecessor_parked") && line.contains(&n_op.op_id)),
+            "{logs}"
         );
     }
 

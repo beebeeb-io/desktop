@@ -967,6 +967,166 @@ fn finder_write_conn(conn: &Connection, op_id: &str) -> Result<Option<FinderWrit
     })
 }
 
+/// The claim's transaction ends in a wait, which is not an attempt (S3 steps 2–4). After
+/// a hand-over it commits that, and the caller logs it and releases the payload (S6).
+fn finish_wait(tx: rusqlite::Transaction<'_>, took_over: Option<TookOver>) -> Result<ClaimOutcome> {
+    tx.commit()?;
+    Ok(match took_over {
+        None => ClaimOutcome::Wait,
+        Some(took_over) => ClaimOutcome::WaitAfterHandOver(took_over),
+    })
+}
+
+/// The claim parks the op with its bytes (spec §8.4, S5), in its own transaction.
+fn park_in_claim(
+    tx: rusqlite::Transaction<'_>,
+    op: &PendingOperation,
+    reason: ParkReason,
+    took_over: Option<TookOver>,
+    now: i64,
+) -> Result<ClaimOutcome> {
+    tx.execute(
+        "UPDATE operation_queue
+         SET attempts = max_attempts, last_error = ?2, last_error_class = ?2, updated_at = ?3
+         WHERE op_id = ?1",
+        params![op.op_id, reason.as_str(), now],
+    )?;
+    tx.commit()?;
+    Ok(ClaimOutcome::Parked {
+        op_id: op.op_id.clone(),
+        file_id: op.file_id.clone(),
+        reason,
+        took_over,
+    })
+}
+
+/// A successor's direct predecessor, as the claim reads it (spec §8.4).
+struct Predecessor {
+    op_id: String,
+    kind: String,
+    parent_id: Option<String>,
+    target_path: Option<String>,
+    metadata_json: Option<String>,
+    payload_path: Option<String>,
+    base_version: Option<i64>,
+    base_object_version_id: Option<String>,
+    after_write_id: Option<String>,
+    base_pending: i64,
+    attempts: i64,
+    max_attempts: i64,
+    origin: Option<WriteOrigin>,
+    /// Its `complete` answered and the resume row recorded it (§8.6 rule 1).
+    completed: bool,
+}
+
+fn predecessor_conn(conn: &Connection, write_id: &str) -> Result<Option<Predecessor>> {
+    conn.query_row(
+        "SELECT q.op_id, q.kind, q.parent_id, q.target_path, q.metadata_json, q.payload_path,
+                q.base_version, q.base_object_version_id, q.after_write_id, q.base_pending,
+                q.attempts, q.max_attempts, q.write_origin,
+                EXISTS (SELECT 1 FROM upload_resume r
+                        WHERE r.op_id = q.op_id AND r.completed_version IS NOT NULL)
+         FROM operation_queue q WHERE q.write_id = ?1",
+        params![write_id],
+        |row| {
+            Ok(Predecessor {
+                op_id: row.get(0)?,
+                kind: row.get(1)?,
+                parent_id: row.get(2)?,
+                target_path: row.get(3)?,
+                metadata_json: row.get(4)?,
+                payload_path: row.get(5)?,
+                base_version: row.get(6)?,
+                base_object_version_id: row.get(7)?,
+                after_write_id: row.get(8)?,
+                base_pending: row.get(9)?,
+                attempts: row.get(10)?,
+                max_attempts: row.get(11)?,
+                origin: WriteOrigin::from_db(row.get::<_, Option<String>>(12)?.as_deref()),
+                completed: row.get(13)?,
+            })
+        },
+    )
+    .optional()
+}
+
+/// §8.4: successor N takes parked predecessor W's role. N's bytes contain W's (§8.2,
+/// last point), so no byte the person saved is lost. W's op and resume row are removed
+/// and its payload is journalled for release; the caller unlinks it after the commit
+/// (S6). Both rows are addressed exactly; anything else fails and the transaction
+/// rolls back.
+fn hand_over_conn(
+    conn: &Connection,
+    n_op_id: &str,
+    n_write_id: &str,
+    n: &PendingOperation,
+    w: &Predecessor,
+) -> Result<()> {
+    let w_is_create = w
+        .metadata_json
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .is_some_and(|m| m["operation"].as_str() == Some("create_file"));
+    // Plan Spec issue 1: a Finder create is `upload_version` with `"operation": "create_file"`.
+    // N takes W's create: W's kind, parent and path, and N's metadata as a create.
+    let (kind, parent_id, target_path, metadata_json) = if w_is_create {
+        let mut metadata: serde_json::Value = n
+            .metadata_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str(raw).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        metadata["operation"] = serde_json::json!("create_file");
+        if let Some(map) = metadata.as_object_mut() {
+            map.remove("base_version_identifier");
+        }
+        (
+            w.kind.clone(),
+            w.parent_id.clone(),
+            w.target_path.clone(),
+            Some(metadata.to_string()),
+        )
+    } else {
+        (
+            n.kind.as_str().to_string(),
+            n.parent_id.clone(),
+            n.target_path.clone(),
+            n.metadata_json.clone(),
+        )
+    };
+    let moved = conn.execute(
+        "UPDATE operation_queue
+         SET base_version = ?3, base_object_version_id = ?4, after_write_id = ?5, base_pending = ?6,
+             kind = ?7, parent_id = ?8, target_path = ?9, metadata_json = ?10
+         WHERE op_id = ?1 AND write_id = ?2",
+        params![
+            n_op_id,
+            n_write_id,
+            w.base_version,
+            w.base_object_version_id,
+            w.after_write_id,
+            w.base_pending,
+            kind,
+            parent_id,
+            target_path,
+            metadata_json,
+        ],
+    )?;
+    let retired = conn.execute("DELETE FROM operation_queue WHERE op_id = ?1", params![w.op_id])?;
+    if moved != 1 || retired != 1 {
+        // The caller's `?` drops the transaction, which rolls back.
+        return Err(rusqlite::Error::StatementChangedRows(moved + retired));
+    }
+    conn.execute("DELETE FROM upload_resume WHERE op_id = ?1", params![w.op_id])?;
+    if let Some(path) = &w.payload_path {
+        conn.execute(
+            "INSERT INTO staged_payloads(path, completed) VALUES (?1, 1)
+             ON CONFLICT(path) DO UPDATE SET completed = 1",
+            params![path],
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 fn held_write_conn(conn: &Connection, file_id: &str) -> Result<(Option<crate::write_token::HeldWrite>, bool)> {
     conn.query_row(
@@ -1129,6 +1289,17 @@ pub struct ClaimedOp {
     pub op: PendingOperation,
     pub claim_id: String,
     pub write: Option<FinderWrite>,
+    /// The claim handed a parked predecessor's role to this op (spec §8.4).
+    pub took_over: Option<TookOver>,
+}
+
+/// A parked predecessor whose role its direct successor took at the claim (spec §8.4).
+/// Its op and resume row are gone and its staged payload is journalled for release;
+/// the caller unlinks the payload after the commit (S6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TookOver {
+    pub parked_op_id: String,
+    pub released_payload: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1137,13 +1308,18 @@ pub enum ClaimOutcome {
     Gone,
     /// Not an attempt: an earlier content op of the same file is queued and has not parked.
     Wait,
+    /// Not an attempt: the hand-over committed, and the successor itself must still wait
+    /// (its inherited base is pending, or its inherited predecessor is queued).
+    WaitAfterHandOver(TookOver),
     /// Boxed: the op is large and the other outcomes carry nothing.
     Claimed(Box<ClaimedOp>),
-    /// Not an attempt: the claim parked the op with its bytes (spec §8.4, S5).
+    /// Not an attempt: the claim parked the op with its bytes (spec §8.4, S5). A
+    /// hand-over committed in the same transaction rides along.
     Parked {
         op_id: String,
         file_id: Option<String>,
         reason: ParkReason,
+        took_over: Option<TookOver>,
     },
 }
 
@@ -3768,39 +3944,43 @@ impl StateDb {
                 return Ok(ClaimOutcome::Wait);
             }
         }
-        let write = finder_write_conn(&tx, op_id)?;
-        if let Some(write) = &write {
-            if write.base_pending > 0 {
-                return Ok(ClaimOutcome::Wait); // step 3, not an attempt
+        // Steps 3 and 4, with the hand-over (spec §8.4): a parked predecessor this spec
+        // minted hands its role to this op, in this transaction. The loop runs again on
+        // what the op inherited: a pending base, or the predecessor's own predecessor.
+        let mut op = op;
+        let mut write = finder_write_conn(&tx, op_id)?;
+        let mut took_over: Option<TookOver> = None;
+        while let Some(current) = write.clone() {
+            if current.base_pending > 0 {
+                return finish_wait(tx, took_over); // step 3, not an attempt
             }
-            if let Some(predecessor) = &write.after_write_id {
-                let state: Option<(i64, i64)> = tx
-                    .query_row(
-                        "SELECT attempts, max_attempts FROM operation_queue WHERE write_id = ?1",
-                        params![predecessor],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )
-                    .optional()?;
-                let reason = match state {
-                    // Step 4: the predecessor is queued and has not parked.
-                    Some((attempts, max)) if attempts < max => return Ok(ClaimOutcome::Wait),
-                    // Task 5 replaces this arm with the hand-over for a minted predecessor.
-                    Some(_) => ParkReason::PredecessorParked,
-                    // S5: only a bug can orphan a successor; it shows as a parked file.
-                    None => ParkReason::PredecessorLost,
-                };
-                tx.execute(
-                    "UPDATE operation_queue
-                     SET attempts = max_attempts, last_error = ?2, last_error_class = ?2, updated_at = ?3
-                     WHERE op_id = ?1",
-                    params![op_id, reason.as_str(), now],
-                )?;
-                tx.commit()?;
-                return Ok(ClaimOutcome::Parked {
-                    op_id: op_id.to_string(),
-                    file_id: op.file_id.clone(),
-                    reason,
-                });
+            let Some(predecessor) = current.after_write_id.clone() else {
+                break;
+            };
+            match predecessor_conn(&tx, &predecessor)? {
+                // S5: only a bug can orphan a successor; it shows as a parked file.
+                None => return park_in_claim(tx, &op, ParkReason::PredecessorLost, took_over, now),
+                // Step 4: the predecessor is queued and has not parked.
+                Some(pred) if pred.attempts < pred.max_attempts => return finish_wait(tx, took_over),
+                // m-2: an earlier build's bytes may not be contained in this save's (§3).
+                Some(pred) if pred.origin != Some(WriteOrigin::Minted) => {
+                    return park_in_claim(tx, &op, ParkReason::PredecessorParked, took_over, now);
+                }
+                // A recorded completion never parks (§8.6 rule 6, Task 7): wait for its landing.
+                Some(pred) if pred.completed => return finish_wait(tx, took_over),
+                Some(pred) => {
+                    hand_over_conn(&tx, op_id, &current.write_id, &op, &pred)?;
+                    took_over = Some(TookOver {
+                        parked_op_id: pred.op_id.clone(),
+                        released_payload: pred.payload_path.clone(),
+                    });
+                    op = tx.query_row(
+                        &format!("SELECT {PENDING_OPERATION_COLUMNS} FROM operation_queue WHERE op_id = ?1"),
+                        params![op_id],
+                        pending_operation_from_row,
+                    )?;
+                    write = finder_write_conn(&tx, op_id)?;
+                }
             }
         }
         let claim_id = uuid::Uuid::new_v4().simple().to_string();
@@ -3809,7 +3989,12 @@ impl StateDb {
             params![op_id, claim_id, now],
         )?;
         tx.commit()?;
-        Ok(ClaimOutcome::Claimed(Box::new(ClaimedOp { op, claim_id, write })))
+        Ok(ClaimOutcome::Claimed(Box::new(ClaimedOp {
+            op,
+            claim_id,
+            write,
+            took_over,
+        })))
     }
 
     /// A failed attempt of a claimed op: its retry schedule, and the claim ends.
@@ -4035,6 +4220,41 @@ impl StateDb {
         let conn = self.0.lock().unwrap();
         conn.query_row("SELECT COUNT(*) FROM id_aliases", [], |row| row.get(0))
             .unwrap()
+    }
+
+    /// T26 (m-2): an op as an earlier build would have queued it (spec §10.2).
+    #[cfg(test)]
+    pub(crate) fn set_write_origin_for_test(&self, op_id: &str, origin: WriteOrigin) {
+        let conn = self.0.lock().unwrap();
+        conn.execute(
+            "UPDATE operation_queue SET write_origin = ?2 WHERE op_id = ?1",
+            params![op_id, origin.as_str()],
+        )
+        .unwrap();
+    }
+
+    /// M19: a resume row whose `complete` answered (spec §8.6 rule 1; Task 7 records it).
+    #[cfg(test)]
+    pub(crate) fn set_completed_for_test(&self, op_id: &str, version: i64) {
+        let conn = self.0.lock().unwrap();
+        let n = conn
+            .execute(
+                "UPDATE upload_resume SET completed_version = ?2 WHERE op_id = ?1",
+                params![op_id, version],
+            )
+            .unwrap();
+        assert_eq!(n, 1, "no resume row for {op_id}");
+    }
+
+    /// T26: an op that used up its attempts (parked, with its bytes).
+    #[cfg(test)]
+    pub(crate) fn park_for_test(&self, op_id: &str) {
+        let conn = self.0.lock().unwrap();
+        conn.execute(
+            "UPDATE operation_queue SET attempts = max_attempts WHERE op_id = ?1",
+            params![op_id],
+        )
+        .unwrap();
     }
 
     /// P2: a Finder write is an op with a write id; the restore/upload wait is keyed on it.
@@ -6859,6 +7079,52 @@ mod tests {
         assert!(
             !db.record_attempt_claimed("u1", &stale.claim_id, 1, 0, None).unwrap(),
             "a claim from before the restart guards nothing"
+        );
+    }
+
+    /// S2 (parked from Task 2's review): a park or a pause written under an old claim,
+    /// on a row that still exists, changes nothing. The claim id, not the op id alone,
+    /// is the key.
+    #[test]
+    fn a_park_or_a_pause_under_a_stale_claim_changes_nothing() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        db.enqueue_operation(&queued("u1", OperationKind::UploadVersion, "f", Some("/staged/u1")))
+            .unwrap();
+        let ClaimOutcome::Claimed(old) = db.claim_operation("u1", 1).unwrap() else {
+            panic!("claimable")
+        };
+        // The attempt under `old` ended, and a newer attempt claimed the op.
+        assert!(
+            db.record_attempt_claimed("u1", &old.claim_id, 1, 0, Some("boom"))
+                .unwrap()
+        );
+        let ClaimOutcome::Claimed(current) = db.claim_operation("u1", 2).unwrap() else {
+            panic!("claimable again")
+        };
+        assert_ne!(old.claim_id, current.claim_id);
+        let before = db.get_operation("u1").unwrap().unwrap();
+
+        assert!(
+            !db.park_claimed("u1", &old.claim_id, ParkReason::StaleBase, 3).unwrap(),
+            "a park under an old claim matches no row"
+        );
+        assert!(
+            !db.record_pause_claimed("u1", &old.claim_id, OperationPauseReason::Quota, Some("quota"), 4)
+                .unwrap(),
+            "a pause under an old claim matches no row"
+        );
+        assert_eq!(
+            db.get_operation("u1").unwrap().unwrap(),
+            before,
+            "the row is as the current claim left it"
+        );
+        assert_eq!(db.queue_diagnostics(i64::MAX).unwrap().paused, 0, "nothing paused");
+        // The current claim still holds the op: its own outcome writes.
+        assert!(
+            db.park_claimed("u1", &current.claim_id, ParkReason::StaleBase, 5)
+                .unwrap(),
+            "the current claim is intact"
         );
     }
 
