@@ -251,17 +251,26 @@ Nothing a Mac compiles starts `/usr/bin/open`. A child process inherits the App 
 the URL macOS handed the app, so LaunchServices refused `~/Library/CloudStorage/Beebeeb-Beebeeb` with -54 while
 `spawn()` had already answered `Ok`: "Open in Finder" did nothing and reported success. The bridge now keeps the
 security-scoped URL from `getUserVisibleURLForItemIdentifier` (NSFileProviderManager.h:103-128, :120-121 for the
-scope) and opens it in this process: `beebeeb_fp_open_location` (Open in Finder) waits for
-`NSWorkspace openURL:configuration:completionHandler:` (NSWorkspace.h:40) and returns its error;
-`beebeeb_fp_reveal_item` (Show in Finder, the item's File Provider identifier is its state-db file id) selects
-the item with `activateFileViewerSelectingURLs:` (NSWorkspace.h:53, `void`: the bridge proves the item resolved
-and exists, not that Finder drew a window); `beebeeb_open_url` opens System Settings (no gate: it must work when the
-File Provider is stuck). Each answer is the command's result (`finder_open::finder_open_outcome`, domain and
-code only), so a failure is the existing one-sentence toast. The commands are `async` on the blocking pool
-(an open waits up to 2 s to resolve the URL and 5 s for LaunchServices). The pins are `test_1885_*` in
-`src/finder_open.rs`, `macos_workspace.rs` and `macos_file_provider.rs`. Windows and Linux keep `explorer` and
-`xdg-open`. The device rung (5 of 5 opens, button and menu, during the Ready poll, on a signed QA build) is the
-lead's.
+scope) and opens it in this process. The work is two halves: a GATED resolve (`beebeeb_fp_resolve_location` /
+`beebeeb_fp_resolve_item`, under the shared bridge gate) returns the URL as a retained handle; Rust drops the gate
+(`finder_setup::macos_ports::resolve_then`); then an UNGATED call takes the handle: `beebeeb_open_scoped_url` (Open in
+Finder) waits for `NSWorkspace openURL:configuration:completionHandler:` (NSWorkspace.h:39-40) and returns its error,
+`beebeeb_reveal_scoped_url` (Show in Finder; the item's File Provider identifier is its state-db file id) selects the
+item with `activateFileViewerSelectingURLs:` (NSWorkspace.h:53, `void`: the bridge proves the item resolved and
+exists, not that Finder drew a window). The gate is not held across the open because a sign-out's removal waits only
+3 s for it and is never retried. The scope is stopped once, in the completion handler or by a 60 s safety timer.
+`beebeeb_open_url` opens System Settings (no gate: it must work when the File Provider is stuck). Each answer is the
+command's result (`finder_open::finder_open_outcome`, domain and code only), so a failure is the existing one-sentence
+toast; the menu's "Open in Finder" shows the same sentence in a native alert (`show_menu_open_failure`, there is no
+window to put a toast in). A Mac never asks the File Provider about a shared-with-me row (ruling 1701: webapp-only):
+`open_in_finder` refuses it by namespace before any bridge call, and quick search results carry `shared_with_me` and
+drop those rows on a Mac. The commands are `async` on the blocking pool (the resolve waits up to 3 s for the gate and 2 s
+for macOS, the open up to 5 s for LaunchServices); the upload and new-folder fallbacks open in the background. A
+success that arrives after the 5 s limit still opens the window after the caller was told it failed (no API cancels an
+open). The pins are `test_1885_*` in `src/finder_open.rs`, `macos_workspace.rs`, `macos_file_provider.rs` and
+`finder_setup/macos_ports.rs`; the two tests that ask the real `NSWorkspace` are `#[ignore]` (they need a GUI session;
+run `cargo test --lib -- --ignored test_1885`). Windows and Linux keep `explorer` and `xdg-open`. The device rung (5 of 5
+opens, button and menu, during the Ready poll, on a signed QA build) is the lead's.
 
 ### Re-sign-in in place (ruling R8)
 

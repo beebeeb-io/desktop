@@ -280,7 +280,7 @@ placeholder default is unreachable for a validated NavId.
 | `install_windows_shell_integration` | `WindowsFirstRun.tsx`, `windows/views/SettingsView.tsx` | Wired (surface table above) |
 | `reset_macos_integration` | `pages/SyncFolder.tsx`, `MacSettings.tsx` | Mac-only; absent from Windows surface; Repair removes the Finder domain, then the reconciler checks once and adds it back |
 | `open_finder_location` | `WindowsTray.tsx`, `WindowsApp.tsx`, `pages/SyncFolder.tsx` | Wired (surface table above). macOS (task 1885): `NSWorkspace` opens the File Provider URL macOS returns, inside the bridge, and the command answers when LaunchServices has; never a child `open` |
-| `open_in_finder` | `DesktopQuickSearch.tsx`, `pages/Shared.tsx` | Wired (surface table above). macOS (task 1885): the item's File Provider URL (identifier = state-db file id) is revealed through `NSWorkspace`; a missing location or item is an error |
+| `open_in_finder` | `DesktopQuickSearch.tsx` (`pages/Shared.tsx` also calls it but is unmounted, see U62) | Wired (surface table above). macOS (task 1885): the item's File Provider URL (identifier = state-db file id) is revealed through `NSWorkspace`; a missing location or item is an error, and a shared-with-me row is refused before the File Provider is asked (quick search does not offer those rows on a Mac) |
 | `get_desktop_config` | `pages/Bandwidth.tsx`, `pages/Notifications.tsx` | Compact-only; no Windows view action |
 | `set_desktop_config` | `pages/Bandwidth.tsx`, `pages/Notifications.tsx`, `windows/views/SettingsView.tsx` | Wired (surface table above) |
 | `account_email` | `pages/Account.tsx` | Compact-only; no Windows view action |
