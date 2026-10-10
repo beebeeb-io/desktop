@@ -1947,6 +1947,11 @@ async fn clear_session(app: tauri::AppHandle, state: State<'_, AppState>) -> Res
 /// own alert after a removal that kept files — the sentence, a blank line, then the folder. It
 /// is the only place the folder's path is shown for a sign-out, the Add-to-Finder rollback and
 /// the app-start sweep; logs never carry it. Nothing kept → no alert.
+///
+/// Device K-F1 (round 2): with no parent window, `tauri-plugin-dialog` 2.7 hands this to `rfd`
+/// 0.16, which calls `CFUserNotificationDisplayAlert` on a background thread. macOS draws that
+/// alert in its own UserNotificationCenter process, so it is never a Beebeeb window. The two
+/// debug lines let a device check prove it was raised and closed, without the path.
 fn show_preserved_files_alert(app: &tauri::AppHandle, preserved_location: Option<&str>) {
     let Some(location) = preserved_location else {
         return;
@@ -1955,7 +1960,10 @@ fn show_preserved_files_alert(app: &tauri::AppHandle, preserved_location: Option
         .message(finder_removal::preserved_files_message(location))
         .title(finder_removal::PRESERVED_FILES_TITLE)
         .kind(tauri_plugin_dialog::MessageDialogKind::Info)
-        .show(|_| {});
+        .show(|_| {
+            tracing::debug!("kept-folder alert closed");
+        });
+    tracing::debug!("kept-folder alert shown");
 }
 
 /// Put a session restored from the Keychain into memory. Deliberately no `bump_vault_epoch()`
@@ -12884,6 +12892,29 @@ mod finder_removal_wiring_tests {
             ..result
         };
         assert!(serde_json::to_value(&nothing_kept).unwrap()["preserved_location"].is_null());
+    }
+
+    /// Device K-F1 (round 2): the alert is drawn by macOS's UserNotificationCenter process, not a
+    /// Beebeeb window, so a device check needs the app's own word that it raised the alert and
+    /// that the person closed it. Both are debug lines without the path.
+    #[test]
+    fn test_1882_the_kept_folder_alert_logs_that_it_was_shown_and_closed() {
+        let full = source();
+        let source = full[..full.find("\nmod finder_removal_wiring_tests {").expect("this module")].to_string();
+        let alert = item(&source, "fn show_preserved_files_alert(");
+        let show = alert.find(".show(").expect("the alert is shown");
+        let closed = alert
+            .find("tracing::debug!(\"kept-folder alert closed\")")
+            .expect("the alert's callback logs that the person closed it");
+        let shown = alert
+            .find("tracing::debug!(\"kept-folder alert shown\")")
+            .expect("the alert logs that it was raised");
+        assert!(show < closed, "\"closed\" is logged inside the alert's callback");
+        assert!(closed < shown, "\"shown\" is logged after show() returns");
+        assert!(
+            !alert[show..].contains("location"),
+            "nothing after show() may carry the folder's path into a log"
+        );
     }
 
     #[test]
