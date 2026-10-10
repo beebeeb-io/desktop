@@ -123,6 +123,8 @@ A revoked session is deliberately **not** a trigger.
 Neither is a same-account re-sign-in (R8): it replaces only the session token, so the reconciler has nothing to add or remove. Keys that the re-sign-in loads from the Keychain count as trigger 2, which confirms a domain that is already there. — lead, 2026-10-06 (plan review)
 When the server says the vault key this Mac kept is no longer the account's (§5.6), the re-sign-in first ends the session in memory the way Lock does (trigger 7: the check is cancelled and held, then the engine stops), then removes the key. It never removes the domain. The recovery phrase brings the keys back (trigger 2). — lead, 2026-10-08 (final review)
 
+Every removal the reconciler makes (sign-out, Repair, an owed removal, and the Repair that §5.6's reset asks for) keeps the files that never reached the server and reports the folder macOS kept them in, as `docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md` describes: the removal's answer carries the folder to the sign-out's alert and to Repair's result, and a removal that nobody waits for shows it the way the app-start sweep does. — lead, 2026-10-10 (rebase onto 1882)
+
 ### 5.4 One check at a time
 
 There is exactly one reconciler task. A trigger that arrives while a check is running sets a "check again" flag, so any number of triggers during a check produce at most one follow-up check.
