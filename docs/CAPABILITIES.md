@@ -170,7 +170,7 @@ are the obsolete CLI daemon/config/API, not the shipping shell. Its `--start-min
 | U57 | Tray View all in Beebeeb | main-window event/storage nav to `activity` | Wired; selected Activity page |
 | U58 | Tray Open folder, View online | `open_finder_location`; web app URL | Wired; flyout hides and correct destination opens |
 | U59 | Tray context Open Beebeeb, Hide, Start at login, Quit | `show_main_app_window_impl`, window.hide, autostart manager, Tauri quit | Wired; process count/window visibility/autostart state |
-| U60 | Auth-expired banner Sign in again | `forceReauth`: `clear_session` then `open_onboarding_window` | Wired; stops if clearing fails; old account never retained |
+| U60 | Auth-expired banner Sign in again | `forceReauth`: on Windows/Linux `clear_session` then `open_onboarding_window`; on macOS `open_reauth_window` (R8) | Wired; Windows/Linux stop if clearing fails and the old account is never retained; macOS clears nothing, the same account keeps its keys, queue and Finder, and another account gets the switch warning |
 | U61 | Conflict window Keep mine/Keep theirs/Keep both | `conflict_content_preview`, `resolve_conflict(local/remote/both)` | Wired; exact queued operation and version bytes, W-lane durability |
 | U62 | Shared-with-me / share administration | `list_shared_roots` exists but Shared.tsx unmounted | Dead page/unoffered; recipient read/decrypt in engine/filesystem only; creation/invites in web app |
 | U63 | Error toasts close; modals Escape/backdrop/Cancel; disabled busy controls | ToastProvider/Modal/local state | Wired/local; focus returns correctly, duplicate submissions prevented |
@@ -211,6 +211,9 @@ behavior; do not count their existence as Windows reachability:
 - Finder location: pick root, install, open, reset/cancel, native System Settings
   and continue-without-integration paths. Mac-only File Provider commands must
   not be exposed by a forced compact Finder route on Windows.
+  On macOS (spec 2026-10-06) the pane has no install action: it reads
+  finder_setup_state, follows finder-setup-changed, and offers only the one
+  action of the current failure.
 - Account: Lock, Unlock, sign out, diagnostics, autostart, web account/billing.
   The Windows Account page has sign-out but **no lock/unlock/diagnostics buttons**;
   diagnostic export is reachable through the native Help menu.
@@ -235,7 +238,7 @@ placeholder default is unreachable for a validated NavId.
 
 ## Complete registered IPC cross-reference
 
-90 registered application commands at the U1 source revision; task 1665 adds `consume_menu_update_check` (91 total); task 1683 slice 2 adds `popover_snapshot` (92 total). Every command is indexed below; plugin opener/event/window IPCs are covered by the surface checklist. `desktopApi.ts` entries are wrapper references, not independent views. Native/internal-only and compact-only entries are deliberately retained so their absence from Windows is visible.
+90 registered application commands at the U1 source revision; task 1665 adds `consume_menu_update_check` (91 total); task 1683 slice 2 adds `popover_snapshot` (92 total); task 1834 adds `finder_setup_state`, `finder_setup_retry`, `finder_setup_copy_details`, `finder_setup_show_app` and `open_reauth_window` (the total was not recounted). Every command is indexed below; plugin opener/event/window IPCs are covered by the surface checklist. `desktopApi.ts` entries are wrapper references, not independent views. Native/internal-only and compact-only entries are deliberately retained so their absence from Windows is visible.
 
 | Registered command | Source references (relative to src/) | Windows reachability |
 | --- | --- | --- |
@@ -263,14 +266,19 @@ placeholder default is unreachable for a validated NavId.
 | `default_sync_root` | `WindowsApp.tsx`, `WindowsFirstRun.tsx`, `Onboarding.tsx` | Wired (surface table above) |
 | `desktop_platform` | `App.tsx`, `WindowsFirstRun.tsx`, `Onboarding.tsx`, `pages/SyncFolder.tsx`, `platform.ts` | Wired (surface table above) |
 | `desktop_capabilities` | `capabilities.tsx` | Wired (surface table above) |
-| `finder_location_state` | `Onboarding.tsx`, `pages/SyncFolder.tsx`, `pages/Status.tsx`, `windows/views/SettingsView.tsx` | Mac-only; absent from Windows surface |
-| `install_finder_location` | `Onboarding.tsx`, `pages/SyncFolder.tsx`, `windows/views/SettingsView.tsx` | Mac-only; absent from Windows surface |
-| `continue_without_finder_location` | `Onboarding.tsx` | Mac-only; absent from Windows surface |
-| `finder_domain_user_enabled` | `Onboarding.tsx` | Mac-only; absent from Windows surface |
-| `open_login_items_and_extensions_settings` | `Onboarding.tsx` | Mac-only; absent from Windows surface |
+| `finder_location_state` | `Onboarding.tsx` (Windows/Linux step), `pages/SyncFolder.tsx`, `pages/Status.tsx` (non-macOS branches) | Not called on macOS since spec 2026-10-06; on macOS it returns an error naming `finder_setup_state` |
+| `install_finder_location` | `Onboarding.tsx` (Windows/Linux step), `pages/SyncFolder.tsx` (non-macOS branch) | Not called on macOS (ruling R5); on macOS it returns an error |
+| `continue_without_finder_location` | `Onboarding.tsx` (Windows/Linux step) | Windows/Linux escape hatch |
+| `finder_domain_user_enabled` | none | Registered, unused: the poll moved into the Rust reconciler |
+| `open_login_items_and_extensions_settings` | `finderSetup.ts`, `pages/SyncFolder.tsx` (non-macOS `user_disabled` branch) | macOS "Open System Settings" for `user_disabled` |
+| `finder_setup_state` | `finderSetup.ts` (Onboarding, MacSettings, SyncFolder, Status, SettingsView on macOS) | macOS reconciler state; `finder-setup-changed` carries the same view |
+| `finder_setup_retry` | `finderSetup.ts` | macOS "Try again", only inside a failure |
+| `finder_setup_copy_details` | `finderSetup.ts` | macOS "Copy details" (no paths, names or email) |
+| `finder_setup_show_app` | `finderSetup.ts` | macOS "Show in Finder" for `not_in_applications` |
+| `open_reauth_window` | `desktopApi.ts` (`forceReauth`, macOS) | R8: opens sign-in in place; clears nothing |
 | `windows_shell_integration_state` | `WindowsFirstRun.tsx`, `windows/views/SettingsView.tsx` | Wired (surface table above) |
 | `install_windows_shell_integration` | `WindowsFirstRun.tsx`, `windows/views/SettingsView.tsx` | Wired (surface table above) |
-| `reset_macos_integration` | `pages/SyncFolder.tsx` | Mac-only; absent from Windows surface |
+| `reset_macos_integration` | `pages/SyncFolder.tsx`, `MacSettings.tsx` | Mac-only; absent from Windows surface; Repair removes the Finder domain, then the reconciler checks once and adds it back |
 | `open_finder_location` | `WindowsTray.tsx`, `WindowsApp.tsx`, `pages/SyncFolder.tsx` | Wired (surface table above) |
 | `open_in_finder` | `DesktopQuickSearch.tsx`, `pages/Shared.tsx` | Wired (surface table above) |
 | `get_desktop_config` | `pages/Bandwidth.tsx`, `pages/Notifications.tsx` | Compact-only; no Windows view action |
@@ -314,8 +322,8 @@ placeholder default is unreachable for a validated NavId.
 | `resolve_conflict` | `ConflictWindow.tsx` | Wired (surface table above) |
 | `conflict_content_preview` | `desktopApi.ts` | Wired (surface table above) |
 | `notify_conflict` | No TS literal | Native/internal handler; menu/daemon, no direct Windows TS button |
-| `desktop_login` | `WindowsFirstRun.tsx`, `onboardingSignIn.ts`, `desktopApi.ts` | Wired (surface table above) |
-| `desktop_login_2fa` | `WindowsFirstRun.tsx`, `onboardingSignIn.ts`, `desktopApi.ts` | Wired (surface table above) |
+| `desktop_login` | `WindowsFirstRun.tsx`, `onboardingSignIn.ts`, `desktopApi.ts` | Returns LoginOutcome (R8): requires_2fa, reauthenticated, vault_unlocked, account_mismatch { pending_changes }; Windows keeps refusing while signed in |
+| `desktop_login_2fa` | `WindowsFirstRun.tsx`, `onboardingSignIn.ts`, `desktopApi.ts` | Returns LoginOutcome (R8): requires_2fa, reauthenticated, vault_unlocked, account_mismatch { pending_changes }; Windows keeps refusing while signed in |
 | `start_browser_login` | `WindowsFirstRun.tsx` | Wired (surface table above) |
 | `open_onboarding_window` | `WindowsApp.tsx`, `pages/VersionCenter.tsx`, `pages/Status.tsx`, `desktopApi.ts` | Wired (surface table above) |
 | `show_main_app_window` | `WindowsTray.tsx`, `WindowsFirstRun.tsx`, `Onboarding.tsx`, `desktopApi.ts` | Wired (surface table above) |

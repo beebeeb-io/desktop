@@ -28,7 +28,7 @@ import {
   type AccountProfile,
   type Subscription,
 } from '../../desktopApi'
-import { T, Card, PageHeader, Chip, Skeleton, NavIcon, PrimaryBtn } from '../ui'
+import { T, Card, PageHeader, Chip, Skeleton, NavIcon, PrimaryBtn, useToast } from '../ui'
 
 const ACCOUNT_URL = 'https://app.beebeeb.io/settings/account'
 const BILLING_URL = 'https://app.beebeeb.io/billing'
@@ -306,6 +306,7 @@ function PlanCard({ sub }: { sub: Subscription }) {
 type DisconnectPhase = 'idle' | 'confirming' | 'busy' | 'error'
 
 function DisconnectSection() {
+  const { showToast } = useToast()
   const [phase, setPhase] = useState<DisconnectPhase>('idle')
   const [errorMsg, setErrorMsg] = useState<string>('')
 
@@ -315,9 +316,13 @@ function DisconnectSection() {
     if (!result.ok) {
       setErrorMsg(result.reason)
       setPhase('error')
+      return
     }
     // On success: the root sync_status poll will detect logged_in: false and
-    // unmount this whole view — no explicit navigation needed here.
+    // unmount this whole view — no explicit navigation needed here. A step the
+    // sign-out could not confirm (FB-24) is said neutrally, in a note that
+    // outlives this view and stays until dismissed.
+    if (result.value.warning) showToast({ variant: 'info', message: result.value.warning.sentence, durationMs: null })
   }
 
   const reset = () => {

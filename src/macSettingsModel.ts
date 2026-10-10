@@ -9,8 +9,17 @@
  * The window itself (`MacSettings.tsx`) is mounted only at `?window=settings-v2&platform=macos`
  * until slice 6 flips macOS to it; nothing rendered today imports this file.
  */
-import type { FinderInstallState, Subscription, VaultItem } from './desktopApi'
-import { finderInstallNotice } from './finderInstallCard'
+import type { EngineRefusal, Subscription, VaultItem } from './desktopApi'
+import type { FinderFailureReason, FinderSetupView } from './finderSetup'
+import {
+  FINDER_ADDING_LINE,
+  FINDER_READY_LINE,
+  FINDER_RESTING_LINE,
+  FINDER_UNAVAILABLE_LINE,
+  finderRepairWarningNote,
+  finderSetupPresentation,
+  type FinderSetupAction,
+} from './finderSetupCopy'
 import { quotaPercent, titleCasePlan, planRenewalCopy } from './planPresentation'
 import type { ManualUpdateCheckState } from './windows/updateCheckViewModel'
 import { formatStorageUsage } from './storageFormat'
@@ -79,82 +88,132 @@ export function monoReason(category: string | null | undefined): string | null {
   return line.length <= MONO_REASON_MAX ? line : `${line.slice(0, MONO_REASON_MAX - 1)}…`
 }
 
-/**
- * What a failed Add to Finder says. Spec section 4 (state f2) words exactly one case, the timeout
- * from screenshot 1: "macOS didn't respond in time." with the mono line `reason: timeout`, and
- * no remedy advice (no task owns the cause). Every other category keeps the mono line (the
- * 2026-09-30 amendment: `reason: <category>` for every category) and gets one neutral sentence
- * that claims nothing about the cause. The raw error text is never shown: it names internals
- * ("File Provider domain") and it already goes into the support bundle.
- */
-export const FINDER_FAILURE_TITLE = 'Couldn’t add Beebeeb to Finder'
-
-export function finderFailureCopy(category: string | null | undefined): { sentence: string; reason: string | null } {
-  return {
-    sentence: category === 'timeout' ? 'macOS didn’t respond in time.' : 'macOS couldn’t finish setting it up.',
-    reason: monoReason(category),
-  }
-}
-
 export type FinderRow =
   | { kind: 'loading' }
   | { kind: 'unavailable' }
   | { kind: 'adding' }
+  /** A loaded `Missing` (FA-I2): its one sentence, no button, no activity. */
+  | { kind: 'resting' }
   | { kind: 'added' }
-  | { kind: 'missing' }
-  | { kind: 'failed'; title: string; sentence: string; reason: string | null }
-  | { kind: 'user_disabled'; message: string }
+  | {
+      kind: 'notice'
+      tone: 'alert' | 'status'
+      reason: FinderFailureReason
+      sentence: string
+      /** `null` for an unconfirmed engine stop: only a relaunch helps (must-render row 9). */
+      action: FinderSetupAction | null
+      actionLabel: string | null
+    }
 
 /**
- * One row, one state. `loadFailed` is a LOAD failure (the state could not be read at all); a
- * failed install is a state the backend returns (decision D1: saved and returned as `Ok`, never
- * also thrown), so it arrives here as `state.last_error` and is shown once, under the row.
+ * One row, one reconciler state (spec 2026-10-06). `loadFailed` is a LOAD failure (the state could
+ * not be read at all); a failed setup is part of the state and is shown once, under the row. A loaded
+ * `Missing` is a resting state (after a sign-out, a Lock, or with no keys on this Mac; spec §5.2 as
+ * amended, lead ruling FA-I2): a quiet row with one sentence and no button, never "Adding", and there
+ * is no "missing" row with an add button (R5). The sentence and the action of a notice come from
+ * `finderSetupCopy` (one sentence, one action per reason); the raw error never reaches this row.
+ * `refusal` (`sync_status.engine_refusal`) turns a `failed` + `unknown` into the refusal's sentence.
  */
-export function finderRow(state: FinderInstallState | null, attempting: boolean, loadFailed = false): FinderRow {
-  if (attempting) return { kind: 'adding' }
-  if (state === null) return loadFailed ? { kind: 'unavailable' } : { kind: 'loading' }
-  if (state.installed) return { kind: 'added' }
-  const notice = finderInstallNotice(state)
-  if (notice?.kind === 'user_disabled') return { kind: 'user_disabled', message: notice.message }
-  if (notice?.kind === 'error' || state.status === 'error') {
-    return { kind: 'failed', title: FINDER_FAILURE_TITLE, ...finderFailureCopy(state.reason_category) }
+export function finderRow(view: FinderSetupView | null, loadFailed = false, refusal: EngineRefusal | null = null): FinderRow {
+  if (view === null) return loadFailed ? { kind: 'unavailable' } : { kind: 'loading' }
+  const presentation = finderSetupPresentation(view, refusal)
+  switch (presentation.kind) {
+    case 'ready':
+      return { kind: 'added' }
+    case 'adding':
+      return { kind: 'adding' }
+    case 'notice': {
+      const { tone, reason, sentence, action, actionLabel } = presentation
+      return { kind: 'notice', tone, reason, sentence, action, actionLabel }
+    }
+    case 'resting':
+      return { kind: 'resting' }
+    default:
+      return { kind: 'loading' }
   }
-  return { kind: 'missing' }
 }
 
-/**
- * The hint under "Beebeeb in Finder". It may say the vault appears in Finder only while it does;
- * before that it says what adding does (the words of spec state f). While the state is still
- * loading it says nothing rather than guess.
- */
+/** The hint under "Beebeeb in Finder". A notice row says its sentence in the Note, not here. */
 export function finderHint(row: FinderRow): string {
   switch (row.kind) {
     case 'added':
-      return 'Your vault appears under Locations in Finder.'
-    case 'loading':
-      return ''
+      return FINDER_READY_LINE
+    case 'adding':
+      return FINDER_ADDING_LINE
+    case 'resting':
+      return FINDER_RESTING_LINE
     case 'unavailable':
-      return 'Couldn’t check Finder.'
+      return FINDER_UNAVAILABLE_LINE
     default:
-      return 'Add it to see your files in Finder like any other folder.'
+      return ''
   }
 }
 
 /** What the Repair confirmation says. It must name the login item (spec section 5). */
 export const REPAIR_TITLE = 'Repair Beebeeb in Finder?'
 export const REPAIR_BODY =
-  'Beebeeb removes its Finder location and turns off Open Beebeeb at login. Files waiting to upload are kept. You can add it back afterwards.'
+  'Beebeeb removes its Finder location and turns off Open Beebeeb at login, then adds itself back to Finder. Files waiting to upload are kept.'
 
-/** After a successful repair: one neutral line, or nothing when there is nothing to add. */
-export function repairNote(result: { pending_operations_preserved: number; warnings: string[] }): string | null {
-  const parts: string[] = []
+/**
+ * After a successful repair: one neutral line, or nothing when there is nothing to add. A repair's
+ * `warnings` hold a bridge error code and a cache-file path (task 17b, fix round 1), so they are never
+ * shown: any warning makes this one fixed sentence instead of the count.
+ */
+export function repairNote(result: { pending_operations_preserved: number; warnings: string[]; engine_stop_unconfirmed?: boolean }): string | null {
+  const warned = finderRepairWarningNote(result)
+  if (warned) return warned
   const kept = result.pending_operations_preserved
-  if (kept > 0) parts.push(`${kept} ${kept === 1 ? 'change' : 'changes'} waiting to upload ${kept === 1 ? 'was' : 'were'} kept.`)
-  for (const warning of result.warnings) {
-    const text = warning.trim()
-    if (text) parts.push(text)
-  }
-  return parts.length > 0 ? parts.join(' ') : null
+  return kept > 0 ? `${kept} ${kept === 1 ? 'change' : 'changes'} waiting to upload ${kept === 1 ? 'was' : 'were'} kept.` : null
+}
+
+/**
+ * Task 1882 (P0, spec docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md §5): the one
+ * sentence shown when removing Beebeeb from Finder kept files that had not reached the server.
+ * The folder's path follows it, in mono. The same string is `PRESERVED_FILES_SENTENCE` in
+ * src-tauri/src/finder_removal.rs, which the app's alert shows after a sign-out;
+ * tests/finderPreservedFiles.test.ts pins the two equal.
+ */
+export const PRESERVED_FILES_SENTENCE = 'Files that hadn’t reached your vault yet were kept on this Mac, in this folder:'
+
+/**
+ * Round 3 (re-review D3): the sentence on the saved kept-folder row in Settings › Sync. The row
+ * outlives the sign-out that kept the files, so after an account switch another account reads it:
+ * it says nothing about "your vault", and names no account or provider. The alert and the Repair
+ * line appear straight after the removal and keep `PRESERVED_FILES_SENTENCE`.
+ */
+export const KEPT_FOLDER_ROW_SENTENCE = 'Files that had not reached the server were kept in this folder:'
+
+/** The kept-files note for a removal's result: the sentence and the exact folder, or null when macOS kept nothing. */
+export function preservedFilesNote(result: { preserved_location?: string | null }): { sentence: string; path: string } | null {
+  const path = result.preserved_location
+  if (typeof path !== 'string' || path.trim() === '') return null
+  return { sentence: PRESERVED_FILES_SENTENCE, path }
+}
+
+/** The same note as one line, for a surface without a mono line of its own (the compact window). */
+export function preservedFilesLine(result: { preserved_location?: string | null }): string | null {
+  const note = preservedFilesNote(result)
+  return note ? `${note.sentence} ${note.path}` : null
+}
+
+/**
+ * What the `dismiss_kept_unsynced_folder` command reports (1882 r5): `cleared` is whether the saved
+ * folder was the one the row showed and is now gone; `current` is the folder saved after the
+ * command, null when none is. The same two keys as `DismissOutcome` in `finder_removal.rs`.
+ */
+export interface DismissKeptFolderResult {
+  cleared: boolean
+  current: string | null
+}
+
+/**
+ * The folder the row shows after a Dismiss: none when Rust cleared it, otherwise the folder saved
+ * now. A row that showed an older folder when a newer one was kept is not cleared, so it shows the
+ * newer one instead of vanishing as if the person had dismissed it.
+ */
+export function keptFolderAfterDismiss(result: DismissKeptFolderResult): string | null {
+  if (result.cleared) return null
+  return preservedFilesNote({ preserved_location: result.current })?.path ?? null
 }
 
 // ── Sync > Keep on this Mac ─────────────────────────────────────────────────

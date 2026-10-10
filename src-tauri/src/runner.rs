@@ -41,11 +41,10 @@ use tokio::task::JoinHandle;
 
 use crate::api_client::{ApiClient, HeartbeatBody};
 use crate::conflict::auto_resolution_deadline;
-use crate::engine_status::{Activity, StatusTracker, compute_activity, tick_outcome};
 use crate::engine_bridge::{
-    ConflictDetected, EngineBridge, OperationFailureClass, WireCounters, classify_operation_error,
-    sync_tick_outcome,
+    ConflictDetected, EngineBridge, OperationFailureClass, WireCounters, classify_operation_error, sync_tick_outcome,
 };
+use crate::engine_status::{Activity, StatusTracker, compute_activity, tick_outcome};
 use crate::lockfile::LockFile;
 use crate::state_db::{FileStatus, StateDb};
 use crate::state_paths;
@@ -640,11 +639,15 @@ impl EngineRunner {
     /// the loop without restarting the runner. `auth_health` is likewise
     /// shared with the account runtime so `sync_status` can read the
     /// consecutive-401 streak this task feeds (task 1546 finding 5).
+    ///
+    /// The token and the key arrive as `Zeroizing` values (R10, lead ruling 2): the copy that travelled
+    /// from the session to here is wiped when `run` is done with it, and only `ApiClient` (which wipes
+    /// its own on drop) keeps a plain one.
     pub fn spawn(
         app: AppHandle,
         sync_root: PathBuf,
-        session_token: String,
-        master_key: [u8; 32],
+        session_token: zeroize::Zeroizing<String>,
+        master_key: zeroize::Zeroizing<[u8; 32]>,
         sync_paused: Arc<AtomicBool>,
         auth_health: Arc<AuthHealth>,
     ) -> Self {
@@ -880,9 +883,7 @@ async fn stop_task_and_confirm(
     handle.abort();
     let confirmed = tokio::time::timeout(force, handle).await.is_ok();
     if !confirmed {
-        tracing::error!(
-            "engine did not confirm termination even after a forced abort; it may still be running"
-        );
+        tracing::error!("engine did not confirm termination even after a forced abort; it may still be running");
     }
     confirmed
 }
@@ -926,7 +927,13 @@ struct RunnerControls {
 /// builds the API client + engine bridge, ticks every
 /// [`TICK_INTERVAL`] running [`sync_tick`], exits when the cancel
 /// channel fires.
-async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_key: [u8; 32], controls: RunnerControls) {
+async fn run(
+    app: AppHandle,
+    sync_root: PathBuf,
+    session_token: zeroize::Zeroizing<String>,
+    master_key: zeroize::Zeroizing<[u8; 32]>,
+    controls: RunnerControls,
+) {
     // Task 1538 Codex P1: destructured immediately so the rest of this
     // (already long-standing) function body is untouched — every field
     // below is used exactly as the old flat `cancel`/`sync_paused`/
@@ -1028,7 +1035,16 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
         }
     }
 
-    let api = Arc::new(ApiClient::new(api_base_url(), session_token, master_key));
+    // The token's buffer MOVES into the client (nothing is copied); the key is copied into it once. Both
+    // wrappers are dropped right here, so the wiped originals do not live as long as this task.
+    let mut session_token = session_token;
+    let api = Arc::new(ApiClient::new(
+        api_base_url(),
+        std::mem::take(&mut *session_token),
+        *master_key,
+    ));
+    drop(session_token);
+    drop(master_key);
     #[cfg(target_os = "windows")]
     crate::windows_cf::track_credentials(&api);
     // Shares `stopping` with `EngineRunner::abort` (task 1538 Codex P1) so
@@ -1041,7 +1057,8 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
         .try_state::<crate::popover_data::PopoverRuntime>()
         .map(|runtime| runtime.transfers.clone())
         .unwrap_or_else(crate::transfer_progress::TransferBoard::new);
-    let bridge = Arc::new(EngineBridge::new_with_stop_flag(db.clone(), api.clone(), stopping).with_transfers(transfers.clone()));
+    let bridge =
+        Arc::new(EngineBridge::new_with_stop_flag(db.clone(), api.clone(), stopping).with_transfers(transfers.clone()));
     // What each request saw of the link (offline vs server did not answer).
     let link = api.link();
     let tracker = Arc::new(StatusTracker::new(Some(sync_root.to_string_lossy().into_owned())));
@@ -1196,6 +1213,8 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
     let mut tick = tokio::time::interval(TICK_INTERVAL);
     let mut sync_complete_notifications = SyncCompleteNotificationState::default();
     let mut quota_warning_notifications = QuotaWarningNotificationState::default();
+    // Working-set signals a busy bridge gate dropped (Task 9 fix round 1, item B): owed to the next tick.
+    let mut owed_working_set_signal = OwedWorkingSetSignal::default();
     let mut last_search_index_signature: Option<u64> = None;
 
     // Known-folder backup (task 0797, Windows): run the source→vault mirror on a
@@ -1304,7 +1323,7 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
                             removed = outcome.removed_shared_file_ids.len(),
                             "revoked shared content removed from local Finder state"
                         );
-                        signal_file_provider_working_set(&db, "shared_roots_changed", &outcome.removed_shared_file_ids);
+                        signal_working_set_owing(&mut owed_working_set_signal, &db, "shared_roots_changed", &outcome.removed_shared_file_ids);
                     }
                     Ok(_) => {}
                     Err(e) => {
@@ -1341,7 +1360,7 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
                                 // invalidations and the REMOTE ingestion applies —
                                 // in a mixed tick two signals would be redundant.
                                 let (reason, ids) = tick_working_set_signal(&outcome.invalidated_item_ids, &tick.applied_item_ids);
-                                signal_file_provider_working_set(&db, reason, &ids);
+                                signal_working_set_owing(&mut owed_working_set_signal, &db, reason, &ids);
                                 if !outcome.paused_op_ids.is_empty() || !outcome.retried_op_ids.is_empty() {
                                     tracing::info!(
                                         paused = outcome.paused_op_ids.len(),
@@ -1357,7 +1376,7 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
                                 // ingestion may still have applied server-side
                                 // changes — Finder must hear about them anyway.
                                 if !tick.applied_item_ids.is_empty() {
-                                    signal_file_provider_working_set(&db, "remote_changes_applied", &tick.applied_item_ids);
+                                    signal_working_set_owing(&mut owed_working_set_signal, &db, "remote_changes_applied", &tick.applied_item_ids);
                                 }
                                 0
                             }
@@ -1698,8 +1717,7 @@ pub fn working_set_signal_needed(changed_parent_ids: &[Option<String>], material
     if materialized.is_empty() {
         return !changed_parent_ids.is_empty();
     }
-    let materialized: std::collections::HashSet<&str> =
-        materialized.iter().map(String::as_str).collect();
+    let materialized: std::collections::HashSet<&str> = materialized.iter().map(String::as_str).collect();
     changed_parent_ids.iter().any(|parent| match parent {
         None => true,
         Some(parent_id) => {
@@ -1723,10 +1741,14 @@ pub fn working_set_signal_needed(changed_parent_ids: &[Option<String>], material
 /// replaces the dead `file-provider-invalidate` Tauri event (zero consumers)
 /// with a real signal through the ObjC FFI bridge. macOS-only and
 /// best-effort: a failed signal is logged and never fails the tick.
+///
+/// Returns `true` when the signal was DROPPED because the shared bridge gate was busy (Task 9 fix round 1,
+/// item B): the caller owes those ids to the next tick (`OwedWorkingSetSignal`), because nothing else
+/// re-sends them.
 #[cfg(target_os = "macos")]
-fn signal_file_provider_working_set(db: &StateDb, reason: &str, item_ids: &[String]) {
+fn signal_file_provider_working_set(db: &StateDb, reason: &str, item_ids: &[String]) -> bool {
     if !crate::macos_file_provider::should_signal_working_set(item_ids) {
-        return;
+        return false;
     }
     // Audit P0 item 4: filter the signal to changes whose old-or-new parent
     // is materialized (the set the extension publishes via ReportMaterialized).
@@ -1737,12 +1759,31 @@ fn signal_file_provider_working_set(db: &StateDb, reason: &str, item_ids: &[Stri
         .collect();
     let materialized = db.materialized_containers().unwrap_or_default();
     if !working_set_signal_needed(&parents, &materialized) {
-        tracing::debug!(reason, items = item_ids.len(), "no materialized parent changed; skipping the working-set signal");
-        return;
+        tracing::debug!(
+            reason,
+            items = item_ids.len(),
+            "no materialized parent changed; skipping the working-set signal"
+        );
+        return false;
     }
-    match crate::macos_file_provider::signal_working_set() {
+    // Through the one bridge gate, like every other File Provider call (lead ruling T8-gate-all): a busy
+    // gate fails at once, and the signal is reported as dropped so the caller can owe it to the next tick.
+    let mut dropped = false;
+    match crate::finder_setup::macos_ports::signal_working_set() {
         Ok(outcome) => {
-            tracing::debug!(reason, items = item_ids.len(), ?outcome, "signaled the File Provider working set");
+            tracing::debug!(
+                reason,
+                items = item_ids.len(),
+                ?outcome,
+                "signaled the File Provider working set"
+            );
+        }
+        Err(e) if crate::finder_setup::macos_ports::is_gate_busy(&e) => {
+            dropped = true;
+            tracing::warn!(
+                reason,
+                "the working-set signal met a busy bridge gate; it is owed to the next tick"
+            );
         }
         Err(e) => {
             tracing::warn!(reason, error = %e, "signaling the File Provider working set failed (best-effort)");
@@ -1754,13 +1795,68 @@ fn signal_file_provider_working_set(db: &StateDb, reason: &str, item_ids: &[Stri
     if let Err(e) = db.sweep_file_changes(now_secs() - 7 * 24 * 3600) {
         tracing::debug!(error = %e, "change-log sweep failed (best-effort)");
     }
+    dropped
 }
 
 /// Non-macOS stub: Windows CFAPI refreshes placeholders natively and Linux
 /// FUSE is an unmounted prototype.
 #[cfg(not(target_os = "macos"))]
-fn signal_file_provider_working_set(db: &StateDb, reason: &str, item_ids: &[String]) {
+fn signal_file_provider_working_set(db: &StateDb, reason: &str, item_ids: &[String]) -> bool {
     let _ = (db, reason, item_ids);
+    false
+}
+
+/// The most ids a dropped signal's debt keeps. A gate that stays busy for hours must not make the debt
+/// grow without bound.
+const OWED_SIGNAL_MAX_IDS: usize = 2000;
+
+/// What the debt becomes past the cap: one id no row has. `working_set_signal_needed` treats the
+/// unknown parent as a change that always signals, so the signal still goes out, unfiltered.
+const OWED_SIGNAL_UNKNOWN_ID: &str = "__owed-working-set-signal__";
+
+/// Working-set signals that met a busy bridge gate and are owed to the next tick (Task 9 fix round 1,
+/// item B). The signal is the daemon's ONLY replica-refresh channel; the gate never queues, so a signal
+/// that finds it busy (a reconciler `addDomain`, a window-focus read, the startup sweep) is dropped, and
+/// before this nothing re-sent it: on a quiet account Finder stayed stale until some later tick happened
+/// to change a materialized parent. Now the dropped ids are added to the next tick's signal, so the
+/// staleness is at most one tick (`TICK_INTERVAL`, 30 s).
+#[derive(Debug, Default)]
+struct OwedWorkingSetSignal {
+    ids: Vec<String>,
+}
+
+impl OwedWorkingSetSignal {
+    /// What this tick should signal: the debt, then this tick's ids, first-seen order, no duplicates. Not
+    /// empty whenever something is owed, which keeps `should_signal_working_set` from skipping a quiet tick.
+    fn merged_with(&self, ids: &[String]) -> Vec<String> {
+        let mut merged: Vec<String> = Vec::with_capacity(self.ids.len() + ids.len());
+        for id in self.ids.iter().chain(ids) {
+            if !merged.contains(id) {
+                merged.push(id.clone());
+            }
+        }
+        merged
+    }
+
+    /// After a signal attempt for `sent` (what `merged_with` returned): a drop makes it the new debt,
+    /// anything else pays the debt.
+    fn record(&mut self, dropped: bool, sent: Vec<String>) {
+        if !dropped {
+            self.ids.clear();
+        } else if sent.len() > OWED_SIGNAL_MAX_IDS {
+            self.ids = vec![OWED_SIGNAL_UNKNOWN_ID.to_string()];
+        } else {
+            self.ids = sent;
+        }
+    }
+}
+
+/// One working-set signal with the debt carried: signals `owed + ids`, and owes them again when the gate
+/// was busy. Every call site in the tick loop goes through this one.
+fn signal_working_set_owing(owed: &mut OwedWorkingSetSignal, db: &StateDb, reason: &str, ids: &[String]) {
+    let merged = owed.merged_with(ids);
+    let dropped = signal_file_provider_working_set(db, reason, &merged);
+    owed.record(dropped, merged);
 }
 
 /// Task 1697 review fix (T3): ONE working-set signal per tick. Merges the
@@ -1976,8 +2072,13 @@ mod tests {
             let _ = rx.await;
         });
 
-        let confirmed =
-            stop_task_and_confirm(Some(tx), Some(task), Duration::from_millis(200), Duration::from_millis(200)).await;
+        let confirmed = stop_task_and_confirm(
+            Some(tx),
+            Some(task),
+            Duration::from_millis(200),
+            Duration::from_millis(200),
+        )
+        .await;
 
         assert!(confirmed, "a task that honors cancel must be confirmed stopped");
     }
@@ -2013,8 +2114,13 @@ mod tests {
             }
         });
 
-        let confirmed =
-            stop_task_and_confirm(Some(_tx), Some(task), Duration::from_millis(30), Duration::from_millis(300)).await;
+        let confirmed = stop_task_and_confirm(
+            Some(_tx),
+            Some(task),
+            Duration::from_millis(30),
+            Duration::from_millis(300),
+        )
+        .await;
 
         assert!(
             confirmed,
@@ -2082,11 +2188,17 @@ mod tests {
         assert!(!health.is_expired());
 
         health.note_result(Some(&other_error()));
-        assert!(!health.is_expired(), "an unrelated error must not itself trip the banner");
+        assert!(
+            !health.is_expired(),
+            "an unrelated error must not itself trip the banner"
+        );
 
         // The streak must still be at 2 — one more REAL auth failure trips it.
         health.note_result(Some(&auth_error()));
-        assert!(health.is_expired(), "the unrelated error must not have reset the streak back to 0");
+        assert!(
+            health.is_expired(),
+            "the unrelated error must not have reset the streak back to 0"
+        );
     }
 
     #[test]
@@ -2104,33 +2216,144 @@ mod tests {
         // two more failures alone must not re-trip it.
         health.note_result(Some(&auth_error()));
         health.note_result(Some(&auth_error()));
-        assert!(!health.is_expired(), "the streak must have been reset to 0, not left at 3");
+        assert!(
+            !health.is_expired(),
+            "the streak must have been reset to 0, not left at 3"
+        );
     }
 
     // Task 1697 review fix (T3): the per-tick signal merge decision. RED-first:
-// written against the pass-through stub and seen failing (it returned an
-// empty batch for non-empty inputs) before the merge landed.
-#[test]
-fn tick1697_working_set_signal_merges_local_and_remote_into_one_signal() {
-    // Local only: unchanged reason, ids pass through.
-    let (reason, ids) = tick_working_set_signal(&["f-1".to_string()], &[]);
-    assert_eq!(reason, "operations_applied");
-    assert_eq!(ids, vec!["f-1".to_string()]);
-    // Remote only: the ingestion side is named.
-    let (reason, ids) = tick_working_set_signal(&[], &["r-1".to_string()]);
-    assert_eq!(reason, "remote_changes_applied");
-    assert_eq!(ids, vec!["r-1".to_string()]);
-    // Mixed tick: ONE signal with the UNION, never two signals.
-    let (reason, ids) = tick_working_set_signal(&["f-1".to_string(), "f-2".to_string()], &["r-1".to_string(), "f-2".to_string()]);
-    assert_eq!(reason, "operations_applied+remote_changes_applied");
-    assert_eq!(ids, vec!["f-1".to_string(), "f-2".to_string(), "r-1".to_string()],
-        "the union dedupes while preserving first-seen order");
-    // Nothing changed: same shape as before the fix (empty batch; the macOS
-    // signal path no-ops on it but still runs its log sweep).
-    let (reason, ids) = tick_working_set_signal(&[], &[]);
-    assert_eq!(reason, "operations_applied");
-    assert!(ids.is_empty());
-}
+    // written against the pass-through stub and seen failing (it returned an
+    // empty batch for non-empty inputs) before the merge landed.
+    #[test]
+    fn tick1697_working_set_signal_merges_local_and_remote_into_one_signal() {
+        // Local only: unchanged reason, ids pass through.
+        let (reason, ids) = tick_working_set_signal(&["f-1".to_string()], &[]);
+        assert_eq!(reason, "operations_applied");
+        assert_eq!(ids, vec!["f-1".to_string()]);
+        // Remote only: the ingestion side is named.
+        let (reason, ids) = tick_working_set_signal(&[], &["r-1".to_string()]);
+        assert_eq!(reason, "remote_changes_applied");
+        assert_eq!(ids, vec!["r-1".to_string()]);
+        // Mixed tick: ONE signal with the UNION, never two signals.
+        let (reason, ids) = tick_working_set_signal(
+            &["f-1".to_string(), "f-2".to_string()],
+            &["r-1".to_string(), "f-2".to_string()],
+        );
+        assert_eq!(reason, "operations_applied+remote_changes_applied");
+        assert_eq!(
+            ids,
+            vec!["f-1".to_string(), "f-2".to_string(), "r-1".to_string()],
+            "the union dedupes while preserving first-seen order"
+        );
+        // Nothing changed: same shape as before the fix (empty batch; the macOS
+        // signal path no-ops on it but still runs its log sweep).
+        let (reason, ids) = tick_working_set_signal(&[], &[]);
+        assert_eq!(reason, "operations_applied");
+        assert!(ids.is_empty());
+    }
+
+    // Task 9 fix round 1 (item B): a working-set signal that meets a busy bridge gate is owed to the next
+    // tick. The signal is the daemon's ONLY replica-refresh channel, so a dropped one would leave Finder
+    // stale until some later tick happened to change a materialized parent.
+    #[test]
+    fn a_dropped_working_set_signal_is_owed_to_the_next_tick_and_a_delivered_one_clears_the_debt() {
+        let mut owed = OwedWorkingSetSignal::default();
+        assert_eq!(
+            owed.merged_with(&[]),
+            Vec::<String>::new(),
+            "nothing owed, nothing to signal"
+        );
+        // The first tick's signal was dropped on a busy gate.
+        owed.record(true, vec!["a".to_string(), "b".to_string()]);
+        // A quiet next tick still signals: the owed ids make the batch non-empty, which is what keeps
+        // `should_signal_working_set` from skipping it.
+        assert_eq!(owed.merged_with(&[]), vec!["a".to_string(), "b".to_string()]);
+        // A busy next tick adds its own ids to the debt, first-seen order, no duplicates.
+        let merged = owed.merged_with(&["b".to_string(), "c".to_string()]);
+        assert_eq!(merged, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        owed.record(true, merged);
+        // Delivered: the debt is paid.
+        let merged = owed.merged_with(&["d".to_string()]);
+        assert_eq!(
+            merged,
+            vec!["a".to_string(), "b".to_string(), "c".to_string(), "d".to_string()]
+        );
+        owed.record(false, merged);
+        assert_eq!(owed.merged_with(&[]), Vec::<String>::new());
+    }
+
+    /// A gate that stays busy for hours must not make the debt grow without bound: past the cap the debt
+    /// is one id no row has, which `working_set_signal_needed` treats as an unknown parent and signals.
+    #[test]
+    fn the_owed_working_set_signal_is_bounded() {
+        let mut owed = OwedWorkingSetSignal::default();
+        let many: Vec<String> = (0..OWED_SIGNAL_MAX_IDS + 1).map(|n| format!("f-{n}")).collect();
+        owed.record(true, many);
+        assert_eq!(
+            owed.merged_with(&["x".to_string()]),
+            vec![OWED_SIGNAL_UNKNOWN_ID.to_string(), "x".to_string()]
+        );
+        assert!(
+            working_set_signal_needed(&[None], &["folder-1".to_string()]),
+            "an unknown parent always signals"
+        );
+    }
+
+    /// The reconciler's gate is the one `signal_file_provider_working_set` takes: with it held, the signal
+    /// is DROPPED, and says so (`true`), and the next tick's call carries the ids. No real bridge call is
+    /// made: a busy gate answers at once, and the test only ever runs calls that hit it busy.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_working_set_signal_that_meets_a_busy_gate_reports_the_drop_and_the_debt_carries_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let ids = vec!["f-1".to_string()];
+        let mut owed = OwedWorkingSetSignal::default();
+        crate::finder_setup::macos_ports::with_shared_gate_held(|| {
+            assert!(
+                signal_file_provider_working_set(&db, "operations_applied", &ids),
+                "a busy gate drops the signal, and says so"
+            );
+            // Nothing to signal is not a drop.
+            assert!(!signal_file_provider_working_set(&db, "operations_applied", &[]));
+            // The wrapper the tick loop uses: the drop becomes a debt, and the next tick adds to it.
+            signal_working_set_owing(&mut owed, &db, "operations_applied", &ids);
+            assert_eq!(owed.merged_with(&[]), ids);
+            signal_working_set_owing(&mut owed, &db, "remote_changes_applied", &["r-1".to_string()]);
+            assert_eq!(
+                owed.merged_with(&[]),
+                vec!["f-1".to_string(), "r-1".to_string()],
+                "still owed, nothing lost"
+            );
+        });
+    }
+
+    /// The tick loop uses the owing wrapper at every one of its three call sites, so no signal bypasses the debt.
+    #[test]
+    fn every_working_set_signal_in_the_tick_loop_goes_through_the_owed_wrapper() {
+        let source = include_str!("runner.rs").replace("\r\n", "\n");
+        let production = &source[..source.find("#[cfg(test)]\nmod tests {").expect("the tests follow")];
+        assert_eq!(
+            production.matches("signal_file_provider_working_set(&db").count(),
+            0,
+            "the tick loop calls the signal directly"
+        );
+        assert_eq!(
+            production
+                .matches("signal_file_provider_working_set(db, reason, &merged)")
+                .count(),
+            1,
+            "only the owing wrapper calls the signal"
+        );
+        assert_eq!(
+            production
+                .matches("signal_working_set_owing(&mut owed_working_set_signal,")
+                .count(),
+            3,
+            "the three tick call sites"
+        );
+    }
 
     // Task 1697: the retired `file-provider-invalidate` Tauri event and its
     // payload builder are gone — the only replica-refresh channel is the
@@ -2147,7 +2370,9 @@ fn tick1697_working_set_signal_merges_local_and_remote_into_one_signal() {
     fn signal_file_provider_working_set_decision_gates_on_changed_items() {
         // Mirrors macos_file_provider::should_signal_working_set so a runner
         // change that bypasses the gate fails here too.
-        assert!(crate::macos_file_provider::should_signal_working_set(&["f-1".to_string()]));
+        assert!(crate::macos_file_provider::should_signal_working_set(&[
+            "f-1".to_string()
+        ]));
         assert!(!crate::macos_file_provider::should_signal_working_set(&[]));
     }
 
@@ -2159,7 +2384,10 @@ fn tick1697_working_set_signal_merges_local_and_remote_into_one_signal() {
     #[test]
     fn working_set_signal_filter_skips_batches_with_no_materialized_parent() {
         assert!(
-            !working_set_signal_needed(&[Some("folder-9".into()), Some("folder-8".into())], &["folder-1".into()]),
+            !working_set_signal_needed(
+                &[Some("folder-9".into()), Some("folder-8".into())],
+                &["folder-1".into()]
+            ),
             "no changed parent is materialized: no signal"
         );
         assert!(
@@ -2167,7 +2395,10 @@ fn tick1697_working_set_signal_merges_local_and_remote_into_one_signal() {
             "a materialized parent changed: signal"
         );
         assert!(
-            working_set_signal_needed(&[Some("folder-9".into()), Some("folder-1".into())], &["folder-1".into()]),
+            working_set_signal_needed(
+                &[Some("folder-9".into()), Some("folder-1".into())],
+                &["folder-1".into()]
+            ),
             "ANY changed parent materialized: signal"
         );
     }
@@ -2178,21 +2409,24 @@ fn tick1697_working_set_signal_merges_local_and_remote_into_one_signal() {
             working_set_signal_needed(&[Some("folder-9".into())], &[]),
             "an untracked materialized set = the whole dataset (fail open)"
         );
-        assert!(
-            !working_set_signal_needed(&[], &[]),
-            "an empty batch never signals"
-        );
+        assert!(!working_set_signal_needed(&[], &[]), "an empty batch never signals");
     }
 
     #[test]
     fn working_set_signal_filter_always_signals_root_and_unknown_parents() {
         let materialized = vec!["folder-1".to_string()];
         assert!(
-            working_set_signal_needed(&[Some("NSFileProviderRootContainerItemIdentifier".into())], &materialized),
+            working_set_signal_needed(
+                &[Some("NSFileProviderRootContainerItemIdentifier".into())],
+                &materialized
+            ),
             "the single root container is always materialized"
         );
         assert!(working_set_signal_needed(&[Some("__fp_root__".into())], &materialized));
-        assert!(working_set_signal_needed(&[None], &materialized), "unknown parent (a deletion whose row is gone) fails open");
+        assert!(
+            working_set_signal_needed(&[None], &materialized),
+            "unknown parent (a deletion whose row is gone) fails open"
+        );
         assert!(
             !working_set_signal_needed(&[Some("namespace:my_files".into())], &materialized),
             "1701: synthetic namespace ids are no longer a Finder surface — they are not materialized parents"
@@ -2485,8 +2719,15 @@ fn tick1697_working_set_signal_merges_local_and_remote_into_one_signal() {
         assert_eq!(payload["files_remaining"], 0);
         assert_eq!(payload["bytes_total"], 500, "the final frame of the batch: 500 of 500");
         assert_eq!(payload["bytes_done"], 500);
-        assert!(payload["last_tick_ok_at"].as_i64().unwrap() > 0, "a good check stamps its time");
-        assert_eq!(board.finished_bytes(), 0, "nothing left: the next batch starts its bar at 0");
+        assert!(
+            payload["last_tick_ok_at"].as_i64().unwrap() > 0,
+            "a good check stamps its time"
+        );
+        assert_eq!(
+            board.finished_bytes(),
+            0,
+            "nothing left: the next batch starts its bar at 0"
+        );
     }
 
     #[test]
@@ -2524,7 +2765,10 @@ fn tick1697_working_set_signal_merges_local_and_remote_into_one_signal() {
         let tracker = StatusTracker::new(None);
         let payload = finish_tick_payload(&tracker, Ok(()), &link, 0, &db, &board);
         assert_eq!(payload["state"], "offline");
-        assert_eq!(payload["legacy_state"], "idle", "an Ok tick still reads idle to old consumers");
+        assert_eq!(
+            payload["legacy_state"], "idle",
+            "an Ok tick still reads idle to old consumers"
+        );
         assert_eq!(payload["last_tick_ok_at"], serde_json::Value::Null);
     }
 
@@ -2548,7 +2792,8 @@ fn tick1697_working_set_signal_merges_local_and_remote_into_one_signal() {
         // `run` needs a real window system, so its wiring is asserted on the source (CRLF
         // normalised: a Windows checkout has CRLF, slice 5's lesson).
         let source = include_str!("runner.rs").replace("\r\n", "\n");
-        let start = source.find("async fn run(app: AppHandle").expect("run exists");
+        // The signature is wrapped over lines by rustfmt. (A single-line needle would also find this very line.)
+        let start = source.find("async fn run(\n    app: AppHandle").expect("run exists");
         let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
         for needle in [
             "emit_payload(&app, tracker.running().to_json());",
@@ -2560,12 +2805,25 @@ fn tick1697_working_set_signal_merges_local_and_remote_into_one_signal() {
             ".with_transfers(transfers.clone())",
             "let link = api.link();",
         ] {
-            assert_eq!(body.matches(needle).count(), 1, "`run` must contain exactly one `{needle}`");
+            assert_eq!(
+                body.matches(needle).count(),
+                1,
+                "`run` must contain exactly one `{needle}`"
+            );
         }
         // The old bare emitters are gone from the loop: each `emit_status` left in `run` is a
         // start-up failure (`"error"`), never a state the tracker owns.
-        for old in ["emit_status(&app, \"idle\"", "emit_status(&app, \"paused\"", "emit_status(&app, \"running\"", "emit_status(&app, \"stopped\""] {
-            assert_eq!(body.matches(old).count(), 0, "`run` still emits `{old}` around the tracker");
+        for old in [
+            "emit_status(&app, \"idle\"",
+            "emit_status(&app, \"paused\"",
+            "emit_status(&app, \"running\"",
+            "emit_status(&app, \"stopped\"",
+        ] {
+            assert_eq!(
+                body.matches(old).count(),
+                0,
+                "`run` still emits `{old}` around the tracker"
+            );
         }
     }
 
@@ -2616,7 +2874,10 @@ fn tick1697_working_set_signal_merges_local_and_remote_into_one_signal() {
         let board = crate::transfer_progress::TransferBoard::new();
         let activity = current_activity(&db, &board);
         assert_eq!(activity.files_remaining, 1, "one file left, not two");
-        assert_eq!(activity.bytes_total, 100, "the backed-off file's 5000 bytes are not in the total");
+        assert_eq!(
+            activity.bytes_total, 100,
+            "the backed-off file's 5000 bytes are not in the total"
+        );
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -2688,7 +2949,10 @@ fn tick1697_working_set_signal_merges_local_and_remote_into_one_signal() {
         ));
         paused.store(true, Ordering::Relaxed);
         let paused_event = wait_for_event(&events, Duration::from_millis(3000), |e| e["state"] == "paused").await;
-        assert!(paused_event.is_some(), "the pulse must say `paused` within two seconds of the flag");
+        assert!(
+            paused_event.is_some(),
+            "the pulse must say `paused` within two seconds of the flag"
+        );
         pulse.abort();
     }
 
@@ -2765,7 +3029,11 @@ fn tick1697_working_set_signal_merges_local_and_remote_into_one_signal() {
 
         let outcome = runner.abort().await;
 
-        assert_eq!(outcome, AbortOutcome::Stopped, "a cooperative task must classify as Stopped");
+        assert_eq!(
+            outcome,
+            AbortOutcome::Stopped,
+            "a cooperative task must classify as Stopped"
+        );
     }
 
     /// The pathological case (task 1538): a task with NO await point cannot

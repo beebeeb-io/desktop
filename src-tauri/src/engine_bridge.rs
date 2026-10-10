@@ -1111,7 +1111,8 @@ impl EngineBridge {
                 self.record_transfer_done(crate::transfer_progress::Direction::Up, &server_file_id, plaintext_size);
                 #[cfg(target_os = "windows")]
                 self.defer_local_upload_finalization(op, &server_file_id, sync_root, payload_path)?;
-                self.db.track_staged_payload(&payload_path.to_string_lossy(), None, true)?;
+                self.db
+                    .track_staged_payload(&payload_path.to_string_lossy(), None, true)?;
                 self.db.clear_upload_resume(&op.op_id)?;
                 // Task 1700: post-complete thumbnail work must never fail the upload,
                 // but its failure used to vanish into a `tracing::warn!` that no
@@ -1310,7 +1311,10 @@ impl EngineBridge {
             // A failed stamp or unlink retains its durable completed proof.
             match self.db.upload_finalizations() {
                 Ok(rows) if rows.iter().any(|row| row.op_id == op.op_id) => return thumbnails,
-                Err(e) => { tracing::warn!(error = %e, "cannot inspect finalization journal"); return thumbnails; }
+                Err(e) => {
+                    tracing::warn!(error = %e, "cannot inspect finalization journal");
+                    return thumbnails;
+                }
                 _ => {}
             }
         }
@@ -1394,14 +1398,28 @@ impl EngineBridge {
 
     /// Journal native stamping before any cancellable post-completion work.
     #[cfg(target_os = "windows")]
-    fn defer_local_upload_finalization(&self, op: &PendingOperation, server_file_id: &str, sync_root: &Path, payload_path: &Path) -> anyhow::Result<()> {
-        let is_create = op.metadata_json.as_deref()
+    fn defer_local_upload_finalization(
+        &self,
+        op: &PendingOperation,
+        server_file_id: &str,
+        sync_root: &Path,
+        payload_path: &Path,
+    ) -> anyhow::Result<()> {
+        let is_create = op
+            .metadata_json
+            .as_deref()
             .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
             .is_some_and(|m| m["operation"].as_str() == Some("create_file"));
-        if !is_create { return Ok(()); }
-        let Some(target_path) = op.target_path.as_deref() else { return Ok(()); };
+        if !is_create {
+            return Ok(());
+        }
+        let Some(target_path) = op.target_path.as_deref() else {
+            return Ok(());
+        };
         let on_disk = local_file_path_under_sync_root(sync_root, target_path)?;
-        if !on_disk.is_file() { return Ok(()); }
+        if !on_disk.is_file() {
+            return Ok(());
+        }
         self.db.put_upload_finalization(&crate::state_db::UploadFinalization {
             op_id: op.op_id.clone(),
             local_file_id: op.file_id.as_deref().unwrap_or(server_file_id).to_string(),
@@ -3084,7 +3102,8 @@ impl EngineBridge {
     /// instead** — that variant never writes plaintext to disk, satisfying the
     /// zero-knowledge requirement for on-demand CF hydration.
     pub async fn hydrate_file(&self, file_id: &str, dest_path: &Path, allowed_roots: &[&Path]) -> anyhow::Result<()> {
-        self.hydrate_file_with_progress(file_id, dest_path, allowed_roots, None).await
+        self.hydrate_file_with_progress(file_id, dest_path, allowed_roots, None)
+            .await
     }
 
     /// [`Self::hydrate_file`] plus an optional `progress(done_bytes,
@@ -3111,9 +3130,7 @@ impl EngineBridge {
         // decrypt-oracle + arbitrary-write primitive (e.g. writing decrypted
         // vault plaintext over ~/.ssh/authorized_keys).
         if !hydrate_dest_is_allowed(dest_path, allowed_roots) {
-            return Err(anyhow::anyhow!(
-                "hydrate destination is not within an allowed root"
-            ));
+            return Err(anyhow::anyhow!("hydrate destination is not within an allowed root"));
         }
         self.ensure_shared_hydrate_path_safe(file_id)?;
         // RAII-style: any early return below the status flip should
@@ -3353,7 +3370,11 @@ impl EngineBridge {
         }
     }
 
-    async fn do_hydrate(&self, file_id: &str, progress: Option<&HydrateProgressFn>) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+    async fn do_hydrate(
+        &self,
+        file_id: &str,
+        progress: Option<&HydrateProgressFn>,
+    ) -> anyhow::Result<Zeroizing<Vec<u8>>> {
         let _file_uuid: uuid::Uuid = file_id
             .parse()
             .map_err(|e| anyhow::anyhow!("invalid file_id (not a UUID): {e}"))?;
@@ -3919,7 +3940,11 @@ impl EngineBridge {
 
         if !is_text {
             // Binary preview only ever shows size — the bytes are never read.
-            return ConflictContentSide { size_bytes: Some(size_bytes), text: None, unavailable_reason: None };
+            return ConflictContentSide {
+                size_bytes: Some(size_bytes),
+                text: None,
+                unavailable_reason: None,
+            };
         }
         if size_bytes > CONFLICT_PREVIEW_TEXT_MAX_BYTES as u64 {
             return ConflictContentSide {
@@ -3943,7 +3968,10 @@ impl EngineBridge {
         // `take(LIMIT + 1)` bounds the read itself — never `std::fs::read`
         // (unbounded) — so even a TOCTOU race where the file grows after the
         // `metadata()` call above can produce at most LIMIT+1 bytes.
-        match file.take(CONFLICT_PREVIEW_TEXT_MAX_BYTES as u64 + 1).read_to_end(&mut bytes) {
+        match file
+            .take(CONFLICT_PREVIEW_TEXT_MAX_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+        {
             Ok(_) => content_side_from_bytes(bytes, is_text),
             Err(e) => ConflictContentSide {
                 size_bytes: Some(size_bytes),
@@ -3987,7 +4015,11 @@ impl EngineBridge {
 
         if !is_text {
             // Binary preview only ever shows size — never download the bytes.
-            return ConflictContentSide { size_bytes, text: None, unavailable_reason: None };
+            return ConflictContentSide {
+                size_bytes,
+                text: None,
+                unavailable_reason: None,
+            };
         }
         let within_limit = matches!(size_bytes, Some(s) if s <= CONFLICT_PREVIEW_TEXT_MAX_BYTES as u64);
         if !within_limit {
@@ -4059,7 +4091,11 @@ const CONFLICT_PREVIEW_TEXT_MAX_BYTES: usize = 256 * 1024;
 fn content_side_from_bytes(bytes: Vec<u8>, is_text: bool) -> ConflictContentSide {
     let size_bytes = Some(bytes.len() as u64);
     if !is_text {
-        return ConflictContentSide { size_bytes, text: None, unavailable_reason: None };
+        return ConflictContentSide {
+            size_bytes,
+            text: None,
+            unavailable_reason: None,
+        };
     }
     if bytes.len() > CONFLICT_PREVIEW_TEXT_MAX_BYTES {
         return ConflictContentSide {
@@ -4069,7 +4105,11 @@ fn content_side_from_bytes(bytes: Vec<u8>, is_text: bool) -> ConflictContentSide
         };
     }
     match String::from_utf8(bytes) {
-        Ok(text) => ConflictContentSide { size_bytes, text: Some(text), unavailable_reason: None },
+        Ok(text) => ConflictContentSide {
+            size_bytes,
+            text: Some(text),
+            unavailable_reason: None,
+        },
         Err(_) => ConflictContentSide {
             size_bytes,
             text: None,
@@ -4828,7 +4868,6 @@ fn plan_hydration_chunk_range(
     }))
 }
 
-
 pub(crate) fn local_file_path_under_sync_root(sync_root: &Path, rel_path: &str) -> anyhow::Result<PathBuf> {
     crate::reject_unsafe_rel_path(rel_path)
         .map_err(|e| anyhow::anyhow!("local path must stay under the sync root: {e}"))?;
@@ -5117,7 +5156,13 @@ pub(crate) fn write_hydrated_plaintext(dest_path: &Path, allowed_roots: &[&Path]
     let leaf_c = path_to_cstring(leaf)?;
     // SAFETY: `dir_fd` is a live, already-validated directory fd; `leaf_c` is
     // NUL-terminated. We only inspect the syscall's return value / errno.
-    let probe = unsafe { libc::openat(dir_fd.as_raw_fd(), leaf_c.as_ptr(), libc::O_NOFOLLOW | libc::O_RDONLY | libc::O_CLOEXEC) };
+    let probe = unsafe {
+        libc::openat(
+            dir_fd.as_raw_fd(),
+            leaf_c.as_ptr(),
+            libc::O_NOFOLLOW | libc::O_RDONLY | libc::O_CLOEXEC,
+        )
+    };
     if probe < 0 {
         let err = std::io::Error::last_os_error();
         if err.raw_os_error() != Some(libc::ENOENT) {
@@ -5162,7 +5207,14 @@ pub(crate) fn write_hydrated_plaintext(dest_path: &Path, allowed_roots: &[&Path]
     // the already-validated directory inode, not a fresh path resolution.
     // SAFETY: both name arguments are NUL-terminated `CString`s alive for this
     // call; `dir_fd` is a live, already-validated directory fd.
-    let rc = unsafe { libc::renameat(dir_fd.as_raw_fd(), temp_leaf_c.as_ptr(), dir_fd.as_raw_fd(), leaf_c.as_ptr()) };
+    let rc = unsafe {
+        libc::renameat(
+            dir_fd.as_raw_fd(),
+            temp_leaf_c.as_ptr(),
+            dir_fd.as_raw_fd(),
+            leaf_c.as_ptr(),
+        )
+    };
     if rc != 0 {
         let err = std::io::Error::last_os_error();
         remove_temp();
@@ -5203,17 +5255,20 @@ fn open_dir_relative_no_follow(
     component: &std::ffi::OsStr,
 ) -> std::io::Result<std::os::unix::io::OwnedFd> {
     use std::os::unix::io::FromRawFd;
-    if component.is_empty()
-        || component == std::ffi::OsStr::new(".")
-        || component == std::ffi::OsStr::new("..")
-    {
+    if component.is_empty() || component == std::ffi::OsStr::new(".") || component == std::ffi::OsStr::new("..") {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "unsafe path component in hydrate destination",
         ));
     }
     let c = path_to_cstring(component)?;
-    let raw = unsafe { libc::openat(dir_fd, c.as_ptr(), libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+    let raw = unsafe {
+        libc::openat(
+            dir_fd,
+            c.as_ptr(),
+            libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
     if raw < 0 {
         return Err(std::io::Error::last_os_error());
     }
@@ -5275,10 +5330,7 @@ fn stage_finder_contents(
 }
 
 fn default_finder_staging_root() -> PathBuf {
-    let primary = dirs::cache_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join("beebeeb")
-        .join("finder-writes");
+    let primary = finder_staging_cache_base().join("beebeeb").join("finder-writes");
     match verify_staging_root_writable(&primary) {
         Ok(()) => primary,
         Err(e) => {
@@ -5292,6 +5344,33 @@ fn default_finder_staging_root() -> PathBuf {
             fallback
         }
     }
+}
+
+/// The directory that holds `beebeeb/finder-writes`: the user's cache dir (the temp dir if the
+/// OS gives none).
+#[cfg(not(test))]
+fn finder_staging_cache_base() -> PathBuf {
+    dirs::cache_dir().unwrap_or_else(std::env::temp_dir)
+}
+
+/// A test build stages under a per-process sandbox, never the person's real
+/// `~/Library/Caches/beebeeb/finder-writes`: the installed app stages there too, and every test
+/// that queues a Finder write (engine bridge, IPC socket, watcher: 17 of them leave a plaintext
+/// copy behind) would otherwise add files to it. Pinned by
+/// `unit_tests_stage_finder_writes_in_a_sandbox_never_the_real_cache`.
+#[cfg(test)]
+fn finder_staging_cache_base() -> PathBuf {
+    crate::test_sandbox::dir("cache").expect("create the unit-test sandbox")
+}
+
+/// Where Finder-write plaintext copies are staged: the preferred directory and the temp-dir fallback
+/// (`default_finder_staging_root` picks one of them). The account reset and the sign-out purge sweep both, so a
+/// copy no row points at any more does not outlive the account. Paths only: nothing is created or touched here.
+pub(crate) fn finder_staging_candidates() -> Vec<PathBuf> {
+    vec![
+        finder_staging_cache_base().join("beebeeb").join("finder-writes"),
+        std::env::temp_dir().join("beebeeb").join("finder-writes"),
+    ]
 }
 
 fn verify_staging_root_writable(root: &Path) -> std::io::Result<()> {
@@ -6283,7 +6362,10 @@ pub async fn sync_tick_outcome(
                 bridge.db().clear_resnapshot_request(seen)?;
             }
             applied_item_ids.extend(applied);
-            return Ok(SyncTickOutcome { conflicts, applied_item_ids: dedupe(applied_item_ids) });
+            return Ok(SyncTickOutcome {
+                conflicts,
+                applied_item_ids: dedupe(applied_item_ids),
+            });
         }
         Some(_) if needs_resnapshot => {
             tracing::info!("sync_tick: re-snapshot requested (gap recovery); bootstrapping");
@@ -6293,7 +6375,10 @@ pub async fn sync_tick_outcome(
                 bridge.db().clear_resnapshot_request(seen)?;
             }
             applied_item_ids.extend(applied);
-            return Ok(SyncTickOutcome { conflicts, applied_item_ids: dedupe(applied_item_ids) });
+            return Ok(SyncTickOutcome {
+                conflicts,
+                applied_item_ids: dedupe(applied_item_ids),
+            });
         }
         Some(c) => c,
     };
@@ -6306,7 +6391,10 @@ pub async fn sync_tick_outcome(
             // snapshot — just skip this tick and retry next time. The cursor is
             // unchanged, so no op is missed.
             tracing::warn!(error = %e, cursor, "sync_tick: /sync/ops failed; retrying next tick");
-            return Ok(SyncTickOutcome { conflicts, applied_item_ids: dedupe(applied_item_ids) });
+            return Ok(SyncTickOutcome {
+                conflicts,
+                applied_item_ids: dedupe(applied_item_ids),
+            });
         }
     };
 
@@ -6343,7 +6431,10 @@ pub async fn sync_tick_outcome(
                 tracing::warn!(error = %e, "sync_tick: snapshot freshness probe failed; retrying next tick");
             }
         }
-        return Ok(SyncTickOutcome { conflicts, applied_item_ids: dedupe(applied_item_ids) });
+        return Ok(SyncTickOutcome {
+            conflicts,
+            applied_item_ids: dedupe(applied_item_ids),
+        });
     }
 
     // Apply the delta ops in order, advancing the cursor to the max seq_id.
@@ -6361,7 +6452,10 @@ pub async fn sync_tick_outcome(
     if max_seq > cursor {
         bridge.db().set_sync_cursor(max_seq)?;
     }
-    Ok(SyncTickOutcome { conflicts, applied_item_ids: dedupe(applied_item_ids) })
+    Ok(SyncTickOutcome {
+        conflicts,
+        applied_item_ids: dedupe(applied_item_ids),
+    })
 }
 
 /// Drop duplicate ids from one tick's applied batch (an item can be applied
@@ -7377,7 +7471,8 @@ mod tests {
         let source = dir.path().join("report.txt");
         std::fs::write(&source, b"finder data").unwrap();
         let db = Arc::new(StateDb::open(dir.path().join("state.db")).unwrap());
-        let staged = crate::staged_payload::StagedPayload::copy(db.clone(), &source, dir.path().join("staging")).unwrap();
+        let staged =
+            crate::staged_payload::StagedPayload::copy(db.clone(), &source, dir.path().join("staging")).unwrap();
         assert_eq!(std::fs::read(staged.path()).unwrap(), b"finder data");
         assert_eq!(db.staged_payloads_for_signout().unwrap().len(), 1);
     }
@@ -7621,7 +7716,10 @@ mod tests {
             ),
             ("PUT", path) if path.starts_with("/api/v1/files/server-file-1/thumbnail") => {
                 if fail_thumbnails {
-                    http_json("500 Internal Server Error", serde_json::json!({ "error": "thumbnail boom" }))
+                    http_json(
+                        "500 Internal Server Error",
+                        serde_json::json!({ "error": "thumbnail boom" }),
+                    )
                 } else {
                     http_json("200 OK", serde_json::json!({ "message": "thumbnail uploaded" }))
                 }
@@ -7942,6 +8040,57 @@ mod tests {
         assert!(result.is_none());
 
         handle.join().unwrap();
+    }
+
+    /// R4 (task 1834 fix round 2): the directories the account reset and the sign-out purge sweep are exactly the
+    /// places the engine can stage into: the preferred one and the temp-dir fallback, in that order, and the one
+    /// `default_finder_staging_root()` picks is always among them.
+    #[test]
+    fn the_swept_staging_directories_are_the_ones_the_engine_stages_into() {
+        let candidates = finder_staging_candidates();
+        assert_eq!(
+            candidates,
+            vec![
+                finder_staging_cache_base().join("beebeeb").join("finder-writes"),
+                std::env::temp_dir().join("beebeeb").join("finder-writes"),
+            ]
+        );
+        assert!(
+            candidates.contains(&default_finder_staging_root()),
+            "the engine stages somewhere the sweep covers"
+        );
+    }
+
+    #[test]
+    fn unit_tests_stage_finder_writes_in_a_sandbox_never_the_real_cache() {
+        // `default_finder_staging_root()` is where Finder create/modify/keep-mine copy the plaintext
+        // they are about to upload. The INSTALLED app uses the real `<cache dir>/beebeeb/finder-writes`
+        // on this machine, so a test build must resolve to a per-process sandbox next to the test
+        // binary: otherwise every test that queues a Finder write drops plaintext files there.
+        // Only paths are computed (and the sandbox dir is created); the real dir is not touched.
+        let root = default_finder_staging_root();
+        // The specific real directory, not the whole cache dir: a `CARGO_TARGET_DIR` under
+        // `~/Library/Caches` (or `~/.cache`) puts the sandbox inside the cache dir legitimately.
+        let real_staging = dirs::cache_dir()
+            .expect("a user cache dir exists on a dev machine or CI runner")
+            .join("beebeeb/finder-writes");
+        assert!(
+            !root.starts_with(&real_staging),
+            "{root:?} is inside the real staging dir {real_staging:?}"
+        );
+        let exe_dir = std::env::current_exe()
+            .expect("test binary path")
+            .parent()
+            .expect("exe dir")
+            .to_path_buf();
+        assert!(
+            root.starts_with(&exe_dir),
+            "{root:?} is not inside the test binary's directory {exe_dir:?}"
+        );
+        assert!(
+            root.ends_with("beebeeb/finder-writes"),
+            "the tail of the staging path is unchanged: {root:?}"
+        );
     }
 
     #[test]
@@ -8429,7 +8578,8 @@ mod tests {
         let child_id = "4a823d35-3ae2-4fc7-8266-762096405bc7";
         let owner_public_key = "zr4yc0fCIWlQgKPrOGWQG25jB3Kbm13rDDezBBz61Uc=";
         let encrypted_folder_key = "PVZ8a7JfzaV/m2p53h33xsIHsXtwaFmfcttbly6GoKnRVlnh8V5LbXiwCGFLbZhNLskOuwJX0NJQ3UzJ";
-        let encrypted_child_file_key = "xbKO8C1APBQytc8VqT0mfT5oSaP+8h02CWObRL2kegAOsBbzFE6N4ZLfRQy2m63bLsPBjmNXLEUaHlPu";
+        let encrypted_child_file_key =
+            "xbKO8C1APBQytc8VqT0mfT5oSaP+8h02CWObRL2kegAOsBbzFE6N4ZLfRQy2m63bLsPBjmNXLEUaHlPu";
 
         let folder_key =
             unwrap_folder_share_key(&recipient_master, owner_public_key, folder_id, encrypted_folder_key).unwrap();
@@ -8673,18 +8823,24 @@ mod tests {
         }
         // A connection error to the same kind of port is likewise Retryable.
         assert_eq!(
-            classify_operation_error("error sending request for url (http://127.0.0.1:45401/api/v1/uploads/upload-session-1/chunks/0)"),
+            classify_operation_error(
+                "error sending request for url (http://127.0.0.1:45401/api/v1/uploads/upload-session-1/chunks/0)"
+            ),
             OperationFailureClass::Retryable
         );
         // Genuine auth/permission failures still classify from reqwest's status
         // reason phrase (which sits BEFORE the stripped URL), even when the URL
         // also carries unrelated digits.
         assert_eq!(
-            classify_operation_error("HTTP status client error (401 Unauthorized) for url (http://127.0.0.1:8080/api/v1/uploads/init)"),
+            classify_operation_error(
+                "HTTP status client error (401 Unauthorized) for url (http://127.0.0.1:8080/api/v1/uploads/init)"
+            ),
             OperationFailureClass::Auth
         );
         assert_eq!(
-            classify_operation_error("HTTP status client error (403 Forbidden) for url (http://127.0.0.1:8080/api/v1/files/abc)"),
+            classify_operation_error(
+                "HTTP status client error (403 Forbidden) for url (http://127.0.0.1:8080/api/v1/files/abc)"
+            ),
             OperationFailureClass::Permission
         );
     }
@@ -8958,7 +9114,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("state.db");
         let db = Arc::new(StateDb::open(&db_path).unwrap());
-        let api = Arc::new(ApiClient::new("https://api.beebeeb.io".into(), "token".into(), [7u8; 32]));
+        let api = Arc::new(ApiClient::new(
+            "https://api.beebeeb.io".into(),
+            "token".into(),
+            [7u8; 32],
+        ));
         let stopping = Arc::new(AtomicBool::new(false));
         let bridge = EngineBridge::new_with_stop_flag(db.clone(), api, stopping.clone());
 
@@ -9029,7 +9189,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("state.db");
         let db = Arc::new(StateDb::open(&db_path).unwrap());
-        let api = Arc::new(ApiClient::new("https://api.beebeeb.io".into(), "token".into(), [7u8; 32]));
+        let api = Arc::new(ApiClient::new(
+            "https://api.beebeeb.io".into(),
+            "token".into(),
+            [7u8; 32],
+        ));
         let stopping = Arc::new(AtomicBool::new(true));
         let bridge = EngineBridge::new_with_stop_flag(db.clone(), api, stopping);
 
@@ -9198,13 +9362,21 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         crate::windows_cf::register_sync_root(&root).unwrap();
         struct Registration(std::path::PathBuf);
-        impl Drop for Registration { fn drop(&mut self) { crate::windows_cf::unregister_sync_root(&self.0).unwrap(); } }
+        impl Drop for Registration {
+            fn drop(&mut self) {
+                crate::windows_cf::unregister_sync_root(&self.0).unwrap();
+            }
+        }
         let _registration = Registration(root.clone());
         let local = root.join("report.txt");
         std::fs::write(&local, b"live upload payload").unwrap();
         crate::windows_cf::placeholders::convert_to_unsynced_placeholder(&local, "local-file-1").unwrap();
         use std::os::windows::fs::OpenOptionsExt;
-        let held = std::fs::OpenOptions::new().read(true).share_mode(7).open(&local).unwrap();
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(7)
+            .open(&local)
+            .unwrap();
         let payload = dir.path().join("payload.txt");
         std::fs::write(&payload, b"live upload payload").unwrap();
         let server = UploadMockServer::start(false);
@@ -9522,10 +9694,7 @@ mod tests {
             })
             .unwrap();
 
-        let preview = bridge
-            .conflict_content_preview(TEST_FILE_ID, &sync_root)
-            .await
-            .unwrap();
+        let preview = bridge.conflict_content_preview(TEST_FILE_ID, &sync_root).await.unwrap();
 
         // The two sides must be the REAL, DIFFERENT content, not the old
         // "Content from this device…" / "Content from other device…" pair.
@@ -9575,10 +9744,7 @@ mod tests {
             })
             .unwrap();
 
-        let preview = bridge
-            .conflict_content_preview(TEST_FILE_ID, &sync_root)
-            .await
-            .unwrap();
+        let preview = bridge.conflict_content_preview(TEST_FILE_ID, &sync_root).await.unwrap();
 
         assert!(preview.local.text.is_none());
         assert!(preview.local.unavailable_reason.is_some());
@@ -9631,7 +9797,10 @@ mod tests {
         assert!(preview.is_text, "notes.txt must classify as text");
         assert!(preview.remote.text.is_none());
         assert_eq!(preview.remote.size_bytes, Some(expected_size));
-        let reason = preview.remote.unavailable_reason.expect("must explain why text is absent");
+        let reason = preview
+            .remote
+            .unavailable_reason
+            .expect("must explain why text is absent");
         assert!(reason.contains("too large"), "reason was: {reason}");
         assert!(reason.contains(&expected_size.to_string()), "reason was: {reason}");
 
@@ -9678,7 +9847,10 @@ mod tests {
 
         assert!(preview.local.text.is_none());
         assert_eq!(preview.local.size_bytes, Some(expected_size));
-        let reason = preview.local.unavailable_reason.expect("must explain why text is absent");
+        let reason = preview
+            .local
+            .unavailable_reason
+            .expect("must explain why text is absent");
         assert!(reason.contains("too large"), "reason was: {reason}");
         assert!(reason.contains(&expected_size.to_string()), "reason was: {reason}");
 
@@ -9736,8 +9908,14 @@ mod tests {
         assert!(!preview.is_text, "a .jpg path must classify as binary");
         assert!(preview.local.text.is_none());
         assert!(preview.remote.text.is_none());
-        assert!(preview.local.unavailable_reason.is_none(), "binary is an expected, not an error, state");
-        assert!(preview.remote.unavailable_reason.is_none(), "binary is an expected, not an error, state");
+        assert!(
+            preview.local.unavailable_reason.is_none(),
+            "binary is an expected, not an error, state"
+        );
+        assert!(
+            preview.remote.unavailable_reason.is_none(),
+            "binary is an expected, not an error, state"
+        );
         assert_eq!(preview.local.size_bytes, Some(21));
         assert_eq!(preview.remote.size_bytes, Some(26));
 
@@ -9904,7 +10082,10 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
-        assert!(err.contains("error sending request") || err.contains("Connection refused"), "actual hydration error: {err}");
+        assert!(
+            err.contains("error sending request") || err.contains("Connection refused"),
+            "actual hydration error: {err}"
+        );
 
         let row = bridge.db.get_file(file_id).unwrap().unwrap();
         assert_eq!(row.status, FileStatus::Error);
@@ -9971,24 +10152,15 @@ mod tests {
         );
 
         let requests = server.finish();
-        let recorded: Vec<String> = requests
-            .iter()
-            .map(|r| format!("{} {}", r.method, r.path))
-            .collect();
+        let recorded: Vec<String> = requests.iter().map(|r| format!("{} {}", r.method, r.path)).collect();
         let medium = requests
             .iter()
             .find(|r| r.method == "PUT" && r.path.starts_with("/api/v1/files/server-file-1/thumbnail?blurhash="))
-            .unwrap_or_else(|| {
-                panic!(
-                    "medium thumbnail upload with blurhash query — recorded requests: {recorded:?}"
-                )
-            });
+            .unwrap_or_else(|| panic!("medium thumbnail upload with blurhash query — recorded requests: {recorded:?}"));
         let large = requests
             .iter()
             .find(|r| r.method == "PUT" && r.path == "/api/v1/files/server-file-1/thumbnail/large")
-            .unwrap_or_else(|| {
-                panic!("large thumbnail upload — recorded requests: {recorded:?}")
-            });
+            .unwrap_or_else(|| panic!("large thumbnail upload — recorded requests: {recorded:?}"));
 
         let master_key = beebeeb_core::kdf::MasterKey::from_bytes(master_key);
         let file_key = beebeeb_core::kdf::derive_file_key(&master_key, b"server-file-1");
@@ -10095,7 +10267,10 @@ mod tests {
                 .iter()
                 .any(|r| r.method == "PUT" && r.path.starts_with("/api/v1/files/server-file-1/thumbnail?blurhash=")),
             "the medium thumbnail PUT must reach the server: {:?}",
-            requests.iter().map(|r| format!("{} {}", r.method, r.path)).collect::<Vec<_>>()
+            requests
+                .iter()
+                .map(|r| format!("{} {}", r.method, r.path))
+                .collect::<Vec<_>>()
         );
         assert!(
             !requests
@@ -10207,7 +10382,12 @@ mod tests {
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [11u8; 32]);
         bridge
             .db
-            .enqueue_operation(&slice2_upload_op("op-1", "local-file-1", "Reports/report.txt", &payload))
+            .enqueue_operation(&slice2_upload_op(
+                "op-1",
+                "local-file-1",
+                "Reports/report.txt",
+                &payload,
+            ))
             .unwrap();
 
         let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
@@ -10215,7 +10395,10 @@ mod tests {
         server.finish();
 
         assert_eq!(bridge.transfers().finished_bytes(), 19, "the payload is 19 bytes");
-        assert!(bridge.transfers().active().is_empty(), "nothing is in flight after the upload");
+        assert!(
+            bridge.transfers().active().is_empty(),
+            "nothing is in flight after the upload"
+        );
         let rows = bridge.db.list_recent_transfer_activity(5).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].direction, "up");
@@ -10241,8 +10424,15 @@ mod tests {
         assert_eq!(outcome.retried_op_ids, vec!["op-2".to_string()]);
         server.finish();
 
-        assert!(bridge.transfers().active().is_empty(), "a failed upload must not linger as in flight");
-        assert_eq!(bridge.transfers().finished_bytes(), 0, "a failed upload finishes no bytes");
+        assert!(
+            bridge.transfers().active().is_empty(),
+            "a failed upload must not linger as in flight"
+        );
+        assert_eq!(
+            bridge.transfers().finished_bytes(),
+            0,
+            "a failed upload finishes no bytes"
+        );
         assert!(bridge.db.list_recent_transfer_activity(5).unwrap().is_empty());
     }
 
@@ -10255,7 +10445,14 @@ mod tests {
         // 1 metadata GET + 3 chunk GETs.
         let server = HydrationMockServer::start(file_key, chunks, 4);
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        seed_bridge_row(&bridge, TEST_FILE_ID, "Photos/three-chunks.bin", None, FileStatus::CloudOnly, 30);
+        seed_bridge_row(
+            &bridge,
+            TEST_FILE_ID,
+            "Photos/three-chunks.bin",
+            None,
+            FileStatus::CloudOnly,
+            30,
+        );
         let dest = dir.path().join("three-chunks.bin");
 
         // Read the board from inside the caller's own progress callback: that is the
@@ -10265,7 +10462,10 @@ mod tests {
         let seen_in = seen.clone();
         let progress = move |done: u64, total: u64| {
             let on_board = board.get(TEST_FILE_ID).expect("in flight while reporting");
-            seen_in.lock().unwrap().push((done, total, on_board.done, on_board.total));
+            seen_in
+                .lock()
+                .unwrap()
+                .push((done, total, on_board.done, on_board.total));
         };
         tokio::runtime::Runtime::new()
             .unwrap()
@@ -10286,7 +10486,10 @@ mod tests {
         assert_eq!(bridge.transfers().finished_bytes(), 30);
         let rows = bridge.db.list_recent_transfer_activity(5).unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!((rows[0].direction.as_str(), rows[0].file_name.as_str()), ("down", "three-chunks.bin"));
+        assert_eq!(
+            (rows[0].direction.as_str(), rows[0].file_name.as_str()),
+            ("down", "three-chunks.bin")
+        );
         assert_eq!(rows[0].bytes, 30);
     }
 
@@ -10435,7 +10638,10 @@ mod tests {
             let action = parts.next().unwrap_or_default();
             let hung_before = state.lock().unwrap().hung;
             if mode == ResumeMockMode::HangOnceThenSessionGone && session == "session-1" && hung_before {
-                return (None, http_json("404 Not Found", serde_json::json!({ "error": "not found" })));
+                return (
+                    None,
+                    http_json("404 Not Found", serde_json::json!({ "error": "not found" })),
+                );
             }
             if method == "PUT" && action == "chunks" {
                 let index: u32 = parts.next().unwrap_or("0").parse().unwrap();
@@ -10513,12 +10719,8 @@ mod tests {
     }
 
     fn count_requests(requests: &[RecordedRequest], method: &str, path: &str) -> usize {
-        requests
-            .iter()
-            .filter(|r| r.method == method && r.path == path)
-            .count()
+        requests.iter().filter(|r| r.method == method && r.path == path).count()
     }
-
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn round5_lock_during_keep_mine_restores_conflict_and_removes_staging() {
@@ -10634,15 +10836,27 @@ mod tests {
 
         let requests = server.finish();
         let inits = count_requests(&requests, "POST", "/api/v1/uploads/init");
-        assert_eq!(inits, 1, "retry must resume the persisted session, not init a second file row");
+        assert_eq!(
+            inits, 1,
+            "retry must resume the persisted session, not init a second file row"
+        );
         assert_eq!(
             count_requests(&requests, "PUT", "/api/v1/uploads/session-1/chunks/0"),
             1,
             "chunk 0 was acknowledged before the cut and must not be re-sent"
         );
-        assert_eq!(count_requests(&requests, "PUT", "/api/v1/uploads/session-1/chunks/1"), 2);
-        assert_eq!(count_requests(&requests, "PUT", "/api/v1/uploads/session-1/chunks/2"), 1);
-        assert_eq!(count_requests(&requests, "POST", "/api/v1/uploads/session-1/complete"), 1);
+        assert_eq!(
+            count_requests(&requests, "PUT", "/api/v1/uploads/session-1/chunks/1"),
+            2
+        );
+        assert_eq!(
+            count_requests(&requests, "PUT", "/api/v1/uploads/session-1/chunks/2"),
+            1
+        );
+        assert_eq!(
+            count_requests(&requests, "POST", "/api/v1/uploads/session-1/complete"),
+            1
+        );
         assert_eq!(
             requests.iter().filter(|r| r.method == "DELETE").count(),
             0,
@@ -10689,7 +10903,10 @@ mod tests {
         let board = bridge.transfers().clone();
 
         let (cut, seen) = tokio::join!(
-            tokio::time::timeout(Duration::from_millis(1500), bridge.process_due_operations(dir.path(), 200)),
+            tokio::time::timeout(
+                Duration::from_millis(1500),
+                bridge.process_due_operations(dir.path(), 200)
+            ),
             wait_for_upload_bytes(&board, "local-file-resume", 8, Duration::from_millis(1400)),
         );
         assert!(cut.is_err(), "the first pass is cut mid-upload");
@@ -10708,7 +10925,11 @@ mod tests {
         let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
         assert_eq!(outcome.completed_op_ids, vec!["op-upload-resume".to_string()]);
         server.finish();
-        assert_eq!(board.finished_bytes(), 20, "the resumed upload finishes the whole 20 bytes");
+        assert_eq!(
+            board.finished_bytes(),
+            20,
+            "the resumed upload finishes the whole 20 bytes"
+        );
         assert!(board.active().is_empty());
     }
 
@@ -10741,7 +10962,10 @@ mod tests {
             .unwrap();
         let board = bridge.transfers().clone();
         let (cut, seen) = tokio::join!(
-            tokio::time::timeout(Duration::from_millis(1200), bridge.process_due_operations(dir.path(), 200)),
+            tokio::time::timeout(
+                Duration::from_millis(1200),
+                bridge.process_due_operations(dir.path(), 200)
+            ),
             wait_for_upload_bytes(&board, "local-file-resume", 8, Duration::from_millis(1000)),
         );
         assert!(cut.is_err(), "chunk 1 hangs, so the pass is cut");
@@ -10789,7 +11013,10 @@ mod tests {
             1,
             "the orphaned is_uploading row from the dead session must be trashed"
         );
-        assert_eq!(count_requests(&requests, "POST", "/api/v1/uploads/session-2/complete"), 1);
+        assert_eq!(
+            count_requests(&requests, "POST", "/api/v1/uploads/session-2/complete"),
+            1
+        );
         assert!(bridge.db.get_file("server-file-2").unwrap().is_some());
     }
 
@@ -10818,8 +11045,14 @@ mod tests {
         let requests = server.finish();
         assert_eq!(count_requests(&requests, "POST", "/api/v1/uploads/init"), 2);
         assert_eq!(count_requests(&requests, "DELETE", "/api/v1/files/server-file-1"), 1);
-        assert_eq!(count_requests(&requests, "POST", "/api/v1/uploads/session-1/complete"), 0);
-        assert_eq!(count_requests(&requests, "POST", "/api/v1/uploads/session-2/complete"), 1);
+        assert_eq!(
+            count_requests(&requests, "POST", "/api/v1/uploads/session-1/complete"),
+            0
+        );
+        assert_eq!(
+            count_requests(&requests, "POST", "/api/v1/uploads/session-2/complete"),
+            1
+        );
     }
 
     #[tokio::test]
@@ -10835,7 +11068,10 @@ mod tests {
 
         let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
         assert_eq!(outcome.retried_op_ids, vec!["op-upload-resume".to_string()]);
-        assert!(bridge.db.list_due_operations(i64::MAX).unwrap().is_empty(), "op exhausted its retries");
+        assert!(
+            bridge.db.list_due_operations(i64::MAX).unwrap().is_empty(),
+            "op exhausted its retries"
+        );
         assert!(bridge.db.get_upload_resume("op-upload-resume").unwrap().is_none());
 
         let requests = server.finish();
@@ -11180,8 +11416,15 @@ mod tests {
         };
         let mut conflicts = Vec::new();
         let applied = apply_sync_op(&bridge, dir.path(), &op, 200, &mut conflicts).unwrap();
-        assert!(bridge.db().get_file(file).unwrap().is_some(), "the create must really have been ingested");
-        assert_eq!(applied, vec![file.to_string()], "an applied create op must report its file id for the working-set signal");
+        assert!(
+            bridge.db().get_file(file).unwrap().is_some(),
+            "the create must really have been ingested"
+        );
+        assert_eq!(
+            applied,
+            vec![file.to_string()],
+            "an applied create op must report its file id for the working-set signal"
+        );
     }
 
     #[test]
@@ -11208,8 +11451,14 @@ mod tests {
         };
         let mut conflicts = Vec::new();
         let applied = apply_sync_op(&bridge, dir.path(), &op, 200, &mut conflicts).unwrap();
-        assert!(bridge.db().get_file(folder).unwrap().is_some(), "the trash keeps the folder (trash view)");
-        assert!(bridge.db().get_file(child).unwrap().is_some(), "the trash keeps the descendant (trash view)");
+        assert!(
+            bridge.db().get_file(folder).unwrap().is_some(),
+            "the trash keeps the folder (trash view)"
+        );
+        assert!(
+            bridge.db().get_file(child).unwrap().is_some(),
+            "the trash keeps the descendant (trash view)"
+        );
         for id in [folder, child] {
             assert_eq!(
                 bridge.db().get_file(id).unwrap().unwrap().status,
@@ -11217,8 +11466,10 @@ mod tests {
                 "{id} must be Trashing"
             );
         }
-        assert!(applied.contains(&folder.to_string()) && applied.contains(&child.to_string()),
-            "remote delete must report the folder AND its descendants: {applied:?}");
+        assert!(
+            applied.contains(&folder.to_string()) && applied.contains(&child.to_string()),
+            "remote delete must report the folder AND its descendants: {applied:?}"
+        );
     }
 
     #[test]
@@ -11237,8 +11488,14 @@ mod tests {
         };
         let mut conflicts = Vec::new();
         let applied = apply_sync_op(&bridge, dir.path(), &op, 200, &mut conflicts).unwrap();
-        assert!(applied.is_empty(), "a Trashing echo applies nothing itself: {applied:?}");
-        assert!(bridge.db().get_file(file).unwrap().is_some(), "the echo must leave the row to the 0802 path");
+        assert!(
+            applied.is_empty(),
+            "a Trashing echo applies nothing itself: {applied:?}"
+        );
+        assert!(
+            bridge.db().get_file(file).unwrap().is_some(),
+            "the echo must leave the row to the 0802 path"
+        );
     }
 
     #[test]
@@ -11258,16 +11515,28 @@ mod tests {
         };
         let mut conflicts = Vec::new();
         let applied = apply_snapshot(&bridge, dir.path(), &snapshot, 200, 200, &mut conflicts).unwrap();
-        assert!(bridge.db().get_file(kept).unwrap().is_some(), "the snapshot node must be ingested");
-        assert!(bridge.db().get_file(absent).unwrap().is_none(), "the row absent from the snapshot must be pruned");
-        assert!(applied.contains(&kept.to_string()), "ingested ids are collected: {applied:?}");
-        assert!(applied.contains(&absent.to_string()), "pruned (remote-deleted) ids are collected: {applied:?}");
+        assert!(
+            bridge.db().get_file(kept).unwrap().is_some(),
+            "the snapshot node must be ingested"
+        );
+        assert!(
+            bridge.db().get_file(absent).unwrap().is_none(),
+            "the row absent from the snapshot must be pruned"
+        );
+        assert!(
+            applied.contains(&kept.to_string()),
+            "ingested ids are collected: {applied:?}"
+        );
+        assert!(
+            applied.contains(&absent.to_string()),
+            "pruned (remote-deleted) ids are collected: {applied:?}"
+        );
     }
 
     #[test]
     fn audit_1244_apply_sync_op_trash_echo_preserves_local_trashing_owner() {
-    // Production mutation caught: removing a Trashing row on a file_trash echo
-    // would make the local-delete-in-flight path lose its durable owner state.
+        // Production mutation caught: removing a Trashing row on a file_trash echo
+        // would make the local-delete-in-flight path lose its durable owner state.
         let dir = tempfile::tempdir().unwrap();
         let bridge = test_bridge(&dir.path().join("state.db"));
         let file = "echo0000-0000-4000-8000-000000000001";
@@ -12225,7 +12494,14 @@ mod tests {
     fn record_hydration_cache_state_skips_mark_cached_under_the_hydrate_dir() {
         let dir = tempfile::tempdir().unwrap();
         let bridge = test_bridge(&dir.path().join("state.db"));
-        seed_bridge_row(&bridge, TEST_FILE_ID, "/finder-peek.bin", None, FileStatus::CloudOnly, 0);
+        seed_bridge_row(
+            &bridge,
+            TEST_FILE_ID,
+            "/finder-peek.bin",
+            None,
+            FileStatus::CloudOnly,
+            0,
+        );
 
         let hydrate_dir = tempfile::tempdir().unwrap();
         let finder_dest = hydrate_dir.path().join("finder-peek.abcd1234");
@@ -12363,7 +12639,9 @@ mod tests {
                                         "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                                         body.len()
                                     );
-                                    stream.write_all(header.as_bytes()).and_then(|()| stream.write_all(&body))
+                                    stream
+                                        .write_all(header.as_bytes())
+                                        .and_then(|()| stream.write_all(&body))
                                 }
                             };
                             if chunk_delay.is_zero() {
@@ -12648,7 +12926,14 @@ mod tests {
         let db = Arc::new(StateDb::open(dir.path().join("state.db")).unwrap());
         let api = Arc::new(ApiClient::new(server.base_url.clone(), "token".into(), master_key));
         let bridge = Arc::new(EngineBridge::new(db.clone(), api));
-        seed_bridge_row(&bridge, TEST_FILE_ID, "/three-chunks.bin", None, FileStatus::CloudOnly, 30);
+        seed_bridge_row(
+            &bridge,
+            TEST_FILE_ID,
+            "/three-chunks.bin",
+            None,
+            FileStatus::CloudOnly,
+            30,
+        );
         let dest = dest_dir.path().join("three-chunks.bin");
         let request = hydrate_request_line(&dest, true);
 
@@ -12703,7 +12988,14 @@ mod tests {
         let db = Arc::new(StateDb::open(dir.path().join("state.db")).unwrap());
         let api = Arc::new(ApiClient::new(server.base_url.clone(), "token".into(), master_key));
         let bridge = Arc::new(EngineBridge::new(db.clone(), api));
-        seed_bridge_row(&bridge, TEST_FILE_ID, "/two-chunks.bin", None, FileStatus::CloudOnly, 20);
+        seed_bridge_row(
+            &bridge,
+            TEST_FILE_ID,
+            "/two-chunks.bin",
+            None,
+            FileStatus::CloudOnly,
+            20,
+        );
         let request = hydrate_request_line(&dest_dir.path().join("two-chunks.bin"), false);
 
         let (first, quiet) = with_ipc_client(db, bridge, |mut client| {
@@ -12718,7 +13010,11 @@ mod tests {
                 (first, quiet)
             })
         });
-        assert_eq!(first, serde_json::json!({"Ok": {}}), "the first and only line is the final reply");
+        assert_eq!(
+            first,
+            serde_json::json!({"Ok": {}}),
+            "the first and only line is the final reply"
+        );
         assert!(quiet, "nothing may follow the single reply");
         server.stop_and_count();
     }
@@ -12747,24 +13043,28 @@ mod tests {
         let request = hydrate_request_line(&dest, true);
         let db_probe = db.clone();
 
-        let (status_when_first_frame_arrived, status_600ms_after_hangup) = with_ipc_client(db.clone(), bridge, |mut client| {
-            Box::pin(async move {
-                client.write_all(&request).await.unwrap();
-                let first = read_json_line(&mut client).await;
-                assert_eq!(first["HydrateProgress"]["done"], 0, "first frame is the initial 0/total");
-                let status = db_probe.get_file(TEST_FILE_ID).unwrap().unwrap().status;
-                drop(client); // Finder cancelled the transfer
-                // Well inside the first chunk's 1 s delay: a daemon that
-                // watches the socket has already dropped the download; one that
-                // only notices at its next write has not.
-                tokio::time::sleep(Duration::from_millis(600)).await;
-                let after_hangup = db_probe.get_file(TEST_FILE_ID).unwrap().unwrap().status;
-                // Then leave time for a (wrongly) uncancelled hydrate to
-                // finish (3 x 1 s).
-                tokio::time::sleep(Duration::from_millis(3000)).await;
-                (status, after_hangup)
-            })
-        });
+        let (status_when_first_frame_arrived, status_600ms_after_hangup) =
+            with_ipc_client(db.clone(), bridge, |mut client| {
+                Box::pin(async move {
+                    client.write_all(&request).await.unwrap();
+                    let first = read_json_line(&mut client).await;
+                    assert_eq!(
+                        first["HydrateProgress"]["done"], 0,
+                        "first frame is the initial 0/total"
+                    );
+                    let status = db_probe.get_file(TEST_FILE_ID).unwrap().unwrap().status;
+                    drop(client); // Finder cancelled the transfer
+                    // Well inside the first chunk's 1 s delay: a daemon that
+                    // watches the socket has already dropped the download; one that
+                    // only notices at its next write has not.
+                    tokio::time::sleep(Duration::from_millis(600)).await;
+                    let after_hangup = db_probe.get_file(TEST_FILE_ID).unwrap().unwrap().status;
+                    // Then leave time for a (wrongly) uncancelled hydrate to
+                    // finish (3 x 1 s).
+                    tokio::time::sleep(Duration::from_millis(3000)).await;
+                    (status, after_hangup)
+                })
+            });
 
         assert_eq!(
             status_when_first_frame_arrived,
@@ -12853,7 +13153,10 @@ mod tests {
         write_hydrated_plaintext(&real_dest, &[root.path()], b"plaintext-payload").unwrap();
         assert_eq!(std::fs::read(&real_dest).unwrap(), b"plaintext-payload");
         let mode = std::fs::metadata(&real_dest).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "freshly written plaintext must be owner-only, got {mode:o}");
+        assert_eq!(
+            mode, 0o600,
+            "freshly written plaintext must be owner-only, got {mode:o}"
+        );
 
         // Attack path: destination is a symlink pointing OUTSIDE the root at a
         // not-yet-existing target. O_NOFOLLOW must make the open fail closed so
@@ -12861,7 +13164,10 @@ mod tests {
         let planted_target = outside.path().join("authorized_keys");
         let symlink_dest = root.path().join("bb_planted_link");
         std::os::unix::fs::symlink(&planted_target, &symlink_dest).unwrap();
-        assert!(!planted_target.exists(), "precondition: symlink target must not exist yet");
+        assert!(
+            !planted_target.exists(),
+            "precondition: symlink target must not exist yet"
+        );
 
         let err = write_hydrated_plaintext(&symlink_dest, &[root.path()], b"decrypted-secret").unwrap_err();
         assert!(
@@ -13076,7 +13382,10 @@ mod tests {
         let mut via_fd = unsafe { std::fs::File::from(std::os::unix::io::OwnedFd::from_raw_fd(read_raw)) };
         let mut got = Vec::new();
         via_fd.read_to_end(&mut got).unwrap();
-        assert_eq!(got, b"anchored-plaintext", "the write landed in the originally-validated inode");
+        assert_eq!(
+            got, b"anchored-plaintext",
+            "the write landed in the originally-validated inode"
+        );
 
         // The write followed the fd: it is visible under the ORIGINAL inode's new
         // name (orig_moved) and NOT under the current `subdir` name (which now
@@ -13128,7 +13437,10 @@ mod tests {
         let planted_target = outside.path().join("authorized_keys");
         let dest = dir.path().join("bb_target_link");
         std::os::unix::fs::symlink(&planted_target, &dest).unwrap();
-        assert!(!planted_target.exists(), "precondition: symlink target must not exist yet");
+        assert!(
+            !planted_target.exists(),
+            "precondition: symlink target must not exist yet"
+        );
         // Sanity: the destination genuinely passes the containment guard, so this
         // test really is exercising the write-site O_NOFOLLOW defense, not the guard.
         assert!(
@@ -13183,7 +13495,10 @@ mod tests {
         seed_bridge_entry(&bridge, file, "doomed.txt", None, FileStatus::Local, false, 10);
 
         let outcome = bridge.queue_finder_delete(file, None).unwrap();
-        assert!(matches!(outcome, crate::engine_bridge::FinderWriteOutcome::Queued { .. }));
+        assert!(matches!(
+            outcome,
+            crate::engine_bridge::FinderWriteOutcome::Queued { .. }
+        ));
         let row = bridge.db().get_file(file).unwrap().unwrap();
         assert_eq!(row.status, FileStatus::Trashing, "the row parks Trashing right away");
         assert_eq!(
@@ -13227,7 +13542,15 @@ mod tests {
         let folder = "fold0000-0000-4000-8000-000000000001";
         let child = "chil0000-0000-4000-8000-000000000002";
         seed_bridge_entry(&bridge, folder, "docs", None, FileStatus::CloudOnly, true, 10);
-        seed_bridge_entry(&bridge, child, "docs/notes.txt", Some(folder), FileStatus::CloudOnly, false, 10);
+        seed_bridge_entry(
+            &bridge,
+            child,
+            "docs/notes.txt",
+            Some(folder),
+            FileStatus::CloudOnly,
+            false,
+            10,
+        );
 
         let op = crate::api_client::SyncOp {
             seq_id: 4,
@@ -13236,10 +13559,16 @@ mod tests {
         };
         let mut conflicts = Vec::new();
         let applied = apply_sync_op(&bridge, dir.path(), &op, 200, &mut conflicts).unwrap();
-        assert!(applied.contains(&folder.to_string()) && applied.contains(&child.to_string()),
-            "the flip reports the folder AND its descendants for the working-set signal: {applied:?}");
+        assert!(
+            applied.contains(&folder.to_string()) && applied.contains(&child.to_string()),
+            "the flip reports the folder AND its descendants for the working-set signal: {applied:?}"
+        );
         for id in [folder, child] {
-            let row = bridge.db().get_file(id).unwrap().expect("the row SURVIVES (trash view)");
+            let row = bridge
+                .db()
+                .get_file(id)
+                .unwrap()
+                .expect("the row SURVIVES (trash view)");
             assert_eq!(row.status, FileStatus::Trashing, "{id} must be Trashing, not deleted");
         }
     }
@@ -13261,11 +13590,19 @@ mod tests {
         };
         let mut conflicts = Vec::new();
         let applied = apply_sync_op(&bridge, dir.path(), &op, 200, &mut conflicts).unwrap();
-        assert!(bridge.db().get_file(file).unwrap().is_none(), "the permanently-deleted row leaves the mirror");
-        assert!(applied.contains(&file.to_string()), "the removal is reported for the working set");
+        assert!(
+            bridge.db().get_file(file).unwrap().is_none(),
+            "the permanently-deleted row leaves the mirror"
+        );
+        assert!(
+            applied.contains(&file.to_string()),
+            "the removal is reported for the working set"
+        );
         let changes = bridge.db().list_file_changes_paged(None, 100).unwrap().unwrap().0;
         assert!(
-            changes.iter().any(|change| change.file_id == file && change.kind == crate::state_db::FpChangeKind::Deleted),
+            changes
+                .iter()
+                .any(|change| change.file_id == file && change.kind == crate::state_db::FpChangeKind::Deleted),
             "a `deleted` change must reach the feed so the replica drops the item"
         );
     }
@@ -13288,8 +13625,15 @@ mod tests {
         let mut conflicts = Vec::new();
         let applied = apply_sync_op(&bridge, dir.path(), &op, 200, &mut conflicts).unwrap();
         let row = bridge.db().get_file(file).unwrap().unwrap();
-        assert_eq!(row.status, FileStatus::CloudOnly, "the restored row leaves the trash view");
-        assert!(applied.contains(&file.to_string()), "the flip is reported for the working set");
+        assert_eq!(
+            row.status,
+            FileStatus::CloudOnly,
+            "the restored row leaves the trash view"
+        );
+        assert!(
+            applied.contains(&file.to_string()),
+            "the flip is reported for the working set"
+        );
     }
 
     #[test]
@@ -13305,8 +13649,7 @@ mod tests {
         let master_key = [7u8; 32];
         let file_key = hydration_test_key(master_key, TEST_FILE_ID);
         let server = HydrationMockServer::start(file_key, vec![vec![b't'; 8]], 2);
-        let bridge =
-            test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
         seed_bridge_row(&bridge, TEST_FILE_ID, "trash-view.txt", None, FileStatus::Trashing, 8);
         let dest = dir.path().join("trash-view.txt");
         tokio::runtime::Runtime::new()

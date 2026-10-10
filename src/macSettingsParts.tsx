@@ -269,6 +269,7 @@ export function Note({
   title,
   children,
   reason,
+  reasonWraps,
   actions,
 }: {
   kind: 'alert' | 'status'
@@ -277,6 +278,8 @@ export function Note({
   title?: string
   children?: ReactNode
   reason?: string | null
+  /** The mono line wraps instead of ending in "…" (a path the person must be able to read in full). */
+  reasonWraps?: boolean
   actions?: ReactNode
 }) {
   return (
@@ -293,7 +296,7 @@ export function Note({
       <div className="ms-note-text">
         {title ? <div className="ms-note-title">{title}</div> : null}
         {children ? <div className="ms-note-body">{children}</div> : null}
-        {reason ? <div className="ms-mono">{reason}</div> : null}
+        {reason ? <div className={reasonWraps ? 'ms-mono ms-mono--wrap' : 'ms-mono'}>{reason}</div> : null}
         {actions ? <div className="ms-note-actions">{actions}</div> : null}
       </div>
     </div>

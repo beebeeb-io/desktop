@@ -25,18 +25,23 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type Ke
 import {
   accountSubscription,
   BILLING_URL,
+  clearSession,
   command,
   commandUnavailableLabel,
+  lockVault,
   openUrl,
   popoverSnapshot,
   type DesktopConfig,
-  type FinderInstallState,
+  type CommandResult,
   type MacosIntegrationResetResult,
+  type SessionActionOutcome,
   type Subscription,
   type VaultItem,
 } from './desktopApi'
 import type { PopoverSnapshot } from './popoverContract'
-import { finderInstallStateAfterAttempt, finderInstallStateWhileAttempting } from './finderInstallCard'
+import { clearSignOutWarning, heldSignOutWarning, holdSignOutWarning, subscribeSignOutWarning } from './accountSession'
+import { subscribeKeptFolderChanged, useFinderSetup } from './finderSetup'
+import { finderActionButtonLabel } from './finderSetupCopy'
 import { SUPPORT_BUNDLE_DETAIL, SUPPORT_BUNDLE_SAVED_TITLE, supportBundleSavedMessage, type ProblemReportResult } from './diagnosticsCopy'
 import {
   accountInitial,
@@ -45,8 +50,12 @@ import {
   HELP_URL,
   keepCountLabel,
   keepOnMac,
+  KEPT_FOLDER_ROW_SENTENCE,
+  keptFolderAfterDismiss,
+  monoReason,
   NOTIFICATION_ROWS,
   planLine,
+  preservedFilesNote,
   REPAIR_BODY,
   REPAIR_TITLE,
   repairNote,
@@ -56,6 +65,7 @@ import {
   storageLine,
   tabAfterKey,
   updateRow,
+  type DismissKeptFolderResult,
   type SettingsTab,
 } from './macSettingsModel'
 import { Btn, Note, Select, SettingRow, SettingsGroup, SettingsIcon, Switch, ToggleRow } from './macSettingsParts'
@@ -245,6 +255,11 @@ function AccountTab() {
   const [plan, setPlan] = useState<Subscription | null | undefined>(undefined)
   const [busy, setBusy] = useState<AccountBusy>(null)
   const [confirmSignOut, setConfirmSignOut] = useState(false)
+  // FB-24: a Lock or a sign-out that happened but could not confirm one step. Rust's sentence, shown
+  // as a neutral line (never under "Couldn’t …"), until the next action. A sign-out's sentence is held
+  // outside the session boundary, because the sign-out remounts this tab (accountSession.ts).
+  const [actionNote, setActionNote] = useState<string | null>(null)
+  const signOutNote = useSyncExternalStore(subscribeSignOutWarning, heldSignOutWarning, heldSignOutWarning)
 
   const refresh = useCallback(async () => {
     const result = await popoverSnapshot(1)
@@ -274,9 +289,14 @@ function AccountTab() {
     }
   }, [signedIn, unlocked])
 
-  const run = async (name: 'lock_vault' | 'unlock_vault' | 'clear_session', failTitle: string) => {
+  // One action at a time. An Err means it did not happen: one error toast. An Ok of a Lock or a
+  // sign-out may carry a warning (FB-24): its sentence becomes the neutral note. The account is read
+  // again after ANY result (M4), so the tab never keeps showing a state the action changed.
+  const run = async (name: NonNullable<AccountBusy>, send: () => Promise<CommandResult<unknown>>, failTitle: string) => {
     setBusy(name)
-    const result = await command<void>(name)
+    setActionNote(null)
+    clearSignOutWarning()
+    const result = await send()
     setBusy(null)
     if (!result.ok) {
       showToast({
@@ -284,36 +304,67 @@ function AccountTab() {
         title: failTitle,
         message: result.unsupported ? commandUnavailableLabel(name) : result.reason,
       })
-      return false
     }
     await refresh()
-    return true
+    return result
   }
 
+  const lock = async () => {
+    const result = await run('lock_vault', lockVault, 'Couldn’t lock the vault')
+    if (result.ok) setActionNote((result.value as SessionActionOutcome).warning?.sentence ?? null)
+  }
+
+  // The sentence is held the moment the sign-out answers, before the tab reads the account again: the session
+  // boundary can remount this window at any point after the sign-out, and the remount must find it held.
   const signOut = async () => {
     setConfirmSignOut(false)
-    await run('clear_session', 'Couldn’t sign out')
+    await run('clear_session', async () => {
+      const result = await clearSession()
+      if (result.ok) holdSignOutWarning(result.value.warning?.sentence ?? null)
+      return result
+    }, 'Couldn’t sign out')
   }
 
-  if (load.status === 'loading') return <div className="ms-loading" role="status">Loading…</div>
+  const shownNote = actionNote ?? signOutNote
+  const note = shownNote ? (
+    <SettingsGroup>
+      <Note kind="status">{shownNote}</Note>
+    </SettingsGroup>
+  ) : null
+
+  // The note stays up while the tab loads: a sign-out's remount loads this tab again from scratch.
+  if (load.status === 'loading') {
+    return (
+      <>
+        {note}
+        <div className="ms-loading" role="status">Loading…</div>
+      </>
+    )
+  }
   if (load.status === 'failed' || account === null) {
     return (
-      <SettingsGroup>
-        <Note
-          kind="alert"
-          surface="account-load"
-          title="Couldn’t load your account"
-          actions={<Btn onClick={() => void refresh()}>Try again</Btn>}
-        />
-      </SettingsGroup>
+      <>
+        {note}
+        <SettingsGroup>
+          <Note
+            kind="alert"
+            surface="account-load"
+            title="Couldn’t load your account"
+            actions={<Btn onClick={() => void refresh()}>Try again</Btn>}
+          />
+        </SettingsGroup>
+      </>
     )
   }
 
   if (!account.logged_in) {
     return (
-      <SettingsGroup>
-        <SettingRow name="signed-out" tall label="You’re signed out" hint="Sign in from the Beebeeb menu to start syncing." />
-      </SettingsGroup>
+      <>
+        {note}
+        <SettingsGroup>
+          <SettingRow name="signed-out" tall label="You’re signed out" hint="Sign in from the Beebeeb menu to start syncing." />
+        </SettingsGroup>
+      </>
     )
   }
 
@@ -323,6 +374,7 @@ function AccountTab() {
 
   return (
     <>
+      {note}
       <SettingsGroup>
         <div className="ms-account">
           <div className="ms-avatar" aria-hidden="true">
@@ -371,7 +423,7 @@ function AccountTab() {
             }
             hint="Locking stops sync until you enter your password again."
             control={
-              <Btn disabled={busy === 'lock_vault'} onClick={() => void run('lock_vault', 'Couldn’t lock the vault')}>
+              <Btn disabled={busy === 'lock_vault'} onClick={() => void lock()}>
                 {busy === 'lock_vault' ? 'Locking…' : 'Lock now'}
               </Btn>
             }
@@ -390,7 +442,7 @@ function AccountTab() {
             }
             hint="Sync is paused until you unlock it."
             control={
-              <Btn primary disabled={busy === 'unlock_vault'} onClick={() => void run('unlock_vault', 'Couldn’t unlock the vault')}>
+              <Btn primary disabled={busy === 'unlock_vault'} onClick={() => void run('unlock_vault', () => command<void>('unlock_vault'), 'Couldn’t unlock the vault')}>
                 {busy === 'unlock_vault' ? 'Unlocking…' : 'Unlock'}
               </Btn>
             }
@@ -486,31 +538,24 @@ type RepairPhase = 'idle' | 'confirming' | 'busy'
 
 function SyncTab({ settings }: { settings: SettingsConfig }) {
   const { showToast } = useToast()
-  // The failure of the last Add to Finder lives in this state and is shown once, under its row.
-  // It gates the row's action (decision D1, slice 5), so it is inline and never also a toast.
-  const [finder, setFinder] = useState<FinderInstallState | null>(null)
-  const [finderLoadFailed, setFinderLoadFailed] = useState(false)
-  const [attempting, setAttempting] = useState(false)
+  // The Finder row is the reconciler's state, read and followed by the one shared hook (lead
+  // ruling 7b): it loads, follows `finder-setup-changed` (no polling), and toasts a failed ACTION.
+  // A failed SETUP is part of the state: it gates Finder, so it is the inline notice under the
+  // row and never also a toast. Nothing here adds Beebeeb to Finder by hand (R5): the reconciler does.
+  const finder = useFinderSetup()
   const [repair, setRepair] = useState<RepairPhase>('idle')
   const [repairFailed, setRepairFailed] = useState(false)
   const [repairResult, setRepairResult] = useState<string | null>(null)
+  // Task 1882 round 2 (review I2, lead ruling): where macOS last kept Finder files that had not
+  // reached the server, after a sign-out, a Repair, another reconciler removal or the app-start sweep. Rust
+  // saves it in desktop.toml; this row shows it until the person dismisses it, so a tab switch,
+  // closing Settings or a restart cannot lose it. Rebase re-review I2: Rust says when it saved one
+  // (`kept-folder-changed`), and the row reads it again then.
+  const [kept, setKept] = useState<string | null>(null)
   const [tree, setTree] = useState<VaultItem[] | null>(null)
   const [treeLoadFailed, setTreeLoadFailed] = useState(false)
   const [chooser, setChooser] = useState(false)
   const [savingFolder, setSavingFolder] = useState<string | null>(null)
-
-  const loadFinder = useCallback(async () => {
-    setFinderLoadFailed(false)
-    const result = await command<FinderInstallState>('finder_location_state')
-    if (result.ok) setFinder(result.value)
-    else {
-      // The state could not be read: whatever it said before may no longer be true (a repair
-      // that just succeeded removed the integration), so drop it and show the failed refresh
-      // with its Try again instead of the stale row.
-      setFinder(null)
-      setFinderLoadFailed(true)
-    }
-  }, [])
 
   const loadTree = useCallback(async () => {
     setTreeLoadFailed(false)
@@ -519,31 +564,41 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
     else setTreeLoadFailed(true)
   }, [])
 
+  // A failed read shows no row: the folder stays saved, and the next open shows it again.
+  const loadKept = useCallback(async () => {
+    const result = await command<string | null>('kept_unsynced_folder')
+    const note = result.ok ? preservedFilesNote({ preserved_location: result.value }) : null
+    setKept(note ? note.path : null)
+  }, [])
+
   useEffect(() => {
-    void loadFinder()
     void loadTree()
-  }, [loadFinder, loadTree])
+  }, [loadTree])
 
-  const addToFinder = async () => {
-    setAttempting(true)
-    setRepairFailed(false)
-    setRepairResult(null)
-    setFinder(finderInstallStateWhileAttempting)
-    const result = await command<FinderInstallState>('install_finder_location', { path: null })
-    setAttempting(false)
-    setFinder((previous) => finderInstallStateAfterAttempt(result, previous, commandUnavailableLabel('install_finder_location')))
-  }
+  // Rebase re-review I2: a removal the reconciler runs in the background (its Try again can start an owed one, and
+  // one can finish after the reconciler's time limit) saves the folder long after this tab opened. Rust then emits
+  // `kept-folder-changed`, and the row reads the folder again. The first read waits for the listener, so a folder
+  // saved between the two is not missed.
+  useEffect(
+    () => subscribeKeptFolderChanged(() => void loadKept(), { onSubscribed: () => void loadKept() }),
+    [loadKept],
+  )
 
-  // A one-off action that gates nothing: a failure is a toast (house rule).
-  const openSystemSettings = async () => {
-    const result = await command<void>('open_login_items_and_extensions_settings')
+  // A one-off action that gates nothing: a failure is a toast (house rule), and the row stays.
+  const dismissKept = async () => {
+    if (kept === null) return
+    const result = await command<DismissKeptFolderResult>('dismiss_kept_unsynced_folder', { path: kept })
     if (!result.ok) {
       showToast({
         variant: 'error',
-        title: 'Couldn’t open System Settings',
-        message: result.unsupported ? commandUnavailableLabel('open_login_items_and_extensions_settings') : result.reason,
+        title: 'Couldn’t dismiss that note',
+        message: result.unsupported ? commandUnavailableLabel('dismiss_kept_unsynced_folder') : result.reason,
       })
+      return
     }
+    // 1882 r5: the row goes only if Rust cleared the folder it showed. If a newer folder was kept
+    // since the row was drawn, nothing was dismissed, and the row shows the newer one.
+    setKept(keptFolderAfterDismiss(result.value))
   }
 
   const runRepair = async () => {
@@ -554,11 +609,22 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
     setRepair('idle')
     if (!result.ok) {
       setRepairFailed(true)
-      await loadFinder()
+      await finder.retry()
       return
     }
     setRepairResult(repairNote(result.value))
-    await loadFinder()
+    // On a Mac, Repair saves the kept folder (if any) for the row on its own (`remember_kept_folder`, under the
+    // config-write lock), and only best-effort: a failed save is logged, Repair still succeeds, and it raises no
+    // alert. The row reads the record back. So when no other folder is saved, this fallback covers both a save that
+    // failed and a record that cannot be read back just now: the folder this repair reported is still shown. (Rebase
+    // re-review Minor 5: this said a failed save fails Repair and raises the alert, which was main's Repair, not a
+    // Mac's.)
+    await loadKept()
+    const reported = preservedFilesNote(result.value)
+    if (reported) setKept((current) => current ?? reported.path)
+    // The reconciler adds Beebeeb back by itself and says so through finder-setup-changed; this
+    // read is the safety net that keeps the row from claiming the pre-repair "Added".
+    await finder.retry()
   }
 
   const toggleFolder = async (id: string, pinned: boolean) => {
@@ -576,7 +642,7 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
     setTree((current) => (current === null ? current : withPinned(current, id, pinned)))
   }
 
-  const row = finderRow(finder, attempting, finderLoadFailed)
+  const row = finderRow(finder.load.status === 'loaded' ? finder.load.view : null, finder.load.status === 'unavailable', finder.refusal)
   const keep = keepOnMac(tree, treeLoadFailed)
   const config = settings.state.status === 'ready' ? settings.state.config : null
 
@@ -595,18 +661,12 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
         </Btn>
       </>
     )
-  } else if (row.kind === 'missing') {
-    finderControl = (
-      <Btn primary onClick={() => void addToFinder()}>
-        Add to Finder
-      </Btn>
-    )
-  } else if (row.kind === 'failed' || row.kind === 'user_disabled') {
-    finderControl = <Btn onClick={() => void addToFinder()}>Try again</Btn>
   } else if (row.kind === 'adding') {
     finderControl = <Btn disabled>Adding…</Btn>
   } else if (row.kind === 'unavailable') {
-    finderControl = <Btn onClick={() => void loadFinder()}>Try again</Btn>
+    // The state could not be read: this Try again reads it again. It is NOT the reconciler's
+    // retry, which only exists inside a failure notice below (two different "Try again"s).
+    finderControl = <Btn onClick={() => void finder.retry()}>Try again</Btn>
   }
 
   let keepControl = null
@@ -642,25 +702,33 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
           hint={finderHint(row)}
           control={finderControl}
         />
-        {row.kind === 'failed' ? (
-          <Note kind="alert" surface="finder-install" title={row.title} reason={row.reason}>
+        {row.kind === 'notice' ? (
+          <Note
+            kind={row.tone}
+            surface="finder-setup"
+            reason={row.tone === 'alert' ? monoReason(row.reason) : null}
+            actions={row.action ? <Btn onClick={() => void finder.run(row.action!)}>{finderActionButtonLabel(row.action, row.actionLabel, finder.copied)}</Btn> : null}
+          >
             {row.sentence}
           </Note>
         ) : null}
-        {row.kind === 'user_disabled' ? (
-          <Note
-            kind="status"
-            actions={<Btn onClick={() => void openSystemSettings()}>Open Login Items &amp; Extensions</Btn>}
-          >
-            {row.message}
-          </Note>
-        ) : null}
+        {finder.actionNote ? <Note kind="status">{finder.actionNote}</Note> : null}
         {repairFailed ? (
           <Note kind="alert" surface="finder-repair" title="Couldn’t repair Beebeeb in Finder">
             Nothing was changed that you need to undo. Try again.
           </Note>
         ) : null}
         {repairResult ? <Note kind="status">{repairResult}</Note> : null}
+        {kept !== null ? (
+          <Note
+            kind="status"
+            reason={kept}
+            reasonWraps
+            actions={<Btn onClick={() => void dismissKept()}>Dismiss</Btn>}
+          >
+            {KEPT_FOLDER_ROW_SENTENCE}
+          </Note>
+        ) : null}
         <SettingRow
           name="keep"
           tall
@@ -857,7 +925,17 @@ function AboutTab() {
 
 export default function MacSettings({ initialTab }: { initialTab?: SettingsTab }) {
   const settings = useSettingsConfig()
-  const [tab, setTab] = useState<SettingsTab>(() => initialTab ?? settingsTabFromLocation())
+  // A remount after a sign-out that left a sentence opens on the Account tab, where it is shown (accountSession.ts).
+  const [tab, setTab] = useState<SettingsTab>(() => initialTab ?? (heldSignOutWarning() !== null ? 'account' : settingsTabFromLocation()))
+  // And a sentence that becomes held after this window mounted brings it to the Account tab too: the boundary's
+  // remount and the sign-out's answer arrive in either order.
+  const signOutNote = useSyncExternalStore(subscribeSignOutWarning, heldSignOutWarning, heldSignOutWarning)
+  const seenSignOutNote = useRef(signOutNote)
+  useEffect(() => {
+    if (signOutNote === seenSignOutNote.current) return
+    seenSignOutNote.current = signOutNote
+    if (signOutNote !== null) setTab('account')
+  }, [signOutNote])
 
   // Slice 6: this window is the surface the native "Check for updates…" menu item opens on
   // macOS, so it drains the pending request itself and answers inline in the About tab's row

@@ -5,9 +5,9 @@
 
 #![cfg(unix)]
 
-use serde::{Deserialize, Serialize};
 use crate::ipc_frame::{FrameError, FrameReader, MAX_REQUEST_BYTES, write_frame};
 use crate::ipc_write_dedup::{MAX_KEY_BYTES, WriteDedup};
+use serde::{Deserialize, Serialize};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -342,9 +342,21 @@ fn macos_hydrate_cache_dir_in(home_dir: &std::path::Path) -> std::path::PathBuf 
         .join(MACOS_HYDRATE_CACHE_DIRNAME)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 pub fn macos_hydrate_cache_dir() -> std::path::PathBuf {
     macos_hydrate_cache_dir_in(&macos_real_home_dir())
+}
+
+/// A test build resolves a per-process sandbox with the same
+/// `Library/Group Containers/<group>/hydrate-cache` shape, never the real App Group directory
+/// the installed app shares (`getpwuid`-resolved, so `$HOME` cannot redirect it). Without this,
+/// 9 tests ran the production code that creates the real dir and TTL-sweeps it (the hydrate and
+/// thumbnail handlers) or empties it (`purge_macos_hydrate_cache`: sign-out and lock). Pinned
+/// by `unit_tests_resolve_the_hydrate_dir_in_a_sandbox_never_the_real_group_container`.
+#[cfg(all(target_os = "macos", test))]
+pub fn macos_hydrate_cache_dir() -> std::path::PathBuf {
+    let home = crate::test_sandbox::dir("real-home").expect("create the unit-test sandbox");
+    macos_hydrate_cache_dir_in(&home)
 }
 
 /// Task 1670 round 3 (lead review of round 2): Apple's own `fetchContents`
@@ -637,11 +649,7 @@ pub(crate) fn macos_sweep_stale_hydrate_cache_entries(
     let mut removed = 0usize;
     for entry in entries.flatten() {
         let path = entry.path();
-        if path
-            .file_name()
-            .map(macos_is_hydrate_cache_temp_name)
-            .unwrap_or(false)
-        {
+        if path.file_name().map(macos_is_hydrate_cache_temp_name).unwrap_or(false) {
             continue;
         }
         let age = std::fs::metadata(&path)
@@ -1449,7 +1457,7 @@ fn write_refusal_category(error: &anyhow::Error) -> &'static str {
 /// `dirs::home_dir()` only if the password-database lookup itself fails
 /// (not expected on a real macOS install).
 #[cfg(target_os = "macos")]
-fn macos_real_home_dir() -> std::path::PathBuf {
+pub(crate) fn macos_real_home_dir() -> std::path::PathBuf {
     match getpwuid_home_dir() {
         Some(dir) => {
             tracing::debug!("ipc_socket_path: resolved real home via getpwuid_r (bypassing $HOME)");
@@ -1710,7 +1718,11 @@ async fn handle_connection(
     match peer_uid(&stream) {
         Ok(uid) if is_authorized_peer(daemon_uid, uid) => {}
         Ok(uid) => {
-            tracing::warn!(peer_uid = uid, daemon_uid, "IPC connection rejected: peer UID does not match daemon");
+            tracing::warn!(
+                peer_uid = uid,
+                daemon_uid,
+                "IPC connection rejected: peer UID does not match daemon"
+            );
             return;
         }
         Err(e) => {
@@ -1939,7 +1951,9 @@ async fn handle_connection(
                 #[cfg(not(target_os = "macos"))]
                 let identifier_check: Result<(), &'static str> = Ok(());
                 let validated = match identifier_check {
-                    Err(msg) => Err(IpcResponse::Error { message: msg.to_string() }),
+                    Err(msg) => Err(IpcResponse::Error {
+                        message: msg.to_string(),
+                    }),
                     Ok(()) => {
                         // `dest_path` arrives straight off the wire
                         // (untrusted). Bound it to the caller's legitimate
@@ -1961,12 +1975,14 @@ async fn handle_connection(
                                     .fetch_thumbnail_to_memory(&file_id, thumbnail_variant(max_dimension))
                                     .await;
                                 match fetched {
-                                    Ok(plaintext) => match persist_thumbnail_plaintext(&dest, &allowed_roots, &plaintext) {
-                                        Ok(size_bytes) => Ok(IpcResponse::ThumbnailWritten { size_bytes }),
-                                        Err(e) => Ok(IpcResponse::Error {
-                                            message: format!("thumbnail fetch failed: {e}"),
-                                        }),
-                                    },
+                                    Ok(plaintext) => {
+                                        match persist_thumbnail_plaintext(&dest, &allowed_roots, &plaintext) {
+                                            Ok(size_bytes) => Ok(IpcResponse::ThumbnailWritten { size_bytes }),
+                                            Err(e) => Ok(IpcResponse::Error {
+                                                message: format!("thumbnail fetch failed: {e}"),
+                                            }),
+                                        }
+                                    }
                                     Err(e) => Ok(IpcResponse::Error {
                                         message: format!("thumbnail fetch failed: {e}"),
                                     }),
@@ -1996,10 +2012,7 @@ async fn handle_connection(
                     conflicts,
                 }
             }
-            IpcRequest::ListChanges {
-                since_anchor,
-                limit,
-            } => {
+            IpcRequest::ListChanges { since_anchor, limit } => {
                 // Page limit: honor the caller's suggested size, clamped to a
                 // 100-change ceiling (Apple caps the system at 100x its
                 // suggestion; our ceiling keeps replies well inside the frame
@@ -2034,9 +2047,7 @@ async fn handle_connection(
             },
             IpcRequest::ReportMaterialized { container_ids } => match db.set_materialized_containers(&container_ids) {
                 Ok(()) => IpcResponse::Ok {},
-                Err(e) => IpcResponse::Error {
-                    message: e.to_string(),
-                },
+                Err(e) => IpcResponse::Error { message: e.to_string() },
             },
         };
         if write_frame(&mut write_half, &resp).await.is_err() {
@@ -2077,7 +2088,9 @@ async fn hydrate_over_ipc(
     if let Err(msg) = identifier_check {
         // The identifier is untrusted wire input: never logged.
         tracing::warn!(reason = "invalid_identifier", "Finder hydrate failed");
-        return HydrateOutcome::Reply(IpcResponse::Error { message: msg.to_string() });
+        return HydrateOutcome::Reply(IpcResponse::Error {
+            message: msg.to_string(),
+        });
     }
     // `dest_path` arrives straight off the wire (untrusted). Bound
     // it to the caller's legitimate destinations before handing it
@@ -2114,7 +2127,9 @@ async fn hydrate_over_ipc(
         if let Err(e) = macos_ensure_hydrate_cache_dir(&dir) {
             tracing::warn!(error = %e, dir = %dir.display(), "could not create macOS hydrate-cache dir");
         }
-        if let Err(e) = macos_sweep_stale_hydrate_cache_entries(&dir, MACOS_HYDRATE_CACHE_TTL, std::time::SystemTime::now()) {
+        if let Err(e) =
+            macos_sweep_stale_hydrate_cache_entries(&dir, MACOS_HYDRATE_CACHE_TTL, std::time::SystemTime::now())
+        {
             tracing::warn!(error = %e, dir = %dir.display(), "hydrate-cache TTL sweep failed (best-effort)");
         }
         dir
@@ -2271,9 +2286,9 @@ fn parse_write_kind_name(kind: &crate::engine_bridge::FinderWriteItemKind) -> &'
 /// handed to whoever was already waiting but a later retry runs again.
 /// Drop every remembered write reply that describes `file_id`.
 fn forget_dedup_for_item(dedup: &std::sync::Arc<WriteDedup<IpcResponse>>, file_id: &str) {
-    dedup.forget_where(|cached| {
-        matches!(cached, IpcResponse::WriteQueued { item: Some(item), .. } if item.identifier == file_id)
-    });
+    dedup.forget_where(
+        |cached| matches!(cached, IpcResponse::WriteQueued { item: Some(item), .. } if item.identifier == file_id),
+    );
 }
 
 /// Decide whether a remembered write reply still describes reality, and bring it
@@ -2437,10 +2452,7 @@ pub(crate) fn file_provider_change_payloads(
                         db.get_file_contract_state(&entry.file_id)
                             .ok()
                             .flatten()
-                            .map(|contract| {
-                                contract.namespace
-                                    != crate::state_db::Namespace::SharedWithMe
-                            })
+                            .map(|contract| contract.namespace != crate::state_db::Namespace::SharedWithMe)
                             .unwrap_or(true)
                     })
                     .map(|entry| file_entry_payload_for_db(db, &entry, FP_ROOT_APPLE)),
@@ -2463,9 +2475,7 @@ fn list_file_provider_items(db: &crate::state_db::StateDb, container_id: &str) -
             .list_files()
             .unwrap_or_default()
             .into_iter()
-            .filter(|entry| {
-                entry.status == crate::state_db::FileStatus::Trashing && !parent_row_is_trashing(db, entry)
-            })
+            .filter(|entry| entry.status == crate::state_db::FileStatus::Trashing && !parent_row_is_trashing(db, entry))
             .map(|entry| file_entry_payload_for_db(db, &entry, FP_TRASH_APPLE))
             .collect();
     }
@@ -2524,9 +2534,7 @@ fn list_file_provider_items(db: &crate::state_db::StateDb, container_id: &str) -
                 .as_deref()
                 == Some(container_id)
         })
-        .filter(move |entry| {
-            container_is_trashed || entry.status != crate::state_db::FileStatus::Trashing
-        })
+        .filter(move |entry| container_is_trashed || entry.status != crate::state_db::FileStatus::Trashing)
         .map(|entry| file_entry_payload_for_db(db, &entry, container_id))
         .collect()
 }
@@ -2558,11 +2566,7 @@ fn is_trash_container(container_id: &str) -> bool {
 /// is on its way out) and keeps the bit unset. Files never get the bit.
 /// `capabilities_for_status` stays status-only; the folder grant is applied
 /// at the payload construction sites where the kind is known.
-fn with_folder_add_subitems(
-    kind: &str,
-    status: &crate::state_db::FileStatus,
-    capabilities: u32,
-) -> u32 {
+fn with_folder_add_subitems(kind: &str, status: &crate::state_db::FileStatus, capabilities: u32) -> u32 {
     if kind == "folder" && !matches!(status, crate::state_db::FileStatus::Trashing) {
         capabilities | CAP_ADD_SUBITEMS
     } else {
@@ -2739,10 +2743,7 @@ fn file_entry_payload(
         child_item_count: None,
         content_version: Some(content_version),
         metadata_version: Some(metadata_version),
-        pinned: matches!(
-            contract.effective_pin_state(),
-            crate::state_db::PinState::Pinned
-        ),
+        pinned: matches!(contract.effective_pin_state(), crate::state_db::PinState::Pinned),
     }
 }
 
@@ -2760,11 +2761,7 @@ fn file_entry_payload_without_contract(
         crate::state_db::ItemKind::Folder => "folder",
         crate::state_db::ItemKind::File => "file",
     };
-    let capabilities = with_folder_add_subitems(
-        kind,
-        &entry.status,
-        capabilities_for_status(&entry.status),
-    );
+    let capabilities = with_folder_add_subitems(kind, &entry.status, capabilities_for_status(&entry.status));
 
     // Task 1697: version split without a contract. With no contract there is
     // no known server version, so both identifiers lead with 0, which the
@@ -2883,7 +2880,9 @@ fn thumbnail_allowed_roots() -> Vec<std::path::PathBuf> {
         if let Err(e) = macos_ensure_hydrate_cache_dir(&dir) {
             tracing::warn!(error = %e, dir = %dir.display(), "could not create macOS hydrate-cache dir");
         }
-        if let Err(e) = macos_sweep_stale_hydrate_cache_entries(&dir, MACOS_HYDRATE_CACHE_TTL, std::time::SystemTime::now()) {
+        if let Err(e) =
+            macos_sweep_stale_hydrate_cache_entries(&dir, MACOS_HYDRATE_CACHE_TTL, std::time::SystemTime::now())
+        {
             tracing::warn!(error = %e, dir = %dir.display(), "hydrate-cache TTL sweep failed (best-effort)");
         }
         roots.push(dir);
@@ -2914,7 +2913,10 @@ fn thumbnail_destination_error(dest: &std::path::Path, allowed_roots: &[std::pat
     if contained {
         None
     } else {
-        Some(format!("thumbnail destination {} is not under an allowed root", dest.display()))
+        Some(format!(
+            "thumbnail destination {} is not under an allowed root",
+            dest.display()
+        ))
     }
 }
 
@@ -3141,10 +3143,7 @@ mod tests {
             "a live SharedWithMe row must not carry an item payload — its FP_ROOT_APPLE fallback would surface it beneath the root"
         );
         let mine = payloads.iter().find(|p| p.file_id == "mine-live").unwrap();
-        assert!(
-            mine.item.is_some(),
-            "a live MyFiles row keeps its ride-along payload"
-        );
+        assert!(mine.item.is_some(), "a live MyFiles row keeps its ride-along payload");
     }
 
     #[test]
@@ -3204,13 +3203,7 @@ mod tests {
     // dead code does not ship. The 1694 intent lives on in the folder payload
     // tests below and in the 1701 shared-root test above.
 
-    fn seed_1694_item(
-        db: &StateDb,
-        file_id: &str,
-        status: FileStatus,
-        permissions: i64,
-        item_kind: ItemKind,
-    ) {
+    fn seed_1694_item(db: &StateDb, file_id: &str, status: FileStatus, permissions: i64, item_kind: ItemKind) {
         db.upsert_file(&FileEntry {
             file_id: file_id.into(),
             path: format!("My files/{file_id}.txt"),
@@ -3298,8 +3291,7 @@ mod tests {
             contract_payload.capabilities
         );
 
-        let no_contract_payload =
-            file_entry_payload_without_contract(&entry, FP_ROOT_APPLE);
+        let no_contract_payload = file_entry_payload_without_contract(&entry, FP_ROOT_APPLE);
         assert!(
             no_contract_payload.capabilities & CAP_ADD_SUBITEMS == 0,
             "a Trashing folder must NOT grant ADD_SUBITEMS in the no-contract fallback either, got {:#b}",
@@ -3486,6 +3478,48 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn unit_tests_resolve_the_hydrate_dir_in_a_sandbox_never_the_real_group_container() {
+        // `macos_hydrate_cache_dir()` is what the hydrate handler and the thumbnail handler
+        // (create the dir, then TTL-sweep it), the periodic sweep, and the sign-out / lock purge
+        // (empties it) all resolve. In a test build it must be a per-process sandbox: the REAL one
+        // is in the App Group container shared with the installed app, `getpwuid`-resolved so
+        // `$HOME` cannot redirect it. Paths only; nothing on disk is read or touched. The real path is
+        // built from the password database directly (not through `macos_real_home_dir`) and
+        // compared as the specific `hydrate-cache` dir, so a `CARGO_TARGET_DIR` elsewhere in the
+        // container cannot turn this red.
+        let real_home = getpwuid_home_dir().expect("the password database knows this user");
+        let real = macos_hydrate_cache_dir_in(&real_home);
+        let resolved = macos_hydrate_cache_dir();
+
+        assert_ne!(
+            resolved, real,
+            "unit tests resolved the REAL App Group hydrate-cache dir"
+        );
+        assert!(
+            !resolved.starts_with(&real),
+            "{resolved:?} is inside the real hydrate-cache dir {real:?}"
+        );
+        let exe_dir = std::env::current_exe()
+            .expect("test binary path")
+            .parent()
+            .expect("exe dir")
+            .to_path_buf();
+        assert!(
+            resolved.starts_with(&exe_dir),
+            "{resolved:?} is not inside the test binary's directory {exe_dir:?}"
+        );
+        assert!(
+            resolved.ends_with(
+                std::path::Path::new("Group Containers")
+                    .join(MACOS_APP_GROUP_ID)
+                    .join(MACOS_HYDRATE_CACHE_DIRNAME)
+            ),
+            "the sandbox keeps the production path shape, got {resolved:?}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn test_macos_hydrate_cache_dir_does_not_collide_with_ipc_socket_path() {
         // Both live under the same App Group container by design (task
         // 1670's doc comment); they must still be distinct paths, or a
@@ -3581,8 +3615,7 @@ mod tests {
         let staging = StagingDir::open(dir.path()).expect("a temp dir is a private directory");
         macos_exclude_from_backups(&staging).expect("setxattr must succeed on a writable dir");
 
-        let attr_name =
-            std::ffi::CString::new("com.apple.metadata:com_apple_backup_excludeItem").unwrap();
+        let attr_name = std::ffi::CString::new("com.apple.metadata:com_apple_backup_excludeItem").unwrap();
         let path_c = std::ffi::CString::new(dir.path().as_os_str().as_bytes()).unwrap();
         let mut buf = vec![0u8; 64];
         let n = unsafe {
@@ -3595,7 +3628,10 @@ mod tests {
                 0,
             )
         };
-        assert!(n > 0, "the backup-exclude xattr must be readable back after setting it, got {n}");
+        assert!(
+            n > 0,
+            "the backup-exclude xattr must be readable back after setting it, got {n}"
+        );
         assert_eq!(&buf[..n as usize], b"com.apple.backupd");
     }
 
@@ -3610,7 +3646,10 @@ mod tests {
 
         let removed = macos_purge_hydrate_cache_dir(dir.path()).expect("purge must succeed");
 
-        assert_eq!(removed, 3, "must report one removal per top-level entry (2 files + 1 dir)");
+        assert_eq!(
+            removed, 3,
+            "must report one removal per top-level entry (2 files + 1 dir)"
+        );
         assert!(dir.path().exists(), "the hydrate-cache dir itself must remain");
         assert_eq!(
             std::fs::read_dir(dir.path()).unwrap().count(),
@@ -3671,8 +3710,14 @@ mod tests {
         let now = std::time::SystemTime::now();
         let ttl = std::time::Duration::from_secs(600);
         let old_mtime = now - std::time::Duration::from_secs(700);
-        std::fs::File::open(&in_progress).unwrap().set_modified(old_mtime).unwrap();
-        std::fs::File::open(&stale_final).unwrap().set_modified(old_mtime).unwrap();
+        std::fs::File::open(&in_progress)
+            .unwrap()
+            .set_modified(old_mtime)
+            .unwrap();
+        std::fs::File::open(&stale_final)
+            .unwrap()
+            .set_modified(old_mtime)
+            .unwrap();
 
         let removed = macos_sweep_stale_hydrate_cache_entries(dir.path(), ttl, now).expect("sweep must succeed");
 
@@ -3681,7 +3726,10 @@ mod tests {
             in_progress.exists(),
             "an in-progress temp-named entry must never be removed by the sweep, however old its mtime"
         );
-        assert!(!stale_final.exists(), "the stale, already-published entry must still be removed");
+        assert!(
+            !stale_final.exists(),
+            "the stale, already-published entry must still be removed"
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -3721,8 +3769,7 @@ mod tests {
         // `FileManager.homeDirectoryForCurrentUser`.
         let _guard = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
-        let real_home =
-            getpwuid_home_dir().expect("getpwuid_r must resolve a real home directory on this machine");
+        let real_home = getpwuid_home_dir().expect("getpwuid_r must resolve a real home directory on this machine");
         let expected = macos_ipc_socket_path_in(&real_home);
 
         let original_home = std::env::var_os("HOME");
@@ -3979,8 +4026,16 @@ mod tests {
         db.upsert_file(&entry).unwrap();
         db.set_file_contract_state(&live_contract()).unwrap();
         let payload = file_entry_payload_for_db(&db, &entry, FP_ROOT_APPLE);
-        assert_eq!(payload.capabilities & CAP_REPARENT, 0, "read-only terminal states stay read-only");
-        assert_eq!(payload.capabilities & CAP_TRASH, 0, "read-only terminal states stay read-only");
+        assert_eq!(
+            payload.capabilities & CAP_REPARENT,
+            0,
+            "read-only terminal states stay read-only"
+        );
+        assert_eq!(
+            payload.capabilities & CAP_TRASH,
+            0,
+            "read-only terminal states stay read-only"
+        );
     }
 
     #[test]
@@ -4186,7 +4241,10 @@ mod tests {
         contract.pin_state = crate::state_db::PinState::Pinned;
         db.set_file_contract_state(&contract).unwrap();
         let payload = file_entry_payload_for_db(&db, &entry, FP_ROOT_APPLE);
-        assert!(payload.pinned, "a row whose OWN pin_state is Pinned must report pinned=true");
+        assert!(
+            payload.pinned,
+            "a row whose OWN pin_state is Pinned must report pinned=true"
+        );
 
         // Inherited pin: own state Inherit + inherited_pin_state = Pinned.
         let child = FileEntry {
@@ -4236,7 +4294,12 @@ mod tests {
 
         // The trash container lists it, parented at the trash container.
         let items = list_file_provider_items(&db, FP_TRASH_APPLE);
-        assert_eq!(items.len(), 1, "the trash container must enumerate the Trashing row: {:?}", items.iter().map(|i| i.filename.clone()).collect::<Vec<_>>());
+        assert_eq!(
+            items.len(),
+            1,
+            "the trash container must enumerate the Trashing row: {:?}",
+            items.iter().map(|i| i.filename.clone()).collect::<Vec<_>>()
+        );
         assert_eq!(
             items[0].parent_identifier, FP_TRASH_APPLE,
             "a trash-container child must be parented at the trash container"
@@ -4288,8 +4351,15 @@ mod tests {
         // The folder's own enumeration (the system enumerates the trashed
         // folder's container) still lists the child.
         let children = list_file_provider_items(&db, "1698-folder");
-        assert_eq!(children.len(), 1, "a trashed folder's children must still enumerate inside it");
-        assert_eq!(children[0].parent_identifier, "1698-folder", "the child stays parented inside the trashed folder");
+        assert_eq!(
+            children.len(),
+            1,
+            "a trashed folder's children must still enumerate inside it"
+        );
+        assert_eq!(
+            children[0].parent_identifier, "1698-folder",
+            "the child stays parented inside the trashed folder"
+        );
     }
 
     #[test]
@@ -4341,11 +4411,7 @@ mod tests {
         // The trash: a status flip records a `Modified` change (set_status).
         db.set_status("1697-item", FileStatus::Trashing).unwrap();
 
-        let changes = db
-            .list_file_changes_paged(None, 100)
-            .unwrap()
-            .unwrap()
-            .0;
+        let changes = db.list_file_changes_paged(None, 100).unwrap().unwrap().0;
         let payloads = file_provider_change_payloads(&db, changes);
         // The LAST change is the status flip (set_status); its payload must
         // carry the Trashing status under the trash container.
@@ -4353,7 +4419,10 @@ mod tests {
             .last()
             .and_then(|change| change.item.as_ref())
             .expect("the status-flip change carries the item");
-        assert_eq!(payload.status, "trashing", "the flip's payload carries the Trashing status");
+        assert_eq!(
+            payload.status, "trashing",
+            "the flip's payload carries the Trashing status"
+        );
         assert_eq!(
             payload.parent_identifier, FP_TRASH_APPLE,
             "the change feed must present a Trashing item under the trash container"

@@ -41,11 +41,20 @@ The dialogs reuse the Settings-window system exactly: `design.css` tokens, the 1
   - Title: “Repair Beebeeb in Finder?”
   - Body: “Beebeeb removes its Finder location and turns off Open Beebeeb at login. Files waiting to upload are kept. **You can add it back afterwards.**”
   - Buttons: “Cancel” / “Repair”
-  - Failure note (inline in the Sync pane): “Couldn’t repair Beebeeb in Finder” / “Nothing was changed that you need to undo. Try again.”
+  - ~~Failure note (inline in the Sync pane): “Couldn’t repair Beebeeb in Finder” / “Nothing was changed that you need to undo. Try again.”~~
+  - Failure note (inline in the Sync pane), **when Repair fails before it removes the Finder location** (amended 10 Oct 2026, task 1882 round 4): “Couldn’t repair Beebeeb in Finder” / “Nothing was changed that you need to undo. Try again.” Unchanged.
+  - ~~Failure note, **when Repair fails after it removed the Finder location** (added 10 Oct 2026, task 1882 round 4): “Beebeeb was removed from Finder” / “Repair couldn’t finish, so Beebeeb is no longer in Finder. Choose Add to Finder to add it back.” The compact window's toast says “Install in Finder” instead of “Add to Finder”, its button's name. If files were kept, the app's alert naming the folder still comes first (`docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md` §5). The hifi file does not draw this note; updating it is a design follow-up.~~
+
+    — lead ruling, 2026-10-10 (1882 r4)
+  - No such note any more: with the Finder reconciler (`docs/specs/2026-10-06-macos-finder-setup-reconciler.md`), Repair never fails after a removal that worked, on any platform. A Mac saves nothing after the removal, and Windows and Linux have no File Provider domain, so their removal never works. So the note above is the one failure note for Repair, and nothing in the design needs to draw a second one.
+
+    — lead ruling, 2026-10-10 (rebase re-review Minor 4)
 - **Actions:** primary confirm **Repair**; **Cancel** dismisses. Dismiss-on-confirm already: the dialog closes when Repair runs; the busy state lives on the trigger button.
 - **Destructive-action treatment:** **amber-primary, deliberately.** Repair is reversible — the body says you can add it back — so it is a caution, not a destruction. Red is reserved for irreversible actions. Keep as built.
 - **Keyboard:** Esc cancels (built). Enter triggers the focused Repair confirm (built, PR #104 — handler on the confirm button; Enter on open lands on the close button, so a stray Return cancels).
 - **Modal mapping:** `ConfirmSheet` (Modal 400, footer Cancel + primary confirm). Nothing changes.
+- **Amendment — 10 Oct 2026 (task 1882):** the removal now keeps files that never reached the server. When macOS reports a folder, the Sync pane adds one status note under the existing Repair note: “Files that hadn’t reached your vault yet were kept on this Mac, in this folder:” with the folder in mono beneath (`Note` with `reason`). Nothing kept → no note. Spec: `docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md`. The hifi file does not draw this note yet.
+  - **Amended — 10 Oct 2026 (task 1882 round 2, lead ruling on review I2):** ~~the note under the existing Repair note~~ the note is now a saved row. It shows the latest kept folder from any removal (sign-out, Repair, the add rollback, the cleanup inside Add to Finder, the app-start sweep). It stays until the person presses **Dismiss**, so a tab switch, closing Settings or a restart does not clear it. Its path wraps (`ms-mono ms-mono--wrap`) and is never cut off with "…". There is no "Show in Finder": the headers do not say a sandboxed app may reveal that path. A folder that does not exist or is empty is "nothing kept" and shows no row. The hifi file does not draw this row yet; updating it is a design follow-up.
 
 ## Dialog 3 — Sign out of this Mac (Account tab)
 
@@ -59,6 +68,7 @@ The dialogs reuse the Settings-window system exactly: `design.css` tokens, the 1
 - **Actions:** confirm **Sign out**; **Cancel** dismisses. Failure is a toast (transient), consistent with the popover spec ruling.
 - **Destructive-action treatment:** **the shipped change (PR #104).** Signing out stops sync on this Mac — a destructive consequence. The confirm button renders as `ms-btn--danger` (red fill `--red`, fixed ink `--red-ink` — paper text fails 4.5:1 on red) instead of amber-primary, so its weight matches Repair’s caution level being exceeded: Repair is reversible and amber; Sign out is not offered as reversible and is red. Because confirmations keep the safe action first, order stays Cancel → Sign out; the red fill is the guard, and Enter (built, PR #104) resolves to **Cancel** on open — the handler lives on the confirm button, not the dialog.
 - **Keyboard:** Esc cancels (built). Enter triggers the confirm only when the confirm button is focused — never on open (built, PR #104: handler on the confirm button; initial focus on the close button).
+- **Amendment — 10 Oct 2026 (task 1882):** when the sign-out kept Finder files that never reached the server, the app’s own alert (title “Files kept on this Mac”) shows the same sentence and the folder after the sheet closes. Spec: `docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md`.
 - **Modal mapping:** `ConfirmSheet` (Modal 400). **Shipped (PR #104):** `danger?: boolean` on `ConfirmSheet`; when set, the confirm button gets `ms-btn--danger` (`--red-ink` text). `MacSettings.tsx` passes `danger` on the Sign-out sheet. Nothing else changes.
 
 ## Keyboard rules (summary)

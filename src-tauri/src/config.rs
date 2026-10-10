@@ -14,8 +14,26 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
+
+/// Task 1882 r5: the one process-wide lock around writing `desktop.toml`.
+///
+/// Every save of the config goes through the same `desktop.toml.tmp`, so two saves at once could
+/// tear each other's temp file, and two load-modify-save passes at once lose the earlier one's
+/// change. [`DesktopConfig::save`] takes this lock for the write; [`DesktopConfig::update_at`] takes
+/// it across the whole load, change and write. The lock is not re-entrant: nothing inside an
+/// `update_at` closure may call `save` or `update_at`.
+static CONFIG_WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Takes [`CONFIG_WRITE_LOCK`]. A holder that panicked leaves the lock usable: the file itself is
+/// only ever replaced by a rename, so it is never half-written.
+fn config_write_guard() -> std::sync::MutexGuard<'static, ()> {
+    CONFIG_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Filename inside the platform config dir.
 const CONFIG_FILENAME: &str = "desktop.toml";
@@ -254,6 +272,30 @@ pub struct DesktopConfig {
     /// `DesktopSettings`, so a settings save cannot rewrite update provenance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub installed_release_channel: Option<ReleaseChannel>,
+
+    /// Task 1882 round 2 (review I2, lead ruling 2026-10-10): the folder where macOS last kept
+    /// Finder files that had not reached the server when Beebeeb's Finder location was removed.
+    /// Settings › Sync shows it until the person dismisses it. Exactly as the system reported it;
+    /// never logged, never sent anywhere. Like `account_id`, it is NOT in
+    /// `DesktopSettings`/`apply_settings`, so a settings save can never clear it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kept_unsynced_folder: Option<String>,
+
+    // ── Spec 2026-10-06 (macOS Finder setup reconciler) §9 ────────────
+    //
+    // Truth about Finder comes from macOS on every check. These two keys are only memory: the
+    // `finder_install_*` keys above stay for Windows/Linux and are no longer written on macOS.
+    /// Set when the person signs out (the reconciler then removes Beebeeb from Finder); cleared
+    /// at the next sign-in. A startup 401 that discards a revoked session does NOT set it, so
+    /// ruling R2 keeps Beebeeb in Finder across that relaunch.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub finder_signed_out_by_choice: bool,
+    /// The last failure, for "Copy details" across a relaunch. Kept last: it serializes as a
+    /// TOML table, and a table belongs after the plain values. The `toml` crate we use reorders
+    /// on its own (swapping the two fields changes no test result), so this is for the reader and
+    /// for any other writer of the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finder_last_failure: Option<crate::finder_setup::error::FailureRecord>,
 }
 
 /// `#[serde(default = ...)]` needs a function returning the default.
@@ -275,7 +317,6 @@ pub enum DesktopTheme {
     System,
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
@@ -285,7 +326,6 @@ pub enum ReleaseChannel {
     Beta,
     Alpha,
 }
-
 
 impl ReleaseChannel {
     pub fn as_str(self) -> &'static str {
@@ -331,6 +371,9 @@ impl Default for DesktopConfig {
             local_cache_limit_bytes: DEFAULT_LOCAL_CACHE_LIMIT_BYTES,
             release_channel: ReleaseChannel::Stable,
             installed_release_channel: None,
+            kept_unsynced_folder: None,
+            finder_signed_out_by_choice: false,
+            finder_last_failure: None,
         }
     }
 }
@@ -469,15 +512,43 @@ impl DesktopConfig {
     }
 }
 
+// Tests only: the config directory for one future (`CONFIG_DIR_OVERRIDE.scope(dir, future)`), instead of the
+// per-process sandbox every test shares. For a test that asserts what a command wrote to `desktop.toml` while other
+// tests write the shared one in parallel. Code that runs on another task or thread inside the scope uses the shared
+// sandbox, as before.
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static CONFIG_DIR_OVERRIDE: PathBuf;
+}
+
 impl DesktopConfig {
     /// Resolve the absolute path to `desktop.toml` for the current user,
     /// creating the parent directory if missing. Errors propagate as
     /// strings so they can flow through Tauri commands.
     pub fn path() -> Result<PathBuf, String> {
-        let base = dirs::config_dir().ok_or_else(|| "could not determine user config directory".to_string())?;
+        let base = Self::config_base_dir()?;
         let dir = base.join(APP_CONFIG_DIR);
         fs::create_dir_all(&dir).map_err(|e| format!("create config dir: {e}"))?;
         Ok(dir.join(CONFIG_FILENAME))
+    }
+
+    /// The directory that holds the `beebeeb` config folder: the user's config dir.
+    #[cfg(not(test))]
+    fn config_base_dir() -> Result<PathBuf, String> {
+        dirs::config_dir().ok_or_else(|| "could not determine user config directory".to_string())
+    }
+
+    /// Unit tests never see the person's real config. In a test build this is a per-process
+    /// sandbox next to the test binary (`crate::test_sandbox`), so a test that calls `load()`,
+    /// `save()` or `ensure_account_id()` (directly, or through a command it runs) reads and
+    /// writes the sandbox, not `~/Library/Application Support/beebeeb/desktop.toml`. The guard
+    /// test `unit_tests_resolve_the_config_path_in_a_sandbox_never_the_real_one` pins this.
+    #[cfg(test)]
+    fn config_base_dir() -> Result<PathBuf, String> {
+        if let Ok(dir) = CONFIG_DIR_OVERRIDE.try_with(PathBuf::clone) {
+            return Ok(dir);
+        }
+        crate::test_sandbox::dir("config")
     }
 
     /// Load the on-disk config. A missing file is normal on first
@@ -485,12 +556,16 @@ impl DesktopConfig {
     /// error. A corrupt or unparseable file IS an error — surfacing
     /// it loud avoids silently overwriting a user's settings on save.
     pub fn load() -> Result<Self, String> {
-        let path = Self::path()?;
+        Self::load_from(&Self::path()?)
+    }
+
+    /// [`Self::load`] from `path`. A seam so a test can run the real load against its own file.
+    pub(crate) fn load_from(path: &Path) -> Result<Self, String> {
         if !path.exists() {
             return Ok(Self::default());
         }
         // toml 0.8 removed from_slice; read as UTF-8 string and parse.
-        let s = fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        let s = fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
         let mut cfg: Self = toml::from_str(&s).map_err(|e| format!("parse {}: {e}", path.display()))?;
 
         // Reject relative paths defensively. Hand-editing the TOML to a
@@ -502,7 +577,21 @@ impl DesktopConfig {
             tracing::warn!("ignoring non-absolute sync_root in desktop.toml: {}", p.display());
             cfg.sync_root = None;
         }
+        cfg.scrub_legacy_finder_error(cfg!(target_os = "macos"));
         Ok(cfg)
+    }
+
+    /// Forget the old `finder_install_last_error` on macOS (lead ruling T4-3). 0.8.11 saved the
+    /// OS's own message there, and that prose can name a file or a folder. macOS no longer
+    /// writes the `finder_install_*` keys (it reads Finder's state from the OS, spec §9), so
+    /// nothing there needs the text and the next `save()` drops it from disk. The other old
+    /// keys carry no path: they still load and are kept. Windows and Linux keep reading and
+    /// writing the error unchanged. `on_macos` is a parameter so tests exercise both branches
+    /// on any host; `load_from` passes `cfg!(target_os = "macos")`.
+    fn scrub_legacy_finder_error(&mut self, on_macos: bool) {
+        if on_macos {
+            self.finder_install_last_error = None;
+        }
     }
 
     /// Return this install's account id, minting + persisting one on first use.
@@ -519,12 +608,24 @@ impl DesktopConfig {
     /// orphan-on-relaunch hole: a crash after this returns still finds the same
     /// id on the next launch, so the secrets written under it are recoverable.
     pub fn ensure_account_id(&mut self) -> Result<String, String> {
+        // Checked here too so an id that is already set never resolves (or creates) the config dir.
+        if let Some(id) = &self.account_id {
+            return Ok(id.clone());
+        }
+        self.ensure_account_id_in(&Self::path()?)
+    }
+
+    /// `ensure_account_id()` against an explicit file, so a test can run the real mint, persist
+    /// and re-read path in a temp dir instead of the person's `desktop.toml`.
+    fn ensure_account_id_in(&mut self, path: &Path) -> Result<String, String> {
         if let Some(id) = &self.account_id {
             return Ok(id.clone());
         }
         let id = uuid::Uuid::new_v4().to_string();
         self.account_id = Some(id.clone());
-        self.save()?;
+        // Like `save()`, the write takes the config-write lock (task 1882 r5).
+        let _writing = config_write_guard();
+        self.save_to(path)?;
         Ok(id)
     }
 
@@ -534,6 +635,31 @@ impl DesktopConfig {
     /// inheritance from the user's profile is the right default.
     pub fn save(&self) -> Result<(), String> {
         let path = Self::path()?;
+        let _writing = config_write_guard();
+        self.save_to(&path)
+    }
+
+    /// Load the config at `path`, let `change` modify it, and save it if `change` says so, all
+    /// under the config-write lock, so no other `update_at` or `save` lands between the load and
+    /// the save (task 1882 r5). `change` returns `(save, value)`: whether the config changed, and
+    /// what `update_at` hands back. A change that is not saved leaves the file untouched. Callers
+    /// pass [`Self::path`]; a test passes its own file, so it runs the real lock, load and save.
+    ///
+    /// For a short, synchronous change. A caller that loaded its own copy earlier and saves it
+    /// later (the install and Repair commands) is not covered: its save still replaces the file
+    /// with that copy.
+    pub(crate) fn update_at<R>(path: &Path, change: impl FnOnce(&mut Self) -> (bool, R)) -> Result<R, String> {
+        let _writing = config_write_guard();
+        let mut cfg = Self::load_from(path)?;
+        let (save, value) = change(&mut cfg);
+        if save {
+            cfg.save_to(path)?;
+        }
+        Ok(value)
+    }
+
+    /// The write itself. The caller holds the config-write lock.
+    fn save_to(&self, path: &Path) -> Result<(), String> {
         let toml_str = toml::to_string_pretty(self).map_err(|e| format!("serialize: {e}"))?;
 
         // Atomic write: temp + rename. Avoids leaving a half-written
@@ -548,7 +674,7 @@ impl DesktopConfig {
             fs::set_permissions(&tmp, perms).map_err(|e| format!("chmod {}: {e}", tmp.display()))?;
         }
 
-        fs::rename(&tmp, &path).map_err(|e| format!("rename {} → {}: {e}", tmp.display(), path.display()))?;
+        fs::rename(&tmp, path).map_err(|e| format!("rename {} → {}: {e}", tmp.display(), path.display()))?;
         Ok(())
     }
 }
@@ -599,9 +725,7 @@ pub fn ensure_directory(path: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        DesktopConfig, DesktopSettings, DesktopTheme, ReleaseChannel, default_sync_root_suggestion,
-    };
+    use super::{DesktopConfig, DesktopSettings, DesktopTheme, ReleaseChannel, default_sync_root_suggestion};
 
     // ── Task 0800 — multi-account Phase 1: persisted account id ────────────
 
@@ -683,43 +807,21 @@ mod tests {
 
     #[test]
     fn ensure_account_id_mints_persists_and_is_stable_across_relaunch() {
-        // This exercises the real mint+persist+readback path against the on-disk
-        // `desktop.toml`. To avoid clobbering a developer's real config, snapshot
-        // whatever is there, run the test, then restore it (or remove the file if
-        // none existed). Serialised behind a mutex so the parallel test harness
-        // can't race on the single shared config path.
-        use std::sync::Mutex;
-        static CONFIG_LOCK: Mutex<()> = Mutex::new(());
-        let _guard = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-        let path = DesktopConfig::path().expect("config path resolves");
-        let backup = std::fs::read(&path).ok();
-        // Start from a clean slate so the mint branch (account_id == None) fires.
-        let _ = std::fs::remove_file(&path);
-
-        let restore = || match &backup {
-            Some(bytes) => {
-                std::fs::write(&path, bytes).expect("restore original config");
-            }
-            None => {
-                let _ = std::fs::remove_file(&path);
-            }
-        };
+        // The real mint + persist + readback path, against a file in a temp dir. (This used to
+        // snapshot, delete and restore the person's real `desktop.toml`; a crash mid-test would
+        // have left it deleted. No test may touch the real file, so it runs on a temp path.)
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("desktop.toml");
 
         // Mint: a fresh config has no id; ensure_account_id mints + persists one.
-        let mut cfg = DesktopConfig::load().expect("load (missing → default)");
+        let mut cfg = DesktopConfig::load_from(&path).expect("load (missing → default)");
         assert!(cfg.account_id.is_none(), "fresh config must start without an id");
-        let minted = match cfg.ensure_account_id() {
-            Ok(id) => id,
-            Err(e) => {
-                restore();
-                panic!("ensure_account_id should mint: {e}");
-            }
-        };
+        let minted = cfg.ensure_account_id_in(&path).expect("ensure_account_id should mint");
         assert!(uuid::Uuid::parse_str(&minted).is_ok(), "minted id is a valid uuid");
+        assert!(path.exists(), "the id is on disk before ensure_account_id returns");
 
         // Persist: a fresh load from disk (simulating relaunch) sees the SAME id.
-        let reloaded = DesktopConfig::load().expect("reload after persist");
+        let reloaded = DesktopConfig::load_from(&path).expect("reload after persist");
         assert_eq!(
             reloaded.account_id.as_deref(),
             Some(minted.as_str()),
@@ -727,12 +829,16 @@ mod tests {
         );
 
         // Idempotent across relaunch: ensure_account_id on the reloaded config
-        // returns the same id (no re-mint).
+        // returns the same id (no re-mint) and does not rewrite the file.
+        let before = std::fs::read(&path).expect("read saved config");
         let mut reloaded = reloaded;
-        let again = reloaded.ensure_account_id().expect("idempotent on reload");
+        let again = reloaded.ensure_account_id_in(&path).expect("idempotent on reload");
         assert_eq!(again, minted, "relaunch must keep the same account id");
-
-        restore();
+        assert_eq!(
+            std::fs::read(&path).expect("read again"),
+            before,
+            "an id already set is not re-saved"
+        );
     }
 
     #[test]
@@ -829,8 +935,7 @@ mod tests {
 
     #[test]
     fn installed_release_channel_defaults_absent_and_round_trips_separately_from_configured_channel() {
-        let cfg: DesktopConfig =
-            toml::from_str("release_channel = \"alpha\"").expect("parse legacy channel config");
+        let cfg: DesktopConfig = toml::from_str("release_channel = \"alpha\"").expect("parse legacy channel config");
         assert_eq!(cfg.release_channel, ReleaseChannel::Alpha);
         assert_eq!(cfg.installed_release_channel, None);
 
@@ -871,5 +976,258 @@ mod tests {
         let path = default_sync_root_suggestion();
 
         assert_eq!(path.file_name().and_then(|name| name.to_str()), Some("Beebeeb"));
+    }
+
+    // ── Task 1882 r5 — one lock around every load-modify-save ───────────────
+
+    #[test]
+    fn test_1882_r5_two_updates_at_once_both_land_and_an_unsaved_change_writes_nothing() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("desktop.toml");
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let slow_path = path.clone();
+        let slow = std::thread::spawn(move || {
+            DesktopConfig::update_at(&slow_path, |cfg| {
+                cfg.kept_unsynced_folder = Some("/Users/someone/Kept".to_string());
+                entered_tx.send(()).expect("the test is waiting");
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                (true, "slow")
+            })
+        });
+        entered_rx.recv().expect("the slow update started");
+        // This one starts while the slow one is between its load and its save.
+        let fast = DesktopConfig::update_at(&path, |cfg| {
+            cfg.last_signed_in_email = Some("someone@beebeeb.io".to_string());
+            (true, "fast")
+        });
+        assert_eq!(fast, Ok("fast"));
+        assert_eq!(slow.join().expect("no panic"), Ok("slow"));
+        let on_disk = DesktopConfig::load_from(&path).expect("reads back");
+        assert_eq!(on_disk.kept_unsynced_folder.as_deref(), Some("/Users/someone/Kept"));
+        assert_eq!(on_disk.last_signed_in_email.as_deref(), Some("someone@beebeeb.io"));
+
+        // A change that says "nothing to save" leaves the file byte for byte as it was.
+        let written = std::fs::read(&path).expect("exists");
+        let untouched = DesktopConfig::update_at(&path, |cfg| {
+            cfg.kept_unsynced_folder = None;
+            (false, 7)
+        });
+        assert_eq!(untouched, Ok(7));
+        assert_eq!(std::fs::read(&path).expect("exists"), written);
+    }
+
+    #[test]
+    fn test_1882_r5_an_update_of_a_corrupt_config_fails_and_does_not_overwrite_it() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("desktop.toml");
+        std::fs::write(&path, "this is = not [valid toml").expect("write");
+        let result = DesktopConfig::update_at(&path, |_| (true, ()));
+        assert!(result.is_err(), "a corrupt config is an error, never overwritten");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("exists"),
+            "this is = not [valid toml"
+        );
+    }
+
+    // ── Spec 2026-10-06 (macOS Finder setup reconciler) §9 ─────────────────
+
+    #[test]
+    fn a_0_8_11_desktop_toml_with_the_old_finder_keys_still_loads() {
+        let cfg: DesktopConfig =
+            toml::from_str(include_str!("../tests/fixtures/desktop-0.8.11.toml")).expect("a 0.8.11 config parses");
+        // The old keys still load: Windows and Linux keep using them; macOS ignores them.
+        assert_eq!(cfg.finder_install_status.as_deref(), Some("error"));
+        assert_eq!(cfg.finder_install_reason_category.as_deref(), Some("unknown"));
+        assert_eq!(cfg.finder_last_failure, None);
+        assert!(!cfg.finder_signed_out_by_choice);
+        let back = toml::to_string_pretty(&cfg).expect("serialize");
+        assert!(!back.contains("finder_last_failure"), "None is not written:\n{back}");
+        assert!(
+            !back.contains("finder_signed_out_by_choice"),
+            "false is not written:\n{back}"
+        );
+    }
+
+    #[test]
+    fn the_new_finder_keys_round_trip() {
+        use crate::finder_setup::error::FailureRecord;
+        use crate::surfaces::phase::FinderFailureReason;
+        // A struct literal, not field assignments after `default()`: clippy's
+        // `field_reassign_with_default` would add a warning over the baseline.
+        let cfg = DesktopConfig {
+            finder_signed_out_by_choice: true,
+            finder_last_failure: Some(FailureRecord {
+                reason: FinderFailureReason::FolderTaken,
+                domain: "NSCocoaErrorDomain".into(),
+                code: 516,
+                at: 1_791_291_909,
+            }),
+            ..DesktopConfig::default()
+        };
+        let text = toml::to_string_pretty(&cfg).expect("serialize");
+        assert!(text.contains("reason = \"folder_taken\""), "{text}");
+        let back: DesktopConfig = toml::from_str(&text).expect("parse");
+        assert_eq!(back.finder_last_failure, cfg.finder_last_failure);
+        assert!(back.finder_signed_out_by_choice);
+    }
+
+    /// Forward compatibility (area A M3): a later build can add a failure reason and write it, and a downgrade
+    /// (`install_channel_downgrade`) then runs this build on that file. An unknown reason reads as `Unknown`; it never
+    /// makes the whole `desktop.toml` unreadable for every caller.
+    #[test]
+    fn a_failure_reason_from_a_later_build_reads_as_unknown_and_the_rest_still_loads() {
+        use crate::surfaces::phase::FinderFailureReason;
+        let text = r#"
+sync_root = "/tmp/bb-later-build"
+finder_signed_out_by_choice = true
+
+[finder_last_failure]
+reason = "something_new"
+domain = "NSFileProviderErrorDomain"
+code = -2099
+at = 1791291909
+"#;
+        let cfg: DesktopConfig = toml::from_str(text).expect("a later build's reason never breaks the file");
+        let failure = cfg.finder_last_failure.expect("the record is kept");
+        assert_eq!(failure.reason, FinderFailureReason::Unknown);
+        assert_eq!(
+            (failure.domain.as_str(), failure.code),
+            ("NSFileProviderErrorDomain", -2099)
+        );
+        assert!(cfg.finder_signed_out_by_choice, "and the rest of the file still loads");
+    }
+
+    // ── Lead ruling T4-3: the old, unredacted Finder error is scrubbed on macOS ─────────
+    //
+    // A 0.8.11 `desktop.toml` can hold `finder_install_last_error` = the OS's own message, which
+    // can name a file or folder. macOS no longer writes it, so loading drops it and the next save
+    // removes it from disk. Windows/Linux still read and write it. The platform is a parameter of
+    // `scrub_legacy_finder_error` so both branches run on any host; the two file tests below are
+    // `cfg`-split and run the real load/save against a temp dir on whichever host builds them.
+    // None of these tests calls `DesktopConfig::load`/`save`/`path`, so none can reach the
+    // person's real `desktop.toml`.
+
+    const FIXTURE_ERROR: &str =
+        "The file couldn\u{2019}t be saved because a file with the same name already exists. (NSCocoaErrorDomain 516)";
+    const PATH_ERROR: &str =
+        "The file \u{201c}/Users/sam/Secret Folder/tax.pdf\u{201d} couldn\u{2019}t be saved. (NSCocoaErrorDomain 516)";
+
+    /// The 0.8.11 fixture with a path in the old error key (the fixture itself carries none).
+    fn fixture_with_a_path_in_the_old_error() -> String {
+        let fixture = include_str!("../tests/fixtures/desktop-0.8.11.toml");
+        let with_path = fixture.replace(FIXTURE_ERROR, PATH_ERROR);
+        assert_ne!(
+            with_path, fixture,
+            "the fixture's error line changed: update FIXTURE_ERROR"
+        );
+        with_path
+    }
+
+    #[test]
+    fn the_legacy_finder_error_is_scrubbed_on_macos_and_kept_elsewhere() {
+        let text = fixture_with_a_path_in_the_old_error();
+        let on_macos: DesktopConfig = toml::from_str(&text).expect("parse");
+        assert_eq!(
+            on_macos.finder_install_last_error.as_deref(),
+            Some(PATH_ERROR),
+            "precondition"
+        );
+        let mut elsewhere = on_macos.clone();
+        let mut on_macos = on_macos;
+
+        on_macos.scrub_legacy_finder_error(true);
+        elsewhere.scrub_legacy_finder_error(false);
+
+        assert_eq!(on_macos.finder_install_last_error, None);
+        assert_eq!(elsewhere.finder_install_last_error.as_deref(), Some(PATH_ERROR));
+        // Only the one field that can carry a path goes; the other old keys still load.
+        assert_eq!(on_macos.finder_install_status.as_deref(), Some("error"));
+        assert_eq!(on_macos.finder_install_last_attempt_at, Some(1_791_291_909));
+        assert_eq!(on_macos.finder_install_reason_category.as_deref(), Some("unknown"));
+        assert_eq!(on_macos.sync_root, elsewhere.sync_root);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn on_macos_loading_a_0_8_11_file_drops_the_old_error_and_the_next_save_removes_it_from_disk() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("desktop.toml");
+        std::fs::write(&path, fixture_with_a_path_in_the_old_error()).expect("write fixture");
+
+        let cfg = DesktopConfig::load_from(&path).expect("a 0.8.11 file loads");
+        assert_eq!(cfg.finder_install_last_error, None);
+        assert_eq!(
+            cfg.finder_install_status.as_deref(),
+            Some("error"),
+            "the other old keys still load"
+        );
+        // Loading never rewrites the file (it runs from many threads): the path is on disk until a save.
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("/Users/sam/Secret Folder")
+        );
+
+        cfg.save_to(&path).expect("save");
+        let saved = std::fs::read_to_string(&path).unwrap();
+        for leaked in ["/Users/sam/Secret", "tax.pdf", "finder_install_last_error"] {
+            assert!(
+                !saved.contains(leaked),
+                "the saved file still holds {leaked:?}:\n{saved}"
+            );
+        }
+        assert!(
+            saved.contains("finder_install_status"),
+            "only the error key is dropped:\n{saved}"
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn off_macos_a_0_8_11_file_with_the_old_error_round_trips_unchanged() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("desktop.toml");
+        std::fs::write(&path, fixture_with_a_path_in_the_old_error()).expect("write fixture");
+
+        let cfg = DesktopConfig::load_from(&path).expect("a 0.8.11 file loads");
+        assert_eq!(cfg.finder_install_last_error.as_deref(), Some(PATH_ERROR));
+
+        cfg.save_to(&path).expect("save");
+        let back = DesktopConfig::load_from(&path).expect("reload");
+        assert_eq!(back.finder_install_last_error.as_deref(), Some(PATH_ERROR));
+        assert_eq!(back.finder_install_status.as_deref(), Some("error"));
+    }
+
+    // ── No unit test may reach the person's real desktop.toml ────────────────────────────
+
+    #[test]
+    fn unit_tests_resolve_the_config_path_in_a_sandbox_never_the_real_one() {
+        // `DesktopConfig::path()` is what `load()`, `save()` and `ensure_account_id()` resolve.
+        // Under `cfg(test)` it must point inside a per-process sandbox next to the test binary,
+        // so a test that calls `load()`/`save()` (directly, or through a command it exercises)
+        // cannot read, delete or rewrite the real `desktop.toml` in the person's config dir.
+        // Only paths are computed here; nothing is read.
+        let sandboxed = DesktopConfig::path().expect("config path resolves");
+        let real_dir = dirs::config_dir().expect("a user config dir exists on a dev machine or CI runner");
+        let real = real_dir.join(super::APP_CONFIG_DIR).join(super::CONFIG_FILENAME);
+
+        assert_ne!(sandboxed, real, "unit tests resolved the REAL desktop.toml");
+        // The specific real `beebeeb` config folder, not the whole config dir: a `CARGO_TARGET_DIR`
+        // under `~/Library/Application Support` (or `~/.config`) puts the sandbox inside the config
+        // dir legitimately.
+        let real_app_dir = real_dir.join(super::APP_CONFIG_DIR);
+        assert!(
+            !sandboxed.starts_with(&real_app_dir),
+            "{sandboxed:?} is inside the real config folder {real_app_dir:?}"
+        );
+        let exe_dir = std::env::current_exe()
+            .expect("test binary path")
+            .parent()
+            .expect("exe dir")
+            .to_path_buf();
+        assert!(
+            sandboxed.starts_with(&exe_dir),
+            "{sandboxed:?} is not inside the test binary's directory {exe_dir:?}"
+        );
     }
 }

@@ -236,7 +236,8 @@ fn signin_log(line: &str) {
 ///   - `waiting` { user_code, verification_uri, expires_in } — browser opened,
 ///     awaiting confirmation; the UI shows the code so the user can verify it
 ///   - `authorized`            — encrypted payload received, decrypting
-///   - `done` { email }        — session persisted + engine started
+///   - `done` { email }        — session persisted + engine started (no `email` when the account record could
+///                               not be fetched: the session is installed, but no engine starts until it is)
 ///   - `error` { message }     — any failure (also returned as `Err`)
 ///
 /// The whole handoff is bounded by the server's 300s code expiry; on timeout we
@@ -272,6 +273,10 @@ async fn run_handoff(
     state: &State<'_, AppState>,
     #[cfg(target_os = "windows")] attempt: &crate::auth_attempts::Attempt,
 ) -> Result<(), String> {
+    // This sign-in is one session transition: its generation is captured before it looks at anything on this
+    // computer, so a Lock, a Sign-out or another sign-in that completes while the browser is open is never followed by
+    // its writes (they are refused, and nothing of it is stored).
+    let mut turn = state.active_account()?.session_generation();
     // 1. Ephemeral P-256 key pair (uncompressed SEC1 point, base64).
     let secret = EphemeralSecret::random(&mut OsRng);
     let public_key = secret.public_key();
@@ -413,11 +418,10 @@ async fn run_handoff(
     struct Credentials {
         session_token: String,
         master_key_b64: String,
-        email: Option<String>,
     }
+    // The email the browser also sends is not read: it is the web client's text, not an identity (see below).
     let creds: Credentials =
         serde_json::from_slice(&plaintext).map_err(|e| format!("Invalid credentials JSON: {e}"))?;
-    let email = creds.email.clone();
     let master_key_vec = zeroize::Zeroizing::new(
         B64.decode(creds.master_key_b64.trim())
             .map_err(|e| format!("Invalid master key encoding: {e}"))?,
@@ -427,12 +431,100 @@ async fn run_handoff(
     }
     let mut master_key = zeroize::Zeroizing::new([0u8; 32]);
     master_key.copy_from_slice(&master_key_vec);
+    // The account's own record names it the way the server spells it (and gives its user id), which is what the
+    // session is known by. Fetched here, outside `apply_session`'s Windows transition lock, like the password
+    // login's profile fetch. If the fetch fails the session has NO identity: nothing the browser handed over stands
+    // in for it, so no engine starts (and no local data is bound, adopted or reset) until a fetch names it.
+    let profile = crate::fetch_canonical_profile(&creds.session_token).await;
+    let email = crate::session_email(profile.as_ref());
+    // R8 (spec 2026-10-06): the same account signs in again in place; another account is an account switch. The
+    // account behind the new session is the server's own record of it. A record that could not be fetched cannot be
+    // compared, so on a Mac that holds an account the sign-in is refused and nothing changes. Compiled out on
+    // Windows, which refuses a sign-in while a session exists.
+    #[cfg(not(target_os = "windows"))]
+    {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .default_headers(provenance_headers())
+            .build()
+            .map_err(|e| format!("reqwest build: {e}"))?;
+        let base_url = runner::api_base_url();
+        let settlement = match profile.as_ref() {
+            Some(profile) => {
+                // The handed-over key goes to the check too: when the key this Mac kept differs from it, the kept
+                // key is not used and `apply_session` below installs the handed-over one (spec §5.6).
+                match crate::settle_sign_in(
+                    app.clone(),
+                    state,
+                    &creds.session_token,
+                    profile,
+                    Some(&*master_key),
+                    &mut turn,
+                )
+                .await
+                {
+                    Ok(settlement) => Some(settlement),
+                    Err(failure) => {
+                        // Failed before its token reached the Keychain: nothing of the new session is stored.
+                        if !failure.token_stored {
+                            let _ = crate::revoke_desktop_session(&client, &base_url, &creds.session_token).await;
+                        }
+                        return Err(failure.message);
+                    }
+                }
+            }
+            None if crate::sign_in_leaves_account_traces(state) => {
+                let _ = crate::revoke_desktop_session(&client, &base_url, &creds.session_token).await;
+                return Err(crate::SIGN_IN_ACCOUNT_UNKNOWN.to_string());
+            }
+            None => None,
+        };
+        match settlement {
+            Some(crate::SignInSettlement::Reauthenticated {
+                vault_unlocked: true, ..
+            }) => {
+                emit(
+                    app,
+                    "done",
+                    email
+                        .as_ref()
+                        .map_or_else(|| serde_json::json!({}), |email| serde_json::json!({ "email": email })),
+                );
+                return Ok(());
+            }
+            Some(crate::SignInSettlement::AccountMismatch { pending_changes }) => {
+                let _ = crate::revoke_desktop_session(&client, &base_url, &creds.session_token).await;
+                emit(
+                    app,
+                    "account_mismatch",
+                    serde_json::json!({ "pending_changes": pending_changes }),
+                );
+                return Err("account_mismatch".to_string());
+            }
+            Some(crate::SignInSettlement::Unconfirmed) => {
+                let _ = crate::revoke_desktop_session(&client, &base_url, &creds.session_token).await;
+                return Err(crate::SIGN_IN_ACCOUNT_UNKNOWN.to_string());
+            }
+            // A first sign-in; or the same account with no usable key on this Mac (none was kept, the server no longer
+            // accepted the kept one, or it differs from the handed-over one): `apply_session` below installs the
+            // handoff's key, which is this same account's current key, and purges nothing; or an unidentified sign-in
+            // on a Mac that holds nothing of an account.
+            Some(
+                crate::SignInSettlement::Reauthenticated {
+                    vault_unlocked: false, ..
+                }
+                | crate::SignInSettlement::Fresh,
+            )
+            | None => {}
+        }
+    }
     crate::apply_session(
         app.clone(),
         state,
         creds.session_token.clone(),
-        *master_key,
-        email.clone(),
+        &master_key,
+        profile,
+        &mut turn,
         #[cfg(target_os = "windows")]
         attempt,
     )
@@ -440,7 +532,11 @@ async fn run_handoff(
 
     tracing::info!("browser-login: done, session installed");
     signin_log("done session-installed");
-    emit(app, "done", serde_json::json!({ "email": email }));
+    emit(
+        app,
+        "done",
+        email.map_or_else(|| serde_json::json!({}), |email| serde_json::json!({ "email": email })),
+    );
     Ok(())
 }
 
@@ -467,8 +563,12 @@ fn decrypt_payload(
     let shared_secret = secret.diffie_hellman(&browser_pub_key);
     let shared_bytes = shared_secret.raw_secret_bytes();
 
-    let nonce_bytes = B64.decode(nonce_b64).map_err(|e| format!("Invalid nonce encoding: {e}"))?;
-    let ciphertext = B64.decode(payload_b64).map_err(|e| format!("Invalid payload encoding: {e}"))?;
+    let nonce_bytes = B64
+        .decode(nonce_b64)
+        .map_err(|e| format!("Invalid nonce encoding: {e}"))?;
+    let ciphertext = B64
+        .decode(payload_b64)
+        .map_err(|e| format!("Invalid payload encoding: {e}"))?;
 
     let hk = Hkdf::<Sha256>::new(None, shared_bytes);
     let mut hkdf_key = zeroize::Zeroizing::new([0u8; 32]);
@@ -641,7 +741,9 @@ mod tests {
             frames: vec![
                 Message::Ping(vec![].into()),
                 Message::Pong(vec![].into()),
-                Message::Text(r#"{"user_code":"ABCD-1234","verification_uri":"https://beebeeb.io/cli","expires_in":300}"#.into()),
+                Message::Text(
+                    r#"{"user_code":"ABCD-1234","verification_uri":"https://beebeeb.io/cli","expires_in":300}"#.into(),
+                ),
             ],
         };
         let bound = Duration::from_secs(15); // mirrors DEVICE_CODE_TIMEOUT — real-time wait, but this branch resolves immediately

@@ -490,6 +490,14 @@
   text-overflow: ellipsis;
 }
 
+/* Task 1882 round 2 (review I2): a folder the person must find again is never cut off. */
+.ms-mono--wrap {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  overflow: visible;
+  text-overflow: clip;
+}
+
 /* ── Sheets (in-window dialogs) ── */
 
 .ms-sheet-copy {

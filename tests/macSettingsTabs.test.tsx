@@ -10,13 +10,16 @@
  */
 import { afterEach, describe, expect, test } from 'bun:test'
 import { createElement, Fragment } from 'react'
+import * as accountSession from '../src/accountSession'
 import * as desktopApi from '../src/desktopApi'
 import { connectNativeUpdateMenu as realConnectNativeUpdateMenu, desktopUpdateCheck } from '../src/windows/manualUpdateCheck'
 import * as diagnosticsCopy from '../src/diagnosticsCopy'
-import * as finderInstallCard from '../src/finderInstallCard'
+import * as finderSetup from '../src/finderSetup'
+import * as finderSetupCopy from '../src/finderSetupCopy'
 import * as model from '../src/macSettingsModel'
 import * as parts from '../src/macSettingsParts'
 import { expand, loadComponent, mount, textOf, visibleErrorSurfaces, type Mounted, type TreeNode } from './fixtures/componentHarness'
+import { rustStr } from './fixtures/rustConstants'
 
 const React = { createElement, Fragment }
 
@@ -32,28 +35,96 @@ const ConfigLoadFailed = loadComponent('MacSettings.tsx', 'ConfigLoadFailed', { 
 const withPinned = loadComponent('MacSettings.tsx', 'withPinned', {})
 
 const baseBindings = {
+  ...accountSession,
   ...desktopApi,
   ...diagnosticsCopy,
-  ...finderInstallCard,
   ...model,
   ...parts,
   Modal,
   ConfirmSheet,
   ConfigLoadFailed,
   withPinned,
+  finderActionButtonLabel: finderSetupCopy.finderActionButtonLabel,
+  // The real one: with no event bus here it reports ready at once, so a tab opened without `keptBus` still reads.
+  subscribeKeptFolderChanged: finderSetup.subscribeKeptFolderChanged,
   // The Mac's number format is pinned so the label does not depend on the machine running the test.
   storageLine: (storage: any) => model.storageLine(storage, 'nl-NL'),
 }
 
 const mounted: Mounted[] = []
-afterEach(() => { while (mounted.length) mounted.pop()!.close() })
+afterEach(() => {
+  while (mounted.length) mounted.pop()!.close()
+  // A sign-out's sentence lives in a module store (it outlives the session boundary): one test's is not the next one's.
+  accountSession.clearSignOutWarning()
+})
 
-function open(name: string, backend: Record<string, (args: any) => unknown>, extra: { props?: any; bindings?: Record<string, unknown> } = {}) {
+/**
+ * A scripted stand-in for `subscribeFinderSetup` (the real one needs a Tauri event bus): the
+ * registration lands on the next microtask, as the real one does, and `emit` is a reconciler
+ * transition arriving as a `finder-setup-changed` event.
+ */
+function finderBus() {
+  const listeners: Array<(view: unknown) => void> = []
+  return {
+    get live() { return listeners.length },
+    subscribeFinderSetup(onView: (view: unknown) => void, options: { onSubscribed?: () => void } = {}) {
+      listeners.push(onView)
+      void Promise.resolve().then(() => options.onSubscribed?.())
+      return () => { const at = listeners.indexOf(onView); if (at >= 0) listeners.splice(at, 1) }
+    },
+    emit(view: unknown) { for (const listener of [...listeners]) listener(view) },
+  }
+}
+
+/**
+ * A scripted stand-in for `subscribeKeptFolderChanged` (rebase re-review I2), like `finderBus`: the registration lands
+ * on the next microtask, as the real one does, and `emit` is Rust's `kept-folder-changed` once it has saved a folder.
+ * `log` gets "subscribed" when the registration lands, so a test can order it against the backend's reads.
+ */
+function keptBus(log: string[] = []) {
+  const listeners: Array<() => void> = []
+  return {
+    get live() { return listeners.length },
+    subscribe(onChanged: () => void, options: { onSubscribed?: () => void } = {}) {
+      listeners.push(onChanged)
+      void Promise.resolve().then(() => { log.push('subscribed'); options.onSubscribed?.() })
+      return () => { const at = listeners.indexOf(onChanged); if (at >= 0) listeners.splice(at, 1) }
+    },
+    emit() { for (const listener of [...listeners]) listener() },
+  }
+}
+
+interface FinderHarness {
+  bus: ReturnType<typeof finderBus>
+  /** What "Copy details" put on the (stand-in) pasteboard. */
+  copied: string[]
+}
+
+/** The REAL `useFinderSetup` declaration, run inside the mounted Sync tab (lead ruling 7b). */
+const useFinderSetupModule = ({ bus, copied }: FinderHarness) => ({
+  file: 'finderSetup.ts',
+  name: 'useFinderSetup',
+  bindings: {
+    loadFinderSetup: finderSetup.loadFinderSetup,
+    runFinderSetupAction: (action: finderSetupCopy.FinderSetupAction) =>
+      finderSetup.runFinderSetupAction(action, { writeClipboard: async (text) => { copied.push(await text) } }),
+    finderSetupLoadPresentation: finderSetupCopy.finderSetupLoadPresentation,
+    FINDER_ACTION_FAILED: finderSetupCopy.FINDER_ACTION_FAILED,
+    FINDER_COPIED_MS: finderSetupCopy.FINDER_COPIED_MS,
+    FINDER_ACTION_COMMAND: finderSetup.FINDER_ACTION_COMMAND,
+    commandUnavailableLabel: desktopApi.commandUnavailableLabel,
+    subscribeFinderSetup: bus.subscribeFinderSetup,
+    loadEngineRefusal: desktopApi.loadEngineRefusal,
+  },
+})
+
+function open(name: string, backend: Record<string, (args: any) => unknown>, extra: { props?: any; bindings?: Record<string, unknown>; finder?: FinderHarness } = {}) {
   const m = mount('MacSettings.tsx', name, {
     backend: backend as any,
     expand: true,
     props: extra.props,
     bindings: { ...baseBindings, ...extra.bindings },
+    hookModules: name === 'SyncTab' ? [useFinderSetupModule(extra.finder ?? { bus: finderBus(), copied: [] })] : undefined,
   })
   mounted.push(m)
   return m
@@ -93,12 +164,15 @@ const statuses = (m: Mounted) => find(m, (el) => el.props.role === 'status')
 
 // ── fixtures ────────────────────────────────────────────────────────────────
 
-const TIMEOUT_TEXT = 'Timed out waiting for the Beebeeb File Provider domain to become available'
+const finderView = (over: Record<string, unknown> = {}) => ({
+  setup: 'missing', reason: null, launch_location: 'applications', attempt: 1, max_attempts: 1, last_failure: null, ...over,
+})
 const finder = {
-  installed: { installed: true, path: 'Beebeeb in Finder', status: 'installed', last_error: null, last_attempt_at: 3, reason_category: null },
-  missing: { installed: false, path: null, status: 'missing', last_error: null, last_attempt_at: null, reason_category: null },
-  failed: { installed: false, path: null, status: 'error', last_error: TIMEOUT_TEXT, last_attempt_at: 2, reason_category: 'timeout' },
-  userDisabled: { installed: false, path: null, status: 'error', last_error: 'Beebeeb is turned off in System Settings. Open Login Items & Extensions, then try again.', last_attempt_at: 4, reason_category: 'user_disabled' },
+  installed: finderView({ setup: 'ready' }),
+  adding: finderView({ setup: 'adding' }),
+  failed: finderView({ setup: 'failed', reason: 'timeout', attempt: 4, max_attempts: 4 }),
+  folderTaken: finderView({ setup: 'failed', reason: 'folder_taken' }),
+  userDisabled: finderView({ setup: 'user_disabled', reason: 'user_disabled' }),
 }
 const config = { upload_kbps_limit: 0, download_kbps_limit: 5000, pause_sync: false, notify_conflicts: true, notify_sync_complete: false, notify_quota_warnings: true, theme: 'dark', local_cache_limit_bytes: 123 }
 const snapshot = (over: { account?: object; storage?: object | null; phase?: string } = {}) => ({
@@ -345,11 +419,49 @@ describe('Account tab', () => {
   const backend = (over: Record<string, (a: any) => unknown> = {}, snap = snapshot()) => ({
     popover_snapshot: () => snap,
     account_subscription: () => subscription,
-    lock_vault: () => undefined,
+    lock_vault: () => ({ warning: null }),
     unlock_vault: () => undefined,
-    clear_session: () => undefined,
+    clear_session: () => ({ warning: null }),
     'plugin:opener|open_url': () => undefined,
     ...over,
+  })
+
+  // FB-24 / rows 12 and 13 (M4): a Lock or a sign-out that HAPPENED but could not confirm a step is Ok
+  // with a warning. Its sentence is a neutral status line, never under "Couldn’t …", and the tab reads
+  // the account again after any result.
+  const LOCK_WARNING = { code: 'finder_lock_unconfirmed', sentence: 'The vault is locked, but Beebeeb could not confirm that its Finder setup stopped. Restart Beebeeb to be sure.' }
+  const SIGN_OUT_WARNING = { code: 'finder_removal_unconfirmed', sentence: 'You are signed out, but Beebeeb could not confirm that it was removed from Finder. If it still shows there, restart Beebeeb and sign out again.' }
+
+  test('a Lock that happened with a warning: the vault reads locked, and the sentence is a neutral line, not an error', async () => {
+    let unlocked = true
+    const m = open('AccountTab', backend({ lock_vault: () => { unlocked = false; return { warning: LOCK_WARNING } }, popover_snapshot: () => snapshot({ account: { vault_unlocked: unlocked }, storage: unlocked ? undefined : null }) }))
+    await settle(m)
+    await press(m, 'Lock now')
+    await settle(m)
+    expect(visibleText(m)).toContain('Vault is locked')
+    expect(statuses(m).map((el) => textOf(el.props.children).trim())).toContain(LOCK_WARNING.sentence)
+    expect(visibleErrorSurfaces(m)).toEqual([])
+    expect(m.toasts).toEqual([])
+  })
+
+  test('a failed Lock is still followed by a fresh read of the account (M4)', async () => {
+    const m = open('AccountTab', backend({ lock_vault: () => { throw new Error('busy') } }))
+    await settle(m)
+    await press(m, 'Lock now')
+    expect(m.calls.filter((c) => c.name === 'popover_snapshot')).toHaveLength(2)
+  })
+
+  test('a sign-out that happened with a warning: signed out, and the sentence is a neutral line, not "Couldn’t sign out"', async () => {
+    let signedIn = true
+    const m = open('AccountTab', backend({ clear_session: () => { signedIn = false; return { warning: SIGN_OUT_WARNING } }, popover_snapshot: () => snapshot({ account: { logged_in: signedIn } }) }))
+    await settle(m)
+    await press(m, 'Sign out…')
+    await press(m, 'Sign out')
+    await settle(m)
+    expect(visibleText(m)).toContain('You’re signed out')
+    expect(statuses(m).map((el) => textOf(el.props.children).trim())).toContain(SIGN_OUT_WARNING.sentence)
+    expect(m.toasts).toEqual([])
+    expect(visibleErrorSurfaces(m)).toEqual([])
   })
 
   test('shows who is signed in, the plan, one storage figure on the Mac\'s number format, and the vault', async () => {
@@ -383,7 +495,7 @@ describe('Account tab', () => {
 
   test('Lock now locks through lock_vault, reads the account again and shows the locked vault', async () => {
     let unlocked = true
-    const m = open('AccountTab', backend({ lock_vault: () => { unlocked = false }, popover_snapshot: () => snapshot({ account: { vault_unlocked: unlocked }, storage: unlocked ? undefined : null }) }))
+    const m = open('AccountTab', backend({ lock_vault: () => { unlocked = false; return { warning: null } }, popover_snapshot: () => snapshot({ account: { vault_unlocked: unlocked }, storage: unlocked ? undefined : null }) }))
     await settle(m)
     await press(m, 'Lock now')
     expect(m.calls.filter((c) => c.name === 'lock_vault')).toHaveLength(1)
@@ -424,7 +536,7 @@ describe('Account tab', () => {
 
   test('after signing out the tab reads the account again and says you are signed out', async () => {
     let signedIn = true
-    const m = open('AccountTab', backend({ clear_session: () => { signedIn = false }, popover_snapshot: () => snapshot({ account: { logged_in: signedIn, vault_unlocked: signedIn, email: signedIn ? 'sam@example.eu' : null }, storage: null }) }))
+    const m = open('AccountTab', backend({ clear_session: () => { signedIn = false; return { warning: null } }, popover_snapshot: () => snapshot({ account: { logged_in: signedIn, vault_unlocked: signedIn, email: signedIn ? 'sam@example.eu' : null }, storage: null }) }))
     await settle(m)
     await press(m, 'Sign out…')
     await press(m, 'Sign out')
@@ -482,21 +594,44 @@ describe('Account tab', () => {
 
 describe('Sync tab', () => {
   const ready = (over: object = {}) => ({ state: { status: 'ready', config: { ...config, ...over } }, save: async () => {}, reload: async () => {} })
+  /** These four stay registered for Windows and Linux (spec §4, §9); no macOS code path may call them (R5). */
+  const FORBIDDEN_COMMANDS = ['install_finder_location', 'continue_without_finder_location', 'finder_location_state', 'finder_domain_user_enabled']
+  const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
+  /** The hook reads once its subscription has landed, so a render needs microtasks AND a macrotask. */
+  const settleFinder = async (m: Mounted) => { await m.flush(); await tick(); await m.flush() }
+  const pressFinder = async (m: Mounted, label: string) => { await button(m, label).props.onClick(); await settleFinder(m) }
+  const calls = (m: Mounted, name: string) => m.calls.filter((c) => c.name === name).length
 
-  function syncBackend(opts: { finder?: any; install?: (a: any) => unknown; tree?: any[]; repair?: (a: any) => unknown; pin?: (a: any) => unknown; gate?: Promise<void> } = {}) {
-    const st = { finder: opts.finder ?? finder.installed }
+  function syncBackend(opts: { finder?: any; unreadable?: boolean; tree?: any[]; repair?: (a: any) => unknown; pin?: (a: any) => unknown; retry?: () => unknown; refusal?: unknown; kept?: string | null; dismissFails?: boolean; keptReadFails?: boolean; log?: string[] } = {}) {
+    // `kept` is the folder Rust saved in desktop.toml (task 1882 round 2, review I2).
+    const st: { finder: any; unreadable: boolean; kept: string | null } = { finder: opts.finder ?? finder.installed, unreadable: opts.unreadable ?? false, kept: opts.kept ?? null }
     return {
       st,
       backend: {
-        finder_location_state: () => st.finder,
-        install_finder_location: async (a: any) => {
-          if (opts.gate) await opts.gate
-          return opts.install ? opts.install(a) : st.finder
-        },
+        finder_setup_state: () => { if (st.unreadable) throw new Error('no reconciler'); return st.finder },
+        sync_status: () => ({ logged_in: true, engine: 'stopped', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0, engine_refusal: opts.refusal ?? null }),
+        finder_setup_retry: opts.retry ?? (() => undefined),
+        finder_setup_copy_details: () => 'details',
+        finder_setup_show_app: () => undefined,
         reset_macos_integration: (a: any) => {
-          const result = opts.repair ? opts.repair(a) : { removed_file_provider_domain: true, disabled_autostart: true, removed_socket: true, removed_cache_files: 0, skipped_cache_files: 0, pending_operations_preserved: 0, warnings: [] }
-          st.finder = finder.missing
+          const result: any = opts.repair ? opts.repair(a) : { removed_file_provider_domain: true, disabled_autostart: true, removed_socket: true, removed_cache_files: 0, skipped_cache_files: 0, pending_operations_preserved: 0, warnings: [] }
+          st.finder = finder.adding // the reconciler adds Beebeeb back by itself
+          // Like Rust: a repair that kept files saves the folder for the row.
+          if (typeof result?.preserved_location === 'string') st.kept = result.preserved_location
           return result
+        },
+        kept_unsynced_folder: () => {
+          opts.log?.push('read')
+          if (opts.keptReadFails) throw new Error('desktop.toml could not be read')
+          return st.kept
+        },
+        dismiss_kept_unsynced_folder: (a: any) => {
+          if (opts.dismissFails) throw new Error('disk full')
+          // Like Rust (1882 r5): clears the saved folder only if it is still the one the row
+          // showed, and reports whether it did and which folder is saved now.
+          const cleared = st.kept === a?.path
+          if (cleared) st.kept = null
+          return { cleared, current: st.kept }
         },
         list_remote_tree: () => opts.tree ?? [folder('a', 'Photos', true), folder('b', 'Work', false)],
         set_recursive_pin: opts.pin ?? (() => undefined),
@@ -506,152 +641,500 @@ describe('Sync tab', () => {
   }
   const openSync = async (opts: Parameters<typeof syncBackend>[0] = {}, settings: any = ready()) => {
     const { backend, st } = syncBackend(opts)
-    const m = open('SyncTab', backend, { props: { settings } })
-    await m.flush()
-    return { m, st }
+    const harness: FinderHarness = { bus: finderBus(), copied: [] }
+    const kept = keptBus(opts.log)
+    const m = open('SyncTab', backend, { props: { settings }, finder: harness, bindings: { subscribeKeptFolderChanged: kept.subscribe } })
+    await settleFinder(m)
+    return { m, st, bus: harness.bus, copied: harness.copied, kept }
   }
 
-  test('an added Finder location reads Added with Repair…, no error, and the spec\'s hint', async () => {
+  test('an added Finder location reads Added with Repair…, no error, and the ready hint', async () => {
     const { m } = await openSync()
     const text = visibleText(m)
     expect(text).toContain('Beebeeb in Finder')
     expect(text).toContain('Your vault appears under Locations in Finder.')
     expect(text).toContain('Added')
     expect(buttons(m)).toContain('Repair…')
-    expect(buttons(m)).not.toContain('Add to Finder')
     expect(visibleErrorSurfaces(m)).toEqual([])
     expect(visibleText(m)).not.toContain('Users')
   })
 
-  test('a Finder location that is not added offers exactly one primary action, Add to Finder', async () => {
-    const { m } = await openSync({ finder: finder.missing })
-    expect(buttons(m)).toContain('Add to Finder')
-    expect(buttons(m)).not.toContain('Repair…')
-    expect(button(m, 'Add to Finder').props.className).toContain('ms-btn--primary')
-    expect(visibleText(m)).toContain('Add it to see your files in Finder like any other folder.')
-    expect(visibleText(m)).not.toContain('Your vault appears under Locations')
+  test('no state ever offers Add to Finder or Install, and no macOS code path calls the Windows/Linux commands (R5)', async () => {
+    const states = [
+      ...Object.values(finder),
+      ...finderSetup.FINDER_FAILURE_REASONS.map((reason) => finderView({ setup: reason === 'user_disabled' ? 'user_disabled' : 'failed', reason })),
+    ]
+    for (const state of states) {
+      const { m } = await openSync({ finder: state })
+      expect(buttons(m).join('|')).not.toMatch(/Add to Finder|Install/)
+      expect(visibleText(m)).not.toMatch(/Add to Finder|Add it to see/)
+      for (const forbidden of FORBIDDEN_COMMANDS) expect(m.calls.map((c) => c.name)).not.toContain(forbidden)
+    }
+    const unreadable = await openSync({ unreadable: true })
+    expect(buttons(unreadable.m).join('|')).not.toMatch(/Add to Finder|Install/)
+    for (const forbidden of FORBIDDEN_COMMANDS) expect(unreadable.m.calls.map((c) => c.name)).not.toContain(forbidden)
   })
 
-  test('screenshot 1: a failed install is ONE inline alert (title, sentence, mono reason), never also a toast, and never the raw error', async () => {
-    const { m } = await openSync({ finder: finder.missing, install: () => finder.failed })
-    await press(m, 'Add to Finder')
-    expect(find(m, (el) => el.props['data-error-surface'] === 'finder-install')).toHaveLength(1)
+  test('adding is a disabled Adding… with the adding line, no error and no other button for it', async () => {
+    const { m } = await openSync({ finder: finder.adding })
+    expect(button(m, 'Adding…').props.disabled).toBe(true)
+    expect(visibleText(m)).toContain('Adding Beebeeb to Finder…')
+    expect(buttons(m)).not.toContain('Try again')
+    expect(visibleErrorSurfaces(m)).toEqual([])
+  })
+
+  // FA-I2: a loaded Missing rests (after a sign-out, a Lock, or with no keys on this Mac). The row
+  // claims no activity and nothing about presence: one sentence, no button, no error.
+  test('a loaded Missing is a quiet row: the one sentence, no button, no "Adding…", no error', async () => {
+    const { m } = await openSync({ finder: finderView({ setup: 'missing' }) })
+    expect(visibleText(m)).toContain(finderSetupCopy.FINDER_RESTING_LINE)
+    expect(visibleText(m)).not.toMatch(/Adding|Checking/)
+    expect(buttons(m).filter((b) => ['Adding…', 'Try again', 'Repair…'].includes(b))).toEqual([])
+    expect(visibleErrorSurfaces(m)).toEqual([])
+  })
+
+  test('the instant before the first answer says nothing and offers nothing (it is not "Adding" either)', async () => {
+    const { backend } = syncBackend()
+    const m = open('SyncTab', { ...backend, finder_setup_state: () => new Promise(() => {}) }, { props: { settings: ready() } })
+    await settleFinder(m)
+    expect(visibleText(m)).not.toContain('Adding Beebeeb to Finder…')
+    expect(visibleText(m)).not.toContain('Your vault appears under Locations')
+    expect(buttons(m)).not.toContain('Adding…')
+    expect(buttons(m)).not.toContain('Try again')
+    expect(buttons(m)).not.toContain('Repair…')
+    expect(visibleErrorSurfaces(m)).toEqual([])
+  })
+
+  test('a failure is ONE inline alert with one sentence and one action, never a toast, never raw error text', async () => {
+    const { m } = await openSync({ finder: finder.failed })
+    expect(find(m, (el) => el.props['data-error-surface'] === 'finder-setup')).toHaveLength(1)
     expect(alerts(m)).toHaveLength(1)
     expect(visibleErrorSurfaces(m)).toHaveLength(1)
     expect(m.toasts).toEqual([])
-    const text = visibleText(m)
-    expect(text).toContain('Couldn’t add Beebeeb to Finder')
-    expect(text).toContain('macOS didn’t respond in time.')
-    expect(text).toContain('reason: timeout')
-    expect(text).not.toContain('File Provider')
-    expect(text).not.toContain(TIMEOUT_TEXT)
-    expect(buttons(m)).toContain('Try again')
+    expect(visibleText(m)).toContain('macOS didn’t finish adding Beebeeb to Finder.')
+    expect(visibleText(m)).toContain('reason: timeout')
+    expect(visibleText(m)).not.toContain('Couldn’t add Beebeeb to Finder') // the old title is gone: one sentence, not two
+    expect(buttons(m).filter((b) => b === 'Try again')).toHaveLength(1)
+    expect(visibleText(m)).not.toContain('File Provider')
+    expect(buttons(m)).not.toContain('Repair…') // nothing is Added, so nothing to repair
   })
 
-  test('the same failure that arrives as a rejected command is still one inline alert and no toast', async () => {
-    const { m } = await openSync({ finder: finder.missing, install: () => { throw new Error('Finder location must be absolute: relative/path') } })
-    await press(m, 'Add to Finder')
-    expect(visibleErrorSurfaces(m)).toHaveLength(1)
+  test('each of the seven reasons is one notice with its one sentence and its one action (spec §6.2)', async () => {
+    const actionLabels = Object.values(finderSetupCopy.FINDER_ACTION_LABEL)
+    for (const reason of finderSetup.FINDER_FAILURE_REASONS) {
+      const setup = reason === 'user_disabled' ? 'user_disabled' : 'failed'
+      const { m } = await openSync({ finder: finderView({ setup, reason }) })
+      const copy = finderSetupCopy.FINDER_REASON_COPY[reason]
+      const notice = [...alerts(m), ...statuses(m)]
+      expect(notice).toHaveLength(1)
+      expect(notice[0].props.role).toBe(reason === 'user_disabled' ? 'status' : 'alert')
+      expect(textOf(notice[0].props.children)).toContain(copy.sentence)
+      expect(buttons(m).filter((b) => actionLabels.includes(b))).toEqual([finderSetupCopy.FINDER_ACTION_LABEL[copy.action]])
+      expect(visibleText(m).includes(`reason: ${reason}`)).toBe(reason !== 'user_disabled') // the mono line is for alerts only
+      expect(m.toasts).toEqual([])
+    }
+  })
+
+  // Must-render row 9 (FT-I5): a failed + unknown with an engine refusal says the refusal's sentence.
+  test('an engine refusal replaces the unknown sentence; identity_unknown keeps Try again', async () => {
+    const sentence = 'Beebeeb couldn’t confirm which account this computer’s local files belong to, so sync didn’t start. Connect to the internet and open Beebeeb again.'
+    const { m } = await openSync({ finder: finderView({ setup: 'failed', reason: 'unknown' }), refusal: { code: 'identity_unknown', sentence } })
+    expect(alerts(m).map((el) => textOf(el.props.children))[0]).toContain(sentence)
+    expect(visibleText(m)).not.toContain(finderSetupCopy.FINDER_REASON_COPY.unknown.sentence)
+    expect(buttons(m).filter((b) => b === 'Try again')).toHaveLength(1)
+  })
+
+  test('engine_stop_unconfirmed: its sentence and no Try again, because only a relaunch helps', async () => {
+    const sentence = 'Beebeeb’s sync didn’t confirm it stopped. Quit and reopen Beebeeb before syncing again.'
+    const { m } = await openSync({ finder: finderView({ setup: 'failed', reason: 'unknown' }), refusal: { code: 'engine_stop_unconfirmed', sentence } })
+    expect(alerts(m).map((el) => textOf(el.props.children))[0]).toContain(sentence)
+    expect(buttons(m)).not.toContain('Try again')
+  })
+
+  test('a failure notice\'s Try again asks the reconciler (finder_setup_retry); it does not re-read the state', async () => {
+    const { m } = await openSync({ finder: finder.failed })
+    const reads = calls(m, 'finder_setup_state')
+    await pressFinder(m, 'Try again')
+    expect(calls(m, 'finder_setup_retry')).toBe(1)
+    expect(calls(m, 'finder_setup_state')).toBe(reads)
     expect(m.toasts).toEqual([])
-    expect(visibleText(m)).not.toContain('relative/path')
   })
 
-  test('Add to Finder sends no path on macOS (the app picks its own location)', async () => {
-    const { m } = await openSync({ finder: finder.missing, install: () => finder.installed })
-    await press(m, 'Add to Finder')
-    expect(m.calls.find((c) => c.name === 'install_finder_location')?.args).toEqual({ path: null })
+  test('Copy details says Copied on its button after a success (FT-clipboard)', async () => {
+    const { m } = await openSync({ finder: finder.folderTaken })
+    await pressFinder(m, 'Copy details')
+    expect(buttons(m)).toContain('Copied')
+    expect(buttons(m)).not.toContain('Copy details')
+  })
+
+  test('folder_taken offers Copy details and no Try again; Copy details uses the shared action and the pasteboard once', async () => {
+    const { m, copied } = await openSync({ finder: finder.folderTaken })
+    expect(buttons(m)).toContain('Copy details')
+    expect(buttons(m)).not.toContain('Try again')
+    await pressFinder(m, 'Copy details')
+    expect(calls(m, 'finder_setup_copy_details')).toBe(1)
+    expect(copied).toEqual(['details'])
+    expect(m.toasts).toEqual([])
+  })
+
+  test('a Finder state that cannot be read is "Couldn’t check Finder." with one Try again that reads again, and never "Adding"', async () => {
+    const { m, st } = await openSync({ unreadable: true })
+    expect(visibleText(m)).toContain('Couldn’t check Finder.')
+    expect(visibleText(m)).not.toContain('Adding')
+    expect(buttons(m).filter((b) => b === 'Try again')).toHaveLength(1)
+    expect(buttons(m)).not.toContain('Adding…')
+    expect(m.toasts).toEqual([])
+    const reads = calls(m, 'finder_setup_state')
+    st.unreadable = false
+    await pressFinder(m, 'Try again')
+    // The unavailable state's Try again is a re-read, NOT the reconciler's retry.
+    expect(calls(m, 'finder_setup_state')).toBe(reads + 1)
+    expect(calls(m, 'finder_setup_retry')).toBe(0)
+    expect(visibleText(m)).toContain('Your vault appears under Locations in Finder.')
     expect(buttons(m)).toContain('Repair…')
-    expect(visibleErrorSurfaces(m)).toEqual([])
   })
 
-  test('a new attempt clears the old failure while it runs ("Adding…", disabled), then shows the new result once', async () => {
-    let release!: () => void
-    const gate = new Promise<void>((resolve) => { release = resolve })
-    const { m } = await openSync({ finder: finder.failed, install: () => finder.failed, gate })
-    expect(visibleErrorSurfaces(m)).toHaveLength(1)
-    void button(m, 'Try again').props.onClick()
-    m.render()
-    expect(visibleErrorSurfaces(m)).toEqual([])
-    expect(button(m, 'Adding…').props.disabled).toBe(true)
-    release()
-    await m.flush()
-    expect(visibleErrorSurfaces(m)).toHaveLength(1)
-    expect(m.toasts).toEqual([])
-  })
-
-  test('a user-disabled extension is a neutral notice with the System Settings action, not an error', async () => {
+  test('a turned-off extension is a neutral notice with Open System Settings, not an error', async () => {
     const { m } = await openSync({ finder: finder.userDisabled })
     expect(visibleErrorSurfaces(m)).toEqual([])
     expect(alerts(m)).toHaveLength(0)
     expect(statuses(m)).toHaveLength(1)
-    await press(m, 'Open Login Items & Extensions')
-    expect(m.calls.filter((c) => c.name === 'open_login_items_and_extensions_settings')).toHaveLength(1)
+    expect(visibleText(m)).toContain('Beebeeb is turned off in System Settings.')
+    await pressFinder(m, 'Open System Settings')
+    expect(calls(m, 'open_login_items_and_extensions_settings')).toBe(1)
     expect(m.toasts).toEqual([])
   })
 
-  test('Repair… asks first, says it turns off Open Beebeeb at login, and sends nothing until the second click', async () => {
+  test('the row follows finder-setup-changed without asking again (no polling)', async () => {
+    const { m, bus } = await openSync({ finder: finder.adding })
+    const reads = calls(m, 'finder_setup_state')
+    expect(buttons(m)).not.toContain('Repair…')
+    bus.emit(finder.installed)
+    await m.flush()
+    expect(buttons(m)).toContain('Repair…')
+    expect(visibleText(m)).toContain('Your vault appears under Locations in Finder.')
+    bus.emit(finder.failed)
+    await m.flush()
+    expect(alerts(m)).toHaveLength(1)
+    expect(buttons(m)).not.toContain('Repair…')
+    expect(calls(m, 'finder_setup_state')).toBe(reads)
+  })
+
+  // Row 15: Try again fails only with Rust's fixed sentences, which carry the remedy: a neutral note.
+  test('a failed Try again is Rust\'s sentence as a neutral note, never a toast or a second error surface', async () => {
+    // The not-running answer, read from driver.rs so this feeds what Rust sends; it is the ruled sentence.
+    const sentence = rustStr('finder_setup/driver.rs', 'NOT_RUNNING')
+    expect(sentence).toBe('Beebeeb’s Finder setup isn’t running. Quit and reopen Beebeeb to start it again.')
+    const { m } = await openSync({ finder: finder.failed, retry: () => { throw sentence } })
+    await pressFinder(m, 'Try again')
+    expect(m.toasts).toEqual([])
+    expect(statuses(m).map((el) => textOf(el.props.children).trim())).toContain(sentence)
+    expect(alerts(m)).toHaveLength(1)
+    expect(find(m, (el) => el.props['data-error-surface'] === 'finder-setup')).toHaveLength(1)
+  })
+
+  test('a Try again that fails at the IPC level (not one of Rust\'s answers) keeps the one fixed toast', async () => {
+    const { m } = await openSync({ finder: finder.failed, retry: () => { throw new Error('finder_setup_retry is not a registered command') } })
+    await pressFinder(m, 'Try again')
+    expect(m.toasts).toEqual([{ variant: 'error', message: 'Beebeeb couldn’t retry adding itself to Finder.' }])
+    expect(JSON.stringify(m.toasts)).not.toContain('registered')
+  })
+
+  test('Repair… asks first, says it turns off Open Beebeeb at login and adds itself back, and sends nothing until the second click', async () => {
     const { m } = await openSync()
     await press(m, 'Repair…')
     expect(dialogs(m)).toHaveLength(1)
     expect(visibleText(m)).toContain('Repair Beebeeb in Finder?')
     expect(visibleText(m)).toContain('turns off Open Beebeeb at login')
-    expect(m.calls.filter((c) => c.name === 'reset_macos_integration')).toHaveLength(0)
+    expect(visibleText(m)).toContain('then adds itself back to Finder')
+    expect(visibleText(m)).not.toContain('You can add it back afterwards')
+    expect(calls(m, 'reset_macos_integration')).toBe(0)
     await press(m, 'Cancel')
     expect(dialogs(m)).toHaveLength(0)
-    expect(m.calls.filter((c) => c.name === 'reset_macos_integration')).toHaveLength(0)
+    expect(calls(m, 'reset_macos_integration')).toBe(0)
   })
 
-  test('confirming a repair resets once, reads the Finder state again and says what was kept, in one neutral line', async () => {
+  test('confirming a repair resets once, reads the Finder state again, says what was kept in one neutral line, and shows Adding… while the reconciler puts Beebeeb back', async () => {
     const { m } = await openSync({ repair: () => ({ pending_operations_preserved: 3, warnings: [] }) })
     await press(m, 'Repair…')
-    await press(m, 'Repair')
-    expect(m.calls.filter((c) => c.name === 'reset_macos_integration')).toHaveLength(1)
-    expect(m.calls.filter((c) => c.name === 'finder_location_state')).toHaveLength(2)
+    await pressFinder(m, 'Repair')
+    expect(calls(m, 'reset_macos_integration')).toBe(1)
+    expect(calls(m, 'finder_setup_state')).toBe(2)
     expect(statuses(m).map((el) => textOf(el.props.children).trim())).toContain('3 changes waiting to upload were kept.')
-    expect(buttons(m)).toContain('Add to Finder') // the repair removed it, so it can be added again
+    expect(button(m, 'Adding…').props.disabled).toBe(true) // the reconciler adds it back by itself
+    expect(buttons(m).join('|')).not.toMatch(/Add to Finder|Install/)
     expect(visibleErrorSurfaces(m)).toEqual([])
     expect(dialogs(m)).toHaveLength(0)
+  })
+
+  // Task 1882 (spec 2026-10-09 §5): the repair's removal kept files that never reached the server.
+  const KEPT = '/Users/sam/Library/CloudStorage/Beebeeb (kept)'
+  // Round 3 (re-review D3): the saved row outlives the account that kept the files, so its
+  // sentence is neutral: no "your vault" for files that may belong to another account. The
+  // literal is on purpose: it is what a person reads, not whatever the constant holds.
+  const ROW_SENTENCE = 'Files that had not reached the server were kept in this folder:'
+  const keptNotes = (m: Mounted) =>
+    statuses(m).filter((el) => readable(expand(el)).join(' ').includes(ROW_SENTENCE))
+  const monoLines = (m: Mounted) => find(m, (el) => String(el.props.className ?? '').split(' ').includes('ms-mono'))
+
+  // Round 2 (review I2, lead ruling 2026-10-10): the kept folder is saved by Rust and shown as a
+  // dismissible row until the person dismisses it. A tab switch or closing Settings unmounts
+  // SyncTab, so the row must come from the saved folder, not from this component's state.
+  test('a saved kept folder shows on open, in one status note whose path wraps, with Dismiss', async () => {
+    const { m } = await openSync({ kept: KEPT })
+    expect(keptNotes(m)).toHaveLength(1)
+    const mono = monoLines(m)
+    expect(mono.map((el) => textOf(el.props.children).trim())).toEqual([KEPT])
+    expect(String(mono[0].props.className).split(' ')).toContain('ms-mono--wrap')
+    expect(buttons(m)).toContain('Dismiss')
+    expect(visibleErrorSurfaces(m)).toEqual([])
+  })
+
+  // Re-review D5: the fallback in runRepair covers a failed READ of the saved record, and only that.
+  // A failed SAVE makes Repair return an error instead ("a repair that fails" below, one inline
+  // alert and no row); the folder is then named by the app's own alert, which Rust raises before
+  // it returns the error.
+  test('a repair that kept files shows its folder even when the saved record cannot be read back', async () => {
+    const { m } = await openSync({
+      keptReadFails: true,
+      repair: () => ({ pending_operations_preserved: 0, warnings: [], preserved_location: KEPT }),
+    })
+    expect(keptNotes(m)).toHaveLength(0) // nothing readable on open, so no row
+    await press(m, 'Repair…')
+    await press(m, 'Repair')
+    expect(keptNotes(m)).toHaveLength(1)
+    expect(monoLines(m).map((el) => textOf(el.props.children).trim())).toEqual([KEPT])
+    expect(visibleErrorSurfaces(m)).toEqual([])
+  })
+
+  test('the saved row is neutral, so it reads correctly after an account switch (re-review D3)', async () => {
+    const { m } = await openSync({ kept: KEPT })
+    const [note] = keptNotes(m)
+    const text = readable(expand(note)).join(' ')
+    expect(text).toContain(ROW_SENTENCE)
+    expect(text).not.toMatch(/\byour\b/i) // not "your vault": the files may be another account's
+    expect(visibleText(m)).not.toContain(model.PRESERVED_FILES_SENTENCE)
+    expect(model.KEPT_FOLDER_ROW_SENTENCE).toBe(ROW_SENTENCE)
+  })
+
+  test('the row survives a tab switch: a fresh Sync tab shows the same saved folder', async () => {
+    const { backend, st } = syncBackend({ repair: () => ({ pending_operations_preserved: 0, warnings: [], preserved_location: KEPT }) })
+    const first = open('SyncTab', backend, { props: { settings: ready() } })
+    await first.flush()
+    await press(first, 'Repair…')
+    await press(first, 'Repair')
+    expect(keptNotes(first)).toHaveLength(1)
+    first.close()
+    mounted.splice(mounted.indexOf(first), 1)
+    expect(st.kept).toBe(KEPT)
+    const again = open('SyncTab', backend, { props: { settings: ready() } })
+    await again.flush()
+    expect(keptNotes(again)).toHaveLength(1)
+    expect(monoLines(again).map((el) => textOf(el.props.children).trim())).toEqual([KEPT])
+  })
+
+  test('Dismiss sends the exact folder the row showed and the row goes', async () => {
+    const { m, st } = await openSync({ kept: KEPT })
+    await press(m, 'Dismiss')
+    expect(m.calls.filter((c) => c.name === 'dismiss_kept_unsynced_folder').map((c) => c.args)).toEqual([{ path: KEPT }])
+    expect(st.kept).toBeNull()
+    expect(keptNotes(m)).toHaveLength(0)
+    expect(buttons(m)).not.toContain('Dismiss')
+  })
+
+  // 1882 r5 (review thread on `dismissKept`): the command reports whether it cleared the folder.
+  // A row that showed an older folder while a newer one was saved must not vanish as if the newer
+  // folder had been dismissed unseen.
+  const NEWER = '/Users/sam/Library/CloudStorage/Beebeeb (kept 2)'
+
+  test('a Dismiss on a row that showed an older folder keeps the row and shows the newer folder', async () => {
+    const { m, st } = await openSync({ kept: KEPT })
+    st.kept = NEWER // another removal kept files after this row was drawn
+    await press(m, 'Dismiss')
+    expect(m.calls.filter((c) => c.name === 'dismiss_kept_unsynced_folder').map((c) => c.args)).toEqual([{ path: KEPT }])
+    expect(st.kept).toBe(NEWER) // Rust cleared nothing
+    expect(keptNotes(m)).toHaveLength(1)
+    expect(monoLines(m).map((el) => textOf(el.props.children).trim())).toEqual([NEWER])
+    expect(buttons(m)).toContain('Dismiss')
+    expect(m.toasts).toEqual([])
+    expect(visibleErrorSurfaces(m)).toEqual([])
+    // A second Dismiss now sends the newer folder, and that one clears it.
+    await press(m, 'Dismiss')
+    expect(m.calls.filter((c) => c.name === 'dismiss_kept_unsynced_folder').map((c) => c.args)).toEqual([{ path: KEPT }, { path: NEWER }])
+    expect(st.kept).toBeNull()
+    expect(keptNotes(m)).toHaveLength(0)
+  })
+
+  test('a Dismiss on a folder that was already dismissed elsewhere removes the row without a toast', async () => {
+    const { m, st } = await openSync({ kept: KEPT })
+    st.kept = null // dismissed from another window
+    await press(m, 'Dismiss')
+    expect(keptNotes(m)).toHaveLength(0)
+    expect(buttons(m)).not.toContain('Dismiss')
+    expect(m.toasts).toEqual([])
+  })
+
+  test('a Dismiss that fails keeps the row and says so once, in a toast', async () => {
+    const { m } = await openSync({ kept: KEPT, dismissFails: true })
+    await press(m, 'Dismiss')
+    expect(keptNotes(m)).toHaveLength(1)
+    expect(m.toasts).toHaveLength(1)
+    expect(m.toasts[0]).toMatchObject({ variant: 'error' })
+  })
+
+  test('nothing saved shows no kept-folder row', async () => {
+    const { m } = await openSync({ kept: null })
+    expect(keptNotes(m)).toHaveLength(0)
+    expect(buttons(m)).not.toContain('Dismiss')
+  })
+
+  // Rebase re-review I2 (it replaces the 1882 r5 tests that stood here): a removal the reconciler runs in the
+  // background (its Try again can start an owed one) saves the folder long after the tab read it, and Rust then emits
+  // `kept-folder-changed`. The tab reads the folder again on that event. The old tests faked a save inside the retry
+  // command, which no Rust path does: `finder_setup_retry` only triggers the reconciler and returns.
+  describe('a kept folder saved by a removal in the background', () => {
+    const keptReads = (m: Mounted) => m.calls.filter((c) => c.name === 'kept_unsynced_folder')
+
+    test('a Try again whose removal keeps files later shows the row when Rust says it saved it', async () => {
+      const { m, st, kept } = await openSync({ finder: finder.failed })
+      expect(keptNotes(m)).toHaveLength(0)
+      await pressFinder(m, 'Try again')
+      // `finder_setup_retry` has returned; the removal it started has not saved anything yet.
+      expect(keptNotes(m)).toHaveLength(0)
+      st.kept = KEPT // Rust: the removal kept files, and `surface_kept_folder` saved them for the row ...
+      kept.emit() // ... then told the windows
+      await settleFinder(m)
+      expect(keptNotes(m)).toHaveLength(1)
+      expect(monoLines(m).map((el) => textOf(el.props.children).trim())).toContain(KEPT)
+      expect(m.toasts).toEqual([])
+    })
+
+    test('a Finder action alone does not read the folder again; the event does', async () => {
+      const { m, kept } = await openSync({ finder: finder.failed })
+      expect(keptReads(m)).toHaveLength(1) // on open
+      await pressFinder(m, 'Try again')
+      expect(keptReads(m)).toHaveLength(1) // the action's answer says nothing about a removal still running
+      kept.emit()
+      await settleFinder(m)
+      expect(keptReads(m)).toHaveLength(2)
+      expect(keptNotes(m)).toHaveLength(0) // nothing was saved
+    })
+
+    test('the first read waits for the listener, so a folder saved in between is not missed', async () => {
+      const log: string[] = []
+      const { m, kept } = await openSync({ kept: KEPT, log })
+      expect(log).toEqual(['subscribed', 'read'])
+      expect(keptNotes(m)).toHaveLength(1)
+      expect(kept.live).toBe(1)
+      m.unmount()
+      expect(kept.live).toBe(0) // and a closed tab stops listening
+    })
+  })
+
+  test('a repair that kept un-synced files says so in one status note, with the folder in mono', async () => {
+    const { m } = await openSync({ repair: () => ({ pending_operations_preserved: 0, warnings: [], preserved_location: KEPT }) })
+    await press(m, 'Repair…')
+    await press(m, 'Repair')
+    expect(keptNotes(m)).toHaveLength(1)
+    const mono = monoLines(m).map((el) => textOf(el.props.children).trim())
+    expect(mono).toEqual([KEPT])
+    expect(visibleText(m)).toContain(ROW_SENTENCE)
+    expect(visibleErrorSurfaces(m)).toEqual([])
+  })
+
+  test('a repair that kept nothing shows no kept-files sentence and no folder', async () => {
+    for (const preserved_location of [null, undefined]) {
+      const { m } = await openSync({ repair: () => ({ pending_operations_preserved: 2, warnings: [], preserved_location }) })
+      await press(m, 'Repair…')
+      await press(m, 'Repair')
+      expect(keptNotes(m)).toHaveLength(0)
+      expect(visibleText(m)).not.toContain(ROW_SENTENCE)
+      expect(monoLines(m)).toHaveLength(0)
+      expect(statuses(m).map((el) => textOf(el.props.children).trim())).toContain('2 changes waiting to upload were kept.')
+    }
+  })
+
+  // Task 17b, fix round 1: Rust puts a bridge code and a cache path in `warnings` (lib.rs:3326, 3265).
+  test('a repair that succeeds with warnings shows ONE fixed sentence and none of the warning text', async () => {
+    const leaks = ['io.beebeeb.bridge 3', '/Users/sam/Library/x.db']
+    const { m } = await openSync({ repair: () => ({ pending_operations_preserved: 2, warnings: leaks }) })
+    await press(m, 'Repair…')
+    await pressFinder(m, 'Repair')
+    expect(calls(m, 'reset_macos_integration')).toBe(1)
+    expect(statuses(m).map((el) => textOf(el.props.children).trim())).toContain(finderSetupCopy.FINDER_REPAIR_PARTIAL)
+    for (const leak of leaks) {
+      expect(visibleText(m)).not.toContain(leak)
+      expect(JSON.stringify(m.toasts)).not.toContain(leak)
+    }
+    expect(m.toasts).toEqual([])
+  })
+
+  // Row 11 on a Mac: when the engine stop is unconfirmed, Repair says so through the flag alone, and its
+  // `warnings` does not also carry the engine-stop text (lib.rs, MacosIntegrationResetResult).
+  test('a repair whose engine stop is unconfirmed, and nothing else left over, says only to quit and reopen (row 11)', async () => {
+    const { m } = await openSync({ repair: () => ({ pending_operations_preserved: 0, warnings: [], engine_stop_unconfirmed: true }) })
+    await press(m, 'Repair…')
+    await pressFinder(m, 'Repair')
+    const lines = statuses(m).map((el) => textOf(el.props.children).trim())
+    expect(lines).toContain(finderSetupCopy.FINDER_REPAIR_ENGINE_UNCONFIRMED)
+    expect(lines.filter((line) => line.includes(finderSetupCopy.FINDER_REPAIR_PARTIAL))).toEqual([])
+    expect(m.toasts).toEqual([])
+  })
+
+  test('an unconfirmed engine stop and a step Repair could not finish: quit and reopen first, then the partial-cleanup sentence (row 11)', async () => {
+    const leftover = 'Could not remove Finder File Provider domain: io.beebeeb.bridge 3'
+    const { m } = await openSync({ repair: () => ({ pending_operations_preserved: 0, warnings: [leftover], engine_stop_unconfirmed: true }) })
+    await press(m, 'Repair…')
+    await pressFinder(m, 'Repair')
+    expect(statuses(m).map((el) => textOf(el.props.children).trim())).toContain(
+      `${finderSetupCopy.FINDER_REPAIR_ENGINE_UNCONFIRMED} ${finderSetupCopy.FINDER_REPAIR_PARTIAL}`,
+    )
+    expect(visibleText(m)).not.toContain('io.beebeeb.bridge')
+    expect(m.toasts).toEqual([])
   })
 
   test('a repair that fails is ONE inline alert (spec section 7), no toast', async () => {
     const { m } = await openSync({ repair: () => { throw new Error('socket busy') } })
     await press(m, 'Repair…')
-    await press(m, 'Repair')
+    await pressFinder(m, 'Repair')
     expect(find(m, (el) => el.props['data-error-surface'] === 'finder-repair')).toHaveLength(1)
     expect(visibleErrorSurfaces(m)).toHaveLength(1)
     expect(m.toasts).toEqual([])
     expect(visibleText(m)).not.toContain('socket busy')
   })
 
+  // A failed Repair shows its one note, word for word, and never the raw detail. (1882 r4 had a second note, for a
+  // Repair that failed after its removal; under spec A no platform can fail there, so it is gone: rebase re-review
+  // Minor 4, lead ruling.)
+  const alertText = (m: Mounted) => find(m, (el) => el.props['data-error-surface'] === 'finder-repair').map((el) => readable(expand(el)).join(' '))
+
+  test('a repair that fails before the removal keeps the old copy, word for word', async () => {
+    const { m } = await openSync({ repair: () => { throw new Error('socket busy') } })
+    await press(m, 'Repair…')
+    await press(m, 'Repair')
+    const [text] = alertText(m)
+    expect(text).toContain('Couldn’t repair Beebeeb in Finder')
+    expect(text).toContain('Nothing was changed that you need to undo. Try again.')
+    expect(text).not.toContain('was removed from Finder')
+  })
+
   test('a successful repair whose refreshed Finder state cannot be read stops claiming Added and offers Try again', async () => {
-    let failRead = false
-    const st = { finder: finder.installed }
-    const m = open('SyncTab', {
-      finder_location_state: () => {
-        if (failRead) throw new Error('offline')
-        return st.finder
-      },
-      reset_macos_integration: () => {
-        st.finder = finder.missing // the repair really removed the integration
-        return { removed_file_provider_domain: true, disabled_autostart: true, removed_socket: true, removed_cache_files: 0, skipped_cache_files: 0, pending_operations_preserved: 0, warnings: [] }
-      },
-      list_remote_tree: () => [folder('a', 'Photos', true)],
-      open_login_items_and_extensions_settings: () => undefined,
-    }, { props: { settings: ready() } })
-    await m.flush()
+    const { backend, st } = syncBackend()
+    const m = open('SyncTab', backend, { props: { settings: ready() } })
+    await settleFinder(m)
     expect(visibleText(m)).toContain('Added')
     await press(m, 'Repair…')
-    failRead = true
-    await press(m, 'Repair')
+    st.unreadable = true
+    await pressFinder(m, 'Repair')
     // The reset succeeded but the refresh failed: the row must not keep the pre-repair "Added"
     // (the integration is gone), and the failed refresh needs its own way back in.
     expect(visibleText(m)).not.toContain('Added')
     expect(visibleText(m)).toContain('Couldn’t check Finder.')
     expect(buttons(m)).toContain('Try again')
-    failRead = false
-    await press(m, 'Try again')
-    expect(visibleText(m)).toContain('Add it to see your files in Finder like any other folder.')
-    expect(buttons(m)).toContain('Add to Finder')
+    st.unreadable = false
+    await pressFinder(m, 'Try again')
+    expect(button(m, 'Adding…').props.disabled).toBe(true)
+    expect(buttons(m).join('|')).not.toMatch(/Add to Finder|Install/)
   })
 
   test('Keep on this Mac: the count of kept folders and a way to choose', async () => {
@@ -962,13 +1445,12 @@ describe('Confirmation dialogs: danger and Enter', () => {
   const accountBackend = () => ({
     popover_snapshot: () => snapshot(),
     account_subscription: () => subscription,
-    lock_vault: () => undefined,
+    lock_vault: () => ({ warning: null }),
     unlock_vault: () => undefined,
-    clear_session: () => undefined,
+    clear_session: () => ({ warning: null }),
   })
   const repairBackend = (over: Record<string, (a: any) => unknown> = {}) => ({
-    finder_location_state: () => finder.installed,
-    install_finder_location: () => finder.installed,
+    finder_setup_state: () => finder.installed,
     reset_macos_integration: () => ({ removed_file_provider_domain: true, disabled_autostart: true, removed_socket: true, removed_cache_files: 0, skipped_cache_files: 0, pending_operations_preserved: 0, warnings: [] }),
     list_remote_tree: () => [],
     open_login_items_and_extensions_settings: () => undefined,
@@ -976,6 +1458,8 @@ describe('Confirmation dialogs: danger and Enter', () => {
   })
   const openSyncRepair = async (over: Record<string, (a: any) => unknown> = {}) => {
     const m = open('SyncTab', repairBackend(over), { props: { settings: readySettings } })
+    await m.flush()
+    await new Promise<void>((resolve) => setTimeout(resolve, 0)) // the Finder state is read once the subscription has landed
     await m.flush()
     return m
   }

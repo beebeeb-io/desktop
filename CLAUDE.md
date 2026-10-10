@@ -180,6 +180,91 @@ The Tauri warning that `io.beebeeb.app` ends in `.app` is known. Keep this
 identifier unless Guus creates a new macOS App Store Connect record and chooses
 to migrate. Expo is unrelated to desktop builds; it only applies to mobile.
 
+**Removing the Finder location keeps un-synced files (task 1882, P0).** Every
+`NSFileProviderManager` domain removal (sign-out, Repair, ~~the Add-to-Finder
+rollback,~~ every other removal the Finder reconciler makes, the app-start sweep,
+`BeebeebFileProviderCtl remove`) passes
+`NSFileProviderDomainRemovalModePreserveDirtyUserData`; never add a plain
+`removeDomain:`/`remove(domain)` or `removeAllDomains`. The source pin
+`test_1882_every_domain_removal_in_the_repo_keeps_unsynced_files`
+(`src-tauri/src/finder_removal.rs`) scans every `.m`/`.swift` file and fails on
+one. macOS reports a folder even when it kept nothing (device, 2026-10-10), so
+the bridge checks it on the returned URL (`BeebeebKeptFolderState`): only a folder
+that exists and holds at least one entry (or that the sandbox will not let it
+list) reaches the person, and never the logs: an alert (sign-out, ~~add rollback,~~
+a reconciler removal nobody waits for, sweep; drawn by macOS's UserNotificationCenter, not a
+Beebeeb window) plus a row in
+Settings → Sync until dismissed (`kept_unsynced_folder` in `desktop.toml`; commands
+`kept_unsynced_folder` / `dismiss_kept_unsynced_folder`, which returns
+`{ cleared, current }`). Writes to `desktop.toml` take the one config-write lock in
+`config.rs` (`DesktopConfig::update_at` is a load-change-save under it). The 1882 source pins
+read through `lf()`/`slash()` in `finder_removal.rs`, so they run on a Windows checkout
+(CRLF text, `\` paths). Spec: `docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md`.
+Correction: a Mac has no Add-to-Finder rollback. Since spec A (R5) the reconciler adds Beebeeb and
+never removes a domain it added. Windows and Linux keep `install_finder_location`'s rollback, where
+there is no File Provider and nothing is kept. — lead ruling, 2026-10-10 (rebase onto spec A, Q1)
+
+### Finder setup reconciler (spec `docs/specs/2026-10-06-macos-finder-setup-reconciler.md`)
+
+On macOS nobody installs the Finder location any more: there is no install button, and no macOS code
+path calls `install_finder_location`, `continue_without_finder_location` or `finder_domain_user_enabled`
+(they stay registered for Windows and Linux). One Rust task in `src-tauri/src/finder_setup/`
+keeps Beebeeb in Finder: a pure `core` (the state machine of spec §5), a pure `policy`
+(classification by NSError domain + code only; retries at 0/5/15/45 s), a pure `launch_location`,
+and one `driver` task that runs one `NSFileProviderManager` call at a time through
+`macos/FileProviderBridge.m`, which returns structured `(domain, code, message, underlying)` errors.
+Triggers: launch (after the startup restore), keys arriving (`apply_session`,
+`desktop_unlock_with_recovery_phrase`, `unlock_vault`, and `reauth_in_place`: a same-account re-sign-in
+that loads the key from the Keychain), "Try again", and the userEnabled flip.
+Sign-out removes the domain and holds until the next sign-in. Repair removes, then checks once, so a
+signed-in Mac ends with Beebeeb back in Finder. A revoked session keeps Beebeeb in Finder (R2).
+Lock cancels a running check and never removes. Surfaces read `finder_setup_state` (through
+`src/finderSetup.ts`) and listen to `finder-setup-changed`; the same hook reads `sync_status.engine_refusal`
+on load and on every event, so a refused engine start names its own cause. A loaded `Missing` is a quiet
+row (no pill, no activity, one sentence). All copy lives in `src/finderSetupCopy.ts`.
+
+**Launch rule.** `launch_location` classifies where the app runs from: a path containing
+`/AppTranslocation/` is `translocated`; a bundle directly at `/Volumes/<name>/` is `disk_image`; an
+Applications folder anywhere, including one on another disk, is `applications`; anything else is
+`elsewhere`. `translocated` and `disk_image` report `not_in_applications` and never call add;
+`applications` and `elsewhere` proceed and macOS decides (a -2002 is still classified). The result is
+in `finder_setup_state` before anyone signs in.
+
+**Lifecycle log.** From the app's point of view it is `~/Library/Logs/Beebeeb/lifecycle.log`. The app is
+sandboxed, so on disk it is `~/Library/Containers/io.beebeeb.app/Data/Library/Logs/Beebeeb/lifecycle.log`:
+1 MB × 3 files, a closed vocabulary of typed events, redacted NSError text, and **not** a `tracing`
+sink. It holds no user content, so it survives sign-out. "Copy details" and the support bundle include
+its last 200 lines. Whether Console.app lists this file is not verified yet: device check D0 records
+the answer, so do not tell anyone to look for it there.
+
+**Correction — 1698.** The `DOMAIN_IDENTIFIER` comment in `macos_file_provider.rs` claimed the zombie
+`io.beebeeb.desktop.FileProvider` domain owned `Beebeeb-Drive` and that a signed context could sweep it.
+Both claims were wrong. Its folder is `Beebeeb-Beebeeb`, and `getDomains` returns only the calling
+provider's domains, so our stale-domain sweep cannot see another provider's domains. Renaming our
+domain to "Beebeeb" made it collide with that folder. A pre-rename `io.beebeeb.desktop` domain on a dev
+Mac (any Mac that ran a build from before 18 May) is cleared once by a one-off helper (spec §11), not
+by the app.
+
+### Re-sign-in in place (ruling R8)
+
+"Sign in again" on macOS opens sign-in in place (`open_reauth_window`); nothing is cleared first.
+`desktop_login`, `desktop_login_2fa` and the browser handoff compare the account signing in with
+the recorded owner of the local data (`src-tauri/src/reauth.rs`, R10). The same account swaps only its
+session token: keys, cache, queue and Finder stay, and the queue uploads afterwards. Only an account
+switch purges: another account gets the switch warning (with the pending-change count), then a full
+sign-out, then a fresh sign-in. A startup 401 drops only the revoked token on macOS/Linux. Windows
+keeps today's flow.
+
+### Local data belongs to one account (R10)
+
+Local data is bound to the account that created it; a different account never reuses it. `state.db`
+records the owner (`owner_user_id`, `owner_email` in `sync_state`). Every engine start goes through
+`spawn_bound_engine`, which runs `account_binding::bind_before_engine_start` first: the same account
+keeps everything; another account's data, or data with no recorded owner, is reset before anything
+starts (Windows refuses instead); an owner that cannot be compared stops the start. A failed reset or
+sign-out purge stops. Keep every engine start behind `spawn_bound_engine`:
+`every_engine_start_is_bound_first` counts them.
+
 ## Browser sign-in (`src-tauri/src/browser_login.rs`, task 1734)
 
 The first-run "Sign in with browser" handoff opens `<APP_URL>/cli-auth` and shows the device code in the app. The link carries NO code: the person TYPES the code on the page and confirms with their password, so a link someone else sends them has nothing to approve (security review 2026-10-04, finding 9). The WS init frame (`init_frame`) adds `client: "desktop"`, the release version, `os` and the hostname for the page to show as "reported by the device"; the screen copy lives in `src/browserLoginCopy.ts` (tested by `tests/browserLoginCopy.test.ts`). The decrypt path is unchanged.

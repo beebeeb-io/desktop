@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import { accountSessionRevision, observeAccountSession, subscribeAccountSession } from './accountSession'
+import { accountSessionRevision, observeAccountSession, observeSignOutWarning, subscribeAccountSession } from './accountSession'
 import { parsePopoverSnapshot, type PopoverSnapshot } from './popoverContract'
 
 export type CommandResult<T> =
@@ -22,6 +22,34 @@ export interface SyncStatus {
   // while every call it makes fails. Drives the persistent "You're signed
   // out on this device" banner.
   auth_expired?: boolean
+  /**
+   * Why sync did not start, when the engine start was refused (Lane R, ruling P; must-render rows
+   * 8–10): the local data's account could not be confirmed, another account's data is on a Windows
+   * PC, or an earlier engine stop was never confirmed. Parsed by `loadSyncStatus`; null otherwise.
+   */
+  engine_refusal?: EngineRefusal | null
+}
+
+/** The closed set of `sync_status.engine_refusal` codes (`account_binding::Refusal::code()` in Rust). */
+export const ENGINE_REFUSAL_CODES = ['identity_unknown', 'other_account_on_windows', 'engine_stop_unconfirmed'] as const
+export type EngineRefusalCode = (typeof ENGINE_REFUSAL_CODES)[number]
+export interface EngineRefusal {
+  code: EngineRefusalCode
+  /** Rust's fixed sentence for the code; shown verbatim. */
+  sentence: string
+}
+
+/**
+ * `sync_status.engine_refusal`, strictly: `{code, sentence}` with a code from the closed set and a
+ * non-blank sentence, else `null`. A value outside the contract is no refusal (the surface keeps its
+ * own sentence), never a guess at what it meant.
+ */
+export function parseEngineRefusal(value: unknown): EngineRefusal | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
+  const { code, sentence } = value as Record<string, unknown>
+  if (typeof code !== 'string' || !(ENGINE_REFUSAL_CODES as readonly string[]).includes(code)) return null
+  if (typeof sentence !== 'string' || sentence.trim().length === 0) return null
+  return { code: code as EngineRefusalCode, sentence }
 }
 
 export type DesktopPlatform = 'macos' | 'windows' | 'linux' | 'unknown'
@@ -227,12 +255,20 @@ export interface FinderInstallState {
 
 export interface MacosIntegrationResetResult {
   removed_file_provider_domain: boolean
+  /** Task 1882: where macOS kept the un-synced Finder files the removal found; null = nothing kept. */
+  preserved_location?: string | null
   disabled_autostart: boolean
   removed_socket: boolean
   removed_cache_files: number
   skipped_cache_files: number
   pending_operations_preserved: number
   sync_root_preserved?: string | null
+  /**
+   * An engine stop on this account is unconfirmed after Repair's own stop (this one or an earlier one):
+   * sync starts again only after Beebeeb is quit and reopened (Lane R, FA-I3). Surfaces render one
+   * fixed sentence for it (`FINDER_REPAIR_ENGINE_UNCONFIRMED`), never the warning text.
+   */
+  engine_stop_unconfirmed: boolean
   warnings: string[]
 }
 
@@ -388,11 +424,22 @@ export function conflictContentPreview(fileId: string): Promise<CommandResult<Co
   return command<ConflictContentPreview>('conflict_content_preview', { fileId })
 }
 
+/**
+ * Commands whose answer stands even when this WebView observed a new session revision while they ran.
+ * `sync_status` is what observes it. `clear_session` (a sign-out, and the account switch's sign-out with
+ * `forgetEmail`) and `lock_vault` end the session themselves: the revision moves because of them (always for a
+ * sign-out; for a Lock, when no Keychain session is left), and their answer is `{warning}`, with no account data
+ * in it. On a Mac a status read sent during the sign-out waits behind the engine slot and is released already
+ * carrying the new revision; when it is observed first, "Account changed" would report a sign-out that happened
+ * as one that failed. Every other command keeps the guard.
+ */
+const ANSWER_STANDS_WHEN_THE_ACCOUNT_CHANGES: ReadonlySet<string> = new Set(['sync_status', 'clear_session', 'lock_vault'])
+
 export async function command<T>(name: string, args?: Record<string, unknown>): Promise<CommandResult<T>> {
   const revision = accountSessionRevision()
   try {
     const value = await invoke<T>(name, args)
-    if (name !== 'sync_status' && revision !== accountSessionRevision()) {
+    if (!ANSWER_STANDS_WHEN_THE_ACCOUNT_CHANGES.has(name) && revision !== accountSessionRevision()) {
       return { ok: false, reason: 'Account changed. Please try again.', unsupported: false }
     }
     return { ok: true, value }
@@ -418,8 +465,17 @@ export async function popoverSnapshot(activityLimit?: number): Promise<CommandRe
 
 export async function loadSyncStatus(): Promise<SyncStatus | null> {
   const result = await command<SyncStatus>('sync_status')
-  if (result.ok && result.value.session_revision !== undefined) observeAccountSession(result.value.session_revision)
-  return result.ok ? result.value : null
+  if (result.ok && result.value.session_revision !== undefined) {
+    // A sign-in clears a held sign-out sentence first, so the remount it causes does not show it again.
+    observeSignOutWarning(result.value.logged_in === true, result.value.session_revision)
+    observeAccountSession(result.value.session_revision)
+  }
+  return result.ok ? { ...result.value, engine_refusal: parseEngineRefusal(result.value.engine_refusal) } : null
+}
+
+/** The current engine refusal, or `null` when there is none or the status cannot be read. */
+export async function loadEngineRefusal(): Promise<EngineRefusal | null> {
+  return (await loadSyncStatus())?.engine_refusal ?? null
 }
 
 export async function openUrl(url: string): Promise<CommandResult<void>> {
@@ -956,9 +1012,26 @@ export function showMainAppWindow(): Promise<CommandResult<void>> {
 
 // ── 2FA / TOTP login (desktop credential path) ─────────────────────────────
 
-/** Shape returned by the `desktop_login` Tauri command. */
+/**
+ * Shape returned by `desktop_login` and `desktop_login_2fa`. Rust's `LoginOutcome` ALWAYS sends all
+ * five fields (`false`, `false`, `false`, `false`, `null` for a plain sign-in; pinned by
+ * `login_outcome_json_is_the_frontends_contract` in lib.rs), and this bundle ships with that Rust, so
+ * they are required: `settledFrom` (onboardingSignIn.ts) reads a missing one as a contract break
+ * (M9), never as a plain sign-in.
+ */
 export interface DesktopLoginResult {
   requires_2fa: boolean
+  /** The account on this Mac signed in again in place; nothing was cleared. */
+  reauthenticated: boolean
+  /** With `reauthenticated`: the keys are here, so no recovery phrase is needed. */
+  vault_unlocked: boolean
+  /**
+   * With `reauthenticated` (FB-I1): the kept vault key was no longer the account's (the key was changed
+   * on another device), so it was removed and the recovery phrase follows.
+   */
+  key_replaced: boolean
+  /** Another account signed in; nothing changed on this Mac. */
+  account_mismatch: { pending_changes: number } | null
 }
 
 /**
@@ -988,8 +1061,51 @@ export function desktopLogin(
  * `{ requires_2fa: true }`. The partial token is held server-side for ~5 min.
  * Rejects with "Invalid authentication code" on a wrong code (retryable).
  */
-export function desktopLogin2fa(code: string): Promise<CommandResult<void>> {
-  return command<void>('desktop_login_2fa', { code })
+export function desktopLogin2fa(code: string): Promise<CommandResult<DesktopLoginResult>> {
+  return command<DesktopLoginResult>('desktop_login_2fa', { code })
+}
+
+/**
+ * What `clear_session` and `lock_vault` answer when the action HAPPENED (Lane R, lead ruling FB-24):
+ * `warning` is always present, null when every step was confirmed, else the one step that could not be
+ * (a closed code and Rust's fixed sentence). An `Err` from either command still means "it did not
+ * happen". Codes mirror `ActionWarning::code()` in lib.rs.
+ */
+export const SESSION_ACTION_WARNING_CODES = ['finder_removal_unconfirmed', 'finder_lock_unconfirmed', 'engine_stop_unconfirmed'] as const
+export type SessionActionWarningCode = (typeof SESSION_ACTION_WARNING_CODES)[number]
+export interface SessionActionWarning {
+  code: SessionActionWarningCode
+  /** Shown verbatim, as a neutral status line: never under a "Couldn’t …" title. */
+  sentence: string
+}
+export interface SessionActionOutcome {
+  warning: SessionActionWarning | null
+}
+
+/** Strict: `{warning: null}` or `{warning: {code, sentence}}` with a known code and a non-blank sentence, else `null`. */
+export function parseSessionActionOutcome(value: unknown): SessionActionOutcome | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value) || !('warning' in value)) return null
+  const { warning } = value as { warning: unknown }
+  if (warning === null) return { warning: null }
+  if (typeof warning !== 'object' || Array.isArray(warning) || warning === undefined) return null
+  const { code, sentence } = warning as Record<string, unknown>
+  if (typeof code !== 'string' || !(SESSION_ACTION_WARNING_CODES as readonly string[]).includes(code)) return null
+  if (typeof sentence !== 'string' || sentence.trim().length === 0) return null
+  return { warning: { code: code as SessionActionWarningCode, sentence } }
+}
+
+/**
+ * The action happened (`Ok`), so an outcome that cannot be read is still `Ok` with no warning: reporting
+ * "it did not happen" would be false. A trace with the command and a fixed reason code is left for
+ * diagnostics, never the payload (it is Rust's text, but a contract break is not something to echo).
+ */
+async function sessionAction(name: 'clear_session' | 'lock_vault', args?: Record<string, unknown>): Promise<CommandResult<SessionActionOutcome>> {
+  const result = await command<unknown>(name, args)
+  if (!result.ok) return result
+  const outcome = parseSessionActionOutcome(result.value)
+  if (outcome) return { ok: true, value: outcome }
+  console.warn(name, 'outcome_unreadable')
+  return { ok: true, value: { warning: null } }
 }
 
 /**
@@ -997,40 +1113,62 @@ export function desktopLogin2fa(code: string): Promise<CommandResult<void>> {
  * wipes any cached credentials from the keychain. The files in the sync root
  * stay on disk; the vault stays intact in the cloud. After this call the root
  * `sync_status` poll will return `logged_in: false` and the SignedOutGate will
- * take over.
+ * take over. `forgetEmail` is the account switch (FB-I2): the previous account's
+ * address is forgotten too, or the sign-out stops (`Err`).
  */
-export function clearSession(): Promise<CommandResult<void>> {
-  return command<void>('clear_session')
+export function clearSession(options: { forgetEmail?: boolean } = {}): Promise<CommandResult<SessionActionOutcome>> {
+  return sessionAction('clear_session', options.forgetEmail ? { forgetEmail: true } : undefined)
+}
+
+/** Lock the vault. `Ok` means it is locked; its `warning` says which step could not be confirmed. */
+export function lockVault(): Promise<CommandResult<SessionActionOutcome>> {
+  return sessionAction('lock_vault')
 }
 
 export interface ForceReauthApi {
+  platform: () => Promise<CommandResult<DesktopPlatform>>
   clearSession: typeof clearSession
   openOnboardingWindow: () => Promise<CommandResult<void>>
+  openReauthWindow: () => Promise<CommandResult<void>>
 }
 
 const defaultForceReauthApi: ForceReauthApi = {
+  platform: () => command<DesktopPlatform>('desktop_platform'),
   clearSession,
   openOnboardingWindow: () => command<void>('open_onboarding_window'),
+  openReauthWindow: () => command<void>('open_reauth_window'),
 }
 
 /**
- * Force a fresh sign-in (task 1546 Codex round 2, finding 2). Clears the
- * (expired/invalid) session on the Rust side FIRST — via `clearSession`, so
- * `sync_status` reports `logged_in: false` and `auth_expired: false` — THEN
- * opens the onboarding window. Routing straight to `open_onboarding_window`
- * while the stale session/token was still installed let onboarding
- * fast-forward an "unlocked, configured" user straight past the sign-in
- * form. Shared by VersionCenter's "Sign in again" review action and the
- * persistent auth-expired banner, so both use the exact same forced flow.
+ * "Sign in again". On macOS (ruling R8, spec 2026-10-06) it opens sign-in IN PLACE: nothing is
+ * cleared, so a same-account sign-in keeps Finder, keys, cache and pending edits, and another
+ * account gets the switch warning. On Windows and Linux it is unchanged (task 1546 Codex round 2,
+ * finding 2): clear the session first, then open onboarding, which otherwise fast-forwards an
+ * "unlocked, configured" user past the sign-in form. If the platform cannot be read, nothing is
+ * cleared: clearing on a Mac by mistake is the data loss R8 fixes.
  *
- * Takes an injectable `api` (default: the real Tauri commands) so the
- * ordering + short-circuit-on-failure decision is unit-testable without a
- * Tauri runtime — mirrors `onboardingSignIn.ts`'s `SignInApi` pattern.
+ * Shared by VersionCenter's "Sign in again" review action and the persistent auth-expired banner,
+ * so both use the exact same flow. Takes an injectable `api` (default: the real Tauri commands) so
+ * the platform branch, the ordering and the short-circuit-on-failure decision are unit-testable
+ * without a Tauri runtime; mirrors `onboardingSignIn.ts`'s `SignInApi` pattern.
  */
-export async function forceReauth(api: ForceReauthApi = defaultForceReauthApi): Promise<CommandResult<void>> {
-  const cleared = await api.clearSession()
+export async function forceReauth(api: ForceReauthApi = defaultForceReauthApi): Promise<CommandResult<SessionActionOutcome>> {
+  // M7: a command this build does not have is named by the step that needed it; the callers show the
+  // reason as is.
+  const named = <T,>(name: string, result: CommandResult<T>): CommandResult<T> =>
+    !result.ok && result.unsupported ? { ok: false, reason: commandUnavailableLabel(name), unsupported: true } : result
+  const platform = named('desktop_platform', await api.platform())
+  if (!platform.ok) return platform
+  if (platform.value === 'macos') {
+    const opened = named('open_reauth_window', await api.openReauthWindow())
+    return opened.ok ? { ok: true, value: { warning: null } } : opened
+  }
+  const cleared = named('clear_session', await api.clearSession())
   if (!cleared.ok) return cleared
-  return api.openOnboardingWindow()
+  // A clear that happened with a warning (FB-24) is no reason to stop: onboarding opens, and the
+  // warning goes back to the caller, which shows it neutrally.
+  const opened = named('open_onboarding_window', await api.openOnboardingWindow())
+  return opened.ok ? { ok: true, value: { warning: cleared.value.warning } } : opened
 }
 
 // ── Selective sync (wave-2) ──────────────────────────────────────────────────

@@ -1,7 +1,8 @@
 import { useCapabilities, supportsRoute, CapabilityAlternative } from './capabilities'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { command, loadSyncStatus, type DesktopPlatform, type SyncStatus } from './desktopApi'
+import { heldSignOutWarning, subscribeSignOutWarning } from './accountSession'
 import Status from './pages/Status'
 import SyncFolder from './pages/SyncFolder'
 import SelectiveSync from './pages/SelectiveSync'
@@ -29,7 +30,17 @@ function initialPage(): Page {
 
 export default function App() {
   const caps = useCapabilities()
-  const [page, setPage] = useState<Page>(() => initialPage())
+  // A remount after a sign-out that left a sentence opens on the Account page, where it is shown (accountSession.ts).
+  const [page, setPage] = useState<Page>(() => (heldSignOutWarning() !== null ? 'account' : initialPage()))
+  // And a sentence that becomes held after this window mounted brings it to the Account page too: the boundary's
+  // remount and the sign-out's answer arrive in either order.
+  const signOutNote = useSyncExternalStore(subscribeSignOutWarning, heldSignOutWarning, heldSignOutWarning)
+  const seenSignOutNote = useRef(signOutNote)
+  useEffect(() => {
+    if (signOutNote === seenSignOutNote.current) return
+    seenSignOutNote.current = signOutNote
+    if (signOutNote !== null) setPage('account')
+  }, [signOutNote])
   const [status, setStatus] = useState<SyncStatus | null>(null)
   const [version, setVersion] = useState<string | null>(null)
   const [versionCenterRefresh, setVersionCenterRefresh] = useState(0)
