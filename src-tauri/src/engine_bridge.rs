@@ -46,9 +46,9 @@ use serde::{Deserialize, Serialize};
 use crate::api_client::{ApiClient, DesktopUploadInitRequest};
 use crate::conflict::{VersionInfo, is_conflict, is_text_file};
 use crate::state_db::{
-    FileContractState, FileEntry, FileStatus, ItemKind, LocalActivityEventInput, LocalActivityKind, Namespace,
-    OperationKind, OperationPauseReason, PERMISSION_OWNER, PERMISSION_READ, PERMISSION_SHARE, PERMISSION_WRITE,
-    PendingOperation, QueueDiagnostics, StateDb, UploadResume,
+    ClaimOutcome, ClaimedOp, FileContractState, FileEntry, FileStatus, ItemKind, LocalActivityEventInput,
+    LocalActivityKind, Namespace, OperationKind, OperationPauseReason, PERMISSION_OWNER, PERMISSION_READ,
+    PERMISSION_SHARE, PERMISSION_WRITE, PendingOperation, QueueDiagnostics, StateDb, UploadResume,
 };
 
 // ── Wire-byte counters (P1 — live throughput) ────────────────────────────────
@@ -226,6 +226,34 @@ pub struct EngineBridge {
     /// entire in-progress due-operations batch, or a fresh watcher/File-
     /// Provider write landing mid-teardown, through unchecked.
     stopping: Arc<AtomicBool>,
+    #[cfg(test)]
+    pub(crate) seams: Seams,
+}
+
+/// Test-only hooks at named points where the concurrency tests force an
+/// interleaving (spec §13, "Concurrency tests"). Each hook fires once.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct Seams {
+    hooks: std::sync::Mutex<HashMap<&'static str, SeamHook>>,
+}
+
+#[cfg(test)]
+type SeamHook = Box<dyn FnOnce() + Send>;
+
+#[cfg(test)]
+impl Seams {
+    pub(crate) fn arm(&self, name: &'static str, hook: impl FnOnce() + Send + 'static) {
+        self.hooks.lock().unwrap().insert(name, Box::new(hook));
+    }
+
+    fn fire(&self, name: &'static str) {
+        // Taken out first: the hook runs without the map's lock held.
+        let hook = self.hooks.lock().unwrap().remove(name);
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -402,7 +430,17 @@ impl EngineBridge {
             wire: WireCounters::new(),
             transfers: crate::transfer_progress::TransferBoard::new(),
             stopping,
+            #[cfg(test)]
+            seams: Seams::default(),
         }
+    }
+
+    /// A named point for the concurrency tests; nothing outside tests.
+    fn seam(&self, name: &'static str) {
+        #[cfg(test)]
+        self.seams.fire(name);
+        #[cfg(not(test))]
+        let _ = name;
     }
 
     /// Report transfer progress to `board` (task 1683 slice 2).
@@ -486,32 +524,54 @@ impl EngineBridge {
             }
             // The list is read once per pass, and an upload that lands moves
             // the later ops of its file along (`chain_queued_ops_after_upload`),
-            // so run each op as it is NOW.
-            let Some(op) = self.db.get_operation(&op.op_id)? else {
-                continue;
+            // so run each op as it is NOW: the claim re-reads it, enforces its
+            // file's content order and marks this attempt, in one transaction.
+            // Every write that records the attempt's outcome names the claim.
+            self.seam("claim:before_tx");
+            let claimed = match self.db.claim_operation(&op.op_id, now)? {
+                // Waiting for an earlier content op of its file is not an attempt.
+                ClaimOutcome::Gone | ClaimOutcome::Wait => continue,
+                ClaimOutcome::Claimed(claimed) => *claimed,
             };
-            if matches!(op.kind, OperationKind::UploadVersion | OperationKind::UploadFile)
-                && self.db.has_earlier_live_upload(&op.op_id)?
-            {
-                // Not an attempt: it waits for the earlier upload of its file.
-                continue;
-            }
+            let op = claimed.op.clone();
             let result = self
-                .execute_operation(&op, sync_root, now, &mut outcome.post_complete_errors)
+                .execute_operation(&claimed, sync_root, now, &mut outcome.post_complete_errors)
                 .await;
             match result {
-                Ok(()) => {
-                    self.db.remove_operation(&op.op_id)?;
+                Ok(release) => {
+                    if !self
+                        .db
+                        .finish_claimed(&op.op_id, &claimed.claim_id, release.as_deref())?
+                        && !handed_to_local_finalization(&op)
+                    {
+                        log_queue_state_moved(&op.op_id, "landing");
+                        continue;
+                    }
+                    if let Some(path) = release.as_deref()
+                        && let Err(e) = crate::staged_payload::remove(&self.db, Path::new(path))
+                    {
+                        tracing::warn!(error = %e, "staged upload cleanup deferred; journal retained");
+                    }
                     if let Some(file_id) = &op.file_id {
                         outcome.invalidated_item_ids.push(file_id.clone());
                     }
                     outcome.completed_op_ids.push(op.op_id);
                 }
+                // The attempt already logged the step that found the op gone.
+                Err(error) if error.downcast_ref::<QueueStateMoved>().is_some() => continue,
                 Err(error) => {
                     let class = classify_operation_error(&error.to_string());
                     if let Some(reason) = class.pause_reason() {
-                        self.db
-                            .record_operation_pause(&op.op_id, reason, Some(&error.to_string()), now)?;
+                        if !self.db.record_pause_claimed(
+                            &op.op_id,
+                            &claimed.claim_id,
+                            reason,
+                            Some(&error.to_string()),
+                            now,
+                        )? {
+                            log_queue_state_moved(&op.op_id, "pause");
+                            continue;
+                        }
                         outcome.paused_op_ids.push(op.op_id);
                     } else {
                         let attempts = op.attempts.saturating_add(1);
@@ -521,12 +581,16 @@ impl EngineBridge {
                             log_refused_upload(&op, attempts);
                         }
                         let next_retry_at = now.saturating_add(retry_delay_seconds(attempts));
-                        self.db.record_operation_attempt(
+                        if !self.db.record_attempt_claimed(
                             &op.op_id,
+                            &claimed.claim_id,
                             attempts,
                             next_retry_at,
                             Some(&error.to_string()),
-                        )?;
+                        )? {
+                            log_queue_state_moved(&op.op_id, "attempt");
+                            continue;
+                        }
                         if attempts >= op.max_attempts {
                             self.abandon_upload_after_give_up(&op).await;
                         }
@@ -539,15 +603,18 @@ impl EngineBridge {
         Ok(outcome)
     }
 
+    /// Run one claimed op. `Ok(Some(path))`: the op's staged payload, to release
+    /// once the op's removal has committed (macOS uploads, spec §8.7 S6).
     async fn execute_operation(
         &self,
-        op: &PendingOperation,
+        claimed: &ClaimedOp,
         sync_root: &Path,
         now: i64,
         post_complete_errors: &mut Vec<String>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Option<String>> {
+        let op = &claimed.op;
         match op.kind {
-            OperationKind::PinTree => Ok(()),
+            OperationKind::PinTree => Ok(None),
             OperationKind::HydrateFile => {
                 let file_id = op
                     .file_id
@@ -560,7 +627,8 @@ impl EngineBridge {
                 } else {
                     return Err(anyhow::anyhow!("hydrate operation target missing from state"));
                 };
-                self.hydrate_file(file_id, &dest, &[sync_root]).await
+                self.hydrate_file(file_id, &dest, &[sync_root]).await?;
+                Ok(None)
             }
             OperationKind::CreateFolder => {
                 let metadata = operation_metadata(op)?;
@@ -570,7 +638,7 @@ impl EngineBridge {
                 self.api
                     .create_folder(name, op.parent_id.as_deref(), op.file_id.as_deref())
                     .await?;
-                Ok(())
+                Ok(None)
             }
             OperationKind::MoveFile | OperationKind::RenameFile => {
                 let file_id = op
@@ -580,7 +648,7 @@ impl EngineBridge {
                 let metadata = operation_metadata(op)?;
                 let name = metadata["name_encrypted"].as_str();
                 self.api.update_metadata(file_id, name, op.parent_id.as_deref()).await?;
-                Ok(())
+                Ok(None)
             }
             OperationKind::TrashFile => {
                 let file_id = op
@@ -619,7 +687,7 @@ impl EngineBridge {
                     file_id = %file_id,
                     "trash op: server DELETE /files/{{id}} returned 2xx — keeping row Trashing, dropping op"
                 );
-                Ok(())
+                Ok(None)
             }
             OperationKind::RestoreFile => {
                 let file_id = op
@@ -627,7 +695,7 @@ impl EngineBridge {
                     .as_deref()
                     .ok_or_else(|| anyhow::anyhow!("restore file operation missing file_id"))?;
                 self.api.restore_file(file_id).await?;
-                Ok(())
+                Ok(None)
             }
             OperationKind::RestoreVersion => {
                 let file_id = op
@@ -640,20 +708,26 @@ impl EngineBridge {
                     .or(op.base_object_version_id.as_deref())
                     .ok_or_else(|| anyhow::anyhow!("restore operation missing version id"))?;
                 self.api.restore_version(file_id, version_id).await?;
-                Ok(())
+                Ok(None)
             }
             OperationKind::UploadVersion | OperationKind::UploadFile => {
-                self.upload_version(op, sync_root, post_complete_errors).await
+                self.upload_version(op, Some(claimed), sync_root, post_complete_errors)
+                    .await
             }
         }
     }
 
+    /// Upload one op's staged bytes. `claim` is the runner's claim of the op; every
+    /// queue write the upload makes is guarded by it (spec §8.7 S4). `None` is Keep
+    /// Mine's inline run, outside the queue: its writes stay unguarded. `Ok(Some(path))`
+    /// on macOS: the staged payload, which the caller releases once the op is gone.
     async fn upload_version(
         &self,
         op: &PendingOperation,
+        claim: Option<&ClaimedOp>,
         #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
         post_complete_errors: &mut Vec<String>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Option<String>> {
         let local_file_id = op
             .file_id
             .as_deref()
@@ -691,16 +765,18 @@ impl EngineBridge {
             id: local_file_id,
             previous: previous_status,
         };
-        self.do_upload_version(local_file_id, op, sync_root, post_complete_errors).await
+        self.do_upload_version(local_file_id, op, claim, sync_root, post_complete_errors)
+            .await
     }
 
     async fn do_upload_version(
         &self,
         local_file_id: &str,
         op: &PendingOperation,
+        claim: Option<&ClaimedOp>,
         #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
         post_complete_errors: &mut Vec<String>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Option<String>> {
         let payload_path = op
             .payload_path
             .as_deref()
@@ -795,7 +871,16 @@ impl EngineBridge {
                 };
                 // Persist BEFORE the next await: a cut anywhere after init must
                 // leave the session discoverable by the retry.
-                self.db.put_upload_resume(&session)?;
+                match claim {
+                    Some(claim) => {
+                        if !self.db.put_upload_resume_claimed(&session, &claim.claim_id)? {
+                            log_queue_state_moved(&op.op_id, "resume");
+                            return Err(anyhow::Error::new(QueueStateMoved));
+                        }
+                    }
+                    // Keep Mine runs inline, outside the queue: no claim guards it.
+                    None => self.db.put_upload_resume(&session)?,
+                }
                 session
             }
         };
@@ -853,7 +938,15 @@ impl EngineBridge {
                     );
                     post_complete_errors.push(format!("{}: {e}", op.op_id));
                 }
-                Ok(())
+                // macOS: the staged copy is released after the op's removal commits,
+                // not here (spec §8.7 S6). Elsewhere `finish_completed_upload` has
+                // already unlinked it, as before.
+                let released = if cfg!(target_os = "macos") {
+                    Some(payload_path_str.clone())
+                } else {
+                    None
+                };
+                Ok(released)
             }
             Err(error) => {
                 if upload_session_is_gone(&error) {
@@ -1024,8 +1117,13 @@ impl EngineBridge {
                 _ => {}
             }
         }
-        if let Err(e) = crate::staged_payload::remove(&self.db, payload_path) {
-            tracing::warn!(error = %e, "staged upload cleanup deferred; journal retained");
+        // On macOS the caller releases the payload once the op's removal has
+        // committed (spec §8.7 S6).
+        #[cfg(not(target_os = "macos"))]
+        {
+            if let Err(e) = crate::staged_payload::remove(&self.db, payload_path) {
+                tracing::warn!(error = %e, "staged upload cleanup deferred; journal retained");
+            }
         }
         thumbnails
     }
@@ -1210,8 +1308,8 @@ impl EngineBridge {
     ///   has none) gets the created version.
     ///
     /// Any other base is left alone: it was not this chain's. Uploads of one
-    /// file also run in queue order (`StateDb::has_earlier_live_upload`), so
-    /// a rebased upload never runs before the one it follows, and the newest
+    /// file also run in queue order (`StateDb::claim_operation`), so a
+    /// rebased upload never runs before the one it follows, and the newest
     /// bytes land last.
     fn chain_queued_ops_after_upload(
         &self,
@@ -3191,13 +3289,23 @@ impl EngineBridge {
         };
 
         let mut post_complete_errors = Vec::new();
-        if let Err(e) = self
-            .upload_version(&op, sync_root, &mut post_complete_errors)
+        let released = match self
+            .upload_version(&op, None, sync_root, &mut post_complete_errors)
             .await
         {
-            // One-shot op (never queued): nothing will resume its session.
-            self.abandon_upload_after_give_up(&op).await;
-            return Err(anyhow::anyhow!("Keep Mine upload failed: {e}"));
+            Ok(released) => released,
+            Err(e) => {
+                // One-shot op (never queued): nothing will resume its session.
+                self.abandon_upload_after_give_up(&op).await;
+                return Err(anyhow::anyhow!("Keep Mine upload failed: {e}"));
+            }
+        };
+        // macOS: the upload leaves its staged copy for the caller to release. This op
+        // was never queued, so there is no removal to wait for.
+        if let Some(path) = released.as_deref()
+            && let Err(e) = crate::staged_payload::remove(&self.db, Path::new(path))
+        {
+            tracing::warn!(error = %e, "staged upload cleanup deferred; journal retained");
         }
         // Task 1700: thumbnail failures never fail the resolution, but they
         // must not vanish silently either.
@@ -4022,6 +4130,45 @@ fn log_refused_upload(op: &PendingOperation, attempt: i64) {
             "upload refused by the server (409 Conflict); will retry"
         );
     }
+}
+
+/// A guarded queue write matched no row: the op moved since its claim (spec §8.7 S2, S4).
+#[derive(Debug)]
+pub(crate) struct QueueStateMoved;
+
+impl std::fmt::Display for QueueStateMoved {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("queue state moved")
+    }
+}
+
+impl std::error::Error for QueueStateMoved {}
+
+/// One line for an attempt whose op moved since its claim: the op id and the
+/// step only (spec §11).
+fn log_queue_state_moved(op_id: &str, step: &'static str) {
+    tracing::warn!(op_id = %op_id, step, "queue state moved");
+}
+
+/// Windows: a create's own success hands its op to the upload finalization
+/// journal, which removes the op before the thumbnail work
+/// (`StateDb::put_upload_finalization`). The landing then matches no row. That
+/// is the attempt's own hand-over, not a moved queue, so the op counts as
+/// completed, as it did before claims existed. The test is the same one
+/// `defer_local_upload_finalization` starts with.
+#[cfg(target_os = "windows")]
+fn handed_to_local_finalization(op: &PendingOperation) -> bool {
+    matches!(op.kind, OperationKind::UploadVersion | OperationKind::UploadFile)
+        && op
+            .metadata_json
+            .as_deref()
+            .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+            .is_some_and(|m| m["operation"].as_str() == Some("create_file"))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn handed_to_local_finalization(_op: &PendingOperation) -> bool {
+    false
 }
 
 /// `op`'s metadata with its encrypted name (if it carries one) re-encrypted
@@ -12647,6 +12794,10 @@ mod tests {
         fail_first_chunk_once: HashSet<String>,
         /// Sessions whose chunk PUTs answer only after this delay.
         delay_chunks: HashMap<String, Duration>,
+        /// Every request, in order: (method, path).
+        requests: Vec<(String, String)>,
+        /// `POST /api/v1/uploads/init` answers only after this delay.
+        delay_init: Option<Duration>,
     }
 
     /// Upload mock that behaves like the server's version check: a replace
@@ -12752,12 +12903,17 @@ mod tests {
         state: &Arc<Mutex<VersionedServerState>>,
     ) -> (Option<Duration>, String) {
         let mut s = state.lock().unwrap();
-        let delay = request
-            .path
-            .strip_prefix("/api/v1/uploads/")
-            .and_then(|rest| rest.split('/').next())
-            .filter(|_| request.method == "PUT")
-            .and_then(|session| s.delay_chunks.get(session).copied());
+        s.requests.push((request.method.clone(), request.path.clone()));
+        let delay = if request.method == "POST" && request.path == "/api/v1/uploads/init" {
+            s.delay_init
+        } else {
+            request
+                .path
+                .strip_prefix("/api/v1/uploads/")
+                .and_then(|rest| rest.split('/').next())
+                .filter(|_| request.method == "PUT")
+                .and_then(|session| s.delay_chunks.get(session).copied())
+        };
         (delay, versioned_server_answer(request, &mut s))
     }
 
@@ -12872,6 +13028,20 @@ mod tests {
             }
         }
         12
+    }
+
+    /// Run `action` on its own thread and wait for it, at most 5 s, and fail the test if it
+    /// has not finished. Every seam sits outside every transaction and every lock, so a
+    /// correct implementation never blocks the action: a hang is a defect, not a timing
+    /// artefact, and a silent timeout would let the action race the rest of the test.
+    fn run_competing(action: impl FnOnce() + Send + 'static) {
+        let (done, wait) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            action();
+            let _ = done.send(());
+        });
+        wait.recv_timeout(Duration::from_secs(5))
+            .expect("the competing action did not finish");
     }
 
     fn finder_file_target(
@@ -13258,6 +13428,109 @@ mod tests {
             b"older save, newer save",
             "the older save must not land after the newer one: {:?}",
             state.init_summary()
+        );
+    }
+
+    #[cfg(target_os = "macos")] // other platforms keep created_at order
+    #[tokio::test]
+    async fn m2_order_is_insertion_order_when_the_clock_steps_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [41u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_uploaded_row(&bridge, &server, "clock");
+        queue_save(&bridge, dir.path(), "clock", "notes.txt", b"older save", "1");
+        queue_save(
+            &bridge,
+            dir.path(),
+            "clock",
+            "notes.txt",
+            b"older save, newer save",
+            "1",
+        );
+        // The wall clock stepped back between the two saves.
+        let ops = bridge.db.list_operations_for_file("clock").unwrap();
+        assert_eq!(ops.len(), 2);
+        bridge.db.set_created_at_for_test(&ops[0].op_id, 2_000_000_000);
+        bridge.db.set_created_at_for_test(&ops[1].op_id, 1_000_000_000);
+
+        drain_upload_queue(&bridge, &sync_root).await;
+
+        let state = server.finish();
+        assert_eq!(state.files["clock"].versions.len(), 3, "{:?}", state.init_summary());
+        assert_eq!(
+            state.latest_plaintext("clock", master_key),
+            b"older save, newer save",
+            "the newest bytes land last: {:?}",
+            state.init_summary()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_runners_copy_never_resurrects_or_drops_a_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [42u8; 32];
+        let server = VersionedServerMock::start();
+        server.state.lock().unwrap().delay_init = Some(Duration::from_millis(400));
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_uploaded_row(&bridge, &server, "revoked");
+        queue_save(
+            &bridge,
+            dir.path(),
+            "revoked",
+            "notes.txt",
+            b"save under a share that goes away",
+            "1",
+        );
+        seed_uploaded_row(&bridge, &server, "kept");
+        queue_save(&bridge, dir.path(), "kept", "other.txt", b"the second file's save", "1");
+        let w = bridge.db.list_operations_for_file("revoked").unwrap().remove(0);
+        // The first file is content of a share; the share is revoked while W's init is in flight.
+        let mut contract = bridge.db.get_file_contract_state("revoked").unwrap().unwrap();
+        contract.namespace = Namespace::SharedWithMe;
+        contract.shared_root_id = Some("revoked-root".into());
+        bridge.db.set_file_contract_state(&contract).unwrap();
+
+        let logs = capture_logs_async(async {
+            let ((), ()) = tokio::join!(
+                async {
+                    bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+                },
+                async {
+                    tokio::time::timeout(Duration::from_secs(10), async {
+                        while server.state.lock().unwrap().inits.is_empty() {
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                        }
+                    })
+                    .await
+                    .expect("init never reached the mock");
+                    // The revoked-share purge path (SD:2587-2620): a bulk delete by file id.
+                    bridge.db.purge_revoked_shared_content(&[]).unwrap();
+                }
+            );
+        })
+        .await;
+
+        let state = server.finish();
+        assert!(
+            bridge.db.get_upload_resume(&w.op_id).unwrap().is_none(),
+            "no resume row for a purged op"
+        );
+        assert!(
+            bridge.db.get_operation(&w.op_id).unwrap().is_none(),
+            "a purged op is never re-inserted"
+        );
+        let moved: Vec<&str> = logs.lines().filter(|line| line.contains("queue state moved")).collect();
+        assert_eq!(moved.len(), 1, "one line for the purged attempt:\n{logs}");
+        assert!(moved[0].contains(&w.op_id) && moved[0].contains("resume"), "{logs}");
+        assert_eq!(
+            state.latest_plaintext("kept", master_key),
+            b"the second file's save",
+            "the other file's save is untouched and lands"
         );
     }
 

@@ -994,6 +994,27 @@ async fn run(app: AppHandle, sync_root: PathBuf, session_token: String, master_k
             return;
         }
     };
+    // No runner survives a restart: clear every queue claim. On macOS, also remove
+    // the staged copies the queue released and nothing references any more
+    // (spec §8.7 S3, S6).
+    match db.engine_start_repair() {
+        Ok(repair) => {
+            #[cfg(target_os = "macos")]
+            for path in &repair.released_payloads {
+                if let Err(e) = crate::staged_payload::remove(&db, std::path::Path::new(path)) {
+                    tracing::warn!(error = %e, "released upload copy kept; removal is retried at the next start");
+                }
+            }
+            if repair.claims_cleared > 0 || !repair.released_payloads.is_empty() {
+                tracing::info!(
+                    claims_cleared = repair.claims_cleared,
+                    released = repair.released_payloads.len(),
+                    "engine start: queue claims cleared, released upload copies removed"
+                );
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "engine start repair failed"),
+    }
     match db.reconcile_stale_in_flight_on_startup() {
         Ok(0) => {}
         Ok(touched) => {

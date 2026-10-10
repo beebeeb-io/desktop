@@ -360,6 +360,21 @@ const PENDING_OPERATION_COLUMNS: &str = "op_id, kind, file_id, parent_id, target
     base_version, base_object_version_id, attempts, max_attempts, next_retry_at,
     last_error, backup_source_key, created_at, updated_at";
 
+/// Queue order (spec §8.5, M2). On macOS it is insertion order, `rowid` alone: a
+/// wall clock that steps back must not run a newer save before an older one. Other
+/// platforms keep round 3's order, `created_at` then `rowid`.
+#[cfg(target_os = "macos")]
+const DUE_ORDER_SQL: &str = "ORDER BY rowid ASC";
+#[cfg(not(target_os = "macos"))]
+const DUE_ORDER_SQL: &str = "ORDER BY created_at ASC, rowid ASC";
+
+/// `earlier` comes before `this` in [`DUE_ORDER_SQL`]'s order.
+#[cfg(target_os = "macos")]
+const EARLIER_IN_QUEUE_SQL: &str = "earlier.rowid < this.rowid";
+#[cfg(not(target_os = "macos"))]
+const EARLIER_IN_QUEUE_SQL: &str =
+    "earlier.created_at < this.created_at OR (earlier.created_at = this.created_at AND earlier.rowid < this.rowid)";
+
 fn pending_operation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PendingOperation> {
     Ok(PendingOperation {
         op_id: row.get(0)?,
@@ -847,6 +862,66 @@ fn held_write_conn(conn: &Connection, file_id: &str) -> Result<(Option<crate::wr
             };
             Ok((held, row.get::<_, i64>(4)? != 0))
         },
+    )
+}
+
+/// Why a File Provider upload parked with its bytes kept (spec §11, "Parked").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParkReason {
+    StaleBase,
+    BaseUnknown,
+    PayloadMissing,
+    PredecessorParked,
+    PredecessorLost,
+    RekeyFailed,
+}
+
+impl ParkReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ParkReason::StaleBase => "stale_base",
+            ParkReason::BaseUnknown => "base_unknown",
+            ParkReason::PayloadMissing => "payload_missing",
+            ParkReason::PredecessorParked => "predecessor_parked",
+            ParkReason::PredecessorLost => "predecessor_lost",
+            ParkReason::RekeyFailed => "rekey_failed",
+        }
+    }
+}
+
+/// One op the runner may run now. Every later write for this attempt names `claim_id`
+/// (spec §8.7 S2–S4).
+#[derive(Debug, Clone)]
+pub struct ClaimedOp {
+    pub op: PendingOperation,
+    pub claim_id: String,
+    pub write: Option<FinderWrite>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ClaimOutcome {
+    /// The op is gone.
+    Gone,
+    /// Not an attempt: an earlier content op of the same file is queued and has not parked.
+    Wait,
+    /// Boxed: the op is large and the other outcomes carry nothing.
+    Claimed(Box<ClaimedOp>),
+}
+
+/// What engine start repaired (spec §8.7 S3, S6; §10.2).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EngineStartRepair {
+    pub claims_cleared: usize,
+    /// Journalled payloads marked released that no op, resume row or Windows
+    /// finalization references: the caller unlinks them.
+    pub released_payloads: Vec<String>,
+}
+
+/// Uploads and restores of one file run in insertion order (spec §8.5, m-9).
+fn is_content_kind(kind: &OperationKind) -> bool {
+    matches!(
+        kind,
+        OperationKind::UploadVersion | OperationKind::UploadFile | OperationKind::RestoreVersion
     )
 }
 
@@ -2849,14 +2924,14 @@ impl StateDb {
 
     pub fn list_due_operations(&self, now: i64) -> Result<Vec<PendingOperation>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "SELECT op_id, kind, file_id, parent_id, target_path, metadata_json, payload_path,
                     base_version, base_object_version_id, attempts, max_attempts, next_retry_at,
                     last_error, backup_source_key, created_at, updated_at
              FROM operation_queue
              WHERE next_retry_at <= ?1 AND attempts < max_attempts AND paused_reason IS NULL
-             ORDER BY created_at ASC, rowid ASC",
-        )?;
+             {DUE_ORDER_SQL}"
+        ))?;
         let rows = stmt.query_map(params![now], |row| {
             Ok(PendingOperation {
                 op_id: row.get(0)?,
@@ -3269,32 +3344,257 @@ impl StateDb {
         let mut stmt = conn.prepare(&format!(
             "SELECT {PENDING_OPERATION_COLUMNS} FROM operation_queue
              WHERE file_id = ?1
-             ORDER BY created_at ASC, rowid ASC"
+             {DUE_ORDER_SQL}"
         ))?;
         let rows = stmt.query_map(params![file_id], pending_operation_from_row)?;
         rows.collect()
     }
 
-    /// Whether an upload of the same file was queued before `op_id` and can
-    /// still run (paused or backing off included; one that used up its
-    /// attempts cannot). This device's uploads of one file run in queue order:
-    /// a later save carries newer bytes and is based on what the earlier one
-    /// produces, so it must never land first.
-    pub fn has_earlier_live_upload(&self, op_id: &str) -> Result<bool> {
+    /// S3: re-read the op, enforce the file's content order, and claim it, in one
+    /// transaction. Replaces `get_operation` + the earlier-upload check the runner
+    /// made in two separate calls.
+    pub fn claim_operation(&self, op_id: &str, now: i64) -> Result<ClaimOutcome> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let Some(op) = tx
+            .query_row(
+                &format!("SELECT {PENDING_OPERATION_COLUMNS} FROM operation_queue WHERE op_id = ?1"),
+                params![op_id],
+                pending_operation_from_row,
+            )
+            .optional()?
+        else {
+            return Ok(ClaimOutcome::Gone);
+        };
+        if is_content_kind(&op.kind) {
+            // Uploads of one file wait for its earlier uploads that can still run. A
+            // restore waits only for Finder writes (an upload with a write id), and only
+            // Finder writes wait for a restore: the watcher's and Windows' uploads carry
+            // no write id and keep the upload-only order. The order is
+            // `EARLIER_IN_QUEUE_SQL`.
+            let earlier: bool = tx.query_row(
+                &format!(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM operation_queue AS this
+                        JOIN operation_queue AS earlier
+                          ON earlier.file_id = this.file_id AND earlier.op_id != this.op_id
+                        WHERE this.op_id = ?1
+                          AND earlier.kind IN ('upload_version', 'upload_file', 'restore_version')
+                          AND earlier.attempts < earlier.max_attempts
+                          AND ({EARLIER_IN_QUEUE_SQL})
+                          AND (this.kind != 'restore_version' OR earlier.write_id IS NOT NULL)
+                          AND (earlier.kind != 'restore_version' OR this.write_id IS NOT NULL))"
+                ),
+                params![op_id],
+                |row| row.get(0),
+            )?;
+            if earlier {
+                return Ok(ClaimOutcome::Wait);
+            }
+        }
+        let claim_id = uuid::Uuid::new_v4().simple().to_string();
+        tx.execute(
+            "UPDATE operation_queue SET claim_id = ?2, claimed_at = ?3 WHERE op_id = ?1",
+            params![op_id, claim_id, now],
+        )?;
+        let write = finder_write_conn(&tx, op_id)?;
+        tx.commit()?;
+        Ok(ClaimOutcome::Claimed(Box::new(ClaimedOp { op, claim_id, write })))
+    }
+
+    /// A failed attempt of a claimed op: its retry schedule, and the claim ends.
+    /// `false`: the op moved since the claim and nothing was written (S2).
+    pub fn record_attempt_claimed(
+        &self,
+        op_id: &str,
+        claim_id: &str,
+        attempts: i64,
+        next_retry_at: i64,
+        last_error: Option<&str>,
+    ) -> Result<bool> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        conn.query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM operation_queue AS this
-                JOIN operation_queue AS earlier
-                  ON earlier.file_id = this.file_id AND earlier.op_id != this.op_id
-                WHERE this.op_id = ?1
-                  AND earlier.kind IN ('upload_version', 'upload_file')
-                  AND earlier.attempts < earlier.max_attempts
-                  AND (earlier.created_at < this.created_at
-                       OR (earlier.created_at = this.created_at AND earlier.rowid < this.rowid)))",
-            params![op_id],
-            |row| row.get(0),
+        let n = conn.execute(
+            "UPDATE operation_queue
+             SET attempts = ?3, next_retry_at = ?4, last_error = ?5, last_error_class = NULL,
+                 paused_reason = NULL, updated_at = ?4, claim_id = NULL, claimed_at = NULL
+             WHERE op_id = ?1 AND claim_id = ?2",
+            params![op_id, claim_id, attempts, next_retry_at, last_error],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// A claimed op paused (auth, quota, permission, locked), and the claim ends.
+    /// `false`: the op moved since the claim and nothing was written (S2).
+    pub fn record_pause_claimed(
+        &self,
+        op_id: &str,
+        claim_id: &str,
+        reason: OperationPauseReason,
+        last_error: Option<&str>,
+        now: i64,
+    ) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let n = conn.execute(
+            "UPDATE operation_queue
+             SET paused_reason = ?3, last_error_class = ?3, last_error = ?4, updated_at = ?5,
+                 claim_id = NULL, claimed_at = NULL
+             WHERE op_id = ?1 AND claim_id = ?2",
+            params![
+                op_id,
+                claim_id,
+                reason.as_str(),
+                last_error.map(redact_diagnostic_error),
+                now
+            ],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// Park with the bytes kept: attempts used up, so nothing retries it (spec §8.4).
+    /// `false`: the op moved since the claim and nothing was written (S2).
+    pub fn park_claimed(&self, op_id: &str, claim_id: &str, reason: ParkReason, now: i64) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let n = conn.execute(
+            "UPDATE operation_queue
+             SET attempts = max_attempts, last_error = ?3, last_error_class = ?3, updated_at = ?4,
+                 claim_id = NULL, claimed_at = NULL
+             WHERE op_id = ?1 AND claim_id = ?2",
+            params![op_id, claim_id, reason.as_str(), now],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// S4: the resume row is written only while the claimed op exists, with its
+    /// payload journalled in the same transaction. `false`: the op moved since the
+    /// claim and nothing was written.
+    pub fn put_upload_resume_claimed(&self, resume: &UploadResume, claim_id: &str) -> Result<bool> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let n = tx.execute(
+            "INSERT INTO upload_resume (
+                op_id, payload_path, payload_size, payload_mtime_ns, upload_session_id,
+                server_file_id, object_version_id, chunk_size_bytes, chunk_count,
+                acked_chunks, metadata_applied, is_create, updated_at
+             )
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, strftime('%s','now')
+             WHERE EXISTS (SELECT 1 FROM operation_queue WHERE op_id = ?1 AND claim_id = ?13)
+             ON CONFLICT(op_id) DO UPDATE SET
+                payload_path = excluded.payload_path,
+                payload_size = excluded.payload_size,
+                payload_mtime_ns = excluded.payload_mtime_ns,
+                upload_session_id = excluded.upload_session_id,
+                server_file_id = excluded.server_file_id,
+                object_version_id = excluded.object_version_id,
+                chunk_size_bytes = excluded.chunk_size_bytes,
+                chunk_count = excluded.chunk_count,
+                acked_chunks = excluded.acked_chunks,
+                metadata_applied = excluded.metadata_applied,
+                is_create = excluded.is_create,
+                updated_at = excluded.updated_at",
+            params![
+                resume.op_id,
+                resume.payload_path,
+                resume.payload_size,
+                resume.payload_mtime_ns,
+                resume.upload_session_id,
+                resume.server_file_id,
+                resume.object_version_id,
+                resume.chunk_size_bytes,
+                resume.chunk_count,
+                resume.acked_chunks,
+                resume.metadata_applied,
+                resume.is_create,
+                claim_id,
+            ],
+        )?;
+        if n == 1 {
+            tx.execute(
+                "INSERT INTO staged_payloads(path, source_path, completed) VALUES (?1, NULL, 0)
+                 ON CONFLICT(path) DO NOTHING",
+                params![resume.payload_path],
+            )?;
+        }
+        tx.commit()?;
+        Ok(n == 1)
+    }
+
+    /// The op's removal after it succeeded, with its resume row; a released payload is
+    /// marked in the journal in the same transaction, and unlinked by the caller only
+    /// after this commits (S6). `false`: the op moved since the claim and nothing was
+    /// written.
+    pub fn finish_claimed(&self, op_id: &str, claim_id: &str, release_payload: Option<&str>) -> Result<bool> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let n = tx.execute(
+            "DELETE FROM operation_queue WHERE op_id = ?1 AND claim_id = ?2",
+            params![op_id, claim_id],
+        )?;
+        if n == 1 {
+            tx.execute("DELETE FROM upload_resume WHERE op_id = ?1", params![op_id])?;
+            if let Some(path) = release_payload {
+                tx.execute(
+                    "INSERT INTO staged_payloads(path, completed) VALUES (?1, 1)
+                     ON CONFLICT(path) DO UPDATE SET completed = 1",
+                    params![path],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(n == 1)
+    }
+
+    /// Engine start: no runner survives a restart, so every claim is cleared (S3).
+    /// On macOS it also lists the journalled payloads marked released that nothing
+    /// references any more, for the caller to unlink (S6).
+    pub fn engine_start_repair(&self) -> Result<EngineStartRepair> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let claims_cleared = tx.execute(
+            "UPDATE operation_queue SET claim_id = NULL, claimed_at = NULL WHERE claim_id IS NOT NULL",
+            [],
+        )?;
+        // macOS only: the release journal is written only by the macOS landing.
+        #[cfg(target_os = "macos")]
+        let released_payloads = {
+            let mut stmt = tx.prepare(
+                "SELECT path FROM staged_payloads
+                 WHERE completed = 1
+                   AND path NOT IN (SELECT payload_path FROM operation_queue WHERE payload_path IS NOT NULL)
+                   AND path NOT IN (SELECT payload_path FROM upload_resume)
+                   AND path NOT IN (SELECT payload_path FROM upload_finalizations)
+                 ORDER BY path",
+            )?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>>>()?
+        };
+        #[cfg(not(target_os = "macos"))]
+        let released_payloads: Vec<String> = Vec::new();
+        tx.commit()?;
+        Ok(EngineStartRepair {
+            claims_cleared,
+            released_payloads,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_created_at_for_test(&self, op_id: &str, created_at: i64) {
+        let conn = self.0.lock().unwrap();
+        conn.execute(
+            "UPDATE operation_queue SET created_at = ?2 WHERE op_id = ?1",
+            params![op_id, created_at],
         )
+        .unwrap();
+    }
+
+    /// P2: a Finder write is an op with a write id; the restore/upload wait is keyed on it.
+    #[cfg(test)]
+    pub(crate) fn set_write_id_for_test(&self, op_id: &str, write_id: &str) {
+        let conn = self.0.lock().unwrap();
+        conn.execute(
+            "UPDATE operation_queue SET write_id = ?2 WHERE op_id = ?1",
+            params![op_id, write_id],
+        )
+        .unwrap();
     }
 
     /// Move queued operations along a chain in one transaction: their file id
@@ -5869,6 +6169,89 @@ mod tests {
         assert_eq!(WriteOrigin::from_db(None), None);
         assert_eq!(WriteOrigin::from_db(Some("")), None);
         assert_eq!(WriteOrigin::from_db(Some("Minted")), None);
+    }
+
+    fn queued(op_id: &str, kind: OperationKind, file_id: &str, payload: Option<&str>) -> PendingOperation {
+        PendingOperation {
+            op_id: op_id.into(),
+            kind,
+            file_id: Some(file_id.into()),
+            parent_id: None,
+            target_path: None,
+            metadata_json: None,
+            payload_path: payload.map(str::to_string),
+            base_version: None,
+            base_object_version_id: None,
+            attempts: 0,
+            max_attempts: 25,
+            next_retry_at: 0,
+            last_error: None,
+            backup_source_key: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn a_restore_and_an_upload_of_one_file_wait_for_each_other_in_queue_order() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        db.enqueue_operation(&queued("u1", OperationKind::UploadVersion, "f", None))
+            .unwrap();
+        db.enqueue_operation(&queued("r", OperationKind::RestoreVersion, "f", None))
+            .unwrap();
+        db.enqueue_operation(&queued("u2", OperationKind::UploadVersion, "f", None))
+            .unwrap();
+        // A restore and an upload wait for each other only when the upload is a Finder write.
+        db.set_write_id_for_test("u1", &"1".repeat(32));
+        db.set_write_id_for_test("u2", &"2".repeat(32));
+
+        assert!(
+            matches!(db.claim_operation("r", 1).unwrap(), ClaimOutcome::Wait),
+            "a restore waits for an earlier upload"
+        );
+        let ClaimOutcome::Claimed(u1) = db.claim_operation("u1", 1).unwrap() else {
+            panic!("u1 is first")
+        };
+        assert!(db.finish_claimed("u1", &u1.claim_id, None).unwrap());
+        assert!(
+            matches!(db.claim_operation("u2", 1).unwrap(), ClaimOutcome::Wait),
+            "an upload waits for an earlier restore"
+        );
+        assert!(matches!(db.claim_operation("r", 1).unwrap(), ClaimOutcome::Claimed(_)));
+        assert!(matches!(db.claim_operation("gone", 1).unwrap(), ClaimOutcome::Gone));
+    }
+
+    #[test]
+    fn engine_start_clears_claims_and_releases_only_unreferenced_completed_payloads() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        db.enqueue_operation(&queued(
+            "u1",
+            OperationKind::UploadVersion,
+            "f",
+            Some("/staged/referenced"),
+        ))
+        .unwrap();
+        let ClaimOutcome::Claimed(stale) = db.claim_operation("u1", 1).unwrap() else {
+            panic!("claimable")
+        };
+        db.track_staged_payload("/staged/free", None, true).unwrap();
+        db.track_staged_payload("/staged/referenced", None, true).unwrap();
+        db.track_staged_payload("/staged/unfinished", None, false).unwrap();
+
+        let repair = db.engine_start_repair().unwrap();
+
+        assert_eq!(repair.claims_cleared, 1);
+        // The release journal is macOS-only: elsewhere nothing is released at engine start.
+        #[cfg(target_os = "macos")]
+        assert_eq!(repair.released_payloads, vec!["/staged/free".to_string()]);
+        #[cfg(not(target_os = "macos"))]
+        assert!(repair.released_payloads.is_empty(), "{:?}", repair.released_payloads);
+        assert!(
+            !db.record_attempt_claimed("u1", &stale.claim_id, 1, 0, None).unwrap(),
+            "a claim from before the restart guards nothing"
+        );
     }
 
     #[test]
