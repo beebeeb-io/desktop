@@ -1060,16 +1060,14 @@ mod tests {
     #[test]
     fn the_calls_a_person_waits_on_wait_a_little_for_the_gate() {
         let source = production();
-        for (wrapper, call) in [("fn domain_state(", "macos_file_provider::domain_state")] {
-            let body = &source[source.find(wrapper).unwrap_or_else(|| panic!("{wrapper}"))..];
-            let body = &body[..body.find("\n}\n").unwrap()];
-            assert!(
-                squeeze(body).contains(&squeeze(&format!(
-                    "BridgeGate::shared().run_sync_waiting(BRIDGE_GATE_WAIT, {call})"
-                ))),
-                "{wrapper} waits a little for the shared gate:\n{body}"
-            );
-        }
+        let state = &source[source.find("fn domain_state(").expect("domain_state")..];
+        let state = &state[..state.find("\n}\n").unwrap()];
+        assert!(
+            squeeze(state).contains(&squeeze(
+                "BridgeGate::shared().run_sync_waiting(BRIDGE_GATE_WAIT, macos_file_provider::domain_state)"
+            )),
+            "fn domain_state( waits a little for the shared gate:\n{state}"
+        );
         // The open and the reveal wait for the gate inside `resolve_then`, which each of them calls on the shared gate
         // with its own resolve and its own open (fix round 1, I1).
         let then = &source[source.find("fn resolve_then<").expect("resolve_then")..];
