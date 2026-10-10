@@ -952,16 +952,19 @@ impl EngineBridge {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound && claim.and_then(|c| c.write.as_ref()).is_some() => {
                 return Err(anyhow::Error::new(ParkNow(ParkReason::PayloadMissing)));
             }
-            // Everything else keeps today's retry and today's text: an op without a
-            // write id, and any other error reading the copy (permission, I/O). A
-            // new text naming the I/O error would carry "permission" into
-            // `classify_operation_error` and pause the op instead.
-            _ => {
+            // An op without a write id keeps today's retry and today's text
+            // (`test_process_due_operations_records_retry_for_upload_worker_handoff`).
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Err(anyhow::anyhow!(
                     "staged upload payload is missing: {}",
                     payload_path.display()
                 ));
             }
+            // Every other read error (permission, I/O, not a regular file) retries as
+            // today (spec §8.4), with a fixed text. Neither the path nor the I/O error
+            // reaches `classify_operation_error`: it matches bare substrings such as
+            // `403` and `permission`, and would pause the op instead.
+            _ => return Err(anyhow::anyhow!("staged upload payload could not be read")),
         }
 
         let metadata = operation_metadata(op)?;
@@ -9023,6 +9026,69 @@ mod tests {
             bridge.db.get_file("file-1").unwrap().unwrap().status,
             FileStatus::Error,
             "a failed/deferred upload must not remain counted as active Uploading"
+        );
+    }
+
+    /// Review Minor 3: a staged-copy read error other than a missing copy retries with a
+    /// fixed text. The copy's path never reaches `classify_operation_error`, so a path that
+    /// contains `403` is not taken for a refused request (the class of bug behind task 1252).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unreadable_staged_copy_is_retried_whatever_its_path_contains() {
+        use std::os::unix::fs::PermissionsExt;
+        struct RestoreMode(PathBuf);
+        impl Drop for RestoreMode {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        seed_bridge_row(&bridge, "file-1", "Draft.txt", None, FileStatus::Uploading, 0);
+        let locked = dir.path().join("staged-403");
+        std::fs::create_dir(&locked).unwrap();
+        let payload = locked.join("payload");
+        std::fs::write(&payload, b"bytes").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let _restore = RestoreMode(locked.clone());
+        match std::fs::metadata(&payload) {
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {}
+            other => panic!("the setup must produce a permission error (not as root): {other:?}"),
+        }
+        bridge
+            .db
+            .enqueue_operation(&PendingOperation {
+                op_id: "op-upload".into(),
+                kind: OperationKind::UploadVersion,
+                file_id: Some("file-1".into()),
+                parent_id: None,
+                target_path: Some("Draft.txt".into()),
+                metadata_json: Some(r#"{"operation":"upload_version"}"#.into()),
+                payload_path: Some(payload.to_string_lossy().into_owned()),
+                base_version: Some(1),
+                base_object_version_id: None,
+                attempts: 0,
+                max_attempts: 5,
+                next_retry_at: 0,
+                last_error: None,
+                backup_source_key: None,
+                created_at: 100,
+                updated_at: 100,
+            })
+            .unwrap();
+
+        let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
+        assert!(
+            outcome.paused_op_ids.is_empty(),
+            "a read error is not a refused request: {outcome:?}"
+        );
+        assert_eq!(outcome.retried_op_ids, vec!["op-upload".to_string()]);
+        let op = bridge.db.get_operation("op-upload").unwrap().unwrap();
+        assert_eq!(op.attempts, 1);
+        assert_eq!(
+            op.last_error.as_deref(),
+            Some("staged upload payload could not be read"),
+            "a fixed text, without the path"
         );
     }
 
