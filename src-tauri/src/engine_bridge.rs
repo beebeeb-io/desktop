@@ -19002,6 +19002,60 @@ mod tests {
         drop(server.finish());
     }
 
+    /// [t9-review] Minor 1 (§9.1, m-8): a save queued before a Finder trash lands while its row is
+    /// `Trashing`, before the trash op runs. The landing leaves the row in the trash: never `Local`,
+    /// so never writable or evictable, and still under the trash container.
+    #[cfg(unix)] // names `crate::ipc_socket::file_entry_payload_for_db`
+    #[tokio::test]
+    async fn a_save_that_lands_under_a_trashing_row_keeps_it_in_the_trash() {
+        let master_key = [102u8; 32];
+        let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_row(&bridge, &server, "lands-in-trash");
+        let w = fp_save(&bridge, dir.path(), "lands-in-trash", "notes.txt", b"edit", "1");
+        bridge.queue_finder_delete("lands-in-trash", w.token).unwrap();
+        // The save is listed first, so it lands before the trash op runs. The seam fires once, at
+        // the save's outcome: the trash op has not reached the server yet.
+        let seen = Arc::new(Mutex::new(None));
+        let (db, server_state, seen_in_seam) = (bridge.db.clone(), Arc::clone(&server.state), Arc::clone(&seen));
+        bridge.seams.arm("outcome:before_tx", move || {
+            let trashes = server_state.lock().unwrap().trashes.len();
+            let entry = db.get_file("lands-in-trash").unwrap().unwrap();
+            let payload = crate::ipc_socket::file_entry_payload_for_db(&db, &entry, "root");
+            *seen_in_seam.lock().unwrap() = Some((trashes, entry.status, payload));
+        });
+        bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+        let (trashes, status, payload) = seen.lock().unwrap().take().expect("the seam fired");
+        assert_eq!(trashes, 0, "precondition: the save's outcome, before the trash op");
+        assert_eq!(status, FileStatus::Trashing, "the landing leaves the row in the trash");
+        assert!(
+            payload.status != "local" && payload.status != "uploading",
+            "never presented writable: {}",
+            payload.status
+        );
+        assert_eq!(
+            payload.capabilities & crate::ipc_socket::CAP_WRITE,
+            0,
+            "no write capability"
+        );
+        assert_eq!(payload.parent_identifier, crate::ipc_socket::FP_TRASH_APPLE);
+        assert_eq!(
+            bridge.db.get_file("lands-in-trash").unwrap().unwrap().status,
+            FileStatus::Trashing,
+            "still in the trash after the trash op"
+        );
+        let state = server.finish();
+        assert_eq!(
+            state.latest_plaintext("lands-in-trash", master_key),
+            b"edit",
+            "precondition: the save landed"
+        );
+        assert_eq!(
+            state.trashes,
+            vec!["lands-in-trash".to_string()],
+            "precondition: the trash op ran"
+        );
+    }
+
     /// T31 / Review Focus 2: a restart in the middle of a save's upload. Every chunk was
     /// acknowledged and the completion was lost when the process died holding its claim. After the
     /// relaunch the item is still writable, it keeps the token it had (no re-download), and the

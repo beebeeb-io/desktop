@@ -3715,9 +3715,20 @@ impl StateDb {
         )?;
         if !later_unparked && !later_parked {
             // `Local`: no later write. The save-time presentation is split off (spec §12).
+            // §9.1 (m-8): a Finder write's landing leaves a `Trashing` row in the trash until its
+            // trash op finishes; it never becomes writable or evictable on the way out.
+            // Write-keyed (`?5`): other landings keep today's status.
             tx.execute(
-                "UPDATE files SET status = ?2, size_bytes = ?3, modified_at = ?4 WHERE file_id = ?1",
-                params![server, FileStatus::Local.as_str(), input.size_bytes, input.now],
+                "UPDATE files SET status = CASE WHEN status = 'trashing' AND ?5 THEN status ELSE ?2 END,
+                                  size_bytes = ?3, modified_at = ?4
+                 WHERE file_id = ?1",
+                params![
+                    server,
+                    FileStatus::Local.as_str(),
+                    input.size_bytes,
+                    input.now,
+                    input.write_id.is_some()
+                ],
             )?;
         }
         // Only parked writes remain: a parked upload presents `error` (spec §9.1), settled once
