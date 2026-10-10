@@ -19537,7 +19537,12 @@ mod finder_setup_wiring_tests {
             "the window show() sites f7b counted (2026-10-09): {windows:?}"
         );
         assert_eq!(notifications, 3, "the three notification builders");
-        assert_eq!(dialogs, 3, "the three sign-out message dialogs");
+        // The menu's three sign-out message dialogs, and (task 1882, rebase 2026-10-10) the kept-folder alert,
+        // `show_preserved_files_alert`. None of them is a window: macOS draws a parentless alert itself.
+        assert_eq!(
+            dialogs, 4,
+            "the three sign-out message dialogs and the kept-folder alert"
+        );
     }
 
     /// Lead ruling T8-t9 (10): the support bundle's lifecycle tail was done in Task 8
