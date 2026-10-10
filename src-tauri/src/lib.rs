@@ -3500,6 +3500,8 @@ async fn lock_vault(state: State<'_, AppState>) -> Result<SessionActionOutcome, 
         tracing::warn!(%error, "the Finder reconciler did not acknowledge the lock; locking anyway");
     }
     let mut engine_slot = acct.engine.lock().await;
+    #[cfg(all(test, target_os = "macos"))]
+    signal_lock_holds_the_engine_slot();
     // Lead ruling T8-lockflag: like sign-out, lock honours an earlier stop that was never confirmed.
     // It still clears the session, and it says to restart instead of reporting success.
     #[cfg(not(target_os = "windows"))]
@@ -5421,6 +5423,21 @@ const FINDER_REMOVE_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 #[cfg(all(test, target_os = "macos"))]
 tokio::task_local! {
     static FINDER_WAIT_OVERRIDE: std::time::Duration;
+}
+
+// A test learns the moment `lock_vault` holds the engine slot from this signal, never by polling the
+// slot (task 1891): anything else that briefly holds it looks the same to a poll, such as the stand-in
+// reconciler's own look at the slot when it handles the Lock, and a start that was released on that
+// poll gets the slot BEFORE the lock does. Scoped to the future that runs the command, like the waits
+// above, and compiled out of every build that is not a macOS test build.
+#[cfg(all(test, target_os = "macos"))]
+tokio::task_local! {
+    static LOCK_HOLDS_THE_ENGINE_SLOT: std::sync::Arc<tokio::sync::Notify>;
+}
+
+#[cfg(all(test, target_os = "macos"))]
+fn signal_lock_holds_the_engine_slot() {
+    let _ = LOCK_HOLDS_THE_ENGINE_SLOT.try_with(|signal| signal.notify_one());
 }
 
 #[cfg(target_os = "macos")]
@@ -20616,6 +20633,16 @@ mod finder_lock_and_sign_out_tests {
         rt.block_on(fx.finish());
     }
 
+    /// Returns once `lock_vault` has the engine slot (task 1891): its own signal, not a look at the slot. A look
+    /// at the slot (`try_lock`) cannot tell the lock from anyone else holding it for a moment, and the stand-in
+    /// reconciler does exactly that when it handles the Lock, so a start released by a look could get the slot
+    /// first, with the old engine still in it. Fails the test instead of hanging it if the lock never takes the slot.
+    async fn wait_until_the_lock_holds_the_slot(signal: &tokio::sync::Notify) {
+        tokio::time::timeout(Duration::from_secs(10), signal.notified())
+            .await
+            .expect("the lock never took the engine slot");
+    }
+
     /// The same ordering as a race, end to end: starts that are waiting for the engine slot while a
     /// lock holds it find no keys when they get it. This is a smoke test, not the pin: it catches an
     /// early release most of the time on an idle machine and can miss it under load (a start has to
@@ -20628,10 +20655,9 @@ mod finder_lock_and_sign_out_tests {
             fx.reconciler(Some(Reconciler::Answers));
             fx.install_keys();
             fx.install_ticking_engine().await; // abort() holds the slot for its 3 s window
+            let lock_holds_the_slot = Arc::new(tokio::sync::Notify::new());
             let queued = async {
-                while fx.acct.engine.try_lock().is_ok() {
-                    tokio::time::sleep(Duration::from_millis(2)).await; // until the lock holds the slot
-                }
+                wait_until_the_lock_holds_the_slot(&lock_holds_the_slot).await;
                 (0..8)
                     .map(|_| {
                         let acct = fx.acct.clone();
@@ -20644,7 +20670,10 @@ mod finder_lock_and_sign_out_tests {
                     })
                     .collect::<Vec<_>>()
             };
-            let (locked, starts) = tokio::join!(lock_vault(fx.state()), queued);
+            let (locked, starts) = tokio::join!(
+                LOCK_HOLDS_THE_ENGINE_SLOT.scope(lock_holds_the_slot.clone(), lock_vault(fx.state())),
+                queued
+            );
             locked.expect("the lock succeeds");
             for start in starts {
                 assert!(
@@ -20671,10 +20700,9 @@ mod finder_lock_and_sign_out_tests {
             fx.install_keys();
             fx.install_ticking_engine().await; // abort() holds the slot for its 3 s window
             let handle = fx.app.handle().clone();
+            let lock_holds_the_slot = Arc::new(tokio::sync::Notify::new());
             let queued = async {
-                while fx.acct.engine.try_lock().is_ok() {
-                    tokio::time::sleep(Duration::from_millis(2)).await; // until the lock holds the slot
-                }
+                wait_until_the_lock_holds_the_slot(&lock_holds_the_slot).await;
                 (0..8)
                     .map(|_| {
                         let (acct, handle, state_dir) = (fx.acct.clone(), handle.clone(), state_dir.clone());
@@ -20695,7 +20723,10 @@ mod finder_lock_and_sign_out_tests {
                     })
                     .collect::<Vec<_>>()
             };
-            let (locked, starts) = tokio::join!(lock_vault(fx.state()), queued);
+            let (locked, starts) = tokio::join!(
+                LOCK_HOLDS_THE_ENGINE_SLOT.scope(lock_holds_the_slot.clone(), lock_vault(fx.state())),
+                queued
+            );
             locked.expect("the lock succeeds");
             for start in starts {
                 assert_eq!(
