@@ -2127,6 +2127,11 @@ impl StateDb {
     /// survives a restart between ticks; idempotent.
     pub fn request_resnapshot(&self) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
+        Self::request_resnapshot_conn(&conn)
+    }
+
+    /// [`Self::request_resnapshot`] inside the caller's connection or transaction.
+    fn request_resnapshot_conn(conn: &Connection) -> Result<()> {
         conn.execute(
             "INSERT INTO sync_state (key, value) VALUES (?1, '1')
              ON CONFLICT(key) DO UPDATE SET value = '1'",
@@ -2736,6 +2741,11 @@ impl StateDb {
     /// §5.4 row 10 (m-9): a restore from this Mac. Its version becomes current, so the
     /// system re-downloads; the held columns are cleared only when no File Provider
     /// write of the file is queued (plan Spec issue 5). One transaction.
+    ///
+    /// The content changed on the server whatever the reply holds: a reply without a
+    /// version (no server branch answers so today) still records the change, and asks
+    /// a snapshot to fill the version. A reply without an object version (the legacy
+    /// branch, which keeps the server's own) keeps the row's.
     #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
     pub fn apply_restore_response(
         &self,
@@ -2745,15 +2755,19 @@ impl StateDb {
     ) -> Result<()> {
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        if let Some(version) = version {
-            tx.execute(
-                "UPDATE files SET current_version = ?2, local_base_version = ?2,
-                                  current_object_version_id = ?3, version_filled = 0
-                 WHERE file_id = ?1",
-                params![file_id, version, object_version_id],
-            )?;
-            record_file_change_conn(&tx, file_id, FpChangeKind::Modified, None)?;
+        match version {
+            Some(version) => {
+                tx.execute(
+                    "UPDATE files SET current_version = ?2, local_base_version = ?2,
+                                      current_object_version_id = COALESCE(?3, current_object_version_id),
+                                      version_filled = 0
+                     WHERE file_id = ?1",
+                    params![file_id, version, object_version_id],
+                )?;
+            }
+            None => Self::request_resnapshot_conn(&tx)?,
         }
+        record_file_change_conn(&tx, file_id, FpChangeKind::Modified, None)?;
         tx.execute(
             "UPDATE files SET held_write_id = NULL, held_base = NULL, held_version = NULL,
                               held_object_version_id = NULL
@@ -4000,6 +4014,18 @@ impl StateDb {
         conn.execute(
             "INSERT INTO id_aliases (provisional_id, server_id, created_at) VALUES (?1, ?2, ?3)",
             params![provisional_id, server_id, created_at],
+        )
+        .unwrap();
+    }
+
+    /// Review Minor 4: writes the held pair as given, including the half-set row
+    /// (a write id without its base) that no writer produces and every read refuses.
+    #[cfg(test)]
+    pub(crate) fn set_held_pair_for_test(&self, file_id: &str, write_id: Option<&str>, base: Option<i64>) {
+        let conn = self.0.lock().unwrap();
+        conn.execute(
+            "UPDATE files SET held_write_id = ?2, held_base = ?3 WHERE file_id = ?1",
+            params![file_id, write_id, base],
         )
         .unwrap();
     }
@@ -7095,6 +7121,83 @@ mod tests {
 
         // Unknown id → empty, no-op.
         assert!(db.delete_file_subtree("does-not-exist").unwrap().is_empty());
+    }
+
+    /// A row the server holds at `version`, under `object`.
+    fn seed_restorable_row(db: &StateDb, file_id: &str, version: i64, object: &str) {
+        db.upsert_file(&FileEntry {
+            file_id: file_id.into(),
+            path: "notes.txt".into(),
+            status: FileStatus::Local,
+            size_bytes: 1,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+        let mut contract = db.get_file_contract_state(file_id).unwrap().unwrap();
+        contract.current_version = version;
+        contract.current_object_version_id = Some(object.into());
+        db.set_file_contract_state(&contract).unwrap();
+    }
+
+    fn version_and_object(db: &StateDb, file_id: &str) -> (i64, Option<String>) {
+        let contract = db.get_file_contract_state(file_id).unwrap().unwrap();
+        (contract.current_version, contract.current_object_version_id)
+    }
+
+    /// Review Minor 1 (spec §5.4 row 10): a restore reply without `version_number`
+    /// still tells the system the content changed, and a snapshot fills the version.
+    #[test]
+    fn a_restore_reply_without_a_version_records_the_change_and_requests_a_snapshot() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_restorable_row(&db, "restored", 2, "object-v2");
+        assert!(!db.take_needs_resnapshot().unwrap(), "no snapshot is pending before");
+        let (_, anchor) = db.list_file_changes(None).unwrap().unwrap();
+
+        db.apply_restore_response("restored", None, None).unwrap();
+
+        let (changes, _) = db.list_file_changes(anchor.as_deref()).unwrap().unwrap();
+        let modified = changes
+            .iter()
+            .filter(|change| change.file_id == "restored" && change.kind == FpChangeKind::Modified)
+            .count();
+        assert_eq!(modified, 1, "the system is told the content changed: {changes:?}");
+        assert!(
+            db.take_needs_resnapshot().unwrap(),
+            "a snapshot fills the version the reply left out"
+        );
+        assert_eq!(
+            version_and_object(&db, "restored"),
+            (2, Some("object-v2".to_string())),
+            "nothing is guessed"
+        );
+    }
+
+    /// Review Minor 2: the server's legacy restore branch answers no object version
+    /// and keeps its own (VER:663-674), so the row keeps its own too.
+    #[test]
+    fn a_restore_reply_without_an_object_version_keeps_the_rows() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_restorable_row(&db, "legacy", 2, "object-v2");
+
+        db.apply_restore_response("legacy", Some(3), None).unwrap();
+        assert_eq!(
+            version_and_object(&db, "legacy"),
+            (3, Some("object-v2".to_string())),
+            "the legacy branch's reply keeps the row's object version"
+        );
+
+        db.apply_restore_response("legacy", Some(4), Some("object-v4")).unwrap();
+        assert_eq!(
+            version_and_object(&db, "legacy"),
+            (4, Some("object-v4".to_string())),
+            "a reply that names one replaces it"
+        );
     }
 
     #[test]

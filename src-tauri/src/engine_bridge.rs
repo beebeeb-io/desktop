@@ -790,11 +790,33 @@ impl EngineBridge {
                 #[cfg(target_os = "macos")]
                 {
                     let response = self.api.restore_version(file_id, version_id).await?;
-                    self.db.apply_restore_response(
-                        file_id,
-                        response["version_number"].as_i64(),
-                        response["current_object_version_id"].as_str(),
-                    )?;
+                    self.seam("restore:after_server");
+                    // The server has restored, and each restore mints a version: a
+                    // retry would make another. A local failure is left to a snapshot
+                    // to repair, and the op completes. A fixed category only: the
+                    // error can carry a path (spec §11).
+                    if self
+                        .db
+                        .apply_restore_response(
+                            file_id,
+                            response["version_number"].as_i64(),
+                            response["current_object_version_id"].as_str(),
+                        )
+                        .is_err()
+                    {
+                        tracing::warn!(
+                            file_id = %file_id,
+                            category = "restore_bookkeeping_failed",
+                            "restore done on the server; its local record failed, a snapshot will repair it"
+                        );
+                        if self.db.request_resnapshot().is_err() {
+                            tracing::warn!(
+                                file_id = %file_id,
+                                category = "resnapshot_request_failed",
+                                "restore done on the server; a snapshot could not be requested"
+                            );
+                        }
+                    }
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
@@ -14914,6 +14936,64 @@ mod tests {
             vec![("ordered".to_string(), "object-ordered-v1".to_string())]
         );
         assert_eq!(held_content_version(&bridge, "ordered"), "3");
+    }
+
+    /// Review Minor 3: the server's restore is not idempotent (each call mints a
+    /// version, VER:534-535). A local failure after it must not send it again.
+    #[cfg(target_os = "macos")] // tests the restore response, which only macOS applies
+    #[tokio::test]
+    async fn a_restore_the_server_made_is_never_sent_again_after_a_local_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [65u8; 32];
+        let server = VersionedServerMock::start();
+        let db_path = dir.path().join("state.db");
+        let bridge = test_bridge_with_api(&db_path, server.base_url.clone(), master_key);
+        seed_uploaded_row(&bridge, &server, "restore-once");
+        bridge
+            .queue_restore_version("restore-once", "object-restore-once-v1", None)
+            .unwrap();
+        assert!(
+            !bridge.db.take_needs_resnapshot().unwrap(),
+            "no snapshot is pending before"
+        );
+        // The server restores; then the local record fails: the change log is gone.
+        let path = db_path.clone();
+        bridge.seams.arm("restore:after_server", move || {
+            rusqlite::Connection::open(&path)
+                .unwrap()
+                .execute("ALTER TABLE fp_changes RENAME TO fp_changes_away", [])
+                .unwrap();
+        });
+        let logs = capture_logs_async(async {
+            drain_upload_queue(&bridge, &sync_root).await;
+        })
+        .await;
+        let state = server.finish();
+        assert_eq!(
+            state.restores,
+            vec![("restore-once".to_string(), "object-restore-once-v1".to_string())],
+            "the restore is sent once"
+        );
+        assert!(
+            bridge.db.list_due_operations(i64::MAX).unwrap().is_empty(),
+            "the op is done, not retried"
+        );
+        assert!(
+            bridge.db.take_needs_resnapshot().unwrap(),
+            "a snapshot repairs what the reply could not record"
+        );
+        let lines: Vec<&str> = logs
+            .lines()
+            .filter(|line| line.contains("restore_bookkeeping_failed"))
+            .collect();
+        assert_eq!(lines.len(), 1, "one line for the failed record:\n{logs}");
+        assert!(lines[0].contains("WARN") && lines[0].contains("restore-once"), "{logs}");
+        assert!(
+            !logs.contains("fp_changes"),
+            "the raw error never reaches the log:\n{logs}"
+        );
     }
 
     #[cfg(unix)] // names `arm_builder_seam`

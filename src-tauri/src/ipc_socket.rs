@@ -2607,13 +2607,28 @@ pub(crate) fn file_entry_payload_for_db(
 ) -> FileProviderItemPayload {
     // Spec §5.3: the row and the queue come from ONE read, so the predicate never
     // sees a row from before a landing beside a queue from after it.
-    let presentation = db.item_presentation(&entry.file_id).ok().flatten();
+    let read = db.item_presentation(&entry.file_id);
     builder_seam();
-    let mut payload = match &presentation {
-        Some(p) => file_entry_payload(entry, &p.contract, parent_identifier),
-        None => file_entry_payload_without_contract(entry, parent_identifier),
+    let mut payload = match &read {
+        Ok(Some(p)) => file_entry_payload(entry, &p.contract, parent_identifier),
+        Ok(None) => file_entry_payload_without_contract(entry, parent_identifier),
+        Err(_) => {
+            // A failed read (a SQLite error, or a held write without its base) is
+            // presented as round 3 did, from the contract alone: the system never
+            // sees a spurious content change, and the capabilities are kept. A fixed
+            // category only: the error can carry a path (spec §11).
+            tracing::warn!(
+                file_id = %entry.file_id,
+                category = "presentation_read_failed",
+                "item presented from its contract alone"
+            );
+            match db.get_file_contract_state(&entry.file_id).ok().flatten() {
+                Some(contract) => file_entry_payload(entry, &contract, parent_identifier),
+                None => file_entry_payload_without_contract(entry, parent_identifier),
+            }
+        }
     };
-    if let Some(p) = &presentation {
+    if let Ok(Some(p)) = &read {
         // Rule 1: the bytes the system holds keep the name their write was given,
         // while that write is queued or is what the server holds now.
         match crate::write_token::held_token(
@@ -5072,6 +5087,45 @@ mod tests {
         tracing::subscriber::with_default(subscriber, body);
         let bytes = buffer.lock().unwrap().clone();
         String::from_utf8(bytes).unwrap()
+    }
+
+    /// Review Minor 4: a presentation read that fails (here the one bug row, a held
+    /// write id without its base) presents the item from its contract, as round 3
+    /// did: never a spurious "0", and the contract's capabilities are kept.
+    #[test]
+    fn a_failed_presentation_read_presents_the_contract_and_logs_it() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_1694_item(
+            &db,
+            "half-set",
+            FileStatus::Local,
+            PERMISSION_READ | PERMISSION_WRITE,
+            ItemKind::File,
+        );
+        let mut contract = db.get_file_contract_state("half-set").unwrap().unwrap();
+        contract.current_version = 4;
+        db.set_file_contract_state(&contract).unwrap();
+        let entry = db.get_file("half-set").unwrap().unwrap();
+        let healthy = file_entry_payload_for_db(&db, &entry, FP_ROOT_APPLE);
+        assert_eq!(healthy.content_version.as_deref(), Some("4"));
+
+        db.set_held_pair_for_test("half-set", Some(&"a".repeat(32)), None);
+        assert!(db.item_presentation("half-set").is_err(), "the bug row is a read error");
+        let mut presented = None;
+        let logs = capture_logs(|| presented = Some(file_entry_payload_for_db(&db, &entry, FP_ROOT_APPLE)));
+        let presented = presented.unwrap();
+        assert_eq!(
+            serde_json::to_value(&presented).unwrap(),
+            serde_json::to_value(&healthy).unwrap(),
+            "the item is presented from its contract, never as \"0\""
+        );
+        let lines: Vec<&str> = logs
+            .lines()
+            .filter(|line| line.contains("presentation_read_failed"))
+            .collect();
+        assert_eq!(lines.len(), 1, "one line per failed read:\n{logs}");
+        assert!(lines[0].contains("WARN") && lines[0].contains("half-set"), "{logs}");
     }
 
     #[test]
