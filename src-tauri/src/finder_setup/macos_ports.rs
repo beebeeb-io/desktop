@@ -374,15 +374,19 @@ fn set_signed_out_by_choice(cfg: &mut DesktopConfig, value: bool) -> bool {
 }
 
 fn update_config(change: impl FnOnce(&mut DesktopConfig) -> bool) {
-    match DesktopConfig::load() {
-        Ok(mut cfg) => {
-            if change(&mut cfg)
-                && let Err(error) = cfg.save()
-            {
-                tracing::warn!(%error, "finder setup: could not save desktop.toml");
-            }
-        }
-        Err(error) => tracing::warn!(%error, "finder setup: could not load desktop.toml"),
+    match DesktopConfig::path() {
+        Ok(path) => update_config_at(&path, change),
+        Err(error) => tracing::warn!(%error, "finder setup: could not find desktop.toml"),
+    }
+}
+
+/// [`update_config`] on the config file at `path` (a seam for the tests). One load-change-save under the
+/// config-write lock (`DesktopConfig::update_at`, task 1882 r5; rebase re-review Minor 3): a load here and a save
+/// after another writer's would put back the copy loaded first, and the kept folder a Repair saved meanwhile would be
+/// lost. A change that is not saved leaves the file untouched.
+fn update_config_at(path: &std::path::Path, change: impl FnOnce(&mut DesktopConfig) -> bool) {
+    if let Err(error) = DesktopConfig::update_at(path, |cfg| (change(cfg), ())) {
+        tracing::warn!(%error, "finder setup: could not update desktop.toml");
     }
 }
 
@@ -1487,5 +1491,113 @@ mod tests {
         assert_eq!(call(), Ok(()), "the OS call returns after that");
         assert_eq!(*alerts.lock().unwrap(), vec![later.to_string()], "the late sink has it");
         assert_eq!(saved_folder(&config).as_deref(), Some(later));
+    }
+
+    // ── Rebase re-review Minor 3: the reconciler's config writes are one load-change-save under the lock ──
+
+    /// Runs `slow` on its own thread and returns once `slow` has signalled that it is between its load and its save;
+    /// the caller's next step runs while it is in flight. `slow` gets the signal to send.
+    fn in_flight<R: Send + 'static>(
+        slow: impl FnOnce(std::sync::mpsc::Sender<()>) -> R + Send + 'static,
+    ) -> std::thread::JoinHandle<R> {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || slow(entered_tx));
+        entered_rx.recv().expect("the slow update started");
+        handle
+    }
+
+    /// The reviewer's case, both ways round (this test and the next): a Repair saves the kept folder while the
+    /// reconciler saves its failure record (§5.3 (6)'s fresh check), or the other way round. Each is one
+    /// load-change-save under the config-write lock (`DesktopConfig::update_at`, 1882 r5), so neither overwrites the
+    /// other with the copy it loaded first. Here the reconciler's update is between its load and its save while the
+    /// folder is saved.
+    #[test]
+    fn a_kept_folder_saved_during_a_reconciler_config_update_survives_it() {
+        let record = FailureRecord {
+            reason: FinderFailureReason::Timeout,
+            domain: "io.beebeeb.app".into(),
+            code: app_code::OP_TIMEOUT,
+            at: 1_791_291_909,
+        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("desktop.toml");
+        let reconciler = {
+            let (path, record) = (path.clone(), record.clone());
+            in_flight(move |entered| {
+                update_config_at(&path, move |cfg| {
+                    let changed = set_failure(cfg, Some(record));
+                    entered.send(()).expect("the test is waiting");
+                    std::thread::sleep(Duration::from_millis(200));
+                    changed
+                })
+            })
+        };
+        crate::finder_removal::remember_kept_folder_at(&path, KEPT_AT).expect("the folder is saved");
+        reconciler.join().expect("the reconciler's update did not panic");
+        let on_disk = DesktopConfig::load_from(&path).expect("reads back");
+        assert_eq!(
+            on_disk.kept_unsynced_folder.as_deref(),
+            Some(KEPT_AT),
+            "the kept folder survived the reconciler's update"
+        );
+        assert_eq!(on_disk.finder_last_failure, Some(record), "and the update landed");
+    }
+
+    /// Minor 3: the two tests around this one drive `update_config_at`; this pins that the port's writes reach it, and
+    /// that nothing in the ports saves a copy of the config it loaded earlier.
+    #[test]
+    fn the_ports_write_the_config_only_through_one_update_at() {
+        let source = production();
+        assert!(!source.contains(".save()"), "no save of a config loaded earlier");
+        let update = squeeze(&source[source.find("fn update_config(").expect("update_config")..]);
+        let update = &update[..update.find(&squeeze("fn update_config_at(")).expect("its seam follows")];
+        assert!(
+            update.contains(&squeeze("Ok(path) => update_config_at(&path, change),")),
+            "{update}"
+        );
+        let at = squeeze(&source[source.find("fn update_config_at(").expect("the seam")..]);
+        let at = &at[..at
+            .find(&squeeze("impl Ports for MacosPorts"))
+            .expect("the ports follow")];
+        assert!(
+            at.contains(&squeeze("DesktopConfig::update_at(path, |cfg| (change(cfg), ()))")),
+            "one load-change-save under the lock:\n{at}"
+        );
+        for persist in ["fn persist_failure(", "fn persist_signed_out_by_choice("] {
+            let body = &source[source.find(persist).expect(persist)..];
+            let body = &body[..body.find("\n    }\n").expect("it ends")];
+            assert!(body.contains("update_config(move |cfg|"), "{persist}:\n{body}");
+        }
+    }
+
+    /// The other way round: the folder's save is between its load and its save while the reconciler updates the
+    /// config.
+    #[test]
+    fn a_reconciler_config_update_during_a_kept_folder_save_keeps_the_folder() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("desktop.toml");
+        let saving = {
+            let path = path.clone();
+            in_flight(move |entered| {
+                DesktopConfig::update_at(&path, move |cfg| {
+                    let changed = crate::finder_removal::record_kept_folder(cfg, KEPT_AT);
+                    entered.send(()).expect("the test is waiting");
+                    std::thread::sleep(Duration::from_millis(200));
+                    (changed, ())
+                })
+            })
+        };
+        update_config_at(&path, |cfg| set_signed_out_by_choice(cfg, true));
+        saving
+            .join()
+            .expect("the folder's save did not panic")
+            .expect("the folder was saved");
+        let on_disk = DesktopConfig::load_from(&path).expect("reads back");
+        assert_eq!(
+            on_disk.kept_unsynced_folder.as_deref(),
+            Some(KEPT_AT),
+            "the kept folder survived the reconciler's update"
+        );
+        assert!(on_disk.finder_signed_out_by_choice, "and the update landed");
     }
 }
