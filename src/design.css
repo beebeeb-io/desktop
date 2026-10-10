@@ -937,6 +937,26 @@ button {
   color: oklch(0.5 0.18 25);
 }
 
+/*
+ * The filled destructive confirm in an onboarding card (R8, spec 2026-10-06; design/hifi/
+ * macos-settings-dialogs.html §4). The 1683 ruling's fill: --red with the fixed --red-ink label,
+ * exactly what `.ms-btn--danger` paints in macSettings.css, so no new colour. `.button.danger` alone
+ * stays the red outline (Account, Sync folder). The hover rule pins the fill: the plain `.button`
+ * hover (same specificity as the base rule here) would turn a red button paper-coloured.
+ */
+.button.danger.filled {
+  border-color: var(--red);
+  background: var(--red);
+  color: var(--red-ink);
+}
+
+.button.danger.filled:hover:not(:disabled) {
+  border-color: var(--red);
+  background: var(--red);
+  color: var(--red-ink);
+  filter: brightness(0.96);
+}
+
 .button:disabled {
   cursor: not-allowed;
   opacity: 0.55;

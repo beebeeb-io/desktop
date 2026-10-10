@@ -3,6 +3,7 @@
 **Status:** design ruling APPROVED. Guus accepted **all seven recommendations** on 2026-10-01.
 **Hi-fi source:** [`design/hifi/macos-menubar-popover.html`](../../design/hifi/macos-menubar-popover.html) (authored by the Claude Cloud design lane, 2026-09-30, as the task-1683 design review; recovered from `~/Downloads` and committed here 2026-10-01 — it was never committed at design time).
 **Implementation plan:** nine slices, each ships tests that are seen failing first; the last rung is a manual pass by Guus on the next macOS alpha. Slice 4 (the macOS Settings window, 4 tabs) already shipped via PR #85 + notes amendment #86.
+**Amended 2026-10-06 (ruling R5, [spec A](2026-10-06-macos-finder-setup-reconciler.md) §12):** the "finder not added" state and its "Add to Finder" action are removed: Beebeeb adds itself to Finder after sign-in. "Finder add failed" shows one sentence and one action per reason (spec A §6.2), and "Try again" survives only inside a failure. The `States:` bullet below keeps its original wording for the record.
 
 ## Popover shape
 - 372×488 pt popover anchored under the menu-bar icon.

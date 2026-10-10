@@ -6,7 +6,7 @@
  * sign-out). The rendering is pinned in tests/macSettingsTabs.test.tsx ("Sync tab").
  */
 import { describe, expect, test } from 'bun:test'
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   KEPT_FOLDER_ROW_SENTENCE,
@@ -14,8 +14,6 @@ import {
   PRESERVED_FILES_SENTENCE,
   preservedFilesLine,
   preservedFilesNote,
-  REPAIR_FAILED_AFTER_REMOVAL_CODE,
-  repairRemovedNotice,
 } from '../src/macSettingsModel'
 
 const FOLDER = '/Users/sam/Library/CloudStorage/Beebeeb (kept) /Notes '
@@ -90,45 +88,31 @@ describe('kept-files note (1882)', () => {
   })
 })
 
-// 1882 r4: a Repair that fails after it removed the Finder location says so (spec
-// docs/specs/2026-10-02-macos-settings-dialogs.md, Dialog 2).
-describe('Repair failed after the removal (1882 r4)', () => {
-  const AFTER = `${REPAIR_FAILED_AFTER_REMOVAL_CODE}: No space left on device`
+// Rebase re-review Minor 4 (lead ruling, 2026-10-10): 1882 r4's "Repair failed after the removal" note can occur on
+// no platform under spec A. A Mac saves nothing after its removal, and Windows and Linux have no File Provider domain,
+// so their removal never works. The note, its code and its copy are gone. The copy a failed Repair still shows is
+// pinned where it is shown: tests/macSettingsTabs.test.tsx and tests/finderInstallOneSurface.test.tsx.
+describe('no Repair-failed-after-the-removal note (rebase re-review Minor 4)', () => {
+  const sources = (dir: string): string[] =>
+    readdirSync(dir, { recursive: true, encoding: 'utf8' })
+      .filter((name) => /\.(ts|tsx)$/.test(name))
+      .map((name) => join(dir, name))
 
-  test('an error that starts with the code says Beebeeb was removed and how to add it back, never the raw detail', () => {
-    expect(repairRemovedNotice(AFTER, 'Add to Finder')).toEqual({
-      title: 'Beebeeb was removed from Finder',
-      body: 'Repair couldn’t finish, so Beebeeb is no longer in Finder. Choose Add to Finder to add it back.',
-    })
-    // The compact window names its own button.
-    expect(repairRemovedNotice(AFTER, 'Install in Finder')?.body).toBe(
-      'Repair couldn’t finish, so Beebeeb is no longer in Finder. Choose Install in Finder to add it back.',
-    )
-    expect(JSON.stringify(repairRemovedNotice(AFTER, 'Add to Finder'))).not.toContain('No space left')
-  })
-
-  test('every other error is not that notice: the old failure copy stays for a failure before the removal', () => {
-    for (const reason of ['socket busy', 'Account changed. Please try again.', '', ` ${REPAIR_FAILED_AFTER_REMOVAL_CODE}`, `x ${AFTER}`]) {
-      expect(repairRemovedNotice(reason, 'Add to Finder')).toBeNull()
+  test('no frontend file names the r4 code, its helpers or its copy', () => {
+    const files = sources(join(import.meta.dir, '..', 'src'))
+    expect(files.length).toBeGreaterThan(20) // the walk read the frontend
+    for (const file of files) {
+      const text = readFileSync(file, 'utf8')
+      for (const r4 of ['repair_failed_after_removal', 'REPAIR_FAILED_AFTER_REMOVAL_CODE', 'repairRemoved', 'REPAIR_REMOVED', 'Beebeeb was removed from Finder', 'is no longer in Finder']) {
+        expect({ file, r4, named: text.includes(r4) }).toEqual({ file, r4, named: false })
+      }
     }
   })
 
-  test('both surfaces show it: Settings names Add to Finder, the compact window names its own button', () => {
-    const settings = readFileSync(join(import.meta.dir, '..', 'src', 'MacSettings.tsx'), 'utf8')
-    expect(settings).toContain("repairRemovedNotice(result.reason, 'Add to Finder')")
-    expect(settings).toMatch(/>\s*Add to Finder\s*</) // the button the sentence names exists
-    const compact = readFileSync(join(import.meta.dir, '..', 'src', 'pages', 'SyncFolder.tsx'), 'utf8')
-    expect(compact).toContain("repairRemovedNotice(result.reason, 'Install in Finder')")
-    expect(compact).toContain('showToast({ variant: \'error\', title: removed.title, message: removed.body })')
-    expect(compact).toMatch(/>\s*Install in Finder\s*</) // and so does its own
-  })
-
-  test('the notice is in the house voice: plain, names no provider, no emoji', () => {
-    const notice = repairRemovedNotice(AFTER, 'Add to Finder')!
-    const text = `${notice.title} ${notice.body}`.toLowerCase()
-    for (const word of ['apple', 'icloud', 'hetzner', 'file provider', 'fileprovider', 'sorry', 'oops', 'bank-grade']) {
-      expect(text).not.toContain(word)
-    }
-    expect(/\p{Extended_Pictographic}/u.test(text)).toBe(false)
+  test('Rust no longer builds the code', () => {
+    const rust = readFileSync(join(import.meta.dir, '..', 'src-tauri', 'src', 'finder_removal.rs'), 'utf8')
+    expect(rust).toContain('pub const PRESERVED_FILES_SENTENCE') // the file read is the right one
+    expect(rust).not.toContain('REPAIR_FAILED_AFTER_REMOVAL_CODE')
+    expect(rust).not.toContain('fn repair_save_error')
   })
 })

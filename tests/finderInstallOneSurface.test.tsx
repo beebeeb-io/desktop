@@ -15,12 +15,22 @@
  * counts inline error notices plus error toasts, so "exactly 1" means 1 in total.
  *
  * Mutation checks (red first, then reverted) are recorded in the task Notes, 2026-09-30.
+ *
+ * Task 17 (spec 2026-10-06 §10): on macOS nothing installs by hand any more. SyncFolder and the
+ * main-window Settings panel follow the reconciler through `useFinderSetup`, so the install-failure
+ * tests below now run on LINUX, where the install-era commands are unchanged (the proof that the
+ * non-macOS pane did not move), and the macOS behaviour has its own describes at the end.
  */
 import { afterEach, describe, expect, test } from 'bun:test'
 import * as desktopApi from '../src/desktopApi'
 import * as finderInstallCard from '../src/finderInstallCard'
+import * as finderSetup from '../src/finderSetup'
+import * as finderSetupCopy from '../src/finderSetupCopy'
+import * as macSettingsModel from '../src/macSettingsModel'
 import { T } from '../src/windows/ui'
 import { mount, textOf, visibleErrorSurfaces, type Mounted } from './fixtures/componentHarness'
+import { finderBus, finderView, tick, useFinderSetupModule } from './fixtures/finderSetupHarness'
+import { rustStr } from './fixtures/rustConstants'
 
 const TIMEOUT = 'Timed out waiting for the Beebeeb File Provider domain to become available'
 const OTHER = 'Finder location must be absolute: relative/path'
@@ -43,7 +53,7 @@ type Shape = 'err' | 'state' | 'unsaved' | 'success' | 'user_disabled'
 function finderBackend(shape: Shape, persistedBefore: string | null, gate?: { release: Promise<void> }) {
   let persisted: any = persistedBefore ? failed(persistedBefore) : missing
   return {
-    desktop_platform: () => 'macos',
+    desktop_platform: () => 'linux',
     sync_status: () => ({ logged_in: true, engine: 'running', sync_root: '/Users/fixture/Library/CloudStorage/Beebeeb', syncing: 0, cloud_only: 0, conflicts: 0 }),
     finder_location_state: () => persisted,
     install_windows_shell_integration: () => { throw new Error('windows-only command called on macOS') },
@@ -63,17 +73,31 @@ function finderBackend(shape: Shape, persistedBefore: string | null, gate?: { re
 const mounted: Mounted[] = []
 afterEach(() => { while (mounted.length) mounted.pop()!.close() })
 
-async function openFinderPane(shape: Shape, persistedBefore: string | null, gate?: { release: Promise<void> }) {
+/**
+ * SyncFolder runs the REAL `useFinderSetup` (switched on only for a Mac) against a scripted bus.
+ * `extra` is what a macOS test adds; the Windows/Linux tests bind none of the Finder-setup copy, so
+ * a ReferenceError there would mean the non-macOS pane evaluated a macOS identifier.
+ */
+function mountSyncFolder(backend: Record<string, any>, opts: { caps?: string | null; extra?: Record<string, unknown> } = {}) {
+  const bus = finderBus()
   const m = mount('pages/SyncFolder.tsx', 'SyncFolder', {
-    backend: finderBackend(shape, persistedBefore, gate),
-    bindings: { ...desktopApi, ...finderInstallCard },
+    expand: true,
+    backend,
+    hookModules: [useFinderSetupModule(bus)],
+    // Task 1882 (rebase onto main): the page also reads the kept folder and the repair-removed code from macSettingsModel.
+    bindings: { ...desktopApi, ...finderInstallCard, finderActionButtonLabel: finderSetupCopy.finderActionButtonLabel, preservedFilesLine: macSettingsModel.preservedFilesLine, useCapabilities: () => (opts.caps ? { host_os: opts.caps } : null), ...opts.extra },
   })
   mounted.push(m)
+  return { m, bus }
+}
+
+async function openFinderPane(shape: Shape, persistedBefore: string | null, gate?: { release: Promise<void> }) {
+  const { m } = mountSyncFolder(finderBackend(shape, persistedBefore, gate))
   await m.flush()
   return m
 }
 
-describe('SyncFolder (Finder location pane)', () => {
+describe('SyncFolder on Windows/Linux (unchanged): Finder location pane', () => {
   test('a failed install saved AND returned as an error renders one inline banner and no toast', async () => {
     const m = await openFinderPane('err', null)
     expect(visibleErrorSurfaces(m)).toEqual([])
@@ -146,19 +170,336 @@ describe('SyncFolder (Finder location pane)', () => {
   })
 
   test('a transient failure that gates nothing still toasts: the folder picker on the non-macOS pane', async () => {
-    const w = mount('pages/SyncFolder.tsx', 'SyncFolder', {
-      backend: { ...finderBackend('success', null), desktop_platform: () => 'windows', pick_sync_root: () => { throw new Error('picker crashed') } },
-      bindings: { ...desktopApi, ...finderInstallCard },
-    })
-    mounted.push(w)
+    const { m: w } = mountSyncFolder({ ...finderBackend('success', null), desktop_platform: () => 'windows', pick_sync_root: () => { throw new Error('picker crashed') } })
     await w.flush()
     await w.click('Choose location')
     expect(w.toasts.map((t) => t.title)).toEqual(['Couldn’t open the folder picker'])
     expect(visibleErrorSurfaces(w)).toEqual([`toast: Couldn’t open the folder picker — picker crashed`])
   })
+
+  // Task 17b: the one-sentence mapping is macOS only. Off a Mac the error text names a folder the
+  // person can act on, and it keeps its own title. The macOS helper is bound to a throwing stub, so
+  // a ReferenceError-free pass also proves the Windows/Linux branch never evaluates it.
+  test('a failed Open in Explorer keeps its title and shows the error text, and never reaches the macOS sentence (task 17b)', async () => {
+    for (const platform of ['windows', 'linux']) {
+      const reason = 'open Explorer: access is denied'
+      const { m } = mountSyncFolder(
+        { ...finderBackend('success', null), desktop_platform: () => platform, open_finder_location: () => { throw new Error(reason) } },
+        { caps: platform, extra: { finderOpenFailedToast: () => { throw new Error('the macOS helper was reached off a Mac') } } },
+      )
+      await m.flush(); await m.flush()
+      await m.click('Open in Finder')
+      expect(m.calls.filter((c) => c.name === 'open_finder_location').map((c) => c.args)).toEqual([{ path: '/Users/fixture/Library/CloudStorage/Beebeeb' }])
+      expect(m.toasts.map((t) => ({ variant: t.variant, title: t.title, message: t.message }))).toEqual([
+        { variant: 'error', title: 'Couldn’t open the sync folder', message: reason },
+      ])
+    }
+  })
+
+  test('a failed Finder reset keeps its title and shows the error text, and never reaches the macOS sentence (task 17b)', async () => {
+    for (const platform of ['windows', 'linux']) {
+      const reason = 'reset failed: the socket is busy'
+      const { m } = mountSyncFolder(
+        { ...finderBackend('success', null), desktop_platform: () => platform, reset_macos_integration: () => { throw new Error(reason) } },
+        { caps: platform, extra: { finderRepairFailedToast: () => { throw new Error('the macOS helper was reached off a Mac') } } },
+      )
+      await m.flush(); await m.flush()
+      await m.click('Reset Finder integration…')
+      await m.click('Reset Finder integration')
+      expect(m.calls.filter((c) => c.name === 'reset_macos_integration')).toHaveLength(1)
+      expect(m.toasts.map((t) => ({ variant: t.variant, title: t.title, message: t.message }))).toEqual([
+        { variant: 'error', title: 'Couldn’t reset Finder integration', message: reason },
+      ])
+    }
+  })
+
+  test('a Finder reset that succeeds with warnings keeps its notice and shows the warnings, and never reaches the macOS sentence (task 17b)', async () => {
+    for (const platform of ['windows', 'linux']) {
+      const warning = 'Could not remove cache file /var/x.db: permission denied'
+      const { m } = mountSyncFolder(
+        { ...finderBackend('success', null), desktop_platform: () => platform, reset_macos_integration: () => ({ pending_operations_preserved: 2, removed_cache_files: 3, warnings: [warning] }) },
+        { caps: platform, extra: { finderRepairWarningNote: () => { throw new Error('the macOS helper was reached off a Mac') } } },
+      )
+      await m.flush(); await m.flush()
+      await m.click('Reset Finder integration…')
+      await m.click('Reset Finder integration')
+      expect(textOf(m.tree())).toContain(`Finder integration was reset. 2 queued operations preserved. 3 disposable cache files removed. ${warning}`)
+    }
+  })
+
+  test('it still installs through the install-era commands, and never reads or listens to the reconciler', async () => {
+    const { m, bus } = mountSyncFolder(finderBackend('success', null), { caps: 'linux' })
+    await m.flush(); await m.flush()
+    await m.click('Install in Finder')
+    const names = m.calls.map((c) => c.name)
+    expect(names).toContain('finder_location_state')
+    expect(names).toContain('install_finder_location')
+    expect(names).not.toContain('finder_setup_state')
+    expect(bus.registered).toBe(0)
+  })
 })
 
-describe('Settings panel (ExplorerIntegrationPanel), same action, same rule on macOS; Windows is unchanged', () => {
+describe('SyncFolder on macOS follows the reconciler (spec §10)', () => {
+  const settle = async (m: Mounted) => { for (let i = 0; i < 6; i++) { await m.flush(); await tick() } }
+  const btns = (m: Mounted) => m.elements().filter((el) => el.type === 'button').map((el) => textOf(el.props.children).trim())
+  const names = (m: Mounted) => m.calls.map((c) => c.name)
+  const count = (m: Mounted, name: string) => m.calls.filter((c) => c.name === name).length
+  const INSTALL_ERA = ['install_finder_location', 'finder_location_state', 'continue_without_finder_location', 'finder_domain_user_enabled']
+
+  /** `platform: 'fails'` is a desktop_platform that rejects; `caps` is the capability snapshot's host OS. */
+  function macBackend(over: { view?: unknown; platform?: string; refusal?: unknown } = {}) {
+    const { view = finderView(), platform = 'macos' } = over
+    return {
+      desktop_platform: () => { if (platform === 'fails') throw new Error('desktop_platform is down'); return platform },
+      sync_status: () => ({ logged_in: true, engine: 'running', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0, engine_refusal: over.refusal ?? null }),
+      finder_setup_state: () => { if (view instanceof Error) throw view; return view },
+      finder_setup_retry: () => undefined,
+      finder_setup_copy_details: () => 'details',
+      open_finder_location: () => undefined,
+      open_login_items_and_extensions_settings: () => undefined,
+      reset_macos_integration: () => ({ pending_operations_preserved: 0, removed_cache_files: 0, warnings: [] }),
+    }
+  }
+  async function openMac(over: { view?: unknown; platform?: string; refusal?: unknown } = {}, caps: string | null = 'macos') {
+    const { m, bus } = mountSyncFolder(macBackend(over), { caps, extra: { finderStatusPill: finderSetupCopy.finderStatusPill, finderRepairWarningNote: finderSetupCopy.finderRepairWarningNote } })
+    await settle(m)
+    return { m, bus }
+  }
+
+  test('no Install button in any state; Open in Finder only when Beebeeb is in Finder', async () => {
+    for (const state of [finderView(), finderView({ setup: 'ready' }), finderView({ setup: 'failed', reason: 'timeout' }), finderView({ setup: 'user_disabled', reason: 'user_disabled' })]) {
+      const { m } = await openMac({ view: state })
+      expect(btns(m).join('|')).not.toMatch(/Install/)
+      expect(btns(m).includes('Open in Finder')).toBe(state.setup === 'ready')
+      expect(btns(m).includes('Choose location')).toBe(false)
+      expect(names(m).filter((n) => INSTALL_ERA.includes(n))).toEqual([])
+    }
+  })
+
+  test('the pill follows the reconciler: Adding, then Installed on the event, with no second read', async () => {
+    const { m, bus } = await openMac()
+    expect(textOf(m.tree())).toContain('Adding Beebeeb to Finder…')
+    expect(m.elements().filter((el) => el.props.className === 'status-pill').map((el) => textOf(el.props.children).trim())).toEqual(['Adding'])
+    bus.emit(finderView({ setup: 'ready' }))
+    await m.flush()
+    expect(m.elements().filter((el) => el.props.className === 'status-pill').map((el) => textOf(el.props.children).trim())).toEqual(['Installed'])
+    expect(btns(m)).toContain('Open in Finder')
+    expect(count(m, 'finder_setup_state')).toBe(1)
+    expect(bus.registered).toBe(1)
+  })
+
+  // FA-I2: a loaded Missing is a quiet row: no pill, no activity, the one sentence as a neutral line.
+  test('a loaded Missing: no pill, the one sentence as a neutral line, no button, no error', async () => {
+    const { m } = await openMac({ view: finderView({ setup: 'missing' }) })
+    expect(m.elements().filter((el) => el.props.className === 'status-pill')).toEqual([])
+    expect(m.elements().filter((el) => el.props.role === 'status').map((el) => textOf(el.props.children))).toEqual([finderSetupCopy.FINDER_RESTING_LINE])
+    expect(textOf(m.tree())).not.toMatch(/Adding|Checking/)
+    expect(btns(m).filter((b) => ['Try again', 'Open in Finder'].includes(b))).toEqual([])
+    expect(visibleErrorSurfaces(m)).toEqual([])
+  })
+
+  test('a Missing that carries a reason (D7) has the notice\'s pill, never "Checking"', async () => {
+    const { m } = await openMac({ view: finderView({ setup: 'missing', reason: 'not_in_applications', launch_location: 'disk_image' }) })
+    expect(m.elements().filter((el) => el.props.className === 'status-pill').map((el) => textOf(el.props.children).trim())).toEqual(['Setup blocked'])
+  })
+
+  test('adding is a neutral status line, not an error, with no action', async () => {
+    const { m } = await openMac()
+    expect(visibleErrorSurfaces(m)).toEqual([])
+    const notice = m.elements().filter((el) => el.props.role === 'status')
+    expect(notice.map((el) => textOf(el.props.children))).toEqual([finderSetupCopy.FINDER_ADDING_LINE])
+    expect(btns(m)).not.toContain('Try again')
+  })
+
+  test('a failure is one inline alert with its sentence, and Try again only there', async () => {
+    const { m } = await openMac({ view: finderView({ setup: 'failed', reason: 'timeout' }) })
+    expect(visibleErrorSurfaces(m)).toEqual([`inline: ${finderSetupCopy.FINDER_REASON_COPY.timeout.sentence}Try again`])
+    expect(btns(m).filter((b) => b === 'Try again')).toHaveLength(1)
+    expect(m.toasts).toEqual([])
+    expect(m.elements().filter((el) => el.props['data-error-surface'] === 'finder-setup').map((el) => el.props.role)).toEqual(['alert'])
+  })
+
+  // Must-render row 9: an engine refusal on a failed + unknown is the notice's sentence.
+  test('engine_stop_unconfirmed: the refusal\'s sentence in the one alert, and no Try again', async () => {
+    const sentence = 'Beebeeb’s sync didn’t confirm it stopped. Quit and reopen Beebeeb before syncing again.'
+    const { m } = await openMac({ view: finderView({ setup: 'failed', reason: 'unknown' }), refusal: { code: 'engine_stop_unconfirmed', sentence } })
+    expect(visibleErrorSurfaces(m)).toEqual([`inline: ${sentence}`])
+    expect(btns(m)).not.toContain('Try again')
+  })
+
+  test('a failure notice\'s Try again asks the reconciler (finder_setup_retry) and does not re-read the state', async () => {
+    const { m } = await openMac({ view: finderView({ setup: 'failed', reason: 'timeout' }) })
+    await m.click('Try again')
+    expect(count(m, 'finder_setup_retry')).toBe(1)
+    expect(count(m, 'finder_setup_state')).toBe(1)
+  })
+
+  // Row 15: Try again fails only with Rust's fixed sentences, which carry the remedy: shown verbatim as
+  // a neutral note, never as a toast or a second error surface.
+  test('a failed Try again says Rust\'s sentence as a neutral note: no toast, no second error surface', async () => {
+    const sentence = rustStr('finder_setup/driver.rs', 'NOT_RUNNING')
+    const backend = { ...macBackend({ view: finderView({ setup: 'failed', reason: 'timeout' }) }), finder_setup_retry: () => { throw sentence } }
+    const { m } = mountSyncFolder(backend, { caps: 'macos', extra: { finderStatusPill: finderSetupCopy.finderStatusPill } })
+    await settle(m)
+    await m.click('Try again')
+    expect(m.toasts).toEqual([])
+    expect(m.elements().filter((el) => el.props.role === 'status').map((el) => textOf(el.props.children))).toContain(sentence)
+    expect(visibleErrorSurfaces(m).filter((surface) => surface.startsWith('inline:'))).toHaveLength(1)
+  })
+
+  test('Copy details says Copied on its button after a success (FT-clipboard)', async () => {
+    const { m } = await openMac({ view: finderView({ setup: 'failed', reason: 'folder_taken' }) })
+    const backendHasDetails = btns(m).includes('Copy details')
+    expect(backendHasDetails).toBe(true)
+    await m.click('Copy details')
+    await settle(m)
+    expect(btns(m)).toContain('Copied')
+  })
+
+  test('a user-disabled extension is a neutral status with Open System Settings, never a red error', async () => {
+    const { m } = await openMac({ view: finderView({ setup: 'user_disabled', reason: 'user_disabled' }) })
+    expect(visibleErrorSurfaces(m)).toEqual([])
+    const notice = m.elements().filter((el) => el.props.role === 'status')
+    expect(notice).toHaveLength(1)
+    expect(textOf(notice[0].props.children)).toContain(finderSetupCopy.FINDER_REASON_COPY.user_disabled.sentence)
+    await m.click('Open System Settings')
+    expect(count(m, 'open_login_items_and_extensions_settings')).toBe(1)
+  })
+
+  test('a state that cannot be read is a neutral line with ONE Try again that reads again; never "Adding" (lead ruling 7a)', async () => {
+    const { m } = await openMac({ view: new Error('no reconciler') })
+    const text = textOf(m.tree())
+    expect(text).toContain(finderSetupCopy.FINDER_UNAVAILABLE_LINE)
+    expect(text).not.toContain('Adding')
+    expect(m.elements().filter((el) => el.props.className === 'status-pill').map((el) => textOf(el.props.children).trim())).toEqual([finderSetupCopy.FINDER_STATUS_PILL_UNAVAILABLE])
+    expect(visibleErrorSurfaces(m)).toEqual([])
+    expect(btns(m).filter((b) => b === 'Try again')).toHaveLength(1)
+    await m.click('Try again')
+    await settle(m)
+    expect(count(m, 'finder_setup_state')).toBe(2)
+    expect(count(m, 'finder_setup_retry')).toBe(0)
+  })
+
+  test('Open in Finder opens the managed location, with no path to choose', async () => {
+    const { m } = await openMac({ view: finderView({ setup: 'ready' }) })
+    await m.click('Open in Finder')
+    expect(m.calls.filter((c) => c.name === 'open_finder_location').map((c) => c.args)).toEqual([{ path: null }])
+    expect(textOf(m.tree())).toContain('Beebeeb in Finder')
+  })
+
+  // Task 17b (lead ruling T4-⚠2): every macOS FpError that reaches the frontend is redacted to a
+  // domain and a code, so "Open in Finder" must not render `result.reason`. A failed action that
+  // gates nothing is a toast, and the toast is the one sentence.
+  test('a failed Open in Finder is one toast with the one sentence; the bridge code is rendered nowhere (task 17b)', async () => {
+    const toastText = (t: any) => [t.title, t.message].filter((part) => part != null).map((part) => textOf(part)).join(' ')
+    // A bare code, the same code arriving in a message the unsupported-command heuristic matches,
+    // and a plain OS message: none of them reaches a person.
+    for (const reason of ['io.beebeeb.bridge 3', 'invoke failed: io.beebeeb.bridge 3', 'open Finder: No such file or directory']) {
+      const backend = { ...macBackend({ view: finderView({ setup: 'ready' }) }), open_finder_location: () => { throw new Error(reason) } }
+      const { m } = mountSyncFolder(backend, { caps: 'macos', extra: { finderStatusPill: finderSetupCopy.finderStatusPill, finderOpenFailedToast: finderSetup.finderOpenFailedToast } })
+      await settle(m)
+      await m.click('Open in Finder')
+      expect(count(m, 'open_finder_location')).toBe(1)
+      expect(m.toasts.map(toastText)).toEqual([finderSetupCopy.FINDER_OPEN_FAILED])
+      expect(m.toasts.map((t) => t.variant)).toEqual(['error'])
+      expect(visibleErrorSurfaces(m).filter((surface) => surface.startsWith('inline:'))).toEqual([])
+      for (const rendered of [JSON.stringify(m.toasts), textOf(m.tree())]) {
+        expect(rendered).not.toContain('io.beebeeb')
+        expect(rendered).not.toContain('No such file')
+      }
+    }
+  })
+
+  // Task 17b (lead ruling): the Reset button's failure is a redacted bridge code on a Mac too. It is
+  // one toast with the one sentence, never `result.reason`, and the state is not re-read after it.
+  test('a failed Reset is one toast with the one sentence; the bridge code is rendered nowhere (task 17b)', async () => {
+    const toastText = (t: any) => [t.title, t.message].filter((part) => part != null).map((part) => textOf(part)).join(' ')
+    for (const reason of ['io.beebeeb.bridge 3', 'invoke failed: io.beebeeb.bridge 3']) {
+      const backend = { ...macBackend({ view: finderView({ setup: 'ready' }) }), reset_macos_integration: () => { throw new Error(reason) } }
+      const { m } = mountSyncFolder(backend, { caps: 'macos', extra: { finderStatusPill: finderSetupCopy.finderStatusPill, finderRepairFailedToast: finderSetup.finderRepairFailedToast } })
+      await settle(m)
+      await m.click('Reset Finder integration…')
+      await m.click('Reset Finder integration')
+      expect(count(m, 'reset_macos_integration')).toBe(1)
+      expect(m.toasts.map(toastText)).toEqual([finderSetupCopy.FINDER_REPAIR_FAILED])
+      expect(m.toasts.map((t) => t.variant)).toEqual(['error'])
+      expect(count(m, 'finder_setup_state')).toBe(1)
+      expect(visibleErrorSurfaces(m).filter((surface) => surface.startsWith('inline:'))).toEqual([])
+      for (const rendered of [JSON.stringify(m.toasts), textOf(m.tree())]) expect(rendered).not.toContain('io.beebeeb')
+    }
+  })
+
+  // Task 17b, fix round 1: a SUCCESSFUL Reset can still carry `warnings` that hold a bridge code and a
+  // cache-file path (lib.rs:3326, 3265). A Mac shows one fixed sentence and none of that text.
+  test('a Reset that succeeds with warnings shows ONE fixed sentence; neither the code nor the path is rendered', async () => {
+    const leaks = ['io.beebeeb.bridge 3', '/Users/sam/Library/x.db']
+    const reset = (warnings: string[]) => ({ pending_operations_preserved: 2, removed_cache_files: 3, skipped_cache_files: 0, warnings })
+    const open = async (warnings: string[]) => {
+      const backend = { ...macBackend({ view: finderView({ setup: 'ready' }) }), reset_macos_integration: () => reset(warnings) }
+      const { m } = mountSyncFolder(backend, { caps: 'macos', extra: { finderStatusPill: finderSetupCopy.finderStatusPill, finderRepairWarningNote: finderSetupCopy.finderRepairWarningNote } })
+      await settle(m)
+      await m.click('Reset Finder integration…')
+      await m.click('Reset Finder integration')
+      return m
+    }
+    const warned = await open(leaks)
+    const warnedText = textOf(warned.tree())
+    expect(warnedText).toContain(finderSetupCopy.FINDER_REPAIR_PARTIAL)
+    for (const leak of leaks) expect(warnedText).not.toContain(leak)
+    expect(warned.toasts).toEqual([])
+    // Without warnings the notice is what it always was.
+    const clean = await open([])
+    expect(textOf(clean.tree())).toContain('Finder integration was reset. 2 queued operations preserved. 3 disposable cache files removed.')
+    expect(textOf(clean.tree())).not.toContain(finderSetupCopy.FINDER_REPAIR_PARTIAL)
+  })
+
+  test('a Reset whose engine stop is unconfirmed says to quit and reopen (row 11)', async () => {
+    const backend = {
+      ...macBackend({ view: finderView({ setup: 'ready' }) }),
+      reset_macos_integration: () => ({ pending_operations_preserved: 0, removed_cache_files: 0, skipped_cache_files: 0, warnings: [], engine_stop_unconfirmed: true }),
+    }
+    const { m } = mountSyncFolder(backend, { caps: 'macos', extra: { finderStatusPill: finderSetupCopy.finderStatusPill, finderRepairWarningNote: finderSetupCopy.finderRepairWarningNote } })
+    await settle(m)
+    await m.click('Reset Finder integration…')
+    await m.click('Reset Finder integration')
+    expect(textOf(m.tree())).toContain(finderSetupCopy.FINDER_REPAIR_ENGINE_UNCONFIRMED)
+    expect(textOf(m.tree())).not.toContain('Finder integration was reset.')
+  })
+
+  test('Reset reads the reconciler again, never finder_location_state', async () => {
+    const { m } = await openMac({ view: finderView({ setup: 'ready' }) })
+    await m.click('Reset Finder integration…')
+    await m.click('Reset Finder integration')
+    await settle(m)
+    expect(count(m, 'reset_macos_integration')).toBe(1)
+    expect(count(m, 'finder_setup_state')).toBe(2)
+    expect(names(m).filter((n) => INSTALL_ERA.includes(n))).toEqual([])
+  })
+
+  test('a Mac whose desktop_platform read fails is still a Mac: the snapshot decides, and nothing install-era is offered or called', async () => {
+    for (const platform of ['fails', 'unknown']) {
+      const { m } = await openMac({ platform }, 'macos')
+      expect(btns(m).join('|')).not.toMatch(/Install|Choose location/)
+      expect(names(m).filter((n) => INSTALL_ERA.includes(n))).toEqual([])
+      expect(count(m, 'finder_setup_state')).toBe(1)
+    }
+  })
+
+  test('the first paint of a Mac is already the Mac pane: no moment with an Install button', () => {
+    const { m } = mountSyncFolder(macBackend(), { caps: 'macos', extra: { finderStatusPill: finderSetupCopy.finderStatusPill } })
+    expect(btns(m).join('|')).not.toMatch(/Install|Choose location/)
+    expect(textOf(m.tree())).toContain('system-managed Finder location')
+  })
+
+  test('only when neither desktop_platform nor the snapshot can say does the pane take the Windows/Linux path, as Onboarding does', async () => {
+    const { m } = mountSyncFolder({ ...macBackend({ platform: 'fails' }), finder_location_state: () => missing }, { caps: null })
+    await settle(m)
+    expect(names(m)).toContain('finder_location_state')
+    expect(names(m)).not.toContain('finder_setup_state')
+  })
+})
+
+describe('Settings panel: Windows (ExplorerIntegrationPanel) is unchanged; macOS (MacFinderIntegrationPanel) follows the reconciler', () => {
   type PanelBehaviour = 'err' | 'state' | 'success' | 'user_disabled'
   async function openPanel(platform: 'macos' | 'windows', installBehaviour: PanelBehaviour, persistedBefore: string | null = null) {
     const windows = platform === 'windows'
@@ -194,41 +535,144 @@ describe('Settings panel (ExplorerIntegrationPanel), same action, same rule on m
     return m
   }
 
-  describe('macOS: a failed install gates the row, so it is one inline banner', () => {
-    test('a failed install returned as an error is one inline surface, not a toast', async () => {
-      const m = await openPanel('macos', 'err')
-      await m.click('Install')
-      expect(visibleErrorSurfaces(m)).toEqual([`inline: ${TIMEOUT}`])
+  describe('macOS: MacFinderIntegrationPanel shows the reconciler\'s state and offers no install (R5)', () => {
+    const settle = async (m: Mounted) => { for (let i = 0; i < 6; i++) { await m.flush(); await tick() } }
+    const btns = (m: Mounted) => m.elements().filter((el) => el.type === 'button').map((el) => textOf(el.props.children).trim())
+    const chips = (m: Mounted) => m.elements().filter((el) => el.type === 'chip').map((el) => textOf(el.props.children).trim())
+    const count = (m: Mounted, name: string) => m.calls.filter((c) => c.name === name).length
+
+    async function openMacPanel(view: unknown, over: Record<string, any> = {}) {
+      const bus = finderBus()
+      const m = mount('windows/views/SettingsView.tsx', 'MacFinderIntegrationPanel', {
+        expand: true,
+        backend: {
+          finder_setup_state: () => { if (view instanceof Error) throw view; return view },
+          sync_status: () => ({ logged_in: true, engine: 'stopped', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0, engine_refusal: null }),
+          finder_setup_retry: () => undefined,
+          open_login_items_and_extensions_settings: () => undefined,
+          ...over,
+        },
+        hookModules: [useFinderSetupModule(bus)],
+        bindings: {
+          ...desktopApi,
+          ...finderSetupCopy,
+          T,
+          useRegionLabel: () => 'Stored in the EU',
+          SettingsSectionShell: 'section', PageHeader: 'header', Card: 'card', PrimaryBtn: 'button', Chip: 'chip',
+        },
+      })
+      mounted.push(m)
+      await settle(m)
+      return { m, bus }
+    }
+
+    test('a failure is one inline alert with its one action, never a toast', async () => {
+      const { m } = await openMacPanel(finderView({ setup: 'failed', reason: 'timeout' }))
+      expect(visibleErrorSurfaces(m)).toEqual([`inline: ${finderSetupCopy.FINDER_REASON_COPY.timeout.sentence}Try again`])
+      expect(btns(m).filter((b) => b === 'Try again')).toHaveLength(1)
       expect(m.toasts).toEqual([])
+      expect(m.elements().filter((el) => el.props['data-error-surface'] === 'finder-setup').map((el) => el.props.role)).toEqual(['alert'])
     })
-    test('a failed install returned as a state is one inline surface, not a silent nothing', async () => {
-      const m = await openPanel('macos', 'state')
-      await m.click('Install')
-      expect(visibleErrorSurfaces(m)).toEqual([`inline: ${TIMEOUT}`])
+
+    test('engine_stop_unconfirmed: the refusal\'s sentence in the one alert, and no Try again (row 9)', async () => {
+      const sentence = 'Beebeeb’s sync didn’t confirm it stopped. Quit and reopen Beebeeb before syncing again.'
+      const refused = () => ({ logged_in: true, engine: 'stopped', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0, engine_refusal: { code: 'engine_stop_unconfirmed', sentence } })
+      const { m } = await openMacPanel(finderView({ setup: 'failed', reason: 'unknown' }), { sync_status: refused })
+      expect(visibleErrorSurfaces(m)).toEqual([`inline: ${sentence}`])
+      expect(btns(m)).toEqual([])
+    })
+
+    test('a failure notice\'s Try again asks the reconciler (finder_setup_retry) and does not re-read the state', async () => {
+      const { m } = await openMacPanel(finderView({ setup: 'failed', reason: 'timeout' }))
+      await m.click('Try again')
+      expect(count(m, 'finder_setup_retry')).toBe(1)
+      expect(count(m, 'finder_setup_state')).toBe(1)
+    })
+
+    test('a failed Try again says Rust\'s sentence as a neutral note: no toast, no second error surface (row 15)', async () => {
+      const sentence = rustStr('lib.rs', 'FINDER_SETUP_HELD')
+      const { m } = await openMacPanel(finderView({ setup: 'failed', reason: 'timeout' }), { finder_setup_retry: () => { throw sentence } })
+      await m.click('Try again')
       expect(m.toasts).toEqual([])
+      expect(m.elements().filter((el) => el.props.role === 'status').map((el) => textOf(el.props.children))).toContain(sentence)
+      expect(visibleErrorSurfaces(m).filter((surface) => surface.startsWith('inline:'))).toHaveLength(1)
     })
-    test('the banner is a live region (role=alert)', async () => {
-      const m = await openPanel('macos', 'state')
-      await m.click('Install')
-      expect(m.elements().filter((el) => el.props['data-error-surface'] === 'finder-install').map((el) => el.props.role)).toEqual(['alert'])
-    })
-    test('success shows no error surface', async () => {
-      const m = await openPanel('macos', 'success', TIMEOUT)
-      await m.click('Install')
+
+    test('a user-disabled extension is a neutral status with Open System Settings, not a red error', async () => {
+      const { m } = await openMacPanel(finderView({ setup: 'user_disabled', reason: 'user_disabled' }))
       expect(visibleErrorSurfaces(m)).toEqual([])
       expect(m.toasts).toEqual([])
+      const notices = m.elements().filter((el) => el.props.role === 'status')
+      expect(notices).toHaveLength(1)
+      expect(textOf(notices[0].props.children)).toContain(finderSetupCopy.FINDER_REASON_COPY.user_disabled.sentence)
+      await m.click('Open System Settings')
+      expect(count(m, 'open_login_items_and_extensions_settings')).toBe(1)
     })
-    test('a user-disabled extension is one distinct notice with a System Settings action, not a red error', async () => {
-      const m = await openPanel('macos', 'user_disabled')
-      await m.click('Install')
+
+    test('Copy details says Copied on its button after a success (FT-clipboard)', async () => {
+      const { m } = await openMacPanel(finderView({ setup: 'failed', reason: 'signing' }), { finder_setup_copy_details: () => 'details' })
+      await m.click('Copy details')
+      await settle(m)
+      expect(btns(m)).toEqual(['Copied'])
+    })
+
+    test('ready shows no error surface and an Active chip', async () => {
+      const { m } = await openMacPanel(finderView({ setup: 'ready' }))
       expect(visibleErrorSurfaces(m)).toEqual([])
-      expect(m.toasts).toEqual([])
-      const notices = m.elements().filter((el) => el.props['data-finder-state'] === 'user_disabled')
-      expect(notices.length).toBe(1)
-      expect(textOf(notices[0].props.children)).toContain(userDisabledMessage)
-      expect(notices[0].props.role).toBe('status')
-      await m.click('Open Login Items & Extensions')
-      expect(m.calls.filter((c) => c.name === 'open_login_items_and_extensions_settings').length).toBe(1)
+      expect(chips(m)).toEqual(['Active'])
+      expect(textOf(m.tree())).toContain(finderSetupCopy.FINDER_READY_LINE)
+    })
+
+    test('adding is the adding line with no chip and no button; the event then makes it Active, with no second read', async () => {
+      const { m, bus } = await openMacPanel(finderView())
+      expect(textOf(m.tree())).toContain(finderSetupCopy.FINDER_ADDING_LINE)
+      expect(chips(m)).toEqual([])
+      expect(btns(m)).toEqual([])
+      bus.emit(finderView({ setup: 'ready' }))
+      await m.flush()
+      expect(chips(m)).toEqual(['Active'])
+      expect(count(m, 'finder_setup_state')).toBe(1)
+    })
+
+    test('a state that cannot be read says so with ONE Try again that reads again; never "Adding" (lead ruling 7a)', async () => {
+      const { m } = await openMacPanel(new Error('no reconciler'))
+      expect(textOf(m.tree())).toContain(finderSetupCopy.FINDER_UNAVAILABLE_LINE)
+      expect(textOf(m.tree())).not.toContain('Adding')
+      expect(visibleErrorSurfaces(m)).toEqual([])
+      expect(btns(m).filter((b) => b === 'Try again')).toHaveLength(1)
+      await m.click('Try again')
+      await settle(m)
+      expect(count(m, 'finder_setup_state')).toBe(2)
+      expect(count(m, 'finder_setup_retry')).toBe(0)
+    })
+
+    // FA-I2: a loaded Missing is a quiet row: its one sentence, no chip, no button, no activity.
+    test('a loaded Missing: the one sentence, no chip, no button, never "Checking"', async () => {
+      const { m } = await openMacPanel(finderView({ setup: 'missing' }))
+      expect(textOf(m.tree())).toContain(finderSetupCopy.FINDER_RESTING_LINE)
+      expect(textOf(m.tree())).not.toMatch(/Checking|Adding/)
+      expect(chips(m)).toEqual([])
+      expect(btns(m)).toEqual([])
+      expect(visibleErrorSurfaces(m)).toEqual([])
+    })
+
+    test('a Missing with a reason (D7): the card says the notice\'s label, never "Checking"', async () => {
+      const { m } = await openMacPanel(finderView({ setup: 'missing', reason: 'not_in_applications', launch_location: 'disk_image' }))
+      expect(textOf(m.tree())).toContain('Setup blocked')
+      expect(textOf(m.tree())).not.toContain('Checking')
+    })
+
+    test('before the first answer: no ad-hoc "Checking..." line', async () => {
+      const { m } = await openMacPanel(new Promise(() => {}) as unknown)
+      expect(textOf(m.tree())).not.toContain('Checking')
+    })
+
+    test('no state offers Install or Enable, and no install-era command is called', async () => {
+      for (const state of [finderView(), finderView({ setup: 'ready' }), finderView({ setup: 'failed', reason: 'unknown' }), finderView({ setup: 'user_disabled', reason: 'user_disabled' }), finderView({ setup: 'missing' }), new Error('x')]) {
+        const { m } = await openMacPanel(state)
+        expect(btns(m).join('|')).not.toMatch(/Install|Enable|Add to Finder/)
+        expect(m.calls.map((c) => c.name).filter((n) => ['install_finder_location', 'finder_location_state', 'continue_without_finder_location', 'finder_domain_user_enabled'].includes(n))).toEqual([])
+      }
     })
   })
 

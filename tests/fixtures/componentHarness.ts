@@ -61,6 +61,12 @@ export interface Mounted {
   elements: () => TreeNode[]
   render: () => void
   flush: () => Promise<void>
+  /**
+   * Run the cleanup every effect returned (what React does when the component unmounts).
+   * Cleanups run on unmount only, never on a dependency change, so a test that needs to count
+   * live subscriptions must keep its effect dependencies stable.
+   */
+  unmount: () => void
   /** Click the button whose text is exactly `label`; resolves after the handler and a re-render. */
   click: (label: string) => Promise<void>
   /** Start the click but do not wait for it (to inspect the in-flight render). */
@@ -68,14 +74,33 @@ export interface Mounted {
   close: () => void
 }
 
+/**
+ * A custom hook (or any function that calls hooks) from another module, executed with THIS mount's
+ * controlled hooks so it and the component under test share one state/effect/ref store, as they do
+ * in React. It is bound into the component's scope under `name`; `bindings` are what the hook
+ * itself references (the component's own `bindings` are not visible to it).
+ */
+export interface HookModule {
+  file: string
+  name: string
+  bindings?: Record<string, unknown>
+}
+
 export function mount(
   file: string,
   name: string,
-  opts: { backend: Record<string, Handler>; bindings?: Record<string, unknown>; props?: any; expand?: boolean },
+  opts: {
+    backend: Record<string, Handler>
+    bindings?: Record<string, unknown>
+    props?: any
+    expand?: boolean
+    hookModules?: HookModule[]
+  },
 ): Mounted {
   const states: any[] = []
   const deps: any[][] = []
-  const effects: Array<() => unknown> = []
+  const effects: Array<{ index: number; run: () => unknown }> = []
+  const cleanups = new Map<number, () => void>()
   const toasts: any[] = []
   const calls: Array<{ name: string; args: any }> = []
   let cursor = 0
@@ -84,6 +109,11 @@ export function mount(
   ;(globalThis as any).window = {
     setInterval: () => 0,
     clearInterval() {},
+    // A timer fires on the next microtask (no real delay), so a debounced effect settles inside `flush`.
+    setTimeout: (fn: () => void) => { queueMicrotask(fn); return 0 },
+    clearTimeout() {},
+    addEventListener() {},
+    removeEventListener() {},
     __TAURI_INTERNALS__: {
       invoke: async (command: string, args: any) => {
         calls.push({ name: command, args })
@@ -93,7 +123,7 @@ export function mount(
       },
     },
   }
-  const View = loadComponent(file, name, {
+  const controlledHooks: Record<string, unknown> = {
     React: { createElement, Fragment },
     useState(initial: any) {
       const index = cursor++
@@ -102,7 +132,7 @@ export function mount(
     },
     useEffect(fn: any, next: any[]) {
       const index = cursor++
-      if (!deps[index] || !next || next.some((v, i) => v !== deps[index][i])) effects.push(fn)
+      if (!deps[index] || !next || next.some((v, i) => v !== deps[index][i])) effects.push({ index, run: fn })
       deps[index] = next
     },
     useMemo: (fn: any) => fn(),
@@ -123,12 +153,27 @@ export function mount(
     },
     useSyncExternalStore: (_subscribe: unknown, getSnapshot: () => unknown) => getSnapshot(),
     useToast: () => ({ showToast: (toast: any) => toasts.push(toast), dismissToast() {}, clearToasts() {} }),
-    ...opts.bindings,
-  })
+  }
+  const hookFunctions: Record<string, unknown> = {}
+  for (const hook of opts.hookModules ?? []) {
+    hookFunctions[hook.name] = loadComponent(hook.file, hook.name, { ...controlledHooks, ...hook.bindings })
+  }
+  const View = loadComponent(file, name, { ...controlledHooks, ...hookFunctions, ...opts.bindings })
   const render = () => { cursor = 0; tree = View(opts.props ?? {}) }
   const flush = async () => {
-    for (let i = 0; i < 12; i++) { while (effects.length) effects.shift()!(); await Promise.resolve() }
+    for (let i = 0; i < 12; i++) {
+      while (effects.length) {
+        const { index, run } = effects.shift()!
+        const cleanup = run()
+        if (typeof cleanup === 'function') cleanups.set(index, cleanup as () => void)
+      }
+      await Promise.resolve()
+    }
     render()
+  }
+  const unmount = () => {
+    for (const cleanup of cleanups.values()) cleanup()
+    cleanups.clear()
   }
   const view = () => (opts.expand ? expand(tree) : tree)
   const findButton = (label: string) => {
@@ -144,6 +189,7 @@ export function mount(
     elements: () => elementsOf(view()),
     render,
     flush,
+    unmount,
     click: async (label) => { await findButton(label).props.onClick(); await flush() },
     clickNoWait: async (label) => { void findButton(label).props.onClick(); render() },
     close() { (globalThis as any).window = previousWindow },

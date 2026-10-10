@@ -1,13 +1,15 @@
 import { useRegionLabel } from '../windows/useRegion'
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useSyncExternalStore } from 'react'
 import { useToast } from '../windows/ui'
 import {
   accountSubscription,
   BILLING_URL,
+  clearSession,
   command,
   commandUnavailableLabel,
   formatBytes,
   loadSyncStatus,
+  lockVault,
   openUrl,
   type Subscription,
   type SyncStatus,
@@ -19,6 +21,7 @@ import {
   supportBundleSavedMessage,
   type ProblemReportResult,
 } from '../diagnosticsCopy'
+import { clearSignOutWarning, heldSignOutWarning, holdSignOutWarning, subscribeSignOutWarning } from '../accountSession'
 import { planRenewalCopy, planStatusTone, quotaPercent, titleCasePlan } from '../planPresentation'
 
 const WEB_APP_URL = 'https://app.beebeeb.io'
@@ -41,6 +44,12 @@ export default function Account() {
   const [autostart, setAutostart] = useState<boolean | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [plan, setPlan] = useState<PlanState>({ phase: 'loading' })
+  // FB-24: a Lock or a sign-out that happened but could not confirm one step. Rust's sentence, as a
+  // neutral line (never under "Couldn’t …"), until the next Lock or sign-out. A sign-out's sentence is
+  // held outside the session boundary, because the sign-out remounts this page (accountSession.ts); the
+  // next Lock, Unlock or sign-out clears it.
+  const [actionNote, setActionNote] = useState<string | null>(null)
+  const signOutNote = useSyncExternalStore(subscribeSignOutWarning, heldSignOutWarning, heldSignOutWarning)
 
   // Poll sync_status so the component reflects auto-unlock state that
   // occurs on startup — the vault may unlock a few seconds after mount.
@@ -109,14 +118,28 @@ export default function Account() {
     return true
   }
 
+  // An Err means it did not happen (one error toast); an Ok may carry a warning (FB-24), shown as the
+  // neutral line. The status is read again after ANY result (M4).
   const lock = async () => {
-    if (await runAction('lock_vault')) {
-      const next = await loadSyncStatus()
-      setStatus(next)
+    setBusy('lock_vault')
+    setActionNote(null)
+    clearSignOutWarning()
+    const result = await lockVault()
+    setBusy(null)
+    if (!result.ok) {
+      showToast({
+        variant: 'error',
+        title: 'That didn’t work',
+        message: result.unsupported ? commandUnavailableLabel('lock_vault') : result.reason,
+      })
+    } else {
+      setActionNote(result.value.warning?.sentence ?? null)
     }
+    setStatus(await loadSyncStatus())
   }
 
   const unlock = async () => {
+    clearSignOutWarning()
     if (await runAction('unlock_vault')) {
       const next = await loadSyncStatus()
       setStatus(next)
@@ -125,7 +148,9 @@ export default function Account() {
 
   const signOut = async () => {
     setBusy('clear_session')
-    const result = await command<void>('clear_session')
+    setActionNote(null)
+    clearSignOutWarning()
+    const result = await clearSession()
     setBusy(null)
     if (!result.ok) {
       showToast({
@@ -133,8 +158,10 @@ export default function Account() {
         title: 'Couldn’t sign out',
         message: result.unsupported ? commandUnavailableLabel('clear_session') : result.reason,
       })
+      setStatus(await loadSyncStatus())
       return
     }
+    holdSignOutWarning(result.value.warning?.sentence ?? null)
     setEmail(null)
     setStatus({ logged_in: false, engine: 'stopped', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0 })
   }
@@ -175,6 +202,7 @@ export default function Account() {
 
   const loggedIn = status?.logged_in ?? false
   const unlocked = loggedIn && (status?.vault_unlocked ?? status?.engine === 'running')
+  const note = actionNote ?? signOutNote
 
   return (
     <section className="page">
@@ -191,6 +219,12 @@ export default function Account() {
           {unlocked ? 'Unlocked' : loggedIn ? 'Locked or paused' : 'Signed out'}
         </span>
       </div>
+
+      {note && (
+        <div className="notice" role="status" style={{ marginBottom: 14 }}>
+          {note}
+        </div>
+      )}
 
 
       <div className="grid two">
