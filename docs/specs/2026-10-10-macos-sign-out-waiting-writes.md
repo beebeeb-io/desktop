@@ -876,9 +876,18 @@ D2 records it. If macOS keeps it, the same file appears in both folders, which l
   - When only macOS kept files, the alert is byte for byte 1882's (U23).
   - **Telling the two apart** (review M3). K1 now opens "Beebeeb copied …", and 1882's sentence opens "Files that
     hadn’t reached your vault yet were kept …" (`main:finder_removal.rs:17-18`). The reader can tell which folder holds
-    what without being told there are two. Rewording 1882's sentence in the two-folder alert (for example "macOS also
+    what without being told there are two. ~~Rewording 1882's sentence in the two-folder alert (for example "macOS also
     kept …") would break U23's byte-for-byte rule for 1882's body, so it waits for a ruling (§15, question 2). Until
-    then 1882's body stays as it is.
+    then 1882's body stays as it is.~~
+  - **The two-folder alert, ruled.** When one sign-out produced both folders, the alert body is two paragraphs:
+    1. first, 1887's own sentence (K1) and its path;
+    2. then a blank line, then 1882's sentence verbatim and its path. That is `PRESERVED_FILES_SENTENCE` unchanged:
+       "Files that hadn’t reached your vault yet were kept on this Mac, in this folder:" (`main:finder_removal.rs:17-18`,
+       with its typographic apostrophe).
+
+    There is no "macOS also …" and no other rewording: 1882's pinned constant stays unchanged. U23 pins the order and
+    the verbatim sentence.
+    — lead ruling, 2026-10-10 ([1887-two-folders])
 - **The rows.** Settings › Sync shows one row per folder, ours first, each with its own sentence and "Dismiss":
   - ours: K2, the path in mono with wrapping, "Show in Finder", "Dismiss";
   - 1882's row is unchanged (~~`main:MacSettings.tsx:723-732`~~ `main:MacSettings.tsx:722-731`, review M1). Its
@@ -1064,7 +1073,8 @@ output go into the task's notes and QA evidence.
 | ~~U21~~ | ~~`the_menu_never_purges_a_waiting_write`: the menu handler with a waiting write → Settings is asked to open the flow; no "Sign-out paused" dialog; the queue is intact~~ | ~~Handle `unsent_changes` as an error~~ |
 | U21 | `the_menu_never_purges_a_waiting_write` (review I6): the menu handler with a waiting write → the flow request is stored, Settings is asked to open, and `menu:sign-out-flow` is emitted to it. No "Sign-out paused" dialog; the queue is intact. A second call while the request is pending stores one request, not two | Handle `unsent_changes` as an error (the dialog is raised) |
 | U22 | `kept_unsent_folder_follows_1882s_rules_and_its_own_key`: newer replaces older; dismiss clears only the shown folder and reports `{cleared, current}`; it survives a settings save; saving it never changes `kept_unsynced_folder`, and the reverse | Store both in one key |
-| U23 | `one_alert_names_both_folders_ours_first`: ours only, macOS's only (byte for byte 1882's body), both (K1, a blank line, 1882's body) | Swap the order; change 1882's body |
+| ~~U23~~ | ~~`one_alert_names_both_folders_ours_first`: ours only, macOS's only (byte for byte 1882's body), both (K1, a blank line, 1882's body)~~ | ~~Swap the order; change 1882's body~~ |
+| U23 | `one_alert_names_both_folders_ours_first` (lead ruling [1887-two-folders]). Three cases. Ours only: K1, a blank line, our path. macOS's only: byte for byte `finder_removal::preserved_files_message(path)`, 1882's body. Both: the body equals K1 + "\n\n" + our path + "\n\n" + `PRESERVED_FILES_SENTENCE` + "\n\n" + macOS's path, exactly. The test also asserts that `PRESERVED_FILES_SENTENCE` equals the literal "Files that hadn’t reached your vault yet were kept on this Mac, in this folder:", so a reword of the shared constant turns it red too. The title is K0 in every case | Swap the two paragraphs; open 1882's paragraph with "macOS also kept …" (in the constant or in a variant used only after K1); drop the blank line between the paragraphs |
 | U24 | `no_count_string_renders_zero`: every builder (P1, A2, A3, A4, K1) returns nothing for 0 and singular text for 1 | Render "0 files" |
 | U25 | `logs_never_carry_a_kept_path_or_name`: a log capture across a keeping sign-out holds no path component and no file name | Log the folder path |
 | U26 | `show_in_finder_reveals_only_the_saved_folder`: any other path is refused | Reveal the given path |
@@ -1173,21 +1183,31 @@ the proxy, or the task stays open until the lead's ruling on U16 is recorded. (r
 
 ## 15. Open questions
 
-~~None remain.~~ One remains (review M3).
+~~None remain.~~ ~~One remains (review M3).~~ None remain: question 2 is answered by the lead ruling below.
 
-2. **In the two-folder alert, may 1882's sentence open with "macOS also kept …"?**
-   - With both folders, the alert reads K1 ("Beebeeb copied … to this folder on this Mac:"), then 1882's
+2. ~~**In the two-folder alert, may 1882's sentence open with "macOS also kept …"?**~~
+   - ~~With both folders, the alert reads K1 ("Beebeeb copied … to this folder on this Mac:"), then 1882's
      `PRESERVED_FILES_SENTENCE` ("Files that hadn’t reached your vault yet were kept on this Mac, in this folder:",
-     `main:finder_removal.rs:17-18`).
-   - The reviewer asks for a ruling to let the second paragraph open "macOS also kept files that hadn’t reached your
-     vault yet, in this folder:" when it follows K1, so the reader is told why there are two folders.
-   - That changes text 1882 pins: U23 and 1882's own test (`tests/finderPreservedFiles.test.ts`) hold its body byte for
-     byte. So it needs a decision, not a code read.
-   - **Until a ruling:** 1882's body stays unchanged in every alert, and K1's "Beebeeb copied" is what tells the two
-     apart (§9).
-   - **If the ruling is yes:** a constant `PRESERVED_FILES_SENTENCE_AFTER_OURS` is used only after K1, U23's "both" case
-     pins it, and its "macOS's only" case still pins 1882's body byte for byte.
-   - Owner: the lead (a copy ruling).
+     `main:finder_removal.rs:17-18`).~~
+   - ~~The reviewer asks for a ruling to let the second paragraph open "macOS also kept files that hadn’t reached your
+     vault yet, in this folder:" when it follows K1, so the reader is told why there are two folders.~~
+   - ~~That changes text 1882 pins: U23 and 1882's own test (`tests/finderPreservedFiles.test.ts`) hold its body byte for
+     byte. So it needs a decision, not a code read.~~
+   - ~~**Until a ruling:** 1882's body stays unchanged in every alert, and K1's "Beebeeb copied" is what tells the two
+     apart (§9).~~
+   - ~~**If the ruling is yes:** a constant `PRESERVED_FILES_SENTENCE_AFTER_OURS` is used only after K1, U23's "both" case
+     pins it, and its "macOS's only" case still pins 1882's body byte for byte.~~
+   - ~~Owner: the lead (a copy ruling).~~
+
+   **Answered: no rewording.** When one sign-out produced both folders, the alert shows two paragraphs:
+   - first, 1887's own sentence (K1) and its path;
+   - then a blank line, then 1882's sentence verbatim ("Files that hadn’t reached your vault yet were kept on this
+     Mac, in this folder:", `PRESERVED_FILES_SENTENCE`, `main:finder_removal.rs:17-18`) and its path.
+
+   There is no "macOS also …", so 1882's pinned constant stays unchanged, and no variant constant is added. The rule is
+   in §9. **U23** (`one_alert_names_both_folders_ours_first`, §13.1) pins the order and the verbatim sentence, and 1882's
+   own `tests/finderPreservedFiles.test.ts` still pins the constant.
+   — lead ruling, 2026-10-10 ([1887-two-folders])
 
 The struck question below is the original question 1, answered by amend 1.
 
