@@ -1617,6 +1617,45 @@ struct SignOutReport {
     preserved_location: Option<String>,
 }
 
+/// [`clear_session_impl`]'s failure. Review I1 (round 2): a sign-out can still fail AFTER it
+/// removed the Finder location (the Keychain clear), and the folder macOS kept must not be lost
+/// with it: the error carries it, and the alert is raised before the error is returned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SignOutFailure {
+    message: String,
+    /// The folder macOS kept, when the failure came after the removal. Never logged.
+    preserved_location: Option<String>,
+}
+
+impl From<String> for SignOutFailure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            preserved_location: None,
+        }
+    }
+}
+
+impl From<&str> for SignOutFailure {
+    fn from(message: &str) -> Self {
+        message.to_string().into()
+    }
+}
+
+impl std::fmt::Display for SignOutFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+/// The folder a sign-out kept, whether it succeeded or failed after the removal (review I1).
+fn sign_out_kept_folder(result: &Result<SignOutReport, SignOutFailure>) -> Option<&str> {
+    match result {
+        Ok(report) => report.preserved_location.as_deref(),
+        Err(failure) => failure.preserved_location.as_deref(),
+    }
+}
+
 /// The unconfirmed-stop refusal (Bug A / task 1538 Codex P1). Shared by the
 /// fresh-abort path and the Bug-A2 retry gate so a retry cannot be
 /// distinguished from a first refusal by its message.
@@ -1628,7 +1667,7 @@ const UNCONFIRMED_ENGINE_STOP_ERROR: &str =
 ///
 /// Shared by the WebView IPC command and the native menu "Sign out" item so
 /// both routes have the exact same security side-effects.
-async fn clear_session_impl(state: &AppState) -> Result<SignOutReport, String> {
+async fn clear_session_impl(state: &AppState) -> Result<SignOutReport, SignOutFailure> {
     #[cfg(target_os = "windows")]
     let _transition = SESSION_TRANSITION.lock().await;
     #[cfg(target_os = "windows")]
@@ -1688,7 +1727,7 @@ async fn clear_session_impl(state: &AppState) -> Result<SignOutReport, String> {
                 "sign-out refused: a previous attempt could not confirm the sync engine \
                  stopped; restart Beebeeb before signing in with a different account"
             );
-            return Err(UNCONFIRMED_ENGINE_STOP_ERROR.to_string());
+            return Err(UNCONFIRMED_ENGINE_STOP_ERROR.into());
         }
         if let Some(prev) = engine_slot.take() {
             match prev.abort().await {
@@ -1705,11 +1744,11 @@ async fn clear_session_impl(state: &AppState) -> Result<SignOutReport, String> {
                         %source,
                         "sign-out refused: Cloud Files revocation failed after the engine task itself stopped"
                     );
-                    return Err(format!(
+                    return Err(SignOutFailure::from(format!(
                         "Cloud Files revocation failed ({stage}); the sync engine itself stopped. \
                          Please try signing out again; if this keeps happening, restart Beebeeb \
                          before signing in with a different account. ({source})"
-                    ));
+                    )));
                 }
                 runner::AbortOutcome::TaskUnconfirmed => {
                     acct.engine_stop_unconfirmed
@@ -1718,7 +1757,7 @@ async fn clear_session_impl(state: &AppState) -> Result<SignOutReport, String> {
                         "sign-out refused: could not confirm the sync engine stopped; \
                          refusing to purge local state or clear credentials while it may still be running"
                     );
-                    return Err(UNCONFIRMED_ENGINE_STOP_ERROR.to_string());
+                    return Err(UNCONFIRMED_ENGINE_STOP_ERROR.into());
                 }
             }
         }
@@ -1873,6 +1912,20 @@ async fn clear_session_impl(state: &AppState) -> Result<SignOutReport, String> {
     // separate switch-account hook to add this to.
     purge_macos_hydrate_cache("sign-out");
 
+    finish_sign_out_after_removal(state, &acct, already_signed_out, preserved_location, clear_keychain_session)
+}
+
+/// The rest of a sign-out once the Finder location is gone (or was never there): drop the
+/// session from memory and clear the Keychain. Review I1 (round 2): every failure from here on
+/// carries the folder macOS kept, so the alert can still name it. `clear_keychain` is
+/// `clear_keychain_session` in the app; tests pass a fake so they never touch the Keychain.
+fn finish_sign_out_after_removal(
+    state: &AppState,
+    acct: &crate::account::AccountRuntime,
+    already_signed_out: bool,
+    preserved_location: Option<String>,
+    clear_keychain: impl FnOnce(&str) -> Result<(), String>,
+) -> Result<SignOutReport, SignOutFailure> {
     match acct.session.lock() {
         Ok(mut guard) => {
             guard.take();
@@ -1881,7 +1934,10 @@ async fn clear_session_impl(state: &AppState) -> Result<SignOutReport, String> {
         }
         Err(_) => {
             #[cfg(target_os = "windows")]
-            return Err("Could not clear the runtime session. The vault is not locked; restart Beebeeb.".into());
+            return Err(SignOutFailure {
+                message: "Could not clear the runtime session. The vault is not locked; restart Beebeeb.".to_string(),
+                preserved_location,
+            });
             #[cfg(not(target_os = "windows"))]
             tracing::warn!("session mutex poisoned during clear_session");
         }
@@ -1906,7 +1962,7 @@ async fn clear_session_impl(state: &AppState) -> Result<SignOutReport, String> {
         // idempotent, but on a store that cannot answer (e.g. the Linux
         // fail-closed stub) an error must not turn an already-signed-out
         // no-op into a failure — log it and return success.
-        if let Err(error) = clear_keychain_session(acct.id.as_str()) {
+        if let Err(error) = clear_keychain(acct.id.as_str()) {
             tracing::warn!(
                 %error,
                 "already-signed-out sign-out: keychain session clear failed (nothing should be left); continuing"
@@ -1919,7 +1975,13 @@ async fn clear_session_impl(state: &AppState) -> Result<SignOutReport, String> {
             preserved_location,
         });
     }
-    clear_keychain_session(acct.id.as_str())?;
+    // Review I1: the Finder location is already gone, so a failure here must keep the folder.
+    if let Err(message) = clear_keychain(acct.id.as_str()) {
+        return Err(SignOutFailure {
+            message,
+            preserved_location,
+        });
+    }
     set_auth_present(state, false);
     set_auth_email(state, None);
     Ok(SignOutReport {
@@ -1938,9 +2000,10 @@ async fn clear_session_impl(state: &AppState) -> Result<SignOutReport, String> {
 /// raises the same alert in its own handler.
 #[tauri::command]
 async fn clear_session(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    let report = clear_session_impl(&state).await?;
-    show_preserved_files_alert(&app, report.preserved_location.as_deref());
-    Ok(())
+    let result = clear_session_impl(&state).await;
+    // Review I1: the alert comes first, also when the sign-out failed after the removal.
+    show_preserved_files_alert(&app, sign_out_kept_folder(&result));
+    result.map(|_| ()).map_err(|failure| failure.message)
 }
 
 /// Task 1882 (spec `docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md` §5): the app's
@@ -9653,10 +9716,9 @@ fn handle_desktop_menu_action(app: &tauri::AppHandle, spec: &'static DesktopMenu
                 let state = app.state::<AppState>();
                 let result = clear_session_impl(&state).await;
                 // Task 1882: the menu's sign-out names the folder of kept
-                // Finder files in the same alert as the `clear_session` command.
-                if let Ok(report) = &result {
-                    show_preserved_files_alert(&app, report.preserved_location.as_deref());
-                }
+                // Finder files in the same alert as the `clear_session` command,
+                // also when it failed after the removal (review I1).
+                show_preserved_files_alert(&app, sign_out_kept_folder(&result));
                 #[cfg(target_os = "windows")]
                 match &result {
                     // Nothing to tear down — tell the user instead of running
@@ -9674,11 +9736,11 @@ fn handle_desktop_menu_action(app: &tauri::AppHandle, spec: &'static DesktopMenu
                         ..
                     }) => {}
                     Err(error) => {
-                        app.dialog().message(error.clone()).title("Sign-out paused")
+                        app.dialog().message(error.message.clone()).title("Sign-out paused")
                             .kind(tauri_plugin_dialog::MessageDialogKind::Error).show(|_| {});
                     }
                 }
-                result.map(|_| ())
+                result.map(|_| ()).map_err(|failure| failure.message)
             });
         }
         DesktopMenuAction::Quit => app.exit(0),
@@ -12719,7 +12781,7 @@ mod signout_teardown_tests {
             .await
             .expect_err("the first attempt must fail while the engine stop is unconfirmed");
         assert!(
-            first.contains("Could not stop the sync engine"),
+            first.message.contains("Could not stop the sync engine"),
             "first attempt must be the unconfirmed-stop refusal, got: {first}"
         );
 
@@ -12727,7 +12789,7 @@ mod signout_teardown_tests {
             .await
             .expect_err("the retry must also be refused, not silently proceed past the stop gate");
         assert!(
-            second.contains("Could not stop the sync engine"),
+            second.message.contains("Could not stop the sync engine"),
             "the retry must be gated by the same unconfirmed-stop refusal \
              (Bug A2: it must not skip the stop gate on an empty slot), got: {second}"
         );
@@ -12934,17 +12996,22 @@ mod finder_removal_wiring_tests {
         assert!(sign_out.contains(
             "let preserved_location = finder_removal::sign_out_kept_location(remove_file_provider_domain());"
         ));
+        assert!(sign_out.contains(
+            "finish_sign_out_after_removal(state, &acct, already_signed_out, preserved_location, clear_keychain_session)"
+        ));
+        let tail = code_only(&item(&source, "fn finish_sign_out_after_removal("));
         assert_eq!(
-            sign_out.matches("preserved_location,\n").count(),
-            2,
-            "both Ok returns carry it"
+            tail.matches("preserved_location,\n").count(),
+            4,
+            "both Ok returns and both failures after the removal (the Windows session lock, the \
+             Keychain clear) carry it"
         );
-        // ... and both ways out of a sign-out raise the alert.
+        // ... and both ways out of a sign-out raise the alert, on success and on failure (I1).
         let command = code_only(&item(&source, "async fn clear_session("));
-        assert!(command.contains("show_preserved_files_alert(&app, report.preserved_location.as_deref());"));
+        assert!(command.contains("show_preserved_files_alert(&app, sign_out_kept_folder(&result));"));
         let menu = &source[source.find("DesktopMenuAction::SignOut => {").expect("menu sign-out")..];
         let menu = &menu[..menu.find("DesktopMenuAction::Quit").expect("next arm")];
-        assert!(code_only(menu).contains("show_preserved_files_alert(&app, report.preserved_location.as_deref());"));
+        assert!(code_only(menu).contains("show_preserved_files_alert(&app, sign_out_kept_folder(&result));"));
 
         // Repair: the folder goes into the result the Sync tab reads.
         let repair = code_only(&item(&source, "async fn reset_macos_integration("));
@@ -12964,5 +13031,62 @@ mod finder_removal_wiring_tests {
             3 + 2,
             "3 calls + 2 definitions"
         );
+    }
+}
+
+/// Review I1 (round 2): a sign-out that fails AFTER it removed the Finder location still names
+/// the folder macOS kept. Drives the real post-removal step with a fake Keychain clear, so it
+/// never touches the Keychain, the bridge or a window.
+#[cfg(test)]
+mod sign_out_kept_folder_tests {
+    use super::{
+        AppState, SignOutOutcome, finish_sign_out_after_removal, finder_removal, set_auth_present,
+        sign_out_kept_folder,
+    };
+    use crate::account::{AccountId, synthesize_single_account};
+
+    const FOLDER: &str = "/Users/someone/Library/CloudStorage/Beebeeb-Beebeeb (10-10-2026 10:50)";
+
+    fn signed_in(id: &str) -> (AppState, std::sync::Arc<crate::account::AccountRuntime>) {
+        let state = AppState::default();
+        synthesize_single_account(&state, AccountId(id.to_string()));
+        set_auth_present(&state, true);
+        let acct = state.active_account().expect("synthesized account resolves");
+        (state, acct)
+    }
+
+    #[test]
+    fn test_1882_r2_a_sign_out_that_fails_after_the_removal_still_names_the_kept_folder() {
+        let (state, acct) = signed_in("signout-i1-fail");
+        let result = finish_sign_out_after_removal(&state, &acct, false, Some(FOLDER.to_string()), |_| {
+            Err("Could not clear Keychain session: the keychain is locked".to_string())
+        });
+        let failure = result.as_ref().expect_err("the Keychain clear failed, so the sign-out fails");
+        assert_eq!(failure.message, "Could not clear Keychain session: the keychain is locked");
+        assert_eq!(sign_out_kept_folder(&result), Some(FOLDER), "the error carries the kept folder");
+        // The alert text the command and the menu raise before they return the error.
+        assert_eq!(
+            sign_out_kept_folder(&result).map(finder_removal::preserved_files_message),
+            Some(format!("{}\n\n{FOLDER}", finder_removal::PRESERVED_FILES_SENTENCE))
+        );
+    }
+
+    #[test]
+    fn test_1882_r2_the_post_removal_step_carries_the_folder_on_success_and_nothing_when_nothing_was_kept() {
+        let (state, acct) = signed_in("signout-i1-ok");
+        let ok = finish_sign_out_after_removal(&state, &acct, false, Some(FOLDER.to_string()), |_| Ok(()));
+        assert_eq!(ok.as_ref().map(|report| report.outcome), Ok(SignOutOutcome::Completed));
+        assert_eq!(sign_out_kept_folder(&ok), Some(FOLDER));
+
+        let (state, acct) = signed_in("signout-i1-none");
+        let failed = finish_sign_out_after_removal(&state, &acct, false, None, |_| Err("locked".to_string()));
+        assert_eq!(sign_out_kept_folder(&failed), None, "nothing kept → no alert, even on failure");
+
+        // Already signed out: a failing Keychain clear is only logged, and the folder still rides out.
+        let (state, acct) = signed_in("signout-i1-noop");
+        set_auth_present(&state, false);
+        let noop = finish_sign_out_after_removal(&state, &acct, true, Some(FOLDER.to_string()), |_| Err("locked".to_string()));
+        assert_eq!(noop.as_ref().map(|report| report.outcome), Ok(SignOutOutcome::NotSignedIn));
+        assert_eq!(sign_out_kept_folder(&noop), Some(FOLDER));
     }
 }
