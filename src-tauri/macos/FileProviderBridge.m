@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import <AppKit/AppKit.h>
 #import <FileProvider/FileProvider.h>
 #import <dispatch/dispatch.h>
 #include <dirent.h>
@@ -57,6 +58,12 @@ enum {
     BeebeebBridgeResolveUrlTimeout = 3,
     BeebeebBridgeSignalTimeout = 4,
     BeebeebBridgeNoIdentifier = 5,
+    // Task 1885: NSWorkspace did not answer an open within BeebeebOpenTimeoutSeconds.
+    BeebeebBridgeOpenTimeout = 6,
+    // A URL handed to beebeeb_open_url that does not parse, or is a file URL.
+    BeebeebBridgeInvalidURL = 7,
+    // The Finder location macOS returned for an item is not on disk.
+    BeebeebBridgeItemMissing = 8,
 };
 
 // Every write into a caller's buffer goes through here: bounded by the buffer's own length and
@@ -292,37 +299,267 @@ int beebeeb_fp_kept_folder_state_for_path(const char *path) {
     }
 }
 
-int beebeeb_fp_visible_url(char *url_buffer, unsigned long url_buffer_len, BeebeebFpError *out_error) {
+// Task 1885: the Finder location of an item, as the URL macOS returned (never a path string).
+//
+// `getUserVisibleURLForItemIdentifier:completionHandler:` returns a SECURITY-SCOPED URL: the header
+// says so and says what to do with it ("the caller must call `-[NSURL startAccessingSecurityScopedResource]`
+// on the returned URL", NSFileProviderManager.h:120-121; "The returned URL grants read-write access to the
+// user visible location", :123). A path made from it carries no scope (NSURL.h:103), and neither does a
+// child process: `/usr/bin/open <path>` inherited the App Sandbox without the extension, and LaunchServices
+// refused the CloudStorage folder with -54 while `spawn()` had already answered Ok. So the URL stays a URL
+// and is opened in THIS process. Callers use `*status`: 1 = a URL, 0 = macOS reported none, -1 = error.
+static NSURL *BeebeebUserVisibleURL(NSFileProviderItemIdentifier identifier, int *status, BeebeebFpError *out_error) {
+    *status = -1;
+    NSFileProviderManager *manager = [NSFileProviderManager managerForDomain:BeebeebDomain()];
+    if (manager == nil) {
+        BeebeebFillBridgeError(BeebeebBridgeManagerUnavailable,
+                               @"File Provider manager is unavailable for the Beebeeb domain", out_error);
+        return nil;
+    }
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+    __block NSURL *found_url = nil;
+    __block NSError *found_error = nil;
+    [manager getUserVisibleURLForItemIdentifier:identifier
+                              completionHandler:^(NSURL *url, NSError *error) {
+        found_url = url;
+        found_error = error;
+        dispatch_semaphore_signal(semaphore);
+    }];
+    long wait_result = dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC));
+    if (wait_result != 0) {
+        BeebeebFillBridgeError(BeebeebBridgeResolveUrlTimeout, @"Timed out resolving the Beebeeb Finder location", out_error);
+        return nil;
+    }
+    if (found_error != nil) {
+        BeebeebFillError(found_error, out_error);
+        return nil;
+    }
+    *status = (found_url == nil) ? 0 : 1;
+    return found_url;
+}
+
+// Task 1885 fix round 1 (I1): the resolve is a File Provider call and runs under Rust's bridge gate; the
+// open is NOT (NSWorkspace is not a File Provider call, and it can stall for seconds: a sign-out's removal
+// waits only 3 s for the gate and is never retried). So the scoped URL crosses the FFI as a retained,
+// opaque handle (`CFBridgingRetain`), the gate is released, and the open (or reveal) takes the handle
+// back (`CFBridgingRelease`) and always releases it. `BeebeebLiveHandles` counts handles in flight so a
+// test can see none leaks.
+static volatile int64_t BeebeebLiveHandles = 0;
+
+static void *BeebeebRetainHandle(NSURL *url) {
+    __atomic_add_fetch(&BeebeebLiveHandles, 1, __ATOMIC_SEQ_CST);
+    return (void *)CFBridgingRetain(url);
+}
+
+static NSURL *BeebeebTakeHandle(void *handle) {
+    if (handle == NULL) {
+        return nil;
+    }
+    __atomic_sub_fetch(&BeebeebLiveHandles, 1, __ATOMIC_SEQ_CST);
+    return (NSURL *)CFBridgingRelease(handle);
+}
+
+// A security scope that is released exactly once, by whichever of its owners comes first: the open's
+// completion handler, or the safety timer below. `startAccessingSecurityScopedResource` is counted by the
+// system, so a second stop would take a reference somebody else holds.
+@interface BeebeebScope : NSObject
+- (instancetype)initWithURL:(NSURL *)url;
+- (void)stop;
+@end
+
+@implementation BeebeebScope {
+    NSURL *_url;
+    BOOL _active;
+}
+
+- (instancetype)initWithURL:(NSURL *)url {
+    if ((self = [super init])) {
+        _url = url;
+        _active = url.isFileURL ? [url startAccessingSecurityScopedResource] : NO;
+    }
+    return self;
+}
+
+- (void)stop {
+    @synchronized(self) {
+        if (_active) {
+            _active = NO;
+            [_url stopAccessingSecurityScopedResource];
+        }
+    }
+}
+@end
+
+// How long an open waits for LaunchServices. A person clicked and waits, so this is short: LaunchServices
+// answers a folder open in milliseconds, and silence is reported as a failure, never as a success. The open
+// holds no bridge gate (see above), so a stall here delays nothing but this one call.
+static const int64_t BeebeebOpenTimeoutSeconds = 5;
+
+// The longest a scope outlives its open when the completion handler never comes (m3). `NSWorkspace` gives
+// no way to cancel an open, so after the timeout above the answer may still arrive; if it never does, this
+// timer is what releases the scope, and the handler's later call (if any) finds it already stopped.
+static const int64_t BeebeebScopeSafetySeconds = 60;
+
+// Task 1885: open `url` through NSWorkspace and WAIT for the answer. 0 = LaunchServices opened it,
+// -1 = it refused (its NSError crosses as structured, like every File Provider error) or did not answer
+// in time (BeebeebBridgeOpenTimeout). Nothing here is fire-and-forget: a `spawn()` that answers before
+// the OS has is how "Open in Finder" reported success for an open that failed.
+//
+// A file URL keeps its scope until LaunchServices answers, which is the last thing that needs it. After
+// the timeout the open is not cancelled (there is no API for that): a success that arrives later still
+// opens the window, after the caller has already been told it failed (a false error, bounded to a stall
+// longer than the limit above).
+//
+// `promptsUserIfNeeded = NO`: the completion handler "will not be invoked until the user dismisses any
+// such UI" (NSWorkspace.h:155-158), and a wait that a dialog can hold back is not a wait this bridge can bound.
+static int BeebeebOpenURLAndWait(NSURL *url, BeebeebFpError *out_error) {
+    BeebeebScope *scope = [[BeebeebScope alloc] initWithURL:url];
+    NSWorkspaceOpenConfiguration *configuration = [NSWorkspaceOpenConfiguration configuration];
+    configuration.promptsUserIfNeeded = NO;
+    configuration.addsToRecentItems = NO;
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+    __block NSError *found_error = nil;
+    [[NSWorkspace sharedWorkspace] openURL:url configuration:configuration
+                         completionHandler:^(NSRunningApplication *application, NSError *error) {
+        found_error = error;
+        [scope stop];
+        dispatch_semaphore_signal(semaphore);
+    }];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, BeebeebScopeSafetySeconds * NSEC_PER_SEC),
+                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        [scope stop];
+    });
+    long wait_result = dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, BeebeebOpenTimeoutSeconds * NSEC_PER_SEC));
+    if (wait_result != 0) {
+        BeebeebFillBridgeError(BeebeebBridgeOpenTimeout, @"Timed out waiting for LaunchServices to open the URL", out_error);
+        return -1;
+    }
+    if (found_error != nil) {
+        BeebeebFillError(found_error, out_error);
+        return -1;
+    }
+    return 0;
+}
+
+// Task 1885 fix round 1 (I1): the GATED half of "Open in Finder": resolves the Beebeeb domain's root to
+// its scoped URL and returns it as a retained handle. Returns: 1 = `*out_handle` set (the caller owns it:
+// it MUST pass it to beebeeb_open_scoped_url / beebeeb_reveal_scoped_url / beebeeb_release_url_handle),
+// 0 = macOS reported no location (the domain is not added), -1 = error (`out_error` set).
+int beebeeb_fp_resolve_location(void **out_handle, BeebeebFpError *out_error) {
     @autoreleasepool {
-        NSFileProviderManager *manager = [NSFileProviderManager managerForDomain:BeebeebDomain()];
-        if (manager == nil) {
-            BeebeebFillBridgeError(BeebeebBridgeManagerUnavailable,
-                                   @"File Provider manager is unavailable for the Beebeeb domain", out_error);
+        *out_handle = NULL;
+        int status = -1;
+        NSURL *url = BeebeebUserVisibleURL(NSFileProviderRootContainerItemIdentifier, &status, out_error);
+        if (status < 0) {
             return -1;
         }
-        dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
-        __block NSURL *found_url = nil;
-        __block NSError *found_error = nil;
-        [manager getUserVisibleURLForItemIdentifier:NSFileProviderRootContainerItemIdentifier
-                                  completionHandler:^(NSURL *url, NSError *error) {
-            found_url = url;
-            found_error = error;
-            dispatch_semaphore_signal(semaphore);
-        }];
-        long wait_result = dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC));
-        if (wait_result != 0) {
-            BeebeebFillBridgeError(BeebeebBridgeResolveUrlTimeout, @"Timed out resolving the Beebeeb Finder location", out_error);
-            return -1;
-        }
-        if (found_error != nil) {
-            BeebeebFillError(found_error, out_error);
-            return -1;
-        }
-        if (found_url == nil) {
+        if (url == nil) {
             return 0;
         }
-        BeebeebCopyString(found_url.path ?: found_url.absoluteString, url_buffer, url_buffer_len);
+        *out_handle = BeebeebRetainHandle(url);
         return 1;
+    }
+}
+
+// The same for one item: the item identifier is the state database's file id (the extension's
+// `itemIdentifier` is the daemon's `identifier`). Returns: 1 = handle set, 0 = macOS reported no location,
+// -1 = error (`out_error` set; a missing or empty identifier is the bridge's `NoIdentifier`).
+int beebeeb_fp_resolve_item(const char *identifier, void **out_handle, BeebeebFpError *out_error) {
+    @autoreleasepool {
+        *out_handle = NULL;
+        NSString *item = (identifier == NULL || identifier[0] == '\0') ? nil : [NSString stringWithUTF8String:identifier];
+        if (item == nil) {
+            BeebeebFillBridgeError(BeebeebBridgeNoIdentifier, @"no item identifier given", out_error);
+            return -1;
+        }
+        int status = -1;
+        NSURL *url = BeebeebUserVisibleURL(item, &status, out_error);
+        if (status < 0) {
+            return -1;
+        }
+        if (url == nil) {
+            return 0;
+        }
+        *out_handle = BeebeebRetainHandle(url);
+        return 1;
+    }
+}
+
+// Task 1885 fix round 1 (I1): the UNGATED half. Takes the handle (and always releases it), opens the URL
+// in Finder with its scope and returns when LaunchServices has answered. It makes no File Provider call.
+// Returns: 1 = opened, -1 = error (`out_error` set).
+int beebeeb_open_scoped_url(void *handle, BeebeebFpError *out_error) {
+    @autoreleasepool {
+        NSURL *url = BeebeebTakeHandle(handle);
+        if (url == nil) {
+            BeebeebFillBridgeError(BeebeebBridgeInvalidURL, @"no URL handle given", out_error);
+            return -1;
+        }
+        if (BeebeebOpenURLAndWait(url, out_error) != 0) {
+            return -1;
+        }
+        return 1;
+    }
+}
+
+// "Show in Finder": the ungated half of a reveal. Takes the handle (and always releases it), checks the
+// URL is on disk, and selects it in a Finder window. Returns: 1 = handed to Finder, -1 = error.
+//
+// `activateFileViewerSelectingURLs:` is `void` (NSWorkspace.h:53): Finder's own answer cannot be waited
+// for. What this reports is what can be known before it: the item resolved to a URL and the URL exists.
+// Whether Finder drew the window is the device check's.
+//
+// The scope is held after the call, for a bounded time, because the request reaches Finder after this
+// function returns and the header does not say when the URL's extension is read.
+int beebeeb_reveal_scoped_url(void *handle, BeebeebFpError *out_error) {
+    @autoreleasepool {
+        NSURL *url = BeebeebTakeHandle(handle);
+        if (url == nil) {
+            BeebeebFillBridgeError(BeebeebBridgeInvalidURL, @"no URL handle given", out_error);
+            return -1;
+        }
+        BeebeebScope *scope = [[BeebeebScope alloc] initWithURL:url];
+        const char *fs_path = url.fileSystemRepresentation;
+        struct stat info;
+        if (fs_path == NULL || lstat(fs_path, &info) != 0) {
+            [scope stop];
+            BeebeebFillBridgeError(BeebeebBridgeItemMissing, @"The Finder location of the item is not on disk", out_error);
+            return -1;
+        }
+        [[NSWorkspace sharedWorkspace] activateFileViewerSelectingURLs:@[ url ]];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, BeebeebOpenTimeoutSeconds * NSEC_PER_SEC),
+                       dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            [scope stop];
+        });
+        return 1;
+    }
+}
+
+// A handle the caller will not open (an error between the resolve and the open): releases it.
+void beebeeb_release_url_handle(void *handle) {
+    @autoreleasepool {
+        (void)BeebeebTakeHandle(handle);
+    }
+}
+
+// Task 1885: opens a NON-file URL (System Settings' `x-apple.systempreferences:` pane) through
+// NSWorkspace and waits for the answer. A file URL is refused: those open only through the scoped URL
+// macOS returned for a Finder item (beebeeb_fp_resolve_location). Returns 0 = opened, -1 = error.
+// It touches no File Provider state, so Rust calls it without the bridge gate: the link to System
+// Settings must work exactly when the File Provider is stuck.
+int beebeeb_open_url(const char *url_string, BeebeebFpError *out_error) {
+    @autoreleasepool {
+        NSString *text = url_string == NULL ? nil : [NSString stringWithUTF8String:url_string];
+        NSURL *url = text.length == 0 ? nil : [NSURL URLWithString:text];
+        if (url == nil || url.scheme.length == 0) {
+            BeebeebFillBridgeError(BeebeebBridgeInvalidURL, @"The URL does not parse", out_error);
+            return -1;
+        }
+        if (url.isFileURL) {
+            BeebeebFillBridgeError(BeebeebBridgeInvalidURL, @"File URLs open only through a Finder item's scoped URL", out_error);
+            return -1;
+        }
+        return BeebeebOpenURLAndWait(url, out_error);
     }
 }
 
@@ -524,8 +761,23 @@ void beebeeb_fp_test_error_offsets(unsigned long *out) {
     out[5] = offsetof(BeebeebFpError, message);
 }
 
-// `out` holds 5 values: ManagerUnavailable, StabilizationTimeout, ResolveUrlTimeout,
-// SignalTimeout, NoIdentifier.
+// Task 1885 fix round 1: a handle for an arbitrary URL string (any scheme, including a file URL), made by the
+// same call the resolve uses, so the tests can drive the ungated open and reveal without a File Provider. NULL
+// when the string does not parse. And how many handles are in flight, so a test can see none leaks.
+void *beebeeb_test_url_handle(const char *url_string) {
+    @autoreleasepool {
+        NSString *text = url_string == NULL ? nil : [NSString stringWithUTF8String:url_string];
+        NSURL *url = text.length == 0 ? nil : [NSURL URLWithString:text];
+        return url == nil ? NULL : BeebeebRetainHandle(url);
+    }
+}
+
+int64_t beebeeb_test_live_handles(void) {
+    return __atomic_load_n(&BeebeebLiveHandles, __ATOMIC_SEQ_CST);
+}
+
+// `out` holds 8 values: ManagerUnavailable, StabilizationTimeout, ResolveUrlTimeout,
+// SignalTimeout, NoIdentifier, OpenTimeout, InvalidURL, ItemMissing.
 void beebeeb_fp_test_bridge_codes(int64_t *out) {
     if (out == NULL) {
         return;
@@ -535,4 +787,7 @@ void beebeeb_fp_test_bridge_codes(int64_t *out) {
     out[2] = BeebeebBridgeResolveUrlTimeout;
     out[3] = BeebeebBridgeSignalTimeout;
     out[4] = BeebeebBridgeNoIdentifier;
+    out[5] = BeebeebBridgeOpenTimeout;
+    out[6] = BeebeebBridgeInvalidURL;
+    out[7] = BeebeebBridgeItemMissing;
 }
