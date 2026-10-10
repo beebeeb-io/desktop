@@ -129,8 +129,10 @@ mod tests {
     /// No false success, against the real `NSWorkspace`. A scheme nothing on this Mac handles: LaunchServices
     /// answers with an error (`kLSApplicationNotFoundErr`) without opening anything or showing a dialog
     /// (`promptsUserIfNeeded = NO`), and that error must reach the caller. A bridge that ignored the
-    /// completion handler's error, or answered before the handler ran, would return `Ok` here.
+    /// completion handler's error, or answered before the handler ran, would return `Ok` here. Ignored by default:
+    /// LaunchServices answers only inside a logged-in GUI session (run it with `cargo test --lib -- --ignored test_1885`).
     #[test]
+    #[ignore = "asks the real NSWorkspace, which answers only inside a logged-in GUI session; run with --ignored on a Mac you are sitting at"]
     fn test_1885_an_open_launch_services_refuses_is_an_error_not_a_success() {
         let error = open_url("beebeeb-no-such-scheme-1885:nothing-opens-this")
             .expect_err("LaunchServices has no application for this scheme");

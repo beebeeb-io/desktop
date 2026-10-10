@@ -202,6 +202,27 @@ mod tests {
         );
     }
 
+    /// Fix round 1 (m6): a test that asks the real `NSWorkspace` needs a logged-in GUI session (over SSH or on a
+    /// headless Mac LaunchServices may not answer, and the bridge's 5 s limit turns that into a failing test). Every such
+    /// test in `macos_workspace.rs` carries `#[ignore = "<why>"]` and runs with `--ignored` on a Mac someone is sitting at.
+    #[test]
+    fn test_1885_every_test_that_asks_the_real_nsworkspace_is_ignored_with_a_reason() {
+        let source = read("src/macos_workspace.rs");
+        let tests = &source[source.find("#[cfg(test)]\nmod tests {").expect("the tests")..];
+        let mut asking = 0;
+        for chunk in tests.split("    #[test]\n").skip(1) {
+            let name = chunk.lines().find(|line| line.contains("fn ")).unwrap_or("?").trim();
+            if chunk.contains("open_scoped(") || chunk.contains("beebeeb-no-such-scheme") {
+                asking += 1;
+                assert!(
+                    chunk.trim_start().starts_with("#[ignore = \"") && chunk.contains("GUI session"),
+                    "{name} asks the real NSWorkspace and is not ignored with a reason"
+                );
+            }
+        }
+        assert_eq!(asking, 2, "the two tests that open through the real NSWorkspace");
+    }
+
     /// Fix round 1 (m4): the two fallbacks that open the Finder location after an upload or a new folder run on the
     /// blocking pool and are not waited for. The open can now wait up to 3 s for the gate and 7 s for LaunchServices; the
     /// new-folder one ran inline on the MAIN thread (the menu handler and a plain `#[tauri::command] fn`) and the upload
