@@ -8515,17 +8515,42 @@ mod tests {
             Some(2),
             "m-4a: the waiting op stores its b"
         );
+        let this_build = ["w1", "w2"].map(|op_id| db.finder_write(op_id).unwrap().unwrap());
+        assert!(
+            this_build.iter().all(|write| write.origin == WriteOrigin::Minted),
+            "precondition: this build minted both"
+        );
         // A downgraded build then queued an upload of the same file without a write id.
         db.enqueue_operation(&queued("older-build", OperationKind::UploadVersion, "downgraded", None))
             .unwrap();
-        db.mark_earlier_build_uploads().unwrap();
+        assert_eq!(
+            db.mark_earlier_build_uploads().unwrap(),
+            1,
+            "only the upload without a write id is marked"
+        );
         assert!(
             db.item_presentation("downgraded").unwrap().unwrap().held.is_none(),
             "m-4c: the held columns are cleared"
         );
+        let marked = db.finder_write("older-build").unwrap().unwrap();
+        assert_eq!(marked.origin, WriteOrigin::EarlierBuild);
+        for (op_id, before) in ["w1", "w2"].iter().zip(&this_build) {
+            assert_eq!(
+                &db.finder_write(op_id).unwrap().unwrap(),
+                before,
+                "{op_id}: this build's write keeps its write id and stays minted"
+            );
+        }
+        // The next engine start marks nothing: an op is marked once.
         assert_eq!(
-            db.finder_write("older-build").unwrap().unwrap().origin,
-            WriteOrigin::EarlierBuild
+            db.mark_earlier_build_uploads().unwrap(),
+            0,
+            "a second start marks nothing"
+        );
+        assert_eq!(
+            db.finder_write("older-build").unwrap().unwrap(),
+            marked,
+            "the marked op keeps its write id"
         );
     }
 

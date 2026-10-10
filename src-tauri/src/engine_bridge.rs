@@ -19581,4 +19581,216 @@ mod tests {
             "and its journal row is gone"
         );
     }
+
+    /// Spec §10.2 with §6.3.1: an earlier build could queue a replace with no base. Once marked,
+    /// it carries a write id, so the `init` guard parks it `base_unknown` at its first attempt,
+    /// with its bytes and its base left as they are, and nothing is sent: no replace of a known
+    /// file goes out without a base (§10.5).
+    #[tokio::test]
+    async fn an_earlier_builds_modify_without_a_base_parks_base_unknown_and_sends_nothing() {
+        let (dir, sync_root, server, bridge) = rule3_setup([103u8; 32]);
+        seed_uploaded_row(&bridge, &server, "no-base");
+        // The way an earlier build queued it: through the shared entry point, no write id, no base.
+        let contents = dir.path().join("no-base.txt");
+        std::fs::write(&contents, b"an earlier build's save, no base").unwrap();
+        bridge
+            .queue_finder_modify(finder_file_target(Some("no-base"), "notes.txt", &contents, None))
+            .unwrap();
+        let op = bridge.db.list_operations_for_file("no-base").unwrap().remove(0);
+        assert_eq!(op.base_version, None, "precondition: queued without a base");
+        assert_eq!(bridge.db.mark_earlier_build_uploads().unwrap(), 1);
+
+        let logs = capture_logs_async(async {
+            drain_upload_queue(&bridge, &sync_root).await;
+        })
+        .await;
+        let state = server.finish();
+
+        assert_eq!(state.requests.len(), 0, "nothing is sent: {:?}", state.requests);
+        let parked = bridge.db.get_operation(&op.op_id).unwrap().expect("kept in the queue");
+        assert_eq!(parked.attempts, parked.max_attempts, "parked at its first attempt");
+        assert_eq!(parked.last_error.as_deref(), Some("base_unknown"));
+        assert_eq!(parked.base_version, None, "its base is left as it is");
+        assert_eq!(
+            std::fs::read(parked.payload_path.as_deref().unwrap()).unwrap(),
+            b"an earlier build's save, no base",
+            "its bytes are kept"
+        );
+        assert_eq!(
+            logs.lines()
+                .filter(|line| line.contains("upload parked")
+                    && line.contains(&op.op_id)
+                    && line.contains("base_unknown"))
+                .count(),
+            1,
+            "{logs}"
+        );
+    }
+
+    /// Spec §10.2 holds only while every upload a Mac queues without a write id comes from an
+    /// earlier build. The File Provider's content writes are queued through the entry points that
+    /// mint (`queue_file_provider_*`, §8.8); the shared entry points mint nothing. This census reads
+    /// every source of a module a Mac compiles, as a Mac compiles it, and allows each call of a
+    /// shared entry point only where it cannot queue content on a Mac. A new call fails here: route
+    /// a macOS content write through the minting entry points, or list the call below with the
+    /// reason it queues no content.
+    #[test]
+    fn no_macos_path_queues_content_through_the_entry_points_that_mint_nothing() {
+        use crate::finder_setup_command_tests::macos_compiled;
+        const SHARED: [&str; 4] = [
+            "queue_finder_create_from",
+            "queue_finder_modify_from",
+            "queue_finder_create",
+            "queue_finder_modify",
+        ];
+        // (file, the call, the function it is in, lines between that function's start and the
+        // call, why it queues no content on a Mac)
+        let allowed: [(&str, &str, &str, &[&str], &str); 7] = [
+            (
+                "engine_bridge.rs",
+                "self.queue_finder_create_from(target, None)",
+                "pub fn queue_finder_create(",
+                &[],
+                "a wrapper: its callers are counted under its own name",
+            ),
+            (
+                "engine_bridge.rs",
+                "self.queue_finder_modify_from(target, None)",
+                "pub fn queue_finder_modify(",
+                &[],
+                "a wrapper: its callers are counted under its own name",
+            ),
+            (
+                "engine_bridge.rs",
+                "return self.queue_finder_create_from(target, contents).map(FpWrite::plain);",
+                "pub fn queue_file_provider_create_from(",
+                &["if target.kind == FinderWriteItemKind::Folder {"],
+                "a folder: a create_folder op",
+            ),
+            (
+                "engine_bridge.rs",
+                "return self.queue_finder_modify_from(target, contents).map(|outcome| FpWrite {",
+                "pub fn queue_file_provider_modify_from(",
+                &["let Some(contents_path) = target.contents_path.clone() else {"],
+                "no contents: a rename or move op",
+            ),
+            (
+                "engine_bridge.rs",
+                "match self.queue_finder_create(target) {",
+                "pub fn ensure_local_folder(",
+                &["kind: FinderWriteItemKind::Folder,", "contents_path: None,"],
+                "a folder",
+            ),
+            (
+                "watcher.rs",
+                "match bridge.queue_finder_create(target) {",
+                "fn dispatch_local_create(",
+                &[],
+                "the upload driver, which a Mac never starts (asserted below)",
+            ),
+            (
+                "watcher.rs",
+                "match bridge.queue_finder_modify(modify) {",
+                "async fn handle_rename(",
+                &[],
+                "the upload driver, which a Mac never starts (asserted below)",
+            ),
+        ];
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let read = |path: &Path| std::fs::read_to_string(path).unwrap().replace("\r\n", "\n");
+        // The top-level modules a Mac compiles: their `mod` lines survive in `lib.rs`.
+        let lib = macos_compiled(&read(&src.join("lib.rs")));
+        let compiled = |module: &str| {
+            lib.lines().map(str::trim).any(|line| {
+                line == format!("mod {module};")
+                    || line == format!("pub mod {module};")
+                    || line == format!("mod {module} {{")
+            })
+        };
+        let is_call = |line: &str, name: &str| {
+            let needle = format!("{name}(");
+            !line.contains(&format!("fn {needle}"))
+                && line.match_indices(&needle).any(|(at, _)| {
+                    !line[..at]
+                        .chars()
+                        .next_back()
+                        .is_some_and(|c| c.is_alphanumeric() || c == '_')
+                })
+        };
+        let starts_fn = |line: &str| {
+            [
+                "fn ",
+                "pub fn ",
+                "pub(crate) fn ",
+                "async fn ",
+                "pub async fn ",
+                "pub(crate) async fn ",
+            ]
+            .iter()
+            .any(|prefix| line.starts_with(prefix))
+        };
+        let mut sources = Vec::new();
+        let mut stack = vec![src.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    let rel = path.strip_prefix(&src).unwrap().to_string_lossy().replace('\\', "/");
+                    let module = rel.split('/').next().unwrap().trim_end_matches(".rs").to_string();
+                    if matches!(module.as_str(), "lib" | "main") || compiled(&module) {
+                        sources.push((rel, macos_compiled(&read(&path))));
+                    }
+                }
+            }
+        }
+        assert!(
+            sources.iter().any(|(rel, _)| rel == "ipc_socket.rs")
+                && !sources.iter().any(|(rel, _)| rel.starts_with("windows_cf/")),
+            "the module filter sees what a Mac compiles"
+        );
+        let mut matched = [0usize; 7];
+        for (rel, mac) in &sources {
+            let lines: Vec<&str> = mac.lines().map(str::trim).collect();
+            for (i, line) in lines.iter().enumerate() {
+                if line.starts_with("//") || !SHARED.iter().any(|name| is_call(line, name)) {
+                    continue;
+                }
+                let start = (0..i).rev().find(|&j| starts_fn(lines[j])).unwrap_or(0);
+                let Some(k) = allowed.iter().position(|(file, call, function, guards, _)| {
+                    file == rel
+                        && call == line
+                        && lines[start].starts_with(function)
+                        && guards.iter().all(|guard| lines[start..i].contains(guard))
+                }) else {
+                    panic!(
+                        "{rel}: `{line}` (in `{}`) calls an entry point that mints nothing, in code a Mac \
+                         compiles: queue a macOS content write through `queue_file_provider_*`",
+                        lines[start]
+                    );
+                };
+                matched[k] += 1;
+            }
+        }
+        for (k, (file, call, _, _, why)) in allowed.iter().enumerate() {
+            assert_eq!(matched[k], 1, "{file}: `{call}` ({why}) is found once");
+        }
+        // The upload driver starts only through `watcher::spawn`, and nothing a Mac compiles calls it.
+        let starts: Vec<String> = sources
+            .iter()
+            .filter(|(rel, _)| rel != "watcher.rs")
+            .flat_map(|(rel, mac)| {
+                mac.lines()
+                    .map(str::trim)
+                    .filter(|line| !line.starts_with("//") && line.contains("watcher::spawn("))
+                    .map(move |line| format!("{rel}: {line}"))
+            })
+            .collect();
+        assert!(starts.is_empty(), "a Mac starts the upload driver: {starts:?}");
+        assert!(
+            read(&src.join("runner.rs")).contains("crate::watcher::spawn("),
+            "the upload driver keeps its start on Windows"
+        );
+    }
 }
