@@ -491,6 +491,29 @@ fn without_comments(source: &str) -> String {
 mod tests {
     use super::*;
 
+    // ── portable source pins (r5) ────────────────────────────────────────────
+    //
+    // The pins below read Rust, Objective-C and Swift sources with `include_str!` or from disk.
+    // A Windows checkout turns line endings into CRLF and path separators into `\`, so a pin that
+    // looks for `"\n}\n"` or compares a path with `/` finds nothing there (PR #119, round 5).
+    // Every pin reads its source through these two functions and takes the raw text as an
+    // argument, so a test can hand it the Windows form on any OS.
+
+    /// A source's text with `\r\n` turned into `\n`: what every pin anchors on.
+    fn lf(raw: &str) -> String {
+        raw.replace("\r\n", "\n")
+    }
+
+    /// The Windows form of a source: every line ends in `\r\n`.
+    fn crlf(text: &str) -> String {
+        lf(text).replace('\n', "\r\n")
+    }
+
+    /// A path relative to the repo root with `/` separators, whatever the OS wrote.
+    fn slash(path: &str) -> String {
+        path.replace('\\', "/")
+    }
+
     // ── the bridge's reply ───────────────────────────────────────────────────
 
     fn kept(path: &str, contents_checked: bool) -> KeptFolder {
@@ -767,7 +790,11 @@ mod tests {
     /// the one every removal goes through, with the real look and the real wait.
     #[test]
     fn test_1882_r3_every_removal_settles_a_missing_folder_before_it_decides() {
-        let full = include_str!("macos_file_provider.rs");
+        every_removal_settles_a_missing_folder(include_str!("macos_file_provider.rs"));
+    }
+
+    fn every_removal_settles_a_missing_folder(raw: &str) {
+        let full = lf(raw);
         let source = without_comments(&full[..full.find("\n#[cfg(test)]\nmod tests {").expect("tests module")]);
         let squash = |text: &str| text.chars().filter(|c| !c.is_whitespace()).collect::<String>();
         assert_eq!(
@@ -864,7 +891,13 @@ mod tests {
     /// helper has no test harness of its own, so its source is pinned here.
     #[test]
     fn test_1882_r3_the_helper_prints_preserved_for_any_existing_folder() {
-        let helper = without_comments(include_str!("../../BeebeebFileProviderTools/DomainControlTool.swift"));
+        the_helper_prints_preserved_for_any_existing_folder(include_str!(
+            "../../BeebeebFileProviderTools/DomainControlTool.swift"
+        ));
+    }
+
+    fn the_helper_prints_preserved_for_any_existing_folder(raw: &str) {
+        let helper = without_comments(&lf(raw));
         let remove = &helper[helper.find("static func remove()").expect("remove()")..];
         let remove = &remove[..remove.find("static func signalRoot()").expect("next function")];
         let squashed: String = remove.chars().filter(|c| !c.is_whitespace()).collect();
@@ -953,7 +986,11 @@ mod tests {
     /// that carries both reaches Rust with the folder's state.
     #[test]
     fn test_1882_r2_the_bridge_checks_the_folder_before_the_error() {
-        let bridge = without_comments(include_str!("../macos/FileProviderBridge.m"));
+        the_bridge_checks_the_folder_before_the_error(include_str!("../macos/FileProviderBridge.m"));
+    }
+
+    fn the_bridge_checks_the_folder_before_the_error(raw: &str) {
+        let bridge = without_comments(&lf(raw));
         let start = bridge
             .find("static int BeebeebRemoveDomainKeepingUnsynced(")
             .expect("the shared removal");
@@ -1066,7 +1103,11 @@ mod tests {
 
     #[test]
     fn test_1882_r2_the_folder_states_match_the_bridge() {
-        let bridge = include_str!("../macos/FileProviderBridge.m");
+        the_folder_states_match_the_bridge(include_str!("../macos/FileProviderBridge.m"));
+    }
+
+    fn the_folder_states_match_the_bridge(raw: &str) {
+        let bridge = lf(raw);
         for (name, value) in [
             ("BeebeebKeptNoneReported", KEPT_NONE_REPORTED),
             ("BeebeebKeptMissing", KEPT_MISSING),
@@ -1253,6 +1294,12 @@ NSFileProviderManager.removeAllDomains { error in }
         );
     }
 
+    /// One scanned source as the pins see it, from the path and text the OS gave: the path with
+    /// `/` separators and the text with `\n` line ends, so a Windows checkout reads like the rest.
+    fn scanned_source(rel: &str, raw: &str) -> (String, String) {
+        (slash(rel), lf(raw))
+    }
+
     /// Every Objective-C and Swift source in this repo. `target`, `node_modules`, `.git`, `dist`,
     /// `graphify-out` and `docs` are skipped (build output, dependencies, and prose that quotes
     /// the old calls on purpose).
@@ -1279,7 +1326,7 @@ NSFileProviderManager.removeAllDomains { error in }
                 } else if matches!(path.extension().and_then(|e| e.to_str()), Some("m" | "mm" | "swift")) {
                     let rel = path.strip_prefix(&root).unwrap_or(&path).display().to_string();
                     let source = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
-                    found.push((rel, source));
+                    found.push(scanned_source(&rel, &source));
                 }
             }
         }
@@ -1289,9 +1336,12 @@ NSFileProviderManager.removeAllDomains { error in }
 
     #[test]
     fn test_1882_every_domain_removal_in_the_repo_keeps_unsynced_files() {
-        let sources = repo_native_sources();
+        every_domain_removal_keeps_unsynced_files(&repo_native_sources());
+    }
+
+    fn every_domain_removal_keeps_unsynced_files(sources: &[(String, String)]) {
         let mut sites = Vec::new();
-        for (file, source) in &sources {
+        for (file, source) in sources {
             for site in removal_sites(file, source) {
                 sites.push((file.clone(), site));
             }
@@ -1335,6 +1385,116 @@ NSFileProviderManager.removeAllDomains { error in }
             offenders.is_empty(),
             "every File Provider domain removal must pass the preserve-dirty-user-data mode \
              (spec 2026-10-09 §3); without it macOS deletes files that never reached the server: {offenders:?}"
+        );
+    }
+
+    // ── r5: the pins read a Windows checkout (CRLF text, `\` paths) like any other ──
+
+    #[test]
+    fn test_1882_r5_the_reader_gives_a_windows_source_the_same_path_and_text() {
+        let bridge = include_str!("../macos/FileProviderBridge.m");
+        let windows = crlf(bridge);
+        assert!(windows.contains("\r\n"), "the copy really has Windows line ends");
+        assert_eq!(
+            scanned_source("src-tauri\\macos\\FileProviderBridge.m", &windows),
+            ("src-tauri/macos/FileProviderBridge.m".to_string(), lf(bridge)),
+            "the `\\` path and the CRLF text read as the `/` path and the LF text"
+        );
+        assert_eq!(
+            scanned_source("src-tauri/macos/FileProviderBridge.m", bridge),
+            ("src-tauri/macos/FileProviderBridge.m".to_string(), lf(bridge)),
+            "and a Unix source is unchanged"
+        );
+    }
+
+    #[test]
+    fn test_1882_r5_the_settle_pin_passes_on_a_windows_checkout() {
+        every_removal_settles_a_missing_folder(&crlf(include_str!("macos_file_provider.rs")));
+    }
+
+    #[test]
+    fn test_1882_r5_the_helper_pin_passes_on_a_windows_checkout() {
+        the_helper_prints_preserved_for_any_existing_folder(&crlf(include_str!(
+            "../../BeebeebFileProviderTools/DomainControlTool.swift"
+        )));
+    }
+
+    #[test]
+    fn test_1882_r5_the_bridge_pins_pass_on_a_windows_checkout() {
+        let bridge = crlf(include_str!("../macos/FileProviderBridge.m"));
+        the_bridge_checks_the_folder_before_the_error(&bridge);
+        the_folder_states_match_the_bridge(&bridge);
+    }
+
+    #[test]
+    fn test_1882_r5_the_repo_scan_passes_on_a_windows_checkout() {
+        let windows: Vec<(String, String)> = repo_native_sources()
+            .iter()
+            .map(|(file, source)| scanned_source(&file.replace('/', "\\"), &crlf(source)))
+            .collect();
+        assert_eq!(windows, repo_native_sources(), "the reader undoes the Windows form");
+        every_domain_removal_keeps_unsynced_files(&windows);
+    }
+
+    /// The pins stay meaningful in the Windows form: a real violation still fails them there, and
+    /// fails them for the reason it should (not because the Windows text defeated an anchor).
+    #[test]
+    fn test_1882_r5_the_pins_still_fail_a_real_violation_in_the_windows_form() {
+        fn panic_message(check: impl FnOnce()) -> Option<String> {
+            let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(check)).err()?;
+            Some(
+                payload
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| payload.downcast_ref::<&str>().map(|text| (*text).to_string()))
+                    .unwrap_or_default(),
+            )
+        }
+
+        // The bridge no longer checks the folder.
+        let bridge = crlf(include_str!("../macos/FileProviderBridge.m")).replace(
+            "BeebeebKeptFolderState(found_location)",
+            "BeebeebNotTheCheck(found_location)",
+        );
+        let message = panic_message(|| the_bridge_checks_the_folder_before_the_error(&bridge));
+        assert_eq!(message.as_deref(), Some("the folder is checked"));
+
+        // A decode that no longer settles a missing folder first.
+        let provider = crlf(include_str!("macos_file_provider.rs")).replace(
+            "crate::finder_removal::settle_kept_state(",
+            "crate::finder_removal::skip_the_settle(",
+        );
+        let message = panic_message(|| every_removal_settles_a_missing_folder(&provider));
+        assert!(
+            message
+                .as_deref()
+                .is_some_and(|m| m.starts_with("it settles the state first")),
+            "{message:?}"
+        );
+
+        // The helper stops looking again at a missing folder.
+        let helper = crlf(include_str!("../../BeebeebFileProviderTools/DomainControlTool.swift"))
+            .replace("Thread.sleep(forTimeInterval: keptMissingRecheckInterval)", "");
+        let message = panic_message(|| the_helper_prints_preserved_for_any_existing_folder(&helper));
+        assert!(
+            message
+                .as_deref()
+                .is_some_and(|m| m.starts_with("the helper looks again at a missing folder")),
+            "{message:?}"
+        );
+
+        // A removal without the mode, in a CRLF Swift source with a `\` path, is an offender.
+        let mut sources = repo_native_sources();
+        sources.push(scanned_source(
+            "BeebeebFileProviderTools\\Other.swift",
+            "NSFileProviderManager.remove(domain) { error in }\r\n",
+        ));
+        let message = panic_message(|| every_domain_removal_keeps_unsynced_files(&sources));
+        assert!(
+            message
+                .as_deref()
+                .is_some_and(|m| m.contains("BeebeebFileProviderTools/Other.swift:1")),
+            "{message:?}"
         );
     }
 }
