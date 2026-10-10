@@ -234,6 +234,7 @@ fn round5_signout_preserves_abandoned_legacy_upload_only_copy() {
         is_create: false,
         completed_version: None,
         completed_object_version_id: None,
+        completed_mime_type: None,
     })
     .unwrap();
     assert!(

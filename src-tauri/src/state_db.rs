@@ -758,6 +758,8 @@ pub struct UploadResume {
     pub completed_version: Option<i64>,
     /// The object version id that completion produced.
     pub completed_object_version_id: Option<String>,
+    /// The server's `mime_type` in that completion: the landing's fallback content type.
+    pub completed_mime_type: Option<String>,
 }
 
 #[cfg(test)]
@@ -1923,6 +1925,7 @@ impl StateDb {
         )?;
         ensure_column(&conn, "upload_resume", "completed_version", "INTEGER")?;
         ensure_column(&conn, "upload_resume", "completed_object_version_id", "TEXT")?;
+        ensure_column(&conn, "upload_resume", "completed_mime_type", "TEXT")?;
         conn.execute_batch(
             "
             CREATE INDEX IF NOT EXISTS idx_operation_queue_write_id ON operation_queue(write_id);
@@ -3501,12 +3504,14 @@ impl StateDb {
         claim_id: &str,
         version: i64,
         object_version_id: &str,
+        mime_type: Option<&str>,
     ) -> Result<bool> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let n = conn.execute(
-            "UPDATE upload_resume SET completed_version = ?3, completed_object_version_id = ?4
+            "UPDATE upload_resume
+             SET completed_version = ?3, completed_object_version_id = ?4, completed_mime_type = ?5
              WHERE op_id = ?1 AND EXISTS (SELECT 1 FROM operation_queue WHERE op_id = ?1 AND claim_id = ?2)",
-            params![op_id, claim_id, version, object_version_id],
+            params![op_id, claim_id, version, object_version_id, mime_type],
         )?;
         Ok(n == 1)
     }
@@ -5278,7 +5283,7 @@ impl StateDb {
             "SELECT op_id, payload_path, payload_size, payload_mtime_ns, upload_session_id,
                     server_file_id, object_version_id, chunk_size_bytes, chunk_count,
                     acked_chunks, metadata_applied, is_create, completed_version,
-                    completed_object_version_id
+                    completed_object_version_id, completed_mime_type
              FROM upload_resume WHERE op_id = ?1",
             params![op_id],
             |row| {
@@ -5297,6 +5302,7 @@ impl StateDb {
                     is_create: row.get(11)?,
                     completed_version: row.get(12)?,
                     completed_object_version_id: row.get(13)?,
+                    completed_mime_type: row.get(14)?,
                 })
             },
         )
@@ -7849,6 +7855,7 @@ mod tests {
                 ("operation_queue", "claimed_at"),
                 ("upload_resume", "completed_version"),
                 ("upload_resume", "completed_object_version_id"),
+                ("upload_resume", "completed_mime_type"),
             ] {
                 let _ = conn.execute(&format!("DROP INDEX IF EXISTS idx_{table}_{column}"), []);
                 conn.execute(&format!("ALTER TABLE {table} DROP COLUMN {column}"), [])
@@ -7903,7 +7910,11 @@ mod tests {
                 "operation_queue.{column}"
             );
         }
-        for column in ["completed_version", "completed_object_version_id"] {
+        for column in [
+            "completed_version",
+            "completed_object_version_id",
+            "completed_mime_type",
+        ] {
             assert!(
                 columns("upload_resume").contains(&column.to_string()),
                 "upload_resume.{column}"
@@ -8358,6 +8369,7 @@ mod tests {
             is_create: false,
             completed_version: None,
             completed_object_version_id: None,
+            completed_mime_type: None,
         })
         .unwrap();
         db.track_staged_payload("/staged/resumed", None, true).unwrap();
@@ -8744,13 +8756,14 @@ mod tests {
                     is_create: false,
                     completed_version: None,
                     completed_object_version_id: None,
+                    completed_mime_type: None,
                 },
                 &claimed.claim_id,
             )
             .unwrap()
         );
         assert!(
-            db.record_completion_claimed("w", &claimed.claim_id, 2, "object-2")
+            db.record_completion_claimed("w", &claimed.claim_id, 2, "object-2", None)
                 .unwrap()
         );
         let unparked = |why: &str| {
@@ -8950,6 +8963,7 @@ mod tests {
             is_create: true,
             completed_version: None,
             completed_object_version_id: None,
+            completed_mime_type: None,
         })
         .unwrap();
         let finalization = UploadFinalization {
@@ -9878,6 +9892,7 @@ mod tests {
             is_create: true,
             completed_version: None,
             completed_object_version_id: None,
+            completed_mime_type: None,
         };
         let seed = |op_id: &str, file_id: &str, key: Option<&str>| {
             db.enqueue_operation(&mk_op(op_id, file_id, key)).unwrap();

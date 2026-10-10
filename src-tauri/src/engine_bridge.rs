@@ -1002,8 +1002,8 @@ impl EngineBridge {
             && let (Some(version), Some(object)) =
                 (previous.completed_version, previous.completed_object_version_id.clone())
         {
-            // The save's own content type, as the first attempt had it. The server's
-            // `mime_type`, its fallback, is not recorded.
+            // The save's own content type, as the first attempt had it, and the server's
+            // `mime_type` recorded with the completion, its fallback.
             let content_type = op
                 .metadata_json
                 .as_deref()
@@ -1019,7 +1019,7 @@ impl EngineBridge {
                     &object,
                     previous.payload_size as u64,
                     content_type,
-                    None,
+                    previous.completed_mime_type.clone(),
                     post_complete_errors,
                     sync_root,
                 )
@@ -1138,6 +1138,7 @@ impl EngineBridge {
                     is_create: init_request.file_id.is_none(),
                     completed_version: None,
                     completed_object_version_id: None,
+                    completed_mime_type: None,
                 };
                 // Persist BEFORE the next await: a cut anywhere after init must
                 // leave the session discoverable by the retry.
@@ -1188,17 +1189,21 @@ impl EngineBridge {
                     .as_str()
                     .map(str::to_string)
                     .unwrap_or_else(|| session.object_version_id.clone());
+                let mime_type = completed["mime_type"].as_str().map(str::to_string);
                 if let Some(claim) = claim
                     && claim.write.is_some() // write-keyed
-                    && !self
-                        .db
-                        .record_completion_claimed(&op.op_id, &claim.claim_id, produced_version, &produced_object)?
+                    && !self.db.record_completion_claimed(
+                        &op.op_id,
+                        &claim.claim_id,
+                        produced_version,
+                        &produced_object,
+                        mime_type.as_deref(),
+                    )?
                 {
                     log_queue_state_moved(&op.op_id, "completion");
                     return Err(anyhow::Error::new(QueueStateMoved));
                 }
                 let size = completed["size_bytes"].as_u64().unwrap_or(plaintext_size);
-                let mime_type = completed["mime_type"].as_str().map(str::to_string);
                 self.land(
                     local_file_id,
                     op,
@@ -11222,6 +11227,7 @@ mod tests {
                 is_create: true,
                 completed_version: None,
                 completed_object_version_id: None,
+                completed_mime_type: None,
             })
             .unwrap();
         let board = bridge.transfers().clone();
@@ -15591,6 +15597,7 @@ mod tests {
                 is_create: false,
                 completed_version: None,
                 completed_object_version_id: None,
+                completed_mime_type: None,
             })
             .unwrap();
         bridge.db.set_completed_for_test(&w_op.op_id, 2);
@@ -17821,6 +17828,45 @@ mod tests {
                 .unwrap()
                 .current_version,
             2
+        );
+    }
+
+    /// Review Minor 3: a save with no content type of its own lands with the server's
+    /// `mime_type`, as its first landing would, also when that landing is retried from the
+    /// recorded completion.
+    #[tokio::test]
+    async fn a_retried_landing_keeps_the_servers_mime_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [92u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_uploaded_row(&bridge, &server, "untyped");
+        let contents = dir.path().join("save-untyped");
+        std::fs::write(&contents, b"edit").unwrap();
+        let mut target = finder_file_target(Some("untyped"), "notes", &contents, Some("1".into()));
+        target.content_type = None;
+        bridge.queue_file_provider_modify(target).unwrap();
+        crate::state_db::fail_next_landings_for_test(1);
+        let now = now_secs();
+        bridge.process_due_operations(&sync_root, now).await.unwrap();
+        bridge.process_due_operations(&sync_root, now + 10_000).await.unwrap();
+        drop(server.finish());
+        assert!(
+            bridge.db.list_operations_for_file("untyped").unwrap().is_empty(),
+            "landed on the retry"
+        );
+        assert_eq!(
+            bridge
+                .db
+                .get_file_contract_state("untyped")
+                .unwrap()
+                .unwrap()
+                .content_type
+                .as_deref(),
+            Some("text/plain"),
+            "the server's mime_type: the save has no content type of its own"
         );
     }
 
