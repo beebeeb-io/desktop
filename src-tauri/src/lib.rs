@@ -2020,7 +2020,9 @@ fn install_recovered_session(
         });
         drop(guard);
         set_auth_present(state, true);
-        // Ruling F9: the vault is unlocked now (after a replaced key too), so sync resumes.
+        // Ruling F9: the vault is unlocked now (after a replaced key too), so on a Mac sync resumes. Windows and Linux
+        // keep today's flow (spec R8).
+        #[cfg(target_os = "macos")]
         ask_to_resume_auth_paused(&write, acct);
         drop(write);
     }
@@ -2624,6 +2626,8 @@ fn install_new_session(
     drop(guard);
     set_auth_present(state, true);
     set_auth_email(state, email);
+    // Ruling F9: on a Mac, sync resumes. Windows and Linux keep today's flow (spec R8).
+    #[cfg(target_os = "macos")]
     ask_to_resume_auth_paused(&write, acct);
     drop(write);
     Ok(NewSession::Installed)
@@ -5088,7 +5092,9 @@ fn reauth_swap_token(
         *cached = Some(profile.clone());
     }
     reauth_settle_flags(&write, state, acct, email.as_deref().unwrap_or_default());
-    // Ruling F9: unlocked, so sync resumes. Without keys here the recovery-phrase unlock asks instead.
+    // Ruling F9: unlocked, so on a Mac sync resumes; Linux keeps today's flow (spec R8). Without keys here the
+    // recovery-phrase unlock asks instead.
+    #[cfg(target_os = "macos")]
     if vault_unlocked {
         ask_to_resume_auth_paused(&write, acct);
     }
@@ -5825,10 +5831,12 @@ fn start_engine_bound(
     Ok(EngineStart::Started)
 }
 
-/// Lead ruling F9 (spec 2026-10-06 R8: "sync resumes"): a sign-in that has put a session in memory asks the engine
-/// start that applies it to make the operations paused for `auth` due again. Only inside the sign-in's checked turn
-/// (`_write`) and after the session is in memory, so a start that sees the ask also holds that session (see
-/// [`resume_operations_paused_for_auth`]).
+/// Lead ruling F9 (spec 2026-10-06 R8: "sync resumes"): a sign-in on a Mac that has put a session in memory asks the
+/// engine start that applies it to make the operations paused for `auth` due again. Only inside the sign-in's checked
+/// turn (`_write`) and after the session is in memory, so a start that sees the ask also holds that session (see
+/// [`resume_operations_paused_for_auth`]). macOS only: Windows and Linux keep today's flow (spec R8), so nothing asks
+/// there and every start returns before it resumes anything.
+#[cfg(target_os = "macos")]
 fn ask_to_resume_auth_paused(_write: &SessionWrite, acct: &AccountRuntime) {
     acct.auth_resume_asked.fetch_add(1, Ordering::SeqCst);
 }
@@ -26267,6 +26275,39 @@ mod reauth_tests {
         assert!(
             writer[..writer.find(") {").unwrap()].contains("write: &SessionWrite"),
             "the ask is made only inside a checked turn:\n{writer}"
+        );
+
+        // Ruling F9, round 2: only a Mac asks; Windows and Linux keep today's flow (spec R8). Each ask is gated where it
+        // is made, the function too, so what the other platforms compile names it nowhere: nothing is asked there, and
+        // every start returns before it resumes anything.
+        let macos_only = squeeze("#[cfg(target_os = \"macos\")]");
+        for (signature, gated) in [
+            ("fn install_new_session(", format!("{macos_only}{ask}")),
+            ("fn install_recovered_session(", format!("{macos_only}{ask}")),
+            (
+                "fn reauth_swap_token(",
+                format!(
+                    "{macos_only}{}",
+                    squeeze("if vault_unlocked { ask_to_resume_auth_paused(&write, acct); }")
+                ),
+            ),
+        ] {
+            let body = squeeze(&code_of(&production, signature));
+            assert!(body.contains(&gated), "{signature} asks on macOS only:\n{body}");
+        }
+        let other_platforms =
+            super::finder_setup_command_tests::without_items(&production, &["#[cfg(target_os = \"macos\")]"]);
+        let named = other_platforms
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//") && line.contains("ask_to_resume_auth_paused"))
+            .collect::<Vec<_>>();
+        assert!(named.is_empty(), "Windows and Linux compile no ask: {named:?}");
+        assert_eq!(
+            squeeze(&super::finder_setup_command_tests::macos_compiled(&production))
+                .matches(&ask)
+                .count(),
+            3,
+            "a Mac compiles all three"
         );
     }
 
