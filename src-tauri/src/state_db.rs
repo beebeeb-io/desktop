@@ -721,6 +721,10 @@ pub enum OperationPauseReason {
     /// Lead ruling, F9 review I-1 (spec 2026-10-06 R8, §5.6): paused for `auth` when the server said the vault key this
     /// Mac kept was no longer the account's. The names in these operations were encrypted under that key, so they are
     /// kept and never sent; no resume makes them due again.
+    ///
+    /// Built only by the macOS-only hold ([`StateDb::hold_operations_paused_for_auth_as_key_replaced`]); the `as_str`
+    /// arm does not count as building it, so other platforms would report it never constructed.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
     KeyReplaced,
 }
 
@@ -3198,7 +3202,9 @@ impl StateDb {
     /// Lead ruling, F9 review I-1 (spec 2026-10-06 R8, §5.6): the vault key this Mac kept is no longer the account's,
     /// so every operation paused for `auth` (queued with names encrypted under that key) is paused for `key_replaced`
     /// instead: kept, never sent, and never made due by [`Self::resume_operations_paused_for_auth`]. Operations paused
-    /// for any other reason are untouched. Returns how many were re-marked.
+    /// for any other reason are untouched. Returns how many were re-marked. Only the macOS reconciler's re-sign-in
+    /// path holds them; Windows and Linux keep today's flow (spec R8).
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
     pub fn hold_operations_paused_for_auth_as_key_replaced(&self, now: i64) -> Result<usize> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.execute(
