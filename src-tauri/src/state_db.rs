@@ -9030,7 +9030,10 @@ mod tests {
             "nothing of the landing committed: the op stays for the retry"
         );
         assert!(db.get_upload_resume("create").unwrap().is_some(), "with its resume row");
-        assert!(db.get_file("provisional").unwrap().is_some(), "the provisional row stays");
+        assert!(
+            db.get_file("provisional").unwrap().is_some(),
+            "the provisional row stays"
+        );
         assert!(db.get_file("server").unwrap().is_none(), "no server row");
 
         db.0.lock()
