@@ -28,6 +28,7 @@ use crate::config::DesktopConfig;
 use crate::finder_removal::{DomainRemoval, KeptFolder};
 use crate::lifecycle_log::{self, LifecycleEvent};
 use crate::macos_file_provider::{self, BridgeRemovalFailure};
+use crate::macos_workspace;
 
 pub struct MacosPorts {
     app: tauri::AppHandle,
@@ -238,17 +239,45 @@ pub(crate) fn with_shared_gate_held<T>(f: impl FnOnce() -> T) -> T {
 
 /// "Open in Finder" (task 1885): opens the Beebeeb folder in Finder through `NSWorkspace`, with the scoped URL macOS
 /// returned for it, and returns when LaunchServices has answered. `Ok(false)` is "macOS reports no location". A person
-/// clicked and waits for it, so it waits a little for the gate: the `Ready` poll reads the domain every 3 s, and a
-/// click that meets that read must not fail. It holds the gate for the open's whole length (at most the bridge's 2 s
-/// resolve plus its 5 s open), so a poll that meets the open fails fast as busy, as it does for any held call.
+/// clicked and waits for it, so the resolve waits a little for the gate: the `Ready` poll reads the domain every 3 s,
+/// and a click that meets that read must not fail. The gate covers the resolve only (fix round 1, I1): see
+/// [`resolve_then`].
 pub(crate) fn open_location() -> Result<bool, FpError> {
-    BridgeGate::shared().run_sync_waiting(BRIDGE_GATE_WAIT, macos_file_provider::open_location)
+    resolve_then(
+        &BridgeGate::shared(),
+        macos_file_provider::resolve_location,
+        macos_workspace::open_scoped,
+    )
 }
 
 /// "Show in Finder" for one item (task 1885): selects the item, by its File Provider identifier, in a Finder window.
-/// Waits a little for the gate, for the same reason as [`open_location`].
+/// The resolve waits a little for the gate, for the same reason as [`open_location`], and the gate is released before
+/// the reveal.
 pub(crate) fn reveal_item(item_id: &str) -> Result<bool, FpError> {
-    BridgeGate::shared().run_sync_waiting(BRIDGE_GATE_WAIT, || macos_file_provider::reveal_item(item_id))
+    resolve_then(
+        &BridgeGate::shared(),
+        || macos_file_provider::resolve_item(item_id),
+        macos_workspace::reveal_scoped,
+    )
+}
+
+/// A resolve under the gate, then the open, with the gate released in between (task 1885 fix round 1, I1).
+///
+/// The resolve is a File Provider call and takes the permit, waiting up to [`BRIDGE_GATE_WAIT`]. The open is
+/// `NSWorkspace`, which is not, and which can stall for seconds in LaunchServices: a sign-out's removal waits only
+/// `BRIDGE_GATE_WAIT` for the gate, is never retried, and would answer `OP_TIMEOUT` and leave Beebeeb in Finder if an
+/// open held the permit across that stall. The permit is therefore dropped when `gate.run_sync_waiting` returns, before
+/// `then` runs. `Ok(false)` is "no location": nothing is opened. Both errors are the caller's.
+fn resolve_then<H>(
+    gate: &BridgeGate,
+    resolve: impl FnOnce() -> Result<Option<H>, FpError>,
+    then: impl FnOnce(H) -> Result<(), FpError>,
+) -> Result<bool, FpError> {
+    let resolved = gate.run_sync_waiting(BRIDGE_GATE_WAIT, resolve)?;
+    match resolved {
+        None => Ok(false),
+        Some(handle) => then(handle).map(|()| true),
+    }
 }
 
 /// The domain's state, read from the OS (the `finder_domain_user_enabled` command). Waits a little for the gate,
@@ -1031,11 +1060,7 @@ mod tests {
     #[test]
     fn the_calls_a_person_waits_on_wait_a_little_for_the_gate() {
         let source = production();
-        for (wrapper, call) in [
-            ("fn open_location(", "macos_file_provider::open_location"),
-            ("fn reveal_item(", "|| macos_file_provider::reveal_item(item_id)"),
-            ("fn domain_state(", "macos_file_provider::domain_state"),
-        ] {
+        for (wrapper, call) in [("fn domain_state(", "macos_file_provider::domain_state")] {
             let body = &source[source.find(wrapper).unwrap_or_else(|| panic!("{wrapper}"))..];
             let body = &body[..body.find("\n}\n").unwrap()];
             assert!(
@@ -1043,6 +1068,35 @@ mod tests {
                     "BridgeGate::shared().run_sync_waiting(BRIDGE_GATE_WAIT, {call})"
                 ))),
                 "{wrapper} waits a little for the shared gate:\n{body}"
+            );
+        }
+        // The open and the reveal wait for the gate inside `resolve_then`, which each of them calls on the shared gate
+        // with its own resolve and its own open (fix round 1, I1).
+        let then = &source[source.find("fn resolve_then<").expect("resolve_then")..];
+        let then = &then[..then.find("\n}\n").unwrap()];
+        assert!(
+            squeeze(then).contains(&squeeze("gate.run_sync_waiting(BRIDGE_GATE_WAIT, resolve)")),
+            "the resolve waits a little for the gate:\n{then}"
+        );
+        for (wrapper, resolve, open) in [
+            (
+                "fn open_location(",
+                "macos_file_provider::resolve_location,",
+                "macos_workspace::open_scoped",
+            ),
+            (
+                "fn reveal_item(",
+                "|| macos_file_provider::resolve_item(item_id),",
+                "macos_workspace::reveal_scoped",
+            ),
+        ] {
+            let body = &source[source.find(wrapper).unwrap_or_else(|| panic!("{wrapper}"))..];
+            let body = &body[..body.find("\n}\n").unwrap()];
+            assert!(
+                squeeze(body).contains(&squeeze(&format!(
+                    "resolve_then(&BridgeGate::shared(),{resolve}{open},)"
+                ))),
+                "{wrapper} resolves under the shared gate and opens outside it:\n{body}"
             );
         }
         let signal = &source[source.find("fn signal_working_set(").unwrap()..];
@@ -1053,6 +1107,105 @@ mod tests {
             )),
             "the signal still fails fast:\n{signal}"
         );
+    }
+
+    /// Task 1885 fix round 1 (I1), in the source: `resolve_then` takes the gate for the resolve ALONE. The statement
+    /// that waits for the gate ends before the open is called, and the open is not an argument of it. (The behaviour
+    /// test below proves it with a parked open; this keeps the shape from being rewritten to hold the gate longer.)
+    #[test]
+    fn test_1885_the_open_is_called_after_the_statement_that_holds_the_gate() {
+        let source = production();
+        let then = &source[source.find("fn resolve_then<").expect("resolve_then")..];
+        let then = squeeze(&then[..then.find("\n}\n").unwrap()]);
+        let gate = then
+            .find("gate.run_sync_waiting(BRIDGE_GATE_WAIT,resolve)?;")
+            .expect("the gate call is a statement of its own that ends in `?;`");
+        let open = then.find("then(handle)").expect("the open is called");
+        assert!(gate < open, "the gate statement ends before the open starts:\n{then}");
+        assert_eq!(then.matches("then(").count(), 1, "the open is called once:\n{then}");
+        assert_eq!(
+            then.matches("run_sync_waiting").count(),
+            1,
+            "one gate call, for the resolve:\n{then}"
+        );
+    }
+
+    /// Task 1885 fix round 1 (I1). An open that is blocked inside LaunchServices must not hold the File Provider
+    /// gate: `NSWorkspace` is not a File Provider call, and a sign-out's removal waits only `BRIDGE_GATE_WAIT` (3 s)
+    /// for the gate and is never retried. So the gate covers the resolve and is released before the open. Here the
+    /// open is parked until the test lets it go, and a removal's own gate call, in its strictest form (fail fast),
+    /// runs meanwhile.
+    #[test]
+    fn test_1885_a_removal_gets_the_gate_while_an_open_is_blocked_inside_launch_services() {
+        use std::sync::mpsc;
+        let gate = BridgeGate::new();
+        let (in_open, open_started) = mpsc::channel::<()>();
+        let (release, released) = mpsc::channel::<()>();
+        let opener = {
+            let gate = gate.clone();
+            std::thread::spawn(move || {
+                resolve_then(
+                    &gate,
+                    || Ok(Some(7u32)),
+                    move |handle| {
+                        assert_eq!(handle, 7, "the open gets the handle the resolve returned");
+                        in_open.send(()).unwrap();
+                        released
+                            .recv_timeout(Duration::from_secs(20))
+                            .expect("the test releases the open");
+                        Ok(())
+                    },
+                )
+            })
+        };
+        open_started
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the open started");
+        let removal = gate.run_sync(|| Ok("removed"));
+        release.send(()).unwrap();
+        assert_eq!(opener.join().unwrap(), Ok(true), "the open finished");
+        assert_eq!(
+            removal,
+            Ok("removed"),
+            "the removal got the gate while the open was blocked inside LaunchServices"
+        );
+    }
+
+    /// Task 1885 fix round 1 (I1): the three other ways through the open. No location: nothing is opened. A resolve
+    /// that fails (including the gate answering busy): nothing is opened and the error is the caller's. An open that
+    /// fails: its error is the caller's, and the gate is free again.
+    #[test]
+    fn test_1885_the_open_runs_only_after_a_resolve_that_found_a_location_and_its_errors_are_the_callers() {
+        let gate = BridgeGate::new();
+        let opened = AtomicUsize::new(0);
+        let open = |_: u32| {
+            opened.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        };
+
+        assert_eq!(resolve_then(&gate, || Ok(None::<u32>), open), Ok(false));
+        let refused = FpError::new("NSFileProviderErrorDomain", -2001, "no");
+        assert_eq!(
+            resolve_then(&gate, || Err(refused.clone()), open),
+            Err(refused),
+            "a resolve error is the caller's error"
+        );
+        assert_eq!(
+            opened.load(Ordering::SeqCst),
+            0,
+            "no location and a failed resolve open nothing"
+        );
+
+        let launch_services = FpError::new("NSCocoaErrorDomain", 256, "no");
+        assert_eq!(
+            resolve_then(&gate, || Ok(Some(1u32)), |_| Err(launch_services.clone())),
+            Err(launch_services),
+            "an open error is the caller's error"
+        );
+        assert!(gate.is_idle(), "the gate is free after a failed open");
+
+        assert_eq!(resolve_then(&gate, || Ok(Some(2u32)), open), Ok(true));
+        assert_eq!(opened.load(Ordering::SeqCst), 1);
     }
 
     /// F7 follow-up (review minor 1): the synchronous wait. A call that meets the gate held by a call in flight

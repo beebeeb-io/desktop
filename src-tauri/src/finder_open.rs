@@ -247,21 +247,22 @@ mod tests {
         }
     }
 
+    /// The text of one C function of the bridge, from `start` to the first line that is only `}`.
+    fn c_function<'a>(bridge: &'a str, start: &str) -> &'a str {
+        let from = bridge.find(start).unwrap_or_else(|| panic!("the bridge has {start}"));
+        let to = from + bridge[from..].find("\n}\n").unwrap_or_else(|| panic!("{start} ends"));
+        &bridge[from..to]
+    }
+
     /// The Objective-C open waits for LaunchServices' answer and holds the URL's scope across the
     /// call. Pinned in the text because the failure it prevents (a success reported before the OS
     /// answered, and a scope dropped before it was used) shows only on a signed, sandboxed build.
     #[test]
     fn test_1885_the_bridge_opens_the_scoped_url_and_waits_for_the_answer() {
         let bridge = read("macos/FileProviderBridge.m");
-        let open_url = {
-            let from = bridge
-                .find("static int BeebeebOpenURLAndWait(")
-                .expect("the bridge's open helper");
-            let to = from + bridge[from..].find("\n}\n").expect("the helper ends");
-            &bridge[from..to]
-        };
+        let open_url = c_function(&bridge, "static int BeebeebOpenURLAndWait(");
         let scope = open_url
-            .find("startAccessingSecurityScopedResource")
+            .find("[[BeebeebScope alloc] initWithURL:url]")
             .expect("the helper takes the URL's scope");
         let open = open_url
             .find("openURL:url configuration:")
@@ -275,29 +276,78 @@ mod tests {
             "no dialog can hold the answer back"
         );
         assert!(
-            open_url.contains("stopAccessingSecurityScopedResource"),
+            open_url.contains("[scope stop]"),
             "the scope is released in the completion handler"
         );
         assert!(
             open_url.contains("found_error"),
             "the completion handler's error becomes the bridge's error"
         );
+    }
 
-        let location = {
-            let from = bridge
-                .find("int beebeeb_fp_open_location(")
-                .expect("the open-location entry point");
-            let to = from + bridge[from..].find("\n}\n").expect("it ends");
-            &bridge[from..to]
-        };
+    /// Fix round 1 (I1), in the bridge: the RESOLVE (a File Provider call, run under Rust's gate) hands back a retained
+    /// handle and opens nothing; the OPEN and the REVEAL (run after the gate is released) take the handle first, make
+    /// no File Provider call, and never turn the URL into a path string (a path carries no scope).
+    #[test]
+    fn test_1885_the_resolve_opens_nothing_and_the_open_asks_the_file_provider_nothing() {
+        let bridge = read("macos/FileProviderBridge.m");
+        for resolve in ["int beebeeb_fp_resolve_location(", "int beebeeb_fp_resolve_item("] {
+            let body = c_function(&bridge, resolve);
+            assert!(
+                body.contains("BeebeebRetainHandle(url)"),
+                "{resolve} returns a retained handle:\n{body}"
+            );
+            for forbidden in [
+                "openURL:",
+                "activateFileViewerSelectingURLs",
+                "BeebeebOpenURLAndWait",
+                "fileURLWithPath",
+                ".path",
+            ] {
+                assert!(!body.contains(forbidden), "{resolve} uses {forbidden}:\n{body}");
+            }
+        }
         assert!(
-            location.contains("NSFileProviderRootContainerItemIdentifier")
-                && location.contains("BeebeebOpenURLAndWait("),
-            "the location it opens is the URL macOS returned for the domain's root:\n{location}"
+            c_function(&bridge, "int beebeeb_fp_resolve_location(")
+                .contains("NSFileProviderRootContainerItemIdentifier"),
+            "the location it resolves is the domain's root"
         );
-        assert!(
-            !location.contains("fileURLWithPath") && !location.contains(".path"),
-            "the URL is never turned into a path string (a path carries no scope):\n{location}"
-        );
+        for consumer in [
+            "int beebeeb_open_scoped_url(",
+            "int beebeeb_reveal_scoped_url(",
+            "void beebeeb_release_url_handle(",
+        ] {
+            let body = c_function(&bridge, consumer);
+            let take = body
+                .find("BeebeebTakeHandle(handle)")
+                .unwrap_or_else(|| panic!("{consumer} takes the handle"));
+            let first_use = [
+                "BeebeebOpenURLAndWait",
+                "BeebeebScope alloc",
+                "lstat",
+                "activateFileViewerSelectingURLs",
+            ]
+            .iter()
+            .filter_map(|use_| body.find(use_))
+            .min()
+            .unwrap_or(usize::MAX);
+            assert!(
+                take < first_use,
+                "{consumer} takes (and so owns) the handle before it uses it:\n{body}"
+            );
+            for forbidden in [
+                "managerForDomain",
+                "getUserVisibleURLForItemIdentifier",
+                "BeebeebUserVisibleURL",
+                "BeebeebDomain()",
+                "fileURLWithPath",
+                ".path",
+            ] {
+                assert!(
+                    !body.contains(forbidden),
+                    "{consumer} uses {forbidden}, which is a File Provider call or a path:\n{body}"
+                );
+            }
+        }
     }
 }

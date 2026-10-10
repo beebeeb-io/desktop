@@ -19495,8 +19495,8 @@ mod finder_setup_wiring_tests {
             "add_domain",
             "domain_state",
             "wait_for_domain_ready",
-            "open_location",
-            "reveal_item",
+            "resolve_location",
+            "resolve_item",
             "cleanup_stale_domains",
             "signal_working_set",
         ];
@@ -19528,6 +19528,7 @@ mod finder_setup_wiring_tests {
                 .expect("read a source file")
                 .replace("\r\n", "\n");
             let production = without_items(&text, &["#[cfg(test)]", "#[cfg(all(test"]);
+            let production_lines: Vec<&str> = production.lines().collect();
             for (number, line) in production.lines().enumerate() {
                 if line.trim_start().starts_with("//") {
                     continue;
@@ -19546,11 +19547,20 @@ mod finder_setup_wiring_tests {
                         "{name}:{}: calls the bridge outside the gate: {line}",
                         number + 1
                     );
+                    // The open and the reveal pass their resolve to `resolve_then` together with the shared gate (task 1885
+                    // fix round 1, I1); `resolve_then` takes the gate for it (pinned in `macos_ports`), and the open that
+                    // follows is not a File Provider call.
+                    let given_to_resolve_then_with_the_shared_gate = line
+                        .contains("resolve_then(&BridgeGate::shared(),")
+                        || (number >= 2
+                            && production_lines[number - 1].trim() == "&BridgeGate::shared(),"
+                            && production_lines[number - 2].trim_end().ends_with("resolve_then("));
                     assert!(
                         line.contains(".run(")
                             || line.contains(".run_sync(")
                             || line.contains(".run_waiting(")
-                            || line.contains(".run_sync_waiting("),
+                            || line.contains(".run_sync_waiting(")
+                            || given_to_resolve_then_with_the_shared_gate,
                         "{name}:{}: a bridge call that does not take the gate: {line}",
                         number + 1
                     );
