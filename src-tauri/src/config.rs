@@ -1116,7 +1116,8 @@ mod tests {
     #[test]
     fn test_1889_two_updates_of_different_fields_both_survive_through_every_helper() {
         type Fast = fn(&Path);
-        let helpers: [(&str, Fast, fn(&DesktopConfig) -> bool); 4] = [
+        type Landed = fn(&DesktopConfig) -> bool;
+        let helpers: [(&str, Fast, Landed); 4] = [
             (
                 "update_at",
                 |path| {
