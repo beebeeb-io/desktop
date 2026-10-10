@@ -1501,6 +1501,9 @@ pub struct LandingInput<'a> {
     pub mime_type: Option<&'a str>,
     /// The op's staged payload, marked `completed = 1` in the release journal on every platform.
     pub completed_payload: Option<&'a str>,
+    /// Windows: a create's finalization journal row, written in the landing's own transaction
+    /// so the op is never gone without it. `None` everywhere else.
+    pub finalization: Option<&'a UploadFinalization>,
     pub now: i64,
 }
 
@@ -1511,6 +1514,28 @@ pub struct LandingOutcome {
     pub parked_successors: Vec<(String, ParkReason)>,
     /// Successors the chain step gave the produced version.
     pub resolved_successors: usize,
+}
+
+/// A finalization journal row, with its payload marked completed: the landing writes it in
+/// its own transaction (Windows creates).
+fn insert_upload_finalization_conn(conn: &Connection, row: &UploadFinalization) -> Result<()> {
+    conn.execute(
+        "INSERT INTO upload_finalizations(op_id,local_file_id,server_file_id,target_path,payload_path,stamped)
+        VALUES(?1,?2,?3,?4,?5,0)",
+        params![
+            row.op_id,
+            row.local_file_id,
+            row.server_file_id,
+            row.target_path,
+            row.payload_path
+        ],
+    )?;
+    conn.execute(
+        "INSERT INTO staged_payloads(path,completed) VALUES(?1,1)
+        ON CONFLICT(path) DO UPDATE SET completed=1",
+        params![row.payload_path],
+    )?;
+    Ok(())
 }
 
 /// The contract of a file the database has no row for: our own new file.
@@ -3689,6 +3714,11 @@ impl StateDb {
                 params![path],
             )?;
         }
+        // Windows: the journal takes over the op's local finalization in the same commit, so a
+        // failure here rolls the whole landing back and the op is retried.
+        if let Some(finalization) = input.finalization {
+            insert_upload_finalization_conn(&tx, finalization)?;
+        }
         tx.commit()?;
         Ok(Some(outcome))
     }
@@ -4100,28 +4130,13 @@ impl StateDb {
         Ok(deleted)
     }
 
-    #[cfg(any(target_os = "windows", test))]
+    /// A finalization row as the landing journals it, with the op and its resume row gone.
+    /// Production writes it inside the landing (`apply_landing`); tests set up states with this.
+    #[cfg(test)]
     pub fn put_upload_finalization(&self, pending: &UploadFinalization) -> Result<()> {
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
-        tx.execute(
-            "INSERT INTO upload_finalizations(op_id,local_file_id,server_file_id,target_path,payload_path,stamped)
-            VALUES(?1,?2,?3,?4,?5,0)",
-            params![
-                pending.op_id,
-                pending.local_file_id,
-                pending.server_file_id,
-                pending.target_path,
-                pending.payload_path
-            ],
-        )?;
-        tx.execute(
-            "INSERT INTO staged_payloads(path,completed) VALUES(?1,1)
-            ON CONFLICT(path) DO UPDATE SET completed=1",
-            params![pending.payload_path],
-        )?;
-        // Once the server completed, only local finalization may be retried.
-        // Remove the upload before the next cancellable thumbnail await.
+        insert_upload_finalization_conn(&tx, pending)?;
         tx.execute("DELETE FROM operation_queue WHERE op_id=?1", params![pending.op_id])?;
         tx.execute("DELETE FROM upload_resume WHERE op_id=?1", params![pending.op_id])?;
         tx.commit()
@@ -8819,6 +8834,7 @@ mod tests {
             content_type: None,
             mime_type: None,
             completed_payload: None,
+            finalization: None,
             now: 20,
         };
 
@@ -8897,6 +8913,95 @@ mod tests {
             Some(2),
             "(b) round 3's equal-base rule"
         );
+    }
+
+    /// Review Important 1 (Windows): a create's finalization journal row is written in the
+    /// landing's own transaction. Either the landing commits with its journal row, or nothing
+    /// of it does and the op stays for the retry: here the journal write fails (a row already
+    /// holds its key, as a full disk would fail it), and the landing rolls back whole.
+    #[test]
+    fn a_landing_journals_its_finalization_in_its_own_transaction() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_own_row(&db, "provisional", FileStatus::Uploading, 10);
+        db.0.lock()
+            .unwrap()
+            .execute_batch(
+                r#"INSERT INTO operation_queue (op_id, kind, file_id, target_path, metadata_json, payload_path,
+                                               claim_id, attempts, max_attempts)
+                   VALUES ('create', 'upload_version', 'provisional', 'p.txt', '{"operation":"create_file"}',
+                           '/staged/create', 'claim-c', 0, 25);
+                   INSERT INTO upload_finalizations (op_id, local_file_id, server_file_id, target_path, payload_path)
+                   VALUES ('create', 'other', 'other', 'other.txt', '/staged/other');"#,
+            )
+            .unwrap();
+        db.put_upload_resume(&UploadResume {
+            op_id: "create".into(),
+            payload_path: "/staged/create".into(),
+            payload_size: 3,
+            payload_mtime_ns: 1,
+            upload_session_id: "session-c".into(),
+            server_file_id: "server".into(),
+            object_version_id: "object-1".into(),
+            chunk_size_bytes: 3,
+            chunk_count: 1,
+            acked_chunks: 1,
+            metadata_applied: true,
+            is_create: true,
+            completed_version: None,
+            completed_object_version_id: None,
+        })
+        .unwrap();
+        let finalization = UploadFinalization {
+            op_id: "create".into(),
+            local_file_id: "provisional".into(),
+            server_file_id: "server".into(),
+            target_path: "p.txt".into(),
+            payload_path: "/staged/create".into(),
+            stamped: false,
+        };
+        let input = LandingInput {
+            op_id: "create",
+            claim_id: Some("claim-c"),
+            write_id: None,
+            local_file_id: "provisional",
+            server_file_id: "server",
+            target_path: Some("p.txt"),
+            parent_id: None,
+            landed_base: None,
+            produced_version: 1,
+            produced_object_version_id: "object-1",
+            size_bytes: 3,
+            content_type: None,
+            mime_type: None,
+            completed_payload: Some("/staged/create"),
+            finalization: Some(&finalization),
+            now: 20,
+        };
+        let rekey = |op: &PendingOperation, _: &str| -> anyhow::Result<Option<String>> { Ok(op.metadata_json.clone()) };
+
+        assert!(db.apply_landing(&input, &rekey).is_err(), "the journal write fails");
+        assert!(
+            db.get_operation("create").unwrap().is_some(),
+            "nothing of the landing committed: the op stays for the retry"
+        );
+        assert!(db.get_upload_resume("create").unwrap().is_some(), "with its resume row");
+        assert!(db.get_file("provisional").unwrap().is_some(), "the provisional row stays");
+        assert!(db.get_file("server").unwrap().is_none(), "no server row");
+
+        db.0.lock()
+            .unwrap()
+            .execute("DELETE FROM upload_finalizations WHERE op_id = 'create'", [])
+            .unwrap();
+        assert!(db.apply_landing(&input, &rekey).unwrap().is_some(), "the retry lands");
+        assert_eq!(
+            db.upload_finalizations().unwrap(),
+            vec![finalization.clone()],
+            "the journal row is in the landing's commit"
+        );
+        assert!(db.get_operation("create").unwrap().is_none());
+        assert!(db.get_upload_resume("create").unwrap().is_none());
+        assert!(db.get_file("server").unwrap().is_some());
     }
 
     #[test]

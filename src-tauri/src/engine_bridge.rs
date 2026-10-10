@@ -1256,6 +1256,15 @@ impl EngineBridge {
         } else {
             None
         };
+        // Windows: a create's finalization journal row, read from local state only, and
+        // written in the landing's own transaction (the journal then owns the retry).
+        #[cfg(target_os = "windows")]
+        let finalization = match payload_path.as_deref() {
+            Some(path) => self.defer_local_upload_finalization(op, server_file_id, sync_root, Path::new(path))?,
+            None => None,
+        };
+        #[cfg(not(target_os = "windows"))]
+        let finalization: Option<crate::state_db::UploadFinalization> = None;
         let master_key = self.api.master_key();
         let landed = self.db.apply_landing(
             &crate::state_db::LandingInput {
@@ -1274,6 +1283,7 @@ impl EngineBridge {
                 mime_type: mime_type.as_deref(),
                 // Always the op's payload path, whatever `release` is.
                 completed_payload: payload_path.as_deref(),
+                finalization: finalization.as_ref(),
                 now: now_secs(),
             },
             &|queued, server_id| metadata_rekeyed_to(master_key, queued, server_id),
@@ -1287,8 +1297,6 @@ impl EngineBridge {
         }
         self.record_transfer_done(crate::transfer_progress::Direction::Up, server_file_id, size);
         if let Some(path) = payload_path.as_deref() {
-            #[cfg(target_os = "windows")]
-            self.defer_local_upload_finalization(op, server_file_id, sync_root, Path::new(path))?;
             // Task 1700: post-complete thumbnail work never fails the upload, but its
             // failure is surfaced on the outcome so a red run names the real error.
             let file_key = file_key_for(self.api.master_key(), server_file_id);
@@ -1546,7 +1554,9 @@ impl EngineBridge {
         Ok(())
     }
 
-    /// Journal native stamping before any cancellable post-completion work.
+    /// The journal row that defers a create's native stamping past the landing, or `None`
+    /// when there is nothing on disk to stamp. The landing writes it in its own transaction,
+    /// before any cancellable post-completion work, so the op is never gone without it.
     #[cfg(target_os = "windows")]
     fn defer_local_upload_finalization(
         &self,
@@ -1554,31 +1564,30 @@ impl EngineBridge {
         server_file_id: &str,
         sync_root: &Path,
         payload_path: &Path,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Option<crate::state_db::UploadFinalization>> {
         let is_create = op
             .metadata_json
             .as_deref()
             .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
             .is_some_and(|m| m["operation"].as_str() == Some("create_file"));
         if !is_create {
-            return Ok(());
+            return Ok(None);
         }
         let Some(target_path) = op.target_path.as_deref() else {
-            return Ok(());
+            return Ok(None);
         };
         let on_disk = local_file_path_under_sync_root(sync_root, target_path)?;
         if !on_disk.is_file() {
-            return Ok(());
+            return Ok(None);
         }
-        self.db.put_upload_finalization(&crate::state_db::UploadFinalization {
+        Ok(Some(crate::state_db::UploadFinalization {
             op_id: op.op_id.clone(),
             local_file_id: op.file_id.as_deref().unwrap_or(server_file_id).to_string(),
             server_file_id: server_file_id.to_string(),
             target_path: target_path.to_string(),
             payload_path: payload_path.to_string_lossy().into_owned(),
             stamped: false,
-        })?;
-        Ok(())
+        }))
     }
 
     fn decrypted_direct_shared_root_name(&self, root: &SharedRootMapping) -> Option<String> {
