@@ -3142,6 +3142,8 @@ async fn take_slot_and_stop_engine_for_sign_out(
     // in-memory) keeps the gate closed until the process restarts, which
     // is exactly what the error message tells the user to do.
     let mut engine_slot = acct.engine.lock().await;
+    #[cfg(all(test, target_os = "macos"))]
+    signal_sign_out_holds_the_engine_slot();
     if acct.engine_stop_unconfirmed.load(std::sync::atomic::Ordering::SeqCst) {
         drop(engine_slot);
         tracing::error!(
@@ -5425,19 +5427,27 @@ tokio::task_local! {
     static FINDER_WAIT_OVERRIDE: std::time::Duration;
 }
 
-// A test learns the moment `lock_vault` holds the engine slot from this signal, never by polling the
-// slot (task 1891): anything else that briefly holds it looks the same to a poll, such as the stand-in
-// reconciler's own look at the slot when it handles the Lock, and a start that was released on that
-// poll gets the slot BEFORE the lock does. Scoped to the future that runs the command, like the waits
-// above, and compiled out of every build that is not a macOS test build.
+// A test learns the moment `lock_vault` (or a sign-out) holds the engine slot from these signals, never by
+// polling the slot (task 1891): anything else that briefly holds it looks the same to a poll, such as the
+// stand-in reconciler's own look at the slot when it handles the Lock or the removal, and a start that was
+// released on that poll gets the slot BEFORE the lock does. Each is scoped to the future that runs the command,
+// like the waits above, only signals (it never waits, and it never holds anything), and is compiled out of
+// every build that is not a macOS test build.
 #[cfg(all(test, target_os = "macos"))]
 tokio::task_local! {
     static LOCK_HOLDS_THE_ENGINE_SLOT: std::sync::Arc<tokio::sync::Notify>;
+    // A channel, because the sign-out test runs the command on its own thread and waits for this on another.
+    static SIGN_OUT_HOLDS_THE_ENGINE_SLOT: std::sync::mpsc::Sender<()>;
 }
 
 #[cfg(all(test, target_os = "macos"))]
 fn signal_lock_holds_the_engine_slot() {
     let _ = LOCK_HOLDS_THE_ENGINE_SLOT.try_with(|signal| signal.notify_one());
+}
+
+#[cfg(all(test, target_os = "macos"))]
+fn signal_sign_out_holds_the_engine_slot() {
+    let _ = SIGN_OUT_HOLDS_THE_ENGINE_SLOT.try_with(|signal| signal.send(()));
 }
 
 #[cfg(target_os = "macos")]
@@ -20633,14 +20643,24 @@ mod finder_lock_and_sign_out_tests {
         rt.block_on(fx.finish());
     }
 
-    /// Returns once `lock_vault` has the engine slot (task 1891): its own signal, not a look at the slot. A look
-    /// at the slot (`try_lock`) cannot tell the lock from anyone else holding it for a moment, and the stand-in
+    /// Drives `command` (a lock, here) until it has the engine slot, and returns with `command` still pending, to be
+    /// awaited next (task 1891). It waits for the command's own signal, not for a look at the slot: a look
+    /// (`try_lock`) cannot tell the command from anyone else holding the slot for a moment, and the stand-in
     /// reconciler does exactly that when it handles the Lock, so a start released by a look could get the slot
-    /// first, with the old engine still in it. Fails the test instead of hanging it if the lock never takes the slot.
-    async fn wait_until_the_lock_holds_the_slot(signal: &tokio::sync::Notify) {
-        tokio::time::timeout(Duration::from_secs(10), signal.notified())
-            .await
-            .expect("the lock never took the engine slot");
+    /// first, with the old engine still in it. A command that RETURNS before it signalled never took the slot (it
+    /// failed first): the test fails at once with the command's own answer, not later with a message about a timeout.
+    /// A command that does neither within 60 s fails the test instead of hanging it.
+    async fn until_it_holds_the_slot<F>(what: &str, signal: &tokio::sync::Notify, mut command: std::pin::Pin<&mut F>)
+    where
+        F: std::future::Future,
+        F::Output: std::fmt::Debug,
+    {
+        tokio::select! {
+            biased;
+            () = signal.notified() => {}
+            answer = &mut command => panic!("{what} returned before it took the engine slot: {answer:?}"),
+            () = tokio::time::sleep(Duration::from_secs(60)) => panic!("{what} neither took the engine slot nor returned in 60 s"),
+        }
     }
 
     /// The same ordering as a race, end to end: starts that are waiting for the engine slot while a
@@ -20656,9 +20676,11 @@ mod finder_lock_and_sign_out_tests {
             fx.install_keys();
             fx.install_ticking_engine().await; // abort() holds the slot for its 3 s window
             let lock_holds_the_slot = Arc::new(tokio::sync::Notify::new());
-            let queued = async {
-                wait_until_the_lock_holds_the_slot(&lock_holds_the_slot).await;
-                (0..8)
+            let (locked, starts) = {
+                let lock = LOCK_HOLDS_THE_ENGINE_SLOT.scope(lock_holds_the_slot.clone(), lock_vault(fx.state()));
+                tokio::pin!(lock);
+                until_it_holds_the_slot("the lock", &lock_holds_the_slot, lock.as_mut()).await;
+                let starts = (0..8)
                     .map(|_| {
                         let acct = fx.acct.clone();
                         tokio::spawn(async move {
@@ -20668,12 +20690,9 @@ mod finder_lock_and_sign_out_tests {
                             keys.is_err()
                         })
                     })
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>();
+                (lock.await, starts)
             };
-            let (locked, starts) = tokio::join!(
-                LOCK_HOLDS_THE_ENGINE_SLOT.scope(lock_holds_the_slot.clone(), lock_vault(fx.state())),
-                queued
-            );
             locked.expect("the lock succeeds");
             for start in starts {
                 assert!(
@@ -20701,9 +20720,11 @@ mod finder_lock_and_sign_out_tests {
             fx.install_ticking_engine().await; // abort() holds the slot for its 3 s window
             let handle = fx.app.handle().clone();
             let lock_holds_the_slot = Arc::new(tokio::sync::Notify::new());
-            let queued = async {
-                wait_until_the_lock_holds_the_slot(&lock_holds_the_slot).await;
-                (0..8)
+            let (locked, starts) = {
+                let lock = LOCK_HOLDS_THE_ENGINE_SLOT.scope(lock_holds_the_slot.clone(), lock_vault(fx.state()));
+                tokio::pin!(lock);
+                until_it_holds_the_slot("the lock", &lock_holds_the_slot, lock.as_mut()).await;
+                let starts = (0..8)
                     .map(|_| {
                         let (acct, handle, state_dir) = (fx.acct.clone(), handle.clone(), state_dir.clone());
                         tokio::spawn(async move {
@@ -20721,12 +20742,9 @@ mod finder_lock_and_sign_out_tests {
                             )
                         })
                     })
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>();
+                (lock.await, starts)
             };
-            let (locked, starts) = tokio::join!(
-                LOCK_HOLDS_THE_ENGINE_SLOT.scope(lock_holds_the_slot.clone(), lock_vault(fx.state())),
-                queued
-            );
             locked.expect("the lock succeeds");
             for start in starts {
                 assert_eq!(
@@ -21488,11 +21506,13 @@ mod finder_lock_and_sign_out_tests {
     /// be held and the keys still in memory; released, the sign-out clears them and only then frees the slot.
     #[test]
     fn sign_out_holds_the_engine_slot_until_the_session_is_cleared() {
-        // Fix round 2, item 4 (re-review N2): explicit signals, no timing sample. (1) The engine ignores the cancel, so
-        // the sign-out holds the slot for at least `abort()`'s 3 s graceful window: the slot is seen taken. (2) This
-        // thread then holds the session mutex, and waits for the sign-out's next generation move: the one
-        // `clear_session_holding_slot` makes right before it takes the session mutex to clear it. At that point the
-        // sign-out is at its clear, blocked on this thread; the slot must still be held.
+        // Fix round 2, item 4 (re-review N2): explicit signals, no timing sample. (1) The sign-out says itself that it
+        // holds the slot (task 1891: a `try_lock` poll would also be satisfied by the stand-in reconciler's look at the
+        // slot, which comes before the sign-out takes it, and this thread would then freeze the session mutex too
+        // early). The engine ignores the cancel, so the sign-out then holds the slot for at least `abort()`'s 3 s
+        // graceful window. (2) This thread then holds the session mutex, and waits for the sign-out's next generation
+        // move: the one `clear_session_holding_slot` makes right before it takes the session mutex to clear it. At
+        // that point the sign-out is at its clear, blocked on this thread; the slot must still be held.
         let _ = DesktopConfig::load();
         let mut fx = Fixture::new("t12-signout-freeze");
         let rt = multi_thread_runtime();
@@ -21511,13 +21531,28 @@ mod finder_lock_and_sign_out_tests {
         });
         let acct = fx.acct.clone();
         let state = fx.state();
+        let (sign_out_holds_the_slot, slot_taken) = std::sync::mpsc::channel::<()>();
         let (slot_held_at_the_clear, signed_out) = std::thread::scope(|scope| {
-            let signing_out =
-                scope.spawn(move || runtime().block_on(with_the_shared_state_dir(clear_session_impl(&state, false))));
+            let signing_out = scope.spawn(move || {
+                runtime().block_on(SIGN_OUT_HOLDS_THE_ENGINE_SLOT.scope(
+                    sign_out_holds_the_slot,
+                    with_the_shared_state_dir(clear_session_impl(&state, false)),
+                ))
+            });
             let deadline = Instant::now() + Duration::from_secs(60);
-            while acct.engine.try_lock().is_ok() {
-                assert!(Instant::now() < deadline, "the sign-out never took the engine slot");
-                std::thread::sleep(Duration::from_millis(1));
+            // Wait for the sign-out's own signal. A sign-out that ENDS first never took the slot (it failed before
+            // it): fail at once with its answer, not later with a message about a wait.
+            loop {
+                match slot_taken.recv_timeout(Duration::from_millis(5)) {
+                    Ok(()) => break,
+                    Err(_) if signing_out.is_finished() => {
+                        panic!(
+                            "the sign-out returned before it took the engine slot: {:?}",
+                            signing_out.join().unwrap()
+                        )
+                    }
+                    Err(_) => assert!(Instant::now() < deadline, "the sign-out never took the engine slot"),
+                }
             }
             // The sign-out's start already moved the generation (before it took the slot); its next move is the clear's.
             let before_the_clear = acct.session_generation();
