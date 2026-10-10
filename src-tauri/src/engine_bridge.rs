@@ -6756,14 +6756,20 @@ fn apply_sync_op(
             }
         }
         "file_create" | "folder_create" | "file_update" => {
-            // §6.3.2 (I-3, plan Spec issue 9): a file op without `version_number` cannot say
-            // which version it made (a legacy chunked replace looks like a create), so the
-            // snapshot settles it. A file op on a row this Mac already holds is a content op:
-            // the row's version is no longer a snapshot fill (§6.1).
+            // §6.3.2 (I-3): a content op without `version_number` cannot say which version it
+            // made (a legacy chunked replace looks like a create), so the snapshot settles it.
+            // A content op on a row this Mac already holds means the row's version is no
+            // longer a snapshot fill (§6.1). A file op is a content op when it is a create, or
+            // carries a version or a size; the server's thumbnail-flag ops (`has_thumbnail`,
+            // `has_large_thumbnail`) carry neither, and are not.
             #[cfg(target_os = "macos")]
-            let versionless = op.op_type != "folder_create" && payload["version_number"].as_i64().is_none();
+            let content = op.op_type == "file_create"
+                || (op.op_type == "file_update"
+                    && (payload["version_number"].as_i64().is_some() || payload["size_bytes"].as_i64().is_some()));
             #[cfg(target_os = "macos")]
-            let touches_existing_row = op.op_type != "folder_create" && bridge.db().get_file(id)?.is_some();
+            let versionless = content && payload["version_number"].as_i64().is_none();
+            #[cfg(target_os = "macos")]
+            let touches_existing_row = content && bridge.db().get_file(id)?.is_some();
             let row = synthesize_op_row(bridge, id, op, payload["name_encrypted"].as_str());
             // For a CREATE there is no existing local row, so the parent path must
             // come from the op's `parent_id` resolved against the local mirror —
@@ -16475,6 +16481,59 @@ mod tests {
         assert!(filled("accepted"));
         fp_save(&bridge, dir.path(), "accepted", "notes.txt", b"edit", "1");
         assert!(!filled("accepted"), "an accepted write clears it");
+        drop(server.finish());
+    }
+
+    /// §6.1 / §6.3.2: only a content op asks for a snapshot or clears `version_filled`. The
+    /// server's thumbnail-flag ops (`{id, has_thumbnail}`) carry neither `version_number` nor
+    /// `size_bytes`, and follow nearly every image upload; a versionless op that does carry
+    /// content still does both.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_thumbnail_flag_op_is_not_a_content_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [81u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_version_zero_row(&bridge, &server, "pictured", FileStatus::Local);
+        let snapshot = crate::api_client::SyncSnapshot {
+            seq_id: 2,
+            nodes: vec![node(&master_key, "pictured", "notes.txt", 1, false)],
+        };
+        apply_snapshot(&bridge, &sync_root, &snapshot, now_secs(), now_secs(), &mut Vec::new()).unwrap();
+        assert_eq!(bridge.db.peek_resnapshot_request().unwrap(), None);
+        let filled = || bridge.db.item_presentation("pictured").unwrap().unwrap().version_filled;
+        assert!(filled());
+
+        for (seq_id, flag) in [(3, "has_thumbnail"), (4, "has_large_thumbnail")] {
+            let thumbnail = crate::api_client::SyncOp {
+                seq_id,
+                op_type: "file_update".into(),
+                payload: serde_json::json!({ "id": "pictured", flag: true }),
+            };
+            apply_sync_op(&bridge, &sync_root, &thumbnail, now_secs(), &mut Vec::new()).unwrap();
+            assert!(filled(), "a {flag} op is not a content op: the fill stands");
+            assert_eq!(
+                bridge.db.peek_resnapshot_request().unwrap(),
+                None,
+                "a {flag} op asks for no snapshot"
+            );
+        }
+
+        // A versionless op that carries content (a legacy replace's size) still does both.
+        let content = crate::api_client::SyncOp {
+            seq_id: 5,
+            op_type: "file_update".into(),
+            payload: serde_json::json!({ "id": "pictured", "size_bytes": 12 }),
+        };
+        apply_sync_op(&bridge, &sync_root, &content, now_secs(), &mut Vec::new()).unwrap();
+        assert!(!filled(), "a versionless content op clears the fill");
+        assert!(
+            bridge.db.peek_resnapshot_request().unwrap().is_some(),
+            "a versionless content op asks for a snapshot"
+        );
         drop(server.finish());
     }
 }
