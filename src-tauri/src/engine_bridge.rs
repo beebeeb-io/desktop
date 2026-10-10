@@ -537,6 +537,7 @@ impl EngineBridge {
             let result = self
                 .execute_operation(&claimed, sync_root, now, &mut outcome.post_complete_errors)
                 .await;
+            self.seam("outcome:before_tx");
             match result {
                 Ok(release) => {
                     if !self
@@ -12798,6 +12799,8 @@ mod tests {
         requests: Vec<(String, String)>,
         /// `POST /api/v1/uploads/init` answers only after this delay.
         delay_init: Option<Duration>,
+        /// file id -> the status line its `uploads/init` is refused with.
+        refuse_init: HashMap<String, &'static str>,
     }
 
     /// Upload mock that behaves like the server's version check: a replace
@@ -12922,6 +12925,11 @@ mod tests {
         let path = request.path.as_str();
         if method == "POST" && path == "/api/v1/uploads/init" {
             let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            if let Some(status) = body["file_id"].as_str().and_then(|id| s.refuse_init.get(id)).copied() {
+                let code = status.split(' ').next().and_then(|code| code.parse().ok()).unwrap_or(0);
+                s.inits.push((body, code));
+                return http_json(status, serde_json::json!({ "error": "refused" }));
+            }
             let file_id = match body["file_id"].as_str() {
                 Some(id) => {
                     if let Some(file) = s.files.get(id)
@@ -13476,6 +13484,16 @@ mod tests {
         let master_key = [42u8; 32];
         let server = VersionedServerMock::start();
         server.state.lock().unwrap().delay_init = Some(Duration::from_millis(400));
+        // The purged op's first chunk would fail (its init is the first: session-1). With the
+        // guard its attempt ends at the resume write and sends no chunk. Without it, the
+        // attempt writes a resume row for the deleted op, fails at the chunk and leaves
+        // that row behind, because a failed attempt clears nothing.
+        server
+            .state
+            .lock()
+            .unwrap()
+            .fail_first_chunk_once
+            .insert("session-1".into());
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
         seed_uploaded_row(&bridge, &server, "revoked");
         queue_save(
@@ -13527,11 +13545,112 @@ mod tests {
         let moved: Vec<&str> = logs.lines().filter(|line| line.contains("queue state moved")).collect();
         assert_eq!(moved.len(), 1, "one line for the purged attempt:\n{logs}");
         assert!(moved[0].contains(&w.op_id) && moved[0].contains("resume"), "{logs}");
+        assert!(
+            !state
+                .requests
+                .iter()
+                .any(|(_, path)| path.starts_with("/api/v1/uploads/session-1/")),
+            "the purged op sends no chunk and no complete: {:?}",
+            state.requests
+        );
         assert_eq!(
             state.latest_plaintext("kept", master_key),
             b"the second file's save",
             "the other file's save is untouched and lands"
         );
+    }
+
+    /// What one refused attempt left behind when a purge removed its op between the
+    /// failure and the runner's record of it.
+    struct PurgedAttempt {
+        op_id: String,
+        outcome: TransferLoopOutcome,
+        logs: String,
+        init_statuses: Vec<u16>,
+        op_left: bool,
+    }
+
+    /// One queued save whose `init` the server refuses with `refusal`. The share it
+    /// belongs to is revoked after the attempt failed and before the runner records the
+    /// outcome (the `outcome:before_tx` seam), from another thread.
+    async fn refused_attempt_purged_before_its_outcome(refusal: &'static str) -> PurgedAttempt {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let server = VersionedServerMock::start();
+        server
+            .state
+            .lock()
+            .unwrap()
+            .refuse_init
+            .insert("purged".into(), refusal);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [43u8; 32]);
+        seed_uploaded_row(&bridge, &server, "purged");
+        queue_save(&bridge, dir.path(), "purged", "notes.txt", b"a save in a share", "1");
+        let op_id = bridge.db.list_operations_for_file("purged").unwrap().remove(0).op_id;
+        let mut contract = bridge.db.get_file_contract_state("purged").unwrap().unwrap();
+        contract.namespace = Namespace::SharedWithMe;
+        contract.shared_root_id = Some("purged-root".into());
+        bridge.db.set_file_contract_state(&contract).unwrap();
+        let db = bridge.db.clone();
+        bridge.seams.arm("outcome:before_tx", move || {
+            run_competing(move || {
+                db.purge_revoked_shared_content(&[]).unwrap();
+            })
+        });
+
+        let mut outcome = None;
+        let logs = capture_logs_async(async {
+            outcome = Some(bridge.process_due_operations(&sync_root, now_secs()).await.unwrap());
+        })
+        .await;
+        let op_left = bridge.db.get_operation(&op_id).unwrap().is_some();
+        let state = server.finish();
+        PurgedAttempt {
+            op_id,
+            outcome: outcome.unwrap(),
+            logs,
+            init_statuses: state.inits.iter().map(|(_, status)| *status).collect(),
+            op_left,
+        }
+    }
+
+    fn assert_moved_once(run: &PurgedAttempt, step: &str) {
+        assert!(!run.op_left, "a purged op is never re-inserted");
+        assert!(
+            run.outcome.paused_op_ids.is_empty()
+                && run.outcome.retried_op_ids.is_empty()
+                && run.outcome.completed_op_ids.is_empty(),
+            "an attempt whose op moved is not reported: paused {:?}, retried {:?}, completed {:?}",
+            run.outcome.paused_op_ids,
+            run.outcome.retried_op_ids,
+            run.outcome.completed_op_ids
+        );
+        let moved: Vec<&str> = run
+            .logs
+            .lines()
+            .filter(|line| line.contains("queue state moved"))
+            .collect();
+        assert_eq!(moved.len(), 1, "one line for the purged attempt:\n{}", run.logs);
+        assert!(
+            moved[0].contains(&run.op_id) && moved[0].contains(&format!("step=\"{step}\"")),
+            "{}",
+            run.logs
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pause_for_an_op_purged_under_its_claim_writes_nothing() {
+        let run = refused_attempt_purged_before_its_outcome("403 Forbidden").await;
+        assert_eq!(run.init_statuses, vec![403], "the attempt was refused as a pause");
+        assert_moved_once(&run, "pause");
+    }
+
+    #[tokio::test]
+    async fn an_attempt_for_an_op_purged_under_its_claim_writes_nothing() {
+        let run = refused_attempt_purged_before_its_outcome("500 Internal Server Error").await;
+        assert_eq!(run.init_statuses, vec![500], "the attempt failed as a retry");
+        assert_moved_once(&run, "attempt");
     }
 
     #[tokio::test]

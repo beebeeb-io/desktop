@@ -695,7 +695,7 @@ pub struct PendingOperation {
 
 /// Drop every persisted upload session whose queued op no longer exists.
 /// Called by the bulk `operation_queue` purges so a session never outlives
-/// its op (`remove_operation` already clears its own row).
+/// its op (`finish_claimed` already clears its own row).
 fn drop_orphaned_upload_resumes(conn: &Connection) -> Result<usize> {
     conn.execute(
         "DELETE FROM upload_resume WHERE op_id NOT IN (SELECT op_id FROM operation_queue)",
@@ -3199,6 +3199,9 @@ impl StateDb {
         })
     }
 
+    /// Unguarded; the runner records an attempt with [`Self::record_attempt_claimed`]
+    /// (spec §8.7 S2). Kept for tests that set up queue states.
+    #[cfg(test)]
     pub fn record_operation_attempt(
         &self,
         op_id: &str,
@@ -3221,6 +3224,9 @@ impl StateDb {
         Ok(())
     }
 
+    /// Unguarded; the runner records a pause with [`Self::record_pause_claimed`]
+    /// (spec §8.7 S2). Kept for tests that set up queue states.
+    #[cfg(test)]
     pub fn record_operation_pause(
         &self,
         op_id: &str,
@@ -3622,6 +3628,9 @@ impl StateDb {
         tx.commit()
     }
 
+    /// Unguarded; the runner removes an op with [`Self::finish_claimed`] (spec §8.7
+    /// S2). Kept for tests that set up queue states.
+    #[cfg(test)]
     pub fn remove_operation(&self, op_id: &str) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.execute("DELETE FROM operation_queue WHERE op_id = ?1", params![op_id])?;
@@ -6219,6 +6228,29 @@ mod tests {
             "an upload waits for an earlier restore"
         );
         assert!(matches!(db.claim_operation("r", 1).unwrap(), ClaimOutcome::Claimed(_)));
+
+        // The watcher's and Windows' uploads carry no write id. A restore does not wait
+        // for them, and they do not wait for a restore: round 3's upload-only order.
+        db.enqueue_operation(&queued("g-u0", OperationKind::UploadVersion, "g", None))
+            .unwrap();
+        db.enqueue_operation(&queued("g-r", OperationKind::RestoreVersion, "g", None))
+            .unwrap();
+        db.enqueue_operation(&queued("g-u1", OperationKind::UploadVersion, "g", None))
+            .unwrap();
+        assert!(
+            matches!(db.claim_operation("g-r", 1).unwrap(), ClaimOutcome::Claimed(_)),
+            "a restore does not wait for an earlier upload without a write id"
+        );
+        let ClaimOutcome::Claimed(g_u0) = db.claim_operation("g-u0", 1).unwrap() else {
+            panic!("g-u0 is first")
+        };
+        assert!(db.finish_claimed("g-u0", &g_u0.claim_id, None).unwrap());
+        assert!(
+            matches!(db.claim_operation("g-u1", 1).unwrap(), ClaimOutcome::Claimed(_)),
+            "an upload without a write id does not wait for an earlier restore, still queued"
+        );
+        assert!(db.get_operation("g-r").unwrap().is_some());
+
         assert!(matches!(db.claim_operation("gone", 1).unwrap(), ClaimOutcome::Gone));
     }
 
@@ -6239,6 +6271,33 @@ mod tests {
         db.track_staged_payload("/staged/free", None, true).unwrap();
         db.track_staged_payload("/staged/referenced", None, true).unwrap();
         db.track_staged_payload("/staged/unfinished", None, false).unwrap();
+        // A copy only a resume row references (Keep Mine's one-shot op has no queue row),
+        // and one only a Windows finalization references.
+        db.put_upload_resume(&UploadResume {
+            op_id: "inline".into(),
+            payload_path: "/staged/resumed".into(),
+            payload_size: 1,
+            payload_mtime_ns: 1,
+            upload_session_id: "session".into(),
+            server_file_id: "f".into(),
+            object_version_id: "object".into(),
+            chunk_size_bytes: 1,
+            chunk_count: 1,
+            acked_chunks: 0,
+            metadata_applied: false,
+            is_create: false,
+        })
+        .unwrap();
+        db.track_staged_payload("/staged/resumed", None, true).unwrap();
+        db.put_upload_finalization(&UploadFinalization {
+            op_id: "finalizing".into(),
+            local_file_id: "f".into(),
+            server_file_id: "f".into(),
+            target_path: "a.txt".into(),
+            payload_path: "/staged/finalizing".into(),
+            stamped: false,
+        })
+        .unwrap();
 
         let repair = db.engine_start_repair().unwrap();
 
