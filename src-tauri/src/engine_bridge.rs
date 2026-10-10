@@ -16328,6 +16328,66 @@ mod tests {
         drop(server.finish());
     }
 
+    /// The phone-replace path of the device run (D8b): the node is newer than the row, so the
+    /// `Local` row continues past the short-circuit into the metadata refresh after the raise.
+    /// The raise's facts hold after it.
+    #[cfg(target_os = "macos")]
+    #[cfg(unix)] // asserts a token through `held_content_version` and `land_one_save`
+    #[tokio::test]
+    async fn i3_a_newer_versionless_replace_reaches_the_disk_through_the_metadata_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [82u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        let token = land_one_save(&bridge, &server, dir.path(), &sync_root, "replaced").await;
+        let landed = bridge.db.get_file_contract_state("replaced").unwrap().unwrap();
+        assert_eq!((landed.current_version, landed.local_base_version), (2, 2));
+        assert!(landed.current_object_version_id.is_some());
+        let replace = crate::api_client::SyncOp {
+            seq_id: 9,
+            op_type: "file_create".into(),
+            payload: serde_json::json!({
+                "id": "replaced",
+                "name_encrypted": enc_name(&master_key, "replaced", "notes.txt"),
+                "parent_id": null,
+                "size_bytes": 12
+            }),
+        };
+        apply_sync_op(&bridge, &sync_root, &replace, now_secs(), &mut Vec::new()).unwrap();
+        assert_eq!(held_content_version(&bridge, "replaced"), token);
+        let mut newer = node(&master_key, "replaced", "notes.txt", 3, false);
+        newer["updated_at"] = serde_json::json!(now_secs() + 60);
+        newer["size_bytes"] = serde_json::json!(12);
+        let done = crate::api_client::SyncSnapshot {
+            seq_id: 11,
+            nodes: vec![newer],
+        };
+        apply_snapshot(&bridge, &sync_root, &done, now_secs(), now_secs(), &mut Vec::new()).unwrap();
+        assert_eq!(
+            held_content_version(&bridge, "replaced"),
+            "3",
+            "the system re-downloads the phone's bytes"
+        );
+        let contract = bridge.db.get_file_contract_state("replaced").unwrap().unwrap();
+        assert_eq!(contract.current_version, 3);
+        assert_eq!(
+            contract.local_base_version, 2,
+            "the bytes on disk are still version 2's"
+        );
+        assert_eq!(
+            contract.current_object_version_id, None,
+            "the snapshot names no object version, and version 2's is not current"
+        );
+        assert!(
+            !bridge.db.item_presentation("replaced").unwrap().unwrap().version_filled,
+            "a raise is not a fill"
+        );
+        assert_eq!(bridge.db.get_file("replaced").unwrap().unwrap().size_bytes, 12);
+        drop(server.finish());
+    }
+
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn base_pending_parks_after_ten_successful_snapshots_without_the_file() {
