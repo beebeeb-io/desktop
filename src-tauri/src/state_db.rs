@@ -753,6 +753,58 @@ pub struct UploadResume {
     /// The op created a NEW server file (no prior version): on abandonment
     /// its `is_uploading` row is an orphan the client may trash.
     pub is_create: bool,
+    /// §8.6 rule 1: the version `complete` produced, recorded before any local
+    /// bookkeeping. A row with it is never abandoned and lands without the network.
+    pub completed_version: Option<i64>,
+    /// The object version id that completion produced.
+    pub completed_object_version_id: Option<String>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many of this thread's next landings fail, and whether as "database is locked".
+    /// A thread-local, so parallel tests never share it: under `#[tokio::test]` the landing
+    /// runs on the test's own thread.
+    static FAIL_LANDINGS: std::cell::Cell<(u32, bool)> = const { std::cell::Cell::new((0, false)) };
+}
+
+/// T61, P9: the next `n` landings on this thread fail with a database error.
+#[cfg(test)]
+pub(crate) fn fail_next_landings_for_test(n: u32) {
+    FAIL_LANDINGS.with(|left| left.set((n, false)));
+}
+
+/// m-11's pause filter: the next `n` landings on this thread fail as SQLite's "database is
+/// locked", which `classify_operation_error` reads as `Locked`, a pause.
+#[cfg(test)]
+pub(crate) fn fail_next_landings_as_locked_for_test(n: u32) {
+    FAIL_LANDINGS.with(|left| left.set((n, true)));
+}
+
+/// One injected landing failure, if this thread has one left.
+#[cfg(test)]
+fn injected_landing_failure() -> Option<rusqlite::Error> {
+    FAIL_LANDINGS.with(|left| {
+        let (n, locked) = left.get();
+        if n == 0 {
+            return None;
+        }
+        left.set((n - 1, locked));
+        // Not `InvalidQuery`: it displays as "Query is not read-only", which
+        // `classify_operation_error` pauses as Permission, and a paused op is never listed
+        // again. A full disk classifies as a retryable failure.
+        Some(if locked {
+            rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                Some("database is locked".into()),
+            )
+        } else {
+            rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL),
+                Some("injected landing failure".into()),
+            )
+        })
+    })
 }
 
 /// Who queued a File Provider upload (plan Spec issue 2).
@@ -934,6 +986,103 @@ fn record_local_write_conn<C: std::ops::Deref<Target = Connection>>(
     Ok(())
 }
 
+/// [`StateDb::delete_file`] on an open connection or transaction.
+fn delete_file_conn<C: std::ops::Deref<Target = Connection>>(conn: &C, file_id: &str) -> Result<()> {
+    // Task 1697: capture the parent BEFORE the delete — the change row is
+    // what tells the replica's materialized filter where the item was.
+    let old_parent: Option<String> = conn
+        .query_row(
+            "SELECT parent_id FROM files WHERE file_id = ?1",
+            params![file_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    conn.execute("DELETE FROM files WHERE file_id = ?1", params![file_id])?;
+    record_file_change_conn(conn, file_id, FpChangeKind::Deleted, old_parent)?;
+    Ok(())
+}
+
+/// [`StateDb::set_file_contract_state`] on an open connection or transaction.
+fn set_file_contract_state_conn<C: std::ops::Deref<Target = Connection>>(
+    conn: &C,
+    state: &FileContractState,
+) -> Result<()> {
+    // Task 1697: the contract write is what moves an item BETWEEN
+    // containers (parent change) — record a reparent with the old parent
+    // so the materialized filter can test old-or-new. Other contract
+    // metadata changes (kind, current_version, content_type) record a
+    // plain modified. A no-op write records nothing.
+    let old: Option<(Option<String>, String, String, i64)> = conn
+        .query_row(
+            "SELECT parent_id, item_kind, content_type, current_version
+             FROM files WHERE file_id = ?1",
+            params![state.file_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+    conn.execute(
+        "UPDATE files SET
+           namespace = ?2,
+           parent_id = ?3,
+           shared_root_id = ?4,
+           share_id = ?5,
+           permission_bits = ?6,
+           item_kind = ?7,
+           content_type = ?8,
+           current_version = ?9,
+           current_object_version_id = ?10,
+           local_base_version = ?11,
+           local_hash = ?12,
+           cache_path = ?13,
+           cache_bytes = ?14,
+           pin_state = ?15,
+           inherited_pin_state = ?16,
+           last_sync_at = ?17,
+           owner_email = ?18
+         WHERE file_id = ?1",
+        params![
+            state.file_id,
+            state.namespace.as_str(),
+            state.parent_id,
+            state.shared_root_id,
+            state.share_id,
+            state.permission_bits,
+            state.item_kind.as_str(),
+            state.content_type,
+            state.current_version,
+            state.current_object_version_id,
+            state.local_base_version,
+            state.local_hash,
+            state.cache_path,
+            state.cache_bytes,
+            state.pin_state.as_str(),
+            state.inherited_pin_state.as_str(),
+            state.last_sync_at,
+            state.owner_email,
+        ],
+    )?;
+    if let Some((old_parent, old_kind, old_content_type, old_version)) = old {
+        let parent_changed = old_parent != state.parent_id;
+        let metadata_changed = old_kind != state.item_kind.as_str()
+            || old_content_type != state.content_type.clone().unwrap_or_default()
+            || old_version != state.current_version;
+        if parent_changed {
+            record_file_change_conn(conn, &state.file_id, FpChangeKind::Reparented, old_parent)?;
+        } else if metadata_changed {
+            record_file_change_conn(conn, &state.file_id, FpChangeKind::Modified, None)?;
+        }
+    }
+    Ok(())
+}
+
 fn get_file_contract_state_conn(conn: &Connection, file_id: &str) -> Result<Option<FileContractState>> {
     let mut stmt = conn.prepare(
         "SELECT file_id, namespace, parent_id, shared_root_id, share_id, permission_bits,
@@ -1010,11 +1159,13 @@ fn finish_wait(tx: rusqlite::Transaction<'_>, took_over: Option<TookOver>) -> Re
 /// The park of an op that holds no claim (spec §8.4): attempts used up, the reason
 /// recorded, the bytes kept. The claim's parks and the snapshot count's both use it, so
 /// a later save on the parked write's token takes its role the same way at its claim.
+/// An op whose completion is recorded is never parked (§8.6 rule 6): 0 rows.
 fn park_unclaimed_conn(conn: &Connection, op_id: &str, reason: ParkReason, now: i64) -> Result<usize> {
     conn.execute(
         "UPDATE operation_queue
          SET attempts = max_attempts, last_error = ?2, last_error_class = ?2, updated_at = ?3
-         WHERE op_id = ?1",
+         WHERE op_id = ?1
+           AND NOT EXISTS (SELECT 1 FROM upload_resume WHERE op_id = ?1 AND completed_version IS NOT NULL)",
         params![op_id, reason.as_str(), now],
     )
 }
@@ -1027,7 +1178,11 @@ fn park_in_claim(
     took_over: Option<TookOver>,
     now: i64,
 ) -> Result<ClaimOutcome> {
-    park_unclaimed_conn(&tx, &op.op_id, reason, now)?;
+    // The claim never parks an op whose completion is recorded (it skips steps 3–4 for it);
+    // were one to reach here, the park refuses it and it waits, which is not an attempt.
+    if park_unclaimed_conn(&tx, &op.op_id, reason, now)? != 1 {
+        return finish_wait(tx, took_over);
+    }
     tx.commit()?;
     Ok(ClaimOutcome::Parked {
         op_id: op.op_id.clone(),
@@ -1320,6 +1475,65 @@ impl ParkReason {
             ParkReason::PredecessorLost => "predecessor_lost",
             ParkReason::RekeyFailed => "rekey_failed",
         }
+    }
+}
+
+/// Everything one landing writes (spec §8.6.2, §8.7 S1.2), for [`StateDb::apply_landing`].
+#[derive(Debug)]
+pub struct LandingInput<'a> {
+    pub op_id: &'a str,
+    /// The runner's claim. `None` is Keep Mine's inline run, outside the queue.
+    pub claim_id: Option<&'a str>,
+    /// A File Provider write's id. Everything the landing does beyond round 3 is keyed on it.
+    pub write_id: Option<&'a str>,
+    pub local_file_id: &'a str,
+    pub server_file_id: &'a str,
+    pub target_path: Option<&'a str>,
+    pub parent_id: Option<&'a str>,
+    /// The base the landed upload was sent with.
+    pub landed_base: Option<i64>,
+    /// The version and object version id the server's completion produced (§8.6.1).
+    pub produced_version: i64,
+    pub produced_object_version_id: &'a str,
+    pub size_bytes: i64,
+    pub content_type: Option<&'a str>,
+    /// The server's `mime_type`: the fallback for `content_type`.
+    pub mime_type: Option<&'a str>,
+    /// The op's staged payload, marked `completed = 1` in the release journal on every platform.
+    pub completed_payload: Option<&'a str>,
+    pub now: i64,
+}
+
+/// What the landing did to the ops queued after it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LandingOutcome {
+    /// Successors parked because they could not be re-keyed (§8.6 rule 3).
+    pub parked_successors: Vec<(String, ParkReason)>,
+    /// Successors the chain step gave the produced version.
+    pub resolved_successors: usize,
+}
+
+/// The contract of a file the database has no row for: our own new file.
+fn default_contract(file_id: &str) -> FileContractState {
+    FileContractState {
+        file_id: file_id.to_string(),
+        namespace: Namespace::MyFiles,
+        parent_id: None,
+        shared_root_id: None,
+        share_id: None,
+        owner_email: None,
+        permission_bits: PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER,
+        item_kind: ItemKind::File,
+        content_type: None,
+        current_version: 0,
+        current_object_version_id: None,
+        local_base_version: 0,
+        local_hash: None,
+        cache_path: None,
+        cache_bytes: 0,
+        pin_state: PinState::Inherit,
+        inherited_pin_state: PinState::Inherit,
+        last_sync_at: 0,
     }
 }
 
@@ -1774,21 +1988,12 @@ impl StateDb {
         }
     }
 
+    /// The runner deletes rows only inside a transaction (`delete_file_conn`, the landing);
+    /// tests set up states with this.
+    #[cfg(test)]
     pub fn delete_file(&self, file_id: &str) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        // Task 1697: capture the parent BEFORE the delete — the change row is
-        // what tells the replica's materialized filter where the item was.
-        let old_parent: Option<String> = conn
-            .query_row(
-                "SELECT parent_id FROM files WHERE file_id = ?1",
-                params![file_id],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .optional()?
-            .flatten();
-        conn.execute("DELETE FROM files WHERE file_id = ?1", params![file_id])?;
-        record_file_change_conn(&conn, file_id, FpChangeKind::Deleted, old_parent)?;
-        Ok(())
+        delete_file_conn(&conn, file_id)
     }
 
     /// Delete the row `file_id` AND — when it is a FOLDER — its whole descendant
@@ -2505,7 +2710,7 @@ impl StateDb {
     /// 4. **Rows stamped at/after `snapshot_fetched_at`** — a row whose
     ///    `remote_updated_at >= snapshot_fetched_at` was touched locally (e.g. a
     ///    just-completed upload re-keyed to the server id via
-    ///    `apply_completed_upload`, which stamps `remote_updated_at = now`) AT OR
+    ///    the landing, `apply_landing`, which stamps `remote_updated_at = now`) AT OR
     ///    AFTER the snapshot was taken, so the server snapshot legitimately
     ///    predates it and CANNOT be authoritative about its existence. Pruning it
     ///    would delete a freshly-uploaded file whenever the server snapshot lags
@@ -2902,79 +3107,7 @@ impl StateDb {
 
     pub fn set_file_contract_state(&self, state: &FileContractState) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        // Task 1697: the contract write is what moves an item BETWEEN
-        // containers (parent change) — record a reparent with the old parent
-        // so the materialized filter can test old-or-new. Other contract
-        // metadata changes (kind, current_version, content_type) record a
-        // plain modified. A no-op write records nothing.
-        let old: Option<(Option<String>, String, String, i64)> = conn
-            .query_row(
-                "SELECT parent_id, item_kind, content_type, current_version
-                 FROM files WHERE file_id = ?1",
-                params![state.file_id],
-                |row| {
-                    Ok((
-                        row.get::<_, Option<String>>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                        row.get::<_, i64>(3)?,
-                    ))
-                },
-            )
-            .optional()?;
-        conn.execute(
-            "UPDATE files SET
-               namespace = ?2,
-               parent_id = ?3,
-               shared_root_id = ?4,
-               share_id = ?5,
-               permission_bits = ?6,
-               item_kind = ?7,
-               content_type = ?8,
-               current_version = ?9,
-               current_object_version_id = ?10,
-               local_base_version = ?11,
-               local_hash = ?12,
-               cache_path = ?13,
-               cache_bytes = ?14,
-               pin_state = ?15,
-               inherited_pin_state = ?16,
-               last_sync_at = ?17,
-               owner_email = ?18
-             WHERE file_id = ?1",
-            params![
-                state.file_id,
-                state.namespace.as_str(),
-                state.parent_id,
-                state.shared_root_id,
-                state.share_id,
-                state.permission_bits,
-                state.item_kind.as_str(),
-                state.content_type,
-                state.current_version,
-                state.current_object_version_id,
-                state.local_base_version,
-                state.local_hash,
-                state.cache_path,
-                state.cache_bytes,
-                state.pin_state.as_str(),
-                state.inherited_pin_state.as_str(),
-                state.last_sync_at,
-                state.owner_email,
-            ],
-        )?;
-        if let Some((old_parent, old_kind, old_content_type, old_version)) = old {
-            let parent_changed = old_parent != state.parent_id;
-            let metadata_changed = old_kind != state.item_kind.as_str()
-                || old_content_type != state.content_type.clone().unwrap_or_default()
-                || old_version != state.current_version;
-            if parent_changed {
-                record_file_change_conn(&conn, &state.file_id, FpChangeKind::Reparented, old_parent)?;
-            } else if metadata_changed {
-                record_file_change_conn(&conn, &state.file_id, FpChangeKind::Modified, None)?;
-            }
-        }
-        Ok(())
+        set_file_contract_state_conn(&conn, state)
     }
 
     pub fn get_file_contract_state(&self, file_id: &str) -> Result<Option<FileContractState>> {
@@ -3192,7 +3325,7 @@ impl StateDb {
             "UPDATE operation_queue SET base_pending = base_pending + 1 WHERE base_pending > 0",
             [],
         )?;
-        let parked = {
+        let counted_out = {
             let mut stmt =
                 tx.prepare("SELECT op_id, file_id FROM operation_queue WHERE base_pending >= ?1 ORDER BY rowid")?;
             let rows = stmt.query_map(params![BASE_PENDING_PARK_AT], |r| {
@@ -3200,13 +3333,17 @@ impl StateDb {
             })?;
             rows.collect::<Result<Vec<_>>>()?
         };
-        for (op_id, _) in &parked {
+        let mut parked = Vec::new();
+        for (op_id, file_id) in counted_out {
             // No longer waiting, so no pass asks a snapshot for it any more.
             tx.execute(
                 "UPDATE operation_queue SET base_pending = 0 WHERE op_id = ?1",
                 params![op_id],
             )?;
-            park_unclaimed_conn(&tx, op_id, ParkReason::BaseUnknown, now)?;
+            // A recorded completion is never parked (§8.6 rule 6).
+            if park_unclaimed_conn(&tx, &op_id, ParkReason::BaseUnknown, now)? == 1 {
+                parked.push((op_id, file_id));
+            }
         }
         tx.commit()?;
         Ok(parked)
@@ -3225,8 +3362,9 @@ impl StateDb {
     }
 
     /// The round-4 columns of one File Provider upload op; `None` when the op
-    /// is gone or carries no write id.
-    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    /// is gone or carries no write id. Production reads them inside its transactions
+    /// (`finder_write_conn`).
+    #[cfg(test)]
     pub fn finder_write(&self, op_id: &str) -> Result<Option<FinderWrite>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         finder_write_conn(&conn, op_id)
@@ -3329,52 +3467,230 @@ impl StateDb {
         })
     }
 
-    /// A create's id swap: the server row takes the provisional row's held columns, all
-    /// four in one statement (spec §5.4 row 14). Task 7 folds this into the landing
-    /// transaction.
-    pub fn carry_held_write(&self, from_file_id: &str, to_file_id: &str) -> Result<()> {
-        let conn = self.0.lock().expect("state_db mutex poisoned");
-        conn.execute(
-            "UPDATE files SET
-                held_write_id = (SELECT held_write_id FROM files WHERE file_id = ?1),
-                held_base = (SELECT held_base FROM files WHERE file_id = ?1),
-                held_version = (SELECT held_version FROM files WHERE file_id = ?1),
-                held_object_version_id = (SELECT held_object_version_id FROM files WHERE file_id = ?1)
-             WHERE file_id = ?2
-               AND EXISTS (SELECT 1 FROM files WHERE file_id = ?1 AND held_write_id IS NOT NULL)",
-            params![from_file_id, to_file_id],
-        )?;
-        Ok(())
-    }
-
-    /// The write `write_id` landed as `version` (spec §8.6.2): only while it is still the
-    /// held one, so a later save's token stays held (§5.4 row 6). `false`: it is not.
-    pub fn set_held_landed(
+    /// §8.6.1: the completion the server confirmed, recorded before any local bookkeeping, only
+    /// while the claimed op exists (S4). `false`: the op moved since the claim and nothing was
+    /// written.
+    pub fn record_completion_claimed(
         &self,
-        file_id: &str,
-        write_id: &str,
+        op_id: &str,
+        claim_id: &str,
         version: i64,
-        object_version_id: Option<&str>,
+        object_version_id: &str,
     ) -> Result<bool> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let n = conn.execute(
-            "UPDATE files SET held_version = ?3, held_object_version_id = ?4
-             WHERE file_id = ?1 AND held_write_id = ?2",
-            params![file_id, write_id, version, object_version_id],
+            "UPDATE upload_resume SET completed_version = ?3, completed_object_version_id = ?4
+             WHERE op_id = ?1 AND EXISTS (SELECT 1 FROM operation_queue WHERE op_id = ?1 AND claim_id = ?2)",
+            params![op_id, claim_id, version, object_version_id],
         )?;
         Ok(n == 1)
     }
 
-    /// The chain step by write id (spec §8.1): every op waiting on `write_id` gets the
-    /// version it produced. Returns how many ops it resolved.
-    pub fn resolve_successors(&self, write_id: &str, version: i64, object_version_id: Option<&str>) -> Result<usize> {
-        let conn = self.0.lock().expect("state_db mutex poisoned");
-        conn.execute(
-            "UPDATE operation_queue
-             SET base_version = ?2, base_object_version_id = ?3, after_write_id = NULL
-             WHERE after_write_id = ?1",
-            params![write_id, version, object_version_id],
-        )
+    /// §8.6.2 and §8.7 S1.2: everything the landing changes, in one transaction: the row and
+    /// contract, the held columns, the id swap and the alias, the chain step, the status,
+    /// and the removal of the op and its resume row with its payload marked for release.
+    /// `rekey` re-encrypts a queued op's metadata for the server id. `Ok(None)`: the op moved
+    /// since the claim, and nothing was written.
+    pub fn apply_landing(
+        &self,
+        input: &LandingInput<'_>,
+        rekey: &dyn Fn(&PendingOperation, &str) -> anyhow::Result<Option<String>>,
+    ) -> Result<Option<LandingOutcome>> {
+        #[cfg(test)]
+        if let Some(error) = injected_landing_failure() {
+            return Err(error);
+        }
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let (local, server) = (input.local_file_id, input.server_file_id);
+        if let Some(claim_id) = input.claim_id {
+            let claimed: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM operation_queue WHERE op_id = ?1 AND claim_id = ?2)",
+                params![input.op_id, claim_id],
+                |r| r.get(0),
+            )?;
+            if !claimed {
+                return Ok(None);
+            }
+        }
+        // The row and contract. The row's status, size and mtime are settled below, after
+        // the chain step, because that step can park a later write (spec §9.1–§9.2).
+        let mut entry = get_file_conn(&tx, local)?.unwrap_or_else(|| FileEntry {
+            file_id: server.to_string(),
+            path: input.target_path.unwrap_or(server).to_string(),
+            status: FileStatus::Local,
+            size_bytes: input.size_bytes,
+            modified_at: input.now,
+            content_hash: None,
+            remote_updated_at: input.now,
+            parent_id: input.parent_id.map(str::to_string),
+            item_kind: ItemKind::File,
+        });
+        entry.file_id = server.to_string();
+        if let Some(target_path) = input.target_path {
+            entry.path = target_path.to_string();
+        }
+        entry.remote_updated_at = input.now;
+        upsert_file_conn(&tx, &entry)?;
+        let mut contract = get_file_contract_state_conn(&tx, local)?.unwrap_or_else(|| default_contract(server));
+        contract.file_id = server.to_string();
+        contract.item_kind = ItemKind::File;
+        // The metadata's content type, else the server's `mime_type`, as before.
+        contract.content_type = input.content_type.or(input.mime_type).map(str::to_string);
+        contract.parent_id = input.parent_id.map(str::to_string);
+        contract.current_version = input.produced_version;
+        contract.local_base_version = input.produced_version;
+        contract.current_object_version_id = Some(input.produced_object_version_id.to_string());
+        contract.last_sync_at = input.now;
+        set_file_contract_state_conn(&tx, &contract)?;
+        // A landing: the row's version is the one the server answered, not a snapshot fill (§6.1).
+        tx.execute(
+            "UPDATE files SET version_filled = 0 WHERE file_id = ?1",
+            params![server],
+        )?;
+
+        let mut outcome = LandingOutcome {
+            parked_successors: Vec::new(),
+            resolved_successors: 0,
+        };
+        if local != server {
+            // §5.4 row 14: S takes P's held columns; the alias; P's queued ops move to S.
+            tx.execute(
+                "UPDATE files SET
+                    held_write_id = (SELECT held_write_id FROM files WHERE file_id = ?1),
+                    held_base = (SELECT held_base FROM files WHERE file_id = ?1),
+                    held_version = (SELECT held_version FROM files WHERE file_id = ?1),
+                    held_object_version_id = (SELECT held_object_version_id FROM files WHERE file_id = ?1)
+                 WHERE file_id = ?2",
+                params![local, server],
+            )?;
+            if input.write_id.is_some() {
+                // Write-keyed (§7.1): a Windows create leaves no alias.
+                tx.execute(
+                    "INSERT INTO id_aliases (provisional_id, server_id, created_at) VALUES (?1, ?2, ?3)
+                     ON CONFLICT(provisional_id) DO UPDATE SET server_id = excluded.server_id",
+                    params![local, server, input.now],
+                )?;
+            }
+            let successors = {
+                let mut stmt = tx.prepare(&format!(
+                    "SELECT {PENDING_OPERATION_COLUMNS} FROM operation_queue WHERE file_id = ?1 AND op_id != ?2 ORDER BY rowid"
+                ))?;
+                let rows = stmt.query_map(params![local, input.op_id], pending_operation_from_row)?;
+                rows.collect::<Result<Vec<_>>>()?
+            };
+            for op in successors {
+                match rekey(&op, server) {
+                    Ok(metadata_json) => {
+                        tx.execute(
+                            "UPDATE operation_queue SET file_id = ?2, metadata_json = ?3, updated_at = ?4 WHERE op_id = ?1",
+                            params![op.op_id, server, metadata_json, input.now],
+                        )?;
+                    }
+                    // §8.6 rule 3: a Finder landing's chain step never fails the landing.
+                    Err(_) if input.write_id.is_some() => {
+                        tx.execute(
+                            "UPDATE operation_queue SET file_id = ?2, attempts = max_attempts, last_error = 'rekey_failed',
+                                                        last_error_class = 'rekey_failed', updated_at = ?3
+                             WHERE op_id = ?1",
+                            params![op.op_id, server, input.now],
+                        )?;
+                        outcome.parked_successors.push((op.op_id, ParkReason::RekeyFailed));
+                    }
+                    // Windows and watcher landings propagate the rekey error as before: the
+                    // transaction rolls back and the op is retried.
+                    Err(error) => return Err(rusqlite::Error::ToSqlConversionFailure(error.into())),
+                }
+            }
+            delete_file_conn(&tx, local)?;
+        }
+        // §9.1–§9.2: read after the rekey loop, which can park a successor.
+        // `later_unparked`: other Finder uploads of the file that have not parked;
+        // `later_parked`: the rest.
+        let later_unparked: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM operation_queue WHERE file_id = ?1 AND op_id != ?2
+                            AND write_id IS NOT NULL AND kind IN ('upload_version', 'upload_file')
+                            AND attempts < max_attempts)",
+            params![server, input.op_id],
+            |r| r.get(0),
+        )?;
+        let later_parked: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM operation_queue WHERE file_id = ?1 AND op_id != ?2
+                            AND write_id IS NOT NULL AND kind IN ('upload_version', 'upload_file')
+                            AND attempts >= max_attempts)",
+            params![server, input.op_id],
+            |r| r.get(0),
+        )?;
+        if !later_unparked && !later_parked {
+            // `Local`: no later write. The save-time presentation is split off (spec §12).
+            tx.execute(
+                "UPDATE files SET status = ?2, size_bytes = ?3, modified_at = ?4 WHERE file_id = ?1",
+                params![server, FileStatus::Local.as_str(), input.size_bytes, input.now],
+            )?;
+        } else if !later_unparked {
+            // Only parked writes remain: a parked upload presents `error` (spec §9.1). Task 9's
+            // `settle_status_after_park_conn` takes this over; until then the `UPDATE` is inline.
+            tx.execute(
+                "UPDATE files SET status = ?2 WHERE file_id = ?1 AND status = ?3",
+                params![server, FileStatus::Error.as_str(), FileStatus::Uploading.as_str()],
+            )?;
+        }
+        // Otherwise a later write is still queued and unparked: the status stays `Uploading`,
+        // and the size and mtime stay the newer write's.
+        if let Some(write_id) = input.write_id {
+            // §8.6.2: only WHERE held_write_id = W; a later save's token stays held.
+            tx.execute(
+                "UPDATE files SET held_version = ?3, held_object_version_id = ?4 WHERE file_id = ?1 AND held_write_id = ?2",
+                params![server, write_id, input.produced_version, input.produced_object_version_id],
+            )?;
+            // §8.1: the chain step, by write id, with the version the server produced.
+            outcome.resolved_successors = tx.execute(
+                "UPDATE operation_queue SET base_version = ?2, base_object_version_id = ?3, after_write_id = NULL
+                 WHERE after_write_id = ?1",
+                params![write_id, input.produced_version, input.produced_object_version_id],
+            )?;
+        } else {
+            // Windows and watcher uploads keep round 3's equal-base rule (spec §6.3.1). For a
+            // create (`?6`) the moved op's own base must be `None`; without `base_version IS NULL`
+            // a create's id swap would rebase every non-Finder upload of the file, including
+            // ones with a base.
+            outcome.resolved_successors = tx.execute(
+                "UPDATE operation_queue SET base_version = ?3, base_object_version_id = ?4
+                 WHERE file_id = ?1 AND op_id != ?2 AND write_id IS NULL
+                   AND kind IN ('upload_version', 'upload_file')
+                   AND ((?5 IS NOT NULL AND base_version = ?5) OR (?5 IS NULL AND base_version IS NULL AND ?6))",
+                params![
+                    server,
+                    input.op_id,
+                    input.produced_version,
+                    input.produced_object_version_id,
+                    input.landed_base,
+                    local != server
+                ],
+            )?;
+        }
+        // The op and its resume row. The payload is marked completed on every platform
+        // (Windows keeps it until finalization, and its sign-out reads the flag); the caller
+        // unlinks the released copy after the commit (S6).
+        let removed = match input.claim_id {
+            Some(claim_id) => tx.execute(
+                "DELETE FROM operation_queue WHERE op_id = ?1 AND claim_id = ?2",
+                params![input.op_id, claim_id],
+            )?,
+            None => tx.execute("DELETE FROM operation_queue WHERE op_id = ?1", params![input.op_id])?,
+        };
+        if input.claim_id.is_some() && removed != 1 {
+            return Ok(None); // dropping `tx` rolls back
+        }
+        tx.execute("DELETE FROM upload_resume WHERE op_id = ?1", params![input.op_id])?;
+        if let Some(path) = input.completed_payload {
+            tx.execute(
+                "INSERT INTO staged_payloads(path, completed) VALUES (?1, 1) ON CONFLICT(path) DO UPDATE SET completed = 1",
+                params![path],
+            )?;
+        }
+        tx.commit()?;
+        Ok(Some(outcome))
     }
 
     // ── File Provider change log + sync anchor (task 1697) ────────────────────
@@ -4436,7 +4752,8 @@ impl StateDb {
     }
 
     /// Every queued operation for `file_id`, in queue order, whatever its
-    /// retry state.
+    /// retry state. The landing reads a file's later ops inside its transaction.
+    #[cfg(test)]
     pub fn list_operations_for_file(&self, file_id: &str) -> Result<Vec<PendingOperation>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let mut stmt = conn.prepare(&format!(
@@ -4456,9 +4773,15 @@ impl StateDb {
     pub fn claim_operation(&self, op_id: &str, now: i64) -> Result<ClaimOutcome> {
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        // Gone, or no longer due: a pass lists its ops once, and a landing earlier in the same
+        // pass can park a later op of the file (a successor it could not re-key, §8.6 rule 3).
+        // Nothing retries a parked op.
         let Some(op) = tx
             .query_row(
-                &format!("SELECT {PENDING_OPERATION_COLUMNS} FROM operation_queue WHERE op_id = ?1"),
+                &format!(
+                    "SELECT {PENDING_OPERATION_COLUMNS} FROM operation_queue
+                     WHERE op_id = ?1 AND attempts < max_attempts AND paused_reason IS NULL"
+                ),
                 params![op_id],
                 pending_operation_from_row,
             )
@@ -4495,10 +4818,17 @@ impl StateDb {
         // Steps 3 and 4, with the hand-over (spec §8.4): a parked predecessor this spec
         // minted hands its role to this op, in this transaction. The loop runs again on
         // what the op inherited: a pending base, or the predecessor's own predecessor.
+        // §8.6 rules 4 and 6: an op whose completion is recorded waits for no base and no
+        // predecessor, and never parks: its attempt repeats the landing.
+        let completed: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM upload_resume WHERE op_id = ?1 AND completed_version IS NOT NULL)",
+            params![op_id],
+            |row| row.get(0),
+        )?;
         let mut op = op;
         let mut write = finder_write_conn(&tx, op_id)?;
         let mut took_over: Option<TookOver> = None;
-        while let Some(current) = write.clone() {
+        while let Some(current) = write.clone().filter(|_| !completed) {
             if current.base_pending > 0 {
                 return finish_wait(tx, took_over); // step 3, not an attempt
             }
@@ -4603,14 +4933,16 @@ impl StateDb {
     }
 
     /// Park with the bytes kept: attempts used up, so nothing retries it (spec §8.4).
-    /// `false`: the op moved since the claim and nothing was written (S2).
+    /// `false`: nothing was written, because the op moved since the claim (S2) or its
+    /// completion is recorded (§8.6 rule 6: the runner retries such an op instead).
     pub fn park_claimed(&self, op_id: &str, claim_id: &str, reason: ParkReason, now: i64) -> Result<bool> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let n = conn.execute(
             "UPDATE operation_queue
              SET attempts = max_attempts, last_error = ?3, last_error_class = ?3, updated_at = ?4,
                  claim_id = NULL, claimed_at = NULL
-             WHERE op_id = ?1 AND claim_id = ?2",
+             WHERE op_id = ?1 AND claim_id = ?2
+               AND NOT EXISTS (SELECT 1 FROM upload_resume WHERE op_id = ?1 AND completed_version IS NOT NULL)",
             params![op_id, claim_id, reason.as_str(), now],
         )?;
         Ok(n == 1)
@@ -4828,6 +5160,30 @@ impl StateDb {
         assert_eq!(n, 1, "no resume row for {op_id}");
     }
 
+    /// P10: where the landing's alias sends a provisional id (spec §7.1).
+    #[cfg(test)]
+    pub(crate) fn alias_target_for_test(&self, provisional_id: &str) -> Option<String> {
+        let conn = self.0.lock().unwrap();
+        conn.query_row(
+            "SELECT server_id FROM id_aliases WHERE provisional_id = ?1",
+            params![provisional_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap()
+    }
+
+    /// T27: an op whose name cannot be re-encrypted (no display name, no path).
+    #[cfg(test)]
+    pub(crate) fn set_target_path_for_test(&self, op_id: &str, target_path: Option<&str>) {
+        let conn = self.0.lock().unwrap();
+        conn.execute(
+            "UPDATE operation_queue SET target_path = ?2 WHERE op_id = ?1",
+            params![op_id, target_path],
+        )
+        .unwrap();
+    }
+
     /// T26: an op that used up its attempts (parked, with its bytes).
     #[cfg(test)]
     pub(crate) fn park_for_test(&self, op_id: &str) {
@@ -4848,31 +5204,6 @@ impl StateDb {
             params![op_id, write_id],
         )
         .unwrap();
-    }
-
-    /// Move queued operations along a chain in one transaction: their file id
-    /// (a create's provisional id swapped for the server's), base version,
-    /// base object version and metadata (a name re-encrypted for the new id).
-    pub fn update_operation_chain(&self, ops: &[PendingOperation], now: i64) -> Result<()> {
-        let mut conn = self.0.lock().expect("state_db mutex poisoned");
-        let tx = conn.transaction()?;
-        for op in ops {
-            tx.execute(
-                "UPDATE operation_queue
-                 SET file_id = ?1, base_version = ?2, base_object_version_id = ?3, metadata_json = ?4,
-                     updated_at = ?5
-                 WHERE op_id = ?6",
-                params![
-                    op.file_id,
-                    op.base_version,
-                    op.base_object_version_id,
-                    op.metadata_json,
-                    now,
-                    op.op_id
-                ],
-            )?;
-        }
-        tx.commit()
     }
 
     /// Unguarded; the runner removes an op with [`Self::finish_claimed`] (spec §8.7
@@ -4931,7 +5262,8 @@ impl StateDb {
         conn.query_row(
             "SELECT op_id, payload_path, payload_size, payload_mtime_ns, upload_session_id,
                     server_file_id, object_version_id, chunk_size_bytes, chunk_count,
-                    acked_chunks, metadata_applied, is_create
+                    acked_chunks, metadata_applied, is_create, completed_version,
+                    completed_object_version_id
              FROM upload_resume WHERE op_id = ?1",
             params![op_id],
             |row| {
@@ -4948,6 +5280,8 @@ impl StateDb {
                     acked_chunks: row.get(9)?,
                     metadata_applied: row.get(10)?,
                     is_create: row.get(11)?,
+                    completed_version: row.get(12)?,
+                    completed_object_version_id: row.get(13)?,
                 })
             },
         )
@@ -8007,6 +8341,8 @@ mod tests {
             acked_chunks: 0,
             metadata_applied: false,
             is_create: false,
+            completed_version: None,
+            completed_object_version_id: None,
         })
         .unwrap();
         db.track_staged_payload("/staged/resumed", None, true).unwrap();
@@ -8337,6 +8673,229 @@ mod tests {
             db.park_claimed("u1", &current.claim_id, ParkReason::StaleBase, 5)
                 .unwrap(),
             "the current claim is intact"
+        );
+    }
+
+    /// §8.6 rule 6 (Task 5 review, Minor 4): no park path parks an op whose completion is
+    /// recorded. That covers the runner's park (Task 5's immediate stale-base arm, a missing
+    /// payload, an unknown base), the snapshot count's park and the claim's parks (both
+    /// `park_unclaimed_conn`), and the accept's park, which only ever parks the op it inserts.
+    #[test]
+    fn a_completed_op_is_never_parked() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_own_row(&db, "f", FileStatus::Local, 10);
+        let mut contract = db.get_file_contract_state("f").unwrap().unwrap();
+        contract.current_version = 1;
+        db.set_file_contract_state(&contract).unwrap();
+        let accept = |op_id: &str, base: &str| {
+            db.accept_finder_write(
+                &FinderAccept {
+                    op_id,
+                    file_id: "f",
+                    kind: FinderAcceptKind::Modify {
+                        incoming_base: Some(base),
+                    },
+                    parent_id: None,
+                    target_path: Some("f.txt"),
+                    metadata_json: "{}",
+                    payload_path: "/staged/w",
+                    size_bytes: 3,
+                    modified_at: 20,
+                    backup_source_key: None,
+                    now: 20,
+                },
+                &|_, _| Vec::new(),
+            )
+        };
+        assert!(matches!(accept("w", "1").unwrap(), AcceptOutcome::Queued { .. }));
+        let ClaimOutcome::Claimed(claimed) = db.claim_operation("w", 21).unwrap() else {
+            panic!("claimable")
+        };
+        assert!(
+            db.put_upload_resume_claimed(
+                &UploadResume {
+                    op_id: "w".into(),
+                    payload_path: "/staged/w".into(),
+                    payload_size: 3,
+                    payload_mtime_ns: 1,
+                    upload_session_id: "session-w".into(),
+                    server_file_id: "f".into(),
+                    object_version_id: "object-w".into(),
+                    chunk_size_bytes: 3,
+                    chunk_count: 1,
+                    acked_chunks: 1,
+                    metadata_applied: true,
+                    is_create: false,
+                    completed_version: None,
+                    completed_object_version_id: None,
+                },
+                &claimed.claim_id,
+            )
+            .unwrap()
+        );
+        assert!(
+            db.record_completion_claimed("w", &claimed.claim_id, 2, "object-2")
+                .unwrap()
+        );
+        let unparked = |why: &str| {
+            let op = db.get_operation("w").unwrap().expect(why);
+            assert!(op.attempts < op.max_attempts, "{why}: parked");
+        };
+
+        // The runner's park.
+        for reason in [
+            ParkReason::StaleBase,
+            ParkReason::PayloadMissing,
+            ParkReason::BaseUnknown,
+        ] {
+            assert!(
+                !db.park_claimed("w", &claimed.claim_id, reason, 22).unwrap(),
+                "the runner parked a completed op: {}",
+                reason.as_str()
+            );
+            unparked(reason.as_str());
+        }
+        // The snapshot count's park, at the 10th snapshot without a base.
+        db.0.lock()
+            .unwrap()
+            .execute("UPDATE operation_queue SET base_pending = 10 WHERE op_id = 'w'", [])
+            .unwrap();
+        assert!(
+            db.note_snapshot_for_base_pending(23).unwrap().is_empty(),
+            "the snapshot count parked a completed op"
+        );
+        unparked("the snapshot count");
+        // The claim's parks: W names a predecessor that no op carries (S5).
+        db.0.lock()
+            .unwrap()
+            .execute(
+                "UPDATE operation_queue SET base_pending = 0, after_write_id = 'gone', claim_id = NULL
+                 WHERE op_id = 'w'",
+                [],
+            )
+            .unwrap();
+        assert!(
+            matches!(db.claim_operation("w", 24).unwrap(), ClaimOutcome::Claimed(_)),
+            "claimed for its landing, never parked"
+        );
+        unparked("the claim");
+        // The accept's park (rule 6a′) only parks the op it inserts: one naming W's op id fails.
+        assert!(accept("w", "0").is_err(), "the accept never touches an existing op");
+        unparked("the accept");
+        assert_eq!(
+            db.get_upload_resume("w").unwrap().unwrap().completed_version,
+            Some(2),
+            "the completion is kept"
+        );
+    }
+
+    /// [t3-review] Minor 2, the landing half: across a mixed pair (one op with a write id and
+    /// one without) the landing re-keys but never rebases.
+    /// - (a) A Finder create lands while an op without a write id is queued under its
+    ///   provisional id: that op moves to the server id, and its base stays `None`.
+    /// - (b) An upload without a write id lands while a Finder save on the same base is queued:
+    ///   the save keeps its base (the server then refuses it and it parks with its bytes),
+    ///   while another op without a write id is rebased, as in round 3.
+    ///
+    /// Whether a mixed pair should rebase is left to the spec (Task 12).
+    #[test]
+    fn a_landing_rekeys_a_mixed_pair_but_never_rebases_across_it() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let rekey = |op: &PendingOperation, _: &str| -> anyhow::Result<Option<String>> { Ok(op.metadata_json.clone()) };
+        let landing = |op_id: &'static str, claim_id: &'static str, write_id: Option<&'static str>| LandingInput {
+            op_id,
+            claim_id: Some(claim_id),
+            write_id,
+            local_file_id: "",
+            server_file_id: "",
+            target_path: None,
+            parent_id: None,
+            landed_base: None,
+            produced_version: 0,
+            produced_object_version_id: "",
+            size_bytes: 3,
+            content_type: None,
+            mime_type: None,
+            completed_payload: None,
+            now: 20,
+        };
+
+        // (a)
+        seed_own_row(&db, "provisional", FileStatus::Uploading, 10);
+        db.0.lock()
+            .unwrap()
+            .execute_batch(
+                r#"INSERT INTO operation_queue (op_id, kind, file_id, metadata_json, base_version, write_id,
+                                               write_origin, claim_id, attempts, max_attempts)
+                   VALUES ('create', 'upload_version', 'provisional', '{"operation":"create_file"}', NULL,
+                           'w-create', 'minted', 'claim-c', 0, 25),
+                          ('plain', 'upload_version', 'provisional', '{"operation":"upload_version"}', NULL,
+                           NULL, NULL, NULL, 0, 25);"#,
+            )
+            .unwrap();
+        let landed = db
+            .apply_landing(
+                &LandingInput {
+                    local_file_id: "provisional",
+                    server_file_id: "server",
+                    produced_version: 1,
+                    produced_object_version_id: "object-1",
+                    ..landing("create", "claim-c", Some("w-create"))
+                },
+                &rekey,
+            )
+            .unwrap()
+            .expect("the claim holds");
+        assert_eq!(landed.resolved_successors, 0);
+        let plain = db.get_operation("plain").unwrap().unwrap();
+        assert_eq!(
+            plain.file_id.as_deref(),
+            Some("server"),
+            "(a) re-keyed to the server id"
+        );
+        assert_eq!(plain.base_version, None, "(a) not rebased across the mixed pair");
+
+        // (b)
+        seed_own_row(&db, "f", FileStatus::Uploading, 10);
+        let mut contract = db.get_file_contract_state("f").unwrap().unwrap();
+        contract.current_version = 1;
+        db.set_file_contract_state(&contract).unwrap();
+        db.0.lock()
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO operation_queue (op_id, kind, file_id, metadata_json, base_version, write_id,
+                                              write_origin, claim_id, attempts, max_attempts)
+                 VALUES ('x', 'upload_version', 'f', '{}', 1, NULL, NULL, 'claim-x', 0, 25),
+                        ('n', 'upload_version', 'f', '{}', 1, 'w-n', 'minted', NULL, 0, 25),
+                        ('y', 'upload_version', 'f', '{}', 1, NULL, NULL, NULL, 0, 25);",
+            )
+            .unwrap();
+        let landed = db
+            .apply_landing(
+                &LandingInput {
+                    local_file_id: "f",
+                    server_file_id: "f",
+                    landed_base: Some(1),
+                    produced_version: 2,
+                    produced_object_version_id: "object-2",
+                    ..landing("x", "claim-x", None)
+                },
+                &rekey,
+            )
+            .unwrap()
+            .expect("the claim holds");
+        assert_eq!(landed.resolved_successors, 1, "(b) only the op without a write id");
+        assert_eq!(
+            db.get_operation("n").unwrap().unwrap().base_version,
+            Some(1),
+            "(b) the Finder save keeps its base"
+        );
+        assert_eq!(
+            db.get_operation("y").unwrap().unwrap().base_version,
+            Some(2),
+            "(b) round 3's equal-base rule"
         );
     }
 
@@ -9212,6 +9771,8 @@ mod tests {
             acked_chunks: 1,
             metadata_applied: true,
             is_create: true,
+            completed_version: None,
+            completed_object_version_id: None,
         };
         let seed = |op_id: &str, file_id: &str, key: Option<&str>| {
             db.enqueue_operation(&mk_op(op_id, file_id, key)).unwrap();
