@@ -202,6 +202,54 @@ mod tests {
         );
     }
 
+    /// Fix round 1 (m4): the two fallbacks that open the Finder location after an upload or a new folder run on the
+    /// blocking pool and are not waited for. The open can now wait up to 3 s for the gate and 7 s for LaunchServices; the
+    /// new-folder one ran inline on the MAIN thread (the menu handler and a plain `#[tauri::command] fn`) and the upload
+    /// one on a runtime worker. Their result was already discarded; a failure is logged.
+    #[test]
+    fn test_1885_the_fallback_opens_never_block_the_caller() {
+        use crate::finder_setup_command_tests::{body_between, without_items};
+        use crate::source_pin::squeeze;
+        let production = without_items(&read("src/lib.rs"), &["#[cfg(test)]", "#[cfg(all(test"]);
+        for function in [
+            "fn upload_files_to_sync_root_impl(",
+            "fn create_folder_in_sync_root_impl(",
+        ] {
+            let body = body_between(&production, function, "\n}\n");
+            assert!(
+                !body.contains("open_finder_location_blocking("),
+                "{function} opens the location inline, on its caller's thread:\n{body}"
+            );
+            assert!(
+                body.contains("open_finder_location_in_background("),
+                "{function} hands the open to the background helper:\n{body}"
+            );
+        }
+        let helper = squeeze(body_between(
+            &production,
+            "fn open_finder_location_in_background(",
+            "\n}\n",
+        ));
+        assert!(
+            helper.contains(&squeeze("tauri::async_runtime::spawn_blocking(")),
+            "the helper uses the blocking pool: {helper}"
+        );
+        assert!(
+            helper.contains(&squeeze("open_finder_location_blocking(Some(sync_root))")),
+            "and does the same open: {helper}"
+        );
+        assert!(
+            helper.contains("tracing::warn!"),
+            "a failure is logged, not dropped: {helper}"
+        );
+        assert_eq!(
+            production.matches("open_finder_location_blocking(").count(),
+            // the definition, the command's pool closure, the menu's `open_current_finder_location`, the helper's own call
+            4,
+            "every other caller goes through the pool or the helper"
+        );
+    }
+
     /// Fix round 1 (I2): a failed menu open is shown, on a Mac, with the button's sentence; a success and the other
     /// platforms show nothing.
     #[test]

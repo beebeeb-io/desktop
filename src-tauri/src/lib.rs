@@ -9271,6 +9271,18 @@ fn sync_root_for_menu_file_action() -> Result<PathBuf, String> {
     Ok(root)
 }
 
+/// Opens the Finder location after an upload or a new folder, WITHOUT making the caller wait (task 1885 fix round 1, m4).
+/// The open can wait up to 3 s for the bridge gate and 7 s for LaunchServices. Its callers are the menu handler and a plain
+/// command (the main thread), and a runtime worker, none of which may sit in that wait; and nobody needs its answer, so it
+/// runs on the blocking pool and a failure is logged.
+fn open_finder_location_in_background(sync_root: String) {
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Err(error) = open_finder_location_blocking(Some(sync_root)) {
+            tracing::warn!(%error, "could not open the Beebeeb folder after the menu action");
+        }
+    });
+}
+
 fn upload_files_to_sync_root_impl(app: &tauri::AppHandle) -> Result<usize, String> {
     let sync_root = sync_root_for_menu_file_action()?;
     let selected = app
@@ -9304,7 +9316,7 @@ fn upload_files_to_sync_root_impl(app: &tauri::AppHandle) -> Result<usize, Strin
 
     if copied > 0 {
         let _ = app.emit("menu:files-added", serde_json::json!({ "count": copied }));
-        let _ = open_finder_location_blocking(Some(sync_root.to_string_lossy().into_owned()));
+        open_finder_location_in_background(sync_root.to_string_lossy().into_owned());
     }
 
     Ok(copied)
@@ -9320,7 +9332,7 @@ fn create_folder_in_sync_root_impl(app: &tauri::AppHandle) -> Result<PathBuf, St
     );
     if let Err(error) = app.opener().reveal_item_in_dir(&path) {
         tracing::warn!(%error, path = %path.display(), "could not reveal new folder; opening sync root instead");
-        let _ = open_finder_location_blocking(Some(sync_root.to_string_lossy().into_owned()));
+        open_finder_location_in_background(sync_root.to_string_lossy().into_owned());
     }
     Ok(path)
 }
