@@ -324,6 +324,35 @@ pub fn dismiss_kept_folder(cfg: &mut crate::config::DesktopConfig, shown: &str) 
     true
 }
 
+/// Saves `location` as the latest kept folder in `desktop.toml`, as one load-change-save under the
+/// config-write lock (r5: the app-start sweep and a Settings save can run at the same time, and
+/// both go through the one `desktop.toml.tmp`). Returns whether the config changed.
+pub fn remember_kept_folder(location: &str) -> Result<bool, String> {
+    remember_kept_folder_at(&crate::config::DesktopConfig::path()?, location)
+}
+
+/// [`remember_kept_folder`] on the config file at `path` (a seam for the tests).
+pub(crate) fn remember_kept_folder_at(path: &std::path::Path, location: &str) -> Result<bool, String> {
+    crate::config::DesktopConfig::update_at(path, |cfg| {
+        let changed = record_kept_folder(cfg, location);
+        (changed, changed)
+    })
+}
+
+/// The row's "Dismiss" in `desktop.toml`, as one load-change-save under the config-write lock.
+/// Returns whether it cleared the folder (see [`dismiss_kept_folder`]).
+pub fn dismiss_saved_kept_folder(shown: &str) -> Result<bool, String> {
+    dismiss_saved_kept_folder_at(&crate::config::DesktopConfig::path()?, shown)
+}
+
+/// [`dismiss_saved_kept_folder`] on the config file at `path` (a seam for the tests).
+pub(crate) fn dismiss_saved_kept_folder_at(path: &std::path::Path, shown: &str) -> Result<bool, String> {
+    crate::config::DesktopConfig::update_at(path, |cfg| {
+        let cleared = dismiss_kept_folder(cfg, shown);
+        (cleared, cleared)
+    })
+}
+
 /// The alert after a removal that kept files: `(title, body)`, or nothing at all when nothing was
 /// kept (spec §5). The one decision `show_preserved_files_alert` makes, so it can be tested.
 pub fn kept_folder_alert(preserved_location: Option<&str>) -> Option<(&'static str, String)> {
@@ -1496,5 +1525,106 @@ NSFileProviderManager.removeAllDomains { error in }
                 .is_some_and(|m| m.contains("BeebeebFileProviderTools/Other.swift:1")),
             "{message:?}"
         );
+    }
+
+    // ── r5: the kept-folder writes share one lock with every config save ──────
+
+    /// Runs `slow` as an `update` that holds the config-write lock for a while (it has changed
+    /// the config but not yet saved it), and returns once `slow` is inside its change. Whatever
+    /// the caller does next runs while that update is in flight.
+    fn with_an_update_in_flight<R>(
+        path: &std::path::Path,
+        slow: impl FnOnce(&mut crate::config::DesktopConfig) + Send + 'static,
+        meanwhile: impl FnOnce() -> R,
+    ) -> R {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let slow_path = path.to_path_buf();
+        let slow_update = std::thread::spawn(move || {
+            crate::config::DesktopConfig::update_at(&slow_path, |cfg| {
+                slow(cfg);
+                entered_tx.send(()).expect("the test is waiting");
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                (true, ())
+            })
+        });
+        entered_rx.recv().expect("the slow update started");
+        let result = meanwhile();
+        slow_update
+            .join()
+            .expect("the slow update did not panic")
+            .expect("the slow update saved");
+        result
+    }
+
+    #[test]
+    fn test_1882_r5_the_sweeps_kept_folder_save_does_not_lose_a_concurrent_settings_save() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("desktop.toml");
+        let folder = "/Users/someone/Library/CloudStorage/Beebeeb-Beebeeb (10-10-2026 10:50)";
+        let changed = with_an_update_in_flight(
+            &path,
+            |cfg| cfg.last_signed_in_email = Some("someone@beebeeb.io".to_string()),
+            || remember_kept_folder_at(&path, folder).expect("the kept folder was saved"),
+        );
+        assert!(changed);
+        let on_disk = crate::config::DesktopConfig::load_from(&path).expect("the config reads back");
+        assert_eq!(
+            on_disk.kept_unsynced_folder.as_deref(),
+            Some(folder),
+            "the kept folder survived"
+        );
+        assert_eq!(
+            on_disk.last_signed_in_email.as_deref(),
+            Some("someone@beebeeb.io"),
+            "and so did the settings change that was saving at the same moment"
+        );
+    }
+
+    #[test]
+    fn test_1882_r5_dismissing_the_row_does_not_lose_a_concurrent_settings_save() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("desktop.toml");
+        let folder = "/Users/someone/Library/CloudStorage/Beebeeb-Beebeeb (10-10-2026 10:50)";
+        assert!(remember_kept_folder_at(&path, folder).expect("saved"));
+        let cleared = with_an_update_in_flight(
+            &path,
+            |cfg| cfg.last_signed_in_email = Some("someone@beebeeb.io".to_string()),
+            || dismiss_saved_kept_folder_at(&path, folder).expect("the dismiss was saved"),
+        );
+        assert!(cleared);
+        let on_disk = crate::config::DesktopConfig::load_from(&path).expect("the config reads back");
+        assert_eq!(on_disk.kept_unsynced_folder, None, "the row is dismissed");
+        assert_eq!(
+            on_disk.last_signed_in_email.as_deref(),
+            Some("someone@beebeeb.io"),
+            "and the settings change that was saving at the same moment survived"
+        );
+    }
+
+    #[test]
+    fn test_1882_r5_the_saved_folder_write_reports_unchanged_and_leaves_the_file_alone() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("desktop.toml");
+        assert!(remember_kept_folder_at(&path, "/Users/someone/Kept").expect("saved"));
+        let written = std::fs::read(&path).expect("the file exists");
+        assert!(
+            !remember_kept_folder_at(&path, "/Users/someone/Kept").expect("same folder"),
+            "the same folder again changes nothing"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("still there"),
+            written,
+            "and writes nothing"
+        );
+        assert!(
+            !dismiss_saved_kept_folder_at(&path, "/Users/someone/Other").expect("stale row"),
+            "a row showing another folder dismisses nothing"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("still there"),
+            written,
+            "and writes nothing"
+        );
+        assert!(!path.with_extension("toml.tmp").exists(), "no temp file is left behind");
     }
 }

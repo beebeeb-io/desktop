@@ -2049,17 +2049,12 @@ fn surface_kept_folder(app: &tauri::AppHandle, preserved_location: Option<&str>)
 
 /// Saves the latest kept folder in `desktop.toml` (spec §5, "The kept-folder row"). Best-effort:
 /// a failure is logged without the path, and the alert still names the folder.
+///
+/// Round 5: one load-change-save under the config-write lock (`DesktopConfig::update`), because
+/// the app-start sweep runs this while the window may be saving a setting; two unserialized
+/// saves share one `desktop.toml.tmp` and the later could drop the earlier one's change.
 fn remember_kept_folder(location: &str) {
-    let mut cfg = match DesktopConfig::load() {
-        Ok(cfg) => cfg,
-        Err(error) => {
-            tracing::warn!(error = %error, "could not load the config to save the kept folder");
-            return;
-        }
-    };
-    if finder_removal::record_kept_folder(&mut cfg, location)
-        && let Err(error) = cfg.save()
-    {
+    if let Err(error) = finder_removal::remember_kept_folder(location) {
         tracing::warn!(error = %error, "could not save the kept folder for Settings › Sync");
     }
 }
@@ -2074,10 +2069,8 @@ fn kept_unsynced_folder() -> Result<Option<String>, String> {
 /// the row showed.
 #[tauri::command]
 fn dismiss_kept_unsynced_folder(path: String) -> Result<(), String> {
-    let mut cfg = DesktopConfig::load()?;
-    if finder_removal::dismiss_kept_folder(&mut cfg, &path) {
-        cfg.save()?;
-    }
+    // Round 5: under the config-write lock, like the save above.
+    finder_removal::dismiss_saved_kept_folder(&path)?;
     Ok(())
 }
 
@@ -13148,9 +13141,20 @@ mod finder_removal_wiring_tests {
             .expect("it raises the alert");
         assert!(saved < shown);
         let remember = code_only(&item(&source, "fn remember_kept_folder("));
-        assert!(remember.contains("finder_removal::record_kept_folder(&mut cfg, location)"));
-        assert!(remember.contains("cfg.save()"));
+        // Round 5: the save is one load-change-save under the config-write lock, not a
+        // `DesktopConfig::load()` + `cfg.save()` of its own.
+        assert!(remember.contains("finder_removal::remember_kept_folder(location)"));
+        assert!(
+            !remember.contains("DesktopConfig::load()") && !remember.contains("cfg.save()"),
+            "no unserialized load-modify-save:\n{remember}"
+        );
         assert!(!remember.contains("location ="), "the log line never carries the path");
+        let dismiss = code_only(&item(&source, "fn dismiss_kept_unsynced_folder("));
+        assert!(dismiss.contains("finder_removal::dismiss_saved_kept_folder(&path)"));
+        assert!(
+            !dismiss.contains("DesktopConfig::load()") && !dismiss.contains("cfg.save()"),
+            "no unserialized load-modify-save:\n{dismiss}"
+        );
 
         // Sign-out (command and menu) and the sweep.
         let command = code_only(&item(&source, "async fn clear_session("));

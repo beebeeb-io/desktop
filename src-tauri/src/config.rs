@@ -14,8 +14,26 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
+
+/// Task 1882 r5: the one process-wide lock around writing `desktop.toml`.
+///
+/// Every save of the config goes through the same `desktop.toml.tmp`, so two saves at once could
+/// tear each other's temp file, and two load-modify-save passes at once lose the earlier one's
+/// change. [`DesktopConfig::save`] takes this lock for the write; [`DesktopConfig::update`] takes
+/// it across the whole load, change and write. The lock is not re-entrant: nothing inside an
+/// `update` closure may call `save` or `update`.
+static CONFIG_WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Takes [`CONFIG_WRITE_LOCK`]. A holder that panicked leaves the lock usable: the file itself is
+/// only ever replaced by a rename, so it is never half-written.
+fn config_write_guard() -> std::sync::MutexGuard<'static, ()> {
+    CONFIG_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Filename inside the platform config dir.
 const CONFIG_FILENAME: &str = "desktop.toml";
@@ -494,12 +512,16 @@ impl DesktopConfig {
     /// error. A corrupt or unparseable file IS an error — surfacing
     /// it loud avoids silently overwriting a user's settings on save.
     pub fn load() -> Result<Self, String> {
-        let path = Self::path()?;
+        Self::load_from(&Self::path()?)
+    }
+
+    /// [`Self::load`] from `path`. A seam so a test can run the real load against its own file.
+    pub(crate) fn load_from(path: &Path) -> Result<Self, String> {
         if !path.exists() {
             return Ok(Self::default());
         }
         // toml 0.8 removed from_slice; read as UTF-8 string and parse.
-        let s = fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        let s = fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
         let mut cfg: Self = toml::from_str(&s).map_err(|e| format!("parse {}: {e}", path.display()))?;
 
         // Reject relative paths defensively. Hand-editing the TOML to a
@@ -543,6 +565,36 @@ impl DesktopConfig {
     /// inheritance from the user's profile is the right default.
     pub fn save(&self) -> Result<(), String> {
         let path = Self::path()?;
+        let _writing = config_write_guard();
+        self.save_to(&path)
+    }
+
+    /// Load the config, let `change` modify it, and save it if `change` says so, all under the
+    /// config-write lock, so no other `update` or `save` lands between the load and the save
+    /// (task 1882 r5). `change` returns `(save, value)`: whether the config changed, and what
+    /// `update` hands back. A change that is not saved leaves the file untouched.
+    ///
+    /// For a short, synchronous change. A caller that loaded its own copy earlier and saves it
+    /// later (the install and Repair commands) is not covered: its save still replaces the file
+    /// with that copy.
+    pub fn update<R>(change: impl FnOnce(&mut Self) -> (bool, R)) -> Result<R, String> {
+        Self::update_at(&Self::path()?, change)
+    }
+
+    /// [`Self::update`] on the config file at `path`. A seam so a test can run the real lock,
+    /// load and save against its own file.
+    pub(crate) fn update_at<R>(path: &Path, change: impl FnOnce(&mut Self) -> (bool, R)) -> Result<R, String> {
+        let _writing = config_write_guard();
+        let mut cfg = Self::load_from(path)?;
+        let (save, value) = change(&mut cfg);
+        if save {
+            cfg.save_to(path)?;
+        }
+        Ok(value)
+    }
+
+    /// The write itself. The caller holds the config-write lock.
+    fn save_to(&self, path: &Path) -> Result<(), String> {
         let toml_str = toml::to_string_pretty(self).map_err(|e| format!("serialize: {e}"))?;
 
         // Atomic write: temp + rename. Avoids leaving a half-written
@@ -557,7 +609,7 @@ impl DesktopConfig {
             fs::set_permissions(&tmp, perms).map_err(|e| format!("chmod {}: {e}", tmp.display()))?;
         }
 
-        fs::rename(&tmp, &path).map_err(|e| format!("rename {} → {}: {e}", tmp.display(), path.display()))?;
+        fs::rename(&tmp, path).map_err(|e| format!("rename {} → {}: {e}", tmp.display(), path.display()))?;
         Ok(())
     }
 }
@@ -880,5 +932,56 @@ mod tests {
         let path = default_sync_root_suggestion();
 
         assert_eq!(path.file_name().and_then(|name| name.to_str()), Some("Beebeeb"));
+    }
+
+    // ── Task 1882 r5 — one lock around every load-modify-save ───────────────
+
+    #[test]
+    fn test_1882_r5_two_updates_at_once_both_land_and_an_unsaved_change_writes_nothing() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("desktop.toml");
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let slow_path = path.clone();
+        let slow = std::thread::spawn(move || {
+            DesktopConfig::update_at(&slow_path, |cfg| {
+                cfg.kept_unsynced_folder = Some("/Users/someone/Kept".to_string());
+                entered_tx.send(()).expect("the test is waiting");
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                (true, "slow")
+            })
+        });
+        entered_rx.recv().expect("the slow update started");
+        // This one starts while the slow one is between its load and its save.
+        let fast = DesktopConfig::update_at(&path, |cfg| {
+            cfg.last_signed_in_email = Some("someone@beebeeb.io".to_string());
+            (true, "fast")
+        });
+        assert_eq!(fast, Ok("fast"));
+        assert_eq!(slow.join().expect("no panic"), Ok("slow"));
+        let on_disk = DesktopConfig::load_from(&path).expect("reads back");
+        assert_eq!(on_disk.kept_unsynced_folder.as_deref(), Some("/Users/someone/Kept"));
+        assert_eq!(on_disk.last_signed_in_email.as_deref(), Some("someone@beebeeb.io"));
+
+        // A change that says "nothing to save" leaves the file byte for byte as it was.
+        let written = std::fs::read(&path).expect("exists");
+        let untouched = DesktopConfig::update_at(&path, |cfg| {
+            cfg.kept_unsynced_folder = None;
+            (false, 7)
+        });
+        assert_eq!(untouched, Ok(7));
+        assert_eq!(std::fs::read(&path).expect("exists"), written);
+    }
+
+    #[test]
+    fn test_1882_r5_an_update_of_a_corrupt_config_fails_and_does_not_overwrite_it() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("desktop.toml");
+        std::fs::write(&path, "this is = not [valid toml").expect("write");
+        let result = DesktopConfig::update_at(&path, |_| (true, ()));
+        assert!(result.is_err(), "a corrupt config is an error, never overwritten");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("exists"),
+            "this is = not [valid toml"
+        );
     }
 }
