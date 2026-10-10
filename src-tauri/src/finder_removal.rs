@@ -83,8 +83,12 @@ pub fn kept_folder_from_bridge(state: i32, location: Option<String>) -> KeptFold
             path,
             contents_checked: true,
         },
+        (KEPT_UNCHECKED, Some(path)) => KeptFolder::Kept {
+            path,
+            contents_checked: false,
+        },
         (KEPT_NO_PATH, _) | (_, None) => KeptFolder::Unknown,
-        // KEPT_UNCHECKED, and any state this build does not know: the folder is shown.
+        // A state this build does not know: the folder is shown, never hidden.
         (_, Some(path)) => KeptFolder::Kept {
             path,
             contents_checked: false,
