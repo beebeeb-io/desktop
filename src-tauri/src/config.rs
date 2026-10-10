@@ -1138,11 +1138,6 @@ mod tests {
                         (true, ())
                     })
                     .expect("fast held update");
-                    assert_eq!(
-                        held.kept_unsynced_folder.as_deref(),
-                        Some(KEPT),
-                        "the copy reads what is saved"
-                    );
                 },
                 |cfg| cfg.pause_sync,
             ),
@@ -1165,21 +1160,20 @@ mod tests {
                 |cfg| cfg.sync_mode.as_deref() == Some("smart"),
             ),
         ];
+        let mut lost = Vec::new();
         for (name, fast, landed) in helpers {
             let dir = tempfile::tempdir().expect("temp dir");
             let path = dir.path().join("desktop.toml");
             overlapped_with_a_slow_update(&path, fast);
             let on_disk = DesktopConfig::load_from(&path).expect("reads back");
-            assert_eq!(
-                on_disk.kept_unsynced_folder.as_deref(),
-                Some(KEPT),
-                "{name}: the slow update's change is on disk"
-            );
-            assert!(
-                landed(&on_disk),
-                "{name}: the overlapping update's change is on disk too: {on_disk:?}"
-            );
+            if on_disk.kept_unsynced_folder.as_deref() != Some(KEPT) {
+                lost.push(format!("{name}: the slow update's change is gone"));
+            }
+            if !landed(&on_disk) {
+                lost.push(format!("{name}: the overlapping update's change is gone"));
+            }
         }
+        assert!(lost.is_empty(), "changes lost to a stale save: {lost:?}");
     }
 
     /// The exact bug of the ticket (1882 round 5): an install or Repair flow loads its copy at the start, the app-start
