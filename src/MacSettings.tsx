@@ -613,11 +613,12 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
       return
     }
     setRepairResult(repairNote(result.value))
-    // Rust saved the kept folder (if any) in the same save as the rest of Repair's result, and the
-    // row reads it back. This fallback covers one case only: the saved record cannot be READ back
-    // just now, so the folder this repair reported is still shown. It does not cover a failed
-    // SAVE: then Repair returns an error and takes the `!result.ok` branch above, and this code
-    // never runs. The app's own alert names the folder in that case (re-review P1).
+    // On a Mac, Repair saves the kept folder (if any) for the row on its own (`remember_kept_folder`, under the
+    // config-write lock), and only best-effort: a failed save is logged, Repair still succeeds, and it raises no
+    // alert. The row reads the record back. So when no other folder is saved, this fallback covers both a save that
+    // failed and a record that cannot be read back just now: the folder this repair reported is still shown. (Rebase
+    // re-review Minor 5: this said a failed save fails Repair and raises the alert, which was main's Repair, not a
+    // Mac's.)
     await loadKept()
     const reported = preservedFilesNote(result.value)
     if (reported) setKept((current) => current ?? reported.path)
