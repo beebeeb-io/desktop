@@ -306,6 +306,35 @@ pub(crate) fn remember_kept_folder_at(path: &std::path::Path, location: &str) ->
     })
 }
 
+/// Windows and Linux (task 1889): [`record_kept_folder`] for a flow that keeps its own copy of the config to read across
+/// slow work (Add to Finder, Repair). The folder is written onto the file as it is now, as one load-change-save under the
+/// config-write lock, and `cfg` becomes what was saved. Recording into `cfg` and saving it later would put back whatever
+/// the copy loaded at the start held, such as a kept folder the app-start sweep saved meanwhile.
+///
+/// A write that failed is logged without the path and nothing more: the flow's own write that follows meets the same
+/// file and reports the error, after the alert has named the folder (the order the old save-later had).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub fn remember_kept_folder_held(cfg: &mut crate::config::DesktopConfig, location: &str) {
+    let saved =
+        crate::config::DesktopConfig::path().and_then(|path| remember_kept_folder_held_at(cfg, &path, location));
+    if let Err(error) = saved {
+        tracing::warn!(error = %error, "could not save the kept folder for Settings › Sync");
+    }
+}
+
+/// [`remember_kept_folder_held`] on the config file at `path` (a seam for the tests). Returns whether the config changed.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub(crate) fn remember_kept_folder_held_at(
+    cfg: &mut crate::config::DesktopConfig,
+    path: &std::path::Path,
+    location: &str,
+) -> Result<bool, String> {
+    cfg.update_held_at(path, |held| {
+        let changed = record_kept_folder(held, location);
+        (changed, changed)
+    })
+}
+
 /// What the row's "Dismiss" did, as the frontend reads it (r5, review thread on the dismiss
 /// command): `cleared` says whether the saved folder was the one the row showed and is now gone;
 /// `current` is the folder saved after the command, which is `None` when nothing is saved. A
@@ -1504,6 +1533,45 @@ NSFileProviderManager.removeAllDomains { error in }
             Some("someone@beebeeb.io"),
             "and so did the settings change that was saving at the same moment"
         );
+    }
+
+    /// Task 1889: the Windows and Linux flows that hold their own copy of the config (Add to Finder, Repair) record a kept
+    /// folder onto the file as it is now. The copy was loaded before a settings save that is still in flight, so saving
+    /// the copy would have put the settings back; the record waits for that save and lands next to it, and the copy then
+    /// reads both.
+    #[test]
+    fn test_1889_a_flow_with_its_own_copy_records_the_kept_folder_without_losing_a_concurrent_save() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("desktop.toml");
+        let folder = "/Users/someone/Kept";
+        let mut held = crate::config::DesktopConfig::load_from(&path).expect("the flow loads its copy first");
+        let changed = with_an_update_in_flight(
+            &path,
+            |cfg| cfg.last_signed_in_email = Some("someone@beebeeb.io".to_string()),
+            || remember_kept_folder_held_at(&mut held, &path, folder).expect("the kept folder was saved"),
+        );
+        assert!(changed);
+        let on_disk = crate::config::DesktopConfig::load_from(&path).expect("the config reads back");
+        assert_eq!(on_disk.kept_unsynced_folder.as_deref(), Some(folder));
+        assert_eq!(
+            on_disk.last_signed_in_email.as_deref(),
+            Some("someone@beebeeb.io"),
+            "the settings save that was in flight survived the record"
+        );
+        assert_eq!(
+            held.kept_unsynced_folder.as_deref(),
+            Some(folder),
+            "the copy has the record"
+        );
+        assert_eq!(
+            held.last_signed_in_email.as_deref(),
+            Some("someone@beebeeb.io"),
+            "and what was saved meanwhile"
+        );
+        // The same folder again changes nothing and writes nothing.
+        let written = std::fs::read(&path).expect("the file exists");
+        assert!(!remember_kept_folder_held_at(&mut held, &path, folder).expect("same folder"));
+        assert_eq!(std::fs::read(&path).expect("still there"), written);
     }
 
     #[test]
