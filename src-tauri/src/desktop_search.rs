@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::pin::Pin;
@@ -10,7 +10,7 @@ use beebeeb_core::search_sync::{self, ShardCoord, ShardRef};
 use serde::Serialize;
 
 use crate::api_client::{ApiClient, SearchShardRef};
-use crate::state_db::StateDb;
+use crate::state_db::{Namespace, StateDb};
 
 type StoreFuture<'a, T> = Pin<Box<dyn Future<Output = anyhow::Result<T>> + Send + 'a>>;
 
@@ -52,6 +52,9 @@ pub(crate) struct LocalSearchRecord {
     pub(crate) status: String,
     pub(crate) size_bytes: i64,
     pub(crate) modified_at: i64,
+    /// A row of the `SharedWithMe` namespace. Shared content is webapp-only by ruling 1701: it is not in Finder, so
+    /// quick search must not offer to show it there (task 1885, I3).
+    pub(crate) shared_with_me: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +78,7 @@ pub(crate) struct DesktopSearchResult {
     pub(crate) status: String,
     pub(crate) size_bytes: i64,
     pub(crate) modified_at: i64,
+    pub(crate) shared_with_me: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -107,6 +111,12 @@ pub(crate) fn syncing_response(query: String) -> DesktopSearchResponse {
 pub(crate) fn build_local_index(db: &StateDb) -> anyhow::Result<LocalSearchIndex> {
     let mut records = BTreeMap::new();
     let mut pairs = Vec::new();
+    // One read for every shared row (roots and their children): quick search must not offer them for Finder.
+    let shared: HashSet<String> = db
+        .list_contract_states_by_namespace(Namespace::SharedWithMe)?
+        .into_iter()
+        .map(|contract| contract.file_id)
+        .collect();
     for entry in db.list_files()? {
         if entry.is_dir() {
             continue;
@@ -116,6 +126,7 @@ pub(crate) fn build_local_index(db: &StateDb) -> anyhow::Result<LocalSearchIndex
             continue;
         }
         pairs.push((entry.file_id.clone(), name.clone()));
+        let shared_with_me = shared.contains(&entry.file_id);
         records.insert(
             entry.file_id.clone(),
             LocalSearchRecord {
@@ -125,6 +136,7 @@ pub(crate) fn build_local_index(db: &StateDb) -> anyhow::Result<LocalSearchIndex
                 status: entry.status.as_str().to_string(),
                 size_bytes: entry.size_bytes,
                 modified_at: entry.modified_at,
+                shared_with_me,
             },
         );
     }
@@ -164,6 +176,7 @@ pub(crate) fn query_local_index(local: &LocalSearchIndex, query: &str, limit: us
                 status: r.status,
                 size_bytes: r.size_bytes,
                 modified_at: r.modified_at,
+                shared_with_me: r.shared_with_me,
             })
             .collect(),
     }
@@ -391,6 +404,42 @@ mod tests {
         assert!(
             local.index.query("folder").is_empty(),
             "folder rows are not file results"
+        );
+    }
+
+    /// Task 1885 fix round 1 (I3): the results say which rows are shared with the person. A shared file is in the index
+    /// (the search finds it), but it is not in Finder, so the flag is what lets the quick-search overlay stop offering to
+    /// show it there. A shared root's CHILD is flagged too: its contract carries the namespace, not only the root's.
+    #[test]
+    fn test_1885_results_say_which_rows_are_shared_with_me() {
+        use crate::state_db::Namespace;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = StateDb::open(dir.path().join("state.db")).expect("state db");
+        seed_file(&db, "mine", "Reports/report-mine.pdf", ItemKind::File);
+        seed_file(&db, "shared-root-file", "Shared/report-theirs.pdf", ItemKind::File);
+        seed_file(&db, "shared-child", "Shared/Deep/report-deeper.pdf", ItemKind::File);
+        for id in ["shared-root-file", "shared-child"] {
+            let mut contract = db.get_file_contract_state(id).expect("lookup").expect("row");
+            contract.namespace = Namespace::SharedWithMe;
+            db.set_file_contract_state(&contract).expect("mark shared");
+        }
+
+        let local = super::build_local_index(&db).expect("local index");
+        let found = super::query_local_index(&local, "report", 10);
+        let flags: std::collections::BTreeMap<_, _> = found
+            .results
+            .iter()
+            .map(|r| (r.file_id.as_str(), r.shared_with_me))
+            .collect();
+        assert_eq!(
+            flags,
+            std::collections::BTreeMap::from([("mine", false), ("shared-root-file", true), ("shared-child", true)]),
+            "all three are found; the two shared rows say so"
+        );
+        let json = serde_json::to_value(&found.results[0]).expect("serialize");
+        assert!(
+            json.get("shared_with_me").is_some(),
+            "the flag reaches the frontend: {json}"
         );
     }
 

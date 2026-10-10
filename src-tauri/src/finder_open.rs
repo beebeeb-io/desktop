@@ -12,6 +12,7 @@
 //! back.
 
 use crate::finder_setup::error::FpError;
+use crate::state_db::Namespace;
 
 /// "Open in Finder" when macOS reports no Finder location for the domain (it is not added, or has
 /// been removed). A person sees the one sentence the frontend owns, never this text.
@@ -37,6 +38,36 @@ pub(crate) fn finder_open_outcome(answer: Result<bool, FpError>, nothing_there: 
 /// (`FINDER_OPEN_FAILED` in `src/finderSetupCopy.ts`; a test keeps the two equal). The error behind it is a bare domain
 /// and code and is never shown.
 pub(crate) const OPEN_FAILED_SENTENCE: &str = "Beebeeb couldn’t open its Finder location.";
+
+/// The File Provider-style id of the "shared with me" pseudo folder (`ipc_socket::NAMESPACE_SHARED_WITH_ME`). It is not a
+/// row in the state database, and it is never shown in Finder.
+pub(crate) const SHARED_WITH_ME_PSEUDO_FOLDER: &str = "namespace:shared_with_me";
+
+/// "Show in Finder" for a row that is shared with the person (task 1885 fix round 1, I3). Shared content is webapp-only
+/// by ruling 1701: it is not in Finder. A Mac never asks the File Provider for its location: macOS may fail the lookup
+/// (a toast for a result that was offered) or place it under "Beebeeb", the surfacing the change feed filters out.
+pub(crate) const SHARED_NOT_IN_FINDER: &str = "Files shared with you are not in Finder; they open in the web app.";
+
+/// "Show in Finder" for an id this Mac's state database does not know. Nothing to resolve.
+pub(crate) const ITEM_NOT_KNOWN: &str = "That item is not known on this Mac yet.";
+
+/// Whether a Mac may ask for an item's Finder location (task 1885 fix round 1, I3). `namespace_of` reads the item's
+/// namespace from the state database (`Ok(None)`: no such row). Anything that is not plainly one of the person's own
+/// rows is refused, and a lookup that fails is refused too, so the File Provider is asked about nothing it should not
+/// be. The id is checked here, before any bridge call.
+pub(crate) fn finder_may_show(
+    item_id: &str,
+    namespace_of: impl FnOnce(&str) -> Result<Option<Namespace>, String>,
+) -> Result<(), String> {
+    if item_id == SHARED_WITH_ME_PSEUDO_FOLDER {
+        return Err(SHARED_NOT_IN_FINDER.to_string());
+    }
+    match namespace_of(item_id)? {
+        Some(Namespace::SharedWithMe) => Err(SHARED_NOT_IN_FINDER.to_string()),
+        Some(_) => Ok(()),
+        None => Err(ITEM_NOT_KNOWN.to_string()),
+    }
+}
 
 /// The title of the alert the menu's "Open in Finder" raises when it fails.
 pub(crate) const MENU_OPEN_FAILED_TITLE: &str = "Open in Finder";
@@ -102,6 +133,72 @@ mod tests {
         assert_eq!(
             finder_open_outcome(Err(FpError::app(app_code::OP_TIMEOUT, OS_TEXT)), NOTHING_TO_OPEN),
             Err(format!("{APP_DOMAIN} {}", app_code::OP_TIMEOUT))
+        );
+    }
+
+    /// Fix round 1 (I3): a Mac never asks for the Finder location of a shared-with-me row, whatever the File Provider
+    /// would say; an unknown id and a failed lookup are refused as well.
+    #[test]
+    fn test_1885_a_shared_with_me_item_is_never_asked_of_the_file_provider() {
+        let asked = std::cell::Cell::new(0);
+        let lookup = |namespace: Option<Namespace>| {
+            let asked = &asked;
+            move |_: &str| {
+                asked.set(asked.get() + 1);
+                Ok(namespace)
+            }
+        };
+        assert_eq!(
+            finder_may_show("a-shared-file", lookup(Some(Namespace::SharedWithMe))),
+            Err(SHARED_NOT_IN_FINDER.to_string())
+        );
+        assert_eq!(
+            finder_may_show(SHARED_WITH_ME_PSEUDO_FOLDER, lookup(Some(Namespace::MyFiles))),
+            Err(SHARED_NOT_IN_FINDER.to_string()),
+            "the pseudo folder is refused by its id, without a lookup"
+        );
+        assert_eq!(asked.get(), 1, "only the first call looked the row up");
+        for own in [Namespace::MyFiles, Namespace::Offline, Namespace::Conflicts] {
+            assert_eq!(finder_may_show("mine", lookup(Some(own))), Ok(()));
+        }
+        assert_eq!(
+            finder_may_show("never-seen", lookup(None)),
+            Err(ITEM_NOT_KNOWN.to_string())
+        );
+        assert_eq!(
+            finder_may_show("x", |_| Err("database is locked".to_string())),
+            Err("database is locked".to_string()),
+            "a lookup that fails is a refusal"
+        );
+    }
+
+    /// Fix round 1 (I3), in the command: on a Mac `open_in_finder` checks the namespace after the identifier shape and
+    /// BEFORE the File Provider is asked anything, and the check is `?`-propagated, never discarded.
+    #[test]
+    fn test_1885_open_in_finder_checks_the_namespace_before_it_asks_the_file_provider() {
+        use crate::finder_setup_command_tests::{body_between, macos_compiled};
+        use crate::source_pin::squeeze;
+        let on_a_mac = macos_compiled(&read("src/lib.rs"));
+        let body = squeeze(body_between(&on_a_mac, "fn open_in_finder_blocking(", "\n}\n"));
+        let shape = body
+            .find("macos_validate_hydrate_item_identifier(&item_id)")
+            .expect("the shape check");
+        let guard = body
+            .find(&squeeze("finder_open::finder_may_show(&item_id,"))
+            .expect("the namespace check");
+        let reveal = body.find("file_provider_reveal_item(&item_id)").expect("the reveal");
+        assert!(
+            shape < guard && guard < reveal,
+            "shape, then namespace, then the File Provider:\n{body}"
+        );
+        let guard_statement = &body[guard..reveal];
+        assert!(
+            guard_statement.contains(")?;"),
+            "the refusal is returned, not dropped:\n{guard_statement}"
+        );
+        assert!(
+            guard_statement.contains("get_file_contract_state(id)"),
+            "the namespace comes from the state database's contract row:\n{guard_statement}"
         );
     }
 

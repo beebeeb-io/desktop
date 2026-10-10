@@ -7447,6 +7447,15 @@ fn open_in_finder_blocking(item_id: String, path: Option<String>) -> Result<(), 
         // is the app's private state folder and not a Finder location, opened with a child `open -R` whose failure
         // `spawn()` could not see. The identifier is checked the way every identifier off the wire is.
         ipc_socket::macos_validate_hydrate_item_identifier(&item_id).map_err(str::to_string)?;
+        // Shared content is webapp-only by ruling 1701: it is not in Finder, so the File Provider is never asked about it
+        // (macOS might fail the lookup, or place it under "Beebeeb"). Refused before any bridge call (task 1885, I3).
+        let db =
+            state_db_for_config(&DesktopConfig::load()?)?.ok_or_else(|| finder_open::ITEM_NOT_KNOWN.to_string())?;
+        finder_open::finder_may_show(&item_id, |id| {
+            db.get_file_contract_state(id)
+                .map(|state| state.map(|state| state.namespace))
+                .map_err(|error| format!("read item: {error}"))
+        })?;
         file_provider_reveal_item(&item_id)
     }
 

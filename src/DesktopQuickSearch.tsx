@@ -3,6 +3,7 @@ import {
   command,
   commandUnavailableLabel,
   desktopSearchFiles,
+  finderRevealableResults,
   formatBytes,
   type DesktopSearchResponse,
   type DesktopSearchResult,
@@ -69,7 +70,7 @@ export default function DesktopQuickSearch({
   const requestId = useRef(0)
 
   const trimmedQuery = query.trim()
-  const results = response?.results ?? EMPTY_RESULTS
+  const results = finderRevealableResults(platform, response?.results ?? EMPTY_RESULTS)
   const indexedFileCount = response?.indexed_file_count ?? 0
   const indexSyncing = response?.index_state === 'syncing'
 
