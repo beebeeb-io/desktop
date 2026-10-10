@@ -2520,7 +2520,7 @@ pub(crate) fn write_outcome_response(
             // the system reads a nil item as "delete the item on disk" (REPL.h:629-634). The
             // write is queued and its bytes kept; the system retries and gets the item.
             #[cfg(target_os = "macos")]
-            if item.is_none() {
+            if item.is_none() && matches!(op, "create" | "modify") {
                 log_refused_write(op, "row_unreadable");
                 return IpcResponse::Error {
                     message: "the write was queued but its item could not be read; try again".into(),
@@ -5379,6 +5379,43 @@ mod tests {
         });
         assert_eq!(logs.matches("row_unreadable").count(), 3, "{logs}");
         assert_eq!(logs.matches("Finder write refused").count(), 3, "{logs}");
+    }
+
+    /// Spec 2026-10-09 §7.3 covers creates and modifies: a nil item there deletes the item on
+    /// disk. A delete's reply item is never read (the extension discards it), so a trash whose
+    /// row is gone when the reply is built (the queue finished it meanwhile) stays a success.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_delete_whose_row_is_gone_at_the_reply_is_not_refused() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let logs = capture_logs(|| {
+            let reply = write_outcome_response(
+                "delete",
+                &db,
+                Ok(crate::engine_bridge::FpWrite::plain(
+                    crate::engine_bridge::FinderWriteOutcome::Queued {
+                        op_id: "op-trash".into(),
+                        file_id: Some("3f2a9c1e-0000-4000-8000-00000000dead".into()),
+                        kind: crate::state_db::OperationKind::TrashFile,
+                        ignored: false,
+                        message: "queued for encrypted sync".into(),
+                    },
+                )),
+            );
+            assert!(
+                matches!(
+                    reply,
+                    IpcResponse::WriteQueued {
+                        item: None,
+                        ignored: false,
+                        ..
+                    }
+                ),
+                "a queued delete is a success: {reply:?}"
+            );
+        });
+        assert!(!logs.contains("Finder write refused"), "{logs}");
     }
 
     #[test]
