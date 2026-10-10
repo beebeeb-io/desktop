@@ -158,11 +158,24 @@ exactly the path the system reported.
   - **If the listing is refused** for an existing folder, the app cannot tell whether it is empty.
     It then shows the folder (§5): it points at a folder that exists, never at nothing. It logs
     `contents_checked = false`, so the device rung shows which case it hit.
-- **Timing.** The check assumes macOS has filled the folder by the time the removal's completion
+- ~~**Timing.** The check assumes macOS has filled the folder by the time the removal's completion
   handler runs. On the device, the folder existed afterwards; the rung must also confirm that the
-  app saw it (§7).
+  app saw it (§7).~~
+  **Timing** (replaces the struck bullet; re-review D1). Nothing guarantees that macOS has made or
+  filled the folder when the completion handler runs, and one device sample does not exclude a race.
+  So the decision never hides a folder that exists:
+  - A folder that exists is kept, empty or not, the same as one the app may not list.
+  - A folder that does not exist is looked at again before the removal counts as "nothing kept":
+    `KEPT_MISSING_RECHECKS` (4) looks, `KEPT_MISSING_RECHECK_INTERVAL` (250 ms) apart, about one
+    second in all (`settle_kept_state` in `src-tauri/src/finder_removal.rs`). It stops at the first
+    sight of the folder. The look is `stat`, which the sandbox always allows (above), so it works
+    on a path alone. A removal that kept nothing pays that second; a removal that kept something
+    does not.
+  - A folder still missing after the last look is "nothing kept", and silent.
 
 — lane impl-1882-r2, 2026-10-10, per lead ruling [1882-r2] (device K-F2, review I3, I4)
+
+— lead ruling, 2026-10-10 (re-review D1), for the **Timing** bullet above
 
 ## 5. What the person is told, and where
 
@@ -190,7 +203,7 @@ The folder's path follows on its own line, in mono wherever the surface has mono
 | The cleanup inside Add to Finder (§3, added 2026-10-10) | The same alert as sign-out. The install failure is reported as before. |
 | The app-start sweep | The same alert, once per folder kept. |
 | Every removal above (added 2026-10-10, review I2) | Also the kept-folder row in Settings › Sync, until the person dismisses it (below). |
-| `BeebeebFileProviderCtl remove` | Prints `preserved: <path>` on its own stdout, after `removed`. It is a developer tool. Since 2026-10-10 it prints that line only when files were kept by the rule below. When macOS reported a folder that is missing or empty, it prints `nothing kept: macOS reported <path>, which is missing` (or `… empty`). |
+| `BeebeebFileProviderCtl remove` | Prints `preserved: <path>` on its own stdout, after `removed`. It is a developer tool. Since 2026-10-10 it prints that line only when files were kept by the rule below. ~~When macOS reported a folder that is missing or empty, it prints `nothing kept: macOS reported <path>, which is missing` (or `… empty`).~~ When macOS reported a folder that is still missing after the re-checks, it prints `nothing kept: macOS reported <path>, which is missing`. A folder that exists, empty or not, is `preserved:` like the app (re-review D1, lead ruling, 2026-10-10). |
 
 Why an alert for sign-out rather than a line in the window: sign-out has four entry points
 (Settings, the compact window's Account page, the menu item, and "Sign in again" from the
@@ -211,11 +224,15 @@ warning).~~
 | What the bridge finds | Outcome | What the person sees | Log (never the path) |
 | --- | --- | --- | --- |
 | No URL | Nothing kept | Nothing: no alert, no row, no extra line | debug, `reported = "none"` |
-| A URL whose folder does not exist | Nothing kept | Nothing | debug, `reported = "missing"` |
-| A URL whose folder exists and is empty | Nothing kept | Nothing | debug, `reported = "empty"` |
-| A folder (or a single file) with at least one entry | Kept | The sentence and the path, on every surface above | info, `preserved = true, contents_checked = true` |
-| A folder that exists, but the listing (or the `stat`) is refused | Kept: the fallback in §4 | The sentence and the path | info, `preserved = true, contents_checked = false` |
+| ~~A URL whose folder does not exist~~ | ~~Nothing kept~~ | ~~Nothing~~ | ~~debug, `reported = "missing"`~~ |
+| A URL whose folder does not exist, and still does not after the re-checks (§4, Timing) | Nothing kept | Nothing: no alert, no row, no extra line | debug, `reported = "missing"` |
+| ~~A URL whose folder exists and is empty~~ | ~~Nothing kept~~ | ~~Nothing~~ | ~~debug, `reported = "empty"`~~ |
+| A URL whose folder exists and is empty (it may not be filled yet, §4) | Kept | The sentence and the path, on every surface above | info, `preserved = true, contents_checked = true, empty = true` |
+| A folder (or a single file) with at least one entry | Kept | The sentence and the path, on every surface above | info, `preserved = true, contents_checked = true, empty = false` |
+| A folder that exists, but the listing (or the `stat`) is refused | Kept: the fallback in §4 | The sentence and the path | info, `preserved = true, contents_checked = false, empty = false` |
 | A URL without a path ("removed; folder unknown") | Its own outcome: the domain is removed, but no folder can be named | Nothing: there is no folder to point at. Repair reports the domain as removed, with no warning | warn, "macOS reported kept files without a folder" |
+
+— lead ruling, 2026-10-10 (re-review D1), for the two struck rows and the two rows that replace them
 
 - **A removal that fails** is reported as before:
   - sign-out: logged and never shown, since sign-out must always complete;
@@ -290,7 +307,7 @@ sha256, and the alert must name that folder. Repeat with Repair (the Sync tab no
   point that builds the same `NSURL` and runs the same function. The cases: a missing folder, an
   empty folder, a folder with one item, a folder with only a hidden item, and a single file.
 - **Rust, every OS:** decoding every folder state into its outcome.
-  - Missing and empty are silent.
+  - ~~Missing and empty are silent.~~ Missing is silent (after the re-checks); empty is kept (re-review D1).
   - One entry, or a refused listing, is kept.
   - A URL without a path is the "folder unknown" outcome.
   - An error that carries a folder keeps the folder.
@@ -312,10 +329,26 @@ sha256, and the alert must name that folder. Repeat with Repair (the Sync tab no
   - the alert logs `kept-folder alert shown` and `kept-folder alert closed`;
   - the cleanup inside Add to Finder surfaces its folder.
 
+- **Round 3 (re-review D1), no sleeping in any test:**
+  - an existing empty folder decodes to kept, on every surface (sign-out, Repair, a failed removal,
+    the install cleanup);
+  - a folder missing at the handler and present on a later look is kept (the look is injected, as
+    is the wait; on macOS it also runs on a real disk, with the folder made during the wait);
+  - a folder missing throughout is silent, after exactly `KEPT_MISSING_RECHECKS` looks totalling
+    between 0.75 s and 1.5 s of waiting;
+  - only a missing folder with a path is looked at again;
+  - a source pin: both removal paths decode the bridge's reply in one place, and that place
+    settles a missing folder first.
+
+— lead ruling, 2026-10-10 (re-review D1)
+
 **Device checks** (in addition to §7):
 
-1. **Nothing dirty.** Sign out, and separately run Repair, with no local-only file. Expect no
-   alert, no row, and a debug line with `reported = "missing"` or `"empty"`.
+1. **Nothing dirty.** Sign out, and separately run Repair, with no local-only file. ~~Expect no
+   alert, no row, and a debug line with `reported = "missing"` or `"empty"`.~~ Expect no alert, no
+   row, and a debug line with `reported = "missing"`, about one second after the removal. An alert
+   here, with `empty = true` in the info line, means macOS makes an empty folder for a clean
+   removal: stop and report it (re-review D1, lead ruling, 2026-10-10).
 2. **Something dirty.** Sign out with a file that never uploaded. Expect all of these:
    - a `UserNotificationCenter` window titled "Files kept on this Mac";
    - `kept-folder alert shown` in the log, then `kept-folder alert closed` after OK;
@@ -323,6 +356,11 @@ sha256, and the alert must name that folder. Repeat with Repair (the Sync tab no
      extension and the fallback was taken;
    - the Settings › Sync row, after signing in again;
    - the row still there after a tab switch and after a restart, until "Dismiss".
-3. **Timing.** In check 2, the info line must say `preserved = true`. A debug line with
+3. **Timing.** In check 2, the info line must say `preserved = true`. ~~A debug line with
    `reported = "missing"` while the folder exists afterwards means macOS fills the folder after
-   the completion handler. Stop and report it: the check would then hide kept files.
+   the completion handler. Stop and report it: the check would then hide kept files.~~ A late
+   folder is now looked for, for about one second (§4, Timing). A debug line with
+   `reported = "missing"` while the folder exists afterwards means macOS makes it later than that:
+   stop and report it. `empty = true` with `preserved = true` means the re-check caught the folder
+   before it was filled, which is the case this guard exists for (re-review D1, lead ruling,
+   2026-10-10).

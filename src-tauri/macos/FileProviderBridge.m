@@ -81,8 +81,10 @@ static int BeebeebWaitForDomainReady(NSFileProviderDomain *domain,
 // Task 1882 round 2 (spec docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md §4, §5):
 // what the folder macOS reported after a removal holds. A reported URL does not mean anything was
 // kept (device K-F2: an empty domain's removal reported a folder that never existed), so the
-// person is told only when something is there. The same numbers as `KEPT_*` in
-// src-tauri/src/finder_removal.rs; a test pins them.
+// person is told only when the folder exists. Rust (finder_removal.rs, `settle_kept_state`) looks
+// again at a folder that reads as missing, because macOS may make or fill it after this
+// completion handler runs; an existing folder is kept, empty or not (re-review D1). The same
+// numbers as `KEPT_*` in src-tauri/src/finder_removal.rs; a test pins them.
 enum {
     BeebeebKeptNoneReported = 0,
     BeebeebKeptMissing = 1,
@@ -196,8 +198,9 @@ static int BeebeebRemoveDomainKeepingUnsynced(NSFileProviderDomain *domain,
     return 0;
 }
 
-// Test-only entry point (src-tauri/src/macos_file_provider.rs tests): runs the same folder check
-// on a file URL built from `path`, so the check is tested on a real disk. Nothing else calls it.
+// Runs the same folder check on a file URL built from `path`. Rust calls it to look again at a
+// folder that read as missing (re-review D1: macos_file_provider.rs `kept_state_for_path`; `stat`
+// needs no scope, so a path is enough), and the tests call it to test the check on a real disk.
 int beebeeb_fp_kept_folder_state_for_path(const char *path) {
     @autoreleasepool {
         if (path == NULL) {

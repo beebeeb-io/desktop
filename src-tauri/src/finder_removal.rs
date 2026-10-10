@@ -23,9 +23,10 @@ pub const PRESERVED_FILES_SENTENCE: &str =
 /// No URL came back.
 pub const KEPT_NONE_REPORTED: i32 = 0;
 /// A URL came back, but nothing exists there (device K-F2: macOS reports a folder even when it
-/// kept nothing).
+/// kept nothing). Looked at again before it means "nothing kept" ([`settle_kept_state`]).
 pub const KEPT_MISSING: i32 = 1;
-/// The folder exists and is empty.
+/// The folder exists and is empty. Kept all the same (re-review D1): macOS may not have filled it
+/// yet, and an existing folder is shown whether the app could list it or not.
 pub const KEPT_EMPTY: i32 = 2;
 /// The folder (or a single kept file) holds at least one entry.
 pub const KEPT_HAS_ENTRIES: i32 = 3;
@@ -34,12 +35,51 @@ pub const KEPT_UNCHECKED: i32 = 4;
 /// A URL without a path: the domain is removed, and no folder can be named (review M3).
 pub const KEPT_NO_PATH: i32 = 5;
 
+/// How often a folder that reads as missing is looked at again before the removal is called
+/// "nothing kept" (re-review D1). With [`KEPT_MISSING_RECHECK_INTERVAL`] that is about one second,
+/// paid only by a removal that kept nothing.
+pub const KEPT_MISSING_RECHECKS: u32 = 4;
+/// The wait before each of those looks.
+pub const KEPT_MISSING_RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Re-review D1: a folder that reads as missing is looked at again, a few times over about one
+/// second, before the removal counts as "nothing kept". Nothing guarantees that macOS has made or
+/// filled the folder when the removal's completion handler runs, and a single early look would
+/// hide the person's files for good (no alert, no row, no record, and nothing looks again).
+///
+/// `check` is the bridge's own folder check on a path (`stat` always answers in the sandbox);
+/// `wait` is the sleep. Both are injected, so the tests never sleep. Only a missing folder that
+/// has a path is looked at again; any other state is final. It stops at the first look that finds
+/// the folder, whatever it holds, and returns what that look found.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn settle_kept_state(
+    state: i32,
+    location: Option<&str>,
+    mut check: impl FnMut(&str) -> i32,
+    mut wait: impl FnMut(std::time::Duration),
+) -> i32 {
+    if state != KEPT_MISSING {
+        return state;
+    }
+    let Some(path) = location.filter(|path| !path.trim().is_empty()) else {
+        return state;
+    };
+    for _ in 0..KEPT_MISSING_RECHECKS {
+        wait(KEPT_MISSING_RECHECK_INTERVAL);
+        let again = check(path);
+        if again != KEPT_MISSING {
+            return again;
+        }
+    }
+    KEPT_MISSING
+}
+
 /// Why a removal kept nothing. Logged (debug), never shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NothingKept {
     NotReported,
+    /// Still missing after the re-checks ([`settle_kept_state`]).
     Missing,
-    Empty,
 }
 
 impl NothingKept {
@@ -47,7 +87,6 @@ impl NothingKept {
         match self {
             Self::NotReported => "none",
             Self::Missing => "missing",
-            Self::Empty => "empty",
         }
     }
 }
@@ -58,8 +97,14 @@ pub enum KeptFolder {
     /// Nothing to tell the person.
     Nothing(NothingKept),
     /// Files were kept in this folder, exactly as the system reported it. `contents_checked` is
-    /// `false` when the folder exists but the app could not look inside (spec §4).
-    Kept { path: String, contents_checked: bool },
+    /// `false` when the folder exists but the app could not look inside (spec §4). `empty` is
+    /// `true` when the app looked and found nothing yet: the folder is still shown, because an
+    /// existing folder may be one macOS has not filled (re-review D1).
+    Kept {
+        path: String,
+        contents_checked: bool,
+        empty: bool,
+    },
     /// macOS reported kept files without a folder: removed; folder unknown (review M3).
     Unknown,
 }
@@ -78,20 +123,28 @@ pub fn kept_folder_from_bridge(state: i32, location: Option<String>) -> KeptFold
     match (state, path) {
         (KEPT_NONE_REPORTED, _) => KeptFolder::Nothing(NothingKept::NotReported),
         (KEPT_MISSING, _) => KeptFolder::Nothing(NothingKept::Missing),
-        (KEPT_EMPTY, _) => KeptFolder::Nothing(NothingKept::Empty),
+        // Re-review D1: an existing folder is never hidden, empty or not.
+        (KEPT_EMPTY, Some(path)) => KeptFolder::Kept {
+            path,
+            contents_checked: true,
+            empty: true,
+        },
         (KEPT_HAS_ENTRIES, Some(path)) => KeptFolder::Kept {
             path,
             contents_checked: true,
+            empty: false,
         },
         (KEPT_UNCHECKED, Some(path)) => KeptFolder::Kept {
             path,
             contents_checked: false,
+            empty: false,
         },
         (KEPT_NO_PATH, _) | (_, None) => KeptFolder::Unknown,
         // A state this build does not know: the folder is shown, never hidden.
         (_, Some(path)) => KeptFolder::Kept {
             path,
             contents_checked: false,
+            empty: false,
         },
     }
 }
@@ -107,11 +160,16 @@ impl DomainRemoval {
     /// was), never where: the path is shown only in the app's UI (spec §5).
     pub fn kept_location(self, context: &'static str) -> Option<String> {
         match self.kept {
-            KeptFolder::Kept { path, contents_checked } => {
+            KeptFolder::Kept {
+                path,
+                contents_checked,
+                empty,
+            } => {
                 tracing::info!(
                     context,
                     preserved = true,
                     contents_checked,
+                    empty,
                     "Finder location removed; macOS kept the files that had not reached the server"
                 );
                 Some(path)
@@ -421,6 +479,15 @@ mod tests {
         KeptFolder::Kept {
             path: path.to_string(),
             contents_checked,
+            empty: false,
+        }
+    }
+
+    fn kept_empty(path: &str) -> KeptFolder {
+        KeptFolder::Kept {
+            path: path.to_string(),
+            contents_checked: true,
+            empty: true,
         }
     }
 
@@ -478,12 +545,12 @@ mod tests {
     // ── round 2: is anything actually there? (device K-F2, review I3, M3) ───
 
     #[test]
-    fn test_1882_r2_a_reported_folder_that_is_missing_or_empty_keeps_nothing() {
+    fn test_1882_r2_a_reported_folder_that_is_missing_keeps_nothing() {
+        // Round 3 (re-review D1): an EMPTY folder is no longer in this list; it is kept (below).
         let folder = "/Users/someone/Library/CloudStorage/Beebeeb-Drive (10-10-2026 10:52)";
         for (state, reason) in [
             (KEPT_NONE_REPORTED, NothingKept::NotReported),
             (KEPT_MISSING, NothingKept::Missing),
-            (KEPT_EMPTY, NothingKept::Empty),
         ] {
             let decoded = kept_folder_from_bridge(state, Some(folder.to_string()));
             assert_eq!(decoded, KeptFolder::Nothing(reason), "state {state}");
@@ -522,6 +589,199 @@ mod tests {
                 Some(folder.to_string())
             );
         }
+    }
+
+    // ── round 3: the kept-folder decision must never hide kept files (re-review D1) ─
+
+    #[test]
+    fn test_1882_r3_an_existing_empty_folder_is_kept_like_an_unlistable_one() {
+        let folder = "/Users/someone/Library/CloudStorage/Beebeeb-Beebeeb (10-10-2026 10:50)";
+        let decoded = kept_folder_from_bridge(KEPT_EMPTY, Some(folder.to_string()));
+        assert_eq!(
+            decoded,
+            kept_empty(folder),
+            "an empty folder that exists is reported as kept"
+        );
+        assert_eq!(
+            removal(decoded.clone()).kept_location("sign-out"),
+            Some(folder.to_string()),
+            "sign-out raises the alert for it"
+        );
+        let mut warnings = Vec::new();
+        assert_eq!(
+            repair_removal(Ok(removal(decoded.clone())), &mut warnings),
+            (true, Some(folder.to_string())),
+            "Repair reports it for the row"
+        );
+        assert!(warnings.is_empty());
+        // The same on a failed removal (review M2) and in the install cleanup (review M1).
+        let failure = removal_from_bridge(-1, KEPT_EMPTY, Some(folder.to_string()), Some("busy".to_string()))
+            .expect_err("the removal reported an error");
+        assert_eq!(failure.kept, kept_empty(folder));
+        assert_eq!(
+            install_cleanup_failure("setup".to_string(), Ok(removal(decoded))).kept_folder,
+            Some(folder.to_string())
+        );
+        // An empty folder is told apart from a full one only in the log, never to the person.
+        assert_ne!(kept_empty(folder), kept(folder, true));
+        // Empty with no path is "folder unknown", as any state without a path.
+        assert_eq!(kept_folder_from_bridge(KEPT_EMPTY, None), KeptFolder::Unknown);
+    }
+
+    /// What `settle_kept_state` did, with the answers it was given. No sleeping: the wait is
+    /// injected and only recorded.
+    struct Settled {
+        state: i32,
+        asked: Vec<String>,
+        waits: Vec<std::time::Duration>,
+    }
+
+    fn settle(state: i32, location: Option<&str>, answers: &[i32]) -> Settled {
+        let asked = std::cell::RefCell::new(Vec::<String>::new());
+        let waits = std::cell::RefCell::new(Vec::<std::time::Duration>::new());
+        let state = settle_kept_state(
+            state,
+            location,
+            |path| {
+                let mut asked = asked.borrow_mut();
+                asked.push(path.to_string());
+                answers.get(asked.len() - 1).copied().unwrap_or(KEPT_MISSING)
+            },
+            |wait| waits.borrow_mut().push(wait),
+        );
+        Settled {
+            state,
+            asked: asked.into_inner(),
+            waits: waits.into_inner(),
+        }
+    }
+
+    #[test]
+    fn test_1882_r3_a_missing_folder_that_appears_within_the_window_is_kept() {
+        let folder = "/Users/someone/Library/CloudStorage/Beebeeb-Beebeeb (10-10-2026 10:50) ";
+        let settled = settle(
+            KEPT_MISSING,
+            Some(folder),
+            &[KEPT_MISSING, KEPT_MISSING, KEPT_HAS_ENTRIES],
+        );
+        assert_eq!(settled.state, KEPT_HAS_ENTRIES, "the third look found the files");
+        assert_eq!(
+            settled.asked,
+            vec![folder.to_string(); 3],
+            "each look is at the exact reported path"
+        );
+        assert_eq!(
+            settled.waits,
+            vec![KEPT_MISSING_RECHECK_INTERVAL; 3],
+            "one wait before each look"
+        );
+        assert_eq!(
+            removal_from_bridge(0, settled.state, Some(folder.to_string()), None)
+                .map(|removal| removal.kept_location("sign-out")),
+            Ok(Some(folder.to_string())),
+            "and the files reach the alert"
+        );
+
+        // It may appear empty first: it exists, so it is kept too (above).
+        let empty_first = settle(KEPT_MISSING, Some(folder), &[KEPT_EMPTY]);
+        assert_eq!(empty_first.state, KEPT_EMPTY);
+        assert_eq!(
+            empty_first.waits.len(),
+            1,
+            "it stops looking at the first sight of the folder"
+        );
+    }
+
+    #[test]
+    fn test_1882_r3_a_folder_missing_throughout_is_nothing_kept_after_a_bounded_wait() {
+        let folder = "/Users/someone/Library/CloudStorage/Beebeeb-Drive (10-10-2026 10:52)";
+        let settled = settle(KEPT_MISSING, Some(folder), &[]);
+        assert_eq!(settled.state, KEPT_MISSING);
+        assert_eq!(
+            settled.asked.len(),
+            KEPT_MISSING_RECHECKS as usize,
+            "a few looks, then it stops"
+        );
+        assert_eq!(settled.waits.len(), KEPT_MISSING_RECHECKS as usize);
+        let total: std::time::Duration = settled.waits.iter().sum();
+        assert!(
+            total >= std::time::Duration::from_millis(750) && total <= std::time::Duration::from_millis(1500),
+            "about one second in all, not instant and not long: {total:?}"
+        );
+        // And then it is silent, as before (spec §5).
+        let decoded = kept_folder_from_bridge(settled.state, Some(folder.to_string()));
+        assert_eq!(decoded, KeptFolder::Nothing(NothingKept::Missing));
+        assert_eq!(removal(decoded).kept_location("sign-out"), None);
+    }
+
+    #[test]
+    fn test_1882_r3_only_a_missing_folder_with_a_path_is_looked_at_again() {
+        for state in [
+            KEPT_NONE_REPORTED,
+            KEPT_EMPTY,
+            KEPT_HAS_ENTRIES,
+            KEPT_UNCHECKED,
+            KEPT_NO_PATH,
+            9,
+        ] {
+            let settled = settle(state, Some("/Users/someone/Kept"), &[KEPT_HAS_ENTRIES]);
+            assert_eq!(settled.state, state, "state {state} is final");
+            assert!(
+                settled.asked.is_empty() && settled.waits.is_empty(),
+                "state {state}: no look, no wait"
+            );
+        }
+        for location in [None, Some(""), Some("   ")] {
+            let settled = settle(KEPT_MISSING, location, &[KEPT_HAS_ENTRIES]);
+            assert_eq!(settled.state, KEPT_MISSING, "no path to look at: {location:?}");
+            assert!(
+                settled.asked.is_empty() && settled.waits.is_empty(),
+                "{location:?}: no look, no wait"
+            );
+        }
+    }
+
+    /// Re-review D1: both removal paths (Repair/sign-out/rollback through `remove()`, and the
+    /// app-start sweep through `remove_domain`) decode the bridge's reply in ONE place, and that
+    /// place settles a missing folder first and decodes what the settle found. A path that skips
+    /// it would hide a late-filled folder. The behaviour is tested in `macos_file_provider`
+    /// (`test_1882_r3_the_decode_uses_what_the_settle_found`); this pins that the real decode is
+    /// the one every removal goes through, with the real look and the real wait.
+    #[test]
+    fn test_1882_r3_every_removal_settles_a_missing_folder_before_it_decides() {
+        let full = include_str!("macos_file_provider.rs");
+        let source = without_comments(&full[..full.find("\n#[cfg(test)]\nmod tests {").expect("tests module")]);
+        let squash = |text: &str| text.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        assert_eq!(
+            source.matches("removal_from_bridge(").count(),
+            1,
+            "one decode site, so no removal can skip the settle:\n{source}"
+        );
+        let function = |name: &str| {
+            let from = &source[source.find(name).unwrap_or_else(|| panic!("{name}"))..];
+            squash(&from[..from.find("\n}\n").expect("function ends")])
+        };
+        let decode = function("fn decode_removal(");
+        assert!(
+            decode.contains("decode_removal_with(code,kept_state,location_buffer,error_buffer,kept_state_for_path,std::thread::sleep,)"),
+            "the real decode looks with the bridge's check and really waits: {decode}"
+        );
+        let with = function("fn decode_removal_with(");
+        assert!(
+            with.contains(
+                "letkept_state=crate::finder_removal::settle_kept_state(kept_state,location.as_deref(),check,wait);"
+            ),
+            "it settles the state first: {with}"
+        );
+        assert!(
+            with.contains("crate::finder_removal::removal_from_bridge(code,kept_state,location,"),
+            "and decodes the settled state, not the first look: {with}"
+        );
+        assert_eq!(
+            source.matches("decode_removal(").count(),
+            3,
+            "the definition, `remove()` and the sweep's `remove_domain`"
+        );
     }
 
     #[test]
@@ -564,25 +824,51 @@ mod tests {
     /// holds something or could not be checked, and a plain "nothing kept" line otherwise. The
     /// helper has no test harness of its own, so its source is pinned here.
     #[test]
-    fn test_1882_r2_the_helper_prints_preserved_only_when_something_was_kept() {
+    fn test_1882_r3_the_helper_prints_preserved_for_any_existing_folder() {
         let helper = without_comments(include_str!("../../BeebeebFileProviderTools/DomainControlTool.swift"));
         let remove = &helper[helper.find("static func remove()").expect("remove()")..];
         let remove = &remove[..remove.find("static func signalRoot()").expect("next function")];
         let squashed: String = remove.chars().filter(|c| !c.is_whitespace()).collect();
         assert!(
             squashed.contains(
-                "switchkeptFolder(preservedLocation){case.hasEntries,.unchecked:print(\"preserved:\\(path)\")"
+                "switchsettledKeptFolder(preservedLocation){case.hasEntries,.empty,.unchecked:print(\"preserved:\\(path)\")"
             ),
-            "`preserved:` is printed only for a folder that holds something or could not be checked:\n{remove}"
+            "`preserved:` is printed for any folder that exists, empty or not, after the re-checks (re-review D1):\n{remove}"
         );
         assert_eq!(
             remove.matches("print(\"preserved:").count(),
             1,
             "one `preserved:` line, in the kept arm"
         );
-        for line in ["which is missing", "which is empty"] {
-            assert!(remove.contains(line), "the helper says {line:?} when nothing was kept");
-        }
+        assert!(
+            remove.contains("which is missing"),
+            "the helper says so when the folder is still missing after the re-checks"
+        );
+        assert!(
+            !remove.contains("which is empty"),
+            "an empty folder is kept now, so the helper never calls it 'nothing kept'"
+        );
+        // The same bounded re-check as the app (`settle_kept_state`): a few looks, about a second.
+        let settle = &helper[helper
+            .find("static func settledKeptFolder(")
+            .expect("settledKeptFolder()")..];
+        let settle = &settle[..settle.find("\n    }\n").expect("function ends")];
+        let settle: String = settle.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            settle.contains("for_in0..<keptMissingRechecks{")
+                && settle.contains("Thread.sleep(forTimeInterval:keptMissingRecheckInterval)")
+                && settle.contains("keptFolder(location)"),
+            "the helper looks again at a missing folder, on the same URL:\n{settle}"
+        );
+        let looks = format!("static let keptMissingRechecks = {KEPT_MISSING_RECHECKS}");
+        let seconds = format!(
+            "static let keptMissingRecheckInterval: TimeInterval = {}",
+            KEPT_MISSING_RECHECK_INTERVAL.as_secs_f64()
+        );
+        assert!(
+            helper.contains(&looks) && helper.contains(&seconds),
+            "the helper's constants are the app's ({looks}; {seconds})"
+        );
         let check = &helper[helper.find("static func keptFolder(").expect("keptFolder()")..];
         assert!(
             check.contains("startAccessingSecurityScopedResource()"),

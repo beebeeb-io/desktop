@@ -70,7 +70,9 @@ struct DomainControlTool {
     /// files that never reached the server, like every removal in the app. Prints `removed`, then
     /// `preserved: <folder>` when macOS kept any (this is a developer tool, so the path goes to
     /// its own stdout). Round 2 (device K-F2): macOS reports a folder even when it kept nothing,
-    /// so `preserved:` is printed only when the folder holds something, by the app's own rule.
+    /// so `preserved:` is printed only when that folder exists, by the app's own rule. Round 3
+    /// (re-review D1): an existing folder counts whether it is empty or not, and a missing one is
+    /// looked at again for about a second first.
     static func remove() {
         let semaphore = DispatchSemaphore(value: 0)
         var exitCode: Int32 = 1
@@ -81,13 +83,11 @@ struct DomainControlTool {
             } else {
                 print("removed")
                 let path = preservedLocation?.path ?? ""
-                switch keptFolder(preservedLocation) {
-                case .hasEntries, .unchecked:
+                switch settledKeptFolder(preservedLocation) {
+                case .hasEntries, .empty, .unchecked:
                     print("preserved: \(path)")
                 case .missing:
                     print("nothing kept: macOS reported \(path), which is missing")
-                case .empty:
-                    print("nothing kept: macOS reported \(path), which is empty")
                 case .noPath:
                     print("removed; macOS reported kept files without a folder")
                 case .notReported:
@@ -107,6 +107,23 @@ struct DomainControlTool {
     /// stops at "something is there", and never opens a file.
     enum KeptFolder {
         case notReported, missing, empty, hasEntries, unchecked, noPath
+    }
+
+    /// The app's `settle_kept_state` (src-tauri/src/finder_removal.rs, re-review D1): a folder that
+    /// reads as missing is looked at again, on the same URL. The constants are the app's;
+    /// a test pins them equal.
+    static let keptMissingRechecks = 4
+    static let keptMissingRecheckInterval: TimeInterval = 0.25
+
+    static func settledKeptFolder(_ location: URL?) -> KeptFolder {
+        var state = keptFolder(location)
+        guard state == .missing else { return state }
+        for _ in 0..<keptMissingRechecks {
+            Thread.sleep(forTimeInterval: keptMissingRecheckInterval)
+            state = keptFolder(location)
+            if state != .missing { return state }
+        }
+        return state
     }
 
     static func keptFolder(_ location: URL?) -> KeptFolder {
