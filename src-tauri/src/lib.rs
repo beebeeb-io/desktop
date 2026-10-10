@@ -1903,7 +1903,7 @@ async fn clear_session_impl(state: &AppState) -> Result<SignOutReport, SignOutFa
     // server (`NSFileProviderDomainRemovalModePreserveDirtyUserData`); the
     // folder macOS kept them in rides the report to the alert.
     #[cfg(target_os = "macos")]
-    let preserved_location = finder_removal::sign_out_kept_location(remove_file_provider_domain());
+    let preserved_location = finder_removal::sign_out_kept_location(remove_file_provider_domain_blocking().await);
     #[cfg(not(target_os = "macos"))]
     let preserved_location: Option<String> = None;
     // Task 1670 round 2: also the account-switch boundary — this codebase's
@@ -2948,6 +2948,39 @@ fn remove_file_provider_domain() -> Result<finder_removal::DomainRemoval, finder
     Err("File Provider is only available on macOS.".to_string().into())
 }
 
+/// Runs a blocking File Provider call on the blocking pool, so it never holds the main thread or
+/// an async runtime worker (1882 round 4). The removal blocks on the system's completion handler,
+/// and when a kept folder reads as missing it then sleeps about a second (`settle_kept_state`).
+/// The failure is the pool's own (a panicked or cancelled job); it carries no path.
+async fn on_blocking_pool<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| format!("A File Provider call did not finish: {error}"))
+}
+
+/// The removal, off the runtime (round 4).
+async fn remove_file_provider_domain_blocking() -> Result<finder_removal::DomainRemoval, finder_removal::RemovalFailure>
+{
+    match on_blocking_pool(remove_file_provider_domain).await {
+        Ok(result) => result,
+        Err(message) => Err(message.into()),
+    }
+}
+
+/// The install, off the runtime (round 4): its cleanup is a removal.
+async fn install_file_provider_domain_blocking() -> Result<FileProviderInstallOutcome, finder_removal::InstallFailure> {
+    match on_blocking_pool(install_file_provider_domain).await {
+        Ok(result) => result,
+        Err(message) => Err(message.into()),
+    }
+}
+
+/// The app-start sweep, off the runtime (round 4).
+#[cfg(target_os = "macos")]
+async fn cleanup_stale_domains_blocking() -> Result<macos_file_provider::StaleDomainCleanup, String> {
+    on_blocking_pool(crate::macos_file_provider::cleanup_stale_domains).await?
+}
+
 /// Task 1670 round 2: wipe the macOS hydrate-cache staging directory at every
 /// account-security boundary (sign-out, lock, daemon startup) so a decrypted
 /// plaintext copy staged for a Finder open can never outlive the boundary
@@ -3188,7 +3221,7 @@ async fn install_finder_location(
     )
     .await?;
 
-    match install_file_provider_domain() {
+    match install_file_provider_domain_blocking().await {
         Err(failure) => {
             stop_pending_finder_install_engine(&state, started_pending_engine).await;
             // Review M1 (round 2): the install's own cleanup removed a domain this attempt
@@ -3229,7 +3262,7 @@ async fn install_finder_location(
         // Review I2: recorded into `cfg`, which `finder_install_failed` saves below, so that
         // save cannot overwrite the record with a stale copy.
         // Review M2: a folder kept with a failed removal is surfaced too.
-        let removal = remove_file_provider_domain();
+        let removal = remove_file_provider_domain_blocking().await;
         if let Some(location) = removal.map_or_else(
             |failure| failure.kept_location("add-to-finder rollback"),
             |removal| removal.kept_location("add-to-finder rollback"),
@@ -3533,7 +3566,7 @@ async fn reset_macos_integration(
     // Task 1882: the removal keeps un-synced files; their folder rides the
     // result to the Sync tab's note (spec 2026-10-09 §5).
     let (removed_file_provider_domain, preserved_location) =
-        finder_removal::repair_removal(remove_file_provider_domain(), &mut warnings);
+        finder_removal::repair_removal(remove_file_provider_domain_blocking().await, &mut warnings);
     // Review I2: saved for the Settings › Sync row, into the config this command saves below.
     if let Some(location) = preserved_location.as_deref() {
         finder_removal::record_kept_folder(&mut cfg, location);
@@ -9193,7 +9226,7 @@ pub fn run() {
             {
                 let alert_app = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
-                    match crate::macos_file_provider::cleanup_stale_domains() {
+                    match cleanup_stale_domains_blocking().await {
                         Ok(cleanup) => {
                             if cleanup.removed_count() > 0 || !cleanup.skipped.is_empty() || !cleanup.ours_present {
                                 tracing::info!(
@@ -10952,8 +10985,13 @@ mod tests {
         let engine = body
             .find("start_engine_for_pending_finder_install(")
             .expect("starts the pending engine");
-        let domain = body.find("install_file_provider_domain()").expect("installs the domain");
-        assert!(load < clear && clear < engine && engine < domain, "load, then clear, then the slow work");
+        let domain = body
+            .find("install_file_provider_domain_blocking().await")
+            .expect("installs the domain");
+        assert!(
+            load < clear && clear < engine && engine < domain,
+            "load, then clear, then the slow work"
+        );
     }
 
     #[test]
@@ -12713,7 +12751,7 @@ mod popover_wiring_tests {
         };
         let clear = install.find("begin_finder_install_attempt(&mut cfg)?").unwrap();
         let adding = install.find("finder_adding_guard()").expect("the install marks the attempt for the popover");
-        let slow = install.find("install_file_provider_domain()").unwrap();
+        let slow = install.find("install_file_provider_domain_blocking().await").unwrap();
         assert!(clear < adding && adding < slow, "the marker is set before the slow File Provider work");
     }
 }
@@ -13176,7 +13214,7 @@ mod finder_removal_wiring_tests {
         };
         let install = code_only(&item(&source, "async fn install_finder_location("));
         let failed = &install[install
-            .find("match install_file_provider_domain() {")
+            .find("match install_file_provider_domain_blocking().await {")
             .expect("the install")..];
         let failed = &failed[..failed
             .find("Ok(FileProviderInstallOutcome::UserDisabled)")
@@ -13207,7 +13245,7 @@ mod finder_removal_wiring_tests {
         let sweep = &sweep[..sweep.find("\n}\n").expect("the sweep ends")];
         assert!(sweep.contains("if let Some(location) = failure.kept_location(\"stale-domain sweep\") {"));
         // ... and the rollback surfaces a folder from a failed removal too.
-        assert!(install.contains("let removal = remove_file_provider_domain();"));
+        assert!(install.contains("let removal = remove_file_provider_domain_blocking().await;"));
         let squashed: String = install.chars().filter(|c| !c.is_whitespace()).collect();
         assert!(squashed.contains(
             "removal.map_or_else(|failure|failure.kept_location(\"add-to-finderrollback\"),|removal|removal.kept_location(\"add-to-finderrollback\"),)"
@@ -13229,7 +13267,7 @@ mod finder_removal_wiring_tests {
         // Sign-out: the removal's folder rides the report out of `clear_session_impl` ...
         let sign_out = code_only(&item(&source, "async fn clear_session_impl("));
         assert!(sign_out.contains(
-            "let preserved_location = finder_removal::sign_out_kept_location(remove_file_provider_domain());"
+            "let preserved_location = finder_removal::sign_out_kept_location(remove_file_provider_domain_blocking().await);"
         ));
         let squash = |text: &str| text.chars().filter(|c| !c.is_whitespace()).collect::<String>();
         assert!(squash(&sign_out).contains(
@@ -13251,7 +13289,11 @@ mod finder_removal_wiring_tests {
 
         // Repair: the folder goes into the result the Sync tab reads.
         let repair = code_only(&item(&source, "async fn reset_macos_integration("));
-        assert!(repair.contains("finder_removal::repair_removal(remove_file_provider_domain(), &mut warnings);"));
+        assert!(
+            repair.contains(
+                "finder_removal::repair_removal(remove_file_provider_domain_blocking().await, &mut warnings);"
+            )
+        );
         assert!(repair.contains("        preserved_location,\n"));
 
         // The Add-to-Finder rollback and the app-start sweep raise the same alert.
@@ -13260,11 +13302,143 @@ mod finder_removal_wiring_tests {
         assert!(install.contains("show_preserved_files_alert(&app, Some(&location));"));
         assert!(code_only(&source).contains("surface_kept_folder(&alert_app, Some(location));"));
 
-        // And there is no other removal: three calls, all of them above.
+        // And there is no other removal: three calls, all of them above, all through the wrapper
+        // that moves the blocking removal off the runtime (round 4).
+        assert_eq!(
+            code_only(&source)
+                .matches("remove_file_provider_domain_blocking().await")
+                .count(),
+            3,
+            "3 calls through the blocking wrapper"
+        );
         assert_eq!(
             code_only(&source).matches("remove_file_provider_domain()").count(),
-            3 + 2,
-            "3 calls + 2 definitions"
+            2,
+            "only the 2 definitions: no inline call is left"
+        );
+    }
+
+    /// 1882 r4 (concern 1): the removal, the install (whose cleanup is a removal) and the
+    /// app-start sweep block for about a second when a folder reads as missing (`settle_kept_state`
+    /// sleeps). None of them may run on the main thread or on an async runtime worker: every call
+    /// goes through `on_blocking_pool`, which is `tokio::task::spawn_blocking`.
+    ///
+    /// Where each one runs (all async, so none is the main thread): the `clear_session` command and
+    /// the menu's sign-out (`spawn_menu_task` -> `tauri::async_runtime::spawn`) call
+    /// `clear_session_impl`; Repair and `install_finder_location` are async commands; the sweep is
+    /// spawned from `setup`. The developer helper blocks its own main thread by design and sleeps on
+    /// the completion handler's queue.
+    #[test]
+    fn test_1882_r4_no_blocking_file_provider_call_runs_on_the_main_thread_or_a_runtime_worker() {
+        let full = source();
+        let source = full[..full.find("\nmod finder_removal_wiring_tests {").expect("this module")].to_string();
+        let code = source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let squash = |text: &str| text.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+
+        // The blocking primitives are called in exactly one place each: inside the pool helper.
+        for (call, definitions) in [
+            ("remove_file_provider_domain()", 2), // the macOS and the other-OS definitions
+            ("install_file_provider_domain()", 2),
+            ("macos_file_provider::remove()", 1),
+            ("macos_file_provider::install()?", 1),
+            ("cleanup_stale_domains()", 0),
+        ] {
+            assert_eq!(
+                code.matches(call).count(),
+                definitions,
+                "`{call}` may appear only in its definition, never as an inline call"
+            );
+        }
+        let pool = squash(&item(&code, "async fn on_blocking_pool"));
+        assert!(
+            pool.contains("tokio::task::spawn_blocking(work).await"),
+            "the helper really uses the blocking pool: {pool}"
+        );
+        for (wrapper, primitive) in [
+            (
+                "async fn remove_file_provider_domain_blocking(",
+                "on_blocking_pool(remove_file_provider_domain).await",
+            ),
+            (
+                "async fn install_file_provider_domain_blocking(",
+                "on_blocking_pool(install_file_provider_domain).await",
+            ),
+            (
+                "async fn cleanup_stale_domains_blocking(",
+                "on_blocking_pool(crate::macos_file_provider::cleanup_stale_domains).await",
+            ),
+        ] {
+            assert!(
+                squash(&item(&code, wrapper)).contains(primitive),
+                "{wrapper} goes through the pool with {primitive}"
+            );
+        }
+
+        // Every caller awaits the wrapper.
+        let sign_out = squash(&item(&code, "async fn clear_session_impl("));
+        assert!(sign_out.contains("sign_out_kept_location(remove_file_provider_domain_blocking().await)"));
+        let repair = squash(&item(&code, "async fn reset_macos_integration("));
+        assert!(repair.contains("repair_removal(remove_file_provider_domain_blocking().await,&mutwarnings)"));
+        let install = squash(&item(&code, "async fn install_finder_location("));
+        assert!(install.contains("matchinstall_file_provider_domain_blocking().await{"));
+        assert!(install.contains("letremoval=remove_file_provider_domain_blocking().await;"));
+        let sweep_at = code
+            .find("match cleanup_stale_domains_blocking().await")
+            .expect("the sweep awaits the wrapper");
+        assert!(
+            squash(&code[sweep_at - 120..sweep_at]).ends_with("tauri::async_runtime::spawn(asyncmove{"),
+            "and runs in a spawned task, off the startup path"
+        );
+
+        // The menu's sign-out is spawned, never run inline on the main thread.
+        let menu = &source[source.find("DesktopMenuAction::SignOut => {").expect("menu sign-out")..];
+        let menu = squash(&menu[..menu.find("DesktopMenuAction::Quit").expect("next arm")]);
+        assert!(menu.contains("spawn_menu_task(spec.id,asyncmove{"));
+        assert!(menu.contains("clear_session_impl(&state).await"));
+        assert!(
+            !menu.contains("remove_file_provider_domain"),
+            "no removal in the menu handler itself"
+        );
+        let spawn = squash(&item(&code, "fn spawn_menu_task"));
+        assert!(spawn.contains("tauri::async_runtime::spawn(asyncmove{"));
+    }
+}
+
+/// 1882 r4: the pool helper really leaves the runtime thread free. A single-threaded runtime
+/// drives both the job and the test: if the job ran inline it would hold the only thread while it
+/// waits for a release that only this test can send, and it would give up after the timeout.
+#[cfg(test)]
+mod blocking_pool_tests {
+    use super::on_blocking_pool;
+    use std::time::Duration;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_1882_r4_blocking_work_does_not_hold_the_runtime_thread() {
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let job = tokio::spawn(on_blocking_pool(move || {
+            released.recv_timeout(Duration::from_secs(2)).is_ok()
+        }));
+        // Let the job start; the runtime thread must still be free to run this and send the release.
+        tokio::task::yield_now().await;
+        release.send(()).expect("the job is waiting");
+        let saw_release = job.await.expect("job task").expect("pool");
+        assert!(
+            saw_release,
+            "the blocking job ran off the runtime thread and saw the release"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_1882_r4_blocking_work_returns_its_value_and_runs_on_another_thread() {
+        let here = std::thread::current().id();
+        let there = on_blocking_pool(|| std::thread::current().id()).await.expect("pool");
+        assert_ne!(
+            here, there,
+            "the work ran on the blocking pool, not the caller's thread"
         );
     }
 }
