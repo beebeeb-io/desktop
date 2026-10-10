@@ -2516,14 +2516,23 @@ pub(crate) fn write_outcome_response(
                     }
                     item
                 });
-            // §7.3: no write reply carries no item unless the write was ignored. For a modify,
-            // the system reads a nil item as "delete the item on disk" (REPL.h:629-634). The
-            // write is queued and its bytes kept; the system retries and gets the item.
+            // §7.3: a create or modify reply always carries an item unless the write was ignored:
+            // for a modify, the system reads a nil item as "delete the item on disk"
+            // (REPL.h:629-634). When the row cannot be read back, the write is still queued and
+            // uploads with its bytes kept. The reply is an `Error`, which the extension reports as
+            // `cannotSynchronize`: the system presents an error and does not retry the item until
+            // it changes on disk (NSFileProviderReplicatedExtension.h on modifyItem;
+            // NSFileProviderError.h on `CannotSynchronize`; the extension never signals it
+            // resolved). A transient error would be worse: the system's retry would run the write
+            // again (an `Error` is not remembered by the dedup) and queue it a second time. A
+            // delete's reply item is never read, so a delete is not refused.
             #[cfg(target_os = "macos")]
             if item.is_none() && matches!(op, "create" | "modify") {
                 log_refused_write(op, "row_unreadable");
                 return IpcResponse::Error {
-                    message: "the write was queued but its item could not be read; try again".into(),
+                    message: "Beebeeb saved this change and will upload it, but could not describe the file to \
+                              Finder. Finder shows an error on it until the file changes again."
+                        .into(),
                 };
             }
             IpcResponse::WriteQueued { item, ignored, message }
@@ -5354,7 +5363,11 @@ mod tests {
                 let IpcResponse::Error { message } = &reply else {
                     panic!("{op} {file_id:?}: an error, never an item-less reply: {reply:?}")
                 };
-                assert!(message.contains("could not be read"), "{message}");
+                // What really happens: the write stays queued and uploads; the system does not
+                // retry the reply (`cannotSynchronize`) until the item changes again.
+                assert!(message.contains("will upload"), "{message}");
+                assert!(message.contains("until the file changes again"), "{message}");
+                assert!(!message.contains("try again"), "no retry is promised: {message}");
             }
             let reply = write_outcome_response(
                 "create",
