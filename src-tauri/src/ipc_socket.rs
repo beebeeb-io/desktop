@@ -5444,6 +5444,104 @@ mod tests {
         assert!(lines[0].contains("WARN") && lines[0].contains("half-set"), "{logs}");
     }
 
+    /// The limiter at its cap: 1024 items, each with every kind of failure (`error_category`
+    /// has 16). It stays bounded, a new kind on an item it holds is still logged at once without
+    /// dropping anything, a new item is still logged, and only items whose every kind is past
+    /// the interval are dropped to make room.
+    #[test]
+    fn the_presentation_read_limiter_stays_bounded_at_its_cap() {
+        const KINDS: [&str; 16] = [
+            "not_found",
+            "permission_denied",
+            "disk_full",
+            "read_only",
+            "io",
+            "network",
+            "other",
+            "database_busy",
+            "database_full",
+            "database_corrupt",
+            "database_read_only",
+            "database_cannot_open",
+            "database_io",
+            "database_constraint",
+            "database_schema",
+            "database",
+        ];
+        let start = std::time::Instant::now();
+        let at = |secs| start + std::time::Duration::from_secs(secs);
+        let entries = |seen: &PresentationWarned| seen.values().map(|kinds| kinds.len()).sum::<usize>();
+
+        // Every item but its last kind, then that kind on an item already held.
+        let mut seen = PresentationWarned::new();
+        for i in 0..PRESENTATION_WARN_MAX_ITEMS {
+            for kind in &KINDS[..15] {
+                assert_eq!(
+                    presentation_warn_due(&mut seen, &format!("item-{i}"), kind, at(0)),
+                    Some(0)
+                );
+            }
+        }
+        assert_eq!(seen.len(), PRESENTATION_WARN_MAX_ITEMS);
+        assert_eq!(entries(&seen), PRESENTATION_WARN_MAX_ITEMS * 15);
+        assert_eq!(
+            presentation_warn_due(&mut seen, "item-0", KINDS[15], at(1)),
+            Some(0),
+            "the next new kind on a held item is logged at once"
+        );
+        assert_eq!(
+            seen.len(),
+            PRESENTATION_WARN_MAX_ITEMS,
+            "and nothing was dropped for it"
+        );
+        assert_eq!(entries(&seen), PRESENTATION_WARN_MAX_ITEMS * 15 + 1);
+        for i in 1..PRESENTATION_WARN_MAX_ITEMS {
+            presentation_warn_due(&mut seen, &format!("item-{i}"), KINDS[15], at(1));
+        }
+        assert_eq!(
+            entries(&seen),
+            PRESENTATION_WARN_MAX_ITEMS * KINDS.len(),
+            "full: every item, every kind"
+        );
+
+        // A new item while every entry is still in its interval: logged, and the map stays bounded.
+        assert_eq!(
+            presentation_warn_due(&mut seen, "item-new", KINDS[0], at(2)),
+            Some(0),
+            "a new item at the cap is still logged"
+        );
+        assert!(seen.len() <= PRESENTATION_WARN_MAX_ITEMS, "{} items", seen.len());
+        assert!(seen.contains_key("item-new"));
+
+        // Room is made from expired entries first: an item goes only when every kind it has is
+        // past the interval, and an item with one fresh kind keeps that kind.
+        let half = PRESENTATION_WARN_INTERVAL.as_secs() / 2;
+        let after = PRESENTATION_WARN_INTERVAL.as_secs() + 1;
+        let mut seen = PresentationWarned::new();
+        for i in 0..PRESENTATION_WARN_MAX_ITEMS / 2 {
+            presentation_warn_due(&mut seen, &format!("old-{i}"), KINDS[0], at(0));
+        }
+        for i in 0..PRESENTATION_WARN_MAX_ITEMS / 2 {
+            presentation_warn_due(&mut seen, &format!("fresh-{i}"), KINDS[0], at(half));
+        }
+        presentation_warn_due(&mut seen, "old-0", KINDS[1], at(half));
+        assert_eq!(seen.len(), PRESENTATION_WARN_MAX_ITEMS);
+        assert_eq!(
+            presentation_warn_due(&mut seen, "item-new", KINDS[0], at(after)),
+            Some(0)
+        );
+        assert_eq!(
+            seen.len(),
+            PRESENTATION_WARN_MAX_ITEMS / 2 + 2,
+            "the fresh items, old-0 for its fresh kind, and the new item"
+        );
+        assert_eq!(
+            seen["old-0"].keys().copied().collect::<Vec<_>>(),
+            vec![KINDS[1]],
+            "old-0 keeps only its fresh kind"
+        );
+    }
+
     /// A failed presentation read after the item read cleanly again starts a new episode: it is
     /// logged at once, not held back by the earlier failure's interval.
     #[test]
