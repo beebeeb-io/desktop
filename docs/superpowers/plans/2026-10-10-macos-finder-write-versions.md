@@ -82,7 +82,7 @@ Paths are relative to the desktop repo root.
 | `BeebeebFileProvider/XPCBridge.swift` | modify | `queueCreateItem` passes them | 8 |
 | `BeebeebFileProvider/FileProviderExtension.swift` | modify | `createItem` reads `options`; a queued write without an item is an error; the options log line | 8, 11 |
 | `BeebeebFileProviderTests/main.swift` | modify | T20, T44; the existing no-item check moves into T20 | 8 |
-| `scripts/test-ipc-framing.sh` | modify | `EXPECTED_TESTS=96` | 8 |
+| `scripts/test-ipc-framing.sh` | modify | ~~`EXPECTED_TESTS=96`~~ `EXPECTED_TESTS=97` (superseded: 97, because the `WriteRetryLater` decode check landed first and took the count to 95 — lead, 2026-10-11 (Task 12)) | 8 |
 | `docs/IPC_PROTOCOL.md` | modify | "Versions and queued writes" rewritten; skew rows; tests table | 12 |
 | scratch `d8b-legacy-replace/` | scratch only | the D8b helper, never committed | 13 |
 
@@ -4152,7 +4152,7 @@ After a create lands, every request under its provisional id reaches the server 
 - Modify: `src-tauri/src/ipc_socket.rs`: `QueueFinderCreate` (`IPC:54-66`) gains three optional fields and its arm dispatches; `write_outcome_response` (`IPC:2364-2396`) becomes `pub(crate)`, refuses an unreadable queued row, presents `present_as`; `write_refusal_category` (`IPC:1412-1431`) maps `UnknownItem`; `file_status_response` extracted from the `GetFileStatus` arm (`IPC:1760-1765`) resolves the alias; `hydrate_over_ipc` (`IPC:2128`) calls `serve_hydrate` and logs `Finder hydrate served`; the `FetchThumbnail` arm (`IPC:1921-1966`) calls `finder_thumbnail`
 - Modify: `src-tauri/src/runner.rs`: a daily `sweep_aliases`
 - Modify: `BeebeebFileProvider/IPCFraming.swift` (`IPCWriteRequest.create`, `:573-603`), `BeebeebFileProvider/XPCBridge.swift` (`queueCreateItem`, `:396-427`), `BeebeebFileProvider/FileProviderExtension.swift` (`QueuedWriteCompletion` `:388-391`, `queuedWriteCompletion` `:412-420`, `createItem` `:445-483`, `modifyItem`'s completions)
-- Modify: `BeebeebFileProviderTests/main.swift` (T20, T44; the no-item lines of the check at `:1767-1784` move into T20); `scripts/test-ipc-framing.sh:20` `EXPECTED_TESTS=96`
+- Modify: `BeebeebFileProviderTests/main.swift` (T20, T44; the no-item lines of the check at `:1767-1784` move into T20); `scripts/test-ipc-framing.sh:20` ~~`EXPECTED_TESTS=96`~~ `EXPECTED_TESTS=97` (superseded: 97, because the `WriteRetryLater` decode check landed first and took the count to 95 — lead, 2026-10-11 (Task 12))
 - Test: `engine_bridge.rs` tests
 
 **Interfaces:**
@@ -4722,7 +4722,7 @@ Update the doc comment's third bullet to say so. In `createItem` (`:445-483`):
 
 and every other `queuedWriteCompletion` call site in `modifyItem` passes `completion.error` the same way. (`itemVersion` is an optional requirement of `NSFileProviderItem`, `ITEM.h:355`, `:590`, so it reads as an optional here.)
 
-6.4 `scripts/test-ipc-framing.sh:20`: `EXPECTED_TESTS=96`.
+6.4 `scripts/test-ipc-framing.sh:20`: ~~`EXPECTED_TESTS=96`~~ `EXPECTED_TESTS=97` (superseded: 97, because the `WriteRetryLater` decode check landed first and took the count to 95 — lead, 2026-10-11 (Task 12)).
 
 - [ ] **Step 7: The daily sweep (`runner.rs`)**
 
@@ -4738,7 +4738,7 @@ python3 scripts/check-ipc-timeouts.py > $EVID/r4-t8-ipc-timeouts.log 2>&1; echo 
 bash scripts/build-fileprovider-extension.sh --out "$WT/src-tauri/target/fp-check/BeebeebFileProvider.appex" --helper-out "$WT/src-tauri/target/fp-check/BeebeebFileProviderCtl" > $EVID/r4-t8-extension-build.log 2>&1; echo "extension rc=$?"
 ```
 
-Expected: `ok. 11 passed`; Swift `ipc-framing: 96 passed, 0 failed`; both self-tests and the guard `rc=0`; the extension builds (`rc=0`, the CI recipe `ci.yml:215-225`, unsigned). Mutations (`$EVID/r4-t8-mut-<T>.log`):
+Expected: `ok. 11 passed`; Swift ~~`ipc-framing: 96 passed, 0 failed`~~ `ipc-framing: 97 passed, 0 failed` (— lead, 2026-10-11 (Task 12)); both self-tests and the guard `rc=0`; the extension builds (`rc=0`, the CI recipe `ci.yml:215-225`, unsigned). Mutations (`$EVID/r4-t8-mut-<T>.log`):
 - T15: skip the alias lookup in `queue_file_provider_modify_from` → a second server file.
 - T16 / T58: drop the alias branch in `queue_finder_delete` (T16 red) / drop its held-token gate (T58 red: S trashed).
 - T17: answer `FinderWriteOutcome::Ignored` for an unknown id → `WriteQueued`.
@@ -5288,7 +5288,7 @@ cd $WT/src-tauri && $LOCK cargo-build -- cargo test --locked -p beebeeb-desktop 
 cd $WT && bash scripts/test-ipc-framing.sh > $EVID/r4-t11-swift.log 2>&1; tail -1 $EVID/r4-t11-swift.log
 ```
 
-Expected `ok. 12 passed`, Swift `96 passed, 0 failed`. Mutations: for each T37 row, add the planted name to its line (for example `name = %display_name`) and see that row fail on "leaks `Quarterly`" (`$EVID/r4-t11-mut-<test>.log`, eleven logs); T38: log the raw id → "not-a-uuid" appears.
+Expected `ok. 12 passed`, Swift ~~`96 passed, 0 failed`~~ `97 passed, 0 failed` (— lead, 2026-10-11 (Task 12)). Mutations: for each T37 row, add the planted name to its line (for example `name = %display_name`) and see that row fail on "leaks `Quarterly`" (`$EVID/r4-t11-mut-<test>.log`, eleven logs); T38: log the raw id → "not-a-uuid" appears.
 
 - [ ] **Step 5: Gate and commit**
 
@@ -5359,7 +5359,7 @@ python3 ../scripts/assert-cargo-test-counts.py $EVID/r4-final-cargo-test.log --c
 grep "test result:" $EVID/r4-final-cargo-test.log                        # lib: ok. L0+80 passed; 0 failed; 4 ignored; keychain 20; wsw 8; wsc 3
 $LOCK cargo-build -- cargo clippy --locked --all-targets > $EVID/r4-final-clippy.log 2>&1
 grep -c '^warning' $EVID/r4-final-clippy.log                              # ≤ the baseline (146, Task 1 step 0)
-cd $G && bash scripts/test-ipc-framing.sh > $EVID/r4-final-swift.log 2>&1; tail -1 $EVID/r4-final-swift.log   # 96 passed, 0 failed (expected 96)
+cd $G && bash scripts/test-ipc-framing.sh > $EVID/r4-final-swift.log 2>&1; tail -1 $EVID/r4-final-swift.log   # 97 passed, 0 failed (expected 97); the first plan said 96, superseded: 97, because the `WriteRetryLater` decode check landed first and took the count to 95 — lead, 2026-10-11 (Task 12)
 bash scripts/test-ipc-framing.sh --self-test > $EVID/r4-final-swift-selftest.log 2>&1; echo "rc=$?"
 python3 scripts/check-ipc-timeouts.py && python3 scripts/check-ipc-timeouts.py --self-test; echo "rc=$?"
 git diff --stat 9eced4a -- src-tauri/Cargo.lock bun.lock                   # empty
@@ -5743,7 +5743,7 @@ Reinstall whichever app the lead wants on the Mac (`~/bb-qa/1873-r5/Beebeeb-931b
 - **Release notes (0.8.12):** an authored `RELEASE_NOTES.md` per `docs/RELEASING.md`, and it must state:
   - **the one-time re-download** (spec §10.1): after the update, a materialized file whose old identifier was led by an upload's timestamp, and a materialized server-known file at version 0, is downloaded once more when the system first re-reads it; nothing is lost;
   - the downgrade caveat (spec §5.6 m-4b, §16 Q4): installing an older build while a save is still uploading can put the server's bytes over that save on disk; let saves finish before downgrading;
-  - the counted test results (`test result:` lines and the Swift `96 passed`).
+  - the counted test results (`test result:` lines and the Swift ~~`96 passed`~~ `97 passed` (— lead, 2026-10-11 (Task 12))).
 
 ## Execution notes for the lead
 
