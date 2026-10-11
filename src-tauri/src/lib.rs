@@ -86,6 +86,7 @@ mod popover_data;
 #[cfg_attr(target_os = "windows", allow(dead_code))]
 mod reauth;
 mod runner;
+mod sign_out;
 mod staged_payload;
 mod state_db;
 mod state_paths;

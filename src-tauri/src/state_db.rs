@@ -868,6 +868,27 @@ pub struct ItemPresentation {
     pub version_filled: bool,
 }
 
+/// One queued operation as a sign-out reads it (spec 2026-10-10 §2, W2): every op but a hydrate or a
+/// pin, with its file's path and whether its upload has a recorded completion.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 7
+#[derive(Debug, Clone, PartialEq)]
+pub struct WaitingRow {
+    pub op_id: String,
+    pub kind: OperationKind,
+    pub file_id: Option<String>,
+    pub file_path: Option<String>,
+    pub payload_path: Option<String>,
+    pub origin: Option<WriteOrigin>,
+    /// The queue's order (`rowid`): higher was queued later.
+    pub queue_order: i64,
+    pub attempts: i64,
+    pub max_attempts: i64,
+    pub paused: bool,
+    /// `upload_resume.completed_version` is set: the server has these bytes (§8 item 3).
+    pub completed: bool,
+}
+
 /// [`StateDb::upsert_file`] on an open connection or transaction.
 fn upsert_file_conn<C: std::ops::Deref<Target = Connection>>(conn: &C, e: &FileEntry) -> Result<()> {
     // Task 1697: capture the OLD row before the upsert so the change log
@@ -4776,6 +4797,44 @@ impl StateDb {
             |row| row.get(0),
         )?;
         Ok(u64::try_from(rows).unwrap_or(0))
+    }
+
+    /// Spec 2026-10-10 W2: the queue a sign-out counts, in ONE read (one mutex hold, one transaction), in queue
+    /// order. Hydrates and pins are downloads, never counted.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    #[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 7
+    pub fn waiting_rows(&self) -> Result<Vec<WaitingRow>> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+        let rows = {
+            let mut stmt = tx.prepare(
+                "SELECT q.op_id, q.kind, q.file_id, f.path, q.payload_path, q.write_origin, q.rowid,
+                        q.attempts, q.max_attempts, q.paused_reason IS NOT NULL,
+                        EXISTS(SELECT 1 FROM upload_resume r
+                               WHERE r.op_id = q.op_id AND r.completed_version IS NOT NULL)
+                 FROM operation_queue q LEFT JOIN files f ON f.file_id = q.file_id
+                 WHERE q.kind NOT IN ('hydrate_file', 'pin_tree')
+                 ORDER BY q.rowid",
+            )?;
+            let mapped = stmt.query_map([], |row| {
+                Ok(WaitingRow {
+                    op_id: row.get(0)?,
+                    kind: OperationKind::from_str(&row.get::<_, String>(1)?),
+                    file_id: row.get(2)?,
+                    file_path: row.get(3)?,
+                    payload_path: row.get(4)?,
+                    origin: WriteOrigin::from_db(row.get::<_, Option<String>>(5)?.as_deref()),
+                    queue_order: row.get(6)?,
+                    attempts: row.get(7)?,
+                    max_attempts: row.get(8)?,
+                    paused: row.get(9)?,
+                    completed: row.get(10)?,
+                })
+            })?;
+            mapped.collect::<Result<Vec<_>>>()?
+        };
+        tx.commit()?;
+        Ok(rows)
     }
 
     /// R10: does anything of an account live here, apart from the owner record itself?
