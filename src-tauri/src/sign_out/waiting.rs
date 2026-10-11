@@ -76,22 +76,32 @@ pub struct WaitingChanges {
     pub others: Vec<OtherChange>,
 }
 
+/// What a queued op is to a sign-out (§2).
 #[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 7
-fn is_upload(kind: &OperationKind) -> bool {
-    matches!(kind, OperationKind::UploadFile | OperationKind::UploadVersion)
+enum OpRole {
+    /// A waiting write, unless its upload has a recorded completion.
+    Upload,
+    /// An other waiting change.
+    OtherChange,
+    /// A download the engine queued, never a change the person made: not counted.
+    Download,
 }
 
+/// Every kind is named, with no wildcard arm, so a kind added to `OperationKind` later does not compile until it is
+/// placed here, instead of being counted as nothing. A `kind` string the database holds but this build does not know
+/// never arrives as its own case: `OperationKind::from_str` reads it as `UploadFile`, so it is counted as a waiting write.
 #[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 7
-fn is_other_change(kind: &OperationKind) -> bool {
-    matches!(
-        kind,
+fn op_role(kind: &OperationKind) -> OpRole {
+    match kind {
+        OperationKind::UploadFile | OperationKind::UploadVersion => OpRole::Upload,
         OperationKind::CreateFolder
-            | OperationKind::RenameFile
-            | OperationKind::MoveFile
-            | OperationKind::TrashFile
-            | OperationKind::RestoreFile
-            | OperationKind::RestoreVersion
-    )
+        | OperationKind::RenameFile
+        | OperationKind::MoveFile
+        | OperationKind::TrashFile
+        | OperationKind::RestoreFile
+        | OperationKind::RestoreVersion => OpRole::OtherChange,
+        OperationKind::HydrateFile | OperationKind::PinTree => OpRole::Download,
+    }
 }
 
 /// §2 "Missing": `metadata()` is `NotFound`, the test 1873 uses for `payload_missing`. Any other answer counts as
@@ -115,32 +125,33 @@ impl WaitingChanges {
         let mut others = Vec::new();
         for row in rows {
             let live = row.attempts < row.max_attempts && !row.paused;
-            if is_upload(&row.kind) {
-                if row.completed {
-                    continue;
+            match op_role(&row.kind) {
+                OpRole::Download => {}
+                OpRole::OtherChange => others.push(OtherChange { op_id: row.op_id, live }),
+                // A recorded completion: the server has these bytes, so nothing waits (§2 "Waiting write").
+                OpRole::Upload if row.completed => {}
+                OpRole::Upload => {
+                    let key = row.file_id.clone().unwrap_or_else(|| row.op_id.clone());
+                    let present = row.payload_path.as_deref().is_some_and(|path| exists(Path::new(path)));
+                    let file = by_file.entry(key.clone()).or_insert_with(|| WaitingFile {
+                        file_id: key,
+                        path: row.file_path.clone(),
+                        writes: Vec::new(),
+                    });
+                    file.writes.push(WaitingWrite {
+                        op_id: row.op_id,
+                        payload_path: row.payload_path.map(PathBuf::from),
+                        // An op with no recorded origin is treated as an earlier build's: its copy is kept (§7.2).
+                        origin: row.origin.unwrap_or(WriteOrigin::EarlierBuild),
+                        queue_order: row.queue_order,
+                        live,
+                        state: if present {
+                            WriteState::Copied
+                        } else {
+                            WriteState::Missing
+                        },
+                    });
                 }
-                let key = row.file_id.clone().unwrap_or_else(|| row.op_id.clone());
-                let present = row.payload_path.as_deref().is_some_and(|path| exists(Path::new(path)));
-                let file = by_file.entry(key.clone()).or_insert_with(|| WaitingFile {
-                    file_id: key,
-                    path: row.file_path.clone(),
-                    writes: Vec::new(),
-                });
-                file.writes.push(WaitingWrite {
-                    op_id: row.op_id,
-                    payload_path: row.payload_path.map(PathBuf::from),
-                    // An op with no recorded origin is treated as an earlier build's: its copy is kept (§7.2).
-                    origin: row.origin.unwrap_or(WriteOrigin::EarlierBuild),
-                    queue_order: row.queue_order,
-                    live,
-                    state: if present {
-                        WriteState::Copied
-                    } else {
-                        WriteState::Missing
-                    },
-                });
-            } else if is_other_change(&row.kind) {
-                others.push(OtherChange { op_id: row.op_id, live });
             }
         }
         let mut files: Vec<WaitingFile> = by_file.into_values().collect();
@@ -226,7 +237,7 @@ fn settle_states(writes: &mut [WaitingWrite]) {
     }
 }
 
-/// §6.1: why a sign-out would not send first, in the spec's order. `None` with something waiting: it can send.
+/// §6.1: why a sign-out would not send first, in the spec's order.
 #[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 11
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -319,7 +330,7 @@ mod tests {
         );
     }
 
-    /// U2, amended (spec §2 "Live", plan reconciliation row 18).
+    /// U2 (spec §2 "Live").
     #[test]
     fn parked_and_paused_writes_are_waiting_but_not_live() {
         let (dir, db) = db_with(
@@ -353,10 +364,13 @@ mod tests {
     fn a_missing_staged_copy_counts_as_missing_never_as_nothing() {
         let (_dir, db) = db_with(
             "INSERT INTO operation_queue (op_id, kind, file_id, payload_path, write_id, write_origin)
-             VALUES ('s1', 'upload_version', 'f1', '<dir>/gone', 'w1', 'minted');",
+             VALUES ('s1', 'upload_version', 'f1', '<dir>/gone', 'w1', 'minted'),
+                    ('s2', 'upload_version', NULL, NULL, 'w2', 'minted'),
+                    ('s3', 'upload_version', NULL, NULL, 'w3', 'minted');",
         );
         let counts = WaitingChanges::read(&db).unwrap().counts();
-        assert_eq!((counts.files, counts.missing_files, counts.copied_files), (1, 1, 0));
+        // An upload with no file id is its own waiting file, never merged with another; with no staged copy it is missing.
+        assert_eq!((counts.files, counts.missing_files, counts.copied_files), (3, 3, 0));
     }
 
     /// U4: one `StateDb` call, one mutex hold, one transaction.
@@ -374,7 +388,7 @@ mod tests {
         assert!(read.contains("db.waiting_rows()"), "{read}");
     }
 
-    /// U5: one row per condition, in the spec's order (§6.1).
+    /// U5: one row per condition, and rows where two fail, in the spec's order (§6.1).
     #[test]
     fn can_send_follows_each_condition() {
         let (dir, db) = db_with(
@@ -427,10 +441,54 @@ mod tests {
                 Some(NotSending::Paused),
             ),
             (good, None),
+            // Two conditions fail: the earlier one is named.
+            (
+                SendConditions {
+                    engine_running: false,
+                    session_expired: true,
+                    ..good
+                },
+                Some(NotSending::EngineStopped),
+            ),
+            (
+                SendConditions {
+                    session_expired: true,
+                    link_failed: true,
+                    ..good
+                },
+                Some(NotSending::Session),
+            ),
+            (
+                SendConditions {
+                    link_failed: true,
+                    sync_paused: true,
+                    ..good
+                },
+                Some(NotSending::Offline),
+            ),
         ];
         for (conditions, expected) in cases {
             assert_eq!(send_readiness(conditions, &waiting), expected, "{conditions:?}");
         }
+        // Nothing live: the one write waits for sign-in. Paused is named before held.
+        let (held_dir, held_db) = db_with(
+            "INSERT INTO operation_queue (op_id, kind, file_id, payload_path, write_id, write_origin, paused_reason)
+             VALUES ('s1', 'upload_version', 'f1', '<dir>/a', 'w1', 'minted', 'auth');",
+        );
+        stage(held_dir.path(), &["a"]);
+        let held = WaitingChanges::read(&held_db).unwrap();
+        assert_eq!(send_readiness(good, &held), Some(NotSending::Held), "nothing live");
+        assert_eq!(
+            send_readiness(
+                SendConditions {
+                    sync_paused: true,
+                    ..good
+                },
+                &held
+            ),
+            Some(NotSending::Paused),
+            "paused before held"
+        );
         assert_eq!(
             send_readiness(good, &WaitingChanges::default()),
             None,
@@ -438,7 +496,7 @@ mod tests {
         );
     }
 
-    /// U15 (the count half; Task 5 adds the copy half).
+    /// U15, the count half (the keep step's tests hold the copy half).
     #[test]
     fn completed_and_released_payloads_are_never_sources() {
         let (dir, db) = db_with(&format!(
@@ -452,7 +510,7 @@ mod tests {
         assert!(waiting.is_empty(), "{waiting:?}");
     }
 
-    /// U38 (the count half; Task 5 adds the keep half).
+    /// U38, the count half (the keep step's tests hold the keep half).
     #[test]
     fn copied_files_counts_files_with_a_copy() {
         let (dir, db) = db_with(
@@ -472,7 +530,7 @@ mod tests {
         use WriteState::*;
         /// A case's name, each write's origin and whether its staged copy exists (oldest first), the states expected.
         type Case = (&'static str, &'static [(&'static str, bool)], &'static [WriteState]);
-        let cases: [Case; 5] = [
+        let cases: [Case; 6] = [
             (
                 "two minted saves",
                 &[("minted", true), ("minted", true)],
@@ -497,6 +555,12 @@ mod tests {
                 "older minted gone",
                 &[("minted", false), ("minted", true)],
                 &[Covered, Copied],
+            ),
+            // `WriteOrigin::from_db` reads an origin it does not know as `None`, as it reads a NULL.
+            (
+                "an unrecognised origin, then minted",
+                &[("bogus", true), ("minted", true)],
+                &[Copied, Copied],
             ),
         ];
         for (name, writes, expected) in cases {
