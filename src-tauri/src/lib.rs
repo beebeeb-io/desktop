@@ -160,7 +160,7 @@ async fn close_session_commands() -> Result<(), String> {
         .map_err(|e| format!("Vault lock failed: {e}"))?
 }
 
-use config::{DesktopConfig, ReleaseChannel};
+use config::{DesktopConfig, HeldConfig, ReleaseChannel};
 // `platform_keychain_store_for(id)` resolves to the macOS Keychain store on
 // macOS and the Windows Credential Manager store on Windows (Linux keeps the
 // fail-closed stub), segmenting every secret under the per-account id
@@ -805,12 +805,8 @@ fn stage_last_signed_in_email(cfg: &mut DesktopConfig, email: Option<&str>) -> b
 /// must never fail sign-out — log and continue.
 fn persist_last_signed_in_email(email: Option<String>) {
     let Some(email) = email else { return };
-    let result = DesktopConfig::load().and_then(|mut cfg| {
-        if stage_last_signed_in_email(&mut cfg, Some(&email)) {
-            cfg.save()?;
-        }
-        Ok(())
-    });
+    // Task 1889: one load-change-save under the config-write lock (the sign-out runs beside the window's saves).
+    let result = DesktopConfig::update(|cfg| (stage_last_signed_in_email(cfg, Some(&email)), ()));
     if let Err(error) = result {
         tracing::warn!(
             %error,
@@ -828,17 +824,23 @@ const SIGN_OUT_EMAIL_NOT_FORGOTTEN: &str = "Sign-out paused: Beebeeb couldn’t 
 /// is torn down. Unlike [`persist_last_signed_in_email`] this is not best-effort: a `desktop.toml` that cannot be read
 /// or written stops the switch. An email that is not there is written nothing.
 fn forget_last_signed_in_email() -> Result<(), String> {
-    let mut cfg = DesktopConfig::load().map_err(|error| {
+    let path = DesktopConfig::path().map_err(|error| {
         tracing::warn!(%error, "account switch: desktop.toml could not be read to forget the previous email");
         SIGN_OUT_EMAIL_NOT_FORGOTTEN.to_string()
     })?;
-    if cfg.last_signed_in_email.take().is_some() {
-        cfg.save().map_err(|error| {
-            tracing::warn!(%error, "account switch: desktop.toml could not be written to forget the previous email");
-            SIGN_OUT_EMAIL_NOT_FORGOTTEN.to_string()
-        })?;
-    }
-    Ok(())
+    // Task 1889: one load-change-save under the config-write lock. The two log lines stay apart: a read that
+    // failed and a write that failed are different things to look for.
+    DesktopConfig::try_update_at(&path, |cfg| (cfg.last_signed_in_email.take().is_some(), ())).map_err(|error| {
+        match error {
+            config::UpdateError::Read(error) => {
+                tracing::warn!(%error, "account switch: desktop.toml could not be read to forget the previous email")
+            }
+            config::UpdateError::Write(error) => {
+                tracing::warn!(%error, "account switch: desktop.toml could not be written to forget the previous email")
+            }
+        }
+        SIGN_OUT_EMAIL_NOT_FORGOTTEN.to_string()
+    })
 }
 
 /// Result of the one bounded startup session probe (`GET /api/v1/auth/me`).
@@ -1268,7 +1270,7 @@ async fn start_engine_if_possible(
         // Rehydrate the persisted pause state before spawning so a
         // restart-while-paused stays paused (the in-memory AtomicBool
         // always defaults to false; desktop.toml is the source of truth).
-        acct.sync_paused.store(cfg.pause_sync, Ordering::Relaxed);
+        rehydrate_sync_paused(&acct.sync_paused, cfg.pause_sync);
         let mut engine_slot = acct.engine.lock().await;
         engine_start_refusal(&acct)?;
         if let Some(prev) = engine_slot.take() {
@@ -3838,9 +3840,9 @@ fn finder_state_path(cfg: &DesktopConfig, installed: bool) -> Option<String> {
 /// code and both surfaces' notes for it are gone.
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 fn finish_repair_after_removal(
-    cfg: &mut DesktopConfig,
+    cfg: &mut HeldConfig,
     preserved_location: Option<&str>,
-    save: impl FnOnce(&mut DesktopConfig) -> Result<(), String>,
+    save: impl FnOnce(&mut HeldConfig) -> Result<(), String>,
     surface: impl FnOnce(Option<&str>),
 ) -> Result<(), String> {
     match save(cfg) {
@@ -3853,13 +3855,13 @@ fn finish_repair_after_removal(
 }
 
 #[cfg(not(target_os = "macos"))]
-fn persist_finder_install_result(
-    cfg: &mut DesktopConfig,
-    installed: bool,
-    error: Option<String>,
-) -> Result<(), String> {
-    record_finder_install_result(cfg, installed, error);
-    cfg.save()
+fn persist_finder_install_result(cfg: &mut HeldConfig, installed: bool, error: Option<String>) -> Result<(), String> {
+    // Task 1889: the result is written onto the file as it is now (`update_held`), not by saving the copy this
+    // flow loaded before its slow work, which would put back what another writer saved since.
+    cfg.update_held(|held| {
+        record_finder_install_result(held, installed, error);
+        (true, ())
+    })
 }
 
 /// The in-memory half of [`persist_finder_install_result`]: stamp the attempt time and the
@@ -3917,20 +3919,16 @@ fn clear_finder_install_failure(cfg: &mut DesktopConfig) -> bool {
 
 /// Start of an install attempt: drop the previous attempt's failure from the saved state.
 #[cfg(not(target_os = "macos"))]
-fn begin_finder_install_attempt(cfg: &mut DesktopConfig) -> Result<(), String> {
-    if clear_finder_install_failure(cfg) {
-        cfg.save()?;
-    }
-    Ok(())
+fn begin_finder_install_attempt(cfg: &mut HeldConfig) -> Result<(), String> {
+    cfg.update_held(|held| (clear_finder_install_failure(held), ()))
 }
 
 /// Save a failed Finder install and return it as an `Ok` state (see
 /// [`finder_install_failure_state`]). Only a failure to save the config itself is an `Err`.
 #[cfg(not(target_os = "macos"))]
-fn finder_install_failed(cfg: &mut DesktopConfig, error: String) -> Result<FinderInstallState, String> {
-    let state = finder_install_failure_state(cfg, error);
-    cfg.save()?;
-    Ok(state)
+fn finder_install_failed(cfg: &mut HeldConfig, error: String) -> Result<FinderInstallState, String> {
+    // Task 1889: recorded and saved onto the file as it is now; the state is built from what was saved.
+    cfg.update_held(|held| (true, finder_install_failure_state(held, error)))
 }
 
 fn state_db_for_config(cfg: &DesktopConfig) -> Result<Option<state_db::StateDb>, String> {
@@ -4371,7 +4369,7 @@ fn remove_stale_ipc_socket() -> Result<bool, String> {
 async fn persist_sync_root_and_start_engine(
     app: tauri::AppHandle,
     state: &State<'_, AppState>,
-    cfg: &mut DesktopConfig,
+    cfg: &mut HeldConfig,
     root: PathBuf,
     #[cfg(target_os = "windows")] _transition: &tokio::sync::MutexGuard<'_, ()>,
 ) -> Result<(), String> {
@@ -4380,12 +4378,16 @@ async fn persist_sync_root_and_start_engine(
         windows_cf::ensure_reactivation_allowed()?;
         SESSION_COMMANDS.generation()?
     };
-    cfg.sync_root = Some(root.clone());
-    cfg.save()?;
+    // Task 1889: the sync root is written onto the file as it is now, not by saving the copy loaded earlier; `cfg`
+    // afterwards holds what was saved, so the pause state below is the persisted one.
+    cfg.update_held(|held| {
+        held.sync_root = Some(root.clone());
+        (true, ())
+    })?;
 
     let acct = state.active_account()?;
     // Rehydrate the persisted pause state before spawning.
-    acct.sync_paused.store(cfg.pause_sync, Ordering::Relaxed);
+    rehydrate_sync_paused(&acct.sync_paused, cfg.pause_sync);
     {
         let mut engine_slot = acct.engine.lock().await;
         engine_start_refusal(&acct)?;
@@ -4433,8 +4435,7 @@ async fn start_engine_for_pending_finder_install(
 
     // Rehydrate the persisted pause state before spawning. Best-effort —
     // a missing/unreadable config defaults to not-paused.
-    let paused = DesktopConfig::load().map(|c| c.pause_sync).unwrap_or(false);
-    acct.sync_paused.store(paused, Ordering::Relaxed);
+    rehydrate_sync_paused(&acct.sync_paused, false);
 
     #[cfg_attr(not(unix), allow(unused_variables))]
     let (started, ipc_bind_error) = {
@@ -6414,11 +6415,15 @@ async fn ensure_sync_root_and_engine(
     state: &State<'_, AppState>,
     root: PathBuf,
 ) -> Result<(), String> {
-    let mut cfg = DesktopConfig::load()?;
-    if cfg.sync_root.as_deref() != Some(root.as_path()) {
-        cfg.sync_root = Some(root.clone());
-        cfg.save()?;
-    }
+    // Task 1889: one load-change-save under the config-write lock; the pause state it read is the fallback for the
+    // rehydration below, which stores it under the same lock.
+    let pause_sync = DesktopConfig::update(|cfg| {
+        let changed = cfg.sync_root.as_deref() != Some(root.as_path());
+        if changed {
+            cfg.sync_root = Some(root.clone());
+        }
+        (changed, cfg.pause_sync)
+    })?;
     let acct = state.active_account()?;
     // The slot first, then the keys under it (lead rulings T8-⚠lock 2 and 3): Lock and Sign-out clear
     // the session before they release the slot, so a check that waited for it finds no keys, and
@@ -6426,7 +6431,7 @@ async fn ensure_sync_root_and_engine(
     let mut engine_slot = acct.engine.lock().await;
     engine_start_refusal(&acct)?;
     if engine_slot.is_none() {
-        acct.sync_paused.store(cfg.pause_sync, Ordering::Relaxed);
+        rehydrate_sync_paused(&acct.sync_paused, pause_sync);
         // The keys are read under the slot, and the local data is bound to the account, inside the start.
         match spawn_bound_engine(app, state, &acct, &mut engine_slot, root)? {
             EngineStart::Started => {}
@@ -6474,10 +6479,7 @@ async fn start_check_engine(
         let mut engine_slot = lock_engine_slot(acct, finder_setup::core::Op::StartEngine, slot_limit).await?;
         engine_start_refusal(acct).map_err(|error| FpError::app(app_code::ENGINE_START, error))?;
         // Rehydrate the persisted pause state before spawning. Best-effort: an unreadable config means not paused.
-        acct.sync_paused.store(
-            DesktopConfig::load().map(|c| c.pause_sync).unwrap_or(false),
-            Ordering::Relaxed,
-        );
+        rehydrate_sync_paused(&acct.sync_paused, false);
         if let Some(existing) = engine_slot.as_ref() {
             // Already running (a retry, or the restore started it): reuse its bind-status handle so a
             // REAL bind error is still seen instead of a silent timeout.
@@ -6838,7 +6840,7 @@ async fn start_engine_unless_running(app: tauri::AppHandle, state: &AppState) ->
     let named = named_session_identity(&acct);
     let after = keep_or_rebind_after_naming(&acct, &mut engine_slot, owner.as_ref(), &named, |slot| {
         engine_start_refusal(&acct)?;
-        acct.sync_paused.store(cfg.pause_sync, Ordering::Relaxed);
+        rehydrate_sync_paused(&acct.sync_paused, cfg.pause_sync);
         spawn_bound_engine(app, state, &acct, slot, root)
     })
     .await?;
@@ -6978,7 +6980,7 @@ fn open_login_items_and_extensions_settings_blocking() -> Result<(), String> {
 #[cfg(not(target_os = "macos"))]
 #[tauri::command]
 fn finder_location_state() -> Result<FinderInstallState, String> {
-    let mut cfg = DesktopConfig::load()?;
+    let mut cfg = HeldConfig::load()?;
     match file_provider_installed() {
         Ok(FileProviderStatusOutcome::Installed) => {
             if cfg.finder_install_status.as_deref() != Some("installed") {
@@ -7039,7 +7041,7 @@ async fn install_finder_location(
     }
     config::ensure_directory(&root)?;
 
-    let mut cfg = DesktopConfig::load()?;
+    let mut cfg = HeldConfig::load()?;
     // Spec section 7: the previous attempt's saved failure is cleared when a new attempt starts.
     begin_finder_install_attempt(&mut cfg)?;
     let started_pending_engine = start_engine_for_pending_finder_install(
@@ -7055,10 +7057,11 @@ async fn install_finder_location(
         Err(failure) => {
             stop_pending_finder_install_engine(&state, started_pending_engine).await;
             // Review M1 (round 2): the install's own cleanup removed a domain this attempt
-            // added; a folder it kept is saved for the row (into `cfg`, saved just below) and
-            // shown, like the rollback's.
+            // added; a folder it kept is saved for the row and shown, like the rollback's. Task 1889: the
+            // record is written onto the file as it is now (`cfg` is a read copy from before the slow work),
+            // so the save just below cannot put an older row back.
             if let Some(location) = failure.kept_folder.as_deref() {
-                finder_removal::record_kept_folder(&mut cfg, location);
+                finder_removal::remember_kept_folder_held(&mut cfg, location);
                 show_preserved_files_alert(&app, Some(location));
             }
             // D1 (task 1683 slice 5): saved OR returned as an error, not both.
@@ -7089,15 +7092,15 @@ async fn install_finder_location(
         // Task 1882: `addDomain` also succeeds on a domain that already existed, so this
         // rollback can remove one that holds un-synced files. They are kept; the alert names
         // the folder. A failed rollback stays silent, as before.
-        // Review I2: recorded into `cfg`, which `finder_install_failed` saves below, so that
-        // save cannot overwrite the record with a stale copy.
+        // Review I2 / task 1889: the record is written onto the file as it is now and into `cfg`, so the save
+        // `finder_install_failed` makes below cannot overwrite it with a stale copy.
         // Review M2: a folder kept with a failed removal is surfaced too.
         let removal = remove_file_provider_domain_blocking().await;
         if let Some(location) = removal.map_or_else(
             |failure| failure.kept_location("add-to-finder rollback"),
             |removal| removal.kept_location("add-to-finder rollback"),
         ) {
-            finder_removal::record_kept_folder(&mut cfg, &location);
+            finder_removal::remember_kept_folder_held(&mut cfg, &location);
             show_preserved_files_alert(&app, Some(&location));
         }
         // D1 (task 1683 slice 5): saved OR returned as an error, not both.
@@ -7137,7 +7140,7 @@ async fn continue_without_finder_location(
     }
     config::ensure_directory(&root)?;
 
-    let mut cfg = DesktopConfig::load()?;
+    let mut cfg = HeldConfig::load()?;
     persist_sync_root_and_start_engine(
         app,
         &state,
@@ -7241,7 +7244,7 @@ async fn install_windows_shell_integration(
         }
         config::ensure_directory(&root)?;
 
-        let mut cfg = DesktopConfig::load()?;
+        let mut cfg = HeldConfig::load()?;
 
         // Register the Cloud Files sync root with Windows. Idempotent at the OS
         // layer. The engine runner re-registers + connects callbacks on spawn;
@@ -7314,7 +7317,7 @@ async fn reset_macos_integration(
 
     let mut warnings = Vec::new();
     #[cfg_attr(target_os = "macos", allow(unused_mut))]
-    let mut cfg = DesktopConfig::load()?;
+    let mut cfg = HeldConfig::load()?;
     let sync_root_preserved = cfg.sync_root.as_ref().map(|path| path.to_string_lossy().into_owned());
 
     let queue = match state_db_for_config(&cfg) {
@@ -7417,12 +7420,13 @@ async fn reset_macos_integration(
     let (removed_file_provider_domain, preserved_location) = finder_removal::repair_removal(removal, &mut warnings);
     // Review I2: saved for the Settings › Sync row. On macOS this command saves no config (the reconciler owns
     // the Finder state), so the folder is saved on its own, under the config-write lock; Windows and Linux
-    // record it into the config this command saves below.
+    // write it onto the file as it is now (task 1889), and into the copy this command loaded, which the save below
+    // goes through.
     if let Some(location) = preserved_location.as_deref() {
         #[cfg(target_os = "macos")]
         save_kept_folder_for_row(&app, location);
         #[cfg(not(target_os = "macos"))]
-        finder_removal::record_kept_folder(&mut cfg, location);
+        finder_removal::remember_kept_folder_held(&mut cfg, location);
     }
 
     let disabled_autostart = match app.autolaunch().is_enabled() {
@@ -9053,9 +9057,11 @@ async fn pick_sync_root(app: tauri::AppHandle, state: State<'_, AppState>) -> Re
         }
         config::ensure_directory(&path)?;
 
-        let mut cfg = DesktopConfig::load()?;
-        cfg.sync_root = Some(path.clone());
-        cfg.save()?;
+        // Task 1889: one load-change-save under the config-write lock; `cfg` is what was saved.
+        let cfg = DesktopConfig::update(|cfg| {
+            cfg.sync_root = Some(path.clone());
+            (true, cfg.clone())
+        })?;
 
         tracing::info!(path = %path.display(), "sync root set");
 
@@ -9067,7 +9073,7 @@ async fn pick_sync_root(app: tauri::AppHandle, state: State<'_, AppState>) -> Re
         let acct = state.active_account()?;
         {
             // Rehydrate the persisted pause state before spawning.
-            acct.sync_paused.store(cfg.pause_sync, Ordering::Relaxed);
+            rehydrate_sync_paused(&acct.sync_paused, cfg.pause_sync);
             let mut engine_slot = acct.engine.lock().await;
             engine_start_refusal(&acct)?;
             if let Some(prev) = engine_slot.take() {
@@ -9165,18 +9171,16 @@ fn get_desktop_config() -> Result<config::DesktopSettings, String> {
 }
 
 /// Persist a new settings struct, leaving `sync_root` (and any future
-/// non-settings fields) untouched. Performs a load → merge → save so a
-/// concurrent `pick_sync_root` doesn't race away a sync_root update;
-/// the worst case here is a missed sync_root change between this load
-/// and save, but `pick_sync_root` writes much less frequently than the
-/// settings pages (one-shot vs. debounced sliders), so the practical
-/// risk is near zero.
+/// non-settings fields) untouched. Performs a load → merge → save as one
+/// update under the config-write lock (task 1889), so a concurrent
+/// `pick_sync_root` or any other writer cannot race away a change between
+/// this load and save.
 #[tauri::command]
 fn set_desktop_config(config: config::DesktopSettings) -> Result<(), String> {
-    let mut cfg = DesktopConfig::load()?;
-    cfg.apply_settings(config);
-    cfg.save()?;
-    Ok(())
+    DesktopConfig::update(|cfg| {
+        cfg.apply_settings(config);
+        (true, ())
+    })
 }
 
 // ── IPC aliases for frontend compatibility ────────────────────────────────────
@@ -9352,13 +9356,45 @@ fn tray_recent_activity() -> Vec<TrayActivityItem> {
 ///
 /// Emits an `engine-status` event with `state = "paused"` so the tray
 /// tooltip and any open app window update immediately.
+/// Task 1889 fix round 1 (M6): the pause reaches the in-memory flag in the same step that persists it. The flag is stored
+/// while the config-write lock is held, after the write succeeded, so it can never say paused while the file says
+/// unpaused or the other way round: a write that fails leaves both as they were, and a rehydration
+/// ([`rehydrate_sync_paused`]) or a sync-root write that reads the pause waits for this one and stores what it wrote.
+fn persist_sync_paused_at(path: &Path, flag: &AtomicBool, paused: bool) -> Result<(), String> {
+    DesktopConfig::update_at_then(
+        path,
+        |cfg| {
+            cfg.pause_sync = paused;
+            (true, ())
+        },
+        |cfg| flag.store(cfg.pause_sync, Ordering::Relaxed),
+    )
+}
+
+/// Stores the persisted pause state into the in-memory flag, under the config-write lock (see
+/// [`persist_sync_paused_at`]). A restart that finds the file paused starts paused.
+fn rehydrate_sync_paused_at(path: &Path, flag: &AtomicBool) -> Result<(), String> {
+    DesktopConfig::update_at_then(
+        path,
+        |_| (false, ()),
+        |cfg| flag.store(cfg.pause_sync, Ordering::Relaxed),
+    )
+}
+
+/// [`rehydrate_sync_paused_at`] on the real config. An unreadable config stores `fallback`, which is what each caller
+/// stored before when it could not read the file (the value it had already loaded, or "not paused").
+fn rehydrate_sync_paused(flag: &AtomicBool, fallback: bool) {
+    let stored = DesktopConfig::path().and_then(|path| rehydrate_sync_paused_at(&path, flag));
+    if stored.is_err() {
+        flag.store(fallback, Ordering::Relaxed);
+    }
+}
+
 async fn set_sync_paused(app: &tauri::AppHandle, paused: bool) -> Result<(), String> {
     let state = app.state::<AppState>();
-    state.active_account()?.sync_paused.store(paused, Ordering::Relaxed);
+    let acct = state.active_account()?;
     // Persist so the paused state survives a restart.
-    let mut cfg = DesktopConfig::load()?;
-    cfg.pause_sync = paused;
-    cfg.save()?;
+    persist_sync_paused_at(&DesktopConfig::path()?, &acct.sync_paused, paused)?;
     // Notify the WebView + tray tooltip listener.
     let event_state = if paused { "paused" } else { "idle" };
     let _ = app.emit("engine-status", serde_json::json!({ "state": event_state }));
@@ -9379,9 +9415,48 @@ async fn tray_resume_sync(app: tauri::AppHandle) -> Result<(), String> {
     set_sync_paused(&app, false).await
 }
 
-async fn toggle_sync_paused_from_menu(app: &tauri::AppHandle) -> Result<(), String> {
-    let paused = DesktopConfig::load().map(|cfg| cfg.pause_sync).unwrap_or(false);
-    set_sync_paused(app, !paused).await
+/// The menu's Pause / Resume item: flips the pause the file holds. Returns which way it went (`true` = pausing) with the
+/// result, so a failure can say which.
+async fn toggle_sync_paused_from_menu(app: &tauri::AppHandle) -> (bool, Result<(), String>) {
+    let pausing = !DesktopConfig::load().map(|cfg| cfg.pause_sync).unwrap_or(false);
+    (pausing, set_sync_paused(app, pausing).await)
+}
+
+/// The title of the alert a failed Pause from the menu raises.
+const MENU_PAUSE_FAILED_TITLE: &str = "Pause sync";
+/// The title of the alert a failed Resume from the menu raises.
+const MENU_RESUME_FAILED_TITLE: &str = "Resume sync";
+/// What a failed Pause says. Honest about the state: a pause that cannot be written changes neither the file nor the
+/// running engine (task 1889, M6), so sync carries on as it was. It never carries the error behind it (a path, an OS
+/// message); the caller logs that.
+const MENU_PAUSE_FAILED_SENTENCE: &str = "Beebeeb couldn’t pause syncing, so it carries on as before.";
+/// What a failed Resume says: the pause stays.
+const MENU_RESUME_FAILED_SENTENCE: &str = "Beebeeb couldn’t resume syncing, so it stays paused.";
+
+/// What the menu's Pause / Resume shows the person when its work ended in `result` (task 1889, fix round 2 N2): an `Err`
+/// is an alert with the title and the one sentence for the way it was going (`pausing`); success shows nothing. The menu
+/// works with every window closed, so it has no window to put a toast in and the alert is native, like 1885's failed
+/// "Open in Finder" and the Sign-out menu action's. On every platform: the native menu is the one live caller of the
+/// pause commands, and a pause that does nothing must not look like one that worked.
+fn menu_pause_failure_alert(result: &Result<(), String>, pausing: bool) -> Option<(&'static str, &'static str)> {
+    match (result, pausing) {
+        (Ok(()), _) => None,
+        (Err(_), true) => Some((MENU_PAUSE_FAILED_TITLE, MENU_PAUSE_FAILED_SENTENCE)),
+        (Err(_), false) => Some((MENU_RESUME_FAILED_TITLE, MENU_RESUME_FAILED_SENTENCE)),
+    }
+}
+
+/// A failed Pause or Resume from the menu, shown to the person before the caller logs it (see
+/// [`menu_pause_failure_alert`]).
+fn show_menu_pause_failure(app: &tauri::AppHandle, pausing: bool, result: &Result<(), String>) {
+    let Some((title, message)) = menu_pause_failure_alert(result, pausing) else {
+        return;
+    };
+    app.dialog()
+        .message(message)
+        .title(title)
+        .kind(tauri_plugin_dialog::MessageDialogKind::Error)
+        .show(|_| {});
 }
 
 #[tauri::command]
@@ -9591,9 +9666,10 @@ fn set_sync_mode(mode: String) -> Result<(), String> {
         "everything" | "smart" | "custom" | "online_only" => {}
         _ => return Err(format!("invalid sync mode: {mode}")),
     }
-    let mut cfg = DesktopConfig::load()?;
-    cfg.sync_mode = Some(mode);
-    cfg.save()
+    DesktopConfig::update(|cfg| {
+        cfg.sync_mode = Some(mode);
+        (true, ())
+    })
 }
 
 // ── IPC commands: Task 0090 — selective sync ──────────────────────────────────
@@ -9647,14 +9723,15 @@ fn get_selective_sync() -> Result<Vec<String>, String> {
 async fn set_selective_sync(excluded: Vec<String>) -> Result<(), String> {
     // 1. Snapshot old, persist new. Persist FIRST so the choice sticks
     //    regardless of the reclaim outcome.
-    let mut cfg = DesktopConfig::load()?;
-    let old_excluded = cfg.excluded_folder_ids.clone().unwrap_or_default();
-    cfg.excluded_folder_ids = if excluded.is_empty() {
-        None
-    } else {
-        Some(excluded.clone())
-    };
-    cfg.save()?;
+    let old_excluded = DesktopConfig::update(|cfg| {
+        let old_excluded = cfg.excluded_folder_ids.clone().unwrap_or_default();
+        cfg.excluded_folder_ids = if excluded.is_empty() {
+            None
+        } else {
+            Some(excluded.clone())
+        };
+        (true, old_excluded)
+    })?;
 
     // 2. Diff for the subtrees we must reclaim now.
     let newly_excluded = newly_excluded_ids(&old_excluded, &excluded);
@@ -9807,9 +9884,10 @@ async fn set_known_folder_backup(key: String, enabled: bool) -> Result<(), Strin
         return Err(format!("unknown known-folder key: {key}"));
     }
 
-    let mut cfg = DesktopConfig::load()?;
-    cfg.set_known_folder(&key, enabled);
-    cfg.save()?;
+    let cfg = DesktopConfig::update(|cfg| {
+        cfg.set_known_folder(&key, enabled);
+        (true, cfg.clone())
+    })?;
 
     // On DISABLE, purge this folder's pending backup ops so they stop now and do
     // not resume on restart. Best-effort: a missing/unopenable state DB (no sync
@@ -9880,9 +9958,10 @@ fn get_known_folder_onboarding_seen() -> Result<bool, String> {
 /// accept path writes via `set_known_folder_backup`) untouched.
 #[tauri::command]
 fn mark_known_folder_onboarding_seen() -> Result<(), String> {
-    let mut cfg = DesktopConfig::load()?;
-    cfg.known_folder_onboarding_seen = true;
-    cfg.save()
+    DesktopConfig::update(|cfg| {
+        cfg.known_folder_onboarding_seen = true;
+        (true, ())
+    })
 }
 
 /// Resolve and dehydrate the local, unpinned files under each newly-excluded
@@ -12108,9 +12187,10 @@ fn installed_release_channel() -> ReleaseChannel {
 }
 
 fn record_installed_release_channel(channel: ReleaseChannel) -> Result<(), String> {
-    let mut cfg = DesktopConfig::load()?;
-    cfg.installed_release_channel = Some(channel);
-    cfg.save()
+    DesktopConfig::update(|cfg| {
+        cfg.installed_release_channel = Some(channel);
+        (true, ())
+    })
 }
 
 fn updater_builder_for_release_channel(
@@ -13171,7 +13251,7 @@ pub fn run() {
             // returns the same value thereafter). On error we fall back to an
             // ephemeral id so the app still boots; the legacy READ FALLBACK in the
             // keychain helpers keeps auto-unlock working in that degraded case.
-            let account_id = match DesktopConfig::load().and_then(|mut cfg| cfg.ensure_account_id()) {
+            let account_id = match DesktopConfig::ensure_account_id() {
                 Ok(id) => id,
                 Err(error) => {
                     tracing::warn!(%error, "could not persist account id; using ephemeral id this run");
@@ -13901,7 +13981,12 @@ fn handle_desktop_menu_action(app: &tauri::AppHandle, spec: &'static DesktopMenu
         }
         DesktopMenuAction::ToggleSync => {
             let app = app.clone();
-            spawn_menu_task(spec.id, async move { toggle_sync_paused_from_menu(&app).await });
+            // A failure is shown (task 1889, fix round 2 N2) before it is logged: the menu has no window to put it in.
+            spawn_menu_task(spec.id, async move {
+                let (pausing, result) = toggle_sync_paused_from_menu(&app).await;
+                show_menu_pause_failure(&app, pausing, &result);
+                result
+            });
         }
         DesktopMenuAction::SignOut => {
             let app = app.clone();
@@ -15239,9 +15324,7 @@ mod tests {
         // return `Err` by hand, and the only hand-written save of a failure is the user-disabled
         // state, which is returned as `Ok`.
         let body = install_finder_location_source();
-        let after_load = &body[body
-            .find("DesktopConfig::load()")
-            .expect("the command loads the config")..];
+        let after_load = &body[body.find("HeldConfig::load()").expect("the command loads the config")..];
 
         // 1. No hand-written Err after the config is loaded: neither `return Err(..)` nor an
         //    `=> Err(..)` match arm. (`?` before the load is fine: nothing was saved yet.)
@@ -15290,7 +15373,7 @@ mod tests {
         let clear = body
             .find("begin_finder_install_attempt(&mut cfg)?")
             .expect("the attempt clears the old failure");
-        let load = body.find("DesktopConfig::load()").expect("loads the config");
+        let load = body.find("HeldConfig::load()").expect("loads the config");
         let engine = body
             .find("start_engine_for_pending_finder_install(")
             .expect("starts the pending engine");
@@ -20117,11 +20200,12 @@ mod finder_setup_wiring_tests {
         );
         assert_eq!(notifications, 3, "the three notification builders");
         // The menu's three sign-out message dialogs, and (task 1882, rebase 2026-10-10) the kept-folder alert,
-        // `show_preserved_files_alert`, and (task 1885, I2) the menu's failed-open alert, `show_menu_open_failure`.
+        // `show_preserved_files_alert`, (task 1885, I2) the menu's failed-open alert, `show_menu_open_failure`, and
+        // (task 1889, fix round 2 N2) the menu's failed-pause alert, `show_menu_pause_failure`.
         // None of them is a window: macOS draws a parentless alert itself.
         assert_eq!(
-            dialogs, 5,
-            "the three sign-out message dialogs, the kept-folder alert and the menu's failed-open alert"
+            dialogs, 6,
+            "the three sign-out message dialogs, the kept-folder alert and the menu's failed-open and failed-pause alerts"
         );
     }
 
@@ -29780,9 +29864,11 @@ mod reauth_tests {
                 let config = config_dir.path().to_path_buf();
                 crate::config::CONFIG_DIR_OVERRIDE
                     .scope(config, async {
-                        let mut cfg = DesktopConfig::load().unwrap();
-                        cfg.last_signed_in_email = Some("a@beebeeb.io".into());
-                        cfg.save().unwrap();
+                        DesktopConfig::update(|cfg| {
+                            cfg.last_signed_in_email = Some("a@beebeeb.io".into());
+                            (true, ())
+                        })
+                        .unwrap();
                         let fx = Fixture::new();
                         let id = fx.id().to_string();
                         let (handle, rx) = finder_setup::driver::FinderSetupHandle::for_test(
@@ -29872,9 +29958,11 @@ mod reauth_tests {
                 let config = config_dir.path().to_path_buf();
                 crate::config::CONFIG_DIR_OVERRIDE
                     .scope(config, async {
-                        let mut cfg = DesktopConfig::load().unwrap();
-                        cfg.last_signed_in_email = saved_before.map(str::to_string);
-                        cfg.save().unwrap();
+                        DesktopConfig::update(|cfg| {
+                            cfg.last_signed_in_email = saved_before.map(str::to_string);
+                            (true, ())
+                        })
+                        .unwrap();
                         let fx = Fixture::new();
                         let _reconciler = recording_reconciler(&fx);
                         persist_session_to_keychain(
@@ -29908,9 +29996,11 @@ mod reauth_tests {
             let config = config_dir.path().to_path_buf();
             crate::config::CONFIG_DIR_OVERRIDE
                 .scope(config, async {
-                    let mut cfg = DesktopConfig::load().unwrap();
-                    cfg.last_signed_in_email = Some("a@beebeeb.io".into());
-                    cfg.save().unwrap();
+                    DesktopConfig::update(|cfg| {
+                        cfg.last_signed_in_email = Some("a@beebeeb.io".into());
+                        (true, ())
+                    })
+                    .unwrap();
                     // A save writes a temporary file next to `desktop.toml` first: a directory in its place fails it.
                     std::fs::create_dir(DesktopConfig::path().unwrap().with_extension("toml.tmp")).unwrap();
                     let fx = Fixture::new();
@@ -30907,9 +30997,10 @@ mod finder_removal_wiring_tests {
     /// forget the event. Source pins (the behaviour is `rb3_f1_a_repair_that_kept_a_folder_tells_the_windows_...` and
     /// `rebase_i2_a_surfaced_folder_...`): the one function saves and then tells; sign-out, the sweep and the
     /// reconciler (`surface_kept_folder`) and macOS Repair both go through it; and a census of every `.rs` file under
-    /// `src` finds no other writer of the row. `record_kept_folder` into a config that is saved afterwards is the one
-    /// other way in, kept for Windows and Linux (no File Provider there, so nothing is kept, and the row is MacSettings'
-    /// alone): its three sites are counted by name, so a fourth, or a Mac one, fails here until it tells the windows.
+    /// `src` finds no other writer of the row. `remember_kept_folder_held`, which writes the folder onto the file as it is
+    /// now from a flow that holds its own copy of the config (task 1889), is the one other way in, kept for Windows and
+    /// Linux (no File Provider there, so nothing is kept, and the row is MacSettings' alone): its three sites are
+    /// counted by name, so a fourth, or a Mac one, fails here until it tells the windows.
     #[test]
     fn rb3_f1_every_save_of_the_rows_folder_goes_through_the_one_function_that_tells_the_windows() {
         let full = source();
@@ -30952,8 +31043,10 @@ mod finder_removal_wiring_tests {
             )),
             "macOS Repair saves the row through the one function:\n{repair}"
         );
+        // Task 1889: Windows and Linux write the folder through `remember_kept_folder_held`, which is not the Mac's route.
+        let without_held = repair.replace("remember_kept_folder_held", "");
         assert!(
-            !repair.contains("remember_kept_folder"),
+            !without_held.contains("remember_kept_folder"),
             "Repair never saves the row on its own:\n{repair}"
         );
 
@@ -31038,8 +31131,8 @@ mod finder_removal_wiring_tests {
             }
         }
 
-        // `record_kept_folder` into a config saved afterwards: Windows and Linux only, three sites, by name.
-        let record = "finder_removal::record_kept_folder(&mut cfg";
+        // `remember_kept_folder_held` into a config the flow holds: Windows and Linux only, three sites, by name.
+        let record = "finder_removal::remember_kept_folder_held(&mut cfg";
         let install = code_only(&item(&source, "async fn install_finder_location("));
         assert_eq!(
             install.matches(record).count(),
@@ -31054,19 +31147,19 @@ mod finder_removal_wiring_tests {
         assert!(
             squash_ws(&repair).contains(&squash_ws(
                 "#[cfg(not(target_os = \"macos\"))]
-                finder_removal::record_kept_folder(&mut cfg, location);"
+                finder_removal::remember_kept_folder_held(&mut cfg, location);"
             )),
             "Repair's record is Windows and Linux only; on a Mac the row is saved through the one function:\n{repair}"
         );
         assert_eq!(
-            words(&code_only(&source), "record_kept_folder"),
+            words(&code_only(&source), "remember_kept_folder_held"),
             3,
             "a new site that records the row's folder must tell the windows after its own save, or be named here"
         );
         for (name, text) in &files {
             if name != "lib.rs" && name != "finder_removal.rs" {
                 assert_eq!(
-                    words(text, "record_kept_folder"),
+                    words(text, "remember_kept_folder_held"),
                     0,
                     "{name} records the row's folder around the pin"
                 );
@@ -31197,7 +31290,7 @@ mod finder_removal_wiring_tests {
             "macOS Repair saves the folder for the row:\n{repair}"
         );
         let recorded = repair
-            .find("finder_removal::record_kept_folder(&mut cfg, location);")
+            .find("finder_removal::remember_kept_folder_held(&mut cfg, location);")
             .expect("Repair records the folder into its config");
         // Round 3 (re-review P1): the save is the step that can fail after the removal, so it goes
         // through `finish_repair_after_removal`, which still shows the folder before the error.
@@ -31218,7 +31311,7 @@ mod finder_removal_wiring_tests {
         );
         let install = code_only(&item(&source, "async fn install_finder_location("));
         let recorded = install
-            .find("finder_removal::record_kept_folder(&mut cfg, &location);")
+            .find("finder_removal::remember_kept_folder_held(&mut cfg, &location);")
             .expect("the rollback records the folder into its config");
         let saved = install[recorded..]
             .find("return finder_install_failed(&mut cfg, error);")
@@ -31303,7 +31396,7 @@ mod finder_removal_wiring_tests {
             .find("Ok(FileProviderInstallOutcome::UserDisabled)")
             .expect("next arm")];
         let recorded = failed
-            .find("finder_removal::record_kept_folder(&mut cfg, location);")
+            .find("finder_removal::remember_kept_folder_held(&mut cfg, location);")
             .expect("M1: the install cleanup's folder is saved for the row");
         let shown = failed
             .find("show_preserved_files_alert(&app, Some(location));")
@@ -31572,7 +31665,7 @@ mod blocking_pool_tests {
 /// the removal cannot be undone, and a retry finds no domain, so the folder would never be named.
 #[cfg(test)]
 mod repair_kept_folder_tests {
-    use super::{DesktopConfig, finder_removal, finish_repair_after_removal};
+    use super::{DesktopConfig, HeldConfig, finder_removal, finish_repair_after_removal};
 
     const FOLDER: &str = "/Users/someone/Library/CloudStorage/Beebeeb-Beebeeb (10-10-2026 10:50)";
 
@@ -31582,7 +31675,7 @@ mod repair_kept_folder_tests {
 
     #[test]
     fn test_1882_r3_a_repair_whose_save_fails_after_the_removal_still_names_the_kept_folder() {
-        let mut cfg = DesktopConfig::default();
+        let mut cfg = HeldConfig::from(DesktopConfig::default());
         let mut alert: Alert = None;
         let mut raised = 0;
         let result = finish_repair_after_removal(
@@ -31614,7 +31707,7 @@ mod repair_kept_folder_tests {
 
     #[test]
     fn test_1882_r3_a_repair_whose_save_fails_with_nothing_kept_shows_nothing() {
-        let mut cfg = DesktopConfig::default();
+        let mut cfg = HeldConfig::from(DesktopConfig::default());
         let mut alert: Alert = None;
         let result = finish_repair_after_removal(
             &mut cfg,
@@ -31629,24 +31722,44 @@ mod repair_kept_folder_tests {
     #[test]
     fn test_1882_r3_a_repair_that_saves_shows_no_extra_alert() {
         // The Repair result carries the folder to the Sync tab's row; a second alert would repeat it.
-        let mut cfg = DesktopConfig::default();
+        let mut cfg = HeldConfig::from(DesktopConfig::default());
         let mut raised = 0;
         let result = finish_repair_after_removal(&mut cfg, Some(FOLDER), |_| Ok(()), |_| raised += 1);
         assert_eq!(result, Ok(()));
         assert_eq!(raised, 0);
     }
 
+    /// Fix round 1 (M2) replaces `test_1882_r3_the_save_is_given_the_config_the_repair_recorded_into`, which recorded
+    /// into the held copy and handed the same copy to the save: the pattern that loses data now that the save writes
+    /// onto the file as it is. A Repair's record is written onto the file first; the result is written next, through the
+    /// copy's own update; the copy the save is given already shows the record; and the file holds both.
     #[test]
-    fn test_1882_r3_the_save_is_given_the_config_the_repair_recorded_into() {
-        let mut cfg = DesktopConfig::default();
-        assert!(finder_removal::record_kept_folder(&mut cfg, FOLDER));
+    fn test_1889_the_repairs_result_write_lands_next_to_the_kept_folder_record_that_came_before_it() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("desktop.toml");
+        let mut cfg = HeldConfig::from(DesktopConfig::load_from(&path).expect("the Repair loads its copy first"));
+        // The app-start sweep saves a setting while the Repair waits on the removal.
+        DesktopConfig::update_at(&path, |on_file| {
+            on_file.last_signed_in_email = Some("someone@beebeeb.io".to_string());
+            (true, ())
+        })
+        .expect("the sweep saves");
+
+        assert_eq!(
+            finder_removal::remember_kept_folder_held_at(&mut cfg, &path, FOLDER),
+            Ok(true),
+            "the record is written onto the file as it is now"
+        );
         let mut saw = None;
         let result = finish_repair_after_removal(
             &mut cfg,
             Some(FOLDER),
-            |cfg| {
-                saw = cfg.kept_unsynced_folder.clone();
-                Ok(())
+            |held| {
+                saw = held.kept_unsynced_folder.clone();
+                held.update_held_at(&path, |on_file| {
+                    on_file.finder_install_status = Some("missing".to_string());
+                    (true, ())
+                })
             },
             |_| {},
         );
@@ -31654,7 +31767,812 @@ mod repair_kept_folder_tests {
         assert_eq!(
             saw.as_deref(),
             Some(FOLDER),
-            "the record rides the same save as the install result"
+            "the copy the save is given already shows the record"
         );
+        let on_file = DesktopConfig::load_from(&path).expect("reads back");
+        assert_eq!(
+            on_file.kept_unsynced_folder.as_deref(),
+            Some(FOLDER),
+            "the record is on the file"
+        );
+        assert_eq!(
+            on_file.finder_install_status.as_deref(),
+            Some("missing"),
+            "and so is the result"
+        );
+        assert_eq!(
+            on_file.last_signed_in_email.as_deref(),
+            Some("someone@beebeeb.io"),
+            "and the setting saved meanwhile"
+        );
+    }
+}
+
+/// Task 1889: every `desktop.toml` load-modify-save runs as one serialized update (`DesktopConfig::update_at`, or a
+/// helper that is one: `update`, `try_update_at`, `update_held`, `ensure_account_id`). There is no `save()` to call, and
+/// these pins read the source so that Windows and Linux code, which a Mac does not compile, is held to it as well. They
+/// were each seen to fail on a deliberate mutation (the task's notes).
+#[cfg(test)]
+mod config_write_pin_tests {
+    use super::finder_setup_command_tests::without_items;
+    use super::{DesktopConfig, ReleaseChannel};
+
+    /// Every `.rs` file under `src` as `(name relative to src, production text)`: LF line ends, test modules
+    /// dropped, and lines that are comments dropped.
+    fn production_files() -> Vec<(String, String)> {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        let mut stack = vec![src.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display())) {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                    let name = path.strip_prefix(&src).unwrap().to_string_lossy().replace('\\', "/");
+                    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {name}: {e}"));
+                    let production = without_items(&text.replace("\r\n", "\n"), &["#[cfg(test)]", "#[cfg(all(test"]);
+                    let code = production
+                        .lines()
+                        .filter(|line| !line.trim_start().starts_with("//"))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    files.push((name, code));
+                }
+            }
+        }
+        files.sort();
+        files
+    }
+
+    /// The text of the item starting at `start`, up to the next line that closes it at the start's own indentation.
+    fn item(text: &str, start: &str) -> String {
+        let at = text.find(start).unwrap_or_else(|| panic!("{start} exists"));
+        let line_start = text[..at].rfind('\n').map_or(0, |n| n + 1);
+        let indent: String = text[line_start..].chars().take_while(|c| *c == ' ').collect();
+        let end = format!("\n{indent}}}\n");
+        let to = text[at..].find(&end).unwrap_or_else(|| panic!("{start} ends"));
+        text[at..at + to].to_string()
+    }
+
+    const KEPT: &str = "/Users/someone/Kept";
+
+    /// Runs `seed` on an empty config in its own directory, then `site` (the real writer, which finds the file through
+    /// `DesktopConfig::path()`) while another update is between its load and its save: that update sets the kept folder
+    /// and stays inside for 200 ms. Returns what is on disk once both have finished. A writer that loads its own copy and
+    /// saves it later puts back the copy it loaded, without the kept folder.
+    async fn with_a_save_in_flight<Fut: std::future::Future<Output = ()>>(
+        seed: impl FnOnce(&mut DesktopConfig),
+        site: impl FnOnce() -> Fut,
+    ) -> DesktopConfig {
+        let dir = tempfile::tempdir().expect("temp dir");
+        crate::config::CONFIG_DIR_OVERRIDE
+            .scope(dir.path().to_path_buf(), async {
+                let path = DesktopConfig::path().expect("the scoped config path");
+                DesktopConfig::update_at(&path, |cfg| {
+                    seed(cfg);
+                    (true, ())
+                })
+                .expect("seed");
+                let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+                let slow_path = path.clone();
+                let slow = std::thread::spawn(move || {
+                    DesktopConfig::update_at(&slow_path, |cfg| {
+                        cfg.kept_unsynced_folder = Some(KEPT.to_string());
+                        entered_tx.send(()).expect("the test is waiting");
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        (true, ())
+                    })
+                });
+                entered_rx.recv().expect("the slow update started");
+                site().await; // waits for the lock, then reads the file as the slow update left it
+                assert_eq!(slow.join().expect("no panic"), Ok(()));
+                DesktopConfig::load_from(&path).expect("reads back")
+            })
+            .await
+    }
+
+    /// The real writers, each run while a save of the kept folder is in flight: the folder and the writer's own change
+    /// are both on disk afterwards. This is the behaviour the converted sites share; the pin below holds the rest.
+    #[tokio::test]
+    async fn test_1889_the_real_writers_land_next_to_a_save_that_was_in_flight() {
+        let on_disk = with_a_save_in_flight(
+            |_| {},
+            || async {
+                super::set_sync_mode("smart".to_string()).expect("set_sync_mode");
+            },
+        )
+        .await;
+        assert_eq!(
+            on_disk.kept_unsynced_folder.as_deref(),
+            Some(KEPT),
+            "set_sync_mode: the folder"
+        );
+        assert_eq!(on_disk.sync_mode.as_deref(), Some("smart"), "set_sync_mode: its change");
+
+        let on_disk = with_a_save_in_flight(
+            |_| {},
+            || async {
+                super::mark_known_folder_onboarding_seen().expect("mark_known_folder_onboarding_seen");
+            },
+        )
+        .await;
+        assert_eq!(
+            on_disk.kept_unsynced_folder.as_deref(),
+            Some(KEPT),
+            "mark_known_folder_onboarding_seen: the folder"
+        );
+        assert!(
+            on_disk.known_folder_onboarding_seen,
+            "mark_known_folder_onboarding_seen: its change"
+        );
+
+        let on_disk = with_a_save_in_flight(
+            |_| {},
+            || async {
+                super::record_installed_release_channel(ReleaseChannel::Beta)
+                    .expect("record_installed_release_channel");
+            },
+        )
+        .await;
+        assert_eq!(
+            on_disk.kept_unsynced_folder.as_deref(),
+            Some(KEPT),
+            "record_installed_release_channel: the folder"
+        );
+        assert_eq!(
+            on_disk.installed_release_channel,
+            Some(ReleaseChannel::Beta),
+            "record_installed_release_channel: its change"
+        );
+
+        let on_disk = with_a_save_in_flight(
+            |_| {},
+            || async {
+                super::persist_last_signed_in_email(Some("someone@beebeeb.io".to_string()));
+            },
+        )
+        .await;
+        assert_eq!(
+            on_disk.kept_unsynced_folder.as_deref(),
+            Some(KEPT),
+            "persist_last_signed_in_email: the folder"
+        );
+        assert_eq!(
+            on_disk.last_signed_in_email.as_deref(),
+            Some("someone@beebeeb.io"),
+            "persist_last_signed_in_email: its change"
+        );
+
+        let on_disk = with_a_save_in_flight(
+            |cfg| cfg.last_signed_in_email = Some("previous@beebeeb.io".to_string()),
+            || async {
+                super::forget_last_signed_in_email().expect("forget_last_signed_in_email");
+            },
+        )
+        .await;
+        assert_eq!(
+            on_disk.kept_unsynced_folder.as_deref(),
+            Some(KEPT),
+            "forget_last_signed_in_email: the folder"
+        );
+        assert_eq!(
+            on_disk.last_signed_in_email, None,
+            "forget_last_signed_in_email: its change"
+        );
+
+        let on_disk = with_a_save_in_flight(
+            |_| {},
+            || async {
+                let mut settings = crate::config::DesktopSettings::from(&DesktopConfig::default());
+                settings.upload_kbps_limit = Some(1234);
+                super::set_desktop_config(settings).expect("set_desktop_config");
+            },
+        )
+        .await;
+        assert_eq!(
+            on_disk.kept_unsynced_folder.as_deref(),
+            Some(KEPT),
+            "set_desktop_config: the folder"
+        );
+        assert_eq!(on_disk.upload_kbps_limit, 1234, "set_desktop_config: its change");
+
+        let on_disk = with_a_save_in_flight(
+            |_| {},
+            || async {
+                super::set_known_folder_backup("documents".to_string(), true)
+                    .await
+                    .expect("set_known_folder_backup");
+            },
+        )
+        .await;
+        assert_eq!(
+            on_disk.kept_unsynced_folder.as_deref(),
+            Some(KEPT),
+            "set_known_folder_backup: the folder"
+        );
+        assert!(
+            on_disk.known_folder_enabled("documents"),
+            "set_known_folder_backup: its change"
+        );
+
+        let on_disk = with_a_save_in_flight(
+            |_| {},
+            || async {
+                crate::config::DesktopConfig::ensure_account_id().expect("ensure_account_id");
+            },
+        )
+        .await;
+        assert_eq!(
+            on_disk.kept_unsynced_folder.as_deref(),
+            Some(KEPT),
+            "ensure_account_id: the folder"
+        );
+        assert!(on_disk.account_id.is_some(), "ensure_account_id: its change");
+    }
+
+    /// The census itself must have read the tree: a pin that scanned nothing passes on anything.
+    #[test]
+    fn test_1889_the_census_reads_the_whole_tree() {
+        let files = production_files();
+        let names: Vec<&str> = files.iter().map(|(name, _)| name.as_str()).collect();
+        assert!(files.len() >= 20, "read only {}: {names:?}", files.len());
+        for must in [
+            "lib.rs",
+            "config.rs",
+            "finder_removal.rs",
+            "finder_setup/macos_ports.rs",
+            "keychain.rs",
+        ] {
+            assert!(names.contains(&must), "{must} was not read: {names:?}");
+        }
+        let lib = &files.iter().find(|(name, _)| name == "lib.rs").unwrap().1;
+        assert!(
+            lib.contains("fn set_sync_mode(") && !lib.contains("mod config_write_pin_tests"),
+            "production code is read, test modules are not"
+        );
+    }
+
+    /// No load-modify-save span outside the one helper: nothing outside `config.rs` writes the file, and `config.rs`
+    /// writes it in exactly one place, which holds the lock across the read, the change and the write.
+    #[test]
+    fn test_1889_no_desktop_config_load_modify_save_span_exists_outside_the_one_helper() {
+        let files = production_files();
+        for (name, text) in &files {
+            if name == "config.rs" {
+                continue;
+            }
+            for banned in [".save()", ".save_to("] {
+                let lines: Vec<&str> = text.lines().filter(|line| line.contains(banned)).collect();
+                assert!(
+                    lines.is_empty(),
+                    "{name} writes desktop.toml with `{banned}`; write it through DesktopConfig::update, update_at or update_held: {lines:?}"
+                );
+            }
+        }
+
+        let config = &files.iter().find(|(name, _)| name == "config.rs").unwrap().1;
+        assert!(!config.contains("fn save("), "config.rs has no `save` to call");
+        assert_eq!(
+            config.matches("save_to(").count(),
+            2,
+            "config.rs writes in one place: the definition of `save_to` and its one call"
+        );
+        assert_eq!(
+            config.matches("config_write_guard()").count(),
+            2,
+            "the lock is taken in one place: its definition and its one call"
+        );
+        let one_place = item(config, "    fn try_update_at_then<R>(");
+        let lock = one_place
+            .find("let _writing = config_write_guard();")
+            .expect("it takes the lock");
+        let read = one_place.find("Self::load_from(path)").expect("it reads");
+        let write = one_place.find("cfg.save_to(path)").expect("it writes");
+        let mirror = one_place.find("saved(&cfg);").expect("it runs the mirror step");
+        assert!(
+            lock < read && read < write && write < mirror,
+            "the lock is held before the read and still held at the write and the mirror step:\n{one_place}"
+        );
+
+        // Every other way in is that one place.
+        for (start, calls) in [
+            ("    pub(crate) fn update_at<R>(", "Self::try_update_at("),
+            ("    pub(crate) fn try_update_at<R>(", "Self::try_update_at_then("),
+            ("    pub(crate) fn update_at_then<R>(", "Self::try_update_at_then("),
+            (
+                "    pub(crate) fn update<R>(",
+                "Self::update_at(&Self::path()?, change)",
+            ),
+            ("    pub(crate) fn update_held_at<R>(", "DesktopConfig::update_at(path,"),
+            ("    pub(crate) fn ensure_account_id_at(", "Self::update_at(path,"),
+        ] {
+            let body = item(config, start);
+            assert!(body.contains(calls), "{start} is `{calls}`:\n{body}");
+            assert!(!body.contains("load_from(") && !body.contains("save_to("), "{body}");
+        }
+    }
+
+    /// The text inside the parentheses of the call whose `(` is at byte `open`.
+    fn call_text(text: &str, open: usize) -> &str {
+        let mut depth = 0usize;
+        for (at, c) in text[open..].char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &text[open + 1..open + at];
+                    }
+                }
+                _ => {}
+            }
+        }
+        &text[open + 1..]
+    }
+
+    /// The calls whose closure gets the config to change.
+    const UPDATE_CALLS: [&str; 5] = [
+        "DesktopConfig::update(",
+        "DesktopConfig::update_at(",
+        "DesktopConfig::try_update_at(",
+        ".update_held(",
+        ".update_held_at(",
+    ];
+
+    /// Fix round 1 (M1), shape 1: a stale WHOLE copy written through an update closure. The closure's argument is the
+    /// file as it is now; assigning over all of it (`*cfg = ...`), swapping or replacing or taking it, or `clone_from`
+    /// puts back a copy loaded earlier, which is the bug in a new shape. Returns what it found, one line each.
+    fn whole_copy_writes(text: &str) -> Vec<String> {
+        let mut found = Vec::new();
+        for needle in UPDATE_CALLS {
+            for (at, _) in text.match_indices(needle) {
+                let call = call_text(text, at + needle.len() - 1);
+                let Some(open) = call.find('|') else { continue };
+                let Some(close) = call[open + 1..].find('|') else {
+                    continue;
+                };
+                let params = call[open + 1..open + 1 + close].trim();
+                let name: String = params
+                    .trim_start_matches("mut ")
+                    .trim_start_matches("&mut ")
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                if name.is_empty() || name == "_" {
+                    continue;
+                }
+                let body = crate::source_pin::squeeze(&call[open + 1 + close + 1..]);
+                let assign = format!("*{name}=");
+                let assigns = body.matches(&assign).count() - body.matches(&format!("{assign}=")).count();
+                if assigns > 0 {
+                    found.push(format!(
+                        "{needle} closure `{name}` assigns over the whole config: `{assign}`"
+                    ));
+                }
+                for shape in [
+                    format!("mem::replace({name},"),
+                    format!("mem::swap({name},"),
+                    format!("mem::take({name})"),
+                    format!("{name}.clone_from("),
+                ] {
+                    if body.contains(&shape) {
+                        found.push(format!(
+                            "{needle} closure `{name}` overwrites the whole config: `{shape}`"
+                        ));
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    /// The held-copy helpers: the only callees a flow may hand its copy to.
+    const HELD_CALLEES: [&str; 6] = [
+        "begin_finder_install_attempt",
+        "finder_install_failed",
+        "persist_finder_install_result",
+        "persist_sync_root_and_start_engine",
+        "finish_repair_after_removal",
+        "remember_kept_folder_held",
+    ];
+
+    /// Fix round 1 (M1), shape 2: an edit to a held copy outside an update closure. The copy (`cfg`) is only read; it is
+    /// changed through `cfg.update_held(..)`, or by handing `&mut cfg` to one of the held helpers. An assignment to one of
+    /// its fields, a mutating method on one, or `&mut cfg` handed anywhere else is an edit that the refresh would drop (and
+    /// that does not compile where `HeldConfig` has no `DerefMut`; this scan covers the code a Mac does not compile).
+    fn held_copy_edits(flow: &str) -> Vec<String> {
+        let mut found = Vec::new();
+        for (at, _) in flow.match_indices("cfg.") {
+            if flow[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_')
+            {
+                continue;
+            }
+            let path: String = flow[at + 4..]
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
+                .collect();
+            let after = flow[at + 4 + path.len()..].trim_start();
+            let assigns = ["+=", "-=", "|=", "&="].iter().any(|op| after.starts_with(op))
+                || (after.starts_with('=') && !after.starts_with("=="));
+            let method = path.rsplit('.').next().unwrap_or("");
+            let mutating = path.contains('.')
+                && [
+                    "push", "insert", "remove", "clear", "take", "retain", "extend", "sort", "truncate",
+                ]
+                .contains(&method);
+            let whole = ["set_known_folder", "apply_settings", "ensure_account_id"].contains(&path.as_str());
+            if assigns || mutating || whole {
+                found.push(format!("`cfg.{path}` is edited outside update_held"));
+            }
+        }
+        for (at, _) in flow.match_indices("&mut cfg") {
+            let mut depth = 0usize;
+            let mut open = None;
+            for (i, c) in flow[..at].char_indices().rev() {
+                match c {
+                    ')' => depth += 1,
+                    '(' if depth == 0 => {
+                        open = Some(i);
+                        break;
+                    }
+                    '(' => depth -= 1,
+                    _ => {}
+                }
+            }
+            let callee: String = open
+                .map(|i| {
+                    flow[..i]
+                        .trim_end()
+                        .chars()
+                        .rev()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !HELD_CALLEES.contains(&callee.as_str()) {
+                found.push(format!(
+                    "`&mut cfg` is handed to `{callee}`, which is not a held helper"
+                ));
+            }
+        }
+        found
+    }
+
+    /// Fix round 1 (M6). The in-memory pause flag and `pause_sync` on disk are changed in one order: a pause is stored
+    /// into the flag by the write that persists it, and a rehydration reads the file and stores into the flag, both while
+    /// the config-write lock is held. A lock holder is in the middle of its write here, so a rehydration that did not
+    /// wait for the lock would read the file from before it.
+    #[test]
+    fn test_1889_m6_a_rehydration_waits_for_the_write_in_flight_and_stores_what_it_wrote() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("desktop.toml");
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let holder_path = path.clone();
+        let holder = std::thread::spawn(move || {
+            DesktopConfig::update_at(&holder_path, |cfg| {
+                cfg.pause_sync = true; // the pause is on its way to the file
+                entered_tx.send(()).expect("the test is waiting");
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                (true, ())
+            })
+        });
+        entered_rx.recv().expect("the write started");
+        super::rehydrate_sync_paused_at(&path, &flag).expect("rehydrate");
+        holder.join().expect("no panic").expect("the pause was written");
+        assert!(
+            DesktopConfig::load_from(&path).expect("reads back").pause_sync,
+            "the file says paused"
+        );
+        assert!(
+            flag.load(std::sync::atomic::Ordering::Relaxed),
+            "and so does the flag: the rehydration read the file after that write"
+        );
+    }
+
+    #[test]
+    fn test_1889_m6_a_pause_reaches_the_flag_only_with_the_write_that_persists_it() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("desktop.toml");
+        let flag = std::sync::Arc::new(AtomicBool::new(false));
+        // A write is in flight when the pause arrives.
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let holder_path = path.clone();
+        let holder = std::thread::spawn(move || {
+            DesktopConfig::update_at(&holder_path, |cfg| {
+                cfg.kept_unsynced_folder = Some(KEPT.to_string());
+                entered_tx.send(()).expect("the test is waiting");
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                (true, ())
+            })
+        });
+        entered_rx.recv().expect("the write started");
+        let pause_path = path.clone();
+        let pause_flag = flag.clone();
+        let pause = std::thread::spawn(move || super::persist_sync_paused_at(&pause_path, &pause_flag, true));
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        assert!(
+            !flag.load(Ordering::Relaxed),
+            "the pause has not been written yet, so the flag does not say paused yet"
+        );
+        holder.join().expect("no panic").expect("the holder wrote");
+        pause.join().expect("no panic").expect("the pause was written");
+        let on_disk = DesktopConfig::load_from(&path).expect("reads back");
+        assert!(
+            on_disk.pause_sync && flag.load(Ordering::Relaxed),
+            "file and flag agree: paused"
+        );
+        assert_eq!(
+            on_disk.kept_unsynced_folder.as_deref(),
+            Some(KEPT),
+            "and the other write survived"
+        );
+
+        // A pause that cannot be written is not applied either: the file and the flag cannot disagree.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("desktop.toml");
+        std::fs::create_dir(path.with_extension("toml.tmp")).expect("mkdir");
+        let flag = AtomicBool::new(false);
+        assert!(super::persist_sync_paused_at(&path, &flag, true).is_err());
+        assert!(!path.exists(), "nothing was written");
+        assert!(!flag.load(Ordering::Relaxed), "and the flag did not move");
+    }
+
+    /// Fix round 1 (M5), end to end through the real commands: the window opens (its copy has `pause_sync: false`), the tray
+    /// pauses, the window changes a speed and sends only that field. The pause stays.
+    #[tokio::test]
+    async fn test_1889_m5_a_speed_changed_after_a_tray_pause_leaves_the_pause() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        crate::config::CONFIG_DIR_OVERRIDE
+            .scope(dir.path().to_path_buf(), async {
+                let path = DesktopConfig::path().expect("the scoped config path");
+                let window_copy = super::get_desktop_config().expect("the window reads on open");
+                assert_eq!(window_copy.pause_sync, Some(false));
+
+                let flag = std::sync::atomic::AtomicBool::new(false);
+                super::persist_sync_paused_at(&path, &flag, true).expect("the tray pauses");
+
+                let patch: crate::config::DesktopSettings =
+                    serde_json::from_str(r#"{ "upload_kbps_limit": 2000 }"#).expect("the window sends one field");
+                super::set_desktop_config(patch).expect("the speed is saved");
+
+                let on_disk = DesktopConfig::load_from(&path).expect("reads back");
+                assert!(on_disk.pause_sync, "the tray's pause survived the speed change");
+                assert_eq!(on_disk.upload_kbps_limit, 2000);
+            })
+            .await;
+    }
+
+    /// Fix round 2 (N2), in the menu: the ToggleSync arm waits for the toggle, then hands the result to
+    /// `show_menu_pause_failure` before returning it to the logger, and that function raises a native error dialog for
+    /// exactly what `menu_pause_failure_alert` says. (The same shape as 1885's `test_1885_the_menus_open_folder_shows_a_failure_before_it_logs_it`.)
+    #[test]
+    fn test_1889_n2_the_menus_pause_shows_a_failure_before_it_logs_it() {
+        use crate::source_pin::squeeze;
+        let files = production_files();
+        let lib = &files.iter().find(|(name, _)| name == "lib.rs").unwrap().1;
+        let arm_start = lib
+            .find("DesktopMenuAction::ToggleSync =>")
+            .expect("the menu's toggle arm");
+        let arm_end = lib[arm_start..]
+            .find("DesktopMenuAction::SignOut")
+            .expect("the next arm");
+        let arm = squeeze(&lib[arm_start..arm_start + arm_end]);
+        let toggle = arm
+            .find(&squeeze("toggle_sync_paused_from_menu(&app).await"))
+            .expect("the arm waits for the toggle");
+        let show = arm
+            .find(&squeeze("show_menu_pause_failure(&app, pausing, &result);"))
+            .expect("the arm shows a failure");
+        let give_back = arm.rfind("result").expect("the arm returns the result");
+        assert!(toggle < show, "the failure is shown after the toggle ended: {arm}");
+        assert!(
+            show < give_back,
+            "the result goes on to the logger after it is shown: {arm}"
+        );
+        let shower = squeeze(&item(lib, "fn show_menu_pause_failure("));
+        assert!(
+            shower.contains(&squeeze("menu_pause_failure_alert(result, pausing)"))
+                && shower.contains(".dialog()")
+                && shower.contains(&squeeze("MessageDialogKind::Error")),
+            "the alert is native, an error dialog, for exactly what the pure function says: {shower}"
+        );
+    }
+
+    /// Fix round 2 (N2): the alert's words. A success shows nothing; a failure shows the sentence for the way it was
+    /// going, and never the error behind it (an OS message can name a folder).
+    #[test]
+    fn test_1889_n2_a_failed_menu_pause_or_resume_says_which_and_never_the_error() {
+        let os_text = "rename /Users/sam/Library/Application Support/beebeeb/desktop.toml.tmp: Permission denied";
+        assert_eq!(super::menu_pause_failure_alert(&Ok(()), true), None);
+        assert_eq!(super::menu_pause_failure_alert(&Ok(()), false), None);
+        let pause = super::menu_pause_failure_alert(&Err(os_text.to_string()), true).expect("a failed pause is shown");
+        let resume =
+            super::menu_pause_failure_alert(&Err(os_text.to_string()), false).expect("a failed resume is shown");
+        assert_eq!(
+            pause,
+            (
+                "Pause sync",
+                "Beebeeb couldn’t pause syncing, so it carries on as before."
+            )
+        );
+        assert_eq!(
+            resume,
+            ("Resume sync", "Beebeeb couldn’t resume syncing, so it stays paused.")
+        );
+        for (title, sentence) in [pause, resume] {
+            assert!(!title.contains("/Users") && !sentence.contains("/Users") && !sentence.contains("Permission"));
+            assert_eq!(sentence.matches(". ").count(), 0, "one sentence: {sentence}");
+            assert!(sentence.ends_with('.'));
+        }
+    }
+
+    /// The scanners must be able to go red: each shape, written out, is found; the real shapes are not.
+    #[test]
+    fn test_1889_the_scanners_find_the_shapes_they_are_for_and_pass_the_real_ones() {
+        // Shape 1.
+        for bad in [
+            "DesktopConfig::update(|cfg| { *cfg = stale.clone(); (true, ()) })",
+            "DesktopConfig::update_at(&path, |cfg| { *cfg=stale; (true, ()) })",
+            "held.update_held(|fresh| { std::mem::replace(fresh, stale); (true, ()) })",
+            "DesktopConfig::try_update_at(&path, |cfg| { std::mem::swap(cfg, &mut stale); (true, ()) })",
+            "DesktopConfig::update(|cfg| { cfg.clone_from(&stale); (true, ()) })",
+            "DesktopConfig::update(|c| { let _old = std::mem::take(c); (true, ()) })",
+        ] {
+            assert!(!whole_copy_writes(bad).is_empty(), "not found: {bad}");
+        }
+        for good in [
+            "DesktopConfig::update(|cfg| { cfg.sync_mode = Some(mode); (true, ()) })",
+            "DesktopConfig::update(|cfg| { if *cfg == other { return (false, ()); } (true, ()) })",
+            "held.update_held(|held| (clear_finder_install_failure(held), ()))",
+        ] {
+            assert_eq!(whole_copy_writes(good), Vec::<String>::new(), "found in: {good}");
+        }
+        // Shape 2.
+        for bad in [
+            "let mut cfg = HeldConfig::load()?;\n cfg.sync_root = Some(root);",
+            "cfg.finder_install_status = None;",
+            "cfg.known_folder_backup.push(key);",
+            "cfg.excluded_folder_ids.take();",
+            "cfg.set_known_folder(&key, true);",
+            "cfg.pause_sync |= paused;",
+            "write_it(&mut cfg, 3)?;",
+        ] {
+            assert!(!held_copy_edits(bad).is_empty(), "not found: {bad}");
+        }
+        for good in [
+            "begin_finder_install_attempt(&mut cfg)?;\n finder_install_failed(&mut cfg, failure.message)",
+            "finish_repair_after_removal(&mut cfg, loc, |cfg| persist_finder_install_result(cfg, false, None), |l| s(l))",
+            "finder_removal::remember_kept_folder_held(&mut cfg, location);",
+            "persist_sync_root_and_start_engine(app, &state, &mut cfg, root.clone(), &t).await?;",
+            "if cfg.finder_install_status.as_deref() != Some(\"installed\") { x }",
+            "cfg.update_held(|held| { held.sync_root = Some(root.clone()); (true, ()) })?;",
+            "let ok = cfg.pause_sync == true;",
+        ] {
+            assert_eq!(held_copy_edits(good), Vec::<String>::new(), "found in: {good}");
+        }
+    }
+
+    /// Shape 1 on the real source: no update closure anywhere in production code writes over the whole config.
+    /// (`config.rs` is the one place that holds the whole copy on purpose, in `HeldConfig::update_held_at`.)
+    #[test]
+    fn test_1889_no_stale_whole_copy_is_written_through_an_update_closure() {
+        let mut found = Vec::new();
+        for (name, text) in production_files() {
+            if name == "config.rs" {
+                continue;
+            }
+            for line in whole_copy_writes(&text) {
+                found.push(format!("{name}: {line}"));
+            }
+        }
+        assert!(found.is_empty(), "{found:#?}");
+    }
+
+    /// Shape 2 on the real source: the flows that hold a copy only read it, and change it through `update_held` or
+    /// the held helpers. These bodies are Windows and Linux code that a Mac does not compile, so the text is the guard.
+    #[test]
+    fn test_1889_no_held_copy_is_edited_outside_update_held() {
+        let files = production_files();
+        let lib = &files.iter().find(|(name, _)| name == "lib.rs").unwrap().1;
+        let mut found = Vec::new();
+        for name in [
+            "install_finder_location",
+            "continue_without_finder_location",
+            "install_windows_shell_integration",
+            "finder_location_state",
+            "reset_macos_integration",
+            "persist_finder_install_result",
+            "begin_finder_install_attempt",
+            "finder_install_failed",
+            "persist_sync_root_and_start_engine",
+            "finish_repair_after_removal",
+        ] {
+            let body = item(lib, &format!("fn {name}("));
+            for line in held_copy_edits(&body) {
+                found.push(format!("{name}: {line}"));
+            }
+        }
+        assert!(found.is_empty(), "{found:#?}");
+    }
+
+    /// The sweep, site by site: each place that loads the config in order to change it makes the change inside one
+    /// update, and does not load a copy of its own first. `forbids` is what the site used to do.
+    #[test]
+    fn test_1889_every_writer_of_desktop_toml_changes_it_inside_one_update() {
+        let files = production_files();
+        let lib = &files.iter().find(|(name, _)| name == "lib.rs").unwrap().1;
+        let update = "DesktopConfig::update(";
+        let held = ".update_held(";
+        // (the item, what it must contain). None loads a copy of its own: load, change and write are one update.
+        let sites: [(&str, &str); 16] = [
+            ("persist_last_signed_in_email", update),
+            ("forget_last_signed_in_email", "DesktopConfig::try_update_at("),
+            ("persist_finder_install_result", held),
+            ("begin_finder_install_attempt", held),
+            ("finder_install_failed", held),
+            ("persist_sync_root_and_start_engine", held),
+            ("ensure_sync_root_and_engine", update),
+            ("pick_sync_root", update),
+            ("set_desktop_config", update),
+            ("set_sync_paused", "persist_sync_paused_at("),
+            ("persist_sync_paused_at", "DesktopConfig::update_at_then("),
+            ("set_sync_mode", update),
+            ("set_selective_sync", update),
+            ("set_known_folder_backup", update),
+            ("mark_known_folder_onboarding_seen", update),
+            ("record_installed_release_channel", update),
+        ];
+        for (name, must) in sites {
+            let start = format!("fn {name}(");
+            let body = item(lib, &start);
+            assert!(
+                body.contains(must),
+                "{name} changes the config through `{must}`:\n{body}"
+            );
+            assert!(
+                !body.contains("DesktopConfig::load()"),
+                "{name} loads a copy of its own; load, change and write are one update:\n{body}"
+            );
+        }
+        assert!(
+            lib.contains("match DesktopConfig::ensure_account_id() {"),
+            "startup mints the account id through the one update"
+        );
+        // M6: the in-memory pause flag is stored from the file only under the config-write lock, through the helpers
+        // (`persist_sync_paused_at`, `rehydrate_sync_paused_at`), never by a bare store next to a load.
+        for (name, text) in &files {
+            assert!(
+                !text.contains(".sync_paused.store("),
+                "{name} stores the pause flag outside the locked helpers"
+            );
+        }
+
+        // The flows that keep a copy to READ across slow work write only through `update_held`, so the copy they loaded
+        // is never what lands on the file.
+        for name in [
+            "install_finder_location",
+            "continue_without_finder_location",
+            "install_windows_shell_integration",
+            "finder_location_state",
+            "reset_macos_integration",
+        ] {
+            let body = item(lib, &format!("fn {name}("));
+            assert!(!body.contains(".save()"), "{name}:\n{body}");
+            assert!(
+                body.contains("persist_finder_install_result(")
+                    || body.contains("persist_sync_root_and_start_engine(")
+                    || body.contains("remember_kept_folder_held("),
+                "{name} writes through the held-copy helpers:\n{body}"
+            );
+        }
     }
 }

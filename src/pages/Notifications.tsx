@@ -83,7 +83,10 @@ export default function Notifications() {
   const toggle = (key: ToggleSpec['key']) => {
     const next = { ...config, [key]: !config[key] }
     setConfig(next)
-    invoke('set_desktop_config', { config: next }).catch((e: unknown) => {
+    // Only the switch that was flipped is written (task 1889, fix round 1 M5): the config this page read on mount is
+    // never sent back, so a pause made from the tray meanwhile is not undone.
+    const patch = { [key]: next[key] }
+    invoke('set_desktop_config', { config: patch }).catch((e: unknown) => {
       console.warn('set_desktop_config failed:', e)
       showToast({
         id: 'notification-config-save-error',

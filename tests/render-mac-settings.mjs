@@ -132,7 +132,7 @@ function installBackend({ caps, fx }) {
         case 'sync_status': return { session_revision: 1, logged_in: true, vault_unlocked: true, engine: 'stopped', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0, auth_expired: false }
         case 'desktop_storage_summary': return { used_bytes: 84300000000, quota_bytes: 200000000000, cache_bytes: 0, pinned_bytes: 0 }
         case 'get_desktop_config': return f.config
-        case 'set_desktop_config': f.config = a.config; return null
+        case 'set_desktop_config': f.config = { ...f.config, ...a.config }; return null // merges only the fields sent, as the command does
         case 'autostart_enabled': return true
         case 'toggle_autostart': return false
         case 'finder_setup_state': if (f.finder === 'unreadable') throw new Error('no reconciler'); return f.finder
