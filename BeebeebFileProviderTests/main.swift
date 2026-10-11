@@ -1864,7 +1864,7 @@ check("WriteRetryLater decodes to the transient uploadStagingFailed, never canno
 
 // The unified log shows a value only when the line marks it public, so a line must be built
 // from closed values. These tests check what each line is built from; `extension_log_pin` in
-// src-tauri checks the source (no other log call, no public value outside the closed set).
+// src-tauri checks the source by matching text (its module doc says exactly what it checks).
 
 check("the write-options line carries the call, the raw bitmask and a UUID item id") {
     let uuid = "4f1c2a9e-0d3b-4c5e-9a7f-1b2c3d4e5f60"

@@ -678,9 +678,25 @@ read`, which the diagnostics bundle files under its own code,
 unified log as `<private>`. Informational lines are `.notice`, failures `.error`.
 Only closed values are public (a fixed word, a bitmask, a UUID, the first 12 hex
 digits of a `request_id`, the App Group id, an `NSError` domain and code); a
-path, a file name or an error's text is never logged. `extension_log_pin`
+path, a file name or an error's text is never logged. ~~`extension_log_pin`
 (`src-tauri/src`) fails on any other log call in the extension and on a public
-value outside that set. — lead, 2026-10-11 (device fix round)
+value outside that set.~~ — lead, 2026-10-11 (device fix round)
+
+What the pin checks, exactly: `extension_log_pin` (`src-tauri/src`) reads every
+`BeebeebFileProvider/*.swift`, skipping lines that begin with `//`, and fails
+when: any file calls `NSLog`, `NSLogv`, `os_log`, `print` or `debugPrint`, bare
+or qualified by a module (`Foundation.`, `Swift.`, `os.`, `OSLog.`); a file
+other than `ExtensionLog.swift` builds a `Logger` or an `OSLog` (bare, through
+`.init`, or qualified by a module) or uses a name `logger.`;
+`ExtensionLog.swift` builds a `Logger` other than exactly once, or its subsystem
+is not the build script's `BUNDLE_ID`; or an interpolation in
+`ExtensionLog.swift` does not say `.public` or `.private`, or a `.public` one is
+not one of nine names (`line.call`, `line.options`, `id`, `call.rawValue`,
+`prefix`, `fields.domain`, `fields.code`, `cause`, `XPCBridge.appGroupID`). It
+matches text, so it cannot see what a public name is bound to (the Swift harness
+tests those bindings), a call with a space or a line break before its
+parenthesis, a log function passed by reference, or output that is not a log
+call (`FileHandle`, `fputs`). — lead, 2026-10-11 (device fix round)
 
 ## Timeouts (Swift client)
 

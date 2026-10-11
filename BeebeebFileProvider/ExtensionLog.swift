@@ -11,8 +11,9 @@ import os
 /// domain and code. A value that can carry a path, a file name or an error's text is never
 /// logged; an error is logged by its domain and code, never by its message or description.
 /// Informational lines are `.notice` and failures `.error`, so a plain `log show` lists both.
-/// `extension_log_pin` in `src-tauri/src` checks the source: no other log call in the extension,
-/// and no public value outside the closed set.
+/// `extension_log_pin` in `src-tauri/src` checks the source by matching text: the log calls and
+/// logger constructions it forbids outside this file, and that every public value here is a listed
+/// name. Its module doc says exactly what it checks and what it cannot see.
 enum ExtensionLog {
     /// The extension's bundle id: `BUNDLE_ID` in `scripts/build-fileprovider-extension.sh`, which
     /// the build writes into the Info.plist's `CFBundleIdentifier`.

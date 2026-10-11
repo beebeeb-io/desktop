@@ -4,17 +4,24 @@
 //! cannot be read at all, and a value a line marks public is shown to anyone who reads the log.
 //!
 //! These pins read the extension's Swift source as the build compiles it (every
-//! `BeebeebFileProvider/*.swift`), on every platform:
-//! - only `ExtensionLog.swift` logs: no other file calls `NSLog`, `os_log`, `print` or
-//!   `debugPrint`, builds a `Logger` or calls `logger`;
-//! - `ExtensionLog.swift` builds one `Logger`, under the extension's bundle id;
-//! - every value a line interpolates says its privacy, and a public one is a name from
-//!   [`PUBLIC_VALUES`], each bound in `ExtensionLog.swift` to a closed value, so a path, a file
-//!   name or an error's text never becomes public.
+//! `BeebeebFileProvider/*.swift`), on every platform, skipping lines that begin with `//`. They fail
+//! when:
+//! - any file calls `NSLog`, `NSLogv`, `os_log`, `print` or `debugPrint`, bare or qualified by a
+//!   module (`Foundation.`, `Swift.`, `os.`, `OSLog.`);
+//! - a file other than `ExtensionLog.swift` builds a `Logger` or an `OSLog` (bare, through `.init`,
+//!   or qualified by a module) or uses a name `logger.`;
+//! - `ExtensionLog.swift` builds a `Logger` other than exactly once, or its subsystem is not the
+//!   build script's `BUNDLE_ID`;
+//! - an interpolation in `ExtensionLog.swift` does not say `.public` or `.private`, or a `.public`
+//!   one is not a name from [`PUBLIC_VALUES`].
 //!
-//! What they cannot see: what a public name is bound to. `ExtensionLog.swift` binds each one to a
-//! closed value (an enum's raw value, a bitmask, an id that parsed as a UUID, a hex prefix, an
-//! `NSError` domain and code); the Swift harness tests those bindings.
+//! They match text, so they cannot see:
+//! - what a public name is bound to. `ExtensionLog.swift` binds each one to a closed value (an
+//!   enum's raw value, a bitmask, an id that parsed as a UUID, a hex prefix, an `NSError` domain and
+//!   code); the Swift harness tests those bindings;
+//! - a call with a space or a line break before its parenthesis, or a log function passed by
+//!   reference;
+//! - output that is not a log call, such as `FileHandle` or `fputs`.
 
 /// The one file that logs.
 const LOG_FILE: &str = "ExtensionLog.swift";
@@ -35,6 +42,15 @@ const PUBLIC_VALUES: &[&str] = &[
 /// Log calls no file may make: the extension logs through `ExtensionLog` only.
 const FORBIDDEN_CALLS: &[&str] = &["NSLog(", "NSLogv(", "os_log(", "print(", "debugPrint("];
 
+/// Logger constructions only the log file may make.
+const LOGGER_CONSTRUCTIONS: &[&str] = &["Logger(", "Logger.init(", "OSLog(", "OSLog.init("];
+
+/// The constructions that count as the log file's one `Logger`.
+const LOGGER_ONLY: &[&str] = &["Logger(", "Logger.init("];
+
+/// Modules that qualify a call without making it a member call: `Foundation.NSLog(` is `NSLog(`.
+const MODULES: &[&str] = &["Foundation", "Swift", "os", "OSLog"];
+
 /// `source` without its comment lines, so a comment that names a call is not a call.
 fn code_lines(source: &str) -> impl Iterator<Item = (usize, &str)> {
     source
@@ -44,17 +60,36 @@ fn code_lines(source: &str) -> impl Iterator<Item = (usize, &str)> {
         .filter(|(_, line)| !line.trim_start().starts_with("//"))
 }
 
-/// Every place `needle` starts in `line` as a name of its own: not the tail of a longer name
-/// (`IPCContentFingerprint(` is not `print(`) and not a member (`x.print(` is not `print(`).
+/// `true` when the text before a name ends where a name may start: not inside a longer name and not
+/// after a member dot.
+fn starts_a_name(before: &str) -> bool {
+    before
+        .chars()
+        .next_back()
+        .is_none_or(|c| !(c.is_alphanumeric() || c == '_' || c == '.'))
+}
+
+/// Every place `needle` starts in `line` as a call of its own: not the tail of a longer name
+/// (`IPCContentFingerprint(` is not `print(`) and not a member of a value (`x.print(` is not
+/// `print(`). A module qualifier keeps it a call: `Foundation.NSLog(`, `Swift.print(` and
+/// `os.Logger(` count.
 fn calls_in(line: &str, needle: &str) -> usize {
     line.match_indices(needle)
         .filter(|(at, _)| {
-            line[..*at]
-                .chars()
-                .next_back()
-                .is_none_or(|before| !(before.is_alphanumeric() || before == '_' || before == '.'))
+            let before = &line[..*at];
+            starts_a_name(before)
+                || before.strip_suffix('.').is_some_and(|qualified| {
+                    MODULES
+                        .iter()
+                        .any(|module| qualified.strip_suffix(module).is_some_and(starts_a_name))
+                })
         })
         .count()
+}
+
+/// How many of `needles` `line` calls.
+fn calls_of(line: &str, needles: &[&str]) -> usize {
+    needles.iter().map(|needle| calls_in(line, needle)).sum()
 }
 
 /// Each `\( … )` interpolation of `line`, as its text between the parentheses.
@@ -101,7 +136,7 @@ fn violations(file_name: &str, source: &str) -> Vec<String> {
                 found.push(format!("{at}: `{call}` logs outside ExtensionLog"));
             }
         }
-        if !is_log_file && (calls_in(line, "Logger(") > 0 || line.contains("logger.")) {
+        if !is_log_file && (calls_of(line, LOGGER_CONSTRUCTIONS) > 0 || line.contains("logger.")) {
             found.push(format!("{at}: only {LOG_FILE} builds or calls the logger"));
         }
         if is_log_file {
@@ -119,7 +154,7 @@ fn violations(file_name: &str, source: &str) -> Vec<String> {
     }
     if is_log_file
         && code_lines(&source)
-            .map(|(_, line)| calls_in(line, "Logger("))
+            .map(|(_, line)| calls_of(line, LOGGER_ONLY))
             .sum::<usize>()
             != 1
     {
@@ -276,6 +311,54 @@ mod tests {
         assert_eq!(
             violations("XPCBridge.swift", "func f() {\r\n    NSLog(\"x\")\r\n}\r\n").len(),
             1
+        );
+    }
+
+    /// A call qualified by its module is the same call: `Foundation.NSLog(…)` logs like `NSLog(…)`,
+    /// and `os.Logger(…)`, `OSLog(…)` or `Logger.init(…)` outside the log file builds a second
+    /// logger, whose lines nothing here checks. A member of a value (`request.print(…)`) is not one.
+    #[test]
+    fn the_pin_flags_module_qualified_log_calls_and_loggers_built_elsewhere() {
+        let planted = [
+            "    Foundation.NSLog(\"BeebeebFileProvider: planted\")",
+            "    Foundation.NSLogv(format, args)",
+            "    Swift.print(error)",
+            "    Swift.debugPrint(item)",
+            "    os.os_log(\"x\")",
+            "    let trace = os.Logger(subsystem: \"x\", category: \"y\")",
+            "    let trace = Logger.init(subsystem: \"x\", category: \"y\")",
+            "    let trace = OSLog(subsystem: \"x\", category: \"y\")",
+            "    let trace = os.OSLog(subsystem: \"x\", category: \"y\")",
+        ];
+        let missed: Vec<&str> = planted
+            .iter()
+            .copied()
+            .filter(|line| violations("XPCBridge.swift", &format!("func f() {{\n{line}\n}}\n")).len() != 1)
+            .collect();
+        assert!(missed.is_empty(), "not flagged once:\n{}", missed.join("\n"));
+        for clean in [
+            "    request.print(item)",
+            "    self.os.Logger(item)",
+            "    let store = OSLogStore.local()",
+        ] {
+            assert!(violations("XPCBridge.swift", clean).is_empty(), "flagged: {clean}");
+        }
+        // The log file's one logger may be spelled with its module.
+        assert!(
+            violations(
+                LOG_FILE,
+                "static let logger = os.Logger(subsystem: subsystem, category: category)\n"
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            violations(
+                LOG_FILE,
+                "static let logger = os.Logger(subsystem: s, category: c)\nstatic let other = Logger.init(subsystem: s, category: c)\n"
+            )
+            .len(),
+            1,
+            "a second Logger in the log file"
         );
     }
 }
