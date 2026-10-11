@@ -4,7 +4,7 @@
 
 **Goal:** On a Mac, a sign-out by choice never discards a Finder save that is still waiting to upload. It sends first (at most 60 s), then asks with the real count, then copies every waiting save into a kept folder on this Mac before anything is purged, and surfaces that folder as 1882 surfaces macOS's.
 
-**Architecture:** One `StateDb` read classifies the queue into waiting files (copied, covered or missing per write) and other waiting changes. The webview's ask is a snapshot Rust holds. `clear_session_impl` gates on it before anything changes. After the confirmed engine stop, a keep step closes Finder accepts, copies the copied set with `clonefile` into `<container>/Data/Documents/Changes not sent/<date at time>/…`, flushes, and records the folder durably. The purge refuses, before it deletes any file, if any waiting write is not in the keep step's `KeptSet`. Around that core sit a Rust-owned send phase (a third arm in the runner's `select!`), a window-close hook with a pending late result, the flow commands, and the frontend flow in Settings › Account, the compact page and the switch step.
+**Architecture:** One `StateDb` read classifies the queue into waiting files (copied, covered or missing per write) and other waiting changes. The webview's ask is a snapshot Rust holds. `clear_session_impl` gates on it before anything changes. After the confirmed engine stop, a keep step closes Finder accepts, copies the copied set with `clonefile` into `<container>/Data/Documents/Changes not sent/<date at time>/…`, flushes, and records the folder durably. The purge refuses, before it deletes any file, if any waiting write is not in the keep step's `KeptSet`. Around that core sit a Rust-owned send phase (a third wake in the runner's loop, beside the cancel and the tick), a window-close hook with a pending late result, the flow commands, and the frontend flow in Settings › Account, the compact page and the switch step.
 
 **Tech Stack:** Rust 2024 (Tauri v2 daemon; rusqlite bundled SQLite; tokio; `libc` 0.2.189 for `clonefile`; `chrono` for the event folder's local time; no new crate), React 19 + TypeScript (bun test with the repo's `componentHarness`), Markdown and the hifi HTML for the design-first commit. No Swift change is planned.
 
@@ -18,6 +18,7 @@ Both were spec §15 questions 3 and 4; the spec now records them as answered.
 
 **Q1 (spec question 3): close Finder accepts before the keep step's read. Ruled: option A, with one addition.**
 A Finder accept that carries a `request_id` runs its copy and its transaction in `spawn_blocking` (`@184:ipc_socket.rs:2448-2479`, `@184:ipc_write_dedup.rs:336-342`), and the engine stop aborts the connection tasks without awaiting them (`@184:ipc_socket.rs:1673-1675`; 1873 says so at `@184:runner.rs:1025-1030`). So the keep step first writes `sync_state.finder_accepts_closed` in one `BEGIN IMMEDIATE` transaction; `accept_finder_write` checks it inside its own transaction and answers `AcceptsClosed`, which becomes `WriteRetryLater` (`accepts_closed`), as `CopyGone` does today; `engine_start_repair` reopens. **The addition:** every way a sign-out ends without purging reopens accepts at once, not only the next engine start: Cancel, a failed step, and a quit mid-flow followed by a restart. Task 8 owns all of it, with the test `a_cancelled_or_failed_sign_out_leaves_accepts_open`; Task 14 applies the same rule to the R10 reset.
+**Plan review I1 (lead ruling, 2026-10-11):** the fence covers every change the Finder IPC queues, not only saves. A rename, a move and a folder create run in `dedup_write`'s `spawn_blocking` too, and a delete runs inline in the connection task, where an abort cannot stop the synchronous enqueue once it started. All of them reach `enqueue_finder_operation` (`@184:engine_bridge.rs:3723-3773`), which now queues through `StateDb::enqueue_finder_change`: one `BEGIN IMMEDIATE` transaction that reads the key first and answers `AcceptsClosed` (→ `WriteRetryLater`), with a folder create's row written in the same transaction. Engine-internal enqueues (pins, hydrates, restores) do not read the key. U45 gains a rename, a move to the top level, a folder create and a delete, each through the bridge.
 
 **Q2 (spec question 4): end the send phase on a refusal the account cures. Ruled: option A, with the lead's copy.**
 The first attempt during the phase that meets one of the refusals 1873 lists as curable (`quota_exceeded`, `object_budget_exceeded`, `billing_read_only`, `account_lapsed`, `plan_required`, `trial_cancelled_read_only`; `is_curable_refusal`, `@184:engine_bridge.rs:733-754`, applied at `:1187`) ends the phase with the reason `account`. A5 gains the line "Beebeeb can’t accept uploads for this account until it has free space or an active plan." Task 11 implements the end and U46; Tasks 10 and 16 carry the line.
@@ -57,6 +58,36 @@ The spec was written before 1873's code was final. 1873 merged after fourteen fi
 | — | §2 other change kinds | 1873's three-state parent (`ParentChange`, `@184:api_client.rs:367`): a move to the top level is now `move_file`, before `rename_file` | No amendment: both are other waiting changes, counted the same |
 | — | §1, §4 rows 1-8, §5.1 menu dialogs, §9 1882 records | Same shapes at new lines: `clear_session_impl` `@184:lib.rs:2823`, `clear_session` `:3312-3324`, menu `:13994-14040`, purge `:3260-3293`, `:4216-4265`; `MacSettings.tsx:317-324`, `:458`, `:466-475`; `pages/Account.tsx:148-166`, `:367-370`; `Onboarding.tsx:149-152`, `:472-503`; `finder_removal.rs:13`, `:17-18`, `:276-307`, `:362-389` | No amendment: the descriptions hold; the plan cites `@184:` |
 | — | §6.2 "the queue step runs only inside a successful tick" | `select!` `@184:runner.rs:1299`, pause check `:1357`, tick `:1395`, queue step `:1421` | No amendment |
+
+### Plan review fixes (2026-10-11)
+
+The plan review (`.superpowers/sdd/2026-10-11-macos-sign-out-waiting-writes/plan-review.md`, 0 Critical, 7 Important, 14 Minor) is answered in the tasks below; each fix is marked "(plan review I1)" and so on where it lands. Spec amendments it needs are made in the spec in place, signed "— lead, 2026-10-11 (plan review)", and Task 20 lists them with the spec tests they change.
+
+| Finding | Where it is fixed |
+|---|---|
+| I1 the fence misses renames, moves, folder creates and deletes | Task 8: `enqueue_finder_change`, the folder row in the same transaction, U45 through the bridge |
+| I2 the phase arm cannot wake a waiting runner | Task 11: `next_wake` with no precondition, a wake test |
+| I3 a second config write path | Task 4: `try_update_at_then` takes the durable write step; the 1889 census extended |
+| I4 the R1 restore-wrapper pin | Task 8: the reopen is the first statement of `restore_session_inner` |
+| I5 the path-length test under a symlinked temp dir | Task 3: the writer resolves its root; a symlinked-root test |
+| I6 a Settings remount re-runs a handled request | Task 17: the flow and the request live in the `MacSettings` root; an F9 case |
+| I7 U46's chain is untested | Task 11: `SendPhaseLink` unit test, `note(` in the pins, a driver-level test |
+| M1 U30 | Task 7: an `after_keep` case and the `sync_all` pin; spec U30 amended |
+| M2 the deleted helper's test callers | Task 10: `sign_out_folders`, the tests rewritten on it |
+| M3 two names can still fail | Tasks 2 and 3: an extension with no room is cut as a stem; a too-long directory sends its file to the top |
+| M4 U42 (f) | Task 9: asserts the newest folder; spec U42 amended |
+| M5 narrower assertions | Tasks 7, 10, 17: U6's Keychain and email, U8/U8b's empty queue, U25 across a sign-out, F7 in the flow |
+| M6 tests with no mutation | Tasks 2/5, 6, 18: a mutation each (the engine-start test moves to Task 5, where one can turn it red) |
+| M7 the hifi intro sentence | Task 15 |
+| M8 a failed switch count | Tasks 13 and 18: E3 is a line in the switch step; spec U19 and F8 amended |
+| M9 an R10 folder never surfaced | Task 14: the folder is handed on before the purge |
+| M10 compile nits, fragile pins | Tasks 7, 8, 11, 12 |
+| M11 dead-code warnings off macOS | Tasks 1, 12, 13 |
+| M12 the new root's entry | Task 3: `flush_list` flushes the parent of every directory `create` made |
+| M13 the tick's attempts | Task 11: the tick arm notes its outcome while armed |
+| M14 a failing test poisons the rest | Task 7: `ScratchReset`, a drop guard |
+
+One more pin the review did not name is fixed in Tasks 6 and 7: `test_1882_every_removal_path_surfaces_the_kept_folder` (`@184:lib.rs:31440-31522`) quotes the purge call and counts `.map_err(&kept_with)?` (6).
 
 ---
 
@@ -108,12 +139,12 @@ Paths are relative to the desktop repo root.
 | `src-tauri/src/sign_out/copy.rs` | create | every §11 string and its builders (Rust side) | 10 |
 | `src-tauri/src/sign_out/send_phase.rs` | create | the send phase's pure state and end decision | 11 |
 | `src-tauri/src/sign_out/flow_window.rs` | create | the late-result record and the close hook's pure state | 12 |
-| `src-tauri/src/state_db.rs` | modify | `waiting_rows`, `unkept_waiting_changes`, `close_finder_accepts`, the accept's check, `engine_start_repair`'s reopen, `make_due_for_send_phase` | 1, 6, 8, 11 |
-| `src-tauri/src/config.rs` | modify | the two keys; `update_at_durable` with a file-system seam | 4 |
-| `src-tauri/src/lib.rs` | modify | `mod sign_out;`; `disposable_cache_roots_in`; the purge's `KeptSet` and order; the gate and keep call in `clear_session_impl`; the commands; the alert; the window hook; the menu; the R10 reset; `AppState.sign_out` | 2, 6, 7, 8, 10-14 |
-| `src-tauri/src/engine_bridge.rs` | modify | `AcceptsClosed` → `WriteRetryLater`; the queue outcome's link, session and account signals | 8, 11 |
+| `src-tauri/src/state_db.rs` | modify | `waiting_rows`, `unkept_waiting_changes`, `close_finder_accepts`, the accept's check, `enqueue_finder_change` (the fenced Finder enqueue, plan review I1), `engine_start_repair`'s reopen, `make_due_for_send_phase` | 1, 6, 8, 11 |
+| `src-tauri/src/config.rs` | modify | the two keys; `try_update_at_then` takes the durable write step; `update_at_durable` with a file-system seam | 4 |
+| `src-tauri/src/lib.rs` | modify | `mod sign_out;`; `disposable_cache_roots_in`; the purge's `KeptSet` and order; the gate and keep call in `clear_session_impl`; the commands; the alert; the window hook; the menu; the R10 reset; `AppState.sign_out`; the 1889 census and the 1882 surface pins, extended | 2, 4, 6, 7, 8, 10-14 |
+| `src-tauri/src/engine_bridge.rs` | modify | `AcceptsClosed` → `WriteRetryLater`; every Finder change queued through the fence; the queue outcome's link, session and account signals | 8, 11 |
 | `src-tauri/src/ipc_socket.rs` | modify | the `accepts_closed` reply and refusal category | 8 |
-| `src-tauri/src/runner.rs` | modify | `SendPhaseLink` in `EngineRunner` and `RunnerControls`; the third `select!` arm | 11 |
+| `src-tauri/src/runner.rs` | modify | `SendPhaseLink` in `EngineRunner` and `RunnerControls`; `next_wake`, the loop's three wakes (plan review I2) | 11 |
 | `src-tauri/src/browser_login.rs` | modify | the switch event carries the snapshot on macOS | 13 |
 | `docs/specs/2026-10-02-macos-settings-dialogs.md`, `design/hifi/macos-settings-dialogs.html`, `docs/specs/2026-10-06-macos-finder-setup-reconciler.md` | modify | design first | 15 |
 | `src/signOutCopy.ts` | create | the §11 strings and builders (TypeScript side) | 16 |
@@ -182,7 +213,7 @@ bun run lint > $EVID/t<N>-lint.log 2>&1; echo "lint rc=$?"
 | 5 | The keep step | L | Rust | W6-W9, §5.2 step 7; U8, U8b, U13, U27, U29a, U36, U38 |
 | 6 | The purge guard and its order | M | Rust | §5.2 step 8, W13; U14, U39 |
 | 7 | The ask snapshot, the gate and the sign-out | L | Rust | W5, §5.2 steps 4-10; U6, U7, U9, U10, U29b-c, U30, U32, U37, U41 |
-| 8 | Close Finder accepts for the keep step, and reopen them whenever a sign-out stops (Q1 ruling) | M | Rust | §15 question 3; U45 |
+| 8 | Close Finder accepts for the keep step, and reopen them whenever a sign-out stops (Q1 ruling; every Finder change, plan review I1) | M | Rust | §15 question 3; U45 |
 | 9 | An interrupted sign-out, by a real process death | M | Rust | W13; U42 |
 | 10 | The alert, the row's commands, "Show in Finder", logs, Rust copy | M | Rust | W9, §9, §11; U23-U26, U31 |
 | 11 | The send phase, with the `account` end (Q2 ruling) | L | Rust | §6, §15 question 4; U16-U18, U34a/f, U35, U46 |
@@ -235,6 +266,9 @@ Expected near 1873's final gate (`883e7669`): lib `ok. 1763 passed; 0 failed; 6 
 ```rust
 //! Spec 2026-10-10 (task 1887): a sign-out by choice never loses a Finder save that is still waiting.
 //! The pure parts compile on every platform; the keep step and the folder writer are macOS only (W5).
+// Plan review M11: the state this module adds (`SignOutState` and its fields, Tasks 7-14) is read on macOS and in tests
+// only; elsewhere it is built and never read.
+#![cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 
 pub(crate) mod waiting;
 ```
@@ -834,6 +868,16 @@ mod tests {
         let with = with_suffix(&full, " (2)");
         assert_eq!(with.len(), 255);
         assert!(with.ends_with(" (2).docx"), "{with}");
+
+        // Plan review M3: an "extension" that leaves no room for the suffix is cut as part of one stem, so no name
+        // passes 255 bytes (`clonefile` would answer `ENAMETOOLONG`, which is E2).
+        let long_extension = format!("a.{}", "e".repeat(250)); // 252 bytes, the dot at byte 1
+        let earlier = name(Some(&long_extension), KeptRole::EarlierSave(1)).pop().unwrap();
+        assert!(earlier.len() <= 255 && earlier.ends_with(" (earlier save 1)"), "{} bytes: {earlier}", earlier.len());
+        let second = with_suffix(&long_extension, " (2)");
+        assert!(second.len() <= 255 && second.ends_with(" (2)") && second.starts_with("a."), "{} bytes: {second}", second.len());
+        let over = format!("a.{}", "e".repeat(300)); // a name from another platform, longer than APFS takes
+        assert_eq!(cut_name(&over).len(), 255);
     }
 
     #[test]
@@ -886,31 +930,10 @@ mod sign_out_keep_tests {
         assert_eq!(wrapper.matches("disposable_cache_roots_in(").count(), 1, "{wrapper}");
         assert!(!wrapper.contains("roots.push") && !wrapper.contains("vec!["), "the wrapper builds nothing itself: {wrapper}");
     }
-
-    /// U12's last clause: neither engine-start step touches a kept file.
-    #[test]
-    fn the_engine_start_sweep_never_lists_a_kept_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let container = dir.path().join("Data");
-        let staging = FinderStagingBases {
-            data: Some(container.join("Library/Application Support")),
-            cache: Some(container.join("Library/Caches")),
-            temp: container.join("tmp"),
-        };
-        for folder in staging.candidates() {
-            std::fs::create_dir_all(&folder).unwrap();
-        }
-        let kept = container.join("Documents/Changes not sent/2026-10-10 at 14.05.12/Work");
-        std::fs::create_dir_all(&kept).unwrap();
-        std::fs::write(kept.join("report.docx"), b"kept").unwrap();
-        let db = state_db::StateDb::open(dir.path().join("state.db")).unwrap();
-        crate::staged_payload::sweep_unreferenced(&db, &staging.candidates()).unwrap();
-        let repair = db.engine_start_repair().unwrap();
-        assert!(repair.released_payloads.is_empty());
-        assert_eq!(std::fs::read(kept.join("report.docx")).unwrap(), b"kept");
-    }
 }
 ```
+
+U12's last clause ("the engine-start repair never lists a kept file") is tested in Task 5, on a folder a real keep step made (`the_engine_start_steps_never_touch_a_kept_file`). Plan review M6: a version here, on a hand-made folder, could not be turned red by any mutation of the new code. `sweep_unreferenced` removes only regular files directly inside a staging folder that no row names, and skips every folder entry (`@184:staged_payload.rs:197-277`; the `!is_regular_file` arms at `:228` and `:266`), so even a kept root moved under a staging root keeps its event folders.
 
 - [ ] **Step 2: Run them, expect FAIL.** The test loop with filters `sign_out::kept_names` and then `sign_out_keep_tests`. Expected: compile errors (`kept_root`, `disposable_cache_roots_in` missing).
 
@@ -985,9 +1008,14 @@ pub fn cut_name(name: &str) -> String {
 }
 
 /// `<stem><suffix><.ext>`, the stem cut so the whole is at most 255 bytes (§7.2 "Lengths": the cut applies to the
-/// final name, never to the suffix or the extension).
+/// final name, never to the suffix, and never to the extension while it leaves room for one stem byte and the suffix).
+/// Plan review M3: an "extension" that leaves no such room (`a.<250 bytes>`) is part of the stem, so the name is cut
+/// as one stem and can never pass 255 bytes.
 pub fn with_suffix(name: &str, suffix: &str) -> String {
-    let (stem, extension) = split_extension(name);
+    let (stem, extension) = match split_extension(name) {
+        (_, extension) if extension.len() + suffix.len() >= MAX_NAME_BYTES => (name, ""),
+        split => split,
+    };
     let room = MAX_NAME_BYTES.saturating_sub(suffix.len() + extension.len());
     format!("{}{suffix}{extension}", prefix_within(stem, room))
 }
@@ -1060,7 +1088,7 @@ fn disposable_cache_roots_in(
 }
 ```
 
-- [ ] **Step 4: Run, expect PASS.** Filters `sign_out::kept_names` (`ok. 4 passed`) and `sign_out_keep_tests` (`ok. 2 passed`). Also run the existing `disposable_cache_roots_includes_the_macos_hydrate_cache_dir` (`@184:lib.rs:15923`): still `ok. 1 passed`.
+- [ ] **Step 4: Run, expect PASS.** Filters `sign_out::kept_names` (`ok. 4 passed`) and `sign_out_keep_tests` (`ok. 1 passed`). Also run the existing `disposable_cache_roots_includes_the_macos_hydrate_cache_dir` (`@184:lib.rs:15923`): still `ok. 1 passed`.
 
 - [ ] **Step 5: Mutations, each RED then reverted.**
   1. `kept_root` returns `document_dir.map(|d| d.join(KEPT_FOLDER_NAME))` first: U33 red on "unsandboxed".
@@ -1070,8 +1098,9 @@ fn disposable_cache_roots_in(
   5. Build the list inside `disposable_cache_roots()` again: U12 red on the wrapper pin.
   6. `with_suffix` cuts after adding the suffix (`prefix_within(&format!(...), 255)`): U11 red on `ends_with(" (2).docx")`.
   7. `split_extension` returns `Some(0)` as an extension split: U11 red on `.env (earlier save 1)`.
+  8. Drop the no-room arm in `with_suffix` (always split at the last dot): U11 red on the `long_extension` case (`earlier` is 268 bytes).
 
-- [ ] **Step 6: The task gate** with `<N>` = 2 and `<L>` = `L0 + 14`.
+- [ ] **Step 6: The task gate** with `<N>` = 2 and `<L>` = `L0 + 13`.
 
 - [ ] **Step 7: Commit.**
 
@@ -1092,7 +1121,7 @@ git commit -m "feat(macos): where kept changes go and what they are called (1887
 - Produces:
   - `pub(crate) const CLONE_NOFOLLOW: u32 = 0x0001;` and `pub(crate) const PATH_MAX_BYTES: usize = 1024;`
   - `pub(crate) trait CloneFile { fn clone_file(&self, src: &Path, dst: &Path) -> std::io::Result<()>; }`, `pub(crate) struct SystemClone;` (the production clone with its fallback).
-  - `pub(crate) struct KeptWriter<'a>`: `create(root: &Path, event_name: &str, clone: &'a dyn CloneFile) -> io::Result<Self>`, `event(&self) -> &Path`, `keep(&mut self, components: &[String], source: &Path) -> io::Result<PathBuf>`, `finish(self) -> io::Result<KeptFolder>`, `abandon(self)`.
+  - `pub(crate) struct KeptWriter<'a>`: `create(root: &Path, event_name: &str, clone: &'a dyn CloneFile) -> io::Result<Self>` (resolves the root once it exists, plan review I5), `event(&self) -> &Path` (resolved), `keep(&mut self, components: &[String], source: &Path) -> io::Result<PathBuf>`, `flush_list(&self) -> Vec<PathBuf>` (plan review M12), `finish(self) -> io::Result<KeptFolder>`, `abandon(self)`.
   - `pub(crate) struct KeptFolder { pub path: PathBuf, pub files: usize }`.
 
 - [ ] **Step 1: Write the failing tests** in `kept_writer.rs`:
@@ -1180,13 +1209,16 @@ mod tests {
         parts.join("/")
     }
 
-    /// U11, path length (re-review 2 Q2): 1023 bytes in place, 1024 at the top, 1022 + " (2)" at the top.
+    /// U11, path length (re-review 2 Q2): 1023 bytes in place, 1024 at the top, 1022 + " (2)" at the top. The test's
+    /// temporary directory sits under `/var`, a symlink to `private/var`, and the kernel measures a path with every
+    /// link resolved, so the writer measures the resolved path, and so does the padding here (plan review I5).
     #[test]
     fn long_paths_go_to_the_top_of_the_event_folder() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("Changes not sent");
         let mut writer = KeptWriter::create(&root, "2026-10-10 at 14.05.12", &SystemClone).unwrap();
         let event = writer.event().to_path_buf();
+        assert_eq!(event, std::fs::canonicalize(&event).unwrap(), "the writer measures where the kernel measures");
         let fits = padded(&event, 1023, 'a');
         let too_long = padded(&event, 1024, 'b');
         let grows = padded(&event, 1022, 'c');
@@ -1200,7 +1232,63 @@ mod tests {
         let kept = writer.keep(&parts(&grows), &source("grows-2")).unwrap();
         assert_eq!(kept.parent().unwrap(), event, "1022 bytes plus \" (2)\" goes to the top");
         assert_eq!(sha(&kept), sha(&dir.path().join("staging").join("grows-2")));
+        // Plan review M3: a file holds the name of a directory a later file needs, and that directory's " (2)" would
+        // pass 1023 bytes. The later file goes to the top; the sign-out never fails on a name.
+        let file_first = padded(&event, 1021, 'd');
+        writer.keep(&parts(&file_first), &source("file-first")).unwrap();
+        let under_it = format!("{file_first}/x");
+        assert_eq!(event.join(&under_it).as_os_str().len(), 1023, "planned in place, under a directory that cannot be made");
+        let kept = writer.keep(&parts(&under_it), &source("under-it")).unwrap();
+        assert_eq!(kept, event.join("x"), "the directory's \" (2)\" passes the limit, so the file goes to the top");
+        assert_eq!(sha(&kept), sha(&dir.path().join("staging").join("under-it")));
         writer.finish().unwrap();
+    }
+
+    /// U11, path length through a symlink (plan review I5): a path that is 1023 bytes through a short link is longer
+    /// once the link is resolved. Every file is still kept, each under 1024 bytes as the kernel measures it.
+    #[test]
+    fn a_symlinked_root_still_keeps_every_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let real = base.join("a-real-directory-whose-name-is-longer-than-its-link");
+        std::fs::create_dir(&real).unwrap();
+        let link = base.join("l");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let mut writer = KeptWriter::create(&link.join("Changes not sent"), "2026-10-10 at 14.05.12", &SystemClone).unwrap();
+        let resolved = real.join("Changes not sent").join("2026-10-10 at 14.05.12");
+        assert_eq!(writer.event(), resolved, "the event folder is the resolved one");
+        let through_link = link.join("Changes not sent").join("2026-10-10 at 14.05.12");
+        let mut kept_files = Vec::new();
+        for (tag, total) in [('a', 1023), ('b', 1000), ('c', 900)] {
+            let source = staged(&base, &format!("link-{tag}"), format!("bytes {tag}").as_bytes());
+            let kept = writer.keep(&parts(&padded(&through_link, total, tag)), &source).unwrap();
+            assert_eq!(sha(&kept), sha(&source), "{tag}");
+            assert!(kept.as_os_str().len() < PATH_MAX_BYTES, "{tag}: {} bytes", kept.as_os_str().len());
+            kept_files.push(kept);
+        }
+        assert_eq!(kept_files[0].parent().unwrap(), resolved, "1023 bytes through the link is 1073 on disk: the top");
+        assert!(kept_files[2].parent().unwrap() != resolved, "900 bytes through the link fits in place on disk");
+        assert_eq!(writer.finish().unwrap().files, 3);
+    }
+
+    /// §7.2 "Every directory the step made is fsynced" (plan review M12): when this keep made the root, the entries
+    /// that name it are flushed too, in the root's parent and in every parent `create` made.
+    #[test]
+    fn a_root_the_keep_made_is_flushed_in_its_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let root = base.join("Documents").join("Changes not sent");
+        let made = KeptWriter::create(&root, "event", &SystemClone).unwrap();
+        let flushed = made.flush_list();
+        for entry_holder in [&base, &base.join("Documents"), &root] {
+            assert!(flushed.contains(entry_holder), "{} is flushed: {flushed:?}", entry_holder.display());
+        }
+        made.finish().unwrap();
+        let again = KeptWriter::create(&root, "event", &SystemClone).unwrap();
+        let flushed = again.flush_list();
+        assert!(flushed.contains(&root), "the root holds the new event folder's entry");
+        assert!(!flushed.contains(&base.join("Documents")), "a root that was there already is not this keep's to flush in its parent");
+        again.abandon();
     }
 
     /// U28.
@@ -1239,7 +1327,8 @@ mod tests {
     #[test]
     fn two_keeps_in_the_same_second_make_two_folders() {
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join("Changes not sent");
+        // Resolved first: the writer's paths are the resolved ones (plan review I5).
+        let root = std::fs::canonicalize(dir.path()).unwrap().join("Changes not sent");
         let first = KeptWriter::create(&root, "2026-10-10 at 14.05.12", &SystemClone).unwrap();
         let first_event = first.event().to_path_buf();
         let second = KeptWriter::create(&root, "2026-10-10 at 14.05.12", &SystemClone).unwrap();
@@ -1324,8 +1413,15 @@ fn remove_backup_exclusion(path: &Path) -> io::Result<()> {
     if rc == 0 || error.raw_os_error() == Some(libc::ENOATTR) { Ok(()) } else { Err(error) }
 }
 
+/// Measured on a resolved path only: `create` resolves the root, so every path built from `self.event` is the one the
+/// kernel checks (plan review I5).
 fn too_long(path: &Path) -> bool {
     path.as_os_str().len() >= PATH_MAX_BYTES
+}
+
+/// The directories `create_dir_all(path)` is about to make, deepest first.
+fn missing_ancestors(path: &Path) -> Vec<PathBuf> {
+    path.ancestors().take_while(|dir| !dir.exists()).map(Path::to_path_buf).collect()
 }
 
 /// `name`, then `name (2)`, `name (3)`…, cut to 255 bytes. Directories are never split at a dot.
@@ -1340,12 +1436,15 @@ fn directory_candidate(name: &str, n: u32) -> String {
 
 /// One event folder being written.
 pub(crate) struct KeptWriter<'a> {
+    /// Resolved (`canonicalize`), so every length below is the kernel's (plan review I5).
     root: PathBuf,
     event: PathBuf,
     clone: &'a dyn CloneFile,
     /// The vault directory (its components) → the directory this keep made or merged into for it.
     directories: HashMap<Vec<String>, PathBuf>,
     made: Vec<PathBuf>,
+    /// The root and its ancestors that `create` made, resolved, deepest first (plan review M12).
+    made_root: Vec<PathBuf>,
     files: usize,
 }
 
@@ -1356,8 +1455,13 @@ pub(crate) struct KeptFolder {
 
 impl<'a> KeptWriter<'a> {
     /// Make `<root>/<event_name>`, or `… (2)`, `… (3)` when the name is taken (§7.1). The folder is new and empty.
+    /// The root is resolved once it exists: a symlink anywhere in its prefix (`/var` → `private/var` on a Mac) makes
+    /// the kernel's path longer than the one given, and §7.2's 1024-byte rule is about the kernel's.
     pub(crate) fn create(root: &Path, event_name: &str, clone: &'a dyn CloneFile) -> io::Result<Self> {
+        let missing = missing_ancestors(root);
         std::fs::create_dir_all(root)?;
+        let made_root = missing.iter().map(std::fs::canonicalize).collect::<io::Result<Vec<_>>>()?;
+        let root = std::fs::canonicalize(root)?;
         let mut n = 1;
         let event = loop {
             let candidate = root.join(directory_candidate(event_name, n));
@@ -1367,7 +1471,7 @@ impl<'a> KeptWriter<'a> {
                 Err(error) => return Err(error),
             }
         };
-        Ok(Self { root: root.to_path_buf(), event, clone, directories: HashMap::new(), made: Vec::new(), files: 0 })
+        Ok(Self { root, event, clone, directories: HashMap::new(), made: Vec::new(), made_root, files: 0 })
     }
 
     pub(crate) fn event(&self) -> &Path {
@@ -1376,8 +1480,10 @@ impl<'a> KeptWriter<'a> {
 
     /// The directory on disk for the vault directory `components`, made one component at a time (never
     /// `create_dir_all`, which fails when a file holds the name). A directory already there is merged into (a
-    /// case-only or normalization-only twin); a file there gives the next " (n)".
-    fn directory_for(&mut self, components: &[String]) -> io::Result<PathBuf> {
+    /// case-only or normalization-only twin); a file there gives the next " (n)". `None`: a directory this file
+    /// needs would be 1024 bytes or more after its " (n)", so the file goes to the top (plan review M3: no name can
+    /// fail a sign-out). Directories already made for it stay, and may be empty (§7.2).
+    fn directory_for(&mut self, components: &[String]) -> io::Result<Option<PathBuf>> {
         let mut parent = self.event.clone();
         for depth in 0..components.len() {
             let key = components[..=depth].to_vec();
@@ -1388,6 +1494,9 @@ impl<'a> KeptWriter<'a> {
             let mut n = 1;
             let made = loop {
                 let candidate = parent.join(directory_candidate(&components[depth], n));
+                if too_long(&candidate) {
+                    return Ok(None);
+                }
                 match std::fs::create_dir(&candidate) {
                     Ok(()) => {
                         self.made.push(candidate.clone());
@@ -1406,11 +1515,12 @@ impl<'a> KeptWriter<'a> {
             self.directories.insert(key, made.clone());
             parent = made;
         }
-        Ok(parent)
+        Ok(Some(parent))
     }
 
     /// Copy `source` to the vault path `components` (the last is the file name) and flush it. A destination of 1024
-    /// bytes or more, planned or after any " (n)", goes to the top of the event folder under its last component.
+    /// bytes or more, planned or after any " (n)" on its directories or its name, goes to the top of the event folder
+    /// under its last component.
     pub(crate) fn keep(&mut self, components: &[String], source: &Path) -> io::Result<PathBuf> {
         let name = components.last().expect("kept_relative_path never returns an empty path").clone();
         let planned = components.iter().fold(self.event.clone(), |path, part| path.join(part));
@@ -1418,6 +1528,7 @@ impl<'a> KeptWriter<'a> {
             self.event.clone()
         } else {
             self.directory_for(&components[..components.len() - 1])?
+                .unwrap_or_else(|| self.event.clone())
         };
         let mut n = 1;
         let kept = loop {
@@ -1440,10 +1551,17 @@ impl<'a> KeptWriter<'a> {
         Ok(kept)
     }
 
-    /// Flush every directory this keep made, the event folder and the root, then hand back the folder.
+    /// What `finish` flushes, in order: every directory this keep made (deepest first), the event folder, the root,
+    /// then the parent of each directory `create` made, which holds that directory's entry (plan review M12).
+    pub(crate) fn flush_list(&self) -> Vec<PathBuf> {
+        let parents_of_made_root = self.made_root.iter().filter_map(|dir| dir.parent().map(Path::to_path_buf));
+        self.made.iter().rev().cloned().chain([self.event.clone(), self.root.clone()]).chain(parents_of_made_root).collect()
+    }
+
+    /// Flush [`Self::flush_list`], then hand back the folder.
     pub(crate) fn finish(self) -> io::Result<KeptFolder> {
-        for directory in self.made.iter().rev().chain([&self.event, &self.root]) {
-            File::open(directory)?.sync_all()?;
+        for directory in self.flush_list() {
+            File::open(&directory)?.sync_all()?;
         }
         Ok(KeptFolder { path: self.event, files: self.files })
     }
@@ -1459,7 +1577,7 @@ impl<'a> KeptWriter<'a> {
 
 Add `#[cfg(target_os = "macos")] pub(crate) mod kept_writer;` to `sign_out/mod.rs`.
 
-- [ ] **Step 4: Run, expect PASS.** Filter `sign_out::kept_writer`. Expected: `ok. 5 passed; 0 failed`.
+- [ ] **Step 4: Run, expect PASS.** Filter `sign_out::kept_writer`. Expected: `ok. 7 passed; 0 failed`.
 
 - [ ] **Step 5: Mutations, each RED then reverted.**
   1. `SystemClone::clone_file` becomes `std::fs::copy(src, dst).map(|_| ())`: `kept_names_follow_the_rule_on_disk` red on a collision pair's sha (the second overwrote the first).
@@ -1471,8 +1589,11 @@ Add `#[cfg(target_os = "macos")] pub(crate) mod kept_writer;` to `sign_out/mod.r
   7. `CLONE_NOFOLLOW = 0x0008`: `clone_nofollow_is_the_headers_value` red.
   8. Drop `remove_backup_exclusion`: U28 red (`size` is not -1).
   9. `create` splits at the dots (`with_suffix(event_name, …)`): `two_keeps…` red on `"… (2)"`.
+  10. Drop the `canonicalize` in `create` (keep `root.to_path_buf()`): `long_paths…` red on "the writer measures where the kernel measures", and `a_symlinked_root…` red on "the event folder is the resolved one".
+  11. Drop the `too_long(&candidate)` check in `directory_for`: `long_paths…` red on the `under-it` case (`ENAMETOOLONG` from `create_dir`).
+  12. `flush_list` leaves out the parents of `made_root`: `a_root_the_keep_made…` red on `base`.
 
-- [ ] **Step 6: The task gate** with `<N>` = 3 and `<L>` = `L0 + 19`.
+- [ ] **Step 6: The task gate** with `<N>` = 3 and `<L>` = `L0 + 20`.
 
 - [ ] **Step 7: Commit.**
 
@@ -1484,10 +1605,13 @@ git commit -m "feat(macos): copy waiting saves into a kept folder with no overwr
 ### Task 4: The two config keys and the durable save
 
 **Files:**
-- Modify: `src-tauri/src/config.rs` (two fields after `kept_unsynced_folder`, `@184:config.rs:278-284`, and their defaults at `:376`; `ConfigFs`, `RealConfigFs`, `save_to_durable`, `update_at_durable`, `update_at_durable_with` next to `try_update_at_then`, `@184:config.rs:806-843`)
+- Modify: `src-tauri/src/config.rs` (two fields after `kept_unsynced_folder`, `@184:config.rs:278-284`, and their defaults at `:376`; `ConfigFs`, `RealConfigFs`, `save_to_durable`, `update_at_durable`, `update_at_durable_with` next to `try_update_at_then`, `@184:config.rs:806-843`; `try_update_at_then` gains its write step, and its two callers pass `None`: `try_update_at` at `:788-790` and `update_at_then` at `:797-803`)
 - Create: `src-tauri/src/sign_out/kept_record.rs`
 - Modify: `src-tauri/src/sign_out/mod.rs` (add `pub(crate) mod kept_record;`)
-- Test: `src-tauri/src/sign_out/kept_record.rs`
+- Modify: `src-tauri/src/lib.rs`, the 1889 census `test_1889_no_desktop_config_load_modify_save_span_exists_outside_the_one_helper` (`@184:lib.rs:32042-32096`): two new "ways in" and the durable write's own count
+- Test: `src-tauri/src/sign_out/kept_record.rs`; the census in `lib.rs`
+
+**Plan review I3.** The durable save is not a second write path. 1889 made `try_update_at_then` the one place that takes the config-write lock, reads and writes (`@184:config.rs:806-822`), and its census pins that (`config_write_guard()` twice: the definition and that one call, `@184:lib.rs:32064-32068`). So `try_update_at_then` takes the write step as a parameter, `durable: Option<&dyn ConfigFs>`: `None` is today's `save_to`, `Some` is `save_to_durable`. The lock and the read stay in that one place, `cfg.save_to(path)` stays its one plain write (the census's `save_to(` count stays 2), and the census gains `update_at_durable` and `update_at_durable_with` as ways in, plus a count of 2 for `save_to_durable(`.
 
 **Interfaces:**
 - Consumes: `DesktopConfig::{update_at, load_from, apply_settings}`, `config::DesktopSettings`, `finder_removal::{DismissOutcome, remember_kept_folder_at}`.
@@ -1635,7 +1759,27 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run them, expect FAIL.** Filter `sign_out::kept_record`. Expected: compile errors.
+In `lib.rs`, extend the 1889 census (`test_1889_no_desktop_config_load_modify_save_span_exists_outside_the_one_helper`, `@184:lib.rs:32041-32097`). After its order check (`assert!(lock < read && read < write && write < mirror, …)`, `:32076-32079`), add:
+
+```rust
+        // Task 1887 (plan review I3): the keep step's durable save is the same one place with a durable write step,
+        // never a second load-modify-save: `save_to_durable` is defined once and called once, from that place.
+        assert_eq!(
+            config.matches("save_to_durable(").count(),
+            2,
+            "the durable write is defined once and called once, from the one place"
+        );
+        assert!(one_place.contains("cfg.save_to_durable(path, fs_steps)"), "{one_place}");
+```
+
+and the "every other way in" list (`:32082-32092`) gains two rows:
+
+```rust
+            ("    pub(crate) fn update_at_durable<R>(", "Self::update_at_durable_with("),
+            ("    pub(crate) fn update_at_durable_with<R>(", "Self::try_update_at_then("),
+```
+
+- [ ] **Step 2: Run them, expect FAIL.** Filter `sign_out::kept_record`: compile errors. Filter `test_1889_no_desktop_config_load_modify_save_span`: once the module compiles, red on the `save_to_durable(` count (0) and then on `"    pub(crate) fn update_at_durable<R>( exists"`.
 
 - [ ] **Step 3: Implement.** In `config.rs`, after `kept_unsynced_folder`:
 
@@ -1689,7 +1833,37 @@ impl ConfigFs for RealConfigFs {
 }
 ```
 
-and in `impl DesktopConfig`:
+and in `impl DesktopConfig`, `try_update_at_then` (`@184:config.rs:806-822`) gains the write step as its last parameter. Its body is today's, with the write chosen by it:
+
+```rust
+    /// The one place the file is written: the lock is taken before the read and held through the write and `saved`.
+    /// `durable`: `None` is the plain write every save uses; `Some` is the keep step's durable write (task 1887, spec
+    /// 2026-10-10 §7.3), with its file-system steps.
+    fn try_update_at_then<R>(
+        path: &Path,
+        change: impl FnOnce(&mut Self) -> (bool, R),
+        saved: impl FnOnce(&Self),
+        durable: Option<&dyn ConfigFs>,
+    ) -> Result<R, UpdateError> {
+        let _writing = config_write_guard();
+        let mut cfg = Self::load_from(path).map_err(UpdateError::Read)?;
+        let read = cfg.clone();
+        let (save, value) = change(&mut cfg);
+        if save {
+            match durable {
+                None => cfg.save_to(path),
+                Some(fs_steps) => cfg.save_to_durable(path, fs_steps),
+            }
+            .map_err(UpdateError::Write)?;
+            saved(&cfg);
+        } else {
+            saved(&read);
+        }
+        Ok(value)
+    }
+```
+
+Its two callers pass `None`: `Self::try_update_at_then(path, change, |_| {}, None)` in `try_update_at`, and `Self::try_update_at_then(path, change, saved, None)` in `update_at_then`. Then, beside them:
 
 ```rust
     /// Spec 2026-10-10 §7.3 (task 1887): `update_at`, whose write survives a power loss once it returns: the temp file
@@ -1699,19 +1873,14 @@ and in `impl DesktopConfig`:
         Self::update_at_durable_with(path, change, &RealConfigFs)
     }
 
-    /// [`Self::update_at_durable`] with its file-system steps passed in.
+    /// [`Self::update_at_durable`] with its file-system steps passed in: the one write place with a durable write step
+    /// (plan review I3), so the lock and the read are still taken in one place.
     pub(crate) fn update_at_durable_with<R>(
         path: &Path,
         change: impl FnOnce(&mut Self) -> (bool, R),
         fs_steps: &dyn ConfigFs,
     ) -> Result<R, String> {
-        let _writing = config_write_guard();
-        let mut cfg = Self::load_from(path)?;
-        let (save, value) = change(&mut cfg);
-        if save {
-            cfg.save_to_durable(path, fs_steps)?;
-        }
-        Ok(value)
+        Self::try_update_at_then(path, change, |_| {}, Some(fs_steps)).map_err(UpdateError::into_message)
     }
 
     /// The durable write. The caller holds the config-write lock.
@@ -1801,7 +1970,7 @@ pub(crate) fn unfinished_at(path: &Path) -> Result<Vec<String>, String> {
 
 Add `pub(crate) mod kept_record;` to `sign_out/mod.rs`.
 
-- [ ] **Step 4: Run, expect PASS.** Filter `sign_out::kept_record`: `ok. 3 passed`. Then the 1889 pins, filter `test_1889`: the same count as at Task 1's baseline run (`grep -c "test_1889" $EVID/t0-cargo-test.log` for the number).
+- [ ] **Step 4: Run, expect PASS.** Filter `sign_out::kept_record`: `ok. 3 passed`. Then the 1889 pins, filter `test_1889`: the same count as at Task 1's baseline run (`grep -c "test_1889" $EVID/t0-cargo-test.log` for the number), the extended census among them.
 
 - [ ] **Step 5: Mutations, each RED then reverted.**
   1. Store our folder in `kept_unsynced_folder`: U22 red on the 1882 key.
@@ -1810,14 +1979,15 @@ Add `pub(crate) mod kept_record;` to `sign_out/mod.rs`.
   4. Save the two keys in two `update_at_durable_with` calls: U43 red (two renames).
   5. `take_back_kept_unsent` leaves `kept_unsent_folder` as it is: U43 red on "puts the older row back".
   6. Add a `sync_all` to `save_to`: U43 red on the last assertion.
+  7. Give `update_at_durable_with` its own lock, load and save (the earlier shape: `let _writing = config_write_guard(); let mut cfg = Self::load_from(path)?; …`): the 1889 census red on the `config_write_guard()` count (3).
 
-- [ ] **Step 6: The task gate** with `<N>` = 4 and `<L>` = `L0 + 22`.
+- [ ] **Step 6: The task gate** with `<N>` = 4 and `<L>` = `L0 + 23`.
 
 - [ ] **Step 7: Commit.**
 
 ```bash
-cd $WT && git add -- src-tauri/src/config.rs src-tauri/src/sign_out/kept_record.rs src-tauri/src/sign_out/mod.rs
-git commit -m "feat(macos): record a kept folder and its unfinished marker in one durable save (1887)" -- src-tauri/src/config.rs src-tauri/src/sign_out/kept_record.rs src-tauri/src/sign_out/mod.rs
+cd $WT && git add -- src-tauri/src/config.rs src-tauri/src/sign_out/kept_record.rs src-tauri/src/sign_out/mod.rs src-tauri/src/lib.rs
+git commit -m "feat(macos): record a kept folder and its unfinished marker in one durable save (1887)" -- src-tauri/src/config.rs src-tauri/src/sign_out/kept_record.rs src-tauri/src/sign_out/mod.rs src-tauri/src/lib.rs
 ```
 
 ### Task 5: The keep step
@@ -1828,7 +1998,7 @@ git commit -m "feat(macos): record a kept folder and its unfinished marker in on
 - Test: `src-tauri/src/sign_out/keep.rs`
 
 **Interfaces:**
-- Consumes: `WaitingChanges` (Task 1); `kept_names::{kept_relative_path, KeptRole}` (Task 2); `KeptWriter`, `CloneFile`, `SystemClone` (Task 3); `kept_record::{save_kept_unsent_durably, take_back_kept_unsent_at, saved_kept_unsent_at}`, `ConfigFs`, `RealConfigFs` (Task 4).
+- Consumes: `WaitingChanges` (Task 1); `kept_names::{kept_relative_path, KeptRole}` (Task 2); `KeptWriter`, `CloneFile`, `SystemClone` (Task 3); `kept_record::{save_kept_unsent_durably, take_back_kept_unsent_at, saved_kept_unsent_at}`, `ConfigFs`, `RealConfigFs` (Task 4); in the tests, `engine_bridge::FinderStagingBases`, `staged_payload::{sweep_unreferenced, remove_released}`, `StateDb::engine_start_repair`.
 - Produces:
   - `kept_set::KeptSet { copied, covered, missing_acknowledged, others_acknowledged: BTreeSet<String>, folder: Option<PathBuf>, files: usize }`, `KeptSet::keeps(&self, op_id: &str) -> bool`.
   - `kept_set::Acknowledge<'a>`: `Asked { others: &'a BTreeSet<String>, missing: &'a BTreeSet<String> }` (the snapshot the gate accepted), `Nothing` (no snapshot: the gate counted nothing), `Everything` (the R10 reset, W12).
@@ -1851,17 +2021,21 @@ mod tests {
 
     struct Fixture {
         dir: tempfile::TempDir,
+        /// `dir`, resolved: the writer resolves its root (plan review I5), so a folder it reports is compared with
+        /// paths built from here.
+        base: PathBuf,
         db: StateDb,
     }
 
     impl Fixture {
         fn new() -> Self {
             let dir = tempfile::tempdir().unwrap();
+            let base = std::fs::canonicalize(dir.path()).unwrap();
             let db = StateDb::open(dir.path().join("state.db")).unwrap();
-            Self { dir, db }
+            Self { dir, base, db }
         }
         fn root(&self) -> PathBuf {
-            self.dir.path().join("Documents").join("Changes not sent")
+            self.base.join("Documents").join("Changes not sent")
         }
         fn config(&self) -> PathBuf {
             self.dir.path().join("desktop.toml")
@@ -2172,6 +2346,30 @@ mod tests {
         assert!(kept.missing_acknowledged.contains("gone") && kept.others_acknowledged.contains("r1"));
         assert_eq!(kept.folder, None, "no copy, no folder");
     }
+
+    /// U12's last clause (spec §7.1; moved here from Task 2 by plan review M6): neither engine-start step touches what
+    /// a keep step kept. Both run on the same database right after a real keep, as the next engine start would, over a
+    /// release-shaped staging layout.
+    #[test]
+    fn the_engine_start_steps_never_touch_a_kept_file() {
+        let f = Fixture::new();
+        f.file("report", "Work/report.docx");
+        f.write("w1", "report", "minted", Some(b"kept"));
+        let kept = f.keep(Acknowledge::Nothing).unwrap();
+        let staging = crate::engine_bridge::FinderStagingBases {
+            data: Some(f.base.join("Library/Application Support")),
+            cache: Some(f.base.join("Library/Caches")),
+            temp: f.base.join("tmp"),
+        };
+        for folder in staging.candidates() {
+            std::fs::create_dir_all(&folder).unwrap();
+        }
+        crate::staged_payload::sweep_unreferenced(&f.db, &staging.candidates()).unwrap();
+        let repair = f.db.engine_start_repair().unwrap();
+        assert!(repair.released_payloads.is_empty(), "{:?}", repair.released_payloads);
+        crate::staged_payload::remove_released(&f.db, &repair.released_payloads);
+        assert_eq!(std::fs::read(kept.folder.unwrap().join("Work/report.docx")).unwrap(), b"kept");
+    }
 }
 ```
 
@@ -2404,7 +2602,7 @@ pub(crate) mod kept_set;
 pub(crate) mod keep;
 ```
 
-- [ ] **Step 4: Run, expect PASS.** Filter `sign_out::keep::`. Expected: `ok. 12 passed; 0 failed`.
+- [ ] **Step 4: Run, expect PASS.** Filter `sign_out::keep::`. Expected: `ok. 13 passed; 0 failed`.
 
 - [ ] **Step 5: Mutations, each RED then reverted.**
   1. Skip the copy loop (`to_copy` empty): U8 red on the first `sha_of` (no file).
@@ -2418,8 +2616,9 @@ pub(crate) mod keep;
   9. Accept any other change (`Acknowledge::other` always `true`): U36 red.
   10. Name from the op's `target_path`: Review Focus 4 red.
   11. Drop the take-back: the U43 keep-half red on `(None, [])`.
+  12. Journal each kept copy as released, as a cleanup might (`inputs.db.track_staged_payload(&kept_path.to_string_lossy(), None, true)` after a successful `writer.keep(…)`): `the_engine_start_steps_never_touch_a_kept_file` red on `released_payloads.is_empty()`.
 
-- [ ] **Step 6: The task gate** with `<N>` = 5 and `<L>` = `L0 + 34`.
+- [ ] **Step 6: The task gate** with `<N>` = 5 and `<L>` = `L0 + 36`.
 
 - [ ] **Step 7: Commit.**
 
@@ -2805,9 +3004,9 @@ fn remove_purge_paths(
 cd $WT/src-tauri && grep -n -E "purge_local_state_files(_in|_as)?\(|purge_local_data_for_sign_out\(" src/lib.rs | grep -v -E "^\s*[0-9]+:\s*///|fn purge_local"
 ```
 
-  The two production calls that pass a `KeptSet` come in Task 7 (`clear_session_impl`) and Task 14 (the R10 reset); until then they pass `None` too. A source pin that matches one of these calls by its text and breaks on the added argument is updated to the new text in this task, and named in the Notes.
+  The two production calls that pass a `KeptSet` come in Task 7 (`clear_session_impl`) and Task 14 (the R10 reset); until then they pass `None` too. A source pin that matches one of these calls by its text and breaks on the added argument is updated to the new text in this task, and named in the Notes. One is known: `test_1882_every_removal_path_surfaces_the_kept_folder` (`@184:lib.rs:31440-31522`) lists `"purge_local_data_for_sign_out(state_paths::beebeeb_state_dir(), cfg_sync_root.as_deref(), owe_removal).map_err(&kept_with)?;"` among the failures that carry the kept folder; its entry becomes `"purge_local_data_for_sign_out(state_paths::beebeeb_state_dir(), cfg_sync_root.as_deref(), owe_removal, None).map_err(&kept_with)?;"`, and its count of `.map_err(&kept_with)?` stays 6.
 
-- [ ] **Step 4: Run, expect PASS.** Filter `sign_out_keep_tests`: `ok. 6 passed` (2 from Task 2, 4 new). Then filter `purge_local_state_files` and `signout_teardown_tests`: the same counts as at the baseline run.
+- [ ] **Step 4: Run, expect PASS.** Filter `sign_out_keep_tests`: `ok. 5 passed` (1 from Task 2, 4 new). Then filter `purge_local_state_files` and `signout_teardown_tests`: the same counts as at the baseline run.
 
 - [ ] **Step 5: Mutations, each RED then reverted.**
   1. Run the guard after the removal loop: U14 red on "no staged copy was touched".
@@ -2815,8 +3014,9 @@ cd $WT/src-tauri && grep -n -E "purge_local_state_files(_in|_as)?\(|purge_local_
   3. Remove the files in one loop (`for group in [paths]`): U39 (a) red on "the waiting writes' copies go last".
   4. Never clear the marker: U39 (c) red.
   5. Wrap the guard's refusal in `SIGN_OUT_PURGE_FAILED` inside `purge_local_data_for_sign_out`: no test in this task sees that wrapper (U14 calls the purge below it). Task 7's `a_guard_refusal_reaches_the_caller_with_its_code` does; this mutation is run there.
+  6. Skip the second group (`for group in [others_first]`; in Task 9's form, drop the per-path loop over `waiting_last`): `the_purge_removes_sources_from_every_staging_root` red on `!caches.exists() && !support.exists()` (plan review M6: both sources are waiting writes' copies, so only the second group removes them).
 
-- [ ] **Step 6: The task gate** with `<N>` = 6 and `<L>` = `L0 + 38`.
+- [ ] **Step 6: The task gate** with `<N>` = 6 and `<L>` = `L0 + 40`.
 
 - [ ] **Step 7: Commit.**
 
@@ -2928,11 +3128,32 @@ In `lib.rs`'s `sign_out_keep_tests`, the sign-out tests. They share the scratch 
         state_db::StateDb::open(state_paths::state_db_path_from_state_dir(&dir)).unwrap()
     }
 
-    /// The scratch database as a completed sign-out leaves it: no rows, accepts open again (Task 8). A test that ends
-    /// with rows left, or after a keep step that refused, calls it last, so the next test starts clean.
-    fn reset_scratch(db: &state_db::StateDb) {
-        db.purge_all_local_state().unwrap();
-        db.clear_account_data(false).unwrap();
+    /// The scratch database and config as a completed sign-out leaves them: no rows, accepts open again (Task 8), no
+    /// kept-folder keys. Never panics: it also runs while a failed test unwinds.
+    fn clean_scratch(db: &state_db::StateDb) {
+        let _ = db.purge_all_local_state();
+        let _ = db.clear_account_data(false);
+        let _ = DesktopConfig::update(|cfg| {
+            let changed = cfg.kept_unsent_folder.take().is_some() | !cfg.kept_unsent_unfinished.is_empty();
+            cfg.kept_unsent_unfinished.clear();
+            (changed, ())
+        });
+    }
+
+    /// Plan review M14: every test in this module that works in the shared scratch state dir takes one of these first,
+    /// inside `with_the_shared_state_dir`. It cleans when it is dropped, at the test's end and when the test panics,
+    /// so one failing test cannot leave queue rows that make every later sign-out test here refuse with
+    /// `unsent_changes` (a cascade of false reds). Its own connection, so it needs no borrow of the test's.
+    struct ScratchReset(state_db::StateDb);
+
+    impl Drop for ScratchReset {
+        fn drop(&mut self) {
+            clean_scratch(&self.0);
+        }
+    }
+
+    fn scratch_reset() -> ScratchReset {
+        ScratchReset(state_db_in_scratch())
     }
 
     /// `signout_teardown_tests::test_account` (`@184:lib.rs:18240-18243`), which that module keeps private.
@@ -3009,24 +3230,65 @@ In `lib.rs`'s `sign_out_keep_tests`, the sign-out tests. They share the scratch 
         Arc::new(|_| Ok(()))
     }
 
-    /// U6.
+    /// U6. The switch's sign-out (`forget_email`) is the one that would forget the email prefill, so the refusal is
+    /// tested on it: the gate comes first, and nothing is touched (plan review M5: the Keychain session and the email
+    /// prefill too).
     #[tokio::test]
     async fn clear_session_refuses_while_changes_wait() {
         with_the_shared_state_dir(async {
             let db = state_db_in_scratch();
+            let _reset = scratch_reset();
             let staged = queue_write(&db, "w1", "f1", b"bytes");
             let state = AppState::default();
             let acct = test_account(&state, "signout-1887-u6");
             let events = recording_finder(&state);
             *acct.session.lock().unwrap() = Some(super::Session { token: "t".into(), master_key: [7u8; 32], email: Some("a@beebeeb.io".into()) });
+            persist_session_to_keychain(&SessionWrite::for_test(), "signout-1887-u6", "tok-u6", &[7u8; 32], Some("a@beebeeb.io")).unwrap();
+            DesktopConfig::update(|cfg| {
+                cfg.last_signed_in_email = Some("prefill@beebeeb.io".into());
+                (true, ())
+            })
+            .unwrap();
             set_auth_present(&state, true);
-            let failure = sign_out_with(&state, None, no_seam()).await.unwrap_err();
+            let failure = SIGN_OUT_SEAM.scope(no_seam(), clear_session_impl(&state, true, None)).await.unwrap_err();
             assert!(failure.message.starts_with("unsent_changes: "), "{}", failure.message);
             assert_eq!(db.waiting_rows().unwrap().len(), 1, "the queue is intact");
             assert!(staged.exists(), "the staged copy is intact");
             assert!(acct.session.lock().unwrap().is_some(), "the keys are in memory");
+            assert!(load_session_from_keychain("signout-1887-u6", None).unwrap().is_some(), "the Keychain session is untouched");
+            assert_eq!(
+                DesktopConfig::load().unwrap().last_signed_in_email.as_deref(),
+                Some("prefill@beebeeb.io"),
+                "the email prefill is untouched"
+            );
             assert!(events.lock().unwrap().iter().all(|event| event != "remove"), "the reconciler got no removal");
-            reset_scratch(&db);
+            let _ = clear_keychain_session("signout-1887-u6");
+            DesktopConfig::update(|cfg| (cfg.last_signed_in_email.take().is_some(), ())).unwrap();
+        })
+        .await;
+    }
+
+    /// U8 and U8b through the sign-out (plan review M5): the kept set is kept, one file per file, and then the queue is
+    /// empty. Task 5's tests hold the keep step's half (names and bytes).
+    #[tokio::test]
+    async fn a_sign_out_keeps_the_kept_set_and_empties_the_queue() {
+        with_the_shared_state_dir(async {
+            let db = state_db_in_scratch();
+            let _reset = scratch_reset();
+            queue_write(&db, "s1", "report", b"first save");
+            queue_write(&db, "s2", "report", b"second save");
+            queue_write(&db, "c1", "notes", b"notes");
+            let (state, _acct) = signed_out_state();
+            recording_finder(&state);
+            let id = ask(&state, "macos-settings");
+            let done = sign_out_with(&state, Some(&id), no_seam()).await.unwrap();
+            let kept = done.kept_unsent.expect("a kept folder");
+            let folder = Path::new(&kept.folder);
+            assert_eq!(kept.files, 2, "two saves of one file keep one file (U8b)");
+            assert_eq!(std::fs::read(folder.join("report.bin")).unwrap(), b"second save");
+            assert_eq!(std::fs::read(folder.join("notes.bin")).unwrap(), b"notes");
+            assert_eq!(std::fs::read_dir(folder).unwrap().count(), 2, "no earlier-save copy of a minted save");
+            assert!(db.waiting_rows().unwrap().is_empty(), "the queue is empty");
         })
         .await;
     }
@@ -3053,6 +3315,7 @@ In `lib.rs`'s `sign_out_keep_tests`, the sign-out tests. They share the scratch 
     async fn a_write_that_arrives_after_the_count_is_kept_too() {
         with_the_shared_state_dir(async {
             let db = state_db_in_scratch();
+            let _reset = scratch_reset();
             let (state, _acct) = signed_out_state();
             recording_finder(&state);
             let seam: SignOutSeam = Arc::new(move |point| {
@@ -3097,6 +3360,7 @@ In `lib.rs`'s `sign_out_keep_tests`, the sign-out tests. They share the scratch 
         with_the_shared_state_dir(async {
             use std::os::unix::fs::PermissionsExt;
             let db = state_db_in_scratch();
+            let _reset = scratch_reset();
             let staged = queue_write(&db, "w1", "f1", b"bytes");
             std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o000)).unwrap();
             let state = AppState::default();
@@ -3109,10 +3373,10 @@ In `lib.rs`'s `sign_out_keep_tests`, the sign-out tests. They share the scratch 
             std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o600)).unwrap();
             assert!(failure.message.starts_with("unsent_copy_failed: "), "{}", failure.message);
             assert!(acct.session.lock().unwrap().is_some(), "the keys are in memory");
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            // `std::time::Duration`: `lib.rs` imports no `Duration` at the crate level (plan review M10).
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             assert!(events.lock().unwrap().iter().any(|event| event == "KeysArrived"), "sync restarts: {:?}", events.lock().unwrap());
             assert_eq!(db.waiting_rows().unwrap().len(), 1);
-            reset_scratch(&db);
         })
         .await;
     }
@@ -3122,6 +3386,7 @@ In `lib.rs`'s `sign_out_keep_tests`, the sign-out tests. They share the scratch 
     async fn a_copy_missing_before_the_call_asks_again() {
         with_the_shared_state_dir(async {
             let db = state_db_in_scratch();
+            let _reset = scratch_reset();
             let staged = queue_write(&db, "w1", "f1", b"bytes");
             let (state, _acct) = signed_out_state();
             recording_finder(&state);
@@ -3131,31 +3396,49 @@ In `lib.rs`'s `sign_out_keep_tests`, the sign-out tests. They share the scratch 
             assert!(failure.message.starts_with("unsent_changes: "), "the gate refuses, the ask is shown again");
             let fresh = count_ask("macos-settings").unwrap();
             assert_eq!(fresh.counts.missing_files, 1);
-            reset_scratch(&db);
         })
         .await;
     }
 
-    /// U30: the record is on disk before the purge, and only the keep step writes it.
+    /// U30: the record is on disk before the purge, and only the keep step writes it. Two aborts (plan review M1, spec
+    /// U30 amended): right after the keep step, both keys name the folder; right after the purge, the rows are gone,
+    /// so the marker is cleared and the row stays (§7.3, "When it is cleared").
     #[tokio::test]
     async fn the_kept_folder_is_recorded_before_the_purge() {
         with_the_shared_state_dir(async {
             let db = state_db_in_scratch();
-            queue_write(&db, "w1", "f1", b"bytes");
-            let (state, _acct) = signed_out_state();
-            recording_finder(&state);
-            let id = ask(&state, "macos-settings");
-            let seam: SignOutSeam = Arc::new(|point| if point == "after_purge" { Err("aborted by the test".into()) } else { Ok(()) });
-            let failure = sign_out_with(&state, Some(&id), seam).await.unwrap_err();
-            let folder = failure.kept_unsent.expect("the failure carries the folder").folder;
-            let config = DesktopConfig::load().unwrap();
-            assert_eq!(config.kept_unsent_folder.as_deref(), Some(folder.as_str()));
-            assert!(config.kept_unsent_unfinished.is_empty(), "the purge cleared the rows, so it cleared the marker");
+            let _reset = scratch_reset();
+            for (point, marker_kept) in [("after_keep", true), ("after_purge", false)] {
+                queue_write(&db, "w1", "f1", b"bytes");
+                let (state, _acct) = signed_out_state();
+                recording_finder(&state);
+                let id = ask(&state, "macos-settings");
+                let seam: SignOutSeam = Arc::new(move |at| if at == point { Err("aborted by the test".into()) } else { Ok(()) });
+                let failure = sign_out_with(&state, Some(&id), seam).await.unwrap_err();
+                let folder = failure.kept_unsent.expect("the failure carries the folder").folder;
+                let config = DesktopConfig::load().unwrap();
+                assert_eq!(config.kept_unsent_folder.as_deref(), Some(folder.as_str()), "{point}");
+                let expected: Vec<String> = if marker_kept { vec![folder.clone()] } else { Vec::new() };
+                assert_eq!(config.kept_unsent_unfinished, expected, "{point}: saved in the keep step's one write; cleared with the rows");
+                clean_scratch(&db);
+            }
         })
         .await;
         let production = super::finder_setup_command_tests::production_source();
         let clear = super::finder_setup_command_tests::body_between(&production, "async fn clear_session_impl(", "\n}\n");
         assert!(!clear.contains("save_kept_unsent_durably("), "the Err arm writes neither key; only the keep step does");
+        // The keep step's save is its last act, after its last flush: `finish()` (every `sync_all`) comes before it,
+        // and nothing after it copies or flushes.
+        let keep = include_str!("sign_out/keep.rs");
+        let keep = &keep[..keep.find("#[cfg(test)]\nmod tests").expect("the tests")];
+        let save = keep.find("save_kept_unsent_durably(inputs.config_path").expect("the save");
+        assert!(keep.find("writer.finish()").expect("the flushes") < save, "the flushes come first");
+        let after = &keep[save..];
+        assert!(!after.contains("writer.keep(") && !after.contains(".finish()") && !after.contains("sync_all"), "{after}");
+        let writer = include_str!("sign_out/kept_writer.rs");
+        let finish = &writer[writer.find("pub(crate) fn finish(self)").expect("finish")..];
+        assert!(finish[..finish.find("\n    }\n").unwrap()].contains("sync_all()"), "finish flushes");
+        assert!(clear.find("keep_for_sign_out(").expect("the keep call") < clear.find("purge_local_data_for_sign_out(").expect("the purge"));
     }
 
     /// U32, the macOS half: every new step is macOS only.
@@ -3181,6 +3464,7 @@ In `lib.rs`'s `sign_out_keep_tests`, the sign-out tests. They share the scratch 
     async fn the_keep_step_uses_the_snapshot_the_gate_accepted() {
         with_the_shared_state_dir(async {
             let db = state_db_in_scratch();
+            let _reset = scratch_reset();
             queue_rename(&db, "r1");
             let (state, _acct) = signed_out_state();
             recording_finder(&state);
@@ -3217,6 +3501,7 @@ In `lib.rs`'s `sign_out_keep_tests`, the sign-out tests. They share the scratch 
     async fn an_already_signed_out_sign_out_keeps_before_it_purges() {
         with_the_shared_state_dir(async {
             let db = state_db_in_scratch();
+            let _reset = scratch_reset();
             queue_write(&db, "w1", "f1", b"already signed out");
             let (state, _acct) = signed_out_state();
             recording_finder(&state);
@@ -3235,6 +3520,7 @@ In `lib.rs`'s `sign_out_keep_tests`, the sign-out tests. They share the scratch 
     async fn a_guard_refusal_reaches_the_caller_with_its_code() {
         with_the_shared_state_dir(async {
             let db = state_db_in_scratch();
+            let _reset = scratch_reset();
             queue_write(&db, "w1", "f1", b"bytes");
             let (state, _acct) = signed_out_state();
             recording_finder(&state);
@@ -3249,7 +3535,6 @@ In `lib.rs`'s `sign_out_keep_tests`, the sign-out tests. They share the scratch 
             assert!(failure.message.starts_with("unsent_copy_failed: "), "never wrapped: {}", failure.message);
             assert!(failure.kept_unsent.is_some(), "the kept folder rides the failure");
             assert_eq!(db.waiting_rows().unwrap().len(), 2, "nothing deleted");
-            reset_scratch(&db);
         })
         .await;
     }
@@ -3259,6 +3544,7 @@ In `lib.rs`'s `sign_out_keep_tests`, the sign-out tests. They share the scratch 
     async fn a_second_sign_out_with_the_same_ask_keeps_nothing_twice() {
         with_the_shared_state_dir(async {
             let db = state_db_in_scratch();
+            let _reset = scratch_reset();
             queue_write(&db, "w1", "f1", b"once");
             let (state, _acct) = signed_out_state();
             recording_finder(&state);
@@ -3269,7 +3555,6 @@ In `lib.rs`'s `sign_out_keep_tests`, the sign-out tests. They share the scratch 
             let second = sign_out_with(&state, Some(&id), no_seam()).await.unwrap_err();
             assert!(second.message.starts_with("unsent_changes: "), "{}", second.message);
             assert_eq!(second.kept_unsent, None, "no second folder");
-            reset_scratch(&db);
         })
         .await;
     }
@@ -3279,6 +3564,7 @@ In `lib.rs`'s `sign_out_keep_tests`, the sign-out tests. They share the scratch 
     async fn the_ask_names_the_earlier_folders_only_with_a_missing_write() {
         with_the_shared_state_dir(async {
             let db = state_db_in_scratch();
+            let _reset = scratch_reset();
             let staged = queue_write(&db, "w1", "f1", b"bytes");
             DesktopConfig::update(|cfg| {
                 cfg.kept_unsent_unfinished = vec!["/kept/earlier".into()];
@@ -3293,7 +3579,6 @@ In `lib.rs`'s `sign_out_keep_tests`, the sign-out tests. They share the scratch 
                 (true, ())
             })
             .unwrap();
-            reset_scratch(&db);
         })
         .await;
     }
@@ -3642,7 +3927,9 @@ and it and calls `clear_session_impl(&state, forget_email.unwrap_or(false), keep
 cd $WT/src-tauri && grep -n "clear_session_impl(&" src/lib.rs
 ```
 
-- [ ] **Step 4: Run, expect PASS.** Filters `sign_out::snapshot` (`ok. 2 passed`), `sign_out_keep_tests` (`ok. 19 passed`: 6 before, 13 new), then `signout_teardown_tests` and `finder_setup_wiring_tests` at their baseline counts.
+The 1882 pin `test_1882_every_removal_path_surfaces_the_kept_folder` (`@184:lib.rs:31440-31522`) reads `clear_session_impl` with only comment lines dropped, so `#[cfg(test)]` statements count. It lists every call whose failure carries the kept folder and counts `.map_err(&kept_with)?` (6). This task adds four: the keep call and the three seams. In its list, the purge entry becomes `"purge_local_data_for_sign_out(state_paths::beebeeb_state_dir(), cfg_sync_root.as_deref(), owe_removal, kept.as_ref()).map_err(&kept_with)?;"`, and it gains `"let kept = keep_for_sign_out(accepted.as_ref()).map_err(&kept_with)?;"` and `"sign_out_seam(\"before_keep\").map_err(&kept_with)?;"`, `"sign_out_seam(\"after_keep\").map_err(&kept_with)?;"`, `"sign_out_seam(\"after_purge\").map_err(&kept_with)?;"`; the count becomes 10, with the comment "Task 1887: the keep step and its three test seams (test builds only) carry the folders too." Its rule is unchanged: every failure after the removal carries the folder.
+
+- [ ] **Step 4: Run, expect PASS.** Filters `sign_out::snapshot` (`ok. 2 passed`), `sign_out_keep_tests` (`ok. 19 passed`: 5 before, 14 new), then `signout_teardown_tests`, `finder_setup_wiring_tests` and `test_1882` at their baseline counts.
 
 - [ ] **Step 5: Mutations, each RED then reverted.**
   1. Remove the gate call: U6 red (the sign-out completes, the queue is empty).
@@ -3656,8 +3943,12 @@ cd $WT/src-tauri && grep -n "clear_session_impl(&" src/lib.rs
   9. Read the store's newest snapshot at the keep step instead of `accepted`: U37 red (the second rename is dropped unasked).
   10. Leave the store as it is after a completed sign-out: U37 red on the last assertion.
   11. Wrap the guard's refusal in `SIGN_OUT_PURGE_FAILED` inside `purge_local_data_for_sign_out` (Task 6, mutation 5): `a_guard_refusal_reaches_the_caller_with_its_code` red on "never wrapped".
+  12. Move the gate below `forget_last_signed_in_email(`: U6 red on "the email prefill is untouched" (U7 is red too).
+  13. In `clear_session_impl`, return `Ok` right after the keep step when it kept a folder (skip the purge): `a_sign_out_keeps_the_kept_set_and_empties_the_queue` red on "the queue is empty".
+  14. Clear the marker in `keep_for_sign_out` right after the keep (`clear_unfinished_at`): U30 red on the `after_keep` case.
+  15. The guard (plan review M14), proven the same way: add a `panic!("guard check")` right after the first `queue_write` of `clear_session_refuses_while_changes_wait` (for this run only), make `ScratchReset::drop` a no-op, and run filter `sign_out_keep_tests` with `--test-threads=1`. Expected: tests after it fail on the leftover `w1` row (`UNIQUE constraint failed` or `unsent_changes:`). With the guard back and the `panic!` still there: only `clear_session_refuses_while_changes_wait` fails. Then remove the `panic!`. The three counts go into the Notes.
 
-- [ ] **Step 6: The task gate** with `<N>` = 7 and `<L>` = `L0 + 53`.
+- [ ] **Step 6: The task gate** with `<N>` = 7 and `<L>` = `L0 + 56`.
 
 - [ ] **Step 7: Commit.**
 
@@ -3670,18 +3961,20 @@ git commit -m "feat(macos): a sign-out asks before it purges, keeps what waits, 
 
 **Lead ruling on Q1 (2026-10-11): option A, binding.** The keep step first writes `sync_state.finder_accepts_closed` in one `BEGIN IMMEDIATE` transaction; `accept_finder_write` checks it and answers `WriteRetryLater` (the `CopyGone` path); `engine_start_repair` reopens. And every way a sign-out ends without purging reopens accepts at once, not only the next engine start: the person chooses Cancel (the fence is never written: Cancel comes before the gate), a step fails (the keep step reopens on its own failure; a guard in `clear_session_impl` reopens on any return between a completed keep and a completed purge), or the app is quit mid-flow and restarts (the launch reopens them first). This task comes after Task 7, whose `clear_session_impl` wiring the guard sits in. The R10 reset applies the same rule in Task 14.
 
+**Plan review I1 and I4 (lead rulings, 2026-10-11).** Every change the Finder IPC queues reads the key in the transaction that queues it, not only a save: a rename, a move, a folder create (with its row) and a delete, through `enqueue_finder_change`; a closed key answers `AcceptsClosed` → `WriteRetryLater`. The launch's reopen is the first statement of `restore_session_inner`; the R1 wrapper pin is untouched.
+
 **Files:**
-- Modify: `src-tauri/src/state_db.rs`: `FINDER_ACCEPTS_CLOSED_KEY`, `close_finder_accepts`, `finder_accepts_closed`; `AcceptOutcome::AcceptsClosed` (`@184:state_db.rs:1632-1650`); the check in `accept_finder_write` (`:3724-3743`); the reopen in `engine_start_repair` (`:5613-5620`)
-- Modify: `src-tauri/src/engine_bridge.rs`: `AcceptsClosed` beside `StagedCopyGone` (`@184:engine_bridge.rs:756-770`); both `AcceptOutcome` matches (`:2633`, `:3047`)
+- Modify: `src-tauri/src/state_db.rs`: `FINDER_ACCEPTS_CLOSED_KEY`, `close_finder_accepts`, `finder_accepts_closed`; `AcceptOutcome::AcceptsClosed` (`@184:state_db.rs:1632-1650`); the check in `accept_finder_write` (`:3724-3743`); the reopen in `engine_start_repair` (`:5613-5620`); `enqueue_operation`'s insert moves into `insert_operation_conn` (`:4425-4470`), and `FinderEnqueue`, `FinderFolderRow` and `enqueue_finder_change` sit beside it (plan review I1)
+- Modify: `src-tauri/src/engine_bridge.rs`: `AcceptsClosed` beside `StagedCopyGone` (`@184:engine_bridge.rs:756-770`); both `AcceptOutcome` matches (`:2633`, `:3047`); `enqueue_finder_operation` (`:3723-3773`) queues through `enqueue_finder_change` and takes a `folder` row; its folder caller (`:2389-2446`) passes the row instead of writing it first, and its four other callers (`:2464`, `:2848`, `:2887`, `:3120`) pass `None`; the pin `ingestion_writers_use_the_single_transaction_api` (`:18846-18901`) learns the folder's one call (plan review I1)
 - Modify: `src-tauri/src/ipc_socket.rs`: `write_refusal_category` (`@184:ipc_socket.rs:1452-1466`) and `write_outcome_response`'s arm beside `StagedCopyGone` (`:2573-2578`)
 - Modify: `src-tauri/src/sign_out/keep.rs` (the close is `keep_unsent`'s first act; a keep that stops reopens; the body moves to `keep_after_close`)
-- Modify: `src-tauri/src/lib.rs`: `AcceptsReopenOnAbort` and `reopen_finder_accepts_in` beside `keep_for_sign_out` (Task 7); the guard in `clear_session_impl`, armed after the keep call and disarmed after the purge call; `reopen_finder_accepts_at_startup()` as the first statement of `restore_session_on_startup` (`@184:lib.rs:1006`)
+- Modify: `src-tauri/src/lib.rs`: `AcceptsReopenOnAbort` and `reopen_finder_accepts_in` beside `keep_for_sign_out` (Task 7); the guard in `clear_session_impl`, armed after the keep call and disarmed after the purge call; `reopen_finder_accepts_at_startup()` as the first statement of `restore_session_inner` (`@184:lib.rs:1015`), never in the wrapper `restore_session_on_startup` (`:1006-1012`), whose two statements the R1 pin `every_return_of_the_startup_restore_shuts_the_adoption_window` (`:24903-24928`) holds exact (plan review I4)
 - Modify: `src-tauri/src/lib.rs:3155-3164` (the comment on `stop_engine_for_sign_out` that says no request can be served after the stop)
-- Test: `src-tauri/src/state_db.rs` (tests module), `src-tauri/src/ipc_socket.rs` (tests module), `src-tauri/src/sign_out/keep.rs`, `src-tauri/src/lib.rs` `mod sign_out_keep_tests`
+- Test: `src-tauri/src/state_db.rs` (tests module), `src-tauri/src/engine_bridge.rs` (tests module), `src-tauri/src/ipc_socket.rs` (tests module), `src-tauri/src/sign_out/keep.rs`, `src-tauri/src/lib.rs` `mod sign_out_keep_tests`
 
 **Interfaces:**
-- Consumes: `accept_finder_write`, `FinderAccept`, `FinderAcceptKind`, `track_staged_payload`, `seed_own_row` (the existing `an_accept_whose_journal_row_is_gone_writes_nothing` test, `@184:state_db.rs:11912-11952`, is the pattern); Task 7's `clear_session_impl`, `keep_for_sign_out`, `SIGN_OUT_SEAM` and its test helpers (`state_db_in_scratch`, `queue_write`, `ask`, `signed_out_state`, `recording_finder`, `sign_out_with`, `no_seam`, `reset_scratch`).
-- Produces: `StateDb::close_finder_accepts(&self) -> rusqlite::Result<()>`, `StateDb::reopen_finder_accepts(&self) -> rusqlite::Result<()>`, `StateDb::finder_accepts_closed(&self) -> rusqlite::Result<bool>`, `AcceptOutcome::AcceptsClosed`, `engine_bridge::AcceptsClosed`, the refusal category `"accepts_closed"`; in `lib.rs` (macOS) `struct AcceptsReopenOnAbort`, `fn reopen_finder_accepts_in(state_dir: &Path)`, `fn reopen_finder_accepts_at_startup()`.
+- Consumes: `accept_finder_write`, `FinderAccept`, `FinderAcceptKind`, `track_staged_payload`, `seed_own_row` (the existing `an_accept_whose_journal_row_is_gone_writes_nothing` test, `@184:state_db.rs:11912-11952`, is the pattern); Task 7's `clear_session_impl`, `keep_for_sign_out`, `SIGN_OUT_SEAM` and its test helpers (`state_db_in_scratch`, `queue_write`, `ask`, `signed_out_state`, `recording_finder`, `sign_out_with`, `no_seam`, `scratch_reset`, `clean_scratch`).
+- Produces: `StateDb::close_finder_accepts(&self) -> rusqlite::Result<()>`, `StateDb::reopen_finder_accepts(&self) -> rusqlite::Result<()>`, `StateDb::finder_accepts_closed(&self) -> rusqlite::Result<bool>`, `AcceptOutcome::AcceptsClosed`, `engine_bridge::AcceptsClosed`, the refusal category `"accepts_closed"`; `state_db::{FinderEnqueue, FinderFolderRow}` and `StateDb::enqueue_finder_change(&self, op: &PendingOperation, folder: Option<FinderFolderRow<'_>>) -> rusqlite::Result<FinderEnqueue>`; `enqueue_finder_operation(…, folder: Option<FinderFolderRow<'_>>)`; in `lib.rs` (macOS) `struct AcceptsReopenOnAbort`, `fn reopen_finder_accepts_in(state_dir: &Path)`, `fn reopen_finder_accepts_at_startup()`.
 
 - [ ] **Step 1: Write the failing tests.** In `state_db.rs`'s tests, next to `an_accept_whose_journal_row_is_gone_writes_nothing`:
 
@@ -3775,18 +4068,82 @@ git commit -m "feat(macos): a sign-out asks before it purges, keeps what waits, 
     }
 ```
 
+In `engine_bridge.rs`'s tests, beside `test_queue_finder_writes_refuse_to_enqueue_once_engine_is_stopping` (`@184:engine_bridge.rs:10375`, whose `test_bridge` and `seed_bridge_row` it uses):
+
+```rust
+    /// U45 (plan review I1): every change the Finder IPC queues meets the sign-out's fence in the transaction that
+    /// queues it. Once accepts are closed, a rename, a move to the top level, a folder create and a delete are each
+    /// refused with `AcceptsClosed` (the extension hears `WriteRetryLater`): nothing is queued, and no row is written
+    /// or changed. Reopened, the same rename queues.
+    #[test]
+    fn every_finder_change_after_the_close_queues_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        seed_bridge_row(&bridge, "folder-a", "A", None, FileStatus::Local, 0);
+        seed_bridge_row(&bridge, "in-a", "A/x.txt", Some("folder-a"), FileStatus::Local, 0);
+        let target = |file_id: Option<&str>, parent_id: Option<&str>, filename: &str, kind: FinderWriteItemKind| FinderWriteTarget {
+            file_id: file_id.map(str::to_string),
+            parent_id: parent_id.map(str::to_string),
+            filename: filename.into(),
+            rel_path: None,
+            kind,
+            contents_path: None,
+            content_type: None,
+            base_version_identifier: None,
+        };
+        bridge.db.close_finder_accepts().unwrap();
+        let changes: [(&str, anyhow::Result<FinderWriteOutcome>); 4] = [
+            ("a rename", bridge.queue_finder_modify(target(Some("in-a"), Some("folder-a"), "renamed.txt", FinderWriteItemKind::File))),
+            ("a move to the top level", bridge.queue_finder_modify(target(Some("in-a"), None, "x.txt", FinderWriteItemKind::File))),
+            ("a folder create", bridge.queue_finder_create(target(None, Some("folder-a"), "New folder", FinderWriteItemKind::Folder))),
+            ("a delete", bridge.queue_finder_delete("in-a", None)),
+        ];
+        for (what, result) in changes {
+            let error = result.expect_err(what);
+            assert!(error.is::<AcceptsClosed>(), "{what}: {error:#}");
+        }
+        assert!(bridge.db.list_due_operations(i64::MAX).unwrap().is_empty(), "nothing queued");
+        assert!(bridge.db.get_file_by_path("A/New folder").unwrap().is_none(), "the refused folder create left no row");
+        let row = bridge.db.get_file("in-a").unwrap().unwrap();
+        assert_eq!((row.path.as_str(), row.status), ("A/x.txt", FileStatus::Local), "the refused delete left the row as it was");
+        bridge.db.reopen_finder_accepts().unwrap();
+        bridge
+            .queue_finder_modify(target(Some("in-a"), Some("folder-a"), "renamed.txt", FinderWriteItemKind::File))
+            .expect("reopened, the rename queues: the refusals above were the fence");
+        assert_eq!(bridge.db.list_due_operations(i64::MAX).unwrap().len(), 1);
+    }
+```
+
+In `ingestion_writers_use_the_single_transaction_api` (`@184:engine_bridge.rs:18846-18901`), the row for the Finder create becomes `("pub fn queue_finder_create_from(", 1)`: its file branch still calls `upsert_file_with_contract` once, and its folder branch writes its row, its contract and its op in one call, `enqueue_finder_change`. After the loop:
+
+```rust
+        // Spec 2026-10-10 §5.2 step 6 (plan review I1): a Finder folder create writes its row and its contract in the
+        // same transaction as its op, behind the sign-out's fence, so a refused create leaves no row.
+        assert!(
+            body(production, "pub fn queue_finder_create_from(").contains("Some(crate::state_db::FinderFolderRow {"),
+            "the folder branch hands its row to the fenced enqueue"
+        );
+        let fenced = body(state_db, "    pub fn enqueue_finder_change(");
+        assert!(fenced.contains("upsert_file_conn(") && fenced.contains("set_file_contract_state_conn("), "{fenced}");
+```
+
+and its doc comment gains: "A Finder folder create writes its row and contract through `enqueue_finder_change`, with its op."
+
 In `ipc_socket.rs`'s tests:
 
 ```rust
-    /// U45: the extension is told to retry, as for a copy an engine-start sweep removed.
+    /// U45: the extension is told to retry, as for a copy an engine-start sweep removed: for a save, a rename or move,
+    /// a folder create and a delete alike (plan review I1).
     #[test]
     fn a_closed_accept_answers_write_retry_later() {
         let dir = tempfile::tempdir().unwrap();
         let db = crate::state_db::StateDb::open(dir.path().join("state.db")).unwrap();
         let error = anyhow::Error::new(crate::engine_bridge::AcceptsClosed);
         assert_eq!(write_refusal_category(&error), "accepts_closed");
-        let response = write_outcome_response("modify", &db, Err(anyhow::Error::new(crate::engine_bridge::AcceptsClosed)));
-        assert!(matches!(response, IpcResponse::WriteRetryLater { .. }), "{response:?}");
+        for op in ["create", "modify", "delete"] {
+            let response = write_outcome_response(op, &db, Err(anyhow::Error::new(crate::engine_bridge::AcceptsClosed)));
+            assert!(matches!(response, IpcResponse::WriteRetryLater { .. }), "{op}: {response:?}");
+        }
     }
 ```
 
@@ -3804,11 +4161,14 @@ In `keep.rs`'s tests:
         let (others, missing) = (set(&["r1"]), set(&[]));
         f.keep(Acknowledge::Asked { others: &others, missing: &missing }).unwrap();
         assert!(f.db.finder_accepts_closed().unwrap(), "a completed keep leaves them closed for the purge");
+        // `keep_unsent`'s own body (plan review M10: never the rest of the file, whose tests name both calls too).
         let source = include_str!("keep.rs");
-        let body = &source[source.find("pub(crate) fn keep_unsent(").unwrap()..];
+        let start = source.find("pub(crate) fn keep_unsent(").unwrap();
+        let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
         let close = body.find("close_finder_accepts()").expect("the close");
-        let read = body.find("WaitingChanges::read(").expect("the read");
+        let read = body.find("keep_after_close(").expect("the read, inside keep_after_close");
         assert!(close < read, "accepts are closed before the read");
+        assert!(!body.contains("WaitingChanges::read("), "the read is keep_after_close's, after the close");
     }
 ```
 
@@ -3821,6 +4181,7 @@ In `lib.rs`'s `sign_out_keep_tests` (Task 7's helpers):
         with_the_shared_state_dir(async {
             use std::os::unix::fs::PermissionsExt;
             let db = state_db_in_scratch();
+            let _reset = scratch_reset();
             let staged = queue_write(&db, "w1", "f1", b"bytes");
             let (state, _acct) = signed_out_state();
             recording_finder(&state);
@@ -3847,13 +4208,13 @@ In `lib.rs`'s `sign_out_keep_tests` (Task 7's helpers):
             });
             assert!(sign_out_with(&state, Some(&id), seam).await.is_err());
             assert!(!db.finder_accepts_closed().unwrap(), "a refused purge");
-            reset_scratch(&db);
         })
         .await;
     }
 
     /// Lead ruling on Q1: a quit between the keep step and the purge leaves the key on disk; the next launch reopens
-    /// accepts first, before the restore can start an engine.
+    /// accepts first, before the restore can start an engine. Plan review I4: the reopen is the first statement of
+    /// `restore_session_inner`, never in the wrapper, whose two statements the R1 pin holds exact.
     #[test]
     fn accepts_reopen_when_the_app_starts() {
         let dir = tempfile::tempdir().unwrap();
@@ -3862,13 +4223,16 @@ In `lib.rs`'s `sign_out_keep_tests` (Task 7's helpers):
         reopen_finder_accepts_in(dir.path());
         assert!(!db.finder_accepts_closed().unwrap());
         let production = super::finder_setup_command_tests::production_source();
-        let restore = super::finder_setup_command_tests::body_between(&production, "async fn restore_session_on_startup(", "\n}\n");
+        let restore = super::finder_setup_command_tests::body_between(&production, "async fn restore_session_inner(", "\n}\n");
         let reopen = restore.find("reopen_finder_accepts_at_startup()").expect("the launch reopens accepts");
-        assert!(reopen < restore.find("restore_session_inner(").unwrap(), "before the restore can start an engine");
+        assert!(reopen < restore.find("restore_stored_session(").expect("the restore"), "before the restore");
+        assert!(reopen < restore.find("start_engine_if_possible(").expect("the engine start"), "before any engine can start");
+        let first = restore.lines().skip(1).map(str::trim).find(|line| !line.is_empty() && !line.starts_with("//")).unwrap();
+        assert_eq!(first, "#[cfg(target_os = \"macos\")]", "the reopen opens the body:\n{restore}");
     }
 ```
 
-- [ ] **Step 2: Run them, expect FAIL.** Filters `a_finder_accept_after`, `accepts_reopen`, `an_accept_already_running`, `a_closed_accept`, `closes_accepts_first`, `a_cancelled_or_failed_sign_out`, `accepts_reopen_when_the_app_starts`. Expected: compile errors, then (with stubs) the assertions.
+- [ ] **Step 2: Run them, expect FAIL.** Filters `a_finder_accept_after`, `accepts_reopen`, `an_accept_already_running`, `every_finder_change_after_the_close`, `a_closed_accept`, `closes_accepts_first`, `a_cancelled_or_failed_sign_out`, `accepts_reopen_when_the_app_starts`, `ingestion_writers_use_the_single_transaction_api`. Expected: compile errors, then (with stubs) the assertions; the ingestion pin red on the folder branch's count (2, not 1).
 
 - [ ] **Step 3: Implement.** In `state_db.rs`:
 
@@ -3887,18 +4251,75 @@ const FINDER_ACCEPTS_CLOSED_KEY: &str = "finder_accepts_closed";
     AcceptsClosed,
 ```
 
+The one read of the key, for every transaction that needs it:
+
+```rust
+/// Whether a sign-out closed Finder accepts, read inside the caller's transaction (spec 2026-10-10 §15 question 3).
+fn finder_accepts_closed_conn(conn: &Connection) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sync_state WHERE key = ?1)",
+        params![FINDER_ACCEPTS_CLOSED_KEY],
+        |row| row.get(0),
+    )
+}
+```
+
 In `accept_finder_write`, as the first statement inside its `BEGIN IMMEDIATE` transaction (before the `journalled` read):
 
 ```rust
-        let closed: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sync_state WHERE key = ?1)",
-            params![FINDER_ACCEPTS_CLOSED_KEY],
-            |row| row.get(0),
-        )?;
-        if closed {
+        if finder_accepts_closed_conn(&tx)? {
             return Ok(AcceptOutcome::AcceptsClosed);
         }
 ```
+
+Plan review I1: the other Finder changes. `enqueue_operation`'s `INSERT … ON CONFLICT` moves, unchanged, into `fn insert_operation_conn(conn: &Connection, op: &PendingOperation) -> Result<()>`, and `enqueue_operation` becomes its lock plus that call. Beside it:
+
+```rust
+/// Spec 2026-10-10 §5.2 step 6 (plan review I1): what a fenced Finder enqueue did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinderEnqueue {
+    Queued,
+    /// A sign-out closed Finder accepts: nothing was written.
+    AcceptsClosed,
+}
+
+/// A Finder folder create's row (plan review I1), written in the same transaction as its op, so a refused create
+/// leaves no row behind.
+pub struct FinderFolderRow<'a> {
+    pub entry: &'a FileEntry,
+    pub parent_id: Option<&'a str>,
+}
+```
+
+and in `impl StateDb`:
+
+```rust
+    /// Spec 2026-10-10 §5.2 step 6 (plan review I1): every change the Finder IPC queues (a rename, a move, a folder
+    /// create with its row, a delete, and the watcher's and non-macOS writes) is queued in one `BEGIN IMMEDIATE`
+    /// transaction that reads the sign-out's fence first, as `accept_finder_write` does for a save. A closed fence
+    /// writes nothing. Engine-internal enqueues (`enqueue_operation`: pins, hydrates, restores) never read it.
+    pub fn enqueue_finder_change(&self, op: &PendingOperation, folder: Option<FinderFolderRow<'_>>) -> Result<FinderEnqueue> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if finder_accepts_closed_conn(&tx)? {
+            return Ok(FinderEnqueue::AcceptsClosed);
+        }
+        if let Some(folder) = folder {
+            // `upsert_file_with_contract`'s two steps, in this transaction.
+            upsert_file_conn(&tx, folder.entry)?;
+            let mut contract = get_file_contract_state_conn(&tx, &folder.entry.file_id)?
+                .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+            contract.item_kind = ItemKind::Folder;
+            contract.parent_id = folder.parent_id.map(str::to_string);
+            set_file_contract_state_conn(&tx, &contract)?;
+        }
+        insert_operation_conn(&tx, op)?;
+        tx.commit()?;
+        Ok(FinderEnqueue::Queued)
+    }
+```
+
+(`finder_accepts_closed` below reads through `finder_accepts_closed_conn` too.)
 
 In `impl StateDb`:
 
@@ -3927,11 +4348,7 @@ In `impl StateDb`:
     #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
     pub fn finder_accepts_closed(&self) -> Result<bool> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sync_state WHERE key = ?1)",
-            params![FINDER_ACCEPTS_CLOSED_KEY],
-            |row| row.get(0),
-        )
+        finder_accepts_closed_conn(&conn)
     }
 ```
 
@@ -3955,7 +4372,47 @@ impl std::fmt::Display for AcceptsClosed {
 impl std::error::Error for AcceptsClosed {}
 ```
 
-and in both matches (`@184:engine_bridge.rs:2633`, `:3047`): `crate::state_db::AcceptOutcome::AcceptsClosed => return Err(anyhow::Error::new(AcceptsClosed)),`. In `ipc_socket.rs`, `write_refusal_category` gains `if error.is::<crate::engine_bridge::AcceptsClosed>() { return "accepts_closed"; }` after the `StagedCopyGone` check, and `write_outcome_response` gains, after the `StagedCopyGone` arm:
+and in both matches (`@184:engine_bridge.rs:2633`, `:3047`): `crate::state_db::AcceptOutcome::AcceptsClosed => return Err(anyhow::Error::new(AcceptsClosed)),`.
+
+Plan review I1, the other changes. `enqueue_finder_operation` (`@184:engine_bridge.rs:3723-3773`) gains a last parameter, `folder: Option<crate::state_db::FinderFolderRow<'_>>`, and `#[allow(clippy::too_many_arguments)]` (now nine, as at `:1766`). It builds its `PendingOperation` as today; its last two statements (`self.db.enqueue_operation(&op)?;` and the `Ok(FinderWriteOutcome::Queued { … })`) become:
+
+```rust
+        // Spec 2026-10-10 §5.2 step 6 (plan review I1): the sign-out's fence is read in the transaction that queues
+        // the op, and a folder's row is written in it too.
+        match self.db.enqueue_finder_change(&op, folder)? {
+            crate::state_db::FinderEnqueue::AcceptsClosed => Err(anyhow::Error::new(AcceptsClosed)),
+            crate::state_db::FinderEnqueue::Queued => Ok(FinderWriteOutcome::Queued {
+                op_id,
+                file_id,
+                kind,
+                ignored: false,
+                message: "queued for encrypted sync".to_string(),
+            }),
+        }
+```
+
+The four callers that queue no folder (`:2464` the watcher's file create, `:2848` a content modify off the File Provider path, `:2887` a rename or move, `:3120` a delete) pass `None`. A refused delete returns before `set_status(Trashing)`, so its row is untouched, as for any failed enqueue (`:3132-3141`). In the folder branch of `queue_finder_create_from` (`:2389-2446`), the row is no longer written first: the `FileEntry` the `upsert_file_with_contract(…)` call built becomes `let entry = FileEntry { … };` (same fields), the call goes, and the enqueue passes it:
+
+```rust
+                self.enqueue_finder_operation(
+                    OperationKind::CreateFolder,
+                    Some(file_id),
+                    target.parent_id.clone(),
+                    Some(rel_path),
+                    payload,
+                    None,
+                    None,
+                    None,
+                    // The row, its contract (`Folder`, under its parent) and the op in one transaction (plan review I1),
+                    // so a nested child dispatched later still resolves this folder as its parent, and a refused create
+                    // leaves no row.
+                    Some(crate::state_db::FinderFolderRow { entry: &entry, parent_id: target.parent_id.as_deref() }),
+                )
+```
+
+The comment above the old call (the row "synchronously, the same way the File branch writes its `Uploading` row") stays true and moves to `let entry`. The file branch and the content modify are the watcher's and the non-macOS IPC's: on macOS a save goes through `accept_finder_write`, and on Windows and Linux the key is never set, so they never meet a closed fence; they go through the same fenced insert anyway.
+
+In `ipc_socket.rs`, `write_refusal_category` gains `if error.is::<crate::engine_bridge::AcceptsClosed>() { return "accepts_closed"; }` after the `StagedCopyGone` check, and `write_outcome_response` gains, after the `StagedCopyGone` arm:
 
 ```rust
         // Spec 2026-10-10, open question 3: a sign-out closed accepts after its engine stop. Nothing was queued; the
@@ -4033,23 +4490,33 @@ impl Drop for AcceptsReopenOnAbort {
 }
 ```
 
-In `clear_session_impl` (Task 7's wiring): right after `let kept = keep_for_sign_out(accepted.as_ref()).map_err(&kept_with)?;`, `#[cfg(target_os = "macos")] let mut reopen_accepts = AcceptsReopenOnAbort { armed: true };`; right after the `purge_local_data_for_sign_out(…).map_err(&kept_with)?;` call, before the `after_purge` seam, `#[cfg(target_os = "macos")] reopen_accepts.disarm();`. U10's deny-list does not list either. In `restore_session_on_startup` (`@184:lib.rs:1006`), the first statement: `#[cfg(target_os = "macos")] reopen_finder_accepts_at_startup();`.
+In `clear_session_impl` (Task 7's wiring): right after `let kept = keep_for_sign_out(accepted.as_ref()).map_err(&kept_with)?;`, `#[cfg(target_os = "macos")] let mut reopen_accepts = AcceptsReopenOnAbort { armed: true };`; right after the `purge_local_data_for_sign_out(…).map_err(&kept_with)?;` call, before the `after_purge` seam, `#[cfg(target_os = "macos")] reopen_accepts.disarm();`. U10's deny-list does not list either. In `restore_session_inner` (`@184:lib.rs:1015`), the first statement, before the Windows `SESSION_TRANSITION` lock and before anything that can start an engine (plan review I4: the wrapper `restore_session_on_startup` stays exactly its two statements):
 
-Rewrite the comment above `stop_engine_for_sign_out` (`@184:lib.rs:3159-3164`) so it no longer says no request can be served after the stop: "Then upload staging: every handed-over copy is removed. A request that arrives later reaches no daemon and fails transiently. One accept may still be running in `spawn_blocking`: the keep step closes accepts before it reads the queue, and reopens them if the sign-out stops (spec 2026-10-10 §5.2 step 6, §15 question 3)."
+```rust
+    // Spec 2026-10-10 §15 question 3 (lead ruling): a sign-out quit between its keep step and its purge left Finder
+    // accepts closed on disk. Reopen them before this restore can start an engine.
+    #[cfg(target_os = "macos")]
+    reopen_finder_accepts_at_startup();
+```
 
-- [ ] **Step 4: Run, expect PASS.** The seven filters: `ok. 1 passed` each; then filter `sign_out::keep::`: `ok. 13 passed`, and `sign_out_keep_tests`: Task 7's count plus 2.
+Rewrite the comment above `stop_engine_for_sign_out` (`@184:lib.rs:3159-3164`) so it no longer says no request can be served after the stop: "Then upload staging: every handed-over copy is removed. A request that arrives later reaches no daemon and fails transiently. One Finder write or change may still be running: a save, a rename, a move or a folder create in `spawn_blocking`, or a delete's synchronous enqueue, which an abort cannot stop once it started. The keep step closes accepts before it reads the queue, each of them reads that in the transaction that queues it, and a sign-out that stops reopens them (spec 2026-10-10 §5.2 step 6, §15 question 3)."
+
+- [ ] **Step 4: Run, expect PASS.** The eight new-test filters: `ok. 1 passed` each (`accepts_reopen` matches two tests: `ok. 2 passed`); then filter `sign_out::keep::`: `ok. 14 passed`; `sign_out_keep_tests`: Task 7's count plus 2 (`ok. 21 passed`); and, at their baseline counts, `ingestion_writers_use_the_single_transaction_api`, `test_queue_finder_writes_refuse_to_enqueue_once_engine_is_stopping`, `a_finder_move_to_the_top_level` and `every_return_of_the_startup_restore_shuts_the_adoption_window` (the R1 pin, untouched).
 
 - [ ] **Step 5: Mutations, each RED then reverted.**
   1. Remove the check in `accept_finder_write`: `a_finder_accept_after…` red (`Queued`).
   2. Remove the reopen in `engine_start_repair`: `accepts_reopen…` red on the first `assert!`.
   3. Make `close_finder_accepts` an in-memory flag that takes no SQLite lock (a `static CLOSED: AtomicBool` set and read instead of the key): `an_accept_already_running…` red, because the read runs before the running accept commits.
-  4. Move `close_finder_accepts()` below `WaitingChanges::read(` (into `keep_after_close`): `the_keep_step_closes_accepts_first…` red on the order.
+  4. Move `close_finder_accepts()` below `WaitingChanges::read(` (into `keep_after_close`): `the_keep_step_closes_accepts_first…` red on "the close" (it is no longer in `keep_unsent`'s body).
   5. Map `AcceptsClosed` to `IpcResponse::Error`: `a_closed_accept…` red.
   6. Drop the reopen in `keep_unsent`: `the_keep_step_closes_accepts_first…` red on "a refused keep reopens accepts", and `a_cancelled_or_failed_sign_out…` red on "a failed keep".
   7. Never arm the guard (`armed: false`): `a_cancelled_or_failed_sign_out…` red on "a refused purge".
-  8. Drop `reopen_finder_accepts_at_startup()` from `restore_session_on_startup`, or move it below `restore_session_inner(`: `accepts_reopen_when_the_app_starts` red.
+  8. Drop `reopen_finder_accepts_at_startup()` from `restore_session_inner`, or move it below `restore_stored_session(`: `accepts_reopen_when_the_app_starts` red.
+  9. In `enqueue_finder_operation`, queue with `self.db.enqueue_operation(&op)?` again (no fence): `every_finder_change_after_the_close…` red on "a rename" (`Ok`, not `AcceptsClosed`).
+  10. Keep the folder branch's two calls (write the row with `upsert_file_with_contract`, then enqueue with `None`): `every_finder_change_after_the_close…` red on "the refused folder create left no row", and the ingestion pin red on the count (2).
+  11. Move the reopen into `restore_session_on_startup`, above `restore_session_inner(app).await;`: the R1 pin `every_return_of_the_startup_restore_shuts_the_adoption_window` red, and `accepts_reopen_when_the_app_starts` red on its `expect`.
 
-- [ ] **Step 6: The task gate** with `<N>` = 8 and `<L>` = `L0 + 60`.
+- [ ] **Step 6: The task gate** with `<N>` = 8 and `<L>` = `L0 + 64`.
 
 - [ ] **Step 7: Commit.**
 
@@ -4161,9 +4628,11 @@ git commit -m "feat(macos): a sign-out closes Finder accepts before it reads wha
             return; // reached only if the crash point was never hit; the parent then fails on `reached`
         }
         let f1 = |c: &CrashDir| c.kept_root().join("event").to_string_lossy().into_owned();
+        // Resolved: the writer records its resolved root (plan review I5), and these compare with what it recorded.
+        let crash_dir = |scratch: &tempfile::TempDir| CrashDir { dir: std::fs::canonicalize(scratch.path()).unwrap() };
         for (point, missing) in [("AfterKeepSave", 0), ("AfterFirstGroup", 0), ("BetweenWaitingCopies", 1), ("BeforeRowClear", 3)] {
             let scratch = tempfile::tempdir().unwrap();
-            let c = CrashDir { dir: scratch.path().to_path_buf() };
+            let c = crash_dir(&scratch);
             c.seed();
             c.crash_at(point);
             let (missing_files, earlier, row) = c.count().await;
@@ -4176,7 +4645,7 @@ git commit -m "feat(macos): a sign-out closes Finder accepts before it reads wha
         }
         // (e) From (c)'s leftovers, a second sign-out dies at (c) again: the list holds both, oldest first.
         let scratch = tempfile::tempdir().unwrap();
-        let c = CrashDir { dir: scratch.path().to_path_buf() };
+        let c = crash_dir(&scratch);
         c.seed();
         c.crash_at("BetweenWaitingCopies");
         c.crash_at("BetweenWaitingCopies");
@@ -4185,7 +4654,9 @@ git commit -m "feat(macos): a sign-out closes Finder accepts before it reads wha
         assert_eq!(crate::sign_out::kept_record::unfinished_at(&config).unwrap(), [f1(&c), f2.clone()]);
         assert_eq!(c.count().await.2.as_deref(), Some(f2.as_str()));
         assert_eq!(std::fs::read(Path::new(&f1(&c)).join("w1.txt")).unwrap(), b"w1", "F1 still holds its files");
-        // (f) A sign-out that completes clears the list and never touches 1882's key.
+        // (f) From (e)'s leftovers, a sign-out that completes clears the list and never touches 1882's key. Its keep
+        // makes the newest folder, F3 (F2 is (e)'s), and the row names it (plan review M4; spec U42 amended: it ran
+        // from (c)'s leftovers and named F2).
         crate::finder_removal::remember_kept_folder_at(&config, "/macos/kept").unwrap();
         let kept = {
             let db = c.db();
@@ -4202,12 +4673,16 @@ git commit -m "feat(macos): a sign-out closes Finder accepts before it reads wha
             })
             .unwrap()
         };
+        let f3 = c.kept_root().join("event (3)");
+        assert_eq!(kept.folder.as_deref(), Some(f3.as_path()), "a file still had a copy, so (f) kept it in a third folder");
         crate::config::CONFIG_DIR_OVERRIDE
             .scope(c.dir.join("config"), purge_local_data_for_sign_out_async(c.dir.clone(), kept))
             .await;
         let text = std::fs::read_to_string(&config).unwrap();
         assert!(!text.contains("kept_unsent_unfinished"), "{text}");
-        assert_eq!(DesktopConfig::load_from(&config).unwrap().kept_unsynced_folder.as_deref(), Some("/macos/kept"));
+        let after = DesktopConfig::load_from(&config).unwrap();
+        assert_eq!(after.kept_unsent_folder.as_deref(), Some(f3.to_string_lossy().as_ref()), "the row names the newest folder");
+        assert_eq!(after.kept_unsynced_folder.as_deref(), Some("/macos/kept"));
     }
 
     async fn purge_local_data_for_sign_out_async(dir: PathBuf, kept: KeptSet) {
@@ -4265,8 +4740,9 @@ In `keep_unsent`, right after the durable save succeeded: `#[cfg(test)] super::c
   2. Move the durable save to just before the second group: `AfterKeepSave` and `AfterFirstGroup` red.
   3. `record_kept_unsent` replaces the list: (e) red on `[F1, F2]`.
   4. Never clear the list: (f) red.
+  5. `record_kept_unsent` keeps the older `kept_unsent_folder` when one is set (`get_or_insert`): (e) red on "F2", and (f) red on "the row names the newest folder".
 
-- [ ] **Step 6: The task gate** with `<N>` = 9 and `<L>` = `L0 + 61`.
+- [ ] **Step 6: The task gate** with `<N>` = 9 and `<L>` = `L0 + 65`.
 
 - [ ] **Step 7: Commit.**
 
@@ -4389,6 +4865,67 @@ In `sign_out_keep_tests`:
         assert!(body.contains("reveal_item_in_dir("), "{body}");
         assert!(!body.contains("Command::new(\"open\")") && !body.contains("\"/usr/bin/open\""), "{body}");
         assert!(body.contains("\"kept folder reveal requested\""), "D2 reads this line from stdout");
+    }
+
+    /// Everything `tracing` emits on this thread at `info` and above while `body` runs, as text: a copy of
+    /// `engine_bridge.rs`'s `capture_logs_async` (`@184:engine_bridge.rs:16200-16235`). `#[tokio::test]` runs the
+    /// future on the test's own thread, so a thread-local subscriber sees all of it. Task 14 uses it too.
+    async fn capture_logs_async(body: impl std::future::Future<Output = ()>) -> String {
+        #[derive(Clone)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let writer = Capture(buffer.clone());
+        // tracing caches each callsite's interest for the whole process. While only ONE dispatcher is alive,
+        // tracing-core takes that interest from the registering thread's own default (`has_just_one`), so a callsite
+        // first hit by another test thread, which has no subscriber, is cached as "never" and this capture misses its
+        // events. A second live dispatcher keeps registration on the all-dispatchers path.
+        let _second_dispatcher = tracing::Dispatch::new(tracing_subscriber::registry());
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+        body.await;
+        drop(guard);
+        let bytes = buffer.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    /// U25 across a keeping sign-out (plan review M5: the keep-step capture above misses every line the sign-out logs
+    /// around it): no line of the whole sign-out names a kept path or a file name.
+    #[tokio::test]
+    async fn a_keeping_sign_out_logs_no_path_or_name() {
+        with_the_shared_state_dir(async {
+            let db = state_db_in_scratch();
+            let _reset = scratch_reset();
+            db.hold_lock_for_test()
+                .execute("INSERT INTO files (file_id, path) VALUES ('secret', 'Secret Project/plan for Q4.docx')", [])
+                .unwrap();
+            queue_write(&db, "ws", "secret", b"plan"); // its `INSERT OR IGNORE` keeps the row above
+            let (state, _acct) = signed_out_state();
+            recording_finder(&state);
+            let id = ask(&state, "macos-settings");
+            let logs = capture_logs_async(async {
+                let done = sign_out_with(&state, Some(&id), no_seam()).await.unwrap();
+                assert_eq!(done.kept_unsent.map(|kept| kept.files), Some(1));
+            })
+            .await;
+            assert!(logs.contains("kept unsent changes"), "{logs}");
+            for leaked in ["Secret Project", "plan for Q4", ".docx", "Changes not sent"] {
+                assert!(!logs.contains(leaked), "{leaked} in {logs}");
+            }
+        })
+        .await;
     }
 
     /// W9, §9: both sign-out routes surface both folders, through one function.
@@ -4554,10 +5091,7 @@ In `lib.rs`, beside `surface_kept_folder`:
 /// the keep step already; macOS's is saved for its row here, as before (the one route that tells the windows). Neither
 /// path is logged.
 fn surface_sign_out_folders(app: &tauri::AppHandle, result: &Result<SignedOut, SignOutFailure>) {
-    let (macos, ours) = match result {
-        Ok(done) => (done.preserved_location.as_deref(), done.kept_unsent.as_ref()),
-        Err(failure) => (failure.preserved_location.as_deref(), failure.kept_unsent.as_ref()),
-    };
+    let (macos, ours) = sign_out_folders(result);
     match macos {
         Some(location) => save_kept_folder_for_row(app, location),
         None if ours.is_some() => emit_kept_folder_changed(app),
@@ -4574,6 +5108,15 @@ fn surface_sign_out_folders(app: &tauri::AppHandle, result: &Result<SignedOut, S
             tracing::debug!("kept-folder alert closed");
         });
     tracing::debug!("kept-folder alert shown");
+}
+
+/// The two folders a sign-out's result carries, whether it succeeded or failed after the removal (1882 review I1):
+/// macOS's, then ours. It replaces `sign_out_kept_folder` (`@184:lib.rs:2805-2811`), which named macOS's only.
+fn sign_out_folders(result: &Result<SignedOut, SignOutFailure>) -> (Option<&str>, Option<&KeptUnsent>) {
+    match result {
+        Ok(done) => (done.preserved_location.as_deref(), done.kept_unsent.as_ref()),
+        Err(failure) => (failure.preserved_location.as_deref(), failure.kept_unsent.as_ref()),
+    }
 }
 
 /// U26: "Show in Finder" reveals only the folder saved for the row.
@@ -4606,9 +5149,15 @@ fn show_kept_unsent_folder(app: tauri::AppHandle, path: String) -> Result<(), St
 }
 ```
 
-Replace `surface_kept_folder(&app, sign_out_kept_folder(&result));` with `surface_sign_out_folders(&app, &result);` in `clear_session` and in the menu's `DesktopMenuAction::SignOut` arm. Register the three commands in `generate_handler!`. If an 1882 source pin names the old call (`grep -n "sign_out_kept_folder(&result)" src-tauri/src/*.rs`), point it at `surface_sign_out_folders(&app, &result)` and keep what it asserts: both routes surface the folder before they return. `sign_out_kept_folder` then has no caller: delete it.
+Replace `surface_kept_folder(&app, sign_out_kept_folder(&result));` with `surface_sign_out_folders(&app, &result);` in `clear_session` and in the menu's `DesktopMenuAction::SignOut` arm. Register the three commands in `generate_handler!`.
 
-- [ ] **Step 4: Run, expect PASS.** The four filters: `ok. 2 passed`, `ok. 1 passed`, `ok. 2 passed`, `ok. 1 passed`. Then filter `rb3_f1` and `test_1882`: their baseline counts.
+`sign_out_kept_folder` (`@184:lib.rs:2805-2811`) then has no production caller, and is deleted (plan review M2) once its users move to `sign_out_folders`, the function `surface_sign_out_folders` reads its inputs through:
+- three tests call it (`@184:lib.rs:21696`, `:21702`, `:21732`): `sign_out_kept_folder(&result)` becomes `sign_out_folders(&result).0`, and the alert line at `:21702`, `finder_removal::kept_folder_alert(sign_out_kept_folder(&result)).map(|(_, body)| body)`, becomes `sign_out::copy::sign_out_alert(None, sign_out_folders(&result).0).map(|(_, body)| body)`, the body `surface_sign_out_folders` raises when only macOS kept a folder. Their expected values do not change (1882's body, byte for byte: U23's "macOS's only" case);
+- four 1882 source pins quote the old call (`@184:lib.rs:31278`, `:31281`, `:31480`, `:31483`): each `contains("surface_kept_folder(&app, sign_out_kept_folder(&result));")` becomes `contains("surface_sign_out_folders(&app, &result);")`, and what they assert stays: both routes surface the folder before they return.
+
+`grep -n "sign_out_kept_folder" src-tauri/src/*.rs` then prints nothing.
+
+- [ ] **Step 4: Run, expect PASS.** The four filters: `ok. 2 passed`, `ok. 1 passed`, `ok. 2 passed`, `ok. 1 passed`; then `a_keeping_sign_out_logs`: `ok. 1 passed`. Then filter `rb3_f1` and `test_1882`: their baseline counts (the three rewritten tests and the four pins among them).
 
 - [ ] **Step 5: Mutations, each RED then reverted.**
   1. `p1(0)` returns `Some("Sending 0 changes…")`: U24 red.
@@ -4619,8 +5168,9 @@ Replace `surface_kept_folder(&app, sign_out_kept_folder(&result));` with `surfac
   6. Log the folder in `log_kept` (`folder = ?kept.folder`): U25 red.
   7. `reveal_target` returns `Ok(path)` always: U26 red.
   8. Reveal with `std::process::Command::new("open").arg("-R")`: U31 red.
+  9. Log the kept folder in `keep_for_sign_out` (`tracing::info!(folder = ?kept.folder, "kept for the sign-out")` on its `Ok`): `a_keeping_sign_out_logs_no_path_or_name` red on "Changes not sent" (and `logs_never_carry…` stays green: it captures the keep step alone).
 
-- [ ] **Step 6: The task gate** with `<N>` = 10 and `<L>` = `L0 + 67`.
+- [ ] **Step 6: The task gate** with `<N>` = 10 and `<L>` = `L0 + 72`.
 
 - [ ] **Step 7: Commit.**
 
@@ -4636,8 +5186,8 @@ git commit -m "feat(macos): one alert names the kept folder and macOS's; the row
 **Files:**
 - Create: `src-tauri/src/sign_out/send_phase.rs` (pure: the end decision, the progress, the bound)
 - Modify: `src-tauri/src/sign_out/mod.rs` (`SignOutState.phase`), `src-tauri/src/sign_out/snapshot.rs` (`AskSnapshot.any_live`), `src-tauri/src/sign_out/waiting.rs` (`readiness`)
-- Modify: `src-tauri/src/runner.rs`: `SendPhaseLink`; `EngineRunner` (`@184:runner.rs:617-688`) and `RunnerControls` (`:918-924`) carry it; `run` attaches the link monitor (`:1119`) and gains the third `select!` arm (`:1298-1302`)
-- Modify: `src-tauri/src/engine_bridge.rs`: `TransferLoopOutcome` (`@184:engine_bridge.rs:633-646`) gains three signals, set in the failure branch (`:1183-1196`)
+- Modify: `src-tauri/src/runner.rs`: `SendPhaseLink`; `EngineRunner` (`@184:runner.rs:617-688`) and `RunnerControls` (`:918-924`) carry it; `run` attaches the link monitor (`:1119`), and its loop's `select!` (`:1297-1565`) becomes a `match` on `next_wake`, with the phase's wake as a third case and the tick's queue step (`:1421`) noting its outcome while a phase is armed (plan review I2, M13)
+- Modify: `src-tauri/src/engine_bridge.rs`: `TransferLoopOutcome` (`@184:engine_bridge.rs:632-646`) gains three signals, set in the failure branch (`:1183-1196`), and `Default`
 - Modify: `src-tauri/src/state_db.rs`: `make_due_for_send_phase`
 - Modify: `src-tauri/src/lib.rs`: `sign_out_count`, `sign_out_send_start`, `sign_out_send_stop` (macOS, with same-signature stubs elsewhere that answer an error), the phase driver, registration in `generate_handler!`
 - Test: `send_phase.rs`, `state_db.rs`, `engine_bridge.rs`, `runner.rs`, `lib.rs` `sign_out_keep_tests`
@@ -4646,12 +5196,12 @@ git commit -m "feat(macos): one alert names the kept folder and macOS's; the row
 - Consumes: `count_ask`, `read_waiting_changes` (Task 7), `SnapshotStore` (Task 7), `send_readiness`, `SendConditions`, `NotSending` (Task 1), `link_health::{LinkMonitor, classify_error}`, `is_curable_refusal`, `OperationFailureClass::Auth`.
 - Produces:
   - `send_phase::{SIGN_OUT_SEND_LIMIT, PhaseEnd, PhaseObservation, PhaseStep, SendPhase, phase_end, RunningPhase}`. `PhaseEnd` serializes snake_case: `all_sent`, `held`, `time_limit`, `stopped`, `closed`, `offline`, `session`, `engine_stopped`, `account` (Q2 ruling).
-  - `runner::{SendPhaseLink, AttemptSignals}`; `EngineRunner::send_phase(&self) -> Arc<SendPhaseLink>`; `SendPhaseLink::{arm, disarm, is_armed, wake, link_failed, signals, note}`; `runner::phase_step_due(armed: bool, paused: bool, last_run: Option<Instant>, now: Instant) -> bool`.
+  - `runner::{SendPhaseLink, AttemptSignals, Wake}`; `EngineRunner::send_phase(&self) -> Arc<SendPhaseLink>`; `SendPhaseLink::{arm, disarm, is_armed, wake, link_failed, signals, note}`; `runner::phase_step_due(armed: bool, paused: bool, last_run: Option<std::time::Instant>, now: std::time::Instant) -> bool`; `runner::next_wake(cancel: &mut oneshot::Receiver<()>, tick: &mut tokio::time::Interval, send_phase: &SendPhaseLink) -> Wake` (plan review I2).
   - `TransferLoopOutcome.{link_failed, session_refused, account_refused}: bool`.
   - `StateDb::make_due_for_send_phase(&self, now: i64) -> rusqlite::Result<usize>`.
   - `SignOutState.phase: std::sync::Mutex<Option<RunningPhase>>`; `RunningPhase { ask_id, owner, stop: Arc<AtomicBool>, closed: Arc<AtomicBool> }`.
   - Commands: `sign_out_count(window) -> Result<SignOutCount, String>` (`{ askId, files, copiedFiles, others, missingFiles, earlierFolders, canSend, notSending }`); `sign_out_send_start(window, ask_id: String) -> Result<(), String>`; `sign_out_send_stop() -> Result<(), String>`. Events to the starting window: `sign-out-send-progress` `{ changesLeft }`, `sign-out-send-ended` `{ reason, ask }`.
-  - `lib.rs`: `fn start_send_phase(sign_out: &SignOutState, ask_id: &str, owner: &str, link: Option<Arc<runner::SendPhaseLink>>) -> Result<Option<PhaseRun>, String>`, `fn end_send_phase(sign_out: &SignOutState, link: Option<&runner::SendPhaseLink>)`.
+  - `lib.rs`: `fn start_send_phase(sign_out: &SignOutState, ask_id: &str, owner: &str, link: Option<Arc<runner::SendPhaseLink>>) -> Result<Option<PhaseRun>, String>`, `fn end_send_phase(sign_out: &SignOutState, link: Option<&runner::SendPhaseLink>)`, `fn observe_phase(run: &PhaseRun, waiting: &WaitingChanges, conditions: SendConditions) -> PhaseObservation` (the driver's step, plan review I7).
 
 - [ ] **Step 1: Write the failing tests.** In `send_phase.rs`:
 
@@ -4830,7 +5380,8 @@ In `engine_bridge.rs`'s tests (they reach the private `next_attempt_count` and t
 In `runner.rs`'s tests:
 
 ```rust
-    /// U35: the third arm runs the queue step alone, at most once a second, never while paused or disarmed.
+    /// U35: the phase's wake runs the queue step alone, at most once a second, never while paused or disarmed, and it
+    /// notes what each attempt met; the tick notes its own attempts while a phase is armed (plan review M13).
     #[test]
     fn the_send_phase_runs_the_queue_step_alone() {
         let start = std::time::Instant::now();
@@ -4847,12 +5398,61 @@ In `runner.rs`'s tests:
         assert!(!phase_step_due(true, true, None, start), "not while paused");
         assert!(!phase_step_due(false, false, None, start), "never once disarmed");
         let source = include_str!("runner.rs");
-        let arm = &source[source.find("_ = send_phase.wake.notified(), if send_phase.is_armed() =>").expect("the third arm")..];
+        let arm = &source[source.find("Wake::Phase => {").expect("the phase's arm")..];
         let arm = &arm[..arm.find("\n            }\n").unwrap()];
         assert!(arm.contains("process_due_operations("), "{arm}");
+        assert!(arm.contains("send_phase.note(&outcome)"), "plan review I7: every attempt is noted:\n{arm}");
         for denied in ["sync_tick_outcome(", "refresh_shared_roots(", "sweep_", "run_known_folder_mirror("] {
             assert!(!arm.contains(denied), "{denied} in the arm");
         }
+        let tick = &source[source.find("Wake::Tick => {").expect("the tick's arm")..source.find("Wake::Phase => {").unwrap()];
+        assert!(tick.contains("send_phase.note(&outcome);"), "plan review M13: the tick's attempts count too");
+        // Plan review I2: no precondition on the wake. `select!` reads one when it starts waiting, so an arm disabled
+        // then stays disabled until another arm fires: up to a 30 s tick.
+        let wait = &source[source.find("async fn next_wake(").expect("next_wake")..];
+        let wait = &wait[..wait.find("\n}\n").unwrap()];
+        assert!(wait.contains("_ = send_phase.wake.notified() => Wake::Phase,"), "{wait}");
+        assert!(!wait.contains(", if "), "no arm of the wait has a precondition:\n{wait}");
+    }
+
+    /// U35 (plan review I2): a phase armed while the runner already waits between ticks wakes it at once, not at its
+    /// next tick 30 s on.
+    #[tokio::test]
+    async fn a_phase_armed_while_the_runner_waits_wakes_it_at_once() {
+        let send_phase = Arc::new(SendPhaseLink::default());
+        let (_keep_open, mut cancel) = oneshot::channel::<()>();
+        let mut tick = tokio::time::interval(TICK_INTERVAL);
+        assert_eq!(next_wake(&mut cancel, &mut tick, &send_phase).await, Wake::Tick, "an interval's first tick is at once");
+        let waiter = {
+            let send_phase = send_phase.clone();
+            tokio::spawn(async move { next_wake(&mut cancel, &mut tick, &send_phase).await })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await; // the runner now waits, 29.95 s from its next tick
+        let armed_at = std::time::Instant::now();
+        send_phase.arm();
+        let woke = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("woken within a second of the arm, not at the next tick");
+        assert_eq!(woke.unwrap(), Wake::Phase);
+        assert!(armed_at.elapsed() < Duration::from_secs(1));
+    }
+
+    /// U46's chain, link by link (plan review I7): what an attempt met reaches the phase's signals, signals add up
+    /// within a phase, and arming a new phase forgets the last one's.
+    #[test]
+    fn an_attempts_refusal_reaches_the_phase_signals() {
+        use crate::engine_bridge::TransferLoopOutcome;
+        let link = SendPhaseLink::default();
+        link.arm();
+        assert_eq!(link.signals(), AttemptSignals::default());
+        link.note(&TransferLoopOutcome { account_refused: true, ..Default::default() });
+        assert_eq!(link.signals(), AttemptSignals { account_refused: true, ..Default::default() });
+        link.note(&TransferLoopOutcome { link_failed: true, ..Default::default() });
+        assert_eq!(link.signals(), AttemptSignals { account_refused: true, link_failed: true, session_refused: false }, "they add up");
+        link.note(&TransferLoopOutcome { session_refused: true, ..Default::default() });
+        assert!(link.signals().session_refused);
+        link.arm();
+        assert_eq!(link.signals(), AttemptSignals::default(), "a new phase starts with none");
     }
 ```
 
@@ -4864,6 +5464,7 @@ In `lib.rs`'s `sign_out_keep_tests`:
     async fn the_send_phase_is_owned_by_rust() {
         with_the_shared_state_dir(async {
             let db = state_db_in_scratch();
+            let _reset = scratch_reset();
             queue_write(&db, "w1", "f1", b"bytes");
             let state = AppState::default();
             let id = ask(&state, "macos-settings");
@@ -4875,9 +5476,52 @@ In `lib.rs`'s `sign_out_keep_tests`:
             assert!(start_send_phase(&state.sign_out, &id, "macos-settings", Some(link.clone())).unwrap().is_none(), "a second start starts nothing");
             end_send_phase(&state.sign_out, Some(&link));
             assert!(!link.is_armed() && state.sign_out.phase.lock().unwrap().is_none());
-            reset_scratch(&db);
         })
         .await;
+    }
+
+    /// U46, the chain past the bridge (plan review I7): what the runner noted on the phase's link ends the phase at
+    /// the driver's first observation of it, long before the limit: `account` for a refusal the account cures, and
+    /// `offline` and `session` for an attempt's link failure and refused session (U16 reads those from an attempt
+    /// alone). `observe_phase` is the driver's own step, so this is the driver's reading, not a copy of it.
+    #[test]
+    fn an_attempts_refusal_ends_the_phase_at_its_first_observation() {
+        use crate::engine_bridge::TransferLoopOutcome;
+        use sign_out::send_phase::{PhaseEnd, PhaseStep, SIGN_OUT_SEND_LIMIT, SendPhase};
+        let waiting = sign_out::waiting::WaitingChanges {
+            files: Vec::new(),
+            others: vec![sign_out::waiting::OtherChange { op_id: "r1".into(), live: true }],
+        };
+        let good = sign_out::waiting::SendConditions {
+            engine_running: true,
+            vault_unlocked: true,
+            session_expired: false,
+            link_failed: false,
+            sync_paused: false,
+        };
+        for (outcome, end) in [
+            (TransferLoopOutcome { account_refused: true, ..Default::default() }, PhaseEnd::Account),
+            (TransferLoopOutcome { link_failed: true, ..Default::default() }, PhaseEnd::Offline),
+            (TransferLoopOutcome { session_refused: true, ..Default::default() }, PhaseEnd::Session),
+        ] {
+            let link = Arc::new(runner::SendPhaseLink::default());
+            link.arm();
+            let run = PhaseRun {
+                owner: "macos-settings".into(),
+                link: Some(link.clone()),
+                stop: Default::default(),
+                closed: Default::default(),
+                started: std::time::Instant::now(),
+                changes_at_start: 1,
+            };
+            let mut phase = SendPhase::default();
+            assert_eq!(phase.observe(&observe_phase(&run, &waiting, good)), PhaseStep::Progress(1), "nothing noted yet: it runs");
+            link.note(&outcome);
+            let observation = observe_phase(&run, &waiting, good);
+            assert!(observation.elapsed < SIGN_OUT_SEND_LIMIT);
+            assert_eq!(phase.observe(&observation), PhaseStep::End(end), "{outcome:?}");
+            assert_eq!(serde_json::to_value(end).unwrap(), end.as_str(), "the reason the ask's A5 line is chosen by");
+        }
     }
 
     /// §5.1, the contract: `sign_out_count`'s answer.
@@ -4892,7 +5536,7 @@ In `lib.rs`'s `sign_out_keep_tests`:
     }
 ```
 
-- [ ] **Step 2: Run them, expect FAIL.** Filters `sign_out::send_phase`, `the_send_phase_makes`, `never_touches_parked`, `a_phase_never_parks`, `a_refusal_the_account_cures`, `runs_the_queue_step_alone`, `is_owned_by_rust`, `contract_shape`. Expected: compile errors.
+- [ ] **Step 2: Run them, expect FAIL.** Filters `sign_out::send_phase`, `the_send_phase_makes`, `never_touches_parked`, `a_phase_never_parks`, `a_refusal_the_account_cures`, `runs_the_queue_step_alone`, `a_phase_armed_while_the_runner_waits`, `an_attempts_refusal_reaches_the_phase_signals`, `an_attempts_refusal_ends_the_phase`, `is_owned_by_rust`, `contract_shape`. Expected: compile errors.
 
 - [ ] **Step 3: Implement.**
 
@@ -5046,7 +5690,7 @@ and `send_readiness` becomes `readiness(conditions, waiting.is_empty(), waiting.
 
 ```rust
 /// Spec 2026-10-10 §6.2 (task 1887): the sign-out's send phase, as the runner sees it. Armed only while a phase runs;
-/// the runner's third `select!` arm runs the queue step alone then.
+/// the runner's phase wake (`Wake::Phase`) runs the queue step alone then.
 #[derive(Default)]
 pub struct SendPhaseLink {
     armed: AtomicBool,
@@ -5096,19 +5740,51 @@ impl SendPhaseLink {
     }
 }
 
-/// The third arm's gate (U35): armed, not paused, and at most once a second.
-pub(crate) fn phase_step_due(armed: bool, paused: bool, last_run: Option<Instant>, now: Instant) -> bool {
+/// The phase arm's gate (U35): armed, not paused, and at most once a second. (`runner.rs` imports `Duration` but not
+/// `Instant`, plan review M10.)
+pub(crate) fn phase_step_due(armed: bool, paused: bool, last_run: Option<std::time::Instant>, now: std::time::Instant) -> bool {
     armed && !paused && last_run.is_none_or(|last| now.duration_since(last) >= Duration::from_secs(1))
+}
+
+/// What woke the runner's loop (spec 2026-10-10 §6.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Wake {
+    Cancel,
+    Tick,
+    Phase,
+}
+
+/// The loop's one wait, in the order `run`'s `select!` always had (`biased`: the cancel first, then the tick), plus the
+/// send phase's wake. Plan review I2: the phase's arm has no precondition. `select!` evaluates an `if` precondition once,
+/// when it starts waiting, so an arm disabled then cannot be woken by `notify_one` until another arm fires: a phase
+/// armed while the runner waits would get no queue step until the next tick, up to 30 s later. The `Notify` fires only
+/// when `arm()` or the phase's driver wakes it (a wake with no phase running finds `phase_step_due` false), and
+/// `notify_one` stores a permit when nobody waits, so a wake sent mid-tick is not lost.
+async fn next_wake(cancel: &mut oneshot::Receiver<()>, tick: &mut tokio::time::Interval, send_phase: &SendPhaseLink) -> Wake {
+    tokio::select! {
+        biased;
+        _ = cancel => Wake::Cancel,
+        _ = tick.tick() => Wake::Tick,
+        _ = send_phase.wake.notified() => Wake::Phase,
+    }
 }
 ```
 
-`EngineRunner` gains `send_phase: Arc<SendPhaseLink>`, made in `spawn` (`let send_phase = Arc::new(SendPhaseLink::default());`), passed in `RunnerControls { …, send_phase: send_phase.clone() }`, kept on `Self`, and handed out by `pub fn send_phase(&self) -> Arc<SendPhaseLink> { self.send_phase.clone() }`. `for_test_with_task` makes a default one. In `run`, after `let link = api.link();`: `send_phase.attach(link.clone());`, and before the loop `let mut last_phase_run: Option<Instant> = None;`. The `select!` gains, after the tick arm:
+`EngineRunner` gains `send_phase: Arc<SendPhaseLink>`, made in `spawn` (`let send_phase = Arc::new(SendPhaseLink::default());`), passed in `RunnerControls { …, send_phase: send_phase.clone() }`, kept on `Self`, and handed out by `pub fn send_phase(&self) -> Arc<SendPhaseLink> { self.send_phase.clone() }`. `for_test_with_task` makes a default one. In `run`, after `let link = api.link();`: `send_phase.attach(link.clone());`, and before the loop `let mut last_phase_run: Option<std::time::Instant> = None;`.
+
+The loop's `tokio::select! { biased; _ = &mut cancel => break, _ = tick.tick() => { … } }` (`@184:runner.rs:1297-1565`) becomes a `match` on `next_wake`. The tick's body stays as it is, at the same indentation:
 
 ```rust
+    loop {
+        match next_wake(&mut cancel, &mut tick, &send_phase).await {
+            Wake::Cancel => break,
+            Wake::Tick => {
+                // … today's tick body (`@184:runner.rs:1301-1563`), unchanged but for the note below …
+            }
             // Spec 2026-10-10 §6.2: while a sign-out's send phase is armed, the queue step alone, at most once a second.
             // Never the remote tick, the sweeps or the shared-root refresh.
-            _ = send_phase.wake.notified(), if send_phase.is_armed() => {
-                let now = Instant::now();
+            Wake::Phase => {
+                let now = std::time::Instant::now();
                 if !phase_step_due(send_phase.is_armed(), sync_paused.load(Ordering::Relaxed), last_phase_run, now) {
                     continue;
                 }
@@ -5122,7 +5798,19 @@ pub(crate) fn phase_step_due(armed: bool, paused: bool, last_run: Option<Instant
                     Err(e) => tracing::warn!(error = %e, "operation queue processing failed during the send phase"),
                 }
             }
+        }
+    }
 ```
+
+In the tick's own queue step (`@184:runner.rs:1421`), first statement of its `Ok(outcome) =>` arm (plan review M13: the tick's attempt during a phase counts as the phase's, so an `account` refusal or an attempt-only `offline` on it ends the phase too):
+
+```rust
+                                if send_phase.is_armed() {
+                                    send_phase.note(&outcome);
+                                }
+```
+
+Every `continue` in the tick's body still continues the loop, as it did inside the `select!`.
 
 `engine_bridge.rs`: `TransferLoopOutcome` gains
 
@@ -5134,7 +5822,7 @@ pub(crate) fn phase_step_due(armed: bool, paused: bool, last_run: Option<Instant
     pub account_refused: bool,
 ```
 
-(the literal at `@184:engine_bridge.rs:1036` and every literal the compiler names set them `false`), and in the failure branch, after `class` is decided (`:1187-1191`):
+(the literal at `@184:engine_bridge.rs:1036` and every literal the compiler names set them `false`; the struct also gains `Default` in its derive, `#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]`, for the tests that build one with `..Default::default()`), and in the failure branch, after `class` is decided (`:1187-1191`):
 
 ```rust
                     outcome.link_failed |= crate::link_health::classify_error(&error).is_some();
@@ -5161,7 +5849,7 @@ pub(crate) fn phase_step_due(armed: bool, paused: bool, last_run: Option<Instant
     }
 ```
 
-`lib.rs` (macOS; each command also gets a `#[cfg(not(target_os = "macos"))]` twin with the same signature whose body is `Err("This works on a Mac only.".into())`, because `generate_handler!` takes no `cfg`):
+`lib.rs` (macOS; each command also gets a `#[cfg(not(target_os = "macos"))]` twin with the same signature whose body is `Err("This works on a Mac only.".into())`, because `generate_handler!` takes no `cfg`). Each macOS command is defined above its twin: `the_late_result_is_macos_only` (Task 12) reads the first `fn sign_out_count(` and `fn sign_out_send_start(` it finds (plan review M10):
 
 ```rust
 /// §5.1, the contract: `sign_out_count`'s answer.
@@ -5281,6 +5969,28 @@ fn sign_out_send_stop(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+/// One observation of the world for the phase (§6.4): the queue as read, the account's conditions, and what the
+/// phase's attempts met on its link. The driver's own step, split out so a test can run it with no window (plan
+/// review I7).
+#[cfg(target_os = "macos")]
+fn observe_phase(
+    run: &PhaseRun,
+    waiting: &sign_out::waiting::WaitingChanges,
+    conditions: sign_out::waiting::SendConditions,
+) -> sign_out::send_phase::PhaseObservation {
+    sign_out::send_phase::PhaseObservation {
+        elapsed: run.started.elapsed(),
+        changes_left: waiting.changes(),
+        any_live: waiting.any_live(),
+        engine_running: run.link.is_some() && conditions.engine_running,
+        session_expired: conditions.session_expired,
+        link_failed: conditions.link_failed,
+        attempt: run.link.as_ref().map(|link| link.signals()).unwrap_or_default(),
+        stop_requested: run.stop.load(Ordering::SeqCst),
+        window_closed: run.closed.load(Ordering::SeqCst),
+    }
+}
+
 /// The driver: once a second, wake the runner's queue step, read the world, and end or report progress.
 #[cfg(target_os = "macos")]
 async fn drive_send_phase(app: tauri::AppHandle, run: PhaseRun) {
@@ -5291,23 +6001,14 @@ async fn drive_send_phase(app: tauri::AppHandle, run: PhaseRun) {
         if let Some(link) = &run.link {
             link.wake();
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        // `std::time::Duration`: `lib.rs` imports none at the crate level (plan review M10).
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         let Ok(waiting) = read_waiting_changes() else {
             break sign_out::send_phase::PhaseEnd::Stopped;
         };
         changes_left = waiting.changes();
         let (conditions, _) = send_conditions(&state).await;
-        let observation = sign_out::send_phase::PhaseObservation {
-            elapsed: run.started.elapsed(),
-            changes_left,
-            any_live: waiting.any_live(),
-            engine_running: run.link.is_some() && conditions.engine_running,
-            session_expired: conditions.session_expired,
-            link_failed: conditions.link_failed,
-            attempt: run.link.as_ref().map(|link| link.signals()).unwrap_or_default(),
-            stop_requested: run.stop.load(Ordering::SeqCst),
-            window_closed: run.closed.load(Ordering::SeqCst),
-        };
+        let observation = observe_phase(&run, &waiting, conditions);
         match phase.observe(&observation) {
             sign_out::send_phase::PhaseStep::Continue => {}
             sign_out::send_phase::PhaseStep::Progress(left) => {
@@ -5339,7 +6040,7 @@ async fn drive_send_phase(app: tauri::AppHandle, run: PhaseRun) {
 
 (`now_unix_seconds()` is `lib.rs`'s unix-seconds helper, `@184:lib.rs:3756`.) Register `sign_out_count`, `sign_out_send_start`, `sign_out_send_stop` in `generate_handler!`.
 
-- [ ] **Step 4: Run, expect PASS.** The eight filters: `ok. 3`, `ok. 1`, `ok. 1`, `ok. 1`, `ok. 1`, `ok. 1`, `ok. 1`, `ok. 1` passed.
+- [ ] **Step 4: Run, expect PASS.** The eleven filters, in order: `ok. 3`, then `ok. 1` for each of the other ten. Then filter `runner::`: its baseline count plus 3 (the loop's other source pins, which read `run`, stay green).
 
 - [ ] **Step 5: Mutations, each RED then reverted.**
   1. `SIGN_OUT_SEND_LIMIT = 59 s`, then `61 s`: U16 red each time.
@@ -5352,8 +6053,13 @@ async fn drive_send_phase(app: tauri::AppHandle, run: PhaseRun) {
   8. Drop `outcome.account_refused |= …`: U46 red.
   9. Let a second start register a second phase: U34 (f) red.
   10. Leave the link armed in `end_send_phase`: U34 (a) red.
+  11. Put the precondition back on the phase's wake (`_ = send_phase.wake.notified(), if send_phase.is_armed() => Wake::Phase,`): `a_phase_armed_while_the_runner_waits…` red on "woken within a second of the arm" (the wait ends at the tick, 30 s on), and U35 red on "no arm of the wait has a precondition".
+  12. Drop `send_phase.note(&outcome)` from the phase's arm: U35 red on "every attempt is noted".
+  13. Drop the reset in `arm()` (`signals` keep the last phase's): `an_attempts_refusal_reaches_the_phase_signals` red on "a new phase starts with none".
+  14. `observe_phase` passes `AttemptSignals::default()` instead of `link.signals()`: `an_attempts_refusal_ends_the_phase…` red on the `Account` case (`Continue`).
+  15. Drop the tick's note: U35 red on "the tick's attempts count too".
 
-- [ ] **Step 6: The task gate** with `<N>` = 11 and `<L>` = `L0 + 77`.
+- [ ] **Step 6: The task gate** with `<N>` = 11 and `<L>` = `L0 + 85`.
 
 - [ ] **Step 7: Commit.**
 
@@ -5473,6 +6179,7 @@ In `sign_out_keep_tests`:
     async fn the_send_phase_is_owned_by_rust_and_a_close_ends_the_flow() {
         with_the_shared_state_dir(async {
             let db = state_db_in_scratch();
+            let _reset = scratch_reset();
             queue_write(&db, "w1", "f1", b"bytes");
             let state = AppState::default();
             // (b) a close during that window's phase: ended `closed`, its snapshot dropped; a later Sign out refuses.
@@ -5502,7 +6209,6 @@ In `sign_out_keep_tests`:
             state.sign_out.late_results.begin("macos-settings");
             assert_eq!(flow_window_closed(&state.sign_out, "macos-settings").show, None);
             assert!(state.sign_out.late_results.complete("macos-settings", Some(crate::sign_out::flow_window::Shown::Failure("x".into()))).is_some());
-            reset_scratch(&db);
         })
         .await;
     }
@@ -5528,7 +6234,8 @@ In `sign_out_keep_tests`:
         );
     }
 
-    /// U32, extended (PR #121 reviews 1, 2): the late result is macOS only, defined and registered.
+    /// U32, extended (PR #121 reviews 1, 2): the late result is macOS only, defined and registered. It reads the first
+    /// definition of each name, so every macOS command sits above its non-macOS twin (Task 11; plan review M10).
     #[test]
     fn the_late_result_is_macos_only() {
         let production = super::finder_setup_command_tests::production_source();
@@ -5634,7 +6341,8 @@ impl LateResults {
 
 ```rust
 /// §5.1 "A late result": what needs showing. Not `unsent_changes` (nothing changed, and a hidden window cannot show
-/// the ask), and not a completed sign-out without a warning.
+/// the ask), and not a completed sign-out without a warning. Read on macOS and in tests only (plan review M11).
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 fn late_result_of(result: &Result<SignedOut, SignOutFailure>) -> Option<sign_out::flow_window::Shown> {
     use sign_out::flow_window::Shown;
     match result {
@@ -5656,13 +6364,16 @@ fn show_late_result(app: &tauri::AppHandle, shown: sign_out::flow_window::Shown)
     app.dialog().message(message).title(title).kind(kind).show(|_| {});
 }
 
-/// What a close of `label` did (U34): the four steps of §5.1's hook, on the flow state alone.
+/// What a close of `label` did (U34): the four steps of §5.1's hook, on the flow state alone. Read on macOS and in
+/// tests only (plan review M11).
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 struct FlowClosed {
     phase_closed: bool,
     snapshot_dropped: bool,
     show: Option<sign_out::flow_window::Shown>,
 }
 
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 fn flow_window_closed(sign_out: &sign_out::SignOutState, label: &str) -> FlowClosed {
     let phase_closed = match sign_out.phase.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
         Some(phase) if phase.owner == label => {
@@ -5700,7 +6411,7 @@ fn sign_out_result_ack(window: tauri::WebviewWindow, state: State<'_, AppState>)
 }
 ```
 
-(`window.app_handle()` and `webview.app_handle()` are `&AppHandle<Wry>`, which is `&tauri::AppHandle`.) `sign_out_result_ack` gets a non-macOS twin with the same signature returning `Ok(())`, and is registered in `generate_handler!`.
+(`window.app_handle()` and `webview.app_handle()` are `&AppHandle<Wry>`, which is `&tauri::AppHandle`.) `sign_out_result_ack` gets a non-macOS twin with the same signature returning `Ok(())`, defined below the macOS one (plan review M10), and is registered in `generate_handler!`.
 
 In the global `.on_window_event` handler, before the close-policy block:
 
@@ -5757,7 +6468,7 @@ On the builder, before `.on_window_event(`:
   8. End the phase `stopped` instead of `closed` (store into `phase.stop`): U34 (b) red.
   9. Drop the `cfg` from `sign_out_result_ack`: the macOS-only pin red.
 
-- [ ] **Step 6: The task gate** with `<N>` = 12 and `<L>` = `L0 + 82`.
+- [ ] **Step 6: The task gate** with `<N>` = 12 and `<L>` = `L0 + 90`.
 
 - [ ] **Step 7: Commit.**
 
@@ -5781,7 +6492,8 @@ git commit -m "feat(macos): closing Settings ends the sign-out flow, and a late 
   - Commands `request_sign_out_flow(app) -> Result<(), String>` (the compact page, entry point 2) and `consume_sign_out_flow_request(state) -> bool` (Settings, F9); event `menu:sign-out-flow` to `macos-settings`.
   - `fn open_sign_out_flow(app: &tauri::AppHandle)`; `fn take_sign_out_flow_request(sign_out: &SignOutState) -> bool`.
   - `fn switch_snapshot(state: &AppState) -> Result<Option<AskCounts>, String>` (macOS: `count_ask("onboarding")`, recorded as the newest; elsewhere `Ok(None)`).
-  - `AccountMismatchDto { pending_changes: u64, #[serde(skip_serializing_if = "Option::is_none")] unsent: Option<AskCounts> }`; `LoginOutcome::account_mismatch(pending_changes: u64, unsent: Option<AskCounts>)`; `SignInSettlement::AccountMismatch { pending_changes, unsent }`. The browser sign-in's `account_mismatch` event payload adds `"unsent"` only when it is `Some`.
+  - `AccountMismatchDto { pending_changes: u64, #[serde(skip_serializing_if = "Option::is_none")] unsent: Option<AskCounts>, #[serde(skip_serializing_if = "Option::is_none")] unsent_error: Option<String> }`; `LoginOutcome::account_mismatch(pending_changes: u64, unsent: Option<AskCounts>, unsent_error: Option<String>)`; `SignInSettlement::AccountMismatch { pending_changes, unsent, unsent_error }`; `fn switch_settlement(pending_changes: u64, counted: Result<Option<AskCounts>, String>) -> SignInSettlement` (not on Windows). The browser sign-in's `account_mismatch` event payload adds `"unsent"` and `"unsent_error"` only when they are `Some`.
+  - Plan review M8 (spec §5.3 row 1: E3 is "a line in the switch step"): a switch count that cannot be read no longer fails the sign-in. It settles `AccountMismatch` with `unsent: None` and `unsent_error: Some(<E3, coded>)`, and the switch step (Task 18) shows E3 as a line; nothing changed, and "Sign out and switch" then counts again through the gate.
 
 - [ ] **Step 1: Write the failing tests** in `sign_out_keep_tests`:
 
@@ -5791,6 +6503,7 @@ git commit -m "feat(macos): closing Settings ends the sign-out flow, and a late 
     async fn the_switch_carries_a_snapshot_on_macos_only() {
         with_the_shared_state_dir(async {
             let db = state_db_in_scratch();
+            let _reset = scratch_reset();
             queue_write(&db, "w1", "f1", b"bytes");
             queue_rename(&db, "r1");
             let state = AppState::default();
@@ -5798,15 +6511,34 @@ git commit -m "feat(macos): closing Settings ends the sign-out flow, and a late 
             assert_eq!((unsent.files, unsent.others), (1, 1));
             assert_eq!(state.sign_out.snapshots.newest_ask_id().as_deref(), Some(unsent.ask_id.as_str()), "recorded as the newest");
             assert!(state.sign_out.phase.lock().unwrap().is_none(), "no send is started");
-            let json = serde_json::to_value(LoginOutcome::account_mismatch(2, Some(unsent))).unwrap();
+            let json = serde_json::to_value(LoginOutcome::account_mismatch(2, Some(unsent), None)).unwrap();
             assert_eq!(json["account_mismatch"]["pending_changes"], 2);
             assert!(json["account_mismatch"]["unsent"]["askId"].is_string());
+            assert!(json["account_mismatch"].get("unsent_error").is_none(), "absent while the count worked");
             assert!(state.sign_out.snapshots.drop_owned_by("onboarding"), "owned by the window the switch step runs in");
-            let without = serde_json::to_value(LoginOutcome::account_mismatch(2, None)).unwrap();
+            let without = serde_json::to_value(LoginOutcome::account_mismatch(2, None, None)).unwrap();
             assert_eq!(without["account_mismatch"], serde_json::json!({ "pending_changes": 2 }), "elsewhere: unchanged");
-            reset_scratch(&db);
         })
         .await;
+    }
+
+    /// Spec §5.3 row 1 (plan review M8): a switch count that cannot be read is E3, a line in the switch step. The
+    /// sign-in settles as a switch, with no snapshot and the coded E3; it is never a failed sign-in.
+    #[test]
+    fn a_switch_count_that_fails_is_a_line_in_the_step() {
+        let e3 = sign_out::copy::coded(sign_out::copy::UNSENT_COUNT_FAILED_CODE, sign_out::copy::E3_UNSENT_COUNT_FAILED);
+        let SignInSettlement::AccountMismatch { pending_changes, unsent, unsent_error } = switch_settlement(3, Err(e3.clone())) else {
+            panic!("a switch, not a failure");
+        };
+        assert_eq!((pending_changes, unsent, unsent_error.as_deref()), (3, None, Some(e3.as_str())));
+        let json = serde_json::to_value(LoginOutcome::account_mismatch(3, None, Some(e3.clone()))).unwrap();
+        assert_eq!(json["account_mismatch"], serde_json::json!({ "pending_changes": 3, "unsent_error": e3 }));
+        let settle = super::finder_setup_command_tests::body_between(
+            &super::finder_setup_command_tests::production_source(),
+            "async fn settle_sign_in(",
+            "\n}\n",
+        );
+        assert!(settle.contains("switch_settlement(pending_changes, switch_snapshot(state))"), "{settle}");
     }
 
     /// U21: the menu never purges a waiting write and never shows the error dialog for it.
@@ -5836,12 +6568,14 @@ git commit -m "feat(macos): closing Settings ends the sign-out flow, and a late 
     }
 ```
 
-- [ ] **Step 2: Run them, expect FAIL.** Filters `switch_carries_a_snapshot`, `menu_never_purges`, `flow_request_waits`. Expected: compile errors.
+- [ ] **Step 2: Run them, expect FAIL.** Filters `switch_carries_a_snapshot`, `a_switch_count_that_fails`, `menu_never_purges`, `flow_request_waits`. Expected: compile errors.
 
 - [ ] **Step 3: Implement.** `SignOutState` gains `pub flow_request: std::sync::atomic::AtomicBool`. In `lib.rs`:
 
 ```rust
-/// §5.1 "A flow request survives a window that has not loaded yet": one pending request.
+/// §5.1 "A flow request survives a window that has not loaded yet": one pending request. Read on macOS and in tests
+/// only (plan review M11).
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 fn take_sign_out_flow_request(sign_out: &sign_out::SignOutState) -> bool {
     sign_out.flow_request.swap(false, Ordering::SeqCst)
 }
@@ -5867,7 +6601,9 @@ fn consume_sign_out_flow_request(state: State<'_, AppState>) -> bool {
     take_sign_out_flow_request(&state.sign_out)
 }
 
-/// W11: on macOS the switch step renders a snapshot, owned by the sign-in window, `onboarding`.
+/// W11: on macOS the switch step renders a snapshot, owned by the sign-in window, `onboarding`. Its one caller,
+/// `settle_sign_in`, is not built on Windows (plan review M11).
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn switch_snapshot(state: &AppState) -> Result<Option<sign_out::snapshot::AskCounts>, String> {
     #[cfg(target_os = "macos")]
     {
@@ -5905,41 +6641,50 @@ The menu's `SignOut` arm calls `clear_session_impl(&state, false, None)` and gai
                     Err(error) if error.message.starts_with("unsent_changes: ") => open_sign_out_flow(&app),
 ```
 
-`AccountMismatchDto` gains `#[serde(skip_serializing_if = "Option::is_none")] unsent: Option<sign_out::snapshot::AskCounts>`; `LoginOutcome::account_mismatch(pending_changes, unsent)` fills it; `SignInSettlement::AccountMismatch` gains `unsent: Option<sign_out::snapshot::AskCounts>`; `settle_sign_in`'s `DifferentAccount` arm becomes:
+`AccountMismatchDto` gains `#[serde(skip_serializing_if = "Option::is_none")] unsent: Option<sign_out::snapshot::AskCounts>` and `#[serde(skip_serializing_if = "Option::is_none")] unsent_error: Option<String>`; `LoginOutcome::account_mismatch(pending_changes, unsent, unsent_error)` fills them; `SignInSettlement::AccountMismatch` gains `unsent: Option<sign_out::snapshot::AskCounts>` and `unsent_error: Option<String>`. Beside `settle_sign_in`:
 
 ```rust
-        reauth::SignInKind::DifferentAccount => {
-            // A count that cannot be read settles nothing, as the switch's own count already does (triage 25).
-            let unsent = switch_snapshot(state).map_err(ReauthError::before_store)?;
-            Ok(SignInSettlement::AccountMismatch { pending_changes, unsent })
-        }
+/// W11 and §5.3 row 1 (plan review M8): the switch settles with what its count found: a snapshot (macOS), none
+/// (elsewhere), or E3 for the switch step to show as a line. A count that cannot be read never fails the sign-in:
+/// nothing changed, and "Sign out and switch" counts again through the gate.
+#[cfg(not(target_os = "windows"))]
+fn switch_settlement(pending_changes: u64, counted: Result<Option<sign_out::snapshot::AskCounts>, String>) -> SignInSettlement {
+    match counted {
+        Ok(unsent) => SignInSettlement::AccountMismatch { pending_changes, unsent, unsent_error: None },
+        Err(error) => SignInSettlement::AccountMismatch { pending_changes, unsent: None, unsent_error: Some(error) },
+    }
+}
 ```
 
-The two callers pass `unsent` through (`LoginOutcome::account_mismatch(pending_changes, unsent)`). In `browser_login.rs`:
+and `settle_sign_in`'s `DifferentAccount` arm becomes `reauth::SignInKind::DifferentAccount => Ok(switch_settlement(pending_changes, switch_snapshot(state))),`. (`count_ask`'s error is already the coded E3, `unsent_count_failed: …`.) The two callers pass both through (`LoginOutcome::account_mismatch(pending_changes, unsent, unsent_error)`). In `browser_login.rs`:
 
 ```rust
-            Some(crate::SignInSettlement::AccountMismatch { pending_changes, unsent }) => {
+            Some(crate::SignInSettlement::AccountMismatch { pending_changes, unsent, unsent_error }) => {
                 let _ = crate::revoke_desktop_session(&client, &base_url, &creds.session_token).await;
                 let mut payload = serde_json::json!({ "pending_changes": pending_changes });
                 if let Some(unsent) = unsent {
                     payload["unsent"] = serde_json::to_value(unsent).unwrap_or(serde_json::Value::Null);
+                }
+                if let Some(unsent_error) = unsent_error {
+                    payload["unsent_error"] = serde_json::Value::String(unsent_error);
                 }
                 emit(app, "account_mismatch", payload);
                 return Err("account_mismatch".to_string());
             }
 ```
 
-Every test call of `LoginOutcome::account_mismatch(n)` becomes `LoginOutcome::account_mismatch(n, None)` (`grep -n "account_mismatch(" src-tauri/src/lib.rs`); their expected JSON is unchanged.
+Every test call of `LoginOutcome::account_mismatch(n)` becomes `LoginOutcome::account_mismatch(n, None, None)` (`grep -n "account_mismatch(" src-tauri/src/lib.rs`); their expected JSON is unchanged.
 
-- [ ] **Step 4: Run, expect PASS.** The three filters: `ok. 1` each. Then the existing login-outcome JSON test (filter `account_mismatch`): its baseline count.
+- [ ] **Step 4: Run, expect PASS.** The four filters: `ok. 1` each. Then the existing login-outcome JSON test (filter `account_mismatch`): its baseline count.
 
 - [ ] **Step 5: Mutations, each RED then reverted.**
   1. Fill `unsent` from `pending_changes_count` (`unsent: None` and the frontend reads `pending_changes`): U19 red on `unsent`.
   2. Start a phase in `switch_snapshot`: U19 red on "no send is started".
   3. Handle `unsent_changes` as an error in the menu (delete the flow arm): U21 red.
   4. Store requests in a counter: U21 red on "not two".
+  5. Fail the sign-in on a failed count again (`switch_snapshot(state).map_err(ReauthError::before_store)?` in the arm): `a_switch_count_that_fails…` red on the settle pin; and in `switch_settlement`, `Err(error) => SignInSettlement::Unconfirmed`: red on "a switch, not a failure".
 
-- [ ] **Step 6: The task gate** with `<N>` = 13 and `<L>` = `L0 + 85`.
+- [ ] **Step 6: The task gate** with `<N>` = 13 and `<L>` = `L0 + 94`.
 
 - [ ] **Step 7: Commit.**
 
@@ -5956,7 +6701,7 @@ git commit -m "feat(macos): the menu, the compact page and the account switch re
 
 **Interfaces:**
 - Consumes: `keep_unsent`, `Acknowledge::Everything` (Task 5); `purge_local_state_files_in(…, kept)` (Task 6); `sign_out_alert`, `KeptUnsent` (Tasks 7, 10); `StateDb::reopen_finder_accepts` (Task 8).
-- Produces: `fn keep_in(db: &state_db::StateDb, acknowledge: Acknowledge<'_>) -> Result<KeptSet, String>` (macOS); `StateDbLocalData.kept: std::sync::Mutex<Option<KeptSet>>`; `SignOutState.reset_kept: std::sync::Mutex<Option<(String, usize)>>` (the folder and its file count; `sign_out/mod.rs` cannot name `lib.rs`'s `KeptUnsent`); `fn surface_reset_folder(app: &tauri::AppHandle, folder: &str, files: usize)`.
+- Produces: `fn keep_in(db: &state_db::StateDb, acknowledge: Acknowledge<'_>) -> Result<KeptSet, String>` (macOS); `StateDbLocalData.kept: std::sync::Mutex<Option<KeptSet>>`; `SignOutState.reset_kept: std::sync::Mutex<Option<(String, usize)>>` (the folder and its file count; `sign_out/mod.rs` cannot name `lib.rs`'s `KeptUnsent`); `fn hand_on_reset_kept(state: &AppState, data: &StateDbLocalData)` (macOS, plan review M9); `fn surface_reset_folder(app: &tauri::AppHandle, folder: &str, files: usize)`.
 
 - [ ] **Step 1: Write the failing test** in `sign_out_keep_tests`:
 
@@ -5968,6 +6713,7 @@ git commit -m "feat(macos): the menu, the compact page and the account switch re
             let state_dir = state_paths::init_for_test();
             let sync_root = tempfile::tempdir().unwrap();
             let db = state_db_in_scratch();
+            let _reset = scratch_reset();
             queue_write(&db, "w1", "f1", b"another account's save");
             queue_rename(&db, "r1");
             let data = StateDbLocalData::for_engine_start(&LocalDataPaths::for_test(&state_dir, sync_root.path())).unwrap();
@@ -5989,12 +6735,7 @@ git commit -m "feat(macos): the menu, the compact page and the account switch re
             assert!(squeezed.contains(&call), "the guard is in the reset's path: {reset}");
             // A failing copy: the reset fails, nothing is deleted, no record.
             use std::os::unix::fs::PermissionsExt;
-            DesktopConfig::update(|cfg| {
-                cfg.kept_unsent_folder = None;
-                cfg.kept_unsent_unfinished.clear();
-                (true, ())
-            })
-            .unwrap();
+            clean_scratch(&db);
             let staged = queue_write(&db, "w2", "f2", b"bytes");
             std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o000)).unwrap();
             let data = StateDbLocalData::for_engine_start(&LocalDataPaths::for_test(&state_dir, sync_root.path())).unwrap();
@@ -6004,13 +6745,31 @@ git commit -m "feat(macos): the menu, the compact page and the account switch re
             assert!(!db.finder_accepts_closed().unwrap(), "a reset that stops reopens Finder accepts (Q1 ruling)");
             assert_eq!(db.waiting_rows().unwrap().len(), 1, "nothing deleted");
             assert_eq!(DesktopConfig::load().unwrap().kept_unsent_folder, None, "no record");
-            reset_scratch(&db);
+            // Plan review M9: a reset whose purge fails after a completed keep still hands its folder on to be
+            // surfaced (W12: the alert and the row), as the recorded folder is on disk either way.
+            clean_scratch(&db);
+            let blocker = std::env::temp_dir().join(format!("bb-1887-{}-blocker", std::process::id()));
+            std::fs::create_dir_all(&blocker).unwrap();
+            db.track_staged_payload(blocker.to_str().unwrap(), None, true).unwrap(); // a "file" no removal can take
+            queue_write(&db, "w3", "f3", b"kept, then the purge failed");
+            let data = StateDbLocalData::for_engine_start(&LocalDataPaths::for_test(&state_dir, sync_root.path())).unwrap();
+            let failed = account_binding::LocalData::reset(&data);
+            std::fs::remove_dir(&blocker).unwrap();
+            assert!(failed.is_err(), "the purge failed on the folder at a journal path");
+            let surfaced = AppState::default();
+            hand_on_reset_kept(&surfaced, &data);
+            let (folder, files) = surfaced.sign_out.reset_kept.lock().unwrap().clone().expect("the recorded folder is handed on");
+            assert_eq!(files, 1);
+            assert_eq!(std::fs::read(Path::new(&folder).join("f3.bin")).unwrap(), b"kept, then the purge failed");
+            let bind = super::finder_setup_command_tests::body_between(&production, "fn bind_data_to_session(", "\n}\n");
+            let handed = bind.find("hand_on_reset_kept(state, data);").expect("the binding hands the folder on");
+            assert!(handed < bind.find("match bound?").expect("before it looks at the result"), "{bind}");
         })
         .await;
     }
 ```
 
-(`capture_logs_async` is the async twin of Task 10's `capture_logs`; copy `engine_bridge.rs`'s `capture_logs_async`, `@184:engine_bridge.rs:16203`, into this module.)
+(`capture_logs_async` is the one Task 10 put in this module.)
 
 - [ ] **Step 2: Run it, expect FAIL.** Filter `the_r10_reset_keeps`. Expected: compile error (`data.kept`), then the folder assertion.
 
@@ -6046,6 +6805,9 @@ fn keep_in(db: &state_db::StateDb, acknowledge: sign_out::keep::Acknowledge<'_>)
         let kept = Some(keep_in(&self.db, sign_out::keep::Acknowledge::Everything)?);
         #[cfg(not(target_os = "macos"))]
         let kept: Option<sign_out::kept_set::KeptSet> = None;
+        // Plan review M9: the folder is recorded now, so it is handed on to be surfaced whether or not the purge below
+        // then finishes.
+        *self.kept.lock().unwrap_or_else(|p| p.into_inner()) = kept.clone();
         // Lead ruling on Q1: a reset that stops without purging reopens Finder accepts at once (the keep step already
         // reopens them on its own failure).
         let reopen = || {
@@ -6072,7 +6834,6 @@ fn keep_in(db: &state_db::StateDb, acknowledge: sign_out::keep::Acknowledge<'_>)
         if let Err(error) = DesktopConfig::path().and_then(|path| sign_out::kept_record::clear_unfinished_at(&path)) {
             tracing::warn!(error = %error, "could not clear the unfinished sign-out marker");
         }
-        *self.kept.lock().unwrap_or_else(|p| p.into_inner()) = kept;
         self.db.clear_account_data(cfg!(target_os = "macos")).map_err(|e| {
             reopen();
             format!("clear the local data: {e}")
@@ -6080,7 +6841,22 @@ fn keep_in(db: &state_db::StateDb, acknowledge: sign_out::keep::Acknowledge<'_>)
     }
 ```
 
-In `bind_data_to_session`, in the `Bound::Reset` arm, hand the folder to the state for surfacing: `if let Some(kept) = data.kept.lock().unwrap_or_else(|p| p.into_inner()).take() { if let Some(folder) = kept.folder { *state.sign_out.reset_kept.lock().unwrap_or_else(|p| p.into_inner()) = Some((folder.to_string_lossy().into_owned(), kept.files)); } }`. In `spawn_bound_engine`, which holds the `app`, after `start_engine_bound` returns (either way):
+`bind_data_to_session` (`@184:lib.rs:5965-5985`) hands the folder on whatever the binding's result (plan review M9: a reset whose purge failed after a completed keep returns `Err`, and the `Bound::Reset` arm never runs then). Its first statement becomes `let bound = account_binding::bind_before_engine_start(data, session, !cfg!(target_os = "windows"));`, then `#[cfg(target_os = "macos")] hand_on_reset_kept(state, data);`, then `match bound? { … }` as today. Beside it:
+
+```rust
+/// W12: an R10 reset that kept files hands its folder to the state, to be surfaced once the start returns (the row,
+/// then one alert). Taken out, so it is surfaced once.
+#[cfg(target_os = "macos")]
+fn hand_on_reset_kept(state: &AppState, data: &StateDbLocalData) {
+    if let Some(kept) = data.kept.lock().unwrap_or_else(|p| p.into_inner()).take()
+        && let Some(folder) = kept.folder
+    {
+        *state.sign_out.reset_kept.lock().unwrap_or_else(|p| p.into_inner()) = Some((folder.to_string_lossy().into_owned(), kept.files));
+    }
+}
+```
+
+In `spawn_bound_engine`, which holds the `app`, after `start_engine_bound` returns (either way):
 
 ```rust
     // W12: the R10 reset's kept folder is surfaced the way the app-start sweep surfaces macOS's: the row, then one alert.
@@ -6108,8 +6884,10 @@ fn surface_reset_folder(app: &tauri::AppHandle, folder: &str, files: usize) {
   1. Reset without the keep step (`let kept = None` on macOS): the guard is never asked, the write is purged unkept: U20 red on "the reset kept the write".
   2. Purge without passing the `KeptSet` (`purge_local_state_files_in(…, None)`): U20 red on "the guard is in the reset's path" (with a full keep the guard has nothing to refuse, so behaviour alone cannot show it).
   3. Ignore the copy failure (`unwrap_or_default()` on `keep_in`): U20 red on "nothing deleted".
+  4. Store `self.kept` only after a successful purge (the earlier shape): U20 red on "the recorded folder is handed on".
+  5. Hand the folder on only in the `Bound::Reset` arm (after `bound?`): U20 red on the `bind_data_to_session` order.
 
-- [ ] **Step 6: The task gate** with `<N>` = 14 and `<L>` = `L0 + 86`.
+- [ ] **Step 6: The task gate** with `<N>` = 14 and `<L>` = `L0 + 95`.
 
 - [ ] **Step 7: Commit.**
 
@@ -6146,18 +6924,19 @@ Spec §11 "The design changes first": this commit lands before any frontend code
   3. **Ask, a missing copy and an earlier folder:** “1 file you changed in Finder hasn’t reached the server.” / “Beebeeb’s copy of a change to that file is missing, so that change can’t be kept.” / “A sign-out that didn’t finish copied changes to this folder, so a change listed as missing may be there:” then a `p.sheet-copy` in mono with `/Users/sam/Library/Containers/io.beebeeb.app/Data/Documents/Changes not sent/2026-10-10 at 14.05.12`.
   4. **The alert, two folders:** a plain box titled “Files kept on this Mac” with “Beebeeb copied 2 files with changes that hadn’t reached the server to this folder on this Mac:”, the path, a blank line, “Files that hadn’t reached your vault yet were kept on this Mac, in this folder:”, macOS's path. Caption: “Drawn by macOS, not a Beebeeb window; ours first.”
 
-  In section 4 (the switch step), replace the “changes waiting” card's copy in both variants (the onboarding Card at `:314` and the modal at `:319`): title “Switch accounts with changes not sent?”, then “This Mac is signed in to another Beebeeb account. Switching signs that account out of this Mac.”, then “1 file changed in Finder while that account was signed in hasn’t reached the server. Before switching, Beebeeb copies it to a folder on this Mac and shows you where.”, then “1 other change (a rename, move, deletion, new folder or restore) hasn’t reached the server either. Switching drops it, and that item stays as it is on the server.” Update both captions so neither says “removes it” or “removes them”, and add “amended 11 Oct 2026 (task 1887)” to the section's comment line at `:147`. The “nothing waiting” variants stay as they are. In the copy table, add rows for the send phase, the ask (with its seven A5 lines from spec §11, `account` included: “Beebeeb can’t accept uploads for this account until it has free space or an active plan.”) and the alert, with the strings above.
+  In section 4 (the switch step), replace the “changes waiting” card's copy in both variants (the onboarding Card at `:314` and the modal at `:319`): title “Switch accounts with changes not sent?”, then “This Mac is signed in to another Beebeeb account. Switching signs that account out of this Mac.”, then “1 file changed in Finder while that account was signed in hasn’t reached the server. Before switching, Beebeeb copies it to a folder on this Mac and shows you where.”, then “1 other change (a rename, move, deletion, new folder or restore) hasn’t reached the server either. Switching drops it, and that item stays as it is on the server.” Update both captions so neither says “removes it” or “removes them”, and add “amended 11 Oct 2026 (task 1887)” to the section's comment line at `:147`. The “nothing waiting” variants stay as they are. The section's intro (`:311`) still ends “The confirm button is destructive: it signs the other account out of this Mac and removes changes that have not uploaded.” (plan review M7): strike “and removes changes that have not uploaded” in place (`<s>…</s>`) and add after the sentence “<strong>Amended 11 Oct 2026 (task 1887):</strong> on macOS it first copies each file whose changes haven’t reached the server to a folder on this Mac and shows where; only the other changes (renames, moves, deletions, new folders, restores) are dropped.” Add one more onboarding-window Card beside the two (plan review M8, spec §5.3 row 1): **count failed**, title “Switch to a different account?”, copy “This Mac is signed in to another Beebeeb account. Switching signs that account out of this Mac.”, then a `p.page-copy` with E3, “Beebeeb couldn’t check for changes that haven’t reached the server, so it changed nothing. Try again. If it keeps happening, restart Beebeeb.”, the same buttons. Caption: “The count could not be read: E3 is a line in the step, never a toast. ‘Sign out and switch’ counts again first.” In the copy table, add rows for the send phase, the ask (with its seven A5 lines from spec §11, `account` included: “Beebeeb can’t accept uploads for this account until it has free space or an active plan.”) and the alert, with the strings above.
 
 - [ ] **Step 3: Amend spec A** at `docs/specs/2026-10-06-macos-finder-setup-reconciler.md:80`: after “an account switch: the pending-edits warning first, then a full sign-out (**absent**, queue and cache purged), then a fresh sign-in (**present**)”, add “On macOS the warning is the ask of spec 2026-10-10 (A0s-A4s), and the sign-out keeps every waiting Finder save in a kept folder before the queue is purged; “queue and cache purged” stays true for what remains. — lead, 2026-10-11 (1887)”.
 
 - [ ] **Step 4: Check the drawing.** Open `design/hifi/macos-settings-dialogs.html` in a local browser (a `file://` URL; no network), capture section 1 and section 4 in light and dark into `$EVID/t15-section1-light.png`, `t15-section1-dark.png`, `t15-section4-light.png`, `t15-section4-dark.png`. Then:
 
 ```bash
-cd $WT && grep -c "removes them\|removes it" design/hifi/macos-settings-dialogs.html
+cd $WT && grep -n "removes them\|removes it\|removes changes\|removes the changes" design/hifi/macos-settings-dialogs.html
 grep -c "Sending changes first\|Sign out with changes not sent?\|Switch accounts with changes not sent?" design/hifi/macos-settings-dialogs.html
+grep -c "couldn’t check for changes that haven’t reached the server" design/hifi/macos-settings-dialogs.html
 ```
 
-Expected: the first count is the number of occurrences left only in the "nothing waiting" history or in struck notes (write it into the Notes, with each line's context); the second is at least 4.
+Expected: every match the first command prints is inside `<s>…</s>` (write each line's context into the Notes; a match outside a strike is a red); the second count is at least 4; the third is at least 1.
 
 - [ ] **Step 5: Commit** (docs and design only; the lead reviews the drawings before Task 16 starts).
 
@@ -6364,12 +7143,14 @@ git commit -m "feat(macos): the sign-out ask's copy, mirrored from Rust and pinn
 **Files:**
 - Create: `src/signOutFlow.ts` (the flow, its API and its two event connectors)
 - Modify: `src/desktopApi.ts:1132-1134` (`clearSession` takes `keepUnsent`)
-- Modify: `src/MacSettings.tsx`: `AccountTab` (`@184:src/MacSettings.tsx:250-490`) runs the flow; two new sheets, `SendingSheet` and `UnsentAskSheet`, beside `ConfirmSheet`; the root (`:924-952`) consumes flow requests
+- Modify: `src/MacSettings.tsx`: the root `MacSettings` (`@184:src/MacSettings.tsx:924-990`) owns the flow and consumes flow requests; `AccountTab` (`:250-490`) renders it from props; two new sheets, `SendingSheet` and `UnsentAskSheet`, beside `ConfirmSheet`
+
+**Plan review I6.** `AccountTab` mounts only while its tab is selected (`{tab === 'account' ? <AccountTab /> : null}`, `@184:src/MacSettings.tsx:985`). A flow it owned would be a new, idle one at every return to the tab, and an effect that replays a request counter on mount would run a handled request again: after Cancel at the ask, the Sync tab and back would count again, and with nothing waiting would call `clear_session` and sign the Mac out with no click. So the `SignOutFlow` and the pending request live in the root, which mounts once per window (and is remounted by the session boundary only after a sign-out, `src/main.tsx:98`, when an idle flow is right). A consumed request calls `flow.request()` once, directly; nothing replays it.
 - Test: `tests/signOutFlow.test.ts` (create); `tests/macSettingsTabs.test.tsx` (its `backend()` and `baseBindings` learn the new commands and names)
 
 **Interfaces:**
 - Consumes: `signOutCopy` (Task 16); commands `sign_out_count`, `sign_out_send_start`, `sign_out_send_stop`, `clear_session` with `keepUnsent`, `sign_out_result_ack`, `consume_sign_out_flow_request`; events `sign-out-send-progress`, `sign-out-send-ended`, `sign-out-flow-closed`, `menu:sign-out-flow` (Tasks 11-13).
-- Produces (`src/signOutFlow.ts`): `FlowView`, `FlowOutcome`, `SignOutFlowApi`, `signOutFlowApi`, `class SignOutFlow` with `open()`, `confirm()`, `request()`, `cancel()`, `stopWaiting()`, `progress(n)`, `ended(event)`, `signOutAtAsk()`, `reset()`, `current()`; `connectSignOutFlowEvents(listen, flow)`, `connectSignOutFlowMenu(listen, consume, onRequest)`. `clearSession(options: { forgetEmail?: boolean; keepUnsent?: { askId: string } })`.
+- Produces (`src/signOutFlow.ts`): `FlowView`, `FlowOutcome`, `SignOutFlowApi`, `signOutFlowApi`, `class SignOutFlow` with `open()`, `confirm()`, `request()`, `cancel()`, `stopWaiting()`, `progress(n)`, `ended(event)`, `signOutAtAsk()`, `reset()`, `current()`; `connectSignOutFlowEvents(listen, flow)`, `connectSignOutFlowMenu(listen, consume, onRequest)`. `clearSession(options: { forgetEmail?: boolean; keepUnsent?: { askId: string } })`. In `MacSettings.tsx`: `AccountTab({ flow, flowView, flowOutcomes })` and `showSignOutOutcome(outcome, showToast)` (plan review I6).
 
 - [ ] **Step 1: Write the failing tests** in `tests/signOutFlow.test.ts`:
 
@@ -6421,6 +7202,9 @@ describe('the Settings sign-out flow (spec 2026-10-10 §5.1)', () => {
     expect(h.names()).toEqual(['count', 'sendStart'])
     expect(h.calls[1].args).toBe('first')
     h.flow.progress(1)
+    expect(h.flow.current()).toEqual({ kind: 'sending', changesLeft: 1 })
+    // F7 at the flow (plan review M5): a progress event with 0 never renders; the phase ends first.
+    h.flow.progress(0)
     expect(h.flow.current()).toEqual({ kind: 'sending', changesLeft: 1 })
     const second: AskCounts = { askId: 'second', files: 1, copiedFiles: 1, others: 0, missingFiles: 0, earlierFolders: [] }
     await h.flow.ended({ reason: 'offline', ask: second })
@@ -6539,7 +7323,7 @@ describe('the Settings sign-out flow (spec 2026-10-10 §5.1)', () => {
 })
 ```
 
-In `tests/macSettingsTabs.test.tsx`: `backend()` gains `sign_out_count: () => ({ askId: 'a0', files: 0, copiedFiles: 0, others: 0, missingFiles: 0, earlierFolders: [], canSend: false, notSending: null })` and `sign_out_result_ack: () => null`, and `baseBindings` gains every new name `AccountTab` and `MacSettings` reference (the compiler and the harness name them: `SignOutFlow`, `signOutFlowApi`, `connectSignOutFlowEvents`, `connectSignOutFlowMenu`, `SendingSheet`, `UnsentAskSheet`, `askLines`, `progressLine`, `stripCode`, and the copy constants), loaded the way `ConfirmSheet` is (`@184:tests/macSettingsTabs.test.tsx:33`). Add two tests there:
+In `tests/macSettingsTabs.test.tsx`: `backend()` gains `sign_out_count: () => ({ askId: 'a0', files: 0, copiedFiles: 0, others: 0, missingFiles: 0, earlierFolders: [], canSend: false, notSending: null })` and `sign_out_result_ack: () => null`, and `baseBindings` gains every new name `AccountTab` and `MacSettings` reference (the compiler and the harness name them: `SendingSheet`, `UnsentAskSheet`, `askLines`, `progressLine`, `stripCode`, and the copy constants; the root's `SignOutFlow`, `signOutFlowApi`, `connectSignOutFlowEvents`, `connectSignOutFlowMenu` and `showSignOutOutcome` go into the window tests' bindings), loaded the way `ConfirmSheet` is (`@184:tests/macSettingsTabs.test.tsx:33`). Add two tests there:
 
 ```ts
   /** F3, the sheets: Esc is Stop waiting in the phase and Cancel at the ask; Enter on open is Cancel. */
@@ -6556,7 +7340,7 @@ In `tests/macSettingsTabs.test.tsx`: `backend()` gains `sign_out_count: () => ({
   })
 
   test('nothing waits: "Sign out" counts, then signs out with no keepUnsent', async () => {
-    const m = open('AccountTab', backend({ clear_session: (args: any) => ({ warning: null, args }) }))
+    const m = openAccount(backend({ clear_session: (args: any) => ({ warning: null, args }) }))
     await settle(m)
     await press(m, 'Sign out…')
     await press(m, 'Sign out')
@@ -6566,6 +7350,78 @@ In `tests/macSettingsTabs.test.tsx`: `backend()` gains `sign_out_count: () => ({
     expect(m.calls.find((c) => c.name === 'clear_session')?.args?.keepUnsent).toBeUndefined()
   })
 ```
+
+`AccountTab` now takes its flow from the root (plan review I6), so the file mounts it the way the root does. A real `SignOutFlow` on the real `signOutFlowApi` reaches the scripted backend through the harness's `__TAURI_INTERNALS__.invoke` (`tests/fixtures/componentHarness.ts:117-124`). Its view and outcome count reach the tab through a props object the harness re-reads at every render. Its outcomes go through `showSignOutOutcome`, the root's own function, loaded from `MacSettings.tsx` (below):
+
+```ts
+import { SignOutFlow, signOutFlowApi, connectSignOutFlowEvents, connectSignOutFlowMenu } from '../src/signOutFlow'
+import { stripCode } from '../src/signOutCopy'
+
+const showSignOutOutcome = loadComponent('MacSettings.tsx', 'showSignOutOutcome', { stripCode, holdSignOutWarning: accountSession.holdSignOutWarning })
+
+/** `AccountTab` as the root mounts it: the flow, its view and its outcome count as props (plan review I6). */
+function openAccount(b: Record<string, (args: any) => unknown>, extra: { bindings?: Record<string, unknown> } = {}) {
+  const props: any = { flowView: { kind: 'idle' }, flowOutcomes: 0 }
+  let m: Mounted | null = null
+  props.flow = new SignOutFlow(signOutFlowApi, (view) => { props.flowView = view }, (outcome) => {
+    showSignOutOutcome(outcome, (toast: any) => m!.toasts.push(toast))
+    props.flowOutcomes += 1
+  })
+  m = open('AccountTab', b, { ...extra, props })
+  return m
+}
+```
+
+Every existing `open('AccountTab', …)` in the file becomes `openAccount(…)` (19 calls), and their expectations do not change. The root now builds a flow and listens for requests, so the existing tests of `describe('MacSettings window', …)` (`openWindow` and the three update-menu tests, `@184:tests/macSettingsTabs.test.tsx:1318-1412`) gain in their bindings `SignOutFlow, signOutFlowApi, showSignOutOutcome, connectSignOutFlowEvents: () => () => {}, connectSignOutFlowMenu: () => () => {}`, as they already stub `connectNativeUpdateMenu`; their expectations do not change either.
+
+In the same file's `describe('MacSettings window', …)`, the F9 case (plan review I6):
+
+```ts
+  /** F9 (plan review I6): the flow and its request live in the root. A request handled once never runs again, however
+   *  often the Account tab mounts: a request, Cancel at the ask, the Sync tab, the Account tab again → one count, no
+   *  `clear_session`. */
+  test('a handled flow request never runs again when the Account tab mounts again', async () => {
+    let pending = true
+    let flow: any = null
+    const accountStub = (props: any) => { flow = props.flow; return createElement('div', { 'data-tab': 'account' }) }
+    const m = open('MacSettings', {
+      consume_sign_out_flow_request: () => { const was = pending; pending = false; return was },
+      sign_out_count: () => ({ askId: 'a1', files: 1, copiedFiles: 1, others: 0, missingFiles: 0, earlierFolders: [], canSend: false, notSending: 'offline' }),
+      clear_session: () => ({ warning: null }),
+    }, {
+      props: { initialTab: 'general' },
+      bindings: {
+        GeneralTab: tabStub('general'), AccountTab: accountStub, SyncTab: tabStub('sync'), AboutTab: tabStub('about'),
+        useSettingsConfig: settingsStub,
+        listen: () => Promise.resolve(() => {}),
+        connectNativeUpdateMenu: () => () => {},
+        SignOutFlow, signOutFlowApi, connectSignOutFlowEvents, connectSignOutFlowMenu, stripCode, showSignOutOutcome,
+      },
+    })
+    await settle(m)
+    expect(shown(m)).toEqual(['account'])
+    expect(flow.current().kind).toBe('ask')
+    flow.cancel()
+    m.render()
+    tabs(m)[2].props.onClick() // Sync
+    m.render()
+    tabs(m)[1].props.onClick() // Account again: the tab mounts again
+    m.render()
+    await settle(m)
+    expect(m.calls.filter((c) => c.name === 'sign_out_count')).toHaveLength(1)
+    expect(m.calls.filter((c) => c.name === 'clear_session')).toHaveLength(0)
+    expect(flow.current().kind).toBe('idle')
+    // The tab, which mounts on every visit, never builds a flow or runs a request itself.
+    const source = readFileSync(new URL('../src/MacSettings.tsx', import.meta.url), 'utf8')
+    const start = source.indexOf('function AccountTab(')
+    const tab = source.slice(start, source.indexOf('\n}\n', start))
+    for (const banned of ['new SignOutFlow(', 'connectSignOutFlowMenu(', 'connectSignOutFlowEvents(', '.request()']) {
+      expect(tab.includes(banned), banned).toBe(false)
+    }
+  })
+```
+
+(`readFileSync` from `node:fs`, imported at the top of the file.)
 
 - [ ] **Step 2: Run them, expect FAIL.** `bun test tests/signOutFlow.test.ts tests/macSettingsTabs.test.tsx > $EVID/t17-red.log 2>&1`. Expected: module not found, then the new Settings tests red.
 
@@ -6797,29 +7653,7 @@ function UnsentAskSheet({ ask, reason, onCancel, onSignOut }: { ask: AskCounts; 
 }
 ```
 
-In `AccountTab`: remove `confirmSignOut` and `signOut`; add
-
-```tsx
-  const [flowView, setFlowView] = useState<FlowView>({ kind: 'idle' })
-  const flowRef = useRef<SignOutFlow | null>(null)
-  if (flowRef.current === null) {
-    flowRef.current = new SignOutFlow(signOutFlowApi, setFlowView, (outcome) => {
-      if (outcome.kind === 'failed') {
-        showToast({ variant: 'error', title: 'Couldn’t sign out', message: stripCode(outcome.message) })
-      } else {
-        holdSignOutWarning(outcome.warning)
-      }
-      void refresh()
-    })
-  }
-  const flow = flowRef.current
-  useEffect(() => connectSignOutFlowEvents(listen, flow), [flow])
-  useEffect(() => {
-    if (flowRequest > 0) void flow.request()
-  }, [flowRequest, flow])
-```
-
-`AccountTab` takes `{ flowRequest }: { flowRequest: number }`; the "Sign out…" button calls `flow.open()` and is disabled while `flowView.kind !== 'idle'`; the confirm sheet is `open={flowView.kind === 'confirm'}`, `onCancel={() => flow.cancel()}`, `onConfirm={() => void flow.confirm()}`; then:
+In `AccountTab`: remove `confirmSignOut` and `signOut`. It takes `{ flow, flowView, flowOutcomes }: { flow: SignOutFlow; flowView: FlowView; flowOutcomes: number }` from the root, builds no flow and consumes no request, and reads the account again after each sign-out outcome: its mount effect `useEffect(() => { void refresh() }, [refresh])` becomes `useEffect(() => { void refresh() }, [refresh, flowOutcomes])` (a read: running it again on a mount is harmless, unlike a sign-out). The "Sign out…" button calls `flow.open()` and is disabled while `flowView.kind !== 'idle'`; the confirm sheet is `open={flowView.kind === 'confirm'}`, `onCancel={() => flow.cancel()}`, `onConfirm={() => void flow.confirm()}`; then:
 
 ```tsx
       {flowView.kind === 'sending' ? <SendingSheet changesLeft={flowView.changesLeft} onStop={() => void flow.stopWaiting()} /> : null}
@@ -6831,17 +7665,44 @@ In `AccountTab`: remove `confirmSignOut` and `signOut`; add
 In the root `MacSettings`, beside the update-menu effect:
 
 ```tsx
-  // Spec 2026-10-10 §5.1: the menu and the compact page hand Settings a flow request.
-  const [flowRequest, setFlowRequest] = useState(0)
+  // Spec 2026-10-10 §5.1 (plan review I6): the sign-out flow and its pending request live here, not in the Account tab,
+  // which mounts only while it is selected. A flow it owned would be new at every return to the tab, and a request it
+  // had handled would run again. The menu and the compact page hand this window a request; it runs once.
+  const { showToast } = useToast()
+  const showToastRef = useRef(showToast)
+  showToastRef.current = showToast
+  const [flowView, setFlowView] = useState<FlowView>({ kind: 'idle' })
+  const [flowOutcomes, setFlowOutcomes] = useState(0)
+  const flowRef = useRef<SignOutFlow | null>(null)
+  if (flowRef.current === null) {
+    flowRef.current = new SignOutFlow(signOutFlowApi, setFlowView, (outcome) => {
+      showSignOutOutcome(outcome, (toast) => showToastRef.current(toast))
+      setFlowOutcomes((n) => n + 1)
+    })
+  }
+  const flow = flowRef.current
+  useEffect(() => connectSignOutFlowEvents(listen, flow), [flow])
   useEffect(() => connectSignOutFlowMenu(listen, () => command<boolean>('consume_sign_out_flow_request'), () => {
     setTab('account')
-    setFlowRequest((n) => n + 1)
-  }), [])
+    void flow.request()
+  }), [flow])
 ```
 
-and renders `<AccountTab flowRequest={flowRequest} />`.
+and renders `<AccountTab flow={flow} flowView={flowView} flowOutcomes={flowOutcomes} />`. (`ToastProvider` wraps this window above the root, `src/main.tsx:96-98`, so `useToast` works here as it does in the tabs.) The outcome is shown by one named function beside the root, which the root calls above and the tests load:
 
-- [ ] **Step 4: Run, expect PASS.** `bun test tests/signOutFlow.test.ts`: `7 pass`; `bun test tests/macSettingsTabs.test.tsx`: its baseline count plus 2, `0 fail`.
+```tsx
+/** How the window shows a sign-out's outcome (§5.1): a failure as one toast, its code stripped (§11); a completed
+ *  sign-out's warning held for the Account tab's note, outside the session boundary (accountSession.ts). */
+function showSignOutOutcome(outcome: FlowOutcome, showToast: (toast: { variant: 'error'; title: string; message: string }) => void) {
+  if (outcome.kind === 'failed') {
+    showToast({ variant: 'error', title: 'Couldn’t sign out', message: stripCode(outcome.message) })
+  } else {
+    holdSignOutWarning(outcome.warning)
+  }
+}
+```
+
+- [ ] **Step 4: Run, expect PASS.** `bun test tests/signOutFlow.test.ts`: `7 pass`; `bun test tests/macSettingsTabs.test.tsx`: its baseline count plus 3, `0 fail`.
 
 - [ ] **Step 5: Mutations, each RED then reverted.**
   1. `signOutAtAsk` passes the first snapshot's `askId` (keep it in a field at the first count): F1 red.
@@ -6852,8 +7713,10 @@ and renders `<AccountTab flowRequest={flowRequest} />`.
   6. Acknowledge before `report`: F12 red on the order.
   7. Consume only on the event (drop `void take()`): F9 red.
   8. `SendingSheet` closes with Cancel: the Settings F3 test red.
+  9. Build the flow in `AccountTab` again, with the root's request as a counter it replays on mount (the earlier shape): the F9 window test red on `new SignOutFlow(` in the tab. (The window test mounts a stub tab, so the tab's own replay is caught by this pin, and the root's by the `sign_out_count` count.)
+  10. Drop `changesLeft > 0` from `progress`: F1 red on the `progress(0)` line.
 
-- [ ] **Step 6: The frontend gate** with `<N>` = 17; expected `B0 + 4 + 9 pass` (Task 16's 4, this task's 7 and 2), `0 fail`.
+- [ ] **Step 6: The frontend gate** with `<N>` = 17; expected `B0 + 4 + 10 pass` (Task 16's 4, this task's 7 and 3), `0 fail`.
 
 - [ ] **Step 7: Commit.**
 
@@ -6873,7 +7736,7 @@ git commit -m "feat(macos): Settings sends, asks and keeps before a sign-out (18
 
 **Interfaces:**
 - Consumes: `clearSession({ forgetEmail, keepUnsent })` (Task 17), `askLines`, `stripCode`, `A0S_TITLE`, `A1S_LINE`, `AskCounts`, `SignOutCount` (Task 16), commands `request_sign_out_flow`, `sign_out_count`, `sign_out_result_ack` (Tasks 11-13).
-- Produces: `SignInSettled`'s `account_mismatch` case is `{ kind: 'account_mismatch'; pendingChanges: number; unsent: AskCounts | null }`; `AccountSwitchStep({ pendingChanges, unsent, onSwitched, onCancel })`.
+- Produces: `SignInSettled`'s `account_mismatch` case is `{ kind: 'account_mismatch'; pendingChanges: number; unsent: AskCounts | null; unsentError: string | null }`; `AccountSwitchStep({ pendingChanges, unsent, unsentError, onSwitched, onCancel })`. Plan review M8: `unsentError` is the coded E3 Rust settles with when the switch's count failed (Task 13); the step shows it as a line, never a toast.
 
 The browser handoff's `account_mismatch` phase is read only by `WindowsFirstRun.tsx` (`@184:src/WindowsFirstRun.tsx:353`), which never runs on a Mac. On macOS the switch step is reached through the sign-in commands' `LoginOutcome`, so no other reader changes.
 
@@ -6897,11 +7760,11 @@ afterEach(() => { while (mounted.length) mounted.pop()!.close() })
 
 const unsent = (over: Partial<copy.AskCounts> = {}): copy.AskCounts => ({ askId: 'switch-1', files: 1, copiedFiles: 1, others: 1, missingFiles: 0, earlierFolders: [], ...over })
 
-function switchStep(props: { pendingChanges: number; unsent: copy.AskCounts | null }, backend: Record<string, (args: any) => unknown>) {
+function switchStep(props: { pendingChanges: number; unsent: copy.AskCounts | null; unsentError?: string | null }, backend: Record<string, (args: any) => unknown>) {
   const m = mount('Onboarding.tsx', 'AccountSwitchStep', {
     backend: { sign_out_result_ack: () => null, ...backend },
     expand: true,
-    props: { ...props, onSwitched: () => {}, onCancel: () => {} },
+    props: { unsentError: null, ...props, onSwitched: () => {}, onCancel: () => {} },
     bindings: {
       clearSession: desktopApi.clearSession, command: desktopApi.command, commandUnavailableLabel: desktopApi.commandUnavailableLabel,
       Card: ({ title, copy: body, children }: any) => createElement('section', null, createElement('h3', null, title), createElement('p', null, body), children),
@@ -6958,8 +7821,39 @@ describe('entry points (spec 2026-10-10 §4)', () => {
 
   test('settledFrom carries the snapshot, and reads a missing one as none', () => {
     const base = { requires_2fa: false, reauthenticated: false, vault_unlocked: false, key_replaced: false }
-    expect(settledFrom({ ...base, account_mismatch: { pending_changes: 1, unsent: unsent() } } as any)).toEqual({ kind: 'account_mismatch', pendingChanges: 1, unsent: unsent() })
-    expect(settledFrom({ ...base, account_mismatch: { pending_changes: 2 } } as any)).toEqual({ kind: 'account_mismatch', pendingChanges: 2, unsent: null })
+    expect(settledFrom({ ...base, account_mismatch: { pending_changes: 1, unsent: unsent() } } as any)).toEqual({ kind: 'account_mismatch', pendingChanges: 1, unsent: unsent(), unsentError: null })
+    expect(settledFrom({ ...base, account_mismatch: { pending_changes: 2 } } as any)).toEqual({ kind: 'account_mismatch', pendingChanges: 2, unsent: null, unsentError: null })
+    const e3 = `unsent_count_failed: ${copy.E3_UNSENT_COUNT_FAILED}`
+    expect(settledFrom({ ...base, account_mismatch: { pending_changes: 2, unsent_error: e3 } } as any)).toEqual({ kind: 'account_mismatch', pendingChanges: 2, unsent: null, unsentError: e3 })
+  })
+
+  /** §5.3 row 1 (plan review M8): a count that failed is E3, a line in the step, never a toast. "Sign out and switch"
+   *  then counts again through the gate; a re-count that fails is the same line. */
+  test('a count that failed shows E3 as a line in the step, and a fresh count replaces it', async () => {
+    const e3 = `unsent_count_failed: ${copy.E3_UNSENT_COUNT_FAILED}`
+    let counts = 0
+    const m = switchStep({ pendingChanges: 2, unsent: null, unsentError: e3 }, {
+      clear_session: () => { throw new Error('unsent_changes: Some changes…') },
+      sign_out_count: () => {
+        counts += 1
+        if (counts === 1) throw new Error(e3)
+        return { ...unsent({ askId: 'switch-3' }), canSend: false, notSending: null }
+      },
+    })
+    await m.flush()
+    expect(textOf(m.tree())).toContain(copy.E3_UNSENT_COUNT_FAILED)
+    expect(textOf(m.tree())).not.toContain('unsent_count_failed')
+    expect(textOf(m.tree())).toContain(switchCopy.ACCOUNT_SWITCH_TITLE)
+    await m.click(copy.ASK_SWITCH)
+    await m.flush()
+    expect(m.toasts).toEqual([])
+    expect(textOf(m.tree())).toContain(copy.E3_UNSENT_COUNT_FAILED) // the re-count failed too: still the line
+    await m.click(copy.ASK_SWITCH)
+    await m.flush()
+    expect(m.toasts).toEqual([])
+    expect(textOf(m.tree())).toContain(copy.A0S_TITLE)
+    expect(textOf(m.tree())).not.toContain(copy.E3_UNSENT_COUNT_FAILED)
+    expect(m.calls.filter((c) => c.name === 'clear_session').map((c) => c.args)).toEqual([{ forgetEmail: true }, { forgetEmail: true }])
   })
 
   /** F4. */
@@ -7007,6 +7901,8 @@ describe('entry points (spec 2026-10-10 §4)', () => {
     expect(names.indexOf('sign_out_result_ack')).toBeGreaterThan(names.indexOf('clear_session'))
   })
 
+  /** F4's last clause. `tests/forceReauth.test.ts` (`@184:tests/forceReauth.test.ts:125-160`) already pins the same
+   *  for R8; this states it beside the other entry points. */
   test('on macOS "Sign in again" never clears the session', async () => {
     const calls: string[] = []
     const result = await desktopApi.forceReauth({
@@ -7037,13 +7933,28 @@ function unsentFrom(raw: unknown): AskCounts | null {
 }
 ```
 
-and `return { kind: 'account_mismatch', pendingChanges: pending, unsent: unsentFrom((account_mismatch as Record<string, unknown>).unsent) }`. `desktopApi.ts:1047`: `account_mismatch: { pending_changes: number; unsent?: AskCounts } | null`. `Onboarding.tsx`: `afterSignIn` keeps `settled.unsent` in state beside `pendingSwitch` (`const [switchUnsent, setSwitchUnsent] = useState<AskCounts | null>(null)`) and passes `unsent={switchUnsent}`. `AccountSwitchStep`:
+and
+
+```ts
+  const raw = account_mismatch as Record<string, unknown>
+  return {
+    kind: 'account_mismatch',
+    pendingChanges: pending,
+    unsent: unsentFrom(raw.unsent),
+    // Plan review M8: the coded E3 when the switch's count failed (Task 13); the step shows it as a line.
+    unsentError: typeof raw.unsent_error === 'string' ? raw.unsent_error : null,
+  }
+```
+
+`desktopApi.ts:1047`: `account_mismatch: { pending_changes: number; unsent?: AskCounts; unsent_error?: string } | null`. `Onboarding.tsx`: `afterSignIn` keeps `settled.unsent` and `settled.unsentError` in state beside `pendingSwitch` (`const [switchUnsent, setSwitchUnsent] = useState<AskCounts | null>(null)`, `const [switchUnsentError, setSwitchUnsentError] = useState<string | null>(null)`) and passes `unsent={switchUnsent}` and `unsentError={switchUnsentError}`. `AccountSwitchStep`:
 
 ```tsx
-function AccountSwitchStep({ pendingChanges, unsent, onSwitched, onCancel }: { pendingChanges: number; unsent: AskCounts | null; onSwitched: () => void; onCancel: () => void }) {
+function AccountSwitchStep({ pendingChanges, unsent, unsentError, onSwitched, onCancel }: { pendingChanges: number; unsent: AskCounts | null; unsentError: string | null; onSwitched: () => void; onCancel: () => void }) {
   const { showToast } = useToast()
   const [busy, setBusy] = useState(false)
   const [ask, setAsk] = useState<AskCounts | null>(unsent)
+  // Spec 2026-10-10 §5.3 row 1 (plan review M8): E3, a line in this step, while the count could not be read.
+  const [countError, setCountError] = useState<string | null>(unsentError)
   const cancelRef = useRef<HTMLButtonElement | null>(null)
   useEffect(() => {
     cancelRef.current?.focus()
@@ -7059,9 +7970,16 @@ function AccountSwitchStep({ pendingChanges, unsent, onSwitched, onCancel }: { p
         const fresh = await command<SignOutCount>('sign_out_count')
         if (fresh.ok) {
           setAsk(fresh.value)
+          setCountError(null)
           return
         }
-        showToast({ variant: 'error', title: ACCOUNT_SWITCH_FAILED, message: stripCode(fresh.reason) })
+        setCountError(fresh.reason) // E3 again: the line, never a toast
+        return
+      }
+      // The gate's own read failed: E3 as the line; Rust holds it pending, so it is acknowledged once shown (F12).
+      if (result.reason.startsWith('unsent_count_failed: ')) {
+        setCountError(result.reason)
+        void command<void>('sign_out_result_ack')
         return
       }
       showToast({ variant: 'error', title: ACCOUNT_SWITCH_FAILED, message: result.unsupported ? commandUnavailableLabel('clear_session') : stripCode(result.reason) })
@@ -7075,8 +7993,11 @@ function AccountSwitchStep({ pendingChanges, unsent, onSwitched, onCancel }: { p
     onSwitched()
   }
   const lines = waiting && ask ? askLines(ask, null, true) : null
+  // With no count (E3), the step says only what is known: the switch signs the other account out.
+  const copyLine = waiting || countError !== null ? A1S_LINE : accountSwitchBody(ask ? 0 : pendingChanges)
   return (
-    <Card title={waiting ? A0S_TITLE : ACCOUNT_SWITCH_TITLE} copy={waiting ? A1S_LINE : accountSwitchBody(ask ? 0 : pendingChanges)}>
+    <Card title={waiting ? A0S_TITLE : ACCOUNT_SWITCH_TITLE} copy={copyLine}>
+      {countError !== null && !waiting ? <p className="page-copy" role="alert">{stripCode(countError)}</p> : null}
       {lines ? lines.paragraphs.slice(0, lines.foldersAfter).map((line) => <p key={line} className="page-copy">{line}</p>) : null}
       {lines?.foldersLine ? <p className="page-copy">{lines.foldersLine}</p> : null}
       {lines ? lines.folders.map((folder) => <p key={folder} className="page-copy" style={{ fontFamily: 'var(--font-mono)', overflowWrap: 'anywhere' }}>{folder}</p>) : null}
@@ -7119,7 +8040,7 @@ function AccountSwitchStep({ pendingChanges, unsent, onSwitched, onCancel }: { p
 
 `accountSwitchCopy.ts`'s header: replace "Honest about the loss: the changes that have not uploaded are removed." with "Honest about the loss: on Windows and Linux the changes that have not uploaded are removed; on macOS the step is the sign-out ask of spec 2026-10-10 (A0s-A4s), and they are kept in a folder first." `tests/reauthInPlace.test.tsx`'s `AccountSwitchStep` stub and its `account_mismatch` expectations gain `unsent: null`.
 
-- [ ] **Step 4: Run, expect PASS.** `bun test tests/signOutEntryPoints.test.tsx`: `7 pass`. `bun test tests/reauthInPlace.test.tsx tests/forceReauth.test.ts`: their baseline counts.
+- [ ] **Step 4: Run, expect PASS.** `bun test tests/signOutEntryPoints.test.tsx`: `8 pass`. `bun test tests/reauthInPlace.test.tsx tests/forceReauth.test.ts`: their baseline counts.
 
 - [ ] **Step 5: Mutations, each RED then reverted.**
   1. Drop `keepUnsent` from the step's call: F8 red on the args.
@@ -7128,8 +8049,11 @@ function AccountSwitchStep({ pendingChanges, unsent, onSwitched, onCancel }: { p
   4. Read a missing snapshot as nothing waiting (`unsent ?? emptyAsk`): the Linux case red.
   5. The compact page toasts `unsent_changes:`: F4 red.
   6. Acknowledge before the toast, or never: the F12 case red.
+  7. Toast a failed re-count with `ACCOUNT_SWITCH_FAILED` (the earlier shape) instead of the line: the M8 case red on `toasts`.
+  8. Render `accountSwitchBody(pendingChanges)` and no line when `unsentError` is set: the M8 case red on the E3 line.
+  9. In `forceReauth` (`src/desktopApi.ts:1168-1185`), call `api.clearSession()` before the macOS branch (plan review M6): `on macOS "Sign in again" never clears the session` red on `calls` (`['clear', 'reauth']`); `tests/forceReauth.test.ts`'s R8 case red too.
 
-- [ ] **Step 6: The frontend gate** with `<N>` = 18; expected `B0 + 4 + 9 + 7 pass`, `0 fail`.
+- [ ] **Step 6: The frontend gate** with `<N>` = 18; expected `B0 + 4 + 10 + 8 pass`, `0 fail`.
 
 - [ ] **Step 7: Commit.**
 
@@ -7236,7 +8160,7 @@ and, right before 1882's `{kept !== null ? (…)}` row:
   2. Put ours after 1882's: F5 red on the order.
   3. Remove the row on a failed "Show in Finder": F5 red on "the row stays".
 
-- [ ] **Step 6: The frontend gate** with `<N>` = 19; expected `B0 + 21 pass`, `0 fail`.
+- [ ] **Step 6: The frontend gate** with `<N>` = 19; expected `B0 + 23 pass`, `0 fail`.
 
 - [ ] **Step 7: Commit.**
 
@@ -7259,16 +8183,26 @@ git commit -m "feat(macos): Settings › Sync shows the kept folder, with Show i
 
 - [ ] **Step 1: Amend the spec where this plan tests differently**, struck and signed "— lead, <date> (Task 20)":
   - U17: "against a stub server" becomes the margin's SQL test (`the_send_phase_makes_live_changes_due_with_a_margin`) plus the backoff arithmetic on the real `next_attempt_count` and `retry_delay_seconds` (`a_phase_never_parks_what_it_made_due`). The landing within the phase is D1's.
-  - U35: "counted through test hooks" becomes the third arm's pure gate (`phase_step_due`, at most 61 runs in 60 s) plus a source pin on the arm's body. The runner loop needs a live engine; D7 and D10 drive the arm on a device.
+  - U35: "counted through test hooks" becomes the phase arm's pure gate (`phase_step_due`, at most 61 runs in 60 s), a source pin on the arm's body (the queue step alone, and `send_phase.note(&outcome)`) and on the tick's note, and a wake test on the loop's own wait (`next_wake`: a phase armed while the runner waits wakes it within a second, plan review I2). The whole loop needs a live engine; D7 and D10 drive the arm on a device.
   - U34 (a)-(h) run on `flow_window_closed` and `SendPhase`, the pure flow state, as the spec allows ("On the pure flow state").
   - The send phase's "Checked at least once a second, and on every landing" is checked once a second; a landing shows in the next second's count.
   - The Q1 and Q2 rulings are already in the spec (§15, signed 2026-10-11); nothing more to add for them.
 
+  Already amended at the plan review (2026-10-11, signed "— lead, 2026-10-11 (plan review)"); check each is still true of the code, and list each with its test names in the Notes:
+  - §5.2 step 6 and §15 question 3: every Finder change the IPC accepts is fenced (`enqueue_finder_change`), the delete included. U45 gains `every_finder_change_after_the_close_queues_nothing` (a rename, a move to the top level, a folder create, a delete) and the IPC reply for `create`, `modify` and `delete` (plan review I1).
+  - §7.2 "Path length, exact", "Lengths" and "No name can fail a sign-out": the length is the resolved path's (`a_symlinked_root_still_keeps_every_file`); an extension with no room for the suffix is cut as a stem; a directory whose " (n)" would pass 1023 bytes sends its file to the top. U11 gains those cases (plan review I5, M3).
+  - U19 and F8: a switch count that fails settles with `unsent_error` (E3) and the step shows it as a line (`a_switch_count_that_fails_is_a_line_in_the_step`, `a count that failed shows E3 as a line in the step…`) (plan review M8).
+  - U20: a reset whose purge fails after a completed keep still hands its folder on to be surfaced (plan review M9).
+  - U30: the first case's marker reads as §7.3 says (cleared with the rows); an `after_keep` abort is the case where both keys name the folder (plan review M1).
+  - U42 (f): it runs from (e)'s leftovers, so its folder is F3 and the row names it (plan review M4).
+  - F9: the flow and its request live in the window's root; a request handled once never runs again (plan review I6).
+  - Not narrowed, so not amended: U46 and U16 (the chain is tested link by link: the bridge's flag, `SendPhaseLink::note` and `signals`, the noted arms, and the driver's own `observe_phase`; plan review I7), U6, U8, U8b, U25 and F7 (each now asserted in full; plan review M5).
+
 - [ ] **Step 2: The other docs (spec §14).**
   - 1882 §3, under "A limit this fix does not change (sign-out only).": "Closed by `docs/specs/2026-10-10-macos-sign-out-waiting-writes.md` (task 1887): a sign-out by choice now copies every queued Finder save into its own kept folder before the queue is purged, and asks first. — lead, <date> (1887)".
   - 1873 §5.4 row 15's last cell: "~~Queued saves are purged by design (§10.5)~~ Queued saves are kept in a folder on this Mac before the purge, and the person is asked first (spec 2026-10-10, task 1887)". §10.5's m-12 paragraph gets the same sentence beneath it.
-  - `CLAUDE.md`, after the 1882 paragraph in "Current macOS integration state": "**A sign-out keeps waiting Finder saves (task 1887).** On macOS `clear_session` gates on an ask snapshot (`sign_out_count`), and refuses with `unsent_changes:` while changes wait and the person was not asked. Settings › Account sends first (`sign_out_send_start`, at most 60 s, Rust-owned, a third `select!` arm in the runner), then asks. On "Sign out" the keep step closes Finder accepts, copies every waiting save into `<container>/Data/Documents/Changes not sent/<date at time>/` with `clonefile` (never overwriting), and records it durably in `desktop.toml` (`kept_unsent_folder`, `kept_unsent_unfinished`) before the purge, whose guard refuses before any deletion unless every waiting write was kept. One alert names our folder and macOS's; Settings › Sync shows our row with Show in Finder and Dismiss. Closing Settings ends the flow; a late result is shown in the native dialog. Windows and Linux are unchanged. Spec: `docs/specs/2026-10-10-macos-sign-out-waiting-writes.md`."
-  - `docs/IPC_PROTOCOL.md:767`, the refusal reasons: add "`accepts_closed` (a sign-out closed Finder accepts after its engine stop; nothing queued, the reply is `WriteRetryLater`)".
+  - `CLAUDE.md`, after the 1882 paragraph in "Current macOS integration state": "**A sign-out keeps waiting Finder saves (task 1887).** On macOS `clear_session` gates on an ask snapshot (`sign_out_count`), and refuses with `unsent_changes:` while changes wait and the person was not asked. Settings › Account sends first (`sign_out_send_start`, at most 60 s, Rust-owned, a third wake in the runner's loop), then asks. On "Sign out" the keep step closes Finder accepts, copies every waiting save into `<container>/Data/Documents/Changes not sent/<date at time>/` with `clonefile` (never overwriting), and records it durably in `desktop.toml` (`kept_unsent_folder`, `kept_unsent_unfinished`) before the purge, whose guard refuses before any deletion unless every waiting write was kept. One alert names our folder and macOS's; Settings › Sync shows our row with Show in Finder and Dismiss. Closing Settings ends the flow; a late result is shown in the native dialog. Windows and Linux are unchanged. Spec: `docs/specs/2026-10-10-macos-sign-out-waiting-writes.md`."
+  - `docs/IPC_PROTOCOL.md:767`, the refusal reasons: add "`accepts_closed` (a sign-out closed Finder accepts after its engine stop; nothing queued for a save, a rename or move, a folder create or a delete, and the reply is `WriteRetryLater`)".
   - The task file's Notes (workspace, lead): a paragraph "For the release notes" that the release author pastes into `RELEASE_NOTES.md` for the version that carries 1873 and 1887, under "What's New": "[macOS] Signing out no longer loses a save that is still waiting to upload. Beebeeb first tries to send waiting changes, for at most a minute, then asks before signing out, with the real count. Every save it could not send is copied to a folder on this Mac (in the app's container, under Documents › Changes not sent), shown in an alert and in Settings › Sync." The counted test results are the release's own, at release time (`docs/RELEASING.md`). `RELEASE_NOTES.md` is not edited here: it names 0.8.11.
 
 - [ ] **Step 3: The branch gate, in a fresh tree at the branch head** (the lane's tree has built every task; a fresh one proves the branch alone):
@@ -7280,9 +8214,9 @@ cd $G/src-tauri && cargo fmt --check > $EVID/t20-fmt.log 2>&1; echo "fmt rc=$?"
 $LOCK cargo-build -- cargo check --locked --all-targets > $EVID/t20-check.log 2>&1; echo "check rc=$?"
 $LOCK cargo-build -- cargo test --locked > $EVID/t20-cargo-test.log 2>&1; echo $? > $EVID/t20-cargo-test.exit
 python3 ../scripts/assert-cargo-test-counts.py --self-test; python3 ../scripts/assert-cargo-test-counts.py $EVID/t20-cargo-test.log --cargo-exit-code "$(cat $EVID/t20-cargo-test.exit)"
-grep "test result:" $EVID/t20-cargo-test.log      # lib: ok. L0 + 86 passed; 0 failed; I0 ignored; keychain, wsw, wsc at baseline
+grep "test result:" $EVID/t20-cargo-test.log      # lib: ok. L0 + 95 passed; 0 failed; I0 ignored; keychain, wsw, wsc at baseline
 $LOCK cargo-build -- cargo clippy --locked --all-targets > $EVID/t20-clippy.log 2>&1; grep -c "^warning" $EVID/t20-clippy.log   # ≤ C0
-cd $G && bun install --frozen-lockfile > /dev/null && bun test > $EVID/t20-bun.log 2>&1; grep -E "^ *[0-9]+ (pass|fail)" $EVID/t20-bun.log   # B0 + 21 pass, 0 fail
+cd $G && bun install --frozen-lockfile > /dev/null && bun test > $EVID/t20-bun.log 2>&1; grep -E "^ *[0-9]+ (pass|fail)" $EVID/t20-bun.log   # B0 + 23 pass, 0 fail
 bunx tsc --noEmit -p . > $EVID/t20-tsc.log 2>&1; echo "tsc rc=$?"
 bun run lint > $EVID/t20-lint.log 2>&1; echo "lint rc=$?"
 bash scripts/test-ipc-framing.sh > $EVID/t20-swift.log 2>&1; tail -1 $EVID/t20-swift.log   # 102 passed, 0 failed: no Swift changed
