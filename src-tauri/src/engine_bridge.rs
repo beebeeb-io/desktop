@@ -720,6 +720,26 @@ fn has_transport_cause(error: &anyhow::Error) -> bool {
     false
 }
 
+/// Spec §8.4: a refusal the person cures by freeing space, subscribing or paying, read from the
+/// server's code by type, never from text: 413 `quota_exceeded` (init, a chunk, complete), 403
+/// `object_budget_exceeded`, 403 `billing_read_only`, 409 `trial_ended`. For a File Provider write
+/// it is a quota refusal: never paused, never parked, so the save lands once it is cured. Any
+/// other 413, 403 or 409 keeps its rule.
+fn is_curable_refusal(error: &anyhow::Error) -> bool {
+    use crate::api_client::{InitConflict, UploadRefusalCode as Code, UploadRefused};
+    error.chain().any(|cause| {
+        cause.downcast_ref::<UploadRefused>().is_some_and(|refused| {
+            matches!(
+                (refused.status(), refused.code),
+                (Some(413), Some(Code::QuotaExceeded))
+                    | (Some(403), Some(Code::ObjectBudgetExceeded | Code::BillingReadOnly))
+            )
+        }) || cause
+            .downcast_ref::<InitConflict>()
+            .is_some_and(|conflict| conflict.refusal == Some(Code::TrialEnded))
+    })
+}
+
 /// What the runner does with a failed attempt that neither parked at once nor found its op
 /// gone ([`failed_attempt_rule`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1065,9 +1085,14 @@ impl EngineBridge {
                     outcome.retried_op_ids.push(op.op_id);
                 }
                 Err(error) => {
-                    let class = classify_operation_error(&error.to_string());
                     let finder_write = claimed.write.is_some()
                         && matches!(op.kind, OperationKind::UploadVersion | OperationKind::UploadFile);
+                    // §8.4: for a File Provider write, a refusal the person cures is a quota refusal.
+                    let class = if finder_write && is_curable_refusal(&error) {
+                        OperationFailureClass::Quota
+                    } else {
+                        classify_operation_error(&error.to_string())
+                    };
                     // m-11: a recorded completion is never paused (a busy database reads as
                     // `Locked`), because a paused op is not listed again.
                     let transient = finder_write && finder_write_failure_is_transient(class, &error);
@@ -14813,6 +14838,14 @@ mod tests {
         delay_init: Option<Duration>,
         /// file id -> the status line its `uploads/init` is refused with.
         refuse_init: HashMap<String, &'static str>,
+        /// file id -> the status line and the exact JSON body its `uploads/init` is refused with
+        /// (the server's real refusal bodies, spec §8.4).
+        refuse_init_with: HashMap<String, (&'static str, serde_json::Value)>,
+        /// file id -> the status line and body every chunk `PUT` of its sessions is refused with.
+        refuse_chunk_with: HashMap<String, (&'static str, serde_json::Value)>,
+        /// file id -> the status line and body every `complete` of its sessions is refused with;
+        /// the session stays.
+        refuse_complete_with: HashMap<String, (&'static str, serde_json::Value)>,
         /// file id -> the 409 message its next `uploads/init` gets, once (spec §8.4).
         conflict_init_once: HashMap<String, String>,
         /// Every `POST /files/{id}/versions/{vid}/restore`: (file id, object version id).
@@ -15055,6 +15088,15 @@ mod tests {
                 s.inits.push((body, code));
                 return http_json(status, serde_json::json!({ "error": "refused" }));
             }
+            if let Some((status, refusal)) = body["file_id"]
+                .as_str()
+                .and_then(|id| s.refuse_init_with.get(id))
+                .cloned()
+            {
+                let code = status.split(' ').next().and_then(|code| code.parse().ok()).unwrap_or(0);
+                s.inits.push((body, code));
+                return http_json(status, refusal);
+            }
             if body["file_id"].as_str().is_some_and(|id| s.trashed_files.contains(id)) {
                 s.inits.push((body, 409));
                 return http_json("409 Conflict", serde_json::json!({ "error": "file is in trash" }));
@@ -15156,6 +15198,14 @@ mod tests {
                 if s.fail_first_chunk_once.remove(&session) {
                     return http_json("500 Internal Server Error", serde_json::json!({ "error": "boom" }));
                 }
+                if let Some((status, refusal)) = s
+                    .sessions
+                    .get(&session)
+                    .and_then(|(file_id, _)| s.refuse_chunk_with.get(file_id))
+                    .cloned()
+                {
+                    return http_json(status, refusal);
+                }
                 let Some((_, chunks)) = s.sessions.get_mut(&session) else {
                     return http_json("404 Not Found", serde_json::json!({ "error": "no session" }));
                 };
@@ -15171,6 +15221,14 @@ mod tests {
             if method == "POST" && action == "complete" {
                 if s.fail_complete_once.remove(&session) {
                     return http_json("500 Internal Server Error", serde_json::json!({ "error": "boom" }));
+                }
+                if let Some((status, refusal)) = s
+                    .sessions
+                    .get(&session)
+                    .and_then(|(file_id, _)| s.refuse_complete_with.get(file_id))
+                    .cloned()
+                {
+                    return http_json(status, refusal);
                 }
                 if let Some(file_id) = s.completed_reply_lost.get(&session).cloned() {
                     return http_json(
@@ -19326,38 +19384,204 @@ mod tests {
         );
     }
 
-    /// A quota refusal, then the person frees space: the save lands, and it was never paused.
-    #[tokio::test]
-    async fn a_finder_write_refused_for_quota_lands_once_space_is_free_and_was_never_paused() {
-        let master_key = [143u8; 32];
+    /// Where the mock refuses a File Provider write.
+    #[derive(Debug, Clone, Copy)]
+    enum Refused {
+        Init,
+        Chunk,
+        Complete,
+    }
+
+    /// The server's real refusal bodies (server `error.rs`, `signup_plan.rs`): the status and the
+    /// JSON the client reads its code from.
+    fn quota_exceeded() -> (&'static str, serde_json::Value) {
+        (
+            "413 Payload Too Large",
+            json!({ "error": "quota_exceeded", "limit_bytes": 5368709120_i64, "used_bytes": 5368709120_i64, "is_trial_cap": false }),
+        )
+    }
+
+    fn object_budget_exceeded() -> (&'static str, serde_json::Value) {
+        (
+            "403 Forbidden",
+            json!({
+                "error": "object_budget_exceeded",
+                "message": "This account has reached its stored-object limit. Delete files or old versions to free objects.",
+                "used": 100000,
+                "cap": 100000
+            }),
+        )
+    }
+
+    fn billing_read_only() -> (&'static str, serde_json::Value) {
+        (
+            "403 Forbidden",
+            json!({
+                "error": "billing_read_only",
+                "message": "Your account is read-only due to an unpaid invoice. Update your payment method to restore access."
+            }),
+        )
+    }
+
+    fn trial_ended() -> (&'static str, serde_json::Value) {
+        (
+            "409 Conflict",
+            json!({
+                "error": "trial_ended",
+                "message": "Your trial has ended and your account holds more than its included storage, so it is read-only. Subscribe, or free up space, to keep your files."
+            }),
+        )
+    }
+
+    fn refuse(server: &VersionedServerMock, at: Refused, file_id: &str, refusal: (&'static str, serde_json::Value)) {
+        let mut s = server.state.lock().unwrap();
+        match at {
+            Refused::Init => s.refuse_init_with.insert(file_id.into(), refusal),
+            Refused::Chunk => s.refuse_chunk_with.insert(file_id.into(), refusal),
+            Refused::Complete => s.refuse_complete_with.insert(file_id.into(), refusal),
+        };
+    }
+
+    fn stop_refusing(server: &VersionedServerMock, file_id: &str) {
+        let mut s = server.state.lock().unwrap();
+        s.refuse_init_with.remove(file_id);
+        s.refuse_chunk_with.remove(file_id);
+        s.refuse_complete_with.remove(file_id);
+    }
+
+    /// Spec §8.4: a refusal the person cures (free space, subscribe, pay), in the server's real
+    /// shape, 30 times: the File Provider write is never paused or parked and keeps presenting
+    /// `uploading`; once the person has cured it, the save lands.
+    async fn a_curable_refusal_lands_once_cured(
+        master_key: [u8; 32],
+        file_id: &str,
+        at: Refused,
+        refusal: (&'static str, serde_json::Value),
+    ) {
         let (dir, sync_root, server, bridge) = rule3_setup(master_key);
-        seed_uploaded_row(&bridge, &server, "over-quota");
-        server
-            .state
-            .lock()
-            .unwrap()
-            .refuse_init
-            .insert("over-quota".into(), "507 Insufficient Storage");
-        fp_save(
-            &bridge,
-            dir.path(),
-            "over-quota",
-            "notes.txt",
-            b"saved at the limit",
-            "1",
-        );
+        seed_uploaded_row(&bridge, &server, file_id);
+        refuse(&server, at, file_id, refusal);
+        fp_save(&bridge, dir.path(), file_id, "notes.txt", b"saved at the limit", "1");
         let mut now = now_secs();
-        let outcomes = failing_passes(&bridge, &sync_root, "over-quota", 30, &mut now).await;
-        assert_kept_uploading(&bridge, "over-quota", &outcomes, OperationFailureClass::Quota);
-        server.state.lock().unwrap().refuse_init.remove("over-quota");
+        let outcomes = failing_passes(&bridge, &sync_root, file_id, 30, &mut now).await;
+        for (pass, outcome) in outcomes.iter().enumerate() {
+            assert!(
+                outcome.paused_op_ids.is_empty() && outcome.invalidated_item_ids.is_empty(),
+                "{at:?} pass {}: never paused, nothing changed for the system: {outcome:?}",
+                pass + 1
+            );
+        }
+        assert_eq!(
+            bridge.db.get_file(file_id).unwrap().unwrap().status,
+            FileStatus::Uploading,
+            "{at:?}: still uploading"
+        );
+        stop_refusing(&server, file_id);
         bridge.process_due_operations(&sync_root, now).await.unwrap();
         assert!(
-            bridge.db.list_operations_for_file("over-quota").unwrap().is_empty(),
-            "landed once there was space"
+            bridge.db.list_operations_for_file(file_id).unwrap().is_empty(),
+            "{at:?}: landed once cured"
         );
         let state = server.finish();
-        assert_eq!(state.inits.iter().filter(|(_, status)| *status == 507).count(), 30);
-        assert_eq!(state.latest_plaintext("over-quota", master_key), b"saved at the limit");
+        assert_eq!(state.latest_plaintext(file_id, master_key), b"saved at the limit");
+    }
+
+    #[tokio::test]
+    async fn a_finder_write_over_quota_at_init_lands_once_space_is_free() {
+        a_curable_refusal_lands_once_cured([143u8; 32], "quota-init", Refused::Init, quota_exceeded()).await;
+    }
+
+    #[tokio::test]
+    async fn a_finder_write_over_quota_at_a_chunk_lands_once_space_is_free() {
+        a_curable_refusal_lands_once_cured([159u8; 32], "quota-chunk", Refused::Chunk, quota_exceeded()).await;
+    }
+
+    #[tokio::test]
+    async fn a_finder_write_over_quota_at_complete_lands_once_space_is_free() {
+        a_curable_refusal_lands_once_cured([160u8; 32], "quota-complete", Refused::Complete, quota_exceeded()).await;
+    }
+
+    #[tokio::test]
+    async fn a_finder_write_over_the_object_budget_lands_once_objects_are_freed() {
+        a_curable_refusal_lands_once_cured([161u8; 32], "budget-chunk", Refused::Chunk, object_budget_exceeded()).await;
+    }
+
+    #[tokio::test]
+    async fn a_finder_write_refused_while_billing_is_read_only_lands_once_paid() {
+        a_curable_refusal_lands_once_cured([162u8; 32], "billing-init", Refused::Init, billing_read_only()).await;
+    }
+
+    #[tokio::test]
+    async fn a_finder_write_refused_after_the_trial_ended_lands_once_subscribed() {
+        a_curable_refusal_lands_once_cured([163u8; 32], "trial-init", Refused::Init, trial_ended()).await;
+    }
+
+    /// Any other 413, 403 or 409 keeps its rule: the code decides, not the status. And an upload
+    /// without a write id keeps its rules for the curable codes too.
+    #[tokio::test]
+    async fn other_refusals_and_uploads_without_a_write_id_keep_their_rules() {
+        let (dir, sync_root, server, bridge) = rule3_setup([164u8; 32]);
+        for (file_id, refusal) in [
+            (
+                "other-413",
+                ("413 Payload Too Large", json!({ "error": "payload_too_large" })),
+            ),
+            (
+                "other-409",
+                (
+                    "409 Conflict",
+                    json!({ "error": "plan_required", "message": "Choose a plan." }),
+                ),
+            ),
+            ("other-403", ("403 Forbidden", json!({ "error": "forbidden" }))),
+        ] {
+            seed_uploaded_row(&bridge, &server, file_id);
+            refuse(&server, Refused::Init, file_id, refusal);
+            fp_save(&bridge, dir.path(), file_id, "notes.txt", b"a save", "1");
+        }
+        let outcome = bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+        assert!(outcome.paused_op_ids.is_empty(), "{outcome:?}");
+        for file_id in ["other-413", "other-409"] {
+            let op = bridge.db.list_operations_for_file(file_id).unwrap().remove(0);
+            assert_eq!(op.attempts, 1, "{file_id}: counted");
+        }
+        let forbidden = bridge.db.list_operations_for_file("other-403").unwrap().remove(0);
+        assert_eq!(
+            forbidden.last_error.as_deref(),
+            Some("permission_denied"),
+            "a 403 with another code parks at once"
+        );
+        drop(server.finish());
+
+        // Without a write id: a quota refusal uses up an attempt and a billing refusal pauses,
+        // as before.
+        for (file_id, refusal, paused) in [
+            ("plain-quota-413", quota_exceeded(), false),
+            ("plain-billing-403", billing_read_only(), true),
+        ] {
+            let (dir, sync_root, server, bridge) = rule3_setup([165u8; 32]);
+            seed_uploaded_row(&bridge, &server, file_id);
+            refuse(&server, Refused::Init, file_id, refusal);
+            let contents = dir.path().join("watched.txt");
+            std::fs::write(&contents, b"a watched edit").unwrap();
+            bridge
+                .queue_finder_modify(finder_file_target(
+                    Some(file_id),
+                    "notes.txt",
+                    &contents,
+                    Some("1".into()),
+                ))
+                .unwrap();
+            let outcome = bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+            let op = bridge.db.list_operations_for_file(file_id).unwrap().remove(0);
+            assert_eq!(
+                outcome.paused_op_ids.len(),
+                usize::from(paused),
+                "{file_id}: {outcome:?}"
+            );
+            assert_eq!(op.attempts, i64::from(!paused), "{file_id}");
+            drop(server.finish());
+        }
     }
 
     /// A 403 parks at once as `permission_denied`: read-only with its bytes kept, its row

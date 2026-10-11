@@ -264,6 +264,79 @@ pub fn classify_init_conflict(message: &str) -> InitConflictClass {
 #[derive(Debug)]
 pub struct InitConflict {
     pub class: InitConflictClass,
+    /// The server's code, when it is one the client acts on (`trial_ended`).
+    pub refusal: Option<UploadRefusalCode>,
+}
+
+/// The server's code on a refused upload request (`{"error": <code>, ...}`), for the codes the
+/// client acts on: each is a refusal the person cures (free space, subscribe, pay), spec §8.4.
+/// Read from the `error` field by exact match. Nothing else of the body is kept, and the body's
+/// text never reaches a log or a stored error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UploadRefusalCode {
+    /// 413: the account is over its storage quota.
+    QuotaExceeded,
+    /// 403: the account has reached its stored-object limit.
+    ObjectBudgetExceeded,
+    /// 403: the account is read-only for an unpaid invoice.
+    BillingReadOnly,
+    /// 409: the trial ended and the account holds more than its included storage.
+    TrialEnded,
+}
+
+impl UploadRefusalCode {
+    pub fn from_code(code: &str) -> Option<Self> {
+        match code {
+            "quota_exceeded" => Some(UploadRefusalCode::QuotaExceeded),
+            "object_budget_exceeded" => Some(UploadRefusalCode::ObjectBudgetExceeded),
+            "billing_read_only" => Some(UploadRefusalCode::BillingReadOnly),
+            "trial_ended" => Some(UploadRefusalCode::TrialEnded),
+            _ => None,
+        }
+    }
+}
+
+/// An upload request (init, a chunk, complete) the server answered with a non-2xx status, other
+/// than init's 409 ([`InitConflict`]). It shows, and has as its source, the `reqwest` error
+/// `error_for_status` gives (the status and the URL, never the body), so every reading of the
+/// error's text and status stays as it was. It adds the server's code when the client acts on it.
+#[derive(Debug)]
+pub struct UploadRefused {
+    pub code: Option<UploadRefusalCode>,
+    status_error: reqwest::Error,
+}
+
+impl UploadRefused {
+    pub fn status(&self) -> Option<u16> {
+        self.status_error.status().map(|status| status.as_u16())
+    }
+}
+
+impl std::fmt::Display for UploadRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.status_error.fmt(f)
+    }
+}
+
+impl std::error::Error for UploadRefused {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.status_error)
+    }
+}
+
+/// `resp` when it is a 2xx; else an [`UploadRefused`] with the server's code read from the body's
+/// `error` field.
+async fn upload_response(resp: reqwest::Response) -> anyhow::Result<reqwest::Response> {
+    let status_error = resp.error_for_status_ref().err();
+    let Some(status_error) = status_error else {
+        return Ok(resp);
+    };
+    let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+    let code = body
+        .get("error")
+        .and_then(|value| value.as_str())
+        .and_then(UploadRefusalCode::from_code);
+    Err(anyhow::Error::new(UploadRefused { code, status_error }))
 }
 
 impl std::fmt::Display for InitConflict {
@@ -790,9 +863,10 @@ impl ApiClient {
             let message = body.get("error").and_then(|value| value.as_str()).unwrap_or_default();
             return Err(anyhow::Error::new(InitConflict {
                 class: classify_init_conflict(message),
+                refusal: UploadRefusalCode::from_code(message),
             }));
         }
-        Ok(resp.error_for_status()?.json().await?)
+        Ok(upload_response(resp).await?.json().await?)
     }
 
     pub async fn upload_session_chunk(
@@ -808,9 +882,8 @@ impl ApiClient {
             .header("Content-Type", "application/octet-stream")
             .body(data.to_vec())
             .send()
-            .await?
-            .error_for_status()?;
-        Ok(resp.json().await?)
+            .await?;
+        Ok(upload_response(resp).await?.json().await?)
     }
 
     pub async fn complete_upload_session(&self, upload_session_id: &str) -> anyhow::Result<serde_json::Value> {
@@ -820,9 +893,8 @@ impl ApiClient {
             .header("Authorization", format!("Bearer {}", self.token))
             .json(&serde_json::json!({}))
             .send()
-            .await?
-            .error_for_status()?;
-        Ok(resp.json().await?)
+            .await?;
+        Ok(upload_response(resp).await?.json().await?)
     }
 
     pub async fn list_shared_folder_files(
@@ -2006,5 +2078,72 @@ mod tests {
             Some(expected_version),
             "X-Beebeeb-Client-Version missing or stale on a real ApiClient request"
         );
+    }
+
+    /// Spec §8.4: a refused upload request keeps the server's code by type, matched exactly, and
+    /// its text is the status error's alone: the body (its code, its numbers, its message) never
+    /// reaches the error's text, which is what a log line or the queue's `last_error` could show.
+    #[tokio::test]
+    async fn an_upload_refusal_keeps_the_servers_code_and_never_its_body() {
+        use std::io::{Read, Write};
+        async fn refused(status: &'static str, body: &'static str) -> anyhow::Error {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}/", listener.local_addr().unwrap());
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0u8; 4096];
+                let _ = stream.read(&mut request);
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            });
+            let response = reqwest::Client::new().get(&url).send().await.unwrap();
+            let error = upload_response(response).await.unwrap_err();
+            server.join().unwrap();
+            error
+        }
+        let quota = refused(
+            "413 Payload Too Large",
+            r#"{"error":"quota_exceeded","limit_bytes":5368709120,"used_bytes":5368709120,"is_trial_cap":false}"#,
+        )
+        .await;
+        let refusal = quota.downcast_ref::<UploadRefused>().expect("typed");
+        assert_eq!(refusal.code, Some(UploadRefusalCode::QuotaExceeded));
+        assert_eq!(refusal.status(), Some(413));
+        let text = quota.to_string();
+        assert!(text.contains("413 Payload Too Large"), "{text}");
+        assert!(
+            !text.contains("quota_exceeded") && !text.contains("5368709120"),
+            "the body never reaches the text: {text}"
+        );
+        assert!(
+            quota
+                .chain()
+                .any(|cause| cause.downcast_ref::<reqwest::Error>().is_some()),
+            "the status error stays in the chain"
+        );
+        // Matched exactly: another spelling, or another code, is no code.
+        for body in [
+            r#"{"error":"Quota_Exceeded"}"#,
+            r#"{"error":"quota exceeded"}"#,
+            r#"{"error":"payload_too_large"}"#,
+            "not json",
+        ] {
+            let error = refused("413 Payload Too Large", body).await;
+            assert_eq!(
+                error.downcast_ref::<UploadRefused>().expect("typed").code,
+                None,
+                "{body}"
+            );
+        }
+        for (code, expected) in [
+            ("object_budget_exceeded", UploadRefusalCode::ObjectBudgetExceeded),
+            ("billing_read_only", UploadRefusalCode::BillingReadOnly),
+            ("trial_ended", UploadRefusalCode::TrialEnded),
+        ] {
+            assert_eq!(UploadRefusalCode::from_code(code), Some(expected));
+        }
     }
 }
