@@ -167,16 +167,24 @@ impl UnreferencedSweep {
 ///
 /// 1. A journal row with `completed = 0` that no op, resume row or finalization names: an accept
 ///    that never committed (a crash between its journal row and its transaction, or a refusal
-///    after the copy). Its copy is unlinked, then its row deleted.
+///    after the copy). Its row is deleted first, guarded ([`StateDb::forget_unfinished_unreferenced`]:
+///    only while it is still unfinished and nothing names it), and only then is its copy unlinked.
+///    An accept still running (a stopping engine's handler) requires that row in its own
+///    transaction, so it either committed first, and its op keeps the row and the copy, or finds
+///    the row gone, queues nothing and is retried. A copy whose unlink fails has no row left, so the
+///    next start's step 2 finds it.
 /// 2. A regular file directly in a staging folder that no row of `staged_payloads`,
 ///    `operation_queue`, `upload_resume` or `upload_finalizations` names: a copy whose row an
-///    older build's sign-out deleted. It is unlinked.
+///    older build's sign-out deleted. It is unlinked. Each folder is listed before the rows are
+///    read: a copy is made only after its journal row, so a copy the listing saw is named by the
+///    rows read after it, unless nothing names it. Read the other way round, an accept that
+///    journalled after the read and copied before the listing would lose its copy.
 ///
 /// On macOS the system hands a write's bytes over again when it retries the write, so a copy no
 /// row names is never the only copy of a save still to upload. A write whose accept never
-/// committed was never acknowledged, so the system still holds its bytes as a pending change. A committed write's
-/// copy is named by its op until it lands, and released after. A copy whose op an older build's
-/// sign-out purged belongs to a save that sign-out already discarded.
+/// committed was never acknowledged, so the system still holds its bytes as a pending change. A
+/// committed write's copy is named by its op until it lands, and released after. A copy whose op
+/// an older build's sign-out purged belongs to a save that sign-out already discarded.
 ///
 /// It never follows a link. Each folder is opened without following one, and must be a directory
 /// this user owns; inside it, only regular files are touched (`lstat`), never a link, a subfolder
