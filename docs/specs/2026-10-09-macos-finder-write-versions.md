@@ -857,7 +857,7 @@ Every rule that reads or changes the queue or the held columns cites this sectio
 Each decision below is ONE `StateDb` method. The method:
 - takes the mutex once;
 - ~~opens `BEGIN IMMEDIATE` (rusqlite `TransactionBehavior::Immediate`, so the rule still holds if a second connection ever appears);~~
-  a decision that writes (1–7, and 10 inside 2) opens `BEGIN IMMEDIATE` (rusqlite `TransactionBehavior::Immediate`, so the rule still holds if a second connection ever appears). The two read-only decisions, 8 and 9, take one deferred read instead: the predicate's inputs come from one deferred transaction (`item_presentation`), and the fetch's from one statement. A deferred read pins one snapshot from its first read, a WAL read snapshot or a held shared lock, so "one read" holds even with a second connection; `BEGIN IMMEDIATE` would serialize every enumeration behind the writers for nothing. — lead, 2026-10-11 (Task 12)
+  a decision that writes (1–6, and 10 inside 2) opens `BEGIN IMMEDIATE` (rusqlite `TransactionBehavior::Immediate`, so the rule still holds if a second connection ever appears). The guarded clear (7) is one guarded `UPDATE`: SQLite runs a single statement as its own transaction, and its precondition is its `WHERE`. The two read-only decisions, 8 and 9, take one deferred read instead: the predicate's inputs come from one deferred transaction (`item_presentation`), and the fetch's from one statement. A deferred read pins one snapshot from its first read, a WAL read snapshot or a held shared lock, so "one read" holds even with a second connection; `BEGIN IMMEDIATE` would serialize every enumeration behind the writers for nothing. — lead, 2026-10-11 (Task 12)
 - reads its preconditions inside;
 - decides with a pure function;
 - writes, and commits.
@@ -878,7 +878,8 @@ Nothing inside awaits or touches the network. Its preconditions are never read i
 3. **A park**: stale base, missing payload, unknown base, a lost predecessor, or the last attempt used up. The claim is cleared in the same statement.
 4. **The claim** (S3), with the hand-over (§8.4) and the orphan check (S5).
 5. **A snapshot fill or raise of one row** (§6.3.2), with the resolution of that row's `base_pending` ops.
-6. **A restore's enqueue**, which reads whether a write of the file is queued (§5.4 row 10).
+6. ~~**A restore's enqueue**, which reads whether a write of the file is queued (§5.4 row 10).~~
+   **The restore's reply**, which reads whether a write of the file is queued in the transaction that applies the reply's version (§5.4 row 10). The enqueue itself is a plain insert; the order between the restore and the file's writes is the claim's (S3 step 2, §8.5). — lead, 2026-10-11 (Task 12)
 7. **The guarded clear** of held columns ~~and `minted_writes`~~ (§5.3). — lead ruling, 2026-10-10 (spec r4b)
 8. **A fetch served from the queue**: the predicate and the payload path, in one read (§7.4).
 9. **The predicate** for every builder: the row and the queue, in one read (§5.3).
