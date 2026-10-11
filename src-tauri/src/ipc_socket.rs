@@ -2771,16 +2771,24 @@ const PRESENTATION_WARN_INTERVAL: std::time::Duration = std::time::Duration::fro
 /// then all of them (a line too many, never unbounded memory).
 const PRESENTATION_WARN_MAX_ITEMS: usize = 1024;
 
-/// Per item: when its last line was written, and how many failed reads were not logged since.
-type PresentationWarned = std::collections::HashMap<String, (std::time::Instant, u64)>;
+/// Per item, per kind of failure (a fixed category): when its last line was written, and how
+/// many failed reads were not logged since. An item is forgotten when it reads cleanly again.
+type PresentationWarned =
+    std::collections::HashMap<String, std::collections::HashMap<&'static str, (std::time::Instant, u64)>>;
 
 static PRESENTATION_WARNED: std::sync::LazyLock<std::sync::Mutex<PresentationWarned>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(PresentationWarned::new()));
 
-/// Whether this failed presentation read of `file_id` is logged now: `Some(n)`, with the `n`
-/// earlier ones that were not, or `None` while its interval runs.
-fn presentation_warn_due(seen: &mut PresentationWarned, file_id: &str, now: std::time::Instant) -> Option<u64> {
-    if let Some((last, held_back)) = seen.get_mut(file_id) {
+/// Whether this failed presentation read of `file_id`, of `kind`, is logged now: `Some(n)`,
+/// with the `n` earlier ones of that kind that were not, or `None` while its interval runs. A
+/// different kind of failure on the same item has its own interval, so it is logged at once.
+fn presentation_warn_due(
+    seen: &mut PresentationWarned,
+    file_id: &str,
+    kind: &'static str,
+    now: std::time::Instant,
+) -> Option<u64> {
+    if let Some((last, held_back)) = seen.get_mut(file_id).and_then(|kinds| kinds.get_mut(kind)) {
         if now.saturating_duration_since(*last) < PRESENTATION_WARN_INTERVAL {
             *held_back += 1;
             return None;
@@ -2790,14 +2798,29 @@ fn presentation_warn_due(seen: &mut PresentationWarned, file_id: &str, now: std:
         *held_back = 0;
         return logged;
     }
-    if seen.len() >= PRESENTATION_WARN_MAX_ITEMS {
-        seen.retain(|_, (last, _)| now.saturating_duration_since(*last) < PRESENTATION_WARN_INTERVAL);
+    if !seen.contains_key(file_id) && seen.len() >= PRESENTATION_WARN_MAX_ITEMS {
+        seen.retain(|_, kinds| {
+            kinds.retain(|_, (last, _)| now.saturating_duration_since(*last) < PRESENTATION_WARN_INTERVAL);
+            !kinds.is_empty()
+        });
         if seen.len() >= PRESENTATION_WARN_MAX_ITEMS {
             seen.clear();
         }
     }
-    seen.insert(file_id.to_string(), (now, 0));
+    seen.entry(file_id.to_string()).or_default().insert(kind, (now, 0));
     Some(0)
+}
+
+/// The item's presentation read succeeded: a later failure is a new episode, logged at once.
+fn presentation_read_ok(seen: &mut PresentationWarned, file_id: &str) {
+    seen.remove(file_id);
+}
+
+/// [`PRESENTATION_WARNED`], locked; a poisoned lock is taken as it is (it only holds counts).
+fn presentation_warned() -> std::sync::MutexGuard<'static, PresentationWarned> {
+    PRESENTATION_WARNED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 pub(crate) fn file_entry_payload_for_db(
@@ -2822,26 +2845,30 @@ pub(crate) fn file_entry_payload_for_db(
         }
         _ => entry,
     };
+    if read.is_ok() {
+        presentation_read_ok(&mut presentation_warned(), &entry.file_id);
+    }
     let mut payload = match &read {
         Ok(Some(p)) => file_entry_payload(entry, &p.contract, parent_identifier),
         Ok(None) => file_entry_payload_without_contract(entry, parent_identifier),
-        Err(_) => {
+        Err(error) => {
             // A failed read (a SQLite error, or a held write without its base) is
             // presented as round 3 did, from the contract alone: the system never
             // sees a spurious content change, and the capabilities are kept. A fixed
-            // category only: the error can carry a path (spec §11). Once per item per
-            // interval, with how many were held back.
+            // category only: the error can carry a path (spec §11). Once per item and
+            // kind of failure per interval, with how many were held back.
+            let kind = crate::engine_bridge::error_category(error);
             let due = presentation_warn_due(
-                &mut PRESENTATION_WARNED
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+                &mut presentation_warned(),
                 &entry.file_id,
+                kind,
                 std::time::Instant::now(),
             );
             if let Some(held_back) = due {
                 tracing::warn!(
                     file_id = %entry.file_id,
                     category = "presentation_read_failed",
+                    kind,
                     held_back,
                     "item presented from its contract alone"
                 );
@@ -5417,6 +5444,46 @@ mod tests {
         assert!(lines[0].contains("WARN") && lines[0].contains("half-set"), "{logs}");
     }
 
+    /// A failed presentation read after the item read cleanly again starts a new episode: it is
+    /// logged at once, not held back by the earlier failure's interval.
+    #[test]
+    fn a_failed_presentation_read_after_a_clean_one_is_logged_at_once() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_1694_item(
+            &db,
+            "half-set-episode",
+            FileStatus::Local,
+            PERMISSION_READ | PERMISSION_WRITE,
+            ItemKind::File,
+        );
+        let entry = db.get_file("half-set-episode").unwrap().unwrap();
+        let failed_lines = |logs: &str| {
+            logs.lines()
+                .filter(|line| line.contains("presentation_read_failed"))
+                .count()
+        };
+        db.set_held_pair_for_test("half-set-episode", Some(&"c".repeat(32)), None);
+        let first = capture_logs(|| {
+            for _ in 0..2 {
+                let _ = file_entry_payload_for_db(&db, &entry, FP_ROOT_APPLE);
+            }
+        });
+        assert_eq!(failed_lines(&first), 1, "the first episode, once:\n{first}");
+        db.set_held_pair_for_test("half-set-episode", None, None);
+        assert!(
+            db.item_presentation("half-set-episode").is_ok(),
+            "precondition: a clean read"
+        );
+        let _ = file_entry_payload_for_db(&db, &entry, FP_ROOT_APPLE);
+        db.set_held_pair_for_test("half-set-episode", Some(&"d".repeat(32)), None);
+        let second = capture_logs(|| {
+            let _ = file_entry_payload_for_db(&db, &entry, FP_ROOT_APPLE);
+        });
+        assert_eq!(failed_lines(&second), 1, "a new episode is logged at once:\n{second}");
+        assert!(second.contains("held_back=0"), "{second}");
+    }
+
     /// Task 4 parked item: a row whose presentation read keeps failing is built again by the
     /// change feed, every enumeration and every item lookup. It is logged once per item per
     /// interval, and the next line says how many failed reads went unlogged meanwhile.
@@ -5452,29 +5519,47 @@ mod tests {
             "{logs}"
         );
 
+        assert!(
+            lines[0].contains("kind=\"database_schema\""),
+            "the kind of failure: {logs}"
+        );
+
         // The limiter itself, on a clock of its own.
-        let mut seen = std::collections::HashMap::new();
+        let mut seen = PresentationWarned::new();
         let start = std::time::Instant::now();
         let later = |secs| start + std::time::Duration::from_secs(secs);
+        let schema = "database_schema";
         assert_eq!(
-            presentation_warn_due(&mut seen, "f", start),
+            presentation_warn_due(&mut seen, "f", schema, start),
             Some(0),
             "the first read is logged"
         );
-        assert_eq!(presentation_warn_due(&mut seen, "f", later(1)), None);
-        assert_eq!(presentation_warn_due(&mut seen, "f", later(2)), None);
+        assert_eq!(presentation_warn_due(&mut seen, "f", schema, later(1)), None);
+        assert_eq!(presentation_warn_due(&mut seen, "f", schema, later(2)), None);
         assert_eq!(
-            presentation_warn_due(&mut seen, "g", later(2)),
+            presentation_warn_due(&mut seen, "g", schema, later(2)),
             Some(0),
             "another item has its own"
         );
+        assert_eq!(
+            presentation_warn_due(&mut seen, "f", "database_busy", later(3)),
+            Some(0),
+            "another kind of failure on the same item is logged at once"
+        );
+        assert_eq!(presentation_warn_due(&mut seen, "f", "database_busy", later(4)), None);
         let after = PRESENTATION_WARN_INTERVAL.as_secs() + 1;
         assert_eq!(
-            presentation_warn_due(&mut seen, "f", later(after)),
+            presentation_warn_due(&mut seen, "f", schema, later(after)),
             Some(2),
             "after the interval, logged again with the two it held back"
         );
-        assert_eq!(presentation_warn_due(&mut seen, "f", later(after + 1)), None);
+        assert_eq!(presentation_warn_due(&mut seen, "f", schema, later(after + 1)), None);
+        presentation_read_ok(&mut seen, "f");
+        assert_eq!(
+            presentation_warn_due(&mut seen, "f", schema, later(after + 2)),
+            Some(0),
+            "a clean read ends the episode"
+        );
     }
 
     /// Spec 2026-10-09 §7.3: a queued write whose row cannot be read back is refused, never
