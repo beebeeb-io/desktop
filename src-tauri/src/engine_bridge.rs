@@ -15872,6 +15872,14 @@ mod tests {
             refused[0].contains("stale_base") && refused[0].contains("parked"),
             "{logs}"
         );
+        // The runner words this park by its reason and logs the attempt that was made, not the
+        // cap: an immediate park never says its attempts were used up.
+        assert!(
+            refused[0].contains("its base is stale")
+                && !refused[0].contains("attempts used up")
+                && refused[0].contains("attempt=1 "),
+            "{logs}"
+        );
         drop(server.finish());
     }
 
