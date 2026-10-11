@@ -1126,6 +1126,11 @@ impl EngineBridge {
                                 continue;
                             }
                             if uses_up_attempts && attempts >= op.max_attempts {
+                                // A File Provider write parked by the queue's rule: its line, once,
+                                // after the record committed. A 409 says so on its own line above.
+                                if finder_write && error_http_status(&error) != Some(409) {
+                                    log_parked_attempts_used_up(&op.op_id, op.file_id.as_deref());
+                                }
                                 self.abandon_upload_after_give_up(&op).await;
                                 // Its attempts are used up, so it has parked by the queue's rule,
                                 // and the attempt's transaction settled the row (spec §9.2).
@@ -5389,6 +5394,20 @@ fn log_parked(op_id: &str, file_id: Option<&str>, reason: ParkReason) {
         op_id = %op_id,
         file_id = file_id.unwrap_or_default(),
         reason = reason.as_str(),
+        "upload parked with its bytes kept in the queue"
+    );
+}
+
+/// Spec §11: a File Provider write whose attempts a failure waiting does not cure used up parks by
+/// the queue's rule. A 409 says so on its refused-upload line; any other failure logs the park line
+/// once, with `reason="attempts_used_up"`, a log reason and not a [`ParkReason`]. `file_id` by M5.
+fn log_parked_attempts_used_up(op_id: &str, file_id: Option<&str>) {
+    let (file_id, id_kind) = wire_id_fields(file_id.unwrap_or_default());
+    tracing::warn!(
+        op_id = %op_id,
+        file_id,
+        id_kind,
+        reason = "attempts_used_up",
         "upload parked with its bytes kept in the queue"
     );
 }
@@ -19565,6 +19584,72 @@ mod tests {
         let state = server.finish();
         assert_eq!(state.inits.len(), 25, "nothing is sent once it parked");
         assert!(state.inits.iter().all(|(_, status)| *status == 400));
+    }
+
+    /// Spec §11: a File Provider write whose attempts a failure waiting does not cure used up
+    /// (here 422, not a 409) logs the park line once, at the attempt that used them up, with
+    /// `reason="attempts_used_up"`, and never before.
+    #[tokio::test]
+    async fn an_attempts_used_up_park_logs_its_line_once_at_the_cap() {
+        let file = "3f2a9c1e-0000-4000-8000-0000000000c5";
+        let (dir, sync_root, server, bridge) = rule3_setup([158u8; 32]);
+        seed_uploaded_row(&bridge, &server, file);
+        server
+            .state
+            .lock()
+            .unwrap()
+            .refuse_init
+            .insert(file.into(), "422 Unprocessable Entity");
+        fp_save(
+            &bridge,
+            dir.path(),
+            file,
+            "notes.txt",
+            b"a save the server cannot take",
+            "1",
+        );
+        let op_id = bridge.db.list_operations_for_file(file).unwrap().remove(0).op_id;
+        let mut now = now_secs();
+        let mut lines_per_pass = Vec::new();
+        for _ in 1..=30 {
+            let logs = capture_logs_async(async {
+                bridge.process_due_operations(&sync_root, now).await.unwrap();
+            })
+            .await;
+            now += 10_000;
+            let lines: Vec<String> = logs
+                .lines()
+                .filter(|line| line.contains("upload parked with its bytes kept in the queue"))
+                .map(str::to_string)
+                .collect();
+            lines_per_pass.push(lines);
+        }
+        let passes_with_a_line: Vec<usize> = lines_per_pass
+            .iter()
+            .enumerate()
+            .filter(|(_, lines)| !lines.is_empty())
+            .map(|(index, _)| index + 1)
+            .collect();
+        assert_eq!(
+            passes_with_a_line,
+            vec![25],
+            "only the attempt that used them up logs it"
+        );
+        assert_eq!(lines_per_pass[24].len(), 1, "once: {:?}", lines_per_pass[24]);
+        let line = &lines_per_pass[24][0];
+        assert!(
+            line.contains("reason=\"attempts_used_up\"")
+                && line.contains(&op_id)
+                && line.contains(&format!("file_id={file}")),
+            "{line}"
+        );
+        assert!(
+            !line.contains("Unprocessable") && !line.contains("http://"),
+            "no error text: {line}"
+        );
+        let op = bridge.db.get_operation(&op_id).unwrap().unwrap();
+        assert_eq!(op.attempts, op.max_attempts, "precondition: parked");
+        drop(server.finish());
     }
 
     /// One refusal of an upload WITHOUT a write id (the watcher, Windows), queued at `attempts`:
