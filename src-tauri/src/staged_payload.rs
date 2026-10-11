@@ -232,8 +232,12 @@ pub fn sweep_unreferenced(db: &StateDb, roots: &[PathBuf]) -> rusqlite::Result<U
             continue;
         }
         sweep.unfinished += 1;
-        if regular && let Err(e) = dir.unlink_entry(name) {
-            // The row is gone: the next start's step 2 finds the copy.
+        // A copy already gone (its accept's own cleanup won the race) is done, not kept. Any other
+        // failure leaves the copy without a row: the next start's step 2 finds it.
+        if regular
+            && let Err(e) = dir.unlink_entry(name)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
             sweep.kept(&e);
         }
     }
@@ -262,6 +266,8 @@ pub fn sweep_unreferenced(db: &StateDb, roots: &[PathBuf]) -> rusqlite::Result<U
                 Ok(stat) if !is_regular_file(&stat) => {}
                 Ok(_) => match dir.unlink_entry(name) {
                     Ok(()) => sweep.unjournalled += 1,
+                    // Gone already: done, not kept.
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => sweep.unjournalled += 1,
                     Err(e) => sweep.kept(&e),
                 },
             }

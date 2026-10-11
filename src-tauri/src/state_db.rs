@@ -11620,7 +11620,8 @@ mod tests {
         );
     }
 
-    /// Spec §8.7 S6 (N3): the accept requires its copy's journal row, unfinished. Without it,
+    /// Spec §8.7 S6: the accept requires its copy's journal row, unfinished, so an engine-start sweep
+    /// that removed the copy first cannot leave an op naming a missing file. Without it,
     /// nothing is written: no op, no held write, no status change.
     #[test]
     fn an_accept_whose_journal_row_is_gone_writes_nothing() {
@@ -11665,7 +11666,7 @@ mod tests {
         assert!(matches!(accept("/staged/journalled"), AcceptOutcome::Queued { .. }));
     }
 
-    /// Spec §8.7 S6 (N3): the sweep deletes an unfinished row only while nothing names it, so an
+    /// Spec §8.7 S6: the sweep deletes an unfinished row only while nothing names it, so an
     /// accept that committed first keeps its row; a released row is never this step's.
     #[test]
     fn the_sweep_never_forgets_a_row_an_accept_committed() {

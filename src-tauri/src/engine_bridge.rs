@@ -6627,10 +6627,15 @@ pub fn classify_operation_error(error: &str) -> OperationFailureClass {
 /// raises a File Provider write's count to (spec §8.4). Derived from the backoff, so changing the
 /// backoff moves it too.
 fn backoff_cap_attempts() -> i64 {
+    /// Where the search stops if the backoff ever had no cap; the backoff reaches its cap at 6 today.
+    const SEARCH_LIMIT: i64 = 64;
     let cap = retry_delay_seconds(i64::MAX);
-    (1..)
-        .find(|&attempts| retry_delay_seconds(attempts) >= cap)
-        .unwrap_or(1)
+    let found = (1..=SEARCH_LIMIT).find(|&attempts| retry_delay_seconds(attempts) >= cap);
+    debug_assert!(
+        found.is_some(),
+        "retry_delay_seconds reaches its cap within {SEARCH_LIMIT} attempts"
+    );
+    found.unwrap_or(SEARCH_LIMIT)
 }
 
 pub fn retry_delay_seconds(attempts: i64) -> i64 {
@@ -19852,7 +19857,7 @@ mod tests {
         assert_eq!(next_attempt_count(24, 25, AttemptCount::UsesUp), 25);
     }
 
-    /// Spec §8.4 (N2): a transient failure uses no counted budget past the backoff's cap. After
+    /// Spec §8.4: a transient failure uses no counted budget past the backoff's cap. After
     /// an outage of 30 passes the count sits where the backoff stops growing, so a failure waiting
     /// does not cure still has its remaining attempts: the write parks only after
     /// `max_attempts - backoff_cap_attempts()` of them (19 today), not at the first.
@@ -19897,7 +19902,7 @@ mod tests {
         drop(server.finish());
     }
 
-    /// Spec §8.4 (N2): a save whose upload session was open through an outage. 24 transient
+    /// Spec §8.4: a save whose upload session was open through an outage. 24 transient
     /// failures at the resumed chunk; then the server has reaped the session, so the resumed chunk
     /// answers 404. The attempt abandons the session, which is not a counted failure, and the next
     /// attempt starts a fresh upload that lands.
@@ -20691,7 +20696,7 @@ mod tests {
         );
     }
 
-    /// Spec §8.7 S6 (N3): an engine start's sweep that runs between an accept's copy and its
+    /// Spec §8.7 S6: an engine start's sweep that runs between an accept's copy and its
     /// transaction (a stopping engine's handler still inside an accept) removes the unfinished
     /// copy and its row. The accept's transaction then finds the row gone, queues nothing, and the
     /// reply asks the system to hand the write over again.
