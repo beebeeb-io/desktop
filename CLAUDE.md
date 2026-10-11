@@ -350,6 +350,15 @@ watermark; a changed payload, a gone session (400/404/410), or a given-up op aba
 a create's orphaned `is_uploading` server row is trashed, a replace's never is. Snapshot rows
 still `is_uploading` and unknown locally are not materialised as placeholders.
 
+One exception, for macOS Finder writes (uploads with a `write_id`): once `complete` has
+answered, the op records the server's completion in `upload_resume` (`completed_version`,
+`completed_object_version_id`, `completed_mime_type`) before any local bookkeeping, and from
+then on it is never abandoned, paused or parked, at give-up either. It retries only its local
+landing, which is one transaction (spec `docs/specs/2026-10-09-macos-finder-write-versions.md`
+§8.6). Those writes also carry a write token as their content version, are claimed and landed
+under `StateDb`'s one-transaction rules, and hand over to the next save when they park: see
+`docs/IPC_PROTOCOL.md`, "Versions and queued writes". Windows and the watcher are unchanged.
+
 Windows local-create completion keeps a separate `upload_finalizations` journal
 (local/server identity, target, completed payload, stamped acknowledgement).
 The queue/resume rows stop owning uploads once this journal is committed; native
