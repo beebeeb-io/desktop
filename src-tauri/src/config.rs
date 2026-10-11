@@ -540,6 +540,10 @@ impl UpdateError {
     }
 }
 
+/// A record that its own write failed and that rides the flow's next write instead (fix round 1, M4): the change to
+/// apply to the file, and its argument. It returns whether it changed the config.
+type QueuedRecord = (fn(&mut DesktopConfig, &str) -> bool, String);
+
 /// A copy of the config that a flow keeps to READ across slow work (task 1889, fix round 1 M2). Add to Finder waits
 /// many seconds on the File Provider and the config-write lock must not be held that long, so the Windows and Linux
 /// install, Repair and sync-root flows load a copy at the start and read it as they go. The copy can be read (it
@@ -548,26 +552,32 @@ impl UpdateError {
 /// to the copy outside the closure does not compile, so it cannot be silently dropped by the refresh, and the copy can
 /// never be what is written.
 #[derive(Debug, Clone)]
-pub(crate) struct HeldConfig(DesktopConfig);
+pub(crate) struct HeldConfig {
+    copy: DesktopConfig,
+    queued: Vec<QueuedRecord>,
+}
 
 impl std::ops::Deref for HeldConfig {
     type Target = DesktopConfig;
 
     fn deref(&self) -> &DesktopConfig {
-        &self.0
+        &self.copy
     }
 }
 
 impl From<DesktopConfig> for HeldConfig {
-    fn from(cfg: DesktopConfig) -> Self {
-        Self(cfg)
+    fn from(copy: DesktopConfig) -> Self {
+        Self {
+            copy,
+            queued: Vec::new(),
+        }
     }
 }
 
 impl HeldConfig {
     /// [`DesktopConfig::load`], as a copy to hold.
     pub(crate) fn load() -> Result<Self, String> {
-        DesktopConfig::load().map(Self)
+        DesktopConfig::load().map(Self::from)
     }
 
     /// Writes through the file, never through the copy. `change` is applied to the file as it is now
@@ -576,6 +586,9 @@ impl HeldConfig {
     /// a sweep saved meanwhile). Afterwards the copy equals what a load of the file returns: the file as it was read
     /// plus `change`'s edits if it said to save, and the file as it was read, unedited, if it said not to (an edit that
     /// is not saved is not kept; M3), so the flow reads its own write and everyone else's.
+    ///
+    /// Records queued by [`Self::queue_for_next_write`] are applied first, in the same write; they make a write that
+    /// says "nothing changed" a write when they changed something.
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub(crate) fn update_held<R>(&mut self, change: impl FnOnce(&mut DesktopConfig) -> (bool, R)) -> Result<R, String> {
         self.update_held_at(&DesktopConfig::path()?, change)
@@ -588,14 +601,38 @@ impl HeldConfig {
         path: &Path,
         change: impl FnOnce(&mut DesktopConfig) -> (bool, R),
     ) -> Result<R, String> {
+        let queued = self.queued.clone();
         let (fresh, value) = DesktopConfig::update_at(path, |cfg| {
-            let read = cfg.clone();
+            let mut queued_changed = false;
+            for (apply, argument) in &queued {
+                queued_changed |= apply(cfg, argument);
+            }
+            let with_queued = cfg.clone();
             let (save, value) = change(cfg);
-            let on_file = if save { cfg.clone() } else { read };
-            (save, (on_file, value))
+            if save {
+                (true, (cfg.clone(), value))
+            } else {
+                // An edit that is not saved is not kept (M3): the file as it was read, plus what was queued.
+                *cfg = with_queued.clone();
+                (queued_changed, (with_queued, value))
+            }
         })?;
-        self.0 = fresh;
+        self.copy = fresh;
+        self.queued.clear();
         Ok(value)
+    }
+
+    /// A record whose own write failed: it is applied to the file by this copy's next [`Self::update_held`], so it lands
+    /// with the flow's own result or the flow gets that write's error (M4). Queuing the same record twice is one.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    pub(crate) fn queue_for_next_write(&mut self, apply: fn(&mut DesktopConfig, &str) -> bool, argument: &str) {
+        if !self
+            .queued
+            .iter()
+            .any(|(queued, arg)| *queued == apply && arg == argument)
+        {
+            self.queued.push((apply, argument.to_string()));
+        }
     }
 }
 

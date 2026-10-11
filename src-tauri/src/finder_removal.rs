@@ -311,28 +311,37 @@ pub(crate) fn remember_kept_folder_at(path: &std::path::Path, location: &str) ->
 /// config-write lock, and `cfg` becomes what was saved. Recording into `cfg` and saving it later would put back whatever
 /// the copy loaded at the start held, such as a kept folder the app-start sweep saved meanwhile.
 ///
-/// A write that failed is logged without the path and nothing more: the flow's own write that follows meets the same
-/// file and reports the error, after the alert has named the folder (the order the old save-later had).
+/// A write that failed is logged without the path, and the record is queued on the copy (fix round 1, M4): the flow's
+/// next write applies it in the same write as its own result, so the row's record and the result land together, and if
+/// that write fails too the flow returns its error. The person is told either way: the alert that follows this call names
+/// the folder, as 1882 spec §5 has it for every removal ("the alert, and saved for the row if the save allows"), and a
+/// failed save is the command's error ("Repair then returns an error and the app's alert names the folder", re-review D5).
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn remember_kept_folder_held(cfg: &mut crate::config::HeldConfig, location: &str) {
     let saved =
         crate::config::DesktopConfig::path().and_then(|path| remember_kept_folder_held_at(cfg, &path, location));
     if let Err(error) = saved {
-        tracing::warn!(error = %error, "could not save the kept folder for Settings › Sync");
+        cfg.queue_for_next_write(record_kept_folder, location);
+        tracing::warn!(error = %error, "could not save the kept folder for Settings › Sync; it rides the next write");
     }
 }
 
-/// [`remember_kept_folder_held`] on the config file at `path` (a seam for the tests). Returns whether the config changed.
+/// [`remember_kept_folder_held`] on the config file at `path` (a seam for the tests). Returns whether the config changed;
+/// a write that failed queues the record on `cfg` and returns the error.
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 pub(crate) fn remember_kept_folder_held_at(
     cfg: &mut crate::config::HeldConfig,
     path: &std::path::Path,
     location: &str,
 ) -> Result<bool, String> {
-    cfg.update_held_at(path, |held| {
+    let saved = cfg.update_held_at(path, |held| {
         let changed = record_kept_folder(held, location);
         (changed, changed)
-    })
+    });
+    if saved.is_err() {
+        cfg.queue_for_next_write(record_kept_folder, location);
+    }
+    saved
 }
 
 /// What the row's "Dismiss" did, as the frontend reads it (r5, review thread on the dismiss
@@ -1574,6 +1583,66 @@ NSFileProviderManager.removeAllDomains { error in }
         let written = std::fs::read(&path).expect("the file exists");
         assert!(!remember_kept_folder_held_at(&mut held, &path, folder).expect("same folder"));
         assert_eq!(std::fs::read(&path).expect("still there"), written);
+    }
+
+    /// Fix round 1 (M4). On Windows and Linux the record is its own write, ahead of the flow's result write. A record whose
+    /// write failed (a scanner holding `desktop.toml.tmp` for a moment) must not be lost while the result write goes
+    /// through: the alert names the folder (1882 spec §5, "the alert, and saved for the row if the save allows"), and the
+    /// row's record rides the flow's next write, so the two land together or the flow reports the write that failed (the
+    /// spec's "a failed save ... Repair then returns an error and the app's alert names the folder", re-review D5, P1).
+    #[test]
+    fn test_1889_a_record_whose_write_failed_rides_the_flows_next_write() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("desktop.toml");
+        let folder = "/Users/someone/Kept";
+        let mut held = crate::config::HeldConfig::from(
+            crate::config::DesktopConfig::load_from(&path).expect("the flow loads its copy first"),
+        );
+        // A directory where the temp file goes fails the record's write.
+        let tmp = path.with_extension("toml.tmp");
+        std::fs::create_dir(&tmp).expect("mkdir");
+        assert!(
+            remember_kept_folder_held_at(&mut held, &path, folder).is_err(),
+            "the record's write failed"
+        );
+        assert!(!path.exists(), "nothing was written");
+
+        // The flow's result write fails the same way: the flow gets the error, and the record is still owed.
+        let failed = held.update_held_at(&path, |cfg| {
+            cfg.finder_install_status = Some("error".to_string());
+            (true, ())
+        });
+        assert!(failed.is_err(), "the flow's own write reports the failure");
+        assert!(!path.exists(), "still nothing written");
+
+        // The scanner lets go; the next write carries the record and the result together.
+        std::fs::remove_dir(&tmp).expect("rmdir");
+        held.update_held_at(&path, |cfg| {
+            cfg.finder_install_status = Some("error".to_string());
+            (true, ())
+        })
+        .expect("the flow's write");
+        let on_disk = crate::config::DesktopConfig::load_from(&path).expect("reads back");
+        assert_eq!(
+            on_disk.kept_unsynced_folder.as_deref(),
+            Some(folder),
+            "the record landed"
+        );
+        assert_eq!(
+            on_disk.finder_install_status.as_deref(),
+            Some("error"),
+            "with the result"
+        );
+        assert_eq!(
+            held.kept_unsynced_folder.as_deref(),
+            Some(folder),
+            "and the copy reads it"
+        );
+
+        // Once landed it is not owed again: a later write that says nothing changed writes nothing.
+        let written = std::fs::read(&path).expect("exists");
+        held.update_held_at(&path, |_| (false, ())).expect("no-op");
+        assert_eq!(std::fs::read(&path).expect("exists"), written);
     }
 
     #[test]
