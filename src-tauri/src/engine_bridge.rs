@@ -19945,7 +19945,23 @@ mod tests {
             );
         }
         let dir = dir.to_string_lossy();
-        for leak in ["Quarterly", "secret", "/api/v1", "127.0.0.1", "/Users/", dir.as_ref()] {
+        // The test build's staging folder, and the per-process sandbox it lives in. On a Mac
+        // `/Users/` covers them too; on Linux and Windows only these entries catch a staged
+        // copy's path.
+        let staging = default_finder_staging_root().expect("the test build's staging root");
+        let staging = staging.to_string_lossy();
+        let sandbox = crate::test_sandbox::dir("data").expect("the unit-test sandbox");
+        let sandbox = sandbox.parent().expect("the sandbox root").to_string_lossy();
+        for leak in [
+            "Quarterly",
+            "secret",
+            "/api/v1",
+            "127.0.0.1",
+            "/Users/",
+            dir.as_ref(),
+            staging.as_ref(),
+            sandbox.as_ref(),
+        ] {
             assert!(!line.contains(leak), "`{message}` leaks `{leak}`: {line}");
         }
         line
