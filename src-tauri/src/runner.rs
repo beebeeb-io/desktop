@@ -1519,6 +1519,9 @@ async fn run(
                             finish_tick_payload(&tracker, Err(&e), &link, tick_started_at, &db, &transfers),
                         );
                         set_telemetry_state(&telemetry, "error");
+                        // A failed tick reaches no other signal site: a pending debt (the
+                        // startup resets, or a signal a busy gate dropped) is paid here.
+                        signal_owed_debt_after_a_failed_tick(&mut owed_working_set_signal, &db);
                         // Windows breadcrumb flyout: surface the tick failure as
                         // an Error state in the flyout too.
                         #[cfg(target_os = "windows")]
@@ -1771,6 +1774,12 @@ pub fn working_set_signal_needed(changed_parent_ids: &[Option<String>], material
     })
 }
 
+#[cfg(all(test, target_os = "macos"))]
+thread_local! {
+    /// Test-only: how many times this thread asked the bridge to signal the working set.
+    static SIGNALS_ASKED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Task 1697: the daemon's ONLY replica-refresh channel. Under
 /// `NSFileProviderReplicatedExtension` the system honors signals for the
 /// WORKING SET alone (`.rootContainer` is ignored by design); the extension's
@@ -1806,6 +1815,8 @@ fn signal_file_provider_working_set(db: &StateDb, reason: &str, item_ids: &[Stri
     // Through the one bridge gate, like every other File Provider call (lead ruling T8-gate-all): a busy
     // gate fails at once, and the signal is reported as dropped so the caller can owe it to the next tick.
     let mut dropped = false;
+    #[cfg(test)]
+    SIGNALS_ASKED.with(|asked| asked.set(asked.get() + 1));
     match crate::finder_setup::macos_ports::signal_working_set() {
         Ok(outcome) => {
             tracing::debug!(
@@ -1883,6 +1894,11 @@ impl OwedWorkingSetSignal {
         merged
     }
 
+    /// Something is owed to the next signal.
+    fn is_owing(&self) -> bool {
+        !self.ids.is_empty()
+    }
+
     /// After a signal attempt for `sent` (what `merged_with` returned): a drop makes it the new debt,
     /// anything else pays the debt.
     fn record(&mut self, dropped: bool, sent: Vec<String>) {
@@ -1893,6 +1909,15 @@ impl OwedWorkingSetSignal {
         } else {
             self.ids = sent;
         }
+    }
+}
+
+/// A failed tick reaches none of the tick loop's other signal sites, so it pays a pending debt here. The
+/// signal is local and needs no network: without it, an offline start kept the startup resets (and a
+/// signal a busy gate dropped) from the system until the network came back. Nothing owed, nothing sent.
+fn signal_owed_debt_after_a_failed_tick(owed_working_set_signal: &mut OwedWorkingSetSignal, db: &StateDb) {
+    if owed_working_set_signal.is_owing() {
+        signal_working_set_owing(owed_working_set_signal, db, "owed_debt", &[]);
     }
 }
 
@@ -2380,6 +2405,41 @@ mod tests {
         );
     }
 
+    /// A failed tick pays a pending debt with exactly one signal, and sends none when nothing is owed. The
+    /// shared gate is held, so the signal meets a busy gate and no real bridge call is made; the count is of
+    /// the times the bridge was asked.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_failed_tick_pays_a_pending_debt_with_one_signal() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let mut owed = OwedWorkingSetSignal::owing(vec!["reset-1".to_string()]);
+        let before = SIGNALS_ASKED.with(|asked| asked.get());
+        crate::finder_setup::macos_ports::with_shared_gate_held(|| {
+            signal_owed_debt_after_a_failed_tick(&mut owed, &db);
+        });
+        assert_eq!(SIGNALS_ASKED.with(|asked| asked.get()) - before, 1, "one signal");
+        assert_eq!(
+            owed.merged_with(&[]),
+            vec!["reset-1".to_string()],
+            "the busy gate dropped it, so it is still owed"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_failed_tick_with_nothing_owed_sends_no_signal() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let mut owed = OwedWorkingSetSignal::default();
+        let before = SIGNALS_ASKED.with(|asked| asked.get());
+        crate::finder_setup::macos_ports::with_shared_gate_held(|| {
+            signal_owed_debt_after_a_failed_tick(&mut owed, &db);
+        });
+        assert_eq!(SIGNALS_ASKED.with(|asked| asked.get()) - before, 0, "no signal");
+        assert_eq!(owed.merged_with(&[]), Vec::<String>::new());
+    }
+
     /// The reconciler's gate is the one `signal_file_provider_working_set` takes: with it held, the signal
     /// is DROPPED, and says so (`true`), and the next tick's call carries the ids. No real bridge call is
     /// made: a busy gate answers at once, and the test only ever runs calls that hit it busy.
@@ -2409,9 +2469,13 @@ mod tests {
         });
     }
 
-    /// The tick loop uses the owing wrapper at every one of its three call sites, so no signal bypasses the debt.
+    /// The tick loop signals through the owing wrapper only, at four named sites: revoked shared content,
+    /// the tick's one signal, a tick whose queue failed (its remote applies), and a failed tick that owes a
+    /// debt. A fifth call fails here, so no signal bypasses the debt. A failed tick reaches only the fourth,
+    /// so a tick still sends one signal of its own.
     #[test]
     fn every_working_set_signal_in_the_tick_loop_goes_through_the_owed_wrapper() {
+        use crate::source_pin::squeeze;
         let source = include_str!("runner.rs").replace("\r\n", "\n");
         let production = &source[..source.find("#[cfg(test)]\nmod tests {").expect("the tests follow")];
         assert_eq!(
@@ -2426,12 +2490,34 @@ mod tests {
             1,
             "only the owing wrapper calls the signal"
         );
+        let squeezed = squeeze(production);
         assert_eq!(
-            production
-                .matches("signal_working_set_owing(&mut owed_working_set_signal,")
-                .count(),
-            3,
-            "the three tick call sites"
+            squeezed.matches("signal_working_set_owing(").count()
+                - squeezed.matches("fnsignal_working_set_owing(").count(),
+            4,
+            "four call sites"
+        );
+        for site in [
+            "signal_working_set_owing(&mut owed_working_set_signal, &db, \"shared_roots_changed\", &outcome.removed_shared_file_ids)",
+            "signal_working_set_owing(&mut owed_working_set_signal, &db, reason, &ids)",
+            "signal_working_set_owing(&mut owed_working_set_signal, &db, \"remote_changes_applied\", &tick.applied_item_ids)",
+            "signal_working_set_owing(owed_working_set_signal, db, \"owed_debt\", &[])",
+        ] {
+            assert_eq!(squeezed.matches(&squeeze(site)).count(), 1, "the site {site}");
+        }
+        // The fourth site's helper is called once, from the failed tick's arm of `run`.
+        assert_eq!(
+            squeezed.matches("signal_owed_debt_after_a_failed_tick(").count(),
+            2,
+            "its definition and one call"
+        );
+        let start = source.find("async fn run(\n    app: AppHandle").expect("run exists");
+        let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+        let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("`run` holds {needle}"));
+        let call = at("signal_owed_debt_after_a_failed_tick(&mut owed_working_set_signal, &db);");
+        assert!(
+            at("\"sync tick failed\"") < call && call < at("refresh_status_ui_snapshot(&db, false, true)"),
+            "in the failed tick's arm"
         );
     }
 

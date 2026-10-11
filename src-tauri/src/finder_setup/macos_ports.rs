@@ -229,12 +229,14 @@ pub(crate) fn is_gate_busy(error: &FpError) -> bool {
     error.domain == super::error::APP_DOMAIN && error.code == app_code::OP_TIMEOUT
 }
 
-/// Run `f` with the shared gate held, as if a bridge call were in flight (tests only).
+/// Run `f` with the shared gate held, as if a bridge call were in flight (tests only). The gate is one per
+/// process and tests run in parallel, so another test may hold it for a moment: this waits for it, at
+/// most 5 s, instead of failing on a gate a sibling test holds.
 #[cfg(test)]
 pub(crate) fn with_shared_gate_held<T>(f: impl FnOnce() -> T) -> T {
     BridgeGate::shared()
-        .run_sync(|| Ok(f()))
-        .expect("the shared gate is free at the start of the test")
+        .run_sync_waiting(std::time::Duration::from_secs(5), || Ok(f()))
+        .expect("the shared gate is free within 5 s")
 }
 
 /// "Open in Finder" (task 1885): opens the Beebeeb folder in Finder through `NSWorkspace`, with the scoped URL macOS

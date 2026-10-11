@@ -589,7 +589,8 @@ while that write has not parked. The returned item names the token.
   records each row it resets as a change, and the first tick's signal carries
   those ids.~~ Engine start records one change per row it resets, `downloading`
   → `cloud_only` included, and the first tick carries those ids as its opening
-  debt. The rule is spec §9.2's last bullet. — lead, 2026-10-11 (device fix round)
+  debt. A tick that fails still pays that debt with one signal (the signal is
+  local). The rule is spec §9.2's last bullet. — lead, 2026-10-11 (device fix round)
 - The size and modification time are the newest bytes'. The accept records the
   staged copy's; the landing writes the server's size and "now" only when no
   later write is queued. Finder's date stays `max(modified_at,
