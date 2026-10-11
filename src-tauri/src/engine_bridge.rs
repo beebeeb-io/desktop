@@ -2284,42 +2284,39 @@ impl EngineBridge {
             crate::reject_unsafe_rel_path(&root_path)
                 .map_err(|e| anyhow::anyhow!("unsafe shared root path for {}: {e}", root.file_id))?;
 
-            self.db.upsert_file(&FileEntry {
-                file_id: root.file_id.clone(),
-                path: root_path,
-                status: FileStatus::CloudOnly,
-                size_bytes: root.size_bytes,
-                modified_at: root.approved_at.unwrap_or(now),
-                content_hash: None,
-                remote_updated_at: root.approved_at.unwrap_or(0),
-                // upsert_file does not persist these; the contract update
-                // just below sets the authoritative parent_id/item_kind.
-                parent_id: None,
-                item_kind: if root.is_folder {
-                    ItemKind::Folder
-                } else {
-                    ItemKind::File
-                },
-            })?;
-
-            let mut contract = self
-                .db
-                .get_file_contract_state(&root.file_id)?
-                .ok_or_else(|| anyhow::anyhow!("missing state row for shared root {}", root.file_id))?;
-            contract.namespace = Namespace::SharedWithMe;
-            contract.parent_id = None;
-            contract.shared_root_id = Some(root.file_id.clone());
-            contract.share_id = Some(root.invite_id.clone());
-            contract.owner_email = root.owner_email.clone();
-            contract.permission_bits = root.permission_bits;
-            contract.item_kind = if root.is_folder {
+            let item_kind = if root.is_folder {
                 ItemKind::Folder
             } else {
                 ItemKind::File
             };
-            contract.content_type = root.content_type.clone();
-            contract.last_sync_at = now;
-            self.db.set_file_contract_state(&contract)?;
+            // Spec §7.2 (final review): the row and its contract in one transaction, so no
+            // listing sees a new shared root in the person's own namespace.
+            self.db.upsert_file_with_contract(
+                &FileEntry {
+                    file_id: root.file_id.clone(),
+                    path: root_path,
+                    status: FileStatus::CloudOnly,
+                    size_bytes: root.size_bytes,
+                    modified_at: root.approved_at.unwrap_or(now),
+                    content_hash: None,
+                    remote_updated_at: root.approved_at.unwrap_or(0),
+                    // upsert_file does not persist these; the contract update sets the
+                    // authoritative parent_id/item_kind.
+                    parent_id: None,
+                    item_kind: item_kind.clone(),
+                },
+                |contract| {
+                    contract.namespace = Namespace::SharedWithMe;
+                    contract.parent_id = None;
+                    contract.shared_root_id = Some(root.file_id.clone());
+                    contract.share_id = Some(root.invite_id.clone());
+                    contract.owner_email = root.owner_email.clone();
+                    contract.permission_bits = root.permission_bits;
+                    contract.item_kind = item_kind;
+                    contract.content_type = root.content_type.clone();
+                    contract.last_sync_at = now;
+                },
+            )?;
 
             if let Some((folder_key, folder_keys_response)) = folder_material
                 && let Err(e) = self
@@ -2396,23 +2393,26 @@ impl EngineBridge {
                 // its parent (`resolve_parent_id_for` reads `files.item_kind`)
                 // without waiting for a server `/sync` round-trip. `Local` =
                 // present on disk, server CreateFolder op pending in the queue.
-                self.db.upsert_file(&FileEntry {
-                    file_id: file_id.clone(),
-                    path: row_path,
-                    status: FileStatus::Local,
-                    size_bytes: 0,
-                    modified_at: now_secs(),
-                    content_hash: None,
-                    remote_updated_at: 0,
-                    // Not persisted by upsert_file; the contract update owns these.
-                    parent_id: None,
-                    item_kind: ItemKind::Folder,
-                })?;
-                if let Some(mut contract) = self.db.get_file_contract_state(&file_id)? {
-                    contract.item_kind = ItemKind::Folder;
-                    contract.parent_id = target.parent_id.clone();
-                    self.db.set_file_contract_state(&contract)?;
-                }
+                // Spec §7.2 (final review): the row and its parent in one transaction, so no
+                // listing sees the new folder without its parent.
+                self.db.upsert_file_with_contract(
+                    &FileEntry {
+                        file_id: file_id.clone(),
+                        path: row_path,
+                        status: FileStatus::Local,
+                        size_bytes: 0,
+                        modified_at: now_secs(),
+                        content_hash: None,
+                        remote_updated_at: 0,
+                        // Not persisted by upsert_file; the contract update owns these.
+                        parent_id: None,
+                        item_kind: ItemKind::Folder,
+                    },
+                    |contract| {
+                        contract.item_kind = ItemKind::Folder;
+                        contract.parent_id = target.parent_id.clone();
+                    },
+                )?;
                 let mut payload = serde_json::json!({
                     "operation": "create_folder",
                     "name_encrypted": metadata,
@@ -2439,7 +2439,13 @@ impl EngineBridge {
                     payload,
                     ..
                 } = self.prepare_finder_create(&target, contents, start)?;
-                self.db.upsert_file(&row)?;
+                // Spec §7.2 (final review): the row and its parent in one transaction, as the
+                // landing will write them, so no listing sees a new nested file without its
+                // parent while it is queued.
+                self.db.upsert_file_with_contract(&row, |contract| {
+                    contract.item_kind = ItemKind::File;
+                    contract.parent_id = target.parent_id.clone();
+                })?;
                 let outcome = self.enqueue_finder_operation(
                     OperationKind::UploadVersion,
                     Some(file_id),
@@ -7010,34 +7016,32 @@ fn apply_shared_metadata_file_row(
         parent_id: parent_id.clone(),
         item_kind: item_kind.clone(),
     };
-    db.upsert_file(&entry)?;
-
-    let mut contract = db
-        .get_file_contract_state(file_id)?
-        .ok_or_else(|| anyhow::anyhow!("missing state row for shared item {file_id}"))?;
-    contract.namespace = Namespace::SharedWithMe;
-    contract.parent_id = parent_id;
-    contract.shared_root_id = Some(root.file_id.clone());
-    contract.share_id = Some(root.invite_id.clone());
-    contract.owner_email = root.owner_email.clone();
-    contract.permission_bits = root.permission_bits;
-    contract.item_kind = item_kind;
-    contract.content_type = f["content_type"]
-        .as_str()
-        .or_else(|| f["mime_type"].as_str())
-        .map(str::to_string);
-    contract.current_version = f["current_version"]
-        .as_i64()
-        .or_else(|| f["version"].as_i64())
-        .or_else(|| f["version_number"].as_i64())
-        .unwrap_or(contract.current_version);
-    contract.current_object_version_id = f["current_object_version_id"]
-        .as_str()
-        .or_else(|| f["object_version_id"].as_str())
-        .map(str::to_string)
-        .or(contract.current_object_version_id);
-    contract.last_sync_at = now;
-    db.set_file_contract_state(&contract)?;
+    // Spec §7.2 (final review): the row and its contract in one transaction, so no listing
+    // sees a new shared row in the person's own namespace.
+    db.upsert_file_with_contract(&entry, |contract| {
+        contract.namespace = Namespace::SharedWithMe;
+        contract.parent_id = parent_id;
+        contract.shared_root_id = Some(root.file_id.clone());
+        contract.share_id = Some(root.invite_id.clone());
+        contract.owner_email = root.owner_email.clone();
+        contract.permission_bits = root.permission_bits;
+        contract.item_kind = item_kind;
+        contract.content_type = f["content_type"]
+            .as_str()
+            .or_else(|| f["mime_type"].as_str())
+            .map(str::to_string);
+        contract.current_version = f["current_version"]
+            .as_i64()
+            .or_else(|| f["version"].as_i64())
+            .or_else(|| f["version_number"].as_i64())
+            .unwrap_or(contract.current_version);
+        contract.current_object_version_id = f["current_object_version_id"]
+            .as_str()
+            .or_else(|| f["object_version_id"].as_str())
+            .map(str::to_string)
+            .or(contract.current_object_version_id.take());
+        contract.last_sync_at = now;
+    })?;
     Ok(Some(entry))
 }
 
@@ -7182,7 +7186,7 @@ fn apply_metadata_file_row(
         content_hash: existing.as_ref().and_then(|entry| entry.content_hash.clone()),
         remote_updated_at: remote_updated,
         // NOTE: parent_id/item_kind are NOT persisted by upsert_file — the
-        // `set_file_contract_state` call at the end of this fn writes the
+        // contract write in the same transaction (below) writes the
         // authoritative `files.parent_id` / `files.item_kind` columns. These
         // struct fields exist so the in-memory `FileEntry` returned to callers
         // (notably the windows_cf placeholder seeder reading via list_by_status)
@@ -7190,54 +7194,34 @@ fn apply_metadata_file_row(
         parent_id: server_parent_id.clone(),
         item_kind: item_kind.clone(),
     };
-    db.upsert_file(&entry)?;
-    let mut contract = db
-        .get_file_contract_state(file_id)?
-        .unwrap_or_else(|| FileContractState {
-            file_id: file_id.to_string(),
-            namespace: namespace.clone(),
-            parent_id: None,
-            shared_root_id: shared_root_id.clone(),
-            share_id: share_id.clone(),
-            owner_email: None,
-            permission_bits,
-            item_kind: item_kind.clone(),
-            content_type: None,
-            current_version: 0,
-            current_object_version_id: None,
-            local_base_version: 0,
-            local_hash: None,
-            cache_path: None,
-            cache_bytes: 0,
-            pin_state: crate::state_db::PinState::Inherit,
-            inherited_pin_state: crate::state_db::PinState::Unpinned,
-            last_sync_at: now,
-        });
-    contract.namespace = namespace;
-    contract.parent_id = server_parent_id;
-    contract.shared_root_id = shared_root_id;
-    contract.share_id = share_id;
-    contract.permission_bits = permission_bits;
-    contract.item_kind = item_kind;
-    contract.content_type = f["content_type"]
-        .as_str()
-        .or_else(|| f["mime_type"].as_str())
-        .map(str::to_string);
-    contract.current_version = f["current_version"]
-        .as_i64()
-        .or_else(|| f["version"].as_i64())
-        .or_else(|| f["version_number"].as_i64())
-        .unwrap_or(contract.current_version);
-    contract.current_object_version_id = f["current_object_version_id"]
-        .as_str()
-        .or_else(|| f["object_version_id"].as_str())
-        .map(str::to_string)
-        .or(contract.current_object_version_id);
-    if entry.status == FileStatus::Local && contract.local_base_version == 0 {
-        contract.local_base_version = contract.current_version;
-    }
-    contract.last_sync_at = now;
-    db.set_file_contract_state(&contract)?;
+    // Spec §7.2 (final review): the row and its contract in one transaction, so no listing
+    // sees a new nested row without its parent.
+    db.upsert_file_with_contract(&entry, |contract| {
+        contract.namespace = namespace;
+        contract.parent_id = server_parent_id;
+        contract.shared_root_id = shared_root_id;
+        contract.share_id = share_id;
+        contract.permission_bits = permission_bits;
+        contract.item_kind = item_kind;
+        contract.content_type = f["content_type"]
+            .as_str()
+            .or_else(|| f["mime_type"].as_str())
+            .map(str::to_string);
+        contract.current_version = f["current_version"]
+            .as_i64()
+            .or_else(|| f["version"].as_i64())
+            .or_else(|| f["version_number"].as_i64())
+            .unwrap_or(contract.current_version);
+        contract.current_object_version_id = f["current_object_version_id"]
+            .as_str()
+            .or_else(|| f["object_version_id"].as_str())
+            .map(str::to_string)
+            .or(contract.current_object_version_id.take());
+        if entry.status == FileStatus::Local && contract.local_base_version == 0 {
+            contract.local_base_version = contract.current_version;
+        }
+        contract.last_sync_at = now;
+    })?;
     Ok(Some(entry))
 }
 
@@ -18237,6 +18221,231 @@ mod tests {
         let ops = bridge.db.list_operations_for_file("in-trash").unwrap();
         assert_eq!(ops[0].parent_id.as_deref(), Some("folder-a"), "the upload's parent");
         drop(server.finish());
+    }
+
+    /// Spec §7.2 (final review): a move to the top level made elsewhere (`file_move` or
+    /// `folder_move` with `"new_parent_id": null`, as the server's PATCH emits it, and the bare
+    /// `file_move` of its restore re-home) leaves the row with no parent and its name alone as the
+    /// path: a `Local` file, a `CloudOnly` file and folders. The root lists each; the old folder
+    /// lists none.
+    #[cfg(unix)] // names `crate::ipc_socket::list_file_provider_items`
+    #[test]
+    fn a_remote_move_to_the_top_level_clears_the_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        seed_folder_row(&bridge, "folder-a", "Docs");
+        let rows = [
+            (
+                "local-file",
+                "Docs/local.txt",
+                FileStatus::Local,
+                ItemKind::File,
+                "local.txt",
+            ),
+            (
+                "cloud-file",
+                "Docs/cloud.txt",
+                FileStatus::CloudOnly,
+                ItemKind::File,
+                "cloud.txt",
+            ),
+            ("sub-folder", "Docs/Sub", FileStatus::Local, ItemKind::Folder, "Sub"),
+            (
+                "rehomed-folder",
+                "Docs/Restored",
+                FileStatus::CloudOnly,
+                ItemKind::Folder,
+                "Restored",
+            ),
+        ];
+        for (id, path, status, kind, _) in &rows {
+            bridge
+                .db
+                .upsert_file_with_contract(
+                    &FileEntry {
+                        file_id: (*id).into(),
+                        path: (*path).into(),
+                        status: status.clone(),
+                        size_bytes: 3,
+                        modified_at: 1_700_000_000,
+                        content_hash: None,
+                        remote_updated_at: 1_700_000_000,
+                        parent_id: Some("folder-a".into()),
+                        item_kind: kind.clone(),
+                    },
+                    |contract| {
+                        contract.parent_id = Some("folder-a".into());
+                        contract.item_kind = kind.clone();
+                    },
+                )
+                .unwrap();
+        }
+        let ops = [
+            (
+                "file_move",
+                serde_json::json!({ "id": "local-file", "old_parent_id": "folder-a", "new_parent_id": null }),
+            ),
+            (
+                "file_move",
+                serde_json::json!({ "id": "cloud-file", "old_parent_id": "folder-a", "new_parent_id": null }),
+            ),
+            (
+                "folder_move",
+                serde_json::json!({ "id": "sub-folder", "old_parent_id": "folder-a", "new_parent_id": null }),
+            ),
+            // The restore re-home: `file_move` for a folder too, with the id and a null parent only.
+            (
+                "file_move",
+                serde_json::json!({ "id": "rehomed-folder", "new_parent_id": null }),
+            ),
+        ];
+        for (seq_id, (op_type, payload)) in (601..).zip(ops) {
+            let op = crate::api_client::SyncOp {
+                seq_id,
+                op_type: op_type.into(),
+                payload,
+            };
+            apply_sync_op(&bridge, &sync_root, &op, now_secs(), &mut Vec::new()).unwrap();
+        }
+        let root = listed_under(&bridge, FP_ROOT);
+        let old_folder = listed_under(&bridge, "folder-a");
+        for (id, _, _, _, name) in &rows {
+            let row = bridge.db.get_file(id).unwrap().unwrap();
+            assert_eq!((row.path.as_str(), row.parent_id.as_deref()), (*name, None), "{id}");
+            assert!(root.contains(&id.to_string()), "{id} is listed at the root: {root:?}");
+            assert!(!old_folder.contains(&id.to_string()), "{id} is not in its old folder");
+        }
+    }
+
+    /// Spec §7.2 (final review): ingestion writes a new row with its parent, namespace and kind
+    /// in ONE call, `upsert_file_with_contract`, so no listing can see a new nested row without
+    /// its parent, or a new shared row in the person's own namespace. After the single call the
+    /// row carries them, and the root lists neither.
+    #[cfg(unix)] // names `crate::ipc_socket::list_file_provider_items`
+    #[test]
+    fn ingestion_writes_a_new_row_with_its_parent_and_namespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        seed_folder_row(&bridge, "folder-a", "Docs");
+        // The person's own tree, nested.
+        apply_metadata_file_row(
+            &bridge.db,
+            &serde_json::json!({ "id": "nested", "name": "n.txt", "parent_id": "folder-a", "size_bytes": 3 }),
+            Namespace::MyFiles,
+            None,
+            None,
+            PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER,
+            1_700_000_000,
+            &[0u8; 32],
+            "Docs",
+        )
+        .unwrap();
+        // A shared folder's child.
+        let root = SharedRootMapping {
+            invite_id: "invite-1".into(),
+            file_id: "shared-root".into(),
+            display_name: "Team".into(),
+            is_folder: true,
+            size_bytes: 0,
+            content_type: None,
+            owner_email: None,
+            sender_public_key: None,
+            encrypted_file_key: None,
+            encrypted_folder_key: None,
+            file_name_encrypted: None,
+            permission_bits: PERMISSION_READ,
+            approved_at: None,
+        };
+        apply_shared_metadata_file_row(
+            &bridge.db,
+            &serde_json::json!({ "id": "shared-child", "size_bytes": 3, "is_folder": false }),
+            &root,
+            1_700_000_000,
+            Some(root.file_id.clone()),
+            "Shared with me/Team",
+            None,
+        )
+        .unwrap();
+        // A create through the shared entry point (the watcher's), in a folder.
+        let contents = dir.path().join("w.txt");
+        std::fs::write(&contents, b"watched").unwrap();
+        let FinderWriteOutcome::Queued {
+            file_id: Some(watched), ..
+        } = bridge
+            .queue_finder_create(FinderWriteTarget {
+                file_id: None,
+                parent_id: Some("folder-a".into()),
+                filename: "w.txt".into(),
+                rel_path: Some("Docs/w.txt".into()),
+                kind: FinderWriteItemKind::File,
+                contents_path: Some(contents.to_string_lossy().into_owned()),
+                content_type: Some("text/plain".into()),
+                base_version_identifier: None,
+            })
+            .unwrap()
+        else {
+            panic!("a queued create")
+        };
+
+        let contract = |id: &str| bridge.db.get_file_contract_state(id).unwrap().unwrap();
+        assert_eq!(
+            (contract("nested").parent_id, contract("nested").namespace),
+            (Some("folder-a".into()), Namespace::MyFiles)
+        );
+        assert_eq!(
+            (contract("shared-child").parent_id, contract("shared-child").namespace),
+            (Some("shared-root".into()), Namespace::SharedWithMe)
+        );
+        assert_eq!(
+            (contract(&watched).parent_id, contract(&watched).item_kind),
+            (Some("folder-a".into()), ItemKind::File)
+        );
+        let at_root = listed_under(&bridge, FP_ROOT);
+        for id in ["nested", "shared-child", watched.as_str()] {
+            assert!(
+                !at_root.contains(&id.to_string()),
+                "{id} is not at the top level: {at_root:?}"
+            );
+        }
+    }
+
+    /// Spec §7.2 (final review): the writers that insert a row from the server or a create write
+    /// its contract in the same call. The two-call shape (`upsert_file`, then
+    /// `set_file_contract_state`) is gone from production code: `set_file_contract_state` exists
+    /// for tests only, and each writer calls `upsert_file_with_contract`.
+    #[test]
+    fn ingestion_writers_use_the_single_transaction_api() {
+        let source = include_str!("engine_bridge.rs");
+        let production = source.split("\nmod tests {").next().unwrap();
+        assert!(
+            !production.contains(".set_file_contract_state("),
+            "production code writes a contract in a second call"
+        );
+        let state_db = include_str!("state_db.rs");
+        let at = state_db
+            .find("    pub fn set_file_contract_state(")
+            .expect("the test-only writer");
+        assert!(
+            state_db[..at].trim_end().ends_with("#[cfg(test)]"),
+            "set_file_contract_state is for tests only"
+        );
+        for writer in [
+            "pub async fn refresh_shared_roots(",
+            "pub fn queue_finder_create_from(",
+            "fn apply_shared_metadata_file_row(",
+            "fn apply_metadata_file_row(",
+        ] {
+            let start = production.find(writer).unwrap_or_else(|| panic!("{writer} not found"));
+            let body = &production[start..];
+            let end = body[1..].find("\n    pub fn ").map_or(body.len(), |i| i + 1);
+            let end = end.min(body[1..].find("\nfn ").map_or(body.len(), |i| i + 1));
+            assert!(
+                body[..end].contains("upsert_file_with_contract("),
+                "{writer} writes its row and contract in one call"
+            );
+        }
     }
 
     /// The `parent_id` of each `PATCH /files/{file_id}` the server got, in order: `None` when the

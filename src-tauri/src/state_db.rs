@@ -2074,6 +2074,27 @@ impl StateDb {
         upsert_file_conn(&conn, e)
     }
 
+    /// Spec 2026-10-09 §7.2 (final review): insert or update a row and write its contract
+    /// (parent, namespace, kind and the rest) in ONE transaction. Where a row is listed is
+    /// decided by its parent alone, and a new row's columns default to no parent and the
+    /// person's own namespace, so no reader may see a new row between the two writes. `update`
+    /// gets the row's contract as it is after the upsert (a new row's: the column defaults);
+    /// it runs under the database lock and must not call back into the database.
+    pub fn upsert_file_with_contract(
+        &self,
+        entry: &FileEntry,
+        update: impl FnOnce(&mut FileContractState),
+    ) -> Result<()> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        upsert_file_conn(&tx, entry)?;
+        let mut contract =
+            get_file_contract_state_conn(&tx, &entry.file_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        update(&mut contract);
+        set_file_contract_state_conn(&tx, &contract)?;
+        tx.commit()
+    }
+
     /// Fetch a single row by `file_id`. `Ok(None)` if absent.
     pub fn get_file(&self, file_id: &str) -> Result<Option<FileEntry>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
@@ -3312,6 +3333,9 @@ impl StateDb {
         rows.collect()
     }
 
+    /// Tests only (spec §7.2, final review): production writes a row's contract together with
+    /// the row, through [`StateDb::upsert_file_with_contract`].
+    #[cfg(test)]
     pub fn set_file_contract_state(&self, state: &FileContractState) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         set_file_contract_state_conn(&conn, state)

@@ -669,6 +669,12 @@ while that write has not parked. The returned item names the token.
   send their parent when they have one, as before. A `file_move` echo with a
   `null` `new_parent_id` clears the row's parent (spec §7.2). — lead,
   2026-10-11 (final review)
+- (fix round 12) A row and its contract (parent, namespace, kind) are written
+  in one transaction by every writer that inserts a row from the server or a
+  create (`StateDb::upsert_file_with_contract`), so no listing sees a new nested
+  row without its parent, or a new shared row in the person's own namespace. A
+  move echo's explicit `new_parent_id` decides the parent for files and folders,
+  the server's restore re-home included. — lead, 2026-10-11 (final review)
 - Uploads without a write id (Windows, the watcher, Keep Mine) keep today's
   status writers.
 
