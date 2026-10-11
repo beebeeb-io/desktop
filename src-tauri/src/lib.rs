@@ -32671,5 +32671,19 @@ mod sign_out_keep_tests {
             !wrapper.contains("roots.push") && !wrapper.contains("vec!["),
             "the wrapper builds nothing itself: {wrapper}"
         );
+        // The whole body is the one call: a root added after the core (the whole data dir, say) would put the kept
+        // folder's fallback under the purge, and the core's own test would not see it.
+        let body: String = wrapper
+            .split_once('{')
+            .map_or("", |(_, body)| body)
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert_eq!(
+            body.replace(",)", ")"),
+            "disposable_cache_roots_in(std::env::temp_dir(),dirs::cache_dir(),macos_hydrate_cache_root(),\
+             &engine_bridge::FinderStagingBases::current())",
+            "the wrapper is one call to its core and nothing else: {wrapper}"
+        );
     }
 }

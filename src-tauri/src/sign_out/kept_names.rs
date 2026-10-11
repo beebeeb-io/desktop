@@ -72,6 +72,11 @@ fn prefix_within(text: &str, max: usize) -> &str {
     &text[..end]
 }
 
+/// The bytes `text`'s first character takes; 0 for an empty text.
+fn first_char_len(text: &str) -> usize {
+    text.chars().next().map_or(0, char::len_utf8)
+}
+
 /// `name` cut to 255 bytes; the stem is cut, never the extension.
 pub fn cut_name(name: &str) -> String {
     with_suffix(name, "")
@@ -80,10 +85,11 @@ pub fn cut_name(name: &str) -> String {
 /// `<stem><suffix><.ext>`, the stem cut so the whole is at most 255 bytes (§7.2 "Lengths": the cut applies to the
 /// final name, never to the suffix, and never to the extension while it leaves room for one stem byte and the suffix).
 /// An "extension" that leaves no such room (`a.<250 bytes>`) is part of the stem, so the name is cut
-/// as one stem and can never pass 255 bytes.
+/// as one stem and can never pass 255 bytes. The room is measured for the stem's first character, which can take more
+/// than one byte, so a stem is never cut to nothing.
 pub fn with_suffix(name: &str, suffix: &str) -> String {
     let (stem, extension) = match split_extension(name) {
-        (_, extension) if extension.len() + suffix.len() >= MAX_NAME_BYTES => (name, ""),
+        (stem, extension) if extension.len() + suffix.len() + first_char_len(stem) > MAX_NAME_BYTES => (name, ""),
         split => split,
     };
     let room = MAX_NAME_BYTES.saturating_sub(suffix.len() + extension.len());
@@ -148,6 +154,15 @@ mod tests {
             fallback,
             "another bundle's container"
         );
+        assert_eq!(
+            kept_root(
+                Some(Path::new("Library/Containers/io.beebeeb.app/Data/Documents")),
+                Some(data),
+                APP_BUNDLE_ID
+            ),
+            fallback,
+            "a relative path is not the container"
+        );
         assert_eq!(kept_root(None, Some(data), APP_BUNDLE_ID), fallback);
         assert_eq!(kept_root(None, None, APP_BUNDLE_ID), None);
     }
@@ -159,7 +174,7 @@ mod tests {
         assert_eq!(conf["identifier"].as_str(), Some(APP_BUNDLE_ID));
     }
 
-    /// U11, the naming half (Task 3 has the disk half).
+    /// U11, the naming half; the writer's tests hold the disk half.
     #[test]
     fn kept_names_follow_the_rule() {
         let name = |path: Option<&str>, role| kept_relative_path(path, "0123456789abcdef", role);
@@ -193,13 +208,12 @@ mod tests {
         let long = format!("{}.docx", "x".repeat(300));
         let cut = name(Some(&long), KeptRole::Newest).pop().unwrap();
         assert_eq!(cut.len(), 255, "{cut}");
-        assert!(cut.ends_with(".docx"));
+        assert!(cut.ends_with(".docx"), "{cut}");
         let accented = format!("{}.txt", "é".repeat(200)); // 2 bytes each
         let cut = name(Some(&accented), KeptRole::Newest).pop().unwrap();
-        assert!(
-            cut.len() <= 255 && cut.ends_with(".txt") && cut.is_char_boundary(cut.len() - 4),
-            "{cut}"
-        );
+        // A 400-byte stem gets 251 bytes, which ends inside a character, so it is cut back to 250.
+        assert_eq!(cut.len(), 254, "{cut}");
+        assert!(cut.ends_with(".txt"), "{cut}");
 
         let full = format!("{}.docx", "y".repeat(250)); // exactly 255 bytes
         let with = with_suffix(&full, " (2)");
@@ -207,7 +221,7 @@ mod tests {
         assert!(with.ends_with(" (2).docx"), "{with}");
 
         // An "extension" that leaves no room for the suffix is cut as part of one stem, so no name
-        // passes 255 bytes (`clonefile` would answer `ENAMETOOLONG`, which is E2).
+        // passes 255 bytes (`clonefile` would answer `ENAMETOOLONG` and fail the copy).
         let long_extension = format!("a.{}", "e".repeat(250)); // 252 bytes, the dot at byte 1
         let earlier = name(Some(&long_extension), KeptRole::EarlierSave(1)).pop().unwrap();
         assert!(
@@ -223,12 +237,43 @@ mod tests {
         );
         let over = format!("a.{}", "e".repeat(300)); // a name from another platform, longer than APFS takes
         assert_eq!(cut_name(&over).len(), 255);
+
+        // An extension and suffix that leave less than the stem's first character are cut with the stem, so a name
+        // never loses its whole stem (spec §7.2 "Lengths").
+        let narrow = format!("é.{}", "e".repeat(249)); // a 250-byte extension: with " (2)", 254 bytes
+        let second = with_suffix(&narrow, " (2)");
+        assert!(
+            second.len() <= 255 && second.starts_with("é.") && second.ends_with(" (2)"),
+            "{} bytes: {second}",
+            second.len()
+        );
+        let hidden = cut_name(&format!("é.{}", "e".repeat(253))); // a 254-byte extension
+        assert!(
+            hidden.len() <= 255 && hidden.starts_with("é."),
+            "{} bytes: {hidden}",
+            hidden.len()
+        );
+        let ascii = format!("a.{}", "e".repeat(249)); // the same 254 bytes leave room for a one-byte stem
+        assert_eq!(with_suffix(&ascii, " (2)"), format!("a (2).{}", "e".repeat(249)));
+
+        // A folder name longer than 255 bytes is cut too, at a character boundary; the file keeps its name.
+        let dir = name(Some(&format!("{}/a.txt", "d".repeat(300))), KeptRole::Newest);
+        assert_eq!(dir[0].len(), 255, "a long folder name: {}", dir[0]);
+        assert_eq!(dir[1], "a.txt");
+        let dir = name(Some(&format!("{}/a.txt", "é".repeat(150))), KeptRole::Newest); // 300 bytes
+        assert_eq!(
+            dir[0].len(),
+            254,
+            "a long folder name, cut at a character boundary: {}",
+            dir[0]
+        );
+        assert_eq!(dir[1], "a.txt");
     }
 
     #[test]
     fn the_event_folder_reads_like_a_screenshot() {
         use chrono::TimeZone;
-        let at = chrono::Local.with_ymd_and_hms(2026, 10, 10, 14, 5, 12).unwrap();
-        assert_eq!(event_folder_name(at), "2026-10-10 at 14.05.12");
+        let at = chrono::Local.with_ymd_and_hms(2026, 1, 2, 3, 4, 5).unwrap();
+        assert_eq!(event_folder_name(at), "2026-01-02 at 03.04.05");
     }
 }
