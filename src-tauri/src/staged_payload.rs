@@ -247,6 +247,8 @@ pub fn sweep_unreferenced(db: &StateDb, roots: &[PathBuf]) -> rusqlite::Result<U
             Err(e) => sweep.failed(&e),
         }
     }
+    #[cfg(test)]
+    run_between_listing_and_names();
     let named: std::collections::HashSet<std::ffi::OsString> = db
         .staged_copy_names()?
         .iter()
@@ -266,6 +268,26 @@ pub fn sweep_unreferenced(db: &StateDb, roots: &[PathBuf]) -> rusqlite::Result<U
         }
     }
     Ok(sweep)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Runs once, on this thread, between step 2's listing and its read of the rows (tests only).
+    static BETWEEN_LISTING_AND_NAMES: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `hook` at the next sweep on this thread, between its listing and its read of the rows.
+#[cfg(test)]
+pub(crate) fn between_listing_and_names_for_test(hook: impl FnOnce() + 'static) {
+    BETWEEN_LISTING_AND_NAMES.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn run_between_listing_and_names() {
+    if let Some(hook) = BETWEEN_LISTING_AND_NAMES.with(|slot| slot.borrow_mut().take()) {
+        hook();
+    }
 }
 
 #[cfg(unix)]
@@ -697,5 +719,72 @@ mod tests {
         let mode = std::fs::metadata(staged.path()).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "{mode:o}");
         staged.retain();
+    }
+
+    /// Spec §8.7 S6: an accept still running that journals its row and makes its copy after
+    /// step 2 listed the folder, but before it read the rows, keeps its copy, and its accept then
+    /// queues. With the rows read before the listing, the copy would be unnamed and unlinked.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_made_between_the_listing_and_the_rows_survives_and_its_accept_queues() {
+        use crate::state_db::{AcceptOutcome, FileEntry, FileStatus, FinderAccept, FinderAcceptKind, ItemKind};
+        let temp = tempfile::tempdir().unwrap();
+        let db = Arc::new(StateDb::open(temp.path().join("state.db")).unwrap());
+        let root = private_root(temp.path());
+        db.upsert_file(&FileEntry {
+            file_id: "mid-accept".into(),
+            path: "notes.txt".into(),
+            status: FileStatus::Local,
+            size_bytes: 4,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+        let mut contract = db.get_file_contract_state("mid-accept").unwrap().unwrap();
+        contract.current_version = 1;
+        db.set_file_contract_state(&contract).unwrap();
+        let copy = root.join(uuid::Uuid::new_v4().to_string());
+        let copy_path = copy.to_string_lossy().into_owned();
+        let (accepting, copy_at_seam, path_at_seam) = (db.clone(), copy.clone(), copy_path.clone());
+        between_listing_and_names_for_test(move || {
+            // The accept's journal row, then its copy (`StagedPayload`'s order).
+            accepting
+                .track_staged_payload(&path_at_seam, Some("/handed-over"), false)
+                .unwrap();
+            std::fs::write(&copy_at_seam, b"a save mid-accept").unwrap();
+        });
+        let sweep = sweep_unreferenced(&db, std::slice::from_ref(&root)).unwrap();
+        assert!(copy.exists(), "the copy survives: {sweep:?}");
+        let accepted = db
+            .accept_finder_write(
+                &FinderAccept {
+                    op_id: "op-mid-accept",
+                    file_id: "mid-accept",
+                    kind: FinderAcceptKind::Modify {
+                        incoming_base: Some("1"),
+                    },
+                    parent_id: None,
+                    target_path: Some("notes.txt"),
+                    metadata_json: "{}",
+                    payload_path: &copy_path,
+                    size_bytes: 17,
+                    modified_at: 2,
+                    backup_source_key: None,
+                    now: 3,
+                },
+                &|_, _| Vec::new(),
+            )
+            .unwrap();
+        assert!(matches!(accepted, AcceptOutcome::Queued { .. }), "{accepted:?}");
+        assert_eq!(
+            db.list_operations_for_file("mid-accept").unwrap()[0]
+                .payload_path
+                .as_deref(),
+            Some(copy_path.as_str())
+        );
+        assert_eq!(std::fs::read(&copy).unwrap(), b"a save mid-accept");
     }
 }
