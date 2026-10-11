@@ -1040,22 +1040,27 @@ async fn run(
         ),
     }
     // The count is the rows reset; a row whose Finder upload resumes stays `Uploading` and is
-    // not counted (spec §9.2).
-    match db.reconcile_stale_in_flight_on_startup() {
-        Ok(0) => {}
-        Ok(reset) => {
-            tracing::info!(
-                reset,
-                "engine start: stale in-flight rows from a previous engine session reset"
-            );
+    // not counted (spec §9.2). Each reset changes how its item is presented, so the first tick's
+    // working-set signal carries the reset ids (below, as the signal's opening debt).
+    let reset_item_ids = match db.reconcile_stale_in_flight_on_startup() {
+        Ok(reset_item_ids) => {
+            let reset = reset_item_ids.len();
+            if reset > 0 {
+                tracing::info!(
+                    reset,
+                    "engine start: stale in-flight rows from a previous engine session reset"
+                );
+            }
+            reset_item_ids
         }
         Err(e) => {
             tracing::warn!(
                 reason = crate::engine_bridge::error_category(&e),
                 "could not reconcile stale in-flight state rows on startup"
             );
+            Vec::new()
         }
-    }
+    };
 
     // The token's buffer MOVES into the client (nothing is copied); the key is copied into it once. Both
     // wrappers are dropped right here, so the wiped originals do not live as long as this task.
@@ -1236,7 +1241,8 @@ async fn run(
     let mut sync_complete_notifications = SyncCompleteNotificationState::default();
     let mut quota_warning_notifications = QuotaWarningNotificationState::default();
     // Working-set signals a busy bridge gate dropped (Task 9 fix round 1, item B): owed to the next tick.
-    let mut owed_working_set_signal = OwedWorkingSetSignal::default();
+    // It opens with the rows the startup reconcile reset, which no signal has carried yet.
+    let mut owed_working_set_signal = OwedWorkingSetSignal::owing(reset_item_ids);
     let mut last_search_index_signature: Option<u64> = None;
 
     // Known-folder backup (task 0797, Windows): run the source→vault mirror on a
@@ -1857,6 +1863,14 @@ struct OwedWorkingSetSignal {
 }
 
 impl OwedWorkingSetSignal {
+    /// A debt that opens with `ids`: changes recorded before the tick loop started, which the first
+    /// tick's signal must carry. Bounded like any other debt.
+    fn owing(ids: Vec<String>) -> Self {
+        let mut owed = Self::default();
+        owed.record(!ids.is_empty(), ids);
+        owed
+    }
+
     /// What this tick should signal: the debt, then this tick's ids, first-seen order, no duplicates. Not
     /// empty whenever something is owed, which keeps `should_signal_working_set` from skipping a quiet tick.
     fn merged_with(&self, ids: &[String]) -> Vec<String> {
@@ -2328,6 +2342,41 @@ mod tests {
         assert!(
             working_set_signal_needed(&[None], &["folder-1".to_string()]),
             "an unknown parent always signals"
+        );
+    }
+
+    /// The rows the startup reconcile reset are owed to the first tick: its signal carries them before
+    /// that tick's own ids, and once a signal went out the debt is paid. Nothing reset owes nothing.
+    #[test]
+    fn the_startup_resets_are_owed_to_the_first_ticks_signal() {
+        let mut owed = OwedWorkingSetSignal::owing(vec!["reset-1".to_string(), "reset-2".to_string()]);
+        let first = owed.merged_with(&["tick-1".to_string()]);
+        assert_eq!(
+            first,
+            vec!["reset-1".to_string(), "reset-2".to_string(), "tick-1".to_string()]
+        );
+        owed.record(false, first);
+        assert_eq!(owed.merged_with(&[]), Vec::<String>::new(), "paid by the first signal");
+        assert_eq!(
+            OwedWorkingSetSignal::owing(Vec::new()).merged_with(&[]),
+            Vec::<String>::new()
+        );
+    }
+
+    /// `run` opens the tick loop's debt with the ids the startup reconcile returned, so a reset reaches
+    /// the system at the first tick, not at the next unrelated change. `run` needs a real window
+    /// system, so the wiring is asserted on the source, on every platform.
+    #[test]
+    fn the_tick_loop_opens_its_debt_with_the_startup_resets() {
+        let source = include_str!("runner.rs").replace("\r\n", "\n");
+        let start = source.find("async fn run(\n    app: AppHandle").expect("run exists");
+        let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+        let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("`run` holds {needle}"));
+        assert_eq!(body.matches("OwedWorkingSetSignal::").count(), 1, "one debt");
+        assert!(
+            at("let reset_item_ids = match db.reconcile_stale_in_flight_on_startup()")
+                < at("let mut owed_working_set_signal = OwedWorkingSetSignal::owing(reset_item_ids);"),
+            "the debt opens with the reconcile's ids"
         );
     }
 

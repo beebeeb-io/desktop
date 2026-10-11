@@ -833,6 +833,11 @@ impl EngineBridge {
             // so run each op as it is NOW: the claim re-reads it, enforces its
             // file's content order and marks this attempt, in one transaction.
             // Every write that records the attempt's outcome names the claim.
+            // Every outcome below that changes how an item is presented (spec §9.1) puts the
+            // item's id in `invalidated_item_ids`, once its transaction committed, so the tick's
+            // one working-set signal tells the system to read it again. Without it a park
+            // reached Finder only at the next unrelated signal, and the person could keep
+            // editing a file whose saves would not upload.
             self.seam("claim:before_tx");
             let claimed = match self.db.claim_operation(&op.op_id, now)? {
                 // Waiting for an earlier content op of its file is not an attempt.
@@ -840,14 +845,18 @@ impl EngineBridge {
                 // The hand-over committed (spec §8.4); the successor itself still waits.
                 ClaimOutcome::WaitAfterHandOver(took_over) => {
                     self.after_hand_over(&op, &took_over);
+                    outcome.invalidated_item_ids.extend(op.file_id.clone());
                     continue;
                 }
                 ClaimOutcome::Claimed(claimed) => {
                     if let Some(took_over) = &claimed.took_over {
                         self.after_hand_over(&claimed.op, took_over);
+                        outcome.invalidated_item_ids.extend(claimed.op.file_id.clone());
                     }
                     *claimed
                 }
+                // The park committed in the claim's transaction, with any hand-over: the
+                // successor is the op that parked, so its id covers both.
                 ClaimOutcome::Parked {
                     op_id,
                     file_id,
@@ -858,6 +867,7 @@ impl EngineBridge {
                         self.after_hand_over(&op, took_over);
                     }
                     log_parked(&op_id, file_id.as_deref(), reason);
+                    outcome.invalidated_item_ids.extend(file_id);
                     outcome.retried_op_ids.push(op_id);
                     continue;
                 }
@@ -914,6 +924,7 @@ impl EngineBridge {
                         continue;
                     }
                     log_parked(&op.op_id, op.file_id.as_deref(), reason);
+                    outcome.invalidated_item_ids.extend(op.file_id.clone());
                     outcome.retried_op_ids.push(op.op_id);
                 }
                 // A stale base never becomes valid again: the server's version only grows
@@ -937,6 +948,7 @@ impl EngineBridge {
                         crate::api_client::InitConflictClass::StaleBase,
                         true,
                     );
+                    outcome.invalidated_item_ids.extend(op.file_id.clone());
                     outcome.retried_op_ids.push(op.op_id);
                 }
                 Err(error) => {
@@ -986,6 +998,9 @@ impl EngineBridge {
                         }
                         if attempts >= op.max_attempts && !completed {
                             self.abandon_upload_after_give_up(&op).await;
+                            // Its attempts are used up, so it has parked by the queue's rule, and
+                            // the attempt's transaction settled the row (spec §9.2).
+                            outcome.invalidated_item_ids.extend(op.file_id.clone());
                         }
                         outcome.retried_op_ids.push(op.op_id);
                     }
@@ -7127,12 +7142,16 @@ async fn bootstrap_from_snapshot(
     // completion stamps while this snapshot is in flight (see `prune_absent`).
     let fetched_at = now_secs;
     let snapshot = bridge.api().sync_snapshot().await?;
-    let applied = apply_snapshot(bridge, sync_root, &snapshot, now_secs, fetched_at, conflicts)?;
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    let mut applied = apply_snapshot(bridge, sync_root, &snapshot, now_secs, fetched_at, conflicts)?;
     // §6.3.3: an upload still waiting for its base after this successful snapshot counts
-    // one more; at the 10th it parks with its bytes.
+    // one more; at the 10th it parks with its bytes. The park changes how its item is
+    // presented (spec §9.1), and the snapshot did not list the file, so its id joins the
+    // tick's applied ids, which the tick's one working-set signal carries.
     #[cfg(target_os = "macos")]
     for (op_id, file_id) in bridge.db().note_snapshot_for_base_pending(now_secs)? {
         log_parked(&op_id, file_id.as_deref(), ParkReason::BaseUnknown);
+        applied.extend(file_id);
     }
     Ok(applied)
 }
@@ -16487,6 +16506,349 @@ mod tests {
         assert!(!logs.contains("upload parked"), "{logs}");
     }
 
+    // ── Every committed park and hand-over reaches the tick's working-set signal (spec §9.1) ──
+    //
+    // A parked upload presents `error`, read-only. The runner's one signal per tick is built
+    // from `invalidated_item_ids` (and the tick's remote applies), so a park missing from it
+    // reached Finder only at the next unrelated signal: on a Mac, minutes during which the
+    // person could keep editing a file whose saves would not upload.
+
+    #[tokio::test]
+    async fn a_stale_base_park_puts_its_item_in_the_ticks_signal() {
+        let (dir, sync_root, server, bridge) = rule3_setup([120u8; 32]);
+        seed_uploaded_row(&bridge, &server, "stale-signal");
+        server.seed_file("stale-signal", 2); // the server moved on
+        fp_save(&bridge, dir.path(), "stale-signal", "notes.txt", b"edit on v1", "1");
+
+        let outcome = bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+
+        let op = bridge.db.list_operations_for_file("stale-signal").unwrap().remove(0);
+        assert_eq!(op.attempts, op.max_attempts, "precondition: parked");
+        assert_eq!(
+            op.last_error.as_deref(),
+            Some("stale_base"),
+            "precondition: the 409 park"
+        );
+        assert_eq!(
+            bridge.db.get_file("stale-signal").unwrap().unwrap().status,
+            FileStatus::Error,
+            "the park settled the row"
+        );
+        assert_eq!(outcome.invalidated_item_ids, vec!["stale-signal".to_string()]);
+        drop(server.finish());
+    }
+
+    #[tokio::test]
+    async fn a_park_before_any_request_puts_its_item_in_the_ticks_signal() {
+        // `ParkNow`: the `init` guard (§6.3.1) never sends a replace of a known file without a base.
+        let (dir, sync_root, server, bridge) = rule3_setup([121u8; 32]);
+        seed_uploaded_row(&bridge, &server, "no-base-signal");
+        fp_save(&bridge, dir.path(), "no-base-signal", "notes.txt", b"a save", "1");
+        let op_id = bridge
+            .db
+            .list_operations_for_file("no-base-signal")
+            .unwrap()
+            .remove(0)
+            .op_id;
+        bridge.db.set_base_version_for_test(&op_id, None);
+
+        let outcome = bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+
+        let op = bridge.db.get_operation(&op_id).unwrap().unwrap();
+        assert_eq!(op.attempts, op.max_attempts, "precondition: parked");
+        assert_eq!(op.last_error.as_deref(), Some("base_unknown"));
+        assert_eq!(
+            bridge.db.get_file("no-base-signal").unwrap().unwrap().status,
+            FileStatus::Error
+        );
+        assert_eq!(outcome.invalidated_item_ids, vec!["no-base-signal".to_string()]);
+        let state = server.finish();
+        assert!(state.inits.is_empty(), "nothing is sent: {:?}", state.init_summary());
+    }
+
+    #[tokio::test]
+    async fn a_claim_time_park_puts_its_item_in_the_ticks_signal() {
+        // X, an earlier build's op, is parked; N, saved on X's token, parks at its claim without
+        // a hand-over, because an earlier build's bytes may not be contained in a later save's.
+        let (dir, sync_root, server, bridge) = rule3_setup([122u8; 32]);
+        seed_uploaded_row(&bridge, &server, "claim-park-signal");
+        let x = fp_save(&bridge, dir.path(), "claim-park-signal", "notes.txt", b"X", "1");
+        let x_op = bridge
+            .db
+            .list_operations_for_file("claim-park-signal")
+            .unwrap()
+            .remove(0);
+        bridge
+            .db
+            .set_write_origin_for_test(&x_op.op_id, crate::state_db::WriteOrigin::EarlierBuild);
+        bridge.db.park_for_test(&x_op.op_id);
+        fp_save(
+            &bridge,
+            dir.path(),
+            "claim-park-signal",
+            "notes.txt",
+            b"X N",
+            x.token.as_deref().unwrap(),
+        );
+
+        let outcome = bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+
+        let n = bridge
+            .db
+            .list_operations_for_file("claim-park-signal")
+            .unwrap()
+            .remove(1);
+        assert_eq!(n.attempts, n.max_attempts, "precondition: N parked at its claim");
+        assert_eq!(n.last_error.as_deref(), Some("predecessor_parked"));
+        assert_eq!(
+            bridge.db.get_file("claim-park-signal").unwrap().unwrap().status,
+            FileStatus::Error
+        );
+        assert_eq!(outcome.invalidated_item_ids, vec!["claim-park-signal".to_string()]);
+        let state = server.finish();
+        assert!(state.inits.is_empty(), "nothing is sent: {:?}", state.init_summary());
+    }
+
+    #[tokio::test]
+    async fn a_hand_over_whose_successor_waits_puts_its_item_in_the_ticks_signal() {
+        // `ClaimOutcome::WaitAfterHandOver`, the fixture of
+        // `a_hand_over_that_inherits_a_pending_base_waits_and_releases_the_copy`.
+        let (dir, sync_root, server, bridge) = rule3_setup([123u8; 32]);
+        bridge
+            .db
+            .upsert_file(&FileEntry {
+                file_id: "versionless-signal".into(),
+                path: "notes.txt".into(),
+                status: FileStatus::Local,
+                size_bytes: 10,
+                modified_at: 1_700_000_000,
+                content_hash: None,
+                remote_updated_at: 1_700_000_000,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+        let w = fp_save(&bridge, dir.path(), "versionless-signal", "notes.txt", b"W", "0"); // rule 6b
+        fp_save(
+            &bridge,
+            dir.path(),
+            "versionless-signal",
+            "notes.txt",
+            b"W N",
+            w.token.as_deref().unwrap(),
+        );
+        let w_op = bridge
+            .db
+            .list_operations_for_file("versionless-signal")
+            .unwrap()
+            .remove(0);
+        bridge.db.park_for_test(&w_op.op_id);
+
+        let mut outcome = None;
+        let logs = capture_logs_async(async {
+            outcome = Some(bridge.process_due_operations(&sync_root, now_secs()).await.unwrap());
+        })
+        .await;
+
+        assert_eq!(logs.matches("queued write took over a parked one").count(), 1, "{logs}");
+        let ops = bridge.db.list_operations_for_file("versionless-signal").unwrap();
+        assert_eq!(ops.len(), 1, "precondition: W's op is gone");
+        assert_eq!(ops[0].attempts, 0, "precondition: N waits");
+        assert_eq!(
+            outcome.unwrap().invalidated_item_ids,
+            vec!["versionless-signal".to_string()]
+        );
+        let state = server.finish();
+        assert!(state.requests.is_empty(), "nothing is sent: {:?}", state.requests);
+    }
+
+    #[tokio::test]
+    async fn a_hand_over_whose_successor_then_runs_puts_its_item_in_the_ticks_signal() {
+        // `ClaimOutcome::Claimed` with a hand-over: W parks `payload_missing`, N takes its role
+        // at the claim and runs. N's `init` is answered "in progress", a plain retry, which
+        // adds no id of its own.
+        let (dir, sync_root, server, bridge) = rule3_setup([124u8; 32]);
+        seed_uploaded_row(&bridge, &server, "handover-signal");
+        let w = fp_save(&bridge, dir.path(), "handover-signal", "notes.txt", b"W", "1");
+        let w_op = bridge.db.list_operations_for_file("handover-signal").unwrap().remove(0);
+        std::fs::remove_file(w_op.payload_path.as_deref().unwrap()).unwrap();
+        bridge.process_due_operations(&sync_root, now_secs()).await.unwrap(); // W parks
+        fp_save(
+            &bridge,
+            dir.path(),
+            "handover-signal",
+            "notes.txt",
+            b"W N",
+            w.token.as_deref().unwrap(),
+        );
+        server
+            .state
+            .lock()
+            .unwrap()
+            .conflict_init_once
+            .insert("handover-signal".into(), crate::api_client::IN_PROGRESS_MESSAGE.into());
+
+        let mut outcome = None;
+        let logs = capture_logs_async(async {
+            outcome = Some(bridge.process_due_operations(&sync_root, now_secs()).await.unwrap());
+        })
+        .await;
+
+        assert_eq!(logs.matches("queued write took over a parked one").count(), 1, "{logs}");
+        let ops = bridge.db.list_operations_for_file("handover-signal").unwrap();
+        assert_eq!(ops.len(), 1, "precondition: W's op is gone");
+        assert_eq!(ops[0].attempts, 1, "precondition: N ran once and will retry");
+        assert_eq!(
+            outcome.unwrap().invalidated_item_ids,
+            vec!["handover-signal".to_string()]
+        );
+        let state = server.finish();
+        assert_eq!(
+            state.init_summary(),
+            vec![(json!("handover-signal"), json!(1), 409)],
+            "N ran on W's base"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hand_over_whose_successor_parks_at_the_claim_puts_its_item_in_the_ticks_signal() {
+        // `ClaimOutcome::Parked` with a hand-over, the fixture of
+        // `a_base_unknown_predecessor_hands_over_and_the_successor_parks_without_a_request`.
+        let (dir, sync_root, server, bridge) = rule3_setup([125u8; 32]);
+        seed_uploaded_row(&bridge, &server, "unknown-base-signal"); // version 1, not filled
+        let w = fp_save(&bridge, dir.path(), "unknown-base-signal", "notes.txt", b"W", "0");
+        fp_save(
+            &bridge,
+            dir.path(),
+            "unknown-base-signal",
+            "notes.txt",
+            b"W N",
+            w.token.as_deref().unwrap(),
+        );
+
+        let mut outcome = None;
+        let logs = capture_logs_async(async {
+            outcome = Some(bridge.process_due_operations(&sync_root, now_secs()).await.unwrap());
+        })
+        .await;
+
+        assert_eq!(logs.matches("queued write took over a parked one").count(), 1, "{logs}");
+        let ops = bridge.db.list_operations_for_file("unknown-base-signal").unwrap();
+        assert_eq!(ops.len(), 1, "precondition: W's op is gone");
+        assert_eq!(
+            ops[0].last_error.as_deref(),
+            Some("base_unknown"),
+            "precondition: N parked"
+        );
+        assert_eq!(
+            outcome.unwrap().invalidated_item_ids,
+            vec!["unknown-base-signal".to_string()]
+        );
+        drop(server.finish());
+    }
+
+    #[tokio::test]
+    async fn the_attempt_that_uses_up_an_ops_attempts_puts_its_item_in_the_ticks_signal() {
+        let (dir, sync_root, server, bridge) = rule3_setup([126u8; 32]);
+        seed_uploaded_row(&bridge, &server, "given-up-signal");
+        server
+            .state
+            .lock()
+            .unwrap()
+            .refuse_init
+            .insert("given-up-signal".into(), "500 Internal Server Error");
+        fp_save(&bridge, dir.path(), "given-up-signal", "notes.txt", b"a save", "1");
+        let op_id = bridge
+            .db
+            .list_operations_for_file("given-up-signal")
+            .unwrap()
+            .remove(0)
+            .op_id;
+        let now = now_secs();
+
+        // An attempt that leaves attempts to spare changes nothing the system shows.
+        let first = bridge.process_due_operations(&sync_root, now).await.unwrap();
+        assert_eq!(bridge.db.get_operation(&op_id).unwrap().unwrap().attempts, 1);
+        assert!(
+            first.invalidated_item_ids.is_empty(),
+            "{:?}",
+            first.invalidated_item_ids
+        );
+
+        bridge
+            .db
+            .hold_lock_for_test()
+            .execute(
+                "UPDATE operation_queue SET attempts = max_attempts - 1 WHERE op_id = ?1",
+                rusqlite::params![op_id],
+            )
+            .unwrap();
+        let last = bridge.process_due_operations(&sync_root, now + 10_000).await.unwrap();
+
+        let op = bridge.db.get_operation(&op_id).unwrap().unwrap();
+        assert_eq!(op.attempts, op.max_attempts, "precondition: its attempts are used up");
+        assert_eq!(
+            bridge.db.get_file("given-up-signal").unwrap().unwrap().status,
+            FileStatus::Error,
+            "the attempt settled the row"
+        );
+        assert_eq!(last.invalidated_item_ids, vec!["given-up-signal".to_string()]);
+        drop(server.finish());
+    }
+
+    #[tokio::test]
+    async fn a_park_whose_op_moved_under_its_claim_puts_no_item_in_the_signal() {
+        // The stale-base 409 park, with the op purged between the attempt and the park (the
+        // `outcome:before_tx` seam): `park_claimed` writes nothing, so nothing changed for the
+        // system and no id is reported.
+        let (dir, sync_root, server, bridge) = rule3_setup([127u8; 32]);
+        seed_uploaded_row(&bridge, &server, "moved-signal");
+        server.seed_file("moved-signal", 2);
+        fp_save(&bridge, dir.path(), "moved-signal", "notes.txt", b"edit on v1", "1");
+        let op_id = bridge
+            .db
+            .list_operations_for_file("moved-signal")
+            .unwrap()
+            .remove(0)
+            .op_id;
+        let mut contract = bridge.db.get_file_contract_state("moved-signal").unwrap().unwrap();
+        contract.namespace = Namespace::SharedWithMe;
+        contract.shared_root_id = Some("moved-root".into());
+        bridge.db.set_file_contract_state(&contract).unwrap();
+        let db = bridge.db.clone();
+        bridge.seams.arm("outcome:before_tx", move || {
+            run_competing(move || {
+                db.purge_revoked_shared_content(&[]).unwrap();
+            })
+        });
+
+        let mut outcome = None;
+        let logs = capture_logs_async(async {
+            outcome = Some(bridge.process_due_operations(&sync_root, now_secs()).await.unwrap());
+        })
+        .await;
+
+        assert!(
+            bridge.db.get_operation(&op_id).unwrap().is_none(),
+            "precondition: purged"
+        );
+        assert_eq!(
+            logs.lines()
+                .filter(|line| line.contains("queue state moved")
+                    && line.contains(&op_id)
+                    && line.contains("step=\"park\""))
+                .count(),
+            1,
+            "precondition: the park found the op gone:\n{logs}"
+        );
+        assert!(
+            outcome.unwrap().invalidated_item_ids.is_empty(),
+            "a park that did not commit is not reported"
+        );
+        let state = server.finish();
+        assert_eq!(state.init_summary(), vec![(json!("moved-signal"), json!(1), 409)]);
+    }
+
     // ── The accept transaction and the base mapping (spec §6.1, §6.3.1, §8.7 S1.1, S3, S5) ──
 
     #[tokio::test]
@@ -17767,6 +18129,56 @@ mod tests {
                 );
             } else {
                 assert_eq!(op.attempts, op.max_attempts, "parked base_unknown after the 10th");
+            }
+        }
+        let state = server.finish();
+        assert!(state.inits.is_empty());
+    }
+
+    /// Spec §9.1: the snapshot count's park changes how the item is presented, and the snapshot
+    /// did not list the file, so the park puts the id in the tick's applied ids itself; the tick's
+    /// one working-set signal carries them. Before the 10th snapshot nothing changed for it.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_snapshot_count_park_puts_its_item_in_the_ticks_signal() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [128u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_version_zero_row(&bridge, &server, "never-listed-signal", FileStatus::Local);
+        seed_uploaded_row(&bridge, &server, "listed");
+        bridge.db.set_sync_cursor(0).unwrap();
+        fp_save(&bridge, dir.path(), "never-listed-signal", "notes.txt", b"edit", "0");
+        let listed = serde_json::json!({ "seq_id": 1, "nodes": [node(&master_key, "listed", "notes.txt", 1, false)] });
+        for success in 1..=10 {
+            server
+                .state
+                .lock()
+                .unwrap()
+                .snapshots
+                .push_back(("200 OK".into(), listed.clone()));
+            let tick = sync_tick_outcome(&bridge, &sync_root).await.unwrap();
+            let carried = tick.applied_item_ids.contains(&"never-listed-signal".to_string());
+            if success < 10 {
+                assert!(
+                    !carried,
+                    "nothing changed after {success} snapshots: {:?}",
+                    tick.applied_item_ids
+                );
+            } else {
+                let op = bridge
+                    .db
+                    .list_operations_for_file("never-listed-signal")
+                    .unwrap()
+                    .remove(0);
+                assert_eq!(op.attempts, op.max_attempts, "precondition: parked after the 10th");
+                assert_eq!(
+                    bridge.db.get_file("never-listed-signal").unwrap().unwrap().status,
+                    FileStatus::Error
+                );
+                assert!(carried, "the park is carried: {:?}", tick.applied_item_ids);
             }
         }
         let state = server.finish();

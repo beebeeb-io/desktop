@@ -578,6 +578,16 @@ while that write has not parked. The returned item names the token.
   row stays in the trash, and a `Conflict` row keeps its own status. The landing
   settles the row as in its step 2. Engine start keeps `Uploading` for a row with
   an unparked File Provider upload and resets every other in-flight row.
+- How the system hears about it. The extension re-reads items only after a
+  working-set signal, and the runner sends one per tick. Every queue outcome that
+  changes how an item is presented puts the item's id in that signal, once its
+  transaction committed: a landing; a park (at the claim, by the runner, or the
+  stale-base 409); a hand-over (the successor's id); the attempt that uses up an
+  op's attempts; and the snapshot count's park (through the tick's applied ids). A
+  park whose guarded write matched no row puts nothing. The accept's own park
+  answers the system's call with the item, so it needs no signal. Engine start
+  records each row it resets as a change, and the first tick's signal carries
+  those ids.
 - The size and modification time are the newest bytes'. The accept records the
   staged copy's; the landing writes the server's size and "now" only when no
   later write is queued. Finder's date stays `max(modified_at,
@@ -863,7 +873,8 @@ change records nothing, so the metadata sweeps produce no churn),
 `delete_file` / `delete_file_subtree` / `prune_absent` (deleted, with the
 parent captured before the delete), `set_status` / `set_size_bytes` /
 `set_file_contract_state` (modified; a contract parent change is
-`reparented`). Windows-only reconciliation writes (`reconcile_os_state`,
+`reparented`), and `reconcile_stale_in_flight_on_startup` (modified, one per
+row it resets). Windows-only reconciliation writes (`reconcile_os_state`,
 `finish_windows_signout`) are deliberately NOT wired — the change log is FPFS
 machinery and Windows refreshes placeholders natively.
 

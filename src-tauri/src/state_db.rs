@@ -2996,20 +2996,36 @@ impl StateDb {
     ///   `Uploading`, because that upload resumes after the relaunch and the item stays
     ///   writable and not evictable meanwhile. Only a Finder upload carries a write id.
     ///
-    /// Returns the rows it reset, which is what the engine-start line reports; a row it keeps
-    /// `Uploading` is not touched, so not counted.
-    pub fn reconcile_stale_in_flight_on_startup(&self) -> Result<usize> {
-        let conn = self.0.lock().expect("state_db mutex poisoned");
-        conn.execute(
-            "UPDATE files
-             SET status = CASE status WHEN 'downloading' THEN 'cloud_only' ELSE 'error' END
-             WHERE status = 'downloading'
+    /// Returns the ids of the rows it reset: their count is what the engine-start line reports,
+    /// and the first tick's working-set signal carries them. A row it keeps `Uploading` is not
+    /// touched, so not returned. Each reset changes how the item is presented, so it is recorded
+    /// for the system, as every status change is; without the record the system kept showing
+    /// the item as it was until the item changed again.
+    pub fn reconcile_stale_in_flight_on_startup(&self) -> Result<Vec<String>> {
+        const STALE: &str = "status = 'downloading'
                 OR (status = 'uploading' AND NOT EXISTS (
                         SELECT 1 FROM operation_queue q
                         WHERE q.file_id = files.file_id AND q.write_id IS NOT NULL
-                          AND q.kind IN ('upload_version', 'upload_file') AND q.attempts < q.max_attempts))",
+                          AND q.kind IN ('upload_version', 'upload_file') AND q.attempts < q.max_attempts))";
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let reset = {
+            let mut stmt = tx.prepare(&format!("SELECT file_id FROM files WHERE {STALE} ORDER BY file_id"))?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>>>()?
+        };
+        tx.execute(
+            &format!(
+                "UPDATE files SET status = CASE status WHEN 'downloading' THEN 'cloud_only' ELSE 'error' END
+                 WHERE {STALE}"
+            ),
             [],
-        )
+        )?;
+        for file_id in &reset {
+            record_file_change_conn(&tx, file_id, FpChangeKind::Modified, None)?;
+        }
+        tx.commit()?;
+        Ok(reset)
     }
 
     /// Apply a batch of native-Explorer-derived state deltas in ONE
@@ -8009,7 +8025,7 @@ mod tests {
 
         let touched = db.reconcile_stale_in_flight_on_startup().unwrap();
 
-        assert_eq!(touched, 2);
+        assert_eq!(touched.len(), 2);
         assert_eq!(db.get_file("stale-upload").unwrap().unwrap().status, FileStatus::Error);
         assert_eq!(
             db.get_file("stale-download").unwrap().unwrap().status,
@@ -11096,17 +11112,68 @@ mod tests {
 
         let reset = db.reconcile_stale_in_flight_on_startup().unwrap();
 
-        assert_eq!(reset, 2, "the stale upload and the stale download, not the kept row");
+        assert_eq!(
+            reset,
+            vec!["stale-download".to_string(), "stale-upload".to_string()],
+            "the stale upload and the stale download, not the kept row"
+        );
         assert_eq!(db.get_file("with-save").unwrap().unwrap().status, FileStatus::Uploading);
         assert_eq!(db.get_file("stale-upload").unwrap().unwrap().status, FileStatus::Error);
         assert_eq!(
             db.get_file("stale-download").unwrap().unwrap().status,
             FileStatus::CloudOnly
         );
-        assert_eq!(
-            db.reconcile_stale_in_flight_on_startup().unwrap(),
-            0,
+        assert!(
+            db.reconcile_stale_in_flight_on_startup().unwrap().is_empty(),
             "nothing left to reset"
+        );
+    }
+
+    /// Spec §9.1–§9.2: a row the startup reconcile resets changes how its item is presented
+    /// (an upload that will not resume presents `error`, read-only), so each reset is recorded
+    /// for the system like every other status change, in the reconcile's transaction. A row it
+    /// keeps records nothing.
+    #[test]
+    fn the_startup_reconcile_records_each_row_it_resets_for_the_system() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_v1_row(&db, "with-save");
+        assert!(matches!(
+            accept_save(&db, "op-with-save", "with-save", Some("1")),
+            AcceptOutcome::Queued { .. }
+        ));
+        seed_own_row(&db, "stale-upload", FileStatus::Uploading, 20);
+        seed_own_row(&db, "stale-download", FileStatus::Downloading, 30);
+        let tip = |db: &StateDb| -> i64 {
+            db.0.lock()
+                .unwrap()
+                .query_row("SELECT COALESCE(MAX(seq), 0) FROM fp_changes", [], |row| row.get(0))
+                .unwrap()
+        };
+        let before = tip(&db);
+
+        db.reconcile_stale_in_flight_on_startup().unwrap();
+
+        let recorded: Vec<(String, String)> = {
+            let conn = db.0.lock().unwrap();
+            let mut stmt = conn
+                .prepare("SELECT file_id, kind FROM fp_changes WHERE seq > ?1 ORDER BY file_id")
+                .unwrap();
+            stmt.query_map(params![before], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>>>()
+                .unwrap()
+        };
+        assert_eq!(
+            recorded,
+            vec![
+                (
+                    "stale-download".to_string(),
+                    FpChangeKind::Modified.as_str().to_string()
+                ),
+                ("stale-upload".to_string(), FpChangeKind::Modified.as_str().to_string()),
+            ],
+            "one change per reset row, none for the row whose save still uploads"
         );
     }
 
