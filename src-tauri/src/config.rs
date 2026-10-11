@@ -651,7 +651,7 @@ impl HeldConfig {
         if !self
             .queued
             .iter()
-            .any(|(queued, arg)| *queued == apply && arg == argument)
+            .any(|(queued, arg)| std::ptr::fn_addr_eq(*queued, apply) && arg == argument)
         {
             self.queued.push((apply, argument.to_string()));
         }
