@@ -31661,6 +31661,247 @@ mod config_write_pin_tests {
         }
     }
 
+    /// The text inside the parentheses of the call whose `(` is at byte `open`.
+    fn call_text(text: &str, open: usize) -> &str {
+        let mut depth = 0usize;
+        for (at, c) in text[open..].char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &text[open + 1..open + at];
+                    }
+                }
+                _ => {}
+            }
+        }
+        &text[open + 1..]
+    }
+
+    /// The calls whose closure gets the config to change.
+    const UPDATE_CALLS: [&str; 5] = [
+        "DesktopConfig::update(",
+        "DesktopConfig::update_at(",
+        "DesktopConfig::try_update_at(",
+        ".update_held(",
+        ".update_held_at(",
+    ];
+
+    /// Fix round 1 (M1), shape 1: a stale WHOLE copy written through an update closure. The closure's argument is the
+    /// file as it is now; assigning over all of it (`*cfg = ...`), swapping or replacing or taking it, or `clone_from`
+    /// puts back a copy loaded earlier, which is the bug in a new shape. Returns what it found, one line each.
+    fn whole_copy_writes(text: &str) -> Vec<String> {
+        let mut found = Vec::new();
+        for needle in UPDATE_CALLS {
+            for (at, _) in text.match_indices(needle) {
+                let call = call_text(text, at + needle.len() - 1);
+                let Some(open) = call.find('|') else { continue };
+                let Some(close) = call[open + 1..].find('|') else {
+                    continue;
+                };
+                let params = call[open + 1..open + 1 + close].trim();
+                let name: String = params
+                    .trim_start_matches("mut ")
+                    .trim_start_matches("&mut ")
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                if name.is_empty() || name == "_" {
+                    continue;
+                }
+                let body = crate::source_pin::squeeze(&call[open + 1 + close + 1..]);
+                let assign = format!("*{name}=");
+                let assigns = body.matches(&assign).count() - body.matches(&format!("{assign}=")).count();
+                if assigns > 0 {
+                    found.push(format!(
+                        "{needle} closure `{name}` assigns over the whole config: `{assign}`"
+                    ));
+                }
+                for shape in [
+                    format!("mem::replace({name},"),
+                    format!("mem::swap({name},"),
+                    format!("mem::take({name})"),
+                    format!("{name}.clone_from("),
+                ] {
+                    if body.contains(&shape) {
+                        found.push(format!(
+                            "{needle} closure `{name}` overwrites the whole config: `{shape}`"
+                        ));
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    /// The held-copy helpers: the only callees a flow may hand its copy to.
+    const HELD_CALLEES: [&str; 6] = [
+        "begin_finder_install_attempt",
+        "finder_install_failed",
+        "persist_finder_install_result",
+        "persist_sync_root_and_start_engine",
+        "finish_repair_after_removal",
+        "remember_kept_folder_held",
+    ];
+
+    /// Fix round 1 (M1), shape 2: an edit to a held copy outside an update closure. The copy (`cfg`) is only read; it is
+    /// changed through `cfg.update_held(..)`, or by handing `&mut cfg` to one of the held helpers. An assignment to one of
+    /// its fields, a mutating method on one, or `&mut cfg` handed anywhere else is an edit that the refresh would drop (and
+    /// that does not compile where `HeldConfig` has no `DerefMut`; this scan covers the code a Mac does not compile).
+    fn held_copy_edits(flow: &str) -> Vec<String> {
+        let mut found = Vec::new();
+        for (at, _) in flow.match_indices("cfg.") {
+            if flow[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_')
+            {
+                continue;
+            }
+            let path: String = flow[at + 4..]
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
+                .collect();
+            let after = flow[at + 4 + path.len()..].trim_start();
+            let assigns = ["+=", "-=", "|=", "&="].iter().any(|op| after.starts_with(op))
+                || (after.starts_with('=') && !after.starts_with("=="));
+            let method = path.rsplit('.').next().unwrap_or("");
+            let mutating = path.contains('.')
+                && [
+                    "push", "insert", "remove", "clear", "take", "retain", "extend", "sort", "truncate",
+                ]
+                .contains(&method);
+            let whole = ["set_known_folder", "apply_settings", "ensure_account_id"].contains(&path.as_str());
+            if assigns || mutating || whole {
+                found.push(format!("`cfg.{path}` is edited outside update_held"));
+            }
+        }
+        for (at, _) in flow.match_indices("&mut cfg") {
+            let mut depth = 0usize;
+            let mut open = None;
+            for (i, c) in flow[..at].char_indices().rev() {
+                match c {
+                    ')' => depth += 1,
+                    '(' if depth == 0 => {
+                        open = Some(i);
+                        break;
+                    }
+                    '(' => depth -= 1,
+                    _ => {}
+                }
+            }
+            let callee: String = open
+                .map(|i| {
+                    flow[..i]
+                        .trim_end()
+                        .chars()
+                        .rev()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !HELD_CALLEES.contains(&callee.as_str()) {
+                found.push(format!(
+                    "`&mut cfg` is handed to `{callee}`, which is not a held helper"
+                ));
+            }
+        }
+        found
+    }
+
+    /// The scanners must be able to go red: each shape, written out, is found; the real shapes are not.
+    #[test]
+    fn test_1889_the_scanners_find_the_shapes_they_are_for_and_pass_the_real_ones() {
+        // Shape 1.
+        for bad in [
+            "DesktopConfig::update(|cfg| { *cfg = stale.clone(); (true, ()) })",
+            "DesktopConfig::update_at(&path, |cfg| { *cfg=stale; (true, ()) })",
+            "held.update_held(|fresh| { std::mem::replace(fresh, stale); (true, ()) })",
+            "DesktopConfig::try_update_at(&path, |cfg| { std::mem::swap(cfg, &mut stale); (true, ()) })",
+            "DesktopConfig::update(|cfg| { cfg.clone_from(&stale); (true, ()) })",
+            "DesktopConfig::update(|c| { let _old = std::mem::take(c); (true, ()) })",
+        ] {
+            assert!(!whole_copy_writes(bad).is_empty(), "not found: {bad}");
+        }
+        for good in [
+            "DesktopConfig::update(|cfg| { cfg.sync_mode = Some(mode); (true, ()) })",
+            "DesktopConfig::update(|cfg| { if *cfg == other { return (false, ()); } (true, ()) })",
+            "held.update_held(|held| (clear_finder_install_failure(held), ()))",
+        ] {
+            assert_eq!(whole_copy_writes(good), Vec::<String>::new(), "found in: {good}");
+        }
+        // Shape 2.
+        for bad in [
+            "let mut cfg = HeldConfig::load()?;\n cfg.sync_root = Some(root);",
+            "cfg.finder_install_status = None;",
+            "cfg.known_folder_backup.push(key);",
+            "cfg.excluded_folder_ids.take();",
+            "cfg.set_known_folder(&key, true);",
+            "cfg.pause_sync |= paused;",
+            "write_it(&mut cfg, 3)?;",
+        ] {
+            assert!(!held_copy_edits(bad).is_empty(), "not found: {bad}");
+        }
+        for good in [
+            "begin_finder_install_attempt(&mut cfg)?;\n finder_install_failed(&mut cfg, failure.message)",
+            "finish_repair_after_removal(&mut cfg, loc, |cfg| persist_finder_install_result(cfg, false, None), |l| s(l))",
+            "finder_removal::remember_kept_folder_held(&mut cfg, location);",
+            "persist_sync_root_and_start_engine(app, &state, &mut cfg, root.clone(), &t).await?;",
+            "if cfg.finder_install_status.as_deref() != Some(\"installed\") { x }",
+            "cfg.update_held(|held| { held.sync_root = Some(root.clone()); (true, ()) })?;",
+            "let ok = cfg.pause_sync == true;",
+        ] {
+            assert_eq!(held_copy_edits(good), Vec::<String>::new(), "found in: {good}");
+        }
+    }
+
+    /// Shape 1 on the real source: no update closure anywhere in production code writes over the whole config.
+    /// (`config.rs` is the one place that holds the whole copy on purpose, in `HeldConfig::update_held_at`.)
+    #[test]
+    fn test_1889_no_stale_whole_copy_is_written_through_an_update_closure() {
+        let mut found = Vec::new();
+        for (name, text) in production_files() {
+            if name == "config.rs" {
+                continue;
+            }
+            for line in whole_copy_writes(&text) {
+                found.push(format!("{name}: {line}"));
+            }
+        }
+        assert!(found.is_empty(), "{found:#?}");
+    }
+
+    /// Shape 2 on the real source: the flows that hold a copy only read it, and change it through `update_held` or
+    /// the held helpers. These bodies are Windows and Linux code that a Mac does not compile, so the text is the guard.
+    #[test]
+    fn test_1889_no_held_copy_is_edited_outside_update_held() {
+        let files = production_files();
+        let lib = &files.iter().find(|(name, _)| name == "lib.rs").unwrap().1;
+        let mut found = Vec::new();
+        for name in [
+            "install_finder_location",
+            "continue_without_finder_location",
+            "install_windows_shell_integration",
+            "finder_location_state",
+            "reset_macos_integration",
+            "persist_finder_install_result",
+            "begin_finder_install_attempt",
+            "finder_install_failed",
+            "persist_sync_root_and_start_engine",
+            "finish_repair_after_removal",
+        ] {
+            let body = item(lib, &format!("fn {name}("));
+            for line in held_copy_edits(&body) {
+                found.push(format!("{name}: {line}"));
+            }
+        }
+        assert!(found.is_empty(), "{found:#?}");
+    }
+
     /// The sweep, site by site: each place that loads the config in order to change it makes the change inside one
     /// update, and does not load a copy of its own first. `forbids` is what the site used to do.
     #[test]
@@ -31669,37 +31910,35 @@ mod config_write_pin_tests {
         let lib = &files.iter().find(|(name, _)| name == "lib.rs").unwrap().1;
         let update = "DesktopConfig::update(";
         let held = ".update_held(";
-        // (the item, what it must contain, whether it may still load a copy to read)
-        let sites: [(&str, &str, bool); 15] = [
-            ("persist_last_signed_in_email", update, false),
-            ("forget_last_signed_in_email", "DesktopConfig::try_update_at(", false),
-            ("persist_finder_install_result", held, false),
-            ("begin_finder_install_attempt", held, false),
-            ("finder_install_failed", held, false),
-            ("persist_sync_root_and_start_engine", held, false),
-            ("ensure_sync_root_and_engine", update, false),
-            ("pick_sync_root", update, false),
-            ("set_desktop_config", update, false),
-            ("set_sync_paused", update, false),
-            ("set_sync_mode", update, false),
-            ("set_selective_sync", update, false),
-            ("set_known_folder_backup", update, false),
-            ("mark_known_folder_onboarding_seen", update, false),
-            ("record_installed_release_channel", update, false),
+        // (the item, what it must contain). None loads a copy of its own: load, change and write are one update.
+        let sites: [(&str, &str); 15] = [
+            ("persist_last_signed_in_email", update),
+            ("forget_last_signed_in_email", "DesktopConfig::try_update_at("),
+            ("persist_finder_install_result", held),
+            ("begin_finder_install_attempt", held),
+            ("finder_install_failed", held),
+            ("persist_sync_root_and_start_engine", held),
+            ("ensure_sync_root_and_engine", update),
+            ("pick_sync_root", update),
+            ("set_desktop_config", update),
+            ("set_sync_paused", update),
+            ("set_sync_mode", update),
+            ("set_selective_sync", update),
+            ("set_known_folder_backup", update),
+            ("mark_known_folder_onboarding_seen", update),
+            ("record_installed_release_channel", update),
         ];
-        for (name, must, may_load) in sites {
+        for (name, must) in sites {
             let start = format!("fn {name}(");
             let body = item(lib, &start);
             assert!(
                 body.contains(must),
                 "{name} changes the config through `{must}`:\n{body}"
             );
-            if !may_load {
-                assert!(
-                    !body.contains("DesktopConfig::load()"),
-                    "{name} loads a copy of its own; load, change and write are one update:\n{body}"
-                );
-            }
+            assert!(
+                !body.contains("DesktopConfig::load()"),
+                "{name} loads a copy of its own; load, change and write are one update:\n{body}"
+            );
         }
         assert!(
             lib.contains("match DesktopConfig::ensure_account_id() {"),
