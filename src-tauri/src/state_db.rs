@@ -4079,6 +4079,16 @@ impl StateDb {
             if active.contains(root_id) {
                 continue;
             }
+            // The ops' staged copies are released in this transaction, so the next start's
+            // release path unlinks them (spec §8.7 S6). Before, the op went and its plaintext
+            // copy stayed until a sign-out. macOS only: the release journal is read only there.
+            #[cfg(target_os = "macos")]
+            tx.execute(
+                "INSERT INTO staged_payloads(path, completed)
+                 SELECT payload_path, 1 FROM operation_queue WHERE file_id = ?1 AND payload_path IS NOT NULL
+                 ON CONFLICT(path) DO UPDATE SET completed = 1",
+                params![file_id],
+            )?;
             tx.execute("DELETE FROM operation_queue WHERE file_id = ?1", params![file_id])?;
             tx.execute("DELETE FROM files WHERE file_id = ?1", params![file_id])?;
             revoked.push(RevokedSharedCache { file_id, cache_path });
@@ -4297,6 +4307,38 @@ impl StateDb {
              WHERE payload_path NOT IN (SELECT path FROM staged_payloads)",
         )?;
         stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect()
+    }
+
+    /// Engine start (spec §8.7 S6): the journalled copies of accepts that never committed. Their
+    /// row says `completed = 0`, and no op, resume row or finalization names the path.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn unfinished_unreferenced_payloads(&self) -> Result<Vec<String>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT path FROM staged_payloads
+             WHERE completed = 0
+               AND path NOT IN (SELECT payload_path FROM operation_queue WHERE payload_path IS NOT NULL)
+               AND path NOT IN (SELECT payload_path FROM upload_resume)
+               AND path NOT IN (SELECT payload_path FROM upload_finalizations)
+             ORDER BY path",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect()
+    }
+
+    /// Engine start (spec §8.7 S6): every path a row of `staged_payloads`, `operation_queue`,
+    /// `upload_resume` or `upload_finalizations` names, in one read.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn staged_copy_names(&self) -> Result<Vec<String>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT path FROM staged_payloads
+             UNION SELECT payload_path FROM operation_queue WHERE payload_path IS NOT NULL
+             UNION SELECT payload_path FROM upload_resume
+             UNION SELECT payload_path FROM upload_finalizations",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect()
     }
 
     // Windows account cleanup must not silently discard paused/exhausted writes.
@@ -11424,5 +11466,63 @@ mod tests {
             FileStatus::Uploading,
             "write-keyed: no write id, not touched here"
         );
+    }
+
+    /// P2-1: purging a revoked share's content marks its queued ops' copies released in the same
+    /// transaction, so the next start's release path removes them. Before, the op went and its
+    /// plaintext copy stayed until a sign-out.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_revoked_shares_queued_copy_is_released_and_removed_at_the_next_start() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = StateDb::open(temp.path().join("state.db")).unwrap();
+        seed_contract_row(&db, "revoked", "/Shared with me/Revoked", None, FileStatus::Local, 20);
+        let mut revoked = db.get_file_contract_state("revoked").unwrap().unwrap();
+        revoked.namespace = Namespace::SharedWithMe;
+        revoked.shared_root_id = Some("revoked".into());
+        revoked.share_id = Some("invite-revoked".into());
+        revoked.permission_bits = PERMISSION_READ | PERMISSION_WRITE;
+        db.set_file_contract_state(&revoked).unwrap();
+        let copy = temp.path().join("copy");
+        std::fs::write(&copy, b"a save to a share that was revoked").unwrap();
+        let copy_path = copy.to_string_lossy().into_owned();
+        db.track_staged_payload(&copy_path, Some("/handed-over"), false)
+            .unwrap();
+        db.enqueue_operation(&PendingOperation {
+            op_id: "op-revoked".into(),
+            kind: OperationKind::UploadVersion,
+            file_id: Some("revoked".into()),
+            parent_id: None,
+            target_path: None,
+            metadata_json: None,
+            payload_path: Some(copy_path.clone()),
+            base_version: Some(1),
+            base_object_version_id: None,
+            attempts: 0,
+            max_attempts: 25,
+            next_retry_at: 0,
+            last_error: None,
+            backup_source_key: None,
+            created_at: 1,
+            updated_at: 1,
+        })
+        .unwrap();
+
+        db.purge_revoked_shared_content(&[]).unwrap();
+
+        assert!(db.get_operation("op-revoked").unwrap().is_none(), "the op is gone");
+        assert_eq!(
+            db.staged_payloads_for_signout().unwrap(),
+            vec![(copy_path.clone(), Some("/handed-over".to_string()), true)],
+            "its copy is released in the purge's transaction"
+        );
+        let repair = db.engine_start_repair().unwrap();
+        assert_eq!(repair.released_payloads, vec![copy_path]);
+        assert_eq!(
+            crate::staged_payload::remove_released(&db, &repair.released_payloads),
+            1
+        );
+        assert!(!copy.exists(), "the next start removed it");
+        assert!(db.staged_payloads_for_signout().unwrap().is_empty());
     }
 }

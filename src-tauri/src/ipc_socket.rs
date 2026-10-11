@@ -767,8 +767,8 @@ impl StagingDirRefusal {
         }
     }
 
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    fn into_io_error(self) -> std::io::Error {
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub(crate) fn into_io_error(self) -> std::io::Error {
         match self {
             Self::Missing => std::io::ErrorKind::NotFound.into(),
             Self::NotPrivate => std::io::Error::new(
@@ -852,19 +852,19 @@ impl StagingDir {
 
     /// The names directly inside, without `.` and `..`.
     #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
-    fn entry_names(&self) -> std::io::Result<Vec<std::ffi::OsString>> {
+    pub(crate) fn entry_names(&self) -> std::io::Result<Vec<std::ffi::OsString>> {
         use std::os::fd::AsRawFd;
         list_dir_fd(self.fd.as_raw_fd())
     }
 
     /// `lstat` of one entry: a symlink is described, never followed.
-    fn stat_entry(&self, name: &std::ffi::OsStr) -> std::io::Result<libc::stat> {
+    pub(crate) fn stat_entry(&self, name: &std::ffi::OsStr) -> std::io::Result<libc::stat> {
         use std::os::fd::AsRawFd;
         fstatat_nofollow(self.fd.as_raw_fd(), name)
     }
 
     /// Unlink one non-directory entry (a symlink itself, never its target).
-    fn unlink_entry(&self, name: &std::ffi::OsStr) -> std::io::Result<()> {
+    pub(crate) fn unlink_entry(&self, name: &std::ffi::OsStr) -> std::io::Result<()> {
         use std::os::fd::AsRawFd;
         unlink_at(self.fd.as_raw_fd(), name, 0)
     }

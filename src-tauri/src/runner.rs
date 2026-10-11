@@ -1022,6 +1022,32 @@ async fn run(
             "engine start repair failed"
         ),
     }
+    // Then the staged plaintext copies nothing will upload: an accept that never committed, a
+    // copy whose row an older build's sign-out deleted (spec §8.7 S6). Here, after the claims
+    // are cleared and before the IPC server below serves a write, so no accept is in flight.
+    #[cfg(target_os = "macos")]
+    match crate::staged_payload::sweep_unreferenced(&db, &crate::engine_bridge::finder_staging_candidates()) {
+        Ok(sweep) => {
+            if sweep.unfinished > 0 || sweep.unjournalled > 0 {
+                tracing::info!(
+                    unfinished = sweep.unfinished,
+                    unjournalled = sweep.unjournalled,
+                    "engine start: staged copies no queue row names removed"
+                );
+            }
+            if let Some(reason) = sweep.failure {
+                tracing::warn!(
+                    kept = sweep.kept,
+                    reason,
+                    "engine start: staged copies no queue row names kept; removal is retried at the next start"
+                );
+            }
+        }
+        Err(e) => tracing::warn!(
+            reason = crate::engine_bridge::error_category(&e),
+            "engine start: removing staged copies no queue row names failed"
+        ),
+    }
     // Uploads an earlier build queued get a write id and are marked as from an earlier build,
     // so they are never handed over; their bases are left as they are (spec §10.2–§10.3). Before
     // the reconcile below, which keeps a row with an unparked Finder upload (one with a write id)
@@ -3016,6 +3042,27 @@ mod tests {
         );
     }
 
+    /// Spec §8.7 S6: engine start removes the staged copies nothing will upload, once, on macOS
+    /// only, after the start repair cleared the claims and before the IPC server serves a write.
+    /// `run` needs a real window system, so the wiring is asserted on the source, on every platform.
+    #[test]
+    fn engine_start_sweeps_unreferenced_staged_copies_on_macos_after_the_repair_before_ipc() {
+        let source = include_str!("runner.rs").replace("\r\n", "\n");
+        let start = source.find("async fn run(\n    app: AppHandle").expect("run exists");
+        let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+        let call = "crate::staged_payload::sweep_unreferenced(&db, &crate::engine_bridge::finder_staging_candidates())";
+        assert_eq!(body.matches(call).count(), 1, "`run` sweeps once");
+        assert!(
+            body.contains(&format!("#[cfg(target_os = \"macos\")]\n    match {call}")),
+            "the sweep is gated to macOS"
+        );
+        let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("`run` calls {needle}"));
+        assert!(
+            at("db.engine_start_repair()") < at(call) && at(call) < at("crate::ipc_socket::serve_ipc("),
+            "after the start repair, before the IPC server"
+        );
+    }
+
     /// Spec §11: the engine-start lines from the start
     /// repair to the in-flight reconcile log counts and, when a step fails, the error's category;
     /// never the error's text, which can carry a path. The reconcile's count is the rows it
@@ -3032,12 +3079,12 @@ mod tests {
                 .find("// The token's buffer MOVES into the client")
                 .expect("the end of the start steps");
         let steps = &body[from..to];
-        assert_eq!(steps.matches("Err(e)").count(), 3, "three steps can fail:\n{steps}");
+        assert_eq!(steps.matches("Err(e)").count(), 4, "four steps can fail:\n{steps}");
         assert_eq!(
             steps
                 .matches("reason = crate::engine_bridge::error_category(&e)")
                 .count(),
-            3,
+            4,
             "each failure logs its category:\n{steps}"
         );
         for raw in ["error = %e", "%e,", "error = ?e", "{e}"] {

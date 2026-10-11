@@ -134,6 +134,130 @@ pub fn remove_released(db: &StateDb, paths: &[String]) -> usize {
     }
     removed
 }
+/// What [`sweep_unreferenced`] did at engine start. Counts only (spec §11).
+#[cfg(unix)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct UnreferencedSweep {
+    /// Journal rows of accepts that never committed, cleared with their copies.
+    pub unfinished: usize,
+    /// Files that no row names, unlinked.
+    pub unjournalled: usize,
+    /// Copies the sweep would remove but could not; the next start or a sign-out finds them.
+    pub kept: usize,
+    /// The category of the first failure: a copy that could not be removed, or a staging folder
+    /// that could not be opened or listed.
+    pub failure: Option<&'static str>,
+}
+
+#[cfg(unix)]
+impl UnreferencedSweep {
+    fn kept(&mut self, error: &std::io::Error) {
+        self.kept += 1;
+        self.failed(error);
+    }
+
+    fn failed(&mut self, error: &std::io::Error) {
+        self.failure.get_or_insert(crate::engine_bridge::error_category(error));
+    }
+}
+
+/// Engine start on macOS, after the queue claims are cleared and before the IPC server serves a
+/// write (spec §8.7 S6): remove every staged plaintext copy in the staging `roots` that nothing
+/// will upload.
+///
+/// 1. A journal row with `completed = 0` that no op, resume row or finalization names: an accept
+///    that never committed (a crash between its journal row and its transaction, or a refusal
+///    after the copy). Its copy is unlinked, then its row deleted.
+/// 2. A regular file directly in a staging folder that no row of `staged_payloads`,
+///    `operation_queue`, `upload_resume` or `upload_finalizations` names: a copy whose row an
+///    older build's sign-out deleted. It is unlinked.
+///
+/// On macOS the system hands a write's bytes over again when it retries the write, so a copy no
+/// row names is never the only copy of a save still to upload. A write whose accept never
+/// committed was never acknowledged, so the system still holds its bytes as a pending change. A committed write's
+/// copy is named by its op until it lands, and released after. A copy whose op an older build's
+/// sign-out purged belongs to a save that sign-out already discarded.
+///
+/// It never follows a link. Each folder is opened without following one, and must be a directory
+/// this user owns; inside it, only regular files are touched (`lstat`), never a link, a subfolder
+/// or the folder itself. A file counts as named when a row names a path with the same file name:
+/// a copy is named by a fresh UUID, and comparing names rather than whole paths keeps a copy whose
+/// row spells its folder another way. A row of step 1 whose folder is not one of `roots` is left
+/// alone. A copy that cannot be removed stays, counted in `kept`.
+#[cfg(unix)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn sweep_unreferenced(db: &StateDb, roots: &[PathBuf]) -> rusqlite::Result<UnreferencedSweep> {
+    use crate::ipc_socket::{StagingDir, StagingDirRefusal};
+    let mut sweep = UnreferencedSweep::default();
+    let mut folders: Vec<(&Path, StagingDir)> = Vec::new();
+    for root in roots {
+        match StagingDir::open(root) {
+            Ok(dir) => folders.push((root.as_path(), dir)),
+            Err(StagingDirRefusal::Missing) => {}
+            Err(refusal) => sweep.failed(&refusal.into_io_error()),
+        }
+    }
+    // 1. Accepts that never committed.
+    for path in db.unfinished_unreferenced_payloads()? {
+        let path_ref = Path::new(&path);
+        let (Some(parent), Some(name)) = (path_ref.parent(), path_ref.file_name()) else {
+            continue;
+        };
+        let Some((_, dir)) = folders.iter().find(|(root, _)| *root == parent) else {
+            continue;
+        };
+        match dir.stat_entry(name) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                sweep.kept(&e);
+                continue;
+            }
+            // A link or a folder at the journalled name is never followed or removed.
+            Ok(stat) if !is_regular_file(&stat) => continue,
+            Ok(_) => {
+                if let Err(e) = dir.unlink_entry(name) {
+                    sweep.kept(&e);
+                    continue;
+                }
+            }
+        }
+        db.forget_staged_payload(&path)?;
+        sweep.unfinished += 1;
+    }
+    // 2. Files no row names.
+    let named: std::collections::HashSet<std::ffi::OsString> = db
+        .staged_copy_names()?
+        .iter()
+        .filter_map(|path| Path::new(path).file_name().map(std::ffi::OsStr::to_os_string))
+        .collect();
+    for (_, dir) in &folders {
+        let names = match dir.entry_names() {
+            Ok(names) => names,
+            Err(e) => {
+                sweep.failed(&e);
+                continue;
+            }
+        };
+        for name in names.iter().filter(|name| !named.contains(*name)) {
+            match dir.stat_entry(name) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => sweep.kept(&e),
+                Ok(stat) if !is_regular_file(&stat) => {}
+                Ok(_) => match dir.unlink_entry(name) {
+                    Ok(()) => sweep.unjournalled += 1,
+                    Err(e) => sweep.kept(&e),
+                },
+            }
+        }
+    }
+    Ok(sweep)
+}
+
+#[cfg(unix)]
+fn is_regular_file(stat: &libc::stat) -> bool {
+    stat.st_mode & libc::S_IFMT == libc::S_IFREG
+}
+
 pub fn same_bytes(a: &Path, b: &Path) -> std::io::Result<bool> {
     same_contents(std::fs::File::open(a)?, std::fs::File::open(b)?)
 }
@@ -177,7 +301,13 @@ fn copy_open_file(source: &std::fs::File, dest: &Path) -> std::io::Result<()> {
         options.mode(0o600);
     }
     let mut writer = options.open(dest)?;
-    std::io::copy(&mut reader, &mut writer)?;
+    // A copy that fails partway is never kept: a partial plaintext copy would outlive its write,
+    // and the drop would keep it as "not a duplicate". The file is this call's own (`create_new`).
+    if let Err(error) = std::io::copy(&mut reader, &mut writer) {
+        drop(writer);
+        let _ = std::fs::remove_file(dest);
+        return Err(error);
+    }
     Ok(())
 }
 
@@ -318,5 +448,209 @@ mod tests {
         assert!(!Path::new(&path).exists());
         assert_eq!(db.staged_payloads_for_signout().unwrap().len(), 0);
         assert_eq!(std::fs::read(source).unwrap(), b"unchanged original");
+    }
+
+    /// A private staging folder, as `durable_finder_staging_root` makes it.
+    #[cfg(unix)]
+    fn private_root(parent: &Path) -> PathBuf {
+        use std::os::unix::fs::DirBuilderExt;
+        let root = parent.join("finder-writes");
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&root)
+            .unwrap();
+        root
+    }
+
+    /// A copy in `root`, named as the accept names one: a fresh UUID.
+    #[cfg(unix)]
+    fn copy_in(root: &Path, bytes: &[u8]) -> PathBuf {
+        let path = root.join(uuid::Uuid::new_v4().to_string());
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    /// I3: an older build's sign-out deleted the journal row and skipped the copy, or a copy
+    /// lost its row some other way. No row names it, so the start removes it.
+    #[cfg(unix)]
+    #[test]
+    fn the_start_sweep_removes_a_copy_no_row_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = StateDb::open(temp.path().join("state.db")).unwrap();
+        let root = private_root(temp.path());
+        let stray = copy_in(&root, b"plaintext an older build left behind");
+        let sweep = sweep_unreferenced(&db, &[root.clone(), temp.path().join("never-made")]).unwrap();
+        assert!(!stray.exists(), "removed");
+        assert_eq!(
+            sweep,
+            UnreferencedSweep {
+                unfinished: 0,
+                unjournalled: 1,
+                kept: 0,
+                failure: None
+            },
+            "a folder that does not exist is no failure"
+        );
+        assert!(root.is_dir(), "the folder itself stays");
+    }
+
+    /// P2-1: a crash between the journal row and the accept's transaction leaves a
+    /// `completed = 0` row that no op names. Its copy and its row go; so does a row whose copy
+    /// was never made.
+    #[cfg(unix)]
+    #[test]
+    fn the_start_sweep_removes_an_unfinished_copy_and_its_row() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = StateDb::open(temp.path().join("state.db")).unwrap();
+        let root = private_root(temp.path());
+        let orphan = copy_in(&root, b"an accept that never committed");
+        db.track_staged_payload(&orphan.to_string_lossy(), Some("/handed-over"), false)
+            .unwrap();
+        let never_made = root.join(uuid::Uuid::new_v4().to_string());
+        db.track_staged_payload(&never_made.to_string_lossy(), None, false)
+            .unwrap();
+        let sweep = sweep_unreferenced(&db, std::slice::from_ref(&root)).unwrap();
+        assert!(!orphan.exists(), "the copy is removed");
+        assert!(
+            db.staged_payloads_for_signout().unwrap().is_empty(),
+            "both rows are deleted"
+        );
+        assert_eq!(sweep.unfinished, 2, "{sweep:?}");
+        assert_eq!(sweep.unjournalled, 0, "{sweep:?}");
+        assert_eq!(sweep.failure, None);
+    }
+
+    /// A copy any of the four tables names is kept, file and row: an op's payload, a resume row,
+    /// a finalization, and a released journal row (the release path removes that one, not the
+    /// sweep). A `completed = 0` row that an op names is kept too.
+    #[cfg(unix)]
+    #[test]
+    fn the_start_sweep_keeps_every_copy_a_row_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = StateDb::open(temp.path().join("state.db")).unwrap();
+        let root = private_root(temp.path());
+        let queued = copy_in(&root, b"named by its op");
+        let resumed = copy_in(&root, b"named by a resume row");
+        let finalizing = copy_in(&root, b"named by a finalization");
+        let released = copy_in(&root, b"named by a released journal row");
+        let journalled_and_queued = copy_in(&root, b"journalled, and named by its op");
+        let text = |path: &Path| path.to_string_lossy().into_owned();
+        {
+            let conn = db.hold_lock_for_test();
+            conn.execute(
+                "INSERT INTO operation_queue (op_id, kind, file_id, payload_path)
+                 VALUES ('op-queued', 'upload_version', 'f-queued', ?1),
+                        ('op-journalled', 'upload_version', 'f-journalled', ?2)",
+                rusqlite::params![text(&queued), text(&journalled_and_queued)],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO upload_resume (op_id, payload_path, payload_size, payload_mtime_ns,
+                     upload_session_id, server_file_id, object_version_id, chunk_size_bytes, chunk_count)
+                 VALUES ('op-gone', ?1, 1, 1, 'session', 'server-file', 'object', 1, 1)",
+                rusqlite::params![text(&resumed)],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO upload_finalizations (op_id, local_file_id, server_file_id, target_path, payload_path)
+                 VALUES ('op-finalizing', 'local', 'server', 'target', ?1)",
+                rusqlite::params![text(&finalizing)],
+            )
+            .unwrap();
+        }
+        db.track_staged_payload(&text(&released), None, true).unwrap();
+        db.track_staged_payload(&text(&journalled_and_queued), Some("/handed-over"), false)
+            .unwrap();
+        let sweep = sweep_unreferenced(&db, std::slice::from_ref(&root)).unwrap();
+        for (path, bytes) in [
+            (&queued, &b"named by its op"[..]),
+            (&resumed, b"named by a resume row"),
+            (&finalizing, b"named by a finalization"),
+            (&released, b"named by a released journal row"),
+            (&journalled_and_queued, b"journalled, and named by its op"),
+        ] {
+            assert_eq!(std::fs::read(path).unwrap(), bytes, "{}", path.display());
+        }
+        assert_eq!(
+            db.staged_payloads_for_signout().unwrap().len(),
+            3,
+            "the two journal rows and the resume row's path stay"
+        );
+        assert_eq!(sweep, UnreferencedSweep::default());
+    }
+
+    /// The sweep never follows a link: a link in the folder (to a file or a folder) is left as
+    /// it is and its target is untouched, a subfolder is not entered, a journalled path that is a
+    /// link keeps its row, and a staging root that is itself a link is refused.
+    #[cfg(unix)]
+    #[test]
+    fn the_start_sweep_never_follows_a_link() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = StateDb::open(temp.path().join("state.db")).unwrap();
+        let root = private_root(&temp.path().join("data"));
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let target = outside.join("not-ours");
+        std::fs::write(&target, b"a file the sweep must not touch").unwrap();
+        let file_link = root.join(uuid::Uuid::new_v4().to_string());
+        std::os::unix::fs::symlink(&target, &file_link).unwrap();
+        let dir_link = root.join(uuid::Uuid::new_v4().to_string());
+        std::os::unix::fs::symlink(&outside, &dir_link).unwrap();
+        let journalled_link = root.join(uuid::Uuid::new_v4().to_string());
+        std::os::unix::fs::symlink(&target, &journalled_link).unwrap();
+        db.track_staged_payload(&journalled_link.to_string_lossy(), None, false)
+            .unwrap();
+        let sub = root.join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("leaf"), b"below the folder").unwrap();
+        let linked_root = temp.path().join("linked-root");
+        std::os::unix::fs::symlink(&outside, &linked_root).unwrap();
+
+        let sweep = sweep_unreferenced(&db, &[root.clone(), linked_root.clone()]).unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"a file the sweep must not touch");
+        for link in [&file_link, &dir_link, &journalled_link] {
+            assert!(
+                link.symlink_metadata().unwrap().file_type().is_symlink(),
+                "a link is left as it is: {}",
+                link.display()
+            );
+        }
+        assert_eq!(std::fs::read(sub.join("leaf")).unwrap(), b"below the folder");
+        assert_eq!(
+            db.staged_payloads_for_signout().unwrap().len(),
+            1,
+            "the journalled link keeps its row"
+        );
+        assert_eq!(sweep.unfinished, 0, "{sweep:?}");
+        assert_eq!(sweep.unjournalled, 0, "{sweep:?}");
+        assert_eq!(
+            sweep.failure,
+            Some("permission_denied"),
+            "the linked root is refused: {sweep:?}"
+        );
+    }
+
+    /// P2-1: a copy that fails partway is never kept, and neither is its journal row.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_copy_from_file_leaves_no_file_and_no_row() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = Arc::new(StateDb::open(temp.path().join("state.db")).unwrap());
+        let source = temp.path().join("handed-over");
+        std::fs::write(&source, b"bytes the copy cannot read").unwrap();
+        // Open for writing only: every read fails, once the copy's file exists.
+        let write_only = std::fs::OpenOptions::new().write(true).open(&source).unwrap();
+        let root = temp.path().join("staging");
+        let result = StagedPayload::copy_from_file(db.clone(), &write_only, &source, root.clone());
+        assert!(result.is_err(), "the copy failed");
+        drop(result);
+        let left: Vec<_> = std::fs::read_dir(&root).unwrap().collect();
+        assert!(left.is_empty(), "no partial copy is kept: {left:?}");
+        assert!(
+            db.staged_payloads_for_signout().unwrap().is_empty(),
+            "and no journal row"
+        );
     }
 }

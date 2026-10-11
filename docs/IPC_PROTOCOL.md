@@ -484,7 +484,15 @@ process. Two calls are not, which is why each decision is one call.
 - **S6.** A staged copy is unlinked only after the transaction that removed its
   last reference has committed: the transaction records it in the release
   journal (`staged_payloads`). Engine start unlinks every released copy that no
-  op references, in the current staging folder and the old ones.
+  op references, in the current staging folder and the old ones. On macOS it
+  then removes every copy nothing will upload, before the IPC server serves a
+  write: a `completed = 0` row no op, resume row or finalization names (an
+  accept that never committed) goes with its copy, and a regular file in any of
+  the three staging folders that no row of the four tables names (a copy whose
+  row an older build's sign-out deleted) is unlinked. It never follows a link,
+  touches only regular files directly in a folder this user owns, and counts a
+  file as named by its file name. The revoked-share purge releases its ops'
+  copies in its own transaction, and a copy that fails partway removes itself.
 
 ```mermaid
 sequenceDiagram
@@ -677,6 +685,7 @@ parked op stops logging.
 | a presentation read that failed (the item is built from its contract) | `item presented from its contract alone` | `file_id`, `category="presentation_read_failed"`, `kind` (the category), `held_back` (failures of this item and kind not logged since the last line). At most one line per item and kind per 10 minutes, for at most 1024 items; a clean read ends the interval |
 | a restore the server made whose local record failed | `restore done on the server; its local record failed, a snapshot will repair it` | `file_id`, `category="restore_bookkeeping_failed"`; if the snapshot request fails too, `restore done on the server; a snapshot could not be requested` with `category="resnapshot_request_failed"` |
 | engine start (`info!` for the counts) | `engine start: queue claims cleared, released upload copies removed`; `engine start: uploads from an earlier build marked; their bases are unchanged`; `engine start: stale in-flight rows from a previous engine session reset` | `claims_cleared`, `released`; `marked`; `reset` (the rows it changed). A failed step: `engine start repair failed`, `engine start: marking earlier-build uploads failed`, `could not reconcile stale in-flight state rows on startup`, each with `reason` |
+| engine start, the staged copies nothing will upload (macOS) | `engine start: staged copies no queue row names removed` (`info!`); `engine start: staged copies no queue row names kept; removal is retried at the next start`; `engine start: removing staged copies no queue row names failed` | `unfinished`, `unjournalled`; `kept`, `reason`; `reason` |
 | a staged copy that could not be removed | `staged payload cleanup deferred; journal retained`; `staged upload cleanup deferred; journal retained`; `released upload copy kept; removal is retried at the next start` | `reason`; the journal row stays, so a later start or sign-out still finds the copy |
 | the daily alias sweep failed | `daily alias sweep failed` | `reason="database"` |
 | ~~the extension saw write options that are not empty (`NSLog`)~~ | ~~`BeebeebFileProvider: write options`~~ | ~~`call` (`create`, `modify`), `options` (the raw bitmask), `item`~~ |
