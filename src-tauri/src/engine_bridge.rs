@@ -18707,6 +18707,75 @@ mod tests {
         assert!(!listed_under(&bridge, "folder-a").contains(&"to-top".to_string()));
     }
 
+    /// Spec §7.2 (final review): the watcher's rename tells "the root" from "not found". A file in
+    /// a folder, renamed under a directory with no folder row (a stale path after a folder
+    /// rename, a scan that has not written the folder yet, a database error), queues a rename
+    /// that leaves the parent alone: its `PATCH` has no `parent_id` key. Before, the miss read
+    /// as the root, and the move rule sent the file to the top level.
+    #[tokio::test]
+    async fn a_watcher_rename_under_an_unknown_folder_leaves_the_parent_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(sync_root.join("Docs")).unwrap();
+        std::fs::create_dir_all(sync_root.join("Unknown")).unwrap();
+        let master_key = [108u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_row_in_folder(&bridge, &server, "watched");
+        crate::watcher::handle_rename(
+            &bridge,
+            &sync_root,
+            &sync_root.join("Docs").join("notes.txt"),
+            &sync_root.join("Unknown").join("renamed.txt"),
+        )
+        .await;
+        let ops = bridge.db.list_operations_for_file("watched").unwrap();
+        assert_eq!(ops[0].kind, OperationKind::RenameFile, "a rename");
+        // The sync root itself is still the top level: a move there names it.
+        server.seed_file("to-root", 1);
+        bridge
+            .db
+            .upsert_file_with_contract(
+                &FileEntry {
+                    file_id: "to-root".into(),
+                    path: "Docs/other.txt".into(),
+                    status: FileStatus::Local,
+                    size_bytes: 10,
+                    modified_at: 1_700_000_000,
+                    content_hash: None,
+                    remote_updated_at: 1_700_000_000,
+                    parent_id: Some("folder-a".into()),
+                    item_kind: ItemKind::File,
+                },
+                |contract| {
+                    contract.parent_id = Some("folder-a".into());
+                    contract.current_version = 1;
+                },
+            )
+            .unwrap();
+        crate::watcher::handle_rename(
+            &bridge,
+            &sync_root,
+            &sync_root.join("Docs").join("other.txt"),
+            &sync_root.join("other.txt"),
+        )
+        .await;
+        let ops = bridge.db.list_operations_for_file("to-root").unwrap();
+        assert_eq!(
+            (ops[0].kind.clone(), ops[0].parent_id.clone()),
+            (OperationKind::MoveFile, None),
+            "a move to the top level"
+        );
+        drain_upload_queue(&bridge, &sync_root).await;
+        let state = server.finish();
+        assert_eq!(patched_parents(&state, "watched"), vec![None], "no parent_id key");
+        assert_eq!(
+            patched_parents(&state, "to-root"),
+            vec![Some(serde_json::Value::Null)],
+            "the top level"
+        );
+    }
+
     /// Spec §7.2 (final review): a rename in place leaves the parent alone: its `PATCH` has no
     /// `parent_id` key.
     #[tokio::test]
@@ -23216,7 +23285,7 @@ mod tests {
             (
                 "watcher.rs",
                 "match bridge.queue_finder_modify(modify) {",
-                "async fn handle_rename(",
+                "pub(crate) async fn handle_rename(",
                 &[],
                 "the upload driver, which a Mac never starts (asserted below)",
             ),
