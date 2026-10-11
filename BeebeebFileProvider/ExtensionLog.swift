@@ -7,8 +7,8 @@ import os
 /// used: on macOS 26 the unified log shows every `NSLog` line of the extension as `<private>`.
 ///
 /// Each line is one function below, and only closed values are public: a fixed word, a bitmask,
-/// an id that parses as a UUID (rule M5), a hex prefix, the App Group id, and an error's `NSError`
-/// domain and code. A value that can carry a path, a file name or an error's text is never
+/// an id that parses as a UUID (rule M5), the App Group id, and an error's `NSError` domain and
+/// code. A value that can carry a path, a file name or an error's text is never
 /// logged; an error is logged by its domain and code, never by its message or description.
 /// Informational lines are `.notice` and failures `.error`, so a plain `log show` lists both.
 /// `extension_log_pin` in `src-tauri/src` checks the source by matching text: the log calls and
@@ -96,11 +96,13 @@ enum ExtensionLog {
     }
 
     /// Task 1684: the first 12 characters of a write's `request_id`, so the log shows whether the
-    /// system's retry of a timed-out write computed the same key.
+    /// system's retry of a timed-out write computed the same key. The prefix is private: the key is
+    /// a hash over the item's name, size and modification time, so a reader of the log who knows
+    /// those could confirm a guess. The call stays public.
     static func requestID(call: WriteCall, id: String) {
         if let prefix = requestIDPrefix(id) {
             logger.notice(
-                "BeebeebFileProvider: \(call.rawValue, privacy: .public) request_id=\(prefix, privacy: .public)"
+                "BeebeebFileProvider: \(call.rawValue, privacy: .public) request_id=\(prefix, privacy: .private)"
             )
         } else {
             logger.notice("BeebeebFileProvider: \(call.rawValue, privacy: .public) request_id_kind=non_hex")

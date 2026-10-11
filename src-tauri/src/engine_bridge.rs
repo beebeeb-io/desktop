@@ -231,6 +231,10 @@ pub struct EngineBridge {
     /// landing takes the op off the queue before they are uploaded, and until they are, the
     /// server holds the previous version's (one per file): [`Self::finder_thumbnail`] refuses.
     thumbnails_pending: std::sync::Mutex<HashSet<String>>,
+    /// Re-snapshots that failed in a row (spec §6.3.2, macOS): from
+    /// [`FAILED_SNAPSHOTS_BEFORE_THE_QUEUE_RUNS`] on, a failed one no longer ends the tick.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    failed_snapshots: std::sync::atomic::AtomicU32,
     #[cfg(test)]
     pub(crate) seams: Seams,
 }
@@ -752,6 +756,7 @@ impl EngineBridge {
             transfers: crate::transfer_progress::TransferBoard::new(),
             stopping,
             thumbnails_pending: std::sync::Mutex::new(HashSet::new()),
+            failed_snapshots: std::sync::atomic::AtomicU32::new(0),
             #[cfg(test)]
             seams: Seams::default(),
         }
@@ -1653,9 +1658,10 @@ impl EngineBridge {
                 }
                 // The refusal stays: the server still holds the previous version's thumbnail.
                 Err(e) => {
+                    // A category only: the error's text can carry the request URL (spec §11).
                     tracing::warn!(
                         file_id = %server_file_id,
-                        error = %e,
+                        reason = error_category(e.as_ref()),
                         "upload-time thumbnail generation/upload skipped"
                     );
                     post_complete_errors.push(format!("{}: {e}", op.op_id));
@@ -2525,6 +2531,9 @@ impl EngineBridge {
                         std::fs::create_dir_all(parent)?;
                     }
                     let bytes = write_hydrated_from_reader(dest, allowed_roots, &mut staged)?;
+                    // Recorded as the server path records it, so the sign-out sweep finds a
+                    // copy written outside the hydrate cache.
+                    self.record_hydrated_destination(&file_id, dest)?;
                     if let Some(progress) = progress {
                         progress(bytes, bytes);
                     }
@@ -2557,12 +2566,17 @@ impl EngineBridge {
     #[cfg_attr(not(any(unix, test)), allow(dead_code))]
     pub async fn finder_thumbnail(&self, id: &str, variant: &str) -> anyhow::Result<Zeroizing<Vec<u8>>> {
         let (file_id, _) = self.resolve_provisional(id, "thumbnail")?;
-        if self.thumbnails_pending(&file_id)
-            || self
-                .db
-                .item_presentation(&file_id)?
-                .is_some_and(|presentation| presentation.held_write_queued)
-        {
+        // The queue first, then the mark. A landing sets the mark before it commits the op's
+        // removal and clears it only after the upload, so a request that finds the write no
+        // longer queued finds the mark. Read the other way round, a landing between the two
+        // reads served the previous version's thumbnail under the new token.
+        let queued = self
+            .db
+            .item_presentation(&file_id)?
+            .is_some_and(|presentation| presentation.held_write_queued);
+        self.seam("thumbnail:between_reads");
+        let marked = self.thumbnails_pending(&file_id);
+        if queued || marked {
             return Err(anyhow::Error::new(ThumbnailNotYet));
         }
         self.fetch_thumbnail_to_memory(&file_id, variant).await
@@ -3690,11 +3704,16 @@ impl EngineBridge {
             .db
             .item_presentation(file_id)?
             .is_some_and(|presentation| presentation.unparked_finder_upload || presentation.parked_finder_upload);
+        // Every status the hydrate writes after its `Downloading` is written only over that
+        // `Downloading`: a save accepted meanwhile has made the row `Uploading`, and its status
+        // stays (spec §9.2). Before, the hydrate's end wrote over it.
         let set_failed = || {
             if touch_status {
                 // Best-effort status flip; if the DB is broken we still
                 // return the original error.
-                let _ = self.db.set_status(file_id, FileStatus::Error);
+                let _ = self
+                    .db
+                    .set_status_if(file_id, FileStatus::Downloading, FileStatus::Error);
             }
         };
         // RAII-style: any early return below the status flip should
@@ -3768,9 +3787,13 @@ impl EngineBridge {
                 // completed as `Local` and reparented itself out of the trash
                 // view. `DownloadingStatusGuard::arm` captured exactly that
                 // pre-flip status when it armed above — reuse it.
+                self.seam("hydrate:before_final_status");
                 if let Some(guard) = &downloading_guard {
-                    self.db
-                        .set_status(file_id, hydrate_final_status(guard.restore.clone()))?;
+                    self.db.set_status_if(
+                        file_id,
+                        FileStatus::Downloading,
+                        hydrate_final_status(guard.restore.clone()),
+                    )?;
                 }
                 let downloaded_bytes = self.transfers.get(file_id).map(|t| t.total).unwrap_or(0);
                 transfer.finish();
@@ -3784,19 +3807,7 @@ impl EngineBridge {
                 // `mark_cached` anyway left a phantom cache-usage entry in
                 // `desktop_storage_summary` / smart-cache eviction after the
                 // system (not us) took over the materialized content.
-                #[cfg(target_os = "macos")]
-                record_hydration_cache_state(
-                    &self.db,
-                    file_id,
-                    dest_path,
-                    &crate::ipc_socket::macos_hydrate_cache_dir(),
-                )?;
-                #[cfg(not(target_os = "macos"))]
-                {
-                    let cache_bytes = std::fs::metadata(dest_path).map(|m| m.len() as i64).unwrap_or(0);
-                    self.db
-                        .mark_cached(file_id, &dest_path.to_string_lossy(), cache_bytes, now_secs())?;
-                }
+                self.record_hydrated_destination(file_id, dest_path)?;
                 #[cfg(target_os = "linux")]
                 self.write_linux_freedesktop_thumbnails(file_id, dest_path).await;
                 let _ = self.enforce_configured_cache_limit();
@@ -3807,6 +3818,26 @@ impl EngineBridge {
                 Err(e)
             }
         }
+    }
+
+    /// Record where a hydrate wrote `file_id`'s plaintext, for the cache accounting and the
+    /// sign-out sweep. Both hydrate paths, the server's and the queue's, call it. On macOS a
+    /// Finder hand-off into the hydrate cache is not a cached copy ([`record_hydration_cache_state`]).
+    fn record_hydrated_destination(&self, file_id: &str, dest_path: &Path) -> anyhow::Result<()> {
+        #[cfg(target_os = "macos")]
+        record_hydration_cache_state(
+            &self.db,
+            file_id,
+            dest_path,
+            &crate::ipc_socket::macos_hydrate_cache_dir(),
+        )?;
+        #[cfg(not(target_os = "macos"))]
+        {
+            let cache_bytes = std::fs::metadata(dest_path).map(|m| m.len() as i64).unwrap_or(0);
+            self.db
+                .mark_cached(file_id, &dest_path.to_string_lossy(), cache_bytes, now_secs())?;
+        }
+        Ok(())
     }
 
     fn ensure_shared_hydrate_path_safe(&self, file_id: &str) -> anyhow::Result<()> {
@@ -5496,7 +5527,10 @@ impl<'a> DownloadingStatusGuard<'a> {
 impl Drop for DownloadingStatusGuard<'_> {
     fn drop(&mut self) {
         if self.armed {
-            let _ = self.db.set_status(self.file_id, self.restore.clone());
+            // Only over the hydrate's own `Downloading` (spec §9.2).
+            let _ = self
+                .db
+                .set_status_if(self.file_id, FileStatus::Downloading, self.restore.clone());
         }
     }
 }
@@ -7000,6 +7034,36 @@ pub struct SyncTickOutcome {
     pub applied_item_ids: Vec<String>,
 }
 
+/// Re-snapshots that must fail in a row before a failed one no longer ends the tick (spec §6.3.2).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const FAILED_SNAPSHOTS_BEFORE_THE_QUEUE_RUNS: u32 = 3;
+
+/// A requested re-snapshot failed (spec §6.3.2). On macOS the request survives a failure, so the
+/// next tick tries again. The first two failures in a row end the tick, as before; from the third
+/// on, the tick goes on with the ops pull from `cursor` and the queue runs: an upload whose base is
+/// known needs no snapshot, and one still waiting for its base keeps waiting at the claim. Before,
+/// a snapshot that kept failing for a reason waiting does not cure (a local database error, an
+/// endpoint that times out on a large tree) stopped every upload on the Mac. A successful
+/// snapshot resets the count. Elsewhere the request was taken before the snapshot, so a failure
+/// ends only this tick.
+fn after_failed_snapshot(bridge: &EngineBridge, cursor: i64, error: anyhow::Error) -> anyhow::Result<i64> {
+    #[cfg(target_os = "macos")]
+    {
+        let failures = bridge.failed_snapshots.fetch_add(1, Ordering::SeqCst).saturating_add(1);
+        if failures >= FAILED_SNAPSHOTS_BEFORE_THE_QUEUE_RUNS {
+            tracing::warn!(
+                failures,
+                reason = error_category(error.as_ref()),
+                "sync_tick: re-snapshot failed again; pulling ops and running the queue without it"
+            );
+            return Ok(cursor);
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (bridge, cursor);
+    Err(error)
+}
+
 pub async fn sync_tick(
     bridge: &EngineBridge,
     // See `sync_tick_outcome` for the `sync_root` contract.
@@ -7084,8 +7148,11 @@ pub async fn sync_tick_outcome(
         None => {
             let applied = bootstrap_from_snapshot(bridge, sync_root, now_secs, &mut conflicts).await?;
             #[cfg(target_os = "macos")]
-            if let Some(seen) = resnapshot_request {
-                bridge.db().clear_resnapshot_request(seen)?;
+            {
+                bridge.failed_snapshots.store(0, Ordering::SeqCst);
+                if let Some(seen) = resnapshot_request {
+                    bridge.db().clear_resnapshot_request(seen)?;
+                }
             }
             applied_item_ids.extend(applied);
             return Ok(SyncTickOutcome {
@@ -7093,18 +7160,25 @@ pub async fn sync_tick_outcome(
                 applied_item_ids: dedupe(applied_item_ids),
             });
         }
-        Some(_) if needs_resnapshot => {
+        Some(c) if needs_resnapshot => {
             tracing::info!("sync_tick: re-snapshot requested (gap recovery); bootstrapping");
-            let applied = bootstrap_from_snapshot(bridge, sync_root, now_secs, &mut conflicts).await?;
-            #[cfg(target_os = "macos")]
-            if let Some(seen) = resnapshot_request {
-                bridge.db().clear_resnapshot_request(seen)?;
+            match bootstrap_from_snapshot(bridge, sync_root, now_secs, &mut conflicts).await {
+                Ok(applied) => {
+                    #[cfg(target_os = "macos")]
+                    {
+                        bridge.failed_snapshots.store(0, Ordering::SeqCst);
+                        if let Some(seen) = resnapshot_request {
+                            bridge.db().clear_resnapshot_request(seen)?;
+                        }
+                    }
+                    applied_item_ids.extend(applied);
+                    return Ok(SyncTickOutcome {
+                        conflicts,
+                        applied_item_ids: dedupe(applied_item_ids),
+                    });
+                }
+                Err(e) => after_failed_snapshot(bridge, c, e)?,
             }
-            applied_item_ids.extend(applied);
-            return Ok(SyncTickOutcome {
-                conflicts,
-                applied_item_ids: dedupe(applied_item_ids),
-            });
         }
         Some(c) => c,
     };
@@ -19344,6 +19418,257 @@ mod tests {
         assert_eq!(op.attempts, op.max_attempts, "its attempts are used up");
         assert_eq!(op.max_attempts, 25);
         assert_eq!(outcome.invalidated_item_ids, vec!["plain-retry".to_string()]);
+    }
+
+    // ── The final review's small items ──
+
+    /// Security P3-2: a fetch served from the queue records its destination as the server path
+    /// does, so the sign-out sweep finds a copy written outside the hydrate cache. The row keeps
+    /// its upload's status.
+    #[tokio::test]
+    async fn a_fetch_served_from_the_queue_records_its_destination() {
+        let (dir, _sync_root, server, bridge) = rule3_setup([150u8; 32]);
+        seed_uploaded_row(&bridge, &server, "recorded-dest");
+        fp_save(&bridge, dir.path(), "recorded-dest", "notes.txt", b"queued bytes", "1");
+        let dest = dir.path().join("fetch").join("notes.txt");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        assert_eq!(
+            bridge
+                .serve_hydrate("recorded-dest", &dest, &[dir.path()], None)
+                .await
+                .unwrap(),
+            HydrateSource::Queue
+        );
+        let contract = bridge.db.get_file_contract_state("recorded-dest").unwrap().unwrap();
+        assert_eq!(
+            contract.cache_path.as_deref(),
+            Some(dest.to_string_lossy().as_ref()),
+            "recorded, as the server path records it"
+        );
+        assert_eq!(contract.cache_bytes, 12);
+        assert_eq!(
+            bridge.db.get_file("recorded-dest").unwrap().unwrap().status,
+            FileStatus::Uploading,
+            "the upload's status stays"
+        );
+        drop(server.finish());
+    }
+
+    /// Security P3-7: the landing's thumbnail failure logs a category, never the error's text
+    /// (it carries the request URL with the file id).
+    #[tokio::test]
+    async fn a_landings_thumbnail_failure_logs_a_category_not_its_text() {
+        let photo = "3f2a9c1e-0000-4000-8000-0000000000c2";
+        let (dir, sync_root, server, bridge) = rule3_setup([152u8; 32]);
+        seed_uploaded_row(&bridge, &server, photo);
+        server.state.lock().unwrap().fail_thumbnail_put = true;
+        let png = dir.path().join("photo-save.png");
+        write_test_png(&png);
+        bridge
+            .queue_file_provider_modify(FinderWriteTarget {
+                file_id: Some(photo.into()),
+                parent_id: None,
+                filename: "photo.png".into(),
+                rel_path: None,
+                kind: FinderWriteItemKind::File,
+                contents_path: Some(png.to_string_lossy().into_owned()),
+                content_type: Some("image/png".into()),
+                base_version_identifier: Some("1".into()),
+            })
+            .unwrap();
+        let logs = capture_logs_async(async {
+            drain_upload_queue(&bridge, &sync_root).await;
+        })
+        .await;
+        let lines: Vec<&str> = logs
+            .lines()
+            .filter(|line| line.contains("upload-time thumbnail generation/upload skipped"))
+            .collect();
+        assert_eq!(lines.len(), 1, "{logs}");
+        assert!(lines[0].contains("reason="), "a category: {}", lines[0]);
+        assert!(
+            !lines[0].contains("error=") && !lines[0].contains("http://") && !lines[0].contains("thumbnail:"),
+            "no error text: {}",
+            lines[0]
+        );
+        drop(server.finish());
+    }
+
+    /// Review M2: the thumbnail refusal reads the queue before the mark. A landing that sets the
+    /// mark and then commits between the two reads (the seam) is refused either way; read the
+    /// other way round, the request saw "no mark", then "not queued", and served the previous
+    /// version's thumbnail under the new token.
+    #[tokio::test]
+    async fn a_thumbnail_request_racing_a_landing_is_refused() {
+        let photo = "3f2a9c1e-0000-4000-8000-0000000000c3";
+        let (dir, _sync_root, server, bridge) = rule3_setup([153u8; 32]);
+        seed_uploaded_row(&bridge, &server, photo);
+        fp_save(&bridge, dir.path(), photo, "photo.png", b"a queued save", "1");
+        let op_id = bridge.db.list_operations_for_file(photo).unwrap().remove(0).op_id;
+        let bridge = Arc::new(bridge);
+        let landing = Arc::clone(&bridge);
+        // The landing's order: the mark first, then the commit that takes the op off the queue.
+        bridge.seams.arm("thumbnail:between_reads", move || {
+            landing.set_thumbnails_pending(photo, true);
+            landing.db.remove_operation(&op_id).unwrap();
+        });
+        let error = bridge
+            .finder_thumbnail(photo, "small")
+            .await
+            .expect_err("refused: the server holds the previous version's thumbnail");
+        assert!(error.is::<ThumbnailNotYet>(), "{error:#}");
+        let bridge = Arc::try_unwrap(bridge).unwrap_or_else(|_| panic!("the seam ran and released its handle"));
+        drop(bridge);
+        assert!(
+            server.finish().thumbnail_requests.is_empty(),
+            "nothing asked of the server"
+        );
+    }
+
+    /// Review M3: a save accepted while a server fetch of the same file runs leaves the row
+    /// `Uploading`: the fetch's final status is written only over its own `Downloading`.
+    #[tokio::test]
+    async fn a_save_accepted_during_a_fetch_leaves_the_row_uploading() {
+        let file = "3f2a9c1e-0000-4000-8000-0000000000c4";
+        let (dir, sync_root, server, bridge) = rule3_setup([154u8; 32]);
+        seed_uploaded_row(&bridge, &server, file);
+        fp_save(
+            &bridge,
+            dir.path(),
+            file,
+            "notes.txt",
+            b"the version the server has",
+            "1",
+        );
+        drain_upload_queue(&bridge, &sync_root).await;
+        let landed = held_content_version(&bridge, file);
+        server.state.lock().unwrap().serve_downloads = true;
+        let bridge = Arc::new(bridge);
+        let saver = Arc::clone(&bridge);
+        let save_dir = dir.path().to_path_buf();
+        bridge.seams.arm("hydrate:before_final_status", move || {
+            fp_save(&saver, &save_dir, file, "notes.txt", b"saved during the fetch", &landed);
+        });
+        let dest = dir.path().join("fetch").join("notes.txt");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        assert_eq!(
+            bridge.serve_hydrate(file, &dest, &[dir.path()], None).await.unwrap(),
+            HydrateSource::Server
+        );
+        assert_eq!(
+            bridge.db.list_operations_for_file(file).unwrap().len(),
+            1,
+            "precondition: the save was accepted during the fetch"
+        );
+        assert_eq!(
+            bridge.db.get_file(file).unwrap().unwrap().status,
+            FileStatus::Uploading,
+            "the fetch left the save's status alone"
+        );
+        let bridge = Arc::try_unwrap(bridge).unwrap_or_else(|_| panic!("the seam ran and released its handle"));
+        drop(bridge);
+        drop(server.finish());
+    }
+
+    /// Review M6: a snapshot that keeps failing no longer holds the queue. The first two failures
+    /// end their ticks, as before; from the third on, the tick pulls ops and the queue runs, so a
+    /// write whose base is known lands, and the request is kept. A successful snapshot resets the
+    /// count: the next failure ends its tick again.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_snapshot_that_keeps_failing_no_longer_holds_the_queue() {
+        let master_key = [155u8; 32];
+        let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_row(&bridge, &server, "held-by-snapshot");
+        bridge.db.set_sync_cursor(0).unwrap();
+        fp_save(
+            &bridge,
+            dir.path(),
+            "held-by-snapshot",
+            "notes.txt",
+            b"saved while the snapshot fails",
+            "1",
+        );
+        bridge.db.request_resnapshot().unwrap();
+        // The runner runs the queue only after a tick that returned `Ok`.
+        async fn tick(bridge: &EngineBridge, sync_root: &Path) -> bool {
+            let ok = sync_tick_outcome(bridge, sync_root).await.is_ok();
+            if ok {
+                bridge.process_due_operations(sync_root, now_secs()).await.unwrap();
+            }
+            ok
+        }
+        let mut ticks = Vec::new();
+        for _ in 0..3 {
+            ticks.push(tick(&bridge, &sync_root).await);
+        }
+        assert_eq!(
+            ticks,
+            vec![false, false, true],
+            "the third failed snapshot no longer ends the tick"
+        );
+        assert!(
+            bridge
+                .db
+                .list_operations_for_file("held-by-snapshot")
+                .unwrap()
+                .is_empty(),
+            "the write whose base is known landed"
+        );
+        assert!(
+            bridge.db.peek_resnapshot_request().unwrap().is_some(),
+            "the request is kept: the next tick tries again"
+        );
+        server.state.lock().unwrap().snapshots.push_back((
+            "200 OK".into(),
+            serde_json::json!({
+                "seq_id": 3,
+                "nodes": [node(&master_key, "held-by-snapshot", "notes.txt", 2, false)]
+            }),
+        ));
+        assert!(tick(&bridge, &sync_root).await, "the snapshot succeeded");
+        assert_eq!(bridge.db.peek_resnapshot_request().unwrap(), None);
+        bridge.db.request_resnapshot().unwrap();
+        assert!(
+            !tick(&bridge, &sync_root).await,
+            "the count was reset: a first failure ends its tick again"
+        );
+        drop(server.finish());
+    }
+
+    /// Parked item 3b: a save with no content type of its own, whose only `complete` answer is
+    /// `already_completed` (no `mime_type`), lands keeping the row's content type.
+    #[tokio::test]
+    async fn a_landing_with_no_content_type_keeps_the_rows() {
+        let (dir, sync_root, server, bridge) = rule3_setup([156u8; 32]);
+        seed_uploaded_row(&bridge, &server, "typed");
+        let mut contract = bridge.db.get_file_contract_state("typed").unwrap().unwrap();
+        contract.content_type = Some("text/markdown".into());
+        bridge.db.set_file_contract_state(&contract).unwrap();
+        let contents = dir.path().join("save-typed");
+        std::fs::write(&contents, b"edit").unwrap();
+        let mut target = finder_file_target(Some("typed"), "notes", &contents, Some("1".into()));
+        target.content_type = None;
+        bridge.queue_file_provider_modify(target).unwrap();
+        server
+            .state
+            .lock()
+            .unwrap()
+            .complete_reply_lost_once
+            .insert("session-1".into());
+        drain_upload_queue(&bridge, &sync_root).await;
+        drop(server.finish());
+        assert!(
+            bridge.db.list_operations_for_file("typed").unwrap().is_empty(),
+            "landed"
+        );
+        let contract = bridge.db.get_file_contract_state("typed").unwrap().unwrap();
+        assert_eq!(contract.current_version, 2, "precondition: the retried landing");
+        assert_eq!(
+            contract.content_type.as_deref(),
+            Some("text/markdown"),
+            "the row's content type is kept"
+        );
     }
 
     // ── Rule 3: provisional ids, fetches from the queue, thumbnails, unknown ids (spec §7, §5.6) ──

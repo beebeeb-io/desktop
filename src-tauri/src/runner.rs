@@ -1545,8 +1545,11 @@ async fn run(
                             finish_tick_payload(&tracker, Err(&e), &link, tick_started_at, &db, &transfers),
                         );
                         set_telemetry_state(&telemetry, "error");
-                        // A failed tick reaches no other signal site: a pending debt (the
-                        // startup resets, or a signal a busy gate dropped) is paid here.
+                        // A failed tick reaches none of the signal sites after the tick. Only the
+                        // shared-roots signal runs earlier in the same iteration, and a delivered
+                        // signal pays the debt, so at most one signal is delivered per tick. A
+                        // pending debt (the startup resets, or a signal a busy gate dropped) is
+                        // paid here.
                         signal_owed_debt_after_a_failed_tick(&mut owed_working_set_signal, &db);
                         // Windows breadcrumb flyout: surface the tick failure as
                         // an Error state in the flyout too.
@@ -1938,9 +1941,11 @@ impl OwedWorkingSetSignal {
     }
 }
 
-/// A failed tick reaches none of the tick loop's other signal sites, so it pays a pending debt here. The
-/// signal is local and needs no network: without it, an offline start kept the startup resets (and a
-/// signal a busy gate dropped) from the system until the network came back. Nothing owed, nothing sent.
+/// A failed tick reaches none of the signal sites after the tick, so it pays a pending debt here. Only the
+/// shared-roots signal runs earlier in the same iteration, and a delivered signal pays the debt, so at most
+/// one signal is delivered per tick. The signal is local and needs no network: without it, an offline start
+/// kept the startup resets (and a signal a busy gate dropped) from the system until the network came back.
+/// Nothing owed, nothing sent.
 fn signal_owed_debt_after_a_failed_tick(owed_working_set_signal: &mut OwedWorkingSetSignal, db: &StateDb) {
     if owed_working_set_signal.is_owing() {
         signal_working_set_owing(owed_working_set_signal, db, "owed_debt", &[]);
@@ -2497,8 +2502,9 @@ mod tests {
 
     /// The tick loop signals through the owing wrapper only, at four named sites: revoked shared content,
     /// the tick's one signal, a tick whose queue failed (its remote applies), and a failed tick that owes a
-    /// debt. A fifth call fails here, so no signal bypasses the debt. A failed tick reaches only the fourth,
-    /// so a tick still sends one signal of its own.
+    /// debt. A fifth call fails here, so no signal bypasses the debt. A failed tick reaches the first (it runs
+    /// before the tick, in every iteration) and the fourth; a delivered signal pays the debt, so at most one
+    /// signal is delivered per tick.
     #[test]
     fn every_working_set_signal_in_the_tick_loop_goes_through_the_owed_wrapper() {
         use crate::source_pin::squeeze;

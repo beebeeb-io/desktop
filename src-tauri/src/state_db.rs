@@ -2963,6 +2963,22 @@ impl StateDb {
         Ok(())
     }
 
+    /// [`Self::set_status`], only while the row's status is `expected`: a writer that set the
+    /// status itself (a hydrate's `Downloading`) never writes over a status another writer set
+    /// meanwhile (spec §9.2). One statement. A flip is recorded for the system. Returns whether
+    /// the row changed.
+    pub fn set_status_if(&self, file_id: &str, expected: FileStatus, status: FileStatus) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let changed = conn.execute(
+            "UPDATE files SET status = ?3 WHERE file_id = ?1 AND status = ?2",
+            params![file_id, expected.as_str(), status.as_str()],
+        )? == 1;
+        if changed && expected != status {
+            record_file_change_conn(&conn, file_id, FpChangeKind::Modified, None)?;
+        }
+        Ok(changed)
+    }
+
     /// §9.1 (m-8): a Finder write's attempt marks its row `Uploading`, except a `Trashing` row,
     /// which keeps its trash presentation. One statement, so a trash applied meanwhile is never
     /// overwritten. A flip is recorded for the system, as [`Self::set_status`] does.
@@ -3646,8 +3662,14 @@ impl StateDb {
         let mut contract = get_file_contract_state_conn(&tx, local)?.unwrap_or_else(|| default_contract(server));
         contract.file_id = server.to_string();
         contract.item_kind = ItemKind::File;
-        // The metadata's content type, else the server's `mime_type`, as before.
-        contract.content_type = input.content_type.or(input.mime_type).map(str::to_string);
+        // The metadata's content type, else the server's `mime_type`, as before. A File Provider
+        // write that has neither (its only `complete` answer was `already_completed`) keeps the
+        // row's: metadata only, but nothing told the row its type changed.
+        let landed_type = input.content_type.or(input.mime_type).map(str::to_string);
+        contract.content_type = match landed_type {
+            None if input.write_id.is_some() => contract.content_type.take(),
+            landed_type => landed_type,
+        };
         contract.parent_id = input.parent_id.map(str::to_string);
         contract.current_version = input.produced_version;
         contract.local_base_version = input.produced_version;
@@ -4416,10 +4438,19 @@ impl StateDb {
     /// change is counted once. The number an account switch warns with.
     pub fn pending_changes_count(&self) -> Result<u64> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
+        // macOS: a released copy (`completed = 1`) belongs to an upload that landed and waits only
+        // for its unlink (spec §8.7 S6), so it is not a change that has not uploaded.
+        #[cfg(target_os = "macos")]
+        let released = "AND completed = 0";
+        #[cfg(not(target_os = "macos"))]
+        let released = "";
         let rows: i64 = conn.query_row(
-            "SELECT (SELECT COUNT(*) FROM operation_queue)
-                  + (SELECT COUNT(*) FROM staged_payloads
-                     WHERE path NOT IN (SELECT payload_path FROM operation_queue WHERE payload_path IS NOT NULL))",
+            &format!(
+                "SELECT (SELECT COUNT(*) FROM operation_queue)
+                      + (SELECT COUNT(*) FROM staged_payloads
+                         WHERE path NOT IN (SELECT payload_path FROM operation_queue WHERE payload_path IS NOT NULL)
+                         {released})"
+            ),
             [],
             |row| row.get(0),
         )?;
@@ -11524,5 +11555,27 @@ mod tests {
         );
         assert!(!copy.exists(), "the next start removed it");
         assert!(db.staged_payloads_for_signout().unwrap().is_empty());
+    }
+
+    /// Review M4 (macOS): a released copy (`completed = 1`) is one whose upload landed and that
+    /// waits only for its unlink, so the account-switch warning does not count it as a change not
+    /// uploaded. An unfinished copy still counts.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_released_copy_is_not_a_pending_change() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        db.track_staged_payload("/staged/released", None, true).unwrap();
+        assert_eq!(
+            db.pending_changes_count().unwrap(),
+            0,
+            "a landed copy waiting for its unlink"
+        );
+        db.track_staged_payload("/staged/unfinished", None, false).unwrap();
+        assert_eq!(
+            db.pending_changes_count().unwrap(),
+            1,
+            "an unfinished copy still counts"
+        );
     }
 }

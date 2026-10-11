@@ -181,7 +181,8 @@ a path, a file name or an error's text; ~~`extension_log_pin` (`src-tauri/src`) 
 `print` or `debugPrint`, bare or qualified by `Foundation.`, `Swift.`, `os.` or `OSLog.`; no `Logger` or `OSLog`
 built (bare, `.init`, module-qualified) and no `logger.` outside `ExtensionLog.swift`; exactly one `Logger` in
 `ExtensionLog.swift`, its subsystem equal to the build script's `BUNDLE_ID`; every interpolation there says
-`.public` or `.private`, and a `.public` one is one of nine listed names. It matches text, so it cannot see what a
+`.public` or `.private`, and a `.public` one is one of ~~nine~~ eight listed names (a write's `request_id` prefix is
+`.private` since the final review). It matches text, so it cannot see what a
 public name is bound to, a call with a space or line break before its parenthesis, a log function passed by
 reference, or output that is not a log call. — lead, 2026-10-11 (device fix round)
 

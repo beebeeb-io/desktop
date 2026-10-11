@@ -2563,6 +2563,23 @@ pub(crate) fn write_outcome_response(
             log_refused_write(op, write_refusal_category(&e));
             IpcResponse::WriteRetryLater { message: e.to_string() }
         }
+        // The disk or the state database is full. A create or modify that failed queued nothing
+        // (the accept's transaction is its last step that can fail), so the system retries it, as
+        // for an unavailable staging folder, and it is accepted once there is room. An `Error`
+        // would reach macOS as `cannotSynchronize`, which it does not retry until the item
+        // changes again. A fixed text, never the error's.
+        Err(e)
+            if matches!(op, "create" | "modify")
+                && matches!(
+                    crate::engine_bridge::error_category(e.as_ref()),
+                    "disk_full" | "database_full"
+                ) =>
+        {
+            log_refused_write(op, write_refusal_category(&e));
+            IpcResponse::WriteRetryLater {
+                message: "the disk or Beebeeb's local database is full".into(),
+            }
+        }
         Err(e) => {
             // The extension turns this reply into a definitive Finder error,
             // so it must leave a trace in the daemon log (it used to leave
@@ -2853,10 +2870,17 @@ pub(crate) fn file_entry_payload_for_db(
         Ok(None) => file_entry_payload_without_contract(entry, parent_identifier),
         Err(error) => {
             // A failed read (a SQLite error, or a held write without its base) is
-            // presented as round 3 did, from the contract alone: the system never
-            // sees a spurious content change, and the capabilities are kept. A fixed
-            // category only: the error can carry a path (spec §11). Once per item and
-            // kind of failure per interval, with how many were held back.
+            // presented as round 3 did, from the contract alone, with the capabilities
+            // kept. When the row holds a write token, the numeric content version this
+            // gives is not the one the system holds, so the system reads it as a content
+            // change and fetches the item again (ITEM.h:93-95). That fetch is served from
+            // the queued write's staged copy, or, once the write landed, from the server's
+            // same bytes (spec §7.4): an extra fetch, never other bytes. The held columns
+            // alone are not a fallback: without the queue they cannot tell a write that is
+            // queued or landed here from one a remote change has replaced, and naming the
+            // token for that one would hide the remote change. A fixed category only: the
+            // error can carry a path (spec §11). Once per item and kind of failure per
+            // interval, with how many were held back.
             let kind = crate::engine_bridge::error_category(error);
             let due = presentation_warn_due(
                 &mut presentation_warned(),
@@ -5889,6 +5913,41 @@ mod tests {
         assert!(
             failures[0].contains("3f2a9c1e-0000-4000-8000-0000000000f1") && failures[0].contains("queued_copy_missing"),
             "{logs}"
+        );
+    }
+
+    /// Review M5: an accept that fails because the disk or the state database is full is
+    /// transient: `WriteRetryLater` with a fixed text, so the system retries the write once there
+    /// is room. Any other failure is still an `Error`.
+    #[test]
+    fn a_full_disk_or_database_at_the_accept_is_retried_later() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::state_db::StateDb::open(dir.path().join("state.db")).unwrap();
+        let disk_full = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::StorageFull));
+        let database_full = anyhow::Error::new(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL),
+            None,
+        ));
+        for (category, error) in [("disk_full", disk_full), ("database_full", database_full)] {
+            assert_eq!(
+                crate::engine_bridge::error_category(error.as_ref()),
+                category,
+                "precondition"
+            );
+            match write_outcome_response("modify", &db, Err(error)) {
+                IpcResponse::WriteRetryLater { message } => {
+                    assert!(!message.contains('/'), "{category}: a fixed text: {message}")
+                }
+                other => panic!("{category}: {other:?}"),
+            }
+        }
+        let other = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        assert!(
+            matches!(
+                write_outcome_response("modify", &db, Err(other)),
+                IpcResponse::Error { .. }
+            ),
+            "any other failure is still an error"
         );
     }
 }

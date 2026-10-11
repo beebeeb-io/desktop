@@ -17,8 +17,8 @@
 //!
 //! They match text, so they cannot see:
 //! - what a public name is bound to. `ExtensionLog.swift` binds each one to a closed value (an
-//!   enum's raw value, a bitmask, an id that parsed as a UUID, a hex prefix, an `NSError` domain and
-//!   code); the Swift harness tests those bindings;
+//!   enum's raw value, a bitmask, an id that parsed as a UUID, an `NSError` domain and code); the
+//!   Swift harness tests those bindings;
 //! - a call with a space or a line break before its parenthesis, or a log function passed by
 //!   reference;
 //! - output that is not a log call, such as `FileHandle` or `fputs`.
@@ -32,7 +32,6 @@ const PUBLIC_VALUES: &[&str] = &[
     "line.options",
     "id",
     "call.rawValue",
-    "prefix",
     "fields.domain",
     "fields.code",
     "cause",

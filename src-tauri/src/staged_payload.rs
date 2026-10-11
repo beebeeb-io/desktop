@@ -286,6 +286,18 @@ fn copy_open_file(source: &std::fs::File, dest: &Path) -> std::io::Result<()> {
         // NUL-terminated and lives for the call.
         let rc = unsafe { libc::fclonefileat(source.as_raw_fd(), libc::AT_FDCWD, c_dest.as_ptr(), 0) };
         if rc == 0 {
+            // The clone keeps the source's mode: make the copy private through the file itself
+            // (`fchmod`). A copy that cannot be made private is not kept.
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            let private = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(dest)
+                .and_then(|copy| copy.set_permissions(std::fs::Permissions::from_mode(0o600)));
+            if let Err(error) = private {
+                let _ = std::fs::remove_file(dest);
+                return Err(error);
+            }
             return Ok(());
         }
         // Not clonable (another volume, a filesystem without clones): copy
@@ -652,5 +664,23 @@ mod tests {
             db.staged_payloads_for_signout().unwrap().is_empty(),
             "and no journal row"
         );
+    }
+
+    /// Security P3-3: the copy is private (`0600`) whatever the source's mode. An APFS clone keeps
+    /// the source's mode, so the copy is `fchmod`ed after it.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_is_private_whatever_the_sources_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let db = Arc::new(StateDb::open(temp.path().join("state.db")).unwrap());
+        let source = temp.path().join("handed-over");
+        std::fs::write(&source, b"plaintext").unwrap();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let opened = std::fs::File::open(&source).unwrap();
+        let staged = StagedPayload::copy_from_file(db, &opened, &source, temp.path().join("staging")).unwrap();
+        let mode = std::fs::metadata(staged.path()).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{mode:o}");
+        staged.retain();
     }
 }

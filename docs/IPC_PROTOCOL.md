@@ -313,7 +313,10 @@ write of the file's chain" is `held_write_id`.
   version 0 at engine start, and in every pass while a `base_pending` upload
   exists. The request is a counter: it is cleared only after a snapshot
   succeeds, and only if no newer request arrived meanwhile. A failed snapshot
-  fails the whole tick, so the queue never runs on a guessed base. The upload
+  fails the whole tick, the first two times in a row; from the third failure in
+  a row on, the tick goes on to the ops pull and the queue runs, and a
+  `base_pending` upload still waits at the claim, so nothing runs on a guessed
+  base. A successful snapshot resets the count (final review). The upload
   parks `base_unknown` only after 10 successful snapshots that gave it no base.
   Waiting is not an attempt.
 - **The fill and the raise.** A snapshot node sets `current_version` on a row at
@@ -647,13 +650,15 @@ time on the row, with the `Uploading` status, in the accept transaction.
 text reaches a line: errors are classified, never printed.~~
 Every line in the table below carries ids and fixed categories only. No name,
 path, URL or error text reaches these lines: errors are classified, never
-printed. Older lines outside this table are not covered by this rule, and two of
-them are known exceptions, tracked with the write-versions follow-ups (task
-1879): `upload-time thumbnail generation/upload skipped` logs the error's text
-(`error = %e`), on the landing path of a Finder write; and `purge did not sweep a
-staging directory that is not this user's` logs the directory's path, which holds
-the home directory. Both predate the write-versions work and are unchanged by it.
-— lead, 2026-10-11 (Task 12, fix round 1)
+printed. Older lines outside this table are not covered by this rule, and ~~two of
+them are known exceptions~~ one of them is a known exception, tracked with the
+write-versions follow-ups (task 1879): ~~`upload-time thumbnail generation/upload
+skipped` logs the error's text (`error = %e`), on the landing path of a Finder
+write; and~~ `purge did not sweep a staging directory that is not this user's`
+logs the directory's path, which holds the home directory. It predates the
+write-versions work and is unchanged by it. — lead, 2026-10-11 (Task 12, fix
+round 1). `upload-time thumbnail generation/upload skipped` now logs the error's
+category (`reason`), not its text. — lead, 2026-10-11 (final review)
 
 A line about a failed
 step logs the error's category, from closed codes only (SQLite's result code, the
@@ -703,8 +708,10 @@ read`, which the diagnostics bundle files under its own code,
 `log show --predicate 'subsystem == "io.beebeeb.app.FileProvider"'` lists them.
 `NSLog` is not used: on macOS 26 every `NSLog` line of the extension reached the
 unified log as `<private>`. Informational lines are `.notice`, failures `.error`.
-Only closed values are public (a fixed word, a bitmask, a UUID, the first 12 hex
-digits of a `request_id`, the App Group id, an `NSError` domain and code); a
+Only closed values are public (a fixed word, a bitmask, a UUID, the App Group
+id, an `NSError` domain and code; the first 12 hex digits of a `request_id` are
+logged `.private` since the final review, because the key is a hash over the
+item's name, size and modification time); a
 path, a file name or an error's text is never logged. ~~`extension_log_pin`
 (`src-tauri/src`) fails on any other log call in the extension and on a public
 value outside that set.~~ — lead, 2026-10-11 (device fix round)
@@ -718,8 +725,8 @@ other than `ExtensionLog.swift` builds a `Logger` or an `OSLog` (bare, through
 `ExtensionLog.swift` builds a `Logger` other than exactly once, or its subsystem
 is not the build script's `BUNDLE_ID`; or an interpolation in
 `ExtensionLog.swift` does not say `.public` or `.private`, or a `.public` one is
-not one of nine names (`line.call`, `line.options`, `id`, `call.rawValue`,
-`prefix`, `fields.domain`, `fields.code`, `cause`, `XPCBridge.appGroupID`). It
+not one of eight names (`line.call`, `line.options`, `id`, `call.rawValue`,
+`fields.domain`, `fields.code`, `cause`, `XPCBridge.appGroupID`). It
 matches text, so it cannot see what a public name is bound to (the Swift harness
 tests those bindings), a call with a space or a line break before its
 parenthesis, a log function passed by reference, or output that is not a log
@@ -879,7 +886,8 @@ CI proves the framing, the key derivation, the request shape and the daemon tabl
 prove that the real File Provider system retries with the same staged size and mtime, or that
 the retry happens within 30 minutes. The next macOS alpha must force a write-queue timeout on a
 large file (or lower `stagedCopyTimeoutSeconds` for a test build) and check the unified log for
-the same `request_id=<12 hex>` on both attempts and exactly one queued upload.
+the same `request_id=<12 hex>` on both attempts and exactly one queued upload. The prefix is
+logged `.private`, so that check needs the log's private data shown on the test Mac.
 
 ## Change feed + sync anchor (task 1697)
 
