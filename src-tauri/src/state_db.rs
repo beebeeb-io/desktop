@@ -3745,15 +3745,15 @@ impl StateDb {
                 ) else {
                     return Ok(AcceptOutcome::UnknownItem);
                 };
-                let facts = base_facts_conn(&tx, accept.file_id, &contract, legacy_identifiers(&entry, &contract))?;
-                let decision = decide_base(&facts, *incoming_base);
-                record_local_write_conn(&tx, accept.file_id, accept.size_bytes, accept.modified_at)?;
                 // §7.2 (final review): an item in the trash takes no save, as a create in the
                 // trash is refused: the system holds it there, and a reply would describe it
                 // somewhere else. Refused before anything is written, in this transaction.
                 if entry.status == FileStatus::Trashing || parent_id.as_deref().is_some_and(is_file_provider_trash) {
                     return Ok(AcceptOutcome::InTrash);
                 }
+                let facts = base_facts_conn(&tx, accept.file_id, &contract, legacy_identifiers(&entry, &contract))?;
+                let decision = decide_base(&facts, *incoming_base);
+                record_local_write_conn(&tx, accept.file_id, accept.size_bytes, accept.modified_at)?;
                 let moved = entry.parent_id != parent_id;
                 apply_save_name_and_parent_conn(&tx, &entry, accept.target_path, parent_id.as_deref())?;
                 // §7.2 (final review): the upload's metadata step sends a parent only for a save

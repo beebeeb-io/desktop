@@ -2121,7 +2121,6 @@ mod tests {
         );
     }
 
-    /// Spec §8.4: a refused upload request keeps the server's code by type, matched exactly, and
     /// Spec 2026-10-09 §7.2 (final review): the three parents a metadata update sends, as the
     /// server reads them: omitted (leave it alone), `null` (the top level), an id (that folder).
     #[test]
@@ -2146,6 +2145,7 @@ mod tests {
         assert_eq!(ParentChange::to(Some("folder-1")), ParentChange::Folder("folder-1"));
     }
 
+    /// Spec §8.4: a refused upload request keeps the server's code by type, matched exactly, and
     /// its text is the status error's alone: the body (its code, its numbers, its message) never
     /// reaches the error's text, which is what a log line or the queue's `last_error` could show.
     #[tokio::test]

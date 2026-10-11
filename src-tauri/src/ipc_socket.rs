@@ -5411,6 +5411,8 @@ mod tests {
         assert_eq!(write_refusal_category(&policy), "write_policy");
         let db: anyhow::Error = rusqlite::Error::QueryReturnedNoRows.into();
         assert_eq!(write_refusal_category(&db), "database");
+        let in_trash = anyhow::Error::new(crate::engine_bridge::ItemInTrash);
+        assert_eq!(write_refusal_category(&in_trash), "in_trash");
         let other = anyhow::anyhow!("something else about notes.txt");
         assert_eq!(write_refusal_category(&other), "other");
     }
