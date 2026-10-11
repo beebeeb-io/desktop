@@ -400,12 +400,6 @@ const DUE_ORDER_SQL: &str = "ORDER BY rowid ASC";
 #[cfg(not(target_os = "macos"))]
 const DUE_ORDER_SQL: &str = "ORDER BY created_at ASC, rowid ASC";
 
-/// Spec 2026-10-09 §7.2 (final review): a `files` row with no queued or parked File Provider
-/// write (an upload with a write id). The path sweeps delete only such rows.
-const WITHOUT_A_FINDER_WRITE_SQL: &str = "file_id NOT IN (
-    SELECT file_id FROM operation_queue
-    WHERE file_id IS NOT NULL AND write_id IS NOT NULL AND kind IN ('upload_version', 'upload_file'))";
-
 /// `earlier` comes before `this` in [`DUE_ORDER_SQL`]'s order.
 #[cfg(target_os = "macos")]
 const EARLIER_IN_QUEUE_SQL: &str = "earlier.rowid < this.rowid";
@@ -1031,6 +1025,56 @@ fn relative_path_under_conn<C: std::ops::Deref<Target = Connection>>(
         Some(parent_path) if !parent_path.is_empty() => format!("{parent_path}/{name}"),
         _ => name.to_string(),
     })
+}
+
+/// Spec §7.2 (final review): `file_id` has a queued or parked File Provider write (an upload
+/// with a write id). The path sweeps never delete such a row.
+fn has_finder_write_conn<C: std::ops::Deref<Target = Connection>>(conn: &C, file_id: &str) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM operation_queue
+                        WHERE file_id = ?1 AND write_id IS NOT NULL AND kind IN ('upload_version', 'upload_file'))",
+        params![file_id],
+        |row| row.get(0),
+    )
+}
+
+/// Spec §7.2 (final review): a row a path sweep keeps, because a File Provider write of it is
+/// queued or parked, after its folder is gone. It is re-homed at the top level in the sweep's
+/// transaction: no parent, its name alone as the path, one `reparented` change, and its
+/// writes' parent cleared. A create then lands at the top level; a save sends the move there
+/// with its bytes (`parent_changed`). The row stays listed, at the root, throughout.
+fn rehome_kept_row_conn<C: std::ops::Deref<Target = Connection>>(conn: &C, file_id: &str) -> Result<()> {
+    let Some(row) = get_file_conn(conn, file_id)? else {
+        return Ok(());
+    };
+    conn.execute(
+        "UPDATE files SET parent_id = NULL, path = ?2 WHERE file_id = ?1",
+        params![file_id, path_leaf(&row.path)],
+    )?;
+    let writes: Vec<(String, Option<String>)> = {
+        let mut stmt = conn.prepare(
+            "SELECT op_id, metadata_json FROM operation_queue
+             WHERE file_id = ?1 AND write_id IS NOT NULL AND kind IN ('upload_version', 'upload_file')",
+        )?;
+        let rows = stmt.query_map(params![file_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<Result<Vec<_>>>()?
+    };
+    for (op_id, metadata_json) in writes {
+        // A save (not a create, which its `init` places) records the move, so its metadata step
+        // sends the top level.
+        let metadata_json = metadata_json.map(|raw| match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(mut metadata) if metadata["operation"].as_str() != Some("create_file") && metadata.is_object() => {
+                metadata["parent_changed"] = serde_json::json!(true);
+                metadata.to_string()
+            }
+            _ => raw,
+        });
+        conn.execute(
+            "UPDATE operation_queue SET parent_id = NULL, metadata_json = ?2 WHERE op_id = ?1",
+            params![op_id, metadata_json],
+        )?;
+    }
+    record_file_change_conn(conn, file_id, FpChangeKind::Reparented, row.parent_id)
 }
 
 /// Spec §7.2 (final review): whether a queued File Provider save of `file_id`, parked or not,
@@ -2423,15 +2467,11 @@ impl StateDb {
             let root_path = root.path.trim_matches('/').to_string();
             if !root_path.is_empty() {
                 let descendants: Vec<PrunedRow> = {
-                    // Spec §7.2 (final review): a row with a queued or parked Finder write is
-                    // kept. Its upload then meets the missing folder and parks with its bytes,
-                    // read-only and visible, never bytes queued under no row.
-                    let mut dstmt = tx.prepare(&format!(
+                    let mut dstmt = tx.prepare(
                         "SELECT file_id, path, item_kind FROM files
                          WHERE substr(ltrim(path, '/'), 1, length(?1) + 1) = ?1 || '/'
-                           AND {WITHOUT_A_FINDER_WRITE_SQL}
-                         ORDER BY length(path) DESC, path DESC"
-                    ))?;
+                         ORDER BY length(path) DESC, path DESC",
+                    )?;
                     let drows = dstmt.query_map(params![root_path], |r| {
                         Ok(PrunedRow {
                             file_id: r.get(0)?,
@@ -2442,6 +2482,12 @@ impl StateDb {
                     drows.collect::<Result<Vec<_>>>()?
                 };
                 for d in descendants {
+                    // Spec §7.2 (final review): a row with a queued or parked Finder write is
+                    // kept, and re-homed at the top level, since its folder is gone.
+                    if has_finder_write_conn(&tx, &d.file_id)? {
+                        rehome_kept_row_conn(&tx, &d.file_id)?;
+                        continue;
+                    }
                     let old_parent = old_parent_of(&tx, &d.file_id);
                     tx.execute("DELETE FROM files WHERE file_id = ?1", params![d.file_id])?;
                     record_file_change_conn(&tx, &d.file_id, FpChangeKind::Deleted, old_parent)?;
@@ -2450,13 +2496,9 @@ impl StateDb {
             }
         }
 
-        // The root too keeps a queued or parked Finder write's row (above).
-        let root_has_finder_write: bool = tx.query_row(
-            &format!("SELECT NOT EXISTS(SELECT 1 FROM files WHERE file_id = ?1 AND {WITHOUT_A_FINDER_WRITE_SQL})"),
-            params![root.file_id],
-            |row| row.get(0),
-        )?;
-        if !root_has_finder_write {
+        // Spec §7.2 (final review): the deleted item itself, with a queued or parked Finder write,
+        // is kept where it is: the edit wins, and the save re-creates the file under its id.
+        if !has_finder_write_conn(&tx, &root.file_id)? {
             let root_old_parent = old_parent_of(&tx, &root.file_id);
             tx.execute("DELETE FROM files WHERE file_id = ?1", params![root.file_id])?;
             record_file_change_conn(&tx, &root.file_id, FpChangeKind::Deleted, root_old_parent)?;
@@ -2709,6 +2751,11 @@ impl StateDb {
                         drows.collect::<Result<Vec<_>>>()?
                     };
                     for d in descendants {
+                        // Spec §7.2 (final review): kept and re-homed, as in the other sweeps.
+                        if has_finder_write_conn(&tx, &d.file_id)? {
+                            rehome_kept_row_conn(&tx, &d.file_id)?;
+                            continue;
+                        }
                         tx.execute("DELETE FROM files WHERE file_id = ?1", params![d.file_id])?;
                         removed.push(d);
                     }
@@ -2717,8 +2764,14 @@ impl StateDb {
         }
 
         // Delete the direct children and append them last (after their own
-        // descendants) to maintain children-before-parent ordering.
+        // descendants) to maintain children-before-parent ordering. Spec §7.2 (final
+        // review): a child with a queued or parked Finder write is kept and re-homed at the
+        // top level instead.
         for child in direct_children {
+            if has_finder_write_conn(&tx, &child.file_id)? {
+                rehome_kept_row_conn(&tx, &child.file_id)?;
+                continue;
+            }
             tx.execute("DELETE FROM files WHERE file_id = ?1", params![child.file_id])?;
             removed.push(child);
         }
@@ -3011,20 +3064,19 @@ impl StateDb {
                         // parent is gone server-side, so the orphan must go too —
                         // any stale queued op against it is moot. Spec §7.2 (final
                         // review): except a queued or parked Finder write, whose bytes
-                        // are the person's: its row is kept, visible, and the upload
-                        // parks when it meets the missing folder. Task 1698:
+                        // are the person's: its row is kept and re-homed at the top
+                        // level, where its create lands. Task 1698:
                         // `Trashing` descendants are NOT excluded here by a pending
                         // op, but ARE excluded by STATUS — they are the server
                         // trash's content (recoverable), not dead rows; deleting
                         // them would erase the trash view's folder contents.
-                        let mut dstmt = tx.prepare(&format!(
+                        let mut dstmt = tx.prepare(
                             "SELECT file_id, path, item_kind FROM files
                              WHERE namespace = 'my_files'
                                AND status != 'trashing'
                                AND substr(ltrim(path, '/'), 1, length(?1) + 1) = ?1 || '/'
-                               AND {WITHOUT_A_FINDER_WRITE_SQL}
-                             ORDER BY length(path) DESC, path DESC"
-                        ))?;
+                             ORDER BY length(path) DESC, path DESC",
+                        )?;
                         let drows = dstmt.query_map(params![root_path], |r| {
                             Ok(PrunedRow {
                                 file_id: r.get(0)?,
@@ -3035,6 +3087,10 @@ impl StateDb {
                         drows.collect::<Result<Vec<_>>>()?
                     };
                     for d in descendants {
+                        if has_finder_write_conn(&tx, &d.file_id)? {
+                            rehome_kept_row_conn(&tx, &d.file_id)?;
+                            continue;
+                        }
                         if removed_ids.insert(d.file_id.clone()) {
                             let old_parent = tx
                                 .query_row(

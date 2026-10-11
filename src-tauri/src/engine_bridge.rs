@@ -18282,19 +18282,26 @@ mod tests {
         drop(server.finish());
     }
 
-    /// Spec §7.2 (final review): a folder deleted elsewhere, by a `file_delete` op or by its
-    /// absence from a snapshot, while a create in it is queued. The path sweeps keep the
-    /// create's row, which the item lookup still answers; its upload then meets the missing
-    /// folder and parks with its bytes. A row with no queued write is still swept.
-    #[cfg(unix)] // names `crate::ipc_socket::file_status_response`
-    #[test]
-    fn a_queued_create_survives_its_folder_being_deleted_elsewhere() {
-        for by_snapshot in [false, true] {
+    /// Spec §7.2 (final review): a folder deleted elsewhere while a create in it is queued, by
+    /// each of the three sweeps: a `file_delete` of the folder, its absence from a snapshot, and
+    /// a `file_delete` of a folder this Mac has no row for (the orphan sweep). The sweep keeps the
+    /// create's row and re-homes it at the top level in its transaction: no parent, its name
+    /// alone as the path, a `reparented` change, and the write's parent cleared. The row is
+    /// listed at the root from the sweep on, and the create lands there. A row with no queued
+    /// write is still swept.
+    #[cfg(unix)] // names `crate::ipc_socket::list_file_provider_items`
+    #[tokio::test]
+    async fn a_queued_create_lands_at_the_top_level_after_its_folder_is_deleted_elsewhere() {
+        for (how, folder_row) in [("file_delete", true), ("snapshot", true), ("orphan sweep", false)] {
             let dir = tempfile::tempdir().unwrap();
             let sync_root = dir.path().join("sync-root");
             std::fs::create_dir_all(&sync_root).unwrap();
-            let bridge = test_bridge(&dir.path().join("state.db"));
-            seed_folder_row(&bridge, "r9-folder", "r9-folder");
+            let master_key = [109u8; 32];
+            let server = VersionedServerMock::start();
+            let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+            if folder_row {
+                seed_folder_row(&bridge, "r9-folder", "r9-folder");
+            }
             let created = fp_create_in(&bridge, dir.path(), "r9-folder", "n1.txt", b"queued");
             let p = created.outcome_file_id();
             bridge
@@ -18314,7 +18321,8 @@ mod tests {
                     |contract| contract.parent_id = Some("r9-folder".into()),
                 )
                 .unwrap();
-            if by_snapshot {
+            let moves_before = reparented_changes(&bridge, &p);
+            if how == "snapshot" {
                 let seen: HashSet<String> = ["elsewhere".to_string()].into_iter().collect();
                 bridge.db.prune_absent(&seen, now_secs() + 100).unwrap();
             } else {
@@ -18325,10 +18333,9 @@ mod tests {
                 };
                 apply_sync_op(&bridge, &sync_root, &delete, now_secs(), &mut Vec::new()).unwrap();
             }
-            let how = if by_snapshot { "snapshot" } else { "file_delete" };
             assert!(
                 bridge.db.get_file("r9-folder").unwrap().is_none(),
-                "{how}: the folder is gone"
+                "{how}: no folder row"
             );
             assert!(
                 bridge.db.get_file("synced").unwrap().is_none(),
@@ -18340,41 +18347,104 @@ mod tests {
             );
             assert_eq!(
                 name_parent_status(&bridge, &p),
-                (
-                    "r9-folder/n1.txt".into(),
-                    Some("r9-folder".into()),
-                    FileStatus::Uploading
-                ),
-                "{how}: the queued create's row is kept"
-            );
-            assert!(
-                matches!(
-                    crate::ipc_socket::file_status_response(&bridge.db, &p),
-                    crate::ipc_socket::IpcResponse::FileStatus(_)
-                ),
-                "{how}: the item lookup still answers it"
+                ("n1.txt".into(), None, FileStatus::Uploading),
+                "{how}: re-homed at the top level"
             );
             assert_eq!(
-                bridge.db.list_operations_for_file(&p).unwrap().len(),
-                1,
-                "{how}: still queued"
+                reparented_changes(&bridge, &p),
+                moves_before + 1,
+                "{how}: one move recorded"
+            );
+            assert!(
+                listed_under(&bridge, FP_ROOT).contains(&p),
+                "{how}: listed at the root from the sweep on"
+            );
+            let ops = bridge.db.list_operations_for_file(&p).unwrap();
+            assert_eq!(ops[0].parent_id, None, "{how}: the write's parent is cleared");
+
+            drain_upload_queue(&bridge, &sync_root).await;
+            let s = bridge.db.resolve_alias(&p).unwrap().expect("the create landed");
+            assert_eq!(
+                name_parent_status(&bridge, &s),
+                ("n1.txt".into(), None, FileStatus::Local),
+                "{how}: landed at the top level"
+            );
+            assert!(listed_under(&bridge, FP_ROOT).contains(&s), "{how}: listed at the root");
+            let state = server.finish();
+            assert_eq!(state.latest_plaintext(&s, master_key), b"queued");
+            let init = &state.inits[0].0;
+            assert!(
+                init.get("parent_id").is_none_or(serde_json::Value::is_null),
+                "{how}: the create's init names no folder: {init}"
             );
         }
     }
 
-    /// Spec §7.2 (final review): a file deleted for good elsewhere while a save of it is queued
-    /// keeps its row, with the save; the upload then meets the missing file and parks with its
-    /// bytes.
+    /// Spec §7.2 (final review): a save of a file whose folder is deleted elsewhere is re-homed
+    /// at the top level with its row, and its upload sends that move (`"parent_id": null`), so
+    /// the server file follows the row.
     #[tokio::test]
-    async fn a_permanent_delete_keeps_a_row_with_a_queued_save() {
+    async fn a_save_re_homed_by_a_sweep_sends_the_move() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [110u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_row_in_folder(&bridge, &server, "in-deleted-folder");
+        fp_save_moved(
+            &bridge,
+            dir.path(),
+            "in-deleted-folder",
+            "notes.txt",
+            "folder-a",
+            b"saved",
+            "1",
+        );
+        let delete = crate::api_client::SyncOp {
+            seq_id: 703,
+            op_type: "file_delete".into(),
+            payload: serde_json::json!({ "id": "folder-a" }),
+        };
+        apply_sync_op(&bridge, &sync_root, &delete, now_secs(), &mut Vec::new()).unwrap();
+        assert_eq!(
+            name_parent_status(&bridge, "in-deleted-folder"),
+            ("notes.txt".into(), None, FileStatus::Uploading)
+        );
+        drain_upload_queue(&bridge, &sync_root).await;
+        let state = server.finish();
+        assert_eq!(state.latest_plaintext("in-deleted-folder", master_key), b"saved");
+        assert_eq!(
+            patched_parents(&state, "in-deleted-folder"),
+            vec![Some(serde_json::Value::Null)],
+            "the save sent the move to the top level"
+        );
+    }
+
+    /// Spec §7.2 (final review): a file deleted for good elsewhere while a save of it is queued.
+    /// The edit wins: the row stays, visible, and the save re-creates the file under its id. The
+    /// person can delete it again.
+    #[cfg(unix)] // names `crate::ipc_socket::list_file_provider_items`
+    #[tokio::test]
+    async fn a_save_of_a_file_deleted_elsewhere_re_creates_it() {
         let dir = tempfile::tempdir().unwrap();
         let sync_root = dir.path().join("sync-root");
         std::fs::create_dir_all(&sync_root).unwrap();
         let master_key = [107u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        seed_uploaded_row(&bridge, &server, "deleted-elsewhere");
-        fp_save(&bridge, dir.path(), "deleted-elsewhere", "notes.txt", b"kept", "1");
+        seed_row_in_folder(&bridge, &server, "deleted-elsewhere");
+        fp_save_moved(
+            &bridge,
+            dir.path(),
+            "deleted-elsewhere",
+            "notes.txt",
+            "folder-a",
+            b"the edit",
+            "1",
+        );
+        // The server deleted it for good.
+        server.state.lock().unwrap().files.remove("deleted-elsewhere");
         let delete = crate::api_client::SyncOp {
             seq_id: 702,
             op_type: "file_delete".into(),
@@ -18385,16 +18455,17 @@ mod tests {
             bridge.db.get_file("deleted-elsewhere").unwrap().is_some(),
             "the row with a queued save is kept"
         );
+        assert!(listed_under(&bridge, "folder-a").contains(&"deleted-elsewhere".to_string()));
+
+        drain_upload_queue(&bridge, &sync_root).await;
         assert_eq!(
             name_parent_status(&bridge, "deleted-elsewhere"),
-            ("notes.txt".into(), None, FileStatus::Uploading),
-            "the row is kept"
+            ("Docs/notes.txt".into(), Some("folder-a".into()), FileStatus::Local),
+            "re-created, in its folder"
         );
-        assert_eq!(
-            bridge.db.list_operations_for_file("deleted-elsewhere").unwrap().len(),
-            1
-        );
-        drop(server.finish());
+        assert!(listed_under(&bridge, "folder-a").contains(&"deleted-elsewhere".to_string()));
+        let state = server.finish();
+        assert_eq!(state.latest_plaintext("deleted-elsewhere", master_key), b"the edit");
     }
 
     /// Spec §7.2 (final review): a move to the top level made elsewhere (`file_move` or
