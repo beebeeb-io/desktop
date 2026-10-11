@@ -113,6 +113,81 @@ describe('Bandwidth page', () => {
   })
 })
 
+// Fix round 2 (N1): the retry of a failed write must never put an older value over a newer one that already went out.
+describe('Bandwidth page, a failed write and a newer one', () => {
+  const formatLimit = loadComponent('pages/Bandwidth.tsx', 'formatLimit', {})
+  const bindings = {
+    invoke,
+    formatLimit,
+    DEFAULT_CONFIG: wholeConfig,
+    SLIDER_MAX_KBPS: 100_000,
+    DEBOUNCE_MS: 500,
+    setTimeout: (fn: () => void) => {
+      queueMicrotask(fn)
+      return 0
+    },
+    clearTimeout() {},
+  }
+
+  /** The first `count` writes stay in flight until the test rejects them; later ones land on the disk. */
+  function pendingWrites(count: number) {
+    const { state, backend } = disk()
+    const rejects: Array<(error: Error) => void> = []
+    let calls = 0
+    const m = mount('pages/Bandwidth.tsx', 'Bandwidth', {
+      backend: {
+        ...backend,
+        set_desktop_config: (args: any) => {
+          calls += 1
+          if (calls <= count) {
+            state.writes.push(structuredClone(args.config)) // it went out
+            return new Promise((_resolve, reject) => rejects.push(reject))
+          }
+          return backend.set_desktop_config(args)
+        },
+      },
+      bindings,
+    })
+    mounted.push(m)
+    return { state, m, rejects }
+  }
+
+  test('an older write that fails after a newer one landed does not come back over it', async () => {
+    const { state, m, rejects } = pendingWrites(1)
+    await m.flush()
+    const pause = m.elements().find((el) => el.type === 'input' && el.props.type === 'checkbox')!
+    const upload = m.elements().find((el) => el.type === 'input' && el.props.type === 'range')!
+    pause.props.onChange({ target: { checked: true } }) // write A: pause, in flight
+    pause.props.onChange({ target: { checked: false } }) // write B: resume, goes out and lands
+    await m.flush()
+    expect(state.writes).toEqual([{ pause_sync: true }, { pause_sync: false }])
+    rejects[0](new Error('disk full')) // A fails after B landed
+    await m.flush()
+    upload.props.onChange({ target: { value: '2000' } }) // the next write
+    await m.flush()
+    expect(state.writes.at(-1)).toEqual({ upload_kbps_limit: 2000 })
+    expect(state.config.pause_sync).toBe(false)
+  })
+
+  test('when both fail, the newer value is the one that is retried, whatever order they fail in', async () => {
+    for (const order of [[0, 1], [1, 0]]) {
+      const { state, m, rejects } = pendingWrites(2)
+      await m.flush()
+      const pause = m.elements().find((el) => el.type === 'input' && el.props.type === 'checkbox')!
+      const upload = m.elements().find((el) => el.type === 'input' && el.props.type === 'range')!
+      pause.props.onChange({ target: { checked: true } })
+      pause.props.onChange({ target: { checked: false } })
+      await m.flush()
+      for (const at of order) rejects[at](new Error('disk full'))
+      await m.flush()
+      upload.props.onChange({ target: { value: '2000' } })
+      await m.flush()
+      expect(state.writes.at(-1)).toEqual({ pause_sync: false, upload_kbps_limit: 2000 })
+      expect(state.config.pause_sync).toBe(false)
+    }
+  })
+})
+
 describe('Notifications page', () => {
   test('flipping one switch writes only that switch, and a pause made elsewhere stays', async () => {
     const { state, backend } = disk()

@@ -61,6 +61,11 @@ export default function Bandwidth() {
   // The fields changed since the last write went out. A write carries ONLY these (task 1889, fix round 1 M5): the
   // config this page read on mount is never sent back, so a pause made from the tray meanwhile is not undone.
   const unsent = useRef<Partial<DesktopConfig>>({})
+  // Which change touched each field last (task 1889, fix round 2 N1). A failed write puts a field back to be sent again
+  // only if no later change has touched it, whether that later change is still unsent or already went out: a retry must
+  // never write an older value over a newer one.
+  const changeNumber = useRef(0)
+  const lastChange = useRef<Record<string, number>>({})
 
   useEffect(() => {
     invoke<DesktopConfig>('get_desktop_config')
@@ -85,13 +90,21 @@ export default function Bandwidth() {
 
   const writeBack = (patch: Partial<DesktopConfig>, immediate = false) => {
     if (writeTimer.current) clearTimeout(writeTimer.current)
+    for (const field of Object.keys(patch)) lastChange.current[field] = ++changeNumber.current
     unsent.current = { ...unsent.current, ...patch }
     const fire = () => {
       const body = unsent.current
       unsent.current = {}
+      const fields = Object.keys(body) as Array<keyof DesktopConfig>
+      const changeOf = Object.fromEntries(fields.map((field) => [field, lastChange.current[field]]))
       invoke('set_desktop_config', { config: body }).catch((e: unknown) => {
-        // The change did not reach the file: it goes out again with the next write, under any newer value.
-        unsent.current = { ...body, ...unsent.current }
+        // The change did not reach the file: it goes out again with the next write, unless a later change has touched
+        // the same field since (that one is newer, and either already went out or is waiting to).
+        const retry: Partial<Record<keyof DesktopConfig, unknown>> = {}
+        for (const field of fields) {
+          if (lastChange.current[field] === changeOf[field]) retry[field] = body[field]
+        }
+        unsent.current = { ...unsent.current, ...(retry as Partial<DesktopConfig>) }
         console.warn('set_desktop_config failed:', e)
         showToast({
           id: 'bandwidth-config-save-error',
