@@ -15697,6 +15697,12 @@ mod tests {
     /// A row the server holds at version 1 (seeded on the mock too).
     fn seed_uploaded_row(bridge: &EngineBridge, server: &VersionedServerMock, file_id: &str) {
         server.seed_file(file_id, 1);
+        seed_uploaded_db_row(bridge, file_id);
+    }
+
+    /// The local half of [`seed_uploaded_row`]: the row at version 1, for a test that starts its
+    /// server later.
+    fn seed_uploaded_db_row(bridge: &EngineBridge, file_id: &str) {
         bridge
             .db
             .upsert_file(&FileEntry {
@@ -19422,34 +19428,41 @@ mod tests {
     }
 
     /// The same with nothing listening: 30 connection errors, then the network comes back.
+    ///
+    /// The server the save lands on is started only after the outage, as in the scenario. A
+    /// refused connection to a closed port returns at once on macOS and Linux, but on Windows each
+    /// takes about 2 s (the stack retries the refused connection), so the 30 passes outlast the
+    /// mock's 30 s serving window if it is started first, and the landing found no server.
     #[tokio::test]
     async fn a_finder_write_outlives_thirty_connection_errors_and_lands() {
         let master_key = [141u8; 32];
-        let (dir, sync_root, server, bridge) = rule3_setup(master_key);
-        seed_uploaded_row(&bridge, &server, "outage-offline");
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        // An API whose address nothing listens on.
+        let closed = {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            format!("http://{}", listener.local_addr().unwrap())
+        };
+        let offline = test_bridge_with_api(&dir.path().join("state.db"), closed, master_key);
+        seed_uploaded_db_row(&offline, "outage-offline");
         fp_save(
-            &bridge,
+            &offline,
             dir.path(),
             "outage-offline",
             "notes.txt",
             b"saved offline",
             "1",
         );
-        // The same queue, with an API whose address nothing listens on.
-        let closed = {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            format!("http://{}", listener.local_addr().unwrap())
-        };
-        let offline = EngineBridge::new(
-            bridge.db.clone(),
-            Arc::new(ApiClient::new(closed, "token".into(), master_key)),
-        );
         let mut now = now_secs();
         let outcomes = failing_passes(&offline, &sync_root, "outage-offline", 30, &mut now).await;
-        assert_kept_uploading(&bridge, "outage-offline", &outcomes, OperationFailureClass::Retryable);
-        assert!(
-            server.state.lock().unwrap().requests.is_empty(),
-            "no attempt reached the server"
+        assert_kept_uploading(&offline, "outage-offline", &outcomes, OperationFailureClass::Retryable);
+        // The network comes back: the same queue, with an API that answers.
+        let server = VersionedServerMock::start();
+        server.seed_file("outage-offline", 1);
+        let bridge = EngineBridge::new(
+            offline.db.clone(),
+            Arc::new(ApiClient::new(server.base_url.clone(), "token".into(), master_key)),
         );
         bridge.process_due_operations(&sync_root, now).await.unwrap();
         assert!(
