@@ -18411,6 +18411,85 @@ mod tests {
         }
     }
 
+    /// Spec §7.2 (final review): a sweep re-homes only a write whose own folder is gone. A folder
+    /// in the trash and a live folder with the same path; a save queued in the live one; the
+    /// trashed folder purged (`file_delete`). The prefix `Docs/` reaches the save's row, but its
+    /// parent is still there: the row keeps its parent and path, and its PATCH has no
+    /// `parent_id`.
+    #[tokio::test]
+    async fn a_purged_folder_never_re_homes_a_write_in_a_live_folder_with_the_same_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [112u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_folder_row(&bridge, "trashed-docs", "Docs");
+        bridge.db.set_status("trashed-docs", FileStatus::Trashing).unwrap();
+        seed_folder_row(&bridge, "live-docs", "Docs");
+        server.seed_file("report", 1);
+        bridge
+            .db
+            .upsert_file_with_contract(
+                &FileEntry {
+                    file_id: "report".into(),
+                    path: "Docs/report.txt".into(),
+                    status: FileStatus::Local,
+                    size_bytes: 10,
+                    modified_at: 1_700_000_000,
+                    content_hash: None,
+                    remote_updated_at: 1_700_000_000,
+                    parent_id: Some("live-docs".into()),
+                    item_kind: ItemKind::File,
+                },
+                |contract| {
+                    contract.parent_id = Some("live-docs".into());
+                    contract.current_version = 1;
+                },
+            )
+            .unwrap();
+        fp_save_moved(
+            &bridge,
+            dir.path(),
+            "report",
+            "report.txt",
+            "live-docs",
+            b"saved in the live folder",
+            "1",
+        );
+        let purge = crate::api_client::SyncOp {
+            seq_id: 704,
+            op_type: "file_delete".into(),
+            payload: serde_json::json!({ "id": "trashed-docs" }),
+        };
+        apply_sync_op(&bridge, &sync_root, &purge, now_secs(), &mut Vec::new()).unwrap();
+        assert!(
+            bridge.db.get_file("trashed-docs").unwrap().is_none(),
+            "the trashed folder is purged"
+        );
+        assert_eq!(
+            name_parent_status(&bridge, "report"),
+            (
+                "Docs/report.txt".into(),
+                Some("live-docs".into()),
+                FileStatus::Uploading
+            ),
+            "its folder is still there: the row is left exactly as it is"
+        );
+
+        drain_upload_queue(&bridge, &sync_root).await;
+        let state = server.finish();
+        assert_eq!(
+            state.latest_plaintext("report", master_key),
+            b"saved in the live folder"
+        );
+        assert_eq!(
+            patched_parents(&state, "report"),
+            vec![None],
+            "the save does not move the server file"
+        );
+    }
+
     /// Spec §7.2 (final review): a save of a file whose folder is deleted elsewhere is re-homed
     /// at the top level with its row, and its upload sends that move (`"parent_id": null`), so
     /// the server file follows the row.

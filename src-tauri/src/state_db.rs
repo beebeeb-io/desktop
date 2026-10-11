@@ -1038,11 +1038,35 @@ fn has_finder_write_conn<C: std::ops::Deref<Target = Connection>>(conn: &C, file
     )
 }
 
-/// Spec §7.2 (final review): a row a path sweep keeps, because a File Provider write of it is
-/// queued or parked, after its folder is gone. It is re-homed at the top level in the sweep's
-/// transaction: no parent, its name alone as the path, one `reparented` change, and its
-/// writes' parent cleared. A create then lands at the top level; a save sends the move there
-/// with its bytes (`parent_changed`). The row stays listed, at the root, throughout.
+/// Spec §7.2 (final review): the path sweeps' last step, in their transaction, after their
+/// deletes. Each row with a queued or parked File Provider write whose parent no longer names a
+/// row is re-homed at the top level ([`rehome_kept_row_conn`]). A row whose folder is still
+/// there is left exactly as it is: a path prefix also reaches the rows of another folder with
+/// the same path (one in the trash, or two of the same name), and those are not orphaned.
+fn rehome_orphaned_writes_conn<C: std::ops::Deref<Target = Connection>>(conn: &C) -> Result<()> {
+    let orphans: Vec<String> = {
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT f.file_id FROM files AS f
+             JOIN operation_queue AS o ON o.file_id = f.file_id
+             WHERE o.write_id IS NOT NULL AND o.kind IN ('upload_version', 'upload_file')
+               AND f.parent_id IS NOT NULL
+               AND NOT EXISTS(SELECT 1 FROM files AS p WHERE p.file_id = f.parent_id)",
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        rows.collect::<Result<Vec<_>>>()?
+    };
+    for file_id in orphans {
+        rehome_kept_row_conn(conn, &file_id)?;
+    }
+    Ok(())
+}
+
+/// Spec §7.2 (final review): a row a path sweep kept, because a File Provider write of it is
+/// queued or parked, whose folder is gone ([`rehome_orphaned_writes_conn`]). It is re-homed at
+/// the top level in the sweep's transaction: no parent, its name alone as the path, one
+/// `reparented` change, and its writes' parent cleared. A create then lands at the top level; a
+/// save sends the move there with its bytes (`parent_changed`). The row stays listed, at the
+/// root, throughout.
 fn rehome_kept_row_conn<C: std::ops::Deref<Target = Connection>>(conn: &C, file_id: &str) -> Result<()> {
     let Some(row) = get_file_conn(conn, file_id)? else {
         return Ok(());
@@ -2483,9 +2507,8 @@ impl StateDb {
                 };
                 for d in descendants {
                     // Spec §7.2 (final review): a row with a queued or parked Finder write is
-                    // kept, and re-homed at the top level, since its folder is gone.
+                    // kept; it is re-homed below only if its own folder is gone.
                     if has_finder_write_conn(&tx, &d.file_id)? {
-                        rehome_kept_row_conn(&tx, &d.file_id)?;
                         continue;
                     }
                     let old_parent = old_parent_of(&tx, &d.file_id);
@@ -2504,6 +2527,7 @@ impl StateDb {
             record_file_change_conn(&tx, &root.file_id, FpChangeKind::Deleted, root_old_parent)?;
             removed.push(root);
         }
+        rehome_orphaned_writes_conn(&tx)?;
         tx.commit()?;
         Ok(removed)
     }
@@ -2751,9 +2775,8 @@ impl StateDb {
                         drows.collect::<Result<Vec<_>>>()?
                     };
                     for d in descendants {
-                        // Spec §7.2 (final review): kept and re-homed, as in the other sweeps.
+                        // Spec §7.2 (final review): kept, as in the other sweeps.
                         if has_finder_write_conn(&tx, &d.file_id)? {
-                            rehome_kept_row_conn(&tx, &d.file_id)?;
                             continue;
                         }
                         tx.execute("DELETE FROM files WHERE file_id = ?1", params![d.file_id])?;
@@ -2765,16 +2788,16 @@ impl StateDb {
 
         // Delete the direct children and append them last (after their own
         // descendants) to maintain children-before-parent ordering. Spec §7.2 (final
-        // review): a child with a queued or parked Finder write is kept and re-homed at the
-        // top level instead.
+        // review): a child with a queued or parked Finder write is kept, then re-homed at the
+        // top level with every write whose folder is gone.
         for child in direct_children {
             if has_finder_write_conn(&tx, &child.file_id)? {
-                rehome_kept_row_conn(&tx, &child.file_id)?;
                 continue;
             }
             tx.execute("DELETE FROM files WHERE file_id = ?1", params![child.file_id])?;
             removed.push(child);
         }
+        rehome_orphaned_writes_conn(&tx)?;
 
         tx.commit()?;
         Ok(removed)
@@ -3064,8 +3087,8 @@ impl StateDb {
                         // parent is gone server-side, so the orphan must go too —
                         // any stale queued op against it is moot. Spec §7.2 (final
                         // review): except a queued or parked Finder write, whose bytes
-                        // are the person's: its row is kept and re-homed at the top
-                        // level, where its create lands. Task 1698:
+                        // are the person's: its row is kept, and re-homed at the top
+                        // level after the deletes when its own folder is gone. Task 1698:
                         // `Trashing` descendants are NOT excluded here by a pending
                         // op, but ARE excluded by STATUS — they are the server
                         // trash's content (recoverable), not dead rows; deleting
@@ -3087,8 +3110,9 @@ impl StateDb {
                         drows.collect::<Result<Vec<_>>>()?
                     };
                     for d in descendants {
+                        // Spec §7.2 (final review): kept; re-homed below only if its own
+                        // folder is gone.
                         if has_finder_write_conn(&tx, &d.file_id)? {
-                            rehome_kept_row_conn(&tx, &d.file_id)?;
                             continue;
                         }
                         if removed_ids.insert(d.file_id.clone()) {
@@ -3124,6 +3148,7 @@ impl StateDb {
             record_file_change_conn(&tx, &row.file_id, FpChangeKind::Deleted, old_parent)?;
             pruned.push(row);
         }
+        rehome_orphaned_writes_conn(&tx)?;
         tx.commit()?;
         Ok(pruned)
     }
