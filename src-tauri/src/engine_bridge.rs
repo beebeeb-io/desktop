@@ -2739,7 +2739,9 @@ impl EngineBridge {
         // doomed server call would retry a guaranteed 404 for hours.
         let item_contract = match self.ensure_item_allows_shared_write(file_id, "delete")? {
             contract if contract.is_none() && self.db.get_file(file_id)?.is_none() => {
-                tracing::info!(file_id = %file_id, "finder delete: unknown item — idempotent success");
+                // The id is the request's, from the wire (spec §11 M5).
+                let (file_id, id_kind) = wire_id_fields(file_id);
+                tracing::info!(file_id, id_kind, "finder delete: unknown item — idempotent success");
                 return Ok(FinderWriteOutcome::Ignored {
                     message: "the item is already gone from Beebeeb".to_string(),
                 });
@@ -20303,9 +20305,11 @@ mod tests {
     }
 
     /// M5 for every other line that logs an id from the wire: the alias lines (the request's
-    /// provisional id) and the hydrate count (the requested id).
+    /// provisional id), the hydrate count (the requested id) and the delete of an unknown item.
     #[tokio::test]
     async fn m5_every_wire_id_line_logs_the_kind_of_a_non_uuid() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
         let wire = "not-a-uuid/../evil";
         let logs = capture_logs_async(async {
             // `super::`: the T37 tests above are named after these helpers.
@@ -20313,10 +20317,14 @@ mod tests {
             super::log_alias_delete_kept(wire, "server-file-1");
             super::log_hydrate_served(wire, HydrateSource::Queue);
             super::log_alias_resolved("modify", "3f2a9c1e-0000-4000-8000-000000000002", "server-file-2");
+            assert!(matches!(
+                bridge.queue_finder_delete(wire, None).unwrap(),
+                FinderWriteOutcome::Ignored { .. }
+            ));
         })
         .await;
         assert!(!logs.contains("not-a-uuid"), "{logs}");
-        assert_eq!(logs.matches("id_kind=\"non_uuid\"").count(), 3, "{logs}");
+        assert_eq!(logs.matches("id_kind=\"non_uuid\"").count(), 4, "{logs}");
         assert!(
             logs.contains("provisional_id=3f2a9c1e-0000-4000-8000-000000000002"),
             "a UUID is logged as itself:\n{logs}"
