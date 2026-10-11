@@ -133,6 +133,7 @@ describe('Bandwidth page, a failed write and a newer one', () => {
   function pendingWrites(count: number) {
     const { state, backend } = disk()
     const rejects: Array<(error: Error) => void> = []
+    const resolves: Array<() => void> = []
     let calls = 0
     const m = mount('pages/Bandwidth.tsx', 'Bandwidth', {
       backend: {
@@ -141,7 +142,14 @@ describe('Bandwidth page, a failed write and a newer one', () => {
           calls += 1
           if (calls <= count) {
             state.writes.push(structuredClone(args.config)) // it went out
-            return new Promise((_resolve, reject) => rejects.push(reject))
+            return new Promise<void>((resolve, reject) => {
+              rejects.push(reject)
+              // It lands on the disk when the test lets it.
+              resolves.push(() => {
+                state.config = { ...state.config, ...structuredClone(args.config) }
+                resolve()
+              })
+            })
           }
           return backend.set_desktop_config(args)
         },
@@ -149,7 +157,7 @@ describe('Bandwidth page, a failed write and a newer one', () => {
       bindings,
     })
     mounted.push(m)
-    return { state, m, rejects }
+    return { state, m, rejects, resolves }
   }
 
   test('an older write that fails after a newer one landed does not come back over it', async () => {
@@ -167,6 +175,29 @@ describe('Bandwidth page, a failed write and a newer one', () => {
     await m.flush()
     expect(state.writes.at(-1)).toEqual({ upload_kbps_limit: 2000 })
     expect(state.config.pause_sync).toBe(false)
+  })
+
+  // PR #124's review thread, exactly: two saves overlap (Pause toggled twice), the older request fails after the newer one
+  // already captured and cleared the unsent patch, and a later slider change must not resend the older value over the
+  // newer successful choice. Here the newer save is still in flight when the older one fails and the slider moves.
+  test('the review thread: toggle Pause twice, the older request fails while the newer is in flight, then a slider moves', async () => {
+    const { state, m, rejects, resolves } = pendingWrites(2)
+    await m.flush()
+    const pause = m.elements().find((el) => el.type === 'input' && el.props.type === 'checkbox')!
+    const upload = m.elements().find((el) => el.type === 'input' && el.props.type === 'range')!
+    pause.props.onChange({ target: { checked: true } }) // the older save: pause
+    pause.props.onChange({ target: { checked: false } }) // the newer save: resume; both are in flight now
+    await m.flush()
+    expect(state.writes).toEqual([{ pause_sync: true }, { pause_sync: false }])
+    rejects[0](new Error('disk full')) // the older request fails; the newer has already cleared the unsent patch
+    await m.flush()
+    upload.props.onChange({ target: { value: '2000' } }) // a later slider change, while the newer save is still out
+    await m.flush()
+    expect(state.writes.at(-1)).toEqual({ upload_kbps_limit: 2000 })
+    resolves[1]() // the newer save lands
+    await m.flush()
+    expect(state.config.pause_sync).toBe(false)
+    expect(state.writes).toEqual([{ pause_sync: true }, { pause_sync: false }, { upload_kbps_limit: 2000 }])
   })
 
   test('when both fail, the newer value is the one that is retried, whatever order they fail in', async () => {
