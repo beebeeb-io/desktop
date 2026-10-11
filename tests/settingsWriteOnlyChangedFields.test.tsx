@@ -113,6 +113,57 @@ describe('Bandwidth page', () => {
   })
 })
 
+// Fix round 4 (lead ruling [1889-order]): the page sends its writes one at a time, in the order the changes were made.
+// Two saves in flight at once land in whatever order the IPC and the config lock deliver them, so "Pause on" then
+// "Pause off" sent quickly could end paused on the disk: the ticket's lost-setting class, through ordering.
+describe('Bandwidth page, writes are sent in order', () => {
+  const formatLimit = loadComponent('pages/Bandwidth.tsx', 'formatLimit', {})
+  const bindings = {
+    invoke,
+    formatLimit,
+    DEFAULT_CONFIG: wholeConfig,
+    SLIDER_MAX_KBPS: 100_000,
+    DEBOUNCE_MS: 500,
+    setTimeout: (fn: () => void) => {
+      queueMicrotask(fn)
+      return 0
+    },
+    clearTimeout() {},
+  }
+
+  test('two Pause toggles back to back, the first request resolving LAST: the disk ends with the second', async () => {
+    const { state } = disk()
+    let releaseFirst!: () => void
+    const firstOut = new Promise<void>((resolve) => { releaseFirst = resolve })
+    let calls = 0
+    const land = (config: any) => { state.config = { ...state.config, ...structuredClone(config) } }
+    const m = mount('pages/Bandwidth.tsx', 'Bandwidth', {
+      backend: {
+        get_desktop_config: () => structuredClone(state.config),
+        set_desktop_config: async ({ config }: any) => {
+          calls += 1
+          state.writes.push(structuredClone(config)) // the request went out
+          if (calls === 1) await firstOut // the first one is slow: it lands after anything sent beside it
+          land(config)
+        },
+      },
+      bindings,
+    })
+    mounted.push(m)
+    await m.flush()
+    const pause = m.elements().find((el) => el.type === 'input' && el.props.type === 'checkbox')!
+    pause.props.onChange({ target: { checked: true } })
+    pause.props.onChange({ target: { checked: false } })
+    await m.flush()
+    // The second toggle waits for the first request; it is not sent beside it.
+    expect(state.writes).toEqual([{ pause_sync: true }])
+    releaseFirst()
+    await m.flush()
+    expect(state.writes).toEqual([{ pause_sync: true }, { pause_sync: false }])
+    expect(state.config.pause_sync).toBe(false)
+  })
+})
+
 // Fix round 2 (N1): the retry of a failed write must never put an older value over a newer one that already went out.
 describe('Bandwidth page, a failed write and a newer one', () => {
   const formatLimit = loadComponent('pages/Bandwidth.tsx', 'formatLimit', {})
@@ -160,62 +211,64 @@ describe('Bandwidth page, a failed write and a newer one', () => {
     return { state, m, rejects, resolves }
   }
 
-  test('an older write that fails after a newer one landed does not come back over it', async () => {
+  // The writes go one at a time (fix round 4), so a newer change waits behind an older request that is still out. The
+  // retry rule of fix round 2 still decides what a failed request puts back: never a field a later change has touched.
+  test('an older write that fails while a newer one waits behind it does not come back over it', async () => {
     const { state, m, rejects } = pendingWrites(1)
     await m.flush()
     const pause = m.elements().find((el) => el.type === 'input' && el.props.type === 'checkbox')!
     const upload = m.elements().find((el) => el.type === 'input' && el.props.type === 'range')!
     pause.props.onChange({ target: { checked: true } }) // write A: pause, in flight
-    pause.props.onChange({ target: { checked: false } }) // write B: resume, goes out and lands
+    pause.props.onChange({ target: { checked: false } }) // write B: resume, waits behind A
+    await m.flush()
+    expect(state.writes).toEqual([{ pause_sync: true }])
+    rejects[0](new Error('disk full')) // A fails; B goes out and lands
     await m.flush()
     expect(state.writes).toEqual([{ pause_sync: true }, { pause_sync: false }])
-    rejects[0](new Error('disk full')) // A fails after B landed
-    await m.flush()
     upload.props.onChange({ target: { value: '2000' } }) // the next write
     await m.flush()
     expect(state.writes.at(-1)).toEqual({ upload_kbps_limit: 2000 })
     expect(state.config.pause_sync).toBe(false)
   })
 
-  // PR #124's review thread, exactly: two saves overlap (Pause toggled twice), the older request fails after the newer one
-  // already captured and cleared the unsent patch, and a later slider change must not resend the older value over the
-  // newer successful choice. Here the newer save is still in flight when the older one fails and the slider moves.
-  test('the review thread: toggle Pause twice, the older request fails while the newer is in flight, then a slider moves', async () => {
+  // PR #124's review thread, exactly: Pause toggled twice, the older request fails, and a later slider change must not
+  // resend the older value over the newer successful choice. The newer save is the request in flight when the slider moves.
+  test('the review thread: toggle Pause twice, the older request fails, then a slider moves while the newer is out', async () => {
     const { state, m, rejects, resolves } = pendingWrites(2)
     await m.flush()
     const pause = m.elements().find((el) => el.type === 'input' && el.props.type === 'checkbox')!
     const upload = m.elements().find((el) => el.type === 'input' && el.props.type === 'range')!
     pause.props.onChange({ target: { checked: true } }) // the older save: pause
-    pause.props.onChange({ target: { checked: false } }) // the newer save: resume; both are in flight now
+    pause.props.onChange({ target: { checked: false } }) // the newer save: resume
+    await m.flush()
+    rejects[0](new Error('disk full')) // the older request fails; the newer goes out
     await m.flush()
     expect(state.writes).toEqual([{ pause_sync: true }, { pause_sync: false }])
-    rejects[0](new Error('disk full')) // the older request fails; the newer has already cleared the unsent patch
-    await m.flush()
     upload.props.onChange({ target: { value: '2000' } }) // a later slider change, while the newer save is still out
     await m.flush()
-    expect(state.writes.at(-1)).toEqual({ upload_kbps_limit: 2000 })
-    resolves[1]() // the newer save lands
+    expect(state.writes).toHaveLength(2) // it waits its turn
+    resolves[1]() // the newer save lands; the slider's write follows
     await m.flush()
-    expect(state.config.pause_sync).toBe(false)
     expect(state.writes).toEqual([{ pause_sync: true }, { pause_sync: false }, { upload_kbps_limit: 2000 }])
+    expect(state.config.pause_sync).toBe(false)
   })
 
-  test('when both fail, the newer value is the one that is retried, whatever order they fail in', async () => {
-    for (const order of [[0, 1], [1, 0]]) {
-      const { state, m, rejects } = pendingWrites(2)
-      await m.flush()
-      const pause = m.elements().find((el) => el.type === 'input' && el.props.type === 'checkbox')!
-      const upload = m.elements().find((el) => el.type === 'input' && el.props.type === 'range')!
-      pause.props.onChange({ target: { checked: true } })
-      pause.props.onChange({ target: { checked: false } })
-      await m.flush()
-      for (const at of order) rejects[at](new Error('disk full'))
-      await m.flush()
-      upload.props.onChange({ target: { value: '2000' } })
-      await m.flush()
-      expect(state.writes.at(-1)).toEqual({ pause_sync: false, upload_kbps_limit: 2000 })
-      expect(state.config.pause_sync).toBe(false)
-    }
+  test('when both fail, the newer value is the one that is retried with the next write', async () => {
+    const { state, m, rejects } = pendingWrites(2)
+    await m.flush()
+    const pause = m.elements().find((el) => el.type === 'input' && el.props.type === 'checkbox')!
+    const upload = m.elements().find((el) => el.type === 'input' && el.props.type === 'range')!
+    pause.props.onChange({ target: { checked: true } })
+    pause.props.onChange({ target: { checked: false } })
+    await m.flush()
+    rejects[0](new Error('disk full')) // the older fails; the newer goes out
+    await m.flush()
+    rejects[1](new Error('disk full')) // and fails too
+    await m.flush()
+    upload.props.onChange({ target: { value: '2000' } })
+    await m.flush()
+    expect(state.writes.at(-1)).toEqual({ pause_sync: false, upload_kbps_limit: 2000 })
+    expect(state.config.pause_sync).toBe(false)
   })
 })
 

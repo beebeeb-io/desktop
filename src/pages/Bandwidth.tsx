@@ -66,6 +66,11 @@ export default function Bandwidth() {
   // never write an older value over a newer one.
   const changeNumber = useRef(0)
   const lastChange = useRef<Record<string, number>>({})
+  // The writes are sent one at a time, in the order the changes were made (task 1889, fix round 4). Two requests in
+  // flight at once land in whatever order the IPC and the config lock deliver them, so "Pause on" then "Pause off" sent
+  // quickly could end paused on the disk. A write is a local file replace that takes milliseconds, so a switch waiting
+  // behind a slider's write is not something a person sees.
+  const sending = useRef<Promise<void>>(Promise.resolve())
 
   useEffect(() => {
     invoke<DesktopConfig>('get_desktop_config')
@@ -96,24 +101,30 @@ export default function Bandwidth() {
       const body = unsent.current
       unsent.current = {}
       const fields = Object.keys(body) as Array<keyof DesktopConfig>
+      if (fields.length === 0) return // an earlier write already carried everything
       const changeOf = Object.fromEntries(fields.map((field) => [field, lastChange.current[field]]))
-      invoke('set_desktop_config', { config: body }).catch((e: unknown) => {
-        // The change did not reach the file: it goes out again with the next write, unless a later change has touched
-        // the same field since (that one is newer, and either already went out or is waiting to).
-        const retry: Partial<Record<keyof DesktopConfig, unknown>> = {}
-        for (const field of fields) {
-          if (lastChange.current[field] === changeOf[field]) retry[field] = body[field]
-        }
-        unsent.current = { ...unsent.current, ...(retry as Partial<DesktopConfig>) }
-        console.warn('set_desktop_config failed:', e)
-        showToast({
-          id: 'bandwidth-config-save-error',
-          variant: 'error',
-          title: 'Bandwidth settings were not saved',
-          message: e instanceof Error ? e.message : String(e),
-          durationMs: null,
-        })
-      })
+      const send = () =>
+        invoke('set_desktop_config', { config: body }).then(
+          () => undefined,
+          (e: unknown) => {
+            // The change did not reach the file: it goes out again with the next write, unless a later change has
+            // touched the same field since (that one is newer, and either went out already or is waiting its turn).
+            const retry: Partial<Record<keyof DesktopConfig, unknown>> = {}
+            for (const field of fields) {
+              if (lastChange.current[field] === changeOf[field]) retry[field] = body[field]
+            }
+            unsent.current = { ...unsent.current, ...(retry as Partial<DesktopConfig>) }
+            console.warn('set_desktop_config failed:', e)
+            showToast({
+              id: 'bandwidth-config-save-error',
+              variant: 'error',
+              title: 'Bandwidth settings were not saved',
+              message: e instanceof Error ? e.message : String(e),
+              durationMs: null,
+            })
+          },
+        )
+      sending.current = sending.current.then(send)
     }
     if (immediate) fire()
     else writeTimer.current = setTimeout(fire, DEBOUNCE_MS)
