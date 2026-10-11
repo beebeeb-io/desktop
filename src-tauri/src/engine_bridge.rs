@@ -673,8 +673,8 @@ impl OperationFailureClass {
 /// - `Locked` (the vault, or SQLite busy) and `Quota`: transient;
 /// - `Retryable` with an HTTP status: transient for 408, 425, 429 and every 5xx, counted for any
 ///   other (400, 404, 410, 413, 422, a 409 that is not a stale base, ...);
-/// - `Retryable` whose upload session was gone and has been abandoned ([`SessionAbandoned`]):
-///   transient, because the next attempt starts a fresh upload;
+/// - `Retryable` whose upload session the server reaped (404, 410) and the attempt abandoned
+///   ([`SessionAbandoned`]): transient, because the next attempt starts a fresh upload;
 /// - `Retryable` with no HTTP status: transient only when the chain carries a transport failure
 ///   (see [`has_transport_cause`]); a local error is counted;
 /// - `Auth` and `Permission` never reach it (they pause and park): `false`.
@@ -760,9 +760,9 @@ impl std::fmt::Display for StagedCopyGone {
 
 impl std::error::Error for StagedCopyGone {}
 
-/// The attempt found its upload session gone and abandoned it (`upload_session_is_gone`): the next
-/// attempt starts a fresh upload, so for a File Provider write the failure is transient, never a
-/// counted one (spec §8.4). It shows, and has as its source, the failure it wraps, so every reading
+/// The attempt found its upload session reaped (the server answered 404 or 410) and abandoned it:
+/// the next attempt starts a fresh upload, so for a File Provider write the failure is transient,
+/// never a counted one (spec §8.4). A 400 abandons the session too, but stays counted. It shows, and has as its source, the failure it wraps, so every reading
 /// of the error's text and status stays as it was.
 #[derive(Debug)]
 struct SessionAbandoned(anyhow::Error);
@@ -1700,14 +1700,23 @@ impl EngineBridge {
             }
             Err(error) => {
                 if upload_session_is_gone(&error) {
+                    let status = error_http_status(&error);
+                    // The status and a category only: the error's text carries the request URL
+                    // with the session id (spec §11).
                     tracing::warn!(
                         op_id = %op.op_id,
                         file_id = %session.server_file_id,
-                        error = %error,
+                        status,
+                        reason = error_category(error.as_ref()),
                         "upload: server no longer accepts the persisted session — abandoning it; the retry starts a fresh upload"
                     );
                     self.abandon_upload_session(&session).await?;
-                    return Err(anyhow::Error::new(SessionAbandoned(error)));
+                    // §8.4: a session the server reaped (404, 410) is not a counted failure: the
+                    // next attempt starts a fresh upload. A 400 is counted, so a server that
+                    // refuses every fresh session still parks the write.
+                    if matches!(status, Some(404 | 410)) {
+                        return Err(anyhow::Error::new(SessionAbandoned(error)));
+                    }
                 }
                 Err(error)
             }
@@ -19868,6 +19877,132 @@ mod tests {
             state.latest_plaintext("reaped", master_key),
             b"saved through the outage"
         );
+    }
+
+    /// Spec §8.4 (fix round 5): a resumed session the server answers with 400 is abandoned, so the
+    /// next attempt starts a fresh upload, but the 400 is counted: one attempt. Only a reaped
+    /// session (404, 410) is not.
+    #[tokio::test]
+    async fn a_resumed_sessions_400_is_counted_and_the_next_attempt_starts_fresh() {
+        let master_key = [169u8; 32];
+        let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_row(&bridge, &server, "bad-session");
+        refuse(
+            &server,
+            Refused::Chunk,
+            "bad-session",
+            ("503 Service Unavailable", json!({ "error": "unavailable" })),
+        );
+        fp_save(&bridge, dir.path(), "bad-session", "notes.txt", b"a save", "1");
+        let op_id = bridge
+            .db
+            .list_operations_for_file("bad-session")
+            .unwrap()
+            .remove(0)
+            .op_id;
+        let mut now = now_secs();
+        // An outage first: the count sits at the backoff's cap, where a transient failure no
+        // longer moves it, so only a counted failure can.
+        failing_passes(&bridge, &sync_root, "bad-session", 8, &mut now).await;
+        let before = bridge.db.get_operation(&op_id).unwrap().unwrap().attempts;
+        assert_eq!(before, backoff_cap_attempts(), "precondition: at the backoff's cap");
+        assert!(
+            bridge.db.get_upload_resume(&op_id).unwrap().is_some(),
+            "precondition: a session to resume"
+        );
+        refuse(
+            &server,
+            Refused::Chunk,
+            "bad-session",
+            ("400 Bad Request", json!({ "error": "bad_request" })),
+        );
+        bridge.process_due_operations(&sync_root, now + 10_000).await.unwrap();
+        let op = bridge.db.get_operation(&op_id).unwrap().unwrap();
+        assert_eq!(op.attempts, before + 1, "the 400 is counted");
+        assert!(
+            bridge.db.get_upload_resume(&op_id).unwrap().is_none(),
+            "the session was abandoned"
+        );
+        stop_refusing(&server, "bad-session");
+        bridge.process_due_operations(&sync_root, now + 20_000).await.unwrap();
+        assert!(
+            bridge.db.list_operations_for_file("bad-session").unwrap().is_empty(),
+            "landed on a fresh upload"
+        );
+        let state = server.finish();
+        assert_eq!(state.inits.len(), 2, "the next attempt started fresh");
+        assert_eq!(state.latest_plaintext("bad-session", master_key), b"a save");
+    }
+
+    /// Spec §8.4 (fix round 5): a server that answers 400 to every fresh session still parks the
+    /// write when its attempts are used up.
+    #[tokio::test]
+    async fn a_server_that_refuses_every_session_with_400_parks_the_write() {
+        let (dir, sync_root, server, bridge) = rule3_setup([170u8; 32]);
+        seed_uploaded_row(&bridge, &server, "every-400");
+        refuse(
+            &server,
+            Refused::Chunk,
+            "every-400",
+            ("400 Bad Request", json!({ "error": "bad_request" })),
+        );
+        fp_save(&bridge, dir.path(), "every-400", "notes.txt", b"a save", "1");
+        let op_id = bridge.db.list_operations_for_file("every-400").unwrap().remove(0).op_id;
+        let mut now = now_secs();
+        let mut parked_at = None;
+        for pass in 1..=30 {
+            bridge.process_due_operations(&sync_root, now).await.unwrap();
+            now += 10_000;
+            let op = bridge.db.get_operation(&op_id).unwrap().unwrap();
+            if parked_at.is_none() && op.attempts >= op.max_attempts {
+                parked_at = Some(pass);
+            }
+        }
+        assert_eq!(parked_at, Some(25), "parked when its attempts were used up");
+        assert_eq!(
+            bridge.db.get_file("every-400").unwrap().unwrap().status,
+            FileStatus::Error
+        );
+        assert_eq!(
+            server.finish().inits.len(),
+            25,
+            "a fresh session per attempt, then nothing"
+        );
+    }
+
+    /// Spec §11 (fix round 5): the gone-session line logs ids and a category, never the error's
+    /// text (it carries the request URL with the session id).
+    #[tokio::test]
+    async fn the_gone_session_line_logs_a_category_not_its_text() {
+        let (dir, sync_root, server, bridge) = rule3_setup([171u8; 32]);
+        seed_uploaded_row(&bridge, &server, "gone-line");
+        refuse(
+            &server,
+            Refused::Chunk,
+            "gone-line",
+            ("503 Service Unavailable", json!({ "error": "unavailable" })),
+        );
+        fp_save(&bridge, dir.path(), "gone-line", "notes.txt", b"a save", "1");
+        let now = now_secs();
+        bridge.process_due_operations(&sync_root, now).await.unwrap();
+        {
+            let mut s = server.state.lock().unwrap();
+            s.refuse_chunk_with.remove("gone-line");
+            s.sessions.clear();
+        }
+        let logs = capture_logs_async(async {
+            bridge.process_due_operations(&sync_root, now + 10_000).await.unwrap();
+        })
+        .await;
+        let line = assert_clean_line(
+            &logs,
+            "server no longer accepts the persisted session",
+            &["op_id", "file_id", "reason", "status"],
+            dir.path(),
+        );
+        assert!(line.contains("status=404"), "{line}");
+        assert!(!line.contains("error="), "{line}");
+        drop(server.finish());
     }
 
     /// The error `reqwest` gives for `status`, from a one-request server: what the upload calls
