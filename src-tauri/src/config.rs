@@ -392,12 +392,21 @@ impl Default for DesktopConfig {
 /// except `sync_root`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DesktopSettings {
-    pub upload_kbps_limit: u64,
-    pub download_kbps_limit: u64,
-    pub pause_sync: bool,
-    pub notify_conflicts: bool,
-    pub notify_sync_complete: bool,
-    pub notify_quota_warnings: bool,
+    // Task 1889, fix round 1 (M5): these six are merge-only like the fields below. A write carries the fields that
+    // changed; one it leaves out (`None`) keeps the value on the file. A Settings window that sent back the whole object
+    // it read on open used to undo a pause made from the tray meanwhile. A read (`From<&DesktopConfig>`) always fills them.
+    #[serde(default)]
+    pub upload_kbps_limit: Option<u64>,
+    #[serde(default)]
+    pub download_kbps_limit: Option<u64>,
+    #[serde(default)]
+    pub pause_sync: Option<bool>,
+    #[serde(default)]
+    pub notify_conflicts: Option<bool>,
+    #[serde(default)]
+    pub notify_sync_complete: Option<bool>,
+    #[serde(default)]
+    pub notify_quota_warnings: Option<bool>,
     /// Sync mode chosen in the Windows first-run wizard. `None` when not
     /// yet set (first run). One of `"everything"`, `"smart"`, `"custom"`,
     /// `"online_only"`.
@@ -428,12 +437,12 @@ pub struct DesktopSettings {
 impl From<&DesktopConfig> for DesktopSettings {
     fn from(c: &DesktopConfig) -> Self {
         Self {
-            upload_kbps_limit: c.upload_kbps_limit,
-            download_kbps_limit: c.download_kbps_limit,
-            pause_sync: c.pause_sync,
-            notify_conflicts: c.notify_conflicts,
-            notify_sync_complete: c.notify_sync_complete,
-            notify_quota_warnings: c.notify_quota_warnings,
+            upload_kbps_limit: Some(c.upload_kbps_limit),
+            download_kbps_limit: Some(c.download_kbps_limit),
+            pause_sync: Some(c.pause_sync),
+            notify_conflicts: Some(c.notify_conflicts),
+            notify_sync_complete: Some(c.notify_sync_complete),
+            notify_quota_warnings: Some(c.notify_quota_warnings),
             sync_mode: c.sync_mode.clone(),
             metered: c.metered,
             files_on_demand: c.files_on_demand,
@@ -448,14 +457,27 @@ impl From<&DesktopConfig> for DesktopSettings {
 impl DesktopConfig {
     /// Overlay a settings DTO onto this config without touching
     /// `sync_root`. Used by the `set_desktop_config` IPC to merge a
-    /// settings save into whatever's already on disk.
+    /// settings save into whatever's already on disk. Only the fields the
+    /// DTO carries (`Some`) are written; every other field keeps its value.
     pub fn apply_settings(&mut self, s: DesktopSettings) {
-        self.upload_kbps_limit = s.upload_kbps_limit;
-        self.download_kbps_limit = s.download_kbps_limit;
-        self.pause_sync = s.pause_sync;
-        self.notify_conflicts = s.notify_conflicts;
-        self.notify_sync_complete = s.notify_sync_complete;
-        self.notify_quota_warnings = s.notify_quota_warnings;
+        if let Some(limit) = s.upload_kbps_limit {
+            self.upload_kbps_limit = limit;
+        }
+        if let Some(limit) = s.download_kbps_limit {
+            self.download_kbps_limit = limit;
+        }
+        if let Some(paused) = s.pause_sync {
+            self.pause_sync = paused;
+        }
+        if let Some(notify) = s.notify_conflicts {
+            self.notify_conflicts = notify;
+        }
+        if let Some(notify) = s.notify_sync_complete {
+            self.notify_sync_complete = notify;
+        }
+        if let Some(notify) = s.notify_quota_warnings {
+            self.notify_quota_warnings = notify;
+        }
         // Only overwrite sync_mode if the incoming settings carries one;
         // a plain bandwidth/notification save should not clear a persisted mode.
         if s.sync_mode.is_some() {
@@ -1391,6 +1413,52 @@ mod tests {
         // `update_at` says the same thing as a string.
         let as_string = DesktopConfig::update_at(&path, |_| (true, ()));
         assert_eq!(as_string, Err(write.expect_err("failed").into_message()));
+    }
+
+    // ── Task 1889 fix round 1 (M5) — a settings write carries only the fields that changed ──────────────
+
+    /// The Settings windows used to send back the whole object they read when they opened, so changing a speed after a
+    /// pause from the tray wrote the old `pause_sync` over the pause. A write now carries only what changed; every field
+    /// that is left out keeps the value on the file.
+    #[test]
+    fn test_1889_m5_a_settings_write_with_one_field_changes_only_that_field() {
+        let patch: DesktopSettings =
+            serde_json::from_str(r#"{ "download_kbps_limit": 5000 }"#).expect("one field is a write");
+        let mut cfg = DesktopConfig {
+            upload_kbps_limit: 111,
+            pause_sync: true,
+            notify_conflicts: false,
+            notify_sync_complete: true,
+            notify_quota_warnings: false,
+            ..DesktopConfig::default()
+        };
+        cfg.apply_settings(patch);
+        assert_eq!(cfg.download_kbps_limit, 5000, "the field that was sent");
+        assert_eq!(cfg.upload_kbps_limit, 111);
+        assert!(cfg.pause_sync, "a pause made elsewhere is not undone");
+        assert!(!cfg.notify_conflicts && cfg.notify_sync_complete && !cfg.notify_quota_warnings);
+    }
+
+    #[test]
+    fn test_1889_m5_a_whole_settings_object_still_writes_every_field() {
+        let wanted = DesktopConfig {
+            upload_kbps_limit: 7,
+            download_kbps_limit: 8,
+            pause_sync: true,
+            notify_conflicts: false,
+            notify_sync_complete: true,
+            notify_quota_warnings: false,
+            ..DesktopConfig::default()
+        };
+        let json = serde_json::to_string(&DesktopSettings::from(&wanted)).expect("serialize");
+        let back: DesktopSettings = serde_json::from_str(&json).expect("a whole object parses");
+        let mut cfg = DesktopConfig::default();
+        cfg.apply_settings(back);
+        assert_eq!(
+            (cfg.upload_kbps_limit, cfg.download_kbps_limit, cfg.pause_sync),
+            (7, 8, true)
+        );
+        assert!(!cfg.notify_conflicts && cfg.notify_sync_complete && !cfg.notify_quota_warnings);
     }
 
     // ── Spec 2026-10-06 (macOS Finder setup reconciler) §9 ─────────────────

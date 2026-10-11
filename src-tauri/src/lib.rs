@@ -31564,7 +31564,7 @@ mod config_write_pin_tests {
             |_| {},
             || async {
                 let mut settings = crate::config::DesktopSettings::from(&DesktopConfig::default());
-                settings.upload_kbps_limit = 1234;
+                settings.upload_kbps_limit = Some(1234);
                 super::set_desktop_config(settings).expect("set_desktop_config");
             },
         )
@@ -31923,6 +31923,31 @@ mod config_write_pin_tests {
         assert!(super::persist_sync_paused_at(&path, &flag, true).is_err());
         assert!(!path.exists(), "nothing was written");
         assert!(!flag.load(Ordering::Relaxed), "and the flag did not move");
+    }
+
+    /// Fix round 1 (M5), end to end through the real commands: the window opens (its copy has `pause_sync: false`), the tray
+    /// pauses, the window changes a speed and sends only that field. The pause stays.
+    #[tokio::test]
+    async fn test_1889_m5_a_speed_changed_after_a_tray_pause_leaves_the_pause() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        crate::config::CONFIG_DIR_OVERRIDE
+            .scope(dir.path().to_path_buf(), async {
+                let path = DesktopConfig::path().expect("the scoped config path");
+                let window_copy = super::get_desktop_config().expect("the window reads on open");
+                assert_eq!(window_copy.pause_sync, Some(false));
+
+                let flag = std::sync::atomic::AtomicBool::new(false);
+                super::persist_sync_paused_at(&path, &flag, true).expect("the tray pauses");
+
+                let patch: crate::config::DesktopSettings =
+                    serde_json::from_str(r#"{ "upload_kbps_limit": 2000 }"#).expect("the window sends one field");
+                super::set_desktop_config(patch).expect("the speed is saved");
+
+                let on_disk = DesktopConfig::load_from(&path).expect("reads back");
+                assert!(on_disk.pause_sync, "the tray's pause survived the speed change");
+                assert_eq!(on_disk.upload_kbps_limit, 2000);
+            })
+            .await;
     }
 
     /// The scanners must be able to go red: each shape, written out, is found; the real shapes are not.

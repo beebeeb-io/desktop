@@ -202,6 +202,12 @@ Settings → Sync until dismissed (`kept_unsynced_folder` in `desktop.toml`; com
 read, the change and the write under the lock, so a writer cannot put back a copy it loaded earlier. A flow
 that keeps a copy to READ across slow work (the Windows and Linux install and Repair commands) writes through
 `copy.update_held(|held| …)`, which applies the change to the file as it is now and then refreshes the copy.
+A settings write (`set_desktop_config`) is merge-only: the six speed, pause and notification fields are options like
+`sync_mode`, and a field the window leaves out keeps its value on the file, so a Settings window never sends back the
+whole object it read on open (it would undo a pause made from the tray meanwhile). Every sender writes only what changed
+(`tests/settingsWriteOnlyChangedFields.test.tsx`). The in-memory pause flag follows the file under the same lock
+(`persist_sync_paused_at`, `rehydrate_sync_paused`). A flow that holds a copy holds a `HeldConfig`, which is read-only
+(no `DerefMut`).
 Nothing inside an update closure may call another update (the lock is not re-entrant). The pins are
 `test_1889_*` in `config.rs`, `finder_removal.rs` and `lib.rs` (`config_write_pin_tests`). The 1882 source pins
 read through `lf()`/`slash()` in `finder_removal.rs`, so they run on a Windows checkout

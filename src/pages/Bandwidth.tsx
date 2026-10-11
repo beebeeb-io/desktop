@@ -58,6 +58,9 @@ export default function Bandwidth() {
   const { showToast } = useToast()
   const [config, setConfig] = useState<DesktopConfig | null>(null)
   const writeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // The fields changed since the last write went out. A write carries ONLY these (task 1889, fix round 1 M5): the
+  // config this page read on mount is never sent back, so a pause made from the tray meanwhile is not undone.
+  const unsent = useRef<Partial<DesktopConfig>>({})
 
   useEffect(() => {
     invoke<DesktopConfig>('get_desktop_config')
@@ -80,10 +83,15 @@ export default function Bandwidth() {
     }
   }, [showToast])
 
-  const writeBack = (next: DesktopConfig, immediate = false) => {
+  const writeBack = (patch: Partial<DesktopConfig>, immediate = false) => {
     if (writeTimer.current) clearTimeout(writeTimer.current)
+    unsent.current = { ...unsent.current, ...patch }
     const fire = () => {
-      invoke('set_desktop_config', { config: next }).catch((e: unknown) => {
+      const body = unsent.current
+      unsent.current = {}
+      invoke('set_desktop_config', { config: body }).catch((e: unknown) => {
+        // The change did not reach the file: it goes out again with the next write, under any newer value.
+        unsent.current = { ...body, ...unsent.current }
         console.warn('set_desktop_config failed:', e)
         showToast({
           id: 'bandwidth-config-save-error',
@@ -103,7 +111,7 @@ export default function Bandwidth() {
   const update = (patch: Partial<DesktopConfig>, immediate = false) => {
     const next = { ...config, ...patch }
     setConfig(next)
-    writeBack(next, immediate)
+    writeBack(patch, immediate)
   }
 
   return (
