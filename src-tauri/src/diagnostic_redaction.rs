@@ -1331,7 +1331,7 @@ mod tests {
         );
     }
 
-    /// [t5-rr] obs 3: a staged copy that exists but cannot be read (permission, I/O, not a
+    /// A staged copy that exists but cannot be read (permission, I/O, not a
     /// regular file) has its own code, distinct from a missing copy, never `Other`.
     #[test]
     fn an_unreadable_staged_copy_has_its_own_code() {

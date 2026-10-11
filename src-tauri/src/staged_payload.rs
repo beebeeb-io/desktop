@@ -107,7 +107,7 @@ pub fn remove(db: &StateDb, path: &Path) -> anyhow::Result<()> {
 }
 /// [`remove`], for a copy whose upload is done: a failure keeps the journal row, so a later
 /// start or sign-out still finds the copy. The line logs the error's category only; its text
-/// can carry a path (spec §11, plan Spec issue 15).
+/// can carry a path (spec §11).
 pub fn remove_or_log(db: &StateDb, path: &Path) {
     if let Err(e) = remove(db, path) {
         tracing::warn!(

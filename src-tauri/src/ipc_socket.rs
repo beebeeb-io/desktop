@@ -5405,7 +5405,7 @@ mod tests {
         String::from_utf8(bytes).unwrap()
     }
 
-    /// Review Minor 4: a presentation read that fails (here the one bug row, a held
+    /// A presentation read that fails (here the one bug row, a held
     /// write id without its base) presents the item from its contract, as round 3
     /// did: never a spurious "0", and the contract's capabilities are kept.
     #[test]
@@ -5582,7 +5582,7 @@ mod tests {
         assert!(second.contains("held_back=0"), "{second}");
     }
 
-    /// Task 4 parked item: a row whose presentation read keeps failing is built again by the
+    /// A row whose presentation read keeps failing is built again by the
     /// change feed, every enumeration and every item lookup. It is logged once per item per
     /// interval, and the next line says how many failed reads went unlogged meanwhile.
     #[test]

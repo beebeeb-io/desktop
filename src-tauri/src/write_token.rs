@@ -94,7 +94,7 @@ pub struct BaseFacts {
     /// An op carries `held.write_id`, in any state.
     pub held_write_queued: bool,
     /// A create of this file is queued, in any state, and the server has no version of
-    /// it yet: the row is provisional (plan Spec issue 4).
+    /// it yet: the row is provisional (§6.1 rule 2).
     pub create_queued: bool,
     /// Resolved bases of this file's queued uploads minted by this code.
     pub minted_resolved_bases: Vec<i64>,

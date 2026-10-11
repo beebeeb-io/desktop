@@ -811,7 +811,7 @@ fn injected_landing_failure() -> Option<rusqlite::Error> {
     })
 }
 
-/// Who queued a File Provider upload (plan Spec issue 2).
+/// Who queued a File Provider upload: this build's accept, or an earlier build (spec §10.2).
 #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteOrigin {
@@ -849,7 +849,7 @@ pub struct FinderWrite {
     pub origin: WriteOrigin,
     pub after_write_id: Option<String>,
     /// 0: the base is known. n >= 1: waiting for a snapshot, after n - 1
-    /// successful snapshots that did not report the file (plan Spec issue 3).
+    /// successful snapshots that gave no base for the file (spec §6.3.3).
     pub base_pending: i64,
 }
 
@@ -1294,7 +1294,7 @@ fn hand_over_conn(
         .as_deref()
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
         .is_some_and(|m| m["operation"].as_str() == Some("create_file"));
-    // Plan Spec issue 1: a Finder create is `upload_version` with `"operation": "create_file"`.
+    // A Finder create is `upload_version` with `"operation": "create_file"`.
     // N takes W's create: W's kind, parent and path, and N's metadata as a create.
     let (kind, parent_id, target_path, metadata_json) = if w_is_create {
         let mut metadata: serde_json::Value = n
@@ -1897,8 +1897,8 @@ impl StateDb {
         // Task 1697: which local write created the row (watcher paths set this;
         // Finder-queue paths do not) — the change-log recorder reads it.
         ensure_column(&conn, "files", "creator_for_fp", "TEXT")?;
-        // Task 1873 round 4 (spec 2026-10-09 §5.2): the write token. Additive and
-        // nullable, no backfill; only the dedicated round-4 functions write them.
+        // Spec 2026-10-09 §5.2: the write token. Additive and nullable, no backfill;
+        // only the dedicated functions write them.
         ensure_column(&conn, "files", "held_write_id", "TEXT")?;
         ensure_column(&conn, "files", "held_base", "INTEGER")?;
         ensure_column(&conn, "files", "held_version", "INTEGER")?;
@@ -3250,7 +3250,7 @@ impl StateDb {
 
     /// §5.4 row 10 (m-9): a restore from this Mac. Its version becomes current, so the
     /// system re-downloads; the held columns are cleared only when no File Provider
-    /// write of the file is queued (plan Spec issue 5). One transaction.
+    /// write of the file is queued. One transaction.
     ///
     /// The content changed on the server whatever the reply holds: a reply without a
     /// version (no server branch answers so today) still records the change, and asks
@@ -4935,7 +4935,7 @@ impl StateDb {
                 Some(pred) if pred.origin != Some(WriteOrigin::Minted) => {
                     return park_in_claim(tx, &op, ParkReason::PredecessorParked, took_over, now);
                 }
-                // A recorded completion never parks (§8.6 rule 6, Task 7): wait for its landing.
+                // A recorded completion never parks (§8.6 rule 6): wait for its landing.
                 Some(pred) if pred.completed => return finish_wait(tx, took_over),
                 Some(pred) => {
                     hand_over_conn(&tx, op_id, &current.write_id, &op, &pred)?;
@@ -4951,7 +4951,7 @@ impl StateDb {
                         params![op_id],
                         pending_operation_from_row,
                     )?;
-                    // Ruling [t5-c2]: W parked because its base cannot be known. This op now
+                    // W parked because its base cannot be known. This op now
                     // carries that base, so it parks the same way here, and no request goes
                     // out with it. Keyed on W's recorded reason, never on an inherited 0.
                     if pred.park_reason.as_deref() == Some(ParkReason::BaseUnknown.as_str()) {
@@ -5314,7 +5314,7 @@ impl StateDb {
         .unwrap();
     }
 
-    /// T6, T62: an alias the id swap would record (spec §7.1); Task 8 writes them for real.
+    /// T6, T62: an alias the id swap would record (spec §7.1), without a landing.
     #[cfg(test)]
     pub(crate) fn insert_alias_for_test(&self, provisional_id: &str, server_id: &str, created_at: i64) {
         let conn = self.0.lock().unwrap();
@@ -5325,7 +5325,7 @@ impl StateDb {
         .unwrap();
     }
 
-    /// Review Minor 4: writes the held pair as given, including the half-set row
+    /// Writes the held pair as given, including the half-set row
     /// (a write id without its base) that no writer produces and every read refuses.
     #[cfg(test)]
     pub(crate) fn set_held_pair_for_test(&self, file_id: &str, write_id: Option<&str>, base: Option<i64>) {
@@ -5355,7 +5355,7 @@ impl StateDb {
         .unwrap();
     }
 
-    /// M19: a resume row whose `complete` answered (spec §8.6 rule 1; Task 7 records it).
+    /// A resume row whose `complete` answered (spec §8.6 rule 1), without an upload.
     #[cfg(test)]
     pub(crate) fn set_completed_for_test(&self, op_id: &str, version: i64) {
         let conn = self.0.lock().unwrap();
@@ -8050,7 +8050,7 @@ mod tests {
                     .unwrap();
             }
             conn.execute("DROP TABLE id_aliases", []).unwrap();
-            // Round 3 had no index on operation_queue.file_id either.
+            // The earlier schema had no index on operation_queue.file_id either.
             conn.execute("DROP INDEX IF EXISTS idx_operation_queue_file_id", [])
                 .unwrap();
             conn.execute(
@@ -8158,7 +8158,7 @@ mod tests {
         );
     }
 
-    /// The held columns are written together (Task 1 review, Minor 2): the accept sets
+    /// The held columns are written together: the accept sets
     /// `held_write_id` and `held_base` in one statement, and a row with a write id but no
     /// base is an error, never read as a base of 0.
     #[test]
@@ -8553,7 +8553,7 @@ mod tests {
         );
     }
 
-    /// Spec §10.2 with the auth pauses (lead ruling F9): an upload an earlier build queued that is
+    /// Spec §10.2 with the auth pauses (spec 2026-10-06, F9): an upload an earlier build queued that is
     /// paused for `auth` or `key_replaced` is marked like any other and keeps its pause. The marking
     /// adds a write id and the earlier-build origin; it never makes a paused op due and keeps its
     /// attempts and base. A same-account sign-in then resumes only the `auth` one, still marked;
@@ -8810,7 +8810,7 @@ mod tests {
         }
     }
 
-    /// Ruling [mm-c5] (the merge of main): F9's auth resume never makes a parked Finder write due again. That holds
+    /// The sign-in's auth resume (spec 2026-10-06, F9) never makes a parked Finder write due again. That holds
     /// for one its own attempt parked (`stale_base`, `payload_missing`) and for one the snapshot count parked
     /// (`base_unknown`) while it was paused for `auth`, so a parked write is never resumed as if it were only
     /// auth-paused. Each keeps its park: attempts used up, and its reason. Only the auth-paused write that never
@@ -8915,7 +8915,7 @@ mod tests {
         }
     }
 
-    /// Ruling [mm-c5] (the merge of main): the key-replaced re-mark of an auth-paused Finder write keeps the write
+    /// The key-replaced re-mark of an auth-paused Finder write keeps the write
     /// held. Its token still names the bytes the system holds; its op and its staged copy stay, with the copy's
     /// journal row; engine start finds nothing to unlink; and the auth resume never makes it due.
     #[test]
@@ -9008,7 +9008,7 @@ mod tests {
         );
     }
 
-    /// S2 (parked from Task 2's review): a park or a pause written under an old claim,
+    /// S2: a park or a pause written under an old claim,
     /// on a row that still exists, changes nothing. The claim id, not the op id alone,
     /// is the key.
     #[test]
@@ -9055,7 +9055,7 @@ mod tests {
     }
 
     /// A pass lists its ops once, so the claim skips an op that paused after the listing, as
-    /// the listing itself would (review Minor 5). It is claimable again once resumed.
+    /// the listing itself would. It is claimable again once resumed.
     #[test]
     fn the_claim_skips_an_op_that_paused_after_the_pass_listed_it() {
         let dir = tempdir().unwrap();
@@ -9084,8 +9084,8 @@ mod tests {
         );
     }
 
-    /// §8.6 rule 6 (Task 5 review, Minor 4): no park path parks an op whose completion is
-    /// recorded. That covers the runner's park (Task 5's immediate stale-base arm, a missing
+    /// §8.6 rule 6: no park path parks an op whose completion is
+    /// recorded. That covers the runner's park (the immediate stale-base arm, a missing
     /// payload, an unknown base), the snapshot count's park and the claim's parks (both
     /// `park_unclaimed_conn`), and the accept's park, which only ever parks the op it inserts.
     #[test]
@@ -9199,7 +9199,7 @@ mod tests {
         );
     }
 
-    /// [t3-review] Minor 2, the landing half: across a mixed pair (one op with a write id and
+    /// Across a mixed pair (one op with a write id and
     /// one without) the landing re-keys but never rebases.
     /// - (a) A Finder create lands while an op without a write id is queued under its
     ///   provisional id: that op moves to the server id, and its base stays `None`.
@@ -9207,7 +9207,7 @@ mod tests {
     ///   the save keeps its base (the server then refuses it and it parks with its bytes),
     ///   while another op without a write id is rebased, as in round 3.
     ///
-    /// Whether a mixed pair should rebase is left to the spec (Task 12).
+    /// The spec states this behaviour (§8.1, the mixed pair).
     #[test]
     fn a_landing_rekeys_a_mixed_pair_but_never_rebases_across_it() {
         let dir = tempdir().unwrap();
@@ -9309,7 +9309,7 @@ mod tests {
         );
     }
 
-    /// Review Important 1 (Windows): a create's finalization journal row is written in the
+    /// Windows: a create's finalization journal row is written in the
     /// landing's own transaction. Either the landing commits with its journal row, or nothing
     /// of it does and the op stays for the retry: here the journal write fails (a row already
     /// holds its key, as a full disk would fail it), and the landing rolls back whole.
@@ -9688,7 +9688,7 @@ mod tests {
         (contract.current_version, contract.current_object_version_id)
     }
 
-    /// Review Minor 1 (spec §5.4 row 10): a restore reply without `version_number`
+    /// Spec §5.4 row 10: a restore reply without `version_number`
     /// still tells the system the content changed, and a snapshot fills the version.
     #[test]
     fn a_restore_reply_without_a_version_records_the_change_and_requests_a_snapshot() {
@@ -9730,7 +9730,7 @@ mod tests {
         );
     }
 
-    /// Review Minor 2: the server's legacy restore branch answers no object version
+    /// The server's legacy restore branch answers no object version
     /// and keeps its own (VER:663-674), so the row keeps its own too.
     #[test]
     fn a_restore_reply_without_an_object_version_keeps_the_rows() {
@@ -11079,7 +11079,7 @@ mod tests {
         );
     }
 
-    /// Task 9 Minor 4: the startup reconcile returns the rows it reset, which is what its log
+    /// The startup reconcile returns the rows it reset, which is what its log
     /// line reports. A row it keeps `Uploading` (its Finder upload resumes) is not counted.
     #[test]
     fn the_startup_reconcile_counts_only_the_rows_it_resets() {
@@ -11204,7 +11204,7 @@ mod tests {
         );
     }
 
-    /// [t9-review] Minor 3 (§9.1, m-8): the settle moves only an `uploading` row. A park never
+    /// §9.1 (m-8): the settle moves only an `uploading` row. A park never
     /// takes a `Trashing` row out of the trash, nor a `Conflict` row out of its conflict, and
     /// records no change for either.
     #[test]

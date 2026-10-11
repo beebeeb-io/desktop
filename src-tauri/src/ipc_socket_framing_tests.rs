@@ -833,7 +833,7 @@ fn a_cached_reply_reports_the_row_as_it_is_now_not_as_it_was() {
         assert_eq!(first["WriteQueued"]["item"]["status"], "uploading");
         // Upload finalization: the row becomes Local at a real server version,
         // stamped with the wall-clock second of the upload, as
-        // `apply_completed_upload` leaves it.
+        // the landing (`StateDb::apply_landing`) leaves it.
         fx.db
             .upsert_file(&FileEntry {
                 file_id: id.clone(),
@@ -875,7 +875,7 @@ fn a_cached_reply_reports_the_row_as_it_is_now_not_as_it_was() {
             retry["WriteQueued"]["item"]["content_version"], first["WriteQueued"]["item"]["content_version"],
             "the queued create's bytes keep the name the first reply gave them: {retry}"
         );
-        // The Linux arm does not mint (Task 3 step 5.7): the reply keeps today's content version.
+        // The Linux arm does not mint: the reply keeps today's content version.
         #[cfg(not(target_os = "macos"))]
         assert_eq!(
             retry["WriteQueued"]["item"]["content_version"], "7",
@@ -1083,7 +1083,7 @@ fn a_queued_modify_replies_with_the_size_of_the_bytes_it_was_handed() {
         crate::write_token::parse_token(content_version).is_some_and(|token| token.base == 1),
         "the reply names the bytes it accepted with a token led by their base: {reply}"
     );
-    // The Linux arm does not mint (Task 3 step 5.7): the reply keeps today's content version.
+    // The Linux arm does not mint: the reply keeps today's content version.
     #[cfg(not(target_os = "macos"))]
     assert_eq!(content_version, "1", "{reply}");
     let row = fx.db.get_file("edited-item").unwrap().unwrap();

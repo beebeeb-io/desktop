@@ -1278,7 +1278,7 @@ impl EngineBridge {
             // An op without a write id keeps today's retry and today's text
             // (`test_process_due_operations_records_retry_for_upload_worker_handoff`), without
             // the path: `classify_operation_error` matches bare substrings such as `403`, so a
-            // path would pause the op instead ([t5-rr] obs 1).
+            // path would pause the op instead.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Err(anyhow::anyhow!("staged upload payload is missing"));
             }
@@ -2430,7 +2430,7 @@ impl EngineBridge {
         // write is no longer queued and the server has its bytes (§7.4, 4b). A write that is
         // still queued is never fetched from the server, which holds only the previous version:
         // with its copy missing, the fetch fails (`QueuedCopyMissing`), and the system retries.
-        // Ruling [t8-parked-fetch]: a write that has parked never leaves the queue by itself and
+        // A write that has parked never leaves the queue by itself and
         // its copy cannot come back, so that retry would never end. Its fetch goes to the
         // server for the current version, and the item keeps the parked status (§9.1).
         let mut copy_missing = false;
@@ -3604,8 +3604,8 @@ impl EngineBridge {
         self.ensure_shared_hydrate_path_safe(file_id)?;
         // Spec §7.4.2: a hydrate never changes the status of a row with a live upload of its
         // own (a Finder upload that has not parked): no `Downloading`, `Local` or `Error`.
-        // That status is the upload's, and `Error` would make the item read-only. Ruling
-        // [t8-parked-fetch]: nor of a row whose Finder upload has parked. Its status is the
+        // That status is the upload's, and `Error` would make the item read-only. Nor
+        // of a row whose Finder upload has parked. Its status is the
         // parked one (§9.1), and `Local` would make it writable and evictable.
         let touch_status = !self
             .db
@@ -10039,7 +10039,7 @@ mod tests {
         );
     }
 
-    /// Review Minor 3: a staged-copy read error other than a missing copy retries with a
+    /// A staged-copy read error other than a missing copy retries with a
     /// fixed text. The copy's path never reaches `classify_operation_error`, so a path that
     /// contains `403` is not taken for a refused request (the class of bug behind task 1252).
     #[cfg(unix)]
@@ -10053,7 +10053,7 @@ mod tests {
             }
         }
         // Root reads through mode 000, so the precondition cannot be produced there (a CI
-        // container runs as root). Say so and skip, rather than fail ([t5-rr] obs 4).
+        // container runs as root). Say so and skip, rather than fail.
         // SAFETY: `geteuid` takes no arguments, cannot fail and touches no memory.
         if unsafe { libc::geteuid() } == 0 {
             eprintln!(
@@ -16168,9 +16168,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_parked_predecessor_with_a_recorded_completion_is_waited_for_never_taken_over() {
-        // M19, spec §8.4: "W has a recorded completion: W never parks (§8.6 rule 6). N waits,
-        // and the chain step resolves it when W's local landing succeeds." W stands for an op
-        // parked before that rule existed (Task 7 records the completion).
+        // Spec §8.4: "W has a recorded completion: W never parks (§8.6 rule 6). N waits,
+        // and the chain step resolves it when W's local landing succeeds." W is set up parked
+        // with a recorded completion, a state no park path produces, so the claim's own guard is tested.
         let dir = tempfile::tempdir().unwrap();
         let sync_root = dir.path().join("sync-root");
         std::fs::create_dir_all(&sync_root).unwrap();
@@ -16304,7 +16304,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_base_unknown_predecessor_hands_over_and_the_successor_parks_without_a_request() {
-        // Ruling [t5-c2]: W parked at accept under rule 6a′, because its base cannot be known.
+        // W parked at accept under rule 6a′, because its base cannot be known.
         // N, saved on W's token, takes W's role at its claim and parks `base_unknown` there:
         // no request goes out with a base the client knows is unknown.
         let dir = tempfile::tempdir().unwrap();
@@ -17114,7 +17114,7 @@ mod tests {
         assert_eq!(held_content_version(&bridge, "ordered"), "3");
     }
 
-    /// Review Minor 3: the server's restore is not idempotent (each call mints a
+    /// The server's restore is not idempotent (each call mints a
     /// version, VER:534-535). A local failure after it must not send it again.
     #[cfg(target_os = "macos")] // tests the restore response, which only macOS applies
     #[tokio::test]
@@ -17405,7 +17405,7 @@ mod tests {
     // ── Rule 2, the snapshot side: version 0 and versionless replaces (spec §6.3.2–§6.3.4) ──
 
     /// A row this Mac learned from a legacy `file_create` op: at version 0 (FILES:2286-2297).
-    /// (Both helpers carry `#[cfg(target_os = "macos")]`: only the Task 6 tests call them.)
+    /// (Both helpers carry `#[cfg(target_os = "macos")]`: only the snapshot-side tests call them.)
     #[cfg(target_os = "macos")]
     fn seed_version_zero_row(bridge: &EngineBridge, server: &VersionedServerMock, file_id: &str, status: FileStatus) {
         seed_uploaded_row(bridge, server, file_id);
@@ -17415,7 +17415,7 @@ mod tests {
         bridge.db.set_status(file_id, status).unwrap();
     }
 
-    /// `name` is the file's display name: Task 11's log tests pass `PLANTED` here, so a line
+    /// `name` is the file's display name: the log-line tests pass `PLANTED` here, so a line
     /// that logged the name would leak it. Every other caller passes `"notes.txt"`.
     #[cfg(target_os = "macos")]
     fn node(master_key: &[u8; 32], id: &str, name: &str, version: i64, is_uploading: bool) -> serde_json::Value {
@@ -17834,8 +17834,8 @@ mod tests {
         assert_eq!(ops[0].last_error.as_deref(), Some("base_unknown"));
     }
 
-    /// §6.1: `version_filled` is cleared by a landing, by a content op on the row and (plan
-    /// Spec issue 16) by an accepted Finder write.
+    /// §6.1: `version_filled` is cleared by a landing, by a content op on the row and by an
+    /// accepted Finder write.
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn version_filled_is_cleared_by_a_landing_a_content_op_and_an_accepted_write() {
@@ -17986,9 +17986,8 @@ mod tests {
         assert!(logs.contains("rekey_failed"), "{logs}");
     }
 
-    // T30 (`i1_a_landing_with_a_later_write_queued_keeps_it_uploading`) moved to Task 9:
-    // it needs Task 9 step 3.4, because until then the `Rollback` guard sets `Error` on
-    // any failed attempt.
+    // T30 (`i1_a_landing_with_a_later_write_queued_keeps_it_uploading`) is with rule 5's status
+    // tests below: it needs a failed attempt to leave a Finder write's row `Uploading`.
 
     #[cfg(unix)] // asserts tokens through `held_content_version`
     #[tokio::test]
@@ -18162,7 +18161,7 @@ mod tests {
         );
     }
 
-    /// [t3-review] Minor 1: a save N is accepted on W's token after W's upload landed and
+    /// A save N is accepted on W's token after W's upload landed and
     /// before the runner records W's outcome (`outcome:before_tx`, after the thumbnail
     /// work). The landing transaction has already removed W's op, so N decides against
     /// the landed W (rule 1b) and never waits on a write that no op carries.
@@ -18210,7 +18209,7 @@ mod tests {
         );
     }
 
-    /// [t3-review] Minor 3: the next base is the version the server's reply produced. An
+    /// The next base is the version the server's reply produced. An
     /// idempotent repeat of `complete` answers with neither the version nor the object id
     /// (`already_completed`); the produced version is then W's base + 1 (§8.6.1), never the
     /// stored record + 1. Here a snapshot raised the stored record to W's own version while
@@ -18378,14 +18377,14 @@ mod tests {
         );
     }
 
-    /// [t2-review] / [plan-fix-2] M16: the completion record is guarded by the claim (S4).
+    /// The completion record is guarded by the claim (S4).
     #[tokio::test]
     async fn a_completion_for_an_op_purged_under_its_claim_writes_nothing() {
         let run = upload_purged_after_the_server_completed(true, [87u8; 32]).await;
         assert_purged_landing_wrote_nothing(&run, "completion");
     }
 
-    /// [t3-review] the landing moved-op test: the landing transaction is guarded by the
+    /// The landing transaction is guarded by the
     /// claim (S2, S4) and writes nothing for an op that moved while its upload landed.
     #[tokio::test]
     async fn a_landing_for_an_op_purged_under_its_claim_writes_nothing() {
@@ -18440,7 +18439,7 @@ mod tests {
         );
     }
 
-    /// Review Minor 3: a save with no content type of its own lands with the server's
+    /// A save with no content type of its own lands with the server's
     /// `mime_type`, as its first landing would, also when that landing is retried from the
     /// recorded completion.
     #[tokio::test]
@@ -19135,7 +19134,7 @@ mod tests {
         drop(server.finish());
     }
 
-    /// [t9-review] Minor 1 (§9.1, m-8): a save queued before a Finder trash lands while its row is
+    /// §9.1 (m-8): a save queued before a Finder trash lands while its row is
     /// `Trashing`, before the trash op runs. The landing leaves the row in the trash: never `Local`,
     /// so never writable or evictable, and still under the trash container.
     #[cfg(unix)] // names `crate::ipc_socket::file_entry_payload_for_db`
@@ -19310,7 +19309,7 @@ mod tests {
         );
     }
 
-    /// T30 (§9.1–§9.2), moved here from Task 7: it needs step 3.4. A lands while B is queued and
+    /// T30 (§9.1–§9.2): A lands while B is queued and
     /// B's first attempt fails: the item is `uploading`, with B's size and B's token.
     #[cfg(unix)] // names `crate::ipc_socket::file_entry_payload_for_db`
     #[tokio::test]
@@ -19350,7 +19349,7 @@ mod tests {
         );
     }
 
-    /// [t7-review] Minor 1 (b): A lands while B is queued. When the runner records A's outcome
+    /// A lands while B is queued. When the runner records A's outcome
     /// (`outcome:before_tx`), the row is `Uploading`: the landing left it so for B (§9.2), and the
     /// attempt no longer reads that as a failure and rolls it back to `Error`.
     #[tokio::test]
@@ -19387,7 +19386,7 @@ mod tests {
         drop(server.finish());
     }
 
-    /// [t8-parked-fetch] (§7.4, §9.1): a write that parked because its staged copy is gone never
+    /// §7.4, §9.1: a write that parked because its staged copy is gone never
     /// leaves the queue, and nothing local can serve it. Its fetch goes to the server for the version
     /// the server has, and the item keeps the parked status: read-only, not evictable. A write still
     /// queued with its copy missing keeps its error
@@ -20394,9 +20393,9 @@ mod tests {
         );
     }
 
-    // ── Errors in log lines: a category, never the text (plan Spec issue 15) ──
+    // ── Errors in log lines: a category, never the text (spec §11) ──
 
-    /// [plan-fix-2]: a line about a failed step logs the error's category. The text can carry a
+    /// A line about a failed step logs the error's category. The text can carry a
     /// path (an I/O error's context, a database file name) and never reaches the log.
     #[test]
     fn an_error_is_logged_by_its_category_never_its_text() {
@@ -20498,7 +20497,7 @@ mod tests {
         }
     }
 
-    /// [plan-fix-2] (Spec issue 15, Task 2 step 5.3): a staged copy that cannot be unlinked
+    /// A staged copy that cannot be unlinked
     /// is logged by its category; the I/O error's text never reaches the line.
     #[tokio::test]
     async fn a_staged_copy_kept_after_a_failed_unlink_is_logged_by_category() {
@@ -20523,7 +20522,7 @@ mod tests {
         assert!(not_a_file.exists(), "kept");
     }
 
-    /// [plan-fix-2] (Task 6b's line in `staged_payload.rs`): a released copy that engine start
+    /// The line in `staged_payload.rs`: a released copy that engine start
     /// cannot remove is logged by its category, and its journal row stays for the next start.
     #[cfg(target_os = "macos")]
     #[tokio::test]
@@ -20549,9 +20548,9 @@ mod tests {
         assert!(!line.contains("os error"), "the error's text: {line}");
     }
 
-    // ── Parked review items ─────────────────────────────────────────────────
+    // ── Paths kept out of retry texts, refused-attempt wording, Show in Finder through the alias ──
 
-    /// [t5-rr] obs 1: a missing staged copy of an upload without a write id keeps today's
+    /// A missing staged copy of an upload without a write id keeps today's
     /// retry, and its text carries no path: a path containing `403` would otherwise be read
     /// as a refused request by `classify_operation_error` and pause the op.
     #[tokio::test]
@@ -20595,7 +20594,7 @@ mod tests {
         );
     }
 
-    /// Task 5 Minor 6: a refused attempt's line is worded by why the op left the queue: a
+    /// A refused attempt's line is worded by why the op left the queue: a
     /// stale base parks at once (the attempt that was made, not the cap), attempts used up
     /// park at the cap, and any other refusal retries.
     #[tokio::test]
@@ -20640,7 +20639,7 @@ mod tests {
         assert!(retry.contains("; will retry") && !retry.contains("parked"), "{retry}");
     }
 
-    /// [mm2-c2]: "Show in Finder" under a provisional id whose create has landed (a stale quick
+    /// "Show in Finder" under a provisional id whose create has landed (a stale quick
     /// search result, a request after the swap) reaches the server file through the alias; the
     /// server file's row decides. Without the alias it answered "not known on this Mac".
     #[tokio::test]

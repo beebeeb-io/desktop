@@ -209,7 +209,7 @@ mod tests {
             guard_statement.contains(")?;"),
             "the refusal is returned, not dropped:\n{guard_statement}"
         );
-        // Round 4 ([mm2-c2]): the lookup is `item_namespace`, which follows a landed provisional id to its server
+        // The lookup is `item_namespace`, which follows a landed provisional id to its server
         // file and then reads that row's contract.
         assert!(
             guard_statement.contains(&squeeze("finder_open::item_namespace(&db, id)")),

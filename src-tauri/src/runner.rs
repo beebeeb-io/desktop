@@ -2858,7 +2858,7 @@ mod tests {
         }
     }
 
-    /// Spec §10.2 (plan Spec issue 13): engine start marks the uploads an earlier build queued,
+    /// Spec §10.2: engine start marks the uploads an earlier build queued,
     /// once, on macOS only (on Windows it would hand write ids to Cloud Files uploads, which have
     /// no base), after the start repair and before the stale in-flight rows are reconciled (that
     /// reconcile is keyed on the write id). `run` needs a real window system, so the wiring is
@@ -2881,7 +2881,7 @@ mod tests {
         );
     }
 
-    /// [plan-fix-2] (plan Spec issue 15), Task 9 Minor 4: the engine-start lines from the start
+    /// Spec §11: the engine-start lines from the start
     /// repair to the in-flight reconcile log counts and, when a step fails, the error's category;
     /// never the error's text, which can carry a path. The reconcile's count is the rows it
     /// reset, and its line says so. `run` needs a real window system, so this is asserted on the
