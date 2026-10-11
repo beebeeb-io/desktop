@@ -370,8 +370,7 @@ again, the old identifier no longer matches, and the write meets 409 and parks.
   the base and predecessor checks: its attempt repeats the landing.
 - **The hand-over, at the successor's claim.** W may park for any reason: a stale
   base, a missing copy, an unknown base, a permission refusal, or its attempts
-  used up (only an op whose attempts were used up before the failure rule below
-  can have that). When W was
+  used up (a failure waiting does not cure, below). When W was
   minted by this build and has no recorded completion, the claim of its direct
   successor N gives N W's role, in the claim's transaction: W's resolved base, or
   W's own `after_write_id` or `base_pending`; and for a create, W's create (its
@@ -394,18 +393,21 @@ again, the old identifier no longer matches, and the write meets 409 and parks.
   A staged copy that is gone (`NotFound`) parks it `payload_missing` at once. Any
   other error reading the copy retries, with a fixed text and no path.
 - **A failure that waiting or the person can cure never parks a File Provider
-  upload** (spec §8.4, final review). By the class `classify_operation_error`
-  gives the failure: `Retryable` (connection, timeout, 5xx, and every failure the
-  classifier does not name) and `Locked` record the attempt for the backoff
-  (capped at 960 s), but the count stops at `max_attempts - 1`, so the save lands
-  when the network or the lock comes back; `Quota` is never paused and retries the
-  same way, so the save lands once there is space, and the item keeps presenting
-  `uploading`; `Permission` (a 403) parks at once as `permission_denied`,
-  read-only, through the usual park (settle, change row, signal); `Auth` pauses
-  until the next sign-in, as before. A failure that never clears therefore
-  retries every 16 minutes without end, with its bytes kept and later saves of
-  the file waiting behind it. Uploads without a write id keep their rules:
-  `Retryable` uses up the attempts, every other class pauses.
+  upload** (spec §8.4, final review). Decided by the error's type and kind
+  (`finder_write_failure_is_transient`), never its text. Transient: `Locked`,
+  `Quota`, and `Retryable` with an HTTP status of 408, 425, 429 or any 5xx, or
+  with no status and a transport failure in its chain (a `reqwest::Error` that
+  could not connect, timed out or failed while sending, or below one an I/O
+  error of a connection kind). A transient failure is recorded for the backoff
+  (capped at 960 s) and the count stops at `max_attempts - 1`, so the save lands
+  when the network, the lock or the space comes back; a quota refusal is never
+  paused, and the item keeps presenting `uploading`. Counted, as before: any
+  other HTTP status (400, 404, 413, ...) and a local error; at the cap the write
+  parks `attempts used up`, read-only, with its bytes kept. `Permission` (a 403)
+  parks at once as `permission_denied`, read-only, through the usual park
+  (settle, change row, signal); `Auth` pauses until the next sign-in, as before.
+  Uploads without a write id keep their rules: `Retryable` uses up the attempts,
+  every other class pauses.
 - **409 classes.** `init` keeps the server's message and classifies it:
   `stale_base` parks at once; `in_progress` ("upload is already in progress for
   this file") and `other` retry. A changed message falls back to retry. Uploads

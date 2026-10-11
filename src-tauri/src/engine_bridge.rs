@@ -666,6 +666,60 @@ impl OperationFailureClass {
     }
 }
 
+/// Spec §8.4: does waiting cure this failed attempt of a File Provider write? A transient one
+/// counts for the backoff but never uses up the write's attempts; any other uses them up and the
+/// write parks at the cap, presented read-only, so it never shows `uploading` for good while
+/// later saves wait behind it. Decided by the error's type and kind, never by its text:
+/// - `Locked` (the vault, or SQLite busy) and `Quota`: transient;
+/// - `Retryable` with an HTTP status: transient for 408, 425, 429 and every 5xx, counted for any
+///   other (400, 404, 410, 413, 422, a 409 that is not a stale base, ...);
+/// - `Retryable` with no HTTP status: transient only when the chain carries a transport failure
+///   (see [`has_transport_cause`]); a local error is counted;
+/// - `Auth` and `Permission` never reach it (they pause and park): `false`.
+fn finder_write_failure_is_transient(class: OperationFailureClass, error: &anyhow::Error) -> bool {
+    match class {
+        OperationFailureClass::Locked | OperationFailureClass::Quota => true,
+        OperationFailureClass::Retryable => match error_http_status(error) {
+            Some(status) => matches!(status, 408 | 425 | 429 | 500..=599),
+            None => has_transport_cause(error),
+        },
+        OperationFailureClass::Auth | OperationFailureClass::Permission => false,
+    }
+}
+
+/// A transport failure in `error`'s chain: a `reqwest::Error` that never got a response (it could
+/// not connect, timed out, or failed while sending), or, below a `reqwest::Error`, an I/O error of a
+/// kind the network path gives (a refused, reset, aborted or broken connection, a timeout, an
+/// early end). The same I/O kinds with no request above them come from a local operation and are
+/// not a transport failure.
+fn has_transport_cause(error: &anyhow::Error) -> bool {
+    let mut on_the_network_path = false;
+    for cause in error.chain() {
+        if let Some(request) = cause.downcast_ref::<reqwest::Error>() {
+            if request.status().is_none() && (request.is_connect() || request.is_timeout() || request.is_request()) {
+                return true;
+            }
+            on_the_network_path = true;
+        }
+        if on_the_network_path
+            && let Some(io) = cause.downcast_ref::<std::io::Error>()
+            && matches!(
+                io.kind(),
+                std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::NotConnected
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::UnexpectedEof
+            )
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// What the runner does with a failed attempt that neither parked at once nor found its op
 /// gone ([`failed_attempt_rule`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -684,14 +738,20 @@ enum FailedAttemptRule {
 /// - A recorded completion (`completed`, §8.6 rule 6) only ever retries, and never uses up its
 ///   attempts.
 /// - A File Provider write (`finder_write`: an upload with a write id) never stops uploading for
-///   a reason that waiting or the person can cure (§8.4): a transient failure (`Retryable`, which
-///   is also every failure the classifier does not name, and `Locked`) and a quota refusal retry
-///   on the normal backoff without using up the attempts, so the save lands once the network,
-///   the lock or the space comes back; a permission refusal parks it at once as
-///   `permission_denied`, which presents it read-only; `auth` pauses it until the next sign-in.
+///   a reason that waiting or the person can cure (§8.4): a `transient` failure
+///   ([`finder_write_failure_is_transient`]: the network, a 5xx, 408/425/429, a lock, a quota
+///   refusal) retries on the normal backoff without using up the attempts, so the save lands once
+///   the network, the lock or the space comes back; any other `Retryable` failure uses them up and
+///   parks the write at the cap; a permission refusal parks it at once as `permission_denied`,
+///   which presents it read-only; `auth` pauses it until the next sign-in.
 /// - Every other upload keeps the rules it had: `Retryable` uses up its attempts, every other
 ///   class pauses it.
-fn failed_attempt_rule(class: OperationFailureClass, finder_write: bool, completed: bool) -> FailedAttemptRule {
+fn failed_attempt_rule(
+    class: OperationFailureClass,
+    finder_write: bool,
+    completed: bool,
+    transient: bool,
+) -> FailedAttemptRule {
     if completed {
         return FailedAttemptRule::Retry {
             uses_up_attempts: false,
@@ -708,7 +768,7 @@ fn failed_attempt_rule(class: OperationFailureClass, finder_write: bool, complet
         OperationFailureClass::Permission => FailedAttemptRule::Park(ParkReason::PermissionDenied),
         OperationFailureClass::Retryable | OperationFailureClass::Locked | OperationFailureClass::Quota => {
             FailedAttemptRule::Retry {
-                uses_up_attempts: false,
+                uses_up_attempts: !transient,
             }
         }
     }
@@ -1010,7 +1070,8 @@ impl EngineBridge {
                         && matches!(op.kind, OperationKind::UploadVersion | OperationKind::UploadFile);
                     // m-11: a recorded completion is never paused (a busy database reads as
                     // `Locked`), because a paused op is not listed again.
-                    match failed_attempt_rule(class, finder_write, completed) {
+                    let transient = finder_write && finder_write_failure_is_transient(class, &error);
+                    match failed_attempt_rule(class, finder_write, completed, transient) {
                         FailedAttemptRule::Pause(reason) => {
                             if !self.db.record_pause_claimed(
                                 &op.op_id,
@@ -1036,7 +1097,7 @@ impl EngineBridge {
                         }
                         FailedAttemptRule::Retry { uses_up_attempts } => {
                             // §8.6 rule 6 and §8.4: a recorded completion, and a File Provider
-                            // write whose failure waiting can cure, keep retrying on the normal
+                            // write whose failure waiting cures, keep retrying on the normal
                             // backoff and never use up their attempts.
                             let attempts = if uses_up_attempts {
                                 op.attempts.saturating_add(1)
@@ -16886,10 +16947,10 @@ mod tests {
         drop(server.finish());
     }
 
-    /// No failure the runner classifies uses up a File Provider write's attempts any more
-    /// (spec §8.4): the attempt at the cap retries, leaves the item `uploading` and puts nothing in
-    /// the signal. The give-up push itself is pinned, for an upload without a write id, by
-    /// `an_upload_without_a_write_id_still_gives_up_after_its_attempts`.
+    /// A transient failure (here a 500) never uses up a File Provider write's attempts (spec §8.4):
+    /// the attempt at the cap retries, leaves the item `uploading` and puts nothing in the signal.
+    /// A failure waiting does not cure still parks at the cap
+    /// (`a_finder_write_the_server_keeps_refusing_parks_when_its_attempts_are_used_up`).
     #[tokio::test]
     async fn the_attempt_at_the_cap_leaves_a_finder_write_uploading_and_out_of_the_signal() {
         let (dir, sync_root, server, bridge) = rule3_setup([126u8; 32]);
@@ -19334,6 +19395,176 @@ mod tests {
         // Parked: the next pass sends nothing.
         bridge.process_due_operations(&sync_root, now + 10_000).await.unwrap();
         assert_eq!(server.finish().inits.len(), 1);
+    }
+
+    /// The error `reqwest` gives for `status`, from a one-request server: what the upload calls
+    /// return through `error_for_status`.
+    async fn reqwest_status_error(status: &'static str) -> anyhow::Error {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_http_request(&mut stream);
+            stream
+                .write_all(http_json(status, json!({ "error": "refused" })).as_bytes())
+                .unwrap();
+        });
+        let response = reqwest::Client::new().get(&url).send().await.unwrap();
+        let error = response.error_for_status().unwrap_err();
+        server.join().unwrap();
+        anyhow::Error::new(error)
+    }
+
+    /// `finder_write_failure_is_transient` for `error`, with the class the runner gives it.
+    fn transient(error: &anyhow::Error) -> bool {
+        finder_write_failure_is_transient(classify_operation_error(&error.to_string()), error)
+    }
+
+    /// Spec §8.4: which failures of a File Provider write waiting cures. Decided by the error's
+    /// type and kind, never by its text.
+    #[tokio::test]
+    async fn a_finder_write_failure_is_transient_only_when_waiting_cures_it() {
+        // Transient: nothing listens; a server that never answers; 503; 429; 408; 425.
+        let closed = {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            format!("http://{}/", listener.local_addr().unwrap())
+        };
+        let refused = anyhow::Error::new(reqwest::Client::new().get(&closed).send().await.unwrap_err());
+        assert!(
+            refused.chain().any(|cause| cause
+                .downcast_ref::<reqwest::Error>()
+                .is_some_and(reqwest::Error::is_connect)),
+            "precondition: a connect error"
+        );
+        assert!(transient(&refused), "connection refused: {refused:#}");
+        let silent = TcpListener::bind("127.0.0.1:0").unwrap();
+        let silent_url = format!("http://{}/", silent.local_addr().unwrap());
+        let timed_out = anyhow::Error::new(
+            reqwest::Client::builder()
+                .timeout(Duration::from_millis(200))
+                .build()
+                .unwrap()
+                .get(&silent_url)
+                .send()
+                .await
+                .unwrap_err(),
+        );
+        drop(silent);
+        assert!(
+            timed_out.chain().any(|cause| cause
+                .downcast_ref::<reqwest::Error>()
+                .is_some_and(reqwest::Error::is_timeout)),
+            "precondition: a timeout"
+        );
+        assert!(transient(&timed_out), "timeout: {timed_out:#}");
+        for status in [
+            "503 Service Unavailable",
+            "500 Internal Server Error",
+            "429 Too Many Requests",
+            "408 Request Timeout",
+            "425 Too Early",
+        ] {
+            let error = reqwest_status_error(status).await;
+            assert_eq!(
+                classify_operation_error(&error.to_string()),
+                OperationFailureClass::Retryable
+            );
+            assert!(transient(&error), "{status}: {error:#}");
+        }
+        // Locked and Quota are transient whatever carries them.
+        for class in [OperationFailureClass::Locked, OperationFailureClass::Quota] {
+            assert!(
+                finder_write_failure_is_transient(class, &anyhow::anyhow!("x")),
+                "{class:?}"
+            );
+        }
+
+        // Counted: any other status; a local error; a network-looking I/O error with no request
+        // in its chain (a local file operation, not the network path); and text that only looks
+        // like a transient status.
+        for status in [
+            "400 Bad Request",
+            "404 Not Found",
+            "410 Gone",
+            "413 Payload Too Large",
+            "422 Unprocessable Entity",
+        ] {
+            let error = reqwest_status_error(status).await;
+            assert_eq!(
+                classify_operation_error(&error.to_string()),
+                OperationFailureClass::Retryable
+            );
+            assert!(!transient(&error), "{status}: {error:#}");
+        }
+        assert!(!transient(&anyhow::anyhow!("staged upload payload could not be read")));
+        assert!(!transient(&anyhow::Error::new(std::io::Error::from(
+            std::io::ErrorKind::ConnectionReset
+        ))));
+        assert!(!transient(&anyhow::anyhow!("HTTP 503 Service Unavailable: timed out")));
+        // Auth and Permission never reach the rule (they pause and park), and are not transient.
+        for class in [OperationFailureClass::Auth, OperationFailureClass::Permission] {
+            assert!(!finder_write_failure_is_transient(class, &refused), "{class:?}");
+        }
+    }
+
+    /// Spec §8.4: a failure waiting does not cure (here 30 × 400) still uses up a File Provider
+    /// write's attempts. It parks at the 25th, presented read-only, with its id in that tick's
+    /// signal, and nothing more is sent.
+    #[tokio::test]
+    async fn a_finder_write_the_server_keeps_refusing_parks_when_its_attempts_are_used_up() {
+        let (dir, sync_root, server, bridge) = rule3_setup([157u8; 32]);
+        seed_uploaded_row(&bridge, &server, "bad-request");
+        server
+            .state
+            .lock()
+            .unwrap()
+            .refuse_init
+            .insert("bad-request".into(), "400 Bad Request");
+        fp_save(
+            &bridge,
+            dir.path(),
+            "bad-request",
+            "notes.txt",
+            b"a save the server refuses",
+            "1",
+        );
+        let op_id = bridge
+            .db
+            .list_operations_for_file("bad-request")
+            .unwrap()
+            .remove(0)
+            .op_id;
+        let mut now = now_secs();
+        let mut parked_at = None;
+        for pass in 1..=30 {
+            let outcome = bridge.process_due_operations(&sync_root, now).await.unwrap();
+            now += 10_000;
+            let op = bridge.db.get_operation(&op_id).unwrap().expect("kept in the queue");
+            if parked_at.is_none() && op.attempts >= op.max_attempts {
+                parked_at = Some(pass);
+                assert_eq!(
+                    outcome.invalidated_item_ids,
+                    vec!["bad-request".to_string()],
+                    "the attempt that used them up is in the tick's signal"
+                );
+            }
+        }
+        assert_eq!(parked_at, Some(25), "parked when its 25 attempts were used up");
+        let op = bridge.db.get_operation(&op_id).unwrap().unwrap();
+        assert_eq!(op.attempts, op.max_attempts);
+        assert_eq!(
+            bridge.db.get_file("bad-request").unwrap().unwrap().status,
+            FileStatus::Error,
+            "presented read-only"
+        );
+        assert_eq!(
+            std::fs::read(op.payload_path.as_deref().unwrap()).unwrap(),
+            b"a save the server refuses",
+            "its bytes are kept"
+        );
+        let state = server.finish();
+        assert_eq!(state.inits.len(), 25, "nothing is sent once it parked");
+        assert!(state.inits.iter().all(|(_, status)| *status == 400));
     }
 
     /// One refusal of an upload WITHOUT a write id (the watcher, Windows), queued at `attempts`:
