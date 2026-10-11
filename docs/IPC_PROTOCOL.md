@@ -585,9 +585,11 @@ while that write has not parked. The returned item names the token.
   stale-base 409); a hand-over (the successor's id); the attempt that uses up an
   op's attempts; and the snapshot count's park (through the tick's applied ids). A
   park whose guarded write matched no row puts nothing. The accept's own park
-  answers the system's call with the item, so it needs no signal. Engine start
+  answers the system's call with the item, so it needs no signal. ~~Engine start
   records each row it resets as a change, and the first tick's signal carries
-  those ids.
+  those ids.~~ Engine start records one change per row it resets, `downloading`
+  → `cloud_only` included, and the first tick carries those ids as its opening
+  debt. The rule is spec §9.2's last bullet. — lead, 2026-10-11 (device fix round)
 - The size and modification time are the newest bytes'. The accept records the
   staged copy's; the landing writes the server's size and "now" only when no
   later write is queued. Finder's date stays `max(modified_at,
