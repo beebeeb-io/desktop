@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 /// Every save of the config goes through the same `desktop.toml.tmp`, so two saves at once could
 /// tear each other's temp file, and two load-modify-save passes at once lose the earlier one's
 /// change. There is no public `save`: the only way to write the file is [`DesktopConfig::update_at`]
-/// (or [`DesktopConfig::update`], [`DesktopConfig::update_held`] and
+/// (or [`DesktopConfig::update`], [`HeldConfig::update_held`] and
 /// [`DesktopConfig::ensure_account_id`], which are `update_at`), and it takes this lock across the
 /// whole load, change and write. The lock is not re-entrant: nothing inside an update closure may
 /// call another update.
@@ -540,6 +540,65 @@ impl UpdateError {
     }
 }
 
+/// A copy of the config that a flow keeps to READ across slow work (task 1889, fix round 1 M2). Add to Finder waits
+/// many seconds on the File Provider and the config-write lock must not be held that long, so the Windows and Linux
+/// install, Repair and sync-root flows load a copy at the start and read it as they go. The copy can be read (it
+/// derefs to [`DesktopConfig`]) and it can only be changed through [`Self::update_held`], which applies the change to the
+/// file as it is NOW and then makes the copy equal to what a load of the file returns. There is no `DerefMut`: an edit
+/// to the copy outside the closure does not compile, so it cannot be silently dropped by the refresh, and the copy can
+/// never be what is written.
+#[derive(Debug, Clone)]
+pub(crate) struct HeldConfig(DesktopConfig);
+
+impl std::ops::Deref for HeldConfig {
+    type Target = DesktopConfig;
+
+    fn deref(&self) -> &DesktopConfig {
+        &self.0
+    }
+}
+
+impl From<DesktopConfig> for HeldConfig {
+    fn from(cfg: DesktopConfig) -> Self {
+        Self(cfg)
+    }
+}
+
+impl HeldConfig {
+    /// [`DesktopConfig::load`], as a copy to hold.
+    pub(crate) fn load() -> Result<Self, String> {
+        DesktopConfig::load().map(Self)
+    }
+
+    /// Writes through the file, never through the copy. `change` is applied to the file as it is now
+    /// ([`DesktopConfig::update_at`]), so what the copy loaded at the start cannot replace what another writer saved
+    /// since (task 1889: the install and Repair commands used to save their copy and could drop the kept-folder record
+    /// a sweep saved meanwhile). Afterwards the copy equals what a load of the file returns: the file as it was read
+    /// plus `change`'s edits if it said to save, and the file as it was read, unedited, if it said not to (an edit that
+    /// is not saved is not kept; M3), so the flow reads its own write and everyone else's.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    pub(crate) fn update_held<R>(&mut self, change: impl FnOnce(&mut DesktopConfig) -> (bool, R)) -> Result<R, String> {
+        self.update_held_at(&DesktopConfig::path()?, change)
+    }
+
+    /// [`Self::update_held`] on the config file at `path` (a seam for the tests).
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    pub(crate) fn update_held_at<R>(
+        &mut self,
+        path: &Path,
+        change: impl FnOnce(&mut DesktopConfig) -> (bool, R),
+    ) -> Result<R, String> {
+        let (fresh, value) = DesktopConfig::update_at(path, |cfg| {
+            let read = cfg.clone();
+            let (save, value) = change(cfg);
+            let on_file = if save { cfg.clone() } else { read };
+            (save, (on_file, value))
+        })?;
+        self.0 = fresh;
+        Ok(value)
+    }
+}
+
 impl DesktopConfig {
     /// Resolve the absolute path to `desktop.toml` for the current user,
     /// creating the parent directory if missing. Errors propagate as
@@ -677,38 +736,6 @@ impl DesktopConfig {
         Ok(value)
     }
 
-    /// For a flow that keeps its own copy of the config to READ across slow work (Add to Finder
-    /// waits many seconds on the File Provider, and the lock must not be held that long), and
-    /// writes between the waits. Never save that copy: `change` is applied to the file as it is NOW
-    /// ([`Self::update_at`]), so what the copy loaded at the start cannot replace what another
-    /// writer saved since (task 1889: the install and Repair commands used to save their copy and
-    /// could drop the kept-folder record a sweep saved meanwhile). Afterwards `self` equals what a load
-    /// of the file returns: the file as it was read plus `change`'s edits if it said to save, and the
-    /// file as it was read, unedited, if it said not to (an edit that is not saved is not kept), so the
-    /// flow reads its own write and everyone else's.
-    #[cfg_attr(target_os = "macos", allow(dead_code))]
-    pub(crate) fn update_held<R>(&mut self, change: impl FnOnce(&mut Self) -> (bool, R)) -> Result<R, String> {
-        self.update_held_at(&Self::path()?, change)
-    }
-
-    /// [`Self::update_held`] on the config file at `path` (a seam for the tests).
-    #[cfg_attr(target_os = "macos", allow(dead_code))]
-    pub(crate) fn update_held_at<R>(
-        &mut self,
-        path: &Path,
-        change: impl FnOnce(&mut Self) -> (bool, R),
-    ) -> Result<R, String> {
-        let (fresh, value) = Self::update_at(path, |cfg| {
-            let read = cfg.clone();
-            let (save, value) = change(cfg);
-            // A change that is not saved is not on the file, so the copy keeps what was read (M3).
-            let on_file = if save { cfg.clone() } else { read };
-            (save, (on_file, value))
-        })?;
-        *self = fresh;
-        Ok(value)
-    }
-
     /// The write itself. The caller holds the config-write lock.
     fn save_to(&self, path: &Path) -> Result<(), String> {
         let toml_str = toml::to_string_pretty(self).map_err(|e| format!("serialize: {e}"))?;
@@ -777,7 +804,8 @@ pub fn ensure_directory(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DesktopConfig, DesktopSettings, DesktopTheme, ReleaseChannel, UpdateError, default_sync_root_suggestion,
+        DesktopConfig, DesktopSettings, DesktopTheme, HeldConfig, ReleaseChannel, UpdateError,
+        default_sync_root_suggestion,
     };
     use std::path::Path;
 
@@ -1138,7 +1166,7 @@ mod tests {
                 "update_held_at",
                 |path| {
                     // The copy was loaded before the slow update began, as an install flow's is.
-                    let mut held = DesktopConfig::default();
+                    let mut held = HeldConfig::from(DesktopConfig::default());
                     held.update_held_at(path, |held| {
                         held.pause_sync = true;
                         (true, ())
@@ -1189,7 +1217,7 @@ mod tests {
     fn test_1889_a_held_copy_never_puts_back_what_another_writer_saved_since_it_loaded() {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("desktop.toml");
-        let mut held = DesktopConfig::load_from(&path).expect("the flow loads its copy first");
+        let mut held = HeldConfig::from(DesktopConfig::load_from(&path).expect("the flow loads its copy first"));
         assert_eq!(held.kept_unsynced_folder, None);
 
         // The sweep saves the kept folder while the flow waits on the File Provider.
@@ -1235,7 +1263,7 @@ mod tests {
         })
         .expect("seed");
         let written = std::fs::read(&path).expect("exists");
-        let mut held = DesktopConfig::default();
+        let mut held = HeldConfig::from(DesktopConfig::default());
         let answer = held
             .update_held_at(&path, |held| {
                 held.pause_sync = false; // changed in memory, but the closure says: do not save
@@ -1254,15 +1282,17 @@ mod tests {
             "the copy reads the file (pause_sync = true), not the unsaved change"
         );
         assert_eq!(
-            toml::to_string_pretty(&held).expect("serialize the copy"),
+            toml::to_string_pretty(&*held).expect("serialize the copy"),
             toml::to_string_pretty(&DesktopConfig::load_from(&path).expect("reads back")).expect("serialize the file"),
             "after a no-save update the copy equals what a load of the file returns"
         );
 
         // A file that cannot be read is an error and is left alone, and the held copy is not touched.
         std::fs::write(&path, "this is = not [valid toml").expect("write");
-        let mut held = DesktopConfig::default();
-        held.last_signed_in_email = Some("kept@beebeeb.io".to_string());
+        let mut held = HeldConfig::from(DesktopConfig {
+            last_signed_in_email: Some("kept@beebeeb.io".to_string()),
+            ..DesktopConfig::default()
+        });
         let result = held.update_held_at(&path, |held| {
             held.pause_sync = true;
             (true, ())

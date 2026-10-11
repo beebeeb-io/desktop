@@ -314,7 +314,7 @@ pub(crate) fn remember_kept_folder_at(path: &std::path::Path, location: &str) ->
 /// A write that failed is logged without the path and nothing more: the flow's own write that follows meets the same
 /// file and reports the error, after the alert has named the folder (the order the old save-later had).
 #[cfg_attr(target_os = "macos", allow(dead_code))]
-pub fn remember_kept_folder_held(cfg: &mut crate::config::DesktopConfig, location: &str) {
+pub fn remember_kept_folder_held(cfg: &mut crate::config::HeldConfig, location: &str) {
     let saved =
         crate::config::DesktopConfig::path().and_then(|path| remember_kept_folder_held_at(cfg, &path, location));
     if let Err(error) = saved {
@@ -325,7 +325,7 @@ pub fn remember_kept_folder_held(cfg: &mut crate::config::DesktopConfig, locatio
 /// [`remember_kept_folder_held`] on the config file at `path` (a seam for the tests). Returns whether the config changed.
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 pub(crate) fn remember_kept_folder_held_at(
-    cfg: &mut crate::config::DesktopConfig,
+    cfg: &mut crate::config::HeldConfig,
     path: &std::path::Path,
     location: &str,
 ) -> Result<bool, String> {
@@ -1544,7 +1544,9 @@ NSFileProviderManager.removeAllDomains { error in }
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("desktop.toml");
         let folder = "/Users/someone/Kept";
-        let mut held = crate::config::DesktopConfig::load_from(&path).expect("the flow loads its copy first");
+        let mut held = crate::config::HeldConfig::from(
+            crate::config::DesktopConfig::load_from(&path).expect("the flow loads its copy first"),
+        );
         let changed = with_an_update_in_flight(
             &path,
             |cfg| cfg.last_signed_in_email = Some("someone@beebeeb.io".to_string()),

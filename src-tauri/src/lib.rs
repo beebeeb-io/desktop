@@ -159,7 +159,7 @@ async fn close_session_commands() -> Result<(), String> {
         .map_err(|e| format!("Vault lock failed: {e}"))?
 }
 
-use config::{DesktopConfig, ReleaseChannel};
+use config::{DesktopConfig, HeldConfig, ReleaseChannel};
 // `platform_keychain_store_for(id)` resolves to the macOS Keychain store on
 // macOS and the Windows Credential Manager store on Windows (Linux keeps the
 // fail-closed stub), segmenting every secret under the per-account id
@@ -3721,9 +3721,9 @@ fn finder_state_path(cfg: &DesktopConfig, installed: bool) -> Option<String> {
 /// code and both surfaces' notes for it are gone.
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 fn finish_repair_after_removal(
-    cfg: &mut DesktopConfig,
+    cfg: &mut HeldConfig,
     preserved_location: Option<&str>,
-    save: impl FnOnce(&mut DesktopConfig) -> Result<(), String>,
+    save: impl FnOnce(&mut HeldConfig) -> Result<(), String>,
     surface: impl FnOnce(Option<&str>),
 ) -> Result<(), String> {
     match save(cfg) {
@@ -3736,11 +3736,7 @@ fn finish_repair_after_removal(
 }
 
 #[cfg(not(target_os = "macos"))]
-fn persist_finder_install_result(
-    cfg: &mut DesktopConfig,
-    installed: bool,
-    error: Option<String>,
-) -> Result<(), String> {
+fn persist_finder_install_result(cfg: &mut HeldConfig, installed: bool, error: Option<String>) -> Result<(), String> {
     // Task 1889: the result is written onto the file as it is now (`update_held`), not by saving the copy this
     // flow loaded before its slow work, which would put back what another writer saved since.
     cfg.update_held(|held| {
@@ -3804,14 +3800,14 @@ fn clear_finder_install_failure(cfg: &mut DesktopConfig) -> bool {
 
 /// Start of an install attempt: drop the previous attempt's failure from the saved state.
 #[cfg(not(target_os = "macos"))]
-fn begin_finder_install_attempt(cfg: &mut DesktopConfig) -> Result<(), String> {
+fn begin_finder_install_attempt(cfg: &mut HeldConfig) -> Result<(), String> {
     cfg.update_held(|held| (clear_finder_install_failure(held), ()))
 }
 
 /// Save a failed Finder install and return it as an `Ok` state (see
 /// [`finder_install_failure_state`]). Only a failure to save the config itself is an `Err`.
 #[cfg(not(target_os = "macos"))]
-fn finder_install_failed(cfg: &mut DesktopConfig, error: String) -> Result<FinderInstallState, String> {
+fn finder_install_failed(cfg: &mut HeldConfig, error: String) -> Result<FinderInstallState, String> {
     // Task 1889: recorded and saved onto the file as it is now; the state is built from what was saved.
     cfg.update_held(|held| (true, finder_install_failure_state(held, error)))
 }
@@ -4249,7 +4245,7 @@ fn remove_stale_ipc_socket() -> Result<bool, String> {
 async fn persist_sync_root_and_start_engine(
     app: tauri::AppHandle,
     state: &State<'_, AppState>,
-    cfg: &mut DesktopConfig,
+    cfg: &mut HeldConfig,
     root: PathBuf,
     #[cfg(target_os = "windows")] _transition: &tokio::sync::MutexGuard<'_, ()>,
 ) -> Result<(), String> {
@@ -6863,7 +6859,7 @@ fn open_login_items_and_extensions_settings_blocking() -> Result<(), String> {
 #[cfg(not(target_os = "macos"))]
 #[tauri::command]
 fn finder_location_state() -> Result<FinderInstallState, String> {
-    let mut cfg = DesktopConfig::load()?;
+    let mut cfg = HeldConfig::load()?;
     match file_provider_installed() {
         Ok(FileProviderStatusOutcome::Installed) => {
             if cfg.finder_install_status.as_deref() != Some("installed") {
@@ -6924,7 +6920,7 @@ async fn install_finder_location(
     }
     config::ensure_directory(&root)?;
 
-    let mut cfg = DesktopConfig::load()?;
+    let mut cfg = HeldConfig::load()?;
     // Spec section 7: the previous attempt's saved failure is cleared when a new attempt starts.
     begin_finder_install_attempt(&mut cfg)?;
     let started_pending_engine = start_engine_for_pending_finder_install(
@@ -7023,7 +7019,7 @@ async fn continue_without_finder_location(
     }
     config::ensure_directory(&root)?;
 
-    let mut cfg = DesktopConfig::load()?;
+    let mut cfg = HeldConfig::load()?;
     persist_sync_root_and_start_engine(
         app,
         &state,
@@ -7127,7 +7123,7 @@ async fn install_windows_shell_integration(
         }
         config::ensure_directory(&root)?;
 
-        let mut cfg = DesktopConfig::load()?;
+        let mut cfg = HeldConfig::load()?;
 
         // Register the Cloud Files sync root with Windows. Idempotent at the OS
         // layer. The engine runner re-registers + connects callbacks on spawn;
@@ -7200,7 +7196,7 @@ async fn reset_macos_integration(
 
     let mut warnings = Vec::new();
     #[cfg_attr(target_os = "macos", allow(unused_mut))]
-    let mut cfg = DesktopConfig::load()?;
+    let mut cfg = HeldConfig::load()?;
     let sync_root_preserved = cfg.sync_root.as_ref().map(|path| path.to_string_lossy().into_owned());
 
     let queue = match state_db_for_config(&cfg) {
@@ -15134,9 +15130,7 @@ mod tests {
         // return `Err` by hand, and the only hand-written save of a failure is the user-disabled
         // state, which is returned as `Ok`.
         let body = install_finder_location_source();
-        let after_load = &body[body
-            .find("DesktopConfig::load()")
-            .expect("the command loads the config")..];
+        let after_load = &body[body.find("HeldConfig::load()").expect("the command loads the config")..];
 
         // 1. No hand-written Err after the config is loaded: neither `return Err(..)` nor an
         //    `=> Err(..)` match arm. (`?` before the load is fine: nothing was saved yet.)
@@ -15185,7 +15179,7 @@ mod tests {
         let clear = body
             .find("begin_finder_install_attempt(&mut cfg)?")
             .expect("the attempt clears the old failure");
-        let load = body.find("DesktopConfig::load()").expect("loads the config");
+        let load = body.find("HeldConfig::load()").expect("loads the config");
         let engine = body
             .find("start_engine_for_pending_finder_install(")
             .expect("starts the pending engine");
@@ -31242,7 +31236,7 @@ mod blocking_pool_tests {
 /// the removal cannot be undone, and a retry finds no domain, so the folder would never be named.
 #[cfg(test)]
 mod repair_kept_folder_tests {
-    use super::{DesktopConfig, finder_removal, finish_repair_after_removal};
+    use super::{DesktopConfig, HeldConfig, finder_removal, finish_repair_after_removal};
 
     const FOLDER: &str = "/Users/someone/Library/CloudStorage/Beebeeb-Beebeeb (10-10-2026 10:50)";
 
@@ -31252,7 +31246,7 @@ mod repair_kept_folder_tests {
 
     #[test]
     fn test_1882_r3_a_repair_whose_save_fails_after_the_removal_still_names_the_kept_folder() {
-        let mut cfg = DesktopConfig::default();
+        let mut cfg = HeldConfig::from(DesktopConfig::default());
         let mut alert: Alert = None;
         let mut raised = 0;
         let result = finish_repair_after_removal(
@@ -31284,7 +31278,7 @@ mod repair_kept_folder_tests {
 
     #[test]
     fn test_1882_r3_a_repair_whose_save_fails_with_nothing_kept_shows_nothing() {
-        let mut cfg = DesktopConfig::default();
+        let mut cfg = HeldConfig::from(DesktopConfig::default());
         let mut alert: Alert = None;
         let result = finish_repair_after_removal(
             &mut cfg,
@@ -31299,24 +31293,44 @@ mod repair_kept_folder_tests {
     #[test]
     fn test_1882_r3_a_repair_that_saves_shows_no_extra_alert() {
         // The Repair result carries the folder to the Sync tab's row; a second alert would repeat it.
-        let mut cfg = DesktopConfig::default();
+        let mut cfg = HeldConfig::from(DesktopConfig::default());
         let mut raised = 0;
         let result = finish_repair_after_removal(&mut cfg, Some(FOLDER), |_| Ok(()), |_| raised += 1);
         assert_eq!(result, Ok(()));
         assert_eq!(raised, 0);
     }
 
+    /// Fix round 1 (M2) replaces `test_1882_r3_the_save_is_given_the_config_the_repair_recorded_into`, which recorded
+    /// into the held copy and handed the same copy to the save: the pattern that loses data now that the save writes
+    /// onto the file as it is. A Repair's record is written onto the file first; the result is written next, through the
+    /// copy's own update; the copy the save is given already shows the record; and the file holds both.
     #[test]
-    fn test_1882_r3_the_save_is_given_the_config_the_repair_recorded_into() {
-        let mut cfg = DesktopConfig::default();
-        assert!(finder_removal::record_kept_folder(&mut cfg, FOLDER));
+    fn test_1889_the_repairs_result_write_lands_next_to_the_kept_folder_record_that_came_before_it() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("desktop.toml");
+        let mut cfg = HeldConfig::from(DesktopConfig::load_from(&path).expect("the Repair loads its copy first"));
+        // The app-start sweep saves a setting while the Repair waits on the removal.
+        DesktopConfig::update_at(&path, |on_file| {
+            on_file.last_signed_in_email = Some("someone@beebeeb.io".to_string());
+            (true, ())
+        })
+        .expect("the sweep saves");
+
+        assert_eq!(
+            finder_removal::remember_kept_folder_held_at(&mut cfg, &path, FOLDER),
+            Ok(true),
+            "the record is written onto the file as it is now"
+        );
         let mut saw = None;
         let result = finish_repair_after_removal(
             &mut cfg,
             Some(FOLDER),
-            |cfg| {
-                saw = cfg.kept_unsynced_folder.clone();
-                Ok(())
+            |held| {
+                saw = held.kept_unsynced_folder.clone();
+                held.update_held_at(&path, |on_file| {
+                    on_file.finder_install_status = Some("missing".to_string());
+                    (true, ())
+                })
             },
             |_| {},
         );
@@ -31324,7 +31338,23 @@ mod repair_kept_folder_tests {
         assert_eq!(
             saw.as_deref(),
             Some(FOLDER),
-            "the record rides the same save as the install result"
+            "the copy the save is given already shows the record"
+        );
+        let on_file = DesktopConfig::load_from(&path).expect("reads back");
+        assert_eq!(
+            on_file.kept_unsynced_folder.as_deref(),
+            Some(FOLDER),
+            "the record is on the file"
+        );
+        assert_eq!(
+            on_file.finder_install_status.as_deref(),
+            Some("missing"),
+            "and so is the result"
+        );
+        assert_eq!(
+            on_file.last_signed_in_email.as_deref(),
+            Some("someone@beebeeb.io"),
+            "and the setting saved meanwhile"
         );
     }
 }
@@ -31622,7 +31652,7 @@ mod config_write_pin_tests {
                 "    pub(crate) fn update<R>(",
                 "Self::update_at(&Self::path()?, change)",
             ),
-            ("    pub(crate) fn update_held_at<R>(", "Self::update_at(path,"),
+            ("    pub(crate) fn update_held_at<R>(", "DesktopConfig::update_at(path,"),
             ("    pub(crate) fn ensure_account_id_at(", "Self::update_at(path,"),
         ] {
             let body = item(config, start);
