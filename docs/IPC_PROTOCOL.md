@@ -146,33 +146,185 @@ have existed for an hour.
 The extension hands an item's `contentVersion` back as the base of its next
 write, and the daemon turns that into the `base_version_number` the server
 checks: the server refuses a replacement whose base is not the file's current
-version with 409. So the version identifiers carry the server's version number,
-and a write the extension has queued must leave the user's bytes where they are.
+version with 409. On macOS the daemon names the bytes of every content write it
+accepts with a **write token**, and every surface keeps reporting that name until
+the content changes elsewhere. So the daemon's own upload never looks like a
+remote change to the system: no eviction, no re-download, no stale base.
+
+This section describes the macOS File Provider path. Windows (Cloud Files) and
+Linux are unchanged: their uploads carry no write id and keep the bases they had.
+The design, with its reasons and its Apple citations, is
+`docs/specs/2026-10-09-macos-finder-write-versions.md`; the section numbers below
+are that spec's.
 
 ### Version identifiers
 
 | Field | Format | Changes when |
 | --- | --- | --- |
-| `content_version` (the extension's `contentVersion`, the write base) | `{current_version}`, or `{current_version}:{content_hash}` when the row has a hash | the server version changes (every content change on the server bumps it; the snapshot, the file listings and every content-changing `/sync/ops` op carry `version_number`) or the hash changes |
-| `version_identifier` (older extensions fall back to it) | `{current_version}:{modified_at}:{size_bytes}` | as above, plus the row's time and size |
+| `content_version` (the extension's `contentVersion`, the write base) | the write token `{b}:w{W}` while the row holds one (below); otherwise `{current_version}`, or `{current_version}:{content_hash}` when the row has a hash | a content write is accepted (a new token), or the content changes elsewhere (the token clears and the server version shows) |
+| `version_identifier` (older extensions fall back to it) | `{current_version}:{modified_at}:{size_bytes}` | the server version, the row's time or its size change |
 | `metadata_version` | `{modified_at}:{size_bytes}:{parent}:{name}:{status}` | any metadata change; never forces a re-download |
 | no contract (the row's contract could not be read) | `content_version` `0`, `version_identifier` `0:{modified_at}:{size_bytes}` | no known server version, so no base |
 
-`current_version` is the contract's server version. The write path reads the
-first segment as the base (`parse_base_version_number`; `0` or anything that is
-not a positive number means no base). The wall clock never appears in
-`content_version`: a finished upload and the `/sync/ops` echo of a change
-re-stamp the row's `remote_updated_at`, and that is not a content change. Builders:
-`item_content_version` and `item_version_identifier` in `engine_bridge.rs`,
-used by `file_entry_payload` in `ipc_socket.rs`.
+`current_version` is the contract's server version. The wall clock never appears
+in `content_version`: a finished upload and the `/sync/ops` echo of a change
+re-stamp the row's `remote_updated_at`, and that is not a content change.
+Builders: `item_content_version` and `item_version_identifier` in
+`engine_bridge.rs`, the token in `write_token.rs`, used by
+`file_entry_payload_for_db` in `ipc_socket.rs`.
 
-Rollout: builds before this format led both identifiers with
+Rollout: builds before the server-version format led both identifiers with
 `max(current_version, remote_updated_at)`. Rows whose `remote_updated_at` is
 above their server version (anything this device uploaded, or touched by an op
 echo) get a different `content_version` once; for a materialized file the system
 downloads it once more when it next reads the item.
 
-### Identifiers from earlier builds (legacy acceptance)
+### The write token (§5.1, §5.2)
+
+`{b}:w{W}`, for example `2:w9f1c0e3a5b7d4f2e8a6c4b2d0e9f7a1c`.
+
+- `b` is the server version the bytes derive from, in decimal: a replace's
+  resolved base; for a write queued behind an earlier write that has not landed,
+  that write's `b`; `0` for a create, and for writes queued behind a create that
+  has not landed.
+- `W` is 32 lowercase hex digits, a fresh v4 UUID without hyphens. One is minted
+  for every content write accepted over `QueueFinderCreate` or
+  `QueueFinderModify` with contents. It is never reused and never derived from a
+  name or path. A rename or a move gets no token, and neither does an upload the
+  watcher or Windows queues.
+- At most 44 bytes (Apple allows 128 for a version component).
+- It is matched by exact string equality with the row's held token, never by
+  pattern. The parse is strict (`^\d+:w[0-9a-f]{32}$`), and the `w` keeps a
+  token apart from `{v}`, `{v}:{hash}` and the older timestamp-led forms.
+- Code that does not know tokens reads the first segment as the base
+  (`parse_base_version_number`). `b` is an ancestor of the bytes, so the server
+  either accepts that base (nothing in the chain has landed, and the bytes are a
+  valid replacement) or refuses it with 409. The one exception is `0:wW` after a
+  create landed, which older code reads as "no base" (see "Version skew").
+
+What is stored. Every column is additive and nullable or defaulted, with no
+backfill, and only dedicated `StateDb` functions write them. The token string
+itself is derived (`{held_base}:w{held_write_id}`), never stored.
+
+| Table | Column | Meaning |
+| --- | --- | --- |
+| `files` | `held_write_id`, `held_base` | the write whose bytes the system was last told about, and its `b`. Written together; a write id without its base is a read error, never a base of 0 |
+| `files` | `held_version`, `held_object_version_id` | what that write produced on the server; NULL until it lands |
+| `files` | `version_filled` | the version came from a snapshot fill, and nothing has touched the row since (rule 6a) |
+| `operation_queue` | `write_id`, `write_origin` | the write this upload carries, and who queued it: `minted` (this build's accept) or `earlier_build` (marked at engine start, below) |
+| `operation_queue` | `after_write_id` | this upload's base is the version that write produces; NULL once resolved |
+| `operation_queue` | `base_pending` | the base waits for a snapshot; counts the successful snapshots that gave none |
+| `operation_queue` | `claim_id`, `claimed_at` | the runner's claim for one attempt; every claim is cleared at engine start |
+| `upload_resume` | `completed_version`, `completed_object_version_id`, `completed_mime_type` | the landing the server confirmed, recorded before any local bookkeeping |
+| `id_aliases` | `provisional_id`, `server_id`, `created_at` | a create's provisional id and the server id it landed as |
+
+### What every surface reports (§5.3, §5.4)
+
+`held_token` (`write_token.rs`) is the item's content version exactly when
+`held_write_id` is set and one of these holds:
+
+- an upload op with `write_id = held_write_id` is in the queue, in any state:
+  queued, running, backing off, paused or parked; or
+- `held_version = current_version`, and the held and the current object version
+  ids are equal and not NULL: the server holds what this write produced.
+
+Otherwise the item reports `{current_version}` (with its hash, when it has one).
+
+- **One read.** The row and the queue facts come from one deferred read
+  transaction (`StateDb::item_presentation`). A builder never sees a row from
+  before a landing beside a queue from after it, which would report the old
+  `{cv}`: a content change, for bytes that did not change.
+- **One builder.** `file_entry_payload_for_db` serves enumeration, the change
+  feed, item lookups, the dedup replay, the write replies and the item returned
+  with a fetch.
+- **The clear is housekeeping.** A builder that finds the predicate false clears
+  the held columns with `… WHERE file_id = ? AND held_write_id = ?`, using the
+  value it read, so it never clears a token that a concurrent save has just set.
+- A presentation read that fails presents the item from its contract alone, as
+  before tokens existed: never a spurious `"0"`, and the capabilities are kept.
+  It is logged (see "Logging").
+
+```mermaid
+stateDiagram-v2
+    [*] --> NoToken
+    NoToken --> Queued: save accepted, mint W
+    Queued --> Queued: newer save queues behind it
+    Queued --> Landed: W lands, produced v and o
+    Landed --> Queued: newer save, mint W2
+    Landed --> Landed: own echo with v and o
+    Landed --> NoToken: remote version or object id differs
+    Landed --> NoToken: restore from this Mac
+    Queued --> Parked: stale 409, missing copy or unknown base
+    Parked --> Queued: newer save queues behind it and takes over at its claim
+    NoToken --> [*]: sign-out purge
+    Landed --> [*]: sign-out purge
+```
+
+While `Queued`, `Landed` or `Parked`, every surface reports the token; in
+`NoToken`, `{cv}`. What the system sees, event by event:
+
+| Event | What the system sees |
+| --- | --- |
+| our own landing | the token, unchanged: nothing is evicted or downloaded because of it |
+| our own echo (an op or snapshot row with the version we produced) | unchanged |
+| a remote content change (another version or object id) while nothing of ours is queued | `{cv'}`: the system downloads the new bytes |
+| a remote change while our write is queued | nothing until our write meets the server's 409 and parks; the disk keeps our bytes |
+| a remote replace whose op carries no version (the legacy chunked complete) | a re-snapshot is requested; its node raises the version a pass later, the token clears and the system downloads |
+| a restore from this Mac | the reply's version becomes current and the system downloads; the token clears only when no write of ours is queued |
+| a restore from another device | nothing: the server emits no op. The next save meets 409 and parks |
+| a rename, a move, a trash from Finder | the token, unchanged; a trashed item is never presented writable |
+| a create landing (the id swap) | the server id carries the create's token; the provisional id is gone |
+| a sign-out by choice | the held columns and aliases are cleared, and provisional rows without a contract deleted, in the purge transaction |
+
+### The base the server gets (§6)
+
+The decision is made inside the accept transaction that also mints the token
+and queues the upload, from the row as it is before the write changes it: the
+alias target, when there is one. The first matching rule wins. "The newest
+write of the file's chain" is `held_write_id`.
+
+| # | Incoming base | Condition | Base of the new upload |
+| --- | --- | --- | --- |
+| 1a | the row's held token | its write W is still queued, in any state | after W: W's successor (below) |
+| 1b | the row's held token | W landed | `held_version` |
+| 1c | | | split off to task 1879. A token that is not the held one (a reply lost to an IPC timeout) falls to rule 5; a stale `b` meets 409, and the write parks with its bytes |
+| 2 | anything | the row is provisional: no contract, its create queued | after the newest write of the file's chain |
+| 3 | `{v}` or `{v}:{hash}` | an upload this build minted, with resolved base `v`, is queued for the file | after the newest write of the file's chain |
+| 4 | an identifier from an earlier build that exactly matches the old formula (below) | | `current_version`, then rule 3 with `v = current_version` |
+| 5 | anything whose first segment is `v > 0`, an unknown or older token's `b` included | | `v`; the server decides |
+| 6a | `0`, none or unparseable | server-known, `current_version > 0`, `version_filled = 1` | `current_version`; the server decides |
+| 6a′ | `0`, none or unparseable | server-known, `current_version > 0`, `version_filled = 0` | queued and parked at once (`base_unknown`), bytes kept; nothing is sent |
+| 6b | `0`, none or unparseable | server-known, `current_version = 0` | queued with `base_pending` |
+
+- Rule 3 leaves out uploads from earlier builds: their bytes may not be on disk,
+  so a later save may not contain them.
+- A waiting upload (`after_write_id` or `base_pending`) stores its token's `b`
+  as `base_version`. This code never sends it, because the claim skips the op; a
+  build from before tokens would send a base the server refuses, never no base.
+- **The `init` guard.** A File Provider upload that replaces a file is never sent
+  without a base: a missing base, or one beyond the server's `i32`, parks it
+  `base_unknown`. A create sends no base. Uploads without a write id keep
+  today's bases.
+- **Waiting for a snapshot (`base_pending`).** The base becomes the version a
+  snapshot reports. A re-snapshot is requested by a `file_create` op that
+  carries no version, by any content op without `version_number` (a content op
+  is a `file_create`, or a `file_update` that carries `version_number` or
+  `size_bytes`; the thumbnail-flag updates are not), by a server-known row at
+  version 0 at engine start, and in every pass while a `base_pending` upload
+  exists. The request is a counter: it is cleared only after a snapshot
+  succeeds, and only if no newer request arrived meanwhile. A failed snapshot
+  fails the whole tick, so the queue never runs on a guessed base. The upload
+  parks `base_unknown` only after 10 successful snapshots that gave it no base.
+  Waiting is not an attempt.
+- **The fill and the raise.** A snapshot node sets `current_version` on a row at
+  version 0 (the fill: it also sets `version_filled` and resolves the row's
+  `base_pending` uploads) or on a row below the node's version (the raise), in
+  any status but `Trashing` and `Conflict`. On a row with a queued write only
+  `current_version` changes. A node still uploading is skipped, and the request
+  stays set.
+- Deletes are unchanged: a delete's base is not sent to the server.
+
+#### Identifiers from earlier builds (rule 4)
 
 The system keeps the identifier it was given for an item until it reads the item
 again, and sends it as the base of the next write, also when it re-sends a write
@@ -184,13 +336,251 @@ what the old formula gives for the row as it is now (the old `content_version`
 one, or the old `version_identifier`
 `{max(current_version, remote_updated_at)}:{modified_at}:{size_bytes}`)
 describes the row's current content, so it is based on `current_version`. Every
-other identifier is parsed as before: its first segment is the base, and a base
-the server does not hold is refused as stale. An old identifier of older content
-cannot equal the row's current one: a content change moves `current_version`,
-and every re-stamp moves `remote_updated_at`. The decision is made from the row
-before the write changes it. Limit: if an op echo re-stamps the row after the
-upgrade but before the system has read the item again, the old identifier no
-longer matches and the write is refused as stale.
+other identifier goes through the rules above. An old identifier of older
+content cannot equal the row's current one: a content change moves
+`current_version`, and every re-stamp moves `remote_updated_at`. Limit: if an op
+echo re-stamps the row after the upgrade but before the system has read the item
+again, the old identifier no longer matches, and the write meets 409 and parks.
+
+### Queue order, the chain and the hand-over (§8.1–§8.5)
+
+- **Successor by write id.** A write whose base maps to "after W" is queued with
+  `after_write_id = W`, whatever W's state. When W lands, the chain step, inside
+  the landing transaction, gives every op with `after_write_id = W` the version
+  and object version id W produced. Equal numbers are never compared. Uploads
+  without a write id keep round 3's equal-base rebase among themselves, and
+  nothing is rebased across the two kinds: an op left without a base parks at
+  the `init` guard, a stale one at the server's 409, both with their bytes.
+- **No supersede.** A newer save never replaces a queued one. Every save is its
+  own upload, in order, and the last one is the server's current version; every
+  earlier one is a version in the file's history.
+- **The claim** (`StateDb::claim_operation`, one transaction per attempt) skips
+  the op when it is gone, parked or paused; while an earlier content op of its
+  file can still run; while it waits for a snapshot (`base_pending`); and while
+  its predecessor W is queued and has not parked. None of those skips is an
+  attempt. If W has parked, the claim hands over (below); if no op carries W,
+  it parks the op `predecessor_lost` with its bytes (only a bug can get there).
+  Then it records a fresh `claim_id`. An op whose completion is recorded skips
+  the base and predecessor checks: its attempt repeats the landing.
+- **The hand-over, at the successor's claim.** W may park for any reason: a stale
+  base, a missing copy, an unknown base, or its 25 attempts used up. When W was
+  minted by this build and has no recorded completion, the claim of its direct
+  successor N gives N W's role, in the claim's transaction: W's resolved base, or
+  W's own `after_write_id` or `base_pending`; and for a create, W's create (its
+  kind, parent and provisional id). W's op is removed, and its staged copy is
+  released after the commit. N's bytes contain W's: when the person saved N, the
+  system held W's bytes. One line: `queued write took over a parked one`.
+  - A successor that took over a W parked `base_unknown` parks `base_unknown` at
+    the same claim, so no request goes out with that base.
+  - A W from an earlier build is never handed over (its bytes may not be on
+    disk), and N would park `predecessor_parked`. No production path makes such
+    a W anyone's predecessor: `after_write_id` only ever names a minted write.
+  - A W with a recorded completion never parks; N waits for its landing.
+  - Cost: a successor that was not in the pass's list of due ops is claimed in
+    the next pass, at most 30 s later.
+  - After a parked W's fetch was served from the server (see "Fetches served from
+    the queue"), N is built on the server's version but inherits W's older base,
+    so it can meet 409 and park `stale_base`: a false park, with its bytes kept.
+- **Immediate parks.** The 409 "stale base version for replacement upload" at
+  `init` parks a File Provider upload at once: the server's version only grows.
+  A staged copy that is gone (`NotFound`) parks it `payload_missing` at once. Any
+  other error reading the copy retries, with a fixed text and no path.
+- **409 classes.** `init` keeps the server's message and classifies it:
+  `stale_base` parks at once; `in_progress` ("upload is already in progress for
+  this file") and `other` retry. A changed message falls back to retry. Uploads
+  without a write id keep today's retries for every class.
+- **What still waits:** a successor behind a predecessor that has not parked and
+  failed transiently (network, 5xx, timeout); it would fail the same way. And,
+  after a hand-over, the server session W left open: N's `init` meets
+  `in_progress` until the server's upload lease expires (1 hour by default) and
+  the next `init` takes the session over.
+- **Order is insertion order** (`rowid`) on macOS, so a wall clock that steps back
+  cannot run a newer save first; Windows and Linux keep `created_at`, then
+  `rowid`. A restore and a File Provider upload of the same file wait for each
+  other in that order. Two restores do not wait for each other, and neither do a
+  restore and an upload without a write id. A parked op blocks nothing.
+
+### The landing (§8.6)
+
+1. When `complete` answers, fresh or `already_completed`, the resume row records
+   what the server produced: the version, the object version id and the
+   `mime_type`. An `already_completed` answer carries neither of the first two:
+   the version is then the base + 1 (1 for a create), the object id the
+   session's, and there is no `mime_type`. The next base comes from this record,
+   never from the stored contract.
+2. One transaction then applies the rest:
+   - the row and the contract;
+   - the held columns, only `WHERE held_write_id = W`, so a later save's token
+     stays held;
+   - the id swap, with the alias;
+   - the chain step, and `version_filled = 0`;
+   - the status: `Local` with the server's size when no later File Provider
+     upload of the file is queued; `Error` when only parked ones remain; otherwise
+     unchanged (the later write's `Uploading`, size and time). A `Trashing` row
+     stays `Trashing`;
+   - the removal of the op (`WHERE op_id = ? AND claim_id = ?`, exactly one row)
+     and of its resume row, with the staged copy marked for release. Windows
+     journals a create's local finalization in the same transaction.
+3. The chain step never fails the landing: a successor that cannot be re-keyed
+   parks `rekey_failed` with its bytes.
+4. A retry that finds a recorded completion sends no upload request and repeats
+   step 2. The post-commit thumbnail work still runs after it; the first landing
+   failed before that work, so nothing repeats.
+5. Split off to task 1879: a resumed session whose `complete` answers 404 is
+   abandoned as before. For a create that trashes the server file the session
+   made, and the retry uploads the same bytes as a new create; for a replace,
+   the retry meets 409 if the lost `complete` had landed, and parks with its
+   bytes.
+6. A recorded completion is never abandoned, paused or parked, at give-up either.
+   Its attempts stop one short of the cap, and it keeps retrying the landing on
+   the normal backoff, with one line per attempt.
+
+### Serialization (§8.7)
+
+The daemon has one `StateDb` connection behind one mutex, and each method below
+is one transaction, so it is atomic against every other reader and writer in the
+process. Two calls are not, which is why each decision is one call.
+
+- **S1.** Every decision that writes is one `StateDb` method that opens
+  `BEGIN IMMEDIATE`, reads its preconditions inside, decides, writes and
+  commits, with no network in between: the accept (alias lookup, base decision,
+  mint, held columns, then the enqueue or the at-once park), the landing, a
+  park, the claim with the hand-over, a snapshot fill or raise, and the
+  restore's reply. The guarded clear is one guarded `UPDATE`, which SQLite runs
+  as its own transaction. The two read-only decisions, the predicate's inputs
+  and a fetch's source, take one deferred read.
+- **S2.** After the enqueue an op is addressed by `(op_id, write_id)` outside the
+  runner, and by `(op_id, claim_id)` in the runner's writes after its claim.
+  Each guarded write asserts one row. No path rewrites an op from an in-memory
+  copy, and File Provider ops are never deleted by `file_id`.
+- **S3.** The claim replaces the old read-then-check with one transaction; engine
+  start clears every claim, because no runner survives a restart.
+- **S4.** The runner's copy of the op serves the network work only. Every later
+  write is guarded by the claim. A write that matches nothing means a purge
+  removed the op during the attempt: the runner writes nothing more for it,
+  never re-inserts it, and logs `queue state moved` once.
+- **S5.** The accept and the landing are serialized, so either the accept sees W
+  queued and the chain step resolves N, or it sees W landed and uses rule 1b. An
+  op whose predecessor no op carries can only come from a bug; it parks
+  `predecessor_lost` with its bytes.
+- **S6.** A staged copy is unlinked only after the transaction that removed its
+  last reference has committed: the transaction records it in the release
+  journal (`staged_payloads`). Engine start unlinks every released copy that no
+  op references, in the current staging folder and the old ones.
+
+```mermaid
+sequenceDiagram
+    participant I as IPC task accepting N on W's token
+    participant DB as StateDb, one transaction each
+    participant R as Runner landing W
+    alt accept first
+        I->>DB: accept: W queued, so N after W, held = N
+        R->>DB: landing: the chain step sets N's base to W's version
+    else landing first
+        R->>DB: landing: W removed, held_version = W's version
+        I->>DB: accept: W landed (rule 1b), so N's base = held_version
+    end
+    Note over I,R: Either order leaves N with a base. N never waits on a write that is gone.
+```
+
+### Provisional ids (§7)
+
+A create runs under a provisional id, a random v4 UUID; the server mints the
+file's id. When the create lands, the landing transaction re-keys every op still
+queued for the file to the server id S (an encrypted name an op carries is
+re-encrypted under S, because the name key derives from the file id) and writes
+an alias P → S. The alias is kept 30 days, swept at engine start and once a day,
+and deleted by the sign-out purge.
+
+| A request under P, after its create landed as S | What the daemon does |
+| --- | --- |
+| content modify | resolved to S, its base by the rules above on S's row (P's create token is S's held token); the reply is S's item **presented under identifier P**, with the new token |
+| rename or move | resolved to S; the name is encrypted for S |
+| delete | resolved to S, and S is trashed, **only when the delete's base is S's held token**, the token P's reply named. Any other base keeps the idempotent success, with a warn line |
+| hydrate, item lookup, thumbnail | resolved to S; an item lookup presents S as P |
+| create with `deletion_conflicted` | the template identifier resolved through the alias, or a live row with that id; below |
+| a repeat of a modify (the same `request_id`) | answered from S's row as it is now, presented under P; nothing is queued again |
+| a repeat of a create after it landed | unchanged, split off to task 1879: the create runs again, and a second server file appears |
+| enumeration and change feed | unchanged: S, plus P's deletion |
+
+**The deletion-conflicted create.** When the system cannot apply our delete of P
+because the person edited the file, it re-creates the edited item with
+`NSFileProviderCreateItemDeletionConflicted` and the template identifier P. The
+extension passes that as `deletion_conflicted` with `template_identifier` and
+`template_content_version` (see "Write-queue idempotency"). A template that
+resolves to a live file row that is not `Trashing`, with a file template,
+becomes a content modify of that row: its base from the template's content
+version, in one accept transaction, and the reply under identifier S, the
+provider's, so the system replaces item S on disk with the edited file. One file,
+one new version. Otherwise it is an ordinary create: with no alias and no row
+(the file was deleted elsewhere, so the edit becomes a new file), for a
+`Trashing` row (the edit must not follow it to the trash), and for a folder,
+which has no content to modify, so a second server folder appears.
+
+**Unknown ids.**
+- A modify, content or metadata, of an id with no row and no alias answers
+  `Error`, logs `Finder write refused` with `reason="unknown_item"`, and queues
+  nothing. The extension reports `cannotSynchronize`: the system shows an error,
+  keeps the edit on disk and backs off. It is never `NoSuchItem`, which would
+  make the system delete the item on disk.
+- A name Finder writes for itself (`.DS_Store`, `~$…`, `….tmp` and the like) is
+  answered `Ignored` before that check, whatever its id.
+- A delete of an unknown id stays an idempotent success (see "Trash semantics").
+- No create or modify reply carries `item: None` unless the write was ignored. A
+  queued create or modify whose row cannot be read back answers `Error`
+  (`row_unreadable`). The write stays queued and uploads; the message says the
+  change will upload and that Finder shows an error on the item until the file
+  changes again, because the system does not retry `cannotSynchronize` before
+  that. A delete's reply item is never read, so a delete is not refused this way.
+- The extension turns a queued reply without an item into the transient
+  `serverUnreachable`, so even a daemon from another build can never make the
+  system delete a file through that branch.
+
+#### Fetches served from the queue (§7.4)
+
+A `HydrateFile` of an item whose held write is still queued is served from that
+write's staged copy, the bytes its token names, and never reaches the server
+while that write has not parked. The returned item names the token.
+
+- The copy's path and the predicate come from one read. If the landing unlinked
+  the copy before the open, the fetch decides once more and goes to the server:
+  the write has landed.
+- A still-queued write whose copy is gone fails the fetch with `Error`
+  (`queued_copy_missing`), with no server request, which holds only the previous
+  version. The system retries a failed fetch, and the same missing copy parks the
+  write `payload_missing` at its next attempt.
+- A parked write whose copy is gone is fetched from the server for the current
+  version, and the item keeps its parked status: a stale but real version rather
+  than an endless retry. The item still names the parked write's token until the
+  write is resolved.
+- A hydrate never changes the status of a row that has a File Provider upload of
+  its own, live or parked: no `Downloading`, `Local` or `Error`.
+- Every fetch the daemon serves logs `Finder hydrate served`, with `source`
+  `queue` or `server`: the device plan counts fetches with it. A failed fetch
+  logs `Finder hydrate failed` instead.
+
+### Status follows the queue (§9)
+
+- While a file has a File Provider upload that has not parked (queued, running,
+  backing off, paused, or waiting for a base or a predecessor), its item presents
+  `uploading`: `isUploaded` false, so the system does not evict it, and full write
+  capabilities. A `Trashing` row is the exception: it keeps its trash
+  presentation and never becomes writable.
+- A parked upload presents `error`: read-only, and still not evictable. A
+  successor waiting to take over a parked predecessor keeps the item `uploading`.
+- Who writes the row's status. The accept sets `Uploading`. An attempt sets it
+  only if the row is not `Trashing`, and a failed attempt leaves the row alone.
+  A park, and the attempt that uses up the op's attempts, set `Error`, but only
+  on an `Uploading` row with no other unparked File Provider upload: a `Trashing`
+  row stays in the trash, and a `Conflict` row keeps its own status. The landing
+  settles the row as in its step 2. Engine start keeps `Uploading` for a row with
+  an unparked File Provider upload and resets every other in-flight row.
+- The size and modification time are the newest bytes'. The accept records the
+  staged copy's; the landing writes the server's size and "now" only when no
+  later write is queued. Finder's date stays `max(modified_at,
+  remote_updated_at)`; showing the save time instead is split off to task 1879.
+- Uploads without a write id (Windows, the watcher, Keep Mine) keep today's
+  status writers.
 
 ### Queued creates and modifies never ask the system to fetch
 
@@ -204,66 +594,56 @@ never knew).
 
 | Branch | Item returned | `shouldFetchContent` |
 | --- | --- | --- |
-| queued, with an item | the item as the daemon describes it | false |
+| queued, with an item | the item as the daemon describes it: its content version is the write's token | false |
 | ignored (a temporary Finder item the daemon does not sync) | none | false |
-| queued, no item (the daemon could not read the row back) | none; for a modify Apple treats this as "delete the item on disk", unchanged existing behaviour | false |
+| queued, but the daemon sent no item | never a nil item: the transient `serverUnreachable` error, so the system retries and keeps the item on disk. The daemon itself answers `Error` (`row_unreadable`) instead of such a reply | n/a |
 
-The item in a modify's reply describes the bytes the system holds: the daemon
-records the staged copy's size and modification time on the row with the
-`Uploading` status before it replies (`StateDb::record_local_write`). The content
-hash and `remote_updated_at` are untouched, so `content_version` stays until the
-upload lands. A create writes its new row from the staged copy already.
+The item in a reply describes the bytes the system holds: its content version is
+the write's token, and the daemon records the staged copy's size and modification
+time on the row, with the `Uploading` status, in the accept transaction.
 
-### This device's queued uploads of one file form a chain
+### Logging (§11)
 
-```mermaid
-sequenceDiagram
-    participant S as File Provider system
-    participant D as Daemon queue
-    participant A as Server
-    S->>D: createItem t.txt -> op1 create under provisional id P
-    D->>A: op1 uploads/init (no file_id)
-    S->>D: modifyItem P (base "0") -> op2 under P, no base
-    Note over D: op2 waits: an earlier upload of P can still run
-    A-->>D: op1 complete: file S, version 1
-    D->>D: row P becomes S; op2 re-keyed to S, name re-encrypted for S, base 1
-    D->>A: op2 uploads/init (file_id S, base 1)
-    A-->>D: version 2 holds the edit
-```
+Every line carries ids and fixed categories only. No name, path, URL or error
+text reaches a line: errors are classified, never printed. A line about a failed
+step logs the error's category, from closed codes only (SQLite's result code, the
+I/O error kind): `not_found`, `permission_denied`, `disk_full`, `read_only`,
+`io`, `network`, `database_busy`, `database_full`, `database_corrupt`,
+`database_read_only`, `database_cannot_open`, `database_io`,
+`database_constraint`, `database_schema` (a statement the schema does not match:
+a missing table or column, a statement SQLite rejects at prepare, a value of the
+wrong type), `database` and `other`. An id that comes from the wire is logged
+only when it is a UUID; any other id logs no id and `id_kind="non_uuid"`. A
+parked op stops logging.
 
-- **Order.** An upload waits while an earlier upload of the same file can still
-  run, paused or backing off included (`StateDb::has_earlier_live_upload`;
-  queue order is `created_at`, then insertion order). Waiting is not an attempt.
-  An op whose attempts are used up no longer blocks.
-- **Rebase.** When an upload lands (`chain_queued_ops_after_upload`), each upload
-  queued after it for the same file whose base equals the landed op's base is
-  rebased onto the version it produced: the system holds that base until it
-  reads the item again, so a quick second save carries it. An upload with no
-  base keeps none, except across a create's id swap.
-- **Create's id swap.** A create runs under a provisional id; the server mints
-  the file's id. When it lands, every op still queued under the provisional id
-  is re-keyed to the server id, and an encrypted name it carries is
-  re-encrypted under that id (the name key derives from the file id). An upload
-  with no base gets the created version. Run under the provisional id, a replace
-  would make the server create a second file under it.
-- Each op is re-read from the queue before it runs: a pass reads its list once,
-  and a landed upload can move later ops of its file.
-- Chosen over superseding a not-yet-started upload with the newer bytes:
-  superseding cannot help once the first upload is in flight, and the id swap
-  needs the re-key either way. Either way the newest bytes land last.
-- Not covered: a modify that reaches the daemon for the provisional id AFTER the
-  create landed (the row is gone, the system has not yet applied the swap) still
-  runs under the provisional id.
-
-### Logging
-
-| Event | Line (`warn!`) | Fields |
+| Event | Line (`warn!` unless noted) | Fields |
 | --- | --- | --- |
-| An upload attempt refused with 409 | `upload refused by the server (409 Conflict); will retry` | `op_id`, `file_id`, `attempt`, `max_attempts`, `base_version` |
-| The refused attempt that uses up the op's attempts | `upload refused by the server (409 Conflict); attempts used up, parked with its bytes kept in the queue` | same |
-| A hydrate over the socket answered with an error | `Finder hydrate failed` | `file_id`, `reason` (`not_found`, `unauthorized`, `forbidden`, `conflict`, `server_error`, `http_other`, `network`, `io`, `database`, `other`); a refused identifier logs `reason="invalid_identifier"` only |
+| a create, modify or delete the daemon refused | `Finder write refused` | `op`, `reason`: a staging category (`malformed_path`, `traversal`, `outside_staging`, …), `contents_not_a_file`, `engine_stopping`, `write_policy`, `malformed_request`, `io`, `database`, `other`; `unknown_item` (with `id`, or `id_kind`); `staging_root_unavailable` (the reply is `WriteRetryLater`); `row_unreadable` (a queued create or modify whose row cannot be read back; added during implementation, beyond the spec's original table) |
+| an `init` refused with 409, retried | `upload refused by the server (409 Conflict); will retry` | `op_id`, `file_id`, `attempt`, `max_attempts`, `base_version`, `class` (`stale_base`, `in_progress`, `other`) |
+| a stale-base 409 that parks a File Provider upload at once | `upload refused by the server (409 Conflict); its base is stale, parked with its bytes kept in the queue` | the same, with `class` and `reason` `stale_base`; `attempt` is the attempt that was made (1 for a first try) |
+| a 409 that uses up an op's attempts | `upload refused by the server (409 Conflict); attempts used up, parked with its bytes kept in the queue` | the same; `reason="stale_base"` only for that class |
+| any other park | `upload parked with its bytes kept in the queue` | `op_id`, `file_id`, `reason` (`base_unknown`, `payload_missing`, `predecessor_parked`, `predecessor_lost`, `rekey_failed`) |
+| a successor took over a parked predecessor | `queued write took over a parked one` | `op_id`, `file_id`, `parked_op_id` |
+| a request reached the server id through an alias | `provisional id resolved to the server id` | `request` (`modify`, also for a rename or move; `delete`, `hydrate`, `item`, `thumbnail`, `deletion_conflicted_create`), `provisional_id` (or `id_kind`), `file_id` |
+| a delete under a provisional id that does not name S's held token | `delete of a provisional id not applied to the server file` | `provisional_id` (or `id_kind`), `file_id` |
+| a queued write took its base from a snapshot | `queued write based on the version the snapshot reported` | `op_id`, `file_id`, `base_version` |
+| a snapshot raised a row's version | `file version raised from the snapshot` | `file_id`, `old_version`, `new_version` |
+| a guarded queue write matched no row | `queue state moved` | `op_id`, `step` (`resume`, `completion`, `landing`, `park`, `attempt`, `pause`) |
+| a completed upload whose local landing failed | `upload completed on the server; local landing will be retried` | `op_id`, `file_id`, `attempt` |
+| every fetch the daemon serves (`info!`) | `Finder hydrate served` | `file_id` (or `id_kind`), `source` (`queue`, `server`) |
+| a fetch answered with an error | `Finder hydrate failed` | `file_id` (or `id_kind`), `reason` (`not_found`, `unauthorized`, `forbidden`, `conflict`, `server_error`, `http_other`, `network`, `io`, `database`, `other`, `queued_copy_missing`); a refused identifier logs `reason="invalid_identifier"` only |
+| a presentation read that failed (the item is built from its contract) | `item presented from its contract alone` | `file_id`, `category="presentation_read_failed"`, `kind` (the category), `held_back` (failures of this item and kind not logged since the last line). At most one line per item and kind per 10 minutes, for at most 1024 items; a clean read ends the interval |
+| a restore the server made whose local record failed | `restore done on the server; its local record failed, a snapshot will repair it` | `file_id`, `category="restore_bookkeeping_failed"`; if the snapshot request fails too, `restore done on the server; a snapshot could not be requested` with `category="resnapshot_request_failed"` |
+| engine start (`info!` for the counts) | `engine start: queue claims cleared, released upload copies removed`; `engine start: uploads from an earlier build marked; their bases are unchanged`; `engine start: stale in-flight rows from a previous engine session reset` | `claims_cleared`, `released`; `marked`; `reset` (the rows it changed). A failed step: `engine start repair failed`, `engine start: marking earlier-build uploads failed`, `could not reconcile stale in-flight state rows on startup`, each with `reason` |
+| a staged copy that could not be removed | `staged payload cleanup deferred; journal retained`; `staged upload cleanup deferred; journal retained`; `released upload copy kept; removal is retried at the next start` | `reason`; the journal row stays, so a later start or sign-out still finds the copy |
+| the daily alias sweep failed | `daily alias sweep failed` | `reason="database"` |
+| the extension saw write options that are not empty (`NSLog`) | `BeebeebFileProvider: write options` | `call` (`create`, `modify`), `options` (the raw bitmask), `item` |
 
-No name, path or URL reaches these lines: errors are classified, never printed.
+The `IPC client went away …` lines and `finder delete: unknown item — idempotent
+success` (`info!`) log their id the same way. A staged copy that exists but
+cannot be read retries with the fixed text `staged upload payload could not be
+read`, which the diagnostics bundle files under its own code,
+`payload_unreadable`.
 
 ## Timeouts (Swift client)
 
@@ -283,6 +663,19 @@ error. No error message ever contains raw reply bytes.
 ## Write-queue idempotency (`request_id`, task 1684)
 
 `QueueFinderCreate` and `QueueFinderModify` accept an optional `"request_id"` string.
+
+`QueueFinderCreate` also carries three fields for a deletion-conflicted create (see
+"Versions and queued writes", "Provisional ids"):
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `deletion_conflicted` | bool, default `false` | the system passed `NSFileProviderCreateItemDeletionConflicted`: it re-creates an item whose deletion it could not apply because the person edited it |
+| `template_identifier` | string, optional | the template's `itemIdentifier`, the item the deletion was for; sent only when `deletion_conflicted` is true |
+| `template_content_version` | string, optional | the template's `itemVersion.contentVersion`, decoded as a modify's base is; sent only when `deletion_conflicted` is true |
+
+All three are `#[serde(default)]`: an older daemon ignores them and keeps the
+ordinary create. An older extension never sends them, and the new daemon then
+treats the request as an ordinary create.
 
 **Why it has to be derived, not random.** When the extension's socket call times out, the
 system retries `createItem` / `modifyItem`. That retry is a NEW invocation, so it cannot know a
@@ -343,6 +736,7 @@ shared by all connections, bounded to 4096 entries and a 30 minute TTL.
 | K unknown | runs the work (on the blocking pool, detached from the connection, so the copy finishes and is recorded even though the client hung up) |
 | K `InFlight` | waits for the first run and returns **its** reply; never enqueues a second upload |
 | K `Done` within the TTL and the result is still true | returns the stored reply without enqueueing, **refreshed from the row as it is now** (current `version_identifier` and `status`, see below) |
+| K `Done` for a modify under a provisional id whose create has since landed (macOS) | refreshes the stored reply from the server file's row, through the alias, and presents it under the provisional id; nothing is queued again. A create's stored reply has no such path: its row is gone, so it runs again (split off to task 1879) |
 | K `Done`, but the row it created is gone, renamed, parked `Trashing`, or has a queued `TrashFile` op; or the user deleted that item through this socket since | treats it as a NEW operation (see below) and runs it |
 | K `Done` past the TTL | forgets it and runs the work |
 | K was used for a different (operation, parent or item, filename, kind) | does not merge them; runs the work and leaves the original entry alone |
@@ -521,7 +915,11 @@ non-recursive delete of a non-empty folder with
 `NSFileProviderError.directoryNotEmpty` (child count provable from the
 payload; an absent count fails open). Unknown items report success
 (idempotent) — decided DAEMON-side: `QueueFinderDelete` for an unknown id
-returns `WriteQueued { ignored: true }` instead of queueing a doomed op.
+returns `WriteQueued { ignored: true }` instead of queueing a doomed op. On
+macOS a provisional id whose create has landed is resolved through its alias,
+and trashes the server file only when the delete's base is that file's held
+write token; any other base keeps this idempotent success (see "Versions and
+queued writes", "Provisional ids").
 
 ## Pin state on the payload (`pinned`, task 1698 — deviation 1)
 
@@ -594,6 +992,18 @@ so no plaintext ever crosses the socket.
   (honest "no thumbnail") without calling the daemon.
 - No `contentVersion` bump: thumbnails do not change item content, and the
   system keys its thumbnail cache on `itemVersion.contentVersion`.
+- A queued write's thumbnail (macOS, write-versions spec §5.6). While an item's
+  held write is queued, `FetchThumbnail` answers `Error` and asks the server
+  nothing. The server holds only the previous version's thumbnail, and an answer
+  is cached under the write token until the next content change, which our own
+  landing no longer is; "no thumbnail" would be cached the same way. The refusal
+  lasts past the landing until that version's thumbnails are uploaded (the
+  post-complete thumbnail work runs after the landing transaction), and after a
+  failed thumbnail upload until a later landing uploads them. That mark is kept
+  in memory, so a restart inside the window drops it. This is the safe default:
+  rendering the thumbnail from the staged bytes is split off to task 1879.
+  Whether the system asks again after the per-item error is a device question
+  (spec §16 Q3). A provisional id is resolved through its alias first.
 
 ## Version skew (app update in progress)
 
@@ -608,7 +1018,10 @@ so no plaintext ever crosses the socket.
 | old (before upload staging) | new | The old extension sends the system's contents URL; the daemon refuses it (`outside_staging`, logged) instead of failing to read it. Same user-visible failure as before; both halves ship in one app bundle, so this only lasts until the update completes. |
 | new (server-version identifiers) | old | The old daemon keeps sending timestamp-led identifiers and parsing them as bases: the refusals this section describes continue until the update completes. The new extension no longer asks for a fetch after a queued write, so the user's bytes stay on disk. Not device-tested. |
 | old (fetches after a queued write) | new | The old extension still completes queued writes with `shouldFetchContent: true`, so the system writes the server's current version over the edit; the new daemon queues the edit with the right base, and the system shows the edit again once the upload lands (inferred, not device-tested). Both halves ship in one app bundle. |
-| any | new, system holds an identifier from an earlier build | The legacy acceptance rule above: an old identifier of the row's current content is based on `current_version`; any other is parsed as before. |
+| any | new, system holds an identifier from an earlier build | Rule 4 above (identifiers from earlier builds): an old identifier of the row's current content is based on `current_version`; any other is parsed as before. |
+| old (before write tokens) | new (write tokens) | The token is opaque to the extension: it builds the item version from `contentVersion` and sends that back as the base (`FileProviderItem.swift`, `FileProviderExtension.swift`), so it carries the token unchanged. It sends no deletion-conflicted fields, which gives an ordinary create, as before. It does not know `WriteRetryLater` and reads it as an invalid reply, which it also reports as the transient `serverUnreachable`: the same retry. Its "queued, no item" branch is never reached for a create or a modify: the new daemon answers `Error` instead. Both halves ship in one app bundle. |
+| old | old, after a downgrade from a build with write tokens | The old daemon reads a token's first segment as the base. `b` is an ancestor of the bytes, so the server accepts it or refuses it with 409, except `0:wW` after a create landed, which reads as no base: the first save of such a file on the older build, before the system re-reads the item, is a replace without a base. A row whose save is still queued reports `{cv}` there, which the system takes as a content change, so until that save lands the older build can download the server's bytes over it. Both go in the release notes if the updater can install an older build (write-versions spec §16 Q4; unverified). |
+| any | new, uploads an earlier build queued | Engine start gives each a write id and marks it `earlier_build`, after clearing the held columns of its file (a re-upgrade must not revive a token the system no longer holds); its base is left as it is. A timestamp-led base meets 409 and parks with its bytes, a missing base parks `base_unknown`, and none is ever handed over to a newer save. |
 | old | new | The old extension writes its request with no delimiter and does not close: `FrameReader` accepts a buffer that is already one complete JSON value. It requests no progress, so it gets one reply, now `{"Ok":{}}\n` (which its parser accepts). It sends no `request_id`, so its write-queue requests take the pre-1684 path. |
 
 ## Tests
@@ -621,7 +1034,7 @@ so no plaintext ever crosses the socket.
 | Retired RPCs refused on the wire + connection survives; thumbnail destination containment (wire + unit), variant buckets, atomic persist, daemon failure leaves no dest file | `src/ipc_socket_framing_tests.rs` (`retired_rpcs_are_refused_...`, `thumbnail_*`, `persist_thumbnail_plaintext_*`, `fetch_thumbnail_*`) | `cargo test` counts |
 | Hydrate progress + cancellation | `engine_bridge.rs` tests `ipc_hydrate_*` | `cargo test` counts |
 | Swift framing + exchange over a real `socketpair` | `BeebeebFileProviderTests/main.swift` via `scripts/test-ipc-framing.sh` (macOS CI job "File Provider Swift (macOS)") | `ipc-framing: N passed, 0 failed`, N asserted |
-| Swift key derivation (same inputs same key, any input differs, pinned vectors), request shape (`request_id` on BOTH create and modify, absent without contents) and file fingerprint | same file (10 tests of the 35) | same |
+| Swift key derivation (same inputs same key, any input differs, pinned vectors), request shape (`request_id` on BOTH create and modify, absent without contents) and file fingerprint | same file (10 of its tests) | same |
 | Swift badge mapping (status→decoration identifier, one badge per item, unknown status → none), thumbnail variant/max-dimension/eligibility helpers, `FetchThumbnail` request shape + reply decoding, thumbnail timeout constant, `pendingItemsDidChange` completes | same file (`1699-D*`, `1699-T*`, `1699-P1`) | same |
 | Daemon table: concurrent same key runs once, repeat after completion, different keys, TTL expiry, key reused for another request shape, stale result, refreshed cache hit, `forget_where`, failed result not remembered, panicking leader, capacity | `ipc_write_dedup_tests.rs` | `cargo test` counts |
 | Daemon over the real socket, counting REAL queued operations in the state DB | `ipc_socket_framing_tests.rs` (`concurrent_creates_with_one_request_id_...`, `a_repeat_after_completion_...`, `different_request_ids_...`, `a_request_without_a_request_id_...`, `a_cached_create_is_not_returned_...`, `concurrent_modifies_...`, real-delete-then-recreate, trash op finished, trash op pending, `Trashing` row, refreshed reply). The two concurrency tests hold the state DB lock so the leader is parked and every request provably overlaps it; with a tiny source file they would otherwise finish serially and exercise the cached path instead of the in-flight wait | `cargo test` counts |
@@ -629,10 +1042,84 @@ so no plaintext ever crosses the socket.
 | Upload staging, daemon: contents validation (inside / outside / `..` / `.` / symlink / missing / not a file / FIFO without blocking / hard link / malformed / staging dir missing, a symlink, or another user's), the checks on the opened descriptor, the engine reading the validated file after the entry was swapped for a symlink, the copy deleted on success and on every refusal (through the held directory, never through a swapped-in symlink, never a file that took its name), never for a refused path, kept while detached work still reads it at socket shutdown, the age-bound purge by ctime (an old mtime never makes a copy stale), the purge refusing a symlinked staging dir, removing trees without following links and `0600` trees, refusal and hardening logging (category only, no path) | `ipc_socket.rs` tests (`staged_contents_*`, `upload_staging_*`, `a_staging_dir_*`, `a_hard_link_*`, `a_fifo_*`, `the_checks_on_the_opened_file_*`, `dropping_*`, `a_fresh_copy_*`, `a_copy_is_purged_*`, `a_refused_upload_staging_purge_*`, `a_failed_backup_exclusion_*`, `macos_prepare_upload_staging_dir_*`, `every_refused_write_*`), `staged_payload.rs` (`copy_from_file_*`), `ipc_socket_framing_tests.rs` (`staged_*`, `contents_not_directly_*`, `a_write_refused_*`, `concurrent_staged_*`, `a_create_still_in_flight_*`, `a_staged_copy_swapped_*`) | `cargo test` counts |
 | Upload staging, sign-out and Lock: every copy removed after a confirmed stop or with no engine; nothing removed on an unconfirmed stop (sign-out refuses, also on the retry; Lock goes ahead); the real App Group directory is never resolved under test | `lib.rs` `signout_teardown_tests` (`sign_out_*_upload_staging`, `lock_*_upload_staging`, `the_session_purge_never_targets_*`) | `cargo test` counts |
 | Upload staging, extension: directory path and `0700`, UUID names, exact bytes + `0600` + fresh mtime, a failed copy is transient with no file left and no path in the text, discard, a package or symlink refused definitively before anything is copied | `BeebeebFileProviderTests/main.swift` (`upload-staging-S1`..`S6`) | `ipc-framing: N passed, 0 failed` |
-| Queued writes never ask for a fetch (all three completion branches) | `BeebeebFileProviderTests/main.swift` ("a queued create or modify never asks the system to re-fetch its own bytes") | `ipc-framing: N passed, 0 failed` |
+| Queued writes never ask for a fetch (the queued and the ignored branches; a queued reply without an item is T20 below) | `BeebeebFileProviderTests/main.swift` ("a queued create or modify never asks the system to re-fetch its own bytes") | `ipc-framing: N passed, 0 failed` |
 | Version identifiers lead with the server version; an op echo leaves `content_version` unchanged; no contract carries no base; a cached reply carries the current version | `ipc_socket.rs` tests (`version_identifiers_lead_with_*`, `an_op_echo_leaves_*`, `the_payload_without_a_contract_*`), `ipc_socket_framing_tests.rs` (`a_cached_reply_reports_*`) | `cargo test` counts |
 | A modify after a desktop upload sends the server version as its base, against a server mock that refuses a wrong base with 409 | `engine_bridge.rs` (`a_modify_after_a_desktop_upload_*`, `VersionedServerMock`) | `cargo test` counts |
 | Legacy identifiers: the current content's old identifier is based on `current_version`; older content stays a stale base (also refused by the mock); new-format identifiers parse as before | `engine_bridge.rs` (`a_legacy_identifier_*`, `a_current_format_identifier_*`) | `cargo test` counts |
 | A queued modify's reply carries the staged size and time | `ipc_socket_framing_tests.rs` (`a_queued_modify_replies_with_the_size_*`) | `cargo test` counts |
-| The chain: a second save rebases after the first lands; a later save waits for an earlier one in backoff; a modify queued while its create uploads lands on the one created file, with its name encrypted under the server id | `engine_bridge.rs` (`a_second_queued_save_*`, `a_later_save_waits_*`, `a_modify_queued_while_its_create_*`) | `cargo test` counts |
-| Logging: 409 refusals per retry and at the park, failed hydrates by category, no name, path or URL | `engine_bridge.rs` (`an_upload_refused_with_409_*`), `ipc_socket.rs` (`a_failed_hydrate_is_logged_*`) | `cargo test` counts |
+| The chain: a second save is based on what the first produced; a later save waits for an earlier one in backoff; a modify queued while its create uploads lands on the one created file, with its name encrypted under the server id | `engine_bridge.rs` (`a_second_queued_save_*`, `a_later_save_waits_*`, `a_modify_queued_while_its_create_*`) | `cargo test` counts |
+| Logging: 409 refusals worded by why the op left the queue (retry, stale base parked at once, attempts used up) and the two pinned server messages, failed hydrates by category, no name, path or URL | `engine_bridge.rs` (`a_refused_upload_line_is_worded_by_why_it_parked`, `the_409_messages_are_pinned`), `ipc_socket.rs` (`a_failed_hydrate_is_logged_*`) | `cargo test` counts |
+
+### Write versions (write-versions spec §13)
+
+One row per T-number of the spec's test plan. Each was seen failing on its intended assertion, before its code existed or, for a guard that passed from the start, under its mutation. "unix" and "macOS" are the test's `cfg` gate; T35 was dropped with the timestamp re-base (spec revision 4b). Truth lines: `cargo test` counts (Rust), `ipc-framing: N passed, 0 failed (expected N)` (Swift).
+
+| T | Test | File | Runs on |
+| --- | --- | --- | --- |
+| T1 | `a_landing_keeps_the_content_version_the_reply_named` | `engine_bridge.rs` | unix |
+| T2 | `a_remote_change_replaces_the_token` | `engine_bridge.rs` | unix |
+| T3 | `our_own_echo_keeps_the_token` | `engine_bridge.rs` | unix |
+| T4 | `a_restore_from_this_mac_replaces_the_token` | `engine_bridge.rs` | macOS |
+| T5 | `the_token_survives_rename_move_and_trash` | `engine_bridge.rs` | unix |
+| T6 | `sign_out_clears_tokens_and_aliases` | `engine_bridge.rs` | unix |
+| T7 | `token_format_and_older_parse` | `write_token.rs` | every target |
+| T8 | `c1_a_save_after_the_first_landed_is_based_on_what_it_produced` | `engine_bridge.rs` | unix |
+| T9 | `c1_three_saves_in_one_pass` | `engine_bridge.rs` | every target |
+| T10 | the earlier-build identifier tests: `a_legacy_identifier_of_the_current_content_is_based_on_the_server_version`, `a_legacy_identifier_of_older_content_stays_a_stale_base`, `a_legacy_identifier_of_older_content_is_refused_by_the_server`, `a_current_format_identifier_is_parsed_as_before` | `engine_bridge.rs` | every target |
+| T11 | `i2_a_row_without_a_version_never_uploads_without_a_base` | `engine_bridge.rs` | macOS |
+| T12 | `i2_a_zero_base_on_a_versioned_row_parks` | `engine_bridge.rs` | every target |
+| T13 | `a_versionless_create_op_requests_a_snapshot_that_fills_local_rows` | `engine_bridge.rs` | macOS |
+| T14 | `the_init_guard_refuses_a_finder_replace_without_a_base` | `engine_bridge.rs` | every target |
+| T15 | `i3_create_lands_then_a_modify_under_the_provisional_id` | `engine_bridge.rs` | unix |
+| T16 | `a_delete_of_the_provisional_id_after_landing_trashes_the_server_file` | `engine_bridge.rs` | every target |
+| T17 | `an_unknown_id_is_refused_never_answered_without_an_item` | `engine_bridge.rs` | unix |
+| T18 | `r2a_a_fetch_during_the_creates_queue_wait_is_served_locally` | `engine_bridge.rs` | every target |
+| T19 | `a_failed_hydrate_never_changes_a_row_with_a_live_upload` | `engine_bridge.rs` | every target |
+| T20 | "a queued write without an item is an error, never a nil item" | `BeebeebFileProviderTests/main.swift` | macOS (Swift harness) |
+| T21 | `a_newer_save_queues_behind_a_write_without_a_session_and_both_land` | `engine_bridge.rs` | every target |
+| T22 | `a_newer_save_waits_behind_a_live_session` | `engine_bridge.rs` | every target |
+| T23 | `i4_a_doomed_earlier_write_never_blocks_hours` | `engine_bridge.rs` | every target |
+| T24 | `a_stale_base_409_parks_at_once` | `engine_bridge.rs` | every target |
+| T25 | `an_in_progress_409_is_retried` | `engine_bridge.rs` | every target |
+| T26 | `an_earlier_builds_op_is_never_handed_over` | `engine_bridge.rs` | every target |
+| T27 | `m1_a_chain_failure_after_complete_never_duplicates` | `engine_bridge.rs` | every target |
+| T28 | moved to task 1879 (with the recovery of a swept session after a lost `complete`) |  |  |
+| T29 | `m2_order_is_insertion_order_when_the_clock_steps_back` | `engine_bridge.rs` | macOS |
+| T30 | `i1_a_landing_with_a_later_write_queued_keeps_it_uploading` | `engine_bridge.rs` | unix |
+| T31 | `startup_keeps_a_row_with_a_live_upload_uploading` | `state_db.rs` | every target |
+| T32 | moved to task 1879 (with showing the save time in Finder) |  |  |
+| T33 | `a_retrying_upload_keeps_the_item_writable` | `engine_bridge.rs` | unix |
+| T34 | `an_old_timestamp_base_parks_at_its_first_attempt` | `engine_bridge.rs` | every target |
+| T36 | `the_migration_is_additive_and_idempotent` | `state_db.rs` | every target |
+| T37 | one capture test per new line: `log_finder_write_refused_unknown_item`, `log_upload_refused_with_its_class`, `log_parked_with_its_reason`, `log_took_over`, `log_alias_resolved`, `log_alias_delete_kept`, `log_base_from_snapshot`, `log_version_raised`, `log_queue_state_moved`, `log_completed_landing_retried`, `log_hydrate_served` | `engine_bridge.rs` | every target, except `log_finder_write_refused_unknown_item` (unix) and `log_base_from_snapshot`, `log_version_raised` (macOS) |
+| T38 | `m5_a_non_uuid_wire_id_is_never_logged` | `engine_bridge.rs` | unix |
+| T39 | `enqueue_vs_runner_a_save_accepted_while_its_predecessor_lands_is_never_orphaned` | `engine_bridge.rs` | every target |
+| T40 | `landing_vs_new_save_the_chain_step_sees_every_successor` | `engine_bridge.rs` | unix |
+| T41 | `handover_vs_new_save_the_newest_bytes_land_last` | `engine_bridge.rs` | every target |
+| T42 | `the_runners_copy_never_resurrects_or_drops_a_save` | `engine_bridge.rs` | every target |
+| T43 | `a_deletion_conflicted_create_of_the_provisional_id_modifies_the_server_file` | `engine_bridge.rs` | every target |
+| T44 | "createItem passes deletionConflicted, the template id and its content version" | `BeebeebFileProviderTests/main.swift` | macOS (Swift harness) |
+| T45 | `i2_a_zero_base_save_after_the_fill_lands_on_the_filled_version` | `engine_bridge.rs` | macOS |
+| T46 | `i2_a_failed_snapshot_keeps_the_request_and_base_pending_resolves_on_the_next_success` | `engine_bridge.rs` | macOS |
+| T47 | `i2_the_fill_reaches_an_uploading_row` | `engine_bridge.rs` | macOS |
+| T48 | `i3_a_versionless_replace_from_another_device_reaches_the_disk` | `engine_bridge.rs` | macOS |
+| T49 | `a_numeric_base_while_a_minted_write_is_queued_follows_the_newest_write` | `engine_bridge.rs` | every target |
+| T50 | `an_unknown_token_is_sent_as_its_b` | `engine_bridge.rs` | every target |
+| T51 | moved to task 1879 (with rule 1c, a reply lost to an IPC timeout) |  |  |
+| T52 | `engine_start_requests_a_snapshot_for_version_zero_rows` | `state_db.rs` | macOS |
+| T53 | `base_pending_parks_after_ten_successful_snapshots_without_the_file` | `engine_bridge.rs` | macOS |
+| T54 | `the_alias_resolves_rename_move_item_thumbnail_and_hydrate` | `engine_bridge.rs` | unix |
+| T55 | `aliases_older_than_30_days_are_swept` | `engine_bridge.rs` | every target |
+| T56 | moved to task 1879 (with rendering a queued write's thumbnail from its staged bytes) |  |  |
+| T56′ | `the_thumbnail_of_a_queued_write_is_an_error_without_a_server_request` | `engine_bridge.rs` | every target |
+| T57 | `a_restore_with_a_queued_write_runs_after_it_and_keeps_both_versions` | `engine_bridge.rs` | macOS |
+| T58 | `a_delete_through_the_alias_needs_the_held_token_as_base` | `engine_bridge.rs` | every target |
+| T59 | moved to task 1879 (with a create's dedup replay through the alias) |  |  |
+| T60 | `a_trashing_row_is_never_presented_uploading` | `engine_bridge.rs` | unix |
+| T61 | `a_completed_session_is_never_abandoned_at_give_up` | `engine_bridge.rs` | every target |
+| T62 | `sign_out_purges_provisional_rows_without_a_contract` | `engine_bridge.rs` | every target |
+| T63 | moved to task 1879 (with hydrates pinned to the held object version) |  |  |
+| T64 | `a_builder_clears_held_columns_only_for_the_write_it_read` | `engine_bridge.rs` | unix |
+| T65 | `the_predicate_reads_row_and_queue_together` | `engine_bridge.rs` | unix |
+| T66 | `a_re_upgrade_clears_stale_held_columns_and_waiting_ops_store_b` | `state_db.rs` | every target |
+| T67 | `a_stale_base_predecessor_hands_over_and_the_successor_parks_with_the_newest_bytes` | `engine_bridge.rs` | every target |
