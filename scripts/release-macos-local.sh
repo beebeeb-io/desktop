@@ -499,6 +499,22 @@ $(printf '%s\n' "$notes_bad" | sed 's/^/      /')"
     say "RELEASE_NOTES.md names $VERSION, has no lead markers, and carries test counts"
   fi
 
+  # RELEASE_BLOCKERS.md lists what must be fixed before any desktop release; each blocker is one
+  # list item. The release workflow refuses the same way (release.yml, validate-release-notes).
+  HINT="Resolve each item of RELEASE_BLOCKERS.md on main and remove it from the file in the same change, then re-cut the release and build from the new tag. See docs/RELEASING.md."
+  blockers=""
+  if [[ -f RELEASE_BLOCKERS.md ]]; then
+    blockers="$(grep -nE '^[[:space:]]*[-*][[:space:]]' RELEASE_BLOCKERS.md || true)"
+  fi
+  if [[ -z "$blockers" ]]; then
+    say "RELEASE_BLOCKERS.md lists no item"
+  elif is_dry; then
+    say "would refuse: RELEASE_BLOCKERS.md lists $(grep -c . <<<"$blockers") item(s)"
+  else
+    fail "RELEASE_BLOCKERS.md lists release blockers; no desktop release is cut while it lists one:
+$(printf '%s\n' "$blockers" | sed 's/^/      /')"
+  fi
+
   HINT="The CI run must have created the release with the Windows/Linux assets before the Mac part starts. Run release.yml first."
   capture rel gh release view "$TAG" --repo "$REPO" --json isDraft,assets
   if ! is_dry; then

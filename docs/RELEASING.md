@@ -2,6 +2,10 @@
 
 Desktop releases ship with authored, workbench-style release notes. The generated GitHub changelog still matters, but it is appended after the authored notes instead of being the only release body.
 
+## Release blockers
+
+`RELEASE_BLOCKERS.md` at the repository root lists what must be fixed before any desktop release is cut, one list item (a line that starts with `- `) per blocker. While it lists an item, the release checks refuse: `release.yml` fails closed in its "Validate release notes" job (step "Refuse while RELEASE_BLOCKERS.md lists an item", with an `::error` that names the file), and `scripts/release-macos-local.sh` stops at step 1 and prints the items. A blocker is added when a merge to main ships something that must not reach a release yet, and the change that resolves it removes its item; an empty list, or no file, lets the release through. It exists because a rule that lives only in someone's memory does not stop a release: the first blocker is that a sign-out discards Finder saves still waiting to upload, so no release may ship the Finder write queue until that is fixed. `scripts/test-release-macos-local.sh` has a scenario that proves the script refuses.
+
 ## Release Notes Template
 
 Create `RELEASE_NOTES.md` at the repository root for the exact plain semver version being released. Do not keep a reusable placeholder in the repo root; stale notes should make the release workflow fail.
@@ -191,7 +195,7 @@ upload (step 10); a failure before it leaves GitHub untouched, and the failure m
 
 | Step | What it does | Fail-closed gate |
 | --- | --- | --- |
-| 1 | Release-state gate (always runs, also on resume) | clean tree; `HEAD` == the commit `desktop-v<VERSION>` points to on origin; the CI release exists with its Windows/Linux `.sig`s; `RELEASE_NOTES.md` names the version, has no `<!-- lead:` marker and carries real test counts (`<N> pass / 0 fail`, `test result: ok. <N> passed`, both non-zero); `minisign` installed (unless `--skip-local-sig-check`); signing identity, both profiles and the ASC key present; Apple Silicon |
+| 1 | Release-state gate (always runs, also on resume) | clean tree; `HEAD` == the commit `desktop-v<VERSION>` points to on origin; the CI release exists with its Windows/Linux `.sig`s; `RELEASE_NOTES.md` names the version, has no `<!-- lead:` marker and carries real test counts (`<N> pass / 0 fail`, `test result: ok. <N> passed`, both non-zero); `RELEASE_BLOCKERS.md` lists no item (see "Release blockers"); `minisign` installed (unless `--skip-local-sig-check`); signing identity, both profiles and the ASC key present; Apple Silicon |
 | 2 | Build (`bun install --frozen-lockfile`, version patched into `tauri.conf.json` for the build only, hardened runtime on) with `--bundles app` and a `--config` override turning `createUpdaterArtifacts` off, updater signing variables stripped. Records the commit it built from in `<VERSION>/build-commit` | a resume past this step (`--from-step` 3-13) is refused in step 1 unless that commit equals `HEAD`; `tauri.conf.json` and the tracked `dist/index.html` are restored the moment the build ends and again on any exit; the tree must be clean afterwards |
 | 3 | Preflight the unnotarized `.app` | `CFBundleShortVersionString == VERSION`; `macos-release-preflight.sh` (hardened runtime on the app, appex and helper, profiles, entry-point guard). The `spctl` execute assessment is skipped on this pass only (`BB_PREFLIGHT_SKIP_SPCTL_EXECUTE`) because Gatekeeper cannot accept an app Apple has not notarized yet |
 | 4 | Notarize the `.app` (`notarytool submit --wait`, ASC API key) | status must be `Accepted`; otherwise the notary log's issues are printed |

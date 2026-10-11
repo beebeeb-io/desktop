@@ -71,6 +71,9 @@ and macOS builds cannot be reproduced locally at all (no cross-compile path from
 Before cutting a desktop release, follow `docs/RELEASING.md`. The release workflow fails closed
 unless the released commit contains a root `RELEASE_NOTES.md` whose contents mention the exact
 semver value passed to the workflow; author and commit per-release notes before triggering it.
+It (and `scripts/release-macos-local.sh`) also refuses while the root `RELEASE_BLOCKERS.md` lists an
+item: one list item per thing that must be fixed before any release, removed by the change that fixes
+it (`docs/RELEASING.md`, "Release blockers").
 
 ## Architecture
 

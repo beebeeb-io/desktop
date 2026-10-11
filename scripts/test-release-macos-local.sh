@@ -28,7 +28,7 @@
 # shellcheck disable=SC2329  # predicates are invoked indirectly through `check`
 set -uo pipefail
 
-EXPECTED_CHECKS=397
+EXPECTED_CHECKS=408
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$HERE/.." && pwd)"
@@ -144,6 +144,7 @@ STUB
     '{productName:"Beebeeb",version:"0.1.0",identifier:"io.beebeeb.app",bundle:{targets:"all",createUpdaterArtifacts:true},plugins:{updater:{pubkey:$pk}}}' >"$REPO/src-tauri/tauri.conf.json"
   echo '<!doctype html><html></html>' >"$REPO/dist/index.html"
   write_notes "$REPO/RELEASE_NOTES.md"
+  write_blockers "$REPO/RELEASE_BLOCKERS.md"
   printf 'src-tauri/target/\n' >"$REPO/.gitignore"
   echo fixture >"$HOME_FX/.private_keys/AuthKey_5KRWK96245.p8"
   echo profile >"$HOME_FX/.private_keys/macos-developer-id-profiles/BeebeebApp.provisionprofile"
@@ -178,6 +179,12 @@ write_notes() { # path [the Verification gate bullet(s)]
     printf '# Beebeeb Desktop 0.8.7 - fixture\n\nNotes.\n\n### Verification\n\n'
     printf '%s\n' "${2:-$NOTES_GOOD_GATE}"
   } >"$1"
+}
+
+# The release blockers file as it is once nothing blocks a release: its header and no item. Each
+# blocker is one list item; a scenario appends one.
+write_blockers() { # path
+  printf '# Release blockers\n\nEach item below must be resolved before a desktop release is cut.\n' >"$1"
 }
 
 # run_release <args...>: run the script inside the fixture repo with shims first on PATH.
@@ -238,6 +245,7 @@ new_fixture happy
 run_release 0.8.7 alpha
 check "full run exits 0" rc_is 0
 check "prints DONE" out_has "DONE: macOS 0.8.7 is published on the alpha channel"
+check "a release blockers file with no item lets the release through" out_has "RELEASE_BLOCKERS.md lists no item"
 check "all 13 step banners printed" bash -c "[[ \$(grep -c '^==> \[[0-9]*/13\]' '$OUT') -eq 13 ]]"
 check "exactly 2 notarization submissions" bash -c "[[ \$(grep -cE '^xcrun notarytool submit ' '$LOGF') -eq 2 ]]"
 check "exactly 1 upload" bash -c "[[ \$(grep -cE '^gh release upload ' '$LOGF') -eq 1 ]]"
@@ -443,6 +451,20 @@ new_fixture notesversion
 ) >/dev/null 2>&1
 run_release 0.8.7 alpha
 expect_stop 1 "does not mention 0.8.7" pre-upload
+
+echo "== scenario: RELEASE_BLOCKERS.md lists an item (step 1) =="
+new_fixture blockers
+(
+  cd "$REPO" || exit 1
+  echo '- A sign-out discards Finder saves that are still waiting to upload.' >>RELEASE_BLOCKERS.md
+  "$REAL_GIT" commit -q -am "a release blocker"
+  "$REAL_GIT" tag -f -a desktop-v0.8.7 -m x >/dev/null
+  "$REAL_GIT" push -q -f origin desktop-v0.8.7
+) >/dev/null 2>&1
+run_release 0.8.7 alpha
+expect_stop 1 "RELEASE_BLOCKERS.md lists release blockers" pre-upload
+check "names the blocker" out_has "A sign-out discards Finder saves that are still waiting to upload."
+check "no build was attempted" log_lacks '^bunx '
 
 echo "== scenario: the CI release does not exist yet (step 1) =="
 new_fixture norelease

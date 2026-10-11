@@ -107,6 +107,24 @@ jobs:
               sys.exit(1)
           PY
 
+      - name: Refuse while RELEASE_BLOCKERS.md lists an item
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          blockers_path="RELEASE_BLOCKERS.md"
+          items=""
+          if [[ -f "$blockers_path" ]]; then
+            items="$(grep -nE '^[[:space:]]*[-*][[:space:]]' "$blockers_path" || true)"
+          fi
+
+          if [[ -n "$items" ]]; then
+            echo "::error file=$blockers_path::RELEASE_BLOCKERS.md lists release blockers. No desktop release is cut while it lists an item: resolve each on main, remove it from the file in the same change, then rerun this workflow. See docs/RELEASING.md."
+            printf '%s\n' "$items"
+            exit 1
+          fi
+          echo "RELEASE_BLOCKERS.md lists no item"
+
   test:
     name: Run release test gate
     if: github.event_name == 'workflow_dispatch'
