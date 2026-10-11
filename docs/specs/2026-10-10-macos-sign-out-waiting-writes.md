@@ -871,10 +871,16 @@ On a Mac, the app's container is `/Users/<name>/Library/Containers/io.beebeeb.ap
   **On the same volume as the staged copies.** Ruling [staging-durable] (1873, before it releases) moves the staged copies
   to `dirs::data_dir()/beebeeb/finder-writes`, which is `Data/Library/Application Support/beebeeb/finder-writes` in the
   container, excluded from backup and mode `0700`.
-  - The ruling drops the temp-directory fallback: if that root is not writable, the accept fails, so macOS keeps the item
-    as not synced.
-  - Old journal rows keep their absolute paths under `Data/Library/Caches/beebeeb/finder-writes`, and the orphan purge
-    scans both roots.
+  - ~~The ruling drops the temp-directory fallback: if that root is not writable, the accept fails, so macOS keeps the item
+    as not synced.~~
+    The ruling drops the temp-directory fallback: if that root cannot be created or written to, the accept stages and
+    queues nothing and the app replies `WriteRetryLater`, which the extension reports as the transient
+    `serverUnreachable`, so macOS keeps the item's change and retries the write (1873 spec §8.4). — lead, 2026-10-11 (1873 Task 12)
+  - ~~Old journal rows keep their absolute paths under `Data/Library/Caches/beebeeb/finder-writes`, and the orphan purge
+    scans both roots.~~
+    Old journal rows keep their absolute paths under `Data/Library/Caches/beebeeb/finder-writes` (or the old temp
+    fallback), and the sign-out purge, the account reset and the orphan sweep cover the new root and both old ones:
+    `finder_staging_candidates()` is the data root, the Caches root and the temp root. — lead, 2026-10-11 (1873 Task 12)
   - All three places are in the same container: Application Support, the old Caches root and `Data/Documents`. So the
     copy is on one volume whichever root a write's staged copy is in. ~~`std::fs::copy` on macOS first tries an APFS clone
     (`fclonefileat`), as `1873:staged_payload.rs:118-119` notes, and a clone uses no new data blocks, so a full disk
@@ -1347,7 +1353,7 @@ The frontend pull request does not merge without that commit.
   conflicts.
 - ~~**Moving the staged copies out of `Library/Caches`.** That is 1873's design; see §15.~~
   **Moving the staged copies out of `Library/Caches`** is 1873's work, under its ruling [staging-durable]. This spec only
-  has to work with both roots (§7.1, U27). — lead ruling, 2026-10-10 ([staging-durable])
+  has to work with ~~both roots~~ every staging root, the new one and both old ones (§7.1, U27). — lead ruling, 2026-10-10 ([staging-durable]); the three roots: — lead, 2026-10-11 (1873 Task 12)
 - **A "Delete" for the kept folder.** "Dismiss" forgets it; the files are the person's.
 
 ## 13. Verification (written before the code)
@@ -1605,6 +1611,7 @@ The struck question below is the original question 1, answered by amend 1.
 
    **Answered by [staging-durable]:** before 1873 releases, staged copies live in
    `dirs::data_dir()/beebeeb/finder-writes`, excluded from backup and mode `0700`, with no temp-directory fallback. Old
-   journal rows keep their Caches paths, and the orphan purge scans both roots. This spec's consequences are in §7.1,
+   journal rows keep their Caches paths, and the orphan purge scans ~~both roots~~ the new root and both old ones (the
+   Caches root and the old temp fallback; — lead, 2026-10-11 (1873 Task 12)). This spec's consequences are in §7.1,
    §7.2 and U27-U28.
    — lead ruling, 2026-10-10 ([staging-durable])
