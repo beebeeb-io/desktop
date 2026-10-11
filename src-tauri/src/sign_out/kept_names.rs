@@ -1,0 +1,234 @@
+//! Spec 2026-10-10 §7.1 and §7.2 (task 1887): where the kept folder is, and what each kept file is called.
+#![cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+
+use std::path::{Path, PathBuf};
+
+/// The folder's name under the container's `Documents` (§7.1).
+pub const KEPT_FOLDER_NAME: &str = "Changes not sent";
+/// `tauri.conf.json`'s `identifier`; a test pins the two equal.
+pub const APP_BUNDLE_ID: &str = "io.beebeeb.app";
+/// The longest file name APFS takes, in UTF-8 bytes.
+pub const MAX_NAME_BYTES: usize = 255;
+
+/// §7.2: the newest copied write of a file gets the plain name; every other copied write (an earlier build's) is
+/// `<stem> (earlier save <N>)<.ext>`, N = 1 for the next-newest.
+#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 5
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeptRole {
+    Newest,
+    EarlierSave(u32),
+}
+
+/// §7.1: `<document_dir>/Changes not sent` only inside this app's sandbox container, where
+/// `document_dir` is `<home>/Library/Containers/<bundle_id>/Data/Documents`; otherwise
+/// `<data_dir>/beebeeb/Changes not sent`, so an unsandboxed build never writes plaintext into the person's real
+/// Documents folder.
+#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 7
+pub fn kept_root(document_dir: Option<&Path>, data_dir: Option<&Path>, bundle_id: &str) -> Option<PathBuf> {
+    let container_documents = Path::new("Library")
+        .join("Containers")
+        .join(bundle_id)
+        .join("Data")
+        .join("Documents");
+    match document_dir {
+        Some(dir) if dir.is_absolute() && dir.ends_with(&container_documents) => Some(dir.join(KEPT_FOLDER_NAME)),
+        _ => data_dir.map(|data| data.join("beebeeb").join(KEPT_FOLDER_NAME)),
+    }
+}
+
+/// [`kept_root`] for this process.
+#[allow(dead_code)] // first production caller: Task 7
+pub fn kept_root_for_this_app() -> Option<PathBuf> {
+    kept_root(
+        dirs::document_dir().as_deref(),
+        dirs::data_dir().as_deref(),
+        APP_BUNDLE_ID,
+    )
+}
+
+/// §7.1: local time at the start of the keep step, as macOS names screenshots (dots, never colons).
+#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 7
+pub fn event_folder_name(at: chrono::DateTime<chrono::Local>) -> String {
+    at.format("%Y-%m-%d at %H.%M.%S").to_string()
+}
+
+/// `name` split before its extension. A name that starts with a dot and has no other dot has none.
+fn split_extension(name: &str) -> (&str, &str) {
+    match name.rfind('.') {
+        Some(0) | None => (name, ""),
+        Some(dot) => (&name[..dot], &name[dot..]),
+    }
+}
+
+/// The longest prefix of `text` that fits in `max` bytes, cut at a character boundary.
+fn prefix_within(text: &str, max: usize) -> &str {
+    if text.len() <= max {
+        return text;
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+/// `name` cut to 255 bytes; the stem is cut, never the extension.
+pub fn cut_name(name: &str) -> String {
+    with_suffix(name, "")
+}
+
+/// `<stem><suffix><.ext>`, the stem cut so the whole is at most 255 bytes (§7.2 "Lengths": the cut applies to the
+/// final name, never to the suffix, and never to the extension while it leaves room for one stem byte and the suffix).
+/// An "extension" that leaves no such room (`a.<250 bytes>`) is part of the stem, so the name is cut
+/// as one stem and can never pass 255 bytes.
+pub fn with_suffix(name: &str, suffix: &str) -> String {
+    let (stem, extension) = match split_extension(name) {
+        (_, extension) if extension.len() + suffix.len() >= MAX_NAME_BYTES => (name, ""),
+        split => split,
+    };
+    let room = MAX_NAME_BYTES.saturating_sub(suffix.len() + extension.len());
+    format!("{}{suffix}{extension}", prefix_within(stem, room))
+}
+
+/// §7.2 "Names": the components of a kept file's path under the event folder.
+#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 5
+pub fn kept_relative_path(file_path: Option<&str>, op_id: &str, role: KeptRole) -> Vec<String> {
+    let mut components: Vec<String> = file_path
+        .unwrap_or_default()
+        .split('/')
+        .filter(|component| !component.is_empty())
+        .map(|component| {
+            if component == "." || component == ".." || component.contains('\0') {
+                "_".to_string()
+            } else {
+                component.to_string()
+            }
+        })
+        .collect();
+    if components.is_empty() {
+        components.push(format!("Unnamed {}", prefix_within(op_id, 8)));
+    }
+    let last = components.len() - 1;
+    for (index, component) in components.iter_mut().enumerate() {
+        *component = if index < last {
+            prefix_within(component, MAX_NAME_BYTES).to_string()
+        } else {
+            match role {
+                KeptRole::Newest => cut_name(component),
+                KeptRole::EarlierSave(n) => with_suffix(component, &format!(" (earlier save {n})")),
+            }
+        };
+    }
+    components
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    /// U33.
+    #[test]
+    fn kept_root_is_the_container_or_app_support() {
+        let data = Path::new("/Users/a/Library/Containers/io.beebeeb.app/Data/Library/Application Support");
+        let sandboxed = Path::new("/Users/a/Library/Containers/io.beebeeb.app/Data/Documents");
+        assert_eq!(
+            kept_root(Some(sandboxed), Some(data), APP_BUNDLE_ID),
+            Some(sandboxed.join("Changes not sent"))
+        );
+        let fallback = Some(data.join("beebeeb").join("Changes not sent"));
+        assert_eq!(
+            kept_root(Some(Path::new("/Users/a/Documents")), Some(data), APP_BUNDLE_ID),
+            fallback,
+            "unsandboxed"
+        );
+        let other = Path::new("/Users/a/Library/Containers/com.example.other/Data/Documents");
+        assert_eq!(
+            kept_root(Some(other), Some(data), APP_BUNDLE_ID),
+            fallback,
+            "another bundle's container"
+        );
+        assert_eq!(kept_root(None, Some(data), APP_BUNDLE_ID), fallback);
+        assert_eq!(kept_root(None, None, APP_BUNDLE_ID), None);
+    }
+
+    /// The bundle id the root is checked against is the app's own (`tauri.conf.json`).
+    #[test]
+    fn the_bundle_id_is_the_apps() {
+        let conf: serde_json::Value = serde_json::from_str(include_str!("../../tauri.conf.json")).unwrap();
+        assert_eq!(conf["identifier"].as_str(), Some(APP_BUNDLE_ID));
+    }
+
+    /// U11, the naming half (Task 3 has the disk half).
+    #[test]
+    fn kept_names_follow_the_rule() {
+        let name = |path: Option<&str>, role| kept_relative_path(path, "0123456789abcdef", role);
+        assert_eq!(
+            name(Some("Work/report.docx"), KeptRole::Newest),
+            ["Work", "report.docx"]
+        );
+        assert_eq!(
+            name(Some("/Work//report.docx"), KeptRole::Newest),
+            ["Work", "report.docx"],
+            "empty components dropped"
+        );
+        assert_eq!(
+            name(Some("Old/a.txt"), KeptRole::EarlierSave(1)),
+            ["Old", "a (earlier save 1).txt"]
+        );
+        assert_eq!(
+            name(Some("Old/a.txt"), KeptRole::EarlierSave(2)),
+            ["Old", "a (earlier save 2).txt"]
+        );
+        assert_eq!(
+            name(Some(".env"), KeptRole::EarlierSave(1)),
+            [".env (earlier save 1)"],
+            "a dotfile has no extension"
+        );
+        assert_eq!(name(Some("a/../b/./c"), KeptRole::Newest), ["a", "_", "b", "_", "c"]);
+        assert_eq!(name(Some("a/b\0c"), KeptRole::Newest), ["a", "_"]);
+        assert_eq!(name(None, KeptRole::Newest), ["Unnamed 01234567"]);
+        assert_eq!(name(Some("/"), KeptRole::Newest), ["Unnamed 01234567"]);
+
+        let long = format!("{}.docx", "x".repeat(300));
+        let cut = name(Some(&long), KeptRole::Newest).pop().unwrap();
+        assert_eq!(cut.len(), 255, "{cut}");
+        assert!(cut.ends_with(".docx"));
+        let accented = format!("{}.txt", "é".repeat(200)); // 2 bytes each
+        let cut = name(Some(&accented), KeptRole::Newest).pop().unwrap();
+        assert!(
+            cut.len() <= 255 && cut.ends_with(".txt") && cut.is_char_boundary(cut.len() - 4),
+            "{cut}"
+        );
+
+        let full = format!("{}.docx", "y".repeat(250)); // exactly 255 bytes
+        let with = with_suffix(&full, " (2)");
+        assert_eq!(with.len(), 255);
+        assert!(with.ends_with(" (2).docx"), "{with}");
+
+        // An "extension" that leaves no room for the suffix is cut as part of one stem, so no name
+        // passes 255 bytes (`clonefile` would answer `ENAMETOOLONG`, which is E2).
+        let long_extension = format!("a.{}", "e".repeat(250)); // 252 bytes, the dot at byte 1
+        let earlier = name(Some(&long_extension), KeptRole::EarlierSave(1)).pop().unwrap();
+        assert!(
+            earlier.len() <= 255 && earlier.ends_with(" (earlier save 1)"),
+            "{} bytes: {earlier}",
+            earlier.len()
+        );
+        let second = with_suffix(&long_extension, " (2)");
+        assert!(
+            second.len() <= 255 && second.ends_with(" (2)") && second.starts_with("a."),
+            "{} bytes: {second}",
+            second.len()
+        );
+        let over = format!("a.{}", "e".repeat(300)); // a name from another platform, longer than APFS takes
+        assert_eq!(cut_name(&over).len(), 255);
+    }
+
+    #[test]
+    fn the_event_folder_reads_like_a_screenshot() {
+        use chrono::TimeZone;
+        let at = chrono::Local.with_ymd_and_hms(2026, 10, 10, 14, 5, 12).unwrap();
+        assert_eq!(event_folder_name(at), "2026-10-10 at 14.05.12");
+    }
+}

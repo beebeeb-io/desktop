@@ -3999,10 +3999,37 @@ fn state_db_from_state_dir(state_dir: &std::path::Path) -> Result<Option<state_d
 }
 
 fn disposable_cache_roots() -> Vec<PathBuf> {
-    let mut roots = vec![std::env::temp_dir()];
-    if let Some(cache_dir) = dirs::cache_dir() {
-        roots.push(cache_dir);
+    disposable_cache_roots_in(
+        std::env::temp_dir(),
+        dirs::cache_dir(),
+        macos_hydrate_cache_root(),
+        &engine_bridge::FinderStagingBases::current(),
+    )
+}
+
+/// The hydrate cache's root on a Mac (task 1670); none elsewhere.
+fn macos_hydrate_cache_root() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        Some(crate::ipc_socket::macos_hydrate_cache_dir())
     }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+/// Spec 2026-10-10 §7.1 (U12): the roots `is_disposable_cache_path` accepts, from directories passed in, so a test can
+/// check a release layout. The temp dir, the cache dir, the macOS hydrate cache, then every staging folder (spec
+/// 2026-10-09 §8.4), never the whole data dir.
+fn disposable_cache_roots_in(
+    temp_dir: PathBuf,
+    cache_dir: Option<PathBuf>,
+    hydrate_cache_dir: Option<PathBuf>,
+    staging: &engine_bridge::FinderStagingBases,
+) -> Vec<PathBuf> {
+    let mut roots = vec![temp_dir];
+    roots.extend(cache_dir);
     // Task 1670 round 2, Codex P1 (PR #75): `hydrate_file` records a macOS
     // hydrate-cache destination as `cache_path` via `mark_cached`, same as
     // any other cache entry. Without this, `is_disposable_cache_path` (the
@@ -4019,13 +4046,12 @@ fn disposable_cache_roots() -> Vec<PathBuf> {
     // machinery, not the primary mechanism, but it closes the gap Codex
     // named precisely (this general machinery must never treat a path
     // holding decrypted plaintext as "not ours to remove").
-    #[cfg(target_os = "macos")]
-    roots.push(crate::ipc_socket::macos_hydrate_cache_dir());
+    roots.extend(hydrate_cache_dir);
     // Every folder a Finder write's plaintext copy is staged in, or was staged in by an earlier build (spec
     // 2026-10-09 §8.4): on macOS the data dir's `beebeeb/finder-writes`, which is under neither root above, so
     // without it a sign-out would skip those copies and leave plaintext on disk. The folders themselves, never the
     // whole data dir.
-    roots.extend(engine_bridge::finder_staging_candidates());
+    roots.extend(staging.candidates());
     roots
 }
 
@@ -32578,5 +32604,72 @@ mod config_write_pin_tests {
                 "{name} writes through the held-copy helpers:\n{body}"
             );
         }
+    }
+}
+
+/// Spec 2026-10-10 (task 1887): the sign-out's keep step and its purge, on a Mac.
+#[cfg(all(test, target_os = "macos"))]
+mod sign_out_keep_tests {
+    use super::*;
+    use crate::engine_bridge::FinderStagingBases;
+    use crate::sign_out::kept_names::{APP_BUNDLE_ID, kept_root};
+    use std::path::Path;
+
+    /// U12 on the release layout (spec §7.1, amended for `184ac962`).
+    #[test]
+    fn the_kept_folder_is_out_of_every_purges_reach() {
+        let container = Path::new("/Users/a/Library/Containers/io.beebeeb.app/Data");
+        let data = container.join("Library").join("Application Support");
+        let cache = container.join("Library").join("Caches");
+        let staging = FinderStagingBases {
+            data: Some(data.clone()),
+            cache: Some(cache.clone()),
+            temp: container.join("tmp"),
+        };
+        let hydrate = PathBuf::from("/Users/a/Library/Group Containers/R8352WDJJR.io.beebeeb.app.fileprovider/hydrate");
+        let roots = disposable_cache_roots_in(container.join("tmp"), Some(cache.clone()), Some(hydrate), &staging);
+        let staging_list = staging.candidates();
+        // The lists' shape first: a whole data dir in either list would otherwise show only as the unsandboxed root
+        // being under it.
+        let durable = data.join("beebeeb").join("finder-writes");
+        assert!(
+            roots.contains(&durable),
+            "the purge's allow-list holds the durable staging root"
+        );
+        assert!(staging_list.contains(&durable), "the orphan sweep holds it too");
+        assert!(
+            !roots.contains(&data) && !staging_list.contains(&data),
+            "never the whole data dir"
+        );
+        assert!(
+            staging_list.contains(&cache.join("beebeeb").join("finder-writes")),
+            "the old Caches root stays"
+        );
+        let kept = [
+            kept_root(Some(&container.join("Documents")), Some(&data), APP_BUNDLE_ID).unwrap(),
+            kept_root(Some(Path::new("/Users/a/Documents")), Some(&data), APP_BUNDLE_ID).unwrap(),
+        ];
+        for kept in &kept {
+            for root in roots.iter().chain(staging_list.iter()) {
+                assert!(
+                    !kept.starts_with(root),
+                    "{} is under {}",
+                    kept.display(),
+                    root.display()
+                );
+            }
+        }
+
+        let production = super::finder_setup_command_tests::production_source();
+        let wrapper = super::finder_setup_command_tests::body_between(
+            &production,
+            "fn disposable_cache_roots() -> Vec<PathBuf> {",
+            "\n}\n",
+        );
+        assert_eq!(wrapper.matches("disposable_cache_roots_in(").count(), 1, "{wrapper}");
+        assert!(
+            !wrapper.contains("roots.push") && !wrapper.contains("vec!["),
+            "the wrapper builds nothing itself: {wrapper}"
+        );
     }
 }

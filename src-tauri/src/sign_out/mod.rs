@@ -3,4 +3,5 @@
 // The sign-out state this module holds is read on macOS and in tests only; elsewhere it is built and never read.
 #![cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 
+pub(crate) mod kept_names;
 pub(crate) mod waiting;
