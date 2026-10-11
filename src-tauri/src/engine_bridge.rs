@@ -20646,6 +20646,11 @@ mod tests {
             "S's row decides, not a row of P's"
         );
         assert_eq!(
+            check(&s),
+            Err(crate::finder_open::SHARED_NOT_IN_FINDER.to_string()),
+            "the server id's own row decides when no alias is followed"
+        );
+        assert_eq!(
             check("3f2a9c1e-0000-4000-8000-00000000dead"),
             Err(crate::finder_open::ITEM_NOT_KNOWN.to_string()),
             "an id with neither a row nor an alias is still unknown"
