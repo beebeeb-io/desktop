@@ -744,6 +744,22 @@ fn is_curable_refusal(error: &anyhow::Error) -> bool {
     })
 }
 
+/// The accept found its staged copy's journal row gone: an engine-start sweep removed the copy
+/// between the copy and the accept's transaction (spec §8.7 S6). Nothing was queued; the reply is
+/// `WriteRetryLater`, so the system hands the write over again. Path-free on purpose: the text
+/// reaches the extension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+pub(crate) struct StagedCopyGone;
+
+impl std::fmt::Display for StagedCopyGone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the staged copy of this write was removed before it was queued")
+    }
+}
+
+impl std::error::Error for StagedCopyGone {}
+
 /// The attempt found its upload session gone and abandoned it (`upload_session_is_gone`): the next
 /// attempt starts a fresh upload, so for a File Provider write the failure is transient, never a
 /// counted one (spec §8.4). It shows, and has as its source, the failure it wraps, so every reading
@@ -2552,6 +2568,7 @@ impl EngineBridge {
                 token
             }
             crate::state_db::AcceptOutcome::UnknownItem => anyhow::bail!("a create always inserts its row"),
+            crate::state_db::AcceptOutcome::CopyGone => return Err(anyhow::Error::new(StagedCopyGone)),
         };
         prepared.staged.retain();
         Ok(FpWrite {
@@ -2958,6 +2975,7 @@ impl EngineBridge {
                     requested_id: present_as.unwrap_or(file_id),
                 }));
             }
+            crate::state_db::AcceptOutcome::CopyGone => return Err(anyhow::Error::new(StagedCopyGone)),
         };
         prepared.staged.retain();
         Ok(FpWrite {
@@ -20421,6 +20439,69 @@ mod tests {
             Some("text/markdown"),
             "the row's content type is kept"
         );
+    }
+
+    /// Spec §8.7 S6 (N3): an engine start's sweep that runs between an accept's copy and its
+    /// transaction (a stopping engine's handler still inside an accept) removes the unfinished
+    /// copy and its row. The accept's transaction then finds the row gone, queues nothing, and the
+    /// reply asks the system to hand the write over again.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn an_accept_whose_copy_the_start_sweep_removed_is_retried_later() {
+        let (dir, _sync_root, server, bridge) = rule3_setup([168u8; 32]);
+        seed_uploaded_row(&bridge, &server, "swept");
+        let bases = FinderStagingBases {
+            data: Some(dir.path().join("data")),
+            cache: Some(dir.path().join("cache")),
+            temp: dir.path().join("tmp"),
+        };
+        let root = bases.durable_root().unwrap();
+        bridge.seams.stage_under(bases);
+        let db = bridge.db.clone();
+        let sweep_root = root.clone();
+        let swept = Arc::new(Mutex::new(None));
+        let swept_seen = Arc::clone(&swept);
+        bridge.seams.arm("accept:before_tx", move || {
+            let sweep = crate::staged_payload::sweep_unreferenced(&db, std::slice::from_ref(&sweep_root)).unwrap();
+            *swept_seen.lock().unwrap() = Some(sweep);
+        });
+        let contents = dir.path().join("save.txt");
+        std::fs::write(&contents, b"a save the sweep caught").unwrap();
+        let result = bridge.queue_file_provider_modify(finder_file_target(
+            Some("swept"),
+            "notes.txt",
+            &contents,
+            Some("1".into()),
+        ));
+        let reply = crate::ipc_socket::write_outcome_response("modify", &bridge.db, result);
+        let sweep = swept
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the sweep ran between the copy and the accept");
+        assert_eq!(
+            sweep.unfinished, 1,
+            "precondition: it removed the unfinished copy: {sweep:?}"
+        );
+        assert!(
+            matches!(reply, crate::ipc_socket::IpcResponse::WriteRetryLater { .. }),
+            "{reply:?}"
+        );
+        assert!(
+            bridge.db.list_operations_for_file("swept").unwrap().is_empty(),
+            "nothing was queued"
+        );
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0, "no copy is left");
+        assert!(
+            bridge.db.staged_payloads_for_signout().unwrap().is_empty(),
+            "and no journal row"
+        );
+        assert_eq!(
+            bridge.db.get_file("swept").unwrap().unwrap().status,
+            FileStatus::Local,
+            "the row is as it was"
+        );
+        drop(server.finish());
     }
 
     // ── Rule 3: provisional ids, fetches from the queue, thumbnails, unknown ids (spec §7, §5.6) ──

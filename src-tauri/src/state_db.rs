@@ -1483,6 +1483,10 @@ pub enum AcceptOutcome {
     ParkedAtOnce { token: String, reason: ParkReason },
     /// A modify of a file this database has no row for: nothing was written.
     UnknownItem,
+    /// The staged copy's journal row is no longer an unfinished one: an engine-start sweep removed
+    /// it with its copy between the copy and this transaction (spec §8.7 S6). Nothing was
+    /// written; the write is retried.
+    CopyGone,
 }
 
 /// Why a File Provider upload parked with its bytes kept (spec §11, "Parked").
@@ -3505,6 +3509,18 @@ impl StateDb {
         use crate::write_token::{BaseDecision, WriteToken, decide_base, mint_write_id};
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        // §8.7 S6: the copy must still be journalled as unfinished. An engine-start sweep deletes
+        // such a row, guarded, before it unlinks the copy, so either this transaction comes first
+        // and the op then names the copy (the sweep keeps it), or the row is gone and nothing is
+        // written here.
+        let journalled: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM staged_payloads WHERE path = ?1 AND completed = 0)",
+            params![accept.payload_path],
+            |row| row.get(0),
+        )?;
+        if !journalled {
+            return Ok(AcceptOutcome::CopyGone);
+        }
         let (decision, object_version_id) = match &accept.kind {
             FinderAcceptKind::Create { row } => {
                 debug_assert_eq!(row.file_id, accept.file_id);
@@ -4346,6 +4362,25 @@ impl StateDb {
         )?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         rows.collect()
+    }
+
+    /// Engine start (spec §8.7 S6): delete the journal row of an accept that never committed, only
+    /// while it still is one: `completed = 0`, and no op, resume row or finalization names the path.
+    /// `true` when it was deleted; the caller then unlinks the copy. An accept's transaction
+    /// requires this row, so an accept that committed first keeps the row (and its copy), and one
+    /// that commits after finds it gone and writes nothing (`AcceptOutcome::CopyGone`).
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn forget_unfinished_unreferenced(&self, path: &str) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let deleted = conn.execute(
+            "DELETE FROM staged_payloads
+             WHERE path = ?1 AND completed = 0
+               AND path NOT IN (SELECT payload_path FROM operation_queue WHERE payload_path IS NOT NULL)
+               AND path NOT IN (SELECT payload_path FROM upload_resume)
+               AND path NOT IN (SELECT payload_path FROM upload_finalizations)",
+            params![path],
+        )?;
+        Ok(deleted == 1)
     }
 
     /// Engine start (spec §8.7 S6): every path a row of `staged_payloads`, `operation_queue`,
@@ -8257,6 +8292,8 @@ mod tests {
     #[test]
     fn held_columns_are_written_together_and_a_half_set_row_is_an_error() {
         fn accept(db: &StateDb, op_id: &str, file_id: &str, kind: FinderAcceptKind<'_>) -> Result<AcceptOutcome> {
+            // The accept requires its copy's journal row (spec §8.7 S6), as production writes it.
+            db.track_staged_payload("/staged/x", None, false)?;
             db.accept_finder_write(
                 &FinderAccept {
                     op_id,
@@ -8574,6 +8611,7 @@ mod tests {
         let mut contract = db.get_file_contract_state("downgraded").unwrap().unwrap();
         contract.current_version = 2;
         db.set_file_contract_state(&contract).unwrap();
+        db.track_staged_payload("/staged/d", None, false).unwrap();
         // Borrowed parameters, not `&'static str`: the token below is an owned `String`.
         let accept = |op_id: &str, base: &str| {
             db.accept_finder_write(
@@ -9189,6 +9227,7 @@ mod tests {
         let mut contract = db.get_file_contract_state("f").unwrap().unwrap();
         contract.current_version = 1;
         db.set_file_contract_state(&contract).unwrap();
+        db.track_staged_payload("/staged/w", None, false).unwrap();
         let accept = |op_id: &str, base: &str| {
             db.accept_finder_write(
                 &FinderAccept {
@@ -11135,6 +11174,7 @@ mod tests {
         let mut contract = db.get_file_contract_state("with-save").unwrap().unwrap();
         contract.current_version = 1;
         db.set_file_contract_state(&contract).unwrap();
+        db.track_staged_payload("/staged/with-save", None, false).unwrap();
         let accepted = db
             .accept_finder_write(
                 &FinderAccept {
@@ -11265,6 +11305,7 @@ mod tests {
     /// One File Provider save of `file_id` on `base`, through the accept transaction.
     fn accept_save(db: &StateDb, op_id: &str, file_id: &str, base: Option<&str>) -> AcceptOutcome {
         let payload_path = format!("/staged/{op_id}");
+        db.track_staged_payload(&payload_path, None, false).unwrap();
         db.accept_finder_write(
             &FinderAccept {
                 op_id,
@@ -11576,6 +11617,83 @@ mod tests {
             db.pending_changes_count().unwrap(),
             1,
             "an unfinished copy still counts"
+        );
+    }
+
+    /// Spec §8.7 S6 (N3): the accept requires its copy's journal row, unfinished. Without it,
+    /// nothing is written: no op, no held write, no status change.
+    #[test]
+    fn an_accept_whose_journal_row_is_gone_writes_nothing() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_own_row(&db, "swept", FileStatus::Local, 10);
+        let mut contract = db.get_file_contract_state("swept").unwrap().unwrap();
+        contract.current_version = 1;
+        db.set_file_contract_state(&contract).unwrap();
+        let accept = |payload_path: &str| {
+            db.accept_finder_write(
+                &FinderAccept {
+                    op_id: "op-swept",
+                    file_id: "swept",
+                    kind: FinderAcceptKind::Modify {
+                        incoming_base: Some("1"),
+                    },
+                    parent_id: None,
+                    target_path: Some("swept.txt"),
+                    metadata_json: "{}",
+                    payload_path,
+                    size_bytes: 4,
+                    modified_at: 20,
+                    backup_source_key: None,
+                    now: 30,
+                },
+                &|_, _| Vec::new(),
+            )
+            .unwrap()
+        };
+        // No row at all, and a released row: both are not an unfinished copy.
+        db.track_staged_payload("/staged/released", None, true).unwrap();
+        for path in ["/staged/never-journalled", "/staged/released"] {
+            assert!(matches!(accept(path), AcceptOutcome::CopyGone), "{path}");
+        }
+        assert!(db.list_operations_for_file("swept").unwrap().is_empty(), "no op");
+        assert_eq!(db.get_file("swept").unwrap().unwrap().status, FileStatus::Local);
+        let (held, _) = held_write_conn(&db.hold_lock_for_test(), "swept").unwrap();
+        assert!(held.is_none(), "no held write");
+        // Journalled and unfinished: accepted.
+        db.track_staged_payload("/staged/journalled", None, false).unwrap();
+        assert!(matches!(accept("/staged/journalled"), AcceptOutcome::Queued { .. }));
+    }
+
+    /// Spec §8.7 S6 (N3): the sweep deletes an unfinished row only while nothing names it, so an
+    /// accept that committed first keeps its row; a released row is never this step's.
+    #[test]
+    fn the_sweep_never_forgets_a_row_an_accept_committed() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        db.track_staged_payload("/staged/accepted", None, false).unwrap();
+        db.hold_lock_for_test()
+            .execute(
+                "INSERT INTO operation_queue (op_id, kind, file_id, payload_path)
+                 VALUES ('op-accepted', 'upload_version', 'f', '/staged/accepted')",
+                [],
+            )
+            .unwrap();
+        db.track_staged_payload("/staged/orphan", None, false).unwrap();
+        db.track_staged_payload("/staged/released", None, true).unwrap();
+        assert!(!db.forget_unfinished_unreferenced("/staged/accepted").unwrap());
+        assert!(db.forget_unfinished_unreferenced("/staged/orphan").unwrap());
+        assert!(!db.forget_unfinished_unreferenced("/staged/released").unwrap());
+        let mut left: Vec<String> = db
+            .staged_payloads_for_signout()
+            .unwrap()
+            .into_iter()
+            .map(|(path, _, _)| path)
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            vec!["/staged/accepted".to_string(), "/staged/released".to_string()]
         );
     }
 }

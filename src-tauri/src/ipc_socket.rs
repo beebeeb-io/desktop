@@ -1456,6 +1456,9 @@ fn write_refusal_category(error: &anyhow::Error) -> &'static str {
     if error.is::<crate::engine_bridge::FinderStagingUnavailable>() {
         return "staging_root_unavailable";
     }
+    if error.is::<crate::engine_bridge::StagedCopyGone>() {
+        return "staged_copy_gone";
+    }
     if error.downcast_ref::<std::io::Error>().is_some() {
         return "io";
     }
@@ -2560,6 +2563,12 @@ pub(crate) fn write_outcome_response(
         // queued; the extension reports a transient error, so the system retries the write.
         // The text is the typed error's fixed reason, never a path.
         Err(e) if e.is::<crate::engine_bridge::FinderStagingUnavailable>() => {
+            log_refused_write(op, write_refusal_category(&e));
+            IpcResponse::WriteRetryLater { message: e.to_string() }
+        }
+        // Spec §8.7 S6: an engine-start sweep removed the staged copy before the accept
+        // committed. Nothing was queued; the system hands the write over again.
+        Err(e) if e.is::<crate::engine_bridge::StagedCopyGone>() => {
             log_refused_write(op, write_refusal_category(&e));
             IpcResponse::WriteRetryLater { message: e.to_string() }
         }

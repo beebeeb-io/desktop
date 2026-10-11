@@ -506,6 +506,12 @@ process. Two calls are not, which is why each decision is one call.
   touches only regular files directly in a folder this user owns, and counts a
   file as named by its file name. The revoked-share purge releases its ops'
   copies in its own transaction, and a copy that fails partway removes itself.
+  An accept still running when the sweep runs (a stopping engine's handler) is
+  covered by its own transaction: it requires its copy's journal row,
+  unfinished, and the sweep deletes that row, guarded, before it unlinks the
+  copy, so the accept either committed first (the sweep keeps its copy) or
+  queues nothing and replies `WriteRetryLater`. Each folder is listed before
+  the rows are read (fix round 4).
 
 ```mermaid
 sequenceDiagram
@@ -683,7 +689,7 @@ parked op stops logging.
 
 | Event | Line (`warn!` unless noted) | Fields |
 | --- | --- | --- |
-| a create, modify or delete the daemon refused | `Finder write refused` | `op`, `reason`: a staging category (`malformed_path`, `traversal`, `outside_staging`, …), `contents_not_a_file`, `engine_stopping`, `write_policy`, `malformed_request`, `io`, `database`, `other`; `unknown_item` (with `id`, or `id_kind`); `staging_root_unavailable` (the reply is `WriteRetryLater`); `row_unreadable` (a queued create or modify whose row cannot be read back; added during implementation, beyond the spec's original table) |
+| a create, modify or delete the daemon refused | `Finder write refused` | `op`, `reason`: a staging category (`malformed_path`, `traversal`, `outside_staging`, …), `contents_not_a_file`, `engine_stopping`, `write_policy`, `malformed_request`, `io`, `database`, `other`; `unknown_item` (with `id`, or `id_kind`); `staging_root_unavailable` (the reply is `WriteRetryLater`); `staged_copy_gone` (an engine-start sweep removed the accept's staged copy before it committed; nothing queued, the reply is `WriteRetryLater`); `row_unreadable` (a queued create or modify whose row cannot be read back; added during implementation, beyond the spec's original table) |
 | an `init` refused with 409, retried | `upload refused by the server (409 Conflict); will retry` | `op_id`, `file_id`, `attempt`, `max_attempts`, `base_version`, `class` (`stale_base`, `in_progress`, `other`) |
 | a stale-base 409 that parks a File Provider upload at once | `upload refused by the server (409 Conflict); its base is stale, parked with its bytes kept in the queue` | the same, with `class` and `reason` `stale_base`; `attempt` is the attempt that was made (1 for a first try) |
 | a 409 that uses up an op's attempts | `upload refused by the server (409 Conflict); attempts used up, parked with its bytes kept in the queue` | the same; `reason="stale_base"` only for that class |

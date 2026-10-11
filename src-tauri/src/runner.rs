@@ -1024,7 +1024,10 @@ async fn run(
     }
     // Then the staged plaintext copies nothing will upload: an accept that never committed, a
     // copy whose row an older build's sign-out deleted (spec §8.7 S6). Here, after the claims
-    // are cleared and before the IPC server below serves a write, so no accept is in flight.
+    // are cleared and before the IPC server below serves a write. A stopping engine's IPC handler
+    // can still be inside an accept (its connection tasks are aborted, not awaited); the accept's
+    // own transaction requires its copy's journal row, which the sweep deletes before it unlinks
+    // the copy, so such an accept either committed first or queues nothing and is retried.
     #[cfg(target_os = "macos")]
     match crate::staged_payload::sweep_unreferenced(&db, &crate::engine_bridge::finder_staging_candidates()) {
         Ok(sweep) => {

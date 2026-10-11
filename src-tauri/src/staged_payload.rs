@@ -197,7 +197,10 @@ pub fn sweep_unreferenced(db: &StateDb, roots: &[PathBuf]) -> rusqlite::Result<U
             Err(refusal) => sweep.failed(&refusal.into_io_error()),
         }
     }
-    // 1. Accepts that never committed.
+    // 1. Accepts that never committed. The row goes first, guarded (`forget_unfinished_unreferenced`),
+    // then the copy: an accept's transaction requires the row, so an accept still running (a
+    // stopping engine's handler) either committed first, and its op keeps the row and the copy, or
+    // finds the row gone and queues nothing (`WriteRetryLater`).
     for path in db.unfinished_unreferenced_payloads()? {
         let path_ref = Path::new(&path);
         let (Some(parent), Some(name)) = (path_ref.parent(), path_ref.file_name()) else {
@@ -206,38 +209,42 @@ pub fn sweep_unreferenced(db: &StateDb, roots: &[PathBuf]) -> rusqlite::Result<U
         let Some((_, dir)) = folders.iter().find(|(root, _)| *root == parent) else {
             continue;
         };
-        match dir.stat_entry(name) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        let regular = match dir.stat_entry(name) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
             Err(e) => {
                 sweep.kept(&e);
                 continue;
             }
-            // A link or a folder at the journalled name is never followed or removed.
+            // A link or a folder at the journalled name is never followed or removed, and keeps
+            // its row.
             Ok(stat) if !is_regular_file(&stat) => continue,
-            Ok(_) => {
-                if let Err(e) = dir.unlink_entry(name) {
-                    sweep.kept(&e);
-                    continue;
-                }
-            }
+            Ok(_) => true,
+        };
+        if !db.forget_unfinished_unreferenced(&path)? {
+            continue;
         }
-        db.forget_staged_payload(&path)?;
         sweep.unfinished += 1;
+        if regular && let Err(e) = dir.unlink_entry(name) {
+            // The row is gone: the next start's step 2 finds the copy.
+            sweep.kept(&e);
+        }
     }
-    // 2. Files no row names.
+    // 2. Files no row names. Every folder is listed before the rows are read: a copy is made only
+    // after its journal row (`StagedPayload`), so a copy the listing saw is named by the rows read
+    // after it unless nothing names it.
+    let mut listings = Vec::with_capacity(folders.len());
+    for (_, dir) in &folders {
+        match dir.entry_names() {
+            Ok(names) => listings.push((dir, names)),
+            Err(e) => sweep.failed(&e),
+        }
+    }
     let named: std::collections::HashSet<std::ffi::OsString> = db
         .staged_copy_names()?
         .iter()
         .filter_map(|path| Path::new(path).file_name().map(std::ffi::OsStr::to_os_string))
         .collect();
-    for (_, dir) in &folders {
-        let names = match dir.entry_names() {
-            Ok(names) => names,
-            Err(e) => {
-                sweep.failed(&e);
-                continue;
-            }
-        };
+    for (dir, names) in listings {
         for name in names.iter().filter(|name| !named.contains(*name)) {
             match dir.stat_entry(name) {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
