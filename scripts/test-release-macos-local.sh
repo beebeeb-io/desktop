@@ -28,7 +28,7 @@
 # shellcheck disable=SC2329  # predicates are invoked indirectly through `check`
 set -uo pipefail
 
-EXPECTED_CHECKS=408
+EXPECTED_CHECKS=410
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$HERE/.." && pwd)"
@@ -465,6 +465,19 @@ run_release 0.8.7 alpha
 expect_stop 1 "RELEASE_BLOCKERS.md lists release blockers" pre-upload
 check "names the blocker" out_has "A sign-out discards Finder saves that are still waiting to upload."
 check "no build was attempted" log_lacks '^bunx '
+
+echo "== scenario: no RELEASE_BLOCKERS.md at all lets the release through =="
+new_fixture noblockers
+(
+  cd "$REPO" || exit 1
+  "$REAL_GIT" rm -q RELEASE_BLOCKERS.md
+  "$REAL_GIT" commit -q -m "no release blockers file"
+  "$REAL_GIT" tag -f -a desktop-v0.8.7 -m x >/dev/null
+  "$REAL_GIT" push -q -f origin desktop-v0.8.7
+) >/dev/null 2>&1
+run_release 0.8.7 alpha
+check "a release without RELEASE_BLOCKERS.md exits 0" rc_is 0
+check "it says the file lists no item" out_has "RELEASE_BLOCKERS.md lists no item"
 
 echo "== scenario: the CI release does not exist yet (step 1) =="
 new_fixture norelease
