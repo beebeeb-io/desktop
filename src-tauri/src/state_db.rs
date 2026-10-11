@@ -992,11 +992,46 @@ fn record_local_write_conn<C: std::ops::Deref<Target = Connection>>(
     Ok(())
 }
 
+/// The system's trash container, as the File Provider extension names it (the identifier
+/// `NSFileProviderTrashContainerItemIdentifier`, or its short form).
+pub(crate) fn is_file_provider_trash(id: &str) -> bool {
+    matches!(id, "NSFileProviderTrashContainerItemIdentifier" | "trashContainer")
+}
+
+/// The last component of a row's path: the item's name.
+fn path_leaf(path: &str) -> &str {
+    path.trim_matches('/').rsplit('/').next().unwrap_or_default()
+}
+
+/// Spec §7.2 (final review): the full relative path of the item `name` under `parent_id`, as a
+/// snapshot writes it: the parent row's path, `/`, the name. The name alone at the root, and
+/// when the parent row is unknown or has no path. Where an item is listed is decided by its
+/// parent alone; the path carries its name, and its folders for the readers that use them.
+fn relative_path_under_conn<C: std::ops::Deref<Target = Connection>>(
+    conn: &C,
+    parent_id: Option<&str>,
+    name: &str,
+) -> Result<String> {
+    let name = path_leaf(name);
+    let parent_path: Option<String> = match parent_id {
+        Some(parent_id) => conn
+            .query_row("SELECT path FROM files WHERE file_id = ?1", params![parent_id], |row| {
+                row.get(0)
+            })
+            .optional()?,
+        None => None,
+    };
+    Ok(match parent_path.as_deref().map(|path| path.trim_matches('/')) {
+        Some(parent_path) if !parent_path.is_empty() => format!("{parent_path}/{name}"),
+        _ => name.to_string(),
+    })
+}
+
 /// The name and parent a File Provider save was made under, applied in its accept (spec §7.2).
 /// The system hands a rename or a move over with the contents and takes the reply's item as
 /// the truth for both, so the row describes them from the accept on; a snapshot or an op echo
-/// leaves an `Uploading` or `Error` row's name alone. The path takes the save's name, as the
-/// landing sets it. Nothing is written when neither changed.
+/// leaves an `Uploading` or `Error` row's name alone. The path is the full relative path under
+/// the new parent. Nothing is written when neither changed.
 fn apply_save_name_and_parent_conn<C: std::ops::Deref<Target = Connection>>(
     conn: &C,
     entry: &FileEntry,
@@ -1006,20 +1041,14 @@ fn apply_save_name_and_parent_conn<C: std::ops::Deref<Target = Connection>>(
     let Some(target_path) = target_path else {
         return Ok(());
     };
-    let leaf = |path: &str| {
-        path.trim_matches('/')
-            .rsplit('/')
-            .next()
-            .unwrap_or_default()
-            .to_string()
-    };
     let moved = entry.parent_id.as_deref() != parent_id;
-    if leaf(&entry.path) == leaf(target_path) && !moved {
+    if path_leaf(&entry.path) == path_leaf(target_path) && !moved {
         return Ok(());
     }
+    let path = relative_path_under_conn(conn, parent_id, target_path)?;
     conn.execute(
         "UPDATE files SET path = ?2, parent_id = ?3 WHERE file_id = ?1",
-        params![entry.file_id, target_path, parent_id],
+        params![entry.file_id, path, parent_id],
     )?;
     // A rename or a move, with the old parent, as `upsert_file_conn` records a path change.
     record_file_change_conn(conn, &entry.file_id, FpChangeKind::Reparented, entry.parent_id.clone())
@@ -3040,6 +3069,13 @@ impl StateDb {
         record_local_write_conn(&conn, file_id, size_bytes, modified_at)
     }
 
+    /// The full relative path of the item `name` under `parent_id` (spec §7.2; see
+    /// `relative_path_under_conn`).
+    pub fn relative_path_under(&self, parent_id: Option<&str>, name: &str) -> Result<String> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        relative_path_under_conn(&conn, parent_id, name)
+    }
+
     /// Clear transient transfer states left behind by a previous process.
     ///
     /// `Uploading` and `Downloading` mean "the current engine is actively moving
@@ -3555,10 +3591,24 @@ impl StateDb {
         if !journalled {
             return Ok(AcceptOutcome::CopyGone);
         }
+        // The parent the op carries: the template's (§7.2).
+        let mut parent_id = accept.parent_id.map(str::to_string);
         let (decision, object_version_id) = match &accept.kind {
             FinderAcceptKind::Create { row } => {
                 debug_assert_eq!(row.file_id, accept.file_id);
-                upsert_file_conn(&tx, row)?;
+                // §7.2 (final review): the row is placed where the system created the item:
+                // under the template's parent, with the full relative path read here. The
+                // parent is the contract's column, which `upsert_file_conn` does not write; it
+                // is set after the insert, recorded as a move, as a Finder folder create does.
+                let path = relative_path_under_conn(&tx, accept.parent_id, &row.path)?;
+                upsert_file_conn(&tx, &FileEntry { path, ..(*row).clone() })?;
+                if accept.parent_id.is_some() {
+                    tx.execute(
+                        "UPDATE files SET parent_id = ?2 WHERE file_id = ?1",
+                        params![accept.file_id, accept.parent_id],
+                    )?;
+                    record_file_change_conn(&tx, accept.file_id, FpChangeKind::Reparented, None)?;
+                }
                 (None, None)
             }
             FinderAcceptKind::Modify { incoming_base } => {
@@ -3571,7 +3621,13 @@ impl StateDb {
                 let facts = base_facts_conn(&tx, accept.file_id, &contract, legacy_identifiers(&entry, &contract))?;
                 let decision = decide_base(&facts, *incoming_base);
                 record_local_write_conn(&tx, accept.file_id, accept.size_bytes, accept.modified_at)?;
-                apply_save_name_and_parent_conn(&tx, &entry, accept.target_path, accept.parent_id)?;
+                // §7.2 (final review): a save of an item the system holds in its trash names the
+                // trash container as the parent. That is not a move: the row, and the op, keep
+                // the row's parent.
+                if parent_id.as_deref().is_some_and(is_file_provider_trash) {
+                    parent_id = entry.parent_id.clone();
+                }
+                apply_save_name_and_parent_conn(&tx, &entry, accept.target_path, parent_id.as_deref())?;
                 // A content write touched the row: its version is no longer a snapshot fill.
                 tx.execute(
                     "UPDATE files SET version_filled = 0 WHERE file_id = ?1",
@@ -3606,7 +3662,7 @@ impl StateDb {
                 accept.op_id,
                 OperationKind::UploadVersion.as_str(),
                 accept.file_id,
-                accept.parent_id,
+                parent_id,
                 accept.target_path,
                 accept.metadata_json,
                 accept.payload_path,
@@ -3725,7 +3781,14 @@ impl StateDb {
         });
         entry.file_id = server.to_string();
         if let Some(target_path) = input.target_path.filter(|_| !later_save) {
-            entry.path = target_path.to_string();
+            // §7.2 (final review): a Finder landing, the id swap included, writes the full
+            // relative path under its parent, never the op's name alone. Other landings write
+            // their op's path as before.
+            entry.path = if input.write_id.is_some() {
+                relative_path_under_conn(&tx, input.parent_id, target_path)?
+            } else {
+                target_path.to_string()
+            };
         }
         entry.remote_updated_at = input.now;
         upsert_file_conn(&tx, &entry)?;

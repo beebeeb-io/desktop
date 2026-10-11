@@ -2649,7 +2649,10 @@ pub(crate) fn file_provider_change_payloads(
         .collect()
 }
 
-fn list_file_provider_items(db: &crate::state_db::StateDb, container_id: &str) -> Vec<FileProviderItemPayload> {
+pub(crate) fn list_file_provider_items(
+    db: &crate::state_db::StateDb,
+    container_id: &str,
+) -> Vec<FileProviderItemPayload> {
     // Task 1698: the SYSTEM trash container lists the trash view — the
     // Trashing rows that are TOP of trash (their parent row is not itself
     // Trashing; the children of a trashed folder enumerate INSIDE that
@@ -2677,13 +2680,21 @@ fn list_file_provider_items(db: &crate::state_db::StateDb, container_id: &str) -
         // Task 1698: Trashing rows are excluded — a trashed item left "Beebeeb"
         // (the system reparented it into the trash container); surfacing it at
         // the root would duplicate it in Finder.
+        //
+        // Spec 2026-10-09 §7.2 (final review): the root lists the rows with no
+        // parent, as a folder lists the rows whose parent it is, and as every
+        // reply names the parent. A path with no folder in it decided this
+        // before, so a Finder create or save that wrote its name alone as the
+        // path was listed at the top level whatever its parent. A row with no
+        // name (it did not decrypt) is still left out.
         return db
             .list_files()
             .unwrap_or_default()
             .into_iter()
             .filter(|entry| entry.status != crate::state_db::FileStatus::Trashing)
             .filter(|entry| {
-                is_top_level_path(&entry.path)
+                entry.parent_id.is_none()
+                    && !entry.path.trim_matches('/').is_empty()
                     && db
                         .get_file_contract_state(&entry.file_id)
                         .ok()
@@ -2737,7 +2748,8 @@ fn parent_row_is_trashing(db: &crate::state_db::StateDb, entry: &crate::state_db
 }
 
 fn is_trash_container(container_id: &str) -> bool {
-    container_id == FP_TRASH_APPLE || container_id == "trashContainer"
+    // FP_TRASH_APPLE or its short form; one definition, which the write accept reads too.
+    crate::state_db::is_file_provider_trash(container_id)
 }
 
 /// Task 1694 rule (lead decision, 2026-10-01): every LIVE folder accepts
@@ -3123,11 +3135,6 @@ fn filename_from_path(path: &str) -> String {
         .to_string()
 }
 
-fn is_top_level_path(path: &str) -> bool {
-    let trimmed = path.trim_matches('/');
-    !trimmed.is_empty() && !trimmed.contains('/')
-}
-
 /// Task 1699: mirror of the Windows Cloud Files thumbnail variant picker
 /// (`windows_cf/thumbnail_provider.rs`): the requested maximum pixel
 /// dimension maps to the smallest server variant that satisfies it. The
@@ -3347,6 +3354,47 @@ mod tests {
             item.parent_identifier, FP_ROOT_APPLE,
             "a top-level item must be presented as a child of the ROOT container, not of a synthetic namespace"
         );
+    }
+
+    /// Spec 2026-10-09 §7.2 (final review): the root lists the rows with no parent, as a
+    /// folder lists its children and as every reply names the parent, whatever the path
+    /// says. A row with no name is still left out.
+    #[test]
+    fn the_root_lists_the_rows_without_a_parent_whatever_their_path() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let row = |file_id: &str, path: &str, parent: Option<&str>| {
+            db.upsert_file(&FileEntry {
+                file_id: file_id.into(),
+                path: path.into(),
+                status: FileStatus::Uploading,
+                size_bytes: 3,
+                modified_at: 1,
+                content_hash: None,
+                remote_updated_at: 1,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+            let mut contract = db.get_file_contract_state(file_id).unwrap().unwrap();
+            contract.parent_id = parent.map(str::to_string);
+            db.set_file_contract_state(&contract).unwrap();
+        };
+        // A Finder create in a folder this Mac has no row for keeps its name alone as the path.
+        row("named-alone-in-a-folder", "n1.txt", Some("folder-1"));
+        row("top-level", "top.txt", None);
+        row("no-name", "", None);
+
+        let root: Vec<String> = list_file_provider_items(&db, FP_ROOT_APPLE)
+            .into_iter()
+            .map(|item| item.identifier)
+            .collect();
+        assert_eq!(root, vec!["top-level".to_string()]);
+        let folder: Vec<String> = list_file_provider_items(&db, "folder-1")
+            .into_iter()
+            .map(|item| item.identifier)
+            .collect();
+        assert_eq!(folder, vec!["named-alone-in-a-folder".to_string()]);
     }
 
     #[test]

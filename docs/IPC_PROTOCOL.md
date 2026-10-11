@@ -651,6 +651,15 @@ while that write has not parked. The returned item names the token.
   op's name and parent only when no later Finder save of the file is queued,
   parked or not; a save that parks for good keeps them. — lead, 2026-10-11
   (final review)
+- (fix round 10) Placement is the row's parent alone (spec §7.2): a folder lists
+  its children by `parent_id`, the root lists the rows with none, and every
+  reply names the row's parent. A create stores the template's parent in its
+  accept, so a file created inside a folder is in that folder from its reply on,
+  never at the top level while it is queued or parked. Every Finder writer (the
+  create and modify accepts, the landing and its id swap, a folder create) keeps
+  the path the full relative path under that parent. A save whose template names
+  the trash container as its parent keeps the row's parent. — lead, 2026-10-11
+  (final review)
 - Uploads without a write id (Windows, the watcher, Keep Mine) keep today's
   status writers.
 
@@ -1002,7 +1011,7 @@ domain is registered).
 
 | container | listing |
 | --- | --- |
-| root (`NSFileProviderRootContainerItemIdentifier` / `__fp_root__` / empty / `rootContainer`) | the real top-level tree, EXCLUDING `Trashing` rows |
+| root (`NSFileProviderRootContainerItemIdentifier` / `__fp_root__` / empty / `rootContainer`) | ~~the real top-level tree, EXCLUDING `Trashing` rows~~ the rows with no parent (`parent_id` NULL) and a name, in the person's own namespace, EXCLUDING `Trashing` rows. The path does not decide it (spec §7.2, placement) — lead, 2026-10-11 (final review) |
 | the trash container (`NSFileProviderTrashContainerItemIdentifier` / `trashContainer`) | the trash view: `Trashing` rows that are TOP of trash |
 | a real folder id | children by contract parent; `Trashing` children only when the folder ITSELF is trashed (trash-view content) |
 
@@ -1180,6 +1189,7 @@ so no plaintext ever crosses the socket.
 | Upload staging, extension: directory path and `0700`, UUID names, exact bytes + `0600` + fresh mtime, a failed copy is transient with no file left and no path in the text, discard, a package or symlink refused definitively before anything is copied | `BeebeebFileProviderTests/main.swift` (`upload-staging-S1`..`S6`) | `ipc-framing: N passed, 0 failed` |
 | Queued writes never ask for a fetch (the queued and the ignored branches; a queued reply without an item is T20 below) | `BeebeebFileProviderTests/main.swift` ("a queued create or modify never asks the system to re-fetch its own bytes") | `ipc-framing: N passed, 0 failed` |
 | A save that also renames or moves: the reply and the row carry the new name and parent from the accept on, through the landing, and when the save parks; a landing keeps a later save's name and parent; the server gets each save's parent in order; the extension leaves pending a changed name or parent its reply does not describe (spec §7.2) — lead, 2026-10-11 (final review) | `engine_bridge.rs` (`a_save_that_renames_and_moves_*`, `a_landing_keeps_the_name_and_parent_*`, `a_parked_save_keeps_the_name_and_parent_*`), `BeebeebFileProviderTests/main.swift` ("a save that renames or moves leaves pending the fields its reply does not describe") | `cargo test` counts; `ipc-framing: N passed, 0 failed` |
+| (fix round 10) Placement by parent: a nested create's row, reply and listings place it in its folder while queued and after it lands (the id swap); a nested folder create; a nested contents-only save is never listed at the top level and records no move; a save that renames a queued create keeps the name through the swap; a save under the trash container keeps the row's parent; the root lists the rows without a parent whatever their path (spec §7.2) — lead, 2026-10-11 (final review) | `engine_bridge.rs` (`a_nested_create_stays_in_its_folder_*`, `a_nested_folder_create_*`, `a_nested_save_is_never_listed_*`, `a_save_that_renames_a_queued_create_*`, `a_save_under_the_trash_container_*`), `ipc_socket.rs` (`the_root_lists_the_rows_without_a_parent_*`) | `cargo test` counts |
 | Version identifiers lead with the server version; an op echo leaves `content_version` unchanged; no contract carries no base; a cached reply carries the current version | `ipc_socket.rs` tests (`version_identifiers_lead_with_*`, `an_op_echo_leaves_*`, `the_payload_without_a_contract_*`), `ipc_socket_framing_tests.rs` (`a_cached_reply_reports_*`) | `cargo test` counts |
 | A modify after a desktop upload sends the server version as its base, against a server mock that refuses a wrong base with 409 | `engine_bridge.rs` (`a_modify_after_a_desktop_upload_*`, `VersionedServerMock`) | `cargo test` counts |
 | Legacy identifiers: the current content's old identifier is based on `current_version`; older content stays a stale base (also refused by the mock); new-format identifiers parse as before | `engine_bridge.rs` (`a_legacy_identifier_*`, `a_current_format_identifier_*`) | `cargo test` counts |

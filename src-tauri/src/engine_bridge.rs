@@ -2375,6 +2375,15 @@ impl EngineBridge {
                     rel_path,
                 } = start;
                 let metadata = encrypted_metadata_for_name(self.api.master_key(), &file_id, &target.filename, None)?;
+                // Spec §7.2 (final review): an extension's create names its folder by parent
+                // only, so the row takes the full relative path under that parent, as every
+                // Finder writer does. A caller's own relative path (the watcher's) is kept.
+                let row_path = match &target.rel_path {
+                    Some(_) => rel_path.clone(),
+                    None => self
+                        .db
+                        .relative_path_under(target.parent_id.as_deref(), &target.filename)?,
+                };
                 // Write the local folder row + contract synchronously, the same
                 // way the File branch writes its `Uploading` row, so a nested
                 // child dispatched later in the SAME scan resolves this folder as
@@ -2383,7 +2392,7 @@ impl EngineBridge {
                 // present on disk, server CreateFolder op pending in the queue.
                 self.db.upsert_file(&FileEntry {
                     file_id: file_id.clone(),
-                    path: rel_path.clone(),
+                    path: row_path,
                     status: FileStatus::Local,
                     size_bytes: 0,
                     modified_at: now_secs(),
@@ -17686,8 +17695,34 @@ mod tests {
         drop(server.finish());
     }
 
-    /// [`seed_uploaded_row`], nested as a snapshot writes it: `Docs/notes.txt` in `folder-a`.
+    /// A top-level folder row, as a snapshot writes it.
+    fn seed_folder_row(bridge: &EngineBridge, folder_id: &str, path: &str) {
+        bridge
+            .db
+            .upsert_file(&FileEntry {
+                file_id: folder_id.into(),
+                path: path.into(),
+                status: FileStatus::Local,
+                size_bytes: 0,
+                modified_at: 1_700_000_000,
+                content_hash: None,
+                remote_updated_at: 1_700_000_000,
+                parent_id: None,
+                item_kind: ItemKind::Folder,
+            })
+            .unwrap();
+        let mut contract = bridge.db.get_file_contract_state(folder_id).unwrap().unwrap();
+        contract.item_kind = ItemKind::Folder;
+        contract.current_version = 1;
+        bridge.db.set_file_contract_state(&contract).unwrap();
+    }
+
+    /// [`seed_uploaded_row`], nested as a snapshot writes it: `Docs/notes.txt` in `folder-a`
+    /// (`Docs`). The folders `folder-b` (`Other`) and `folder-c` (`Third`) exist too.
     fn seed_row_in_folder(bridge: &EngineBridge, server: &VersionedServerMock, file_id: &str) {
+        seed_folder_row(bridge, "folder-a", "Docs");
+        seed_folder_row(bridge, "folder-b", "Other");
+        seed_folder_row(bridge, "folder-c", "Third");
         seed_uploaded_row(bridge, server, file_id);
         let mut entry = bridge.db.get_file(file_id).unwrap().unwrap();
         entry.path = "Docs/notes.txt".into();
@@ -17753,14 +17788,18 @@ mod tests {
         );
         assert_eq!(
             name_parent_status(&bridge, "moved-save"),
-            ("renamed.txt".into(), Some("folder-b".into()), FileStatus::Uploading),
-            "the accept applied the name and the parent"
+            (
+                "Other/renamed.txt".into(),
+                Some("folder-b".into()),
+                FileStatus::Uploading
+            ),
+            "the accept applied the name and the parent, with the full relative path"
         );
 
         drain_upload_queue(&bridge, &sync_root).await;
         assert_eq!(
             name_parent_status(&bridge, "moved-save"),
-            ("renamed.txt".into(), Some("folder-b".into()), FileStatus::Local),
+            ("Other/renamed.txt".into(), Some("folder-b".into()), FileStatus::Local),
             "the landing keeps them"
         );
         let state = server.finish();
@@ -17819,14 +17858,18 @@ mod tests {
         );
         assert_eq!(
             name_parent_status(&bridge, "two-moves"),
-            ("second.txt".into(), Some("folder-c".into()), FileStatus::Uploading),
+            (
+                "Third/second.txt".into(),
+                Some("folder-c".into()),
+                FileStatus::Uploading
+            ),
             "the first landing kept the later save's name and parent"
         );
 
         drain_upload_queue(&bridge, &sync_root).await;
         assert_eq!(
             name_parent_status(&bridge, "two-moves"),
-            ("second.txt".into(), Some("folder-c".into()), FileStatus::Local)
+            ("Third/second.txt".into(), Some("folder-c".into()), FileStatus::Local)
         );
         let state = server.finish();
         assert_eq!(state.latest_plaintext("two-moves", master_key), b"second");
@@ -17868,8 +17911,293 @@ mod tests {
         assert_eq!(op[0].attempts, op[0].max_attempts, "parked");
         assert_eq!(
             name_parent_status(&bridge, "parked-move"),
-            ("kept.txt".into(), Some("folder-b".into()), FileStatus::Error)
+            ("Other/kept.txt".into(), Some("folder-b".into()), FileStatus::Error)
         );
+        drop(server.finish());
+    }
+
+    /// The File Provider root container's identifier, as the system names it.
+    #[cfg(unix)] // only the listing tests use it
+    const FP_ROOT: &str = "NSFileProviderRootContainerItemIdentifier";
+
+    /// The ids the File Provider enumeration lists under `container`.
+    #[cfg(unix)] // names `crate::ipc_socket::list_file_provider_items`
+    fn listed_under(bridge: &EngineBridge, container: &str) -> Vec<String> {
+        crate::ipc_socket::list_file_provider_items(&bridge.db, container)
+            .into_iter()
+            .map(|item| item.identifier)
+            .collect()
+    }
+
+    /// How many `reparented` change rows `file_id` has.
+    fn reparented_changes(bridge: &EngineBridge, file_id: &str) -> usize {
+        let (changes, _) = bridge.db.list_file_changes_paged(None, 1000).unwrap().unwrap();
+        changes
+            .iter()
+            .filter(|change| change.file_id == file_id && change.kind == crate::state_db::FpChangeKind::Reparented)
+            .count()
+    }
+
+    /// A File Provider create of `filename` in the folder `parent_id`, as the extension sends it.
+    #[cfg(unix)] // only the unix listing tests use it
+    fn fp_create_in(bridge: &EngineBridge, dir: &Path, parent_id: &str, filename: &str, bytes: &[u8]) -> FpWrite {
+        let contents = dir.join(format!("create-{}.txt", uuid::Uuid::new_v4()));
+        std::fs::write(&contents, bytes).unwrap();
+        let mut target = finder_file_target(None, filename, &contents, None);
+        target.parent_id = Some(parent_id.to_string());
+        bridge.queue_file_provider_create(target).unwrap()
+    }
+
+    /// Spec §7.2 (final review): a create inside a folder is placed in that folder from its
+    /// accept on. The row's parent and full relative path, the reply's parent and the
+    /// listings say so while the create is queued, and after it lands as the server file.
+    #[cfg(unix)] // names `crate::ipc_socket`
+    #[tokio::test]
+    async fn a_nested_create_stays_in_its_folder_while_queued_and_after_it_lands() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [99u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_folder_row(&bridge, "r9-folder", "r9-folder");
+        let created = fp_create_in(&bridge, dir.path(), "r9-folder", "n1.txt", b"nested");
+        let p = created.outcome_file_id();
+        let ipc = crate::ipc_socket::write_outcome_response("create", &bridge.db, Ok(created));
+        let crate::ipc_socket::IpcResponse::WriteQueued { item: Some(item), .. } = ipc else {
+            panic!("an item, never None: {ipc:?}")
+        };
+        assert_eq!(
+            (item.filename.as_str(), item.parent_identifier.as_str()),
+            ("n1.txt", "r9-folder"),
+            "the reply places the new file in its folder, never at the top level"
+        );
+        assert_eq!(
+            name_parent_status(&bridge, &p),
+            (
+                "r9-folder/n1.txt".into(),
+                Some("r9-folder".into()),
+                FileStatus::Uploading
+            )
+        );
+        assert!(
+            !listed_under(&bridge, FP_ROOT).contains(&p),
+            "not listed at the top level while queued"
+        );
+        assert_eq!(
+            listed_under(&bridge, "r9-folder"),
+            vec![p.clone()],
+            "listed in its folder"
+        );
+
+        drain_upload_queue(&bridge, &sync_root).await;
+        let s = bridge.db.resolve_alias(&p).unwrap().expect("the create landed");
+        assert!(bridge.db.get_file(&p).unwrap().is_none());
+        assert_eq!(
+            name_parent_status(&bridge, &s),
+            ("r9-folder/n1.txt".into(), Some("r9-folder".into()), FileStatus::Local),
+            "the landing keeps the full relative path and the parent"
+        );
+        assert!(
+            !listed_under(&bridge, FP_ROOT).contains(&s),
+            "not at the top level once landed"
+        );
+        assert_eq!(listed_under(&bridge, "r9-folder"), vec![s.clone()]);
+        let state = server.finish();
+        assert_eq!(state.latest_plaintext(&s, master_key), b"nested");
+        let parents: Vec<_> = state
+            .patches
+            .iter()
+            .filter(|(id, _)| id == &s)
+            .map(|(_, body)| body["parent_id"].clone())
+            .collect();
+        assert_eq!(
+            parents,
+            vec![serde_json::json!("r9-folder")],
+            "the server file is in the folder"
+        );
+    }
+
+    /// Spec §7.2 (final review): a folder created inside a folder is listed in that folder
+    /// only, with the full relative path.
+    #[cfg(unix)] // names `crate::ipc_socket::list_file_provider_items`
+    #[test]
+    fn a_nested_folder_create_is_listed_in_its_folder_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        seed_folder_row(&bridge, "r9-folder", "r9-folder");
+        let outcome = bridge
+            .queue_finder_create(FinderWriteTarget {
+                file_id: None,
+                parent_id: Some("r9-folder".into()),
+                filename: "sub".into(),
+                rel_path: None,
+                kind: FinderWriteItemKind::Folder,
+                contents_path: None,
+                content_type: None,
+                base_version_identifier: None,
+            })
+            .unwrap();
+        let FinderWriteOutcome::Queued { file_id: Some(sub), .. } = outcome else {
+            panic!("a queued folder create: {outcome:?}")
+        };
+        assert_eq!(
+            name_parent_status(&bridge, &sub),
+            ("r9-folder/sub".into(), Some("r9-folder".into()), FileStatus::Local)
+        );
+        assert!(!listed_under(&bridge, FP_ROOT).contains(&sub), "not at the top level");
+        assert_eq!(listed_under(&bridge, "r9-folder"), vec![sub]);
+    }
+
+    /// Spec §7.2 (final review): a contents-only save of a nested file never lists it at the
+    /// top level, and keeps its full relative path and parent through its landing. Neither
+    /// its accept nor its landing records a move.
+    #[cfg(unix)] // names `crate::ipc_socket::list_file_provider_items`
+    #[tokio::test]
+    async fn a_nested_save_is_never_listed_at_the_top_level() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [100u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_row_in_folder(&bridge, &server, "nested-save");
+        let moves_before = reparented_changes(&bridge, "nested-save");
+        fp_save_moved(
+            &bridge,
+            dir.path(),
+            "nested-save",
+            "notes.txt",
+            "folder-a",
+            b"edited in place",
+            "1",
+        );
+        assert_eq!(
+            reparented_changes(&bridge, "nested-save"),
+            moves_before,
+            "a save that neither renames nor moves records no move"
+        );
+        assert_eq!(
+            name_parent_status(&bridge, "nested-save"),
+            ("Docs/notes.txt".into(), Some("folder-a".into()), FileStatus::Uploading)
+        );
+        assert!(!listed_under(&bridge, FP_ROOT).contains(&"nested-save".to_string()));
+        assert!(listed_under(&bridge, "folder-a").contains(&"nested-save".to_string()));
+
+        drain_upload_queue(&bridge, &sync_root).await;
+        assert_eq!(
+            name_parent_status(&bridge, "nested-save"),
+            ("Docs/notes.txt".into(), Some("folder-a".into()), FileStatus::Local),
+            "the landing keeps the full relative path"
+        );
+        assert!(
+            !listed_under(&bridge, FP_ROOT).contains(&"nested-save".to_string()),
+            "not at the top level once landed"
+        );
+        assert_eq!(
+            reparented_changes(&bridge, "nested-save"),
+            moves_before,
+            "nor does its landing"
+        );
+        drop(server.finish());
+    }
+
+    /// Spec §7.2 (final review): a save that renames its file while the file's create is
+    /// still queued renames the provisional row. The create's landing keeps that name on the
+    /// server file, and the save, re-keyed to it, lands under it.
+    #[cfg(unix)] // names `crate::ipc_socket`
+    #[tokio::test]
+    async fn a_save_that_renames_a_queued_create_keeps_the_new_name_through_the_swap() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [101u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_folder_row(&bridge, "folder-a", "Docs");
+        // The save's first chunk fails once, so the create lands alone first.
+        server
+            .state
+            .lock()
+            .unwrap()
+            .fail_first_chunk_once
+            .insert("session-2".into());
+        let created = fp_create_in(&bridge, dir.path(), "folder-a", "draft.txt", b"draft");
+        let p = created.outcome_file_id();
+        let saved = fp_save_moved(
+            &bridge,
+            dir.path(),
+            &p,
+            "final.txt",
+            "folder-a",
+            b"final",
+            &created.token.clone().unwrap(),
+        );
+        let ipc = crate::ipc_socket::write_outcome_response("modify", &bridge.db, Ok(saved));
+        let crate::ipc_socket::IpcResponse::WriteQueued { item: Some(item), .. } = ipc else {
+            panic!("an item, never None: {ipc:?}")
+        };
+        assert_eq!(
+            (
+                item.identifier.as_str(),
+                item.filename.as_str(),
+                item.parent_identifier.as_str()
+            ),
+            (p.as_str(), "final.txt", "folder-a")
+        );
+        assert_eq!(
+            name_parent_status(&bridge, &p),
+            ("Docs/final.txt".into(), Some("folder-a".into()), FileStatus::Uploading)
+        );
+
+        bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+        let s = bridge.db.resolve_alias(&p).unwrap().expect("the create landed");
+        assert_eq!(
+            name_parent_status(&bridge, &s),
+            ("Docs/final.txt".into(), Some("folder-a".into()), FileStatus::Uploading),
+            "the create's landing kept the save's name"
+        );
+
+        drain_upload_queue(&bridge, &sync_root).await;
+        assert_eq!(
+            name_parent_status(&bridge, &s),
+            ("Docs/final.txt".into(), Some("folder-a".into()), FileStatus::Local)
+        );
+        assert_eq!(listed_under(&bridge, "folder-a"), vec![s.clone()]);
+        assert!(!listed_under(&bridge, FP_ROOT).contains(&s));
+        let state = server.finish();
+        assert_eq!(state.files_with_content(), vec![s.clone()], "one server file");
+        assert_eq!(state.files[&s].versions.len(), 2);
+        assert_eq!(state.latest_plaintext(&s, master_key), b"final");
+    }
+
+    /// Spec §7.2 (final review): a save whose template names the trash container as its parent
+    /// keeps the row's parent, and its upload carries the row's parent too. A `Trashing` row
+    /// has no write capability, so this is a guard.
+    #[tokio::test]
+    async fn a_save_under_the_trash_container_keeps_the_rows_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let master_key = [102u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_row_in_folder(&bridge, &server, "in-trash");
+        let moves_before = reparented_changes(&bridge, "in-trash");
+        fp_save_moved(
+            &bridge,
+            dir.path(),
+            "in-trash",
+            "notes.txt",
+            "NSFileProviderTrashContainerItemIdentifier",
+            b"edited",
+            "1",
+        );
+        assert_eq!(
+            name_parent_status(&bridge, "in-trash"),
+            ("Docs/notes.txt".into(), Some("folder-a".into()), FileStatus::Uploading)
+        );
+        assert_eq!(reparented_changes(&bridge, "in-trash"), moves_before, "no move");
+        let ops = bridge.db.list_operations_for_file("in-trash").unwrap();
+        assert_eq!(ops[0].parent_id.as_deref(), Some("folder-a"), "the upload's parent");
         drop(server.finish());
     }
 
