@@ -412,8 +412,10 @@ again, the old identifier no longer matches, and the write meets 409 and parks.
   paused, and the item keeps presenting `uploading`. A quota refusal is also
   what the server's code says, read by type from the refusal's body (never its
   text): `413 quota_exceeded`, `403 object_budget_exceeded`, `403
-  billing_read_only` and `409 trial_ended` are refusals the person cures, so the
-  save lands afterwards (fix round 4). Counted, as before: any other HTTP status
+  billing_read_only`, and the upload gate's `409 account_lapsed`, `409
+  plan_required` and `409 trial_cancelled_read_only` (at init, a chunk or
+  `complete`) are refusals the person cures, so the save lands afterwards (fix
+  rounds 4 and 6; `trial_ended` is no upload refusal and is counted). Counted, as before: any other HTTP status
   (400, 404, another 413, ...) and a local error; at the cap the write
   parks `attempts used up`, read-only, with its bytes kept. `Permission` (a 403)
   parks at once as `permission_denied`, read-only, through the usual park

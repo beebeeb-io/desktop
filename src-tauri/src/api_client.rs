@@ -264,7 +264,7 @@ pub fn classify_init_conflict(message: &str) -> InitConflictClass {
 #[derive(Debug)]
 pub struct InitConflict {
     pub class: InitConflictClass,
-    /// The server's code, when it is one the client acts on (`trial_ended`).
+    /// The server's code, when it is one the client acts on (the upload gate's 409s).
     pub refusal: Option<UploadRefusalCode>,
 }
 
@@ -280,8 +280,12 @@ pub enum UploadRefusalCode {
     ObjectBudgetExceeded,
     /// 403: the account is read-only for an unpaid invoice.
     BillingReadOnly,
-    /// 409: the trial ended and the account holds more than its included storage.
-    TrialEnded,
+    /// 409 (the upload gate): the trial ended and the account is read-only.
+    AccountLapsed,
+    /// 409 (the upload gate): the account has no plan.
+    PlanRequired,
+    /// 409 (the upload gate): a never-paid trial was cancelled, so uploads are paused.
+    TrialCancelledReadOnly,
 }
 
 impl UploadRefusalCode {
@@ -290,7 +294,9 @@ impl UploadRefusalCode {
             "quota_exceeded" => Some(UploadRefusalCode::QuotaExceeded),
             "object_budget_exceeded" => Some(UploadRefusalCode::ObjectBudgetExceeded),
             "billing_read_only" => Some(UploadRefusalCode::BillingReadOnly),
-            "trial_ended" => Some(UploadRefusalCode::TrialEnded),
+            "account_lapsed" => Some(UploadRefusalCode::AccountLapsed),
+            "plan_required" => Some(UploadRefusalCode::PlanRequired),
+            "trial_cancelled_read_only" => Some(UploadRefusalCode::TrialCancelledReadOnly),
             _ => None,
         }
     }
@@ -2141,9 +2147,13 @@ mod tests {
         for (code, expected) in [
             ("object_budget_exceeded", UploadRefusalCode::ObjectBudgetExceeded),
             ("billing_read_only", UploadRefusalCode::BillingReadOnly),
-            ("trial_ended", UploadRefusalCode::TrialEnded),
+            ("account_lapsed", UploadRefusalCode::AccountLapsed),
+            ("plan_required", UploadRefusalCode::PlanRequired),
+            ("trial_cancelled_read_only", UploadRefusalCode::TrialCancelledReadOnly),
         ] {
             assert_eq!(UploadRefusalCode::from_code(code), Some(expected));
         }
+        // The share gate's `trial_ended` is no upload refusal: no upload route sends it.
+        assert_eq!(UploadRefusalCode::from_code("trial_ended"), None);
     }
 }

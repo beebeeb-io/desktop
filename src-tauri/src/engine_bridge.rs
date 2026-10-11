@@ -725,22 +725,31 @@ fn has_transport_cause(error: &anyhow::Error) -> bool {
 }
 
 /// Spec §8.4: a refusal the person cures by freeing space, subscribing or paying, read from the
-/// server's code by type, never from text: 413 `quota_exceeded` (init, a chunk, complete), 403
-/// `object_budget_exceeded`, 403 `billing_read_only`, 409 `trial_ended`. For a File Provider write
-/// it is a quota refusal: never paused, never parked, so the save lands once it is cured. Any
-/// other 413, 403 or 409 keeps its rule.
+/// server's code by type, never from text, at init, a chunk or complete: 413 `quota_exceeded`, 403
+/// `object_budget_exceeded`, 403 `billing_read_only`, and the upload gate's 409s
+/// (`account_lapsed`, `plan_required`, `trial_cancelled_read_only`). For a File Provider write it is
+/// a quota refusal: never paused, never parked, so the save lands once it is cured; the app's
+/// account-state banner, not the file, says why. Any other 413, 403 or 409 keeps its rule.
 fn is_curable_refusal(error: &anyhow::Error) -> bool {
     use crate::api_client::{InitConflict, UploadRefusalCode as Code, UploadRefused};
+    let upload_gate = |code: Option<Code>| {
+        matches!(
+            code,
+            Some(Code::AccountLapsed | Code::PlanRequired | Code::TrialCancelledReadOnly)
+        )
+    };
     error.chain().any(|cause| {
-        cause.downcast_ref::<UploadRefused>().is_some_and(|refused| {
-            matches!(
-                (refused.status(), refused.code),
-                (Some(413), Some(Code::QuotaExceeded))
-                    | (Some(403), Some(Code::ObjectBudgetExceeded | Code::BillingReadOnly))
-            )
-        }) || cause
-            .downcast_ref::<InitConflict>()
-            .is_some_and(|conflict| conflict.refusal == Some(Code::TrialEnded))
+        cause
+            .downcast_ref::<UploadRefused>()
+            .is_some_and(|refused| match (refused.status(), refused.code) {
+                (Some(413), Some(Code::QuotaExceeded)) => true,
+                (Some(403), Some(Code::ObjectBudgetExceeded | Code::BillingReadOnly)) => true,
+                (Some(409), code) => upload_gate(code),
+                _ => false,
+            })
+            || cause
+                .downcast_ref::<InitConflict>()
+                .is_some_and(|conflict| upload_gate(conflict.refusal))
     })
 }
 
@@ -19522,12 +19531,43 @@ mod tests {
         )
     }
 
+    /// The share gate's 409, which no upload route sends (server `signup_plan.rs`,
+    /// `check_has_plan`): another 409 code, so it keeps the counted rule.
     fn trial_ended() -> (&'static str, serde_json::Value) {
         (
             "409 Conflict",
             json!({
                 "error": "trial_ended",
                 "message": "Your trial has ended and your account holds more than its included storage, so it is read-only. Subscribe, or free up space, to keep your files."
+            }),
+        )
+    }
+
+    /// The upload gate's 409s (server `signup_plan.rs`, `ensure_can_upload_for`, called at init,
+    /// a chunk and complete): `{ "error": code, "message": message }`.
+    fn account_lapsed() -> (&'static str, serde_json::Value) {
+        (
+            "409 Conflict",
+            json!({
+                "error": "account_lapsed",
+                "message": "Your trial has ended and your account is read-only. Subscribe to keep using Beebeeb."
+            }),
+        )
+    }
+
+    fn plan_required() -> (&'static str, serde_json::Value) {
+        (
+            "409 Conflict",
+            json!({ "error": "plan_required", "message": "Choose a plan to start using Beebeeb." }),
+        )
+    }
+
+    fn trial_cancelled_read_only() -> (&'static str, serde_json::Value) {
+        (
+            "409 Conflict",
+            json!({
+                "error": "trial_cancelled_read_only",
+                "message": "You cancelled your trial before it was charged, so uploads are paused. You can still view and download your files until the trial's end date."
             }),
         )
     }
@@ -19611,8 +19651,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_finder_write_refused_after_the_trial_ended_lands_once_subscribed() {
-        a_curable_refusal_lands_once_cured([163u8; 32], "trial-init", Refused::Init, trial_ended()).await;
+    async fn a_finder_write_refused_for_a_lapsed_account_lands_once_subscribed() {
+        a_curable_refusal_lands_once_cured([163u8; 32], "lapsed-init", Refused::Init, account_lapsed()).await;
+        a_curable_refusal_lands_once_cured([173u8; 32], "lapsed-chunk", Refused::Chunk, account_lapsed()).await;
+        a_curable_refusal_lands_once_cured([174u8; 32], "lapsed-complete", Refused::Complete, account_lapsed()).await;
+    }
+
+    #[tokio::test]
+    async fn a_finder_write_refused_for_no_plan_lands_once_subscribed() {
+        a_curable_refusal_lands_once_cured([175u8; 32], "no-plan-init", Refused::Init, plan_required()).await;
+        a_curable_refusal_lands_once_cured([176u8; 32], "no-plan-chunk", Refused::Chunk, plan_required()).await;
+        a_curable_refusal_lands_once_cured([177u8; 32], "no-plan-complete", Refused::Complete, plan_required()).await;
+    }
+
+    #[tokio::test]
+    async fn a_finder_write_refused_after_a_cancelled_trial_lands_once_subscribed() {
+        a_curable_refusal_lands_once_cured(
+            [178u8; 32],
+            "cancelled-init",
+            Refused::Init,
+            trial_cancelled_read_only(),
+        )
+        .await;
+        a_curable_refusal_lands_once_cured(
+            [179u8; 32],
+            "cancelled-chunk",
+            Refused::Chunk,
+            trial_cancelled_read_only(),
+        )
+        .await;
+        a_curable_refusal_lands_once_cured(
+            [180u8; 32],
+            "cancelled-complete",
+            Refused::Complete,
+            trial_cancelled_read_only(),
+        )
+        .await;
     }
 
     /// Any other 413, 403 or 409 keeps its rule: the code decides, not the status. And an upload
@@ -19625,24 +19699,25 @@ mod tests {
                 "other-413",
                 ("413 Payload Too Large", json!({ "error": "payload_too_large" })),
             ),
-            (
-                "other-409",
-                (
-                    "409 Conflict",
-                    json!({ "error": "plan_required", "message": "Choose a plan." }),
-                ),
-            ),
+            ("other-409", trial_ended()),
             ("other-403", ("403 Forbidden", json!({ "error": "forbidden" }))),
         ] {
             seed_uploaded_row(&bridge, &server, file_id);
             refuse(&server, Refused::Init, file_id, refusal);
             fp_save(&bridge, dir.path(), file_id, "notes.txt", b"a save", "1");
         }
-        let outcome = bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
-        assert!(outcome.paused_op_ids.is_empty(), "{outcome:?}");
+        // Past the backoff's cap, so a counted failure (one per pass) and a transient one (stops
+        // at the cap) differ.
+        let passes = backoff_cap_attempts() + 2;
+        let mut now = now_secs();
+        for _ in 0..passes {
+            let outcome = bridge.process_due_operations(&sync_root, now).await.unwrap();
+            now += 10_000;
+            assert!(outcome.paused_op_ids.is_empty(), "{outcome:?}");
+        }
         for file_id in ["other-413", "other-409"] {
             let op = bridge.db.list_operations_for_file(file_id).unwrap().remove(0);
-            assert_eq!(op.attempts, 1, "{file_id}: counted");
+            assert_eq!(op.attempts, passes, "{file_id}: counted, once per pass");
         }
         let forbidden = bridge.db.list_operations_for_file("other-403").unwrap().remove(0);
         assert_eq!(
