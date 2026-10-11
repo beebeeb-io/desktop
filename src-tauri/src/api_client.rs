@@ -360,6 +360,47 @@ pub struct UploadChunkResponse {
     pub skipped: Option<bool>,
 }
 
+/// The parent a metadata update (`PATCH /api/v1/files/{id}`) sends. The server reads an
+/// omitted `parent_id` as "leave the parent alone", an explicit `null` as "move to the top
+/// level", and an id as "move into that folder".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParentChange<'a> {
+    /// The field is omitted.
+    Unchanged,
+    /// `"parent_id": null`.
+    TopLevel,
+    /// `"parent_id": "<id>"`.
+    Folder(&'a str),
+}
+
+impl<'a> ParentChange<'a> {
+    /// A move to `parent`: that folder, or the top level when there is none.
+    pub fn to(parent: Option<&'a str>) -> Self {
+        parent.map_or(Self::TopLevel, Self::Folder)
+    }
+}
+
+/// The body of a metadata update.
+fn metadata_update_body(
+    name_encrypted: Option<&str>,
+    parent: ParentChange<'_>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut body = serde_json::Map::new();
+    if let Some(name) = name_encrypted {
+        body.insert("name_encrypted".into(), serde_json::json!(name));
+    }
+    match parent {
+        ParentChange::Unchanged => {}
+        ParentChange::TopLevel => {
+            body.insert("parent_id".into(), serde_json::Value::Null);
+        }
+        ParentChange::Folder(parent_id) => {
+            body.insert("parent_id".into(), serde_json::json!(parent_id));
+        }
+    }
+    body
+}
+
 /// One entry in `GET /api/v1/search-index/shards`.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SearchShardRef {
@@ -1042,15 +1083,9 @@ impl ApiClient {
         &self,
         file_id: &str,
         name_encrypted: Option<&str>,
-        parent_id: Option<&str>,
+        parent: ParentChange<'_>,
     ) -> anyhow::Result<serde_json::Value> {
-        let mut body = serde_json::Map::new();
-        if let Some(name) = name_encrypted {
-            body.insert("name_encrypted".into(), serde_json::json!(name));
-        }
-        if let Some(parent_id) = parent_id {
-            body.insert("parent_id".into(), serde_json::json!(parent_id));
-        }
+        let body = metadata_update_body(name_encrypted, parent);
         let resp = self
             .client
             .patch(self.file_url(file_id))
@@ -2087,6 +2122,30 @@ mod tests {
     }
 
     /// Spec §8.4: a refused upload request keeps the server's code by type, matched exactly, and
+    /// Spec 2026-10-09 §7.2 (final review): the three parents a metadata update sends, as the
+    /// server reads them: omitted (leave it alone), `null` (the top level), an id (that folder).
+    #[test]
+    fn a_metadata_update_body_names_each_parent_state() {
+        let body = |name, parent| serde_json::Value::Object(metadata_update_body(name, parent));
+        assert_eq!(
+            body(Some("name"), ParentChange::Unchanged),
+            serde_json::json!({ "name_encrypted": "name" }),
+            "unchanged: no parent_id key"
+        );
+        assert_eq!(
+            body(Some("name"), ParentChange::TopLevel),
+            serde_json::json!({ "name_encrypted": "name", "parent_id": null }),
+            "the top level: an explicit null"
+        );
+        assert_eq!(
+            body(None, ParentChange::Folder("folder-1")),
+            serde_json::json!({ "parent_id": "folder-1" }),
+            "a folder: its id"
+        );
+        assert_eq!(ParentChange::to(None), ParentChange::TopLevel);
+        assert_eq!(ParentChange::to(Some("folder-1")), ParentChange::Folder("folder-1"));
+    }
+
     /// its text is the status error's alone: the body (its code, its numbers, its message) never
     /// reaches the error's text, which is what a log line or the queue's `last_error` could show.
     #[tokio::test]

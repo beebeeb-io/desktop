@@ -1027,6 +1027,26 @@ fn relative_path_under_conn<C: std::ops::Deref<Target = Connection>>(
     })
 }
 
+/// Spec §7.2 (final review): whether a queued File Provider save of `file_id`, parked or not,
+/// recorded that it moved the file.
+fn queued_save_moved_conn<C: std::ops::Deref<Target = Connection>>(conn: &C, file_id: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(
+        "SELECT metadata_json FROM operation_queue
+         WHERE file_id = ?1 AND write_id IS NOT NULL AND kind IN ('upload_version', 'upload_file')",
+    )?;
+    let rows = stmt.query_map(params![file_id], |row| row.get::<_, Option<String>>(0))?;
+    for raw in rows {
+        let moved = raw?
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|metadata| metadata.get("parent_changed").and_then(serde_json::Value::as_bool));
+        if moved == Some(true) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// The name and parent a File Provider save was made under, applied in its accept (spec §7.2).
 /// The system hands a rename or a move over with the contents and takes the reply's item as
 /// the truth for both, so the row describes them from the accept on; a snapshot or an op echo
@@ -3593,6 +3613,8 @@ impl StateDb {
         }
         // The parent the op carries: the template's (§7.2).
         let mut parent_id = accept.parent_id.map(str::to_string);
+        // A modify's record, for the upload's metadata step, of whether it moved the file.
+        let mut parent_changed: Option<bool> = None;
         let (decision, object_version_id) = match &accept.kind {
             FinderAcceptKind::Create { row } => {
                 debug_assert_eq!(row.file_id, accept.file_id);
@@ -3627,7 +3649,13 @@ impl StateDb {
                 if parent_id.as_deref().is_some_and(is_file_provider_trash) {
                     parent_id = entry.parent_id.clone();
                 }
+                let moved = entry.parent_id != parent_id;
                 apply_save_name_and_parent_conn(&tx, &entry, accept.target_path, parent_id.as_deref())?;
+                // §7.2 (final review): the upload's metadata step sends a parent only for a save
+                // that moved the file, or that follows a queued save of the file that did: that
+                // one may park before its own metadata step, and its move must still reach the
+                // server.
+                parent_changed = Some(moved || queued_save_moved_conn(&tx, accept.file_id)?);
                 // A content write touched the row: its version is no longer a snapshot fill.
                 tx.execute(
                     "UPDATE files SET version_filled = 0 WHERE file_id = ?1",
@@ -3650,6 +3678,15 @@ impl StateDb {
         };
         const MAX_ATTEMPTS: i64 = 25;
         let park = ParkReason::BaseUnknown.as_str();
+        let metadata_json = match parent_changed {
+            None => accept.metadata_json.to_string(),
+            Some(changed) => {
+                let mut metadata: serde_json::Value = serde_json::from_str(accept.metadata_json)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
+                metadata["parent_changed"] = serde_json::json!(changed);
+                metadata.to_string()
+            }
+        };
         tx.execute(
             "INSERT INTO operation_queue (
                 op_id, kind, file_id, parent_id, target_path, metadata_json, payload_path,
@@ -3664,7 +3701,7 @@ impl StateDb {
                 accept.file_id,
                 parent_id,
                 accept.target_path,
-                accept.metadata_json,
+                metadata_json,
                 accept.payload_path,
                 base_version,
                 object_version_id,
