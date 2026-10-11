@@ -400,6 +400,12 @@ const DUE_ORDER_SQL: &str = "ORDER BY rowid ASC";
 #[cfg(not(target_os = "macos"))]
 const DUE_ORDER_SQL: &str = "ORDER BY created_at ASC, rowid ASC";
 
+/// Spec 2026-10-09 §7.2 (final review): a `files` row with no queued or parked File Provider
+/// write (an upload with a write id). The path sweeps delete only such rows.
+const WITHOUT_A_FINDER_WRITE_SQL: &str = "file_id NOT IN (
+    SELECT file_id FROM operation_queue
+    WHERE file_id IS NOT NULL AND write_id IS NOT NULL AND kind IN ('upload_version', 'upload_file'))";
+
 /// `earlier` comes before `this` in [`DUE_ORDER_SQL`]'s order.
 #[cfg(target_os = "macos")]
 const EARLIER_IN_QUEUE_SQL: &str = "earlier.rowid < this.rowid";
@@ -1569,6 +1575,9 @@ pub enum AcceptOutcome {
     /// it with its copy between the copy and this transaction (spec §8.7 S6). Nothing was
     /// written; the write is retried.
     CopyGone,
+    /// A modify of an item in the trash: its row is `Trashing`, or the system names the trash
+    /// container as its parent (spec §7.2). Nothing was written; the save is refused.
+    InTrash,
 }
 
 /// Why a File Provider upload parked with its bytes kept (spec §11, "Parked").
@@ -2414,11 +2423,15 @@ impl StateDb {
             let root_path = root.path.trim_matches('/').to_string();
             if !root_path.is_empty() {
                 let descendants: Vec<PrunedRow> = {
-                    let mut dstmt = tx.prepare(
+                    // Spec §7.2 (final review): a row with a queued or parked Finder write is
+                    // kept. Its upload then meets the missing folder and parks with its bytes,
+                    // read-only and visible, never bytes queued under no row.
+                    let mut dstmt = tx.prepare(&format!(
                         "SELECT file_id, path, item_kind FROM files
                          WHERE substr(ltrim(path, '/'), 1, length(?1) + 1) = ?1 || '/'
-                         ORDER BY length(path) DESC, path DESC",
-                    )?;
+                           AND {WITHOUT_A_FINDER_WRITE_SQL}
+                         ORDER BY length(path) DESC, path DESC"
+                    ))?;
                     let drows = dstmt.query_map(params![root_path], |r| {
                         Ok(PrunedRow {
                             file_id: r.get(0)?,
@@ -2437,10 +2450,18 @@ impl StateDb {
             }
         }
 
-        let root_old_parent = old_parent_of(&tx, &root.file_id);
-        tx.execute("DELETE FROM files WHERE file_id = ?1", params![root.file_id])?;
-        record_file_change_conn(&tx, &root.file_id, FpChangeKind::Deleted, root_old_parent)?;
-        removed.push(root);
+        // The root too keeps a queued or parked Finder write's row (above).
+        let root_has_finder_write: bool = tx.query_row(
+            &format!("SELECT NOT EXISTS(SELECT 1 FROM files WHERE file_id = ?1 AND {WITHOUT_A_FINDER_WRITE_SQL})"),
+            params![root.file_id],
+            |row| row.get(0),
+        )?;
+        if !root_has_finder_write {
+            let root_old_parent = old_parent_of(&tx, &root.file_id);
+            tx.execute("DELETE FROM files WHERE file_id = ?1", params![root.file_id])?;
+            record_file_change_conn(&tx, &root.file_id, FpChangeKind::Deleted, root_old_parent)?;
+            removed.push(root);
+        }
         tx.commit()?;
         Ok(removed)
     }
@@ -2988,18 +3009,22 @@ impl StateDb {
                         // precede their parent dirs in the returned order. Descendants
                         // with a pending op / mid-upload are NOT excluded here: their
                         // parent is gone server-side, so the orphan must go too —
-                        // any stale queued op against it is moot. Task 1698:
+                        // any stale queued op against it is moot. Spec §7.2 (final
+                        // review): except a queued or parked Finder write, whose bytes
+                        // are the person's: its row is kept, visible, and the upload
+                        // parks when it meets the missing folder. Task 1698:
                         // `Trashing` descendants are NOT excluded here by a pending
                         // op, but ARE excluded by STATUS — they are the server
                         // trash's content (recoverable), not dead rows; deleting
                         // them would erase the trash view's folder contents.
-                        let mut dstmt = tx.prepare(
+                        let mut dstmt = tx.prepare(&format!(
                             "SELECT file_id, path, item_kind FROM files
                              WHERE namespace = 'my_files'
                                AND status != 'trashing'
                                AND substr(ltrim(path, '/'), 1, length(?1) + 1) = ?1 || '/'
-                             ORDER BY length(path) DESC, path DESC",
-                        )?;
+                               AND {WITHOUT_A_FINDER_WRITE_SQL}
+                             ORDER BY length(path) DESC, path DESC"
+                        ))?;
                         let drows = dstmt.query_map(params![root_path], |r| {
                             Ok(PrunedRow {
                                 file_id: r.get(0)?,
@@ -3636,7 +3661,7 @@ impl StateDb {
             return Ok(AcceptOutcome::CopyGone);
         }
         // The parent the op carries: the template's (§7.2).
-        let mut parent_id = accept.parent_id.map(str::to_string);
+        let parent_id = accept.parent_id.map(str::to_string);
         // A modify's record, for the upload's metadata step, of whether it moved the file.
         let mut parent_changed: Option<bool> = None;
         let (decision, object_version_id) = match &accept.kind {
@@ -3667,11 +3692,11 @@ impl StateDb {
                 let facts = base_facts_conn(&tx, accept.file_id, &contract, legacy_identifiers(&entry, &contract))?;
                 let decision = decide_base(&facts, *incoming_base);
                 record_local_write_conn(&tx, accept.file_id, accept.size_bytes, accept.modified_at)?;
-                // §7.2 (final review): a save of an item the system holds in its trash names the
-                // trash container as the parent. That is not a move: the row, and the op, keep
-                // the row's parent.
-                if parent_id.as_deref().is_some_and(is_file_provider_trash) {
-                    parent_id = entry.parent_id.clone();
+                // §7.2 (final review): an item in the trash takes no save, as a create in the
+                // trash is refused: the system holds it there, and a reply would describe it
+                // somewhere else. Refused before anything is written, in this transaction.
+                if entry.status == FileStatus::Trashing || parent_id.as_deref().is_some_and(is_file_provider_trash) {
+                    return Ok(AcceptOutcome::InTrash);
                 }
                 let moved = entry.parent_id != parent_id;
                 apply_save_name_and_parent_conn(&tx, &entry, accept.target_path, parent_id.as_deref())?;

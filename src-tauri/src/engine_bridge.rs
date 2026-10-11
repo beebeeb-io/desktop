@@ -769,6 +769,21 @@ impl std::fmt::Display for StagedCopyGone {
 
 impl std::error::Error for StagedCopyGone {}
 
+/// A content save of an item in the trash (spec §7.2): its row is `Trashing`, or the system names
+/// the trash container as its parent. Refused as a create in the trash is, so the item stays in
+/// the trash; nothing was queued. Path-free: the text reaches the extension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+pub(crate) struct ItemInTrash;
+
+impl std::fmt::Display for ItemInTrash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Beebeeb cannot change items inside the Trash.")
+    }
+}
+
+impl std::error::Error for ItemInTrash {}
+
 /// The attempt resumed its persisted upload session, found it reaped (the server answered 404 or
 /// 410) and abandoned it: the next attempt starts a fresh upload, so for a File Provider write the
 /// failure is transient, never a counted one (spec §8.4). A 400 at any session, and a 404 or 410 at a
@@ -2614,6 +2629,7 @@ impl EngineBridge {
                 token
             }
             crate::state_db::AcceptOutcome::UnknownItem => anyhow::bail!("a create always inserts its row"),
+            crate::state_db::AcceptOutcome::InTrash => anyhow::bail!("a create is never refused as in the trash"),
             crate::state_db::AcceptOutcome::CopyGone => return Err(anyhow::Error::new(StagedCopyGone)),
         };
         prepared.staged.retain();
@@ -3029,6 +3045,8 @@ impl EngineBridge {
                 }));
             }
             crate::state_db::AcceptOutcome::CopyGone => return Err(anyhow::Error::new(StagedCopyGone)),
+            // §7.2: refused; the staged copy is dropped with `prepared`, and nothing was queued.
+            crate::state_db::AcceptOutcome::InTrash => return Err(anyhow::Error::new(ItemInTrash)),
         };
         prepared.staged.retain();
         Ok(FpWrite {
@@ -18193,33 +18211,189 @@ mod tests {
         assert_eq!(state.latest_plaintext(&s, master_key), b"final");
     }
 
-    /// Spec §7.2 (final review): a save whose template names the trash container as its parent
-    /// keeps the row's parent, and its upload carries the row's parent too. A `Trashing` row
-    /// has no write capability, so this is a guard.
+    /// Spec §7.2 (final review): a content save of an item in the trash is refused, as a create
+    /// in the trash is, and the item stays in the trash. Three saves: a real `Trashing` row
+    /// saved under the trash container (as the system holds it) and under its old folder, and
+    /// a live row whose template names the trash container. Each reply is an error, the row
+    /// keeps its status, path and parent, and no upload is queued.
+    #[cfg(unix)] // names `crate::ipc_socket::write_outcome_response`
     #[tokio::test]
-    async fn a_save_under_the_trash_container_keeps_the_rows_parent() {
+    async fn a_save_of_an_item_in_the_trash_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let master_key = [102u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
         seed_row_in_folder(&bridge, &server, "in-trash");
-        let moves_before = reparented_changes(&bridge, "in-trash");
-        fp_save_moved(
-            &bridge,
-            dir.path(),
-            "in-trash",
-            "notes.txt",
-            "NSFileProviderTrashContainerItemIdentifier",
-            b"edited",
-            "1",
+        bridge.queue_finder_delete("in-trash", Some("1".into())).unwrap();
+        assert_eq!(
+            bridge.db.get_file("in-trash").unwrap().unwrap().status,
+            FileStatus::Trashing
+        );
+        seed_uploaded_row(&bridge, &server, "live");
+        let save = |file_id: &str, parent: &str| {
+            let contents = dir.path().join(format!("save-{}.txt", uuid::Uuid::new_v4()));
+            std::fs::write(&contents, b"edited").unwrap();
+            let mut target = finder_file_target(Some(file_id), "notes.txt", &contents, Some("1".into()));
+            target.parent_id = Some(parent.to_string());
+            crate::ipc_socket::write_outcome_response("modify", &bridge.db, bridge.queue_file_provider_modify(target))
+        };
+        for (file_id, parent, status, path, row_parent) in [
+            (
+                "in-trash",
+                "NSFileProviderTrashContainerItemIdentifier",
+                FileStatus::Trashing,
+                "Docs/notes.txt",
+                Some("folder-a"),
+            ),
+            (
+                "in-trash",
+                "folder-a",
+                FileStatus::Trashing,
+                "Docs/notes.txt",
+                Some("folder-a"),
+            ),
+            (
+                "live",
+                "NSFileProviderTrashContainerItemIdentifier",
+                FileStatus::Local,
+                "notes.txt",
+                None,
+            ),
+        ] {
+            let crate::ipc_socket::IpcResponse::Error { message } = save(file_id, parent) else {
+                panic!("{file_id} under {parent}: refused")
+            };
+            assert_eq!(message, "Beebeeb cannot change items inside the Trash.", "{file_id}");
+            assert_eq!(
+                name_parent_status(&bridge, file_id),
+                (path.into(), row_parent.map(str::to_string), status),
+                "{file_id} under {parent}: unchanged"
+            );
+            assert!(
+                bridge
+                    .db
+                    .list_operations_for_file(file_id)
+                    .unwrap()
+                    .iter()
+                    .all(|op| op.kind != OperationKind::UploadVersion),
+                "{file_id} under {parent}: no upload queued"
+            );
+        }
+        drop(server.finish());
+    }
+
+    /// Spec §7.2 (final review): a folder deleted elsewhere, by a `file_delete` op or by its
+    /// absence from a snapshot, while a create in it is queued. The path sweeps keep the
+    /// create's row, which the item lookup still answers; its upload then meets the missing
+    /// folder and parks with its bytes. A row with no queued write is still swept.
+    #[cfg(unix)] // names `crate::ipc_socket::file_status_response`
+    #[test]
+    fn a_queued_create_survives_its_folder_being_deleted_elsewhere() {
+        for by_snapshot in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let sync_root = dir.path().join("sync-root");
+            std::fs::create_dir_all(&sync_root).unwrap();
+            let bridge = test_bridge(&dir.path().join("state.db"));
+            seed_folder_row(&bridge, "r9-folder", "r9-folder");
+            let created = fp_create_in(&bridge, dir.path(), "r9-folder", "n1.txt", b"queued");
+            let p = created.outcome_file_id();
+            bridge
+                .db
+                .upsert_file_with_contract(
+                    &FileEntry {
+                        file_id: "synced".into(),
+                        path: "r9-folder/synced.txt".into(),
+                        status: FileStatus::CloudOnly,
+                        size_bytes: 3,
+                        modified_at: 1_700_000_000,
+                        content_hash: None,
+                        remote_updated_at: 1_700_000_000,
+                        parent_id: Some("r9-folder".into()),
+                        item_kind: ItemKind::File,
+                    },
+                    |contract| contract.parent_id = Some("r9-folder".into()),
+                )
+                .unwrap();
+            if by_snapshot {
+                let seen: HashSet<String> = ["elsewhere".to_string()].into_iter().collect();
+                bridge.db.prune_absent(&seen, now_secs() + 100).unwrap();
+            } else {
+                let delete = crate::api_client::SyncOp {
+                    seq_id: 701,
+                    op_type: "file_delete".into(),
+                    payload: serde_json::json!({ "id": "r9-folder" }),
+                };
+                apply_sync_op(&bridge, &sync_root, &delete, now_secs(), &mut Vec::new()).unwrap();
+            }
+            let how = if by_snapshot { "snapshot" } else { "file_delete" };
+            assert!(
+                bridge.db.get_file("r9-folder").unwrap().is_none(),
+                "{how}: the folder is gone"
+            );
+            assert!(
+                bridge.db.get_file("synced").unwrap().is_none(),
+                "{how}: a row with no write is swept"
+            );
+            assert!(
+                bridge.db.get_file(&p).unwrap().is_some(),
+                "{how}: the queued create's row is kept"
+            );
+            assert_eq!(
+                name_parent_status(&bridge, &p),
+                (
+                    "r9-folder/n1.txt".into(),
+                    Some("r9-folder".into()),
+                    FileStatus::Uploading
+                ),
+                "{how}: the queued create's row is kept"
+            );
+            assert!(
+                matches!(
+                    crate::ipc_socket::file_status_response(&bridge.db, &p),
+                    crate::ipc_socket::IpcResponse::FileStatus(_)
+                ),
+                "{how}: the item lookup still answers it"
+            );
+            assert_eq!(
+                bridge.db.list_operations_for_file(&p).unwrap().len(),
+                1,
+                "{how}: still queued"
+            );
+        }
+    }
+
+    /// Spec §7.2 (final review): a file deleted for good elsewhere while a save of it is queued
+    /// keeps its row, with the save; the upload then meets the missing file and parks with its
+    /// bytes.
+    #[tokio::test]
+    async fn a_permanent_delete_keeps_a_row_with_a_queued_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [107u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_uploaded_row(&bridge, &server, "deleted-elsewhere");
+        fp_save(&bridge, dir.path(), "deleted-elsewhere", "notes.txt", b"kept", "1");
+        let delete = crate::api_client::SyncOp {
+            seq_id: 702,
+            op_type: "file_delete".into(),
+            payload: serde_json::json!({ "id": "deleted-elsewhere" }),
+        };
+        apply_sync_op(&bridge, &sync_root, &delete, now_secs(), &mut Vec::new()).unwrap();
+        assert!(
+            bridge.db.get_file("deleted-elsewhere").unwrap().is_some(),
+            "the row with a queued save is kept"
         );
         assert_eq!(
-            name_parent_status(&bridge, "in-trash"),
-            ("Docs/notes.txt".into(), Some("folder-a".into()), FileStatus::Uploading)
+            name_parent_status(&bridge, "deleted-elsewhere"),
+            ("notes.txt".into(), None, FileStatus::Uploading),
+            "the row is kept"
         );
-        assert_eq!(reparented_changes(&bridge, "in-trash"), moves_before, "no move");
-        let ops = bridge.db.list_operations_for_file("in-trash").unwrap();
-        assert_eq!(ops[0].parent_id.as_deref(), Some("folder-a"), "the upload's parent");
+        assert_eq!(
+            bridge.db.list_operations_for_file("deleted-elsewhere").unwrap().len(),
+            1
+        );
         drop(server.finish());
     }
 

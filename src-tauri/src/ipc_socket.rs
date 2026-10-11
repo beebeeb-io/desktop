@@ -1459,6 +1459,9 @@ fn write_refusal_category(error: &anyhow::Error) -> &'static str {
     if error.is::<crate::engine_bridge::StagedCopyGone>() {
         return "staged_copy_gone";
     }
+    if error.is::<crate::engine_bridge::ItemInTrash>() {
+        return "in_trash";
+    }
     if error.downcast_ref::<std::io::Error>().is_some() {
         return "io";
     }
