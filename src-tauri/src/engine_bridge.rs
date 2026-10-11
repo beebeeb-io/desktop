@@ -481,8 +481,11 @@ fn database_error_category(error: &rusqlite::Error) -> &'static str {
             ErrorCode::Unknown if failure.extended_code & 0xff == rusqlite::ffi::SQLITE_ERROR => "database_schema",
             _ => "database",
         },
-        // The code and the schema disagree about a column, a value or a statement.
-        rusqlite::Error::InvalidColumnType(..)
+        // The code and the schema disagree about a column, a value or a statement. A statement
+        // SQLite rejects at prepare (a column it does not have, a syntax error) is
+        // `SqlInputError`, which this crate's `bundled` build always has.
+        rusqlite::Error::SqlInputError { .. }
+        | rusqlite::Error::InvalidColumnType(..)
         | rusqlite::Error::InvalidColumnIndex(_)
         | rusqlite::Error::InvalidColumnName(_)
         | rusqlite::Error::FromSqlConversionFailure(..)
@@ -20409,6 +20412,12 @@ mod tests {
         };
         let memory = rusqlite::Connection::open_in_memory().unwrap();
         let no_such_table = memory.execute("UPDATE no_such_table SET x = 1", []).unwrap_err();
+        memory.execute("CREATE TABLE t (a INTEGER)", []).unwrap();
+        // A column the schema does not have, named in a SELECT: SQLite reports it at prepare,
+        // as rusqlite's `SqlInputError`.
+        let no_such_column = memory
+            .query_row("SELECT nope FROM t", [], |row| row.get::<_, i64>(0))
+            .unwrap_err();
         let wrong_type = memory
             .query_row("SELECT 'text'", [], |row| row.get::<_, i64>(0))
             .unwrap_err();
@@ -20446,6 +20455,11 @@ mod tests {
             (
                 "schema: no such table",
                 anyhow::Error::new(no_such_table),
+                "database_schema",
+            ),
+            (
+                "schema: no such column in a SELECT",
+                anyhow::Error::new(no_such_column),
                 "database_schema",
             ),
             (
