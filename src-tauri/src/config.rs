@@ -682,8 +682,10 @@ impl DesktopConfig {
     /// writes between the waits. Never save that copy: `change` is applied to the file as it is NOW
     /// ([`Self::update_at`]), so what the copy loaded at the start cannot replace what another
     /// writer saved since (task 1889: the install and Repair commands used to save their copy and
-    /// could drop the kept-folder record a sweep saved meanwhile). Afterwards `self` is what was
-    /// read and, if `change` said so, saved, so the flow reads its own write and everyone else's.
+    /// could drop the kept-folder record a sweep saved meanwhile). Afterwards `self` equals what a load
+    /// of the file returns: the file as it was read plus `change`'s edits if it said to save, and the
+    /// file as it was read, unedited, if it said not to (an edit that is not saved is not kept), so the
+    /// flow reads its own write and everyone else's.
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub(crate) fn update_held<R>(&mut self, change: impl FnOnce(&mut Self) -> (bool, R)) -> Result<R, String> {
         self.update_held_at(&Self::path()?, change)
@@ -697,8 +699,11 @@ impl DesktopConfig {
         change: impl FnOnce(&mut Self) -> (bool, R),
     ) -> Result<R, String> {
         let (fresh, value) = Self::update_at(path, |cfg| {
+            let read = cfg.clone();
             let (save, value) = change(cfg);
-            (save, (cfg.clone(), value))
+            // A change that is not saved is not on the file, so the copy keeps what was read (M3).
+            let on_file = if save { cfg.clone() } else { read };
+            (save, (on_file, value))
         })?;
         *self = fresh;
         Ok(value)
@@ -1242,6 +1247,16 @@ mod tests {
             std::fs::read(&path).expect("exists"),
             written,
             "the file is byte for byte as it was"
+        );
+        // Fix round 1 (M3): the copy is what the file holds, not the change that was not saved.
+        assert!(
+            held.pause_sync,
+            "the copy reads the file (pause_sync = true), not the unsaved change"
+        );
+        assert_eq!(
+            toml::to_string_pretty(&held).expect("serialize the copy"),
+            toml::to_string_pretty(&DesktopConfig::load_from(&path).expect("reads back")).expect("serialize the file"),
+            "after a no-save update the copy equals what a load of the file returns"
         );
 
         // A file that cannot be read is an error and is left alone, and the held copy is not touched.
