@@ -2,8 +2,9 @@
 
 **Status:** ~~design for review. No code yet. The lead reviews this spec and rules before anyone implements it.~~
 ~~design for review, revision 4b. No code yet. The spec review approved round 4 with changes; this revision applies the lead's ten rulings on it. The lead reviews the revision before anyone implements it. — lead ruling, 2026-10-10 (spec review)~~
-design, revision 4c. No code yet. The lead reviewed revision 4b and ruled on it; this revision applies those rulings (see "Revision 4c" below). Implementation follows the plan `docs/superpowers/plans/2026-10-10-macos-finder-write-versions.md`. — lead ruling, 2026-10-10 (spec r4b)
-**Date:** 9 Oct 2026; revised 10 Oct 2026 (4b, 4c)
+~~design, revision 4c. No code yet. The lead reviewed revision 4b and ruled on it; this revision applies those rulings (see "Revision 4c" below). Implementation follows the plan `docs/superpowers/plans/2026-10-10-macos-finder-write-versions.md`. — lead ruling, 2026-10-10 (spec r4b)~~
+implemented, revision 4d. The plan `docs/superpowers/plans/2026-10-10-macos-finder-write-versions.md` is implemented through its task 11; revision 4d (below) states where the code as built and reviewed settled a point this text left open or said differently. No behaviour changes with it. The device plan (§14) has not run yet. — lead, 2026-10-11 (Task 12)
+**Date:** 9 Oct 2026; revised 10 Oct 2026 (4b, 4c) and 11 Oct 2026 (4d)
 **Repo:** desktop. The macOS File Provider path only. Windows (Cloud Files) and Linux behaviour is unchanged.
 **Task:** 1873 (P0: files saved in the Finder location upload reliably), round 4.
 **Read at:** desktop `931b885` (branch `fix/1873-finder-create-staging`). API server (private repository) `46e5054c`, read-only. FileProvider headers from the macOS 27.0 SDK (Xcode 27.0, `27A266a`).
@@ -107,6 +108,31 @@ The lead reviewed revision 4b on 10 Oct 2026 and ruled on it. Changed rules keep
 | The dedup replay (m-7) | Rare: a create re-sent after its own landing, within the dedup TTL (30 min, `ipc_write_dedup.rs:44`). Nothing is lost | Today's: the replay runs the create again, so a second server file appears | T59; the `create_replay` log value |
 | §8.6 rule 5 | It needs a lost `complete` answer followed by a swept session | Today's: the session is abandoned (§8.6). Rule 6 (m-11) still holds for a recorded completion | T28 |
 | The save-time presentation | Cosmetic: a metadata field that moves no content (`ITEM.h:110`) | Today's: Finder shows `max(modified_at, remote_updated_at)` (`IPC:2585`) | T32; the `held_mtime` column; D2's `stat` check |
+
+## Revision 4d (11 Oct 2026): what the implementation settled
+
+The plan's tasks 1–11 are implemented. Their reviews found places where this text and the code differ. In each, the code as built and reviewed is the intended behaviour, and this revision states it. Changed rules keep their old text struck through, with the new text beneath it and the signature "— lead, 2026-10-11 (Task 12)". New lines carry the same signature. Nothing here changes behaviour. — lead, 2026-10-11 (Task 12)
+
+| What the code settled | Where |
+| --- | --- |
+| The two read-only decisions (the predicate, the fetch from the queue) take one deferred read, not `BEGIN IMMEDIATE` | §8.7 S1 |
+| The runner's guarded writes, and the landing's delete, are keyed on `(op_id, claim_id)` | §8.6 rule 2, §8.7 S2 |
+| The claim also skips an op that parked or paused after the pass listed it | §8.7 S3 |
+| Restores: which ops the claim orders (Finder uploads only; two restores are not ordered against each other), a reply without a version, a local failure after the server restored | §5.4, §8.5, §8.7 S3 |
+| Queue order by `rowid` is macOS only | §8.5 |
+| The new columns and indexes as built | §5.2 |
+| On a row with a queued write the fill, like the raise, changes only `current_version`; what a content op is; what counts as a snapshot that gave no base | §6.3.2, §6.3.3 |
+| A retried landing still runs the thumbnail work, and keeps the server's `mime_type` | §8.6 rule 4 |
+| Nothing is rebased across a mixed pair (an op with a write id and one without) | §8.1 |
+| A hand-over leaves the parked write's server session to the lease (about 1 h) | §8.4 |
+| A save after a parked write's server fetch can park `stale_base` falsely; data-safe | §8.4 |
+| The m-2 park is not reached in production; an earlier-build modify without a base parks `base_unknown` | §8.4, §10.3 |
+| An ignored Finder name, a folder in a deletion-conflicted create, a modify's dedup replay, a delete's reply, `row_unreadable`, `queued_copy_missing` | §7.2, §7.3, §7.4 |
+| The thumbnail refusal lasts until the landed version's thumbnails are uploaded | §5.6 |
+| Who sets `Error` on a Finder write's row; a trashed item stays in the trash through an attempt and a landing; a hydrate leaves a parked write's row alone | §9.2 |
+| A staging folder that never becomes usable | §8.4 |
+| The log lines as built | §11 |
+| The Swift harness counts 97 | §13 |
 
 ## 1. Why
 
@@ -291,6 +317,10 @@ The columns are additive and nullable, added with `ensure_column` (the `SD:899-9
 - There is no `file_state` table; the contract columns already live on `files` (`SD:774-800`).
 - `upsert_file` (`SD:974-1048`) and `set_file_contract_state` (`SD:2226`) list their columns explicitly, so they never overwrite the new ones. Only new, dedicated `StateDb` functions write them.
 - The token string is derived (`{held_base}:w{held_write_id}`) and never stored.
+- **(4d) Added by the implementation, beyond the table:** — lead, 2026-10-11 (Task 12)
+  - `operation_queue.write_origin TEXT`: `minted` for a write this code accepted, `earlier_build` for an upload an earlier build queued and engine start marked (§10.2). An unknown value reads as `earlier_build`.
+  - `upload_resume.completed_mime_type TEXT`: the server's `mime_type` from the same `complete` answer as the completion record, so a landing retried from the record keeps it (§8.6 rule 4).
+  - Indexes on `operation_queue(write_id)`, `operation_queue(after_write_id)` and `operation_queue(file_id)`. The last serves the one-read presentation, which looks up a file's queued uploads for every item.
 
 ### 5.3 One predicate decides what is reported
 
@@ -362,6 +392,13 @@ stateDiagram-v2
 
 While `Queued`, `Landed` or `Parked`, every surface reports the token. In `NoToken` they report `{cv}`.
 
+**(4d) Row 10, the restore's reply, as built.** — lead, 2026-10-11 (Task 12)
+- The reply is applied in one transaction: `current_version` takes the reply's `version_number`, and a change is recorded for the system. "No write queued" means no File Provider upload of the file in the queue, in any state, parked included.
+- A reply without `version_number` (no server branch answers so today, `VER:612-617`, `VER:687-690`) still records a content change and requests a snapshot, which fills the version. The system is told the content changed either way.
+- A reply without an object version id (the legacy branch, which keeps the server's own id, `VER:663-674`) keeps the row's (`COALESCE`), never writes NULL.
+- A local failure after the server restored is never retried: each restore mints a version (`VER:534-535`), so a retry would make another. The op completes, one warn line is logged (§11, `restore_bookkeeping_failed`), and a snapshot is requested to repair the row.
+- Only macOS applies the reply. Windows and Linux keep today's restore, whose reply is discarded.
+
 ### 5.5 Apple's own words: our landing no longer moves anything, a remote change still does
 
 - **Our landing.** The reply already named the bytes with the token, under the exception Apple grants to "a content sent by the system when replying to a createItemBasedOnTemplate or modifyItem call with shouldFetchContent set to NO" (`ITEM.h:95-97`).
@@ -393,7 +430,10 @@ While `Queued`, `Landed` or `Parked`, every surface reports the token. In `NoTok
     - Why not the server's thumbnail: the server holds only the previous version's, and an answer is cached under the token until the next content change (`THUMB.h:37-38`). The landing no longer changes the token, so a stale icon would stay for the token's whole life.
     - Why not "no thumbnail" (nil data, nil error, `THUMB.h:29-31`): it would be cached the same way.
     - The daemon answers `IpcResponse::Error`; the extension turns every daemon error into a per-item error (`FPE:1019`, `XPC:534-535`). No Swift change.
-    - Once the write has landed, the server holds the new version's thumbnail (uploaded after `complete`, `EB:1078`), and a request goes to the server as today.
+    - ~~Once the write has landed, the server holds the new version's thumbnail (uploaded after `complete`, `EB:1078`), and a request goes to the server as today.~~
+      The refusal lasts until the landed version's thumbnails are uploaded, not just until the landing. The landing transaction removes the op before the post-complete thumbnail work renders and uploads the new version's thumbnails, and in that window the server still holds the previous version's. So the landing marks the file, and `FetchThumbnail` answers the same per-item error while the mark is set. The mark is cleared when the thumbnail work succeeds, or when nothing landed. After that a request goes to the server as today. — lead, 2026-10-11 (Task 12)
+      - A failed thumbnail upload keeps the mark, because the server still holds the previous thumbnail. The refusal then lasts until a later landing of that file uploads its thumbnails, and the icon stays generic meanwhile.
+      - The mark is held in memory. A restart inside the window drops it; the thumbnail upload is not retried (best effort, as before), so the previous version's thumbnail can then be served. Persisting the mark is a follow-up (1879).
     - **Unverified:** whether the system asks again after a per-item error (§16, Q3). If it does not, the icon stays generic until the next content change. The render from staged bytes is split off to 1879 (§12).
     - — lead ruling, 2026-10-10 (spec r4b)
 - ~~**Finder's modification date.** While the predicate holds, the payload's `modified_at` is `held_mtime`. Today it is `max(modified_at, remote_updated_at)` (`IPC:2585`), which shows the upload time (R1: 16:01:10), or an echo's "now" (`EB:6181`, `EB:5430`, `EB:6351`). The creation date falls back to it (`IPC:2586-2588`).~~
@@ -478,6 +518,7 @@ sequenceDiagram
      - The op carries `id`, `name_encrypted`, `parent_id`, `size_bytes` and `storage_pool_id` (`FILES:3656-3667`), but no version and no object version id.
      - **No field of the op can tell a replace apart.** `size_bytes` can be equal for different bytes, and the other fields are not content. Only the op's kind on an existing row hints at it. The snapshot node's `version_number` (`SY:197`, `SY:213`) settles it.
      - Server line item S1 (§12) closes this at the source.
+   - **(4d) What a content op is.** A `file_create`, or a `file_update` that carries `version_number` or `size_bytes`. The server's thumbnail-flag `file_update`s (`has_thumbnail`, `has_large_thumbnail`) carry neither: they are not content ops, so they request no snapshot and leave `version_filled` alone. A `folder_create` is not a content op. Otherwise nearly every image upload would force a full snapshot and clear the fill. — lead, 2026-10-11 (Task 12)
    - A requested re-snapshot runs instead of the next ops pull (`EB:5605-5619`), so no content op can change the version first.
    - ~~A snapshot node sets `current_version` on a row whose version is 0 even when the row is `Local`. Only that field changes; the `EB:6326` short-circuit stays for everything else.~~
    - **(4b) The fill and the raise.** A snapshot node sets `current_version`, and `size_bytes` from the node, in two cases:
@@ -488,7 +529,8 @@ sequenceDiagram
      - They apply to rows in any status except `Trashing` and `Conflict`. That covers `Local` rows, and `Uploading` rows whose op is `base_pending` (I-2(c)).
        - Today branch 3 skips `Uploading` rows (`EB:6383-6392`), and branch 2 short-circuits `Local` ones (`EB:6326`).
        - A `Conflict` row stays with its own resolution path, which "own[s] its transitions" (`EB:6384-6386`). A raised version there could turn a Keep Mine into an overwrite of the remote change.
-     - On an `Uploading` row with a queued write, the raise changes `current_version` only. The held token is kept by the queued op (§5.4 row 9), and that write meets the server's 409 on its own.
+     - ~~On an `Uploading` row with a queued write, the raise changes `current_version` only. The held token is kept by the queued op (§5.4 row 9), and that write meets the server's 409 on its own.~~
+       On a row with a queued File Provider write, in any state (parked included), the fill and the raise both change `current_version` only. The size stays the write's, and the object version id stays. The fill still sets `version_filled = 1` and resolves the row's `base_pending` ops. The held token is kept by the queued op (§5.4 row 9), and that write meets the server's 409 on its own. On a row with no queued write the node's size is written too, and the raise also clears the row's object version id (the snapshot carries none, and the old one is no longer current) and `version_filled`. — lead, 2026-10-11 (Task 12)
      - A node with `is_uploading = true` is skipped for both, and the request stays set. The legacy init bumps `version_number` before the bytes exist (`FILES:2814-2830`), and the snapshot reports `is_uploading` (`SY:193`).
      - Nothing else changes; the `EB:6326` short-circuit stays for every other field.
      - On a `Local` row with no queued write, the raise makes the predicate false (`held_version ≠ current_version`). The token clears, the item reports `{cv'}`, and the system re-downloads: the phone's bytes reach this Mac's disk.
@@ -510,7 +552,8 @@ sequenceDiagram
      - What waits: only the `base_pending` op and its successors. The item stays `uploading`: writable, not evictable (§9.1). Every other file's queue runs.
      - For how long: until a snapshot succeeds. A failed snapshot (offline, a 5xx) costs nothing and parks nothing; the next pass, 30 s later (`RUN:117`), asks again. Offline, nothing could upload anyway.
      - On the next success: a node for the file with `is_uploading = false` gives the base. The op runs in that same pass, because the snapshot precedes the queue (`RUN:1293`, `RUN:1315`).
-     - The op parks as `base_unknown` only after 10 **successful** snapshots that did not report the file. That bounds the extra snapshots at 10 per such file.
+     - ~~The op parks as `base_unknown` only after 10 **successful** snapshots that did not report the file. That bounds the extra snapshots at 10 per such file.~~
+       The op parks as `base_unknown` only after 10 **successful** snapshots that gave it no base: none had a node for the file with `is_uploading = false` and a version above 0. A node that is still uploading counts as such a snapshot, and keeps the request set. That bounds the extra snapshots at 10 per such file. — lead, 2026-10-11 (Task 12)
      - — lead ruling, 2026-10-10 (spec review)
    - **Residual, named:** a legacy chunked replace (`FILES:3656-3667`) or a restore (`VER:604-610`) between the system's last read of the file and the snapshot is invisible to the desktop. A save in that window lands over a version the person did not see. That version stays in the history. Rule 6a (§6.1) carries the same residual.
 4. **Rows with version 0 today:**
@@ -544,6 +587,7 @@ sequenceDiagram
 | Enumeration and change feed | never list P | unchanged: S, plus P's deletion |
 | **(4b) Create with `.deletionConflicted`** (I-1) | the extension ignores `options` (`FPE:449`, never read in `FPE:445-483`). `queueCreateItem` mints a new provisional id and a second server file with the same name | see "Deletion-conflicted create" below — lead ruling, 2026-10-10 (spec review) |
 | **(4b) Dedup replay of a create** after it landed (m-7) | `refresh_cached_write` returns `None` when P's row is gone (`IPC:2288-2290`), so the create runs again: a second server file | ~~resolved through the alias. While S's filename equals the cached one, the replay answers S's item **under identifier S**, and nothing is queued. With no alias the replay is unchanged — lead ruling, 2026-10-10 (spec review)~~ (4c) unchanged from today: the create runs again and a second server file appears. That needs a create re-sent within the dedup TTL (30 min, `ipc_write_dedup.rs:44`) after its own landing. Nothing is lost. Split off to 1879 (§12) — lead ruling, 2026-10-10 (spec r4b) |
+| **(4d) Dedup replay of a modify** under P (the same `request_id` again) after its create landed | the stored reply names P, whose row is gone, so the replay runs the modify again: a second write of the same bytes | answered from S's row as it is now, **presented under identifier P**, and nothing is queued again. Only a modify's replay resolves through the alias; a create's replay is the row above (§12) — lead, 2026-10-11 (Task 12) |
 
 **Deletion-conflicted create (revision 4b, I-1).**
 - **What Apple does.**
@@ -567,6 +611,7 @@ sequenceDiagram
     - One file, one server file, one new version.
   - **Not resolved** (no alias, no row): an ordinary create, as today. That is right for a file deleted elsewhere: the person's edit becomes a new file.
   - **Resolved to a `Trashing` row:** an ordinary create. The file is going to the trash, and the edit must not follow it there.
+  - **(4d) Only a file.** The content modify needs the resolved row and the template to be files. A folder has no content to modify, so a deletion-conflicted folder create is an ordinary create, and a second server folder with the same name appears. — lead, 2026-10-11 (Task 12)
 - **What the person sees.** `t2.txt` keeps its name and their edit, and no `t2 2.txt` appears. Finder may briefly show the item replaced, since it is a new item for the system. The server gets the edit as the next version of the same file.
 - **Not verified on this macOS:** whether the system ever sends `.deletionConflicted` at our swap. D5 records it (§14).
 
@@ -578,7 +623,12 @@ For the content-modify row of the table: presenting S under P keeps the system's
   - The extension maps a daemon error to `cannotSynchronize` (`XPC:88-92`, `XPC:688-691`). The system "will present an appropriate error message and back off until the next time it is signalled" (`REPL.h:731-736`), and the edit stays on disk.
   - It is never `NoSuchItem`. With that error "the system will attempt to delete the item on disk" (`REPL.h:710-714`).
 - **A delete** of an unknown id stays an idempotent success. That is the existing ruling, "unknown items report success".
-- **No write reply carries `item: None` unless the write was ignored.** A queued outcome whose row cannot be read back becomes an error (`IPC:2364-2396`).
+- **(4d) A name Finder writes for itself** (a temporary item the daemon does not sync) is answered `Ignored`, as before, whatever its id. That check comes before the unknown-id check, so no such write is refused. — lead, 2026-10-11 (Task 12)
+- ~~**No write reply carries `item: None` unless the write was ignored.** A queued outcome whose row cannot be read back becomes an error (`IPC:2364-2396`).~~
+  **No create or modify reply carries `item: None` unless the write was ignored.** A queued create or modify whose row cannot be read back becomes an `Error` reply (`IPC:2364-2396`), logged as `Finder write refused` with `reason="row_unreadable"` (§11). — lead, 2026-10-11 (Task 12)
+  - The write itself stays queued and uploads with its bytes. The extension reports the `Error` as `cannotSynchronize`, which the system does not retry until the item changes on disk, so the text says so: the change is saved and will upload, and Finder shows an error on the item until the file changes again.
+  - A transient error would be worse: the dedup does not remember an `Error`, so the system's retry would run the write again and queue it twice.
+  - A delete is never refused this way. Its reply item is never read (`queueServerTrash` discards it), so a queued delete whose row is gone at the reply (a trash that completed in between) stays a success.
 - **The Swift side follows suit.** `queuedWriteCompletion`'s "queued, no item" branch (`FPE:405-411`, `FPE:419`) becomes the transient `serverUnreachable` error instead of a nil item. Even a daemon from another build can then never make the system delete a file through this branch.
 
 ### 7.4 R2a: trigger and removal
@@ -610,6 +660,7 @@ For the content-modify row of the table: presenting S under P keeps the system's
      - An open that succeeded keeps reading after an unlink, by POSIX semantics.
    - The staged payload is the plaintext copy the queue already holds for upload. The hydrate handover through the App Group and the system's temporary directory is unchanged (`FPE:75-213`).
    - **A parked write whose staged copy is gone.** A parked write keeps its op in the queue: nothing retries it and nothing removes it. When its staged copy is gone (it parked `payload_missing`, or the copy was lost after it parked), nothing local can serve its bytes, and a fetch that failed would be retried by the system without end. Its fetch goes to the server for the current version, and the hydrate leaves the row's parked status (2 below, §9.1): read-only, and still not evictable. The returned item still names the parked write's token, so the system holds the server's version under that token until the parked write is resolved; a stale but real version is preferred to an endless retry. A write that has not parked keeps the rule above: with its copy missing, its fetch fails and is retried, and it never reaches the server. — lead ruling, 2026-10-10 ([t8-parked-fetch])
+   - **(4d) How that fetch fails.** The daemon answers `Error` and logs `Finder hydrate failed` with `reason="queued_copy_missing"` (§11); no request reaches the server. The extension turns it into a per-item error, and for a fetch the system treats an error it does not list as transient and retries it (`NSFileProviderReplicatedExtension.h`, `fetchContents`). The same missing copy parks the write `payload_missing` at its next upload attempt (§8.4), and from then on the exception above applies. — lead, 2026-10-11 (Task 12)
 2. **No status change.** ~~A hydrate never changes the status of a row that has a live upload of its own: no `Downloading`, `Local` or `Error` (`EB:2584`, `EB:2609`, `EB:2633`, `EB:2647`, `EB:2681` today).~~
    A hydrate never changes the status of a row that has a Finder upload of its own in the queue, live or parked: no `Downloading`, `Local` or `Error` (`EB:2584`, `EB:2609`, `EB:2633`, `EB:2647`, `EB:2681` today). A live upload keeps `uploading`; a parked one keeps its parked status (§9.1). — lead ruling, 2026-10-10 ([t8-parked-fetch])
 3. **No more shared `"0"`.** A provisional item reports its write token.
@@ -634,6 +685,11 @@ In R2's sequence, the fetch, if it still happens, gets the same 8,388,618 bytes.
 - When W lands, the chain step sets `base_version` (and the object version id) on every op with `after_write_id = W`, and clears `after_write_id`. Today the chain matches equal bases instead (`EB:1239`).
   - (4b) The chain step runs inside the landing transaction and addresses ops by write id (§8.7 S1, S2).
 - Re-keying across the id swap (`EB:1216-1265`, `SD:3122-3142`) is kept.
+- **(4d) The mixed pair: nothing is rebased across it.** — lead, 2026-10-11 (Task 12)
+  - A Finder landing's chain step resolves only ops whose `after_write_id` names the landed write. The landing of an upload without a write id (Windows, the watcher, Keep Mine) keeps round 3's equal-base rebase, and applies it only to other ops without a write id. Every op of the file is re-keyed at the id swap either way.
+  - (a) A Finder create lands while an op without a write id is queued under its provisional id: that op moves to the server id, and its base stays as it was. On macOS such an op can only come from an earlier build, because engine start gives every queued upload a write id (§10.2). A `None` base then parks `base_unknown` at the `init` guard (§10.3); round 3 gave it the created version instead.
+  - (b) An earlier build's op lands while a minted save on the same numeric base is queued (rule 5): the save keeps its base, meets 409 and parks `stale_base` with its bytes.
+  - Why not rebase across it: an earlier build's bytes may not be on disk (§3), so a minted save cannot be shown to contain them, and rebasing it would replace that build's edit without the person seeing it. The cost is a visible park with the bytes kept, never a lost or overwritten save. What the person is then offered is 1881.
 
 ### 8.2 ~~Supersede: when~~ No supersede
 
@@ -684,6 +740,7 @@ N is queued with `after_write_id = W` whatever W's state: running, waiting, back
       - No fallback. If the folder cannot be created or written to, the accept stages nothing and queues nothing. The app replies `WriteRetryLater`, with a fixed reason and no path. The extension reports `NSFileProviderErrorServerUnreachable` (`uploadStagingFailed`), so macOS keeps the item's changes on disk and retries the write.
         - An `Error` reply would reach macOS as `NSFileProviderErrorCannotSynchronize`, and the system does not retry that until the item changes again (`NSFileProviderError.h:93-98`).
         - Not covered: the copy itself failing after the folder passed its check (for example, a disk that fills during the copy) is an `Error` reply, as today.
+        - (4d) A folder that never becomes usable (another user owns it, or a symlink stands in its place) means the system retries the write without end. The person sees only the item's pending state, and the log gets one `Finder write refused` line with `reason="staging_root_unavailable"` per attempt. The temp fallback used to hide this. No status surface names it yet. — lead, 2026-10-11 (Task 12)
       - The old folders: a journal row written before the move names its copy by an absolute path in the old folder. That copy is read, uploaded, released and unlinked as before; engine start unlinks a released copy wherever it is (§8.7 S6). The sign-out purge and the account reset sweep the new folder and both old ones, and the sign-out purge's path allow-list accepts all three.
       - Windows and Linux keep today's folder and its fallback.
       - — lead ruling, 2026-10-10 ([staging-durable]; the retry reply: [t6b-q])
@@ -696,8 +753,11 @@ N is queued with `after_write_id = W` whatever W's state: running, waiting, back
       - If W is a create, N takes W's create instead: kind `upload_file`, W's parent and create metadata, and the provisional id.
       - W's op is removed, and its staged payload is released after the commit (§8.7 S6).
       - N's bytes contain W's (§8.2, last point), so no byte the person saved is lost.
+        - **(4d) One exception, data-safe.** When W parked with its staged copy gone, a fetch of the item is served from the server (§7.4), so the system holds the server's current version under W's token, and N is built on that, not on W's bytes. N still inherits W's older base at the hand-over. If a remote change landed after W's base, the server refuses N with 409 and N parks `stale_base` with its bytes: a false park, since N's bytes were built on the newest version. Nothing is overwritten or lost; W's bytes were already gone. The resolution path for parked writes (1881) owns it. — lead, 2026-10-11 (Task 12)
       - One warn line: `queued write took over a parked one`.
+      - (4d) If W parked `base_unknown`, N takes over W's unknown base and parks `base_unknown` at the same claim, so no request goes out with it. This is keyed on W's recorded park reason, never on an inherited 0. — lead, 2026-10-11 (Task 12)
     - **W is from an earlier build (§10.2):** no hand-over. N parks as `predecessor_parked`, with its bytes. N's bytes may not contain W's (§3) (m-2).
+      - **(4d) Not reached in production.** No save accepted by this code becomes an earlier-build op's successor: `after_write_id` is set only toward a minted write, an earlier-build op holds no token (§10.2), and rule 3 leaves it out. The claim keeps the guard as a second line; only a test can put an earlier-build op behind `after_write_id`. A newer save of a file whose earlier-build op is parked is therefore sent on its own base, and it can land while that op stays parked with its bytes (§10.3). — lead, 2026-10-11 (Task 12)
     - **W has a recorded completion:** W never parks (§8.6 rule 6). N waits, and the chain step resolves it when W's local landing succeeds.
     - A successor that inherits a stale base meets 409 and parks too. Its bytes contain the predecessor's, so keeping them is enough.
   - **Why at the claim and not at the park.** The claim is the one place where the runner reads the successor and its predecessor's current state in one transaction.
@@ -707,6 +767,7 @@ N is queued with `after_write_id = W` whatever W's state: running, waiting, back
   - — lead ruling, 2026-10-10 (spec review)
   - **(4c) Accepted as written: the hand-over happens at the successor's claim, lazily, in one runner transaction.** Its cost: a successor that was not in the current pass's list of due ops is claimed in the next pass. That is at most one pass, 30 s (`RUN:117`), of extra delay before it uploads. — lead ruling, 2026-10-10 (spec r4b)
 - **What still waits:** a successor behind a predecessor ~~with a live session~~ that has not parked and whose last attempt failed transiently (network, 5xx, timeout). The successor would fail the same way.
+  - **(4d) Also: a hand-over leaves W's open server session to the lease.** W may park (`payload_missing`, or its attempts used up) after its `init` opened a session on the server. The hand-over deletes W's resume row, but the session stays open there, and nothing heartbeats it any more. N's `init` then meets 409 `in_progress` and retries until the server's lease expires (default 3600 s, server `upload_lease.rs:148` at `e18cbfc3`), when the next `init` takes the session over inline (`uploads.rs:798-836`). Bound: about 1 h after W's last chunk or heartbeat, plus one backoff step. The claim cannot abandon the session itself, because nothing inside S1 touches the network. — lead, 2026-10-11 (Task 12)
 - **409 classes.** The server answers 409 for:
   - a stale base: "stale base version for replacement upload" (`UP:777`);
   - another upload in progress: "upload is already in progress for this file" (`UP:732`, `UP:773`);
@@ -721,7 +782,8 @@ N is queued with `after_write_id = W` whatever W's state: running, waiting, back
 
 ### 8.5 Order is insertion order (M2)
 
-- Queue order becomes `rowid` alone, everywhere: `SD:2677`, `SD:3091`, `SD:3112-3113`.
+- ~~Queue order becomes `rowid` alone, everywhere: `SD:2677`, `SD:3091`, `SD:3112-3113`.~~
+  On macOS, queue order becomes `rowid` alone, everywhere: `SD:2677`, `SD:3091`, `SD:3112-3113`. Windows and Linux keep round 3's order, `created_at` then `rowid`, as the whole of this spec is the macOS path. — lead, 2026-10-11 (Task 12)
 - `enqueue_operation`'s `ON CONFLICT DO UPDATE` keeps the `rowid` (`SD:2622-2646`).
 - A new row gets a `rowid` above every live row's. That is SQLite's documented allocation, not re-checked here.
 - The code runs no `VACUUM` (grep: 0 hits). A future `VACUUM` may renumber the rowids of a table without an `INTEGER PRIMARY KEY` (SQLite documentation, unverified here), so it would have to be weighed against this rule.
@@ -734,6 +796,10 @@ N is queued with `after_write_id = W` whatever W's state: running, waiting, back
   So a queued W lands first and the restore follows as r = v + 2, and W stays in the history. Before, the restore could land first: the held token was cleared under a queued W, the system downloaded the restored bytes over W's, and W then parked. W's bytes reached no server version.
 
   A successor of W whose base resolved to v + 1 then meets the restore's v + 2 and parks with its bytes. That is a real conflict between the restore and the later edit, and 1881 decides what is offered. — lead ruling, 2026-10-10 (spec review)
+- **(4d) Which ops the restore order covers, as built.** — lead, 2026-10-11 (Task 12)
+  - A restore waits for an earlier **File Provider** upload of its file (one with a write id) that has not parked, and only File Provider uploads wait for an earlier restore. Uploads without a write id (Windows, the watcher) and restores do not wait for each other: those uploads keep round 3's upload-only order.
+  - Two restores of one file are not ordered against each other, as before this spec. If the first backs off, the second can land first. The rule above is about a restore and the saves around it; restore after restore is unchanged round-3 behaviour.
+  - A parked upload blocks nothing, a restore included.
 
 ### 8.6 A landing is committed once `complete` returns (M1)
 
@@ -750,10 +816,11 @@ N is queued with `after_write_id = W` whatever W's state: running, waiting, back
    - the held columns (only `WHERE held_write_id = W`; a later save's token stays held, §5.4 row 6);
    - the id swap and the alias;
    - the chain step (re-key and rebase);
-   - removal of the op and its resume row; (4b) the delete is `WHERE op_id = ? AND write_id = ? AND claim_id = ?` and asserts one row (§8.7 S2) — lead ruling, 2026-10-10 (spec review);
+   - removal of the op and its resume row; (4b) the delete is ~~`WHERE op_id = ? AND write_id = ? AND claim_id = ?`~~ `WHERE op_id = ? AND claim_id = ?` and asserts one row (§8.7 S2) — lead ruling, 2026-10-10 (spec review); (4d) the claim id is fresh per attempt on that row and no path writes `write_id` after the enqueue, so `write_id` would add nothing to the key — lead, 2026-10-11 (Task 12);
    - ~~release of the staged payload.~~ marking the staged payload for release; the unlink follows the commit (§8.7 S6) — lead ruling, 2026-10-10 (spec review).
 3. **The chain step never fails the landing.** A successor that cannot be re-keyed is parked, with its bytes and a warn line.
-4. A retry that finds a recorded completion skips the network and repeats step 2.
+4. ~~A retry that finds a recorded completion skips the network and repeats step 2.~~
+   A retry that finds a recorded completion skips the upload (no `init`, chunk or `complete` request) and repeats step 2. The post-commit thumbnail work still runs after that landing, and for an image or a video it is network. Nothing repeats: the first landing failed before that work. The completion record also carries the `mime_type` of the server's answer, so a save without a content type of its own keeps it on a retried landing. An `already_completed` answer carries none, so a save whose only answer was that one lands without a content type. — lead, 2026-10-11 (Task 12)
 5. ~~Suppose a resumed session has every chunk acknowledged and `complete` answers 404 (the session was swept). The daemon then reads `GET /files/{S}`. If the current object version is the session's, it applies the landing. It never abandons such a session.~~
    - ~~(4b) Since server `f998c79e`, a session older than 7 days also answers 404 at `complete` (header, "Server re-checked"). The same `GET` decides. If the session's object version is not current, this is the ordinary swept-session path.~~
    - **(4c) Split off to 1879 (§12).** What ships is today's path: a resumed session whose `complete` answers 404 is abandoned (`upload_session_is_gone`, `EB:3982-3988`; `EB:859-866`).
@@ -789,7 +856,8 @@ Every rule that reads or changes the queue or the held columns cites this sectio
 
 Each decision below is ONE `StateDb` method. The method:
 - takes the mutex once;
-- opens `BEGIN IMMEDIATE` (rusqlite `TransactionBehavior::Immediate`, so the rule still holds if a second connection ever appears);
+- ~~opens `BEGIN IMMEDIATE` (rusqlite `TransactionBehavior::Immediate`, so the rule still holds if a second connection ever appears);~~
+  a decision that writes (1–7, and 10 inside 2) opens `BEGIN IMMEDIATE` (rusqlite `TransactionBehavior::Immediate`, so the rule still holds if a second connection ever appears). The two read-only decisions, 8 and 9, take one deferred read instead: the predicate's inputs come from one deferred transaction (`item_presentation`), and the fetch's from one statement. A deferred read pins one snapshot from its first read, a WAL read snapshot or a held shared lock, so "one read" holds even with a second connection; `BEGIN IMMEDIATE` would serialize every enumeration behind the writers for nothing. — lead, 2026-10-11 (Task 12)
 - reads its preconditions inside;
 - decides with a pure function;
 - writes, and commits.
@@ -817,21 +885,24 @@ Nothing inside awaits or touches the network. Its preconditions are never read i
 10. **The alias write**: only inside the landing (2).
 
 **S2. After enqueue, an op is addressed by `(op_id, write_id)`.**
-- Every UPDATE or DELETE of a Finder upload op is `WHERE op_id = ? AND write_id = ?`. From the runner it also has `AND claim_id = ?`.
+- ~~Every UPDATE or DELETE of a Finder upload op is `WHERE op_id = ? AND write_id = ?`. From the runner it also has `AND claim_id = ?`.~~
+  Outside the runner, an UPDATE of a Finder upload op is `WHERE op_id = ? AND write_id = ?` (the hand-over rewrites the successor so). The runner's writes after the claim are `WHERE op_id = ? AND claim_id = ?`: the resume row, the completion record, the landing's delete, a park, an attempt record and a pause. The two keys are equivalent there. A claim id is minted afresh for every attempt on that row, and no path writes `write_id` after the enqueue: the upsert below sets neither `write_id` nor `claim_id`. What keeps the equivalence is the rule below that the upsert is for new ops only. If it were ever broken, a rewritten op under a live claim would still match the runner's key, under either form. Nothing does that today. — lead, 2026-10-11 (Task 12)
 - Each one asserts exactly one affected row.
 - Zero rows means the state moved since the decision read it. The caller rolls back. Then the IPC side re-runs its decision, and the runner ends the attempt without writing (S4).
 - No path rewrites an op from an in-memory copy. `enqueue_operation`'s upsert (`ON CONFLICT(op_id) DO UPDATE`, `SD:2622-2646`) is for new ops only, and is never called with a copy read from the queue.
 - Ops are never deleted by `file_id` on the Finder path.
 
 **S3. How the runner claims an op.** `claim_operation(op_id, claim_id)` replaces `get_operation` + `has_earlier_live_upload` (`EB:490-497`) with one transaction. It:
-1. re-reads the op, and skips it if it is gone;
-2. for an upload or a restore, skips it while an earlier content op of the same file is queued and not parked (by `rowid`, §8.5). That is not an attempt;
+1. re-reads the op, and skips it if it is gone; (4d) also if it has parked (its attempts used up) or is paused. A pass lists its ops once, and a landing or a pause earlier in the same pass can park or pause a later op of the file. Nothing retries a parked op, and a paused op waits for its resume — lead, 2026-10-11 (Task 12);
+2. for an upload or a restore, skips it while an earlier content op of the same file is queued and not parked (by `rowid`, §8.5). That is not an attempt; (4d) which pairs count is in §8.5's last point: a restore and an upload wait for each other only when the upload has a write id, and two restores do not wait for each other — lead, 2026-10-11 (Task 12);
 3. skips it while `base_pending` is set. That is not an attempt;
 4. if `after_write_id = W`:
    - W is queued and not parked → skip;
    - W has parked → the hand-over, or `predecessor_parked` (§8.4);
    - no op carries W → S5;
 5. sets `claim_id` (a fresh random id per attempt) and `claimed_at`, and returns the op as stored.
+
+(4d) An op whose completion is recorded (§8.6 rule 1) skips steps 3 and 4: it waits for no base and no predecessor, and never parks. Its attempt repeats the landing (§8.6 rules 4 and 6). — lead, 2026-10-11 (Task 12)
 
 The claim ends in the transaction that records the outcome:
 - the landing deletes the op;
@@ -906,9 +977,12 @@ sequenceDiagram
      - A fetch of a parked write whose staged copy is gone is served from the server (§7.4), and the hydrate leaves the parked status. — lead ruling, 2026-10-10 ([t8-parked-fetch])
 2. **The writers of `files.status` change:**
    - the landing sets `Local` only when no later upload of the file is queued (`EB:1149`), read inside the landing transaction (§8.7 S1.2);
-   - the rollback guard keeps `Uploading` while the op will retry, and sets `Error` only when it parks (`EB:662-690`);
-   - a hydrate leaves a row with a live upload alone (§7.4);
-   - the startup reconcile leaves a row with such an upload `Uploading` (`SD:2041-2053`).
+     - (4d) when only parked writes of the file remain, the landing settles the row to `Error` instead, once its own op is gone (it counts as unparked until then); a File Provider write's landing leaves a `Trashing` row `Trashing`, so a trashed item never becomes writable or evictable on its way out, and its trash op deletes it — lead, 2026-10-11 (Task 12);
+   - ~~the rollback guard keeps `Uploading` while the op will retry, and sets `Error` only when it parks (`EB:662-690`);~~
+     the rollback guard leaves a File Provider write's row alone: a failed attempt keeps it `Uploading`. `Error` is set by the park, in the park's own transaction (the accept's at-once park, the claim's parks, the runner's park, the snapshot count's park), and by the attempt that uses up the op's attempts, which parks it by the queue's rule (`attempts < max_attempts` is "not parked"). Each sets `Error` only on an `Uploading` row with no other unparked File Provider upload of the file: a successor waiting to take over keeps the item `uploading` (§9.1), a `Trashing` row stays in the trash, and a `Conflict` row keeps its own status. Uploads without a write id keep today's rollback — lead, 2026-10-11 (Task 12);
+   - (4d) an attempt of a File Provider write sets `Uploading` only on a row that is not `Trashing`, in one statement, so a trash applied between two attempts keeps the item in the trash. Other uploads set `Uploading` as today — lead, 2026-10-11 (Task 12);
+   - ~~a hydrate leaves a row with a live upload alone (§7.4);~~ a hydrate leaves a row with a File Provider upload of its own alone, live or parked (§7.4 item 2) — lead, 2026-10-11 (Task 12);
+   - the startup reconcile leaves a row with such an upload `Uploading` (`SD:2041-2053`). (4d) "Such an upload" is one that has not parked; a row whose Finder uploads have all parked is reset to `Error`, and the reconcile's count (its log line) is the rows it reset — lead, 2026-10-11 (Task 12).
    - Keep Mine uploads of a `Conflict` row have no `write_id` and keep today's behaviour; `Conflict` already reports `isUploaded` false (`FPI:228-235`).
 3. **Size and modification time are those of the newest bytes:**
    - B2 records them when the save is queued (`SD:2010-2031`);
@@ -953,6 +1027,8 @@ sequenceDiagram
 - **At engine start**, every upload op without a `write_id` gets one and is marked as from an earlier build (§10.2). ~~Rules 1c and 3 of §6.1~~ Rule 3 of §6.1, and the hand-over of §8.4, never treat it as minted by this spec (rule 1c is split off, §12 — lead ruling, 2026-10-10 (spec r4b)).
 - **Its base is left as it is.** A timestamp-based base (`10^9` or more, a wall-clock second) is sent like any base. The server answers 409 "stale base version for replacement upload" (`UP:775-778`), and the op parks at once with its bytes (§8.4). This is the same path as any stale base.
   - The two QA bases (`1791550250`, `1791550190`) fit the server's `i32`, so the §6.3.1 guard does not refuse them first.
+  - (4d) An earlier-build modify with no base at all (`base_version` NULL) gets its write id at the marking like any other, so the §6.3.1 guard parks it `base_unknown` with its bytes at its first attempt, instead of sending a replace without a base. A base beyond the server's `i32` parks the same way. — lead, 2026-10-11 (Task 12)
+  - (4d) The marking runs on macOS only, at engine start, before the startup reconcile; it clears the held columns of the files it touches first (m-4c) and changes nothing else of the op: its base, attempts, pause and staged copy stay. — lead, 2026-10-11 (Task 12)
 - **Who is affected.** Only round-3 builds and the `d4a5ffe` QA build ever queued such ops, and neither shipped.
   - The upgrade from 0.8.11 is unaffected: 0.8.11 refused every Finder content write before queueing it (§10.1; investigation Q4).
 - **Why.** The re-base was proved safe only for the two QA ops, behind D1's pre-check. In general it is not safe (m-5):
@@ -992,26 +1068,39 @@ sequenceDiagram
 ## 11. Rule 7: observability
 
 Every line is a `warn!`, except the hydrate count (`info!`), with ids and fixed categories only. No name, path, URL or error text appears (the round-3 style, `EB:4004-4027`, `IPC:1406`, `IPC:2194-2203`). There is at most one line per write or per attempt, and a parked op stops logging.
+- (4d) The engine-start lines that report counts are `info!` too, like the reconcile line before them; each failure beside them is a `warn!` with a category. — lead, 2026-10-11 (Task 12)
+- (4d) A line about a failed step logs the error's **category**, never its text, which can carry a path. The category comes from closed codes only (SQLite's result code, the I/O error kind), never from a message: `not_found`, `permission_denied`, `disk_full`, `read_only`, `io`, `network`, `database_busy`, `database_full`, `database_corrupt`, `database_read_only`, `database_cannot_open`, `database_io`, `database_constraint`, `database_schema`, `database`, `other`. `database_schema` is a defect of ours: SQLite's generic error (a table or column the schema lacks), a statement SQLite rejects at prepare (a syntax error, a missing column in a `SELECT` or `WHERE`), or a column or value the code reads as the wrong type. A rare `SQLITE_ERROR` with another cause also reads as `database_schema`. — lead, 2026-10-11 (Task 12)
 
 | Event | Message | Fields |
 | --- | --- | --- |
-| A write refused by the daemon | `Finder write refused` (existing) | `op`, `reason`, now also `unknown_item`, `base_unknown` |
+| A write refused by the daemon | `Finder write refused` (existing) | `op`, `reason`, now also `unknown_item`, ~~`base_unknown`~~ (4d) `row_unreadable` (a queued create or modify whose row cannot be read back, §7.3; not listed here before) and `staging_root_unavailable` (the staging folder cannot take the copy, §8.4). A base the daemon cannot know is not a refusal: the write parks at once, rule 6a′, and the park line says `base_unknown` — lead, 2026-10-11 (Task 12) |
 | `init` refused with 409 | `upload refused by the server (409 Conflict); will retry` (existing) | existing fields + `class` (`stale_base`, `in_progress`, `other`) |
-| Parked | `… parked with its bytes kept in the queue` (existing) | + `reason` (`stale_base`, `base_unknown`, `payload_missing` (4b), `predecessor_parked`, `predecessor_lost` (4b), `rekey_failed`) |
+| (4d) A stale-base 409 that parks a File Provider write at once (§8.4) | `upload refused by the server (409 Conflict); its base is stale, parked with its bytes kept in the queue` | the 409 fields, `class="stale_base"`, `reason="stale_base"`; `attempt` is the attempt that was made (1 for a first try), not the cap. A refusal that uses up an op's attempts says `attempts used up` instead, with `reason="stale_base"` only for that class — lead, 2026-10-11 (Task 12) |
+| Parked | `… parked with its bytes kept in the queue` (existing) | + `reason` (`stale_base`, `base_unknown`, `payload_missing` (4b), `predecessor_parked`, `predecessor_lost` (4b), `rekey_failed`). (4d) Every park but the stale-base 409 logs `upload parked with its bytes kept in the queue` with `op_id`, `file_id`, `reason` — lead, 2026-10-11 (Task 12) |
 | ~~Supersede~~ | ~~`queued write superseded by a newer save`~~ | ~~`op_id`, `file_id`, `superseded_write`, `write`~~ — removed with supersede (§8.2). — lead ruling, 2026-10-10 (spec review) |
 | Successor takes over a parked predecessor | `queued write took over a parked one` | `op_id`, `file_id`, `parked_op_id` |
-| Alias resolution | `provisional id resolved to the server id` | `request` (`modify`, `delete`, `hydrate`, `item`, `thumbnail`, and in 4b `deletion_conflicted_create`~~, `create_replay`~~ (split off, §12 — lead ruling, 2026-10-10 (spec r4b))), `provisional_id`, `file_id` |
+| Alias resolution | `provisional id resolved to the server id` | `request` (`modify`, `delete`, `hydrate`, `item`, `thumbnail`, and in 4b `deletion_conflicted_create`~~, `create_replay`~~ (split off, §12 — lead ruling, 2026-10-10 (spec r4b))), `provisional_id`, `file_id`. (4d) A rename or move logs `request="modify"`; the provisional id follows M5 (below) — lead, 2026-10-11 (Task 12) |
 | (4b) Delete under a provisional id refused by the alias gate (§7.2, m-6) | `delete of a provisional id not applied to the server file` | `provisional_id`, `file_id` |
-| Unknown id | `Finder write refused`, `reason="unknown_item"` | `id` |
+| Unknown id | `Finder write refused`, `reason="unknown_item"` | `id` (4d: by M5, `id` when it is a UUID, else `id_kind="non_uuid"`; `op` as on every refusal — lead, 2026-10-11 (Task 12)) |
 | Base resolved from the snapshot | `queued write based on the version the snapshot reported` | `op_id`, `file_id`, `base_version` |
 | (4b) Version raised from the snapshot (§6.3.2, I-3) | `file version raised from the snapshot` | `file_id`, `old_version`, `new_version` |
 | ~~Upgrade re-base~~ | ~~`queued write re-based after the upgrade`~~ | ~~`op_id`, `file_id`, `old_base`, `new_base`~~ — removed with the re-base (§10.3). — lead ruling, 2026-10-10 (spec review) |
-| (4b) A guarded queue write matched no row (§8.7 S2, S4) | `queue state moved` | `op_id`, `step` (`resume`, `completion`, `landing`, `park`, `attempt`, `pause`, `accept`) |
+| (4b) A guarded queue write matched no row (§8.7 S2, S4) | `queue state moved` | `op_id`, `step` (`resume`, `completion`, `landing`, `park`, `attempt`, `pause`, ~~`accept`~~). (4d) The accept never logs it: its one transaction reads and writes together, and a row gone by then is refused as `unknown_item` — lead, 2026-10-11 (Task 12) |
 | (4b) Completed on the server, local landing failed (§8.6 rule 6) | `upload completed on the server; local landing will be retried` | `op_id`, `file_id`, `attempt` |
-| Every hydrate over the socket (`info!`, the one line that is not a warning: it is the device plan's count of fetches) | `Finder hydrate served` | `file_id`, `source` (`queue`, `server`)~~, and in 4b `pinned` (`true` when the request named `object_version_id`, §7.2)~~ (pinning is split off, §12 — lead ruling, 2026-10-10 (spec r4b)) |
+| Every hydrate over the socket (`info!`, the one line that is not a warning: it is the device plan's count of fetches) | `Finder hydrate served` | `file_id`, `source` (`queue`, `server`)~~, and in 4b `pinned` (`true` when the request named `object_version_id`, §7.2)~~ (pinning is split off, §12 — lead ruling, 2026-10-10 (spec r4b)). (4d) `file_id` is the request's, by M5 — lead, 2026-10-11 (Task 12) |
 | (4b) Extension: write options that are not empty (§8.8, m-16) | `BeebeebFileProvider: write options` (`NSLog`, Default level) | `call` (`create`, `modify`), `options` (the raw bitmask), item id |
+| (4d) A hydrate over the socket that failed | `Finder hydrate failed` (existing) | `file_id` (by M5), `reason`, which gains `queued_copy_missing`: a still-queued write whose staged copy is gone, answered with an error and no server request (§7.4) — lead, 2026-10-11 (Task 12) |
+| (4d) A presentation read that failed (the item is then built from its contract alone, as round 3 did) | `item presented from its contract alone` | `file_id`, `category="presentation_read_failed"`, `kind` (the error's category), `held_back` (how many such failures of this item and kind were not logged since the last line). At most one line per item and kind per 10 minutes; at most 1024 items are tracked; a clean read of the item ends its interval, so an item that alternates fails and clean reads logs every failure — lead, 2026-10-11 (Task 12) |
+| (4d) A restore the server made whose local record failed (§5.4 row 10) | `restore done on the server; its local record failed, a snapshot will repair it` | `file_id`, `category="restore_bookkeeping_failed"`; if the snapshot request also fails, a second line `restore done on the server; a snapshot could not be requested` with `category="resnapshot_request_failed"` — lead, 2026-10-11 (Task 12) |
+| (4d) Engine start (§8.7 S3, S6; §10.2; §9.2) | `engine start: queue claims cleared, released upload copies removed` (`info!`); `engine start: uploads from an earlier build marked; their bases are unchanged` (`info!`); `engine start: stale in-flight rows from a previous engine session reset` (`info!`, renamed from `reconciled stale in-flight state rows`) | `claims_cleared`, `released`; `marked`; `reset` (only the rows it changed). Each step's failure: `engine start repair failed`, `engine start: marking earlier-build uploads failed`, `could not reconcile stale in-flight state rows on startup`, each with `reason=<category>` — lead, 2026-10-11 (Task 12) |
+| (4d) A staged copy that could not be removed (§8.7 S6) | `staged payload cleanup deferred; journal retained`, `staged upload cleanup deferred; journal retained`, `released upload copy kept; removal is retried at the next start` | `reason=<category>`; the journal row stays, so a later start or sign-out finds the copy — lead, 2026-10-11 (Task 12) |
+| (4d) The daily alias sweep failed (§7.1) | `daily alias sweep failed` | `reason="database"` — lead, 2026-10-11 (Task 12) |
+| (4d) Lines that already existed and gain M5 | `IPC client went away while flushing the terminal hydrate progress frames`, `IPC client went away mid-hydrate; hydration cancelled` (both `info!`), `finder delete: unknown item — idempotent success` (`info!`) | `file_id` by M5 (a UUID, else `id_kind="non_uuid"`) — lead, 2026-10-11 (Task 12) |
+
+(4d) **Support bundles.** A staged copy that exists but cannot be read (permission, I/O, not a regular file) retries with the fixed text `staged upload payload could not be read`, and the diagnostics bundle files it under its own code, `payload_unreadable`, apart from `payload_missing`. Neither text carries the path: `classify_operation_error` matches bare substrings such as `403`, so a path could pause the op. Rows written by older builds keep `staged upload payload is missing: <path>`, which still classifies as `payload_missing`. — lead, 2026-10-11 (Task 12)
 
 **M5.** A line that logs an id taken from the wire logs it only when it parses as a UUID. Otherwise it logs `id_kind="non_uuid"`.
+- (4d) That is: a UUID is logged in its own field (`file_id`, `provisional_id` or `id`) and no `id_kind`; any other id logs no id and `id_kind="non_uuid"`. — lead, 2026-10-11 (Task 12)
 - This also applies to the existing hydrate warning on Linux.
 - There the identifier check is a no-op (`IPC:2064-2067`), and the warning logs any caller-supplied text (`IPC:2195-2199`).
 
@@ -1160,7 +1249,7 @@ How a seam is used:
 **Gates:**
 - whole-crate `cargo test --locked` with the per-binary truth lines and the count guard;
 - `cargo clippy --locked --all-targets`: no new warnings against 146;
-- Swift harness ~~`95 passed, 0 failed (expected 95)`~~ `96 passed, 0 failed (expected 96)`, plus its self-test — lead ruling, 2026-10-10 (spec review);
+- Swift harness ~~`95 passed, 0 failed (expected 95)`~~ ~~`96 passed, 0 failed (expected 96)`~~ `97 passed, 0 failed (expected 97)`, plus its self-test — lead ruling, 2026-10-10 (spec review); (4d) 97 with the `WriteRetryLater` decode check, as the count line above says — lead, 2026-10-11 (Task 12);
 - the extension build, as CI does it;
 - `check-ipc-timeouts.py` and its self-test.
 
@@ -1378,3 +1467,4 @@ Only the ones the code and headers cannot settle, each with a recommendation.
   - the where-tested table.
 - `RELEASE_NOTES.md` for the release that carries this: the one-time re-download in §10.1, with the counted test results.
 - `CLAUDE.md`, "Current macOS integration state", if it describes the version identifiers.
+- (4d) Done with the code: `docs/IPC_PROTOCOL.md` ("Versions and queued writes", `QueueFinderCreate`'s fields, "Thumbnails", "Version skew", "Tests"). `CLAUDE.md`'s "Current macOS integration state" does not describe the version identifiers, so it is unchanged; its "Sync engine" paragraph gains the completed-upload exception (§8.6 rule 6). `RELEASE_NOTES.md` is written when the release is cut. — lead, 2026-10-11 (Task 12)
