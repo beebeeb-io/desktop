@@ -435,19 +435,24 @@ pub(crate) fn wire_id_fields(id: &str) -> (Option<tracing::field::DisplayValue<&
     }
 }
 
-/// Spec §11, [plan-fix-2]: the fixed category of an error, for a log line about a step that
+/// Spec §11: the fixed category of an error, for a log line about a step that
 /// failed. The error's text can carry a path (an I/O error's context, a database file name),
-/// so a line logs this instead. The first cause it recognises decides.
+/// so a line logs this instead. The first cause it recognises decides. The category comes from
+/// closed codes only (SQLite's result code, the I/O error kind), never from a message, and it
+/// tells apart the causes that have different answers: a busy database, a full disk, a corrupt
+/// file, and a statement the schema does not match (a defect of ours).
 pub(crate) fn error_category(error: &(dyn std::error::Error + 'static)) -> &'static str {
     let mut cause = Some(error);
     while let Some(current) = cause {
-        if current.downcast_ref::<rusqlite::Error>().is_some() {
-            return "database";
+        if let Some(database) = current.downcast_ref::<rusqlite::Error>() {
+            return database_error_category(database);
         }
         if let Some(io) = current.downcast_ref::<std::io::Error>() {
             return match io.kind() {
                 std::io::ErrorKind::NotFound => "not_found",
                 std::io::ErrorKind::PermissionDenied => "permission_denied",
+                std::io::ErrorKind::StorageFull | std::io::ErrorKind::QuotaExceeded => "disk_full",
+                std::io::ErrorKind::ReadOnlyFilesystem => "read_only",
                 _ => "io",
             };
         }
@@ -457,6 +462,37 @@ pub(crate) fn error_category(error: &(dyn std::error::Error + 'static)) -> &'sta
         cause = current.source();
     }
     "other"
+}
+
+/// [`error_category`] for a database error, from rusqlite's variant and SQLite's result code.
+fn database_error_category(error: &rusqlite::Error) -> &'static str {
+    use rusqlite::ffi::ErrorCode;
+    match error {
+        rusqlite::Error::SqliteFailure(failure, _) => match failure.code {
+            ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked => "database_busy",
+            ErrorCode::DiskFull => "database_full",
+            ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase => "database_corrupt",
+            ErrorCode::ReadOnly => "database_read_only",
+            ErrorCode::CannotOpen => "database_cannot_open",
+            ErrorCode::SystemIoFailure => "database_io",
+            ErrorCode::ConstraintViolation => "database_constraint",
+            // The generic SQLITE_ERROR: a statement that names a table or column the schema
+            // does not have.
+            ErrorCode::Unknown if failure.extended_code & 0xff == rusqlite::ffi::SQLITE_ERROR => "database_schema",
+            _ => "database",
+        },
+        // The code and the schema disagree about a column, a value or a statement.
+        rusqlite::Error::InvalidColumnType(..)
+        | rusqlite::Error::InvalidColumnIndex(_)
+        | rusqlite::Error::InvalidColumnName(_)
+        | rusqlite::Error::FromSqlConversionFailure(..)
+        | rusqlite::Error::IntegralValueOutOfRange(..)
+        | rusqlite::Error::InvalidParameterCount(..)
+        | rusqlite::Error::InvalidParameterName(_)
+        | rusqlite::Error::MultipleStatement
+        | rusqlite::Error::ExecuteReturnedResults => "database_schema",
+        _ => "database",
+    }
 }
 
 /// One line per request that reached the server id through an alias (spec §7.2, §11). The
@@ -20337,28 +20373,91 @@ mod tests {
     /// path (an I/O error's context, a database file name) and never reaches the log.
     #[test]
     fn an_error_is_logged_by_its_category_never_its_text() {
-        let io = |kind| anyhow::Error::new(std::io::Error::new(kind, format!("/Users/someone/{PLANTED}")));
-        assert_eq!(error_category(io(std::io::ErrorKind::NotFound).as_ref()), "not_found");
-        assert_eq!(
-            error_category(io(std::io::ErrorKind::PermissionDenied).as_ref()),
-            "permission_denied"
-        );
-        assert_eq!(error_category(io(std::io::ErrorKind::Other).as_ref()), "io");
-        let busy = || rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(5), Some("database is locked".into()));
-        assert_eq!(error_category(&busy()), "database");
-        assert_eq!(
-            error_category(
-                anyhow::Error::new(busy())
-                    .context("open /Users/someone/state.db")
-                    .as_ref()
+        use rusqlite::ffi;
+        let planted = format!("/Users/someone/{PLANTED}");
+        let io = |kind| anyhow::Error::new(std::io::Error::new(kind, planted.clone()));
+        // A SQLite failure with a result code, and a message that names a path.
+        let sqlite = |code| {
+            anyhow::Error::new(rusqlite::Error::SqliteFailure(
+                ffi::Error::new(code),
+                Some(format!("unable to use {planted}")),
+            ))
+        };
+        let memory = rusqlite::Connection::open_in_memory().unwrap();
+        let no_such_table = memory.execute("UPDATE no_such_table SET x = 1", []).unwrap_err();
+        let wrong_type = memory
+            .query_row("SELECT 'text'", [], |row| row.get::<_, i64>(0))
+            .unwrap_err();
+        let no_row = memory
+            .query_row("SELECT 1 WHERE 0", [], |row| row.get::<_, i64>(0))
+            .unwrap_err();
+        // Each cause support answers differently has its own category.
+        let cases: Vec<(&str, anyhow::Error, &str)> = vec![
+            ("missing file", io(std::io::ErrorKind::NotFound), "not_found"),
+            (
+                "permission",
+                io(std::io::ErrorKind::PermissionDenied),
+                "permission_denied",
             ),
-            "database",
-            "the cause under a path-bearing context"
+            ("full disk (I/O)", io(std::io::ErrorKind::StorageFull), "disk_full"),
+            (
+                "read-only volume",
+                io(std::io::ErrorKind::ReadOnlyFilesystem),
+                "read_only",
+            ),
+            ("other I/O", io(std::io::ErrorKind::Other), "io"),
+            ("busy database", sqlite(ffi::SQLITE_BUSY), "database_busy"),
+            ("locked table", sqlite(ffi::SQLITE_LOCKED), "database_busy"),
+            ("full disk (database)", sqlite(ffi::SQLITE_FULL), "database_full"),
+            ("corrupt database", sqlite(ffi::SQLITE_CORRUPT), "database_corrupt"),
+            ("not a database", sqlite(ffi::SQLITE_NOTADB), "database_corrupt"),
+            ("read-only database", sqlite(ffi::SQLITE_READONLY), "database_read_only"),
+            (
+                "database cannot open",
+                sqlite(ffi::SQLITE_CANTOPEN),
+                "database_cannot_open",
+            ),
+            ("database I/O", sqlite(ffi::SQLITE_IOERR), "database_io"),
+            ("constraint", sqlite(ffi::SQLITE_CONSTRAINT), "database_constraint"),
+            (
+                "schema: no such table",
+                anyhow::Error::new(no_such_table),
+                "database_schema",
+            ),
+            (
+                "schema: wrong column type",
+                anyhow::Error::new(wrong_type),
+                "database_schema",
+            ),
+            ("no row", anyhow::Error::new(no_row), "database"),
+            (
+                "busy, under a path-bearing context",
+                sqlite(ffi::SQLITE_BUSY).context(format!("open {planted}")),
+                "database_busy",
+            ),
+            (
+                "text only",
+                anyhow::anyhow!("staged upload payload is missing: {planted}"),
+                "other",
+            ),
+        ];
+        let wrong: Vec<String> = cases
+            .iter()
+            .filter(|(_, error, expected)| error_category(error.as_ref()) != *expected)
+            .map(|(what, error, expected)| format!("{what}: {} (expected {expected})", error_category(error.as_ref())))
+            .collect();
+        assert!(
+            wrong.is_empty(),
+            "categories that do not tell the cause apart:\n{}",
+            wrong.join("\n")
         );
-        assert_eq!(
-            error_category(anyhow::anyhow!("staged upload payload is missing: /Users/someone/x").as_ref()),
-            "other"
-        );
+        for (what, error, _) in &cases {
+            let category = error_category(error.as_ref());
+            assert!(
+                !category.contains('/') && !category.contains("Quarterly"),
+                "{what}: {category}"
+            );
+        }
     }
 
     /// [plan-fix-2] (Spec issue 15, Task 2 step 5.3): a staged copy that cannot be unlinked
