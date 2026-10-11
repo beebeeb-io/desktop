@@ -213,7 +213,7 @@ itself is derived (`{held_base}:w{held_write_id}`), never stored.
 | `files` | `version_filled` | the version came from a snapshot fill, and nothing has touched the row since (rule 6a) |
 | `operation_queue` | `write_id`, `write_origin` | the write this upload carries, and who queued it: `minted` (this build's accept) or `earlier_build` (marked at engine start, below) |
 | `operation_queue` | `after_write_id` | this upload's base is the version that write produces; NULL once resolved |
-| `operation_queue` | `base_pending` | the base waits for a snapshot; counts the successful snapshots that gave none |
+| `operation_queue` | `base_pending` | ~~the base waits for a snapshot; counts the successful snapshots that gave none~~ 0 when the base is known; while the base waits for a snapshot, 1 plus the successful snapshots that gave none (it parks at 11, after the 10th) — lead, 2026-10-11 (Task 12, fix round 1) |
 | `operation_queue` | `claim_id`, `claimed_at` | the runner's claim for one attempt; every claim is cleared at engine start |
 | `upload_resume` | `completed_version`, `completed_object_version_id`, `completed_mime_type` | the landing the server confirmed, recorded before any local bookkeeping |
 | `id_aliases` | `provisional_id`, `server_id`, `created_at` | a create's provisional id and the server id it landed as |
@@ -288,7 +288,7 @@ write of the file's chain" is `held_write_id`.
 | 1a | the row's held token | its write W is still queued, in any state | after W: W's successor (below) |
 | 1b | the row's held token | W landed | `held_version` |
 | 1c | | | split off to task 1879. A token that is not the held one (a reply lost to an IPC timeout) falls to rule 5; a stale `b` meets 409, and the write parks with its bytes |
-| 2 | anything | the row is provisional: no contract, its create queued | after the newest write of the file's chain |
+| 2 | anything | the row is provisional: ~~no contract, its create queued~~ a create of the file is queued, the row has no server version yet (`current_version` 0), and its newest write is queued — lead, 2026-10-11 (Task 12, fix round 1) | after the newest write of the file's chain |
 | 3 | `{v}` or `{v}:{hash}` | an upload this build minted, with resolved base `v`, is queued for the file | after the newest write of the file's chain |
 | 4 | an identifier from an earlier build that exactly matches the old formula (below) | | `current_version`, then rule 3 with `v = current_version` |
 | 5 | anything whose first segment is `v > 0`, an unknown or older token's `b` included | | `v`; the server decides |
@@ -349,8 +349,11 @@ again, the old identifier no longer matches, and the write meets 409 and parks.
   the landing transaction, gives every op with `after_write_id = W` the version
   and object version id W produced. Equal numbers are never compared. Uploads
   without a write id keep round 3's equal-base rebase among themselves, and
-  nothing is rebased across the two kinds: an op left without a base parks at
-  the `init` guard, a stale one at the server's 409, both with their bytes.
+  nothing is rebased across the two kinds: ~~an op left without a base parks at
+  the `init` guard~~ on macOS an earlier build's op left without a base parks at
+  the `init` guard, which applies because engine start gave it a write id (an op
+  with no write id is never guarded), and a stale one at the server's 409, both
+  with their bytes. — lead, 2026-10-11 (Task 12, fix round 1)
 - **No supersede.** A newer save never replaces a queued one. Every save is its
   own upload, in order, and the last one is the server's current version; every
   earlier one is a version in the file's history.
@@ -604,8 +607,19 @@ time on the row, with the `Uploading` status, in the accept transaction.
 
 ### Logging (§11)
 
-Every line carries ids and fixed categories only. No name, path, URL or error
-text reaches a line: errors are classified, never printed. A line about a failed
+~~Every line carries ids and fixed categories only. No name, path, URL or error
+text reaches a line: errors are classified, never printed.~~
+Every line in the table below carries ids and fixed categories only. No name,
+path, URL or error text reaches these lines: errors are classified, never
+printed. Older lines outside this table are not covered by this rule, and two of
+them are known exceptions, tracked with the write-versions follow-ups (task
+1879): `upload-time thumbnail generation/upload skipped` logs the error's text
+(`error = %e`), on the landing path of a Finder write; and `purge did not sweep a
+staging directory that is not this user's` logs the directory's path, which holds
+the home directory. Both predate the write-versions work and are unchanged by it.
+— lead, 2026-10-11 (Task 12, fix round 1)
+
+A line about a failed
 step logs the error's category, from closed codes only (SQLite's result code, the
 I/O error kind): `not_found`, `permission_denied`, `disk_full`, `read_only`,
 `io`, `network`, `database_busy`, `database_full`, `database_corrupt`,
