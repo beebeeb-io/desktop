@@ -1138,11 +1138,15 @@ id in its `KeptSet`, and the purge guard checks every waiting write against them
   lands next to `a.txt` in `notes (2)`. The other order needs nothing new: with the directory made first, the file's
   clone meets the directory, gets `EEXIST`, and becomes `Notes (2)`.
 - **Lengths** (re-review N4). The 255-byte cut applies to the final name with its " (n)": the stem is cut, never the
-  suffix ~~or the extension~~, and never the extension while it leaves room for one stem byte and the suffix. A name
+  suffix ~~or the extension~~, and never the extension while it leaves room for ~~one stem byte~~ and the suffix. A name
   whose "extension" leaves no such room (`a.` and 250 more bytes, then " (earlier save 1)") is cut as one stem, so no
   name can pass 255 bytes (`clonefile` would answer `ENAMETOOLONG`, E2). — lead, 2026-10-11 (plan review M3) ~~A destination whose whole path would be longer than `PATH_MAX` (1024 bytes, macOS SDK
   `sys/syslimits.h:103`) is not tried: that file goes to the top of the event folder under its last component, with
   the same collision rule. `clonefile` would otherwise fail with `ENAMETOOLONG` (`man 2 clonefile`) on every try.~~
+  - **The room is one character, not one byte** (Task 2 review). The extension is kept while it leaves room for the
+    stem's first character and the suffix. That character can take up to four bytes in UTF-8, so the room is measured
+    for it (`first_char_len`, used by `with_suffix` in `sign_out/kept_names.rs`), and a stem is never cut to nothing.
+    — lead, 2026-10-11 (Task 2 review)
 - **Path length, exact** (re-review 2 Q2). `PATH_MAX` is 1024 (macOS SDK `sys/syslimits.h:103`) and counts the
   terminating NUL, so the longest absolute path that can be made is 1023 bytes. At 1024 bytes `open(O_CREAT|O_EXCL)`
   and `clonefile` both fail with `ENAMETOOLONG` (`man 2 clonefile`); the re-review measured 1023 succeeding and 1024
