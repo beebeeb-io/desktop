@@ -1494,6 +1494,9 @@ pub enum ParkReason {
     PredecessorParked,
     PredecessorLost,
     RekeyFailed,
+    /// The server refused the write with 403: waiting will not cure it, so it parks at once
+    /// and presents read-only (§8.4).
+    PermissionDenied,
 }
 
 impl ParkReason {
@@ -1505,6 +1508,7 @@ impl ParkReason {
             ParkReason::PredecessorParked => "predecessor_parked",
             ParkReason::PredecessorLost => "predecessor_lost",
             ParkReason::RekeyFailed => "rekey_failed",
+            ParkReason::PermissionDenied => "permission_denied",
         }
     }
 }

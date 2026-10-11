@@ -366,7 +366,9 @@ again, the old identifier no longer matches, and the write meets 409 and parks.
   Then it records a fresh `claim_id`. An op whose completion is recorded skips
   the base and predecessor checks: its attempt repeats the landing.
 - **The hand-over, at the successor's claim.** W may park for any reason: a stale
-  base, a missing copy, an unknown base, or its 25 attempts used up. When W was
+  base, a missing copy, an unknown base, a permission refusal, or its attempts
+  used up (only an op whose attempts were used up before the failure rule below
+  can have that). When W was
   minted by this build and has no recorded completion, the claim of its direct
   successor N gives N W's role, in the claim's transaction: W's resolved base, or
   W's own `after_write_id` or `base_pending`; and for a create, W's create (its
@@ -388,6 +390,19 @@ again, the old identifier no longer matches, and the write meets 409 and parks.
   `init` parks a File Provider upload at once: the server's version only grows.
   A staged copy that is gone (`NotFound`) parks it `payload_missing` at once. Any
   other error reading the copy retries, with a fixed text and no path.
+- **A failure that waiting or the person can cure never parks a File Provider
+  upload** (spec §8.4, final review). By the class `classify_operation_error`
+  gives the failure: `Retryable` (connection, timeout, 5xx, and every failure the
+  classifier does not name) and `Locked` record the attempt for the backoff
+  (capped at 960 s), but the count stops at `max_attempts - 1`, so the save lands
+  when the network or the lock comes back; `Quota` is never paused and retries the
+  same way, so the save lands once there is space, and the item keeps presenting
+  `uploading`; `Permission` (a 403) parks at once as `permission_denied`,
+  read-only, through the usual park (settle, change row, signal); `Auth` pauses
+  until the next sign-in, as before. A failure that never clears therefore
+  retries every 16 minutes without end, with its bytes kept and later saves of
+  the file waiting behind it. Uploads without a write id keep their rules:
+  `Retryable` uses up the attempts, every other class pauses.
 - **409 classes.** `init` keeps the server's message and classifies it:
   `stale_base` parks at once; `in_progress` ("upload is already in progress for
   this file") and `other` retry. A changed message falls back to retry. Uploads
@@ -649,7 +664,7 @@ parked op stops logging.
 | an `init` refused with 409, retried | `upload refused by the server (409 Conflict); will retry` | `op_id`, `file_id`, `attempt`, `max_attempts`, `base_version`, `class` (`stale_base`, `in_progress`, `other`) |
 | a stale-base 409 that parks a File Provider upload at once | `upload refused by the server (409 Conflict); its base is stale, parked with its bytes kept in the queue` | the same, with `class` and `reason` `stale_base`; `attempt` is the attempt that was made (1 for a first try) |
 | a 409 that uses up an op's attempts | `upload refused by the server (409 Conflict); attempts used up, parked with its bytes kept in the queue` | the same; `reason="stale_base"` only for that class |
-| any other park | `upload parked with its bytes kept in the queue` | `op_id`, `file_id`, `reason` (`base_unknown`, `payload_missing`, `predecessor_parked`, `predecessor_lost`, `rekey_failed`) |
+| any other park | `upload parked with its bytes kept in the queue` | `op_id`, `file_id`, `reason` (`base_unknown`, `payload_missing`, `predecessor_parked`, `predecessor_lost`, `rekey_failed`, `permission_denied`) |
 | a successor took over a parked predecessor | `queued write took over a parked one` | `op_id`, `file_id`, `parked_op_id` |
 | a request reached the server id through an alias | `provisional id resolved to the server id` | `request` (`modify`, also for a rename or move; `delete`, `hydrate`, `item`, `thumbnail`, `deletion_conflicted_create`), `provisional_id` (or `id_kind`), `file_id` |
 | a delete under a provisional id that does not name S's held token | `delete of a provisional id not applied to the server file` | `provisional_id` (or `id_kind`), `file_id` |

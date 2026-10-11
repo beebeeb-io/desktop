@@ -662,6 +662,54 @@ impl OperationFailureClass {
     }
 }
 
+/// What the runner does with a failed attempt that neither parked at once nor found its op
+/// gone ([`failed_attempt_rule`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FailedAttemptRule {
+    /// Paused until something resumes it (only `auth` is resumed, at sign-in).
+    Pause(OperationPauseReason),
+    /// Parked with its bytes kept (spec §8.4).
+    Park(ParkReason),
+    /// Recorded for the backoff. `uses_up_attempts: false` caps the count at
+    /// `max_attempts - 1`, so the attempt can never park the op.
+    Retry { uses_up_attempts: bool },
+}
+
+/// The rule for a failed attempt of class `class`.
+///
+/// - A recorded completion (`completed`, §8.6 rule 6) only ever retries, and never uses up its
+///   attempts.
+/// - A File Provider write (`finder_write`: an upload with a write id) never stops uploading for
+///   a reason that waiting or the person can cure (§8.4): a transient failure (`Retryable`, which
+///   is also every failure the classifier does not name, and `Locked`) and a quota refusal retry
+///   on the normal backoff without using up the attempts, so the save lands once the network,
+///   the lock or the space comes back; a permission refusal parks it at once as
+///   `permission_denied`, which presents it read-only; `auth` pauses it until the next sign-in.
+/// - Every other upload keeps the rules it had: `Retryable` uses up its attempts, every other
+///   class pauses it.
+fn failed_attempt_rule(class: OperationFailureClass, finder_write: bool, completed: bool) -> FailedAttemptRule {
+    if completed {
+        return FailedAttemptRule::Retry {
+            uses_up_attempts: false,
+        };
+    }
+    if !finder_write {
+        return match class.pause_reason() {
+            Some(reason) => FailedAttemptRule::Pause(reason),
+            None => FailedAttemptRule::Retry { uses_up_attempts: true },
+        };
+    }
+    match class {
+        OperationFailureClass::Auth => FailedAttemptRule::Pause(OperationPauseReason::Auth),
+        OperationFailureClass::Permission => FailedAttemptRule::Park(ParkReason::PermissionDenied),
+        OperationFailureClass::Retryable | OperationFailureClass::Locked | OperationFailureClass::Quota => {
+            FailedAttemptRule::Retry {
+                uses_up_attempts: false,
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SharedRootMapping {
     invite_id: String,
@@ -953,56 +1001,72 @@ impl EngineBridge {
                 }
                 Err(error) => {
                     let class = classify_operation_error(&error.to_string());
+                    let finder_write = claimed.write.is_some()
+                        && matches!(op.kind, OperationKind::UploadVersion | OperationKind::UploadFile);
                     // m-11: a recorded completion is never paused (a busy database reads as
                     // `Locked`), because a paused op is not listed again.
-                    if let Some(reason) = class.pause_reason().filter(|_| !completed) {
-                        if !self.db.record_pause_claimed(
-                            &op.op_id,
-                            &claimed.claim_id,
-                            reason,
-                            Some(&error.to_string()),
-                            now,
-                        )? {
-                            log_queue_state_moved(&op.op_id, "pause");
-                            continue;
+                    match failed_attempt_rule(class, finder_write, completed) {
+                        FailedAttemptRule::Pause(reason) => {
+                            if !self.db.record_pause_claimed(
+                                &op.op_id,
+                                &claimed.claim_id,
+                                reason,
+                                Some(&error.to_string()),
+                                now,
+                            )? {
+                                log_queue_state_moved(&op.op_id, "pause");
+                                continue;
+                            }
+                            outcome.paused_op_ids.push(op.op_id);
                         }
-                        outcome.paused_op_ids.push(op.op_id);
-                    } else {
-                        // §8.6 rule 6: a recorded completion keeps retrying its landing on the
-                        // normal backoff and never uses up its attempts.
-                        let attempts = if completed {
-                            op.attempts.saturating_add(1).min(op.max_attempts.saturating_sub(1))
-                        } else {
-                            op.attempts.saturating_add(1)
-                        };
-                        if completed {
-                            log_completed_landing_retried(&op.op_id, op.file_id.as_deref(), attempts);
-                        }
-                        if matches!(op.kind, OperationKind::UploadVersion | OperationKind::UploadFile)
-                            && error_http_status(&error) == Some(409)
-                        {
-                            let class =
-                                init_conflict_class(&error).unwrap_or(crate::api_client::InitConflictClass::Other);
-                            log_refused_upload(&op, attempts, class, false);
-                        }
-                        let next_retry_at = now.saturating_add(retry_delay_seconds(attempts));
-                        if !self.db.record_attempt_claimed(
-                            &op.op_id,
-                            &claimed.claim_id,
-                            attempts,
-                            next_retry_at,
-                            Some(&error.to_string()),
-                        )? {
-                            log_queue_state_moved(&op.op_id, "attempt");
-                            continue;
-                        }
-                        if attempts >= op.max_attempts && !completed {
-                            self.abandon_upload_after_give_up(&op).await;
-                            // Its attempts are used up, so it has parked by the queue's rule, and
-                            // the attempt's transaction settled the row (spec §9.2).
+                        // The park settled the row in its transaction (spec §9.2).
+                        FailedAttemptRule::Park(reason) => {
+                            if !self.db.park_claimed(&op.op_id, &claimed.claim_id, reason, now)? {
+                                log_queue_state_moved(&op.op_id, "park");
+                                continue;
+                            }
+                            log_parked(&op.op_id, op.file_id.as_deref(), reason);
                             outcome.invalidated_item_ids.extend(op.file_id.clone());
+                            outcome.retried_op_ids.push(op.op_id);
                         }
-                        outcome.retried_op_ids.push(op.op_id);
+                        FailedAttemptRule::Retry { uses_up_attempts } => {
+                            // §8.6 rule 6 and §8.4: a recorded completion, and a File Provider
+                            // write whose failure waiting can cure, keep retrying on the normal
+                            // backoff and never use up their attempts.
+                            let attempts = if uses_up_attempts {
+                                op.attempts.saturating_add(1)
+                            } else {
+                                op.attempts.saturating_add(1).min(op.max_attempts.saturating_sub(1))
+                            };
+                            if completed {
+                                log_completed_landing_retried(&op.op_id, op.file_id.as_deref(), attempts);
+                            }
+                            if matches!(op.kind, OperationKind::UploadVersion | OperationKind::UploadFile)
+                                && error_http_status(&error) == Some(409)
+                            {
+                                let class =
+                                    init_conflict_class(&error).unwrap_or(crate::api_client::InitConflictClass::Other);
+                                log_refused_upload(&op, attempts, class, false);
+                            }
+                            let next_retry_at = now.saturating_add(retry_delay_seconds(attempts));
+                            if !self.db.record_attempt_claimed(
+                                &op.op_id,
+                                &claimed.claim_id,
+                                attempts,
+                                next_retry_at,
+                                Some(&error.to_string()),
+                            )? {
+                                log_queue_state_moved(&op.op_id, "attempt");
+                                continue;
+                            }
+                            if uses_up_attempts && attempts >= op.max_attempts {
+                                self.abandon_upload_after_give_up(&op).await;
+                                // Its attempts are used up, so it has parked by the queue's rule,
+                                // and the attempt's transaction settled the row (spec §9.2).
+                                outcome.invalidated_item_ids.extend(op.file_id.clone());
+                            }
+                            outcome.retried_op_ids.push(op.op_id);
+                        }
                     }
                 }
             }
@@ -15642,8 +15706,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_pause_for_an_op_purged_under_its_claim_writes_nothing() {
-        let run = refused_attempt_purged_before_its_outcome("403 Forbidden").await;
-        assert_eq!(run.init_statuses, vec![403], "the attempt was refused as a pause");
+        // Auth is the one class that still pauses a File Provider write (spec §8.4).
+        let run = refused_attempt_purged_before_its_outcome("401 Unauthorized").await;
+        assert_eq!(run.init_statuses, vec![401], "the attempt was refused as a pause");
         assert_moved_once(&run, "pause");
     }
 
@@ -16747,8 +16812,12 @@ mod tests {
         drop(server.finish());
     }
 
+    /// No failure the runner classifies uses up a File Provider write's attempts any more
+    /// (spec §8.4): the attempt at the cap retries, leaves the item `uploading` and puts nothing in
+    /// the signal. The give-up push itself is pinned, for an upload without a write id, by
+    /// `an_upload_without_a_write_id_still_gives_up_after_its_attempts`.
     #[tokio::test]
-    async fn the_attempt_that_uses_up_an_ops_attempts_puts_its_item_in_the_ticks_signal() {
+    async fn the_attempt_at_the_cap_leaves_a_finder_write_uploading_and_out_of_the_signal() {
         let (dir, sync_root, server, bridge) = rule3_setup([126u8; 32]);
         seed_uploaded_row(&bridge, &server, "given-up-signal");
         server
@@ -16786,13 +16855,16 @@ mod tests {
         let last = bridge.process_due_operations(&sync_root, now + 10_000).await.unwrap();
 
         let op = bridge.db.get_operation(&op_id).unwrap().unwrap();
-        assert_eq!(op.attempts, op.max_attempts, "precondition: its attempts are used up");
+        assert_eq!(op.attempts, op.max_attempts - 1, "its attempts are never used up");
         assert_eq!(
             bridge.db.get_file("given-up-signal").unwrap().unwrap().status,
-            FileStatus::Error,
-            "the attempt settled the row"
+            FileStatus::Uploading,
+            "the row still presents uploading"
         );
-        assert_eq!(last.invalidated_item_ids, vec!["given-up-signal".to_string()]);
+        assert!(
+            last.invalidated_item_ids.is_empty() && last.paused_op_ids.is_empty(),
+            "{last:?}"
+        );
         drop(server.finish());
     }
 
@@ -18916,6 +18988,362 @@ mod tests {
             "landed on the retry"
         );
         assert_eq!(state.inits.len(), 1);
+    }
+
+    // ── A File Provider write never stops uploading for a reason that waiting or the person can
+    // cure (spec §8.4) ──
+
+    /// `passes` passes of the runner, `10_000` s apart from `now`, while every attempt of
+    /// `file_id`'s one queued save fails. After each pass the save is still queued and has
+    /// attempts to spare.
+    async fn failing_passes(
+        bridge: &EngineBridge,
+        sync_root: &Path,
+        file_id: &str,
+        passes: usize,
+        now: &mut i64,
+    ) -> Vec<TransferLoopOutcome> {
+        let mut outcomes = Vec::new();
+        for pass in 1..=passes {
+            outcomes.push(bridge.process_due_operations(sync_root, *now).await.unwrap());
+            *now += 10_000;
+            let ops = bridge.db.list_operations_for_file(file_id).unwrap();
+            assert_eq!(ops.len(), 1, "pass {pass}: the save is still queued");
+            assert!(
+                ops[0].attempts < ops[0].max_attempts,
+                "pass {pass}: never parked, attempts {} of {}",
+                ops[0].attempts,
+                ops[0].max_attempts
+            );
+        }
+        outcomes
+    }
+
+    /// After [`failing_passes`]: no pass paused the save or changed what the system shows, its
+    /// count stopped one short of the cap, its row still presents `uploading`, and its last
+    /// failure is of `class` (the instrument made the failure it names).
+    fn assert_kept_uploading(
+        bridge: &EngineBridge,
+        file_id: &str,
+        outcomes: &[TransferLoopOutcome],
+        class: OperationFailureClass,
+    ) {
+        for (pass, outcome) in outcomes.iter().enumerate() {
+            assert!(
+                outcome.paused_op_ids.is_empty() && outcome.invalidated_item_ids.is_empty(),
+                "pass {}: never paused, nothing changed for the system: {outcome:?}",
+                pass + 1
+            );
+        }
+        let op = bridge.db.list_operations_for_file(file_id).unwrap().remove(0);
+        assert_eq!(op.attempts, op.max_attempts - 1, "the count stops one short of the cap");
+        assert_eq!(
+            classify_operation_error(op.last_error.as_deref().unwrap()),
+            class,
+            "{:?}",
+            op.last_error
+        );
+        assert_eq!(
+            bridge.db.get_file(file_id).unwrap().unwrap().status,
+            FileStatus::Uploading
+        );
+    }
+
+    /// An outage longer than the 25 attempts: 30 refusals with 503, then the server answers
+    /// and the save lands. Before, the 25th attempt parked it read-only for good.
+    #[tokio::test]
+    async fn a_finder_write_outlives_thirty_server_errors_and_lands() {
+        let master_key = [140u8; 32];
+        let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_row(&bridge, &server, "outage-503");
+        server
+            .state
+            .lock()
+            .unwrap()
+            .refuse_init
+            .insert("outage-503".into(), "503 Service Unavailable");
+        fp_save(
+            &bridge,
+            dir.path(),
+            "outage-503",
+            "notes.txt",
+            b"saved during the outage",
+            "1",
+        );
+        let mut now = now_secs();
+        let logs = capture_logs_async(async {
+            let outcomes = failing_passes(&bridge, &sync_root, "outage-503", 30, &mut now).await;
+            assert_kept_uploading(&bridge, "outage-503", &outcomes, OperationFailureClass::Retryable);
+            server.state.lock().unwrap().refuse_init.remove("outage-503");
+            bridge.process_due_operations(&sync_root, now).await.unwrap();
+        })
+        .await;
+        assert!(
+            bridge.db.list_operations_for_file("outage-503").unwrap().is_empty(),
+            "landed once the server answered"
+        );
+        assert!(!logs.contains("parked"), "{logs}");
+        let state = server.finish();
+        assert_eq!(
+            state.inits.iter().filter(|(_, status)| *status == 503).count(),
+            30,
+            "30 refusals reached the server"
+        );
+        assert_eq!(
+            state.latest_plaintext("outage-503", master_key),
+            b"saved during the outage"
+        );
+    }
+
+    /// The same with nothing listening: 30 connection errors, then the network comes back.
+    #[tokio::test]
+    async fn a_finder_write_outlives_thirty_connection_errors_and_lands() {
+        let master_key = [141u8; 32];
+        let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_row(&bridge, &server, "outage-offline");
+        fp_save(
+            &bridge,
+            dir.path(),
+            "outage-offline",
+            "notes.txt",
+            b"saved offline",
+            "1",
+        );
+        // The same queue, with an API whose address nothing listens on.
+        let closed = {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            format!("http://{}", listener.local_addr().unwrap())
+        };
+        let offline = EngineBridge::new(
+            bridge.db.clone(),
+            Arc::new(ApiClient::new(closed, "token".into(), master_key)),
+        );
+        let mut now = now_secs();
+        let outcomes = failing_passes(&offline, &sync_root, "outage-offline", 30, &mut now).await;
+        assert_kept_uploading(&bridge, "outage-offline", &outcomes, OperationFailureClass::Retryable);
+        assert!(
+            server.state.lock().unwrap().requests.is_empty(),
+            "no attempt reached the server"
+        );
+        bridge.process_due_operations(&sync_root, now).await.unwrap();
+        assert!(
+            bridge.db.list_operations_for_file("outage-offline").unwrap().is_empty(),
+            "landed once the network came back"
+        );
+        let state = server.finish();
+        assert_eq!(state.latest_plaintext("outage-offline", master_key), b"saved offline");
+    }
+
+    /// A failure read as `Locked` (here a 423; SQLite's "database is locked" too), 30 times,
+    /// then it clears: the save lands. Before, the first one paused it and nothing resumed it.
+    #[tokio::test]
+    async fn a_finder_write_refused_as_locked_thirty_times_lands_and_is_never_paused() {
+        let master_key = [142u8; 32];
+        let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_row(&bridge, &server, "outage-locked");
+        server
+            .state
+            .lock()
+            .unwrap()
+            .refuse_init
+            .insert("outage-locked".into(), "423 Locked");
+        fp_save(
+            &bridge,
+            dir.path(),
+            "outage-locked",
+            "notes.txt",
+            b"saved while locked",
+            "1",
+        );
+        let mut now = now_secs();
+        let outcomes = failing_passes(&bridge, &sync_root, "outage-locked", 30, &mut now).await;
+        assert_kept_uploading(&bridge, "outage-locked", &outcomes, OperationFailureClass::Locked);
+        server.state.lock().unwrap().refuse_init.remove("outage-locked");
+        bridge.process_due_operations(&sync_root, now).await.unwrap();
+        assert!(
+            bridge.db.list_operations_for_file("outage-locked").unwrap().is_empty(),
+            "landed once the lock cleared"
+        );
+        let state = server.finish();
+        assert_eq!(state.inits.iter().filter(|(_, status)| *status == 423).count(), 30);
+        assert_eq!(
+            state.latest_plaintext("outage-locked", master_key),
+            b"saved while locked"
+        );
+    }
+
+    /// A quota refusal, then the person frees space: the save lands, and it was never paused.
+    #[tokio::test]
+    async fn a_finder_write_refused_for_quota_lands_once_space_is_free_and_was_never_paused() {
+        let master_key = [143u8; 32];
+        let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_row(&bridge, &server, "over-quota");
+        server
+            .state
+            .lock()
+            .unwrap()
+            .refuse_init
+            .insert("over-quota".into(), "507 Insufficient Storage");
+        fp_save(
+            &bridge,
+            dir.path(),
+            "over-quota",
+            "notes.txt",
+            b"saved at the limit",
+            "1",
+        );
+        let mut now = now_secs();
+        let outcomes = failing_passes(&bridge, &sync_root, "over-quota", 30, &mut now).await;
+        assert_kept_uploading(&bridge, "over-quota", &outcomes, OperationFailureClass::Quota);
+        server.state.lock().unwrap().refuse_init.remove("over-quota");
+        bridge.process_due_operations(&sync_root, now).await.unwrap();
+        assert!(
+            bridge.db.list_operations_for_file("over-quota").unwrap().is_empty(),
+            "landed once there was space"
+        );
+        let state = server.finish();
+        assert_eq!(state.inits.iter().filter(|(_, status)| *status == 507).count(), 30);
+        assert_eq!(state.latest_plaintext("over-quota", master_key), b"saved at the limit");
+    }
+
+    /// A 403 parks at once as `permission_denied`: read-only with its bytes kept, its row
+    /// `Error`, and its id in the tick's signal. Before, it paused and showed `uploading`
+    /// for good.
+    #[tokio::test]
+    async fn a_finder_write_the_server_forbids_parks_permission_denied() {
+        let (dir, sync_root, server, bridge) = rule3_setup([144u8; 32]);
+        seed_uploaded_row(&bridge, &server, "forbidden");
+        server
+            .state
+            .lock()
+            .unwrap()
+            .refuse_init
+            .insert("forbidden".into(), "403 Forbidden");
+        fp_save(
+            &bridge,
+            dir.path(),
+            "forbidden",
+            "notes.txt",
+            b"a save the server refuses",
+            "1",
+        );
+        let now = now_secs();
+        let mut outcome = None;
+        let logs = capture_logs_async(async {
+            outcome = Some(bridge.process_due_operations(&sync_root, now).await.unwrap());
+        })
+        .await;
+        let outcome = outcome.unwrap();
+        assert!(outcome.paused_op_ids.is_empty(), "never paused: {outcome:?}");
+        assert_eq!(outcome.invalidated_item_ids, vec!["forbidden".to_string()]);
+        let op = bridge.db.list_operations_for_file("forbidden").unwrap().remove(0);
+        assert_eq!(op.attempts, op.max_attempts, "parked");
+        assert_eq!(op.last_error.as_deref(), Some("permission_denied"));
+        assert_eq!(
+            std::fs::read(op.payload_path.as_deref().unwrap()).unwrap(),
+            b"a save the server refuses",
+            "its bytes are kept"
+        );
+        assert_eq!(
+            bridge.db.get_file("forbidden").unwrap().unwrap().status,
+            FileStatus::Error
+        );
+        let parked: Vec<&str> = logs
+            .lines()
+            .filter(|line| line.contains("upload parked with its bytes kept in the queue"))
+            .collect();
+        assert_eq!(parked.len(), 1, "{logs}");
+        assert!(
+            parked[0].contains("reason=\"permission_denied\"") && parked[0].contains(&op.op_id),
+            "{logs}"
+        );
+        // Parked: the next pass sends nothing.
+        bridge.process_due_operations(&sync_root, now + 10_000).await.unwrap();
+        assert_eq!(server.finish().inits.len(), 1);
+    }
+
+    /// One refusal of an upload WITHOUT a write id (the watcher, Windows), queued at `attempts`:
+    /// the outcome and the op after it.
+    async fn refused_upload_without_a_write_id(
+        master_key: [u8; 32],
+        file_id: &str,
+        refusal: &'static str,
+        attempts: i64,
+    ) -> (TransferLoopOutcome, PendingOperation) {
+        let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_row(&bridge, &server, file_id);
+        server.state.lock().unwrap().refuse_init.insert(file_id.into(), refusal);
+        let contents = dir.path().join("watched.txt");
+        std::fs::write(&contents, b"a watched edit").unwrap();
+        bridge
+            .queue_finder_modify(finder_file_target(
+                Some(file_id),
+                "notes.txt",
+                &contents,
+                Some("1".into()),
+            ))
+            .unwrap();
+        let op_id = bridge.db.list_operations_for_file(file_id).unwrap().remove(0).op_id;
+        let no_write_id: bool = bridge
+            .db
+            .hold_lock_for_test()
+            .query_row(
+                "SELECT write_id IS NULL FROM operation_queue WHERE op_id = ?1 AND attempts = 0",
+                rusqlite::params![op_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(no_write_id, "precondition: an upload without a write id");
+        bridge
+            .db
+            .hold_lock_for_test()
+            .execute(
+                "UPDATE operation_queue SET attempts = ?2 WHERE op_id = ?1",
+                rusqlite::params![op_id, attempts],
+            )
+            .unwrap();
+        let outcome = bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+        let op = bridge.db.get_operation(&op_id).unwrap().expect("still queued");
+        assert_eq!(server.finish().inits.len(), 1, "one attempt reached the server");
+        (outcome, op)
+    }
+
+    /// Today's pause, for each class that pauses an upload without a write id.
+    async fn assert_upload_without_a_write_id_pauses(master_key: [u8; 32], file_id: &str, refusal: &'static str) {
+        let (outcome, op) = refused_upload_without_a_write_id(master_key, file_id, refusal, 0).await;
+        assert_eq!(outcome.paused_op_ids, vec![op.op_id.clone()], "{refusal}: paused");
+        assert_eq!(op.attempts, 0, "{refusal}: a pause is not an attempt");
+    }
+
+    #[tokio::test]
+    async fn an_upload_without_a_write_id_still_pauses_for_auth() {
+        assert_upload_without_a_write_id_pauses([145u8; 32], "plain-auth", "401 Unauthorized").await;
+    }
+
+    #[tokio::test]
+    async fn an_upload_without_a_write_id_still_pauses_for_quota() {
+        assert_upload_without_a_write_id_pauses([146u8; 32], "plain-quota", "507 Insufficient Storage").await;
+    }
+
+    #[tokio::test]
+    async fn an_upload_without_a_write_id_still_pauses_for_permission() {
+        assert_upload_without_a_write_id_pauses([147u8; 32], "plain-permission", "403 Forbidden").await;
+    }
+
+    #[tokio::test]
+    async fn an_upload_without_a_write_id_still_pauses_when_locked() {
+        assert_upload_without_a_write_id_pauses([148u8; 32], "plain-locked", "423 Locked").await;
+    }
+
+    /// Today's give-up: a retryable failure at the last attempt uses the attempts up.
+    #[tokio::test]
+    async fn an_upload_without_a_write_id_still_gives_up_after_its_attempts() {
+        let (outcome, op) =
+            refused_upload_without_a_write_id([149u8; 32], "plain-retry", "503 Service Unavailable", 24).await;
+        assert!(outcome.paused_op_ids.is_empty(), "{outcome:?}");
+        assert_eq!(op.attempts, op.max_attempts, "its attempts are used up");
+        assert_eq!(op.max_attempts, 25);
+        assert_eq!(outcome.invalidated_item_ids, vec!["plain-retry".to_string()]);
     }
 
     // ── Rule 3: provisional ids, fetches from the queue, thumbnails, unknown ids (spec §7, §5.6) ──
