@@ -12,23 +12,15 @@
 
 ---
 
-## Open questions for the lead (answer before Tasks 7 and 11 start)
+## Lead rulings on the two design questions (2026-10-11, binding)
 
-Both are open questions 3 and 4 in the spec's §15, with the full reasoning there. The rest of the plan does not depend on the answers. Each answer changes one task, as stated.
+Both were spec §15 questions 3 and 4; the spec now records them as answered.
 
-**Q1 (spec question 3): close Finder accepts before the keep step's read?**
-A Finder accept that carries a `request_id` runs its copy and its transaction in `spawn_blocking` (`@184:ipc_socket.rs:2448-2479`, `@184:ipc_write_dedup.rs:336-342`). The engine stop aborts the connection tasks without awaiting them (`@184:ipc_socket.rs:1673-1675`), and 1873 says so itself (`@184:runner.rs:1025-1030`). So an accept can commit after the keep step's read. If it commits after the purge guard's read, the purge deletes that waiting write unkept, and only macOS's own copy remains. That breaks W1.
-- **Option A (recommended): close them.** The keep step's first act writes `sync_state.finder_accepts_closed` in one `BEGIN IMMEDIATE` transaction. `accept_finder_write` reads it inside its own transaction and answers `AcceptsClosed`, which becomes `WriteRetryLater` (`accepts_closed`), exactly as `CopyGone` does today. `clear_account_data` and `engine_start_repair` clear it. One key, one read, one delete, U45. No Swift change.
-- **Option B: amend the description only.** The late accept stays. The guard catches some cases (E2, nothing deleted), and in the rest W1 relies on macOS keeping an unacknowledged change.
-- **Recommendation: A.** The case B leaves is exactly what W1 forbids, with an unverified macOS behaviour as its only cover, and A reuses 1873's own refusal path.
-- **Effect on the plan:** Task 7 implements A. Under B, skip Task 7, and in Task 20 add the sentence from the spec's §15 option B to W1.
+**Q1 (spec question 3): close Finder accepts before the keep step's read. Ruled: option A, with one addition.**
+A Finder accept that carries a `request_id` runs its copy and its transaction in `spawn_blocking` (`@184:ipc_socket.rs:2448-2479`, `@184:ipc_write_dedup.rs:336-342`), and the engine stop aborts the connection tasks without awaiting them (`@184:ipc_socket.rs:1673-1675`; 1873 says so at `@184:runner.rs:1025-1030`). So the keep step first writes `sync_state.finder_accepts_closed` in one `BEGIN IMMEDIATE` transaction; `accept_finder_write` checks it inside its own transaction and answers `AcceptsClosed`, which becomes `WriteRetryLater` (`accepts_closed`), as `CopyGone` does today; `engine_start_repair` reopens. **The addition:** every way a sign-out ends without purging reopens accepts at once, not only the next engine start: Cancel, a failed step, and a quit mid-flow followed by a restart. Task 8 owns all of it, with the test `a_cancelled_or_failed_sign_out_leaves_accepts_open`; Task 14 applies the same rule to the R10 reset.
 
-**Q2 (spec question 4): end the send phase on a refusal the account cures?**
-For a Finder write, `quota_exceeded`, `object_budget_exceeded`, `billing_read_only`, `account_lapsed`, `plan_required` and `trial_cancelled_read_only` are transient: the write stays live (`is_curable_refusal`, `@184:engine_bridge.rs:733-754`, applied at `:1187`). As written, the phase retries it, ends `time_limit` at 60 s, and A5 says "Choose Cancel to let it finish, then sign out again.", which is not true until the person frees space or chooses a plan.
-- **Option A (recommended): a reason of its own.** The first attempt during the phase that meets one of those refusals ends it with `account`. A5 gains a line, proposed: "The server isn’t accepting uploads for this account until it has free space or an active plan." U46 and an F2 case pin it.
-- **Option B: no new reason.** The phase runs 60 s; only A5 `time_limit`'s second sentence changes, for example to "Choose Cancel to keep it waiting, then sign out again."
-- **Recommendation: A.** About one second instead of sixty, and a line that says what would let the change through.
-- **Effect on the plan:** Task 11 implements A and Task 16 adds the line. Under B, Task 11 drops the `Account` end and U46 (steps marked "Q2-A"), and Task 16 changes the `time_limit` string instead of adding one.
+**Q2 (spec question 4): end the send phase on a refusal the account cures. Ruled: option A, with the lead's copy.**
+The first attempt during the phase that meets one of the refusals 1873 lists as curable (`quota_exceeded`, `object_budget_exceeded`, `billing_read_only`, `account_lapsed`, `plan_required`, `trial_cancelled_read_only`; `is_curable_refusal`, `@184:engine_bridge.rs:733-754`, applied at `:1187`) ends the phase with the reason `account`. A5 gains the line "Beebeeb can’t accept uploads for this account until it has free space or an active plan." Task 11 implements the end and U46; Tasks 10 and 16 carry the line.
 
 ---
 
@@ -61,7 +53,7 @@ The spec was written before 1873's code was final. 1873 merged after fourteen fi
 | 21 | §13.3 gates | Count guard; baseline lib `1763 passed; 6 ignored`, integration 31 / 8 / 3, guard 1805, Swift 102, release shim 410 (1873 final gate at `883e7669`) | Two bullets added |
 | 22 | §13.4 required rungs | Device note 2026-10-10: a `create_folder` held `key_replaced` was purged with no message | D11 added; D2 records the parked and unparked cases; `RELEASE_BLOCKERS.md` only after D1-D11 and D10b |
 | 23 | §14 | `RELEASE_BLOCKERS.md` | A bullet: its removal is its own change, after the rung |
-| 24 | §15 | Two design gaps | Questions 3 and 4 added |
+| 24 | §15 | Two design gaps | Questions 3 and 4 added, then answered by the lead (option A each; question 3 with the reopen addition, question 4 with the lead's copy) |
 | — | §2 other change kinds | 1873's three-state parent (`ParentChange`, `@184:api_client.rs:367`): a move to the top level is now `move_file`, before `rename_file` | No amendment: both are other waiting changes, counted the same |
 | — | §1, §4 rows 1-8, §5.1 menu dialogs, §9 1882 records | Same shapes at new lines: `clear_session_impl` `@184:lib.rs:2823`, `clear_session` `:3312-3324`, menu `:13994-14040`, purge `:3260-3293`, `:4216-4265`; `MacSettings.tsx:317-324`, `:458`, `:466-475`; `pages/Account.tsx:148-166`, `:367-370`; `Onboarding.tsx:149-152`, `:472-503`; `finder_removal.rs:13`, `:17-18`, `:276-307`, `:362-389` | No amendment: the descriptions hold; the plan cites `@184:` |
 | — | §6.2 "the queue step runs only inside a successful tick" | `select!` `@184:runner.rs:1299`, pause check `:1357`, tick `:1395`, queue step `:1421` | No amendment |
@@ -91,7 +83,7 @@ Copied from the spec; each line is verbatim or names its section.
 
 The five inputs most likely to bite a person that no U, F or D test in the spec exercises. Each has a test, added to the task that owns the code.
 
-1. **Two sign-outs from one ask** (a double click on "Sign out", or ⌘⇧L while Settings is signing out). A person expects one sign-out and one kept folder. Pinned by `a_second_sign_out_with_the_same_ask_keeps_nothing_twice` (Task 8): the second call answers `unsent_changes:` because the first took the snapshot.
+1. **Two sign-outs from one ask** (a double click on "Sign out", or ⌘⇧L while Settings is signing out). A person expects one sign-out and one kept folder. Pinned by `a_second_sign_out_with_the_same_ask_keeps_nothing_twice` (Task 7): the second call answers `unsent_changes:` because the first took the snapshot.
 2. **A retry in the same second as a failed keep.** A person expects a fresh folder, never files added to a half-made one. Pinned by `two_keeps_in_the_same_second_make_two_folders` (Task 3).
 3. **An empty save (0 bytes) waiting.** A person expects an empty file in the kept folder, not "missing". Pinned by `an_empty_save_is_kept_as_an_empty_file` (Task 5).
 4. **A save and a rename of the same file, both waiting.** A person expects one file in the ask plus one other change, and the kept copy under the name Finder shows. Pinned by `a_waiting_rename_names_the_kept_copy_as_finder_shows_it` (Task 5): the name comes from the row's path at the keep step, never from an op's `target_path`.
@@ -111,16 +103,16 @@ Paths are relative to the desktop repo root.
 | `src-tauri/src/sign_out/kept_writer.rs` | create (macOS) | the event folder, directories one at a time, `clonefile` with the collision and length rules, flushes, the backup attribute | 3 |
 | `src-tauri/src/sign_out/kept_set.rs` | create | `KeptSet`, `Acknowledge` | 5 |
 | `src-tauri/src/sign_out/kept_record.rs` | create | the two config keys: record, take back, clear, dismiss | 4 |
-| `src-tauri/src/sign_out/keep.rs` | create (macOS) | the keep step | 5 |
-| `src-tauri/src/sign_out/snapshot.rs` | create | `AskSnapshot`, `SnapshotStore`, the gate's comparison | 8 |
+| `src-tauri/src/sign_out/keep.rs` | create (macOS) | the keep step | 5, 8 |
+| `src-tauri/src/sign_out/snapshot.rs` | create | `AskSnapshot`, `SnapshotStore`, the gate's comparison | 7 |
 | `src-tauri/src/sign_out/copy.rs` | create | every §11 string and its builders (Rust side) | 10 |
 | `src-tauri/src/sign_out/send_phase.rs` | create | the send phase's pure state and end decision | 11 |
 | `src-tauri/src/sign_out/flow_window.rs` | create | the late-result record and the close hook's pure state | 12 |
-| `src-tauri/src/state_db.rs` | modify | `waiting_rows`, `unkept_waiting_changes`, `close_finder_accepts`, the accept's check, `engine_start_repair`'s reopen, `make_due_for_send_phase` | 1, 6, 7, 11 |
+| `src-tauri/src/state_db.rs` | modify | `waiting_rows`, `unkept_waiting_changes`, `close_finder_accepts`, the accept's check, `engine_start_repair`'s reopen, `make_due_for_send_phase` | 1, 6, 8, 11 |
 | `src-tauri/src/config.rs` | modify | the two keys; `update_at_durable` with a file-system seam | 4 |
-| `src-tauri/src/lib.rs` | modify | `mod sign_out;`; `disposable_cache_roots_in`; the purge's `KeptSet` and order; the gate and keep call in `clear_session_impl`; the commands; the alert; the window hook; the menu; the R10 reset; `AppState.sign_out` | 2, 6, 8, 10-14 |
-| `src-tauri/src/engine_bridge.rs` | modify | `AcceptsClosed` → `WriteRetryLater`; the queue outcome's link, session and account signals | 7, 11 |
-| `src-tauri/src/ipc_socket.rs` | modify | the `accepts_closed` reply and refusal category | 7 |
+| `src-tauri/src/lib.rs` | modify | `mod sign_out;`; `disposable_cache_roots_in`; the purge's `KeptSet` and order; the gate and keep call in `clear_session_impl`; the commands; the alert; the window hook; the menu; the R10 reset; `AppState.sign_out` | 2, 6, 7, 8, 10-14 |
+| `src-tauri/src/engine_bridge.rs` | modify | `AcceptsClosed` → `WriteRetryLater`; the queue outcome's link, session and account signals | 8, 11 |
+| `src-tauri/src/ipc_socket.rs` | modify | the `accepts_closed` reply and refusal category | 8 |
 | `src-tauri/src/runner.rs` | modify | `SendPhaseLink` in `EngineRunner` and `RunnerControls`; the third `select!` arm | 11 |
 | `src-tauri/src/browser_login.rs` | modify | the switch event carries the snapshot on macOS | 13 |
 | `docs/specs/2026-10-02-macos-settings-dialogs.md`, `design/hifi/macos-settings-dialogs.html`, `docs/specs/2026-10-06-macos-finder-setup-reconciler.md` | modify | design first | 15 |
@@ -189,11 +181,11 @@ bun run lint > $EVID/t<N>-lint.log 2>&1; echo "lint rc=$?"
 | 4 | The two config keys and the durable save | M | Rust | W9, W13, §7.3; U22, U43 |
 | 5 | The keep step | L | Rust | W6-W9, §5.2 step 7; U8, U8b, U13, U27, U29a, U36, U38 |
 | 6 | The purge guard and its order | M | Rust | §5.2 step 8, W13; U14, U39 |
-| 7 | Close Finder accepts before the keep step (Q1-A) | M | Rust | spec question 3; U45 |
-| 8 | The ask snapshot, the gate and the sign-out | L | Rust | W5, §5.2 steps 4-10; U6, U7, U9, U10, U29b-c, U30, U32, U37, U41 |
+| 7 | The ask snapshot, the gate and the sign-out | L | Rust | W5, §5.2 steps 4-10; U6, U7, U9, U10, U29b-c, U30, U32, U37, U41 |
+| 8 | Close Finder accepts for the keep step, and reopen them whenever a sign-out stops (Q1 ruling) | M | Rust | §15 question 3; U45 |
 | 9 | An interrupted sign-out, by a real process death | M | Rust | W13; U42 |
 | 10 | The alert, the row's commands, "Show in Finder", logs, Rust copy | M | Rust | W9, §9, §11; U23-U26, U31 |
-| 11 | The send phase | L | Rust | §6; U16-U18, U34a/f, U35, U46 |
+| 11 | The send phase, with the `account` end (Q2 ruling) | L | Rust | §6, §15 question 4; U16-U18, U34a/f, U35, U46 |
 | 12 | A close ends the flow; a late result is shown | L | Rust | §5.1; U34b-e/g/h, U44 |
 | 13 | Entry points: the flow request, the menu, the switch's snapshot | M | Rust | §4 rows 2, 5, 6; U19, U21 |
 | 14 | The R10 reset keeps before it purges | S | Rust | W12; U20 |
@@ -1994,7 +1986,7 @@ mod tests {
         assert!(kept.keeps("s1") && kept.covered.contains("s1"));
     }
 
-    /// U13, the keep half (Task 8 has the sign-out half: keys in memory, sync restarts).
+    /// U13, the keep half (Task 7 has the sign-out half: keys in memory, sync restarts).
     #[test]
     fn a_failed_copy_stops_the_sign_out() {
         let f = Fixture::new();
@@ -2813,7 +2805,7 @@ fn remove_purge_paths(
 cd $WT/src-tauri && grep -n -E "purge_local_state_files(_in|_as)?\(|purge_local_data_for_sign_out\(" src/lib.rs | grep -v -E "^\s*[0-9]+:\s*///|fn purge_local"
 ```
 
-  The two production calls that pass a `KeptSet` come in Task 8 (`clear_session_impl`) and Task 14 (the R10 reset); until then they pass `None` too. A source pin that matches one of these calls by its text and breaks on the added argument is updated to the new text in this task, and named in the Notes.
+  The two production calls that pass a `KeptSet` come in Task 7 (`clear_session_impl`) and Task 14 (the R10 reset); until then they pass `None` too. A source pin that matches one of these calls by its text and breaks on the added argument is updated to the new text in this task, and named in the Notes.
 
 - [ ] **Step 4: Run, expect PASS.** Filter `sign_out_keep_tests`: `ok. 6 passed` (2 from Task 2, 4 new). Then filter `purge_local_state_files` and `signout_teardown_tests`: the same counts as at the baseline run.
 
@@ -2822,7 +2814,7 @@ cd $WT/src-tauri && grep -n -E "purge_local_state_files(_in|_as)?\(|purge_local_
   2. Delete the kept folder on a guard refusal (`std::fs::remove_dir_all(folder)` before the `return`): U14 red on "the kept folder stays".
   3. Remove the files in one loop (`for group in [paths]`): U39 (a) red on "the waiting writes' copies go last".
   4. Never clear the marker: U39 (c) red.
-  5. Wrap the guard's refusal in `SIGN_OUT_PURGE_FAILED` inside `purge_local_data_for_sign_out`: no test in this task sees that wrapper (U14 calls the purge below it). Task 8's `a_guard_refusal_reaches_the_caller_with_its_code` does; this mutation is run there.
+  5. Wrap the guard's refusal in `SIGN_OUT_PURGE_FAILED` inside `purge_local_data_for_sign_out`: no test in this task sees that wrapper (U14 calls the purge below it). Task 7's `a_guard_refusal_reaches_the_caller_with_its_code` does; this mutation is run there.
 
 - [ ] **Step 6: The task gate** with `<N>` = 6 and `<L>` = `L0 + 38`.
 
@@ -2833,262 +2825,7 @@ cd $WT && git add -- src-tauri/src/state_db.rs src-tauri/src/lib.rs
 git commit -m "feat(macos): the sign-out purge refuses before any deletion unless every waiting save was kept (1887)" -- src-tauri/src/state_db.rs src-tauri/src/lib.rs
 ```
 
-### Task 7: Close Finder accepts before the keep step (Q1, option A)
-
-**Gated on Q1.** Start only once the lead has answered spec question 3. Under option B, skip this task: Task 20 adds option B's sentence to W1, and U45 is struck from the spec with that ruling named.
-
-**Files:**
-- Modify: `src-tauri/src/state_db.rs`: `FINDER_ACCEPTS_CLOSED_KEY`, `close_finder_accepts`, `finder_accepts_closed`; `AcceptOutcome::AcceptsClosed` (`@184:state_db.rs:1632-1650`); the check in `accept_finder_write` (`:3724-3743`); the reopen in `engine_start_repair` (`:5613-5620`)
-- Modify: `src-tauri/src/engine_bridge.rs`: `AcceptsClosed` beside `StagedCopyGone` (`@184:engine_bridge.rs:756-770`); both `AcceptOutcome` matches (`:2633`, `:3047`)
-- Modify: `src-tauri/src/ipc_socket.rs`: `write_refusal_category` (`@184:ipc_socket.rs:1452-1466`) and `write_outcome_response`'s arm beside `StagedCopyGone` (`:2573-2578`)
-- Modify: `src-tauri/src/sign_out/keep.rs` (the close is `keep_unsent`'s first act)
-- Modify: `src-tauri/src/lib.rs:3155-3164` (the comment on `stop_engine_for_sign_out` that says no request can be served after the stop)
-- Test: `src-tauri/src/state_db.rs` (tests module), `src-tauri/src/ipc_socket.rs` (tests module), `src-tauri/src/sign_out/keep.rs`
-
-**Interfaces:**
-- Consumes: `accept_finder_write`, `FinderAccept`, `FinderAcceptKind`, `track_staged_payload`, `seed_own_row` (the existing `an_accept_whose_journal_row_is_gone_writes_nothing` test, `@184:state_db.rs:11912-11952`, is the pattern).
-- Produces: `StateDb::close_finder_accepts(&self) -> rusqlite::Result<()>`, `StateDb::finder_accepts_closed(&self) -> rusqlite::Result<bool>`, `AcceptOutcome::AcceptsClosed`, `engine_bridge::AcceptsClosed`, the refusal category `"accepts_closed"`.
-
-- [ ] **Step 1: Write the failing tests.** In `state_db.rs`'s tests, next to `an_accept_whose_journal_row_is_gone_writes_nothing`:
-
-```rust
-    fn accept_save(db: &StateDb, payload_path: &str) -> AcceptOutcome {
-        db.accept_finder_write(
-            &FinderAccept {
-                op_id: "op-late",
-                file_id: "late",
-                kind: FinderAcceptKind::Modify { incoming_base: Some("1") },
-                parent_id: None,
-                target_path: Some("late.txt"),
-                metadata_json: "{}",
-                payload_path,
-                size_bytes: 4,
-                modified_at: 20,
-                backup_source_key: None,
-                now: 30,
-            },
-            &|_, _| Vec::new(),
-        )
-        .unwrap()
-    }
-
-    fn seeded_for_a_late_accept() -> (tempfile::TempDir, StateDb) {
-        let dir = tempdir().unwrap();
-        let db = StateDb::open(dir.path().join("state.db")).unwrap();
-        seed_own_row(&db, "late", FileStatus::Local, 10);
-        let mut contract = db.get_file_contract_state("late").unwrap().unwrap();
-        contract.current_version = 1;
-        db.set_file_contract_state(&contract).unwrap();
-        db.track_staged_payload("/staged/late", None, false).unwrap();
-        (dir, db)
-    }
-
-    /// U45 (spec 2026-10-10, open question 3, option A).
-    #[test]
-    fn a_finder_accept_after_the_engine_stop_queues_nothing() {
-        let (_dir, db) = seeded_for_a_late_accept();
-        db.close_finder_accepts().unwrap();
-        assert!(matches!(accept_save(&db, "/staged/late"), AcceptOutcome::AcceptsClosed));
-        assert!(db.list_operations_for_file("late").unwrap().is_empty(), "no op");
-        let unfinished: bool = db
-            .hold_lock_for_test()
-            .query_row("SELECT completed = 0 FROM staged_payloads WHERE path = '/staged/late'", [], |row| row.get(0))
-            .unwrap();
-        assert!(unfinished, "the journal row is left for the purge, or for the next start's sweep");
-    }
-
-    /// U45: an engine start, and a cleared account, take saves again.
-    #[test]
-    fn accepts_reopen_at_engine_start_and_with_the_cleared_account() {
-        let (_dir, db) = seeded_for_a_late_accept();
-        db.close_finder_accepts().unwrap();
-        db.engine_start_repair().unwrap();
-        assert!(!db.finder_accepts_closed().unwrap());
-        assert!(matches!(accept_save(&db, "/staged/late"), AcceptOutcome::Queued { .. }));
-        db.close_finder_accepts().unwrap();
-        db.clear_account_data(false).unwrap();
-        assert!(!db.finder_accepts_closed().unwrap());
-    }
-
-    /// U45: an accept whose transaction began first commits first, and a read after the close sees it. Two
-    /// connections to one file, as the engine and the sign-out have.
-    #[test]
-    fn an_accept_already_running_commits_before_the_close() {
-        for round in 0..50 {
-            let dir = tempdir().unwrap();
-            let path = dir.path().join("state.db");
-            let engine = StateDb::open(&path).unwrap();
-            let sign_out = StateDb::open(&path).unwrap();
-            let (started, wait_started) = std::sync::mpsc::channel();
-            let accept = std::thread::spawn(move || {
-                let mut conn = engine.hold_lock_for_test();
-                let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).unwrap();
-                started.send(()).unwrap();
-                std::thread::sleep(std::time::Duration::from_millis(20));
-                tx.execute("INSERT INTO operation_queue (op_id, kind, file_id) VALUES ('late', 'upload_version', 'f')", [])
-                    .unwrap();
-                tx.commit().unwrap();
-            });
-            wait_started.recv().unwrap();
-            sign_out.close_finder_accepts().unwrap();
-            let rows = sign_out.waiting_rows().unwrap();
-            accept.join().unwrap();
-            assert!(rows.iter().any(|row| row.op_id == "late"), "round {round}");
-        }
-    }
-```
-
-In `ipc_socket.rs`'s tests:
-
-```rust
-    /// U45: the extension is told to retry, as for a copy an engine-start sweep removed.
-    #[test]
-    fn a_closed_accept_answers_write_retry_later() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = crate::state_db::StateDb::open(dir.path().join("state.db")).unwrap();
-        let error = anyhow::Error::new(crate::engine_bridge::AcceptsClosed);
-        assert_eq!(write_refusal_category(&error), "accepts_closed");
-        let response = write_outcome_response("modify", &db, Err(anyhow::Error::new(crate::engine_bridge::AcceptsClosed)));
-        assert!(matches!(response, IpcResponse::WriteRetryLater { .. }), "{response:?}");
-    }
-```
-
-In `keep.rs`'s tests:
-
-```rust
-    /// U45: closing accepts is the keep step's first act, before its read, also when it then refuses.
-    #[test]
-    fn the_keep_step_closes_accepts_before_it_reads() {
-        let f = Fixture::new();
-        f.other("r1", "rename_file", "a");
-        assert!(matches!(f.keep(Acknowledge::Nothing), Err(KeepFailure::Unsent)));
-        assert!(f.db.finder_accepts_closed().unwrap());
-        let source = include_str!("keep.rs");
-        let body = &source[source.find("pub(crate) fn keep_unsent(").unwrap()..];
-        let close = body.find("close_finder_accepts()").expect("the close");
-        let read = body.find("WaitingChanges::read(").expect("the read");
-        assert!(close < read, "accepts are closed before the read");
-    }
-```
-
-- [ ] **Step 2: Run them, expect FAIL.** Filters `a_finder_accept_after`, `accepts_reopen`, `an_accept_already_running`, `a_closed_accept`, `closes_accepts_before`. Expected: compile errors, then (with stubs) the assertions.
-
-- [ ] **Step 3: Implement.** In `state_db.rs`:
-
-```rust
-/// Spec 2026-10-10, open question 3 (option A): set by a sign-out's keep step after the engine stop, so a Finder accept
-/// that outlived the stop queues nothing. Cleared by `engine_start_repair` and with the account's rows.
-const FINDER_ACCEPTS_CLOSED_KEY: &str = "finder_accepts_closed";
-```
-
-`AcceptOutcome` gains, after `CopyGone`:
-
-```rust
-    /// A sign-out closed Finder accepts after its engine stop (spec 2026-10-10, open question 3). Nothing was
-    /// written; the write is retried, and macOS keeps the change until it is.
-    AcceptsClosed,
-```
-
-In `accept_finder_write`, as the first statement inside its `BEGIN IMMEDIATE` transaction (before the `journalled` read):
-
-```rust
-        let closed: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sync_state WHERE key = ?1)",
-            params![FINDER_ACCEPTS_CLOSED_KEY],
-            |row| row.get(0),
-        )?;
-        if closed {
-            return Ok(AcceptOutcome::AcceptsClosed);
-        }
-```
-
-In `impl StateDb`:
-
-```rust
-    /// One `BEGIN IMMEDIATE` transaction: it waits for an accept transaction already running, which therefore commits
-    /// first, and every later accept reads the key in its own transaction and queues nothing.
-    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
-    pub fn close_finder_accepts(&self) -> Result<()> {
-        let mut conn = self.0.lock().expect("state_db mutex poisoned");
-        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        tx.execute(
-            "INSERT INTO sync_state (key, value) VALUES (?1, '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![FINDER_ACCEPTS_CLOSED_KEY],
-        )?;
-        tx.commit()
-    }
-
-    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
-    pub fn finder_accepts_closed(&self) -> Result<bool> {
-        let conn = self.0.lock().expect("state_db mutex poisoned");
-        conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sync_state WHERE key = ?1)",
-            params![FINDER_ACCEPTS_CLOSED_KEY],
-            |row| row.get(0),
-        )
-    }
-```
-
-In `engine_start_repair`, right after `claims_cleared`: `tx.execute("DELETE FROM sync_state WHERE key = ?1", params![FINDER_ACCEPTS_CLOSED_KEY])?;` (`clear_account_data` already deletes every `sync_state` row).
-
-In `engine_bridge.rs`, beside `StagedCopyGone`:
-
-```rust
-/// A sign-out closed Finder accepts after its engine stop (spec 2026-10-10, open question 3). Nothing was queued; the
-/// reply is `WriteRetryLater`, so macOS keeps the change and retries. Path-free: the text reaches the extension.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
-pub(crate) struct AcceptsClosed;
-
-impl std::fmt::Display for AcceptsClosed {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Beebeeb is signing out; this write was not queued")
-    }
-}
-
-impl std::error::Error for AcceptsClosed {}
-```
-
-and in both matches (`@184:engine_bridge.rs:2633`, `:3047`): `crate::state_db::AcceptOutcome::AcceptsClosed => return Err(anyhow::Error::new(AcceptsClosed)),`. In `ipc_socket.rs`, `write_refusal_category` gains `if error.is::<crate::engine_bridge::AcceptsClosed>() { return "accepts_closed"; }` after the `StagedCopyGone` check, and `write_outcome_response` gains, after the `StagedCopyGone` arm:
-
-```rust
-        // Spec 2026-10-10, open question 3: a sign-out closed accepts after its engine stop. Nothing was queued; the
-        // extension reports a transient error, so the system keeps the change and hands it over again.
-        Err(e) if e.is::<crate::engine_bridge::AcceptsClosed>() => {
-            log_refused_write(op, write_refusal_category(&e));
-            IpcResponse::WriteRetryLater { message: e.to_string() }
-        }
-```
-
-In `keep_unsent`, the first statement:
-
-```rust
-    // Open question 3 (option A): a Finder accept can outlive the engine stop (`spawn_blocking`). Closing accepts in one
-    // IMMEDIATE transaction lets one already running commit first, so the read below sees it, and refuses every later one.
-    inputs.db.close_finder_accepts().map_err(|_| KeepFailure::Copy("close_accepts"))?;
-```
-
-Rewrite the comment above `stop_engine_for_sign_out` (`@184:lib.rs:3159-3164`) so it no longer says no request can be served after the stop: "Then upload staging: every handed-over copy is removed. A request that arrives later reaches no daemon and fails transiently. One accept may still be running in `spawn_blocking`: the keep step closes accepts before it reads the queue (spec 2026-10-10 §5.2 step 6)."
-
-- [ ] **Step 4: Run, expect PASS.** The five filters: `ok. 1 passed` each; then filter `sign_out::keep::`: `ok. 13 passed`.
-
-- [ ] **Step 5: Mutations, each RED then reverted.**
-  1. Remove the check in `accept_finder_write`: `a_finder_accept_after…` red (`Queued`).
-  2. Remove the reopen in `engine_start_repair`: `accepts_reopen…` red on the first `assert!`.
-  3. Make `close_finder_accepts` an in-memory flag that takes no SQLite lock (a `static CLOSED: AtomicBool` set and read instead of the key): `an_accept_already_running…` red, because the read runs before the running accept commits.
-  4. Move `close_finder_accepts()` below `WaitingChanges::read(` in `keep_unsent`: `the_keep_step_closes_accepts_before_it_reads` red.
-  5. Map `AcceptsClosed` to `IpcResponse::Error`: `a_closed_accept…` red.
-
-- [ ] **Step 6: The task gate** with `<N>` = 7 and `<L>` = `L0 + 43`.
-
-- [ ] **Step 7: Commit.**
-
-```bash
-cd $WT && git add -- src-tauri/src/state_db.rs src-tauri/src/engine_bridge.rs src-tauri/src/ipc_socket.rs src-tauri/src/sign_out/keep.rs src-tauri/src/lib.rs
-git commit -m "feat(macos): a sign-out closes Finder accepts before it reads what to keep (1887)" -- src-tauri/src/state_db.rs src-tauri/src/engine_bridge.rs src-tauri/src/ipc_socket.rs src-tauri/src/sign_out/keep.rs src-tauri/src/lib.rs
-```
-
-### Task 8: The ask snapshot, the gate and the sign-out
+### Task 7: The ask snapshot, the gate and the sign-out
 
 **Files:**
 - Create: `src-tauri/src/sign_out/snapshot.rs`
@@ -3139,7 +2876,7 @@ mod tests {
         }
     }
 
-    /// U37, the gate's comparison (Task 8's sign-out tests add the keep step's snapshot).
+    /// U37, the gate's comparison (Task 7's sign-out tests add the keep step's snapshot).
     #[test]
     fn the_gate_compares_the_queue_with_the_snapshot() {
         use WriteState::*;
@@ -3191,7 +2928,7 @@ In `lib.rs`'s `sign_out_keep_tests`, the sign-out tests. They share the scratch 
         state_db::StateDb::open(state_paths::state_db_path_from_state_dir(&dir)).unwrap()
     }
 
-    /// The scratch database as a completed sign-out leaves it: no rows, accepts open again (Task 7). A test that ends
+    /// The scratch database as a completed sign-out leaves it: no rows, accepts open again (Task 8). A test that ends
     /// with rows left, or after a keep step that refused, calls it last, so the next test starts clean.
     fn reset_scratch(db: &state_db::StateDb) {
         db.purge_all_local_state().unwrap();
@@ -3920,13 +3657,405 @@ cd $WT/src-tauri && grep -n "clear_session_impl(&" src/lib.rs
   10. Leave the store as it is after a completed sign-out: U37 red on the last assertion.
   11. Wrap the guard's refusal in `SIGN_OUT_PURGE_FAILED` inside `purge_local_data_for_sign_out` (Task 6, mutation 5): `a_guard_refusal_reaches_the_caller_with_its_code` red on "never wrapped".
 
-- [ ] **Step 6: The task gate** with `<N>` = 8 and `<L>` = `L0 + 58`.
+- [ ] **Step 6: The task gate** with `<N>` = 7 and `<L>` = `L0 + 53`.
 
 - [ ] **Step 7: Commit.**
 
 ```bash
 cd $WT && git add -- src-tauri/src/sign_out/snapshot.rs src-tauri/src/sign_out/mod.rs src-tauri/src/lib.rs
 git commit -m "feat(macos): a sign-out asks before it purges, keeps what waits, and is gated in Rust (1887)" -- src-tauri/src/sign_out/snapshot.rs src-tauri/src/sign_out/mod.rs src-tauri/src/lib.rs
+```
+
+### Task 8: Close Finder accepts for the keep step, and reopen them whenever a sign-out stops (Q1)
+
+**Lead ruling on Q1 (2026-10-11): option A, binding.** The keep step first writes `sync_state.finder_accepts_closed` in one `BEGIN IMMEDIATE` transaction; `accept_finder_write` checks it and answers `WriteRetryLater` (the `CopyGone` path); `engine_start_repair` reopens. And every way a sign-out ends without purging reopens accepts at once, not only the next engine start: the person chooses Cancel (the fence is never written: Cancel comes before the gate), a step fails (the keep step reopens on its own failure; a guard in `clear_session_impl` reopens on any return between a completed keep and a completed purge), or the app is quit mid-flow and restarts (the launch reopens them first). This task comes after Task 7, whose `clear_session_impl` wiring the guard sits in. The R10 reset applies the same rule in Task 14.
+
+**Files:**
+- Modify: `src-tauri/src/state_db.rs`: `FINDER_ACCEPTS_CLOSED_KEY`, `close_finder_accepts`, `finder_accepts_closed`; `AcceptOutcome::AcceptsClosed` (`@184:state_db.rs:1632-1650`); the check in `accept_finder_write` (`:3724-3743`); the reopen in `engine_start_repair` (`:5613-5620`)
+- Modify: `src-tauri/src/engine_bridge.rs`: `AcceptsClosed` beside `StagedCopyGone` (`@184:engine_bridge.rs:756-770`); both `AcceptOutcome` matches (`:2633`, `:3047`)
+- Modify: `src-tauri/src/ipc_socket.rs`: `write_refusal_category` (`@184:ipc_socket.rs:1452-1466`) and `write_outcome_response`'s arm beside `StagedCopyGone` (`:2573-2578`)
+- Modify: `src-tauri/src/sign_out/keep.rs` (the close is `keep_unsent`'s first act; a keep that stops reopens; the body moves to `keep_after_close`)
+- Modify: `src-tauri/src/lib.rs`: `AcceptsReopenOnAbort` and `reopen_finder_accepts_in` beside `keep_for_sign_out` (Task 7); the guard in `clear_session_impl`, armed after the keep call and disarmed after the purge call; `reopen_finder_accepts_at_startup()` as the first statement of `restore_session_on_startup` (`@184:lib.rs:1006`)
+- Modify: `src-tauri/src/lib.rs:3155-3164` (the comment on `stop_engine_for_sign_out` that says no request can be served after the stop)
+- Test: `src-tauri/src/state_db.rs` (tests module), `src-tauri/src/ipc_socket.rs` (tests module), `src-tauri/src/sign_out/keep.rs`, `src-tauri/src/lib.rs` `mod sign_out_keep_tests`
+
+**Interfaces:**
+- Consumes: `accept_finder_write`, `FinderAccept`, `FinderAcceptKind`, `track_staged_payload`, `seed_own_row` (the existing `an_accept_whose_journal_row_is_gone_writes_nothing` test, `@184:state_db.rs:11912-11952`, is the pattern); Task 7's `clear_session_impl`, `keep_for_sign_out`, `SIGN_OUT_SEAM` and its test helpers (`state_db_in_scratch`, `queue_write`, `ask`, `signed_out_state`, `recording_finder`, `sign_out_with`, `no_seam`, `reset_scratch`).
+- Produces: `StateDb::close_finder_accepts(&self) -> rusqlite::Result<()>`, `StateDb::reopen_finder_accepts(&self) -> rusqlite::Result<()>`, `StateDb::finder_accepts_closed(&self) -> rusqlite::Result<bool>`, `AcceptOutcome::AcceptsClosed`, `engine_bridge::AcceptsClosed`, the refusal category `"accepts_closed"`; in `lib.rs` (macOS) `struct AcceptsReopenOnAbort`, `fn reopen_finder_accepts_in(state_dir: &Path)`, `fn reopen_finder_accepts_at_startup()`.
+
+- [ ] **Step 1: Write the failing tests.** In `state_db.rs`'s tests, next to `an_accept_whose_journal_row_is_gone_writes_nothing`:
+
+```rust
+    fn accept_save(db: &StateDb, payload_path: &str) -> AcceptOutcome {
+        db.accept_finder_write(
+            &FinderAccept {
+                op_id: "op-late",
+                file_id: "late",
+                kind: FinderAcceptKind::Modify { incoming_base: Some("1") },
+                parent_id: None,
+                target_path: Some("late.txt"),
+                metadata_json: "{}",
+                payload_path,
+                size_bytes: 4,
+                modified_at: 20,
+                backup_source_key: None,
+                now: 30,
+            },
+            &|_, _| Vec::new(),
+        )
+        .unwrap()
+    }
+
+    fn seeded_for_a_late_accept() -> (tempfile::TempDir, StateDb) {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_own_row(&db, "late", FileStatus::Local, 10);
+        let mut contract = db.get_file_contract_state("late").unwrap().unwrap();
+        contract.current_version = 1;
+        db.set_file_contract_state(&contract).unwrap();
+        db.track_staged_payload("/staged/late", None, false).unwrap();
+        (dir, db)
+    }
+
+    /// U45 (spec 2026-10-10, open question 3, option A).
+    #[test]
+    fn a_finder_accept_after_the_engine_stop_queues_nothing() {
+        let (_dir, db) = seeded_for_a_late_accept();
+        db.close_finder_accepts().unwrap();
+        assert!(matches!(accept_save(&db, "/staged/late"), AcceptOutcome::AcceptsClosed));
+        assert!(db.list_operations_for_file("late").unwrap().is_empty(), "no op");
+        let unfinished: bool = db
+            .hold_lock_for_test()
+            .query_row("SELECT completed = 0 FROM staged_payloads WHERE path = '/staged/late'", [], |row| row.get(0))
+            .unwrap();
+        assert!(unfinished, "the journal row is left for the purge, or for the next start's sweep");
+    }
+
+    /// U45: an engine start, and a cleared account, take saves again.
+    #[test]
+    fn accepts_reopen_at_engine_start_and_with_the_cleared_account() {
+        let (_dir, db) = seeded_for_a_late_accept();
+        db.close_finder_accepts().unwrap();
+        db.engine_start_repair().unwrap();
+        assert!(!db.finder_accepts_closed().unwrap());
+        assert!(matches!(accept_save(&db, "/staged/late"), AcceptOutcome::Queued { .. }));
+        db.close_finder_accepts().unwrap();
+        db.clear_account_data(false).unwrap();
+        assert!(!db.finder_accepts_closed().unwrap());
+        db.close_finder_accepts().unwrap();
+        db.reopen_finder_accepts().unwrap();
+        assert!(!db.finder_accepts_closed().unwrap(), "a sign-out that stops reopens them at once");
+    }
+
+    /// U45: an accept whose transaction began first commits first, and a read after the close sees it. Two
+    /// connections to one file, as the engine and the sign-out have.
+    #[test]
+    fn an_accept_already_running_commits_before_the_close() {
+        for round in 0..50 {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("state.db");
+            let engine = StateDb::open(&path).unwrap();
+            let sign_out = StateDb::open(&path).unwrap();
+            let (started, wait_started) = std::sync::mpsc::channel();
+            let accept = std::thread::spawn(move || {
+                let mut conn = engine.hold_lock_for_test();
+                let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).unwrap();
+                started.send(()).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                tx.execute("INSERT INTO operation_queue (op_id, kind, file_id) VALUES ('late', 'upload_version', 'f')", [])
+                    .unwrap();
+                tx.commit().unwrap();
+            });
+            wait_started.recv().unwrap();
+            sign_out.close_finder_accepts().unwrap();
+            let rows = sign_out.waiting_rows().unwrap();
+            accept.join().unwrap();
+            assert!(rows.iter().any(|row| row.op_id == "late"), "round {round}");
+        }
+    }
+```
+
+In `ipc_socket.rs`'s tests:
+
+```rust
+    /// U45: the extension is told to retry, as for a copy an engine-start sweep removed.
+    #[test]
+    fn a_closed_accept_answers_write_retry_later() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::state_db::StateDb::open(dir.path().join("state.db")).unwrap();
+        let error = anyhow::Error::new(crate::engine_bridge::AcceptsClosed);
+        assert_eq!(write_refusal_category(&error), "accepts_closed");
+        let response = write_outcome_response("modify", &db, Err(anyhow::Error::new(crate::engine_bridge::AcceptsClosed)));
+        assert!(matches!(response, IpcResponse::WriteRetryLater { .. }), "{response:?}");
+    }
+```
+
+In `keep.rs`'s tests:
+
+```rust
+    /// U45: closing accepts is the keep step's first act, before its read; a keep that stops reopens them at once (lead
+    /// ruling on Q1), and one that completes leaves them closed for the purge, which clears them with the rows.
+    #[test]
+    fn the_keep_step_closes_accepts_first_and_reopens_them_when_it_stops() {
+        let f = Fixture::new();
+        f.other("r1", "rename_file", "a");
+        assert!(matches!(f.keep(Acknowledge::Nothing), Err(KeepFailure::Unsent)));
+        assert!(!f.db.finder_accepts_closed().unwrap(), "a refused keep reopens accepts");
+        let (others, missing) = (set(&["r1"]), set(&[]));
+        f.keep(Acknowledge::Asked { others: &others, missing: &missing }).unwrap();
+        assert!(f.db.finder_accepts_closed().unwrap(), "a completed keep leaves them closed for the purge");
+        let source = include_str!("keep.rs");
+        let body = &source[source.find("pub(crate) fn keep_unsent(").unwrap()..];
+        let close = body.find("close_finder_accepts()").expect("the close");
+        let read = body.find("WaitingChanges::read(").expect("the read");
+        assert!(close < read, "accepts are closed before the read");
+    }
+```
+
+In `lib.rs`'s `sign_out_keep_tests` (Task 7's helpers):
+
+```rust
+    /// Lead ruling on Q1 (2026-10-11): every sign-out that ends without purging leaves Finder accepts open at once.
+    #[tokio::test]
+    async fn a_cancelled_or_failed_sign_out_leaves_accepts_open() {
+        with_the_shared_state_dir(async {
+            use std::os::unix::fs::PermissionsExt;
+            let db = state_db_in_scratch();
+            let staged = queue_write(&db, "w1", "f1", b"bytes");
+            let (state, _acct) = signed_out_state();
+            recording_finder(&state);
+            // Cancel: the person was asked and chose Cancel, so no `clear_session` ran at all.
+            ask(&state, "macos-settings");
+            assert!(!db.finder_accepts_closed().unwrap(), "a cancelled sign-out");
+            // The gate refuses: changes wait and no `keepUnsent`.
+            assert!(sign_out_with(&state, None, no_seam()).await.is_err());
+            assert!(!db.finder_accepts_closed().unwrap(), "refused at the gate");
+            // The keep step fails: a staged copy it cannot read.
+            std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let id = ask(&state, "macos-settings");
+            let failed = sign_out_with(&state, Some(&id), no_seam()).await;
+            std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o600)).unwrap();
+            assert!(failed.unwrap_err().message.starts_with("unsent_copy_failed: "));
+            assert!(!db.finder_accepts_closed().unwrap(), "a failed keep");
+            // The purge guard refuses after a completed keep (only a test seam can add a write then).
+            let id = ask(&state, "macos-settings");
+            let seam: SignOutSeam = Arc::new(|point| {
+                if point == "after_keep" {
+                    queue_write(&state_db_in_scratch(), "late", "late", b"late");
+                }
+                Ok(())
+            });
+            assert!(sign_out_with(&state, Some(&id), seam).await.is_err());
+            assert!(!db.finder_accepts_closed().unwrap(), "a refused purge");
+            reset_scratch(&db);
+        })
+        .await;
+    }
+
+    /// Lead ruling on Q1: a quit between the keep step and the purge leaves the key on disk; the next launch reopens
+    /// accepts first, before the restore can start an engine.
+    #[test]
+    fn accepts_reopen_when_the_app_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = state_db::StateDb::open(state_paths::state_db_path_from_state_dir(dir.path())).unwrap();
+        db.close_finder_accepts().unwrap();
+        reopen_finder_accepts_in(dir.path());
+        assert!(!db.finder_accepts_closed().unwrap());
+        let production = super::finder_setup_command_tests::production_source();
+        let restore = super::finder_setup_command_tests::body_between(&production, "async fn restore_session_on_startup(", "\n}\n");
+        let reopen = restore.find("reopen_finder_accepts_at_startup()").expect("the launch reopens accepts");
+        assert!(reopen < restore.find("restore_session_inner(").unwrap(), "before the restore can start an engine");
+    }
+```
+
+- [ ] **Step 2: Run them, expect FAIL.** Filters `a_finder_accept_after`, `accepts_reopen`, `an_accept_already_running`, `a_closed_accept`, `closes_accepts_first`, `a_cancelled_or_failed_sign_out`, `accepts_reopen_when_the_app_starts`. Expected: compile errors, then (with stubs) the assertions.
+
+- [ ] **Step 3: Implement.** In `state_db.rs`:
+
+```rust
+/// Spec 2026-10-10 §15 question 3, lead ruling: option A. Set by a sign-out's keep step after the engine stop, so a
+/// Finder accept that outlived the stop queues nothing. Cleared at once by a sign-out that stops without purging, by
+/// the purge with the account's rows, by `engine_start_repair`, and at launch.
+const FINDER_ACCEPTS_CLOSED_KEY: &str = "finder_accepts_closed";
+```
+
+`AcceptOutcome` gains, after `CopyGone`:
+
+```rust
+    /// A sign-out closed Finder accepts after its engine stop (spec 2026-10-10, open question 3). Nothing was
+    /// written; the write is retried, and macOS keeps the change until it is.
+    AcceptsClosed,
+```
+
+In `accept_finder_write`, as the first statement inside its `BEGIN IMMEDIATE` transaction (before the `journalled` read):
+
+```rust
+        let closed: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sync_state WHERE key = ?1)",
+            params![FINDER_ACCEPTS_CLOSED_KEY],
+            |row| row.get(0),
+        )?;
+        if closed {
+            return Ok(AcceptOutcome::AcceptsClosed);
+        }
+```
+
+In `impl StateDb`:
+
+```rust
+    /// Lead ruling on Q1: a sign-out that stops without purging reopens accepts at once.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn reopen_finder_accepts(&self) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute("DELETE FROM sync_state WHERE key = ?1", params![FINDER_ACCEPTS_CLOSED_KEY])?;
+        Ok(())
+    }
+
+    /// One `BEGIN IMMEDIATE` transaction: it waits for an accept transaction already running, which therefore commits
+    /// first, and every later accept reads the key in its own transaction and queues nothing.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn close_finder_accepts(&self) -> Result<()> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO sync_state (key, value) VALUES (?1, '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![FINDER_ACCEPTS_CLOSED_KEY],
+        )?;
+        tx.commit()
+    }
+
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn finder_accepts_closed(&self) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sync_state WHERE key = ?1)",
+            params![FINDER_ACCEPTS_CLOSED_KEY],
+            |row| row.get(0),
+        )
+    }
+```
+
+In `engine_start_repair`, right after `claims_cleared`: `tx.execute("DELETE FROM sync_state WHERE key = ?1", params![FINDER_ACCEPTS_CLOSED_KEY])?;` (`clear_account_data` already deletes every `sync_state` row).
+
+In `engine_bridge.rs`, beside `StagedCopyGone`:
+
+```rust
+/// A sign-out closed Finder accepts after its engine stop (spec 2026-10-10, open question 3). Nothing was queued; the
+/// reply is `WriteRetryLater`, so macOS keeps the change and retries. Path-free: the text reaches the extension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+pub(crate) struct AcceptsClosed;
+
+impl std::fmt::Display for AcceptsClosed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Beebeeb is signing out; this write was not queued")
+    }
+}
+
+impl std::error::Error for AcceptsClosed {}
+```
+
+and in both matches (`@184:engine_bridge.rs:2633`, `:3047`): `crate::state_db::AcceptOutcome::AcceptsClosed => return Err(anyhow::Error::new(AcceptsClosed)),`. In `ipc_socket.rs`, `write_refusal_category` gains `if error.is::<crate::engine_bridge::AcceptsClosed>() { return "accepts_closed"; }` after the `StagedCopyGone` check, and `write_outcome_response` gains, after the `StagedCopyGone` arm:
+
+```rust
+        // Spec 2026-10-10, open question 3: a sign-out closed accepts after its engine stop. Nothing was queued; the
+        // extension reports a transient error, so the system keeps the change and hands it over again.
+        Err(e) if e.is::<crate::engine_bridge::AcceptsClosed>() => {
+            log_refused_write(op, write_refusal_category(&e));
+            IpcResponse::WriteRetryLater { message: e.to_string() }
+        }
+```
+
+In `keep.rs`, the body Task 5 wrote moves, unchanged, into `fn keep_after_close(inputs: &KeepInputs<'_>) -> Result<KeptSet, KeepFailure>` (its `inputs.` reads stay as they are), and `keep_unsent` becomes:
+
+```rust
+pub(crate) fn keep_unsent(inputs: KeepInputs<'_>) -> Result<KeptSet, KeepFailure> {
+    // Spec 2026-10-10 §15 question 3, lead ruling: a Finder accept can outlive the engine stop (`spawn_blocking`).
+    // Closing accepts in one IMMEDIATE transaction lets one already running commit first, so the read below sees it,
+    // and refuses every later one.
+    inputs.db.close_finder_accepts().map_err(|_| KeepFailure::Copy("close_accepts"))?;
+    let kept = keep_after_close(&inputs);
+    // ...and a keep that stops reopens them at once: nothing will be purged.
+    if kept.is_err()
+        && let Err(error) = inputs.db.reopen_finder_accepts()
+    {
+        tracing::warn!(%error, "could not reopen Finder accepts; the next engine start reopens them");
+    }
+    kept
+}
+```
+
+In `lib.rs`, beside `keep_for_sign_out`:
+
+```rust
+/// Spec 2026-10-10 §15 question 3, lead ruling: reopen Finder accepts in the app's state database. Best effort: an
+/// engine start reopens them too (`engine_start_repair`).
+#[cfg(target_os = "macos")]
+fn reopen_finder_accepts_in(state_dir: &Path) {
+    if let Ok(Some(db)) = state_db_from_state_dir(state_dir)
+        && let Err(error) = db.reopen_finder_accepts()
+    {
+        tracing::warn!(%error, "could not reopen Finder accepts; the next engine start reopens them");
+    }
+}
+
+/// A sign-out quit between its keep step and its purge left accepts closed on disk: the launch reopens them first.
+#[cfg(target_os = "macos")]
+fn reopen_finder_accepts_at_startup() {
+    if let Ok(state_dir) = state_paths::beebeeb_state_dir() {
+        reopen_finder_accepts_in(&state_dir);
+    }
+}
+
+/// From a completed keep step until the purge has cleared the rows (and the key with them), any return reopens Finder
+/// accepts at once: a refused or failed purge, a test seam, a panic.
+#[cfg(target_os = "macos")]
+struct AcceptsReopenOnAbort {
+    armed: bool,
+}
+
+#[cfg(target_os = "macos")]
+impl AcceptsReopenOnAbort {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for AcceptsReopenOnAbort {
+    fn drop(&mut self) {
+        if self.armed
+            && let Ok(state_dir) = state_paths::beebeeb_state_dir()
+        {
+            reopen_finder_accepts_in(&state_dir);
+        }
+    }
+}
+```
+
+In `clear_session_impl` (Task 7's wiring): right after `let kept = keep_for_sign_out(accepted.as_ref()).map_err(&kept_with)?;`, `#[cfg(target_os = "macos")] let mut reopen_accepts = AcceptsReopenOnAbort { armed: true };`; right after the `purge_local_data_for_sign_out(…).map_err(&kept_with)?;` call, before the `after_purge` seam, `#[cfg(target_os = "macos")] reopen_accepts.disarm();`. U10's deny-list does not list either. In `restore_session_on_startup` (`@184:lib.rs:1006`), the first statement: `#[cfg(target_os = "macos")] reopen_finder_accepts_at_startup();`.
+
+Rewrite the comment above `stop_engine_for_sign_out` (`@184:lib.rs:3159-3164`) so it no longer says no request can be served after the stop: "Then upload staging: every handed-over copy is removed. A request that arrives later reaches no daemon and fails transiently. One accept may still be running in `spawn_blocking`: the keep step closes accepts before it reads the queue, and reopens them if the sign-out stops (spec 2026-10-10 §5.2 step 6, §15 question 3)."
+
+- [ ] **Step 4: Run, expect PASS.** The seven filters: `ok. 1 passed` each; then filter `sign_out::keep::`: `ok. 13 passed`, and `sign_out_keep_tests`: Task 7's count plus 2.
+
+- [ ] **Step 5: Mutations, each RED then reverted.**
+  1. Remove the check in `accept_finder_write`: `a_finder_accept_after…` red (`Queued`).
+  2. Remove the reopen in `engine_start_repair`: `accepts_reopen…` red on the first `assert!`.
+  3. Make `close_finder_accepts` an in-memory flag that takes no SQLite lock (a `static CLOSED: AtomicBool` set and read instead of the key): `an_accept_already_running…` red, because the read runs before the running accept commits.
+  4. Move `close_finder_accepts()` below `WaitingChanges::read(` (into `keep_after_close`): `the_keep_step_closes_accepts_first…` red on the order.
+  5. Map `AcceptsClosed` to `IpcResponse::Error`: `a_closed_accept…` red.
+  6. Drop the reopen in `keep_unsent`: `the_keep_step_closes_accepts_first…` red on "a refused keep reopens accepts", and `a_cancelled_or_failed_sign_out…` red on "a failed keep".
+  7. Never arm the guard (`armed: false`): `a_cancelled_or_failed_sign_out…` red on "a refused purge".
+  8. Drop `reopen_finder_accepts_at_startup()` from `restore_session_on_startup`, or move it below `restore_session_inner(`: `accepts_reopen_when_the_app_starts` red.
+
+- [ ] **Step 6: The task gate** with `<N>` = 8 and `<L>` = `L0 + 60`.
+
+- [ ] **Step 7: Commit.**
+
+```bash
+cd $WT && git add -- src-tauri/src/state_db.rs src-tauri/src/engine_bridge.rs src-tauri/src/ipc_socket.rs src-tauri/src/sign_out/keep.rs src-tauri/src/lib.rs
+git commit -m "feat(macos): a sign-out closes Finder accepts before it reads what to keep, and reopens them when it stops (1887)" -- src-tauri/src/state_db.rs src-tauri/src/engine_bridge.rs src-tauri/src/ipc_socket.rs src-tauri/src/sign_out/keep.rs src-tauri/src/lib.rs
 ```
 
 ### Task 9: An interrupted sign-out, by a real process death (U42)
@@ -3938,7 +4067,7 @@ git commit -m "feat(macos): a sign-out asks before it purges, keeps what waits, 
 - Test: `src-tauri/src/lib.rs` `mod sign_out_keep_tests`
 
 **Interfaces:**
-- Consumes: `keep_unsent` (Task 5), `purge_local_state_files_with` and `purge_local_data_for_sign_out` (Task 6), `AskSnapshot::of` (Task 8), `kept_record::unfinished_at` (Task 4), `config::CONFIG_DIR_OVERRIDE`.
+- Consumes: `keep_unsent` (Task 5), `purge_local_state_files_with` and `purge_local_data_for_sign_out` (Task 6), `AskSnapshot::of` (Task 7), `kept_record::unfinished_at` (Task 4), `config::CONFIG_DIR_OVERRIDE`.
 - Produces: `sign_out::crash_point(point: &str)` (`#[cfg(test)]`): when `BB_TEST_CRASH_AT` equals `point`, it writes `reached:<point>` to the file `BB_TEST_CRASH_REACHED` names and calls `std::process::abort()`. Points: `AfterKeepSave`, `AfterFirstGroup`, `BetweenWaitingCopies`, `BeforeRowClear`.
 
 - [ ] **Step 1: Write the failing test** in `sign_out_keep_tests`:
@@ -4137,7 +4266,7 @@ In `keep_unsent`, right after the durable save succeeded: `#[cfg(test)] super::c
   3. `record_kept_unsent` replaces the list: (e) red on `[F1, F2]`.
   4. Never clear the list: (f) red.
 
-- [ ] **Step 6: The task gate** with `<N>` = 9 and `<L>` = `L0 + 60`.
+- [ ] **Step 6: The task gate** with `<N>` = 9 and `<L>` = `L0 + 61`.
 
 - [ ] **Step 7: Commit.**
 
@@ -4154,7 +4283,7 @@ git commit -m "test(macos): an interrupted sign-out still names its kept folder 
 - Test: `src-tauri/src/sign_out/copy.rs`, `src-tauri/src/sign_out/keep.rs`, `src-tauri/src/lib.rs` `mod sign_out_keep_tests`
 
 **Interfaces:**
-- Consumes: `KeptUnsent` (Task 8), `kept_record::{saved_kept_unsent_at, dismiss_saved_kept_unsent_at}` (Task 4), `finder_removal::{PRESERVED_FILES_TITLE, PRESERVED_FILES_SENTENCE, preserved_files_message, DismissOutcome}`, `save_kept_folder_for_row`, `emit_kept_folder_changed`, `tauri_plugin_opener::OpenerExt::reveal_item_in_dir`.
+- Consumes: `KeptUnsent` (Task 7), `kept_record::{saved_kept_unsent_at, dismiss_saved_kept_unsent_at}` (Task 4), `finder_removal::{PRESERVED_FILES_TITLE, PRESERVED_FILES_SENTENCE, preserved_files_message, DismissOutcome}`, `save_kept_folder_for_row`, `emit_kept_folder_changed`, `tauri_plugin_opener::OpenerExt::reveal_item_in_dir`.
 - Produces:
   - `copy.rs` constants (each mirrored in `src/signOutCopy.ts` by Task 16 under the same name): `P0_TITLE, P1_ONE, P1_MANY, P2_HINT, P3_STOP, A0_TITLE, A0S_TITLE, A1S_LINE, A2_ONE, A2_MANY, A2_COPY_IT, A2_COPY_THEM, A2_COPY_SOME, A2S_ONE, A2S_MANY, A2S_COPY_IT, A2S_COPY_THEM, A2S_COPY_SOME, A3_ONE_OF_ONE, A3_ONE_OF_MANY, A3_MANY, A3E_ONE, A3E_MANY, A4_ONE, A4_MANY, A4S_ONE, A4S_MANY, A5_OFFLINE, A5_SESSION, A5_PAUSED, A5_HELD, A5_ENGINE_STOPPED, A5_TIME_LIMIT, A5_ACCOUNT, ASK_CANCEL, ASK_SIGN_OUT, ASK_SWITCH, K0_TITLE, K1_ONE, K1_MANY, K2_ROW, K2_SHOW, K2_DISMISS, K3_TOAST` and the three E strings (Task 5).
   - Builders: `p1(n) -> Option<String>`, `a2(n, c, switch: bool) -> Option<String>`, `a3(n, k) -> Option<String>`, `a3e(folders: usize) -> Option<&'static str>`, `a4(m, either: bool, switch: bool) -> Option<String>`, `k1(n) -> Option<String>`, `sign_out_alert(ours: Option<(&str, usize)>, macos: Option<&str>) -> Option<(&'static str, String)>`.
@@ -4313,8 +4442,8 @@ pub const A5_PAUSED: &str = "Sync is paused.";
 pub const A5_HELD: &str = "These are on hold after earlier failures.";
 pub const A5_ENGINE_STOPPED: &str = "Sync stopped before everything was sent.";
 pub const A5_TIME_LIMIT: &str = "Sending took longer than a minute. Choose Cancel to let it finish, then sign out again.";
-/// Q2, option A (spec question 4); the lead rules on the wording.
-pub const A5_ACCOUNT: &str = "The server isn’t accepting uploads for this account until it has free space or an active plan.";
+/// Spec §15 question 4, lead ruling (2026-10-11): option A, this copy.
+pub const A5_ACCOUNT: &str = "Beebeeb can’t accept uploads for this account until it has free space or an active plan.";
 pub const ASK_CANCEL: &str = "Cancel";
 pub const ASK_SIGN_OUT: &str = "Sign out";
 pub const ASK_SWITCH: &str = "Sign out and switch";
@@ -4491,7 +4620,7 @@ Replace `surface_kept_folder(&app, sign_out_kept_folder(&result));` with `surfac
   7. `reveal_target` returns `Ok(path)` always: U26 red.
   8. Reveal with `std::process::Command::new("open").arg("-R")`: U31 red.
 
-- [ ] **Step 6: The task gate** with `<N>` = 10 and `<L>` = `L0 + 66`.
+- [ ] **Step 6: The task gate** with `<N>` = 10 and `<L>` = `L0 + 67`.
 
 - [ ] **Step 7: Commit.**
 
@@ -4502,7 +4631,7 @@ git commit -m "feat(macos): one alert names the kept folder and macOS's; the row
 
 ### Task 11: The send phase
 
-**Gated on Q2 for its `Account` end only.** Steps marked **Q2-A** are dropped under option B (spec question 4).
+**Lead ruling on Q2 (2026-10-11): option A, binding.** The `account` end, its signal and U46 are part of this task; the A5 line is Task 10's and Task 16's.
 
 **Files:**
 - Create: `src-tauri/src/sign_out/send_phase.rs` (pure: the end decision, the progress, the bound)
@@ -4514,9 +4643,9 @@ git commit -m "feat(macos): one alert names the kept folder and macOS's; the row
 - Test: `send_phase.rs`, `state_db.rs`, `engine_bridge.rs`, `runner.rs`, `lib.rs` `sign_out_keep_tests`
 
 **Interfaces:**
-- Consumes: `count_ask`, `read_waiting_changes` (Task 8), `SnapshotStore` (Task 8), `send_readiness`, `SendConditions`, `NotSending` (Task 1), `link_health::{LinkMonitor, classify_error}`, `is_curable_refusal`, `OperationFailureClass::Auth`.
+- Consumes: `count_ask`, `read_waiting_changes` (Task 7), `SnapshotStore` (Task 7), `send_readiness`, `SendConditions`, `NotSending` (Task 1), `link_health::{LinkMonitor, classify_error}`, `is_curable_refusal`, `OperationFailureClass::Auth`.
 - Produces:
-  - `send_phase::{SIGN_OUT_SEND_LIMIT, PhaseEnd, PhaseObservation, PhaseStep, SendPhase, phase_end, RunningPhase}`. `PhaseEnd` serializes snake_case: `all_sent`, `held`, `time_limit`, `stopped`, `closed`, `offline`, `session`, `engine_stopped`, `account` (Q2-A).
+  - `send_phase::{SIGN_OUT_SEND_LIMIT, PhaseEnd, PhaseObservation, PhaseStep, SendPhase, phase_end, RunningPhase}`. `PhaseEnd` serializes snake_case: `all_sent`, `held`, `time_limit`, `stopped`, `closed`, `offline`, `session`, `engine_stopped`, `account` (Q2 ruling).
   - `runner::{SendPhaseLink, AttemptSignals}`; `EngineRunner::send_phase(&self) -> Arc<SendPhaseLink>`; `SendPhaseLink::{arm, disarm, is_armed, wake, link_failed, signals, note}`; `runner::phase_step_due(armed: bool, paused: bool, last_run: Option<Instant>, now: Instant) -> bool`.
   - `TransferLoopOutcome.{link_failed, session_refused, account_refused}: bool`.
   - `StateDb::make_due_for_send_phase(&self, now: i64) -> rusqlite::Result<usize>`.
@@ -4561,7 +4690,7 @@ mod tests {
             (PhaseObservation { session_expired: true, ..base }, PhaseEnd::Session),
             (PhaseObservation { attempt: AttemptSignals { session_refused: true, ..Default::default() }, ..base }, PhaseEnd::Session),
             (PhaseObservation { engine_running: false, ..base }, PhaseEnd::EngineStopped),
-            // Q2-A
+            // Q2 ruling
             (PhaseObservation { attempt: AttemptSignals { account_refused: true, ..Default::default() }, ..base }, PhaseEnd::Account),
         ];
         for (observation, end) in cases {
@@ -4674,7 +4803,7 @@ In `engine_bridge.rs`'s tests (they reach the private `next_attempt_count` and t
         }
     }
 
-    /// U46 (Q2-A): one attempt that meets a refusal the account cures says so to the send phase.
+    /// U46 (Q2 ruling): one attempt that meets a refusal the account cures says so to the send phase.
     #[tokio::test]
     async fn a_refusal_the_account_cures_ends_the_send_phase() {
         let refusals = [quota_exceeded(), object_budget_exceeded(), billing_read_only(), account_lapsed(), plan_required(), trial_cancelled_read_only()];
@@ -4794,7 +4923,7 @@ pub enum PhaseEnd {
     Offline,
     Session,
     EngineStopped,
-    /// Q2, option A.
+    /// Spec §15 question 4, lead ruling: a refusal the account cures.
     Account,
 }
 
@@ -4926,7 +5055,7 @@ pub struct SendPhaseLink {
     signals: Mutex<AttemptSignals>,
 }
 
-/// What the phase's attempts met, since it was armed (§6.4: `offline`, `session`, Q2-A `account`).
+/// What the phase's attempts met, since it was armed (§6.4: `offline`, `session`, and, by the Q2 ruling, `account`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AttemptSignals {
     pub link_failed: bool,
@@ -4999,7 +5128,7 @@ pub(crate) fn phase_step_due(armed: bool, paused: bool, last_run: Option<Instant
 
 ```rust
     /// Spec 2026-10-10 §6.4: an attempt failed at the link level (`offline`), the server refused the session
-    /// (`session`), or, Q2-A, the account refused a Finder write it can cure (`account`).
+    /// (`session`), or, by the Q2 ruling, the account refused a Finder write it can cure (`account`).
     pub link_failed: bool,
     pub session_refused: bool,
     pub account_refused: bool,
@@ -5220,11 +5349,11 @@ async fn drive_send_phase(app: tauri::AppHandle, run: PhaseRun) {
   5. Reset `attempts` in the update (`attempts = 0`): U18 red.
   6. Call `sync_tick_outcome(` in the arm: U35 red.
   7. Drop the once-a-second limit (`phase_step_due` returns `armed && !paused`): U35 red (601 runs).
-  8. Q2-A: drop `outcome.account_refused |= …`: U46 red.
+  8. Drop `outcome.account_refused |= …`: U46 red.
   9. Let a second start register a second phase: U34 (f) red.
   10. Leave the link armed in `end_send_phase`: U34 (a) red.
 
-- [ ] **Step 6: The task gate** with `<N>` = 11 and `<L>` = `L0 + 76`.
+- [ ] **Step 6: The task gate** with `<N>` = 11 and `<L>` = `L0 + 77`.
 
 - [ ] **Step 7: Commit.**
 
@@ -5242,7 +5371,7 @@ git commit -m "feat(macos): send waiting changes first, for at most a minute, be
 - Test: `src-tauri/src/sign_out/flow_window.rs`, `src-tauri/src/lib.rs` `mod sign_out_keep_tests`
 
 **Interfaces:**
-- Consumes: `SignOutState.{snapshots, phase}` (Tasks 8, 11), `RunningPhase` (Task 11), `surfaces::policy::{close_policy, Platform}`, `surfaces::registry::ClosePolicy`, the menu's dialog calls (`@184:lib.rs:14006-14036`).
+- Consumes: `SignOutState.{snapshots, phase}` (Tasks 7, 11), `RunningPhase` (Task 11), `surfaces::policy::{close_policy, Platform}`, `surfaces::registry::ClosePolicy`, the menu's dialog calls (`@184:lib.rs:14006-14036`).
 - Produces:
   - `flow_window::{Shown, LateResults}`; `Shown::{Failure(String), Warning(String)}`; `LateResults::{begin(label), complete(label, Option<Shown>) -> Option<Shown>, window_closed(label) -> Option<Shown>, acknowledge(label) -> bool}`. A `Some` return means "show this now, in the native dialog".
   - `lib.rs`: `fn late_result_of(&Result<SignedOut, SignOutFailure>) -> Option<Shown>`; `struct FlowClosed { phase_closed: bool, snapshot_dropped: bool, show: Option<Shown> }`; `fn flow_window_closed(sign_out: &SignOutState, label: &str) -> FlowClosed`; `fn sign_out_flow_window_closed(app: &tauri::AppHandle, label: &str)`; command `sign_out_result_ack(window) -> Result<(), String>`; event `sign-out-flow-closed` (no payload) to the closed window.
@@ -5628,7 +5757,7 @@ On the builder, before `.on_window_event(`:
   8. End the phase `stopped` instead of `closed` (store into `phase.stop`): U34 (b) red.
   9. Drop the `cfg` from `sign_out_result_ack`: the macOS-only pin red.
 
-- [ ] **Step 6: The task gate** with `<N>` = 12 and `<L>` = `L0 + 81`.
+- [ ] **Step 6: The task gate** with `<N>` = 12 and `<L>` = `L0 + 82`.
 
 - [ ] **Step 7: Commit.**
 
@@ -5646,7 +5775,7 @@ git commit -m "feat(macos): closing Settings ends the sign-out flow, and a late 
 - Test: `src-tauri/src/lib.rs` `mod sign_out_keep_tests`
 
 **Interfaces:**
-- Consumes: `count_ask` (Task 8), `SnapshotStore::record` (Task 8), `show_macos_settings_window` (`@184:lib.rs:13029`), `AskCounts` (Task 8).
+- Consumes: `count_ask` (Task 7), `SnapshotStore::record` (Task 7), `show_macos_settings_window` (`@184:lib.rs:13029`), `AskCounts` (Task 7).
 - Produces:
   - `SignOutState.flow_request: std::sync::atomic::AtomicBool`.
   - Commands `request_sign_out_flow(app) -> Result<(), String>` (the compact page, entry point 2) and `consume_sign_out_flow_request(state) -> bool` (Settings, F9); event `menu:sign-out-flow` to `macos-settings`.
@@ -5810,7 +5939,7 @@ Every test call of `LoginOutcome::account_mismatch(n)` becomes `LoginOutcome::ac
   3. Handle `unsent_changes` as an error in the menu (delete the flow arm): U21 red.
   4. Store requests in a counter: U21 red on "not two".
 
-- [ ] **Step 6: The task gate** with `<N>` = 13 and `<L>` = `L0 + 84`.
+- [ ] **Step 6: The task gate** with `<N>` = 13 and `<L>` = `L0 + 85`.
 
 - [ ] **Step 7: Commit.**
 
@@ -5822,11 +5951,11 @@ git commit -m "feat(macos): the menu, the compact page and the account switch re
 ### Task 14: The R10 reset keeps before it purges
 
 **Files:**
-- Modify: `src-tauri/src/lib.rs`: `keep_for_sign_out` (Task 8) becomes `keep_in(db, acknowledge)` plus two callers; `StateDbLocalData` (`@184:lib.rs:5852-5857`) and its `reset` (`:5921-5934`); `bind_data_to_session` (`:5965-5985`); `spawn_bound_engine` (`:6229`); `SignOutState.reset_kept`
+- Modify: `src-tauri/src/lib.rs`: `keep_for_sign_out` (Task 7) becomes `keep_in(db, acknowledge)` plus two callers; `StateDbLocalData` (`@184:lib.rs:5852-5857`) and its `reset` (`:5921-5934`); `bind_data_to_session` (`:5965-5985`); `spawn_bound_engine` (`:6229`); `SignOutState.reset_kept`
 - Test: `src-tauri/src/lib.rs` `mod sign_out_keep_tests`
 
 **Interfaces:**
-- Consumes: `keep_unsent`, `Acknowledge::Everything` (Task 5); `purge_local_state_files_in(…, kept)` (Task 6); `sign_out_alert`, `KeptUnsent` (Tasks 8, 10).
+- Consumes: `keep_unsent`, `Acknowledge::Everything` (Task 5); `purge_local_state_files_in(…, kept)` (Task 6); `sign_out_alert`, `KeptUnsent` (Tasks 7, 10); `StateDb::reopen_finder_accepts` (Task 8).
 - Produces: `fn keep_in(db: &state_db::StateDb, acknowledge: Acknowledge<'_>) -> Result<KeptSet, String>` (macOS); `StateDbLocalData.kept: std::sync::Mutex<Option<KeptSet>>`; `SignOutState.reset_kept: std::sync::Mutex<Option<(String, usize)>>` (the folder and its file count; `sign_out/mod.rs` cannot name `lib.rs`'s `KeptUnsent`); `fn surface_reset_folder(app: &tauri::AppHandle, folder: &str, files: usize)`.
 
 - [ ] **Step 1: Write the failing test** in `sign_out_keep_tests`:
@@ -5855,7 +5984,9 @@ git commit -m "feat(macos): the menu, the compact page and the account switch re
             assert!(db.waiting_rows().unwrap().is_empty(), "then the purge ran, with the guard");
             let production = super::finder_setup_command_tests::production_source();
             let reset = super::finder_setup_command_tests::body_between(&production, "    fn reset(&self) -> Result<(), String> {", "\n    }\n");
-            assert!(reset.contains("purge_local_state_files_in(&self.db, self.sync_root.as_deref(), &self.staging_dirs, kept.as_ref())"), "the guard is in the reset's path: {reset}");
+            let squeezed = crate::source_pin::squeeze(reset);
+            let call = crate::source_pin::squeeze("purge_local_state_files_in(&self.db, self.sync_root.as_deref(), &self.staging_dirs, kept.as_ref())");
+            assert!(squeezed.contains(&call), "the guard is in the reset's path: {reset}");
             // A failing copy: the reset fails, nothing is deleted, no record.
             use std::os::unix::fs::PermissionsExt;
             DesktopConfig::update(|cfg| {
@@ -5870,6 +6001,7 @@ git commit -m "feat(macos): the menu, the compact page and the account switch re
             let failed = account_binding::LocalData::reset(&data);
             std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o600)).unwrap();
             assert!(failed.unwrap_err().starts_with("unsent_copy_failed: "));
+            assert!(!db.finder_accepts_closed().unwrap(), "a reset that stops reopens Finder accepts (Q1 ruling)");
             assert_eq!(db.waiting_rows().unwrap().len(), 1, "nothing deleted");
             assert_eq!(DesktopConfig::load().unwrap().kept_unsent_folder, None, "no record");
             reset_scratch(&db);
@@ -5882,7 +6014,7 @@ git commit -m "feat(macos): the menu, the compact page and the account switch re
 
 - [ ] **Step 2: Run it, expect FAIL.** Filter `the_r10_reset_keeps`. Expected: compile error (`data.kept`), then the folder assertion.
 
-- [ ] **Step 3: Implement.** Split Task 8's `keep_for_sign_out`:
+- [ ] **Step 3: Implement.** Split Task 7's `keep_for_sign_out`:
 
 ```rust
 /// The keep step on `db` (§5.2 step 7, W12): the kept root, the config, the clone and the durable save are the app's.
@@ -5914,7 +6046,21 @@ fn keep_in(db: &state_db::StateDb, acknowledge: sign_out::keep::Acknowledge<'_>)
         let kept = Some(keep_in(&self.db, sign_out::keep::Acknowledge::Everything)?);
         #[cfg(not(target_os = "macos"))]
         let kept: Option<sign_out::kept_set::KeptSet> = None;
-        let summary = purge_local_state_files_in(&self.db, self.sync_root.as_deref(), &self.staging_dirs, kept.as_ref())?;
+        // Lead ruling on Q1: a reset that stops without purging reopens Finder accepts at once (the keep step already
+        // reopens them on its own failure).
+        let reopen = || {
+            #[cfg(target_os = "macos")]
+            if let Err(error) = self.db.reopen_finder_accepts() {
+                tracing::warn!(%error, "could not reopen Finder accepts; the next engine start reopens them");
+            }
+        };
+        let summary = match purge_local_state_files_in(&self.db, self.sync_root.as_deref(), &self.staging_dirs, kept.as_ref()) {
+            Ok(summary) => summary,
+            Err(error) => {
+                reopen();
+                return Err(error);
+            }
+        };
         tracing::info!(
             queued_ops_purged = summary.queued_ops_purged,
             files_removed = summary.files_removed,
@@ -5927,9 +6073,10 @@ fn keep_in(db: &state_db::StateDb, acknowledge: sign_out::keep::Acknowledge<'_>)
             tracing::warn!(error = %error, "could not clear the unfinished sign-out marker");
         }
         *self.kept.lock().unwrap_or_else(|p| p.into_inner()) = kept;
-        self.db
-            .clear_account_data(cfg!(target_os = "macos"))
-            .map_err(|e| format!("clear the local data: {e}"))
+        self.db.clear_account_data(cfg!(target_os = "macos")).map_err(|e| {
+            reopen();
+            format!("clear the local data: {e}")
+        })
     }
 ```
 
@@ -5962,7 +6109,7 @@ fn surface_reset_folder(app: &tauri::AppHandle, folder: &str, files: usize) {
   2. Purge without passing the `KeptSet` (`purge_local_state_files_in(…, None)`): U20 red on "the guard is in the reset's path" (with a full keep the guard has nothing to refuse, so behaviour alone cannot show it).
   3. Ignore the copy failure (`unwrap_or_default()` on `keep_in`): U20 red on "nothing deleted".
 
-- [ ] **Step 6: The task gate** with `<N>` = 14 and `<L>` = `L0 + 85`.
+- [ ] **Step 6: The task gate** with `<N>` = 14 and `<L>` = `L0 + 86`.
 
 - [ ] **Step 7: Commit.**
 
@@ -5999,7 +6146,7 @@ Spec §11 "The design changes first": this commit lands before any frontend code
   3. **Ask, a missing copy and an earlier folder:** “1 file you changed in Finder hasn’t reached the server.” / “Beebeeb’s copy of a change to that file is missing, so that change can’t be kept.” / “A sign-out that didn’t finish copied changes to this folder, so a change listed as missing may be there:” then a `p.sheet-copy` in mono with `/Users/sam/Library/Containers/io.beebeeb.app/Data/Documents/Changes not sent/2026-10-10 at 14.05.12`.
   4. **The alert, two folders:** a plain box titled “Files kept on this Mac” with “Beebeeb copied 2 files with changes that hadn’t reached the server to this folder on this Mac:”, the path, a blank line, “Files that hadn’t reached your vault yet were kept on this Mac, in this folder:”, macOS's path. Caption: “Drawn by macOS, not a Beebeeb window; ours first.”
 
-  In section 4 (the switch step), replace the “changes waiting” card's copy in both variants (the onboarding Card at `:314` and the modal at `:319`): title “Switch accounts with changes not sent?”, then “This Mac is signed in to another Beebeeb account. Switching signs that account out of this Mac.”, then “1 file changed in Finder while that account was signed in hasn’t reached the server. Before switching, Beebeeb copies it to a folder on this Mac and shows you where.”, then “1 other change (a rename, move, deletion, new folder or restore) hasn’t reached the server either. Switching drops it, and that item stays as it is on the server.” Update both captions so neither says “removes it” or “removes them”, and add “amended 11 Oct 2026 (task 1887)” to the section's comment line at `:147`. The “nothing waiting” variants stay as they are. In the copy table, add rows for the send phase, the ask and the alert with the strings above.
+  In section 4 (the switch step), replace the “changes waiting” card's copy in both variants (the onboarding Card at `:314` and the modal at `:319`): title “Switch accounts with changes not sent?”, then “This Mac is signed in to another Beebeeb account. Switching signs that account out of this Mac.”, then “1 file changed in Finder while that account was signed in hasn’t reached the server. Before switching, Beebeeb copies it to a folder on this Mac and shows you where.”, then “1 other change (a rename, move, deletion, new folder or restore) hasn’t reached the server either. Switching drops it, and that item stays as it is on the server.” Update both captions so neither says “removes it” or “removes them”, and add “amended 11 Oct 2026 (task 1887)” to the section's comment line at `:147`. The “nothing waiting” variants stay as they are. In the copy table, add rows for the send phase, the ask (with its seven A5 lines from spec §11, `account` included: “Beebeeb can’t accept uploads for this account until it has free space or an active plan.”) and the alert, with the strings above.
 
 - [ ] **Step 3: Amend spec A** at `docs/specs/2026-10-06-macos-finder-setup-reconciler.md:80`: after “an account switch: the pending-edits warning first, then a full sign-out (**absent**, queue and cache purged), then a fresh sign-in (**present**)”, add “On macOS the warning is the ask of spec 2026-10-10 (A0s-A4s), and the sign-out keeps every waiting Finder save in a kept folder before the queue is purged; “queue and cache purged” stays true for what remains. — lead, 2026-10-11 (1887)”.
 
@@ -7101,11 +7248,11 @@ git commit -m "feat(macos): Settings › Sync shows the kept folder, with Show i
 ### Task 20: Docs that change with the code, and the branch gate
 
 **Files:**
-- Modify: `docs/specs/2026-10-10-macos-sign-out-waiting-writes.md` (where the plan tests differently from §13, below; and the Q1/Q2 rulings as given)
+- Modify: `docs/specs/2026-10-10-macos-sign-out-waiting-writes.md` (where the plan tests differently from §13, below)
 - Modify: `docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md:137` (1882 §3)
 - Modify: `docs/specs/2026-10-09-macos-finder-write-versions.md:373` (§5.4 row 15) and `:1141` (§10.5)
 - Modify: `CLAUDE.md` ("Current macOS integration state")
-- Modify: `docs/IPC_PROTOCOL.md:767` (the `accepts_closed` reason; under Q1 option A only)
+- Modify: `docs/IPC_PROTOCOL.md:767` (the `accepts_closed` reason)
 - Workspace (lead): `.claude/tasks/in-development/1887-…md` Notes, "For the release notes"
 
 **Interfaces:** none.
@@ -7115,7 +7262,7 @@ git commit -m "feat(macos): Settings › Sync shows the kept folder, with Show i
   - U35: "counted through test hooks" becomes the third arm's pure gate (`phase_step_due`, at most 61 runs in 60 s) plus a source pin on the arm's body. The runner loop needs a live engine; D7 and D10 drive the arm on a device.
   - U34 (a)-(h) run on `flow_window_closed` and `SendPhase`, the pure flow state, as the spec allows ("On the pure flow state").
   - The send phase's "Checked at least once a second, and on every landing" is checked once a second; a landing shows in the next second's count.
-  - Q1 and Q2: the lead's answers, verbatim, with their rulings' names; under Q1 option B, W1 gains the sentence of §15 question 3, option B; under Q2 option B, A5 `time_limit`'s second sentence is the ruled one.
+  - The Q1 and Q2 rulings are already in the spec (§15, signed 2026-10-11); nothing more to add for them.
 
 - [ ] **Step 2: The other docs (spec §14).**
   - 1882 §3, under "A limit this fix does not change (sign-out only).": "Closed by `docs/specs/2026-10-10-macos-sign-out-waiting-writes.md` (task 1887): a sign-out by choice now copies every queued Finder save into its own kept folder before the queue is purged, and asks first. — lead, <date> (1887)".
@@ -7133,7 +7280,7 @@ cd $G/src-tauri && cargo fmt --check > $EVID/t20-fmt.log 2>&1; echo "fmt rc=$?"
 $LOCK cargo-build -- cargo check --locked --all-targets > $EVID/t20-check.log 2>&1; echo "check rc=$?"
 $LOCK cargo-build -- cargo test --locked > $EVID/t20-cargo-test.log 2>&1; echo $? > $EVID/t20-cargo-test.exit
 python3 ../scripts/assert-cargo-test-counts.py --self-test; python3 ../scripts/assert-cargo-test-counts.py $EVID/t20-cargo-test.log --cargo-exit-code "$(cat $EVID/t20-cargo-test.exit)"
-grep "test result:" $EVID/t20-cargo-test.log      # lib: ok. L0 + 85 passed; 0 failed; I0 ignored; keychain, wsw, wsc at baseline
+grep "test result:" $EVID/t20-cargo-test.log      # lib: ok. L0 + 86 passed; 0 failed; I0 ignored; keychain, wsw, wsc at baseline
 $LOCK cargo-build -- cargo clippy --locked --all-targets > $EVID/t20-clippy.log 2>&1; grep -c "^warning" $EVID/t20-clippy.log   # ≤ C0
 cd $G && bun install --frozen-lockfile > /dev/null && bun test > $EVID/t20-bun.log 2>&1; grep -E "^ *[0-9]+ (pass|fail)" $EVID/t20-bun.log   # B0 + 21 pass, 0 fail
 bunx tsc --noEmit -p . > $EVID/t20-tsc.log 2>&1; echo "tsc rc=$?"
@@ -7142,7 +7289,7 @@ bash scripts/test-ipc-framing.sh > $EVID/t20-swift.log 2>&1; tail -1 $EVID/t20-s
 git diff --stat 184ac962 -- src-tauri/Cargo.lock bun.lock BeebeebFileProvider   # empty
 ```
 
-  Every number goes into the task file's Notes. Under Q1 option B, the lib count is `L0 + 80` (Task 7's five tests are not there); under Q2 option B, `L0 + 84` (U46 is not there); under both, `L0 + 79`.
+  Every number goes into the task file's Notes.
 
 - [ ] **Step 4: The other platforms (U32's other half).** The lead pushes the branch and opens the pull request. The public CI's `rust-linux` job and the Windows leg of `rust-check` run `cargo test --locked` there. Evidence: each job's log with `sign_out_unchanged_elsewhere_tests::the_unsent_gate_is_macos_only` and its binary's `test result:` line, as checked by `scripts/assert-cargo-test-counts.py`. If CI cannot run, the Linux half runs on the Linux build host (workspace memory: the Legion host) and the Windows half stays open, named.
 
@@ -7159,7 +7306,7 @@ git commit -m "docs: a sign-out keeps waiting Finder saves; the specs and the re
 
 **Lead only, on the lead's Mac, by the lead.** No lane runs, quits or drives the app, Finder, System Settings, CloudStorage or the containers. Everything runs against the local API with test accounts, under a macOS user account used only for QA (spec §13.4, review M6). Nothing touches production. The steps, their setup and their pass lines are the spec's §13.4, D1-D11 and D10b; this task is the order and the recipe. Evidence goes to `$EVID` as `D*-…`.
 
-**Gate:** Task 20's branch gate passed, and the lead has answered Q1 and Q2.
+**Gate:** Task 20's branch gate passed.
 
 - [ ] **Step 1: Build the signed QA app from the gate tree** (1873's recipe, `docs/superpowers/plans/2026-10-10-macos-finder-write-versions.md`, Task 13 step 2):
 
@@ -7179,7 +7326,7 @@ codesign -d --entitlements - "$APPQA" 2>&1 | grep -c app-sandbox          # 1
 
 - [ ] **Step 2: Setup (spec §13.4 "Setup"),** under the QA-only macOS user: the local API started by the lead with its PID recorded (`cd …/repos/server && cargo run -p beebeeb-api --bin beebeeb-api`, then `curl -sf localhost:3001/health`); `ls -la ~/Library/Containers/io.beebeeb.app/Data/` and the Keychain's Beebeeb items recorded (test accounts only); each test file made with `head -c 1048576 /dev/urandom` and its `shasum -a 256` recorded first; the app launched from Terminal for each D step with `NO_COLOR=1 BB_API_BASE=http://localhost:3001 "$APPQA/Contents/MacOS/<executable>" > $EVID/<step>-app-stdout.log 2>&1` (D7 and D10 use `:3002`); `lsof -a -i -p <the app's pid>` before D1, D7, D8, D10 and D10b shows only the local API or the proxy.
 
-- [ ] **Step 3: Run D1-D6, D8, D9, D10b and D11** exactly as §13.4 states each, and capture each pass line's evidence: screenshots, `grep` of the stdout file for `sign-out flow counted`, `sign-out send phase ended`, `kept unsent changes` and `kept folder reveal requested`, `ls -la` of each kept folder, every `shasum -a 256`. D2 also records the two answers about macOS's folder (§13.4, amended): a queued save that is not parked, and a parked one (park it first with a stale-base save: change the file on the web, then save it in Finder before the change reaches this Mac). Under Q2 option A, D2 has no account case; an account refusal is U46's. D11 records the held folder and the held save under `key_replaced` (§13.4, D11).
+- [ ] **Step 3: Run D1-D6, D8, D9, D10b and D11** exactly as §13.4 states each, and capture each pass line's evidence: screenshots, `grep` of the stdout file for `sign-out flow counted`, `sign-out send phase ended`, `kept unsent changes` and `kept folder reveal requested`, `ls -la` of each kept folder, every `shasum -a 256`. D2 also records the two answers about macOS's folder (§13.4, amended): a queued save that is not parked, and a parked one (park it first with a stale-base save: change the file on the web, then save it in Finder before the change reaches this Mac). D2 has no account case: an account refusal is U46's (the Q2 ruling), and no device step drives one. D11 records the held folder and the held save under `key_replaced` (§13.4, D11).
 
 - [ ] **Step 4: Run D7 and D10** with the throttling proxy on `127.0.0.1:3002` (a scratch script in the lead's scratch directory, never committed, run without sudo, its PID recorded and stopped with `kill <pid>`). The chunk bound and the rate are recorded. If no proxy setup meets D7's bound, D7 and D10 stay open, named, and the lead records a ruling on U16 in the task file (§13.4).
 
@@ -7226,4 +7373,4 @@ git commit -m "chore: a sign-out keeps waiting Finder saves; remove the release 
 
 ## Execution
 
-**Recommended: subagent-driven, one Rust lane then one TypeScript lane** (at most two at once, workspace rule). The Rust tasks consume each other's names (`WaitingChanges` → `KeptSet` → the purge's `kept` → the gate → the phase), so a fresh reviewer per task catches a drifted signature before the next task builds on it, and a mistake that ships here deletes a person's file. Tasks 7 and 11 wait for the lead's answers to Q1 and Q2; every other task can start now. Task 15 is reviewed by the lead before Task 16 starts. Tasks 21 and 22 are the lead's.
+**Recommended: subagent-driven, one Rust lane then one TypeScript lane** (at most two at once, workspace rule). The Rust tasks consume each other's names (`WaitingChanges` → `KeptSet` → the purge's `kept` → the gate → the phase), so a fresh reviewer per task catches a drifted signature before the next task builds on it, and a mistake that ships here deletes a person's file. Both design questions are ruled, so every task can start in order (Task 8 after Task 7). Task 15 is reviewed by the lead before Task 16 starts. Tasks 21 and 22 are the lead's.
