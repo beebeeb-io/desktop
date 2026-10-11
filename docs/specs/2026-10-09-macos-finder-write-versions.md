@@ -132,7 +132,7 @@ The plan's tasks 1–11 are implemented. Their reviews found places where this t
 | Who sets `Error` on a Finder write's row; a trashed item stays in the trash through an attempt and a landing; a hydrate leaves a parked write's row alone | §9.2 |
 | A staging folder that never becomes usable | §8.4 |
 | The log lines as built | §11 |
-| The Swift harness counts 97 | §13 |
+| The Swift harness counts ~~97~~ 101, with the four `ExtensionLog` checks — lead, 2026-10-11 (device fix round) | §13 |
 
 ## 1. Why
 
@@ -1090,7 +1090,8 @@ Every line is a `warn!`, except the hydrate count (`info!`), with ids and fixed 
 | (4b) A guarded queue write matched no row (§8.7 S2, S4) | `queue state moved` | `op_id`, `step` (`resume`, `completion`, `landing`, `park`, `attempt`, `pause`, ~~`accept`~~). (4d) The accept never logs it: its one transaction reads and writes together, and a row gone by then is refused as `unknown_item` — lead, 2026-10-11 (Task 12) |
 | (4b) Completed on the server, local landing failed (§8.6 rule 6) | `upload completed on the server; local landing will be retried` | `op_id`, `file_id`, `attempt` |
 | Every hydrate over the socket (`info!`, the one line that is not a warning: it is the device plan's count of fetches) | `Finder hydrate served` | `file_id`, `source` (`queue`, `server`)~~, and in 4b `pinned` (`true` when the request named `object_version_id`, §7.2)~~ (pinning is split off, §12 — lead ruling, 2026-10-10 (spec r4b)). (4d) `file_id` is the request's, by M5 — lead, 2026-10-11 (Task 12) |
-| (4b) Extension: write options that are not empty (§8.8, m-16) | `BeebeebFileProvider: write options` (`NSLog`, Default level) | `call` (`create`, `modify`), `options` (the raw bitmask), item id |
+| ~~(4b) Extension: write options that are not empty (§8.8, m-16)~~ | ~~`BeebeebFileProvider: write options` (`NSLog`, Default level)~~ | ~~`call` (`create`, `modify`), `options` (the raw bitmask), item id~~ |
+| Extension: write options that are not empty (§8.8, m-16) | `BeebeebFileProvider: write options`, through the extension's one `os.Logger` (subsystem `io.beebeeb.app.FileProvider`, the extension's bundle id; category `extension`) at `.notice`, so a plain `log show` lists it. `NSLog` is not used: on macOS 26 every `NSLog` line of the extension reached the unified log as `<private>`, so the device run's log check (§14, D9) could not read one | `call=` (`create`, `modify`) and `options=` (the raw bitmask), both public; `item=<id>`, public, only when the id parses as a UUID, else no id and `id_kind=non_uuid` (M5). The message text is unchanged, so a predicate on `BeebeebFileProvider: write options` still matches — lead, 2026-10-11 (device fix round) |
 | (4d) A hydrate over the socket that failed | `Finder hydrate failed` (existing) | `file_id` (by M5), `reason`, which gains `queued_copy_missing`: a still-queued write whose staged copy is gone, answered with an error and no server request (§7.4) — lead, 2026-10-11 (Task 12) |
 | (4d) A presentation read that failed (the item is then built from its contract alone, as round 3 did) | `item presented from its contract alone` | `file_id`, `category="presentation_read_failed"`, `kind` (the error's category), `held_back` (how many such failures of this item and kind were not logged since the last line). At most one line per item and kind per 10 minutes; at most 1024 items are tracked; a clean read of the item ends its interval, so an item that alternates fails and clean reads logs every failure — lead, 2026-10-11 (Task 12) |
 | (4d) A restore the server made whose local record failed (§5.4 row 10) | `restore done on the server; its local record failed, a snapshot will repair it` | `file_id`, `category="restore_bookkeeping_failed"`; if the snapshot request also fails, a second line `restore done on the server; a snapshot could not be requested` with `category="resnapshot_request_failed"` — lead, 2026-10-11 (Task 12) |
@@ -1100,6 +1101,8 @@ Every line is a `warn!`, except the hydrate count (`info!`), with ids and fixed 
 | (4d) Lines that already existed and gain M5 | `IPC client went away while flushing the terminal hydrate progress frames`, `IPC client went away mid-hydrate; hydration cancelled` (both `info!`), `finder delete: unknown item — idempotent success` (`info!`) | `file_id` by M5 (a UUID, else `id_kind="non_uuid"`) — lead, 2026-10-11 (Task 12) |
 
 (4d) **Support bundles.** A staged copy that exists but cannot be read (permission, I/O, not a regular file) retries with the fixed text `staged upload payload could not be read`, and the diagnostics bundle files it under its own code, `payload_unreadable`, apart from `payload_missing`. Neither text carries the path: `classify_operation_error` matches bare substrings such as `403`, so a path could pause the op. Rows written by older builds keep `staged upload payload is missing: <path>`, which still classifies as `payload_missing`. — lead, 2026-10-11 (Task 12)
+
+**The extension's lines.** Every line the File Provider extension writes goes through its one `os.Logger` (`BeebeebFileProvider/ExtensionLog.swift`, the subsystem and category of the write-options row above), never `NSLog`. Informational lines are `.notice` and failures `.error`, so a plain `log show` lists both. Only closed values are public: a fixed word, a bitmask, an id that parses as a UUID (M5), the first 12 hex digits of a write's `request_id`, the App Group id, and an error's `NSError` domain and code. A value that can carry a path, a file name or an error's text is never logged: an error is logged by its domain and code, never by its message or description. A source pin (`extension_log_pin`) fails on any other log call in the extension and on a public value outside that set — lead, 2026-10-11 (device fix round)
 
 **M5.** A line that logs an id taken from the wire logs it only when it parses as a UUID. Otherwise it logs `id_kind="non_uuid"`.
 - (4d) That is: a UUID is logged in its own field (`file_id`, `provisional_id` or `id`) and no `id_kind`; any other id logs no id and `id_kind="non_uuid"`. — lead, 2026-10-11 (Task 12)
@@ -1156,6 +1159,7 @@ Every test is seen RED before it passes, and its mutation is seen RED on the int
 
 **Swift style:** `check(…)` in `BeebeebFileProviderTests/main.swift`. `EXPECTED_TESTS` goes from 94 to ~~95~~ 96 (`scripts/test-ipc-framing.sh:20`): T20 and T44. — lead ruling, 2026-10-10 (spec review)
   `EXPECTED_TESTS` goes from 94 to ~~96~~ 97: T20, T44, and the `WriteRetryLater` decode check (§8.4, the staging folder), which lands first and takes the count to 95. — lead ruling, 2026-10-10 ([t6b-q])
+  ~~97~~ 101: four checks of what each extension log line is built from (§11, the extension's lines). — lead, 2026-10-11 (device fix round)
 
 **Concurrency tests (4b, §8.7).** Each one forces its interleaving deterministically with a test-only hook, a `#[cfg(test)]` callback in `EngineBridge` at a named seam:
 - `accept:before_tx`: the accept path, just before its one `StateDb` call;
@@ -1251,7 +1255,7 @@ How a seam is used:
 **Gates:**
 - whole-crate `cargo test --locked` with the per-binary truth lines and the count guard;
 - `cargo clippy --locked --all-targets`: no new warnings against 146;
-- Swift harness ~~`95 passed, 0 failed (expected 95)`~~ ~~`96 passed, 0 failed (expected 96)`~~ `97 passed, 0 failed (expected 97)`, plus its self-test — lead ruling, 2026-10-10 (spec review); (4d) 97 with the `WriteRetryLater` decode check, as the count line above says — lead, 2026-10-11 (Task 12);
+- Swift harness ~~`95 passed, 0 failed (expected 95)`~~ ~~`96 passed, 0 failed (expected 96)`~~ ~~`97 passed, 0 failed (expected 97)`~~ `101 passed, 0 failed (expected 101)`, plus its self-test — lead ruling, 2026-10-10 (spec review); (4d) 97 with the `WriteRetryLater` decode check, as the count line above says — lead, 2026-10-11 (Task 12); 101 with the four `ExtensionLog` checks — lead, 2026-10-11 (device fix round);
 - the extension build, as CI does it;
 - `check-ipc-timeouts.py` and its self-test.
 

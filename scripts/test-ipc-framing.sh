@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-EXPECTED_TESTS=97
+EXPECTED_TESTS=101
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -94,6 +94,9 @@ LOG="$OUT_DIR/run.log"
 # App Group state) and FileProviderExtension.swift + XPCBridge.swift (the
 # enumerator's paging/anchor/change-filter decisions) join too, all pure
 # Foundation/Darwin at heart.
+#
+# ExtensionLog.swift (the extension's one logger, os.Logger) joins too: the
+# tests check what each line is built from.
 
 xcrun swiftc \
   -o "$BIN" \
@@ -103,6 +106,7 @@ xcrun swiftc \
   BeebeebFileProvider/XPCBridge.swift \
   BeebeebFileProvider/FileProviderExtension.swift \
   BeebeebFileProvider/UploadStaging.swift \
+  BeebeebFileProvider/ExtensionLog.swift \
   BeebeebFileProviderTests/main.swift
 
 code=0

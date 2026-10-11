@@ -1860,5 +1860,90 @@ check("WriteRetryLater decodes to the transient uploadStagingFailed, never canno
     }
 }
 
+// MARK: - ExtensionLog: what each line logs (spec 2026-10-09 §11)
+
+// The unified log shows a value only when the line marks it public, so a line must be built
+// from closed values. These tests check what each line is built from; `extension_log_pin` in
+// src-tauri checks the source (no other log call, no public value outside the closed set).
+
+check("the write-options line carries the call, the raw bitmask and a UUID item id") {
+    let uuid = "4f1c2a9e-0d3b-4c5e-9a7f-1b2c3d4e5f60"
+    try expect(
+        ExtensionLog.writeOptionsLine(call: .modify, options: 0x5, item: uuid)
+            == ExtensionLog.WriteOptionsLine(call: "modify", options: 5, item: uuid),
+        "modify, 5, the UUID"
+    )
+    try expect(
+        ExtensionLog.writeOptionsLine(call: .create, options: 1, item: uuid.uppercased()).call == "create",
+        "create"
+    )
+    // The line itself, through the real logger: it must not trap.
+    ExtensionLog.writeOptions(call: .modify, options: 5, item: uuid)
+    ExtensionLog.writeOptions(call: .create, options: 1, item: "a file name.txt")
+}
+
+check("the write-options line logs no id that is not a UUID (rule M5)") {
+    for raw in [
+        NSFileProviderItemIdentifier.rootContainer.rawValue,
+        "/Users/someone/Documents/notes.txt",
+        "notes.txt",
+        "",
+        "4f1c2a9e0d3b4c5e9a7f1b2c3d4e5f60",
+    ] {
+        let line = ExtensionLog.writeOptionsLine(call: .create, options: 2, item: raw)
+        try expect(line.item == nil, "\(raw) is logged as non_uuid, got \(String(describing: line.item))")
+        try expect(line.call == "create" && line.options == 2, "call and options are kept: \(line)")
+    }
+}
+
+check("the request_id line logs 12 hex digits of the key, and nothing that is not hex") {
+    let key = String(repeating: "0123456789abcdef", count: 4)
+    try expect(ExtensionLog.requestIDPrefix(key) == "0123456789ab", "the first 12 hex digits")
+    for raw in ["notes.txt and more", "0123456789a", "/Users/someone/x", "0123456789aZ"] {
+        try expect(ExtensionLog.requestIDPrefix(raw) == nil, "\(raw) is not logged")
+    }
+}
+
+check("an error is logged by its domain and code; a staging cause only in the closed shape") {
+    let copyFailure = NSError(
+        domain: NSCocoaErrorDomain,
+        code: 640,
+        userInfo: [
+            NSFilePathErrorKey: "/Users/someone/Documents/secret plans.txt",
+            NSLocalizedDescriptionKey: "“secret plans.txt” couldn’t be copied because there isn’t enough space.",
+        ]
+    )
+    try expect(
+        ExtensionLog.errorFields(copyFailure) == ExtensionLog.ErrorFields(domain: NSCocoaErrorDomain, code: 640),
+        "domain and code only"
+    )
+    let staged = BeebeebIPCError.uploadStagingFailed(UploadStaging.reason(copyFailure))
+    try expect(
+        ExtensionLog.stagingCause(staged) == "NSCocoaErrorDomain 640",
+        "the copy failure's domain and code, as UploadStaging writes them: \(String(describing: ExtensionLog.stagingCause(staged)))"
+    )
+    try expect(
+        ExtensionLog.errorFields(staged)
+            == ExtensionLog.ErrorFields(
+                domain: NSFileProviderErrorDomain, code: NSFileProviderError.serverUnreachable.rawValue
+            ),
+        "the bridged error's own domain and code"
+    )
+    for error: Error in [
+        BeebeebIPCError.uploadStagingFailed("App Group container unavailable"),
+        BeebeebIPCError.uploadStagingFailed("the staging folder is unavailable: /Users/someone/x"),
+        BeebeebIPCError.uploadStagingFailed("NSCocoaErrorDomain 640 /Users/someone/x"),
+        BeebeebIPCError.uploadStagingFailed("a/b 640"),
+        BeebeebIPCError.daemonRejected("NSCocoaErrorDomain 640"),
+        copyFailure,
+    ] {
+        try expect(ExtensionLog.stagingCause(error) == nil, "no cause is logged for \(error)")
+    }
+    // The lines themselves, through the real logger: they must not trap.
+    ExtensionLog.uploadStagingFailed(staged)
+    ExtensionLog.hydrateCacheDirFailed(copyFailure)
+    ExtensionLog.signalErrorResolvedFailed(copyFailure)
+}
+
 print("ipc-framing: \(passed) passed, \(failed) failed")
 exit(failed == 0 ? 0 : 1)

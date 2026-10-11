@@ -102,6 +102,9 @@ mod test_sandbox;
 // Layout-independent comparison of source text, for the tests that pin the code by reading it.
 #[cfg(test)]
 mod source_pin;
+// The File Provider extension logs through its one logger and makes only closed values public.
+#[cfg(test)]
+mod extension_log_pin;
 // Sync-root filesystem watcher — the local-create UPLOAD trigger (task 0780).
 // Primarily for Windows, where there is no OS extension / IPC socket to fire
 // `QueueFinderCreate`; the macOS File Provider extension drives that over the

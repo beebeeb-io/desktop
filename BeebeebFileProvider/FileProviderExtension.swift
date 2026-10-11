@@ -35,7 +35,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         }
         NSFileProviderManager(for: domain)?.signalErrorResolved(pending) { error in
             if let error {
-                NSLog("BeebeebFileProvider: signalErrorResolved failed: \(error)")
+                ExtensionLog.signalErrorResolvedFailed(error)
             }
         }
     }
@@ -459,8 +459,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     ) -> Progress {
         if options.rawValue != 0 {
             // Spec §8.8 (m-16): recorded for D9; the write is handled as usual.
-            NSLog("BeebeebFileProvider: write options call=%@ options=%lu item=%@",
-                  "create", UInt(options.rawValue), itemTemplate.itemIdentifier.rawValue)
+            ExtensionLog.writeOptions(
+                call: .create, options: UInt(options.rawValue), item: itemTemplate.itemIdentifier.rawValue
+            )
         }
         let progress = Progress(totalUnitCount: 1)
         do {
@@ -517,8 +518,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     ) -> Progress {
         if options.rawValue != 0 {
             // Spec §8.8 (m-16): recorded for D9; the write is handled as usual.
-            NSLog("BeebeebFileProvider: write options call=%@ options=%lu item=%@",
-                  "modify", UInt(options.rawValue), item.itemIdentifier.rawValue)
+            ExtensionLog.writeOptions(
+                call: .modify, options: UInt(options.rawValue), item: item.itemIdentifier.rawValue
+            )
         }
         let progress = Progress(totalUnitCount: 1)
         do {
@@ -1001,7 +1003,7 @@ extension FileProviderExtension {
 // slow or hung one stalls the system's pending-set bookkeeping.
 extension FileProviderExtension {
     func pendingItemsDidChange(completionHandler: @escaping () -> Void) {
-        NSLog("BeebeebFileProvider: pendingItemsDidChange (the system's pending set refreshed)")
+        ExtensionLog.pendingItemsDidChange()
         completionHandler()
     }
 }

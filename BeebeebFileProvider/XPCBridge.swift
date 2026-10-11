@@ -127,7 +127,7 @@ final class XPCBridge {
     /// `crate::ipc_socket::MACOS_APP_GROUP_ID` on the Rust side (task 1524);
     /// keep both, plus the two entitlements plists, in sync if it ever
     /// changes.
-    private static let appGroupID = "R8352WDJJR.io.beebeeb.app.fileprovider"
+    static let appGroupID = "R8352WDJJR.io.beebeeb.app.fileprovider"
 
     /// Deliberately short — `sockaddr_un.sun_path` on macOS is 104 bytes
     /// including the NUL terminator, and the group-container prefix alone
@@ -163,7 +163,7 @@ final class XPCBridge {
             // means every IPC call below just fails closed with
             // `.daemonUnavailable`, which is the same failure shape as a
             // genuinely-not-running daemon, and is visible via this log.
-            NSLog("BeebeebFileProvider: could not resolve app-group container for \(Self.appGroupID); IPC will not reach the daemon")
+            ExtensionLog.appGroupContainerUnresolved()
             let runtimeDir = ProcessInfo.processInfo.environment["XDG_RUNTIME_DIR"] ?? "/tmp"
             self.socketPath = "\(runtimeDir)/beebeeb-daemon.sock"
         }
@@ -269,7 +269,7 @@ final class XPCBridge {
                 attributes: [.posixPermissions: 0o700]
             )
         } catch {
-            NSLog("BeebeebFileProvider: could not create hydrate-cache dir: \(error)")
+            ExtensionLog.hydrateCacheDirFailed(error)
             return .failure(.daemonUnavailable)
         }
 
@@ -424,7 +424,7 @@ final class XPCBridge {
             templateIdentifier: templateIdentifier,
             templateContentVersion: templateContentVersion
         )
-        Self.logRequestID(of: request, operation: "create")
+        Self.logRequestID(of: request, operation: .create)
         return try Self.decodeWriteResponse(sendRequest(
             request,
             timeoutSeconds: IPCFraming.writeQueueTimeoutSeconds(hasContents: contentsURL != nil)
@@ -461,7 +461,7 @@ final class XPCBridge {
             changedFields: UInt64(truncatingIfNeeded: changedFields.rawValue),
             contents: contentsURL.flatMap { IPCContentFingerprint.ofFile(at: $0) }
         )
-        Self.logRequestID(of: request, operation: "modify")
+        Self.logRequestID(of: request, operation: .modify)
         return try Self.decodeWriteResponse(sendRequest(
             request,
             timeoutSeconds: IPCFraming.writeQueueTimeoutSeconds(hasContents: contentsURL != nil)
@@ -471,10 +471,10 @@ final class XPCBridge {
     /// Task 1684 device rung: log the first 12 characters of the write key (a
     /// SHA-256, not secret, no file name) so the unified log shows whether the
     /// system's retry of a timed-out write recomputed the SAME key.
-    private static func logRequestID(of request: [String: Any], operation: String) {
+    private static func logRequestID(of request: [String: Any], operation: ExtensionLog.WriteCall) {
         for payload in request.values {
             if let fields = payload as? [String: Any], let id = fields["request_id"] as? String {
-                NSLog("BeebeebFileProvider: \(operation) request_id=\(id.prefix(12))")
+                ExtensionLog.requestID(call: operation, id: id)
             }
         }
     }
@@ -493,8 +493,8 @@ final class XPCBridge {
             }
             return try UploadStaging.stage(contentsOf: contentsURL, in: groupContainer)
         } catch {
-            // Category only: the reason carries no path or file name.
-            NSLog("BeebeebFileProvider: upload staging failed: \(error.localizedDescription)")
+            // Closed values only: the error's text can carry a path or a file name.
+            ExtensionLog.uploadStagingFailed(error)
             throw error
         }
     }

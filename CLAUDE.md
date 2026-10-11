@@ -171,6 +171,13 @@ Current release identifiers:
 - File Provider domain id: `io.beebeeb.app.domain`
 - App group: `R8352WDJJR.io.beebeeb.app.fileprovider`
 
+**The extension logs only through `ExtensionLog`** (`BeebeebFileProvider/ExtensionLog.swift`, one
+`os.Logger`, subsystem `io.beebeeb.app.FileProvider`). Never `NSLog`: on macOS 26 every `NSLog` line
+of the extension reaches the unified log as `<private>`. A new line is a function in `ExtensionLog`
+whose public values are closed (a fixed word, a bitmask, a UUID, an `NSError` domain and code), never
+a path, a file name or an error's text; `extension_log_pin` (`src-tauri/src`) fails otherwise. Rule:
+`docs/IPC_PROTOCOL.md`, "Logging".
+
 The active Finder/File Provider blocker is Apple provisioning/profile
 entitlement mismatch. Both the containing app and extension profiles must
 include the exact app group above. Do not mask this as a UI timeout or switch to

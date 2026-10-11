@@ -661,13 +661,26 @@ parked op stops logging.
 | engine start (`info!` for the counts) | `engine start: queue claims cleared, released upload copies removed`; `engine start: uploads from an earlier build marked; their bases are unchanged`; `engine start: stale in-flight rows from a previous engine session reset` | `claims_cleared`, `released`; `marked`; `reset` (the rows it changed). A failed step: `engine start repair failed`, `engine start: marking earlier-build uploads failed`, `could not reconcile stale in-flight state rows on startup`, each with `reason` |
 | a staged copy that could not be removed | `staged payload cleanup deferred; journal retained`; `staged upload cleanup deferred; journal retained`; `released upload copy kept; removal is retried at the next start` | `reason`; the journal row stays, so a later start or sign-out still finds the copy |
 | the daily alias sweep failed | `daily alias sweep failed` | `reason="database"` |
-| the extension saw write options that are not empty (`NSLog`) | `BeebeebFileProvider: write options` | `call` (`create`, `modify`), `options` (the raw bitmask), `item` |
+| ~~the extension saw write options that are not empty (`NSLog`)~~ | ~~`BeebeebFileProvider: write options`~~ | ~~`call` (`create`, `modify`), `options` (the raw bitmask), `item`~~ |
+| the extension saw write options that are not empty (its `os.Logger`, `.notice`) — lead, 2026-10-11 (device fix round) | `BeebeebFileProvider: write options` | `call` (`create`, `modify`) and `options` (the raw bitmask), public; `item`, public, only when it is a UUID, else `id_kind=non_uuid` |
 
 The `IPC client went away …` lines and `finder delete: unknown item — idempotent
 success` (`info!`) log their id the same way. A staged copy that exists but
 cannot be read retries with the fixed text `staged upload payload could not be
 read`, which the diagnostics bundle files under its own code,
 `payload_unreadable`.
+
+**The extension's lines** go through its one `os.Logger`
+(`BeebeebFileProvider/ExtensionLog.swift`): subsystem `io.beebeeb.app.FileProvider`
+(the extension's bundle id), category `extension`, so
+`log show --predicate 'subsystem == "io.beebeeb.app.FileProvider"'` lists them.
+`NSLog` is not used: on macOS 26 every `NSLog` line of the extension reached the
+unified log as `<private>`. Informational lines are `.notice`, failures `.error`.
+Only closed values are public (a fixed word, a bitmask, a UUID, the first 12 hex
+digits of a `request_id`, the App Group id, an `NSError` domain and code); a
+path, a file name or an error's text is never logged. `extension_log_pin`
+(`src-tauri/src`) fails on any other log call in the extension and on a public
+value outside that set. — lead, 2026-10-11 (device fix round)
 
 ## Timeouts (Swift client)
 
