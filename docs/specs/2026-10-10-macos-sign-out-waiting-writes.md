@@ -1353,7 +1353,7 @@ The frontend pull request does not merge without that commit.
   conflicts.
 - ~~**Moving the staged copies out of `Library/Caches`.** That is 1873's design; see §15.~~
   **Moving the staged copies out of `Library/Caches`** is 1873's work, under its ruling [staging-durable]. This spec only
-  has to work with ~~both roots~~ every staging root, the new one and both old ones (§7.1, U27). — lead ruling, 2026-10-10 ([staging-durable]); the three roots: — lead, 2026-10-11 (1873 Task 12)
+  has to work with ~~both roots~~ every staging root: the new one in Application Support and both old ones, the Caches root and the old temp fallback (§7.1, U27). — lead ruling, 2026-10-10 (staged copies move out of the purgeable Caches folder); the three roots — lead, 2026-10-11 (1873 Task 12, fix round 1)
 - **A "Delete" for the kept folder.** "Dismiss" forgets it; the files are the person's.
 
 ## 13. Verification (written before the code)
