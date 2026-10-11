@@ -276,7 +276,7 @@ pub fn sweep_unreferenced(db: &StateDb, roots: &[PathBuf]) -> rusqlite::Result<U
     Ok(sweep)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 thread_local! {
     /// Runs once, on this thread, between step 2's listing and its read of the rows (tests only).
     static BETWEEN_LISTING_AND_NAMES: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
@@ -284,12 +284,12 @@ thread_local! {
 }
 
 /// Run `hook` at the next sweep on this thread, between its listing and its read of the rows.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn between_listing_and_names_for_test(hook: impl FnOnce() + 'static) {
     BETWEEN_LISTING_AND_NAMES.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn run_between_listing_and_names() {
     if let Some(hook) = BETWEEN_LISTING_AND_NAMES.with(|slot| slot.borrow_mut().take()) {
         hook();

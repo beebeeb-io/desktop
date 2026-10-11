@@ -4349,7 +4349,7 @@ impl StateDb {
 
     /// Engine start (spec §8.7 S6): the journalled copies of accepts that never committed. Their
     /// row says `completed = 0`, and no op, resume row or finalization names the path.
-    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub fn unfinished_unreferenced_payloads(&self) -> Result<Vec<String>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let mut stmt = conn.prepare(
@@ -4385,7 +4385,7 @@ impl StateDb {
 
     /// Engine start (spec §8.7 S6): every path a row of `staged_payloads`, `operation_queue`,
     /// `upload_resume` or `upload_finalizations` names, in one read.
-    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub fn staged_copy_names(&self) -> Result<Vec<String>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let mut stmt = conn.prepare(

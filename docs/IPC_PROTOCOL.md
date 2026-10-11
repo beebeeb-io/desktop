@@ -400,9 +400,10 @@ again, the old identifier no longer matches, and the write meets 409 and parks.
   could not connect, timed out or failed while sending, or below one an I/O
   error of a connection kind), and a failure whose resumed upload session the
   server reaped (404 or 410 on a session resumed from its persisted row; the
-  attempt abandons it and the next one starts a fresh upload). A 400, and any
-  answer to a session opened in the same attempt, abandons the session too but
-  is counted, so a server that refuses every new session still parks the write
+  attempt abandons it and the next one starts a fresh upload). A 400, 404 or
+  410 at a session opened in the same attempt, and a 400 at a resumed one,
+  abandons the session too but is counted, so a server that refuses every new
+  session still parks the write
   (fix rounds 5 and 6). A transient
   failure is recorded for the backoff (capped at 960 s), and the count stops at
   the attempt where the backoff stops growing (6 today, derived from

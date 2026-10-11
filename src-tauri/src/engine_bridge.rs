@@ -771,9 +771,10 @@ impl std::error::Error for StagedCopyGone {}
 
 /// The attempt resumed its persisted upload session, found it reaped (the server answered 404 or
 /// 410) and abandoned it: the next attempt starts a fresh upload, so for a File Provider write the
-/// failure is transient, never a counted one (spec §8.4). A 400, or any answer to a session opened in
-/// the same attempt, abandons the session too, but stays counted. It shows, and has as its source, the failure it wraps, so every reading
-/// of the error's text and status stays as it was.
+/// failure is transient, never a counted one (spec §8.4). A 400 at any session, and a 404 or 410 at a
+/// session opened in the same attempt, abandon the session too, but stay counted. It shows, and has
+/// as its source, the failure it wraps, so every reading of the error's text and status stays as it
+/// was.
 #[derive(Debug)]
 struct SessionAbandoned(anyhow::Error);
 
@@ -1726,9 +1727,9 @@ impl EngineBridge {
                     );
                     self.abandon_upload_session(&session).await?;
                     // §8.4: a resumed session the server reaped (404, 410) is not a counted
-                    // failure: the next attempt starts a fresh upload. A 400, and any answer to a
-                    // session opened in this attempt, is counted, so a server that refuses every
-                    // new session still parks the write.
+                    // failure: the next attempt starts a fresh upload. A 400, 404 or 410 at a
+                    // session opened in this attempt, and a 400 at a resumed one, is counted, so a
+                    // server that refuses every new session still parks the write.
                     if resumed && matches!(status, Some(404 | 410)) {
                         return Err(anyhow::Error::new(SessionAbandoned(error)));
                     }
@@ -20083,6 +20084,11 @@ mod tests {
             }
         }
         assert_eq!(parked_at, Some(25), "parked when its attempts were used up");
+        assert_eq!(
+            bridge.db.get_file("every-404").unwrap().unwrap().status,
+            FileStatus::Error,
+            "presented read-only"
+        );
         assert_eq!(
             server.finish().inits.len(),
             25,
