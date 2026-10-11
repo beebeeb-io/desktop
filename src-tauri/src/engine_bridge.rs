@@ -673,12 +673,16 @@ impl OperationFailureClass {
 /// - `Locked` (the vault, or SQLite busy) and `Quota`: transient;
 /// - `Retryable` with an HTTP status: transient for 408, 425, 429 and every 5xx, counted for any
 ///   other (400, 404, 410, 413, 422, a 409 that is not a stale base, ...);
+/// - `Retryable` whose upload session was gone and has been abandoned ([`SessionAbandoned`]):
+///   transient, because the next attempt starts a fresh upload;
 /// - `Retryable` with no HTTP status: transient only when the chain carries a transport failure
 ///   (see [`has_transport_cause`]); a local error is counted;
 /// - `Auth` and `Permission` never reach it (they pause and park): `false`.
 fn finder_write_failure_is_transient(class: OperationFailureClass, error: &anyhow::Error) -> bool {
     match class {
         OperationFailureClass::Locked | OperationFailureClass::Quota => true,
+        // A gone session, abandoned: the next attempt starts a fresh upload.
+        OperationFailureClass::Retryable if error.chain().any(|cause| cause.is::<SessionAbandoned>()) => true,
         OperationFailureClass::Retryable => match error_http_status(error) {
             Some(status) => matches!(status, 408 | 425 | 429 | 500..=599),
             None => has_transport_cause(error),
@@ -740,6 +744,26 @@ fn is_curable_refusal(error: &anyhow::Error) -> bool {
     })
 }
 
+/// The attempt found its upload session gone and abandoned it (`upload_session_is_gone`): the next
+/// attempt starts a fresh upload, so for a File Provider write the failure is transient, never a
+/// counted one (spec §8.4). It shows, and has as its source, the failure it wraps, so every reading
+/// of the error's text and status stays as it was.
+#[derive(Debug)]
+struct SessionAbandoned(anyhow::Error);
+
+impl std::fmt::Display for SessionAbandoned {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for SessionAbandoned {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        let inner: &(dyn std::error::Error + 'static) = self.0.as_ref();
+        Some(inner)
+    }
+}
+
 /// What the runner does with a failed attempt that neither parked at once nor found its op
 /// gone ([`failed_attempt_rule`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -748,9 +772,39 @@ enum FailedAttemptRule {
     Pause(OperationPauseReason),
     /// Parked with its bytes kept (spec §8.4).
     Park(ParkReason),
-    /// Recorded for the backoff. `uses_up_attempts: false` caps the count at
-    /// `max_attempts - 1`, so the attempt can never park the op.
-    Retry { uses_up_attempts: bool },
+    /// Recorded for the backoff, the count moved as [`AttemptCount`] says.
+    Retry(AttemptCount),
+}
+
+/// How a retried attempt moves the op's attempt count ([`next_attempt_count`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttemptCount {
+    /// One more: at `max_attempts` the op has parked by the queue's rule.
+    UsesUp,
+    /// One more, but never past `max_attempts - 1` (a recorded completion, §8.6 rule 6).
+    ShortOfTheCap,
+    /// One more, but never past the attempt where the backoff stops growing
+    /// ([`backoff_cap_attempts`]), and never past `max_attempts - 1`; a count already there or
+    /// above stays (a transient failure of a File Provider write, §8.4). The backoff still reaches
+    /// its cap, and an outage leaves the remaining attempts to the failures waiting does not cure.
+    UpToTheBackoffCap,
+}
+
+/// The count an attempt records ([`AttemptCount`]).
+fn next_attempt_count(attempts: i64, max_attempts: i64, count: AttemptCount) -> i64 {
+    let below_the_cap = max_attempts.saturating_sub(1);
+    match count {
+        AttemptCount::UsesUp => attempts.saturating_add(1),
+        AttemptCount::ShortOfTheCap => attempts.saturating_add(1).min(below_the_cap),
+        AttemptCount::UpToTheBackoffCap => {
+            let limit = backoff_cap_attempts().min(below_the_cap);
+            if attempts >= limit {
+                attempts
+            } else {
+                attempts.saturating_add(1)
+            }
+        }
+    }
 }
 
 /// The rule for a failed attempt of class `class`.
@@ -773,23 +827,23 @@ fn failed_attempt_rule(
     transient: bool,
 ) -> FailedAttemptRule {
     if completed {
-        return FailedAttemptRule::Retry {
-            uses_up_attempts: false,
-        };
+        return FailedAttemptRule::Retry(AttemptCount::ShortOfTheCap);
     }
     if !finder_write {
         return match class.pause_reason() {
             Some(reason) => FailedAttemptRule::Pause(reason),
-            None => FailedAttemptRule::Retry { uses_up_attempts: true },
+            None => FailedAttemptRule::Retry(AttemptCount::UsesUp),
         };
     }
     match class {
         OperationFailureClass::Auth => FailedAttemptRule::Pause(OperationPauseReason::Auth),
         OperationFailureClass::Permission => FailedAttemptRule::Park(ParkReason::PermissionDenied),
         OperationFailureClass::Retryable | OperationFailureClass::Locked | OperationFailureClass::Quota => {
-            FailedAttemptRule::Retry {
-                uses_up_attempts: !transient,
-            }
+            FailedAttemptRule::Retry(if transient {
+                AttemptCount::UpToTheBackoffCap
+            } else {
+                AttemptCount::UsesUp
+            })
         }
     }
 }
@@ -1120,15 +1174,12 @@ impl EngineBridge {
                             outcome.invalidated_item_ids.extend(op.file_id.clone());
                             outcome.retried_op_ids.push(op.op_id);
                         }
-                        FailedAttemptRule::Retry { uses_up_attempts } => {
+                        FailedAttemptRule::Retry(count) => {
                             // §8.6 rule 6 and §8.4: a recorded completion, and a File Provider
                             // write whose failure waiting cures, keep retrying on the normal
                             // backoff and never use up their attempts.
-                            let attempts = if uses_up_attempts {
-                                op.attempts.saturating_add(1)
-                            } else {
-                                op.attempts.saturating_add(1).min(op.max_attempts.saturating_sub(1))
-                            };
+                            let uses_up_attempts = count == AttemptCount::UsesUp;
+                            let attempts = next_attempt_count(op.attempts, op.max_attempts, count);
                             if completed {
                                 log_completed_landing_retried(&op.op_id, op.file_id.as_deref(), attempts);
                             }
@@ -1640,6 +1691,7 @@ impl EngineBridge {
                         "upload: server no longer accepts the persisted session — abandoning it; the retry starts a fresh upload"
                     );
                     self.abandon_upload_session(&session).await?;
+                    return Err(anyhow::Error::new(SessionAbandoned(error)));
                 }
                 Err(error)
             }
@@ -6527,6 +6579,16 @@ pub fn classify_operation_error(error: &str) -> OperationFailureClass {
     } else {
         OperationFailureClass::Retryable
     }
+}
+
+/// The attempt count at which [`retry_delay_seconds`] stops growing: the most a transient failure
+/// raises a File Provider write's count to (spec §8.4). Derived from the backoff, so changing the
+/// backoff moves it too.
+fn backoff_cap_attempts() -> i64 {
+    let cap = retry_delay_seconds(i64::MAX);
+    (1..)
+        .find(|&attempts| retry_delay_seconds(attempts) >= cap)
+        .unwrap_or(1)
 }
 
 pub fn retry_delay_seconds(attempts: i64) -> i64 {
@@ -19248,7 +19310,11 @@ mod tests {
             );
         }
         let op = bridge.db.list_operations_for_file(file_id).unwrap().remove(0);
-        assert_eq!(op.attempts, op.max_attempts - 1, "the count stops one short of the cap");
+        assert_eq!(
+            op.attempts,
+            backoff_cap_attempts(),
+            "the count stops where the backoff stops growing"
+        );
         assert_eq!(
             classify_operation_error(op.last_error.as_deref().unwrap()),
             class,
@@ -19638,6 +19704,152 @@ mod tests {
         // Parked: the next pass sends nothing.
         bridge.process_due_operations(&sync_root, now + 10_000).await.unwrap();
         assert_eq!(server.finish().inits.len(), 1);
+    }
+
+    /// Spec §8.4: the backoff stops growing at `backoff_cap_attempts`, derived from
+    /// `retry_delay_seconds`: the delay there is the largest it gets, and the one before is smaller.
+    #[test]
+    fn the_backoff_cap_is_where_the_delay_stops_growing() {
+        let cap = backoff_cap_attempts();
+        assert!(cap >= 1);
+        assert_eq!(retry_delay_seconds(cap), retry_delay_seconds(i64::MAX));
+        assert_eq!(retry_delay_seconds(cap), retry_delay_seconds(cap + 1));
+        if cap > 1 {
+            assert!(retry_delay_seconds(cap - 1) < retry_delay_seconds(cap));
+        }
+    }
+
+    /// Spec §8.4: how each kind of retried attempt moves the count.
+    #[test]
+    fn a_transient_failure_counts_only_up_to_the_backoff_cap() {
+        let cap = backoff_cap_attempts();
+        let mut attempts = 0;
+        for _ in 0..30 {
+            attempts = next_attempt_count(attempts, 25, AttemptCount::UpToTheBackoffCap);
+        }
+        assert_eq!(attempts, cap, "climbs to the backoff's cap and stays");
+        assert_eq!(
+            next_attempt_count(20, 25, AttemptCount::UpToTheBackoffCap),
+            20,
+            "a count already above it stays as it is"
+        );
+        assert_eq!(
+            next_attempt_count(0, 3, AttemptCount::UpToTheBackoffCap),
+            1,
+            "a small budget: still below max - 1"
+        );
+        assert_eq!(next_attempt_count(2, 3, AttemptCount::UpToTheBackoffCap), 2);
+        assert_eq!(next_attempt_count(23, 25, AttemptCount::ShortOfTheCap), 24);
+        assert_eq!(next_attempt_count(24, 25, AttemptCount::ShortOfTheCap), 24);
+        assert_eq!(next_attempt_count(24, 25, AttemptCount::UsesUp), 25);
+    }
+
+    /// Spec §8.4 (N2): a transient failure uses no counted budget past the backoff's cap. After
+    /// an outage of 30 passes the count sits where the backoff stops growing, so a failure waiting
+    /// does not cure still has its remaining attempts: the write parks only after
+    /// `max_attempts - backoff_cap_attempts()` of them (19 today), not at the first.
+    #[tokio::test]
+    async fn after_an_outage_a_counted_failure_still_has_its_remaining_attempts() {
+        let (dir, sync_root, server, bridge) = rule3_setup([166u8; 32]);
+        seed_uploaded_row(&bridge, &server, "after-outage");
+        server
+            .state
+            .lock()
+            .unwrap()
+            .refuse_init
+            .insert("after-outage".into(), "503 Service Unavailable");
+        fp_save(&bridge, dir.path(), "after-outage", "notes.txt", b"a save", "1");
+        let mut now = now_secs();
+        failing_passes(&bridge, &sync_root, "after-outage", 30, &mut now).await;
+        let op = bridge.db.list_operations_for_file("after-outage").unwrap().remove(0);
+        assert_eq!(op.attempts, backoff_cap_attempts(), "the outage used no more than that");
+        let remaining = op.max_attempts - op.attempts;
+        assert!(remaining >= 19, "{remaining} attempts left");
+        server
+            .state
+            .lock()
+            .unwrap()
+            .refuse_init
+            .insert("after-outage".into(), "400 Bad Request");
+        let mut counted = 0;
+        loop {
+            bridge.process_due_operations(&sync_root, now).await.unwrap();
+            now += 10_000;
+            counted += 1;
+            let op = bridge.db.get_operation(&op.op_id).unwrap().unwrap();
+            if op.attempts >= op.max_attempts {
+                break;
+            }
+            assert!(counted < 30, "never parked");
+        }
+        assert_eq!(
+            counted, remaining,
+            "parked after its remaining attempts, not at the first"
+        );
+        drop(server.finish());
+    }
+
+    /// Spec §8.4 (N2): a save whose upload session was open through an outage. 24 transient
+    /// failures at the resumed chunk; then the server has reaped the session, so the resumed chunk
+    /// answers 404. The attempt abandons the session, which is not a counted failure, and the next
+    /// attempt starts a fresh upload that lands.
+    #[tokio::test]
+    async fn a_session_reaped_during_an_outage_lands_on_a_fresh_upload() {
+        let master_key = [167u8; 32];
+        let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_row(&bridge, &server, "reaped");
+        refuse(
+            &server,
+            Refused::Chunk,
+            "reaped",
+            ("503 Service Unavailable", json!({ "error": "unavailable" })),
+        );
+        fp_save(
+            &bridge,
+            dir.path(),
+            "reaped",
+            "notes.txt",
+            b"saved through the outage",
+            "1",
+        );
+        let mut now = now_secs();
+        failing_passes(&bridge, &sync_root, "reaped", 24, &mut now).await;
+        {
+            let mut s = server.state.lock().unwrap();
+            assert_eq!(
+                s.inits.len(),
+                1,
+                "precondition: one session, resumed after the first attempt"
+            );
+            s.refuse_chunk_with.remove("reaped");
+            s.sessions.clear(); // the server reaped it
+        }
+        let reaped = bridge.process_due_operations(&sync_root, now).await.unwrap();
+        now += 10_000;
+        assert!(reaped.invalidated_item_ids.is_empty(), "nothing parked: {reaped:?}");
+        let op = bridge.db.list_operations_for_file("reaped").unwrap().remove(0);
+        assert!(
+            op.attempts < op.max_attempts,
+            "not parked: {} of {}",
+            op.attempts,
+            op.max_attempts
+        );
+        assert_eq!(op.attempts, backoff_cap_attempts(), "the gone session is not counted");
+        assert!(
+            bridge.db.get_upload_resume(&op.op_id).unwrap().is_none(),
+            "precondition: the session was abandoned"
+        );
+        bridge.process_due_operations(&sync_root, now).await.unwrap();
+        assert!(
+            bridge.db.list_operations_for_file("reaped").unwrap().is_empty(),
+            "landed on a fresh upload"
+        );
+        let state = server.finish();
+        assert_eq!(state.inits.len(), 2, "a fresh init after the gone session");
+        assert_eq!(
+            state.latest_plaintext("reaped", master_key),
+            b"saved through the outage"
+        );
     }
 
     /// The error `reqwest` gives for `status`, from a one-request server: what the upload calls

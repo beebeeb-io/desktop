@@ -398,9 +398,13 @@ again, the old identifier no longer matches, and the write meets 409 and parks.
   `Quota`, and `Retryable` with an HTTP status of 408, 425, 429 or any 5xx, or
   with no status and a transport failure in its chain (a `reqwest::Error` that
   could not connect, timed out or failed while sending, or below one an I/O
-  error of a connection kind). A transient failure is recorded for the backoff
-  (capped at 960 s) and the count stops at `max_attempts - 1`, so the save lands
-  when the network, the lock or the space comes back; a quota refusal is never
+  error of a connection kind), and a failure whose upload session was gone and
+  has been abandoned (the next attempt starts a fresh upload). A transient
+  failure is recorded for the backoff (capped at 960 s), and the count stops at
+  the attempt where the backoff stops growing (6 today, derived from
+  `retry_delay_seconds`), so after an outage a failure waiting does not cure still
+  has its remaining attempts; the save lands when the network, the lock or the
+  space comes back; a quota refusal is never
   paused, and the item keeps presenting `uploading`. A quota refusal is also
   what the server's code says, read by type from the refusal's body (never its
   text): `413 quota_exceeded`, `403 object_budget_exceeded`, `403
