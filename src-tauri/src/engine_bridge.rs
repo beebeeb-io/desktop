@@ -17686,6 +17686,193 @@ mod tests {
         drop(server.finish());
     }
 
+    /// [`seed_uploaded_row`], nested as a snapshot writes it: `Docs/notes.txt` in `folder-a`.
+    fn seed_row_in_folder(bridge: &EngineBridge, server: &VersionedServerMock, file_id: &str) {
+        seed_uploaded_row(bridge, server, file_id);
+        let mut entry = bridge.db.get_file(file_id).unwrap().unwrap();
+        entry.path = "Docs/notes.txt".into();
+        bridge.db.upsert_file(&entry).unwrap();
+        let mut contract = bridge.db.get_file_contract_state(file_id).unwrap().unwrap();
+        contract.parent_id = Some("folder-a".into());
+        bridge.db.set_file_contract_state(&contract).unwrap();
+    }
+
+    /// A File Provider save whose item the person also renamed and moved before the system
+    /// synced it: the modify carries the contents with the new name and parent.
+    fn fp_save_moved(
+        bridge: &EngineBridge,
+        dir: &Path,
+        file_id: &str,
+        filename: &str,
+        parent_id: &str,
+        bytes: &[u8],
+        base: &str,
+    ) -> FpWrite {
+        let contents = dir.join(format!("save-{}.txt", uuid::Uuid::new_v4()));
+        std::fs::write(&contents, bytes).unwrap();
+        let mut target = finder_file_target(Some(file_id), filename, &contents, Some(base.to_string()));
+        target.parent_id = Some(parent_id.to_string());
+        bridge.queue_file_provider_modify(target).unwrap()
+    }
+
+    fn name_parent_status(bridge: &EngineBridge, file_id: &str) -> (String, Option<String>, FileStatus) {
+        let row = bridge.db.get_file(file_id).unwrap().unwrap();
+        (row.path, row.parent_id, row.status)
+    }
+
+    /// Spec §7.2 (final review): a save that also renames and moves its file is described by
+    /// the new name and parent from its reply on, and keeps them through its landing. The
+    /// server gets both with the write.
+    #[cfg(unix)] // names `crate::ipc_socket::write_outcome_response`
+    #[tokio::test]
+    async fn a_save_that_renames_and_moves_is_described_by_its_new_name_and_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [96u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_row_in_folder(&bridge, &server, "moved-save");
+        let reply = fp_save_moved(
+            &bridge,
+            dir.path(),
+            "moved-save",
+            "renamed.txt",
+            "folder-b",
+            b"saved under a new name",
+            "1",
+        );
+        let ipc = crate::ipc_socket::write_outcome_response("modify", &bridge.db, Ok(reply));
+        let crate::ipc_socket::IpcResponse::WriteQueued { item: Some(item), .. } = ipc else {
+            panic!("an item, never None: {ipc:?}")
+        };
+        assert_eq!(
+            (item.filename.as_str(), item.parent_identifier.as_str()),
+            ("renamed.txt", "folder-b"),
+            "the reply describes the item as the person left it"
+        );
+        assert_eq!(
+            name_parent_status(&bridge, "moved-save"),
+            ("renamed.txt".into(), Some("folder-b".into()), FileStatus::Uploading),
+            "the accept applied the name and the parent"
+        );
+
+        drain_upload_queue(&bridge, &sync_root).await;
+        assert_eq!(
+            name_parent_status(&bridge, "moved-save"),
+            ("renamed.txt".into(), Some("folder-b".into()), FileStatus::Local),
+            "the landing keeps them"
+        );
+        let state = server.finish();
+        assert_eq!(
+            state.latest_plaintext("moved-save", master_key),
+            b"saved under a new name"
+        );
+        let parents: Vec<_> = state
+            .patches
+            .iter()
+            .filter(|(id, _)| id == "moved-save")
+            .map(|(_, body)| body["parent_id"].clone())
+            .collect();
+        assert_eq!(
+            parents,
+            vec![serde_json::json!("folder-b")],
+            "the move reached the server"
+        );
+    }
+
+    /// Spec §7.2 (final review): a landing keeps the name and parent of a later save of the
+    /// file, which that save's accept applied. The server gets each save's in the order of the
+    /// saves.
+    #[tokio::test]
+    async fn a_landing_keeps_the_name_and_parent_of_a_later_queued_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [97u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_row_in_folder(&bridge, &server, "two-moves");
+        // The second save's first chunk fails once, so the first save lands alone.
+        server
+            .state
+            .lock()
+            .unwrap()
+            .fail_first_chunk_once
+            .insert("session-2".into());
+        let first = fp_save_moved(&bridge, dir.path(), "two-moves", "first.txt", "folder-b", b"first", "1");
+        fp_save_moved(
+            &bridge,
+            dir.path(),
+            "two-moves",
+            "second.txt",
+            "folder-c",
+            b"second",
+            &first.token.unwrap(),
+        );
+
+        bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+        assert_eq!(
+            server.state.lock().unwrap().files["two-moves"].versions.len(),
+            2,
+            "the first save landed, the second did not"
+        );
+        assert_eq!(
+            name_parent_status(&bridge, "two-moves"),
+            ("second.txt".into(), Some("folder-c".into()), FileStatus::Uploading),
+            "the first landing kept the later save's name and parent"
+        );
+
+        drain_upload_queue(&bridge, &sync_root).await;
+        assert_eq!(
+            name_parent_status(&bridge, "two-moves"),
+            ("second.txt".into(), Some("folder-c".into()), FileStatus::Local)
+        );
+        let state = server.finish();
+        assert_eq!(state.latest_plaintext("two-moves", master_key), b"second");
+        let parents: Vec<_> = state
+            .patches
+            .iter()
+            .filter(|(id, _)| id == "two-moves")
+            .map(|(_, body)| body["parent_id"].clone())
+            .collect();
+        assert_eq!(
+            parents,
+            vec![serde_json::json!("folder-b"), serde_json::json!("folder-c")],
+            "each save's parent, in order"
+        );
+    }
+
+    /// Spec §7.2 (final review): a save that parks for good keeps the name and parent it was
+    /// saved with. The row is never left describing the old ones.
+    #[tokio::test]
+    async fn a_parked_save_keeps_the_name_and_parent_it_was_saved_with() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [98u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_row_in_folder(&bridge, &server, "parked-move");
+        server
+            .state
+            .lock()
+            .unwrap()
+            .refuse_init
+            .insert("parked-move".into(), "403 Forbidden");
+        fp_save_moved(&bridge, dir.path(), "parked-move", "kept.txt", "folder-b", b"kept", "1");
+
+        drain_upload_queue(&bridge, &sync_root).await;
+        let op = bridge.db.list_operations_for_file("parked-move").unwrap();
+        assert_eq!(op.len(), 1, "the save is kept, parked");
+        assert_eq!(op[0].attempts, op[0].max_attempts, "parked");
+        assert_eq!(
+            name_parent_status(&bridge, "parked-move"),
+            ("kept.txt".into(), Some("folder-b".into()), FileStatus::Error)
+        );
+        drop(server.finish());
+    }
+
     #[cfg(unix)] // asserts a token through `held_content_version`
     #[tokio::test]
     async fn sign_out_clears_tokens_and_aliases() {

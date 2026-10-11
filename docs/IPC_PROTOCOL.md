@@ -644,6 +644,13 @@ while that write has not parked. The returned item names the token.
   staged copy's; the landing writes the server's size and "now" only when no
   later write is queued. Finder's date stays `max(modified_at,
   remote_updated_at)`; showing the save time instead is split off to task 1879.
+- The name and parent are the newest save's (spec §7.2). A save that also
+  renames or moves its file applies the new name and parent in its accept, so
+  the reply and every enumeration after it describe the item as the person left
+  it; the upload sends both to the server before its bytes. A landing applies its
+  op's name and parent only when no later Finder save of the file is queued,
+  parked or not; a save that parks for good keeps them. — lead, 2026-10-11
+  (final review)
 - Uploads without a write id (Windows, the watcher, Keep Mine) keep today's
   status writers.
 
@@ -663,9 +670,26 @@ never knew).
 | ignored (a temporary Finder item the daemon does not sync) | none | false |
 | queued, but the daemon sent no item | never a nil item: the transient `serverUnreachable` error, so the system retries and keeps the item on disk. The daemon itself answers `Error` (`row_unreadable`) instead of such a reply | n/a |
 
-The item in a reply describes the bytes the system holds: its content version is
+~~The item in a reply describes the bytes the system holds: its content version is
 the write's token, and the daemon records the staged copy's size and modification
-time on the row, with the `Uploading` status, in the accept transaction.
+time on the row, with the `Uploading` status, in the accept transaction.~~
+The item in a reply describes the bytes the system holds, under the name and in
+the folder the person left them: its content version is the write's token, and
+the daemon records the staged copy's size and modification time on the row, with
+the `Uploading` status, and for a modify the save's name and parent, in the
+accept transaction (spec §7.2). — lead, 2026-10-11 (final review)
+
+**Still-pending fields (spec §7.2).** `modifyItem` reports a changed filename or
+parent as still pending when a modify with contents gets back an item that does
+not describe it (`FileProviderExtension.modifyStillPendingFields`). Apple writes
+to disk every field of the returned item that differs from the template and is
+not still pending, so an old name in the reply would undo the rename; pending,
+the system sends the field again. The daemon applies both in the accept, so with
+the app this extension ships in the set is empty; the rule covers an app from
+another build still running across an update. A modify without contents reports
+nothing pending, as before: its reply is built from the row as it was until the
+server's echo of the rename or move arrives (a known gap, spec §12). — lead,
+2026-10-11 (final review)
 
 ### Logging (§11)
 
@@ -1155,6 +1179,7 @@ so no plaintext ever crosses the socket.
 | Upload staging, sign-out and Lock: every copy removed after a confirmed stop or with no engine; nothing removed on an unconfirmed stop (sign-out refuses, also on the retry; Lock goes ahead); the real App Group directory is never resolved under test | `lib.rs` `signout_teardown_tests` (`sign_out_*_upload_staging`, `lock_*_upload_staging`, `the_session_purge_never_targets_*`) | `cargo test` counts |
 | Upload staging, extension: directory path and `0700`, UUID names, exact bytes + `0600` + fresh mtime, a failed copy is transient with no file left and no path in the text, discard, a package or symlink refused definitively before anything is copied | `BeebeebFileProviderTests/main.swift` (`upload-staging-S1`..`S6`) | `ipc-framing: N passed, 0 failed` |
 | Queued writes never ask for a fetch (the queued and the ignored branches; a queued reply without an item is T20 below) | `BeebeebFileProviderTests/main.swift` ("a queued create or modify never asks the system to re-fetch its own bytes") | `ipc-framing: N passed, 0 failed` |
+| A save that also renames or moves: the reply and the row carry the new name and parent from the accept on, through the landing, and when the save parks; a landing keeps a later save's name and parent; the server gets each save's parent in order; the extension leaves pending a changed name or parent its reply does not describe (spec §7.2) — lead, 2026-10-11 (final review) | `engine_bridge.rs` (`a_save_that_renames_and_moves_*`, `a_landing_keeps_the_name_and_parent_*`, `a_parked_save_keeps_the_name_and_parent_*`), `BeebeebFileProviderTests/main.swift` ("a save that renames or moves leaves pending the fields its reply does not describe") | `cargo test` counts; `ipc-framing: N passed, 0 failed` |
 | Version identifiers lead with the server version; an op echo leaves `content_version` unchanged; no contract carries no base; a cached reply carries the current version | `ipc_socket.rs` tests (`version_identifiers_lead_with_*`, `an_op_echo_leaves_*`, `the_payload_without_a_contract_*`), `ipc_socket_framing_tests.rs` (`a_cached_reply_reports_*`) | `cargo test` counts |
 | A modify after a desktop upload sends the server version as its base, against a server mock that refuses a wrong base with 409 | `engine_bridge.rs` (`a_modify_after_a_desktop_upload_*`, `VersionedServerMock`) | `cargo test` counts |
 | Legacy identifiers: the current content's old identifier is based on `current_version`; older content stays a stale base (also refused by the mock); new-format identifiers parse as before | `engine_bridge.rs` (`a_legacy_identifier_*`, `a_current_format_identifier_*`) | `cargo test` counts |

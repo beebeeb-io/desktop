@@ -507,6 +507,35 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         return progress
     }
 
+    /// The fields a modify reports as still pending (spec 2026-10-09 §7.2): a filename or
+    /// parent the person changed that the item the app returned does not describe. Apple:
+    /// "If a field in the returned item does not match the itemTemplate, and is not in the
+    /// list of stillPendingFields, the value from the item will be propagated to the disk"
+    /// (NSFileProviderReplicatedExtension.h, modifyItem). The app applies a save's name and
+    /// parent in the save's accept, so with the app this extension ships in, this is empty.
+    /// An app from another build (one still running across an update) may not, and its old
+    /// name would undo the rename on disk; pending, the system sends the field again instead.
+    /// A modify without contents reports nothing pending, as before: its reply describes the
+    /// item as it was until the server's change arrives, and a pending field would be sent
+    /// again until then.
+    static func modifyStillPendingFields(
+        changedFields: NSFileProviderItemFields,
+        hasContents: Bool,
+        template: NSFileProviderItem,
+        returned: NSFileProviderItem?
+    ) -> NSFileProviderItemFields {
+        guard hasContents, let returned else { return [] }
+        var pending: NSFileProviderItemFields = []
+        if changedFields.contains(.filename), returned.filename != template.filename {
+            pending.insert(.filename)
+        }
+        if changedFields.contains(.parentItemIdentifier),
+           returned.parentItemIdentifier != template.parentItemIdentifier {
+            pending.insert(.parentItemIdentifier)
+        }
+        return pending
+    }
+
     func modifyItem(
         _ item: NSFileProviderItem,
         baseVersion version: NSFileProviderItemVersion,
@@ -559,7 +588,13 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                 changedFields: changedFields
             )
             let completion = Self.queuedWriteCompletion(result)
-            completionHandler(completion.item, [], completion.shouldFetchContent, completion.error)
+            let stillPending = Self.modifyStillPendingFields(
+                changedFields: changedFields,
+                hasContents: newContents != nil,
+                template: item,
+                returned: completion.item
+            )
+            completionHandler(completion.item, stillPending, completion.shouldFetchContent, completion.error)
             if let error = completion.error {
                 // Transient: noted like every other, so the next success lifts the throttle.
                 noteFailure(error)

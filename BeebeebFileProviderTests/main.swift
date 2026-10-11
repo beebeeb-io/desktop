@@ -1823,6 +1823,47 @@ check("createItem passes deletionConflicted, the template id and its content ver
     try expect(payload["request_id"] as? String != nil, "a create with contents still carries its key")
 }
 
+// MARK: - A save that also renames or moves (spec 2026-10-09 §7.2, final review)
+
+// A field in the returned item that differs from the template and is not still pending is
+// written to disk (NSFileProviderReplicatedExtension.h, modifyItem). The app applies a save's
+// name and parent in its accept; a reply that does not describe them must leave them pending.
+func movedItem(filename: String, parent: String) -> FileProviderItem {
+    FileProviderItem(model: BeebeebProviderItem(
+        identifier: "moved-item",
+        parentIdentifier: parent,
+        filename: filename,
+        kind: .file,
+        sizeBytes: 4,
+        contentType: nil,
+        status: "uploading",
+        capabilities: BeebeebProviderItem.read,
+        versionIdentifier: nil
+    ))
+}
+
+check("a save that renames or moves leaves pending the fields its reply does not describe") {
+    let template = movedItem(filename: "renamed.txt", parent: "folder-b")
+    let old = movedItem(filename: "notes.txt", parent: "folder-a")
+    let both: NSFileProviderItemFields = [.contents, .filename, .parentItemIdentifier]
+    func pending(
+        _ changed: NSFileProviderItemFields, contents: Bool = true, _ returned: NSFileProviderItem?
+    ) -> NSFileProviderItemFields {
+        FileProviderExtension.modifyStillPendingFields(
+            changedFields: changed, hasContents: contents, template: template, returned: returned
+        )
+    }
+    try expect(pending(both, template).isEmpty, "a reply with the new name and parent leaves nothing pending")
+    try expect(pending(both, old) == [.filename, .parentItemIdentifier],
+               "a reply with the old name and parent leaves both pending, so the system never writes them to disk")
+    try expect(pending([.contents, .filename], old) == [.filename], "only a field the person changed is pending")
+    try expect(pending([.contents], movedItem(filename: "remote.txt", parent: "folder-z")).isEmpty,
+               "a field the person did not change is the app's to report")
+    try expect(pending([.filename, .parentItemIdentifier], contents: false, old).isEmpty,
+               "a rename or move without contents: unchanged, nothing pending")
+    try expect(pending(both, nil).isEmpty, "no item: nothing pending")
+}
+
 // MARK: - WriteRetryLater: the app cannot stage a write now; the system retries it
 
 // Spec 2026-10-09 §8.4: when the app's own staging folder cannot take a save, the

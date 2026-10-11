@@ -992,6 +992,39 @@ fn record_local_write_conn<C: std::ops::Deref<Target = Connection>>(
     Ok(())
 }
 
+/// The name and parent a File Provider save was made under, applied in its accept (spec §7.2).
+/// The system hands a rename or a move over with the contents and takes the reply's item as
+/// the truth for both, so the row describes them from the accept on; a snapshot or an op echo
+/// leaves an `Uploading` or `Error` row's name alone. The path takes the save's name, as the
+/// landing sets it. Nothing is written when neither changed.
+fn apply_save_name_and_parent_conn<C: std::ops::Deref<Target = Connection>>(
+    conn: &C,
+    entry: &FileEntry,
+    target_path: Option<&str>,
+    parent_id: Option<&str>,
+) -> Result<()> {
+    let Some(target_path) = target_path else {
+        return Ok(());
+    };
+    let leaf = |path: &str| {
+        path.trim_matches('/')
+            .rsplit('/')
+            .next()
+            .unwrap_or_default()
+            .to_string()
+    };
+    let moved = entry.parent_id.as_deref() != parent_id;
+    if leaf(&entry.path) == leaf(target_path) && !moved {
+        return Ok(());
+    }
+    conn.execute(
+        "UPDATE files SET path = ?2, parent_id = ?3 WHERE file_id = ?1",
+        params![entry.file_id, target_path, parent_id],
+    )?;
+    // A rename or a move, with the old parent, as `upsert_file_conn` records a path change.
+    record_file_change_conn(conn, &entry.file_id, FpChangeKind::Reparented, entry.parent_id.clone())
+}
+
 /// [`StateDb::delete_file`] on an open connection or transaction.
 fn delete_file_conn<C: std::ops::Deref<Target = Connection>>(conn: &C, file_id: &str) -> Result<()> {
     // Task 1697: capture the parent BEFORE the delete — the change row is
@@ -3498,7 +3531,8 @@ impl StateDb {
 
     /// S1.1: accept one File Provider content write in ONE transaction. The §6.1
     /// decision is read from the row as it is inside it; the write id is minted and
-    /// held; a modify's row takes the staged copy's size and time; and the op is queued
+    /// held; a modify's row takes the staged copy's size and time, and the name and parent
+    /// the save was made under (§7.2); and the op is queued
     /// (or parked at once, rule 6a′). Nothing inside awaits or touches the network.
     #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
     pub fn accept_finder_write(
@@ -3537,6 +3571,7 @@ impl StateDb {
                 let facts = base_facts_conn(&tx, accept.file_id, &contract, legacy_identifiers(&entry, &contract))?;
                 let decision = decide_base(&facts, *incoming_base);
                 record_local_write_conn(&tx, accept.file_id, accept.size_bytes, accept.modified_at)?;
+                apply_save_name_and_parent_conn(&tx, &entry, accept.target_path, accept.parent_id)?;
                 // A content write touched the row: its version is no longer a snapshot fill.
                 tx.execute(
                     "UPDATE files SET version_filled = 0 WHERE file_id = ?1",
@@ -3656,6 +3691,25 @@ impl StateDb {
                 return Ok(None);
             }
         }
+        // Spec §7.2: a later Finder save of the file, parked or not, applied its own name and
+        // parent in its accept, after this one's; the row keeps them. Read before the rekey
+        // loop moves the file's ops to the server id: `EARLIER_IN_QUEUE_SQL`, with this op as
+        // `earlier`.
+        let later_save: bool = input.write_id.is_some()
+            && tx.query_row(
+                &format!(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM operation_queue AS earlier
+                        JOIN operation_queue AS this
+                          ON this.file_id = earlier.file_id AND this.op_id != earlier.op_id
+                        WHERE earlier.op_id = ?1
+                          AND this.write_id IS NOT NULL
+                          AND this.kind IN ('upload_version', 'upload_file')
+                          AND ({EARLIER_IN_QUEUE_SQL}))"
+                ),
+                params![input.op_id],
+                |r| r.get(0),
+            )?;
         // The row and contract. The row's status, size and mtime are settled below, after
         // the chain step, because that step can park a later write (spec §9.1–§9.2).
         let mut entry = get_file_conn(&tx, local)?.unwrap_or_else(|| FileEntry {
@@ -3670,7 +3724,7 @@ impl StateDb {
             item_kind: ItemKind::File,
         });
         entry.file_id = server.to_string();
-        if let Some(target_path) = input.target_path {
+        if let Some(target_path) = input.target_path.filter(|_| !later_save) {
             entry.path = target_path.to_string();
         }
         entry.remote_updated_at = input.now;
@@ -3686,7 +3740,9 @@ impl StateDb {
             None if input.write_id.is_some() => contract.content_type.take(),
             landed_type => landed_type,
         };
-        contract.parent_id = input.parent_id.map(str::to_string);
+        if !later_save {
+            contract.parent_id = input.parent_id.map(str::to_string);
+        }
         contract.current_version = input.produced_version;
         contract.local_base_version = input.produced_version;
         contract.current_object_version_id = Some(input.produced_object_version_id.to_string());

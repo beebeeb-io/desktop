@@ -132,7 +132,7 @@ The plan's tasks 1–11 are implemented. Their reviews found places where this t
 | Who sets `Error` on a Finder write's row; a trashed item stays in the trash through an attempt and a landing; a hydrate leaves a parked write's row alone | §9.2 |
 | A staging folder that never becomes usable | §8.4 |
 | The log lines as built | §11 |
-| The Swift harness counts ~~97~~ 101, with the four `ExtensionLog` checks — lead, 2026-10-11 (device fix round) | §13 |
+| The Swift harness counts ~~97~~ ~~101~~ 102: 101 with the four `ExtensionLog` checks — lead, 2026-10-11 (device fix round); 102 with the modify's still-pending check (§7.2) — lead, 2026-10-11 (final review) | §13 |
 
 ## 1. Why
 
@@ -356,11 +356,11 @@ The reply is the item in the `WriteQueued` answer. "Others" means enumeration, t
 | --- | --- | --- | --- | --- |
 | 0 | No write since the upgrade, or the token was cleared | nothing | n/a | `{cv}` |
 | 1 | Create queued (provisional id P) | row P with no contract; held `(W, b=0)`; size and mtime from the copy | `0:wW` | `0:wW`, status `uploading` |
-| 2 | Modify queued | held `(W, b)`; size and mtime of W (B2) | `b:wW` | `b:wW`, `uploading` |
+| 2 | Modify queued | ~~held `(W, b)`; size and mtime of W (B2)~~ held `(W, b)`; size and mtime of W (B2); the name and parent W was saved under (§7.2) — lead, 2026-10-11 (final review) | `b:wW` | `b:wW`, `uploading` |
 | 3 | ~~Save queued behind a live upload (§8.3)~~ Save queued behind any queued write, whatever its state (§8.3) — lead ruling, 2026-10-10 (spec review) | held `W2`; op `after_write_id = W1` | `b:wW2` | `b:wW2` |
 | 4 | ~~Save superseded a queued one (§8.2)~~ — removed: there is no supersede (§8.2). Instead: **the predecessor parked and the save took over at its claim (§8.4)** — lead ruling, 2026-10-10 (spec review) | ~~the earlier op carries W2's bytes; held `W2`~~ W1's op is retired; W2's op carries W1's base (or W1's create); held `W2` | `b:wW2` | `b:wW2` |
 | 5 | W landed, nothing later queued | `held_version`/`held_object_version_id` = produced; status `Local`; the server's size (same bytes); ~~`modified_at` kept (§9.3)~~ `modified_at` stamped as today (§9.3; the save-time presentation is split off, §12) — lead ruling, 2026-10-10 (spec r4b) | n/a | `b:wW` unchanged, `local` |
-| 6 | W1 landed, W2 still queued | held stays `W2`; status `Uploading`; W2's size and mtime | n/a | `b:wW2`, `uploading` |
+| 6 | W1 landed, W2 still queued | ~~held stays `W2`; status `Uploading`; W2's size and mtime~~ held stays `W2`; status `Uploading`; W2's size and mtime, and W2's name and parent, parked or not (§7.2) — lead, 2026-10-11 (final review) | n/a | `b:wW2`, `uploading` |
 | 7 | Echo of our own landing (op or snapshot with the produced version) | nothing | n/a | unchanged |
 | 8 | Remote content change (new version or object id), W not queued | held cleared | n/a | `{cv'}`: the system re-downloads |
 | 8b (4b) | Remote **versionless** replace: the legacy chunked complete, a `file_create` op for a row that exists (`FILES:3656-3667`), W not queued | the op cannot tell it from an echo; it requests a re-snapshot, whose node raises `current_version` (§6.3.2, I-3); held cleared then | n/a | `{cv'}` one pass later: the system re-downloads |
@@ -618,6 +618,14 @@ sequenceDiagram
 - **Not verified on this macOS:** whether the system ever sends `.deletionConflicted` at our swap. D5 records it (§14).
 
 For the content-modify row of the table: presenting S under P keeps the system's item P consistent until it applies the swap: an insert of S and a delete of P, in that order (`FPE:777`, `FPE:780`). That mechanism is unchanged; it is follow-up D's concern.
+
+**A save that also renames or moves (final review).** The system hands a rename or a move over together with the contents when the person changes both before it syncs: one `modifyItem` with `newContents` and the filename or parent among `changedFields` ("The filename and contents fields should be synced together", `REPL.h`, modifyItem). Whatever the reply's item says for a field that is not still pending, the system writes to disk (`REPL.h`, modifyItem). — lead, 2026-10-11 (final review)
+- ~~(no rule: the accept recorded the size and mtime only, and the row's name and parent changed at the landing. The extension reported every field handled, so the reply's old name and parent were written back to disk, and while the upload waited or stayed parked, every enumeration described them too.)~~
+- **The accept applies them.** In the accept transaction (§8.7 S1 item 1), the row takes the save's name, as the landing sets it, and its parent, when either differs from the row's, with one `reparented` change row. The reply, and every enumeration after it, describe the item as the person left it. Remote changes do not touch the row's name meanwhile: a snapshot node or an op echo leaves an `Uploading` or `Error` row's name and parent alone (`EB:8235-8243`). — lead, 2026-10-11 (final review)
+- **In order with the write.** The server gets the name and parent from the upload itself, before its bytes (the session's metadata step, `EB:1878-1898`), so a rename can never reach the server ahead of, or without, the save it came with. A landing applies its op's name and parent only when no later Finder save of the file is queued, parked or not (`EARLIER_IN_QUEUE_SQL`): that save's accept applied newer ones, which the row keeps. A save that parks for good keeps the name and parent it was made under, with its bytes. — lead, 2026-10-11 (final review)
+- **Why not "still pending" instead.** Reporting the two fields as still pending would have the system re-send them as a modify without contents. That path queues a `RenameFile` or `MoveFile` op, which the claim does not order with the file's uploads (only content kinds are ordered, `SD:5061-5086`), and whose reply is built from a row it does not change, so it would describe the old name in turn. — lead, 2026-10-11 (final review)
+- **The extension's guard.** `modifyStillPendingFields` reports a changed filename or parent as still pending when a modify with contents gets back an item that does not describe it: an app from another build, still running across an update, may not apply them. With this build's app it is empty. A modify without contents reports nothing pending, as before. — lead, 2026-10-11 (final review)
+- **Known, not changed here:** a rename or move without contents still replies with the row as it was, and a move to the root never reaches the server (§12). — lead, 2026-10-11 (final review)
 
 ### 7.3 An unknown id without an alias is refused
 
@@ -897,10 +905,11 @@ Nothing inside awaits or touches the network. Its preconditions are never read i
 1. **Accept a Finder content write** (create, modify, deletion-conflicted create):
    - the alias lookup and the §6.1 decision;
    - minting W ~~and its `minted_writes` row~~, and the held columns (`minted_writes` is split off, §12 — lead ruling, 2026-10-10 (spec r4b));
-   - the status, size and mtime `record_local_write` sets today;
+   - ~~the status, size and mtime `record_local_write` sets today;~~
+   - the status, size and mtime `record_local_write` sets today, and for a modify the name and parent the save was made under (§7.2) — lead, 2026-10-11 (final review);
    - the enqueue, with `write_id` and `after_write_id`, `base_version` or `base_pending`; or the op parked at once (rule 6a′, the `init` guard's cases).
 2. **The landing**, after the completion record (§8.6.1):
-   - the row and contract, and the held columns (§8.6.2);
+   - the row and contract, and the held columns (§8.6.2); the op's name and parent only when no later Finder save of the file is queued (§7.2) — lead, 2026-10-11 (final review);
    - the id swap and the alias ~~and the re-key of `minted_writes`~~ (— lead ruling, 2026-10-10 (spec r4b));
    - the **chain step**;
    - `version_filled := 0`;
@@ -1198,6 +1207,9 @@ Every line is a `warn!`, except the hydrate count (`info!`), with ids and fixed 
   - **1882:** every domain removal preserves unsynced files (`removeDomain:` with a preserve mode, `NSFileProviderManager.h:239`).
   - Neither is designed here, and neither is part of this spec's code.
 - **(4b) Whether apps pass `NSFileProviderModifyItemIsImmediateUploadRequestByPresentingApplication`** (§8.8). It is logged, not honoured.
+- **(final review) Two rename and move gaps that predate this spec**, found with §7.2's save that renames or moves. Neither is changed here. — lead, 2026-10-11 (final review)
+  - **A rename or move without contents** queues a `RenameFile` or `MoveFile` op and replies with the row as it was: the op changes the row only through the server's echo of it. Until the echo, the reply and every enumeration describe the old name and parent, and the system writes them to disk. The op is also not ordered with the file's uploads (§7.2).
+  - **A move to the root never reaches the server.** `update_metadata` sends `parent_id` only when there is one (`api_client.rs:1051-1053`), and the root is `None`. A move to the root without contents is queued as a `RenameFile` op (`EB:2832-2836`), which sends no parent, and an upload whose save moved its file to the root keeps the server's old parent. The Mac's row says root; the server, and so every other device, keeps the old folder.
 
 ## 13. Test plan
 
@@ -1308,7 +1320,7 @@ How a seam is used:
 **Gates:**
 - whole-crate `cargo test --locked` with the per-binary truth lines and the count guard;
 - `cargo clippy --locked --all-targets`: no new warnings against 146;
-- Swift harness ~~`95 passed, 0 failed (expected 95)`~~ ~~`96 passed, 0 failed (expected 96)`~~ ~~`97 passed, 0 failed (expected 97)`~~ `101 passed, 0 failed (expected 101)`, plus its self-test — lead ruling, 2026-10-10 (spec review); (4d) 97 with the `WriteRetryLater` decode check, as the count line above says — lead, 2026-10-11 (Task 12); 101 with the four `ExtensionLog` checks — lead, 2026-10-11 (device fix round);
+- Swift harness ~~`95 passed, 0 failed (expected 95)`~~ ~~`96 passed, 0 failed (expected 96)`~~ ~~`97 passed, 0 failed (expected 97)`~~ ~~`101 passed, 0 failed (expected 101)`~~ `102 passed, 0 failed (expected 102)`, plus its self-test — lead ruling, 2026-10-10 (spec review); (4d) 97 with the `WriteRetryLater` decode check, as the count line above says — lead, 2026-10-11 (Task 12); 101 with the four `ExtensionLog` checks — lead, 2026-10-11 (device fix round); 102 with the modify's still-pending check (§7.2) — lead, 2026-10-11 (final review);
 - the extension build, as CI does it;
 - `check-ipc-timeouts.py` and its self-test.
 
