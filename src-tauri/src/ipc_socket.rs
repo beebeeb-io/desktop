@@ -1438,6 +1438,14 @@ fn log_refused_write(op: &'static str, reason: &'static str) {
     tracing::warn!(op, reason, "Finder write refused");
 }
 
+/// [`log_refused_write`] for an id with no row and no alias (spec §11, "Unknown id"): it also
+/// logs the id the request named, which comes from the wire (M5: as `id` when it is a UUID,
+/// else as `id_kind = "non_uuid"`).
+fn log_refused_unknown_item(op: &'static str, requested_id: &str) {
+    let (id, id_kind) = crate::engine_bridge::wire_id_fields(requested_id);
+    tracing::warn!(op, reason = "unknown_item", id, id_kind, "Finder write refused");
+}
+
 /// Fixed category for an engine error on the write path, for
 /// [`log_refused_write`]. The error's text can carry user data (names, paths),
 /// so it is classified, never logged.
@@ -2243,8 +2251,10 @@ async fn hydrate_over_ipc(
                     .await
                     .is_err()
                 {
+                    let (file_id, id_kind) = crate::engine_bridge::wire_id_fields(file_id);
                     tracing::info!(
                         file_id,
+                        id_kind,
                         "IPC client went away while flushing the terminal hydrate progress frames"
                     );
                     return HydrateOutcome::ClientGone;
@@ -2257,7 +2267,12 @@ async fn hydrate_over_ipc(
         }
         None => {
             // `hydrate` is dropped when this function returns.
-            tracing::info!(file_id, "IPC client went away mid-hydrate; hydration cancelled");
+            let (file_id, id_kind) = crate::engine_bridge::wire_id_fields(file_id);
+            tracing::info!(
+                file_id,
+                id_kind,
+                "IPC client went away mid-hydrate; hydration cancelled"
+            );
             HydrateOutcome::ClientGone
         }
     }
@@ -2267,9 +2282,13 @@ async fn hydrate_over_ipc(
 /// with it, and the system shows the item as failing to download. It leaves
 /// one warning in the daemon log with the item id and a fixed category; the
 /// error's text can carry a path or a URL, so it is classified, never logged.
-fn hydrate_failure_reply(file_id: &str, error: anyhow::Error) -> IpcResponse {
+/// The id is the request's, from the wire (M5): on Linux the identifier check is a no-op,
+/// so it can be any caller-supplied text.
+pub(crate) fn hydrate_failure_reply(file_id: &str, error: anyhow::Error) -> IpcResponse {
+    let (file_id, id_kind) = crate::engine_bridge::wire_id_fields(file_id);
     tracing::warn!(
         file_id,
+        id_kind,
         reason = hydrate_failure_category(&error),
         "Finder hydrate failed"
     );
@@ -2548,7 +2567,10 @@ pub(crate) fn write_outcome_response(
             // The extension turns this reply into a definitive Finder error,
             // so it must leave a trace in the daemon log (it used to leave
             // none). The category only: the error text can name the file.
-            log_refused_write(op, write_refusal_category(&e));
+            match e.downcast_ref::<crate::engine_bridge::UnknownItem>() {
+                Some(unknown) => log_refused_unknown_item(op, &unknown.requested_id),
+                None => log_refused_write(op, write_refusal_category(&e)),
+            }
             IpcResponse::Error { message: e.to_string() }
         }
     }
@@ -2740,6 +2762,44 @@ fn builder_seam() {
     }
 }
 
+/// How often one item's failed presentation read is logged. The change feed, every enumeration
+/// and every item lookup build the same item again, so a row whose read keeps failing would
+/// otherwise add a line each time (spec §11: at most one line per write or per attempt).
+const PRESENTATION_WARN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// At most this many items are remembered; past it, the ones whose interval is over go first,
+/// then all of them (a line too many, never unbounded memory).
+const PRESENTATION_WARN_MAX_ITEMS: usize = 1024;
+
+/// Per item: when its last line was written, and how many failed reads were not logged since.
+type PresentationWarned = std::collections::HashMap<String, (std::time::Instant, u64)>;
+
+static PRESENTATION_WARNED: std::sync::LazyLock<std::sync::Mutex<PresentationWarned>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(PresentationWarned::new()));
+
+/// Whether this failed presentation read of `file_id` is logged now: `Some(n)`, with the `n`
+/// earlier ones that were not, or `None` while its interval runs.
+fn presentation_warn_due(seen: &mut PresentationWarned, file_id: &str, now: std::time::Instant) -> Option<u64> {
+    if let Some((last, held_back)) = seen.get_mut(file_id) {
+        if now.saturating_duration_since(*last) < PRESENTATION_WARN_INTERVAL {
+            *held_back += 1;
+            return None;
+        }
+        let logged = Some(*held_back);
+        *last = now;
+        *held_back = 0;
+        return logged;
+    }
+    if seen.len() >= PRESENTATION_WARN_MAX_ITEMS {
+        seen.retain(|_, (last, _)| now.saturating_duration_since(*last) < PRESENTATION_WARN_INTERVAL);
+        if seen.len() >= PRESENTATION_WARN_MAX_ITEMS {
+            seen.clear();
+        }
+    }
+    seen.insert(file_id.to_string(), (now, 0));
+    Some(0)
+}
+
 pub(crate) fn file_entry_payload_for_db(
     db: &crate::state_db::StateDb,
     entry: &crate::state_db::FileEntry,
@@ -2769,12 +2829,23 @@ pub(crate) fn file_entry_payload_for_db(
             // A failed read (a SQLite error, or a held write without its base) is
             // presented as round 3 did, from the contract alone: the system never
             // sees a spurious content change, and the capabilities are kept. A fixed
-            // category only: the error can carry a path (spec §11).
-            tracing::warn!(
-                file_id = %entry.file_id,
-                category = "presentation_read_failed",
-                "item presented from its contract alone"
+            // category only: the error can carry a path (spec §11). Once per item per
+            // interval, with how many were held back.
+            let due = presentation_warn_due(
+                &mut PRESENTATION_WARNED
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+                &entry.file_id,
+                std::time::Instant::now(),
             );
+            if let Some(held_back) = due {
+                tracing::warn!(
+                    file_id = %entry.file_id,
+                    category = "presentation_read_failed",
+                    held_back,
+                    "item presented from its contract alone"
+                );
+            }
             match db.get_file_contract_state(&entry.file_id).ok().flatten() {
                 Some(contract) => file_entry_payload(entry, &contract, parent_identifier),
                 None => file_entry_payload_without_contract(entry, parent_identifier),
@@ -5346,6 +5417,66 @@ mod tests {
         assert!(lines[0].contains("WARN") && lines[0].contains("half-set"), "{logs}");
     }
 
+    /// Task 4 parked item: a row whose presentation read keeps failing is built again by the
+    /// change feed, every enumeration and every item lookup. It is logged once per item per
+    /// interval, and the next line says how many failed reads went unlogged meanwhile.
+    #[test]
+    fn a_repeated_failed_presentation_read_is_logged_once_per_item_per_interval() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        for id in ["half-set-again", "half-set-other"] {
+            seed_1694_item(
+                &db,
+                id,
+                FileStatus::Local,
+                PERMISSION_READ | PERMISSION_WRITE,
+                ItemKind::File,
+            );
+            db.set_held_pair_for_test(id, Some(&"b".repeat(32)), None);
+        }
+        let again = db.get_file("half-set-again").unwrap().unwrap();
+        let other = db.get_file("half-set-other").unwrap().unwrap();
+        let logs = capture_logs(|| {
+            for _ in 0..3 {
+                let _ = file_entry_payload_for_db(&db, &again, FP_ROOT_APPLE);
+            }
+            let _ = file_entry_payload_for_db(&db, &other, FP_ROOT_APPLE);
+        });
+        let lines: Vec<&str> = logs
+            .lines()
+            .filter(|line| line.contains("presentation_read_failed"))
+            .collect();
+        assert_eq!(lines.len(), 2, "one line per item:\n{logs}");
+        assert!(
+            lines[0].contains("half-set-again") && lines[1].contains("half-set-other"),
+            "{logs}"
+        );
+
+        // The limiter itself, on a clock of its own.
+        let mut seen = std::collections::HashMap::new();
+        let start = std::time::Instant::now();
+        let later = |secs| start + std::time::Duration::from_secs(secs);
+        assert_eq!(
+            presentation_warn_due(&mut seen, "f", start),
+            Some(0),
+            "the first read is logged"
+        );
+        assert_eq!(presentation_warn_due(&mut seen, "f", later(1)), None);
+        assert_eq!(presentation_warn_due(&mut seen, "f", later(2)), None);
+        assert_eq!(
+            presentation_warn_due(&mut seen, "g", later(2)),
+            Some(0),
+            "another item has its own"
+        );
+        let after = PRESENTATION_WARN_INTERVAL.as_secs() + 1;
+        assert_eq!(
+            presentation_warn_due(&mut seen, "f", later(after)),
+            Some(2),
+            "after the interval, logged again with the two it held back"
+        );
+        assert_eq!(presentation_warn_due(&mut seen, "f", later(after + 1)), None);
+    }
+
     /// Spec 2026-10-09 §7.3: a queued write whose row cannot be read back is refused, never
     /// answered without an item (for a modify the system reads a nil item as "delete the item
     /// on disk"). Only an ignored write is answered without one. macOS only: other unix builds
@@ -5523,10 +5654,10 @@ mod tests {
     fn a_failed_hydrate_is_logged_with_its_category_and_never_the_path() {
         let not_found = http_status_error("404 Not Found");
         let logs = capture_logs(|| {
-            let reply = hydrate_failure_reply("file-404", not_found);
+            let reply = hydrate_failure_reply("3f2a9c1e-0000-4000-8000-000000000404", not_found);
             assert!(matches!(reply, IpcResponse::Error { .. }));
             let reply = hydrate_failure_reply(
-                "file-io",
+                "3f2a9c1e-0000-4000-8000-0000000000f0",
                 std::io::Error::new(std::io::ErrorKind::PermissionDenied, "/Users/someone/secret-report.txt").into(),
             );
             assert!(matches!(reply, IpcResponse::Error { .. }));
@@ -5538,11 +5669,11 @@ mod tests {
         assert_eq!(failures.len(), 2, "one warning per failed hydrate, got:\n{logs}");
         assert!(failures.iter().all(|line| line.contains("WARN")), "{logs}");
         assert!(
-            failures[0].contains("file-404") && failures[0].contains("not_found"),
+            failures[0].contains("3f2a9c1e-0000-4000-8000-000000000404") && failures[0].contains("not_found"),
             "{logs}"
         );
         assert!(
-            failures[1].contains("file-io") && failures[1].contains("\"io\""),
+            failures[1].contains("3f2a9c1e-0000-4000-8000-0000000000f0") && failures[1].contains("\"io\""),
             "{logs}"
         );
         assert!(
@@ -5559,7 +5690,7 @@ mod tests {
     fn a_fetch_whose_queued_copy_is_missing_is_logged_by_its_own_category() {
         let logs = capture_logs(|| {
             let reply = hydrate_failure_reply(
-                "file-queued",
+                "3f2a9c1e-0000-4000-8000-0000000000f1",
                 anyhow::Error::new(crate::engine_bridge::QueuedCopyMissing),
             );
             let IpcResponse::Error { message } = &reply else {
@@ -5573,7 +5704,7 @@ mod tests {
             .collect();
         assert_eq!(failures.len(), 1, "{logs}");
         assert!(
-            failures[0].contains("file-queued") && failures[0].contains("queued_copy_missing"),
+            failures[0].contains("3f2a9c1e-0000-4000-8000-0000000000f1") && failures[0].contains("queued_copy_missing"),
             "{logs}"
         );
     }

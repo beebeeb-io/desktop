@@ -2995,20 +2995,19 @@ impl StateDb {
     /// - Except a row with a Finder upload that has not parked (spec §9.2): it stays
     ///   `Uploading`, because that upload resumes after the relaunch and the item stays
     ///   writable and not evictable meanwhile. Only a Finder upload carries a write id.
+    ///
+    /// Returns the rows it reset, which is what the engine-start line reports; a row it keeps
+    /// `Uploading` is not touched, so not counted.
     pub fn reconcile_stale_in_flight_on_startup(&self) -> Result<usize> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.execute(
             "UPDATE files
-             SET status = CASE status
-                WHEN 'downloading' THEN 'cloud_only'
-                WHEN 'uploading' THEN CASE WHEN EXISTS (
+             SET status = CASE status WHEN 'downloading' THEN 'cloud_only' ELSE 'error' END
+             WHERE status = 'downloading'
+                OR (status = 'uploading' AND NOT EXISTS (
                         SELECT 1 FROM operation_queue q
                         WHERE q.file_id = files.file_id AND q.write_id IS NOT NULL
-                          AND q.kind IN ('upload_version', 'upload_file') AND q.attempts < q.max_attempts)
-                    THEN 'uploading' ELSE 'error' END
-                ELSE status
-             END
-             WHERE status IN ('downloading', 'uploading')",
+                          AND q.kind IN ('upload_version', 'upload_file') AND q.attempts < q.max_attempts))",
             [],
         )
     }
@@ -11077,6 +11076,37 @@ mod tests {
             db.get_file("stale-upload").unwrap().unwrap().status,
             FileStatus::Error,
             "unchanged for a row with no Finder upload"
+        );
+    }
+
+    /// Task 9 Minor 4: the startup reconcile returns the rows it reset, which is what its log
+    /// line reports. A row it keeps `Uploading` (its Finder upload resumes) is not counted.
+    #[test]
+    fn the_startup_reconcile_counts_only_the_rows_it_resets() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_v1_row(&db, "with-save");
+        assert!(matches!(
+            accept_save(&db, "op-with-save", "with-save", Some("1")),
+            AcceptOutcome::Queued { .. }
+        ));
+        db.set_status("with-save", FileStatus::Uploading).unwrap();
+        seed_own_row(&db, "stale-upload", FileStatus::Uploading, 20);
+        seed_own_row(&db, "stale-download", FileStatus::Downloading, 30);
+
+        let reset = db.reconcile_stale_in_flight_on_startup().unwrap();
+
+        assert_eq!(reset, 2, "the stale upload and the stale download, not the kept row");
+        assert_eq!(db.get_file("with-save").unwrap().unwrap().status, FileStatus::Uploading);
+        assert_eq!(db.get_file("stale-upload").unwrap().unwrap().status, FileStatus::Error);
+        assert_eq!(
+            db.get_file("stale-download").unwrap().unwrap().status,
+            FileStatus::CloudOnly
+        );
+        assert_eq!(
+            db.reconcile_stale_in_flight_on_startup().unwrap(),
+            0,
+            "nothing left to reset"
         );
     }
 

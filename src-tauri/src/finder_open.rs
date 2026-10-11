@@ -69,6 +69,19 @@ pub(crate) fn finder_may_show(
     }
 }
 
+/// The namespace of the row `item_id` names, for [`finder_may_show`]. A provisional id whose
+/// create has landed (an old quick-search result, a request after the system applied the swap)
+/// is followed to the server file it became (spec 2026-10-09 §7.1), and that row decides.
+/// `Ok(None)`: neither a row nor an alias.
+pub(crate) fn item_namespace(db: &crate::state_db::StateDb, item_id: &str) -> Result<Option<Namespace>, String> {
+    let landed_as = db
+        .resolve_alias(item_id)
+        .map_err(|error| format!("read item: {error}"))?;
+    db.get_file_contract_state(landed_as.as_deref().unwrap_or(item_id))
+        .map(|state| state.map(|state| state.namespace))
+        .map_err(|error| format!("read item: {error}"))
+}
+
 /// The title of the alert the menu's "Open in Finder" raises when it fails.
 pub(crate) const MENU_OPEN_FAILED_TITLE: &str = "Open in Finder";
 
@@ -196,9 +209,21 @@ mod tests {
             guard_statement.contains(")?;"),
             "the refusal is returned, not dropped:\n{guard_statement}"
         );
+        // Round 4 ([mm2-c2]): the lookup is `item_namespace`, which follows a landed provisional id to its server
+        // file and then reads that row's contract.
         assert!(
-            guard_statement.contains("get_file_contract_state(id)"),
-            "the namespace comes from the state database's contract row:\n{guard_statement}"
+            guard_statement.contains(&squeeze("finder_open::item_namespace(&db, id)")),
+            "the namespace comes from `item_namespace`:\n{guard_statement}"
+        );
+        let own = squeeze(body_between(
+            &read("src/finder_open.rs"),
+            "pub(crate) fn item_namespace(",
+            "\n}\n",
+        ));
+        assert!(
+            own.find("resolve_alias(item_id)").expect("the alias")
+                < own.find("get_file_contract_state(").expect("the row"),
+            "the namespace comes from the state database's contract row, after the alias:\n{own}"
         );
     }
 

@@ -364,10 +364,14 @@ impl HydrateSource {
 
 /// A Finder write for an id this Mac never knew and no alias resolves (spec §7.3). The
 /// reply is an error the extension reports as `cannotSynchronize`, so the edit stays on
-/// disk; never "no such item", which would make the system delete it.
+/// disk; never "no such item", which would make the system delete it. It carries the id
+/// the request named, for the refusal's log line (spec §11, through [`loggable_id`]); the
+/// text never names it.
 #[derive(Debug)]
 #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
-pub(crate) struct UnknownItem;
+pub(crate) struct UnknownItem {
+    pub requested_id: String,
+}
 
 impl std::fmt::Display for UnknownItem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -407,11 +411,62 @@ impl std::fmt::Display for ThumbnailNotYet {
 
 impl std::error::Error for ThumbnailNotYet {}
 
-/// One line per request that reached the server id through an alias (spec §7.2, §11).
+/// What [`loggable_id`] answers for an id that is not a UUID.
+pub(crate) const NON_UUID: &str = "non_uuid";
+
+/// Spec §11 M5: an id taken from the wire is logged only when it parses as a UUID. Anything
+/// else (on Linux, where the identifier check is a no-op, any caller-supplied text) is logged as
+/// its kind. Log hygiene on every platform, not a behaviour change.
+pub(crate) fn loggable_id(id: &str) -> &str {
+    if uuid::Uuid::parse_str(id).is_ok() {
+        id
+    } else {
+        NON_UUID
+    }
+}
+
+/// The two fields of a line that logs an id from the wire (M5): the id field (`Some` when it
+/// is a UUID) and `id_kind` (`Some("non_uuid")` otherwise). Exactly one is `Some`; `tracing`
+/// writes nothing for a `None` field.
+pub(crate) fn wire_id_fields(id: &str) -> (Option<tracing::field::DisplayValue<&str>>, Option<&'static str>) {
+    match loggable_id(id) {
+        NON_UUID => (None, Some(NON_UUID)),
+        id => (Some(tracing::field::display(id)), None),
+    }
+}
+
+/// Spec §11, [plan-fix-2]: the fixed category of an error, for a log line about a step that
+/// failed. The error's text can carry a path (an I/O error's context, a database file name),
+/// so a line logs this instead. The first cause it recognises decides.
+pub(crate) fn error_category(error: &(dyn std::error::Error + 'static)) -> &'static str {
+    let mut cause = Some(error);
+    while let Some(current) = cause {
+        if current.downcast_ref::<rusqlite::Error>().is_some() {
+            return "database";
+        }
+        if let Some(io) = current.downcast_ref::<std::io::Error>() {
+            return match io.kind() {
+                std::io::ErrorKind::NotFound => "not_found",
+                std::io::ErrorKind::PermissionDenied => "permission_denied",
+                _ => "io",
+            };
+        }
+        if current.downcast_ref::<reqwest::Error>().is_some() {
+            return "network";
+        }
+        cause = current.source();
+    }
+    "other"
+}
+
+/// One line per request that reached the server id through an alias (spec §7.2, §11). The
+/// provisional id comes from the wire (M5); the server id is the row's.
 pub(crate) fn log_alias_resolved(request: &'static str, provisional_id: &str, file_id: &str) {
+    let (provisional_id, id_kind) = wire_id_fields(provisional_id);
     tracing::warn!(
         request,
-        provisional_id = %provisional_id,
+        provisional_id,
+        id_kind,
         file_id = %file_id,
         "provisional id resolved to the server id"
     );
@@ -419,17 +474,21 @@ pub(crate) fn log_alias_resolved(request: &'static str, provisional_id: &str, fi
 
 /// A delete under a provisional id that does not name the server file's held token (m-6).
 fn log_alias_delete_kept(provisional_id: &str, file_id: &str) {
+    let (provisional_id, id_kind) = wire_id_fields(provisional_id);
     tracing::warn!(
-        provisional_id = %provisional_id,
+        provisional_id,
+        id_kind,
         file_id = %file_id,
         "delete of a provisional id not applied to the server file"
     );
 }
 
 /// The device plan's count of fetches that reached the daemon (spec §11, §14 instrument 2).
+/// The id is the request's (M5).
 #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 fn log_hydrate_served(file_id: &str, source: HydrateSource) {
-    tracing::info!(file_id = %file_id, source = source.as_str(), "Finder hydrate served");
+    let (file_id, id_kind) = wire_id_fields(file_id);
+    tracing::info!(file_id, id_kind, source = source.as_str(), "Finder hydrate served");
 }
 
 #[cfg(test)]
@@ -796,10 +855,8 @@ impl EngineBridge {
                         // The landing transaction removed the op.
                         OpDone::Removed { release } => release,
                     };
-                    if let Some(path) = release.as_deref()
-                        && let Err(e) = crate::staged_payload::remove(&self.db, Path::new(path))
-                    {
-                        tracing::warn!(error = %e, "staged upload cleanup deferred; journal retained");
+                    if let Some(path) = release.as_deref() {
+                        crate::staged_payload::remove_or_log(&self.db, Path::new(path));
                     }
                     if let Some(file_id) = &op.file_id {
                         outcome.invalidated_item_ids.push(file_id.clone());
@@ -835,7 +892,12 @@ impl EngineBridge {
                         log_queue_state_moved(&op.op_id, "park");
                         continue;
                     }
-                    log_refused_upload(&op, op.max_attempts, crate::api_client::InitConflictClass::StaleBase);
+                    log_refused_upload(
+                        &op,
+                        op.attempts.saturating_add(1),
+                        crate::api_client::InitConflictClass::StaleBase,
+                        true,
+                    );
                     outcome.retried_op_ids.push(op.op_id);
                 }
                 Err(error) => {
@@ -870,7 +932,7 @@ impl EngineBridge {
                         {
                             let class =
                                 init_conflict_class(&error).unwrap_or(crate::api_client::InitConflictClass::Other);
-                            log_refused_upload(&op, attempts, class);
+                            log_refused_upload(&op, attempts, class, false);
                         }
                         let next_retry_at = now.saturating_add(retry_delay_seconds(attempts));
                         if !self.db.record_attempt_claimed(
@@ -899,10 +961,8 @@ impl EngineBridge {
     /// after the commit (S6).
     fn after_hand_over(&self, successor: &PendingOperation, took_over: &TookOver) {
         log_took_over(&successor.op_id, successor.file_id.as_deref(), &took_over.parked_op_id);
-        if let Some(path) = took_over.released_payload.as_deref()
-            && let Err(e) = crate::staged_payload::remove(&self.db, Path::new(path))
-        {
-            tracing::warn!(error = %e, "staged upload cleanup deferred; journal retained");
+        if let Some(path) = took_over.released_payload.as_deref() {
+            crate::staged_payload::remove_or_log(&self.db, Path::new(path));
         }
     }
 
@@ -1177,12 +1237,11 @@ impl EngineBridge {
                 return Err(anyhow::Error::new(ParkNow(ParkReason::PayloadMissing)));
             }
             // An op without a write id keeps today's retry and today's text
-            // (`test_process_due_operations_records_retry_for_upload_worker_handoff`).
+            // (`test_process_due_operations_records_retry_for_upload_worker_handoff`), without
+            // the path: `classify_operation_error` matches bare substrings such as `403`, so a
+            // path would pause the op instead ([t5-rr] obs 1).
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(anyhow::anyhow!(
-                    "staged upload payload is missing: {}",
-                    payload_path.display()
-                ));
+                return Err(anyhow::anyhow!("staged upload payload is missing"));
             }
             // Every other read error (permission, I/O, not a regular file) retries as
             // today (spec §8.4), with a fixed text. Neither the path nor the I/O error
@@ -1652,11 +1711,7 @@ impl EngineBridge {
         // On macOS the caller releases the payload once the op's removal has
         // committed (spec §8.7 S6).
         #[cfg(not(target_os = "macos"))]
-        {
-            if let Err(e) = crate::staged_payload::remove(&self.db, payload_path) {
-                tracing::warn!(error = %e, "staged upload cleanup deferred; journal retained");
-            }
-        }
+        crate::staged_payload::remove_or_log(&self.db, payload_path);
         thumbnails
     }
 
@@ -2575,7 +2630,7 @@ impl EngineBridge {
         {
             let (file_id, presented) = self.resolve_provisional(&requested_id, "modify")?;
             if self.db.get_file(&file_id)?.is_none() {
-                return Err(anyhow::Error::new(UnknownItem));
+                return Err(anyhow::Error::new(UnknownItem { requested_id }));
             }
             target.file_id = Some(file_id);
             present_as = presented;
@@ -2621,8 +2676,13 @@ impl EngineBridge {
                 token
             }
             // The row went between the check above and the accept: refused the same way
-            // (§7.3). The staged copy is dropped with `prepared`; nothing was queued.
-            crate::state_db::AcceptOutcome::UnknownItem => return Err(anyhow::Error::new(UnknownItem)),
+            // (§7.3). The staged copy is dropped with `prepared`; nothing was queued. The
+            // request named the provisional id it is presented under, else this one.
+            crate::state_db::AcceptOutcome::UnknownItem => {
+                return Err(anyhow::Error::new(UnknownItem {
+                    requested_id: present_as.unwrap_or(file_id),
+                }));
+            }
         };
         prepared.staged.retain();
         Ok(FpWrite {
@@ -4153,10 +4213,8 @@ impl EngineBridge {
         };
         // macOS: the upload leaves its staged copy for the caller to release. This op
         // was never queued, so there is no removal to wait for.
-        if let Some(path) = released.as_deref()
-            && let Err(e) = crate::staged_payload::remove(&self.db, Path::new(path))
-        {
-            tracing::warn!(error = %e, "staged upload cleanup deferred; journal retained");
+        if let Some(path) = released.as_deref() {
+            crate::staged_payload::remove_or_log(&self.db, Path::new(path));
         }
         // Task 1700: thumbnail failures never fail the resolution, but they
         // must not vanish silently either.
@@ -5005,12 +5063,29 @@ pub(crate) fn init_conflict_class(error: &anyhow::Error) -> Option<crate::api_cl
 
 /// One warning per upload attempt the server refused with 409, with its class
 /// (a stale base, another upload of the file in progress, or other), and a
-/// distinct one when that attempt parks the op: its attempts are used up, or a
-/// stale base parked it at once (spec §8.4). Ids, counts and the class only: the
+/// distinct one when that attempt parks the op, worded by why: a stale base
+/// parked it at once (`parked_at_once`, spec §8.4; `attempt` is the attempt that
+/// was made), or its attempts are used up. Ids, counts and the class only: the
 /// file's name, the request URL and the server's text never reach the log.
-fn log_refused_upload(op: &PendingOperation, attempt: i64, class: crate::api_client::InitConflictClass) {
+fn log_refused_upload(
+    op: &PendingOperation,
+    attempt: i64,
+    class: crate::api_client::InitConflictClass,
+    parked_at_once: bool,
+) {
     let file_id = op.file_id.as_deref().unwrap_or_default();
-    if attempt >= op.max_attempts {
+    if parked_at_once {
+        tracing::warn!(
+            op_id = %op.op_id,
+            file_id,
+            attempt,
+            max_attempts = op.max_attempts,
+            base_version = ?op.base_version,
+            class = class.as_str(),
+            reason = ParkReason::StaleBase.as_str(),
+            "upload refused by the server (409 Conflict); its base is stale, parked with its bytes kept in the queue"
+        );
+    } else if attempt >= op.max_attempts {
         let reason = (class == crate::api_client::InitConflictClass::StaleBase).then(|| ParkReason::StaleBase.as_str());
         tracing::warn!(
             op_id = %op.op_id,
@@ -9935,6 +10010,15 @@ mod tests {
             fn drop(&mut self) {
                 let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
             }
+        }
+        // Root reads through mode 000, so the precondition cannot be produced there (a CI
+        // container runs as root). Say so and skip, rather than fail ([t5-rr] obs 4).
+        // SAFETY: `geteuid` takes no arguments, cannot fail and touches no memory.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!(
+                "skipped: running as root, which reads a mode-000 directory, so no permission error can be produced"
+            );
+            return;
         }
         let dir = tempfile::tempdir().unwrap();
         let bridge = test_bridge(&dir.path().join("state.db"));
@@ -19792,5 +19876,649 @@ mod tests {
             read(&src.join("runner.rs")).contains("crate::watcher::spawn("),
             "the upload driver keeps its start on Windows"
         );
+    }
+
+    // ── Rule 7: every new log line is captured and clean (spec §11, M5) ──────
+
+    /// The planted name and the staging path must never reach a log line.
+    const PLANTED: &str = "Quarterly secret plan.txt";
+
+    /// The first line carrying `message`: it has every field in `fields`, and neither the
+    /// planted name, a URL, a home path nor the test's directory. In a test build the staging
+    /// folder is under the build's `target/` (`test_sandbox`), so `/Users/` covers it on a Mac.
+    fn assert_clean_line(logs: &str, message: &str, fields: &[&str], dir: &Path) -> String {
+        let line = logs
+            .lines()
+            .find(|line| line.contains(message))
+            .unwrap_or_else(|| panic!("no `{message}` line:\n{logs}"))
+            .to_string();
+        for field in fields {
+            assert!(
+                line.contains(&format!(" {field}=")),
+                "`{message}` lacks `{field}`: {line}"
+            );
+        }
+        let dir = dir.to_string_lossy();
+        for leak in ["Quarterly", "secret", "/api/v1", "127.0.0.1", "/Users/", dir.as_ref()] {
+            assert!(!line.contains(leak), "`{message}` leaks `{leak}`: {line}");
+        }
+        line
+    }
+
+    /// T37: a write to an id with no row and no alias is refused with its reason and the
+    /// requested id (spec §11, "Unknown id").
+    #[cfg(unix)] // names `crate::ipc_socket::write_outcome_response`
+    #[tokio::test]
+    async fn log_finder_write_refused_unknown_item() {
+        let (dir, _sync_root, server, bridge) = rule3_setup([100u8; 32]);
+        let requested = "3f2a9c1e-0000-4000-8000-00000000beef";
+        let contents = dir.path().join(PLANTED);
+        std::fs::write(&contents, b"edit").unwrap();
+        let logs = capture_logs_async(async {
+            let result = bridge.queue_file_provider_modify(finder_file_target(
+                Some(requested),
+                PLANTED,
+                &contents,
+                Some("1".into()),
+            ));
+            let _ = crate::ipc_socket::write_outcome_response("modify", &bridge.db, result);
+        })
+        .await;
+        let line = assert_clean_line(&logs, "Finder write refused", &["op", "reason", "id"], dir.path());
+        assert!(
+            line.contains("\"unknown_item\"") && line.contains(&format!(" id={requested}")),
+            "{line}"
+        );
+        drop(server.finish());
+    }
+
+    /// T37: an `init` refused with 409 and retried names its class (T25's scenario).
+    #[tokio::test]
+    async fn log_upload_refused_with_its_class() {
+        let (dir, sync_root, server, bridge) = rule3_setup([102u8; 32]);
+        seed_uploaded_row(&bridge, &server, "busy");
+        server
+            .state
+            .lock()
+            .unwrap()
+            .conflict_init_once
+            .insert("busy".into(), crate::api_client::IN_PROGRESS_MESSAGE.into());
+        fp_save(&bridge, dir.path(), "busy", PLANTED, b"edit", "1");
+        let logs = capture_logs_async(async {
+            drain_upload_queue(&bridge, &sync_root).await;
+        })
+        .await;
+        let line = assert_clean_line(
+            &logs,
+            "upload refused by the server (409 Conflict); will retry",
+            &["op_id", "file_id", "attempt", "max_attempts", "class"],
+            dir.path(),
+        );
+        assert!(line.contains("\"in_progress\"") && line.contains("busy"), "{line}");
+        assert_eq!(server.finish().latest_plaintext("busy", [102u8; 32]), b"edit");
+    }
+
+    /// The scenario of T23 (`i4_a_doomed_earlier_write_never_blocks_hours`), named `PLANTED`:
+    /// W's staged copy is gone, so W parks and N takes over. Returns W's op id and the logs.
+    async fn doomed_predecessor_logs(master_key: [u8; 32]) -> (tempfile::TempDir, String, String) {
+        let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_row(&bridge, &server, "doomed");
+        let w = fp_save(&bridge, dir.path(), "doomed", PLANTED, b"W", "1");
+        fp_save(
+            &bridge,
+            dir.path(),
+            "doomed",
+            PLANTED,
+            b"W N",
+            w.token.as_deref().unwrap(),
+        );
+        let w_op = bridge.db.list_operations_for_file("doomed").unwrap().remove(0);
+        std::fs::remove_file(w_op.payload_path.as_deref().unwrap()).unwrap();
+        let logs = capture_logs_async(async {
+            drain_upload_queue(&bridge, &sync_root).await;
+        })
+        .await;
+        let state = server.finish();
+        assert_eq!(state.latest_plaintext("doomed", master_key), b"W N", "N landed");
+        (dir, w_op.op_id, logs)
+    }
+
+    /// T37: the predecessor's park names its reason (T23).
+    #[tokio::test]
+    async fn log_parked_with_its_reason() {
+        let (dir, w_op_id, logs) = doomed_predecessor_logs([103u8; 32]).await;
+        let line = assert_clean_line(
+            &logs,
+            "upload parked with its bytes kept in the queue",
+            &["op_id", "file_id", "reason"],
+            dir.path(),
+        );
+        assert!(
+            line.contains("\"payload_missing\"") && line.contains(&w_op_id),
+            "{line}"
+        );
+    }
+
+    /// T37: the successor's hand-over names both ops (T23).
+    #[tokio::test]
+    async fn log_took_over() {
+        let (dir, w_op_id, logs) = doomed_predecessor_logs([104u8; 32]).await;
+        let line = assert_clean_line(
+            &logs,
+            "queued write took over a parked one",
+            &["op_id", "file_id", "parked_op_id"],
+            dir.path(),
+        );
+        assert!(line.contains(&format!("parked_op_id={w_op_id}")), "{line}");
+    }
+
+    /// T37: a modify under P after its create landed resolves through the alias (T15).
+    #[tokio::test]
+    async fn log_alias_resolved() {
+        let (dir, sync_root, server, bridge) = rule3_setup([105u8; 32]);
+        let (p, s, create_token) = landed_create(&bridge, &server, dir.path(), &sync_root, PLANTED).await;
+        let logs = capture_logs_async(async {
+            fp_save(
+                &bridge,
+                dir.path(),
+                &p,
+                PLANTED,
+                b"created bytes, edited",
+                &create_token,
+            );
+        })
+        .await;
+        let line = assert_clean_line(
+            &logs,
+            "provisional id resolved to the server id",
+            &["request", "provisional_id", "file_id"],
+            dir.path(),
+        );
+        assert!(
+            line.contains("\"modify\"")
+                && line.contains(&format!("provisional_id={p}"))
+                && line.contains(&format!("file_id={s}")),
+            "{line}"
+        );
+        drop(server.finish());
+    }
+
+    /// T37: a delete under P that does not name S's held token keeps S (T58).
+    #[tokio::test]
+    async fn log_alias_delete_kept() {
+        let (dir, sync_root, server, bridge) = rule3_setup([106u8; 32]);
+        let (p, s, _create_token) = landed_create(&bridge, &server, dir.path(), &sync_root, PLANTED).await;
+        let logs = capture_logs_async(async {
+            bridge.queue_finder_delete(&p, Some("1".into())).unwrap();
+            drain_upload_queue(&bridge, &sync_root).await;
+        })
+        .await;
+        let line = assert_clean_line(
+            &logs,
+            "delete of a provisional id not applied to the server file",
+            &["provisional_id", "file_id"],
+            dir.path(),
+        );
+        assert!(
+            line.contains(&format!("provisional_id={p}")) && line.contains(&format!("file_id={s}")),
+            "{line}"
+        );
+        assert!(server.finish().trashes.is_empty(), "S kept");
+    }
+
+    /// T37: a queued write waiting for the version takes the one the snapshot reports (T11,
+    /// with `apply_snapshot` called directly). The node carries the planted name.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn log_base_from_snapshot() {
+        let master_key = [107u8; 32];
+        let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_version_zero_row(&bridge, &server, "legacy", FileStatus::Local);
+        bridge.db.set_sync_cursor(0).unwrap();
+        fp_save(&bridge, dir.path(), "legacy", PLANTED, b"edit", "0");
+        drain_upload_queue(&bridge, &sync_root).await;
+        assert!(
+            server.state.lock().unwrap().inits.is_empty(),
+            "precondition: no init until the version is known"
+        );
+        let op = bridge.db.list_operations_for_file("legacy").unwrap().remove(0);
+        let snapshot = crate::api_client::SyncSnapshot {
+            seq_id: 1,
+            nodes: vec![node(&master_key, "legacy", PLANTED, 1, false)],
+        };
+        let logs = capture_logs_async(async {
+            apply_snapshot(&bridge, &sync_root, &snapshot, now_secs(), now_secs(), &mut Vec::new()).unwrap();
+        })
+        .await;
+        let line = assert_clean_line(
+            &logs,
+            "queued write based on the version the snapshot reported",
+            &["op_id", "file_id", "base_version"],
+            dir.path(),
+        );
+        assert!(line.contains(&op.op_id) && line.contains("base_version=1"), "{line}");
+        drop(server.finish());
+    }
+
+    /// T37: a versionless replace from another device raises the version (T48). The raising
+    /// node carries the planted name.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn log_version_raised() {
+        let master_key = [108u8; 32];
+        let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+        land_one_save(&bridge, &server, dir.path(), &sync_root, "replaced").await;
+        let replace = crate::api_client::SyncOp {
+            seq_id: 9,
+            op_type: "file_create".into(),
+            payload: serde_json::json!({
+                "id": "replaced",
+                "name_encrypted": enc_name(&master_key, "replaced", PLANTED),
+                "parent_id": null,
+                "size_bytes": 12
+            }),
+        };
+        apply_sync_op(&bridge, &sync_root, &replace, now_secs(), &mut Vec::new()).unwrap();
+        let mid = crate::api_client::SyncSnapshot {
+            seq_id: 10,
+            nodes: vec![node(&master_key, "replaced", PLANTED, 3, true)],
+        };
+        apply_snapshot(&bridge, &sync_root, &mid, now_secs(), now_secs(), &mut Vec::new()).unwrap();
+        let done = crate::api_client::SyncSnapshot {
+            seq_id: 11,
+            nodes: vec![node(&master_key, "replaced", PLANTED, 3, false)],
+        };
+        let logs = capture_logs_async(async {
+            apply_snapshot(&bridge, &sync_root, &done, now_secs(), now_secs(), &mut Vec::new()).unwrap();
+        })
+        .await;
+        let line = assert_clean_line(
+            &logs,
+            "file version raised from the snapshot",
+            &["file_id", "old_version", "new_version"],
+            dir.path(),
+        );
+        assert!(
+            line.contains("file_id=replaced") && line.contains("old_version=2") && line.contains("new_version=3"),
+            "{line}"
+        );
+        drop(server.finish());
+    }
+
+    /// T37: an attempt whose op was purged since its claim says which step found it gone (T42).
+    #[tokio::test]
+    async fn log_queue_state_moved() {
+        let master_key = [109u8; 32];
+        let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+        server.state.lock().unwrap().delay_init = Some(Duration::from_millis(400));
+        server
+            .state
+            .lock()
+            .unwrap()
+            .fail_first_chunk_once
+            .insert("session-1".into());
+        seed_uploaded_row(&bridge, &server, "revoked");
+        fp_save(
+            &bridge,
+            dir.path(),
+            "revoked",
+            PLANTED,
+            b"save under a share that goes away",
+            "1",
+        );
+        let w = bridge.db.list_operations_for_file("revoked").unwrap().remove(0);
+        let mut contract = bridge.db.get_file_contract_state("revoked").unwrap().unwrap();
+        contract.namespace = Namespace::SharedWithMe;
+        contract.shared_root_id = Some("revoked-root".into());
+        bridge.db.set_file_contract_state(&contract).unwrap();
+        let logs = capture_logs_async(async {
+            let ((), ()) = tokio::join!(
+                async {
+                    bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+                },
+                async {
+                    tokio::time::timeout(Duration::from_secs(10), async {
+                        while server.state.lock().unwrap().inits.is_empty() {
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                        }
+                    })
+                    .await
+                    .expect("init never reached the mock");
+                    bridge.db.purge_revoked_shared_content(&[]).unwrap();
+                }
+            );
+        })
+        .await;
+        let line = assert_clean_line(&logs, "queue state moved", &["op_id", "step"], dir.path());
+        assert!(line.contains(&w.op_id) && line.contains("\"resume\""), "{line}");
+        drop(server.finish());
+    }
+
+    /// T37: an upload the server completed, whose local landing failed once, says the landing
+    /// is retried (P9, one injected failure).
+    #[tokio::test]
+    async fn log_completed_landing_retried() {
+        let master_key = [110u8; 32];
+        let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_row(&bridge, &server, "recorded");
+        fp_save(&bridge, dir.path(), "recorded", PLANTED, b"edit", "1");
+        crate::state_db::fail_next_landings_for_test(1);
+        let now = now_secs();
+        let logs = capture_logs_async(async {
+            bridge.process_due_operations(&sync_root, now).await.unwrap();
+        })
+        .await;
+        let line = assert_clean_line(
+            &logs,
+            "upload completed on the server; local landing will be retried",
+            &["op_id", "file_id", "attempt"],
+            dir.path(),
+        );
+        assert!(
+            line.contains("file_id=\"recorded\"") && line.contains("attempt=1"),
+            "{line}"
+        );
+        bridge.process_due_operations(&sync_root, now + 10_000).await.unwrap();
+        assert!(
+            bridge.db.list_operations_for_file("recorded").unwrap().is_empty(),
+            "landed on the retry"
+        );
+        drop(server.finish());
+    }
+
+    /// T37: every hydrate the daemon serves is counted at `INFO` with its source: a queued
+    /// create (T18) and an empty queued save (RF3), both from the queue.
+    #[tokio::test]
+    async fn log_hydrate_served() {
+        let (dir, _sync_root, server, bridge) = rule3_setup([111u8; 32]);
+        let created = fp_create(&bridge, dir.path(), PLANTED, b"queued bytes");
+        let p = created.outcome_file_id();
+        let dest = dir.path().join("fetch").join(PLANTED);
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        let logs = capture_logs_async(async {
+            let source = bridge.serve_hydrate(&p, &dest, &[dir.path()], None).await.unwrap();
+            assert_eq!(source, HydrateSource::Queue);
+        })
+        .await;
+        let line = assert_clean_line(&logs, "Finder hydrate served", &["file_id", "source"], dir.path());
+        assert!(
+            line.contains("INFO") && line.contains(&format!("file_id={p}")) && line.contains("source=\"queue\""),
+            "{line}"
+        );
+
+        let empty = "3f2a9c1e-0000-4000-8000-0000000000e3";
+        seed_uploaded_row(&bridge, &server, empty);
+        fp_save(&bridge, dir.path(), empty, PLANTED, b"", "1");
+        let dest = dir.path().join("fetch-empty").join(PLANTED);
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        let logs = capture_logs_async(async {
+            let source = bridge.serve_hydrate(empty, &dest, &[dir.path()], None).await.unwrap();
+            assert_eq!(source, HydrateSource::Queue);
+        })
+        .await;
+        assert_eq!(std::fs::metadata(&dest).unwrap().len(), 0, "an empty file");
+        let line = assert_clean_line(&logs, "Finder hydrate served", &["file_id", "source"], dir.path());
+        assert!(
+            line.contains("INFO") && line.contains(&format!("file_id={empty}")) && line.contains("source=\"queue\""),
+            "{line}"
+        );
+        assert!(server.finish().requests.is_empty(), "nothing reached the server");
+    }
+
+    /// T38 (M5): an id taken from the wire is logged only when it parses as a UUID; otherwise
+    /// the line says `id_kind="non_uuid"`. The write path and the hydrate failure line, which
+    /// on Linux logs any caller-supplied text (no identifier check there).
+    #[cfg(unix)] // names `crate::ipc_socket`
+    #[tokio::test]
+    async fn m5_a_non_uuid_wire_id_is_never_logged() {
+        let (dir, _sync_root, server, bridge) = rule3_setup([101u8; 32]);
+        assert_eq!(
+            loggable_id("3f2a9c1e-0000-4000-8000-000000000001"),
+            "3f2a9c1e-0000-4000-8000-000000000001"
+        );
+        assert_eq!(loggable_id("../../etc/passwd"), "non_uuid");
+        let contents = dir.path().join("x.txt");
+        std::fs::write(&contents, b"x").unwrap();
+        let logs = capture_logs_async(async {
+            // An unknown non-UUID id on the write path …
+            let result = bridge.queue_file_provider_modify(finder_file_target(
+                Some("not-a-uuid/../evil"),
+                "x.txt",
+                &contents,
+                Some("1".into()),
+            ));
+            let _ = crate::ipc_socket::write_outcome_response("modify", &bridge.db, result);
+            // … and the hydrate failure line.
+            let _ = crate::ipc_socket::hydrate_failure_reply("not-a-uuid/../evil", anyhow::anyhow!("boom"));
+        })
+        .await;
+        assert!(!logs.contains("not-a-uuid"), "{logs}");
+        assert!(logs.contains("non_uuid"), "{logs}");
+        assert_eq!(
+            logs.matches("id_kind=\"non_uuid\"").count(),
+            2,
+            "one refused write and one failed hydrate, each with the kind only:\n{logs}"
+        );
+        drop(server.finish());
+    }
+
+    /// M5 for every other line that logs an id from the wire: the alias lines (the request's
+    /// provisional id) and the hydrate count (the requested id).
+    #[tokio::test]
+    async fn m5_every_wire_id_line_logs_the_kind_of_a_non_uuid() {
+        let wire = "not-a-uuid/../evil";
+        let logs = capture_logs_async(async {
+            // `super::`: the T37 tests above are named after these helpers.
+            super::log_alias_resolved("modify", wire, "server-file-1");
+            super::log_alias_delete_kept(wire, "server-file-1");
+            super::log_hydrate_served(wire, HydrateSource::Queue);
+            super::log_alias_resolved("modify", "3f2a9c1e-0000-4000-8000-000000000002", "server-file-2");
+        })
+        .await;
+        assert!(!logs.contains("not-a-uuid"), "{logs}");
+        assert_eq!(logs.matches("id_kind=\"non_uuid\"").count(), 3, "{logs}");
+        assert!(
+            logs.contains("provisional_id=3f2a9c1e-0000-4000-8000-000000000002"),
+            "a UUID is logged as itself:\n{logs}"
+        );
+    }
+
+    // ── Errors in log lines: a category, never the text (plan Spec issue 15) ──
+
+    /// [plan-fix-2]: a line about a failed step logs the error's category. The text can carry a
+    /// path (an I/O error's context, a database file name) and never reaches the log.
+    #[test]
+    fn an_error_is_logged_by_its_category_never_its_text() {
+        let io = |kind| anyhow::Error::new(std::io::Error::new(kind, format!("/Users/someone/{PLANTED}")));
+        assert_eq!(error_category(io(std::io::ErrorKind::NotFound).as_ref()), "not_found");
+        assert_eq!(
+            error_category(io(std::io::ErrorKind::PermissionDenied).as_ref()),
+            "permission_denied"
+        );
+        assert_eq!(error_category(io(std::io::ErrorKind::Other).as_ref()), "io");
+        let busy = || rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(5), Some("database is locked".into()));
+        assert_eq!(error_category(&busy()), "database");
+        assert_eq!(
+            error_category(
+                anyhow::Error::new(busy())
+                    .context("open /Users/someone/state.db")
+                    .as_ref()
+            ),
+            "database",
+            "the cause under a path-bearing context"
+        );
+        assert_eq!(
+            error_category(anyhow::anyhow!("staged upload payload is missing: /Users/someone/x").as_ref()),
+            "other"
+        );
+    }
+
+    /// [plan-fix-2] (Spec issue 15, Task 2 step 5.3): a staged copy that cannot be unlinked
+    /// is logged by its category; the I/O error's text never reaches the line.
+    #[tokio::test]
+    async fn a_staged_copy_kept_after_a_failed_unlink_is_logged_by_category() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        // A directory: `remove_file` fails on it (EPERM on a Mac, EISDIR on Linux).
+        let not_a_file = dir.path().join(PLANTED);
+        std::fs::create_dir(&not_a_file).unwrap();
+        db.track_staged_payload(&not_a_file.to_string_lossy(), None, false)
+            .unwrap();
+        let logs = capture_logs_async(async {
+            crate::staged_payload::remove_or_log(&db, &not_a_file);
+        })
+        .await;
+        let line = assert_clean_line(
+            &logs,
+            "staged upload cleanup deferred; journal retained",
+            &["reason"],
+            dir.path(),
+        );
+        assert!(!line.contains("os error"), "the error's text: {line}");
+        assert!(not_a_file.exists(), "kept");
+    }
+
+    /// [plan-fix-2] (Task 6b's line in `staged_payload.rs`): a released copy that engine start
+    /// cannot remove is logged by its category, and its journal row stays for the next start.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_released_copy_engine_start_cannot_remove_is_logged_by_category() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let not_a_file = dir.path().join(PLANTED);
+        std::fs::create_dir(&not_a_file).unwrap();
+        let path = not_a_file.to_string_lossy().into_owned();
+        db.track_staged_payload(&path, None, false).unwrap();
+        let mut removed = usize::MAX;
+        let logs = capture_logs_async(async {
+            removed = crate::staged_payload::remove_released(&db, std::slice::from_ref(&path));
+        })
+        .await;
+        assert_eq!(removed, 0);
+        let line = assert_clean_line(
+            &logs,
+            "released upload copy kept; removal is retried at the next start",
+            &["reason"],
+            dir.path(),
+        );
+        assert!(!line.contains("os error"), "the error's text: {line}");
+    }
+
+    // ── Parked review items ─────────────────────────────────────────────────
+
+    /// [t5-rr] obs 1: a missing staged copy of an upload without a write id keeps today's
+    /// retry, and its text carries no path: a path containing `403` would otherwise be read
+    /// as a refused request by `classify_operation_error` and pause the op.
+    #[tokio::test]
+    async fn a_missing_staged_copy_is_retried_whatever_its_path_contains() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        seed_bridge_row(&bridge, "file-1", "Draft.txt", None, FileStatus::Uploading, 0);
+        let missing = dir.path().join("staged-403").join("payload");
+        bridge
+            .db
+            .enqueue_operation(&PendingOperation {
+                op_id: "op-upload".into(),
+                kind: OperationKind::UploadVersion,
+                file_id: Some("file-1".into()),
+                parent_id: None,
+                target_path: Some("Draft.txt".into()),
+                metadata_json: Some(r#"{"operation":"upload_version"}"#.into()),
+                payload_path: Some(missing.to_string_lossy().into_owned()),
+                base_version: Some(1),
+                base_object_version_id: None,
+                attempts: 0,
+                max_attempts: 5,
+                next_retry_at: 0,
+                last_error: None,
+                backup_source_key: None,
+                created_at: 100,
+                updated_at: 100,
+            })
+            .unwrap();
+        let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
+        assert!(
+            outcome.paused_op_ids.is_empty(),
+            "a missing copy is not a refused request: {outcome:?}"
+        );
+        assert_eq!(outcome.retried_op_ids, vec!["op-upload".to_string()]);
+        let op = bridge.db.get_operation("op-upload").unwrap().unwrap();
+        assert_eq!(
+            op.last_error.as_deref(),
+            Some("staged upload payload is missing"),
+            "a fixed text, without the path"
+        );
+    }
+
+    /// Task 5 Minor 6: a refused attempt's line is worded by why the op left the queue: a
+    /// stale base parks at once (the attempt that was made, not the cap), attempts used up
+    /// park at the cap, and any other refusal retries.
+    #[tokio::test]
+    async fn a_refused_upload_line_is_worded_by_why_it_parked() {
+        let op = PendingOperation {
+            op_id: "op-refused".into(),
+            kind: OperationKind::UploadVersion,
+            file_id: Some("file-refused".into()),
+            parent_id: None,
+            target_path: Some(PLANTED.into()),
+            metadata_json: None,
+            payload_path: None,
+            base_version: Some(1),
+            base_object_version_id: None,
+            attempts: 0,
+            max_attempts: 25,
+            next_retry_at: 0,
+            last_error: None,
+            backup_source_key: None,
+            created_at: 100,
+            updated_at: 100,
+        };
+        use crate::api_client::InitConflictClass;
+        let at_once =
+            capture_logs_async(async { log_refused_upload(&op, 1, InitConflictClass::StaleBase, true) }).await;
+        let used_up =
+            capture_logs_async(async { log_refused_upload(&op, 25, InitConflictClass::StaleBase, false) }).await;
+        let retry =
+            capture_logs_async(async { log_refused_upload(&op, 3, InitConflictClass::InProgress, false) }).await;
+        assert!(
+            at_once.contains("its base is stale, parked with its bytes kept in the queue")
+                && !at_once.contains("attempts used up")
+                && at_once.contains("attempt=1 ")
+                && at_once.contains("reason=\"stale_base\""),
+            "{at_once}"
+        );
+        assert!(
+            used_up.contains("attempts used up, parked with its bytes kept in the queue")
+                && used_up.contains("attempt=25 "),
+            "{used_up}"
+        );
+        assert!(retry.contains("; will retry") && !retry.contains("parked"), "{retry}");
+    }
+
+    /// [mm2-c2]: "Show in Finder" under a provisional id whose create has landed (a stale quick
+    /// search result, a request after the swap) reaches the server file through the alias; the
+    /// server file's row decides. Without the alias it answered "not known on this Mac".
+    #[tokio::test]
+    async fn show_in_finder_under_a_provisional_id_after_the_landing_reaches_the_server_file() {
+        let (dir, sync_root, server, bridge) = rule3_setup([112u8; 32]);
+        let (p, s, _token) = landed_create(&bridge, &server, dir.path(), &sync_root, "shown.txt").await;
+        let check =
+            |id: &str| crate::finder_open::finder_may_show(id, |id| crate::finder_open::item_namespace(&bridge.db, id));
+        assert_eq!(check(&s), Ok(()), "the server id, as before");
+        assert_eq!(check(&p), Ok(()), "the provisional id reaches S");
+        let mut contract = bridge.db.get_file_contract_state(&s).unwrap().unwrap();
+        contract.namespace = Namespace::SharedWithMe;
+        bridge.db.set_file_contract_state(&contract).unwrap();
+        assert_eq!(
+            check(&p),
+            Err(crate::finder_open::SHARED_NOT_IN_FINDER.to_string()),
+            "S's row decides, not a row of P's"
+        );
+        assert_eq!(
+            check("3f2a9c1e-0000-4000-8000-00000000dead"),
+            Err(crate::finder_open::ITEM_NOT_KNOWN.to_string()),
+            "an id with neither a row nor an alias is still unknown"
+        );
+        drop(server.finish());
     }
 }

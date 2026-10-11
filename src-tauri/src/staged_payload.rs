@@ -88,7 +88,10 @@ impl Drop for StagedPayload {
         .unwrap_or(false);
         if !Path::new(&self.path).exists() || duplicate {
             if let Err(error) = remove(&self.db, Path::new(&self.path)) {
-                tracing::warn!(%error, "staged payload cleanup deferred; journal retained");
+                tracing::warn!(
+                    reason = crate::engine_bridge::error_category(error.as_ref()),
+                    "staged payload cleanup deferred; journal retained"
+                );
             }
         }
     }
@@ -102,6 +105,17 @@ pub fn remove(db: &StateDb, path: &Path) -> anyhow::Result<()> {
     db.forget_staged_payload(&path.to_string_lossy())?;
     Ok(())
 }
+/// [`remove`], for a copy whose upload is done: a failure keeps the journal row, so a later
+/// start or sign-out still finds the copy. The line logs the error's category only; its text
+/// can carry a path (spec §11, plan Spec issue 15).
+pub fn remove_or_log(db: &StateDb, path: &Path) {
+    if let Err(e) = remove(db, path) {
+        tracing::warn!(
+            reason = crate::engine_bridge::error_category(e.as_ref()),
+            "staged upload cleanup deferred; journal retained"
+        );
+    }
+}
 /// Engine start (spec §8.7 S6): unlink the released copies `StateDb::engine_start_repair` listed,
 /// each by its journalled absolute path, so a copy staged in a folder an earlier build used goes
 /// too (spec §8.4). A copy that cannot be removed keeps its row for the next start. Returns how
@@ -112,7 +126,10 @@ pub fn remove_released(db: &StateDb, paths: &[String]) -> usize {
     for path in paths {
         match remove(db, Path::new(path)) {
             Ok(()) => removed += 1,
-            Err(e) => tracing::warn!(error = %e, "released upload copy kept; removal is retried at the next start"),
+            Err(e) => tracing::warn!(
+                reason = crate::engine_bridge::error_category(e.as_ref()),
+                "released upload copy kept; removal is retried at the next start"
+            ),
         }
     }
     removed

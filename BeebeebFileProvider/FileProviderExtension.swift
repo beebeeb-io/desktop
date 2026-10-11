@@ -457,6 +457,11 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         request: NSFileProviderRequest,
         completionHandler: @escaping (NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?) -> Void
     ) -> Progress {
+        if options.rawValue != 0 {
+            // Spec §8.8 (m-16): recorded for D9; the write is handled as usual.
+            NSLog("BeebeebFileProvider: write options call=%@ options=%lu item=%@",
+                  "create", UInt(options.rawValue), itemTemplate.itemIdentifier.rawValue)
+        }
         let progress = Progress(totalUnitCount: 1)
         do {
             let contentType = itemTemplate.contentType
@@ -510,6 +515,11 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         request: NSFileProviderRequest,
         completionHandler: @escaping (NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?) -> Void
     ) -> Progress {
+        if options.rawValue != 0 {
+            // Spec §8.8 (m-16): recorded for D9; the write is handled as usual.
+            NSLog("BeebeebFileProvider: write options call=%@ options=%lu item=%@",
+                  "modify", UInt(options.rawValue), item.itemIdentifier.rawValue)
+        }
         let progress = Progress(totalUnitCount: 1)
         do {
             // Task 1698 (trash ruling): a reparent INTO the trash container

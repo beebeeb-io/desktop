@@ -1016,7 +1016,11 @@ async fn run(
                 );
             }
         }
-        Err(e) => tracing::warn!(error = %e, "engine start repair failed"),
+        // A category only: the error's text can carry a path (spec §11).
+        Err(e) => tracing::warn!(
+            reason = crate::engine_bridge::error_category(&e),
+            "engine start repair failed"
+        ),
     }
     // Uploads an earlier build queued get a write id and are marked as from an earlier build,
     // so they are never handed over; their bases are left as they are (spec §10.2–§10.3). Before
@@ -1030,18 +1034,26 @@ async fn run(
             marked,
             "engine start: uploads from an earlier build marked; their bases are unchanged"
         ),
-        Err(e) => tracing::warn!(error = %e, "engine start: marking earlier-build uploads failed"),
+        Err(e) => tracing::warn!(
+            reason = crate::engine_bridge::error_category(&e),
+            "engine start: marking earlier-build uploads failed"
+        ),
     }
+    // The count is the rows reset; a row whose Finder upload resumes stays `Uploading` and is
+    // not counted (spec §9.2).
     match db.reconcile_stale_in_flight_on_startup() {
         Ok(0) => {}
-        Ok(touched) => {
+        Ok(reset) => {
             tracing::info!(
-                touched,
-                "reconciled stale in-flight state rows from a previous engine session"
+                reset,
+                "engine start: stale in-flight rows from a previous engine session reset"
             );
         }
         Err(e) => {
-            tracing::warn!(error = %e, "could not reconcile stale in-flight state rows on startup");
+            tracing::warn!(
+                reason = crate::engine_bridge::error_category(&e),
+                "could not reconcile stale in-flight state rows on startup"
+            );
         }
     }
 
@@ -2866,6 +2878,42 @@ mod tests {
         assert!(
             at("db.engine_start_repair()") < at(call) && at(call) < at("db.reconcile_stale_in_flight_on_startup()"),
             "after the start repair, before the in-flight reconcile"
+        );
+    }
+
+    /// [plan-fix-2] (plan Spec issue 15), Task 9 Minor 4: the engine-start lines from the start
+    /// repair to the in-flight reconcile log counts and, when a step fails, the error's category;
+    /// never the error's text, which can carry a path. The reconcile's count is the rows it
+    /// reset, and its line says so. `run` needs a real window system, so this is asserted on the
+    /// source, on every platform.
+    #[test]
+    fn engine_start_lines_log_counts_and_error_categories_only() {
+        let source = include_str!("runner.rs").replace("\r\n", "\n");
+        let start = source.find("async fn run(\n    app: AppHandle").expect("run exists");
+        let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+        let from = body.find("match db.engine_start_repair()").expect("the start repair");
+        let to = from
+            + body[from..]
+                .find("// The token's buffer MOVES into the client")
+                .expect("the end of the start steps");
+        let steps = &body[from..to];
+        assert_eq!(steps.matches("Err(e)").count(), 3, "three steps can fail:\n{steps}");
+        assert_eq!(
+            steps
+                .matches("reason = crate::engine_bridge::error_category(&e)")
+                .count(),
+            3,
+            "each failure logs its category:\n{steps}"
+        );
+        for raw in ["error = %e", "%e,", "error = ?e", "{e}"] {
+            assert!(
+                !steps.contains(raw),
+                "an engine-start line logs the error's text (`{raw}`):\n{steps}"
+            );
+        }
+        assert!(
+            steps.contains("reset,\n") && steps.contains("in-flight rows from a previous engine session reset"),
+            "the reconcile line names what it counts:\n{steps}"
         );
     }
 
