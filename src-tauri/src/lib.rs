@@ -9293,9 +9293,48 @@ async fn tray_resume_sync(app: tauri::AppHandle) -> Result<(), String> {
     set_sync_paused(&app, false).await
 }
 
-async fn toggle_sync_paused_from_menu(app: &tauri::AppHandle) -> Result<(), String> {
-    let paused = DesktopConfig::load().map(|cfg| cfg.pause_sync).unwrap_or(false);
-    set_sync_paused(app, !paused).await
+/// The menu's Pause / Resume item: flips the pause the file holds. Returns which way it went (`true` = pausing) with the
+/// result, so a failure can say which.
+async fn toggle_sync_paused_from_menu(app: &tauri::AppHandle) -> (bool, Result<(), String>) {
+    let pausing = !DesktopConfig::load().map(|cfg| cfg.pause_sync).unwrap_or(false);
+    (pausing, set_sync_paused(app, pausing).await)
+}
+
+/// The title of the alert a failed Pause from the menu raises.
+const MENU_PAUSE_FAILED_TITLE: &str = "Pause sync";
+/// The title of the alert a failed Resume from the menu raises.
+const MENU_RESUME_FAILED_TITLE: &str = "Resume sync";
+/// What a failed Pause says. Honest about the state: a pause that cannot be written changes neither the file nor the
+/// running engine (task 1889, M6), so sync carries on as it was. It never carries the error behind it (a path, an OS
+/// message); the caller logs that.
+const MENU_PAUSE_FAILED_SENTENCE: &str = "Beebeeb couldn’t pause syncing, so it carries on as before.";
+/// What a failed Resume says: the pause stays.
+const MENU_RESUME_FAILED_SENTENCE: &str = "Beebeeb couldn’t resume syncing, so it stays paused.";
+
+/// What the menu's Pause / Resume shows the person when its work ended in `result` (task 1889, fix round 2 N2): an `Err`
+/// is an alert with the title and the one sentence for the way it was going (`pausing`); success shows nothing. The menu
+/// works with every window closed, so it has no window to put a toast in and the alert is native, like 1885's failed
+/// "Open in Finder" and the Sign-out menu action's. On every platform: the native menu is the one live caller of the
+/// pause commands, and a pause that does nothing must not look like one that worked.
+fn menu_pause_failure_alert(result: &Result<(), String>, pausing: bool) -> Option<(&'static str, &'static str)> {
+    match (result, pausing) {
+        (Ok(()), _) => None,
+        (Err(_), true) => Some((MENU_PAUSE_FAILED_TITLE, MENU_PAUSE_FAILED_SENTENCE)),
+        (Err(_), false) => Some((MENU_RESUME_FAILED_TITLE, MENU_RESUME_FAILED_SENTENCE)),
+    }
+}
+
+/// A failed Pause or Resume from the menu, shown to the person before the caller logs it (see
+/// [`menu_pause_failure_alert`]).
+fn show_menu_pause_failure(app: &tauri::AppHandle, pausing: bool, result: &Result<(), String>) {
+    let Some((title, message)) = menu_pause_failure_alert(result, pausing) else {
+        return;
+    };
+    app.dialog()
+        .message(message)
+        .title(title)
+        .kind(tauri_plugin_dialog::MessageDialogKind::Error)
+        .show(|_| {});
 }
 
 #[tauri::command]
@@ -13820,7 +13859,12 @@ fn handle_desktop_menu_action(app: &tauri::AppHandle, spec: &'static DesktopMenu
         }
         DesktopMenuAction::ToggleSync => {
             let app = app.clone();
-            spawn_menu_task(spec.id, async move { toggle_sync_paused_from_menu(&app).await });
+            // A failure is shown (task 1889, fix round 2 N2) before it is logged: the menu has no window to put it in.
+            spawn_menu_task(spec.id, async move {
+                let (pausing, result) = toggle_sync_paused_from_menu(&app).await;
+                show_menu_pause_failure(&app, pausing, &result);
+                result
+            });
         }
         DesktopMenuAction::SignOut => {
             let app = app.clone();
@@ -19822,11 +19866,12 @@ mod finder_setup_wiring_tests {
         );
         assert_eq!(notifications, 3, "the three notification builders");
         // The menu's three sign-out message dialogs, and (task 1882, rebase 2026-10-10) the kept-folder alert,
-        // `show_preserved_files_alert`, and (task 1885, I2) the menu's failed-open alert, `show_menu_open_failure`.
+        // `show_preserved_files_alert`, (task 1885, I2) the menu's failed-open alert, `show_menu_open_failure`, and
+        // (task 1889, fix round 2 N2) the menu's failed-pause alert, `show_menu_pause_failure`.
         // None of them is a window: macOS draws a parentless alert itself.
         assert_eq!(
-            dialogs, 5,
-            "the three sign-out message dialogs, the kept-folder alert and the menu's failed-open alert"
+            dialogs, 6,
+            "the three sign-out message dialogs, the kept-folder alert and the menu's failed-open and failed-pause alerts"
         );
     }
 
@@ -31948,6 +31993,70 @@ mod config_write_pin_tests {
                 assert_eq!(on_disk.upload_kbps_limit, 2000);
             })
             .await;
+    }
+
+    /// Fix round 2 (N2), in the menu: the ToggleSync arm waits for the toggle, then hands the result to
+    /// `show_menu_pause_failure` before returning it to the logger, and that function raises a native error dialog for
+    /// exactly what `menu_pause_failure_alert` says. (The same shape as 1885's `test_1885_the_menus_open_folder_shows_a_failure_before_it_logs_it`.)
+    #[test]
+    fn test_1889_n2_the_menus_pause_shows_a_failure_before_it_logs_it() {
+        use crate::source_pin::squeeze;
+        let files = production_files();
+        let lib = &files.iter().find(|(name, _)| name == "lib.rs").unwrap().1;
+        let arm_start = lib
+            .find("DesktopMenuAction::ToggleSync =>")
+            .expect("the menu's toggle arm");
+        let arm_end = lib[arm_start..]
+            .find("DesktopMenuAction::SignOut")
+            .expect("the next arm");
+        let arm = squeeze(&lib[arm_start..arm_start + arm_end]);
+        let toggle = arm
+            .find(&squeeze("toggle_sync_paused_from_menu(&app).await"))
+            .expect("the arm waits for the toggle");
+        let show = arm
+            .find(&squeeze("show_menu_pause_failure(&app, pausing, &result);"))
+            .expect("the arm shows a failure");
+        let give_back = arm.rfind("result").expect("the arm returns the result");
+        assert!(toggle < show, "the failure is shown after the toggle ended: {arm}");
+        assert!(
+            show < give_back,
+            "the result goes on to the logger after it is shown: {arm}"
+        );
+        let shower = squeeze(&item(lib, "fn show_menu_pause_failure("));
+        assert!(
+            shower.contains(&squeeze("menu_pause_failure_alert(result, pausing)"))
+                && shower.contains(".dialog()")
+                && shower.contains(&squeeze("MessageDialogKind::Error")),
+            "the alert is native, an error dialog, for exactly what the pure function says: {shower}"
+        );
+    }
+
+    /// Fix round 2 (N2): the alert's words. A success shows nothing; a failure shows the sentence for the way it was
+    /// going, and never the error behind it (an OS message can name a folder).
+    #[test]
+    fn test_1889_n2_a_failed_menu_pause_or_resume_says_which_and_never_the_error() {
+        let os_text = "rename /Users/sam/Library/Application Support/beebeeb/desktop.toml.tmp: Permission denied";
+        assert_eq!(super::menu_pause_failure_alert(&Ok(()), true), None);
+        assert_eq!(super::menu_pause_failure_alert(&Ok(()), false), None);
+        let pause = super::menu_pause_failure_alert(&Err(os_text.to_string()), true).expect("a failed pause is shown");
+        let resume =
+            super::menu_pause_failure_alert(&Err(os_text.to_string()), false).expect("a failed resume is shown");
+        assert_eq!(
+            pause,
+            (
+                "Pause sync",
+                "Beebeeb couldn’t pause syncing, so it carries on as before."
+            )
+        );
+        assert_eq!(
+            resume,
+            ("Resume sync", "Beebeeb couldn’t resume syncing, so it stays paused.")
+        );
+        for (title, sentence) in [pause, resume] {
+            assert!(!title.contains("/Users") && !sentence.contains("/Users") && !sentence.contains("Permission"));
+            assert_eq!(sentence.matches(". ").count(), 0, "one sentence: {sentence}");
+            assert!(sentence.ends_with('.'));
+        }
     }
 
     /// The scanners must be able to go red: each shape, written out, is found; the real shapes are not.
