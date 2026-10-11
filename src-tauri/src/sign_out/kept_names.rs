@@ -83,10 +83,10 @@ pub fn cut_name(name: &str) -> String {
 }
 
 /// `<stem><suffix><.ext>`, the stem cut so the whole is at most 255 bytes (§7.2 "Lengths": the cut applies to the
-/// final name, never to the suffix, and never to the extension while it leaves room for one stem byte and the suffix).
-/// An "extension" that leaves no such room (`a.<250 bytes>`) is part of the stem, so the name is cut
-/// as one stem and can never pass 255 bytes. The room is measured for the stem's first character, which can take more
-/// than one byte, so a stem is never cut to nothing.
+/// final name, never to the suffix, and never to the extension while it leaves room for the stem's first character
+/// and the suffix). An "extension" that leaves no such room (`a.<250 bytes>`) is part of the stem, so the name is
+/// cut as one stem and can never pass 255 bytes. The first character can take more than one byte, so the room is
+/// measured for it, and a stem is never cut to nothing.
 pub fn with_suffix(name: &str, suffix: &str) -> String {
     let (stem, extension) = match split_extension(name) {
         (stem, extension) if extension.len() + suffix.len() + first_char_len(stem) > MAX_NAME_BYTES => (name, ""),

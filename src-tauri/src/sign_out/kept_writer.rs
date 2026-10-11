@@ -6,11 +6,12 @@ use std::ffi::CString;
 use std::fs::{File, OpenOptions};
 use std::io::{self, ErrorKind};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use super::kept_names::{MAX_NAME_BYTES, with_suffix};
 
-/// `sys/clonefile.h:33`. `libc` 0.2.189 has `clonefile` but not this flag (re-review N5).
+/// `sys/clonefile.h:33`. `libc` 0.2.189 has `clonefile` but not this flag.
 #[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 7
 pub(crate) const CLONE_NOFOLLOW: u32 = 0x0001;
 /// `sys/syslimits.h:103`, counting the terminating NUL: a path of 1024 bytes or more cannot be made.
@@ -42,21 +43,41 @@ impl CloneFile for SystemClone {
             return Ok(());
         }
         let error = io::Error::last_os_error();
-        match error.raw_os_error() {
-            Some(libc::ENOTSUP) | Some(libc::EXDEV) => copy_new(src, dst),
-            _ => Err(error),
+        if falls_back(error.raw_os_error()) {
+            copy_new(src, dst)
+        } else {
+            Err(error)
         }
     }
 }
 
-/// The fallback: `create_new` (never truncates), the bytes, then the staged copy's modification time.
+/// §7.2 "How", step 2: only a volume that cannot clone sends the copy to the fallback.
+#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 7
+fn falls_back(errno: Option<i32>) -> bool {
+    matches!(errno, Some(libc::ENOTSUP) | Some(libc::EXDEV))
+}
+
+/// The fallback: `create_new` (never truncates), private as a clone of a staged copy is, the bytes, then the staged
+/// copy's modification time. The source is opened without following a link. A copy that fails partway removes its
+/// file, which is this call's own (`create_new`): a partial plaintext copy never outlives the failed copy.
 #[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 7
 fn copy_new(src: &Path, dst: &Path) -> io::Result<()> {
-    let mut from = File::open(src)?;
-    let mut to = OpenOptions::new().write(true).create_new(true).open(dst)?;
-    io::copy(&mut from, &mut to)?;
-    to.set_modified(from.metadata()?.modified()?)?;
+    let mut from = open_no_follow(src)?;
+    let mut to = OpenOptions::new().write(true).create_new(true).mode(0o600).open(dst)?;
+    let copied = io::copy(&mut from, &mut to)
+        .and_then(|_| from.metadata()?.modified())
+        .and_then(|at| to.set_modified(at));
+    if let Err(error) = copied {
+        drop(to);
+        let _ = std::fs::remove_file(dst);
+        return Err(error);
+    }
     Ok(())
+}
+
+/// `path` opened for reading, never through a link in its last component (`O_NOFOLLOW`: a link answers `ELOOP`).
+fn open_no_follow(path: &Path) -> io::Result<File> {
+    OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(path)
 }
 
 fn remove_backup_exclusion(path: &Path) -> io::Result<()> {
@@ -75,7 +96,7 @@ fn remove_backup_exclusion(path: &Path) -> io::Result<()> {
 }
 
 /// Measured on a resolved path only: `create` resolves the root, so every path built from `self.event` is the one the
-/// kernel checks (plan review I5).
+/// kernel checks.
 fn too_long(path: &Path) -> bool {
     path.as_os_str().len() >= PATH_MAX_BYTES
 }
@@ -100,14 +121,14 @@ fn directory_candidate(name: &str, n: u32) -> String {
 
 /// One event folder being written.
 pub(crate) struct KeptWriter<'a> {
-    /// Resolved (`canonicalize`), so every length below is the kernel's (plan review I5).
+    /// Resolved (`canonicalize`), so every length below is the kernel's.
     root: PathBuf,
     event: PathBuf,
     clone: &'a dyn CloneFile,
     /// The vault directory (its components) → the directory this keep made or merged into for it.
     directories: HashMap<Vec<String>, PathBuf>,
     made: Vec<PathBuf>,
-    /// The root and its ancestors that `create` made, resolved, deepest first (plan review M12).
+    /// The root and its ancestors that `create` made, resolved, deepest first.
     made_root: Vec<PathBuf>,
     files: usize,
 }
@@ -160,8 +181,8 @@ impl<'a> KeptWriter<'a> {
     /// The directory on disk for the vault directory `components`, made one component at a time (never
     /// `create_dir_all`, which fails when a file holds the name). A directory already there is merged into (a
     /// case-only or normalization-only twin); a file there gives the next " (n)". `None`: a directory this file
-    /// needs would be 1024 bytes or more after its " (n)", so the file goes to the top (plan review M3: no name can
-    /// fail a sign-out). Directories already made for it stay, and may be empty (§7.2).
+    /// needs would be 1024 bytes or more after its " (n)", so the file goes to the top (no name can fail a
+    /// sign-out). Directories already made for it stay, and may be empty (§7.2).
     fn directory_for(&mut self, components: &[String]) -> io::Result<Option<PathBuf>> {
         let mut parent = self.event.clone();
         for depth in 0..components.len() {
@@ -206,6 +227,14 @@ impl<'a> KeptWriter<'a> {
             .last()
             .expect("kept_relative_path never returns an empty path")
             .clone();
+        // §7.2 "How", step 3: a staged copy that is not a regular file (a link, a pipe) is a failed copy (W8). It is
+        // refused before anything is made for it, so it is never kept as a link and never counted.
+        if !std::fs::symlink_metadata(source)?.file_type().is_file() {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "a staged copy is not a regular file",
+            ));
+        }
         let planned = components.iter().fold(self.event.clone(), |path, part| path.join(part));
         let mut directory = if too_long(&planned) {
             self.event.clone()
@@ -233,13 +262,13 @@ impl<'a> KeptWriter<'a> {
             }
         };
         remove_backup_exclusion(&kept)?;
-        File::open(&kept)?.sync_all()?;
+        open_no_follow(&kept)?.sync_all()?;
         self.files += 1;
         Ok(kept)
     }
 
     /// What `finish` flushes, in order: every directory this keep made (deepest first), the event folder, the root,
-    /// then the parent of each directory `create` made, which holds that directory's entry (plan review M12).
+    /// then the parent of each directory `create` made, which holds that directory's entry.
     pub(crate) fn flush_list(&self) -> Vec<PathBuf> {
         let parents_of_made_root = self
             .made_root
@@ -296,28 +325,32 @@ mod tests {
     }
 
     /// The disk rules need a case- and normalization-insensitive volume, as the default APFS is. Fail, never skip.
-    fn assert_case_insensitive(dir: &Path) {
-        std::fs::write(dir.join("a"), b"").unwrap();
-        assert!(
-            dir.join("A").exists(),
-            "this test needs a case-insensitive volume for its temporary directory"
-        );
-        std::fs::remove_file(dir.join("a")).unwrap();
+    fn assert_insensitive_volume(dir: &Path) {
+        for (written, other_spelling, needs) in [("a", "A", "case"), ("\u{e9}", "e\u{301}", "normalization")] {
+            std::fs::write(dir.join(written), b"").unwrap();
+            assert!(
+                dir.join(other_spelling).exists(),
+                "this test needs a {needs}-insensitive volume for its temporary directory"
+            );
+            std::fs::remove_file(dir.join(written)).unwrap();
+        }
     }
 
     /// U11, the disk half.
     #[test]
     fn kept_names_follow_the_rule_on_disk() {
         let dir = tempfile::tempdir().unwrap();
-        assert_case_insensitive(dir.path());
+        assert_insensitive_volume(dir.path());
         let root = dir.path().join("Changes not sent");
         let mut writer = KeptWriter::create(&root, "2026-10-10 at 14.05.12", &SystemClone).unwrap();
-        let cases: [(&str, &str); 4] = [
+        let cases: [(&str, &str); 5] = [
             ("Work/Report.docx", "Work/report.docx"),
             ("Caf\u{e9}.txt", "Cafe\u{301}.txt"),
             ("Notes", "notes/a.txt"),
             ("dir-first/a.txt", "Dir-First"),
+            ("Docs/a.txt", "docs/b.txt"),
         ];
+        let mut seconds = Vec::new();
         for (index, (first, second)) in cases.iter().enumerate() {
             let a = staged(dir.path(), &format!("{index}-a"), format!("first {index}").as_bytes());
             let b = staged(dir.path(), &format!("{index}-b"), format!("second {index}").as_bytes());
@@ -326,11 +359,43 @@ mod tests {
             assert_ne!(kept_a, kept_b, "{first} / {second}");
             assert_eq!(sha(&kept_a), sha(&a), "{first}");
             assert_eq!(sha(&kept_b), sha(&b), "{second}");
+            seconds.push(kept_b);
         }
         let event = writer.event().to_path_buf();
-        assert!(
-            event.join("Work").join("report (2).docx").exists(),
+        // Two files the volume takes for one: the second is " (2)".
+        assert_eq!(
+            seconds[1],
+            event.join("Cafe\u{301} (2).txt"),
+            "the normalization-only twin"
+        );
+        assert_eq!(
+            seconds[0],
+            event.join("Work").join("report (2).docx"),
             "the case-only twin"
+        );
+        // Two directories the volume takes for one are one directory: the second file lands beside the first.
+        assert!(
+            event.join("Docs").join("b.txt").is_file(),
+            "the directory twin is merged into"
+        );
+        assert!(
+            !event.join("docs (2)").exists(),
+            "the directory twin is not a new directory"
+        );
+        // A link in the event folder is never merged into: its file takes " (2)", and nothing is written through it.
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, event.join("Linked")).unwrap();
+        let linked = staged(dir.path(), "linked", b"linked");
+        assert_eq!(
+            writer.keep(&parts("Linked/a.txt"), &linked).unwrap(),
+            event.join("Linked (2)").join("a.txt"),
+            "a link is never a directory to merge into"
+        );
+        assert_eq!(
+            std::fs::read_dir(&outside).unwrap().count(),
+            0,
+            "nothing lands outside the event folder"
         );
         // File first: the directory takes " (2)", and a later file of that directory lands beside the first.
         assert!(event.join("notes (2)").join("a.txt").exists());
@@ -351,7 +416,7 @@ mod tests {
         assert_eq!(name.len(), 255);
         assert!(name.ends_with(" (2).docx"), "{name}");
         let kept = writer.finish().unwrap();
-        assert_eq!(kept.files, 11);
+        assert_eq!(kept.files, 14);
     }
 
     /// `event/<path>` exactly `total` bytes long, from components of at most 200 bytes.
@@ -366,9 +431,9 @@ mod tests {
         parts.join("/")
     }
 
-    /// U11, path length (re-review 2 Q2): 1023 bytes in place, 1024 at the top, 1022 + " (2)" at the top. The test's
+    /// U11, path length: 1023 bytes in place, 1024 at the top, 1022 + " (2)" at the top. The test's
     /// temporary directory sits under `/var`, a symlink to `private/var`, and the kernel measures a path with every
-    /// link resolved, so the writer measures the resolved path, and so does the padding here (plan review I5).
+    /// link resolved, so the writer measures the resolved path, and so does the padding here.
     #[test]
     fn long_paths_go_to_the_top_of_the_event_folder() {
         let dir = tempfile::tempdir().unwrap();
@@ -387,8 +452,18 @@ mod tests {
         let kept = writer.keep(&parts(&fits), &source("fits")).unwrap();
         assert_eq!(kept, event.join(&fits), "1023 bytes is made in place");
         assert_eq!(kept.as_os_str().len(), 1023);
+        assert_eq!(
+            sha(&kept),
+            sha(&dir.path().join("staging").join("fits")),
+            "the 1023-byte file's bytes"
+        );
         let kept = writer.keep(&parts(&too_long), &source("too-long")).unwrap();
         assert_eq!(kept.parent().unwrap(), event, "1024 bytes goes to the top");
+        assert_eq!(
+            sha(&kept),
+            sha(&dir.path().join("staging").join("too-long")),
+            "the 1024-byte file's bytes"
+        );
         writer.keep(&parts(&grows), &source("grows-1")).unwrap();
         let kept = writer.keep(&parts(&grows), &source("grows-2")).unwrap();
         assert_eq!(
@@ -397,7 +472,7 @@ mod tests {
             "1022 bytes plus \" (2)\" goes to the top"
         );
         assert_eq!(sha(&kept), sha(&dir.path().join("staging").join("grows-2")));
-        // Plan review M3: a file holds the name of a directory a later file needs, and that directory's " (2)" would
+        // A file holds the name of a directory a later file needs, and that directory's " (2)" would
         // pass 1023 bytes. The later file goes to the top; the sign-out never fails on a name.
         let file_first = padded(&event, 1021, 'd');
         writer.keep(&parts(&file_first), &source("file-first")).unwrap();
@@ -417,7 +492,7 @@ mod tests {
         writer.finish().unwrap();
     }
 
-    /// U11, path length through a symlink (plan review I5): a path that is 1023 bytes through a short link is longer
+    /// U11, path length through a symlink: a path that is 1023 bytes through a short link is longer
     /// once the link is resolved. Every file is still kept, each under 1024 bytes as the kernel measures it.
     #[test]
     fn a_symlinked_root_still_keeps_every_file() {
@@ -458,15 +533,23 @@ mod tests {
         assert_eq!(writer.finish().unwrap().files, 3);
     }
 
-    /// §7.2 "Every directory the step made is fsynced" (plan review M12): when this keep made the root, the entries
+    /// §7.2 "Every directory the step made is fsynced": when this keep made the root, the entries
     /// that name it are flushed too, in the root's parent and in every parent `create` made.
     #[test]
     fn a_root_the_keep_made_is_flushed_in_its_parent() {
         let dir = tempfile::tempdir().unwrap();
         let base = std::fs::canonicalize(dir.path()).unwrap();
         let root = base.join("Documents").join("Changes not sent");
-        let made = KeptWriter::create(&root, "event", &SystemClone).unwrap();
+        let mut made = KeptWriter::create(&root, "event", &SystemClone).unwrap();
+        made.keep(&parts("a/b/c.txt"), &staged(&base, "nested", b"nested"))
+            .unwrap();
+        let event = made.event().to_path_buf();
         let flushed = made.flush_list();
+        assert_eq!(
+            flushed[..4],
+            [event.join("a").join("b"), event.join("a"), event.clone(), root.clone()],
+            "the directories this keep made, deepest first, then the event folder and the root"
+        );
         for entry_holder in [&base, &base.join("Documents"), &root] {
             assert!(
                 flushed.contains(entry_holder),
@@ -511,17 +594,103 @@ mod tests {
     #[test]
     fn clone_nofollow_is_the_headers_value() {
         assert_eq!(CLONE_NOFOLLOW, 0x0001, "sys/clonefile.h:33");
+        // The code above the tests, without its comment lines: a comment that quotes the call never satisfies the pin.
         let source = include_str!("kept_writer.rs");
-        let call = &source[source.find("libc::clonefile(").expect("the clone call")..];
+        let code: String = source[..source.find("#[cfg(test)]").expect("the test module")]
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(code.matches("libc::clonefile(").count(), 1, "one clone call");
+        let call = &code[code.find("libc::clonefile(").unwrap()..];
         let call = &call[..call.find(')').unwrap()];
         assert!(call.contains("CLONE_NOFOLLOW"), "{call}");
     }
 
-    /// Review Focus 2: a keep right after a failed one, in the same second, gets a folder of its own.
+    /// §7.2 "How", step 3: an error other than `EEXIST` is a failed copy (W8). A staged copy that is a link, to a
+    /// file or to nothing, is one: it is never kept as a link and never counted.
+    #[test]
+    fn a_linked_staged_copy_is_a_failed_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = staged(dir.path(), "target", b"bytes");
+        for (name, points_to) in [("to-a-file", target.clone()), ("to-nothing", dir.path().join("gone"))] {
+            let link = dir.path().join("staging").join(name);
+            std::os::unix::fs::symlink(&points_to, &link).unwrap();
+            let mut writer = KeptWriter::create(&dir.path().join("kept"), name, &SystemClone).unwrap();
+            let event = writer.event().to_path_buf();
+            assert!(
+                writer.keep(&parts("a.txt"), &link).is_err(),
+                "{name}: a link is a failed copy"
+            );
+            assert!(
+                std::fs::symlink_metadata(event.join("a.txt")).is_err(),
+                "{name}: nothing is made for it"
+            );
+            assert_eq!(writer.files, 0, "{name}: not counted");
+            writer.abandon();
+            assert!(!event.exists(), "{name}: the half-made folder goes");
+        }
+        // A clone that makes a link, as a source swapped for one after the check would: the flush never follows it.
+        struct LinkingClone;
+        impl CloneFile for LinkingClone {
+            fn clone_file(&self, src: &Path, dst: &Path) -> io::Result<()> {
+                std::os::unix::fs::symlink(src, dst)
+            }
+        }
+        let mut writer = KeptWriter::create(&dir.path().join("kept"), "linking", &LinkingClone).unwrap();
+        assert!(
+            writer.keep(&parts("a.txt"), &target).is_err(),
+            "a link made at the destination is never flushed"
+        );
+        assert_eq!(writer.files, 0, "and never counted");
+        writer.abandon();
+    }
+
+    /// §7.2 "How", step 2: the fallback makes a new file only, with the staged copy's bytes and time, private as a
+    /// clone of a staged copy is. It follows no link, leaves nothing behind when the copy fails, and only `ENOTSUP`
+    /// and `EXDEV` reach it.
+    #[test]
+    fn the_fallback_copy_makes_a_new_file_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let source = staged(dir.path(), "source", b"new bytes");
+        let at = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        File::options()
+            .write(true)
+            .open(&source)
+            .unwrap()
+            .set_modified(at)
+            .unwrap();
+        let made = dir.path().join("made");
+        copy_new(&source, &made).unwrap();
+        let metadata = std::fs::metadata(&made).unwrap();
+        assert_eq!(sha(&made), sha(&source), "the staged copy's bytes");
+        assert_eq!(metadata.modified().unwrap(), at, "the staged copy's time");
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600, "private");
+        let taken = staged(dir.path(), "taken", b"first");
+        assert_eq!(copy_new(&source, &taken).unwrap_err().kind(), ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read(&taken).unwrap(),
+            b"first",
+            "an existing file is never replaced"
+        );
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&source, &link).unwrap();
+        for (from, why) in [(link.as_path(), "a link"), (dir.path(), "a read that fails")] {
+            let to = dir.path().join(format!("from {why}"));
+            assert!(copy_new(from, &to).is_err(), "{why} is a failed copy");
+            assert!(std::fs::symlink_metadata(&to).is_err(), "{why}: nothing is left behind");
+        }
+        for (errno, falls) in [(libc::ENOTSUP, true), (libc::EXDEV, true), (libc::EEXIST, false)] {
+            assert_eq!(falls_back(Some(errno)), falls, "errno {errno}");
+        }
+    }
+
+    /// A keep right after a failed one, in the same second, gets a folder of its own.
     #[test]
     fn two_keeps_in_the_same_second_make_two_folders() {
         let dir = tempfile::tempdir().unwrap();
-        // Resolved first: the writer's paths are the resolved ones (plan review I5).
+        // Resolved first: the writer's paths are the resolved ones.
         let root = std::fs::canonicalize(dir.path()).unwrap().join("Changes not sent");
         let first = KeptWriter::create(&root, "2026-10-10 at 14.05.12", &SystemClone).unwrap();
         let first_event = first.event().to_path_buf();
