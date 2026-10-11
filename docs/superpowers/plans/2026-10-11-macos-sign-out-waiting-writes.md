@@ -84,10 +84,24 @@ The plan review (`.superpowers/sdd/2026-10-11-macos-sign-out-waiting-writes/plan
 | M10 compile nits, fragile pins | Tasks 7, 8, 11, 12 |
 | M11 dead-code warnings off macOS | Tasks 1, 12, 13 |
 | M12 the new root's entry | Task 3: `flush_list` flushes the parent of every directory `create` made |
-| M13 the tick's attempts | Task 11: the tick arm notes its outcome while armed |
+| M13 the tick's attempts | Task 11: the tick's queue step notes its outcome while armed (in `queue_step` since the re-review, N1) |
 | M14 a failing test poisons the rest | Task 7: `ScratchReset`, a drop guard |
 
 One more pin the review did not name is fixed in Tasks 6 and 7: `test_1882_every_removal_path_surfaces_the_kept_folder` (`@184:lib.rs:31440-31522`) quotes the purge call and counts `.map_err(&kept_with)?` (6).
+
+### Plan re-review fixes (2026-10-11)
+
+The re-review of those fixes (`.superpowers/sdd/2026-10-11-macos-sign-out-waiting-writes/plan-rereview.md`: 2 Important, 5 Minor) is answered in the tasks below, marked "(plan re-review N1)" and so on. Spec amendments are signed "— lead, 2026-10-11 (plan review)", as the review's are.
+
+| Finding | Where it is fixed |
+|---|---|
+| R1 the wake test ran on real time | Task 11: `#[tokio::test(start_paused = true)]`, `tokio::time::Instant`; tokio's `test-util` as a `[dev-dependencies]` feature, `Cargo.lock` unchanged (checked offline with `--locked`, and the check seen red on a feature that adds a lock edge); spec §13.3 note |
+| N1 the phase arm added a fifth working-set signal site | Task 11, option (a): the tick's queue step moves into `queue_step`, which the tick and the phase's wake both call, so the count stays 4; the census pin's two moved site strings and a count of `queue_step`'s two callers change in the same commit; mutations 16 and 17 |
+| N3 the F9 window test lacked `desktopUpdateCheck` | Task 17: bound in the F9 test, as the update-menu tests bind it |
+| N4 F9's mutation 9 could not reach its named red | Task 17: the tab's source pin runs first in the F9 test, before anything reads the flow |
+| N5 the widened hifi grep matched "removes its" | Task 15: `grep -E` anchored on `removes (them\|it([^s]\|$)\|changes\|the changes)`, checked on the file as it stands |
+| N6 `update_at_durable` had no caller | Task 4: dropped, with its census row; `update_at_durable_with` is the one durable way in; spec §7.3 and U43 name it |
+| N7 Task 10's grep and its doc comment disagreed | Task 10: the doc comment no longer names the deleted helper; the grep covers `src-tauri/src` recursively |
 
 ---
 
@@ -106,7 +120,7 @@ Copied from the spec; each line is verbatim or names its section.
 - **Logs** (§6.4, §7.2, W10): counts only, "No path and no name". "Logs never carry its path or a file name."
 - **The folder is the person's** (W10): "After the keep step completes, Beebeeb never moves, reads back, deletes or uploads the kept folder."
 - **Design first** (§11): "the first commit of the frontend task, before any frontend code, amends" Dialog 3, the hifi drawing and spec A. "The frontend pull request does not merge without that commit."
-- **No new dependency** (§13.3): "`src-tauri/Cargo.lock` and `bun.lock` unchanged".
+- **No new dependency** (§13.3): "`src-tauri/Cargo.lock` and `bun.lock` unchanged". Task 11 changes `src-tauri/Cargo.toml` by one `[dev-dependencies]` feature, tokio's `test-util`, which adds no crate, so the lock stays unchanged (plan re-review R1; spec §13.3, amended).
 - **Public repository** (workspace rule): neutral wording in commits, comments and docs; no private names or ledger labels; each commit ends with the trailer of the model that wrote it.
 - **Evidence** (§13): "Every new test is seen red before it passes, and its mutation is seen red on the intended assertion. Failure and pass output go into the task's notes and QA evidence." Counts, never adjectives.
 
@@ -140,11 +154,12 @@ Paths are relative to the desktop repo root.
 | `src-tauri/src/sign_out/send_phase.rs` | create | the send phase's pure state and end decision | 11 |
 | `src-tauri/src/sign_out/flow_window.rs` | create | the late-result record and the close hook's pure state | 12 |
 | `src-tauri/src/state_db.rs` | modify | `waiting_rows`, `unkept_waiting_changes`, `close_finder_accepts`, the accept's check, `enqueue_finder_change` (the fenced Finder enqueue, plan review I1), `engine_start_repair`'s reopen, `make_due_for_send_phase` | 1, 6, 8, 11 |
-| `src-tauri/src/config.rs` | modify | the two keys; `try_update_at_then` takes the durable write step; `update_at_durable` with a file-system seam | 4 |
+| `src-tauri/src/config.rs` | modify | the two keys; `try_update_at_then` takes the durable write step; `update_at_durable_with`, the durable save with a file-system seam (plan re-review N6) | 4 |
 | `src-tauri/src/lib.rs` | modify | `mod sign_out;`; `disposable_cache_roots_in`; the purge's `KeptSet` and order; the gate and keep call in `clear_session_impl`; the commands; the alert; the window hook; the menu; the R10 reset; `AppState.sign_out`; the 1889 census and the 1882 surface pins, extended | 2, 4, 6, 7, 8, 10-14 |
 | `src-tauri/src/engine_bridge.rs` | modify | `AcceptsClosed` → `WriteRetryLater`; every Finder change queued through the fence; the queue outcome's link, session and account signals | 8, 11 |
 | `src-tauri/src/ipc_socket.rs` | modify | the `accepts_closed` reply and refusal category | 8 |
-| `src-tauri/src/runner.rs` | modify | `SendPhaseLink` in `EngineRunner` and `RunnerControls`; `next_wake`, the loop's three wakes (plan review I2) | 11 |
+| `src-tauri/src/runner.rs` | modify | `SendPhaseLink` in `EngineRunner` and `RunnerControls`; `next_wake`, the loop's three wakes (plan review I2); `queue_step`, the tick's queue step that the phase's wake also runs, and the working-set census pin that follows it (plan re-review N1) | 11 |
+| `src-tauri/Cargo.toml` | modify | tokio's `test-util` as a `[dev-dependencies]` feature only, for the wake test's paused clock; no crate added, `Cargo.lock` unchanged (plan re-review R1) | 11 |
 | `src-tauri/src/browser_login.rs` | modify | the switch event carries the snapshot on macOS | 13 |
 | `docs/specs/2026-10-02-macos-settings-dialogs.md`, `design/hifi/macos-settings-dialogs.html`, `docs/specs/2026-10-06-macos-finder-setup-reconciler.md` | modify | design first | 15 |
 | `src/signOutCopy.ts` | create | the §11 strings and builders (TypeScript side) | 16 |
@@ -187,6 +202,7 @@ $LOCK cargo-build -- cargo clippy --locked --all-targets > $EVID/t<N>-clippy.log
 ```
 
   Expected: `fmt rc=0`, `check rc=0`, `guard rc=0`; the lib line reads `ok. <L> passed; 0 failed; <I> ignored` with `<I>` the baseline's ignored count; `keychain`, `windows_session_wiring` and `windows_signout_cleanup` keep their baseline counts; clippy's warning count is not above the baseline's.
+- **Dead code before Task 7 (open: found at the second plan fix, for the lead to rule before Task 1 starts).** Every module here is private, so an item whose only caller is test code is dead in the non-test lib build, and so is every item only it reaches. The `cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))` forms (gate forms, below) do not cover a macOS non-test build. Probed on this Mac with a scratch crate of the same crate types (`staticlib`, `cdylib`, `rlib`, edition 2024): a `pub(crate)` function called only from a `#[cfg(test)]` module, inside a module carrying that `cfg_attr`, and the `pub(crate)` trait, struct and associated function it reaches, gave five `is never used` / `is never constructed` warnings under `cargo clippy --all-targets`. Tasks 1-6 add such items: Task 1's `StateDb::waiting_rows` and `WaitingChanges` are first called by Task 7's `count_ask` and `read_waiting_changes`, and Task 4's durable save by Task 7's `keep_for_sign_out`, through Task 5's keep step. So on macOS the clippy count rises above the baseline at those gates and comes back at Task 7. The gate is not relaxed here. Either (a) each such item or module carries `#[cfg_attr(not(test), allow(dead_code))]` with the reason "first production caller: Task 7", and Task 7 removes every one in the commit that wires it (a `grep -rn "first production caller" src-tauri/src` that prints nothing is part of Task 7's gate); or (b) the gates of Tasks 1-6 expect the baseline plus the named dead-code warnings, each listed by item in the task's Notes, and Task 7's gate expects the baseline again.
 - **The frontend gate** (from `$WT`):
 
 ```bash
@@ -1605,19 +1621,19 @@ git commit -m "feat(macos): copy waiting saves into a kept folder with no overwr
 ### Task 4: The two config keys and the durable save
 
 **Files:**
-- Modify: `src-tauri/src/config.rs` (two fields after `kept_unsynced_folder`, `@184:config.rs:278-284`, and their defaults at `:376`; `ConfigFs`, `RealConfigFs`, `save_to_durable`, `update_at_durable`, `update_at_durable_with` next to `try_update_at_then`, `@184:config.rs:806-843`; `try_update_at_then` gains its write step, and its two callers pass `None`: `try_update_at` at `:788-790` and `update_at_then` at `:797-803`)
+- Modify: `src-tauri/src/config.rs` (two fields after `kept_unsynced_folder`, `@184:config.rs:278-284`, and their defaults at `:376`; `ConfigFs`, `RealConfigFs`, `save_to_durable`, `update_at_durable_with` next to `try_update_at_then`, `@184:config.rs:806-843`; `try_update_at_then` gains its write step, and its two callers pass `None`: `try_update_at` at `:788-790` and `update_at_then` at `:797-803`)
 - Create: `src-tauri/src/sign_out/kept_record.rs`
 - Modify: `src-tauri/src/sign_out/mod.rs` (add `pub(crate) mod kept_record;`)
-- Modify: `src-tauri/src/lib.rs`, the 1889 census `test_1889_no_desktop_config_load_modify_save_span_exists_outside_the_one_helper` (`@184:lib.rs:32042-32096`): two new "ways in" and the durable write's own count
+- Modify: `src-tauri/src/lib.rs`, the 1889 census `test_1889_no_desktop_config_load_modify_save_span_exists_outside_the_one_helper` (`@184:lib.rs:32042-32096`): one new "way in" and the durable write's own count
 - Test: `src-tauri/src/sign_out/kept_record.rs`; the census in `lib.rs`
 
-**Plan review I3.** The durable save is not a second write path. 1889 made `try_update_at_then` the one place that takes the config-write lock, reads and writes (`@184:config.rs:806-822`), and its census pins that (`config_write_guard()` twice: the definition and that one call, `@184:lib.rs:32064-32068`). So `try_update_at_then` takes the write step as a parameter, `durable: Option<&dyn ConfigFs>`: `None` is today's `save_to`, `Some` is `save_to_durable`. The lock and the read stay in that one place, `cfg.save_to(path)` stays its one plain write (the census's `save_to(` count stays 2), and the census gains `update_at_durable` and `update_at_durable_with` as ways in, plus a count of 2 for `save_to_durable(`.
+**Plan review I3.** The durable save is not a second write path. 1889 made `try_update_at_then` the one place that takes the config-write lock, reads and writes (`@184:config.rs:806-822`), and its census pins that (`config_write_guard()` twice: the definition and that one call, `@184:lib.rs:32064-32068`). So `try_update_at_then` takes the write step as a parameter, `durable: Option<&dyn ConfigFs>`: `None` is today's `save_to`, `Some` is `save_to_durable`. The lock and the read stay in that one place, `cfg.save_to(path)` stays its one plain write (the census's `save_to(` count stays 2), and the census gains `update_at_durable_with` as a way in, plus a count of 2 for `save_to_durable(`. (Plan re-review N6: round 1 also had `update_at_durable`, a wrapper that passed `&RealConfigFs`, but nothing called it, so it would have been dead code on every platform and raised clippy's count from this task on. It is dropped with its census row. The keep step passes `&RealConfigFs` itself, through `save_kept_unsent_durably`, Task 5. That removes the one item that would have stayed dead at every gate, the branch gate included. It does not make Task 4's macOS build free of dead code: `update_at_durable_with`, `save_to_durable`, `ConfigFs`, `RealConfigFs` and `kept_record` get their first production caller only in Task 7, through Task 5's keep step, so a macOS non-test build warns about them at Tasks 4-6, as it does about every item Tasks 1-6 add ahead of Task 7; see "Dead code before Task 7" under the Rust task gate.)
 
 **Interfaces:**
 - Consumes: `DesktopConfig::{update_at, load_from, apply_settings}`, `config::DesktopSettings`, `finder_removal::{DismissOutcome, remember_kept_folder_at}`.
 - Produces:
   - `DesktopConfig.kept_unsent_folder: Option<String>`, `DesktopConfig.kept_unsent_unfinished: Vec<String>`.
-  - `config::ConfigFs` (trait: `write`, `sync_file`, `rename`, `sync_dir`), `config::RealConfigFs`, `DesktopConfig::update_at_durable(path, change)`, `DesktopConfig::update_at_durable_with(path, change, &dyn ConfigFs)`.
+  - `config::ConfigFs` (trait: `write`, `sync_file`, `rename`, `sync_dir`), `config::RealConfigFs`, `DesktopConfig::update_at_durable_with(path, change, &dyn ConfigFs)` (the one durable way in; plan re-review N6).
   - `kept_record::{record_kept_unsent, take_back_kept_unsent, dismiss_kept_unsent, save_kept_unsent_durably, take_back_kept_unsent_at, clear_unfinished_at, dismiss_saved_kept_unsent_at, saved_kept_unsent_at, unfinished_at}`:
     - `save_kept_unsent_durably(path: &Path, folder: &str, fs: &dyn ConfigFs) -> Result<Option<String>, String>` returns the `kept_unsent_folder` it replaced;
     - `take_back_kept_unsent_at(path: &Path, folder: &str, previous: Option<&str>) -> Result<(), String>`;
@@ -1772,14 +1788,13 @@ In `lib.rs`, extend the 1889 census (`test_1889_no_desktop_config_load_modify_sa
         assert!(one_place.contains("cfg.save_to_durable(path, fs_steps)"), "{one_place}");
 ```
 
-and the "every other way in" list (`:32082-32092`) gains two rows:
+and the "every other way in" list (`:32082-32092`) gains one row (plan re-review N6: no `update_at_durable` row, because there is no such function):
 
 ```rust
-            ("    pub(crate) fn update_at_durable<R>(", "Self::update_at_durable_with("),
             ("    pub(crate) fn update_at_durable_with<R>(", "Self::try_update_at_then("),
 ```
 
-- [ ] **Step 2: Run them, expect FAIL.** Filter `sign_out::kept_record`: compile errors. Filter `test_1889_no_desktop_config_load_modify_save_span`: once the module compiles, red on the `save_to_durable(` count (0) and then on `"    pub(crate) fn update_at_durable<R>( exists"`.
+- [ ] **Step 2: Run them, expect FAIL.** Filter `sign_out::kept_record`: compile errors. Filter `test_1889_no_desktop_config_load_modify_save_span`: once the module compiles, red on the `save_to_durable(` count (0) and then on `"    pub(crate) fn update_at_durable_with<R>( exists"`.
 
 - [ ] **Step 3: Implement.** In `config.rs`, after `kept_unsynced_folder`:
 
@@ -1863,18 +1878,14 @@ and in `impl DesktopConfig`, `try_update_at_then` (`@184:config.rs:806-822`) gai
     }
 ```
 
-Its two callers pass `None`: `Self::try_update_at_then(path, change, |_| {}, None)` in `try_update_at`, and `Self::try_update_at_then(path, change, saved, None)` in `update_at_then`. Then, beside them:
+Its two callers pass `None`: `Self::try_update_at_then(path, change, |_| {}, None)` in `try_update_at`, and `Self::try_update_at_then(path, change, saved, None)` in `update_at_then`. Then, beside them (plan re-review N6: one durable way in, called by `save_kept_unsent_durably` from this task on; no wrapper that nothing calls):
 
 ```rust
     /// Spec 2026-10-10 §7.3 (task 1887): `update_at`, whose write survives a power loss once it returns: the temp file
-    /// is flushed before the rename, and the directory after it. Only the keep step's save uses it; every other save
-    /// stays as it is.
-    pub(crate) fn update_at_durable<R>(path: &Path, change: impl FnOnce(&mut Self) -> (bool, R)) -> Result<R, String> {
-        Self::update_at_durable_with(path, change, &RealConfigFs)
-    }
-
-    /// [`Self::update_at_durable`] with its file-system steps passed in: the one write place with a durable write step
-    /// (plan review I3), so the lock and the read are still taken in one place.
+    /// is flushed before the rename, and the directory after it. Only the keep step's save uses it, with
+    /// `RealConfigFs`; every other save stays as it is. The file-system steps are passed in so a test can record their
+    /// order and fail one (U43). It is the one write place with a durable write step (plan review I3), so the lock and
+    /// the read are still taken in one place.
     pub(crate) fn update_at_durable_with<R>(
         path: &Path,
         change: impl FnOnce(&mut Self) -> (bool, R),
@@ -5111,7 +5122,7 @@ fn surface_sign_out_folders(app: &tauri::AppHandle, result: &Result<SignedOut, S
 }
 
 /// The two folders a sign-out's result carries, whether it succeeded or failed after the removal (1882 review I1):
-/// macOS's, then ours. It replaces `sign_out_kept_folder` (`@184:lib.rs:2805-2811`), which named macOS's only.
+/// macOS's, then ours. It replaces 1882's helper that named macOS's folder only (`@184:lib.rs:2805-2811`).
 fn sign_out_folders(result: &Result<SignedOut, SignOutFailure>) -> (Option<&str>, Option<&KeptUnsent>) {
     match result {
         Ok(done) => (done.preserved_location.as_deref(), done.kept_unsent.as_ref()),
@@ -5155,7 +5166,7 @@ Replace `surface_kept_folder(&app, sign_out_kept_folder(&result));` with `surfac
 - three tests call it (`@184:lib.rs:21696`, `:21702`, `:21732`): `sign_out_kept_folder(&result)` becomes `sign_out_folders(&result).0`, and the alert line at `:21702`, `finder_removal::kept_folder_alert(sign_out_kept_folder(&result)).map(|(_, body)| body)`, becomes `sign_out::copy::sign_out_alert(None, sign_out_folders(&result).0).map(|(_, body)| body)`, the body `surface_sign_out_folders` raises when only macOS kept a folder. Their expected values do not change (1882's body, byte for byte: U23's "macOS's only" case);
 - four 1882 source pins quote the old call (`@184:lib.rs:31278`, `:31281`, `:31480`, `:31483`): each `contains("surface_kept_folder(&app, sign_out_kept_folder(&result));")` becomes `contains("surface_sign_out_folders(&app, &result);")`, and what they assert stays: both routes surface the folder before they return.
 
-`grep -n "sign_out_kept_folder" src-tauri/src/*.rs` then prints nothing.
+`grep -rn "sign_out_kept_folder" src-tauri/src; echo "rc=$?"` then prints only `rc=1`: no line in any file under `src-tauri/src`, the `sign_out/` modules included, and no doc comment either, since `sign_out_folders`' doc names the old helper by what it did, not by its name (plan re-review N7).
 
 - [ ] **Step 4: Run, expect PASS.** The four filters: `ok. 2 passed`, `ok. 1 passed`, `ok. 2 passed`, `ok. 1 passed`; then `a_keeping_sign_out_logs`: `ok. 1 passed`. Then filter `rb3_f1` and `test_1882`: their baseline counts (the three rewritten tests and the four pins among them).
 
@@ -5186,17 +5197,22 @@ git commit -m "feat(macos): one alert names the kept folder and macOS's; the row
 **Files:**
 - Create: `src-tauri/src/sign_out/send_phase.rs` (pure: the end decision, the progress, the bound)
 - Modify: `src-tauri/src/sign_out/mod.rs` (`SignOutState.phase`), `src-tauri/src/sign_out/snapshot.rs` (`AskSnapshot.any_live`), `src-tauri/src/sign_out/waiting.rs` (`readiness`)
-- Modify: `src-tauri/src/runner.rs`: `SendPhaseLink`; `EngineRunner` (`@184:runner.rs:617-688`) and `RunnerControls` (`:918-924`) carry it; `run` attaches the link monitor (`:1119`), and its loop's `select!` (`:1297-1565`) becomes a `match` on `next_wake`, with the phase's wake as a third case and the tick's queue step (`:1421`) noting its outcome while a phase is armed (plan review I2, M13)
+- Modify: `src-tauri/src/runner.rs`: `SendPhaseLink`; `EngineRunner` (`@184:runner.rs:617-688`) and `RunnerControls` (`:918-924`) carry it; `run` attaches the link monitor (`:1119`), and its loop's `select!` (`:1297-1565`) becomes a `match` on `next_wake`, with the phase's wake as a third case (plan review I2); the tick's queue step (`:1421-1446`) moves into one helper, `queue_step`, which the tick and the phase's wake both call, and which notes each attempt while a phase is armed (plan review M13, plan re-review N1); the working-set census pin `every_working_set_signal_in_the_tick_loop_goes_through_the_owed_wrapper` (`:2506-2557`) follows the two sites into `queue_step` and counts its two callers (plan re-review N1)
+- Modify: `src-tauri/Cargo.toml`: tokio's `test-util` as a `[dev-dependencies]` feature, for the wake test's paused clock (plan re-review R1). It adds no crate: `Cargo.lock` is unchanged
 - Modify: `src-tauri/src/engine_bridge.rs`: `TransferLoopOutcome` (`@184:engine_bridge.rs:632-646`) gains three signals, set in the failure branch (`:1183-1196`), and `Default`
 - Modify: `src-tauri/src/state_db.rs`: `make_due_for_send_phase`
 - Modify: `src-tauri/src/lib.rs`: `sign_out_count`, `sign_out_send_start`, `sign_out_send_stop` (macOS, with same-signature stubs elsewhere that answer an error), the phase driver, registration in `generate_handler!`
 - Test: `send_phase.rs`, `state_db.rs`, `engine_bridge.rs`, `runner.rs`, `lib.rs` `sign_out_keep_tests`
 
+**Plan re-review N1: the phase runs the tick's queue step, so the working-set pin keeps four sites.** Spec §6.2: "The arm runs the queue step alone: `process_due_operations` and the bookkeeping that follows it at `:1336` onward (the working-set signal and the landing events)." Round 1 wrote that bookkeeping a second time in the arm, a fifth `signal_working_set_owing(` call, and the census pin `every_working_set_signal_in_the_tick_loop_goes_through_the_owed_wrapper` (`@184:runner.rs:2506-2557`, no cfg gate) allows exactly four ("A fifth call fails here"). So the tick's queue step (`@184:runner.rs:1421-1446`) moves into one helper, `queue_step` (its lines unchanged but for its parameters' names, plus the M13 note), and the tick and the phase's wake both call it; the phase passes no remote applies. The count stays 4: shared roots in `run`, the queue step's signal and its failure branch in `queue_step`, and the failed tick's debt in its own helper. The pin changes in this commit, and only where the code moved: two of its four site strings name `queue_step`'s parameters (as the debt's site already names its helper's), and it counts `queue_step`'s callers, exactly two, so a third caller fails it as a fifth site does. Its doc says why the phase's wake may now signal between ticks: at most once a second, only while a phase is armed, at most a minute. Mutations 16 and 17 turn it red. The note (plan review M13) moves into `queue_step` with the rest, so the tick's attempts during a phase still count as the phase's. Option (b), a fifth named site, was not needed: the queue step is already a self-contained block, and one helper also keeps the tick's step and the phase's from drifting apart.
+
+**Plan re-review R1: the wake test runs on tokio's paused clock.** `a_phase_armed_while_the_runner_waits_wakes_it_at_once` is `#[tokio::test(start_paused = true)]` and measures with `tokio::time::Instant`. On a paused clock the runtime moves time only when every task waits, and then straight to the next timer, so the test takes no real second and a loaded machine cannot flake it. That needs tokio's `test-util` feature, added under `[dev-dependencies]` only (`@184:src-tauri/Cargo.toml:301-305`, beside the `tempfile` and `json-patch` entries; the tauri `test` entry below them is the precedent for a feature-only dev entry). `test-util` is `["rt", "sync", "time"]` in tokio 1.53.1 (the version `Cargo.lock` pins, `Cargo.lock:5702-5703`), all already enabled by `[dependencies]` (`Cargo.toml:38`), so it adds no crate and no lock edge. Checked at the plan re-review on a scratch copy of `Cargo.toml` and `Cargo.lock`, offline: `cargo tree --offline --locked --target aarch64-apple-darwin -e normal,dev,build` passes with the entry and the lock stays byte-identical; the same check with `features = ["test-util", "tracing"]` (tokio's `tracing` adds a lock edge) is refused, "cannot update the lock file … because --locked was passed", so the check can go red. Dev-dependency features reach test builds only; the app's build is unchanged.
+
 **Interfaces:**
 - Consumes: `count_ask`, `read_waiting_changes` (Task 7), `SnapshotStore` (Task 7), `send_readiness`, `SendConditions`, `NotSending` (Task 1), `link_health::{LinkMonitor, classify_error}`, `is_curable_refusal`, `OperationFailureClass::Auth`.
 - Produces:
   - `send_phase::{SIGN_OUT_SEND_LIMIT, PhaseEnd, PhaseObservation, PhaseStep, SendPhase, phase_end, RunningPhase}`. `PhaseEnd` serializes snake_case: `all_sent`, `held`, `time_limit`, `stopped`, `closed`, `offline`, `session`, `engine_stopped`, `account` (Q2 ruling).
-  - `runner::{SendPhaseLink, AttemptSignals, Wake}`; `EngineRunner::send_phase(&self) -> Arc<SendPhaseLink>`; `SendPhaseLink::{arm, disarm, is_armed, wake, link_failed, signals, note}`; `runner::phase_step_due(armed: bool, paused: bool, last_run: Option<std::time::Instant>, now: std::time::Instant) -> bool`; `runner::next_wake(cancel: &mut oneshot::Receiver<()>, tick: &mut tokio::time::Interval, send_phase: &SendPhaseLink) -> Wake` (plan review I2).
+  - `runner::{SendPhaseLink, AttemptSignals, Wake}`; `EngineRunner::send_phase(&self) -> Arc<SendPhaseLink>`; `SendPhaseLink::{arm, disarm, is_armed, wake, link_failed, signals, note}`; `runner::phase_step_due(armed: bool, paused: bool, last_run: Option<std::time::Instant>, now: std::time::Instant) -> bool`; `runner::next_wake(cancel: &mut oneshot::Receiver<()>, tick: &mut tokio::time::Interval, send_phase: &SendPhaseLink) -> Wake` (plan review I2); private to `runner.rs`, `async fn queue_step(bridge: &Arc<EngineBridge>, sync_root: &Path, db: &StateDb, owed_working_set_signal: &mut OwedWorkingSetSignal, applied: &[String], send_phase: &SendPhaseLink) -> u32` (plan re-review N1).
   - `TransferLoopOutcome.{link_failed, session_refused, account_refused}: bool`.
   - `StateDb::make_due_for_send_phase(&self, now: i64) -> rusqlite::Result<usize>`.
   - `SignOutState.phase: std::sync::Mutex<Option<RunningPhase>>`; `RunningPhase { ask_id, owner, stop: Arc<AtomicBool>, closed: Arc<AtomicBool> }`.
@@ -5380,10 +5396,13 @@ In `engine_bridge.rs`'s tests (they reach the private `next_attempt_count` and t
 In `runner.rs`'s tests:
 
 ```rust
-    /// U35: the phase's wake runs the queue step alone, at most once a second, never while paused or disarmed, and it
-    /// notes what each attempt met; the tick notes its own attempts while a phase is armed (plan review M13).
+    /// U35: the phase's wake runs the tick's own queue step (`queue_step`) with no remote applies, at most once a
+    /// second, never while paused or disarmed, and never the remote tick, a sweep or the shared-root refresh. The queue
+    /// step notes what each attempt met while a phase is armed, so the tick's attempts count too (plan review I7, M13),
+    /// and it pays the working-set signal, so the phase adds no signal site (plan re-review N1).
     #[test]
     fn the_send_phase_runs_the_queue_step_alone() {
+        use crate::source_pin::squeeze;
         let start = std::time::Instant::now();
         let mut last = None;
         let mut runs = 0;
@@ -5397,16 +5416,36 @@ In `runner.rs`'s tests:
         assert!((60..=61).contains(&runs), "{runs} runs in 60 s");
         assert!(!phase_step_due(true, true, None, start), "not while paused");
         assert!(!phase_step_due(false, false, None, start), "never once disarmed");
-        let source = include_str!("runner.rs");
+        let source = include_str!("runner.rs").replace("\r\n", "\n");
         let arm = &source[source.find("Wake::Phase => {").expect("the phase's arm")..];
         let arm = &arm[..arm.find("\n            }\n").unwrap()];
-        assert!(arm.contains("process_due_operations("), "{arm}");
-        assert!(arm.contains("send_phase.note(&outcome)"), "plan review I7: every attempt is noted:\n{arm}");
-        for denied in ["sync_tick_outcome(", "refresh_shared_roots(", "sweep_", "run_known_folder_mirror("] {
+        assert!(
+            squeeze(arm).contains(&squeeze("queue_step(&bridge, &sync_root, &db, &mut owed_working_set_signal, &[], &send_phase)")),
+            "plan re-review N1: the arm runs the tick's queue step, with no remote applies:\n{arm}"
+        );
+        for denied in [
+            "process_due_operations(",
+            "signal_working_set_owing(",
+            "sync_tick_outcome(",
+            "refresh_shared_roots(",
+            "sweep_",
+            "run_known_folder_mirror(",
+        ] {
             assert!(!arm.contains(denied), "{denied} in the arm");
         }
+        let step = &source[source.find("async fn queue_step(").expect("the queue step")..];
+        let step = &step[..step.find("\n}\n").unwrap()];
+        assert!(
+            squeeze(step).contains("ifsend_phase.is_armed(){send_phase.note(&outcome);}"),
+            "plan review I7: every attempt is noted while a phase is armed:\n{step}"
+        );
         let tick = &source[source.find("Wake::Tick => {").expect("the tick's arm")..source.find("Wake::Phase => {").unwrap()];
-        assert!(tick.contains("send_phase.note(&outcome);"), "plan review M13: the tick's attempts count too");
+        assert!(
+            squeeze(tick).contains(&squeeze(
+                "queue_step(&bridge, &sync_root, &db, &mut owed_working_set_signal, &tick.applied_item_ids, &send_phase)"
+            )),
+            "plan review M13: the tick's queue step is the same one, so the tick's attempts count too"
+        );
         // Plan review I2: no precondition on the wake. `select!` reads one when it starts waiting, so an arm disabled
         // then stays disabled until another arm fires: up to a 30 s tick.
         let wait = &source[source.find("async fn next_wake(").expect("next_wake")..];
@@ -5416,8 +5455,11 @@ In `runner.rs`'s tests:
     }
 
     /// U35 (plan review I2): a phase armed while the runner already waits between ticks wakes it at once, not at its
-    /// next tick 30 s on.
-    #[tokio::test]
+    /// next tick 30 s on. On tokio's paused clock (plan re-review R1): time moves only when every task waits, and
+    /// then straight to the next timer, so no real time passes and a loaded machine cannot flake the bound. With a
+    /// precondition on the wake, the only timers left are the 1 s timeout and the 30 s tick, so the clock moves to the
+    /// timeout and the test is red at once.
+    #[tokio::test(start_paused = true)]
     async fn a_phase_armed_while_the_runner_waits_wakes_it_at_once() {
         let send_phase = Arc::new(SendPhaseLink::default());
         let (_keep_open, mut cancel) = oneshot::channel::<()>();
@@ -5427,8 +5469,10 @@ In `runner.rs`'s tests:
             let send_phase = send_phase.clone();
             tokio::spawn(async move { next_wake(&mut cancel, &mut tick, &send_phase).await })
         };
-        tokio::time::sleep(Duration::from_millis(50)).await; // the runner now waits, 29.95 s from its next tick
-        let armed_at = std::time::Instant::now();
+        // Paused clock: the waiter runs first and starts waiting, then the clock moves 50 ms. It now waits, 29.95 s
+        // from its next tick.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let armed_at = tokio::time::Instant::now();
         send_phase.arm();
         let woke = tokio::time::timeout(Duration::from_secs(1), waiter)
             .await
@@ -5454,6 +5498,55 @@ In `runner.rs`'s tests:
         link.arm();
         assert_eq!(link.signals(), AttemptSignals::default(), "a new phase starts with none");
     }
+```
+
+In the same tests, the working-set census pin changes (plan re-review N1), and only where the code moves. Its doc comment (`@184:runner.rs:2506-2510`) and its `for site in [ … ]` loop (`:2535-2542`) become the following; its first two assertions, its `"four call sites"` count (`:2528-2534`) and its check that the debt's helper is called once, from the failed tick's arm (`:2543-2556`), stay as they are:
+
+```rust
+    /// The tick loop signals through the owing wrapper only, at four named sites: revoked shared content,
+    /// the queue step's one signal, a queue step that failed (the tick's remote applies), and a failed tick that
+    /// owes a debt. A fifth call fails here, so no signal bypasses the debt. The queue step's two sites are in
+    /// `queue_step`, which has two callers: the tick, and the send phase's wake while a sign-out's phase is armed
+    /// (spec 2026-10-10 §6.2), which passes no remote applies. A third caller fails here too. A failed tick reaches
+    /// the first site (it runs before the tick, in every iteration) and the fourth; a delivered signal pays the debt,
+    /// so at most one signal is delivered per tick. Between ticks, an armed phase's queue step signals as well: at
+    /// most once a second, and only while the phase is armed, at most a minute.
+    #[test]
+    fn every_working_set_signal_in_the_tick_loop_goes_through_the_owed_wrapper() {
+        // … unchanged to the `"four call sites"` count …
+        for site in [
+            "signal_working_set_owing(&mut owed_working_set_signal, &db, \"shared_roots_changed\", &outcome.removed_shared_file_ids)",
+            "signal_working_set_owing(owed_working_set_signal, db, reason, &ids)",
+            "signal_working_set_owing(owed_working_set_signal, db, \"remote_changes_applied\", applied)",
+            "signal_working_set_owing(owed_working_set_signal, db, \"owed_debt\", &[])",
+        ] {
+            assert_eq!(squeezed.matches(&squeeze(site)).count(), 1, "the site {site}");
+        }
+        // The queue step's two sites are `queue_step`'s; the tick and the phase's wake call it, once each.
+        assert_eq!(
+            squeezed.matches("queue_step(").count() - squeezed.matches("fnqueue_step(").count(),
+            2,
+            "the queue step's two callers"
+        );
+        for call in [
+            "queue_step(&bridge, &sync_root, &db, &mut owed_working_set_signal, &tick.applied_item_ids, &send_phase)",
+            "queue_step(&bridge, &sync_root, &db, &mut owed_working_set_signal, &[], &send_phase)",
+        ] {
+            assert_eq!(squeezed.matches(&squeeze(call)).count(), 1, "the call {call}");
+        }
+        // … unchanged from "The fourth site's helper is called once, from the failed tick's arm of `run`." …
+    }
+```
+
+`production` ends at the tests module, so the test names that say "queue step" are not counted, and no comment in `run` or `queue_step` may write the helper's name with its parenthesis. `squeezed` matches the calls however rustfmt wraps them (`source_pin::squeeze` drops whitespace and a trailing comma).
+
+In `src-tauri/Cargo.toml`, under `[dev-dependencies]`, after the `json-patch` entry (`@184:src-tauri/Cargo.toml:305`) and before the `[target.'cfg(not(target_os = "windows"))'.dev-dependencies]` table (plan re-review R1):
+
+```toml
+# Task 1887: the send phase's wake test runs on tokio's paused clock (`#[tokio::test(start_paused = true)]`), so a
+# loaded machine cannot flake it. A feature only: `test-util` turns on tokio's own `rt`, `sync` and `time`, which
+# `[dependencies]` already has, so no crate is added and Cargo.lock is unchanged.
+tokio = { version = "1", features = ["test-util"] }
 ```
 
 In `lib.rs`'s `sign_out_keep_tests`:
@@ -5536,7 +5629,7 @@ In `lib.rs`'s `sign_out_keep_tests`:
     }
 ```
 
-- [ ] **Step 2: Run them, expect FAIL.** Filters `sign_out::send_phase`, `the_send_phase_makes`, `never_touches_parked`, `a_phase_never_parks`, `a_refusal_the_account_cures`, `runs_the_queue_step_alone`, `a_phase_armed_while_the_runner_waits`, `an_attempts_refusal_reaches_the_phase_signals`, `an_attempts_refusal_ends_the_phase`, `is_owned_by_rust`, `contract_shape`. Expected: compile errors.
+- [ ] **Step 2: Run them, expect FAIL.** Filters `sign_out::send_phase`, `the_send_phase_makes`, `never_touches_parked`, `a_phase_never_parks`, `a_refusal_the_account_cures`, `runs_the_queue_step_alone`, `a_phase_armed_while_the_runner_waits`, `an_attempts_refusal_reaches_the_phase_signals`, `an_attempts_refusal_ends_the_phase`, `is_owned_by_rust`, `contract_shape`. Expected: compile errors. Two of them are not only missing items. The changed working-set pin (filter `every_working_set_signal_in_the_tick_loop`) is in the same binary, so it is red as a compile error here too; on its own it would be red on `"the site signal_working_set_owing(owed_working_set_signal, db, reason, &ids)"` (count 0: no `queue_step` yet), and its reds on the assertions this task adds are mutations 16 and 17. The wake test's red on its own assertion is mutation 11 (Step 5): on the paused clock it is red on "woken within a second of the arm" with the run's `finished in` under 1 s, which is the proof that no real second was waited (plan re-review R1).
 
 - [ ] **Step 3: Implement.**
 
@@ -5772,45 +5865,96 @@ async fn next_wake(cancel: &mut oneshot::Receiver<()>, tick: &mut tokio::time::I
 
 `EngineRunner` gains `send_phase: Arc<SendPhaseLink>`, made in `spawn` (`let send_phase = Arc::new(SendPhaseLink::default());`), passed in `RunnerControls { …, send_phase: send_phase.clone() }`, kept on `Self`, and handed out by `pub fn send_phase(&self) -> Arc<SendPhaseLink> { self.send_phase.clone() }`. `for_test_with_task` makes a default one. In `run`, after `let link = api.link();`: `send_phase.attach(link.clone());`, and before the loop `let mut last_phase_run: Option<std::time::Instant> = None;`.
 
-The loop's `tokio::select! { biased; _ = &mut cancel => break, _ = tick.tick() => { … } }` (`@184:runner.rs:1297-1565`) becomes a `match` on `next_wake`. The tick's body stays as it is, at the same indentation:
+The loop's `tokio::select! { biased; _ = &mut cancel => break, _ = tick.tick() => { … } }` (`@184:runner.rs:1297-1565`) becomes a `match` on `next_wake`. The tick's body stays as it is, at the same indentation, but for its queue step, which moves into `queue_step` (below):
 
 ```rust
     loop {
         match next_wake(&mut cancel, &mut tick, &send_phase).await {
             Wake::Cancel => break,
             Wake::Tick => {
-                // … today's tick body (`@184:runner.rs:1301-1563`), unchanged but for the note below …
+                // … today's tick body (`@184:runner.rs:1301-1563`), unchanged but for its queue step, below …
             }
-            // Spec 2026-10-10 §6.2: while a sign-out's send phase is armed, the queue step alone, at most once a second.
-            // Never the remote tick, the sweeps or the shared-root refresh.
+            // Spec 2026-10-10 §6.2: while a sign-out's send phase is armed, the tick's queue step alone, at most once a
+            // second. Never the remote tick, the sweeps or the shared-root refresh. The queue step pays its own
+            // working-set signal; there are no remote applies to merge here.
             Wake::Phase => {
                 let now = std::time::Instant::now();
                 if !phase_step_due(send_phase.is_armed(), sync_paused.load(Ordering::Relaxed), last_phase_run, now) {
                     continue;
                 }
                 last_phase_run = Some(now);
-                match bridge.process_due_operations(&sync_root, now_secs()).await {
-                    Ok(outcome) => {
-                        send_phase.note(&outcome);
-                        let (reason, ids) = tick_working_set_signal(&outcome.invalidated_item_ids, &[]);
-                        signal_working_set_owing(&mut owed_working_set_signal, &db, reason, &ids);
-                    }
-                    Err(e) => tracing::warn!(error = %e, "operation queue processing failed during the send phase"),
-                }
+                queue_step(&bridge, &sync_root, &db, &mut owed_working_set_signal, &[], &send_phase).await;
             }
         }
     }
 ```
 
-In the tick's own queue step (`@184:runner.rs:1421`), first statement of its `Ok(outcome) =>` arm (plan review M13: the tick's attempt during a phase counts as the phase's, so an `account` refusal or an attempt-only `offline` on it ends the phase too):
+In the tick's body, the queue step (`@184:runner.rs:1421-1446`, from `let completed_sync_work = match bridge.process_due_operations(&sync_root, now_secs()).await {` to its closing `};`) becomes one call, as rustfmt lays it out (plan re-review N1):
 
 ```rust
-                                if send_phase.is_armed() {
-                                    send_phase.note(&outcome);
-                                }
+                        let completed_sync_work = queue_step(
+                            &bridge,
+                            &sync_root,
+                            &db,
+                            &mut owed_working_set_signal,
+                            &tick.applied_item_ids,
+                            &send_phase,
+                        )
+                        .await;
 ```
 
-Every `continue` in the tick's body still continues the loop, as it did inside the `select!`.
+and the lines it replaced move, unchanged but for the names their parameters now have, into a helper after `tick_working_set_signal` (`@184:runner.rs:1973-1990`). The note (plan review M13) is its first statement on `Ok`: the tick's attempt during a phase counts as the phase's, so an `account` refusal or an attempt-only `offline` on it ends the phase too.
+
+```rust
+/// The tick's queue step: one run of the local operation queue and the one working-set signal it owes. `applied` is
+/// the tick's remote applies, merged into that one signal (task 1697 review fix T3). Spec 2026-10-10 §6.2 (task 1887):
+/// the send phase's wake runs this same step between ticks, with no remote applies, so the phase adds no signal site;
+/// while a phase is armed, what each attempt met is noted on its link, the tick's attempts included. Returns how many
+/// operations completed.
+async fn queue_step(
+    bridge: &Arc<EngineBridge>,
+    sync_root: &Path,
+    db: &StateDb,
+    owed_working_set_signal: &mut OwedWorkingSetSignal,
+    applied: &[String],
+    send_phase: &SendPhaseLink,
+) -> u32 {
+    match bridge.process_due_operations(sync_root, now_secs()).await {
+        Ok(outcome) => {
+            if send_phase.is_armed() {
+                send_phase.note(&outcome);
+            }
+            let completed = outcome.completed_op_ids.len() as u32;
+            // Task 1697 review fix (T3): ONE signal per tick
+            // carries the union of the local queue's
+            // invalidations and the REMOTE ingestion applies —
+            // in a mixed tick two signals would be redundant.
+            let (reason, ids) = tick_working_set_signal(&outcome.invalidated_item_ids, applied);
+            signal_working_set_owing(owed_working_set_signal, db, reason, &ids);
+            if !outcome.paused_op_ids.is_empty() || !outcome.retried_op_ids.is_empty() {
+                tracing::info!(
+                    paused = outcome.paused_op_ids.len(),
+                    retried = outcome.retried_op_ids.len(),
+                    "sync operation queue processed with deferred work"
+                );
+            }
+            completed
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "operation queue processing failed");
+            // The local queue stalled, but this tick's REMOTE
+            // ingestion may still have applied server-side
+            // changes — Finder must hear about them anyway.
+            if !applied.is_empty() {
+                signal_working_set_owing(owed_working_set_signal, db, "remote_changes_applied", applied);
+            }
+            0
+        }
+    }
+}
+```
+
+`&db` (an `Arc<StateDb>`), `&bridge` and `&send_phase` coerce at the call as they do for today's helpers (`enforce_cache_budget` takes `&Arc<EngineBridge>`, `signal_working_set_owing` takes `&StateDb`). Its log lines are the tick's, word for word, so a phase step that fails logs "operation queue processing failed" as a tick does, and one that defers work logs the tick's `info` line, counts only, at most once a second while the phase runs. No pin reads either line. `runner.rs`'s other source pins read `run` from `async fn run(\n    app: AppHandle` (or, in `lib.rs`, `async fn run(`), which `async fn queue_step(` does not match, and the helper sits outside `run`'s body. Every `continue` in the tick's body still continues the loop, as it did inside the `select!`.
 
 `engine_bridge.rs`: `TransferLoopOutcome` gains
 
@@ -6040,7 +6184,7 @@ async fn drive_send_phase(app: tauri::AppHandle, run: PhaseRun) {
 
 (`now_unix_seconds()` is `lib.rs`'s unix-seconds helper, `@184:lib.rs:3756`.) Register `sign_out_count`, `sign_out_send_start`, `sign_out_send_stop` in `generate_handler!`.
 
-- [ ] **Step 4: Run, expect PASS.** The eleven filters, in order: `ok. 3`, then `ok. 1` for each of the other ten. Then filter `runner::`: its baseline count plus 3 (the loop's other source pins, which read `run`, stay green).
+- [ ] **Step 4: Run, expect PASS.** The eleven filters, in order: `ok. 3`, then `ok. 1` for each of the other ten. Then filter `every_working_set_signal_in_the_tick_loop`: `ok. 1` (the census pin as changed above). Then filter `runner::`: its baseline count plus 3 (`the_send_phase_runs_the_queue_step_alone`, `a_phase_armed_while_the_runner_waits_wakes_it_at_once`, `an_attempts_refusal_reaches_the_phase_signals`). The working-set pin is in that count already and is changed, not added (plan re-review N1); the loop's other source pins, which read `run` and are not edited, stay green: `the_tick_loop_opens_its_debt_with_the_startup_resets`, `the_tick_loop_reports_through_the_tracker` and the three `engine_start_…` pins.
 
 - [ ] **Step 5: Mutations, each RED then reverted.**
   1. `SIGN_OUT_SEND_LIMIT = 59 s`, then `61 s`: U16 red each time.
@@ -6053,19 +6197,28 @@ async fn drive_send_phase(app: tauri::AppHandle, run: PhaseRun) {
   8. Drop `outcome.account_refused |= …`: U46 red.
   9. Let a second start register a second phase: U34 (f) red.
   10. Leave the link armed in `end_send_phase`: U34 (a) red.
-  11. Put the precondition back on the phase's wake (`_ = send_phase.wake.notified(), if send_phase.is_armed() => Wake::Phase,`): `a_phase_armed_while_the_runner_waits…` red on "woken within a second of the arm" (the wait ends at the tick, 30 s on), and U35 red on "no arm of the wait has a precondition".
-  12. Drop `send_phase.note(&outcome)` from the phase's arm: U35 red on "every attempt is noted".
+  11. Put the precondition back on the phase's wake (`_ = send_phase.wake.notified(), if send_phase.is_armed() => Wake::Phase,`): `a_phase_armed_while_the_runner_waits…` red on "woken within a second of the arm" (on the paused clock the runtime moves to the 1 s timeout, the nearest timer, before the 30 s tick), and U35 red on "no arm of the wait has a precondition". Paste the wake test's `test result:` line with its `finished in`: under 1 s although the timeout it hit is 1 s, so no real time was waited (plan re-review R1).
+  12. Drop `send_phase.note(&outcome)` (and its `if`) from `queue_step`: U35 red on "every attempt is noted while a phase is armed".
   13. Drop the reset in `arm()` (`signals` keep the last phase's): `an_attempts_refusal_reaches_the_phase_signals` red on "a new phase starts with none".
   14. `observe_phase` passes `AttemptSignals::default()` instead of `link.signals()`: `an_attempts_refusal_ends_the_phase…` red on the `Account` case (`Continue`).
-  15. Drop the tick's note: U35 red on "the tick's attempts count too".
+  15. The tick runs its own queue step again (today's `match bridge.process_due_operations(…)` block in place of the `queue_step` call): U35 red on "the tick's queue step is the same one, so the tick's attempts count too". (The working-set pin is red as well, on "four call sites", 6; this mutation names U35's.)
+  16. The phase's arm runs the queue itself, with its own signal (round 1's arm: `match bridge.process_due_operations(&sync_root, now_secs()).await { Ok(outcome) => { send_phase.note(&outcome); let (reason, ids) = tick_working_set_signal(&outcome.invalidated_item_ids, &[]); signal_working_set_owing(&mut owed_working_set_signal, &db, reason, &ids); } Err(e) => tracing::warn!(…) }` in place of the `queue_step` call): the working-set pin red on "four call sites" (5) (plan re-review N1). (U35 is red as well, on the arm's `queue_step` call; this mutation names the pin's.)
+  17. The phase's arm drops its signal: `if let Ok(outcome) = bridge.process_due_operations(&sync_root, now_secs()).await { send_phase.note(&outcome); }` in place of the `queue_step` call: the working-set pin red on "the queue step's two callers" (1) (plan re-review N1). (U35 is red as well; this mutation names the pin's.)
 
-- [ ] **Step 6: The task gate** with `<N>` = 11 and `<L>` = `L0 + 85`.
+- [ ] **Step 6: The task gate** with `<N>` = 11 and `<L>` = `L0 + 85`. Every cargo step in the gate runs `--locked`, so a `Cargo.toml` change that needed a new lock entry would fail it; then, from `$WT`:
+
+```bash
+cd $WT && git diff --exit-code -- src-tauri/Cargo.lock; echo "lock rc=$?"
+git diff --numstat -- src-tauri/Cargo.toml
+```
+
+  Expected: `lock rc=0`; one numstat line, `4`, `0`, `src-tauri/Cargo.toml` (tab-separated: the three comment lines and the `tokio` entry added, nothing removed).
 
 - [ ] **Step 7: Commit.**
 
 ```bash
-cd $WT && git add -- src-tauri/src/sign_out/send_phase.rs src-tauri/src/sign_out/mod.rs src-tauri/src/sign_out/snapshot.rs src-tauri/src/sign_out/waiting.rs src-tauri/src/runner.rs src-tauri/src/engine_bridge.rs src-tauri/src/state_db.rs src-tauri/src/lib.rs
-git commit -m "feat(macos): send waiting changes first, for at most a minute, before a sign-out asks (1887)" -- src-tauri/src/sign_out/send_phase.rs src-tauri/src/sign_out/mod.rs src-tauri/src/sign_out/snapshot.rs src-tauri/src/sign_out/waiting.rs src-tauri/src/runner.rs src-tauri/src/engine_bridge.rs src-tauri/src/state_db.rs src-tauri/src/lib.rs
+cd $WT && git add -- src-tauri/src/sign_out/send_phase.rs src-tauri/src/sign_out/mod.rs src-tauri/src/sign_out/snapshot.rs src-tauri/src/sign_out/waiting.rs src-tauri/src/runner.rs src-tauri/src/engine_bridge.rs src-tauri/src/state_db.rs src-tauri/src/lib.rs src-tauri/Cargo.toml
+git commit -m "feat(macos): send waiting changes first, for at most a minute, before a sign-out asks (1887)" -- src-tauri/src/sign_out/send_phase.rs src-tauri/src/sign_out/mod.rs src-tauri/src/sign_out/snapshot.rs src-tauri/src/sign_out/waiting.rs src-tauri/src/runner.rs src-tauri/src/engine_bridge.rs src-tauri/src/state_db.rs src-tauri/src/lib.rs src-tauri/Cargo.toml
 ```
 
 ### Task 12: A close ends the flow; a late result is shown
@@ -6931,12 +7084,12 @@ Spec §11 "The design changes first": this commit lands before any frontend code
 - [ ] **Step 4: Check the drawing.** Open `design/hifi/macos-settings-dialogs.html` in a local browser (a `file://` URL; no network), capture section 1 and section 4 in light and dark into `$EVID/t15-section1-light.png`, `t15-section1-dark.png`, `t15-section4-light.png`, `t15-section4-dark.png`. Then:
 
 ```bash
-cd $WT && grep -n "removes them\|removes it\|removes changes\|removes the changes" design/hifi/macos-settings-dialogs.html
+cd $WT && grep -n -E "removes (them|it([^s]|$)|changes|the changes)" design/hifi/macos-settings-dialogs.html
 grep -c "Sending changes first\|Sign out with changes not sent?\|Switch accounts with changes not sent?" design/hifi/macos-settings-dialogs.html
 grep -c "couldn’t check for changes that haven’t reached the server" design/hifi/macos-settings-dialogs.html
 ```
 
-Expected: every match the first command prints is inside `<s>…</s>` (write each line's context into the Notes; a match outside a strike is a red); the second count is at least 4; the third is at least 1.
+Expected: every match the first command prints is inside `<s>…</s>` (write each line's context into the Notes; a match outside a strike is a red); the second count is at least 4; the third is at least 1. The first grep is anchored (plan re-review N5): "removes it" must be followed by a character other than `s`, or end the line, so the Repair dialog's true "Beebeeb removes its Finder location" (`@184:design/hifi/macos-settings-dialogs.html:233`, `:359`) is not a match and is never struck. Checked at the plan re-review on the file as it stands: the anchored grep matches `:311`, `:314` and `:319` (the three this task rewrites or strikes) and not `:233` or `:359`, which round 1's grep matched; on sample lines it matches "removes it.", "removes it" at a line's end, "removes them", "removes changes" and "removes the changes", and not "removes its" or "removes itself".
 
 - [ ] **Step 5: Commit** (docs and design only; the lead reviews the drawings before Task 16 starts).
 
@@ -7381,6 +7534,16 @@ In the same file's `describe('MacSettings window', …)`, the F9 case (plan revi
    *  often the Account tab mounts: a request, Cancel at the ask, the Sync tab, the Account tab again → one count, no
    *  `clear_session`. */
   test('a handled flow request never runs again when the Account tab mounts again', async () => {
+    // First, before anything reads the flow (plan re-review N4): the tab, which mounts on every visit, never builds a
+    // flow or runs a request itself. In the earlier shape (mutation 9) the root passes the tab no `flow`, and the
+    // behaviour below would stop on `flow.current()` of `undefined` before it reached this pin.
+    const source = readFileSync(new URL('../src/MacSettings.tsx', import.meta.url), 'utf8')
+    const start = source.indexOf('function AccountTab(')
+    expect(start, 'AccountTab is in MacSettings.tsx').toBeGreaterThan(-1)
+    const tab = source.slice(start, source.indexOf('\n}\n', start))
+    for (const banned of ['new SignOutFlow(', 'connectSignOutFlowMenu(', 'connectSignOutFlowEvents(', '.request()']) {
+      expect(tab.includes(banned), banned).toBe(false)
+    }
     let pending = true
     let flow: any = null
     const accountStub = (props: any) => { flow = props.flow; return createElement('div', { 'data-tab': 'account' }) }
@@ -7395,6 +7558,9 @@ In the same file's `describe('MacSettings window', …)`, the F9 case (plan revi
         useSettingsConfig: settingsStub,
         listen: () => Promise.resolve(() => {}),
         connectNativeUpdateMenu: () => () => {},
+        // `settle` runs the root's update-menu effect, which reads `desktopUpdateCheck.check` (plan re-review N3); the
+        // update-menu tests above bind it the same way.
+        desktopUpdateCheck: { check: async () => {} },
         SignOutFlow, signOutFlowApi, connectSignOutFlowEvents, connectSignOutFlowMenu, stripCode, showSignOutOutcome,
       },
     })
@@ -7411,17 +7577,10 @@ In the same file's `describe('MacSettings window', …)`, the F9 case (plan revi
     expect(m.calls.filter((c) => c.name === 'sign_out_count')).toHaveLength(1)
     expect(m.calls.filter((c) => c.name === 'clear_session')).toHaveLength(0)
     expect(flow.current().kind).toBe('idle')
-    // The tab, which mounts on every visit, never builds a flow or runs a request itself.
-    const source = readFileSync(new URL('../src/MacSettings.tsx', import.meta.url), 'utf8')
-    const start = source.indexOf('function AccountTab(')
-    const tab = source.slice(start, source.indexOf('\n}\n', start))
-    for (const banned of ['new SignOutFlow(', 'connectSignOutFlowMenu(', 'connectSignOutFlowEvents(', '.request()']) {
-      expect(tab.includes(banned), banned).toBe(false)
-    }
   })
 ```
 
-(`readFileSync` from `node:fs`, imported at the top of the file.)
+(`readFileSync` from `node:fs`, imported at the top of the file.) The tab's source pin is the test's first assertion and the behaviour follows it, so mutation 9's red is the pin's, and the count stays one test (plan re-review N4). `desktopUpdateCheck` is bound because the root's update-menu effect passes `desktopUpdateCheck.check` as an argument when it runs (`@184:src/MacSettings.tsx:943-951`, the argument at `:950`); unbound, `settle(m)` throws a `ReferenceError` before the first assertion on the flow. The two update-menu tests that settle bind it the same way (`@184:tests/macSettingsTabs.test.tsx:1375`, `:1392`) (plan re-review N3).
 
 - [ ] **Step 2: Run them, expect FAIL.** `bun test tests/signOutFlow.test.ts tests/macSettingsTabs.test.tsx > $EVID/t17-red.log 2>&1`. Expected: module not found, then the new Settings tests red.
 
@@ -7713,7 +7872,7 @@ function showSignOutOutcome(outcome: FlowOutcome, showToast: (toast: { variant: 
   6. Acknowledge before `report`: F12 red on the order.
   7. Consume only on the event (drop `void take()`): F9 red.
   8. `SendingSheet` closes with Cancel: the Settings F3 test red.
-  9. Build the flow in `AccountTab` again, with the root's request as a counter it replays on mount (the earlier shape): the F9 window test red on `new SignOutFlow(` in the tab. (The window test mounts a stub tab, so the tab's own replay is caught by this pin, and the root's by the `sign_out_count` count.)
+  9. Build the flow in `AccountTab` again, with the root's request as a counter it replays on mount (the earlier shape): the F9 window test red on `new SignOutFlow(` in the tab, its first assertion, which runs before anything reads the flow (plan re-review N4: with the pin last, `flow.current()` of `undefined` threw a `TypeError` first). (The window test mounts a stub tab, so the tab's own replay is caught by this pin, and the root's by the `sign_out_count` count.)
   10. Drop `changesLeft > 0` from `progress`: F1 red on the `progress(0)` line.
 
 - [ ] **Step 6: The frontend gate** with `<N>` = 17; expected `B0 + 4 + 10 pass` (Task 16's 4, this task's 7 and 3), `0 fail`.
@@ -8183,7 +8342,7 @@ git commit -m "feat(macos): Settings › Sync shows the kept folder, with Show i
 
 - [ ] **Step 1: Amend the spec where this plan tests differently**, struck and signed "— lead, <date> (Task 20)":
   - U17: "against a stub server" becomes the margin's SQL test (`the_send_phase_makes_live_changes_due_with_a_margin`) plus the backoff arithmetic on the real `next_attempt_count` and `retry_delay_seconds` (`a_phase_never_parks_what_it_made_due`). The landing within the phase is D1's.
-  - U35: "counted through test hooks" becomes the phase arm's pure gate (`phase_step_due`, at most 61 runs in 60 s), a source pin on the arm's body (the queue step alone, and `send_phase.note(&outcome)`) and on the tick's note, and a wake test on the loop's own wait (`next_wake`: a phase armed while the runner waits wakes it within a second, plan review I2). The whole loop needs a live engine; D7 and D10 drive the arm on a device.
+  - U35: "counted through test hooks" becomes the phase arm's pure gate (`phase_step_due`, at most 61 runs in 60 s), a source pin that the arm runs the tick's own queue step (`queue_step`, which notes each attempt while a phase is armed and pays the working-set signal; plan review M13, plan re-review N1) and never the remote tick, a sweep or the shared-root refresh, and a wake test on the loop's own wait, on tokio's paused clock (`next_wake`: a phase armed while the runner waits wakes it within a second, plan review I2, plan re-review R1). "The runner's third `select!` arm" is a third case of a `match` on that wait. The whole loop needs a live engine; D7 and D10 drive the arm on a device.
   - U34 (a)-(h) run on `flow_window_closed` and `SendPhase`, the pure flow state, as the spec allows ("On the pure flow state").
   - The send phase's "Checked at least once a second, and on every landing" is checked once a second; a landing shows in the next second's count.
   - The Q1 and Q2 rulings are already in the spec (§15, signed 2026-10-11); nothing more to add for them.
@@ -8196,6 +8355,8 @@ git commit -m "feat(macos): Settings › Sync shows the kept folder, with Show i
   - U30: the first case's marker reads as §7.3 says (cleared with the rows); an `after_keep` abort is the case where both keys name the folder (plan review M1).
   - U42 (f): it runs from (e)'s leftovers, so its folder is F3 and the row names it (plan review M4).
   - F9: the flow and its request live in the window's root; a request handled once never runs again (plan review I6).
+  - §7.3 and U43: the durable save is `update_at_durable_with`, its `ConfigFs` the seam U43 records through; there is no `update_at_durable` (`the_marker_save_is_one_durable_write`, the 1889 census's one new way in; plan re-review N6).
+  - §13.3: `src-tauri/Cargo.toml` gains tokio's `test-util` as a `[dev-dependencies]` feature for `a_phase_armed_while_the_runner_waits_wakes_it_at_once`'s paused clock; `Cargo.lock` unchanged (Step 3's two `git diff` lines; plan re-review R1).
   - Not narrowed, so not amended: U46 and U16 (the chain is tested link by link: the bridge's flag, `SendPhaseLink::note` and `signals`, the noted arms, and the driver's own `observe_phase`; plan review I7), U6, U8, U8b, U25 and F7 (each now asserted in full; plan review M5).
 
 - [ ] **Step 2: The other docs (spec §14).**
@@ -8221,6 +8382,7 @@ bunx tsc --noEmit -p . > $EVID/t20-tsc.log 2>&1; echo "tsc rc=$?"
 bun run lint > $EVID/t20-lint.log 2>&1; echo "lint rc=$?"
 bash scripts/test-ipc-framing.sh > $EVID/t20-swift.log 2>&1; tail -1 $EVID/t20-swift.log   # 102 passed, 0 failed: no Swift changed
 git diff --stat 184ac962 -- src-tauri/Cargo.lock bun.lock BeebeebFileProvider   # empty
+git diff --numstat 184ac962 -- src-tauri/Cargo.toml   # 4, 0: Task 11's tokio test-util dev entry and its comment, nothing else
 ```
 
   Every number goes into the task file's Notes.
