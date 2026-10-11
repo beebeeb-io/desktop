@@ -208,7 +208,8 @@ describe('useSettingsConfig', () => {
       set_desktop_config: ({ config: written }: any) => {
         writes.push(structuredClone(written))
         if (disk.failWrites && disk.failWrites > 0) { disk.failWrites -= 1; throw new Error('disk full') }
-        disk.config = structuredClone(written)
+        // set_desktop_config merges only the fields it is sent (fix round 1, M5): a field left out keeps its value.
+        disk.config = { ...disk.config, ...structuredClone(written) }
       },
     })
     return { m, writes, hook: () => m.tree() as any }
@@ -222,27 +223,39 @@ describe('useSettingsConfig', () => {
     expect(m.calls.filter((c) => c.name === 'get_desktop_config')).toHaveLength(1)
   })
 
-  test('a change writes the WHOLE config (fields this window never shows included), not just the changed key', async () => {
+  test('a change writes ONLY the field that changed, never the whole object this window loaded on open', async () => {
     const { m, writes, hook } = probe({ config })
     await m.flush()
     await hook().save({ notify_sync_complete: true })
     await m.flush()
     expect(writes).toHaveLength(1)
-    expect(writes[0]).toEqual({ ...config, notify_sync_complete: true })
-    expect(writes[0].theme).toBe('dark')
-    expect(writes[0].local_cache_limit_bytes).toBe(123)
-    expect(hook().state.config.notify_sync_complete).toBe(true)
+    expect(writes[0]).toEqual({ notify_sync_complete: true })
+    expect(hook().state.config).toEqual({ ...config, notify_sync_complete: true })
   })
 
-  test('two quick changes are written in order and the second carries the first', async () => {
+  // Fix round 1, M5: the window used to send back the whole object it read on open, so changing a speed after a pause
+  // from the tray wrote `pause_sync: false` over the pause.
+  test('open settings, pause from the tray, change a speed: the pause stays', async () => {
+    const disk = { config: structuredClone(config) }
+    const { m, writes, hook } = probe(disk)
+    await m.flush()
+    expect(hook().state.config.pause_sync).toBe(false)
+    disk.config.pause_sync = true // the tray pauses sync while this window is open
+    await hook().save({ upload_kbps_limit: 2000 })
+    await m.flush()
+    expect(writes).toEqual([{ upload_kbps_limit: 2000 }])
+    expect(disk.config.pause_sync).toBe(true)
+    expect(disk.config.upload_kbps_limit).toBe(2000)
+  })
+
+  test('two quick changes are written in order, each as its own patch', async () => {
     const { m, writes, hook } = probe({ config })
     await m.flush()
     const first = hook().save({ upload_kbps_limit: 2000 })
     const second = hook().save({ notify_conflicts: false })
     await Promise.all([first, second])
     await m.flush()
-    expect(writes).toHaveLength(2)
-    expect(writes[1]).toEqual({ ...config, upload_kbps_limit: 2000, notify_conflicts: false })
+    expect(writes).toEqual([{ upload_kbps_limit: 2000 }, { notify_conflicts: false }])
     expect(hook().state.config).toEqual({ ...config, upload_kbps_limit: 2000, notify_conflicts: false })
   })
 
@@ -271,12 +284,10 @@ describe('useSettingsConfig', () => {
     release()
     await Promise.all([first, second])
     expect(overlapped).toBe(false)
-    // Each write carries the snapshot its own change produced: the first sends its change alone,
-    // the second sends both, so the last one on disk is the final state whatever order the
-    // clicks and the disk were in. (A write that read whatever was latest when it started would
-    // put a later change into an earlier write — which is exactly what made a failed first
-    // write discard the second one, see the queued-write test above.)
-    expect(order).toEqual(['start:2000:true', 'end:2000:true', 'start:2000:false', 'end:2000:false'])
+    // Each write carries only its own change, in the order the changes were made, so the file ends
+    // as the last click left it whatever order the disk answered in, and no write carries a field
+    // its click did not change.
+    expect(order).toEqual(['start:2000:undefined', 'end:2000:undefined', 'start:undefined:false', 'end:undefined:false'])
   })
 
   test('a failed write is ONE toast and the window shows what is really saved, not what was clicked', async () => {
@@ -302,7 +313,7 @@ describe('useSettingsConfig', () => {
         writes.push(structuredClone(written))
         if (writes.length === 1) await gate
         if (writes.length === 1) throw new Error('disk full')
-        disk.config = structuredClone(written)
+        disk.config = { ...disk.config, ...structuredClone(written) }
       },
     })
     await m.flush()
@@ -317,8 +328,7 @@ describe('useSettingsConfig', () => {
     // reach the disk, computed from what is actually on disk — not be written over by the stale
     // config the failed write's read left behind, and not be reported saved when it was not.
     expect(m.toasts).toHaveLength(1)
-    expect(writes).toHaveLength(2)
-    expect(writes[1]).toEqual({ ...config, notify_conflicts: false })
+    expect(writes).toEqual([{ upload_kbps_limit: 2000 }, { notify_conflicts: false }])
     expect(disk.config).toEqual({ ...config, notify_conflicts: false })
     expect(hook().state).toEqual({ status: 'ready', config: { ...config, notify_conflicts: false } })
   })

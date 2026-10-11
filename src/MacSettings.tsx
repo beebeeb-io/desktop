@@ -85,21 +85,22 @@ export interface SettingsConfig {
 }
 
 /**
- * Notifications and the speed limits are fields of one config object that `set_desktop_config`
- * replaces as a whole, so the window owns one copy: two quick changes cannot overwrite each
- * other with a stale object. Writes are queued in order, and each write carries the snapshot
- * its own change produced, so a later change cannot rewrite what an earlier write sends. A
- * failed write is a toast, and the config is read back so the switch shows what is really
- * saved, not what was clicked; the writes still queued behind the failure are rebased onto
- * what that read found, so a later change survives an earlier one failing.
+ * Notifications and the speed limits are fields of one config object that other writers change too (the tray
+ * pauses sync while this window is open). `set_desktop_config` merges only the fields it is sent, so each write
+ * carries ONLY the field its own change touched, never the object this window read when it opened: changing a
+ * speed after a pause from the tray cannot write the old `pause_sync` back (task 1889, fix round 1 M5). The window
+ * owns one copy for what it shows, writes are queued in order, and a later change cannot rewrite what an earlier
+ * write sends. A failed write is a toast, and the config is read back so the switch shows what is really saved,
+ * not what was clicked; the changes still queued behind the failure are applied on top of what that read found, so
+ * a later change survives an earlier one failing.
  */
 function useSettingsConfig(): SettingsConfig {
   const { showToast } = useToast()
   const [state, setState] = useState<ConfigState>({ status: 'loading' })
   const latest = useRef<DesktopConfig | null>(null)
   const queue = useRef<Promise<void>>(Promise.resolve())
-  /** Changes queued behind the write that is running, with the snapshot each will send. */
-  const pending = useRef<Array<{ patch: Partial<DesktopConfig>; next: DesktopConfig }>>([])
+  /** Changes queued behind the write that is running. Each is written as exactly this patch. */
+  const pending = useRef<Array<{ patch: Partial<DesktopConfig> }>>([])
 
   const read = useCallback(async (): Promise<boolean> => {
     const result = await command<DesktopConfig>('get_desktop_config')
@@ -125,10 +126,10 @@ function useSettingsConfig(): SettingsConfig {
       const next = { ...base, ...patch }
       latest.current = next
       setState({ status: 'ready', config: next })
-      const entry = { patch, next }
+      const entry = { patch }
       pending.current.push(entry)
       const write = async () => {
-        const result = await command<void>('set_desktop_config', { config: entry.next })
+        const result = await command<void>('set_desktop_config', { config: entry.patch })
         pending.current = pending.current.filter((queued) => queued !== entry)
         if (result.ok) return
         showToast({
@@ -140,16 +141,13 @@ function useSettingsConfig(): SettingsConfig {
           setState({ status: 'failed' })
           return
         }
-        // What is on disk lacks the failed patch and every queued one: rebase the still-queued
-        // snapshots onto the config the read brought back, so the later changes still go out
-        // and the window shows the failed change as unsaved instead of claiming it.
+        // What is on disk lacks the failed patch and every queued one. The queued patches still go out
+        // as they are; the window shows them on top of what the read found, and the failed change as
+        // unsaved instead of claiming it.
         const onDisk = latest.current
         if (onDisk === null) return
         let current = onDisk
-        for (const queued of pending.current) {
-          current = { ...current, ...queued.patch }
-          queued.next = current
-        }
+        for (const queued of pending.current) current = { ...current, ...queued.patch }
         latest.current = current
         setState({ status: 'ready', config: current })
       }

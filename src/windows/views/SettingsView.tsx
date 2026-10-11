@@ -1950,7 +1950,9 @@ export default function SettingsView({ status, onOpenSignIn }: SettingsViewProps
     const next: DesktopConfig = { ...configRef.current, ...patch }
     configRef.current = next
     setConfig(next)
-    const result = await command<void>('set_desktop_config', { config: next })
+    // Only the fields this change touched are written (task 1889, fix round 1 M5): the object this window read on
+    // open is never sent back, so a pause made from the tray meanwhile is not undone.
+    const result = await command<void>('set_desktop_config', { config: patch })
     if (!result.ok) {
       // Transient ACTION failure (a settings control the user just changed) -> Toast.
       // This used to be a `notice` string prop-drilled into four panels, which rendered
