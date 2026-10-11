@@ -398,10 +398,12 @@ again, the old identifier no longer matches, and the write meets 409 and parks.
   `Quota`, and `Retryable` with an HTTP status of 408, 425, 429 or any 5xx, or
   with no status and a transport failure in its chain (a `reqwest::Error` that
   could not connect, timed out or failed while sending, or below one an I/O
-  error of a connection kind), and a failure whose upload session the server
-  reaped (404 or 410; the attempt abandons it and the next one starts a fresh
-  upload). A 400 at a resumed session is abandoned too but counted, so a server
-  that refuses every fresh session still parks the write (fix round 5). A transient
+  error of a connection kind), and a failure whose resumed upload session the
+  server reaped (404 or 410 on a session resumed from its persisted row; the
+  attempt abandons it and the next one starts a fresh upload). A 400, and any
+  answer to a session opened in the same attempt, abandons the session too but
+  is counted, so a server that refuses every new session still parks the write
+  (fix rounds 5 and 6). A transient
   failure is recorded for the backoff (capped at 960 s), and the count stops at
   the attempt where the backoff stops growing (6 today, derived from
   `retry_delay_seconds`), so after an outage a failure waiting does not cure still

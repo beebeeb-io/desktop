@@ -673,8 +673,8 @@ impl OperationFailureClass {
 /// - `Locked` (the vault, or SQLite busy) and `Quota`: transient;
 /// - `Retryable` with an HTTP status: transient for 408, 425, 429 and every 5xx, counted for any
 ///   other (400, 404, 410, 413, 422, a 409 that is not a stale base, ...);
-/// - `Retryable` whose upload session the server reaped (404, 410) and the attempt abandoned
-///   ([`SessionAbandoned`]): transient, because the next attempt starts a fresh upload;
+/// - `Retryable` whose resumed upload session the server reaped (404, 410) and the attempt
+///   abandoned ([`SessionAbandoned`]): transient, because the next attempt starts a fresh upload;
 /// - `Retryable` with no HTTP status: transient only when the chain carries a transport failure
 ///   (see [`has_transport_cause`]); a local error is counted;
 /// - `Auth` and `Permission` never reach it (they pause and park): `false`.
@@ -760,9 +760,10 @@ impl std::fmt::Display for StagedCopyGone {
 
 impl std::error::Error for StagedCopyGone {}
 
-/// The attempt found its upload session reaped (the server answered 404 or 410) and abandoned it:
-/// the next attempt starts a fresh upload, so for a File Provider write the failure is transient,
-/// never a counted one (spec §8.4). A 400 abandons the session too, but stays counted. It shows, and has as its source, the failure it wraps, so every reading
+/// The attempt resumed its persisted upload session, found it reaped (the server answered 404 or
+/// 410) and abandoned it: the next attempt starts a fresh upload, so for a File Provider write the
+/// failure is transient, never a counted one (spec §8.4). A 400, or any answer to a session opened in
+/// the same attempt, abandons the session too, but stays counted. It shows, and has as its source, the failure it wraps, so every reading
 /// of the error's text and status stays as it was.
 #[derive(Debug)]
 struct SessionAbandoned(anyhow::Error);
@@ -1579,6 +1580,9 @@ impl EngineBridge {
             }
         }
 
+        // Only a session resumed from its persisted row can have been reaped by the server (each
+        // chunk renews a session's lease, so one opened in this attempt cannot be).
+        let resumed = session.is_some();
         let session = match session {
             Some(session) => session,
             None => {
@@ -1707,14 +1711,16 @@ impl EngineBridge {
                         op_id = %op.op_id,
                         file_id = %session.server_file_id,
                         status,
+                        resumed,
                         reason = error_category(error.as_ref()),
-                        "upload: server no longer accepts the persisted session — abandoning it; the retry starts a fresh upload"
+                        "upload: server no longer accepts the upload session — abandoning it; the next attempt starts a fresh upload"
                     );
                     self.abandon_upload_session(&session).await?;
-                    // §8.4: a session the server reaped (404, 410) is not a counted failure: the
-                    // next attempt starts a fresh upload. A 400 is counted, so a server that
-                    // refuses every fresh session still parks the write.
-                    if matches!(status, Some(404 | 410)) {
+                    // §8.4: a resumed session the server reaped (404, 410) is not a counted
+                    // failure: the next attempt starts a fresh upload. A 400, and any answer to a
+                    // session opened in this attempt, is counted, so a server that refuses every
+                    // new session still parks the write.
+                    if resumed && matches!(status, Some(404 | 410)) {
                         return Err(anyhow::Error::new(SessionAbandoned(error)));
                     }
                 }
@@ -19970,6 +19976,40 @@ mod tests {
         );
     }
 
+    /// Spec §8.4 (fix round 6): only a session resumed from its persisted row can be reaped. A
+    /// 404 at the chunk of a session opened in the same attempt is counted (the session is still
+    /// abandoned, so the next attempt opens a new one), so a server that answers 404 to every new
+    /// session parks the write when its attempts are used up.
+    #[tokio::test]
+    async fn a_404_on_every_new_session_parks_the_write() {
+        let (dir, sync_root, server, bridge) = rule3_setup([172u8; 32]);
+        seed_uploaded_row(&bridge, &server, "every-404");
+        refuse(
+            &server,
+            Refused::Chunk,
+            "every-404",
+            ("404 Not Found", json!({ "error": "not_found" })),
+        );
+        fp_save(&bridge, dir.path(), "every-404", "notes.txt", b"a save", "1");
+        let op_id = bridge.db.list_operations_for_file("every-404").unwrap().remove(0).op_id;
+        let mut now = now_secs();
+        let mut parked_at = None;
+        for pass in 1..=30 {
+            bridge.process_due_operations(&sync_root, now).await.unwrap();
+            now += 10_000;
+            let op = bridge.db.get_operation(&op_id).unwrap().unwrap();
+            if parked_at.is_none() && op.attempts >= op.max_attempts {
+                parked_at = Some(pass);
+            }
+        }
+        assert_eq!(parked_at, Some(25), "parked when its attempts were used up");
+        assert_eq!(
+            server.finish().inits.len(),
+            25,
+            "a new session per attempt, then nothing"
+        );
+    }
+
     /// Spec §11 (fix round 5): the gone-session line logs ids and a category, never the error's
     /// text (it carries the request URL with the session id).
     #[tokio::test]
@@ -19996,11 +20036,11 @@ mod tests {
         .await;
         let line = assert_clean_line(
             &logs,
-            "server no longer accepts the persisted session",
-            &["op_id", "file_id", "reason", "status"],
+            "server no longer accepts the upload session",
+            &["op_id", "file_id", "reason", "status", "resumed"],
             dir.path(),
         );
-        assert!(line.contains("status=404"), "{line}");
+        assert!(line.contains("status=404") && line.contains("resumed=true"), "{line}");
         assert!(!line.contains("error="), "{line}");
         drop(server.finish());
     }
