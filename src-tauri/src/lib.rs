@@ -1269,7 +1269,7 @@ async fn start_engine_if_possible(
         // Rehydrate the persisted pause state before spawning so a
         // restart-while-paused stays paused (the in-memory AtomicBool
         // always defaults to false; desktop.toml is the source of truth).
-        acct.sync_paused.store(cfg.pause_sync, Ordering::Relaxed);
+        rehydrate_sync_paused(&acct.sync_paused, cfg.pause_sync);
         let mut engine_slot = acct.engine.lock().await;
         engine_start_refusal(&acct)?;
         if let Some(prev) = engine_slot.take() {
@@ -4263,7 +4263,7 @@ async fn persist_sync_root_and_start_engine(
 
     let acct = state.active_account()?;
     // Rehydrate the persisted pause state before spawning.
-    acct.sync_paused.store(cfg.pause_sync, Ordering::Relaxed);
+    rehydrate_sync_paused(&acct.sync_paused, cfg.pause_sync);
     {
         let mut engine_slot = acct.engine.lock().await;
         engine_start_refusal(&acct)?;
@@ -4311,8 +4311,7 @@ async fn start_engine_for_pending_finder_install(
 
     // Rehydrate the persisted pause state before spawning. Best-effort —
     // a missing/unreadable config defaults to not-paused.
-    let paused = DesktopConfig::load().map(|c| c.pause_sync).unwrap_or(false);
-    acct.sync_paused.store(paused, Ordering::Relaxed);
+    rehydrate_sync_paused(&acct.sync_paused, false);
 
     #[cfg_attr(not(unix), allow(unused_variables))]
     let (started, ipc_bind_error) = {
@@ -6292,7 +6291,8 @@ async fn ensure_sync_root_and_engine(
     state: &State<'_, AppState>,
     root: PathBuf,
 ) -> Result<(), String> {
-    // Task 1889: one load-change-save under the config-write lock; the pause state is read in the same step.
+    // Task 1889: one load-change-save under the config-write lock; the pause state it read is the fallback for the
+    // rehydration below, which stores it under the same lock.
     let pause_sync = DesktopConfig::update(|cfg| {
         let changed = cfg.sync_root.as_deref() != Some(root.as_path());
         if changed {
@@ -6307,7 +6307,7 @@ async fn ensure_sync_root_and_engine(
     let mut engine_slot = acct.engine.lock().await;
     engine_start_refusal(&acct)?;
     if engine_slot.is_none() {
-        acct.sync_paused.store(pause_sync, Ordering::Relaxed);
+        rehydrate_sync_paused(&acct.sync_paused, pause_sync);
         // The keys are read under the slot, and the local data is bound to the account, inside the start.
         match spawn_bound_engine(app, state, &acct, &mut engine_slot, root)? {
             EngineStart::Started => {}
@@ -6355,10 +6355,7 @@ async fn start_check_engine(
         let mut engine_slot = lock_engine_slot(acct, finder_setup::core::Op::StartEngine, slot_limit).await?;
         engine_start_refusal(acct).map_err(|error| FpError::app(app_code::ENGINE_START, error))?;
         // Rehydrate the persisted pause state before spawning. Best-effort: an unreadable config means not paused.
-        acct.sync_paused.store(
-            DesktopConfig::load().map(|c| c.pause_sync).unwrap_or(false),
-            Ordering::Relaxed,
-        );
+        rehydrate_sync_paused(&acct.sync_paused, false);
         if let Some(existing) = engine_slot.as_ref() {
             // Already running (a retry, or the restore started it): reuse its bind-status handle so a
             // REAL bind error is still seen instead of a silent timeout.
@@ -6719,7 +6716,7 @@ async fn start_engine_unless_running(app: tauri::AppHandle, state: &AppState) ->
     let named = named_session_identity(&acct);
     let after = keep_or_rebind_after_naming(&acct, &mut engine_slot, owner.as_ref(), &named, |slot| {
         engine_start_refusal(&acct)?;
-        acct.sync_paused.store(cfg.pause_sync, Ordering::Relaxed);
+        rehydrate_sync_paused(&acct.sync_paused, cfg.pause_sync);
         spawn_bound_engine(app, state, &acct, slot, root)
     })
     .await?;
@@ -8954,7 +8951,7 @@ async fn pick_sync_root(app: tauri::AppHandle, state: State<'_, AppState>) -> Re
         let acct = state.active_account()?;
         {
             // Rehydrate the persisted pause state before spawning.
-            acct.sync_paused.store(cfg.pause_sync, Ordering::Relaxed);
+            rehydrate_sync_paused(&acct.sync_paused, cfg.pause_sync);
             let mut engine_slot = acct.engine.lock().await;
             engine_start_refusal(&acct)?;
             if let Some(prev) = engine_slot.take() {
@@ -9237,14 +9234,45 @@ fn tray_recent_activity() -> Vec<TrayActivityItem> {
 ///
 /// Emits an `engine-status` event with `state = "paused"` so the tray
 /// tooltip and any open app window update immediately.
+/// Task 1889 fix round 1 (M6): the pause reaches the in-memory flag in the same step that persists it. The flag is stored
+/// while the config-write lock is held, after the write succeeded, so it can never say paused while the file says
+/// unpaused or the other way round: a write that fails leaves both as they were, and a rehydration
+/// ([`rehydrate_sync_paused`]) or a sync-root write that reads the pause waits for this one and stores what it wrote.
+fn persist_sync_paused_at(path: &Path, flag: &AtomicBool, paused: bool) -> Result<(), String> {
+    DesktopConfig::update_at_then(
+        path,
+        |cfg| {
+            cfg.pause_sync = paused;
+            (true, ())
+        },
+        |cfg| flag.store(cfg.pause_sync, Ordering::Relaxed),
+    )
+}
+
+/// Stores the persisted pause state into the in-memory flag, under the config-write lock (see
+/// [`persist_sync_paused_at`]). A restart that finds the file paused starts paused.
+fn rehydrate_sync_paused_at(path: &Path, flag: &AtomicBool) -> Result<(), String> {
+    DesktopConfig::update_at_then(
+        path,
+        |_| (false, ()),
+        |cfg| flag.store(cfg.pause_sync, Ordering::Relaxed),
+    )
+}
+
+/// [`rehydrate_sync_paused_at`] on the real config. An unreadable config stores `fallback`, which is what each caller
+/// stored before when it could not read the file (the value it had already loaded, or "not paused").
+fn rehydrate_sync_paused(flag: &AtomicBool, fallback: bool) {
+    let stored = DesktopConfig::path().and_then(|path| rehydrate_sync_paused_at(&path, flag));
+    if stored.is_err() {
+        flag.store(fallback, Ordering::Relaxed);
+    }
+}
+
 async fn set_sync_paused(app: &tauri::AppHandle, paused: bool) -> Result<(), String> {
     let state = app.state::<AppState>();
-    state.active_account()?.sync_paused.store(paused, Ordering::Relaxed);
+    let acct = state.active_account()?;
     // Persist so the paused state survives a restart.
-    DesktopConfig::update(|cfg| {
-        cfg.pause_sync = paused;
-        (true, ())
-    })?;
+    persist_sync_paused_at(&DesktopConfig::path()?, &acct.sync_paused, paused)?;
     // Notify the WebView + tray tooltip listener.
     let event_state = if paused { "paused" } else { "idle" };
     let _ = app.emit("engine-status", serde_json::json!({ "state": event_state }));
@@ -31634,20 +31662,23 @@ mod config_write_pin_tests {
             2,
             "the lock is taken in one place: its definition and its one call"
         );
-        let one_place = item(config, "    pub(crate) fn try_update_at<R>(");
+        let one_place = item(config, "    fn try_update_at_then<R>(");
         let lock = one_place
             .find("let _writing = config_write_guard();")
             .expect("it takes the lock");
         let read = one_place.find("Self::load_from(path)").expect("it reads");
         let write = one_place.find("cfg.save_to(path)").expect("it writes");
+        let mirror = one_place.find("saved(&cfg);").expect("it runs the mirror step");
         assert!(
-            lock < read && read < write,
-            "the lock is held before the read and still held at the write:\n{one_place}"
+            lock < read && read < write && write < mirror,
+            "the lock is held before the read and still held at the write and the mirror step:\n{one_place}"
         );
 
         // Every other way in is that one place.
         for (start, calls) in [
             ("    pub(crate) fn update_at<R>(", "Self::try_update_at("),
+            ("    pub(crate) fn try_update_at<R>(", "Self::try_update_at_then("),
+            ("    pub(crate) fn update_at_then<R>(", "Self::try_update_at_then("),
             (
                 "    pub(crate) fn update<R>(",
                 "Self::update_at(&Self::path()?, change)",
@@ -31813,6 +31844,87 @@ mod config_write_pin_tests {
         found
     }
 
+    /// Fix round 1 (M6). The in-memory pause flag and `pause_sync` on disk are changed in one order: a pause is stored
+    /// into the flag by the write that persists it, and a rehydration reads the file and stores into the flag, both while
+    /// the config-write lock is held. A lock holder is in the middle of its write here, so a rehydration that did not
+    /// wait for the lock would read the file from before it.
+    #[test]
+    fn test_1889_m6_a_rehydration_waits_for_the_write_in_flight_and_stores_what_it_wrote() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("desktop.toml");
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let holder_path = path.clone();
+        let holder = std::thread::spawn(move || {
+            DesktopConfig::update_at(&holder_path, |cfg| {
+                cfg.pause_sync = true; // the pause is on its way to the file
+                entered_tx.send(()).expect("the test is waiting");
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                (true, ())
+            })
+        });
+        entered_rx.recv().expect("the write started");
+        super::rehydrate_sync_paused_at(&path, &flag).expect("rehydrate");
+        holder.join().expect("no panic").expect("the pause was written");
+        assert!(
+            DesktopConfig::load_from(&path).expect("reads back").pause_sync,
+            "the file says paused"
+        );
+        assert!(
+            flag.load(std::sync::atomic::Ordering::Relaxed),
+            "and so does the flag: the rehydration read the file after that write"
+        );
+    }
+
+    #[test]
+    fn test_1889_m6_a_pause_reaches_the_flag_only_with_the_write_that_persists_it() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("desktop.toml");
+        let flag = std::sync::Arc::new(AtomicBool::new(false));
+        // A write is in flight when the pause arrives.
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let holder_path = path.clone();
+        let holder = std::thread::spawn(move || {
+            DesktopConfig::update_at(&holder_path, |cfg| {
+                cfg.kept_unsynced_folder = Some(KEPT.to_string());
+                entered_tx.send(()).expect("the test is waiting");
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                (true, ())
+            })
+        });
+        entered_rx.recv().expect("the write started");
+        let pause_path = path.clone();
+        let pause_flag = flag.clone();
+        let pause = std::thread::spawn(move || super::persist_sync_paused_at(&pause_path, &pause_flag, true));
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        assert!(
+            !flag.load(Ordering::Relaxed),
+            "the pause has not been written yet, so the flag does not say paused yet"
+        );
+        holder.join().expect("no panic").expect("the holder wrote");
+        pause.join().expect("no panic").expect("the pause was written");
+        let on_disk = DesktopConfig::load_from(&path).expect("reads back");
+        assert!(
+            on_disk.pause_sync && flag.load(Ordering::Relaxed),
+            "file and flag agree: paused"
+        );
+        assert_eq!(
+            on_disk.kept_unsynced_folder.as_deref(),
+            Some(KEPT),
+            "and the other write survived"
+        );
+
+        // A pause that cannot be written is not applied either: the file and the flag cannot disagree.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("desktop.toml");
+        std::fs::create_dir(path.with_extension("toml.tmp")).expect("mkdir");
+        let flag = AtomicBool::new(false);
+        assert!(super::persist_sync_paused_at(&path, &flag, true).is_err());
+        assert!(!path.exists(), "nothing was written");
+        assert!(!flag.load(Ordering::Relaxed), "and the flag did not move");
+    }
+
     /// The scanners must be able to go red: each shape, written out, is found; the real shapes are not.
     #[test]
     fn test_1889_the_scanners_find_the_shapes_they_are_for_and_pass_the_real_ones() {
@@ -31911,7 +32023,7 @@ mod config_write_pin_tests {
         let update = "DesktopConfig::update(";
         let held = ".update_held(";
         // (the item, what it must contain). None loads a copy of its own: load, change and write are one update.
-        let sites: [(&str, &str); 15] = [
+        let sites: [(&str, &str); 16] = [
             ("persist_last_signed_in_email", update),
             ("forget_last_signed_in_email", "DesktopConfig::try_update_at("),
             ("persist_finder_install_result", held),
@@ -31921,7 +32033,8 @@ mod config_write_pin_tests {
             ("ensure_sync_root_and_engine", update),
             ("pick_sync_root", update),
             ("set_desktop_config", update),
-            ("set_sync_paused", update),
+            ("set_sync_paused", "persist_sync_paused_at("),
+            ("persist_sync_paused_at", "DesktopConfig::update_at_then("),
             ("set_sync_mode", update),
             ("set_selective_sync", update),
             ("set_known_folder_backup", update),
@@ -31944,6 +32057,14 @@ mod config_write_pin_tests {
             lib.contains("match DesktopConfig::ensure_account_id() {"),
             "startup mints the account id through the one update"
         );
+        // M6: the in-memory pause flag is stored from the file only under the config-write lock, through the helpers
+        // (`persist_sync_paused_at`, `rehydrate_sync_paused_at`), never by a bare store next to a load.
+        for (name, text) in &files {
+            assert!(
+                !text.contains(".sync_paused.store("),
+                "{name} stores the pause flag outside the locked helpers"
+            );
+        }
 
         // The flows that keep a copy to READ across slow work write only through `update_held`, so the copy they loaded
         // is never what lands on the file.

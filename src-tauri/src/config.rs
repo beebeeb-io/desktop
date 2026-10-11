@@ -764,11 +764,37 @@ impl DesktopConfig {
     /// [`Self::update_at`] that says whether the read or the write failed, for a caller whose log
     /// line names which. The messages are the same strings `update_at` returns.
     pub(crate) fn try_update_at<R>(path: &Path, change: impl FnOnce(&mut Self) -> (bool, R)) -> Result<R, UpdateError> {
+        Self::try_update_at_then(path, change, |_| {})
+    }
+
+    /// [`Self::update_at`] with a step that runs while the lock is STILL held, once the file is final: after a successful
+    /// write, or at once when `change` said not to save (then `saved` sees the file as it was read, not `change`'s
+    /// unsaved edit). For state that mirrors the file and must change in the same order as the file does, such as the
+    /// in-memory pause flag (task 1889 fix 1, M6): the mirror is never ahead of a write that failed and never behind
+    /// one that completed. `saved` does no I/O and takes no lock.
+    pub(crate) fn update_at_then<R>(
+        path: &Path,
+        change: impl FnOnce(&mut Self) -> (bool, R),
+        saved: impl FnOnce(&Self),
+    ) -> Result<R, String> {
+        Self::try_update_at_then(path, change, saved).map_err(UpdateError::into_message)
+    }
+
+    /// The one place the file is written: the lock is taken before the read and held through the write and `saved`.
+    fn try_update_at_then<R>(
+        path: &Path,
+        change: impl FnOnce(&mut Self) -> (bool, R),
+        saved: impl FnOnce(&Self),
+    ) -> Result<R, UpdateError> {
         let _writing = config_write_guard();
         let mut cfg = Self::load_from(path).map_err(UpdateError::Read)?;
+        let read = cfg.clone();
         let (save, value) = change(&mut cfg);
         if save {
             cfg.save_to(path).map_err(UpdateError::Write)?;
+            saved(&cfg);
+        } else {
+            saved(&read);
         }
         Ok(value)
     }
