@@ -314,8 +314,10 @@ pub(crate) fn remember_kept_folder_at(path: &std::path::Path, location: &str) ->
 /// A write that failed is logged without the path, and the record is queued on the copy (fix round 1, M4): the flow's
 /// next write applies it in the same write as its own result, so the row's record and the result land together, and if
 /// that write fails too the flow returns its error. The person is told either way: the alert that follows this call names
-/// the folder, as 1882 spec §5 has it for every removal ("the alert, and saved for the row if the save allows"), and a
-/// failed save is the command's error ("Repair then returns an error and the app's alert names the folder", re-review D5).
+/// the folder, and a failed save is the command's error, which is the live 1882 rule ("A failed save ... Repair then
+/// returns an error and the app's alert names the folder", spec Frontend bullets, re-review D5, P1; the r4 sentence "the
+/// alert, and saved for the row if the save allows" is struck there, but `remember_kept_folder` keeps its rule: a failure
+/// is logged without the path and the alert still names the folder).
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn remember_kept_folder_held(cfg: &mut crate::config::HeldConfig, location: &str) {
     let saved =
@@ -1587,9 +1589,9 @@ NSFileProviderManager.removeAllDomains { error in }
 
     /// Fix round 1 (M4). On Windows and Linux the record is its own write, ahead of the flow's result write. A record whose
     /// write failed (a scanner holding `desktop.toml.tmp` for a moment) must not be lost while the result write goes
-    /// through: the alert names the folder (1882 spec §5, "the alert, and saved for the row if the save allows"), and the
-    /// row's record rides the flow's next write, so the two land together or the flow reports the write that failed (the
-    /// spec's "a failed save ... Repair then returns an error and the app's alert names the folder", re-review D5, P1).
+    /// through: the alert names the folder, and the row's record rides the flow's next write, so the two land together or
+    /// the flow reports the write that failed (the live 1882 rule: "A failed save ... Repair then returns an error and the
+    /// app's alert names the folder", re-review D5, P1).
     #[test]
     fn test_1889_a_record_whose_write_failed_rides_the_flows_next_write() {
         let dir = tempfile::tempdir().expect("temp dir");
