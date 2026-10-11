@@ -203,7 +203,13 @@ Useful inspection commands:
 pluginkit -m -v -p com.apple.fileprovider-nonui | grep -A3 -i Beebeeb
 log show --predicate 'subsystem CONTAINS "fileprovider" OR process CONTAINS "Beebeeb"' \
   --last 20m --style compact
+# The extension's own lines only (ExtensionLog.swift, its one os.Logger):
+log show --predicate 'subsystem == "io.beebeeb.app.FileProvider"' --last 20m --style compact
 ```
+
+The extension logs only through `ExtensionLog` (never `NSLog`, whose lines the
+unified log shows as `<private>`), and only closed values are public: see
+`docs/IPC_PROTOCOL.md`, "Logging".
 
 ## Uninstall / Sign-out Expectations
 

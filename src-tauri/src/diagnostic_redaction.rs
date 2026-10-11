@@ -40,6 +40,7 @@ pub enum DiagnosticErrorCode {
     Locked,
     StaleVersion,
     PayloadMissing,
+    PayloadUnreadable,
     LocalWriteFailed,
     PathRejected,
     Timeout,
@@ -75,6 +76,9 @@ pub fn classify_error_code(error: &str) -> DiagnosticErrorCode {
         DiagnosticErrorCode::StaleVersion
     } else if has("staged upload payload is missing") || has("staged upload ended") {
         DiagnosticErrorCode::PayloadMissing
+    } else if has("staged upload payload could not be read") {
+        // The copy exists but cannot be read (permission, I/O, not a regular file).
+        DiagnosticErrorCode::PayloadUnreadable
     } else if has("must stay under")
         || has("unsafe")
         || has("not within an allowed root")
@@ -1324,6 +1328,25 @@ mod tests {
         assert_eq!(
             classify_error_code("stale base version rejected"),
             DiagnosticErrorCode::StaleVersion
+        );
+    }
+
+    /// A staged copy that exists but cannot be read (permission, I/O, not a
+    /// regular file) has its own code, distinct from a missing copy, never `Other`.
+    #[test]
+    fn an_unreadable_staged_copy_has_its_own_code() {
+        assert_eq!(
+            classify_error_code("staged upload payload could not be read"),
+            DiagnosticErrorCode::PayloadUnreadable
+        );
+        assert_eq!(
+            serde_json::to_string(&DiagnosticErrorCode::PayloadUnreadable).unwrap(),
+            "\"payload_unreadable\""
+        );
+        assert_eq!(
+            classify_error_code("staged upload payload is missing"),
+            DiagnosticErrorCode::PayloadMissing,
+            "the missing copy keeps its code, with or without a path"
         );
     }
 

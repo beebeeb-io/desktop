@@ -226,11 +226,179 @@ pub struct DesktopUploadInitResponse {
     pub region: String,
 }
 
+/// The server's 409 messages at `init` (spec §8.4); a test pins both.
+pub const STALE_BASE_MESSAGE: &str = "stale base version for replacement upload";
+pub const IN_PROGRESS_MESSAGE: &str = "upload is already in progress for this file";
+
+/// Why `init` answered 409 (spec §8.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InitConflictClass {
+    /// The base is not the file's current version; it never becomes valid again.
+    StaleBase,
+    /// Another upload of the file is in progress.
+    InProgress,
+    /// Anything else, a changed message included: retried, as before.
+    Other,
+}
+
+impl InitConflictClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            InitConflictClass::StaleBase => "stale_base",
+            InitConflictClass::InProgress => "in_progress",
+            InitConflictClass::Other => "other",
+        }
+    }
+}
+
+/// A changed server message falls back to `Other` (retry), today's behaviour.
+pub fn classify_init_conflict(message: &str) -> InitConflictClass {
+    match message {
+        STALE_BASE_MESSAGE => InitConflictClass::StaleBase,
+        IN_PROGRESS_MESSAGE => InitConflictClass::InProgress,
+        _ => InitConflictClass::Other,
+    }
+}
+
+/// `init` answered 409. Carries the class only: the server's text never reaches a log.
+#[derive(Debug)]
+pub struct InitConflict {
+    pub class: InitConflictClass,
+    /// The server's code, when it is one the client acts on (the upload gate's 409s).
+    pub refusal: Option<UploadRefusalCode>,
+}
+
+/// The server's code on a refused upload request (`{"error": <code>, ...}`), for the codes the
+/// client acts on: each is a refusal the person cures (free space, subscribe, pay), spec §8.4.
+/// Read from the `error` field by exact match. Nothing else of the body is kept, and the body's
+/// text never reaches a log or a stored error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UploadRefusalCode {
+    /// 413: the account is over its storage quota.
+    QuotaExceeded,
+    /// 403: the account has reached its stored-object limit.
+    ObjectBudgetExceeded,
+    /// 403: the account is read-only for an unpaid invoice.
+    BillingReadOnly,
+    /// 409 (the upload gate): the trial ended and the account is read-only.
+    AccountLapsed,
+    /// 409 (the upload gate): the account has no plan.
+    PlanRequired,
+    /// 409 (the upload gate): a never-paid trial was cancelled, so uploads are paused.
+    TrialCancelledReadOnly,
+}
+
+impl UploadRefusalCode {
+    pub fn from_code(code: &str) -> Option<Self> {
+        match code {
+            "quota_exceeded" => Some(UploadRefusalCode::QuotaExceeded),
+            "object_budget_exceeded" => Some(UploadRefusalCode::ObjectBudgetExceeded),
+            "billing_read_only" => Some(UploadRefusalCode::BillingReadOnly),
+            "account_lapsed" => Some(UploadRefusalCode::AccountLapsed),
+            "plan_required" => Some(UploadRefusalCode::PlanRequired),
+            "trial_cancelled_read_only" => Some(UploadRefusalCode::TrialCancelledReadOnly),
+            _ => None,
+        }
+    }
+}
+
+/// An upload request (init, a chunk, complete) the server answered with a non-2xx status, other
+/// than init's 409 ([`InitConflict`]). It shows, and has as its source, the `reqwest` error
+/// `error_for_status` gives (the status and the URL, never the body), so every reading of the
+/// error's text and status stays as it was. It adds the server's code when the client acts on it.
+#[derive(Debug)]
+pub struct UploadRefused {
+    pub code: Option<UploadRefusalCode>,
+    status_error: reqwest::Error,
+}
+
+impl UploadRefused {
+    pub fn status(&self) -> Option<u16> {
+        self.status_error.status().map(|status| status.as_u16())
+    }
+}
+
+impl std::fmt::Display for UploadRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.status_error.fmt(f)
+    }
+}
+
+impl std::error::Error for UploadRefused {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.status_error)
+    }
+}
+
+/// `resp` when it is a 2xx; else an [`UploadRefused`] with the server's code read from the body's
+/// `error` field.
+async fn upload_response(resp: reqwest::Response) -> anyhow::Result<reqwest::Response> {
+    let status_error = resp.error_for_status_ref().err();
+    let Some(status_error) = status_error else {
+        return Ok(resp);
+    };
+    let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+    let code = body
+        .get("error")
+        .and_then(|value| value.as_str())
+        .and_then(UploadRefusalCode::from_code);
+    Err(anyhow::Error::new(UploadRefused { code, status_error }))
+}
+
+impl std::fmt::Display for InitConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "upload init refused with 409 Conflict ({})", self.class.as_str())
+    }
+}
+
+impl std::error::Error for InitConflict {}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct UploadChunkResponse {
     pub index: u32,
     pub size: i64,
     pub skipped: Option<bool>,
+}
+
+/// The parent a metadata update (`PATCH /api/v1/files/{id}`) sends. The server reads an
+/// omitted `parent_id` as "leave the parent alone", an explicit `null` as "move to the top
+/// level", and an id as "move into that folder".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParentChange<'a> {
+    /// The field is omitted.
+    Unchanged,
+    /// `"parent_id": null`.
+    TopLevel,
+    /// `"parent_id": "<id>"`.
+    Folder(&'a str),
+}
+
+impl<'a> ParentChange<'a> {
+    /// A move to `parent`: that folder, or the top level when there is none.
+    pub fn to(parent: Option<&'a str>) -> Self {
+        parent.map_or(Self::TopLevel, Self::Folder)
+    }
+}
+
+/// The body of a metadata update.
+fn metadata_update_body(
+    name_encrypted: Option<&str>,
+    parent: ParentChange<'_>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut body = serde_json::Map::new();
+    if let Some(name) = name_encrypted {
+        body.insert("name_encrypted".into(), serde_json::json!(name));
+    }
+    match parent {
+        ParentChange::Unchanged => {}
+        ParentChange::TopLevel => {
+            body.insert("parent_id".into(), serde_json::Value::Null);
+        }
+        ParentChange::Folder(parent_id) => {
+            body.insert("parent_id".into(), serde_json::json!(parent_id));
+        }
+    }
+    body
 }
 
 /// One entry in `GET /api/v1/search-index/shards`.
@@ -735,9 +903,17 @@ impl ApiClient {
             .header("Authorization", format!("Bearer {}", self.token))
             .json(body)
             .send()
-            .await?
-            .error_for_status()?;
-        Ok(resp.json().await?)
+            .await?;
+        if resp.status() == reqwest::StatusCode::CONFLICT {
+            // `error_for_status` would drop the message the class is read from (spec §8.4).
+            let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+            let message = body.get("error").and_then(|value| value.as_str()).unwrap_or_default();
+            return Err(anyhow::Error::new(InitConflict {
+                class: classify_init_conflict(message),
+                refusal: UploadRefusalCode::from_code(message),
+            }));
+        }
+        Ok(upload_response(resp).await?.json().await?)
     }
 
     pub async fn upload_session_chunk(
@@ -753,9 +929,8 @@ impl ApiClient {
             .header("Content-Type", "application/octet-stream")
             .body(data.to_vec())
             .send()
-            .await?
-            .error_for_status()?;
-        Ok(resp.json().await?)
+            .await?;
+        Ok(upload_response(resp).await?.json().await?)
     }
 
     pub async fn complete_upload_session(&self, upload_session_id: &str) -> anyhow::Result<serde_json::Value> {
@@ -765,9 +940,8 @@ impl ApiClient {
             .header("Authorization", format!("Bearer {}", self.token))
             .json(&serde_json::json!({}))
             .send()
-            .await?
-            .error_for_status()?;
-        Ok(resp.json().await?)
+            .await?;
+        Ok(upload_response(resp).await?.json().await?)
     }
 
     pub async fn list_shared_folder_files(
@@ -909,15 +1083,9 @@ impl ApiClient {
         &self,
         file_id: &str,
         name_encrypted: Option<&str>,
-        parent_id: Option<&str>,
+        parent: ParentChange<'_>,
     ) -> anyhow::Result<serde_json::Value> {
-        let mut body = serde_json::Map::new();
-        if let Some(name) = name_encrypted {
-            body.insert("name_encrypted".into(), serde_json::json!(name));
-        }
-        if let Some(parent_id) = parent_id {
-            body.insert("parent_id".into(), serde_json::json!(parent_id));
-        }
+        let body = metadata_update_body(name_encrypted, parent);
         let resp = self
             .client
             .patch(self.file_url(file_id))
@@ -1951,5 +2119,100 @@ mod tests {
             Some(expected_version),
             "X-Beebeeb-Client-Version missing or stale on a real ApiClient request"
         );
+    }
+
+    /// Spec 2026-10-09 §7.2 (final review): the three parents a metadata update sends, as the
+    /// server reads them: omitted (leave it alone), `null` (the top level), an id (that folder).
+    #[test]
+    fn a_metadata_update_body_names_each_parent_state() {
+        let body = |name, parent| serde_json::Value::Object(metadata_update_body(name, parent));
+        assert_eq!(
+            body(Some("name"), ParentChange::Unchanged),
+            serde_json::json!({ "name_encrypted": "name" }),
+            "unchanged: no parent_id key"
+        );
+        assert_eq!(
+            body(Some("name"), ParentChange::TopLevel),
+            serde_json::json!({ "name_encrypted": "name", "parent_id": null }),
+            "the top level: an explicit null"
+        );
+        assert_eq!(
+            body(None, ParentChange::Folder("folder-1")),
+            serde_json::json!({ "parent_id": "folder-1" }),
+            "a folder: its id"
+        );
+        assert_eq!(ParentChange::to(None), ParentChange::TopLevel);
+        assert_eq!(ParentChange::to(Some("folder-1")), ParentChange::Folder("folder-1"));
+    }
+
+    /// Spec §8.4: a refused upload request keeps the server's code by type, matched exactly, and
+    /// its text is the status error's alone: the body (its code, its numbers, its message) never
+    /// reaches the error's text, which is what a log line or the queue's `last_error` could show.
+    #[tokio::test]
+    async fn an_upload_refusal_keeps_the_servers_code_and_never_its_body() {
+        use std::io::{Read, Write};
+        async fn refused(status: &'static str, body: &'static str) -> anyhow::Error {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}/", listener.local_addr().unwrap());
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0u8; 4096];
+                let _ = stream.read(&mut request);
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            });
+            let response = reqwest::Client::new().get(&url).send().await.unwrap();
+            let error = upload_response(response).await.unwrap_err();
+            server.join().unwrap();
+            error
+        }
+        let quota = refused(
+            "413 Payload Too Large",
+            r#"{"error":"quota_exceeded","limit_bytes":5368709120,"used_bytes":5368709120,"is_trial_cap":false}"#,
+        )
+        .await;
+        let refusal = quota.downcast_ref::<UploadRefused>().expect("typed");
+        assert_eq!(refusal.code, Some(UploadRefusalCode::QuotaExceeded));
+        assert_eq!(refusal.status(), Some(413));
+        let text = quota.to_string();
+        assert!(text.contains("413 Payload Too Large"), "{text}");
+        assert!(
+            !text.contains("quota_exceeded") && !text.contains("5368709120"),
+            "the body never reaches the text: {text}"
+        );
+        assert!(
+            quota
+                .chain()
+                .any(|cause| cause.downcast_ref::<reqwest::Error>().is_some()),
+            "the status error stays in the chain"
+        );
+        // Matched exactly: another spelling, or another code, is no code.
+        for body in [
+            r#"{"error":"Quota_Exceeded"}"#,
+            r#"{"error":"quota exceeded"}"#,
+            r#"{"error":"payload_too_large"}"#,
+            "not json",
+        ] {
+            let error = refused("413 Payload Too Large", body).await;
+            assert_eq!(
+                error.downcast_ref::<UploadRefused>().expect("typed").code,
+                None,
+                "{body}"
+            );
+        }
+        for (code, expected) in [
+            ("object_budget_exceeded", UploadRefusalCode::ObjectBudgetExceeded),
+            ("billing_read_only", UploadRefusalCode::BillingReadOnly),
+            ("account_lapsed", UploadRefusalCode::AccountLapsed),
+            ("plan_required", UploadRefusalCode::PlanRequired),
+            ("trial_cancelled_read_only", UploadRefusalCode::TrialCancelledReadOnly),
+        ] {
+            assert_eq!(UploadRefusalCode::from_code(code), Some(expected));
+        }
+        // The share gate's `trial_ended` is no upload refusal: no upload route sends it.
+        assert_eq!(UploadRefusalCode::from_code("trial_ended"), None);
     }
 }

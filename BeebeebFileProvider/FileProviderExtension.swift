@@ -35,7 +35,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         }
         NSFileProviderManager(for: domain)?.signalErrorResolved(pending) { error in
             if let error {
-                NSLog("BeebeebFileProvider: signalErrorResolved failed: \(error)")
+                ExtensionLog.signalErrorResolvedFailed(error)
             }
         }
     }
@@ -384,6 +384,48 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         case directoryNotEmpty
     }
 
+    /// What a create or modify the app accepted hands back to the system.
+    struct QueuedWriteCompletion {
+        let item: NSFileProviderItem?
+        let shouldFetchContent: Bool
+        let error: Error?
+    }
+
+    /// The completion for a create or modify the app answered with
+    /// `WriteQueued`. `shouldFetchContent` is false in every branch.
+    ///
+    /// Apple's contract (`NSFileProviderReplicatedExtension.h`, createItem and
+    /// modifyItem): a provider sets `shouldFetchContent` when the content
+    /// described by the returned item does NOT match the contents the system
+    /// handed over; the system then fetches the provider's content and writes
+    /// it to disk. The app uploads exactly the bytes the system handed over,
+    /// so there is never anything to fetch. Setting it made the system fetch
+    /// the server's previous version and write it over the user's edit, and
+    /// after a create fetch an identifier the server never knew (a 404).
+    ///
+    /// - Queued with an item: the item, as the app describes it.
+    /// - Ignored (a temporary Finder item the app does not sync): no item.
+    ///   Unchanged behaviour; nothing was queued, so there is nothing to fetch.
+    /// - Queued but no item (an app from another build, or the app could not
+    ///   read the row back): the transient `serverUnreachable` error, never a
+    ///   nil item. For a modify, Apple treats a nil item as "delete the item on
+    ///   disk" (REPL.h:629-634); with the error the system keeps the file and
+    ///   retries (REPL.h:731-736). Spec 2026-10-09 §7.3.
+    static func queuedWriteCompletion(_ result: WriteQueueResult) -> QueuedWriteCompletion {
+        if result.ignored {
+            return QueuedWriteCompletion(item: nil, shouldFetchContent: false, error: nil)
+        }
+        if let model = result.item {
+            return QueuedWriteCompletion(item: FileProviderItem(model: model), shouldFetchContent: false, error: nil)
+        }
+        // A nil item would make the system delete the item on disk (REPL.h:629-634).
+        return QueuedWriteCompletion(
+            item: nil,
+            shouldFetchContent: false,
+            error: BeebeebIPCError.invalidResponse("the app queued the write but returned no item")
+        )
+    }
+
     /// The server trash / permanent-delete path for one item. The DAEMON
     /// decides the outcome: an unknown item is an idempotent `Ignored`
     /// (ruling: "unknown items report success"), a known item queues the
@@ -415,6 +457,12 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         request: NSFileProviderRequest,
         completionHandler: @escaping (NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?) -> Void
     ) -> Progress {
+        if options.rawValue != 0 {
+            // Spec §8.8 (m-16): recorded for D9; the write is handled as usual.
+            ExtensionLog.writeOptions(
+                call: .create, options: UInt(options.rawValue), item: itemTemplate.itemIdentifier.rawValue
+            )
+        }
         let progress = Progress(totalUnitCount: 1)
         do {
             let contentType = itemTemplate.contentType
@@ -429,27 +477,63 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                     "Beebeeb cannot create items inside the Trash."
                 )
             }
+            // Spec 2026-10-09 §7.2: the system recreates an item it could not delete because
+            // the person edited it. The template's identifier is the item the delete was for,
+            // and its content version is the base of the edit (REPL.h:462-470).
+            let deletionConflicted = options.contains(.deletionConflicted)
             let result = try ipc.queueCreateItem(
                 parentIdentifier: itemTemplate.parentItemIdentifier,
                 filename: itemTemplate.filename,
                 kind: kind,
                 contentsURL: url,
-                contentType: kind == .file ? contentType?.identifier : nil
+                contentType: kind == .file ? contentType?.identifier : nil,
+                deletionConflicted: deletionConflicted,
+                templateIdentifier: deletionConflicted ? itemTemplate.itemIdentifier.rawValue : nil,
+                templateContentVersion: deletionConflicted ? itemTemplate.itemVersion.flatMap { Self.versionIdentifier($0) } : nil
             )
-            if result.ignored {
-                completionHandler(nil, [], false, nil)
-            } else if let model = result.item {
-                completionHandler(FileProviderItem(model: model), [], true, nil)
+            let completion = Self.queuedWriteCompletion(result)
+            completionHandler(completion.item, [], completion.shouldFetchContent, completion.error)
+            if let error = completion.error {
+                // Transient: noted like every other, so the next success lifts the throttle.
+                noteFailure(error)
             } else {
-                completionHandler(nil, [], true, nil)
+                signalErrorResolvedIfPending()
             }
-            signalErrorResolvedIfPending()
         } catch {
             noteFailure(error)
             completionHandler(nil, [], false, error)
         }
         progress.completedUnitCount = 1
         return progress
+    }
+
+    /// The fields a modify reports as still pending (spec 2026-10-09 §7.2): a filename or
+    /// parent the person changed that the item the app returned does not describe. Apple:
+    /// "If a field in the returned item does not match the itemTemplate, and is not in the
+    /// list of stillPendingFields, the value from the item will be propagated to the disk"
+    /// (NSFileProviderReplicatedExtension.h, modifyItem). The app applies a save's name and
+    /// parent in the save's accept, so with the app this extension ships in, this is empty.
+    /// An app from another build (one still running across an update) may not, and its old
+    /// name would undo the rename on disk; pending, the system sends the field again instead.
+    /// A modify without contents reports nothing pending, as before: its reply describes the
+    /// item as it was until the server's change arrives, and a pending field would be sent
+    /// again until then.
+    static func modifyStillPendingFields(
+        changedFields: NSFileProviderItemFields,
+        hasContents: Bool,
+        template: NSFileProviderItem,
+        returned: NSFileProviderItem?
+    ) -> NSFileProviderItemFields {
+        guard hasContents, let returned else { return [] }
+        var pending: NSFileProviderItemFields = []
+        if changedFields.contains(.filename), returned.filename != template.filename {
+            pending.insert(.filename)
+        }
+        if changedFields.contains(.parentItemIdentifier),
+           returned.parentItemIdentifier != template.parentItemIdentifier {
+            pending.insert(.parentItemIdentifier)
+        }
+        return pending
     }
 
     func modifyItem(
@@ -461,6 +545,12 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         request: NSFileProviderRequest,
         completionHandler: @escaping (NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?) -> Void
     ) -> Progress {
+        if options.rawValue != 0 {
+            // Spec §8.8 (m-16): recorded for D9; the write is handled as usual.
+            ExtensionLog.writeOptions(
+                call: .modify, options: UInt(options.rawValue), item: item.itemIdentifier.rawValue
+            )
+        }
         let progress = Progress(totalUnitCount: 1)
         do {
             // Task 1698 (trash ruling): a reparent INTO the trash container
@@ -497,14 +587,20 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                 baseVersionIdentifier: Self.versionIdentifier(version),
                 changedFields: changedFields
             )
-            if result.ignored {
-                completionHandler(nil, [], false, nil)
-            } else if let model = result.item {
-                completionHandler(FileProviderItem(model: model), [], true, nil)
+            let completion = Self.queuedWriteCompletion(result)
+            let stillPending = Self.modifyStillPendingFields(
+                changedFields: changedFields,
+                hasContents: newContents != nil,
+                template: item,
+                returned: completion.item
+            )
+            completionHandler(completion.item, stillPending, completion.shouldFetchContent, completion.error)
+            if let error = completion.error {
+                // Transient: noted like every other, so the next success lifts the throttle.
+                noteFailure(error)
             } else {
-                completionHandler(nil, [], true, nil)
+                signalErrorResolvedIfPending()
             }
-            signalErrorResolvedIfPending()
         } catch {
             noteFailure(error)
             completionHandler(nil, [], false, error)
@@ -942,7 +1038,7 @@ extension FileProviderExtension {
 // slow or hung one stalls the system's pending-set bookkeeping.
 extension FileProviderExtension {
     func pendingItemsDidChange(completionHandler: @escaping () -> Void) {
-        NSLog("BeebeebFileProvider: pendingItemsDidChange (the system's pending set refreshed)")
+        ExtensionLog.pendingItemsDidChange()
         completionHandler()
     }
 }

@@ -71,6 +71,9 @@ and macOS builds cannot be reproduced locally at all (no cross-compile path from
 Before cutting a desktop release, follow `docs/RELEASING.md`. The release workflow fails closed
 unless the released commit contains a root `RELEASE_NOTES.md` whose contents mention the exact
 semver value passed to the workflow; author and commit per-release notes before triggering it.
+It (and `scripts/release-macos-local.sh`) also refuses while the root `RELEASE_BLOCKERS.md` lists an
+item: one list item per thing that must be fixed before any release, removed by the change that fixes
+it (`docs/RELEASING.md`, "Release blockers").
 
 ## Architecture
 
@@ -170,6 +173,21 @@ Current release identifiers:
 - File Provider extension id: `io.beebeeb.app.FileProvider`
 - File Provider domain id: `io.beebeeb.app.domain`
 - App group: `R8352WDJJR.io.beebeeb.app.fileprovider`
+
+**The extension logs only through `ExtensionLog`** (`BeebeebFileProvider/ExtensionLog.swift`, one
+`os.Logger`, subsystem `io.beebeeb.app.FileProvider`). Never `NSLog`: on macOS 26 every `NSLog` line
+of the extension reaches the unified log as `<private>`. A new line is a function in `ExtensionLog`
+whose public values are closed (a fixed word, a bitmask, a UUID, an `NSError` domain and code), never
+a path, a file name or an error's text; ~~`extension_log_pin` (`src-tauri/src`) fails otherwise~~. Rule:
+`docs/IPC_PROTOCOL.md`, "Logging". What `extension_log_pin` (`src-tauri/src`) checks, in every
+`BeebeebFileProvider/*.swift` (lines that begin with `//` skipped): no call of `NSLog`, `NSLogv`, `os_log`,
+`print` or `debugPrint`, bare or qualified by `Foundation.`, `Swift.`, `os.` or `OSLog.`; no `Logger` or `OSLog`
+built (bare, `.init`, module-qualified) and no `logger.` outside `ExtensionLog.swift`; exactly one `Logger` in
+`ExtensionLog.swift`, its subsystem equal to the build script's `BUNDLE_ID`; every interpolation there says
+`.public` or `.private`, and a `.public` one is one of ~~nine~~ eight listed names (a write's `request_id` prefix is
+`.private` since the final review). It matches text, so it cannot see what a
+public name is bound to, a call with a space or line break before its parenthesis, a log function passed by
+reference, or output that is not a log call. — lead, 2026-10-11 (device fix round)
 
 The active Finder/File Provider blocker is Apple provisioning/profile
 entitlement mismatch. Both the containing app and extension profiles must
@@ -349,6 +367,15 @@ acknowledged-chunk watermark advances after every 2xx chunk PUT. A retry resumes
 watermark; a changed payload, a gone session (400/404/410), or a given-up op abandons it —
 a create's orphaned `is_uploading` server row is trashed, a replace's never is. Snapshot rows
 still `is_uploading` and unknown locally are not materialised as placeholders.
+
+One exception, for macOS Finder writes (uploads with a `write_id`): once `complete` has
+answered, the op records the server's completion in `upload_resume` (`completed_version`,
+`completed_object_version_id`, `completed_mime_type`) before any local bookkeeping, and from
+then on it is never abandoned, paused or parked, at give-up either. It retries only its local
+landing, which is one transaction (spec `docs/specs/2026-10-09-macos-finder-write-versions.md`
+§8.6). Those writes also carry a write token as their content version, are claimed and landed
+under `StateDb`'s one-transaction rules, and hand over to the next save when they park: see
+`docs/IPC_PROTOCOL.md`, "Versions and queued writes". Windows and the watcher are unchanged.
 
 Windows local-create completion keeps a separate `upload_finalizations` journal
 (local/server identity, target, completed payload, stamped acknowledgement).

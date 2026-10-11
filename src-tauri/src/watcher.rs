@@ -798,10 +798,11 @@ async fn handle_delete(bridge: &EngineBridge, sync_root: &std::path::Path, path:
 
 /// A local rename/move fired. Resolve the SOURCE path to a known server file and
 /// enqueue a metadata update describing its new name + new parent. The
-/// `queue_finder_modify` metadata path already maps a present `parent_id`
-/// (changed parent) → MoveFile and a name-only change → RenameFile, so we hand
-/// it the new filename + the resolved new parent and let it pick.
-async fn handle_rename(
+/// `queue_finder_modify` metadata path reads a parent that differs from the row's
+/// (the root included) as a move → MoveFile, and the row's own parent as a rename
+/// → RenameFile (spec 2026-10-09 §7.2), so we hand it the new filename and the new
+/// parent, and pass the row's own parent when the new one cannot be resolved.
+pub(crate) async fn handle_rename(
     bridge: &EngineBridge,
     sync_root: &std::path::Path,
     source: &std::path::Path,
@@ -842,10 +843,19 @@ async fn handle_rename(
 
     // Resolve the NEW parent folder id from the target's parent directory. The
     // classifier's parent resolver is reused so move-into-subfolder gets the
-    // right server parent; `None` means moved to (or kept at) the root. We pass
-    // it through verbatim — `queue_finder_modify` treats `Some(parent)` as a
-    // move and `None` as a rename-in-place.
-    let new_parent_id = bridge.resolve_parent_id_for(sync_root, target);
+    // right server parent. Spec §7.2 (final review): "the root" and "not found"
+    // are different answers. The new parent is the root (`None`) only when the
+    // target's directory IS the sync root. A lookup that misses (no folder row yet,
+    // a path left stale by a folder rename, a database error) keeps the row's own
+    // parent, so the op is a rename and sends no parent; read as the root, the
+    // miss would move the file to the top level on every device.
+    let new_parent_id = if target.parent() == Some(sync_root) {
+        None
+    } else {
+        bridge
+            .resolve_parent_id_for(sync_root, target)
+            .or_else(|| existing.parent_id.clone())
+    };
 
     let modify = crate::engine_bridge::FinderWriteTarget {
         file_id: Some(existing.file_id.clone()),

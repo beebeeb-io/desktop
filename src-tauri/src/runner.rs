@@ -159,6 +159,13 @@ const KNOWN_FOLDER_MIRROR_EVERY_N_TICKS: u64 = 2;
 #[cfg(target_os = "macos")]
 const MACOS_HYDRATE_SWEEP_EVERY_N_TICKS: u64 = 2;
 
+/// Upload-staging purge cadence: every 10 ticks (5 minutes at the 30 s
+/// tick). The age bound it applies is an hour
+/// (`crate::ipc_socket::UPLOAD_STAGING_MAX_AGE`), so a faster cadence would
+/// buy nothing. The counter starts at 1 because startup already purged.
+#[cfg(target_os = "macos")]
+const MACOS_UPLOAD_STAGING_SWEEP_EVERY_N_TICKS: u64 = 10;
+
 /// API base URL the engine talks to.
 ///
 /// Returns the value of the `BB_API_BASE` environment variable when it is set
@@ -994,18 +1001,95 @@ async fn run(
             return;
         }
     };
-    match db.reconcile_stale_in_flight_on_startup() {
+    // No runner survives a restart: clear every queue claim. On macOS, also remove
+    // the staged copies the queue released and nothing references any more
+    // (spec §8.7 S3, S6).
+    match db.engine_start_repair() {
+        Ok(repair) => {
+            #[cfg(target_os = "macos")]
+            crate::staged_payload::remove_released(&db, &repair.released_payloads);
+            if repair.claims_cleared > 0 || !repair.released_payloads.is_empty() {
+                tracing::info!(
+                    claims_cleared = repair.claims_cleared,
+                    released = repair.released_payloads.len(),
+                    "engine start: queue claims cleared, released upload copies removed"
+                );
+            }
+        }
+        // A category only: the error's text can carry a path (spec §11).
+        Err(e) => tracing::warn!(
+            reason = crate::engine_bridge::error_category(&e),
+            "engine start repair failed"
+        ),
+    }
+    // Then the staged plaintext copies nothing will upload: an accept that never committed, a
+    // copy whose row an older build's sign-out deleted (spec §8.7 S6). Here, after the claims
+    // are cleared and before the IPC server below serves a write. A stopping engine's IPC handler
+    // can still be inside an accept (its connection tasks are aborted, not awaited); the accept's
+    // own transaction requires its copy's journal row, which the sweep deletes before it unlinks
+    // the copy, so such an accept either committed first or queues nothing and is retried.
+    #[cfg(target_os = "macos")]
+    match crate::staged_payload::sweep_unreferenced(&db, &crate::engine_bridge::finder_staging_candidates()) {
+        Ok(sweep) => {
+            if sweep.unfinished > 0 || sweep.unjournalled > 0 {
+                tracing::info!(
+                    unfinished = sweep.unfinished,
+                    unjournalled = sweep.unjournalled,
+                    "engine start: staged copies no queue row names removed"
+                );
+            }
+            if let Some(reason) = sweep.failure {
+                tracing::warn!(
+                    kept = sweep.kept,
+                    reason,
+                    "engine start: staged copies no queue row names kept; removal is retried at the next start"
+                );
+            }
+        }
+        Err(e) => tracing::warn!(
+            reason = crate::engine_bridge::error_category(&e),
+            "engine start: removing staged copies no queue row names failed"
+        ),
+    }
+    // Uploads an earlier build queued get a write id and are marked as from an earlier build,
+    // so they are never handed over; their bases are left as they are (spec §10.2–§10.3). Before
+    // the reconcile below, which keeps a row with an unparked Finder upload (one with a write id)
+    // uploading. macOS only: on Windows it would hand write ids to Cloud Files uploads, which have
+    // no base.
+    #[cfg(target_os = "macos")]
+    match db.mark_earlier_build_uploads() {
         Ok(0) => {}
-        Ok(touched) => {
-            tracing::info!(
-                touched,
-                "reconciled stale in-flight state rows from a previous engine session"
-            );
+        Ok(marked) => tracing::info!(
+            marked,
+            "engine start: uploads from an earlier build marked; their bases are unchanged"
+        ),
+        Err(e) => tracing::warn!(
+            reason = crate::engine_bridge::error_category(&e),
+            "engine start: marking earlier-build uploads failed"
+        ),
+    }
+    // The count is the rows reset; a row whose Finder upload resumes stays `Uploading` and is
+    // not counted (spec §9.2). Each reset changes how its item is presented, so the first tick's
+    // working-set signal carries the reset ids (below, as the signal's opening debt).
+    let reset_item_ids = match db.reconcile_stale_in_flight_on_startup() {
+        Ok(reset_item_ids) => {
+            let reset = reset_item_ids.len();
+            if reset > 0 {
+                tracing::info!(
+                    reset,
+                    "engine start: stale in-flight rows from a previous engine session reset"
+                );
+            }
+            reset_item_ids
         }
         Err(e) => {
-            tracing::warn!(error = %e, "could not reconcile stale in-flight state rows on startup");
+            tracing::warn!(
+                reason = crate::engine_bridge::error_category(&e),
+                "could not reconcile stale in-flight state rows on startup"
+            );
+            Vec::new()
         }
-    }
+    };
 
     // The token's buffer MOVES into the client (nothing is copied); the key is copied into it once. Both
     // wrappers are dropped right here, so the wiped originals do not live as long as this task.
@@ -1101,6 +1185,12 @@ async fn run(
     // is a no-op on non-macOS (called unconditionally, like its other two call
     // sites in `lib.rs`, so this file doesn't need its own cfg gate).
     crate::purge_macos_hydrate_cache("daemon-startup");
+    // Write contents the File Provider extension hands over arrive in the App
+    // Group upload-staging directory. Harden it and purge copies orphaned by a
+    // crash. Age-bound, not "everything": the extension may be staging a copy
+    // right now (see `ipc_socket::UPLOAD_STAGING_MAX_AGE`).
+    #[cfg(target_os = "macos")]
+    crate::ipc_socket::macos_prepare_upload_staging();
 
     // Spawn the Unix-socket IPC server alongside the sync loop. It
     // shares the same StateDb + EngineBridge handles, so OS extensions
@@ -1180,7 +1270,8 @@ async fn run(
     let mut sync_complete_notifications = SyncCompleteNotificationState::default();
     let mut quota_warning_notifications = QuotaWarningNotificationState::default();
     // Working-set signals a busy bridge gate dropped (Task 9 fix round 1, item B): owed to the next tick.
-    let mut owed_working_set_signal = OwedWorkingSetSignal::default();
+    // It opens with the rows the startup reconcile reset, which no signal has carried yet.
+    let mut owed_working_set_signal = OwedWorkingSetSignal::owing(reset_item_ids);
     let mut last_search_index_signature: Option<u64> = None;
 
     // Known-folder backup (task 0797, Windows): run the source→vault mirror on a
@@ -1199,6 +1290,10 @@ async fn run(
     // for why this exists.
     #[cfg(target_os = "macos")]
     let mut hydrate_sweep_tick_count: u64 = 0;
+    #[cfg(target_os = "macos")]
+    let mut upload_staging_sweep_tick_count: u64 = 1;
+    // Spec §7.1: aliases older than 30 days go once a day (engine start sweeps them too).
+    let mut last_alias_sweep = std::time::Instant::now();
 
     loop {
         tokio::select! {
@@ -1237,6 +1332,23 @@ async fn run(
                         }
                     }
                     hydrate_sweep_tick_count = hydrate_sweep_tick_count.wrapping_add(1);
+                }
+                // Orphaned upload-staging copies: same age bound as at
+                // startup, so a copy left by a crash of either process is gone
+                // within about an hour, not at the next unlock.
+                #[cfg(target_os = "macos")]
+                {
+                    if upload_staging_sweep_tick_count.is_multiple_of(MACOS_UPLOAD_STAGING_SWEEP_EVERY_N_TICKS) {
+                        crate::ipc_socket::macos_sweep_upload_staging();
+                    }
+                    upload_staging_sweep_tick_count = upload_staging_sweep_tick_count.wrapping_add(1);
+                }
+                if last_alias_sweep.elapsed() >= std::time::Duration::from_secs(86_400) {
+                    // A fixed category, never the error text (spec §11).
+                    if db.sweep_aliases(now_secs(), crate::state_db::ALIAS_MAX_AGE_SECS).is_err() {
+                        tracing::warn!(reason = "database", "daily alias sweep failed");
+                    }
+                    last_alias_sweep = std::time::Instant::now();
                 }
 
                 // Skip all sync work while the user has paused sync.
@@ -1436,6 +1548,12 @@ async fn run(
                             finish_tick_payload(&tracker, Err(&e), &link, tick_started_at, &db, &transfers),
                         );
                         set_telemetry_state(&telemetry, "error");
+                        // A failed tick reaches none of the signal sites after the tick. Only the
+                        // shared-roots signal runs earlier in the same iteration, and a delivered
+                        // signal pays the debt, so at most one signal is delivered per tick. A
+                        // pending debt (the startup resets, or a signal a busy gate dropped) is
+                        // paid here.
+                        signal_owed_debt_after_a_failed_tick(&mut owed_working_set_signal, &db);
                         // Windows breadcrumb flyout: surface the tick failure as
                         // an Error state in the flyout too.
                         #[cfg(target_os = "windows")]
@@ -1688,6 +1806,12 @@ pub fn working_set_signal_needed(changed_parent_ids: &[Option<String>], material
     })
 }
 
+#[cfg(all(test, target_os = "macos"))]
+thread_local! {
+    /// Test-only: how many times this thread asked the bridge to signal the working set.
+    static SIGNALS_ASKED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Task 1697: the daemon's ONLY replica-refresh channel. Under
 /// `NSFileProviderReplicatedExtension` the system honors signals for the
 /// WORKING SET alone (`.rootContainer` is ignored by design); the extension's
@@ -1723,6 +1847,8 @@ fn signal_file_provider_working_set(db: &StateDb, reason: &str, item_ids: &[Stri
     // Through the one bridge gate, like every other File Provider call (lead ruling T8-gate-all): a busy
     // gate fails at once, and the signal is reported as dropped so the caller can owe it to the next tick.
     let mut dropped = false;
+    #[cfg(test)]
+    SIGNALS_ASKED.with(|asked| asked.set(asked.get() + 1));
     match crate::finder_setup::macos_ports::signal_working_set() {
         Ok(outcome) => {
             tracing::debug!(
@@ -1780,6 +1906,14 @@ struct OwedWorkingSetSignal {
 }
 
 impl OwedWorkingSetSignal {
+    /// A debt that opens with `ids`: changes recorded before the tick loop started, which the first
+    /// tick's signal must carry. Bounded like any other debt.
+    fn owing(ids: Vec<String>) -> Self {
+        let mut owed = Self::default();
+        owed.record(!ids.is_empty(), ids);
+        owed
+    }
+
     /// What this tick should signal: the debt, then this tick's ids, first-seen order, no duplicates. Not
     /// empty whenever something is owed, which keeps `should_signal_working_set` from skipping a quiet tick.
     fn merged_with(&self, ids: &[String]) -> Vec<String> {
@@ -1792,6 +1926,11 @@ impl OwedWorkingSetSignal {
         merged
     }
 
+    /// Something is owed to the next signal.
+    fn is_owing(&self) -> bool {
+        !self.ids.is_empty()
+    }
+
     /// After a signal attempt for `sent` (what `merged_with` returned): a drop makes it the new debt,
     /// anything else pays the debt.
     fn record(&mut self, dropped: bool, sent: Vec<String>) {
@@ -1802,6 +1941,17 @@ impl OwedWorkingSetSignal {
         } else {
             self.ids = sent;
         }
+    }
+}
+
+/// A failed tick reaches none of the signal sites after the tick, so it pays a pending debt here. Only the
+/// shared-roots signal runs earlier in the same iteration, and a delivered signal pays the debt, so at most
+/// one signal is delivered per tick. The signal is local and needs no network: without it, an offline start
+/// kept the startup resets (and a signal a busy gate dropped) from the system until the network came back.
+/// Nothing owed, nothing sent.
+fn signal_owed_debt_after_a_failed_tick(owed_working_set_signal: &mut OwedWorkingSetSignal, db: &StateDb) {
+    if owed_working_set_signal.is_owing() {
+        signal_working_set_owing(owed_working_set_signal, db, "owed_debt", &[]);
     }
 }
 
@@ -2254,6 +2404,76 @@ mod tests {
         );
     }
 
+    /// The rows the startup reconcile reset are owed to the first tick: its signal carries them before
+    /// that tick's own ids, and once a signal went out the debt is paid. Nothing reset owes nothing.
+    #[test]
+    fn the_startup_resets_are_owed_to_the_first_ticks_signal() {
+        let mut owed = OwedWorkingSetSignal::owing(vec!["reset-1".to_string(), "reset-2".to_string()]);
+        let first = owed.merged_with(&["tick-1".to_string()]);
+        assert_eq!(
+            first,
+            vec!["reset-1".to_string(), "reset-2".to_string(), "tick-1".to_string()]
+        );
+        owed.record(false, first);
+        assert_eq!(owed.merged_with(&[]), Vec::<String>::new(), "paid by the first signal");
+        assert_eq!(
+            OwedWorkingSetSignal::owing(Vec::new()).merged_with(&[]),
+            Vec::<String>::new()
+        );
+    }
+
+    /// `run` opens the tick loop's debt with the ids the startup reconcile returned, so a reset reaches
+    /// the system at the first tick, not at the next unrelated change. `run` needs a real window
+    /// system, so the wiring is asserted on the source, on every platform.
+    #[test]
+    fn the_tick_loop_opens_its_debt_with_the_startup_resets() {
+        let source = include_str!("runner.rs").replace("\r\n", "\n");
+        let start = source.find("async fn run(\n    app: AppHandle").expect("run exists");
+        let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+        let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("`run` holds {needle}"));
+        assert_eq!(body.matches("OwedWorkingSetSignal::").count(), 1, "one debt");
+        assert!(
+            at("let reset_item_ids = match db.reconcile_stale_in_flight_on_startup()")
+                < at("let mut owed_working_set_signal = OwedWorkingSetSignal::owing(reset_item_ids);"),
+            "the debt opens with the reconcile's ids"
+        );
+    }
+
+    /// A failed tick pays a pending debt with exactly one signal, and sends none when nothing is owed. The
+    /// shared gate is held, so the signal meets a busy gate and no real bridge call is made; the count is of
+    /// the times the bridge was asked.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_failed_tick_pays_a_pending_debt_with_one_signal() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let mut owed = OwedWorkingSetSignal::owing(vec!["reset-1".to_string()]);
+        let before = SIGNALS_ASKED.with(|asked| asked.get());
+        crate::finder_setup::macos_ports::with_shared_gate_held(|| {
+            signal_owed_debt_after_a_failed_tick(&mut owed, &db);
+        });
+        assert_eq!(SIGNALS_ASKED.with(|asked| asked.get()) - before, 1, "one signal");
+        assert_eq!(
+            owed.merged_with(&[]),
+            vec!["reset-1".to_string()],
+            "the busy gate dropped it, so it is still owed"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_failed_tick_with_nothing_owed_sends_no_signal() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let mut owed = OwedWorkingSetSignal::default();
+        let before = SIGNALS_ASKED.with(|asked| asked.get());
+        crate::finder_setup::macos_ports::with_shared_gate_held(|| {
+            signal_owed_debt_after_a_failed_tick(&mut owed, &db);
+        });
+        assert_eq!(SIGNALS_ASKED.with(|asked| asked.get()) - before, 0, "no signal");
+        assert_eq!(owed.merged_with(&[]), Vec::<String>::new());
+    }
+
     /// The reconciler's gate is the one `signal_file_provider_working_set` takes: with it held, the signal
     /// is DROPPED, and says so (`true`), and the next tick's call carries the ids. No real bridge call is
     /// made: a busy gate answers at once, and the test only ever runs calls that hit it busy.
@@ -2283,9 +2503,14 @@ mod tests {
         });
     }
 
-    /// The tick loop uses the owing wrapper at every one of its three call sites, so no signal bypasses the debt.
+    /// The tick loop signals through the owing wrapper only, at four named sites: revoked shared content,
+    /// the tick's one signal, a tick whose queue failed (its remote applies), and a failed tick that owes a
+    /// debt. A fifth call fails here, so no signal bypasses the debt. A failed tick reaches the first (it runs
+    /// before the tick, in every iteration) and the fourth; a delivered signal pays the debt, so at most one
+    /// signal is delivered per tick.
     #[test]
     fn every_working_set_signal_in_the_tick_loop_goes_through_the_owed_wrapper() {
+        use crate::source_pin::squeeze;
         let source = include_str!("runner.rs").replace("\r\n", "\n");
         let production = &source[..source.find("#[cfg(test)]\nmod tests {").expect("the tests follow")];
         assert_eq!(
@@ -2300,12 +2525,34 @@ mod tests {
             1,
             "only the owing wrapper calls the signal"
         );
+        let squeezed = squeeze(production);
         assert_eq!(
-            production
-                .matches("signal_working_set_owing(&mut owed_working_set_signal,")
-                .count(),
-            3,
-            "the three tick call sites"
+            squeezed.matches("signal_working_set_owing(").count()
+                - squeezed.matches("fnsignal_working_set_owing(").count(),
+            4,
+            "four call sites"
+        );
+        for site in [
+            "signal_working_set_owing(&mut owed_working_set_signal, &db, \"shared_roots_changed\", &outcome.removed_shared_file_ids)",
+            "signal_working_set_owing(&mut owed_working_set_signal, &db, reason, &ids)",
+            "signal_working_set_owing(&mut owed_working_set_signal, &db, \"remote_changes_applied\", &tick.applied_item_ids)",
+            "signal_working_set_owing(owed_working_set_signal, db, \"owed_debt\", &[])",
+        ] {
+            assert_eq!(squeezed.matches(&squeeze(site)).count(), 1, "the site {site}");
+        }
+        // The fourth site's helper is called once, from the failed tick's arm of `run`.
+        assert_eq!(
+            squeezed.matches("signal_owed_debt_after_a_failed_tick(").count(),
+            2,
+            "its definition and one call"
+        );
+        let start = source.find("async fn run(\n    app: AppHandle").expect("run exists");
+        let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+        let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("`run` holds {needle}"));
+        let call = at("signal_owed_debt_after_a_failed_tick(&mut owed_working_set_signal, &db);");
+        assert!(
+            at("\"sync tick failed\"") < call && call < at("refresh_status_ui_snapshot(&db, false, true)"),
+            "in the failed tick's arm"
         );
     }
 
@@ -2779,6 +3026,86 @@ mod tests {
                 "`run` still emits `{old}` around the tracker"
             );
         }
+    }
+
+    /// Spec §10.2: engine start marks the uploads an earlier build queued,
+    /// once, on macOS only (on Windows it would hand write ids to Cloud Files uploads, which have
+    /// no base), after the start repair and before the stale in-flight rows are reconciled (that
+    /// reconcile is keyed on the write id). `run` needs a real window system, so the wiring is
+    /// asserted on the source, on every platform.
+    #[test]
+    fn engine_start_marks_earlier_build_uploads_on_macos_only_after_the_repair() {
+        let source = include_str!("runner.rs").replace("\r\n", "\n");
+        let start = source.find("async fn run(\n    app: AppHandle").expect("run exists");
+        let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+        let call = "db.mark_earlier_build_uploads()";
+        assert_eq!(body.matches(call).count(), 1, "`run` marks once");
+        assert!(
+            body.contains(&format!("#[cfg(target_os = \"macos\")]\n    match {call}")),
+            "the marking is gated to macOS"
+        );
+        let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("`run` calls {needle}"));
+        assert!(
+            at("db.engine_start_repair()") < at(call) && at(call) < at("db.reconcile_stale_in_flight_on_startup()"),
+            "after the start repair, before the in-flight reconcile"
+        );
+    }
+
+    /// Spec §8.7 S6: engine start removes the staged copies nothing will upload, once, on macOS
+    /// only, after the start repair cleared the claims and before the IPC server serves a write.
+    /// `run` needs a real window system, so the wiring is asserted on the source, on every platform.
+    #[test]
+    fn engine_start_sweeps_unreferenced_staged_copies_on_macos_after_the_repair_before_ipc() {
+        let source = include_str!("runner.rs").replace("\r\n", "\n");
+        let start = source.find("async fn run(\n    app: AppHandle").expect("run exists");
+        let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+        let call = "crate::staged_payload::sweep_unreferenced(&db, &crate::engine_bridge::finder_staging_candidates())";
+        assert_eq!(body.matches(call).count(), 1, "`run` sweeps once");
+        assert!(
+            body.contains(&format!("#[cfg(target_os = \"macos\")]\n    match {call}")),
+            "the sweep is gated to macOS"
+        );
+        let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("`run` calls {needle}"));
+        assert!(
+            at("db.engine_start_repair()") < at(call) && at(call) < at("crate::ipc_socket::serve_ipc("),
+            "after the start repair, before the IPC server"
+        );
+    }
+
+    /// Spec §11: the engine-start lines from the start
+    /// repair to the in-flight reconcile log counts and, when a step fails, the error's category;
+    /// never the error's text, which can carry a path. The reconcile's count is the rows it
+    /// reset, and its line says so. `run` needs a real window system, so this is asserted on the
+    /// source, on every platform.
+    #[test]
+    fn engine_start_lines_log_counts_and_error_categories_only() {
+        let source = include_str!("runner.rs").replace("\r\n", "\n");
+        let start = source.find("async fn run(\n    app: AppHandle").expect("run exists");
+        let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+        let from = body.find("match db.engine_start_repair()").expect("the start repair");
+        let to = from
+            + body[from..]
+                .find("// The token's buffer MOVES into the client")
+                .expect("the end of the start steps");
+        let steps = &body[from..to];
+        assert_eq!(steps.matches("Err(e)").count(), 4, "four steps can fail:\n{steps}");
+        assert_eq!(
+            steps
+                .matches("reason = crate::engine_bridge::error_category(&e)")
+                .count(),
+            4,
+            "each failure logs its category:\n{steps}"
+        );
+        for raw in ["error = %e", "%e,", "error = ?e", "{e}"] {
+            assert!(
+                !steps.contains(raw),
+                "an engine-start line logs the error's text (`{raw}`):\n{steps}"
+            );
+        }
+        assert!(
+            steps.contains("reset,\n") && steps.contains("in-flight rows from a previous engine session reset"),
+            "the reconcile line names what it counts:\n{steps}"
+        );
     }
 
     /// Collect every `engine-status` payload the mock app emits.
