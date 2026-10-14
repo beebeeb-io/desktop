@@ -4,6 +4,7 @@
 #![cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 
 pub(crate) mod kept_names;
+pub(crate) mod kept_record;
 #[cfg(target_os = "macos")]
 pub(crate) mod kept_writer;
 pub(crate) mod waiting;

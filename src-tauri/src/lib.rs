@@ -32104,12 +32104,24 @@ mod config_write_pin_tests {
             lock < read && read < write && write < mirror,
             "the lock is held before the read and still held at the write and the mirror step:\n{one_place}"
         );
+        // Task 1887: the keep step's durable save is the same one place with a durable write step, never a second
+        // load-modify-save: `save_to_durable` is defined once and called once, from that place.
+        assert_eq!(
+            config.matches("save_to_durable(").count(),
+            2,
+            "the durable write is defined once and called once, from the one place"
+        );
+        assert!(one_place.contains("cfg.save_to_durable(path, fs_steps)"), "{one_place}");
 
         // Every other way in is that one place.
         for (start, calls) in [
             ("    pub(crate) fn update_at<R>(", "Self::try_update_at("),
             ("    pub(crate) fn try_update_at<R>(", "Self::try_update_at_then("),
             ("    pub(crate) fn update_at_then<R>(", "Self::try_update_at_then("),
+            (
+                "    pub(crate) fn update_at_durable_with<R>(",
+                "Self::try_update_at_then(",
+            ),
             (
                 "    pub(crate) fn update<R>(",
                 "Self::update_at(&Self::path()?, change)",
