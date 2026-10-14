@@ -87,6 +87,7 @@ pub(crate) fn unfinished_at(path: &Path) -> Result<Vec<String>, String> {
 mod tests {
     use super::*;
     use crate::config::{ConfigFs, DesktopConfig, DesktopSettings, RealConfigFs};
+    use crate::source_pin::squeeze;
     use std::cell::RefCell;
     use std::path::{Path, PathBuf};
 
@@ -117,28 +118,63 @@ mod tests {
             Some("/ours/two"),
             "a newer folder replaces an older one"
         );
-        // A settings save, as `set_desktop_config` makes it, cannot clear it.
-        let settings = DesktopSettings::from(&DesktopConfig::load_from(&path).unwrap());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "the durable write is owner-only: {mode:o}");
+        }
+        // A settings save cannot clear it. A window sends only the fields that changed (task 1889), and a settings
+        // object built from the defaults stands for one that was read before the folder was saved.
+        let patch: DesktopSettings = serde_json::from_str(r#"{"upload_kbps_limit":2000}"#).unwrap();
         DesktopConfig::update_at(&path, |cfg| {
-            cfg.apply_settings(settings);
+            cfg.apply_settings(patch);
             (true, ())
         })
         .unwrap();
-        assert_eq!(saved_kept_unsent_at(&path).unwrap().as_deref(), Some("/ours/two"));
-        // Dismiss clears only the folder the row showed.
-        let stale = dismiss_saved_kept_unsent_at(&path, "/ours/one").unwrap();
-        assert_eq!((stale.cleared, stale.current.as_deref()), (false, Some("/ours/two")));
-        let shown = dismiss_saved_kept_unsent_at(&path, "/ours/two").unwrap();
-        assert_eq!((shown.cleared, shown.current), (true, None));
-        // The two keys never touch each other.
+        assert_eq!(
+            saved_kept_unsent_at(&path).unwrap().as_deref(),
+            Some("/ours/two"),
+            "a settings save of the one field that changed"
+        );
+        let defaults = DesktopSettings::from(&DesktopConfig::default());
+        DesktopConfig::update_at(&path, |cfg| {
+            cfg.apply_settings(defaults);
+            (true, ())
+        })
+        .unwrap();
+        assert_eq!(
+            saved_kept_unsent_at(&path).unwrap().as_deref(),
+            Some("/ours/two"),
+            "a whole settings object built from the defaults"
+        );
+        // The two keys never touch each other: our saves left 1882's key as it was, and 1882's save, made while our row
+        // is set, leaves our row and our list.
         let cfg = DesktopConfig::load_from(&path).unwrap();
         assert_eq!(cfg.kept_unsynced_folder.as_deref(), Some("/macos/kept"));
         crate::finder_removal::remember_kept_folder_at(&path, "/macos/newer").unwrap();
+        assert_eq!(
+            saved_kept_unsent_at(&path).unwrap().as_deref(),
+            Some("/ours/two"),
+            "1882's save leaves our row alone"
+        );
         assert_eq!(
             unfinished_at(&path).unwrap(),
             ["/ours/one", "/ours/two"],
             "1882's save leaves our list alone"
         );
+        // Dismiss clears only the folder the row showed. It leaves the list and 1882's key.
+        let stale = dismiss_saved_kept_unsent_at(&path, "/ours/one").unwrap();
+        assert_eq!((stale.cleared, stale.current.as_deref()), (false, Some("/ours/two")));
+        let shown = dismiss_saved_kept_unsent_at(&path, "/ours/two").unwrap();
+        assert_eq!((shown.cleared, shown.current), (true, None));
+        let cfg = DesktopConfig::load_from(&path).unwrap();
+        assert_eq!(
+            cfg.kept_unsent_unfinished,
+            ["/ours/one", "/ours/two"],
+            "a dismiss leaves the list"
+        );
+        assert_eq!(cfg.kept_unsynced_folder.as_deref(), Some("/macos/newer"));
     }
 
     #[derive(Default)]
@@ -214,8 +250,19 @@ mod tests {
             fail_at: Some("sync_dir"),
             ..Default::default()
         };
-        let previous = save_kept_unsent_durably(&path, "/ours/three", &after_rename);
-        assert!(previous.is_err());
+        assert!(save_kept_unsent_durably(&path, "/ours/three", &after_rename).is_err());
+        // A failure after the rename returns an error with both keys already in the file, for the caller to take back.
+        let cfg = DesktopConfig::load_from(&path).unwrap();
+        assert_eq!(
+            cfg.kept_unsent_folder.as_deref(),
+            Some("/ours/three"),
+            "the row is in the file"
+        );
+        assert_eq!(
+            cfg.kept_unsent_unfinished,
+            ["/ours/one", "/ours/three"],
+            "and so is the list"
+        );
         take_back_kept_unsent_at(&path, "/ours/three", Some("/ours/one")).unwrap();
         let cfg = DesktopConfig::load_from(&path).unwrap();
         assert_eq!(
@@ -229,12 +276,79 @@ mod tests {
             "and puts the older row back"
         );
 
+        // A take-back that failed leaves its folder listed, and a retry in the same second can keep into a folder of
+        // the same name: the list names it once (spec §7.3, "unless it is already there").
+        let after_rename = Recorded {
+            fail_at: Some("sync_dir"),
+            ..Default::default()
+        };
+        assert!(save_kept_unsent_durably(&path, "/ours/four", &after_rename).is_err());
+        save_kept_unsent_durably(&path, "/ours/four", &Recorded::default()).unwrap();
+        assert_eq!(
+            unfinished_at(&path).unwrap(),
+            ["/ours/one", "/ours/four"],
+            "a folder already listed is listed once"
+        );
+
         // Every other save stays as it was: no flush in `save_to` (spec §7.3, amended for 1889). Line ends are read as
         // LF, because a Windows checkout has CRLF.
         let config_rs = include_str!("../config.rs").replace("\r\n", "\n");
         let from = config_rs.find("    fn save_to(&self, path: &Path)").expect("save_to");
         let save_to = &config_rs[from..from + config_rs[from..].find("\n    }\n").unwrap()];
         assert!(!save_to.contains("sync_all"), "{save_to}");
+        // Nothing else picks the durable write: the two plain ways in pass no write step, and `config.rs` names the
+        // real steps only in their struct and its impl.
+        let production = production_text(&config_rs);
+        for (start, plain) in [
+            (
+                "    pub(crate) fn try_update_at<R>(",
+                "Self::try_update_at_then(path, change, |_| {}, None)",
+            ),
+            (
+                "    pub(crate) fn update_at_then<R>(",
+                "Self::try_update_at_then(path, change, saved, None)",
+            ),
+        ] {
+            let body = block(&production, start, 4);
+            assert!(
+                squeeze(body).contains(&squeeze(plain)),
+                "{start} passes no write step:\n{body}"
+            );
+        }
+        assert_eq!(
+            production.matches("RealConfigFs").count(),
+            2,
+            "config.rs names the real steps only in their struct and its impl"
+        );
+        // The real steps are the durable ones. The recording seam above never runs them, so their text is pinned: both
+        // flushes are made, and the write is owner-only.
+        let real = block(&production, "impl ConfigFs for RealConfigFs {", 0);
+        for (step, must) in [
+            ("    fn sync_file(", ".sync_all()"),
+            ("    fn sync_dir(", ".sync_all()"),
+            ("    fn write(", "from_mode(0o600)"),
+        ] {
+            let body = block(real, step, 4);
+            assert!(body.contains(must), "{step} must contain {must}:\n{body}");
+        }
+    }
+
+    /// `text` as production code: the part before its test module, without the lines that are comments.
+    fn production_text(text: &str) -> String {
+        let end = text.find("#[cfg(test)]\nmod tests").expect("the test module");
+        text[..end]
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The text from `start` up to the line that closes it at `indent` spaces.
+    fn block<'a>(text: &'a str, start: &str, indent: usize) -> &'a str {
+        let at = text.find(start).unwrap_or_else(|| panic!("{start} exists"));
+        let end = format!("\n{}}}", " ".repeat(indent));
+        let to = text[at..].find(&end).unwrap_or_else(|| panic!("{start} ends"));
+        &text[at..at + to]
     }
 
     #[cfg_attr(windows, ignore = "the real durable steps need unix flushes; the save is macOS only")]

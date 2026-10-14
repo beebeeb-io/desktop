@@ -32154,10 +32154,12 @@ mod config_write_pin_tests {
     }
 
     /// The calls whose closure gets the config to change.
-    const UPDATE_CALLS: [&str; 5] = [
+    const UPDATE_CALLS: [&str; 7] = [
         "DesktopConfig::update(",
         "DesktopConfig::update_at(",
         "DesktopConfig::try_update_at(",
+        "DesktopConfig::update_at_then(",
+        "DesktopConfig::update_at_durable_with(",
         ".update_held(",
         ".update_held_at(",
     ];
@@ -32468,6 +32470,8 @@ mod config_write_pin_tests {
             "DesktopConfig::try_update_at(&path, |cfg| { std::mem::swap(cfg, &mut stale); (true, ()) })",
             "DesktopConfig::update(|cfg| { cfg.clone_from(&stale); (true, ()) })",
             "DesktopConfig::update(|c| { let _old = std::mem::take(c); (true, ()) })",
+            "DesktopConfig::update_at_then(&path, |cfg| { *cfg = stale.clone(); (true, ()) }, |_| {})",
+            "DesktopConfig::update_at_durable_with(&path, |cfg| { *cfg = stale; (true, ()) }, &RealConfigFs)",
         ] {
             assert!(!whole_copy_writes(bad).is_empty(), "not found: {bad}");
         }
@@ -32475,6 +32479,8 @@ mod config_write_pin_tests {
             "DesktopConfig::update(|cfg| { cfg.sync_mode = Some(mode); (true, ()) })",
             "DesktopConfig::update(|cfg| { if *cfg == other { return (false, ()); } (true, ()) })",
             "held.update_held(|held| (clear_finder_install_failure(held), ()))",
+            "DesktopConfig::update_at_then(path, |cfg| { cfg.pause_sync = paused; (true, ()) }, |cfg| flag.store(cfg.pause_sync, Ordering::Relaxed))",
+            "DesktopConfig::update_at_durable_with(path, |cfg| (true, record_kept_unsent(cfg, folder)), fs_steps)",
         ] {
             assert_eq!(whole_copy_writes(good), Vec::<String>::new(), "found in: {good}");
         }

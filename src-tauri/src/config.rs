@@ -22,11 +22,13 @@ use serde::{Deserialize, Serialize};
 ///
 /// Every save of the config goes through the same `desktop.toml.tmp`, so two saves at once could
 /// tear each other's temp file, and two load-modify-save passes at once lose the earlier one's
-/// change. There is no public `save`: the only way to write the file is [`DesktopConfig::update_at`]
-/// (or [`DesktopConfig::update`], [`HeldConfig::update_held`] and
-/// [`DesktopConfig::ensure_account_id`], which are `update_at`), and it takes this lock across the
-/// whole load, change and write. The lock is not re-entrant: nothing inside an update closure may
-/// call another update.
+/// change. There is no public `save`: the file is written in one place, `try_update_at_then`, which
+/// takes this lock across the whole load, change and write. The ways in are
+/// [`DesktopConfig::update_at`] (and [`DesktopConfig::update`], [`HeldConfig::update_held`] and
+/// [`DesktopConfig::ensure_account_id`], which are `update_at`), [`DesktopConfig::try_update_at`],
+/// [`DesktopConfig::update_at_then`], and [`DesktopConfig::update_at_durable_with`], the one save
+/// that flushes its write (task 1887). The lock is not re-entrant: nothing inside an update closure
+/// may call another update.
 static CONFIG_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Takes [`CONFIG_WRITE_LOCK`]. A holder that panicked leaves the lock usable: the file itself is
@@ -560,7 +562,9 @@ tokio::task_local! {
 }
 
 /// What stopped a [`DesktopConfig::try_update_at`]: the file could not be read (or parsed), or the
-/// changed config could not be written. Nothing was written in the first case.
+/// changed config could not be written. Nothing was written in the first case. A durable save's
+/// `Write` can also come after its rename, when the directory flush failed: the change is then in
+/// the file, but not flushed ([`DesktopConfig::update_at_durable_with`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum UpdateError {
     Read(String),
@@ -820,7 +824,8 @@ impl DesktopConfig {
     /// is flushed before the rename, and the directory after it. Only the keep step's save uses it, with
     /// `RealConfigFs`; every other save stays as it is. The file-system steps are passed in so a test can record their
     /// order and fail one (U43). It is the one write place with a durable write step, so the lock and the read are
-    /// still taken in one place.
+    /// still taken in one place. An `Err` can come after the rename, when the directory flush failed: the change is
+    /// then in the file, so a caller that undoes its work on an error must take the change back (spec 2026-10-10 W8).
     pub(crate) fn update_at_durable_with<R>(
         path: &Path,
         change: impl FnOnce(&mut Self) -> (bool, R),
