@@ -133,9 +133,7 @@ pub(crate) struct KeptWriter<'a> {
     files: usize,
 }
 
-#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 5
 pub(crate) struct KeptFolder {
-    #[allow(dead_code)] // first production caller: Task 5; no test reads it before then
     pub path: PathBuf,
     pub files: usize,
 }
@@ -144,7 +142,6 @@ impl<'a> KeptWriter<'a> {
     /// Make `<root>/<event_name>`, or `… (2)`, `… (3)` when the name is taken (§7.1). The folder is new and empty.
     /// The root is resolved once it exists: a symlink anywhere in its prefix (`/var` → `private/var` on a Mac) makes
     /// the kernel's path longer than the one given, and §7.2's 1024-byte rule is about the kernel's.
-    #[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 5
     pub(crate) fn create(root: &Path, event_name: &str, clone: &'a dyn CloneFile) -> io::Result<Self> {
         let missing = missing_ancestors(root);
         std::fs::create_dir_all(root)?;
@@ -173,7 +170,6 @@ impl<'a> KeptWriter<'a> {
         })
     }
 
-    #[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 5
     pub(crate) fn event(&self) -> &Path {
         &self.event
     }
@@ -221,7 +217,6 @@ impl<'a> KeptWriter<'a> {
     /// Copy `source` to the vault path `components` (the last is the file name) and flush it. A destination of 1024
     /// bytes or more, planned or after any " (n)" on its directories or its name, goes to the top of the event folder
     /// under its last component.
-    #[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 5
     pub(crate) fn keep(&mut self, components: &[String], source: &Path) -> io::Result<PathBuf> {
         let name = components
             .last()
@@ -284,7 +279,6 @@ impl<'a> KeptWriter<'a> {
     }
 
     /// Flush [`Self::flush_list`], then hand back the folder.
-    #[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 5
     pub(crate) fn finish(self) -> io::Result<KeptFolder> {
         for directory in self.flush_list() {
             File::open(&directory)?.sync_all()?;
@@ -296,7 +290,6 @@ impl<'a> KeptWriter<'a> {
     }
 
     /// A failed keep (W8): the half-made folder holds only copies of bytes still in the queue, so it goes.
-    #[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 5
     pub(crate) fn abandon(self) {
         if let Err(error) = std::fs::remove_dir_all(&self.event) {
             tracing::warn!(kind = %error.kind(), "could not remove a half-made kept folder");

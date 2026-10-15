@@ -12,7 +12,6 @@ pub const MAX_NAME_BYTES: usize = 255;
 
 /// §7.2: the newest copied write of a file gets the plain name; every other copied write (an earlier build's) is
 /// `<stem> (earlier save <N>)<.ext>`, N = 1 for the next-newest.
-#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 5
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeptRole {
     Newest,
@@ -97,7 +96,6 @@ pub fn with_suffix(name: &str, suffix: &str) -> String {
 }
 
 /// §7.2 "Names": the components of a kept file's path under the event folder.
-#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 5
 pub fn kept_relative_path(file_path: Option<&str>, op_id: &str, role: KeptRole) -> Vec<String> {
     let mut components: Vec<String> = file_path
         .unwrap_or_default()

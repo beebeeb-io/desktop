@@ -35,7 +35,6 @@ pub(crate) fn dismiss_kept_unsent(cfg: &mut DesktopConfig, shown: &str) -> bool 
 }
 
 /// W9 and W13: both keys in ONE durable save, the keep step's last act.
-#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 5
 pub(crate) fn save_kept_unsent_durably(
     path: &Path,
     folder: &str,
@@ -44,7 +43,6 @@ pub(crate) fn save_kept_unsent_durably(
     DesktopConfig::update_at_durable_with(path, |cfg| (true, record_kept_unsent(cfg, folder)), fs_steps)
 }
 
-#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 5
 pub(crate) fn take_back_kept_unsent_at(path: &Path, folder: &str, previous: Option<&str>) -> Result<(), String> {
     DesktopConfig::update_at(path, |cfg| (take_back_kept_unsent(cfg, folder, previous), ()))
 }
@@ -73,7 +71,6 @@ pub(crate) fn dismiss_saved_kept_unsent_at(path: &Path, shown: &str) -> Result<D
     })
 }
 
-#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 5
 pub(crate) fn saved_kept_unsent_at(path: &Path) -> Result<Option<String>, String> {
     Ok(DesktopConfig::load_from(path)?.kept_unsent_folder)
 }
