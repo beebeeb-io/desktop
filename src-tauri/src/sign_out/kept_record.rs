@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use crate::config::{ConfigFs, DesktopConfig};
+use crate::config::{ConfigFs, DesktopConfig, UpdateError};
 use crate::finder_removal::DismissOutcome;
 
 /// The keep step's record: the row's folder, and the folder added to the unfinished list (unless it is there).
@@ -48,11 +48,17 @@ pub(crate) fn take_back_kept_unsent_at(path: &Path, folder: &str, previous: Opti
 }
 
 /// W13: a purge that cleared the rows clears the list (plain, not durable: a lost clear only repeats A3e once).
+/// `Err` is the step that failed, `read` or `write`, never the error's text: a read error quotes a line of the file,
+/// the list's lines are kept folders' paths, and a caller logs what this returns (W10).
 pub(crate) fn clear_unfinished_at(path: &Path) -> Result<(), String> {
-    DesktopConfig::update_at(path, |cfg| {
+    DesktopConfig::try_update_at(path, |cfg| {
         let changed = !cfg.kept_unsent_unfinished.is_empty();
         cfg.kept_unsent_unfinished.clear();
         (changed, ())
+    })
+    .map_err(|error| match error {
+        UpdateError::Read(_) => "read".to_string(),
+        UpdateError::Write(_) => "write".to_string(),
     })
 }
 

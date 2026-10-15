@@ -3283,12 +3283,15 @@ fn purge_local_data_for_sign_out(
                     windows_placeholders_dehydrated = summary.windows_placeholders_dehydrated,
                     "purged operation queue and decrypted cache on sign-out"
                 );
-                // Spec 2026-10-10 W13: the rows are cleared, so no write can look missing any more.
+                // Spec 2026-10-10 W13: the rows are cleared, so no write can look missing any more. Best effort
+                // (§7.3). The warning names the step that failed, `path`, `read` or `write`, and never an error's
+                // text: a read error quotes a line of the file, and the list's lines are kept folders' paths (W10).
                 #[cfg(target_os = "macos")]
-                if let Err(error) =
-                    DesktopConfig::path().and_then(|path| sign_out::kept_record::clear_unfinished_at(&path))
+                if let Err(step) = DesktopConfig::path()
+                    .map_err(|_| "path".to_string())
+                    .and_then(|path| sign_out::kept_record::clear_unfinished_at(&path))
                 {
-                    tracing::warn!(error = %error, "could not clear the unfinished sign-out marker");
+                    tracing::warn!(step = %step, "could not clear the unfinished sign-out marker");
                 }
                 if let Err(error) = db.clear_account_data(owe_finder_removal) {
                     tracing::error!(error = %error, "sign-out stopped: the account rows could not be cleared");
@@ -24883,6 +24886,15 @@ mod account_binding_tests {
         assert!(!finder_removal_owed_in(dir.path()));
     }
 
+    /// `purge` with the app's `desktop.toml` in a directory of its own. On a Mac a sign-out purge that completes clears
+    /// the unfinished sign-out marker in the file `DesktopConfig::path()` names (spec 2026-10-10 W13): a test that calls
+    /// the purge itself, outside the sign-out tests' purge gate, must never clear it in the sandbox those tests share.
+    #[cfg(not(target_os = "windows"))]
+    fn with_own_config<R>(purge: impl FnOnce() -> R) -> R {
+        let config = tempfile::tempdir().unwrap();
+        crate::config::CONFIG_DIR_OVERRIDE.sync_scope(config.path().to_path_buf(), purge)
+    }
+
     /// The sign-out purge, behaviourally (macOS and Linux), through the real function `clear_session_impl` calls and
     /// a state dir of its own: it clears every account row and the owner, records a removal debt only when the
     /// sign-out's Finder removal was not confirmed, and a failure of any step stops it with the sign-out sentence.
@@ -24896,7 +24908,7 @@ mod account_binding_tests {
                 .execute("INSERT INTO sync_state(key, value) VALUES ('cursor', '9')", [])
                 .unwrap();
             assert_eq!(
-                purge_local_data_for_sign_out(Ok(local.dir.path().to_path_buf()), None, owe, None),
+                with_own_config(|| purge_local_data_for_sign_out(Ok(local.dir.path().to_path_buf()), None, owe, None)),
                 Ok(())
             );
             assert!(!local.data.db.has_account_data().unwrap(), "no account row survives");
@@ -26046,12 +26058,12 @@ mod account_binding_tests {
             // `a_failed_sign_out_purge_stops_the_sign_out_on_macos_and_linux`).
             #[cfg(not(target_os = "windows"))]
             assert_eq!(
-                purge_local_data_for_sign_out(
+                with_own_config(|| purge_local_data_for_sign_out(
                     Ok(local.dir.path().to_path_buf()),
                     None,
                     cfg!(target_os = "macos") && owe_after_sign_out,
                     None
-                ),
+                )),
                 Ok(())
             );
             // Windows signs out through `windows_cf::signout::purge`, which refuses while a change is queued (so the
@@ -26093,7 +26105,7 @@ mod account_binding_tests {
     fn a_registered_domain_is_no_longer_known_gone_so_a_later_first_start_owes_a_check() {
         let local = local_data_of(Some(alice()));
         assert_eq!(
-            purge_local_data_for_sign_out(Ok(local.dir.path().to_path_buf()), None, false, None),
+            with_own_config(|| purge_local_data_for_sign_out(Ok(local.dir.path().to_path_buf()), None, false, None)),
             Ok(())
         );
         assert!(
@@ -26165,7 +26177,7 @@ mod account_binding_tests {
         crate::state_db::StateDb::open(state_dir.path().join("state.db")).unwrap();
         // The function `clear_session_impl` calls, which reaches `purge_local_state_files`.
         assert_eq!(
-            purge_local_data_for_sign_out(Ok(state_dir.path().to_path_buf()), None, false, None),
+            with_own_config(|| purge_local_data_for_sign_out(Ok(state_dir.path().to_path_buf()), None, false, None)),
             Ok(())
         );
         let left: Vec<&PathBuf> = orphans.iter().filter(|orphan| orphan.exists()).collect();
@@ -32738,6 +32750,7 @@ mod sign_out_keep_tests {
     use super::*;
     use crate::config::RealConfigFs;
     use crate::engine_bridge::FinderStagingBases;
+    use crate::sign_out::copy::{E2_UNSENT_COPY_FAILED, UNSENT_COPY_FAILED_CODE, coded};
     use crate::sign_out::keep::{Acknowledge, KeepInputs, KeptSet, keep_unsent};
     use crate::sign_out::kept_names::{APP_BUNDLE_ID, kept_root};
     use crate::sign_out::kept_record::{saved_kept_unsent_at, unfinished_at};
@@ -32780,22 +32793,62 @@ mod sign_out_keep_tests {
             staged
         }
         fn keep(&self) -> KeptSet {
+            self.keep_into(&self.config())
+        }
+        /// The keep step, recording the folder in `config`.
+        fn keep_into(&self, config: &Path) -> KeptSet {
             let root = self.dir.path().join("Documents").join("Changes not sent");
-            let config = self.config();
             keep_unsent(KeepInputs {
                 db: &self.db,
                 acknowledge: Acknowledge::Nothing,
                 root: &root,
                 event_name: "event".into(),
-                config_path: &config,
+                config_path: config,
                 clone: &SystemClone,
                 config_fs: &RealConfigFs,
             })
             .unwrap()
         }
+        /// `body` with the app's `desktop.toml` (`DesktopConfig::path()`, the file the sign-out's purge clears the marker
+        /// in) in this fixture's own directory, never in the sandbox other tests share. `body` gets that file's path.
+        fn with_own_config<R>(&self, body: impl FnOnce(&Path) -> R) -> R {
+            let dir = self.dir.path().join("config");
+            std::fs::create_dir_all(&dir).unwrap();
+            crate::config::CONFIG_DIR_OVERRIDE.sync_scope(dir, || body(&DesktopConfig::path().unwrap()))
+        }
         fn queued(&self) -> usize {
             self.db.waiting_rows().unwrap().len()
         }
+    }
+
+    /// Everything `tracing` emits on this thread while `body` runs, as text.
+    fn capture_logs(body: impl FnOnce()) -> String {
+        #[derive(Clone)]
+        struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buffer = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer = Capture(buffer.clone());
+        // tracing caches each callsite's interest for the whole process. While only ONE dispatcher is alive,
+        // tracing-core takes that interest from the registering thread's own default, so a callsite first hit by another
+        // test thread, which has no subscriber, is cached as "never" and this capture misses its events. A second live
+        // dispatcher keeps registration on the all-dispatchers path.
+        let _second_dispatcher = tracing::Dispatch::new(tracing_subscriber::registry());
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .finish();
+        tracing::subscriber::with_default(subscriber, body);
+        let bytes = buffer.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
     }
 
     /// U12 on the release layout (spec §7.1, amended for `184ac962`).
@@ -32870,7 +32923,7 @@ mod sign_out_keep_tests {
         );
     }
 
-    /// U14.
+    /// U14: a waiting write, then an other change nobody acknowledged, each queued after the keep step.
     #[test]
     fn the_purge_guard_runs_before_any_file_is_deleted() {
         let f = PurgeFixture::new();
@@ -32880,7 +32933,11 @@ mod sign_out_keep_tests {
         let error = purge_local_state_files_as(&f.db, None, &[], None, Some(&kept))
             .err()
             .expect("the guard refuses");
-        assert!(error.starts_with("unsent_copy_failed: "), "{error}");
+        assert_eq!(
+            error,
+            coded(UNSENT_COPY_FAILED_CODE, E2_UNSENT_COPY_FAILED),
+            "the refusal is E2 with its code"
+        );
         assert!(late.exists() && a.exists(), "no staged copy was touched");
         let folder = kept.folder.clone().unwrap();
         assert!(folder.join("a.txt").exists(), "the kept folder stays");
@@ -32889,6 +32946,50 @@ mod sign_out_keep_tests {
             Some(folder.to_string_lossy().into_owned())
         );
         assert_eq!(f.queued(), 2, "no queue row is gone");
+
+        // A rename queued after the keep step: an other change, and nobody was asked about it.
+        let f = PurgeFixture::new();
+        let a = f.write("wa", "a", b"a");
+        let kept = f.keep();
+        f.db.hold_lock_for_test()
+            .execute(
+                "INSERT INTO operation_queue (op_id, kind, file_id, target_path) VALUES ('rn', 'rename_file', 'a', 'b.txt')",
+                [],
+            )
+            .unwrap();
+        let error = purge_local_state_files_as(&f.db, None, &[], None, Some(&kept))
+            .err()
+            .expect("the guard refuses an other change nobody acknowledged");
+        assert_eq!(error, coded(UNSENT_COPY_FAILED_CODE, E2_UNSENT_COPY_FAILED));
+        assert!(a.exists(), "no staged copy was touched");
+        assert!(kept.folder.unwrap().join("a.txt").exists(), "the kept folder stays");
+        assert_eq!(f.queued(), 2, "no queue row is gone");
+    }
+
+    /// Spec §2: an upload whose completion is recorded is not a waiting write. The keep step does not count it, so the
+    /// guard does not ask for it: it neither holds the purge nor survives it.
+    #[test]
+    fn a_completed_upload_does_not_hold_the_purge() {
+        let f = PurgeFixture::new();
+        let a = f.write("wa", "a", b"a");
+        let done = f.write("done", "d", b"done");
+        f.db.hold_lock_for_test()
+            .execute(
+                "INSERT INTO upload_resume (op_id, payload_path, payload_size, payload_mtime_ns, upload_session_id,
+                   server_file_id, object_version_id, chunk_size_bytes, chunk_count, completed_version)
+                 VALUES ('done', ?1, 4, 0, 's', 'd', 'v', 4, 1, 2)",
+                rusqlite::params![done.to_str().unwrap()],
+            )
+            .unwrap();
+        let kept = f.keep();
+        assert!(
+            !kept.keeps("done"),
+            "the keep step does not account for a completed upload"
+        );
+        purge_local_state_files_as(&f.db, None, &[], None, Some(&kept))
+            .expect("a completed upload does not hold the purge");
+        assert!(!a.exists() && !done.exists(), "both copies are removed");
+        assert_eq!(f.queued(), 0);
     }
 
     /// U39 (a) and (b); (c) is the async test below.
@@ -32918,6 +33019,11 @@ mod sign_out_keep_tests {
         assert!(a.exists() && b.exists(), "the waiting writes' copies go last");
         assert_eq!(f.queued(), 2);
         let folder = kept.folder.unwrap().to_string_lossy().into_owned();
+        assert_eq!(
+            saved_kept_unsent_at(&f.config()).unwrap().as_deref(),
+            Some(folder.as_str()),
+            "the kept folder is recorded"
+        );
         assert_eq!(
             unfinished_at(&f.config()).unwrap(),
             [folder],
@@ -32976,6 +33082,102 @@ mod sign_out_keep_tests {
                 assert!(cfg.kept_unsent_folder.is_some(), "the row stays until dismissed");
             })
             .await;
+    }
+
+    /// W13: only a purge that cleared the rows clears the unfinished list. A sign-out purge that stops, on a file it
+    /// cannot remove or at the guard, returns its own error and leaves the list and the row naming the kept folder.
+    /// (A purge that completes clears the list: `a_completed_purge_clears_the_unfinished_list`.)
+    #[test]
+    fn a_sign_out_purge_that_stops_leaves_the_unfinished_list() {
+        // A file that is not a waiting write's copy cannot be removed (a directory where a file is expected).
+        let f = PurgeFixture::new();
+        let a = f.write("wa", "a", b"a");
+        let stuck = f.staged("stuck");
+        std::fs::create_dir_all(stuck.join("inner")).unwrap();
+        f.db.hold_lock_for_test()
+            .execute(
+                "INSERT INTO staged_payloads (path, completed) VALUES (?1, 1)",
+                rusqlite::params![stuck.to_str().unwrap()],
+            )
+            .unwrap();
+        f.with_own_config(|config| {
+            let kept = f.keep_into(config);
+            let folder = kept.folder.clone().unwrap().to_string_lossy().into_owned();
+            let error = purge_local_data_for_sign_out(Ok(f.dir.path().to_path_buf()), None, false, Some(&kept))
+                .expect_err("the purge stops");
+            assert!(
+                error.starts_with(SIGN_OUT_PURGE_FAILED) && error.contains("could not be removed"),
+                "{error}"
+            );
+            assert!(a.exists(), "the waiting write's copy goes last, so it is still there");
+            assert_eq!(f.queued(), 1, "no row is cleared");
+            assert_eq!(
+                unfinished_at(config).unwrap(),
+                [folder.as_str()],
+                "a purge that failed leaves the list"
+            );
+            assert_eq!(saved_kept_unsent_at(config).unwrap(), Some(folder), "and the row");
+        });
+
+        // The guard refuses a waiting write queued after the keep step.
+        let f = PurgeFixture::new();
+        f.write("wa", "a", b"a");
+        f.with_own_config(|config| {
+            let kept = f.keep_into(config);
+            let folder = kept.folder.clone().unwrap().to_string_lossy().into_owned();
+            let late = f.write("late", "late", b"late");
+            let error = purge_local_data_for_sign_out(Ok(f.dir.path().to_path_buf()), None, false, Some(&kept))
+                .expect_err("the guard refuses");
+            assert_eq!(
+                error,
+                coded(UNSENT_COPY_FAILED_CODE, E2_UNSENT_COPY_FAILED),
+                "the refusal reaches the caller as it is, never wrapped"
+            );
+            assert!(late.exists(), "nothing was deleted");
+            assert_eq!(
+                unfinished_at(config).unwrap(),
+                [folder.as_str()],
+                "a refused purge leaves the list"
+            );
+            assert_eq!(saved_kept_unsent_at(config).unwrap(), Some(folder), "and the row");
+        });
+    }
+
+    /// W13 and W10: a marker clear that fails does not stop a purge that cleared the rows (spec §7.3: best effort), and
+    /// its warning names the step that failed, never the error: a read error quotes a line of the file, and the list's
+    /// lines are kept folders' paths.
+    #[test]
+    fn a_failed_marker_clear_is_logged_without_the_kept_folder() {
+        let f = PurgeFixture::new();
+        f.write("wa", "a", b"a");
+        f.with_own_config(|config| {
+            let kept = f.keep_into(config);
+            let folder = kept.folder.clone().unwrap().to_string_lossy().into_owned();
+            // A line the parser stops at, and it names the folder (a hand edit, say): the clear cannot read the file.
+            let mut text = std::fs::read_to_string(config).unwrap();
+            text.push_str(&format!("\nnote = \"{folder}\" and more\n"));
+            std::fs::write(config, text).unwrap();
+            let mut purged = None;
+            let logs = capture_logs(|| {
+                purged = Some(purge_local_data_for_sign_out(
+                    Ok(f.dir.path().to_path_buf()),
+                    None,
+                    false,
+                    Some(&kept),
+                ));
+            });
+            assert_eq!(purged, Some(Ok(())), "a clear that fails does not stop the sign-out");
+            assert_eq!(f.queued(), 0, "the rows are cleared");
+            let warning = logs
+                .lines()
+                .find(|line| line.contains("could not clear the unfinished sign-out marker"))
+                .unwrap_or_else(|| panic!("the failed clear is logged:\n{logs}"));
+            assert!(
+                !logs.contains(&folder),
+                "no log carries the kept folder's path:\n{logs}"
+            );
+            assert!(warning.contains("step=read"), "the warning names the step: {warning}");
+        });
     }
 
     /// U27, the purge half: the purge removes both staging roots' sources after keeping them.

@@ -4844,16 +4844,19 @@ impl StateDb {
         Ok(rows)
     }
 
-    /// The purge guard's ONE read (spec 2026-10-10 W6, §5.2 step 8): one transaction, before any file is touched.
+    /// The purge guard's ONE read (spec 2026-10-10 W6, §5.2 step 8): one transaction, before any file is touched. Each
+    /// op is placed by `sign_out::waiting::op_role`, as the keep step's read places it, so the two cannot disagree on a
+    /// kind.
     #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
     pub fn unkept_waiting_changes(&self, kept: &crate::sign_out::kept_set::KeptSet) -> Result<PurgeGuardRead> {
+        use crate::sign_out::waiting::{OpRole, op_role};
         let mut read = PurgeGuardRead::default();
         for row in self.waiting_rows()? {
-            match row.kind {
-                OperationKind::UploadFile | OperationKind::UploadVersion => {
-                    if row.completed {
-                        continue;
-                    }
+            match op_role(&row.kind) {
+                OpRole::Download => {}
+                // A recorded completion: the server has these bytes, so nothing waits (spec §2 "Waiting write").
+                OpRole::Upload if row.completed => {}
+                OpRole::Upload => {
                     if let Some(path) = &row.payload_path {
                         read.waiting_payloads.push(path.clone());
                     }
@@ -4861,8 +4864,7 @@ impl StateDb {
                         read.unkept.push(row.op_id);
                     }
                 }
-                OperationKind::HydrateFile | OperationKind::PinTree => {}
-                _ => {
+                OpRole::OtherChange => {
                     if !kept.others_acknowledged.contains(&row.op_id) {
                         read.unkept.push(row.op_id);
                     }

@@ -77,8 +77,7 @@ pub struct WaitingChanges {
 }
 
 /// What a queued op is to a sign-out (§2).
-#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 7
-enum OpRole {
+pub(crate) enum OpRole {
     /// A waiting write, unless its upload has a recorded completion.
     Upload,
     /// An other waiting change.
@@ -90,8 +89,9 @@ enum OpRole {
 /// Every kind is named, with no wildcard arm, so a kind added to `OperationKind` later does not compile until it is
 /// placed here, instead of being counted as nothing. A `kind` string the database holds but this build does not know
 /// never arrives as its own case: `OperationKind::from_str` reads it as `UploadFile`, so it is counted as a waiting write.
-#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 7
-fn op_role(kind: &OperationKind) -> OpRole {
+/// The count ([`WaitingChanges::classify`]) and the purge guard (`StateDb::unkept_waiting_changes`) both place ops
+/// here, so what the keep step keeps and what the guard asks for are the same ops.
+pub(crate) fn op_role(kind: &OperationKind) -> OpRole {
     match kind {
         OperationKind::UploadFile | OperationKind::UploadVersion => OpRole::Upload,
         OperationKind::CreateFolder
