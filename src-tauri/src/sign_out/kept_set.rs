@@ -17,7 +17,6 @@ pub struct KeptSet {
 
 impl KeptSet {
     /// Copied, covered, or a missing write the person was shown: the purge may delete it.
-    #[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 6
     pub fn keeps(&self, op_id: &str) -> bool {
         self.copied.contains(op_id) || self.covered.contains(op_id) || self.missing_acknowledged.contains(op_id)
     }

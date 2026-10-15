@@ -48,7 +48,6 @@ pub(crate) fn take_back_kept_unsent_at(path: &Path, folder: &str, previous: Opti
 }
 
 /// W13: a purge that cleared the rows clears the list (plain, not durable: a lost clear only repeats A3e once).
-#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 6
 pub(crate) fn clear_unfinished_at(path: &Path) -> Result<(), String> {
     DesktopConfig::update_at(path, |cfg| {
         let changed = !cfg.kept_unsent_unfinished.is_empty();

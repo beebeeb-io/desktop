@@ -3043,8 +3043,13 @@ async fn clear_session_impl(state: &AppState, forget_email: bool) -> Result<Sign
         } else {
             Some(SIGN_OUT_TEST_PURGE_GATE.lock().await)
         };
-        purge_local_data_for_sign_out(state_paths::beebeeb_state_dir(), cfg_sync_root.as_deref(), owe_removal)
-            .map_err(&kept_with)?;
+        purge_local_data_for_sign_out(
+            state_paths::beebeeb_state_dir(),
+            cfg_sync_root.as_deref(),
+            owe_removal,
+            None,
+        )
+        .map_err(&kept_with)?;
     }
 
     // (macOS: the Finder removal is the reconciler's, at the start of this function: spec 2026-10-06
@@ -3257,14 +3262,19 @@ async fn with_the_shared_state_dir<T>(body: impl std::future::Future<Output = T>
 /// owed before any engine starts. Any failure stops the sign-out: a purge that cannot run (state dir unresolved,
 /// database unopenable), one that fails (a file that cannot be removed), a failed clear. A state.db that does not
 /// exist yet is a fresh install: nothing to purge.
+///
+/// `kept` (macOS, spec 2026-10-10 §5.2 step 8): what the keep step kept. The purge refuses before it deletes anything
+/// unless every waiting change is in it, and that refusal (`unsent_copy_failed: …`) is returned as it is, so the caller
+/// can match its code. Once the rows are cleared, the unfinished sign-out marker is cleared too (W13).
 #[cfg(not(target_os = "windows"))]
 fn purge_local_data_for_sign_out(
     state_dir: Result<PathBuf, String>,
     sync_root: Option<&Path>,
     owe_finder_removal: bool,
+    kept: Option<&sign_out::kept_set::KeptSet>,
 ) -> Result<(), String> {
     match state_dir.and_then(|dir| state_db_from_state_dir(&dir)) {
-        Ok(Some(db)) => match purge_local_state_files(&db, sync_root) {
+        Ok(Some(db)) => match purge_local_state_files(&db, sync_root, kept) {
             Ok(summary) => {
                 tracing::info!(
                     queued_ops_purged = summary.queued_ops_purged,
@@ -3273,12 +3283,21 @@ fn purge_local_data_for_sign_out(
                     windows_placeholders_dehydrated = summary.windows_placeholders_dehydrated,
                     "purged operation queue and decrypted cache on sign-out"
                 );
+                // Spec 2026-10-10 W13: the rows are cleared, so no write can look missing any more.
+                #[cfg(target_os = "macos")]
+                if let Err(error) =
+                    DesktopConfig::path().and_then(|path| sign_out::kept_record::clear_unfinished_at(&path))
+                {
+                    tracing::warn!(error = %error, "could not clear the unfinished sign-out marker");
+                }
                 if let Err(error) = db.clear_account_data(owe_finder_removal) {
                     tracing::error!(error = %error, "sign-out stopped: the account rows could not be cleared");
                     return Err(format!("{SIGN_OUT_PURGE_FAILED} ({error})"));
                 }
                 Ok(())
             }
+            // The guard's refusal is E2 with its code, so the caller can match it (spec §11).
+            Err(error) if error.starts_with(&format!("{}: ", sign_out::copy::UNSENT_COPY_FAILED_CODE)) => Err(error),
             Err(error) => {
                 tracing::error!(error = %error, "sign-out stopped: the local data could not be purged");
                 Err(format!("{SIGN_OUT_PURGE_FAILED} ({error})"))
@@ -4129,8 +4148,9 @@ struct LocalStatePurgeSummary {
 fn purge_local_state_files(
     db: &state_db::StateDb,
     sync_root: Option<&std::path::Path>,
+    kept: Option<&sign_out::kept_set::KeptSet>,
 ) -> Result<LocalStatePurgeSummary, String> {
-    purge_local_state_files_in(db, sync_root, &production_staging_dirs())
+    purge_local_state_files_in(db, sync_root, &production_staging_dirs(), kept)
 }
 
 /// The directories whose plaintext copies the purge sweeps as a whole. A unit test never sweeps the shared
@@ -4230,13 +4250,16 @@ fn orphan_staged_files(staging_dirs: &[PathBuf], uid: Option<u32>) -> Vec<PathBu
 /// [`purge_local_state_files`] with the staging directories to sweep. In this order: delete the files the rows
 /// point at, and every orphan in the staging directories this user owns, each behind `is_disposable_cache_path`;
 /// if ANY removal fails (a missing file is fine) return an error and clear no row, so a retry finds everything and
-/// nothing is forgotten while a plaintext copy is still on disk; only then clear the rows.
+/// nothing is forgotten while a plaintext copy is still on disk; only then clear the rows. Given a `KeptSet` (a
+/// macOS sign-out), the guard of [`purge_local_state_files_with`] runs before all of it, and the waiting writes'
+/// staged copies are deleted last.
 fn purge_local_state_files_in(
     db: &state_db::StateDb,
     sync_root: Option<&std::path::Path>,
     staging_dirs: &[PathBuf],
+    kept: Option<&sign_out::kept_set::KeptSet>,
 ) -> Result<LocalStatePurgeSummary, String> {
-    purge_local_state_files_as(db, sync_root, staging_dirs, current_uid())
+    purge_local_state_files_as(db, sync_root, staging_dirs, current_uid(), kept)
 }
 
 /// [`purge_local_state_files_in`] as the user `uid` (a test pretends to be another user).
@@ -4245,7 +4268,46 @@ fn purge_local_state_files_as(
     sync_root: Option<&std::path::Path>,
     staging_dirs: &[PathBuf],
     uid: Option<u32>,
+    kept: Option<&sign_out::kept_set::KeptSet>,
 ) -> Result<LocalStatePurgeSummary, String> {
+    purge_local_state_files_with(db, sync_root, staging_dirs, uid, kept, &|path| {
+        std::fs::remove_file(path)
+    })
+}
+
+/// [`purge_local_state_files_as`] with the removal passed in (a test makes one removal fail). Spec 2026-10-10 §5.2
+/// step 8 and W13: given a `KeptSet`, the guard comes first and refuses with `unsent_copy_failed: …` before any path
+/// is collected or deleted, unless every waiting change is kept or acknowledged. Then every other file is removed, and
+/// only after all of them the waiting writes' staged copies.
+fn purge_local_state_files_with(
+    db: &state_db::StateDb,
+    sync_root: Option<&std::path::Path>,
+    staging_dirs: &[PathBuf],
+    uid: Option<u32>,
+    kept: Option<&sign_out::kept_set::KeptSet>,
+    remove: &dyn Fn(&std::path::Path) -> std::io::Result<()>,
+) -> Result<LocalStatePurgeSummary, String> {
+    // Spec 2026-10-10 §5.2 step 8: given a `KeptSet` (macOS), the guard is the FIRST statement: one read, and a
+    // refusal before any path is collected or deleted. Without one there is no guard, and no copy is held back.
+    let waiting_copies: std::collections::HashSet<PathBuf> = match kept {
+        Some(kept) => {
+            let guard = db
+                .unkept_waiting_changes(kept)
+                .map_err(|e| format!("check what the sign-out kept: {e}"))?;
+            if !guard.unkept.is_empty() {
+                tracing::error!(
+                    unkept = guard.unkept.len(),
+                    "sign-out stopped: a waiting change was not kept; nothing was deleted"
+                );
+                return Err(sign_out::copy::coded(
+                    sign_out::copy::UNSENT_COPY_FAILED_CODE,
+                    sign_out::copy::E2_UNSENT_COPY_FAILED,
+                ));
+            }
+            guard.waiting_payloads.into_iter().map(PathBuf::from).collect()
+        }
+        None => std::collections::HashSet::new(),
+    };
     let mut paths: Vec<PathBuf> = db
         .local_state_file_paths()
         .map_err(|e| format!("list the local files: {e}"))?
@@ -4258,33 +4320,16 @@ fn purge_local_state_files_as(
             .into_iter()
             .filter(|path| !owned.contains(path)),
     );
-
+    // W13: every other file first, the waiting writes' staged copies last, so a failure on any other file leaves every
+    // waiting write as it was.
+    let (waiting_last, others_first): (Vec<PathBuf>, Vec<PathBuf>) =
+        paths.drain(..).partition(|path| waiting_copies.contains(path));
     let mut files_removed = 0usize;
     let mut files_skipped = 0usize;
-    let mut failed = 0usize;
-    let mut first_failure: Option<std::io::ErrorKind> = None;
-    for path_buf in &paths {
-        if !is_disposable_cache_path(path_buf) {
-            files_skipped += 1;
-            tracing::warn!(path = %path_buf.display(), "purge skipped a path outside the known cache/staging roots");
-            continue;
-        }
-        match std::fs::remove_file(path_buf) {
-            Ok(()) => files_removed += 1,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                failed += 1;
-                first_failure.get_or_insert(error.kind());
-                tracing::warn!(path = %path_buf.display(), error = %error, "failed to remove a local file in the purge");
-            }
-        }
-    }
-    if failed > 0 {
-        // No path in the message: it reaches the sign-out error and the engine-start error.
-        return Err(format!(
-            "{failed} local file(s) could not be removed ({})",
-            first_failure.map_or_else(|| "unknown".to_string(), |kind| kind.to_string())
-        ));
+    for group in [others_first, waiting_last] {
+        let (removed, skipped) = remove_purge_paths(&group, remove)?;
+        files_removed += removed;
+        files_skipped += skipped;
     }
 
     let purge = db
@@ -4339,6 +4384,40 @@ fn purge_local_state_files_as(
         files_skipped,
         windows_placeholders_dehydrated,
     })
+}
+
+/// The purge's removal loop over one group: each path behind `is_disposable_cache_path`; a missing file is fine; any
+/// other failure returns an error with no path in it. `(removed, skipped)`.
+fn remove_purge_paths(
+    paths: &[PathBuf],
+    remove: &dyn Fn(&std::path::Path) -> std::io::Result<()>,
+) -> Result<(usize, usize), String> {
+    let (mut removed, mut skipped, mut failed) = (0usize, 0usize, 0usize);
+    let mut first_failure: Option<std::io::ErrorKind> = None;
+    for path in paths {
+        if !is_disposable_cache_path(path) {
+            skipped += 1;
+            tracing::warn!(path = %path.display(), "purge skipped a path outside the known cache/staging roots");
+            continue;
+        }
+        match remove(path) {
+            Ok(()) => removed += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                failed += 1;
+                first_failure.get_or_insert(error.kind());
+                tracing::warn!(path = %path.display(), error = %error, "failed to remove a local file in the purge");
+            }
+        }
+    }
+    if failed > 0 {
+        // No path in the message: it reaches the sign-out error and the engine-start error.
+        return Err(format!(
+            "{failed} local file(s) could not be removed ({})",
+            first_failure.map_or_else(|| "unknown".to_string(), |kind| kind.to_string())
+        ));
+    }
+    Ok((removed, skipped))
 }
 
 /// Resolve every `(file_id, server_relative_path)` candidate from
@@ -5946,7 +6025,7 @@ impl account_binding::LocalData for StateDbLocalData {
     /// The sign-out purge (its one deletion gate, `is_disposable_cache_path`, never reaches the lifecycle
     /// log directory), then every remaining row. An error from either means nothing may start.
     fn reset(&self) -> Result<(), String> {
-        let summary = purge_local_state_files_in(&self.db, self.sync_root.as_deref(), &self.staging_dirs)?;
+        let summary = purge_local_state_files_in(&self.db, self.sync_root.as_deref(), &self.staging_dirs, None)?;
         tracing::info!(
             queued_ops_purged = summary.queued_ops_purged,
             files_removed = summary.files_removed,
@@ -14790,7 +14869,7 @@ mod tests {
         })
         .unwrap();
 
-        let summary = purge_local_state_files(&db, None).expect("purge succeeds");
+        let summary = purge_local_state_files(&db, None, None).expect("purge succeeds");
 
         assert_eq!(summary.queued_ops_purged, 1);
         assert_eq!(
@@ -14846,7 +14925,7 @@ mod tests {
         db.set_owner(&crate::account_binding::Identity::new(Some("u-a"), None))
             .unwrap();
 
-        let Err(error) = super::purge_local_state_files_in(&db, None, &[]) else {
+        let Err(error) = super::purge_local_state_files_in(&db, None, &[], None) else {
             panic!("a file that cannot go fails the purge");
         };
         assert!(error.contains("could not be removed"), "{error}");
@@ -14865,7 +14944,7 @@ mod tests {
         );
 
         std::fs::remove_dir(&stuck).unwrap(); // the obstacle goes away
-        let summary = super::purge_local_state_files_in(&db, None, &[]).expect("the retry succeeds");
+        let summary = super::purge_local_state_files_in(&db, None, &[], None).expect("the retry succeeds");
         assert_eq!(summary.queued_ops_purged, 2);
         assert!(!removable.exists());
         assert!(db.list_due_operations(i64::MAX).unwrap().is_empty());
@@ -14889,13 +14968,14 @@ mod tests {
         std::fs::write(&outside, b"not in the staging dir").unwrap();
 
         let summary =
-            super::purge_local_state_files_in(&db, None, std::slice::from_ref(&staging)).expect("purge succeeds");
+            super::purge_local_state_files_in(&db, None, std::slice::from_ref(&staging), None).expect("purge succeeds");
 
         assert_eq!(summary.files_removed, 2, "both orphans are removed");
         assert!(!orphan.exists() && !deep.exists(), "no orphan survives");
         assert!(outside.exists(), "nothing outside the staging directory is touched");
         // A staging directory that does not exist is nothing to sweep, not an error.
-        super::purge_local_state_files_in(&db, None, &[root.join("missing")]).expect("a missing directory is fine");
+        super::purge_local_state_files_in(&db, None, &[root.join("missing")], None)
+            .expect("a missing directory is fine");
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -14953,11 +15033,11 @@ mod tests {
         std::fs::write(&foreign_file, b"not ours").unwrap();
         let me = std::fs::metadata(&staging).unwrap().uid();
 
-        let summary = super::purge_local_state_files_as(&db, None, std::slice::from_ref(&staging), Some(me + 1))
+        let summary = super::purge_local_state_files_as(&db, None, std::slice::from_ref(&staging), Some(me + 1), None)
             .expect("the purge succeeds");
         assert_eq!((summary.files_removed, summary.files_skipped), (0, 0));
         assert!(foreign_file.exists(), "a directory that is not ours is not swept");
-        let summary = super::purge_local_state_files_as(&db, None, std::slice::from_ref(&staging), Some(me))
+        let summary = super::purge_local_state_files_as(&db, None, std::slice::from_ref(&staging), Some(me), None)
             .expect("the purge succeeds");
         assert_eq!(summary.files_removed, 1, "ours is");
         assert!(!foreign_file.exists());
@@ -15004,7 +15084,7 @@ mod tests {
         db.mark_cached("file-b", outside_path.to_str().unwrap(), 12, 10)
             .unwrap();
 
-        let summary = purge_local_state_files(&db, None).expect("purge succeeds");
+        let summary = purge_local_state_files(&db, None, None).expect("purge succeeds");
 
         assert_eq!(summary.files_removed, 0);
         assert_eq!(summary.files_skipped, 1);
@@ -20373,7 +20453,7 @@ mod finder_setup_wiring_tests {
             updated_at: 100,
         })
         .unwrap();
-        let summary = super::purge_local_state_files(&db, None).expect("the purge runs");
+        let summary = super::purge_local_state_files(&db, None, None).expect("the purge runs");
         let survived = (log.exists(), rotated.exists(), ordinary.exists());
         std::fs::remove_dir_all(&root).ok();
         assert_eq!(
@@ -23849,14 +23929,30 @@ mod account_binding_tests {
             reset.contains("purge_local_state_files_in("),
             "the reset is the sign-out purge:\n{reset}"
         );
-        let purge = code_of(&production, "fn purge_local_state_files_as(");
-        let removals: Vec<usize> = purge.match_indices("remove_file(").map(|(at, _)| at).collect();
-        assert_eq!(removals.len(), 1, "one removal in the purge:\n{purge}");
+        // Task 1887: the purge's one removal is the `remove_file` its wrapper hands down, and it runs only in
+        // `remove_purge_paths`, right behind the gate.
+        let wrapper = code_of(&production, "fn purge_local_state_files_as(");
+        assert_eq!(
+            wrapper.matches("remove_file(").count(),
+            1,
+            "one removal in the purge:\n{wrapper}"
+        );
+        assert!(wrapper.contains("purge_local_state_files_with("), "{wrapper}");
+        let purge = code_of(&production, "fn purge_local_state_files_with(");
+        for needle in ["remove_file", "remove_dir", "remove("] {
+            assert!(
+                !purge.contains(needle),
+                "the purge removes only through `remove_purge_paths` ({needle}):\n{purge}"
+            );
+        }
+        let removal = code_of(&production, "fn remove_purge_paths(");
+        let removals: Vec<usize> = removal.match_indices("remove(").map(|(at, _)| at).collect();
+        assert_eq!(removals.len(), 1, "one removal in the purge:\n{removal}");
         assert!(
-            purge[..removals[0]]
+            removal[..removals[0]]
                 .rfind("is_disposable_cache_path(")
-                .is_some_and(|gate| purge[gate..removals[0]].lines().count() < 10),
-            "the gate runs right before the removal:\n{purge}"
+                .is_some_and(|gate| removal[gate..removals[0]].lines().count() < 10),
+            "the gate runs right before the removal:\n{removal}"
         );
     }
 
@@ -24800,7 +24896,7 @@ mod account_binding_tests {
                 .execute("INSERT INTO sync_state(key, value) VALUES ('cursor', '9')", [])
                 .unwrap();
             assert_eq!(
-                purge_local_data_for_sign_out(Ok(local.dir.path().to_path_buf()), None, owe),
+                purge_local_data_for_sign_out(Ok(local.dir.path().to_path_buf()), None, owe, None),
                 Ok(())
             );
             assert!(!local.data.db.has_account_data().unwrap(), "no account row survives");
@@ -24823,7 +24919,7 @@ mod account_binding_tests {
         let local = local_data_of(Some(alice()));
         std::fs::remove_file(&local.files[0]).unwrap();
         std::fs::create_dir(&local.files[0]).unwrap();
-        let error = purge_local_data_for_sign_out(Ok(local.dir.path().to_path_buf()), None, false).unwrap_err();
+        let error = purge_local_data_for_sign_out(Ok(local.dir.path().to_path_buf()), None, false, None).unwrap_err();
         assert!(
             error.starts_with(SIGN_OUT_PURGE_FAILED) && error.contains("could not be removed"),
             "{error}"
@@ -24838,19 +24934,19 @@ mod account_binding_tests {
         )
         .unwrap();
         assert!(
-            purge_local_data_for_sign_out(Ok(broken.path().to_path_buf()), None, false)
+            purge_local_data_for_sign_out(Ok(broken.path().to_path_buf()), None, false, None)
                 .unwrap_err()
                 .starts_with(SIGN_OUT_PURGE_FAILED)
         );
         assert!(
-            purge_local_data_for_sign_out(Err("not initialised".into()), None, false)
+            purge_local_data_for_sign_out(Err("not initialised".into()), None, false, None)
                 .unwrap_err()
                 .starts_with(SIGN_OUT_PURGE_FAILED)
         );
         // No database yet is a fresh install: nothing to purge.
         let fresh = tempfile::tempdir().unwrap();
         assert_eq!(
-            purge_local_data_for_sign_out(Ok(fresh.path().to_path_buf()), None, true),
+            purge_local_data_for_sign_out(Ok(fresh.path().to_path_buf()), None, true, None),
             Ok(())
         );
     }
@@ -25953,7 +26049,8 @@ mod account_binding_tests {
                 purge_local_data_for_sign_out(
                     Ok(local.dir.path().to_path_buf()),
                     None,
-                    cfg!(target_os = "macos") && owe_after_sign_out
+                    cfg!(target_os = "macos") && owe_after_sign_out,
+                    None
                 ),
                 Ok(())
             );
@@ -25996,7 +26093,7 @@ mod account_binding_tests {
     fn a_registered_domain_is_no_longer_known_gone_so_a_later_first_start_owes_a_check() {
         let local = local_data_of(Some(alice()));
         assert_eq!(
-            purge_local_data_for_sign_out(Ok(local.dir.path().to_path_buf()), None, false),
+            purge_local_data_for_sign_out(Ok(local.dir.path().to_path_buf()), None, false, None),
             Ok(())
         );
         assert!(
@@ -26068,7 +26165,7 @@ mod account_binding_tests {
         crate::state_db::StateDb::open(state_dir.path().join("state.db")).unwrap();
         // The function `clear_session_impl` calls, which reaches `purge_local_state_files`.
         assert_eq!(
-            purge_local_data_for_sign_out(Ok(state_dir.path().to_path_buf()), None, false),
+            purge_local_data_for_sign_out(Ok(state_dir.path().to_path_buf()), None, false, None),
             Ok(())
         );
         let left: Vec<&PathBuf> = orphans.iter().filter(|orphan| orphan.exists()).collect();
@@ -26211,11 +26308,23 @@ mod account_binding_tests {
             purge.contains("db.clear_account_data(owe_finder_removal)"),
             "a sign-out leaves no account row and no owner"
         );
-        assert!(!purge.contains("tracing::warn!"), "no warn-and-continue left");
+        // Task 1887 (spec 2026-10-10 §7.3): the one warning is the unfinished-marker clear's, a best-effort step after
+        // the rows are cleared. A purge or a clear that fails still stops the sign-out.
+        assert_eq!(
+            purge.matches("tracing::warn!").count(),
+            1,
+            "no warn-and-continue left but the marker clear's:\n{purge}"
+        );
+        assert!(
+            crate::source_pin::squeeze(purge).contains(&crate::source_pin::squeeze(
+                "sign_out::kept_record::clear_unfinished_at(&path)) { tracing::warn!("
+            )),
+            "the one warning is the marker clear's:\n{purge}"
+        );
         let clear = body_between(&production, "async fn clear_session_impl(", "\n}\n");
         assert!(
             crate::source_pin::squeeze(clear).contains(&crate::source_pin::squeeze(
-                "purge_local_data_for_sign_out(state_paths::beebeeb_state_dir(), cfg_sync_root.as_deref(), owe_removal).map_err(&kept_with)?;"
+                "purge_local_data_for_sign_out(state_paths::beebeeb_state_dir(), cfg_sync_root.as_deref(), owe_removal, None).map_err(&kept_with)?;"
             )),
             "sign-out returns the purge's error:\n{clear}"
         );
@@ -27726,9 +27835,7 @@ mod reauth_tests {
             "the gate is compiled into test builds only"
         );
         assert!(
-            gate < clear
-                .find("purge_local_data_for_sign_out(state_paths::")
-                .expect("the purge"),
+            gate < clear.find("purge_local_data_for_sign_out(").expect("the purge"),
             "the gate is taken before the purge"
         );
         // The one test that seeds the shared database itself works under the gate, from its first write to its last check.
@@ -31489,7 +31596,7 @@ mod finder_removal_wiring_tests {
         for failure in [
             "Some(take_slot_and_stop_engine_for_sign_out(&acct).await.map_err(&kept_with)?)",
             "let engine_slot = take_slot_and_stop_engine_for_sign_out(&acct).await.map_err(&kept_with)?;",
-            "purge_local_data_for_sign_out(state_paths::beebeeb_state_dir(), cfg_sync_root.as_deref(), owe_removal).map_err(&kept_with)?;",
+            "purge_local_data_for_sign_out(state_paths::beebeeb_state_dir(), cfg_sync_root.as_deref(), owe_removal, None).map_err(&kept_with)?;",
             "clear_session_holding_slot(&acct, &engine_slot, account::SessionTransition::SignOut).map_err(&kept_with)?;",
             "finish_sign_out_turn(&acct, &engine_slot, true).map_err(&kept_with)?;",
             "finish_sign_out_turn(&acct, &engine_slot, false).map_err(&kept_with)?;",
@@ -32629,9 +32736,67 @@ mod config_write_pin_tests {
 #[cfg(all(test, target_os = "macos"))]
 mod sign_out_keep_tests {
     use super::*;
+    use crate::config::RealConfigFs;
     use crate::engine_bridge::FinderStagingBases;
+    use crate::sign_out::keep::{Acknowledge, KeepInputs, KeptSet, keep_unsent};
     use crate::sign_out::kept_names::{APP_BUNDLE_ID, kept_root};
+    use crate::sign_out::kept_record::{saved_kept_unsent_at, unfinished_at};
+    use crate::sign_out::kept_writer::SystemClone;
     use std::path::Path;
+
+    /// A state dir with `state.db` where the sign-out's purge looks for it, and a config file of its own.
+    struct PurgeFixture {
+        dir: tempfile::TempDir,
+        db: state_db::StateDb,
+    }
+
+    impl PurgeFixture {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let db = state_db::StateDb::open(state_paths::state_db_path_from_state_dir(dir.path())).unwrap();
+            Self { dir, db }
+        }
+        fn config(&self) -> PathBuf {
+            self.dir.path().join("desktop.toml")
+        }
+        fn staged(&self, name: &str) -> PathBuf {
+            self.dir.path().join("staging").join(name)
+        }
+        fn write(&self, op_id: &str, file_id: &str, bytes: &[u8]) -> PathBuf {
+            let staged = self.staged(op_id);
+            std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
+            std::fs::write(&staged, bytes).unwrap();
+            self.db
+                .hold_lock_for_test()
+                .execute_batch(&format!(
+                    "INSERT OR IGNORE INTO files (file_id, path) VALUES ('{file_id}', '{file_id}.txt');
+                     INSERT INTO operation_queue (op_id, kind, file_id, payload_path, write_id, write_origin)
+                     VALUES ('{op_id}', 'upload_version', '{file_id}', '{}', '{op_id}', 'minted');
+                     INSERT INTO staged_payloads (path, completed) VALUES ('{}', 0);",
+                    staged.display(),
+                    staged.display()
+                ))
+                .unwrap();
+            staged
+        }
+        fn keep(&self) -> KeptSet {
+            let root = self.dir.path().join("Documents").join("Changes not sent");
+            let config = self.config();
+            keep_unsent(KeepInputs {
+                db: &self.db,
+                acknowledge: Acknowledge::Nothing,
+                root: &root,
+                event_name: "event".into(),
+                config_path: &config,
+                clone: &SystemClone,
+                config_fs: &RealConfigFs,
+            })
+            .unwrap()
+        }
+        fn queued(&self) -> usize {
+            self.db.waiting_rows().unwrap().len()
+        }
+    }
 
     /// U12 on the release layout (spec §7.1, amended for `184ac962`).
     #[test]
@@ -32703,5 +32868,137 @@ mod sign_out_keep_tests {
              &engine_bridge::FinderStagingBases::current())",
             "the wrapper is one call to its core and nothing else: {wrapper}"
         );
+    }
+
+    /// U14.
+    #[test]
+    fn the_purge_guard_runs_before_any_file_is_deleted() {
+        let f = PurgeFixture::new();
+        let a = f.write("wa", "a", b"a");
+        let kept = f.keep();
+        let late = f.write("late", "late", b"late"); // the test seam: a waiting write after the keep step
+        let error = purge_local_state_files_as(&f.db, None, &[], None, Some(&kept))
+            .err()
+            .expect("the guard refuses");
+        assert!(error.starts_with("unsent_copy_failed: "), "{error}");
+        assert!(late.exists() && a.exists(), "no staged copy was touched");
+        let folder = kept.folder.clone().unwrap();
+        assert!(folder.join("a.txt").exists(), "the kept folder stays");
+        assert_eq!(
+            saved_kept_unsent_at(&f.config()).unwrap(),
+            Some(folder.to_string_lossy().into_owned())
+        );
+        assert_eq!(f.queued(), 2, "no queue row is gone");
+    }
+
+    /// U39 (a) and (b); (c) is the async test below.
+    #[test]
+    fn a_purge_failure_after_the_keep_step_spares_waiting_copies_and_is_named_next_time() {
+        // (a) A removal fails on an orphan: every waiting copy is still there.
+        let f = PurgeFixture::new();
+        let a = f.write("wa", "a", b"a");
+        let b = f.write("wb", "b", b"b");
+        let orphan = f.staged("orphan");
+        std::fs::write(&orphan, b"orphan").unwrap();
+        f.db.hold_lock_for_test()
+            .execute(
+                "INSERT INTO staged_payloads (path, completed) VALUES (?1, 1)",
+                rusqlite::params![orphan.to_str().unwrap()],
+            )
+            .unwrap();
+        let kept = f.keep();
+        let fail_on_orphan = |path: &Path| {
+            if path == orphan {
+                Err(std::io::Error::other("injected"))
+            } else {
+                std::fs::remove_file(path)
+            }
+        };
+        assert!(purge_local_state_files_with(&f.db, None, &[], None, Some(&kept), &fail_on_orphan).is_err());
+        assert!(a.exists() && b.exists(), "the waiting writes' copies go last");
+        assert_eq!(f.queued(), 2);
+        let folder = kept.folder.unwrap().to_string_lossy().into_owned();
+        assert_eq!(
+            unfinished_at(&f.config()).unwrap(),
+            [folder],
+            "saved by the keep step, before the purge"
+        );
+
+        // (b) A removal fails on the second waiting copy: the first is gone, and the next count shows it missing.
+        let f = PurgeFixture::new();
+        let a = f.write("wa", "a", b"a");
+        let b = f.write("wb", "b", b"b");
+        let kept = f.keep();
+        let fail_on_b = |path: &Path| {
+            if path == b {
+                Err(std::io::Error::other("injected"))
+            } else {
+                std::fs::remove_file(path)
+            }
+        };
+        assert!(purge_local_state_files_with(&f.db, None, &[], None, Some(&kept), &fail_on_b).is_err());
+        assert!(!a.exists() && b.exists());
+        let counts = crate::sign_out::waiting::WaitingChanges::read(&f.db).unwrap().counts();
+        assert_eq!(counts.missing_files, 1);
+        assert_eq!(unfinished_at(&f.config()).unwrap().len(), 1);
+    }
+
+    /// U39 (c): a later sign-out that completes clears the list and never touches 1882's key.
+    #[tokio::test]
+    async fn a_completed_purge_clears_the_unfinished_list() {
+        let f = PurgeFixture::new();
+        f.write("wa", "a", b"a");
+        let config_dir = f.dir.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        crate::config::CONFIG_DIR_OVERRIDE
+            .scope(config_dir, async {
+                let config = DesktopConfig::path().unwrap();
+                crate::finder_removal::remember_kept_folder_at(&config, "/macos/kept").unwrap();
+                let root = f.dir.path().join("Documents").join("Changes not sent");
+                let kept = keep_unsent(KeepInputs {
+                    db: &f.db,
+                    acknowledge: Acknowledge::Nothing,
+                    root: &root,
+                    event_name: "event".into(),
+                    config_path: &config,
+                    clone: &SystemClone,
+                    config_fs: &RealConfigFs,
+                })
+                .unwrap();
+                assert_eq!(unfinished_at(&config).unwrap().len(), 1);
+                purge_local_data_for_sign_out(Ok(f.dir.path().to_path_buf()), None, false, Some(&kept)).unwrap();
+                let cfg = DesktopConfig::load_from(&config).unwrap();
+                assert!(
+                    cfg.kept_unsent_unfinished.is_empty(),
+                    "the rows are cleared, so nothing can look missing"
+                );
+                assert_eq!(cfg.kept_unsynced_folder.as_deref(), Some("/macos/kept"));
+                assert!(cfg.kept_unsent_folder.is_some(), "the row stays until dismissed");
+            })
+            .await;
+    }
+
+    /// U27, the purge half: the purge removes both staging roots' sources after keeping them.
+    #[test]
+    fn the_purge_removes_sources_from_every_staging_root() {
+        let f = PurgeFixture::new();
+        let caches = f.dir.path().join("Library/Caches/beebeeb/finder-writes/x");
+        let support = f.dir.path().join("Library/Application Support/beebeeb/finder-writes/y");
+        for path in [&caches, &support] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"bytes").unwrap();
+        }
+        f.db.hold_lock_for_test()
+            .execute_batch(&format!(
+                "INSERT INTO operation_queue (op_id, kind, file_id, payload_path, write_id, write_origin) VALUES
+                   ('ox', 'upload_version', 'x', '{}', 'ox', 'minted'), ('oy', 'upload_version', 'y', '{}', 'oy', 'minted');",
+                caches.display(),
+                support.display()
+            ))
+            .unwrap();
+        let kept = f.keep();
+        purge_local_state_files_as(&f.db, None, &[], None, Some(&kept)).unwrap();
+        assert!(!caches.exists() && !support.exists());
+        assert_eq!(f.queued(), 0);
     }
 }

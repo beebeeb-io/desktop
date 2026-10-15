@@ -871,7 +871,6 @@ pub struct ItemPresentation {
 /// One queued operation as a sign-out reads it (spec 2026-10-10 §2, W2): every op but a hydrate or a
 /// pin, with its file's path and whether its upload has a recorded completion.
 #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
-#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 7
 #[derive(Debug, Clone, PartialEq)]
 pub struct WaitingRow {
     pub op_id: String,
@@ -887,6 +886,15 @@ pub struct WaitingRow {
     pub paused: bool,
     /// `upload_resume.completed_version` is set: the server has these bytes (§8 item 3).
     pub completed: bool,
+}
+
+/// Spec 2026-10-10 §5.2 step 8: what the purge guard read. `unkept`: waiting changes the keep step did not keep or
+/// acknowledge (the purge refuses). `waiting_payloads`: every waiting write's staged copy, deleted last (W13).
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PurgeGuardRead {
+    pub unkept: Vec<String>,
+    pub waiting_payloads: Vec<String>,
 }
 
 /// [`StateDb::upsert_file`] on an open connection or transaction.
@@ -4802,7 +4810,6 @@ impl StateDb {
     /// Spec 2026-10-10 W2: the queue a sign-out counts, in ONE read (one mutex hold, one transaction), in queue
     /// order. Hydrates and pins are downloads, never counted.
     #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
-    #[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 7
     pub fn waiting_rows(&self) -> Result<Vec<WaitingRow>> {
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction()?;
@@ -4835,6 +4842,34 @@ impl StateDb {
         };
         tx.commit()?;
         Ok(rows)
+    }
+
+    /// The purge guard's ONE read (spec 2026-10-10 W6, §5.2 step 8): one transaction, before any file is touched.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn unkept_waiting_changes(&self, kept: &crate::sign_out::kept_set::KeptSet) -> Result<PurgeGuardRead> {
+        let mut read = PurgeGuardRead::default();
+        for row in self.waiting_rows()? {
+            match row.kind {
+                OperationKind::UploadFile | OperationKind::UploadVersion => {
+                    if row.completed {
+                        continue;
+                    }
+                    if let Some(path) = &row.payload_path {
+                        read.waiting_payloads.push(path.clone());
+                    }
+                    if !kept.keeps(&row.op_id) {
+                        read.unkept.push(row.op_id);
+                    }
+                }
+                OperationKind::HydrateFile | OperationKind::PinTree => {}
+                _ => {
+                    if !kept.others_acknowledged.contains(&row.op_id) {
+                        read.unkept.push(row.op_id);
+                    }
+                }
+            }
+        }
+        Ok(read)
     }
 
     /// R10: does anything of an account live here, apart from the owner record itself?
