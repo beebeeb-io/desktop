@@ -11,4 +11,12 @@ pub(crate) mod kept_record;
 pub(crate) mod kept_set;
 #[cfg(target_os = "macos")]
 pub(crate) mod kept_writer;
+pub(crate) mod snapshot;
 pub(crate) mod waiting;
+
+/// The sign-out flow's state in `AppState` (spec 2026-10-10 §5.1). The send phase, the late results and the flow
+/// request join it later.
+#[derive(Default)]
+pub(crate) struct SignOutState {
+    pub snapshots: std::sync::Arc<snapshot::SnapshotStore>,
+}

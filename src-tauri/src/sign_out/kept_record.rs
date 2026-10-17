@@ -80,7 +80,6 @@ pub(crate) fn saved_kept_unsent_at(path: &Path) -> Result<Option<String>, String
     Ok(DesktopConfig::load_from(path)?.kept_unsent_folder)
 }
 
-#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 7
 pub(crate) fn unfinished_at(path: &Path) -> Result<Vec<String>, String> {
     Ok(DesktopConfig::load_from(path)?.kept_unsent_unfinished)
 }

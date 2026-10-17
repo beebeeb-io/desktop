@@ -23,7 +23,6 @@ impl KeptSet {
 }
 
 /// What the keep step may let go without a copy (W6, W7, W12).
-#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 7
 #[derive(Debug, Clone, Copy)]
 pub enum Acknowledge<'a> {
     /// The ask snapshot the gate accepted: its other changes and its missing writes.

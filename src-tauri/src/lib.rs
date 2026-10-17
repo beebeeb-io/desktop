@@ -273,6 +273,8 @@ pub struct AppState {
     /// The macOS Finder reconciler (spec 2026-10-06). Set once in `setup()` on macOS; empty on
     /// Windows/Linux and in tests that install none.
     pub finder_setup: std::sync::OnceLock<finder_setup::driver::FinderSetupHandle>,
+    /// The sign-out flow's state (spec 2026-10-10 §5.1): the newest ask snapshot, which the gate compares with.
+    pub(crate) sign_out: sign_out::SignOutState,
 }
 
 impl AppState {
@@ -316,6 +318,7 @@ impl Default for AppState {
             pending_2fa: Mutex::new(None),
             menu_zoom_scale: Mutex::new(1.0),
             finder_setup: std::sync::OnceLock::new(),
+            sign_out: sign_out::SignOutState::default(),
         }
     }
 }
@@ -2749,6 +2752,13 @@ struct SessionActionOutcome {
     warning: Option<ActionWarning>,
 }
 
+/// Spec 2026-10-10 §5.2 step 10: the folder the keep step made and its file count. Never logged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct KeptUnsent {
+    folder: String,
+    files: usize,
+}
+
 /// What [`clear_session_impl`] did, and what of it could not be confirmed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SignedOut {
@@ -2758,6 +2768,8 @@ struct SignedOut {
     /// sign-out removed the Finder location. Shown to the person in the app's alert
     /// (`show_preserved_files_alert`), never logged.
     preserved_location: Option<String>,
+    /// Task 1887: the folder the sign-out's keep step copied the waiting Finder saves into (macOS). Never logged.
+    kept_unsent: Option<KeptUnsent>,
 }
 
 #[cfg(test)]
@@ -2768,6 +2780,7 @@ impl SignedOut {
             outcome,
             warning: None,
             preserved_location: None,
+            kept_unsent: None,
         }
     }
 }
@@ -2780,6 +2793,8 @@ struct SignOutFailure {
     message: String,
     /// The folder macOS kept, when the failure came after the removal. Never logged.
     preserved_location: Option<String>,
+    /// Task 1887: the folder the keep step made, when the failure came after the keep step. Never logged.
+    kept_unsent: Option<KeptUnsent>,
 }
 
 impl From<String> for SignOutFailure {
@@ -2787,6 +2802,7 @@ impl From<String> for SignOutFailure {
         Self {
             message,
             preserved_location: None,
+            kept_unsent: None,
         }
     }
 }
@@ -2821,11 +2837,20 @@ const UNCONFIRMED_ENGINE_STOP_ERROR: &str = "Could not stop the sync engine. Ple
 ///
 /// Shared by the WebView IPC command and the native menu "Sign out" item so
 /// both routes have the exact same security side-effects.
-async fn clear_session_impl(state: &AppState, forget_email: bool) -> Result<SignedOut, SignOutFailure> {
+async fn clear_session_impl(
+    state: &AppState,
+    forget_email: bool,
+    keep_unsent: Option<&str>,
+) -> Result<SignedOut, SignOutFailure> {
     #[cfg(target_os = "windows")]
     let _transition = SESSION_TRANSITION.lock().await;
     #[cfg(target_os = "windows")]
     let mut _auth_reopen = None;
+    // Spec 2026-10-10 W5: the gate runs first, before anything changes. A refusal changes nothing.
+    #[cfg(target_os = "macos")]
+    let accepted = gate_sign_out(state, keep_unsent)?;
+    #[cfg(not(target_os = "macos"))]
+    let _ = keep_unsent;
     let acct = state.active_account()?;
     // An account switch (spec §5.6) leaves no account email behind, or it stops: the prefill is forgotten before
     // anything is torn down, and it is never saved again below.
@@ -2855,6 +2880,7 @@ async fn clear_session_impl(state: &AppState, forget_email: bool) -> Result<Sign
     let kept_with = |message: String| SignOutFailure {
         message,
         preserved_location: preserved_location.clone(),
+        kept_unsent: None,
     };
     // What the result says when the sign-out happens: a removal the reconciler did not confirm (FB-24).
     #[cfg(target_os = "macos")]
@@ -2944,6 +2970,28 @@ async fn clear_session_impl(state: &AppState, forget_email: bool) -> Result<Sign
         }
         Some(engine_slot)
     };
+    // Spec 2026-10-10 §5.2 step 7 (W6): after the confirmed stop of either arm above, before the purge. Nothing between
+    // here and the purge deletes a file, writes the queue, clears a session or starts an engine (U10).
+    #[cfg(test)]
+    sign_out_seam("before_keep").map_err(&kept_with)?;
+    #[cfg(target_os = "macos")]
+    let kept = keep_for_sign_out(accepted.as_ref()).map_err(&kept_with)?;
+    #[cfg(not(target_os = "macos"))]
+    let kept: Option<sign_out::kept_set::KeptSet> = None;
+    let kept_unsent = kept.as_ref().and_then(|kept| {
+        kept.folder.as_ref().map(|folder| KeptUnsent {
+            folder: folder.to_string_lossy().into_owned(),
+            files: kept.files,
+        })
+    });
+    // §5.2 step 10: from here on every failure carries our folder too.
+    let kept_with = |message: String| SignOutFailure {
+        message,
+        preserved_location: preserved_location.clone(),
+        kept_unsent: kept_unsent.clone(),
+    };
+    #[cfg(test)]
+    sign_out_seam("after_keep").map_err(&kept_with)?;
 
     #[cfg(target_os = "windows")]
     {
@@ -3047,9 +3095,11 @@ async fn clear_session_impl(state: &AppState, forget_email: bool) -> Result<Sign
             state_paths::beebeeb_state_dir(),
             cfg_sync_root.as_deref(),
             owe_removal,
-            None,
+            kept.as_ref(),
         )
         .map_err(&kept_with)?;
+        #[cfg(test)]
+        sign_out_seam("after_purge").map_err(&kept_with)?;
     }
 
     // (macOS: the Finder removal is the reconciler's, at the start of this function: spec 2026-10-06
@@ -3107,10 +3157,12 @@ async fn clear_session_impl(state: &AppState, forget_email: bool) -> Result<Sign
         }
         set_auth_present(state, false);
         set_auth_email(state, None);
+        state.sign_out.snapshots.clear();
         return Ok(SignedOut {
             outcome: SignOutOutcome::NotSignedIn,
             warning: removal_warning,
             preserved_location,
+            kept_unsent: kept_unsent.clone(),
         });
     }
     // macOS/Linux: the Keychain clear and its check in the sign-out's last turn, which moves the generation on after them.
@@ -3127,10 +3179,12 @@ async fn clear_session_impl(state: &AppState, forget_email: bool) -> Result<Sign
     lifecycle_log::event(lifecycle_log::LifecycleEvent::SignedOut);
     // Everything this sign-out can clear is cleared, so it happened; a removal from Finder it could not confirm is a
     // warning on that success, not an error (FB-24; lead rulings T8-⚠lock 1 and T7-⚠2 5).
+    state.sign_out.snapshots.clear();
     Ok(SignedOut {
         outcome: SignOutOutcome::Completed,
         warning: removal_warning,
         preserved_location,
+        kept_unsent: kept_unsent.clone(),
     })
 }
 
@@ -3315,10 +3369,144 @@ fn purge_local_data_for_sign_out(
     }
 }
 
+/// Spec 2026-10-10 §5.1 step 1 without the send conditions (the send phase adds them): one read; the earlier folders
+/// only when the ask shows a missing write. A failed read is E3, never a 0.
+#[cfg(target_os = "macos")]
+#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 11
+fn count_ask(owner: &str) -> Result<sign_out::snapshot::AskSnapshot, String> {
+    let e3 = || {
+        sign_out::copy::coded(
+            sign_out::copy::UNSENT_COUNT_FAILED_CODE,
+            sign_out::copy::E3_UNSENT_COUNT_FAILED,
+        )
+    };
+    let waiting = read_waiting_changes().map_err(|_| e3())?;
+    let earlier = if waiting.counts().missing_files > 0 {
+        DesktopConfig::path()
+            .and_then(|path| sign_out::kept_record::unfinished_at(&path))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    Ok(sign_out::snapshot::AskSnapshot::of(&waiting, owner, earlier))
+}
+
+/// The queue as the sign-out counts it, from the app's state dir. No `state.db` yet: nothing waits.
+#[cfg(target_os = "macos")]
+fn read_waiting_changes() -> Result<sign_out::waiting::WaitingChanges, String> {
+    match state_db_from_state_dir(&state_paths::beebeeb_state_dir()?)? {
+        Some(db) => sign_out::waiting::WaitingChanges::read(&db),
+        None => Ok(sign_out::waiting::WaitingChanges::default()),
+    }
+}
+
+/// W5, the gate: one read compared with the snapshot `keep_unsent` names.
+#[cfg(target_os = "macos")]
+fn gate_sign_out(
+    state: &AppState,
+    keep_unsent: Option<&str>,
+) -> Result<Option<sign_out::snapshot::AskSnapshot>, SignOutFailure> {
+    let waiting = read_waiting_changes().map_err(|_| {
+        SignOutFailure::from(sign_out::copy::coded(
+            sign_out::copy::UNSENT_COUNT_FAILED_CODE,
+            sign_out::copy::E3_UNSENT_COUNT_FAILED,
+        ))
+    })?;
+    state.sign_out.snapshots.gate(&waiting, keep_unsent).map_err(|_| {
+        SignOutFailure::from(sign_out::copy::coded(
+            sign_out::copy::UNSENT_CHANGES_CODE,
+            sign_out::copy::E1_UNSENT_CHANGES,
+        ))
+    })
+}
+
+/// Where the kept folder goes: the container's `Documents/Changes not sent` (§7.1). A test build writes under its
+/// per-process sandbox, never the person's folders.
+#[cfg(target_os = "macos")]
+fn sign_out_kept_root() -> Result<PathBuf, String> {
+    #[cfg(test)]
+    {
+        crate::test_sandbox::dir("kept")
+            .map(|dir| dir.join("Changes not sent"))
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(test))]
+    {
+        sign_out::kept_names::kept_root_for_this_app().ok_or_else(|| "no folder for kept changes".to_string())
+    }
+}
+
+/// §5.2 step 7: the keep step on the app's state dir. `None`: no `state.db` yet, nothing to keep.
+#[cfg(target_os = "macos")]
+fn keep_for_sign_out(
+    accepted: Option<&sign_out::snapshot::AskSnapshot>,
+) -> Result<Option<sign_out::kept_set::KeptSet>, String> {
+    use sign_out::keep::{Acknowledge, KeepInputs, keep_unsent};
+    let failed = || {
+        sign_out::copy::coded(
+            sign_out::copy::UNSENT_COPY_FAILED_CODE,
+            sign_out::copy::E2_UNSENT_COPY_FAILED,
+        )
+    };
+    let Some(db) = state_db_from_state_dir(&state_paths::beebeeb_state_dir()?)? else {
+        return Ok(None);
+    };
+    let root = sign_out_kept_root().map_err(|_| failed())?;
+    let config = DesktopConfig::path().map_err(|_| failed())?;
+    let acknowledge = match accepted {
+        Some(snapshot) => Acknowledge::Asked {
+            others: &snapshot.others,
+            missing: &snapshot.missing,
+        },
+        None => Acknowledge::Nothing,
+    };
+    keep_unsent(KeepInputs {
+        db: &db,
+        acknowledge,
+        root: &root,
+        event_name: sign_out::kept_names::event_folder_name(chrono::Local::now()),
+        config_path: &config,
+        clone: &sign_out::kept_writer::SystemClone,
+        config_fs: &config::RealConfigFs,
+    })
+    .map(Some)
+    .map_err(|failure| {
+        if let sign_out::keep::KeepFailure::Copy(reason) = &failure {
+            tracing::error!(
+                reason,
+                "sign-out stopped: the waiting changes could not be kept; nothing was purged"
+            );
+        }
+        failure.message()
+    })
+}
+
+/// Test builds only: a hook between the steps of `clear_session_impl`, per test task (`SIGN_OUT_SEAM.scope`). An
+/// `Err` stops the sign-out at that point with that message.
+#[cfg(test)]
+type SignOutSeam = Arc<dyn Fn(&'static str) -> Result<(), String> + Send + Sync>;
+
+#[cfg(test)]
+tokio::task_local! {
+    static SIGN_OUT_SEAM: SignOutSeam;
+}
+
+#[cfg(test)]
+fn sign_out_seam(point: &'static str) -> Result<(), String> {
+    SIGN_OUT_SEAM.try_with(|seam| seam(point)).unwrap_or(Ok(()))
+}
+
 /// R10: on macOS and Linux a sign-out whose local-data purge fails stops instead of completing, as
 /// Windows already does. The engine is already stopped, so trying again is safe.
 #[cfg(not(target_os = "windows"))]
 const SIGN_OUT_PURGE_FAILED: &str = "Sign-out paused: Beebeeb couldn’t clear this computer’s local data. Try again; if it keeps happening, restart Beebeeb.";
+
+/// `clear_session`'s `keepUnsent: { askId }` (spec 2026-10-10 §5.1, the contract). Accepted and ignored off macOS (W5).
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KeepUnsentArg {
+    ask_id: String,
+}
 
 /// Sign out through the shared native-menu/WebView teardown. Windows returns
 /// an error while work, plaintext cleanup or root unregistration is incomplete;
@@ -3336,8 +3524,14 @@ async fn clear_session(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     forget_email: Option<bool>,
+    keep_unsent: Option<KeepUnsentArg>,
 ) -> Result<SessionActionOutcome, String> {
-    let result = clear_session_impl(&state, forget_email.unwrap_or(false)).await;
+    let result = clear_session_impl(
+        &state,
+        forget_email.unwrap_or(false),
+        keep_unsent.as_ref().map(|keep| keep.ask_id.as_str()),
+    )
+    .await;
     // Review I1: the alert comes first, also when the sign-out failed after the removal.
     // Review I2: and the folder is saved for the Settings › Sync row.
     surface_kept_folder(&app, sign_out_kept_folder(&result));
@@ -14104,7 +14298,7 @@ fn handle_desktop_menu_action(app: &tauri::AppHandle, spec: &'static DesktopMenu
             let app = app.clone();
             spawn_menu_task(spec.id, async move {
                 let state = app.state::<AppState>();
-                let result = clear_session_impl(&state, false).await;
+                let result = clear_session_impl(&state, false, None).await;
                 // Task 1882: the menu's sign-out names the folder of kept
                 // Finder files in the same alert as the `clear_session` command,
                 // also when it failed after the removal (review I1), and saves it for
@@ -18496,7 +18690,7 @@ mod signout_teardown_tests {
                     .unwrap();
             }
             drop(db);
-            super::with_upload_staging_for_test(upload_staging.clone(), clear_session_impl(&state, false)).await
+            super::with_upload_staging_for_test(upload_staging.clone(), clear_session_impl(&state, false, None)).await
         })
         .await;
 
@@ -18603,7 +18797,7 @@ mod signout_teardown_tests {
         });
         *acct.engine.lock().await = Some(EngineRunner::for_test_with_task(task));
 
-        let result = clear_session_impl(&state, false).await;
+        let result = clear_session_impl(&state, false, None).await;
 
         assert!(
             result.is_ok(),
@@ -18660,7 +18854,7 @@ mod signout_teardown_tests {
             "the premise: already signed out"
         );
         acct.engine_stop_unconfirmed.store(true, Ordering::SeqCst);
-        let result = clear_session_impl(&state, false).await;
+        let result = clear_session_impl(&state, false, None).await;
         #[cfg(not(target_os = "windows"))]
         assert_eq!(
             result,
@@ -18799,7 +18993,7 @@ mod signout_teardown_tests {
         });
         *acct.engine.lock().await = Some(EngineRunner::for_test_with_task(task));
 
-        let first = clear_session_impl(&state, false)
+        let first = clear_session_impl(&state, false, None)
             .await
             .expect_err("the first attempt must fail while the engine stop is unconfirmed");
         assert!(
@@ -18807,7 +19001,7 @@ mod signout_teardown_tests {
             "first attempt must be the unconfirmed-stop refusal, got: {first}"
         );
 
-        let second = clear_session_impl(&state, false)
+        let second = clear_session_impl(&state, false, None)
             .await
             .expect_err("the retry must also be refused, not silently proceed past the stop gate");
         assert!(
@@ -21533,7 +21727,7 @@ mod finder_lock_and_sign_out_tests {
             fx.reconciler(Some(Reconciler::RemovalFails));
             fx.install_keys();
             fx.install_finished_engine().await;
-            let done = clear_session_impl(&fx.state(), false)
+            let done = clear_session_impl(&fx.state(), false, None)
                 .await
                 .expect("the sign-out happened");
             assert_eq!(
@@ -21542,6 +21736,7 @@ mod finder_lock_and_sign_out_tests {
                     outcome: SignOutOutcome::Completed,
                     warning: Some(ActionWarning::FinderRemovalUnconfirmed),
                     preserved_location: None,
+                    kept_unsent: None,
                 }
             );
             assert!(fx.acct.session.lock().unwrap().is_none(), "the keys are cleared");
@@ -21560,7 +21755,7 @@ mod finder_lock_and_sign_out_tests {
             fx.install_keys();
             fx.install_finished_engine().await;
             poison_session(&fx.acct);
-            let outcome = clear_session_impl(&fx.state(), false)
+            let outcome = clear_session_impl(&fx.state(), false, None)
                 .await
                 .expect("a sign-out that cleared the key");
             assert_eq!(outcome, SignedOut::confirmed(SignOutOutcome::Completed));
@@ -21593,7 +21788,7 @@ mod finder_lock_and_sign_out_tests {
                 serde_json::Value::Null,
                 "the premise: a refusal is shown"
             );
-            let outcome = clear_session_impl(&fx.state(), false)
+            let outcome = clear_session_impl(&fx.state(), false, None)
                 .await
                 .expect("the sign-out completes");
             assert_eq!(outcome, SignedOut::confirmed(SignOutOutcome::Completed));
@@ -21650,7 +21845,7 @@ mod finder_lock_and_sign_out_tests {
             fx.reconciler(Some(Reconciler::Answers));
             fx.install_keys();
             fx.install_finished_engine().await;
-            let outcome = tokio::time::timeout(Duration::from_secs(30), clear_session_impl(&fx.state(), false))
+            let outcome = tokio::time::timeout(Duration::from_secs(30), clear_session_impl(&fx.state(), false, None))
                 .await
                 .expect("the sign-out does not wait for the gate its own test holds")
                 .expect("the sign-out completes");
@@ -21756,7 +21951,7 @@ mod finder_lock_and_sign_out_tests {
         let mut fx = Fixture::new("finder-signout");
         runtime().block_on(async {
             fx.reconciler(Some(Reconciler::Answers));
-            let outcome = clear_session_impl(&fx.state(), false)
+            let outcome = clear_session_impl(&fx.state(), false, None)
                 .await
                 .expect("a removal the reconciler confirmed");
             assert_eq!(outcome, SignedOut::confirmed(SignOutOutcome::NotSignedIn));
@@ -21799,7 +21994,7 @@ mod finder_lock_and_sign_out_tests {
                 fx.install_keys();
                 fx.install_finished_engine().await;
                 fx.acct.engine_stop_unconfirmed.store(true, Ordering::SeqCst);
-                let result = clear_session_impl(&fx.state(), false).await;
+                let result = clear_session_impl(&fx.state(), false, None).await;
                 let failure = result.as_ref().expect_err("sign-out refuses after the removal");
                 assert_eq!(failure.message, UNCONFIRMED_ENGINE_STOP_ERROR, "{id}");
                 assert_eq!(
@@ -21835,7 +22030,7 @@ mod finder_lock_and_sign_out_tests {
             let mut fx = Fixture::new(id);
             runtime().block_on(async {
                 fx.reconciler(Some(mode));
-                let result = clear_session_impl(&fx.state(), false).await;
+                let result = clear_session_impl(&fx.state(), false, None).await;
                 let done = result.as_ref().expect("the sign-out happened");
                 assert_eq!(done.outcome, SignOutOutcome::NotSignedIn, "{id}");
                 assert_eq!(done.warning, warning, "{id}");
@@ -21861,7 +22056,7 @@ mod finder_lock_and_sign_out_tests {
                 fx.reconciler(mode);
                 let started = Instant::now();
                 let done = FINDER_WAIT_OVERRIDE
-                    .scope(SHORT_WAIT, clear_session_impl(&fx.state(), false))
+                    .scope(SHORT_WAIT, clear_session_impl(&fx.state(), false, None))
                     .await
                     .expect("the sign-out happened");
                 assert_eq!(
@@ -21870,6 +22065,7 @@ mod finder_lock_and_sign_out_tests {
                         outcome: SignOutOutcome::NotSignedIn,
                         warning: Some(ActionWarning::FinderRemovalUnconfirmed),
                         preserved_location: None,
+                        kept_unsent: None,
                     },
                     "{id}: a removal nobody confirmed is not a plain success"
                 );
@@ -21909,7 +22105,7 @@ mod finder_lock_and_sign_out_tests {
                 fx.install_finished_engine().await;
                 // An earlier stop that was never confirmed: sign-out refuses AFTER the removal.
                 fx.acct.engine_stop_unconfirmed.store(true, Ordering::SeqCst);
-                let error = clear_session_impl(&fx.state(), false)
+                let error = clear_session_impl(&fx.state(), false, None)
                     .await
                     .expect_err("sign-out refuses");
                 assert_eq!(error.message, UNCONFIRMED_ENGINE_STOP_ERROR, "{id}");
@@ -22063,7 +22259,7 @@ mod finder_lock_and_sign_out_tests {
             let restore = restore_stored_session(&state, &fx.acct, &base_url);
             let sign_out_then_answer = async {
                 let probe = server.next_request().await;
-                let signed_out = clear_session_impl(&state, false).await;
+                let signed_out = clear_session_impl(&state, false, None).await;
                 server.release();
                 (probe, signed_out)
             };
@@ -22132,7 +22328,7 @@ mod finder_lock_and_sign_out_tests {
             );
             // "Sign out and switch" from here: the already-signed-out path, which must leave no key and no email.
             assert_eq!(
-                clear_session_impl(&state, false).await,
+                clear_session_impl(&state, false, None).await,
                 Ok(SignedOut::confirmed(SignOutOutcome::NotSignedIn))
             );
             assert_eq!(
@@ -22248,7 +22444,7 @@ mod finder_lock_and_sign_out_tests {
             let signing_out = scope.spawn(move || {
                 runtime().block_on(SIGN_OUT_HOLDS_THE_ENGINE_SLOT.scope(
                     sign_out_holds_the_slot,
-                    with_the_shared_state_dir(clear_session_impl(&state, false)),
+                    with_the_shared_state_dir(clear_session_impl(&state, false, None)),
                 ))
             });
             let deadline = Instant::now() + Duration::from_secs(60);
@@ -22414,7 +22610,7 @@ mod finder_lock_and_sign_out_tests {
             let decide = decide_sign_in_in_turn(&state, &fx.acct, &sources, &sam, "tok-new", &base_url, &turn);
             let sign_out_then_answer = async {
                 let proof = server.next_request().await;
-                let signed_out = clear_session_impl(&state, false).await;
+                let signed_out = clear_session_impl(&state, false, None).await;
                 server.release();
                 (proof, signed_out)
             };
@@ -22897,7 +23093,11 @@ mod finder_lock_and_sign_out_tests {
         let (mut turn, read, signed_out) = std::thread::scope(|scope| {
             let frozen = gap_state.pending_2fa.lock().unwrap();
             let signing_out = scope.spawn(move || {
-                runtime().block_on(with_the_shared_state_dir(clear_session_impl(&signing_out_state, false)))
+                runtime().block_on(with_the_shared_state_dir(clear_session_impl(
+                    &signing_out_state,
+                    false,
+                    None,
+                )))
             });
             let deadline = Instant::now() + Duration::from_secs(60);
             while acct.session.lock().unwrap().is_some() {
@@ -22964,7 +23164,11 @@ mod finder_lock_and_sign_out_tests {
         let (unlocked, signed_out) = std::thread::scope(|scope| {
             let frozen = gap_state.pending_2fa.lock().unwrap();
             let signing_out = scope.spawn(move || {
-                runtime().block_on(with_the_shared_state_dir(clear_session_impl(&signing_out_state, false)))
+                runtime().block_on(with_the_shared_state_dir(clear_session_impl(
+                    &signing_out_state,
+                    false,
+                    None,
+                )))
             });
             let deadline = Instant::now() + Duration::from_secs(60);
             while acct.session.lock().unwrap().is_some() {
@@ -23048,7 +23252,7 @@ mod finder_lock_and_sign_out_tests {
             let gate = SIGN_OUT_TEST_PURGE_GATE.lock().await; // the sign-out waits here, inside its purge
             let state = fx.state();
             let sam = t12_profile("u-1", "sam@beebeeb.io");
-            let sign_out = clear_session_impl(&state, false);
+            let sign_out = clear_session_impl(&state, false, None);
             let sign_in = async {
                 let deadline = Instant::now() + Duration::from_secs(30);
                 while !fx
@@ -23122,7 +23326,7 @@ mod finder_lock_and_sign_out_tests {
             fx.reconciler(Some(Reconciler::Answers));
             after_a_rejected_token(&fx);
             *fx.acct.engine.lock().await = Some(a_running_engine());
-            let signed_out = clear_session_impl(&fx.state(), false).await;
+            let signed_out = clear_session_impl(&fx.state(), false, None).await;
             assert_eq!(signed_out, Ok(SignedOut::confirmed(SignOutOutcome::NotSignedIn)));
             assert!(fx.acct.engine.lock().await.is_none(), "the engine it found is stopped");
             assert!(
@@ -26336,7 +26540,7 @@ mod account_binding_tests {
         let clear = body_between(&production, "async fn clear_session_impl(", "\n}\n");
         assert!(
             crate::source_pin::squeeze(clear).contains(&crate::source_pin::squeeze(
-                "purge_local_data_for_sign_out(state_paths::beebeeb_state_dir(), cfg_sync_root.as_deref(), owe_removal, None).map_err(&kept_with)?;"
+                "purge_local_data_for_sign_out(state_paths::beebeeb_state_dir(), cfg_sync_root.as_deref(), owe_removal, kept.as_ref()).map_err(&kept_with)?;"
             )),
             "sign-out returns the purge's error:\n{clear}"
         );
@@ -30047,7 +30251,7 @@ mod reauth_tests {
                         assert_eq!(stored_token(&id), token_before, "{name}: and stores no token of B's");
 
                         // The confirmed switch: the full sign-out, which forgets A's email too (spec §5.6).
-                        clear_session_impl(&fx.state, true)
+                        clear_session_impl(&fx.state, true, None)
                             .await
                             .unwrap_or_else(|e| panic!("{name}: sign-out: {e}"));
                         assert!(!keychain_vault_key_present(&id), "{name}: A's vault key is gone");
@@ -30123,7 +30327,7 @@ mod reauth_tests {
                         )
                         .unwrap();
                         fx.install_session("tok-a", [1u8; 32], Some("a@beebeeb.io"));
-                        clear_session_impl(&fx.state, forget_email)
+                        clear_session_impl(&fx.state, forget_email, None)
                             .await
                             .unwrap_or_else(|e| panic!("{name}: sign-out: {e}"));
                         assert_eq!(
@@ -30167,7 +30371,7 @@ mod reauth_tests {
                     let before = fx.snapshot();
 
                     assert_eq!(
-                        clear_session_impl(&fx.state, true).await,
+                        clear_session_impl(&fx.state, true, None).await,
                         Err(SIGN_OUT_EMAIL_NOT_FORGOTTEN.into())
                     );
                     assert_eq!(fx.snapshot(), before, "nothing was torn down");
@@ -31608,14 +31812,19 @@ mod finder_removal_wiring_tests {
         for failure in [
             "Some(take_slot_and_stop_engine_for_sign_out(&acct).await.map_err(&kept_with)?)",
             "let engine_slot = take_slot_and_stop_engine_for_sign_out(&acct).await.map_err(&kept_with)?;",
-            "purge_local_data_for_sign_out(state_paths::beebeeb_state_dir(), cfg_sync_root.as_deref(), owe_removal, None).map_err(&kept_with)?;",
+            "let kept = keep_for_sign_out(accepted.as_ref()).map_err(&kept_with)?;",
+            "sign_out_seam(\"before_keep\").map_err(&kept_with)?;",
+            "sign_out_seam(\"after_keep\").map_err(&kept_with)?;",
+            "purge_local_data_for_sign_out(state_paths::beebeeb_state_dir(), cfg_sync_root.as_deref(), owe_removal, kept.as_ref()).map_err(&kept_with)?;",
+            "sign_out_seam(\"after_purge\").map_err(&kept_with)?;",
             "clear_session_holding_slot(&acct, &engine_slot, account::SessionTransition::SignOut).map_err(&kept_with)?;",
             "finish_sign_out_turn(&acct, &engine_slot, true).map_err(&kept_with)?;",
             "finish_sign_out_turn(&acct, &engine_slot, false).map_err(&kept_with)?;",
         ] {
             assert!(squash_ws(&sign_out).contains(&squash_ws(failure)), "{failure}");
         }
-        assert_eq!(squash_ws(&sign_out).matches(".map_err(&kept_with)?").count(), 6);
+        // Task 1887: the keep step and its three test seams (test builds only) carry the folders too.
+        assert_eq!(squash_ws(&sign_out).matches(".map_err(&kept_with)?").count(), 10);
         assert_eq!(
             sign_out.matches("        preserved_location,\n").count(),
             2,
@@ -31764,7 +31973,7 @@ mod finder_removal_wiring_tests {
         let menu = &source[source.find("DesktopMenuAction::SignOut => {").expect("menu sign-out")..];
         let menu = squash(&menu[..menu.find("DesktopMenuAction::Quit").expect("next arm")]);
         assert!(menu.contains("spawn_menu_task(spec.id,asyncmove{"));
-        assert!(menu.contains("clear_session_impl(&state,false).await"));
+        assert!(menu.contains("clear_session_impl(&state,false,None).await"));
         assert!(
             !menu.contains("remove_file_provider_domain"),
             "no removal in the menu handler itself"
@@ -33202,5 +33411,645 @@ mod sign_out_keep_tests {
         purge_local_state_files_as(&f.db, None, &[], None, Some(&kept)).unwrap();
         assert!(!caches.exists() && !support.exists());
         assert_eq!(f.queued(), 0);
+    }
+
+    /// `body` with a state dir and a config dir of its own (`state_paths::STATE_DIR_OVERRIDE`,
+    /// `config::CONFIG_DIR_OVERRIDE`), both new and both removed when it ends, panicking or not. A sign-out on a Mac
+    /// reads the queue before it changes anything, so a row queued in the state dir that the other sign-out tests share
+    /// would refuse their sign-outs, and a row a failed test left there would refuse every later one. Here no other
+    /// test's sign-out sees these rows, and no other test's config write meets the keys these tests check.
+    async fn in_own_dirs<T>(body: impl std::future::Future<Output = T>) -> T {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, config) = (dir.path().join("state"), dir.path().join("config"));
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::create_dir_all(&config).unwrap();
+        state_paths::STATE_DIR_OVERRIDE
+            .scope(state, crate::config::CONFIG_DIR_OVERRIDE.scope(config, body))
+            .await
+    }
+
+    /// The database in the test's own state dir (`in_own_dirs`), the one its sign-out reads and purges.
+    fn state_db_in_scratch() -> state_db::StateDb {
+        let dir = state_paths::beebeeb_state_dir().unwrap();
+        state_db::StateDb::open(state_paths::state_db_path_from_state_dir(&dir)).unwrap()
+    }
+
+    /// The database and config as a completed sign-out leaves them: no rows and no kept-folder keys.
+    fn clean_scratch(db: &state_db::StateDb) {
+        let _ = db.purge_all_local_state();
+        let _ = db.clear_account_data(false);
+        let _ = DesktopConfig::update(|cfg| {
+            let changed = cfg.kept_unsent_folder.take().is_some() | !cfg.kept_unsent_unfinished.is_empty();
+            cfg.kept_unsent_unfinished.clear();
+            (changed, ())
+        });
+    }
+
+    /// `signout_teardown_tests::test_account`, which that module keeps private.
+    fn test_account(state: &AppState, id: &str) -> Arc<crate::account::AccountRuntime> {
+        synthesize_single_account(state, AccountId(id.to_string()));
+        state.active_account().expect("synthesized account resolves")
+    }
+
+    /// Records the reconciler's removals and triggers, and confirms every removal and Lock.
+    fn recording_finder(state: &AppState) -> Arc<std::sync::Mutex<Vec<String>>> {
+        use crate::finder_setup::driver::{Event, FinderSetupHandle, FinderSetupView};
+        let (handle, mut rx) = FinderSetupHandle::for_test(FinderSetupView::initial(
+            crate::finder_setup::launch_location::LaunchLocation::Applications,
+        ));
+        let _ = state.finder_setup.set(handle);
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        tokio::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                match event {
+                    Event::Remove { ack, .. } => {
+                        log.lock().unwrap().push("remove".to_string());
+                        let _ = ack.send((Ok(()), finder_removal::KeptFolder::default()));
+                    }
+                    Event::Lock { ack } => {
+                        let _ = ack.send(());
+                    }
+                    Event::Trigger(trigger) => log.lock().unwrap().push(format!("{trigger:?}")),
+                    _ => {}
+                }
+            }
+        });
+        seen
+    }
+
+    /// A waiting save and its staged copy. The copy is in the test's own state dir (`in_own_dirs`): these tests run
+    /// at once and use the same op ids, and one of them makes its copy unreadable.
+    fn queue_write(db: &state_db::StateDb, op_id: &str, file_id: &str, bytes: &[u8]) -> PathBuf {
+        let staged = state_paths::beebeeb_state_dir()
+            .unwrap()
+            .join(format!("bb-1887-{op_id}"));
+        std::fs::write(&staged, bytes).unwrap();
+        db.hold_lock_for_test()
+            .execute_batch(&format!(
+                "INSERT OR IGNORE INTO files (file_id, path) VALUES ('{file_id}', '{file_id}.bin');
+                 INSERT INTO operation_queue (op_id, kind, file_id, payload_path, write_id, write_origin)
+                 VALUES ('{op_id}', 'upload_version', '{file_id}', '{}', '{op_id}', 'minted');",
+                staged.display()
+            ))
+            .unwrap();
+        staged
+    }
+
+    fn queue_rename(db: &state_db::StateDb, op_id: &str) {
+        db.hold_lock_for_test()
+            .execute(
+                "INSERT INTO operation_queue (op_id, kind, file_id) VALUES (?1, 'rename_file', 'f')",
+                rusqlite::params![op_id],
+            )
+            .unwrap();
+    }
+
+    fn ask(state: &AppState, owner: &str) -> String {
+        let snapshot = count_ask(owner).unwrap();
+        let id = snapshot.ask_id().to_string();
+        state.sign_out.snapshots.record(snapshot);
+        id
+    }
+
+    fn signed_out_state() -> (AppState, Arc<crate::account::AccountRuntime>) {
+        let state = AppState::default();
+        let acct = test_account(&state, "signout-1887");
+        set_auth_present(&state, false);
+        (state, acct)
+    }
+
+    async fn sign_out_with(
+        state: &AppState,
+        keep: Option<&str>,
+        seam: SignOutSeam,
+    ) -> Result<SignedOut, SignOutFailure> {
+        SIGN_OUT_SEAM.scope(seam, clear_session_impl(state, false, keep)).await
+    }
+
+    fn no_seam() -> SignOutSeam {
+        Arc::new(|_| Ok(()))
+    }
+
+    /// U6. The switch's sign-out (`forget_email`) is the one that would forget the email prefill, so the refusal is
+    /// tested on it: the gate comes first, and nothing is touched (the Keychain session and the email prefill too).
+    #[tokio::test]
+    async fn clear_session_refuses_while_changes_wait() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            let staged = queue_write(&db, "w1", "f1", b"bytes");
+            let state = AppState::default();
+            let acct = test_account(&state, "signout-1887-u6");
+            let events = recording_finder(&state);
+            *acct.session.lock().unwrap() = Some(super::Session {
+                token: "t".into(),
+                master_key: [7u8; 32],
+                email: Some("a@beebeeb.io".into()),
+            });
+            persist_session_to_keychain(
+                &SessionWrite::for_test(),
+                "signout-1887-u6",
+                "tok-u6",
+                &[7u8; 32],
+                Some("a@beebeeb.io"),
+            )
+            .unwrap();
+            DesktopConfig::update(|cfg| {
+                cfg.last_signed_in_email = Some("prefill@beebeeb.io".into());
+                (true, ())
+            })
+            .unwrap();
+            set_auth_present(&state, true);
+            let failure = SIGN_OUT_SEAM
+                .scope(no_seam(), clear_session_impl(&state, true, None))
+                .await
+                .unwrap_err();
+            assert!(failure.message.starts_with("unsent_changes: "), "{}", failure.message);
+            assert_eq!(db.waiting_rows().unwrap().len(), 1, "the queue is intact");
+            assert!(staged.exists(), "the staged copy is intact");
+            assert!(acct.session.lock().unwrap().is_some(), "the keys are in memory");
+            assert!(
+                load_session_from_keychain("signout-1887-u6", None).unwrap().is_some(),
+                "the Keychain session is untouched"
+            );
+            assert_eq!(
+                DesktopConfig::load().unwrap().last_signed_in_email.as_deref(),
+                Some("prefill@beebeeb.io"),
+                "the email prefill is untouched"
+            );
+            assert!(
+                events.lock().unwrap().iter().all(|event| event != "remove"),
+                "the reconciler got no removal"
+            );
+            let _ = clear_keychain_session("signout-1887-u6");
+            DesktopConfig::update(|cfg| (cfg.last_signed_in_email.take().is_some(), ())).unwrap();
+        })
+        .await;
+    }
+
+    /// U8 and U8b through the sign-out: the kept set is kept, one file per file, and then the queue is empty. The keep
+    /// step's own tests hold its half (names and bytes).
+    #[tokio::test]
+    async fn a_sign_out_keeps_the_kept_set_and_empties_the_queue() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            queue_write(&db, "s1", "report", b"first save");
+            queue_write(&db, "s2", "report", b"second save");
+            queue_write(&db, "c1", "notes", b"notes");
+            let (state, _acct) = signed_out_state();
+            recording_finder(&state);
+            let id = ask(&state, "macos-settings");
+            let done = sign_out_with(&state, Some(&id), no_seam()).await.unwrap();
+            let kept = done.kept_unsent.expect("a kept folder");
+            let folder = Path::new(&kept.folder);
+            assert_eq!(kept.files, 2, "two saves of one file keep one file (U8b)");
+            assert_eq!(std::fs::read(folder.join("report.bin")).unwrap(), b"second save");
+            assert_eq!(std::fs::read(folder.join("notes.bin")).unwrap(), b"notes");
+            assert_eq!(
+                std::fs::read_dir(folder).unwrap().count(),
+                2,
+                "no earlier-save copy of a minted save"
+            );
+            assert!(db.waiting_rows().unwrap().is_empty(), "the queue is empty");
+        })
+        .await;
+    }
+
+    /// U7.
+    #[test]
+    fn the_gate_comes_before_anything_changes() {
+        let production = super::finder_setup_command_tests::production_source();
+        let clear =
+            super::finder_setup_command_tests::body_between(&production, "async fn clear_session_impl(", "\n}\n");
+        let gate = clear.find("gate_sign_out(").expect("the gate");
+        for later in [
+            "forget_last_signed_in_email(",
+            "end_sessions_in_flight(",
+            "finder_remove_for(",
+            "take_slot_and_stop_engine_for_sign_out(",
+            "purge_local_data_for_sign_out(",
+        ] {
+            assert!(
+                gate < clear.find(later).unwrap_or_else(|| panic!("{later}")),
+                "the gate comes before {later}"
+            );
+        }
+    }
+
+    /// U9: the gate counted nothing; a write that arrives before the keep step is kept and counted.
+    #[tokio::test]
+    async fn a_write_that_arrives_after_the_count_is_kept_too() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            let (state, _acct) = signed_out_state();
+            recording_finder(&state);
+            let seam: SignOutSeam = Arc::new(move |point| {
+                if point == "before_keep" {
+                    let db = state_db_in_scratch();
+                    queue_write(&db, "late", "late", b"late bytes");
+                }
+                Ok(())
+            });
+            let done = sign_out_with(&state, None, seam).await.unwrap();
+            let kept = done.kept_unsent.expect("a kept folder");
+            assert_eq!(kept.files, 1);
+            assert_eq!(
+                std::fs::read(Path::new(&kept.folder).join("late.bin")).unwrap(),
+                b"late bytes"
+            );
+            assert_eq!(db.waiting_rows().unwrap().len(), 0, "the queue is empty");
+        })
+        .await;
+    }
+
+    /// U10 (spec, amended for `184ac962`).
+    #[test]
+    fn nothing_that_deletes_runs_between_stop_keep_and_purge() {
+        let production = super::finder_setup_command_tests::production_source();
+        let clear =
+            super::finder_setup_command_tests::body_between(&production, "async fn clear_session_impl(", "\n}\n");
+        let slot = clear
+            .find("let mut held_engine_slot = if already_signed_out {")
+            .expect("the stop expression");
+        let second_stop = clear.rfind("take_slot_and_stop_engine_for_sign_out(").unwrap();
+        let close = slot + clear[slot..].find("\n    };\n").expect("the expression's end");
+        let keep = clear.find("keep_for_sign_out(").expect("the keep call");
+        let purge = clear.find("purge_local_data_for_sign_out(").unwrap();
+        assert!(
+            second_stop < close && close < keep && keep < purge,
+            "stop arms, then `}};`, then keep, then purge"
+        );
+        let between = &clear[second_stop..purge];
+        for denied in [
+            "remove_file",
+            "remove_dir",
+            "purge_all_local_state(",
+            "purge_macos_hydrate_cache(",
+            "clear_session_holding_slot(",
+            "clear_keychain_session(",
+            "forget_last_signed_in_email(",
+            "start_engine",
+            "KeysArrived",
+        ] {
+            assert!(!between.contains(denied), "{denied} between the stop and the purge");
+        }
+    }
+
+    /// U13, the sign-out half: a failed copy leaves the keys in memory and asks the reconciler to restart sync.
+    #[tokio::test]
+    async fn a_failed_copy_keeps_the_keys_and_restarts_sync() {
+        in_own_dirs(async {
+            use std::os::unix::fs::PermissionsExt;
+            let db = state_db_in_scratch();
+            let staged = queue_write(&db, "w1", "f1", b"bytes");
+            std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let state = AppState::default();
+            let acct = test_account(&state, "signout-1887-u13");
+            let events = recording_finder(&state);
+            *acct.session.lock().unwrap() = Some(super::Session {
+                token: "t".into(),
+                master_key: [7u8; 32],
+                email: None,
+            });
+            set_auth_present(&state, true);
+            let id = ask(&state, "macos-settings");
+            let failure = sign_out_with(&state, Some(&id), no_seam()).await.unwrap_err();
+            std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o600)).unwrap();
+            assert!(
+                failure.message.starts_with("unsent_copy_failed: "),
+                "{}",
+                failure.message
+            );
+            assert!(acct.session.lock().unwrap().is_some(), "the keys are in memory");
+            // `std::time::Duration`: `lib.rs` imports no `Duration` at the crate level.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            assert!(
+                events.lock().unwrap().iter().any(|event| event == "KeysArrived"),
+                "sync restarts: {:?}",
+                events.lock().unwrap()
+            );
+            assert_eq!(db.waiting_rows().unwrap().len(), 1);
+        })
+        .await;
+    }
+
+    /// U29 (b): a copy deleted before the call is a missing write the snapshot did not hold.
+    #[tokio::test]
+    async fn a_copy_missing_before_the_call_asks_again() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            let staged = queue_write(&db, "w1", "f1", b"bytes");
+            let (state, _acct) = signed_out_state();
+            recording_finder(&state);
+            let id = ask(&state, "macos-settings");
+            std::fs::remove_file(&staged).unwrap();
+            let failure = sign_out_with(&state, Some(&id), no_seam()).await.unwrap_err();
+            assert!(
+                failure.message.starts_with("unsent_changes: "),
+                "the gate refuses, the ask is shown again"
+            );
+            let fresh = count_ask("macos-settings").unwrap();
+            assert_eq!(fresh.counts.missing_files, 1);
+        })
+        .await;
+    }
+
+    /// U29 (c), through the sign-out: a copy missing at the ask and held by the snapshot is acknowledged; the sign-out
+    /// completes, the purge's guard lets the missing write go, and the other write is kept.
+    #[tokio::test]
+    async fn a_copy_missing_at_the_ask_is_let_go_and_the_sign_out_completes() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            let gone = queue_write(&db, "w1", "f1", b"gone");
+            queue_write(&db, "w2", "f2", b"kept");
+            std::fs::remove_file(&gone).unwrap();
+            let (state, _acct) = signed_out_state();
+            recording_finder(&state);
+            let id = ask(&state, "macos-settings");
+            let done = sign_out_with(&state, Some(&id), no_seam())
+                .await
+                .expect("the ask showed the missing write, so the sign-out completes");
+            let kept = done.kept_unsent.expect("a kept folder");
+            assert_eq!(kept.files, 1, "the other write is kept");
+            assert_eq!(std::fs::read(Path::new(&kept.folder).join("f2.bin")).unwrap(), b"kept");
+            assert!(db.waiting_rows().unwrap().is_empty(), "the queue is empty");
+        })
+        .await;
+    }
+
+    /// U30: the record is on disk before the purge, and only the keep step writes it. Two aborts: right after the keep
+    /// step, both keys name the folder; right after the purge, the rows are gone, so the marker is cleared and the row
+    /// stays (§7.3, "When it is cleared").
+    #[tokio::test]
+    async fn the_kept_folder_is_recorded_before_the_purge() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            for (point, marker_kept) in [("after_keep", true), ("after_purge", false)] {
+                queue_write(&db, "w1", "f1", b"bytes");
+                let (state, _acct) = signed_out_state();
+                recording_finder(&state);
+                let id = ask(&state, "macos-settings");
+                let seam: SignOutSeam = Arc::new(move |at| {
+                    if at == point {
+                        Err("aborted by the test".into())
+                    } else {
+                        Ok(())
+                    }
+                });
+                let failure = sign_out_with(&state, Some(&id), seam).await.unwrap_err();
+                let folder = failure.kept_unsent.expect("the failure carries the folder").folder;
+                let config = DesktopConfig::load().unwrap();
+                assert_eq!(config.kept_unsent_folder.as_deref(), Some(folder.as_str()), "{point}");
+                let expected: Vec<String> = if marker_kept { vec![folder.clone()] } else { Vec::new() };
+                assert_eq!(
+                    config.kept_unsent_unfinished, expected,
+                    "{point}: saved in the keep step's one write; cleared with the rows"
+                );
+                clean_scratch(&db);
+            }
+        })
+        .await;
+        let production = super::finder_setup_command_tests::production_source();
+        let clear =
+            super::finder_setup_command_tests::body_between(&production, "async fn clear_session_impl(", "\n}\n");
+        assert!(
+            !clear.contains("save_kept_unsent_durably("),
+            "the Err arm writes neither key; only the keep step does"
+        );
+        // The keep step's save is its last act, after its last flush: `finish()` (every `sync_all`) comes before it,
+        // and nothing after it copies or flushes.
+        let keep = include_str!("sign_out/keep.rs");
+        let keep = &keep[..keep.find("#[cfg(test)]\nmod tests").expect("the tests")];
+        let save = keep
+            .find("save_kept_unsent_durably(inputs.config_path")
+            .expect("the save");
+        assert!(
+            keep.find("writer.finish()").expect("the flushes") < save,
+            "the flushes come first"
+        );
+        let after = &keep[save..];
+        assert!(
+            !after.contains("writer.keep(") && !after.contains(".finish()") && !after.contains("sync_all"),
+            "{after}"
+        );
+        let writer = include_str!("sign_out/kept_writer.rs");
+        let finish = &writer[writer.find("pub(crate) fn finish(self)").expect("finish")..];
+        assert!(
+            finish[..finish.find("\n    }\n").unwrap()].contains("sync_all()"),
+            "finish flushes"
+        );
+        assert!(
+            clear.find("keep_for_sign_out(").expect("the keep call")
+                < clear.find("purge_local_data_for_sign_out(").expect("the purge")
+        );
+    }
+
+    /// U32, the macOS half: every new step is macOS only.
+    #[test]
+    fn the_unsent_gate_is_macos_only() {
+        let production = super::finder_setup_command_tests::production_source();
+        let clear =
+            super::finder_setup_command_tests::body_between(&production, "async fn clear_session_impl(", "\n}\n");
+        for call in ["gate_sign_out(", "keep_for_sign_out("] {
+            let at = clear.find(call).unwrap_or_else(|| panic!("{call}"));
+            let before = &clear[..at];
+            let cfg = before.rfind("#[cfg(").unwrap();
+            assert!(
+                before[cfg..].starts_with("#[cfg(target_os = \"macos\")]"),
+                "{call} is under cfg(macos)"
+            );
+        }
+        for definition in ["fn gate_sign_out(", "fn keep_for_sign_out(", "fn count_ask("] {
+            let at = production.find(definition).unwrap_or_else(|| panic!("{definition}"));
+            let before = &production[..at];
+            assert!(
+                before[before.rfind("#[cfg(").unwrap()..].starts_with("#[cfg(target_os = \"macos\")]"),
+                "{definition}"
+            );
+        }
+    }
+
+    /// U37, the keep step's snapshot: the one the gate accepted, by value, never a newer one.
+    #[tokio::test]
+    async fn the_keep_step_uses_the_snapshot_the_gate_accepted() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            queue_rename(&db, "r1");
+            let (state, _acct) = signed_out_state();
+            recording_finder(&state);
+            let id = ask(&state, "macos-settings");
+            let store = state.sign_out.snapshots.clone();
+            let seam: SignOutSeam = Arc::new(move |point| {
+                if point == "before_keep" {
+                    queue_rename(&state_db_in_scratch(), "r2");
+                    store.record(count_ask("macos-settings").unwrap()); // S′ holds both renames
+                }
+                Ok(())
+            });
+            let failure = sign_out_with(&state, Some(&id), seam).await.unwrap_err();
+            assert!(failure.message.starts_with("unsent_changes: "), "{}", failure.message);
+            assert_eq!(db.waiting_rows().unwrap().len(), 2, "nothing purged");
+            // Second run: S′ recorded without changing the queue; the sign-out completes and empties the store.
+            db.hold_lock_for_test()
+                .execute("DELETE FROM operation_queue WHERE op_id = 'r2'", [])
+                .unwrap();
+            let id = ask(&state, "macos-settings");
+            let store = state.sign_out.snapshots.clone();
+            let seam: SignOutSeam = Arc::new(move |point| {
+                if point == "before_keep" {
+                    store.record(count_ask("macos-settings").unwrap());
+                }
+                Ok(())
+            });
+            sign_out_with(&state, Some(&id), seam).await.unwrap();
+            assert_eq!(
+                state.sign_out.snapshots.newest_ask_id(),
+                None,
+                "a completed sign-out empties the store"
+            );
+        })
+        .await;
+    }
+
+    /// U41: entry point 7, the already-signed-out arm, keeps before it purges.
+    #[tokio::test]
+    async fn an_already_signed_out_sign_out_keeps_before_it_purges() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            queue_write(&db, "w1", "f1", b"already signed out");
+            let (state, _acct) = signed_out_state();
+            recording_finder(&state);
+            let id = ask(&state, "macos-settings");
+            let done = sign_out_with(&state, Some(&id), no_seam()).await.unwrap();
+            assert_eq!(
+                done.outcome,
+                SignOutOutcome::NotSignedIn,
+                "the already-signed-out arm ran"
+            );
+            let kept = done.kept_unsent.unwrap();
+            assert_eq!(
+                std::fs::read(Path::new(&kept.folder).join("f1.bin")).unwrap(),
+                b"already signed out"
+            );
+            assert!(db.waiting_rows().unwrap().is_empty());
+        })
+        .await;
+    }
+
+    /// U14 through the sign-out: the guard's refusal reaches the caller with its code, and the folder rides it.
+    #[tokio::test]
+    async fn a_guard_refusal_reaches_the_caller_with_its_code() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            queue_write(&db, "w1", "f1", b"bytes");
+            let (state, _acct) = signed_out_state();
+            recording_finder(&state);
+            let id = ask(&state, "macos-settings");
+            let seam: SignOutSeam = Arc::new(|point| {
+                if point == "after_keep" {
+                    queue_write(&state_db_in_scratch(), "late", "late", b"late"); // only a test seam can add one now
+                }
+                Ok(())
+            });
+            let failure = sign_out_with(&state, Some(&id), seam).await.unwrap_err();
+            assert!(
+                failure.message.starts_with("unsent_copy_failed: "),
+                "never wrapped: {}",
+                failure.message
+            );
+            assert!(failure.kept_unsent.is_some(), "the kept folder rides the failure");
+            assert_eq!(db.waiting_rows().unwrap().len(), 2, "nothing deleted");
+        })
+        .await;
+    }
+
+    /// Two sign-outs from one ask (a double click, or the menu's while Settings signs out): one sign-out, one folder.
+    #[tokio::test]
+    async fn a_second_sign_out_with_the_same_ask_keeps_nothing_twice() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            queue_write(&db, "w1", "f1", b"once");
+            let (state, _acct) = signed_out_state();
+            recording_finder(&state);
+            let id = ask(&state, "macos-settings");
+            let first = sign_out_with(&state, Some(&id), no_seam()).await.unwrap();
+            assert!(first.kept_unsent.is_some());
+            queue_write(&db, "w2", "f2", b"again"); // something waits again, so the stale ask matters
+            let second = sign_out_with(&state, Some(&id), no_seam()).await.unwrap_err();
+            assert!(second.message.starts_with("unsent_changes: "), "{}", second.message);
+            assert_eq!(second.kept_unsent, None, "no second folder");
+        })
+        .await;
+    }
+
+    /// U39 (b), the ask's half: an interrupted sign-out's folder is named when the ask shows a missing write.
+    #[tokio::test]
+    async fn the_ask_names_the_earlier_folders_only_with_a_missing_write() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            let staged = queue_write(&db, "w1", "f1", b"bytes");
+            DesktopConfig::update(|cfg| {
+                cfg.kept_unsent_unfinished = vec!["/kept/earlier".into()];
+                (true, ())
+            })
+            .unwrap();
+            assert!(
+                count_ask("o").unwrap().counts.earlier_folders.is_empty(),
+                "no missing write: no A3e"
+            );
+            std::fs::remove_file(&staged).unwrap();
+            assert_eq!(count_ask("o").unwrap().counts.earlier_folders, ["/kept/earlier"]);
+            DesktopConfig::update(|cfg| {
+                cfg.kept_unsent_unfinished.clear();
+                (true, ())
+            })
+            .unwrap();
+        })
+        .await;
+    }
+}
+
+/// U32, the other half (spec 2026-10-10 §10): Linux and Windows keep today's sign-out. Runs in the public CI only.
+#[cfg(all(test, not(target_os = "macos")))]
+mod sign_out_unchanged_elsewhere_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn the_unsent_gate_is_macos_only() {
+        // A state dir and a config dir of its own (as `sign_out_keep_tests` runs its sign-outs): the rename queued here
+        // is never seen by another test's sign-out, and if a sign-out refuses, the row stays only here.
+        let dir = tempfile::tempdir().unwrap();
+        let (state_dir, config_dir) = (dir.path().join("state"), dir.path().join("config"));
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let body = async {
+            let dir = state_paths::beebeeb_state_dir().unwrap();
+            let db = state_db::StateDb::open(state_paths::state_db_path_from_state_dir(&dir)).unwrap();
+            db.hold_lock_for_test()
+                .execute(
+                    "INSERT INTO operation_queue (op_id, kind, file_id) VALUES ('r1', 'rename_file', 'f')",
+                    [],
+                )
+                .unwrap();
+            let state = AppState::default();
+            synthesize_single_account(&state, AccountId("signout-1887-elsewhere".to_string()));
+            set_auth_present(&state, false);
+            let result = clear_session_impl(&state, false, None).await;
+            #[cfg(target_os = "linux")]
+            {
+                assert!(result.is_ok(), "Linux purges as before: {result:?}");
+                assert!(db.waiting_rows().unwrap().is_empty());
+            }
+            #[cfg(target_os = "windows")]
+            {
+                assert!(
+                    !format!("{result:?}").contains("unsent_changes"),
+                    "Windows keeps its own preflight"
+                );
+            }
+        };
+        state_paths::STATE_DIR_OVERRIDE
+            .scope(state_dir, crate::config::CONFIG_DIR_OVERRIDE.scope(config_dir, body))
+            .await;
     }
 }

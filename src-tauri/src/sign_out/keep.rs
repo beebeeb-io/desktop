@@ -14,7 +14,6 @@ pub(crate) use super::kept_writer::CloneFile;
 use super::kept_writer::KeptWriter;
 use super::waiting::{WaitingChanges, WriteState};
 
-#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 7
 pub(crate) struct KeepInputs<'a> {
     pub db: &'a StateDb,
     pub acknowledge: Acknowledge<'a>,
@@ -36,7 +35,6 @@ pub(crate) enum KeepFailure {
 }
 
 impl KeepFailure {
-    #[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 7
     pub(crate) fn message(&self) -> String {
         match self {
             KeepFailure::Unsent => copy::coded(copy::UNSENT_CHANGES_CODE, E1_UNSENT_CHANGES),
@@ -58,7 +56,6 @@ fn category(error: &std::io::Error) -> &'static str {
 /// W6: one read; refuse a late other change before any copy; refuse a missing write nobody was shown (W7); copy the
 /// copied set; flush; record (W9, W13) as the last act. A failure before the record removes the half-made folder
 /// (W8). Never deletes a queue row or a staged copy.
-#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 7
 pub(crate) fn keep_unsent(inputs: KeepInputs<'_>) -> Result<KeptSet, KeepFailure> {
     let waiting = WaitingChanges::read(inputs.db).map_err(KeepFailure::Read)?;
     let mut kept = KeptSet::default();

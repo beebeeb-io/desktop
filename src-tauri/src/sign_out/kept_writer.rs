@@ -12,7 +12,6 @@ use std::path::{Path, PathBuf};
 use super::kept_names::{MAX_NAME_BYTES, with_suffix};
 
 /// `sys/clonefile.h:33`. `libc` 0.2.189 has `clonefile` but not this flag.
-#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 7
 pub(crate) const CLONE_NOFOLLOW: u32 = 0x0001;
 /// `sys/syslimits.h:103`, counting the terminating NUL: a path of 1024 bytes or more cannot be made.
 pub(crate) const PATH_MAX_BYTES: usize = 1024;
@@ -25,7 +24,6 @@ pub(crate) trait CloneFile {
 }
 
 /// The production copy: an APFS clone, or, where the volume cannot clone, a new file and a byte copy.
-#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 7
 pub(crate) struct SystemClone;
 
 fn c_path(path: &Path) -> io::Result<CString> {
@@ -52,7 +50,6 @@ impl CloneFile for SystemClone {
 }
 
 /// §7.2 "How", step 2: only a volume that cannot clone sends the copy to the fallback.
-#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 7
 fn falls_back(errno: Option<i32>) -> bool {
     matches!(errno, Some(libc::ENOTSUP) | Some(libc::EXDEV))
 }
@@ -60,7 +57,6 @@ fn falls_back(errno: Option<i32>) -> bool {
 /// The fallback: `create_new` (never truncates), private as a clone of a staged copy is, the bytes, then the staged
 /// copy's modification time. The source is opened without following a link. A copy that fails partway removes its
 /// file, which is this call's own (`create_new`): a partial plaintext copy never outlives the failed copy.
-#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 7
 fn copy_new(src: &Path, dst: &Path) -> io::Result<()> {
     let mut from = open_no_follow(src)?;
     let mut to = OpenOptions::new().write(true).create_new(true).mode(0o600).open(dst)?;

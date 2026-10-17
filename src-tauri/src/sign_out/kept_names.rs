@@ -22,7 +22,6 @@ pub enum KeptRole {
 /// `document_dir` is `<home>/Library/Containers/<bundle_id>/Data/Documents`; otherwise
 /// `<data_dir>/beebeeb/Changes not sent`, so an unsandboxed build never writes plaintext into the person's real
 /// Documents folder.
-#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 7
 pub fn kept_root(document_dir: Option<&Path>, data_dir: Option<&Path>, bundle_id: &str) -> Option<PathBuf> {
     let container_documents = Path::new("Library")
         .join("Containers")
@@ -36,7 +35,8 @@ pub fn kept_root(document_dir: Option<&Path>, data_dir: Option<&Path>, bundle_id
 }
 
 /// [`kept_root`] for this process.
-#[allow(dead_code)] // first production caller: Task 7
+// A test build keeps under its sandbox (`sign_out_kept_root` in `lib.rs`), so only a release build calls this.
+#[cfg_attr(test, allow(dead_code))]
 pub fn kept_root_for_this_app() -> Option<PathBuf> {
     kept_root(
         dirs::document_dir().as_deref(),
@@ -46,7 +46,6 @@ pub fn kept_root_for_this_app() -> Option<PathBuf> {
 }
 
 /// §7.1: local time at the start of the keep step, as macOS names screenshots (dots, never colons).
-#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 7
 pub fn event_folder_name(at: chrono::DateTime<chrono::Local>) -> String {
     at.format("%Y-%m-%d at %H.%M.%S").to_string()
 }

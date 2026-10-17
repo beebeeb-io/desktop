@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 
 use crate::state_db::{OperationKind, StateDb, WaitingRow, WriteOrigin};
 
-#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 7
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteState {
     /// The keep step copies it (§2 "Copied").
@@ -19,7 +18,6 @@ pub enum WriteState {
     Missing,
 }
 
-#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 7
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WaitingWrite {
     pub op_id: String,
@@ -30,7 +28,6 @@ pub struct WaitingWrite {
     pub state: WriteState,
 }
 
-#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 7
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WaitingFile {
     pub file_id: String,
@@ -40,7 +37,6 @@ pub struct WaitingFile {
     pub writes: Vec<WaitingWrite>,
 }
 
-#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 7
 impl WaitingFile {
     pub fn has_copy(&self) -> bool {
         self.writes.iter().any(|write| write.state == WriteState::Copied)
@@ -51,14 +47,12 @@ impl WaitingFile {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 7
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OtherChange {
     pub op_id: String,
     pub live: bool,
 }
 
-#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 7
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct WaitingCounts {
     pub files: usize,
@@ -69,7 +63,6 @@ pub struct WaitingCounts {
     pub live: usize,
 }
 
-#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 7
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WaitingChanges {
     pub files: Vec<WaitingFile>,
@@ -106,20 +99,17 @@ pub(crate) fn op_role(kind: &OperationKind) -> OpRole {
 
 /// §2 "Missing": `metadata()` is `NotFound`, the test 1873 uses for `payload_missing`. Any other answer counts as
 /// present, and a copy that then fails stops the sign-out (W8) instead of dropping the write.
-#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 7
 pub fn staged_copy_exists(path: &Path) -> bool {
     !matches!(std::fs::metadata(path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
 }
 
 impl WaitingChanges {
     /// W2: one `StateDb` call, then the file system is asked which staged copies exist.
-    #[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 7
     pub fn read(db: &StateDb) -> Result<Self, String> {
         let rows = db.waiting_rows().map_err(|error| format!("read the queue: {error}"))?;
         Ok(Self::classify(rows, staged_copy_exists))
     }
 
-    #[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 7
     pub fn classify(rows: Vec<WaitingRow>, exists: impl Fn(&Path) -> bool) -> Self {
         let mut by_file: BTreeMap<String, WaitingFile> = BTreeMap::new();
         let mut others = Vec::new();
@@ -161,7 +151,6 @@ impl WaitingChanges {
         Self { files, others }
     }
 
-    #[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 7
     pub fn counts(&self) -> WaitingCounts {
         WaitingCounts {
             files: self.files.len(),
@@ -178,7 +167,6 @@ impl WaitingChanges {
         }
     }
 
-    #[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 7
     pub fn is_empty(&self) -> bool {
         self.files.is_empty() && self.others.is_empty()
     }
@@ -194,17 +182,14 @@ impl WaitingChanges {
         self.counts().live > 0
     }
 
-    #[allow(dead_code)] // first production caller: Task 7; no test calls it before then
     pub fn file_ids(&self) -> BTreeSet<String> {
         self.files.iter().map(|file| file.file_id.clone()).collect()
     }
 
-    #[allow(dead_code)] // first production caller: Task 7; no test calls it before then
     pub fn other_op_ids(&self) -> BTreeSet<String> {
         self.others.iter().map(|other| other.op_id.clone()).collect()
     }
 
-    #[allow(dead_code)] // first production caller: Task 7; no test calls it before then
     pub fn missing_op_ids(&self) -> BTreeSet<String> {
         self.files
             .iter()
@@ -218,7 +203,6 @@ impl WaitingChanges {
 /// §2 and §7.2. On entry `state` says only whether the staged copy exists (`Copied`) or not (`Missing`). The newest
 /// write with a copy is copied; so is every earlier-build write with a copy; a minted write older than the newest
 /// copied one is covered; every other write is missing.
-#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 7
 fn settle_states(writes: &mut [WaitingWrite]) {
     writes.sort_by_key(|write| write.queue_order);
     let newest_copied = writes

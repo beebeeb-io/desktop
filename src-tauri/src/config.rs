@@ -911,7 +911,8 @@ pub(crate) trait ConfigFs {
     fn sync_dir(&self, dir: &Path) -> std::io::Result<()>;
 }
 
-#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 7
+// Outside tests, only the macOS sign-out builds one (spec 2026-10-10 W5).
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 pub(crate) struct RealConfigFs;
 
 impl ConfigFs for RealConfigFs {
