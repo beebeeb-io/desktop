@@ -3370,7 +3370,9 @@ fn purge_local_data_for_sign_out(
 }
 
 /// Spec 2026-10-10 §5.1 step 1 without the send conditions (the send phase adds them): one read; the earlier folders
-/// only when the ask shows a missing write. A failed read is E3, never a 0.
+/// only when the ask shows a missing write. A failed read of the queue is E3, never a 0. A failed read of the
+/// unfinished list leaves the earlier folders out and the ask still counts; its warning names the step that failed,
+/// never the error: a read error quotes a line of the file, and the list's lines are kept folders' paths (W10).
 #[cfg(target_os = "macos")]
 #[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 11
 fn count_ask(owner: &str) -> Result<sign_out::snapshot::AskSnapshot, String> {
@@ -3383,8 +3385,15 @@ fn count_ask(owner: &str) -> Result<sign_out::snapshot::AskSnapshot, String> {
     let waiting = read_waiting_changes().map_err(|_| e3())?;
     let earlier = if waiting.counts().missing_files > 0 {
         DesktopConfig::path()
-            .and_then(|path| sign_out::kept_record::unfinished_at(&path))
-            .unwrap_or_default()
+            .map_err(|_| "path")
+            .and_then(|path| sign_out::kept_record::unfinished_at(&path).map_err(|_| "read"))
+            .unwrap_or_else(|step| {
+                tracing::warn!(
+                    step = %step,
+                    "the ask names no earlier folder: the unfinished sign-out list could not be read"
+                );
+                Vec::new()
+            })
     } else {
         Vec::new()
     };
@@ -3436,7 +3445,9 @@ fn sign_out_kept_root() -> Result<PathBuf, String> {
     }
 }
 
-/// §5.2 step 7: the keep step on the app's state dir. `None`: no `state.db` yet, nothing to keep.
+/// §5.2 step 7: the keep step on the app's state dir. `None`: no `state.db` yet, nothing to keep. A state dir that does
+/// not resolve, or a `state.db` that does not open, means the queue cannot be read: E3 with its code, as a failed read
+/// inside the keep step is. Its log names the step, never the error, whose text names the database's path (W10).
 #[cfg(target_os = "macos")]
 fn keep_for_sign_out(
     accepted: Option<&sign_out::snapshot::AskSnapshot>,
@@ -3448,8 +3459,22 @@ fn keep_for_sign_out(
             sign_out::copy::E2_UNSENT_COPY_FAILED,
         )
     };
-    let Some(db) = state_db_from_state_dir(&state_paths::beebeeb_state_dir()?)? else {
-        return Ok(None);
+    let opened = state_paths::beebeeb_state_dir()
+        .map_err(|_| "state_dir")
+        .and_then(|dir| state_db_from_state_dir(&dir).map_err(|_| "state_db"));
+    let db = match opened {
+        Ok(Some(db)) => db,
+        Ok(None) => return Ok(None),
+        Err(step) => {
+            tracing::error!(
+                step = %step,
+                "sign-out stopped: the waiting changes could not be read; nothing was purged"
+            );
+            return Err(sign_out::copy::coded(
+                sign_out::copy::UNSENT_COUNT_FAILED_CODE,
+                sign_out::copy::E3_UNSENT_COUNT_FAILED,
+            ));
+        }
     };
     let root = sign_out_kept_root().map_err(|_| failed())?;
     let config = DesktopConfig::path().map_err(|_| failed())?;
@@ -32959,7 +32984,10 @@ mod sign_out_keep_tests {
     use super::*;
     use crate::config::RealConfigFs;
     use crate::engine_bridge::FinderStagingBases;
-    use crate::sign_out::copy::{E2_UNSENT_COPY_FAILED, UNSENT_COPY_FAILED_CODE, coded};
+    use crate::sign_out::copy::{
+        E1_UNSENT_CHANGES, E2_UNSENT_COPY_FAILED, E3_UNSENT_COUNT_FAILED, UNSENT_CHANGES_CODE, UNSENT_COPY_FAILED_CODE,
+        UNSENT_COUNT_FAILED_CODE, coded,
+    };
     use crate::sign_out::keep::{Acknowledge, KeepInputs, KeptSet, keep_unsent};
     use crate::sign_out::kept_names::{APP_BUNDLE_ID, kept_root};
     use crate::sign_out::kept_record::{saved_kept_unsent_at, unfinished_at};
@@ -33964,6 +33992,8 @@ mod sign_out_keep_tests {
     }
 
     /// Two sign-outs from one ask (a double click, or the menu's while Settings signs out): one sign-out, one folder.
+    /// The first one's gate takes the snapshot out of the store, so a second gate on the same ask refuses while the
+    /// first sign-out is still running, not only after its completion empties the store.
     #[tokio::test]
     async fn a_second_sign_out_with_the_same_ask_keeps_nothing_twice() {
         in_own_dirs(async {
@@ -33972,8 +34002,24 @@ mod sign_out_keep_tests {
             let (state, _acct) = signed_out_state();
             recording_finder(&state);
             let id = ask(&state, "macos-settings");
-            let first = sign_out_with(&state, Some(&id), no_seam()).await.unwrap();
+            let (store, same_ask) = (state.sign_out.snapshots.clone(), id.clone());
+            let second_gate = Arc::new(std::sync::Mutex::new(None));
+            let seen = second_gate.clone();
+            let seam: SignOutSeam = Arc::new(move |point| {
+                if point == "before_keep" {
+                    // The second click's gate, on the queue as it is now, while the first sign-out runs.
+                    let waiting = crate::sign_out::waiting::WaitingChanges::read(&state_db_in_scratch()).unwrap();
+                    *seen.lock().unwrap() = Some(store.gate(&waiting, Some(&same_ask)));
+                }
+                Ok(())
+            });
+            let first = sign_out_with(&state, Some(&id), seam).await.unwrap();
             assert!(first.kept_unsent.is_some());
+            assert_eq!(
+                *second_gate.lock().unwrap(),
+                Some(Err(crate::sign_out::snapshot::GateRefusal)),
+                "the first sign-out took the snapshot: a second gate on the same ask refuses while it runs"
+            );
             queue_write(&db, "w2", "f2", b"again"); // something waits again, so the stale ask matters
             let second = sign_out_with(&state, Some(&id), no_seam()).await.unwrap_err();
             assert!(second.message.starts_with("unsent_changes: "), "{}", second.message);
@@ -34004,6 +34050,208 @@ mod sign_out_keep_tests {
                 (true, ())
             })
             .unwrap();
+        })
+        .await;
+    }
+
+    /// The sign-out of a person who is signed in, the usual one: it ends `Completed`, its result carries the kept folder
+    /// (the alert names it, W9), and it empties the store, also of a newer count another window recorded meanwhile.
+    #[tokio::test]
+    async fn a_signed_in_sign_out_completes_with_its_folder_and_empties_the_store() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            queue_write(&db, "w1", "f1", b"signed in");
+            let state = AppState::default();
+            let acct = test_account(&state, "signout-1887-completed");
+            recording_finder(&state);
+            *acct.session.lock().unwrap() = Some(super::Session {
+                token: "t".into(),
+                master_key: [7u8; 32],
+                email: None,
+            });
+            set_auth_present(&state, true);
+            let id = ask(&state, "macos-settings");
+            let store = state.sign_out.snapshots.clone();
+            let seam: SignOutSeam = Arc::new(move |point| {
+                if point == "before_keep" {
+                    store.record(count_ask("onboarding").unwrap()); // another window counts while this one signs out
+                }
+                Ok(())
+            });
+            let done = sign_out_with(&state, Some(&id), seam).await.unwrap();
+            assert_eq!(done.outcome, SignOutOutcome::Completed, "the signed-in arm ran");
+            let kept = done.kept_unsent.expect("the Completed arm carries the kept folder");
+            assert_eq!(kept.files, 1);
+            assert_eq!(
+                std::fs::read(Path::new(&kept.folder).join("f1.bin")).unwrap(),
+                b"signed in"
+            );
+            assert_eq!(
+                state.sign_out.snapshots.newest_ask_id(),
+                None,
+                "a completed signed-in sign-out empties the store"
+            );
+            assert!(acct.session.lock().unwrap().is_none(), "the keys are cleared");
+            assert!(db.waiting_rows().unwrap().is_empty(), "the queue is empty");
+        })
+        .await;
+    }
+
+    /// W1 and W6 with no ask: nothing waited at the gate, so the sign-out passed no `keepUnsent`. An other change (a
+    /// rename, a move, a new folder or a deletion) that arrives before the keep step stops the sign-out with
+    /// `unsent_changes`, so the ask is shown, and nothing is purged. (A write that arrives then is kept: U9.)
+    #[tokio::test]
+    async fn a_late_other_change_with_no_ask_stops_the_sign_out() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            let (state, _acct) = signed_out_state();
+            recording_finder(&state);
+            let seam: SignOutSeam = Arc::new(|point| {
+                if point == "before_keep" {
+                    queue_rename(&state_db_in_scratch(), "late-rename");
+                }
+                Ok(())
+            });
+            let result = sign_out_with(&state, None, seam).await;
+            assert_eq!(
+                db.waiting_rows().unwrap().len(),
+                1,
+                "the late rename is not purged unasked: {result:?}"
+            );
+            let failure = result.expect_err("the sign-out stops");
+            assert_eq!(
+                failure.message,
+                coded(UNSENT_CHANGES_CODE, E1_UNSENT_CHANGES),
+                "the ask is shown again"
+            );
+            assert_eq!(failure.kept_unsent, None, "nothing was kept");
+        })
+        .await;
+    }
+
+    /// `clear_session` hands `keepUnsent: { askId }` on to the gate (spec §5.1, the contract). A unit test cannot build
+    /// the command's `AppHandle`, so this checks the name the webview sends and the command's call.
+    #[test]
+    fn clear_session_hands_keep_unsent_on_to_the_gate() {
+        let arg: KeepUnsentArg =
+            serde_json::from_value(serde_json::json!({ "askId": "a1" })).expect("the webview sends askId");
+        assert_eq!(arg.ask_id, "a1");
+        assert!(
+            serde_json::from_value::<KeepUnsentArg>(serde_json::json!({ "ask_id": "a1" })).is_err(),
+            "askId is the only name it takes"
+        );
+        let production = super::finder_setup_command_tests::production_source();
+        let command = crate::source_pin::squeeze(super::finder_setup_command_tests::body_between(
+            &production,
+            "async fn clear_session(",
+            "\n}\n",
+        ));
+        for expected in [
+            // Tauri names the argument after the parameter, in camelCase: `keepUnsent`.
+            "keep_unsent: Option<KeepUnsentArg>",
+            "clear_session_impl(&state, forget_email.unwrap_or(false), keep_unsent.as_ref().map(|keep| keep.ask_id.as_str()))",
+        ] {
+            assert!(
+                command.contains(&crate::source_pin::squeeze(expected)),
+                "clear_session passes keepUnsent on: {expected}\n{command}"
+            );
+        }
+    }
+
+    /// Spec §5.3, "4. Gate | Read fails | E3 | Nothing changed": a gate that cannot read the queue answers E3 before the
+    /// Finder removal and the engine stop, and the keys stay in memory.
+    #[tokio::test]
+    async fn a_gate_that_cannot_read_the_queue_changes_nothing() {
+        in_own_dirs(async {
+            // A directory where `state.db` should be: it exists, and it cannot be opened.
+            let dir = state_paths::beebeeb_state_dir().unwrap();
+            std::fs::create_dir_all(state_paths::state_db_path_from_state_dir(&dir)).unwrap();
+            let state = AppState::default();
+            let acct = test_account(&state, "signout-1887-unread");
+            let events = recording_finder(&state);
+            *acct.session.lock().unwrap() = Some(super::Session {
+                token: "t".into(),
+                master_key: [7u8; 32],
+                email: None,
+            });
+            set_auth_present(&state, true);
+            let failure = sign_out_with(&state, None, no_seam()).await.unwrap_err();
+            assert!(
+                events.lock().unwrap().iter().all(|event| event != "remove"),
+                "the reconciler got no removal: {:?} ({})",
+                events.lock().unwrap(),
+                failure.message
+            );
+            assert_eq!(
+                failure.message,
+                coded(UNSENT_COUNT_FAILED_CODE, E3_UNSENT_COUNT_FAILED),
+                "E3 with its code"
+            );
+            assert!(acct.session.lock().unwrap().is_some(), "the keys are in memory");
+        })
+        .await;
+    }
+
+    /// The keep step opens `state.db` itself. When it cannot, the queue cannot be read: it answers E3 with its code, as a
+    /// failed read inside the keep step does, never the database's error, whose text names the database's absolute
+    /// path; and its log names the step, never the path (W10).
+    #[tokio::test]
+    async fn a_keep_step_that_cannot_open_the_queue_answers_e3_and_names_no_path() {
+        in_own_dirs(async {
+            let dir = state_paths::beebeeb_state_dir().unwrap();
+            std::fs::create_dir_all(state_paths::state_db_path_from_state_dir(&dir)).unwrap();
+            let mut kept = None;
+            let logs = capture_logs(|| kept = Some(keep_for_sign_out(None)));
+            let error = match kept.expect("the keep step ran") {
+                Ok(_) => panic!("a state.db that cannot be opened keeps nothing"),
+                Err(error) => error,
+            };
+            assert_eq!(
+                error,
+                coded(UNSENT_COUNT_FAILED_CODE, E3_UNSENT_COUNT_FAILED),
+                "E3 with its code"
+            );
+            let path = dir.to_string_lossy().into_owned();
+            assert!(!logs.contains(&path), "no log carries the path:\n{logs}");
+            let line = logs
+                .lines()
+                .find(|line| line.contains("the waiting changes could not be read"))
+                .unwrap_or_else(|| panic!("the stop is logged:\n{logs}"));
+            assert!(line.contains("step=state_db"), "the log names the step: {line}");
+        })
+        .await;
+    }
+
+    /// An ask that shows a missing write names the earlier folders (A3e). When the list cannot be read, the ask still
+    /// counts, without them, and its warning names the step that failed, never the error: a read error quotes a line of
+    /// the file, and the list's lines are kept folders' paths (W10).
+    #[tokio::test]
+    async fn an_ask_whose_unfinished_list_cannot_be_read_still_counts_and_logs_the_step() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            let staged = queue_write(&db, "w1", "f1", b"bytes");
+            std::fs::remove_file(&staged).unwrap(); // a missing write: the ask reads the list
+            let config = DesktopConfig::path().unwrap();
+            // A line the parser stops at, and it names a kept folder (a hand edit, say).
+            std::fs::write(
+                &config,
+                "kept_unsent_unfinished = [\"/kept/earlier\"]\nnote = \"/kept/earlier\" and more\n",
+            )
+            .unwrap();
+            let mut counted = None;
+            let logs = capture_logs(|| counted = Some(count_ask("o")));
+            let snapshot = counted.expect("the count ran").expect("the ask still counts");
+            assert_eq!(snapshot.counts.missing_files, 1);
+            assert!(snapshot.counts.earlier_folders.is_empty(), "no folder could be read");
+            let warning = logs
+                .lines()
+                .find(|line| line.contains("the unfinished sign-out list could not be read"))
+                .unwrap_or_else(|| panic!("the failed read is logged:\n{logs}"));
+            assert!(
+                !logs.contains("/kept/earlier") && !logs.contains(&*config.to_string_lossy()),
+                "no log carries a kept folder or the file's path:\n{logs}"
+            );
+            assert!(warning.contains("step=read"), "the warning names the step: {warning}");
         })
         .await;
     }
