@@ -145,6 +145,8 @@ fn keep_after_close(inputs: &KeepInputs<'_>) -> Result<KeptSet, KeepFailure> {
         let _ = std::fs::remove_dir_all(&folder.path);
         return Err(KeepFailure::Copy("record"));
     }
+    #[cfg(test)]
+    super::crash_point("AfterKeepSave");
     kept.folder = Some(folder.path);
     kept.files = folder.files;
     log_kept(&kept);

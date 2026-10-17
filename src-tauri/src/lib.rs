@@ -4620,11 +4620,24 @@ fn purge_local_state_files_with(
         paths.drain(..).partition(|path| waiting_copies.contains(path));
     let mut files_removed = 0usize;
     let mut files_skipped = 0usize;
-    for group in [others_first, waiting_last] {
-        let (removed, skipped) = remove_purge_paths(&group, remove)?;
+    let (removed, skipped) = remove_purge_paths(&others_first, remove)?;
+    files_removed += removed;
+    files_skipped += skipped;
+    #[cfg(test)]
+    sign_out::crash_point("AfterFirstGroup");
+    // The waiting writes' staged copies one at a time: a removal that fails stops the purge before the next copy, and a
+    // test (spec 2026-10-10 U42) can stop the process between two of them.
+    for (index, path) in waiting_last.iter().enumerate() {
+        if index == 1 {
+            #[cfg(test)]
+            sign_out::crash_point("BetweenWaitingCopies");
+        }
+        let (removed, skipped) = remove_purge_paths(std::slice::from_ref(path), remove)?;
         files_removed += removed;
         files_skipped += skipped;
     }
+    #[cfg(test)]
+    sign_out::crash_point("BeforeRowClear");
 
     let purge = db
         .purge_all_local_state()
@@ -33068,6 +33081,7 @@ mod sign_out_keep_tests {
     use crate::sign_out::kept_names::{APP_BUNDLE_ID, kept_root};
     use crate::sign_out::kept_record::{saved_kept_unsent_at, unfinished_at};
     use crate::sign_out::kept_writer::SystemClone;
+    use crate::sign_out::snapshot::AskSnapshot;
     use std::path::Path;
 
     /// A state dir with `state.db` where the sign-out's purge looks for it, and a config file of its own.
@@ -33491,6 +33505,219 @@ mod sign_out_keep_tests {
             );
             assert!(warning.contains("step=read"), "the warning names the step: {warning}");
         });
+    }
+
+    const U42: &str = "sign_out_keep_tests::an_interrupted_sign_out_still_names_its_folder_after_a_restart";
+
+    /// The layout the parent and the child share: `state.db`, staging, the kept root and the config base.
+    struct CrashDir {
+        dir: PathBuf,
+    }
+
+    impl CrashDir {
+        fn db(&self) -> state_db::StateDb {
+            state_db::StateDb::open(state_paths::state_db_path_from_state_dir(&self.dir)).unwrap()
+        }
+        fn kept_root(&self) -> PathBuf {
+            self.dir.join("kept")
+        }
+        async fn config(&self) -> PathBuf {
+            crate::config::CONFIG_DIR_OVERRIDE
+                .scope(self.dir.join("config"), async { DesktopConfig::path().unwrap() })
+                .await
+        }
+        fn seed(&self) {
+            let db = self.db();
+            for op in ["w1", "w2", "w3"] {
+                let staged = self.dir.join("staging").join(op);
+                std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
+                std::fs::write(&staged, op.as_bytes()).unwrap();
+                db.hold_lock_for_test()
+                    .execute_batch(&format!(
+                        "INSERT INTO files (file_id, path) VALUES ('{op}', '{op}.txt');
+                         INSERT INTO operation_queue (op_id, kind, file_id, payload_path, write_id, write_origin)
+                         VALUES ('{op}', 'upload_version', '{op}', '{p}', '{op}', 'minted');
+                         INSERT INTO staged_payloads (path, completed) VALUES ('{p}', 0);",
+                        p = staged.display()
+                    ))
+                    .unwrap();
+            }
+        }
+        /// One sign-out's keep and purge, acknowledging the writes already missing.
+        async fn sign_out(&self) -> Result<KeptSet, String> {
+            let db = self.db();
+            let config = self.config().await;
+            let waiting = crate::sign_out::waiting::WaitingChanges::read(&db).unwrap();
+            let snapshot = AskSnapshot::of(&waiting, "o", Vec::new());
+            let kept = keep_unsent(KeepInputs {
+                db: &db,
+                acknowledge: Acknowledge::Asked {
+                    others: &snapshot.others,
+                    missing: &snapshot.missing,
+                },
+                root: &self.kept_root(),
+                event_name: "event".into(),
+                config_path: &config,
+                clone: &SystemClone,
+                config_fs: &RealConfigFs,
+            })
+            .map_err(|failure| failure.message())?;
+            purge_local_state_files_with(&db, None, &[], None, Some(&kept), &|path| std::fs::remove_file(path))?;
+            Ok(kept)
+        }
+        /// Run the child to `point`; require that it reached it and died by a signal. The child writes its output to a
+        /// file in this directory: on this process's output, its harness's lines would be read as a second test run
+        /// by whatever reads `cargo test`'s output (the count guard does).
+        fn crash_at(&self, point: &str) {
+            use std::os::unix::process::ExitStatusExt;
+            let reached = self.dir.join("reached");
+            let _ = std::fs::remove_file(&reached);
+            let log = self.dir.join("child.log");
+            let output = std::fs::File::create(&log).unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", U42, "--test-threads=1", "--nocapture"])
+                .env("BB_TEST_CRASH_CHILD", &self.dir)
+                .env("BB_TEST_CRASH_AT", point)
+                .env("BB_TEST_CRASH_REACHED", &reached)
+                .env("HOME", self.dir.join("home"))
+                .stdout(output.try_clone().unwrap())
+                .stderr(output)
+                .status()
+                .unwrap();
+            // Each line marked, so a failure message never carries a line that reads as this harness's own.
+            let child: String = std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .lines()
+                .map(|line| format!("child| {line}\n"))
+                .collect();
+            assert_eq!(
+                std::fs::read_to_string(&reached).ok().as_deref(),
+                Some(format!("reached:{point}").as_str()),
+                "the child reached {point}; its output:\n{child}"
+            );
+            assert_eq!(
+                status.signal(),
+                Some(libc::SIGABRT),
+                "the child died there, with no return; its output:\n{child}"
+            );
+        }
+        /// After a "restart": the count from what the child left on disk.
+        async fn count(&self) -> (usize, Vec<String>, Option<String>) {
+            let config = self.config().await;
+            let waiting = crate::sign_out::waiting::WaitingChanges::read(&self.db()).unwrap();
+            let unfinished = crate::sign_out::kept_record::unfinished_at(&config).unwrap();
+            let snapshot = AskSnapshot::of(&waiting, "o", unfinished);
+            let row = DesktopConfig::load_from(&config).unwrap().kept_unsent_folder;
+            (snapshot.counts.missing_files, snapshot.counts.earlier_folders, row)
+        }
+    }
+
+    /// U42.
+    #[tokio::test]
+    async fn an_interrupted_sign_out_still_names_its_folder_after_a_restart() {
+        if let Ok(dir) = std::env::var("BB_TEST_CRASH_CHILD") {
+            let _ = CrashDir {
+                dir: PathBuf::from(dir),
+            }
+            .sign_out()
+            .await;
+            return; // reached only if the crash point was never hit; the parent then fails on `reached`
+        }
+        let f1 = |c: &CrashDir| c.kept_root().join("event").to_string_lossy().into_owned();
+        // Resolved: the writer records its resolved root, and these compare with what it recorded.
+        let crash_dir = |scratch: &tempfile::TempDir| CrashDir {
+            dir: std::fs::canonicalize(scratch.path()).unwrap(),
+        };
+        for (point, missing) in [
+            ("AfterKeepSave", 0),
+            ("AfterFirstGroup", 0),
+            ("BetweenWaitingCopies", 1),
+            ("BeforeRowClear", 3),
+        ] {
+            let scratch = tempfile::tempdir().unwrap();
+            let c = crash_dir(&scratch);
+            c.seed();
+            c.crash_at(point);
+            let (missing_files, earlier, row) = c.count().await;
+            assert_eq!(missing_files, missing, "{point}");
+            let expected: Vec<String> = if missing > 0 { vec![f1(&c)] } else { Vec::new() };
+            assert_eq!(earlier, expected, "{point}");
+            assert_eq!(row.as_deref(), Some(f1(&c).as_str()), "{point}");
+            assert_eq!(
+                crate::sign_out::kept_record::unfinished_at(&c.config().await).unwrap(),
+                [f1(&c)],
+                "{point}"
+            );
+            assert_eq!(
+                std::fs::read(Path::new(&f1(&c)).join("w1.txt")).unwrap(),
+                b"w1",
+                "{point}: F1 holds the bytes"
+            );
+        }
+        // (e) From (c)'s leftovers, a second sign-out dies at (c) again: the list holds both, oldest first.
+        let scratch = tempfile::tempdir().unwrap();
+        let c = crash_dir(&scratch);
+        c.seed();
+        c.crash_at("BetweenWaitingCopies");
+        c.crash_at("BetweenWaitingCopies");
+        let f2 = c.kept_root().join("event (2)").to_string_lossy().into_owned();
+        let config = c.config().await;
+        assert_eq!(
+            crate::sign_out::kept_record::unfinished_at(&config).unwrap(),
+            [f1(&c), f2.clone()]
+        );
+        assert_eq!(c.count().await.2.as_deref(), Some(f2.as_str()));
+        assert_eq!(
+            std::fs::read(Path::new(&f1(&c)).join("w1.txt")).unwrap(),
+            b"w1",
+            "F1 still holds its files"
+        );
+        // (f) From (e)'s leftovers, a sign-out that completes clears the list and never touches 1882's key. Its keep
+        // makes the newest folder, F3 (F2 is (e)'s), and the row names it.
+        crate::finder_removal::remember_kept_folder_at(&config, "/macos/kept").unwrap();
+        let kept = {
+            let db = c.db();
+            let waiting = crate::sign_out::waiting::WaitingChanges::read(&db).unwrap();
+            let snapshot = AskSnapshot::of(&waiting, "o", Vec::new());
+            keep_unsent(KeepInputs {
+                db: &db,
+                acknowledge: Acknowledge::Asked {
+                    others: &snapshot.others,
+                    missing: &snapshot.missing,
+                },
+                root: &c.kept_root(),
+                event_name: "event".into(),
+                config_path: &config,
+                clone: &SystemClone,
+                config_fs: &RealConfigFs,
+            })
+            .unwrap()
+        };
+        let f3 = c.kept_root().join("event (3)");
+        assert_eq!(
+            kept.folder.as_deref(),
+            Some(f3.as_path()),
+            "a file still had a copy, so (f) kept it in a third folder"
+        );
+        crate::config::CONFIG_DIR_OVERRIDE
+            .scope(
+                c.dir.join("config"),
+                purge_local_data_for_sign_out_async(c.dir.clone(), kept),
+            )
+            .await;
+        let text = std::fs::read_to_string(&config).unwrap();
+        assert!(!text.contains("kept_unsent_unfinished"), "{text}");
+        let after = DesktopConfig::load_from(&config).unwrap();
+        assert_eq!(
+            after.kept_unsent_folder.as_deref(),
+            Some(f3.to_string_lossy().as_ref()),
+            "the row names the newest folder"
+        );
+        assert_eq!(after.kept_unsynced_folder.as_deref(), Some("/macos/kept"));
+    }
+
+    async fn purge_local_data_for_sign_out_async(dir: PathBuf, kept: KeptSet) {
+        purge_local_data_for_sign_out(Ok(dir), None, false, Some(&kept)).unwrap();
     }
 
     /// U27, the purge half: the purge removes both staging roots' sources after keeping them.

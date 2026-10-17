@@ -14,6 +14,18 @@ pub(crate) mod kept_writer;
 pub(crate) mod snapshot;
 pub(crate) mod waiting;
 
+/// Test builds only (spec 2026-10-10 U42): a real process death at `point` when `BB_TEST_CRASH_AT` names it. It
+/// writes `reached:<point>` first, so the parent can tell a death here from a death anywhere else.
+#[cfg(test)]
+pub(crate) fn crash_point(point: &str) {
+    if std::env::var("BB_TEST_CRASH_AT").as_deref() == Ok(point) {
+        if let Ok(path) = std::env::var("BB_TEST_CRASH_REACHED") {
+            let _ = std::fs::write(path, format!("reached:{point}"));
+        }
+        std::process::abort();
+    }
+}
+
 /// The sign-out flow's state in `AppState` (spec 2026-10-10 §5.1). The send phase, the late results and the flow
 /// request join it later.
 #[derive(Default)]
