@@ -3,7 +3,6 @@ import { useCapabilities, supportsRoute, CapabilityAlternative, canInstallUpdate
 import { CapabilityNotice } from '../../CapabilityNotice'
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
 import {
-  accountRegion,
   accountNotificationPreferences,
   accountUpdateNotificationPreferences,
   appActivitySnapshot,
@@ -12,13 +11,11 @@ import {
   formatBytes,
   installDesktopChannelDowngrade,
   openUrl,
-  setAccountRegion,
   type AppActivitySnapshot,
   type DesktopConfig,
   type DesktopTheme,
   type FinderInstallState,
   type NotificationPreferenceValues,
-  type RegionInfo,
   type StorageSummary,
   type SyncStatus,
   DEFAULT_CONFIG,
@@ -50,10 +47,11 @@ import {
   normalizeThemePreference,
 } from '../advancedSettingsModel'
 import {
-  loadDataResidency,
   buildDataResidencyViewState,
-  commitPreferredRegionSelection,
+  residencySummary,
+  savedRegionMessage,
 } from '../dataResidencySettingsModel'
+import { useDataResidency } from '../useDataResidency'
 import { useFinderSetup } from '../../finderSetup'
 import { FINDER_SETUP_TITLE, finderActionButtonLabel, finderStatusPill } from '../../finderSetupCopy'
 import { setDesktopThemePreference } from '../theme'
@@ -595,12 +593,12 @@ function RegionSelectionCard({
   onSelect,
 }: {
   item: ReturnType<typeof buildDataResidencyViewState>['items'][number]
-  onSelect: (continent: string) => void
+  onSelect: (id: string) => void
 }) {
   return (
     <button
       type="button"
-      onClick={() => onSelect(item.continent)}
+      onClick={() => onSelect(item.id)}
       disabled={item.disabled}
       aria-pressed={item.selected}
       style={{
@@ -643,10 +641,13 @@ function RegionSelectionCard({
             {item.displayName}
           </span>
           {item.isDefault && <Chip>Default</Chip>}
+          {item.comingSoon && <Chip>Coming soon</Chip>}
         </span>
-        <span style={{ display: 'block', fontFamily: T.fontMono, fontSize: 11.5, color: T.ink3, lineHeight: 1.45 }}>
-          {item.locationLabel}
-        </span>
+        {item.detail && (
+          <span style={{ display: 'block', fontFamily: T.fontMono, fontSize: 11.5, color: T.ink3, lineHeight: 1.45 }}>
+            {item.detail}
+          </span>
+        )}
       </span>
 
       {item.selected && <NavIcon name="check" size={14} color={T.amberDeep} />}
@@ -656,73 +657,29 @@ function RegionSelectionCard({
 
 function DataResidencyPanel() {
   const { showToast } = useToast()
-  const [regions, setRegions] = useState<RegionInfo[]>([])
-  const [preferredRegion, setPreferredRegion] = useState<string | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [saving, setSaving] = useState(false)
-  const [loadError, setLoadError] = useState<string | null>(null)
+  const { loading, loadError, view, retry, select } = useDataResidency()
 
-  const load = () => {
-    let cancelled = false
-    setLoading(true)
-    setLoadError(null)
-    void (async () => {
-      const result = await loadDataResidency(accountRegion)
-      if (cancelled) return
-      setRegions(result.regions)
-      setPreferredRegion(result.preferredRegion)
-      setLoadError(result.error)
-      setLoading(false)
-    })()
-    return () => { cancelled = true }
-  }
-
-  useEffect(() => load(), [])
-
-  const view = buildDataResidencyViewState({
-    preferredRegion,
-    regions,
-    saving,
-  })
-
-  const handleSelect = async (continent: string) => {
-    if (view.onlyOneRegion || saving) return
-
-    setSaving(true)
-    const result = await commitPreferredRegionSelection({
-      continent,
-      preferredRegion,
-      saving,
-      setPreferredRegion,
-      savePreferredRegion: async next => {
-        const response = await setAccountRegion(next)
-        if (!response.ok) {
-          throw new Error(response.unsupported ? commandUnavailableLabel('account_set_region') : response.reason)
-        }
-        return response.value
-      },
-    })
-    setSaving(false)
-
-    if (result.status === 'saved') {
+  const handleSelect = async (id: string) => {
+    const result = await select(id)
+    if (result?.status === 'saved') {
       showToast({
         variant: 'success',
-        title: 'Region updated',
-        message: 'New uploads will use your preferred region.',
+        title: 'Storage location updated',
+        message: savedRegionMessage(view.items, result.preferredRegion),
       })
       return
     }
 
-    if (result.status === 'error') {
+    if (result?.status === 'error') {
       showToast({
         variant: 'error',
-        title: 'Failed to save region',
+        title: 'Failed to save storage location',
         message: result.message || 'Please try again.',
       })
     }
   }
 
-  return <DataResidencyContent loading={loading} loadError={loadError} view={view} onRetry={load} onSelect={handleSelect} />
+  return <DataResidencyContent loading={loading} loadError={loadError} view={view} onRetry={retry} onSelect={handleSelect} />
 }
 
 export function DataResidencyContent({ loading, loadError, view, onRetry, onSelect }: {
@@ -730,18 +687,19 @@ export function DataResidencyContent({ loading, loadError, view, onRetry, onSele
   loadError: string | null
   view: ReturnType<typeof buildDataResidencyViewState>
   onRetry: () => void
-  onSelect: (continent: string) => void
+  onSelect: (id: string) => void
 }) {
-  const currentRegion = view.items.find(item => item.continent === view.effectiveRegion)
-  const error = loadError ?? (!currentRegion?.displayName.trim()
+  const summary = residencySummary(view)
+  // A stored datacenter that left the list is not a load failure: the rows are fine, none is selected.
+  const error = loadError ?? (!summary && !view.preferenceUnavailable
     ? 'Your storage region could not be determined. Please try again.'
     : null)
   const subtitle = loading
     ? 'Loading data residency…'
     : error ? undefined
-    : currentRegion?.continent === 'europe'
-      ? `Stored in the EU (currently ${currentRegion.locationLabel}).`
-      : `Stored in ${currentRegion?.displayName} (currently ${currentRegion?.locationLabel}).`
+    : view.preferenceUnavailable
+      ? 'Your chosen location isn’t available right now. New files go wherever Beebeeb places them by default.'
+      : summary ?? undefined
 
   return (
     <SettingsSectionShell>
@@ -790,9 +748,9 @@ export function DataResidencyContent({ loading, loadError, view, onRetry, onSele
           {!error && <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             {view.items.map(item => (
               <RegionSelectionCard
-                key={item.continent}
+                key={item.id}
                 item={item}
-                onSelect={(continent) => onSelect(continent)}
+                onSelect={(id) => onSelect(id)}
               />
             ))}
           </div>}
@@ -802,7 +760,7 @@ export function DataResidencyContent({ loading, loadError, view, onRetry, onSele
               <NavIcon name="shield" size={14} color={T.amberDeep} />
               <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.55 }}>
                 <strong style={{ color: T.ink2 }}>Existing files stay where they are.</strong>{' '}
-                Only new uploads use your preferred region.
+                Only new uploads use the location you choose.
               </div>
             </div>
           </Card>}

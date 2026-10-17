@@ -129,14 +129,40 @@ pub struct RegionInfo {
     pub is_default: bool,
 }
 
+/// One row of the storage-location list (task 1919): `choices` of `GET /api/v1/me/region`, the same
+/// array as the public `GET /api/v1/storage-regions`. The server owns every field. `id` is sent back
+/// verbatim as `preferred_region` (`europe` or a datacenter id). There is no provider, endpoint or
+/// pool id on the wire, and none is read: any such key a server sends is ignored here and absent
+/// from the IPC.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct StorageChoice {
+    pub id: String,
+    /// `region` (the "Europe" default: any datacenter) or `datacenter`.
+    pub kind: String,
+    pub name: String,
+    #[serde(default)]
+    pub city: Option<String>,
+    #[serde(default)]
+    pub country: Option<String>,
+    #[serde(default)]
+    pub country_code: Option<String>,
+    /// `live` or `coming_soon`.
+    pub status: String,
+    pub selectable: bool,
+    pub is_default: bool,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UserRegionResponse {
-    /// The user's chosen region continent, or null → fall back to the default
-    /// region's continent.
+    /// `europe`, a live datacenter id, or null (no choice: placed like `europe`).
     #[serde(default)]
     pub preferred_region: Option<String>,
     #[serde(alias = "available_regions")]
     pub regions: Vec<RegionInfo>,
+    /// The storage-location list. A server that predates task 1919 sends none: the IPC then carries
+    /// an empty list and the view falls back to `regions`.
+    #[serde(default)]
+    pub choices: Vec<StorageChoice>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -894,13 +920,76 @@ mod tests {
         assert_eq!(region.display_name, "Europe");
         assert_eq!(region.city, "Local");
         assert!(region.is_default);
+        // An older server sends no `choices`: the IPC carries an empty list, never an invented one.
+        assert!(response.choices.is_empty());
         assert_eq!(
             serde_json::to_value(response).unwrap(),
             serde_json::json!({
                 "preferred_region": null,
-                "regions": [{"continent": "europe", "display_name": "Europe", "city": "Local", "is_default": true}]
+                "regions": [{"continent": "europe", "display_name": "Europe", "city": "Local", "is_default": true}],
+                "choices": []
             })
         );
+    }
+
+    // Task 1919: `GET /me/region` carries `choices`, the list the Data residency view renders.
+    // The fixture is a response captured from a real local API (a scratch DB with the fsn1, hel1
+    // and nbg1 pools loaded), not a hand-written shape.
+    #[test]
+    fn region_choices_decode_captured_server_response() {
+        let response: UserRegionResponse =
+            serde_json::from_str(include_str!("../tests/fixtures/region-choices-api.json"))
+                .expect("the captured /me/region response must decode");
+        assert_eq!(response.preferred_region, None);
+        let ids: Vec<&str> = response.choices.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["europe", "fsn1", "hel1", "nbg1", "ede"]);
+
+        let europe = &response.choices[0];
+        assert_eq!(europe.kind, "region");
+        assert_eq!(europe.name, "Europe");
+        assert!(europe.is_default && europe.selectable);
+        assert_eq!((europe.city.as_deref(), europe.country.as_deref()), (None, None));
+
+        let helsinki = &response.choices[2];
+        assert_eq!(helsinki.kind, "datacenter");
+        assert_eq!(helsinki.city.as_deref(), Some("Helsinki"));
+        assert_eq!(helsinki.country.as_deref(), Some("Finland"));
+        assert_eq!(helsinki.country_code.as_deref(), Some("FI"));
+        assert!(helsinki.selectable && !helsinki.is_default);
+
+        let ede = &response.choices[4];
+        assert_eq!(ede.status, "coming_soon");
+        assert!(!ede.selectable, "a coming-soon datacenter is listed, never selectable");
+
+        // Only the Europe entry is the default.
+        assert_eq!(response.choices.iter().filter(|c| c.is_default).count(), 1);
+    }
+
+    #[test]
+    fn region_choices_never_forward_provider_or_endpoint_to_the_ipc() {
+        let mut json: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/region-choices-api.json")).unwrap();
+        json["choices"][1]["provider"] = serde_json::json!("Never Display Storage Provider");
+        json["choices"][1]["endpoint"] = serde_json::json!("https://never.example");
+        let response: UserRegionResponse = serde_json::from_value(json).unwrap();
+        let ipc = serde_json::to_string(&response).unwrap();
+        assert!(!ipc.contains("Never Display"), "{ipc}");
+        assert!(!ipc.contains("never.example"), "{ipc}");
+        assert!(!ipc.contains("provider") && !ipc.contains("endpoint"), "{ipc}");
+    }
+
+    #[test]
+    fn region_choices_reject_malformed_entries() {
+        for json in [
+            r#"{"preferred_region":null,"available_regions":[],"choices":"europe"}"#,
+            r#"{"preferred_region":null,"available_regions":[],"choices":[{"kind":"region"}]}"#,
+            r#"{"preferred_region":null,"available_regions":[],"choices":[{"id":"x","kind":"region","name":"X"}]}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<UserRegionResponse>(json).is_err(),
+                "{json} must not decode"
+            );
+        }
     }
 
     #[test]

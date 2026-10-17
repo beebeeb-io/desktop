@@ -862,10 +862,33 @@ export interface RegionInfo {
   is_default: boolean
 }
 
+/**
+ * One row of the storage-location list (task 1919): `GET /api/v1/me/region` -> `choices`, the same
+ * list as the public `GET /api/v1/storage-regions`. The server owns every field: the "Europe"
+ * default (`kind: 'region'`, no country, any datacenter), the live datacenters, and the datacenters
+ * that are only coming soon (`selectable: false`). The client renders the list as it comes and
+ * keeps no list, city or country table of its own. There is no provider field to read.
+ */
+export interface StorageChoice {
+  /** Sent back verbatim as `preferred_region`: `europe` or a datacenter id. */
+  id: string
+  kind: 'region' | 'datacenter' | (string & {})
+  name: string
+  city: string | null
+  country: string | null
+  country_code: string | null
+  status: 'live' | 'coming_soon' | (string & {})
+  selectable: boolean
+  is_default: boolean
+}
+
 export interface UserRegionResponse {
-  /** Chosen region continent, or null → fall back to the default region. */
+  /** `europe`, a live datacenter id, or null (no choice, which places like `europe`). */
   preferred_region: string | null
+  /** The legacy one-entry-per-continent list. A server without `choices` sends only this. */
   regions: RegionInfo[]
+  /** The storage-location list (task 1919). Empty from a server that predates it. */
+  choices?: StorageChoice[]
 }
 
 export interface SetPreferredRegionResponse {

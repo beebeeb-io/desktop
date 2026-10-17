@@ -17204,6 +17204,66 @@ mod popover_snapshot_command_tests {
         });
     }
 
+    /// Task 1919: the two region COMMANDS the Settings windows invoke (`account_region`, `account_set_region`),
+    /// run through their real handlers against a REAL local API. Ignored by default.
+    ///
+    /// ```text
+    /// BB_REAL_API_BASE=http://127.0.0.1:39191 BB_REAL_API_TOKEN=<session token> \
+    ///   cargo test --lib real_api_region_commands -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "needs a running local API with fsn1/hel1/nbg1 pools: BB_REAL_API_BASE and BB_REAL_API_TOKEN"]
+    fn real_api_region_commands_list_choose_and_refuse() {
+        let base = std::env::var("BB_REAL_API_BASE").expect("BB_REAL_API_BASE");
+        let token = std::env::var("BB_REAL_API_TOKEN").expect("BB_REAL_API_TOKEN");
+        assert!(
+            base.starts_with("http://127.0.0.1:") || base.starts_with("http://localhost:"),
+            "this test only ever talks to a local API, got {base}"
+        );
+        with_isolated_env(&base, || {
+            let app = mock_app_with_account(true, true);
+            app.state::<AppState>()
+                .active_account()
+                .unwrap()
+                .session
+                .lock()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .token = token.clone();
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+
+            let listed = runtime
+                .block_on(account_region(app.state::<AppState>()))
+                .expect("account_region against the real API");
+            let ipc = serde_json::to_value(&listed).unwrap();
+            println!("account_region IPC: {}", serde_json::to_string(&ipc).unwrap());
+            let ids: Vec<&str> = listed.choices.iter().map(|c| c.id.as_str()).collect();
+            assert_eq!(ids, ["europe", "fsn1", "hel1", "nbg1", "ede"]);
+            assert!(!ipc.to_string().contains("provider"));
+
+            let saved = runtime
+                .block_on(account_set_region(app.state::<AppState>(), Some("hel1".into())))
+                .expect("account_set_region hel1");
+            assert_eq!(saved.preferred_region.as_deref(), Some("hel1"));
+            let read_back = runtime.block_on(account_region(app.state::<AppState>())).unwrap();
+            assert_eq!(read_back.preferred_region.as_deref(), Some("hel1"));
+
+            let refused = runtime
+                .block_on(account_set_region(app.state::<AppState>(), Some("ede".into())))
+                .expect_err("ede is coming soon");
+            println!("account_set_region ede -> {refused}");
+            assert!(refused.contains("region_unavailable"), "{refused}");
+            let still = runtime.block_on(account_region(app.state::<AppState>())).unwrap();
+            assert_eq!(still.preferred_region.as_deref(), Some("hel1"), "a refusal changes nothing");
+
+            let cleared = runtime
+                .block_on(account_set_region(app.state::<AppState>(), Some("europe".into())))
+                .expect("account_set_region europe");
+            assert_eq!(cleared.preferred_region.as_deref(), Some("europe"));
+        });
+    }
+
     /// The engine's real tick against a real server that then goes away. `sync_tick` swallows a
     /// failed `GET /sync/ops` and returns `Ok`, so only the link monitor can say "offline".
     /// Ignored by default: run it with the API up, and stop the API while the second phase waits.
