@@ -69,7 +69,7 @@ export interface DataResidencyRegionItem {
 export interface DataResidencyViewState {
   effectiveRegion: string | null
   onlyOneRegion: boolean
-  /** A stored preference that no row matches (its datacenter left the list): said plainly, not an error. */
+  /** A stored preference that no selectable row matches (its datacenter left the list or can no longer be chosen): said plainly, not an error. */
   preferenceUnavailable: boolean
   items: DataResidencyRegionItem[]
 }
@@ -116,30 +116,38 @@ export function buildDataResidencyViewState({
   const defaultId = choices.find(choice => choice.is_default && choice.selectable)?.id ?? null
   const effectiveRegion = preferredRegion ?? defaultId
   const onlyOneRegion = choices.filter(choice => choice.selectable).length <= 1
-  const matched = choices.some(choice => choice.id === effectiveRegion)
+  // A stored row that is still listed but no longer selectable (a retired or disabled datacenter)
+  // is as unavailable as one that left the list: it is not selected and the summary does not
+  // promise new files go there.
+  const matchedId = choices.find(choice => choice.id === effectiveRegion && choice.selectable)?.id ?? null
 
   return {
     effectiveRegion,
     onlyOneRegion,
-    preferenceUnavailable: preferredRegion !== null && !matched && defaultId !== null,
-    items: choices.map(choice => ({
-      id: choice.id,
-      kind: choice.kind,
-      displayName: choice.name,
-      detail: choiceDetail(choice),
-      locationLabel: choiceLocationLabel(choice),
-      isDefault: choice.is_default,
-      anyDatacenter: choice.kind !== 'datacenter' && !choice.city,
-      selected: effectiveRegion === choice.id,
-      comingSoon: !choice.selectable && choice.status === 'coming_soon',
-      disabled: saving || onlyOneRegion || !choice.selectable,
-    })),
+    preferenceUnavailable: preferredRegion !== null && matchedId === null && defaultId !== null,
+    items: choices.map(choice => {
+      const selected = matchedId === choice.id
+      return {
+        id: choice.id,
+        kind: choice.kind,
+        displayName: choice.name,
+        detail: choiceDetail(choice),
+        locationLabel: choiceLocationLabel(choice),
+        isDefault: choice.is_default,
+        anyDatacenter: choice.kind !== 'datacenter' && !choice.city,
+        selected,
+        comingSoon: !choice.selectable && choice.status === 'coming_soon',
+        // The sole selectable row is locked only when it is already the selection; with a stale
+        // preference it must stay clickable so the user can move back to it.
+        disabled: saving || !choice.selectable || (onlyOneRegion && selected),
+      }
+    }),
   }
 }
 
 /** The sentence under the title. The "EU" claim follows the row the account is on. */
 export function residencySummary(view: DataResidencyViewState): string | null {
-  const current = view.items.find(item => item.id === view.effectiveRegion)
+  const current = view.items.find(item => item.selected)
   if (!current?.displayName.trim()) return null
   const where = current.id === 'europe' ? 'the EU' : current.displayName
   if (current.kind === 'datacenter' || current.anyDatacenter) {

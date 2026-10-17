@@ -13,6 +13,7 @@ import {
   buildDataResidencyViewState,
   commitPreferredRegionSelection,
   loadDataResidency,
+  residencySummary,
   savedRegionMessage,
 } from '../src/windows/dataResidencySettingsModel'
 import type { CommandResult, StorageChoice, UserRegionResponse } from '../src/desktopApi'
@@ -163,6 +164,30 @@ describe('copy', () => {
     expect(html).toContain('Your chosen location isn’t available right now.')
     expect(html).not.toContain('Could not load data residency')
     expect(v.view.items.some(i => i.selected)).toBe(false)
+  })
+
+  // PR #128 review: a stored datacenter still in the list but no longer selectable is the same
+  // "unavailable" state, not a selected row with a summary promising new files go there.
+  test('a stored datacenter still listed but no longer selectable is unavailable, not selected', async () => {
+    const retired = (captured.choices as StorageChoice[]).map(c =>
+      c.id === 'hel1' ? { ...c, status: 'coming_soon', selectable: false } : c)
+    const v = await view('hel1', false, { choices: retired })
+    expect(v.view.preferenceUnavailable).toBe(true)
+    expect(v.view.items.some(i => i.selected)).toBe(false)
+    expect(residencySummary(v.view)).toBeNull()
+    const html = render(v)
+    expect(html).toContain('Your chosen location isn’t available right now.')
+    expect(html).not.toContain('Helsinki, Finland')
+  })
+
+  // PR #128 review: with Europe the only selectable row and a stale stored datacenter, Europe must
+  // stay clickable so the user can replace the stale preference with the available default.
+  test('a stale preference with Europe as the only selectable row leaves Europe choosable', async () => {
+    const onlyEurope = (captured.choices as StorageChoice[]).filter(c => c.id === 'europe')
+    const v = await view('hel1', false, { choices: onlyEurope })
+    expect(v.view.onlyOneRegion).toBe(true)
+    expect(v.view.preferenceUnavailable).toBe(true)
+    expect(v.view.items[0]).toMatchObject({ id: 'europe', selected: false, disabled: false })
   })
 })
 
