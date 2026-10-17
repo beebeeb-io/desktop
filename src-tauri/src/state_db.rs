@@ -5809,16 +5809,17 @@ impl StateDb {
     /// references any more, for the caller to unlink (S6).
     pub fn engine_start_repair(&self) -> Result<EngineStartRepair> {
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        // Spec 2026-10-10 §15 question 3: an engine that starts takes Finder writes again, whatever a stopped
+        // sign-out left closed. A statement of its own, before the repair's transaction: a repair that fails rolls
+        // back only its own work, and the runner serves Finder writes after a failed repair too.
+        conn.execute(
+            "DELETE FROM sync_state WHERE key = ?1",
+            params![FINDER_ACCEPTS_CLOSED_KEY],
+        )?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let claims_cleared = tx.execute(
             "UPDATE operation_queue SET claim_id = NULL, claimed_at = NULL WHERE claim_id IS NOT NULL",
             [],
-        )?;
-        // Spec 2026-10-10 §15 question 3: an engine that starts takes Finder writes again, whatever a stopped
-        // sign-out left closed.
-        tx.execute(
-            "DELETE FROM sync_state WHERE key = ?1",
-            params![FINDER_ACCEPTS_CLOSED_KEY],
         )?;
         // §7.1: an alias is kept 30 days; the daily sweep is the runner's.
         tx.execute(
@@ -12235,6 +12236,27 @@ mod tests {
         );
     }
 
+    /// U45: the engine start's reopen does not ride the repair's transaction. A repair that fails rolls back only its
+    /// own work; the runner logs it and serves Finder writes anyway, so accepts are open by then.
+    #[test]
+    fn a_failed_engine_start_repair_still_reopens_accepts() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        db.close_finder_accepts().unwrap();
+        // The repair's alias sweep is refused: an alias old enough to be swept, and a trigger that aborts its delete.
+        db.hold_lock_for_test()
+            .execute_batch(
+                "INSERT INTO id_aliases (provisional_id, server_id, created_at) VALUES ('p', 's', 0);
+                 CREATE TRIGGER no_sweep BEFORE DELETE ON id_aliases BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+            )
+            .unwrap();
+        assert!(db.engine_start_repair().is_err(), "the repair failed");
+        assert!(
+            !db.finder_accepts_closed().unwrap(),
+            "a failed repair still reopens accepts"
+        );
+    }
+
     /// U45: an accept whose transaction began first commits first, and a read after the close sees it. Two
     /// connections to one file, as the engine and the sign-out have.
     #[test]
@@ -12264,6 +12286,116 @@ mod tests {
             let rows = sign_out.waiting_rows().unwrap();
             accept.join().unwrap();
             assert!(rows.iter().any(|row| row.op_id == "late"), "round {round}");
+        }
+    }
+
+    /// U45, the other half of the barrier: the close takes the write lock first. An accept that starts while the
+    /// close's transaction is open waits for it, then reads the key in its own transaction and queues nothing. The
+    /// close is held open by hand here (`close_finder_accepts` commits at once), so the accept starts inside it.
+    #[test]
+    fn an_accept_waiting_behind_the_close_queues_nothing() {
+        for round in 0..20 {
+            let (dir, engine) = seeded_for_a_late_accept();
+            let sign_out = StateDb::open(dir.path().join("state.db")).unwrap();
+            let mut conn = sign_out.hold_lock_for_test();
+            let close = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+            let accept = std::thread::spawn(move || {
+                let outcome = accept_late_save(&engine, "/staged/late");
+                (outcome, engine.list_operations_for_file("late").unwrap().len())
+            });
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            close
+                .execute(
+                    "INSERT INTO sync_state (key, value) VALUES (?1, '1')",
+                    params![FINDER_ACCEPTS_CLOSED_KEY],
+                )
+                .unwrap();
+            close.commit().unwrap();
+            drop(conn);
+            let (outcome, ops) = accept.join().unwrap();
+            assert!(
+                matches!(outcome, AcceptOutcome::AcceptsClosed) && ops == 0,
+                "round {round}: an accept that waited behind the close queued: {outcome:?}, {ops} op(s)"
+            );
+        }
+    }
+
+    /// U45, the same for every other Finder change: one that starts while the close holds the write lock waits for it,
+    /// then reads the key in `enqueue_finder_change`'s own transaction and queues nothing.
+    #[test]
+    fn a_finder_change_waiting_behind_the_close_queues_nothing() {
+        for round in 0..20 {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("state.db");
+            let engine = StateDb::open(&path).unwrap();
+            let sign_out = StateDb::open(&path).unwrap();
+            let mut conn = sign_out.hold_lock_for_test();
+            let close = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+            let change = std::thread::spawn(move || {
+                let outcome = engine
+                    .enqueue_finder_change(&queued_op("rename", OperationKind::RenameFile, "f"), None)
+                    .unwrap();
+                (outcome, engine.list_operations_for_file("f").unwrap().len())
+            });
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            close
+                .execute(
+                    "INSERT INTO sync_state (key, value) VALUES (?1, '1')",
+                    params![FINDER_ACCEPTS_CLOSED_KEY],
+                )
+                .unwrap();
+            close.commit().unwrap();
+            drop(conn);
+            assert_eq!(
+                change.join().unwrap(),
+                (FinderEnqueue::AcceptsClosed, 0),
+                "round {round}: a change that waited behind the close queued"
+            );
+        }
+    }
+
+    /// U45: in both fenced bodies the key is the first thing read inside the `BEGIN IMMEDIATE` transaction that queues,
+    /// never before it: a read taken before the write lock can see accepts open, wait behind the close, and then queue.
+    #[test]
+    fn the_fence_is_read_first_inside_the_transaction_that_queues() {
+        let source: Vec<&str> = include_str!("state_db.rs").lines().collect();
+        for definition in ["pub fn accept_finder_write(", "pub fn enqueue_finder_change("] {
+            let start = source
+                .iter()
+                .position(|line| line.trim_start().starts_with(definition))
+                .unwrap_or_else(|| panic!("{definition} not found"));
+            let end = start
+                + source[start..]
+                    .iter()
+                    .position(|line| *line == "    }")
+                    .expect("the body's end");
+            let body = &source[start..end];
+            let begin = body
+                .iter()
+                .position(|line| {
+                    line.contains(".transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;")
+                })
+                .unwrap_or_else(|| panic!("{definition}: no BEGIN IMMEDIATE"));
+            let first = body[begin + 1..]
+                .iter()
+                .map(|line| line.trim())
+                .find(|line| !line.is_empty() && !line.starts_with("//"))
+                .unwrap();
+            assert_eq!(
+                first, "if finder_accepts_closed_conn(&tx)? {",
+                "{definition}: the fence is the first read inside the transaction"
+            );
+            assert_eq!(
+                body.iter()
+                    .filter(|line| line.contains("finder_accepts_closed_conn("))
+                    .count(),
+                1,
+                "{definition}: one read of the fence"
+            );
         }
     }
 

@@ -641,4 +641,26 @@ mod tests {
             "the read is keep_after_close's, after the close"
         );
     }
+
+    /// U45: a close that fails stops the keep step before its read and before any copy (E2, `close_accepts`), so no
+    /// keep runs while Finder accepts are open.
+    #[test]
+    fn a_close_that_fails_stops_the_keep_before_any_copy() {
+        let f = Fixture::new();
+        f.file("report", "report.docx");
+        f.write("s1", "report", "minted", Some(b"first save"));
+        f.db.hold_lock_for_test()
+            .execute_batch(
+                "CREATE TRIGGER no_close BEFORE INSERT ON sync_state WHEN NEW.key = 'finder_accepts_closed'
+                 BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+            )
+            .unwrap();
+        assert_eq!(
+            f.keep(Acknowledge::Nothing).err(),
+            Some(KeepFailure::Copy("close_accepts")),
+            "a failed close stops the keep (E2)"
+        );
+        assert!(!f.event().exists(), "nothing was copied");
+        assert_eq!(f.queued(), 1, "the waiting write is still queued");
+    }
 }

@@ -772,7 +772,6 @@ impl std::error::Error for StagedCopyGone {}
 /// A sign-out closed Finder accepts after its engine stop (spec 2026-10-10 §15 question 3). Nothing was queued; the
 /// reply is `WriteRetryLater`, so macOS keeps the change and retries. Path-free: the text reaches the extension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 pub(crate) struct AcceptsClosed;
 
 impl std::fmt::Display for AcceptsClosed {
@@ -10496,10 +10495,13 @@ mod tests {
             let error = result.expect_err(what);
             assert!(error.is::<AcceptsClosed>(), "{what}: {error:#}");
         }
-        assert!(
-            bridge.db.list_due_operations(i64::MAX).unwrap().is_empty(),
-            "nothing queued"
-        );
+        // Every row, due or not: a paused, parked or backed-off op is still a queued change.
+        let queued: i64 = bridge
+            .db
+            .hold_lock_for_test()
+            .query_row("SELECT COUNT(*) FROM operation_queue", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(queued, 0, "nothing queued");
         assert!(
             bridge.db.get_file_by_path("A/New folder").unwrap().is_none(),
             "the refused folder create left no row"

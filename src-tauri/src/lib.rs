@@ -3231,7 +3231,8 @@ async fn take_slot_and_stop_engine_for_sign_out(
 /// transiently. One Finder write or change may still be running: a save, a rename, a move or a folder create in
 /// `spawn_blocking`, or a delete's synchronous enqueue, which an abort cannot stop once it started. The keep step
 /// closes accepts before it reads the queue, each of them reads that in the transaction that queues it, and a
-/// sign-out that stops reopens them (spec 2026-10-10 §5.2 step 6, §15 question 3).
+/// sign-out that stops reopens them (spec 2026-10-10 §5.2 step 6, §15 question 3). The caller holds the engine slot,
+/// so no new engine can start in between: no engine start reopens accepts between the keep step and the purge.
 async fn stop_engine_for_sign_out(
     acct: &crate::account::AccountRuntime,
     engine_slot: &mut Option<runner::EngineRunner>,
@@ -3517,12 +3518,19 @@ fn keep_for_sign_out(
 }
 
 /// Spec 2026-10-10 §15 question 3: reopen Finder accepts in the app's state database. Best effort: an engine start
-/// reopens them too (`engine_start_repair`).
+/// reopens them too (`engine_start_repair`). No `state.db` yet: nothing was closed. One that does not open is logged
+/// by its step, never by the error, whose text names the database's path (W10).
 #[cfg(target_os = "macos")]
 fn reopen_finder_accepts_in(state_dir: &Path) {
-    if let Ok(Some(db)) = state_db_from_state_dir(state_dir)
-        && let Err(error) = db.reopen_finder_accepts()
-    {
+    let db = match state_db_from_state_dir(state_dir) {
+        Ok(Some(db)) => db,
+        Ok(None) => return,
+        Err(_) => {
+            accepts_not_reopened("state_db");
+            return;
+        }
+    };
+    if let Err(error) = db.reopen_finder_accepts() {
         tracing::warn!(%error, "could not reopen Finder accepts; the next engine start reopens them");
     }
 }
@@ -3530,9 +3538,19 @@ fn reopen_finder_accepts_in(state_dir: &Path) {
 /// A sign-out quit between its keep step and its purge left accepts closed on disk: the launch reopens them first.
 #[cfg(target_os = "macos")]
 fn reopen_finder_accepts_at_startup() {
-    if let Ok(state_dir) = state_paths::beebeeb_state_dir() {
-        reopen_finder_accepts_in(&state_dir);
+    match state_paths::beebeeb_state_dir() {
+        Ok(state_dir) => reopen_finder_accepts_in(&state_dir),
+        Err(_) => accepts_not_reopened("state_dir"),
     }
+}
+
+/// A reopen that could not reach the state database: the step only (W10).
+#[cfg(target_os = "macos")]
+fn accepts_not_reopened(step: &'static str) {
+    tracing::warn!(
+        step = %step,
+        "could not reopen Finder accepts; the next engine start reopens them"
+    );
 }
 
 /// From a completed keep step until the purge has cleared the rows (and the key with them), any return reopens Finder
@@ -34320,9 +34338,13 @@ mod sign_out_keep_tests {
             let staged = queue_write(&db, "w1", "f1", b"bytes");
             let (state, _acct) = signed_out_state();
             recording_finder(&state);
-            // Cancel: the person was asked and chose Cancel, so no `clear_session` ran at all.
+            // Cancel: the person was asked and chose Cancel, so no `clear_session` ran at all. The ask itself closes
+            // nothing.
             ask(&state, "macos-settings");
-            assert!(!db.finder_accepts_closed().unwrap(), "a cancelled sign-out");
+            assert!(
+                !db.finder_accepts_closed().unwrap(),
+                "a cancelled sign-out: the ask closes nothing"
+            );
             // The gate refuses: changes wait and no `keepUnsent`.
             assert!(sign_out_with(&state, None, no_seam()).await.is_err());
             assert!(!db.finder_accepts_closed().unwrap(), "refused at the gate");
@@ -34381,6 +34403,44 @@ mod sign_out_keep_tests {
             first, "#[cfg(target_os = \"macos\")]",
             "the reopen opens the body:\n{restore}"
         );
+    }
+
+    /// U45: the launch's reopen acts on the app's own state database (here the test's, through `in_own_dirs`), not
+    /// only on a directory its caller names.
+    #[tokio::test]
+    async fn the_launch_reopens_accepts_in_the_apps_state_db() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            db.close_finder_accepts().unwrap();
+            reopen_finder_accepts_at_startup();
+            assert!(
+                !db.finder_accepts_closed().unwrap(),
+                "the launch reopens accepts in the app's state.db"
+            );
+        })
+        .await;
+    }
+
+    /// The launch's reopen is best effort. A state database it cannot open is logged by its step, never by the error,
+    /// whose text names the database's path (W10).
+    #[tokio::test]
+    async fn a_launch_reopen_that_cannot_open_the_state_db_logs_the_step() {
+        in_own_dirs(async {
+            let dir = state_paths::beebeeb_state_dir().unwrap();
+            std::fs::create_dir_all(state_paths::state_db_path_from_state_dir(&dir)).unwrap();
+            let logs = capture_logs(reopen_finder_accepts_at_startup);
+            let path = dir.to_string_lossy().into_owned();
+            assert!(!logs.contains(&path), "no log carries the path:\n{logs}");
+            let warning = logs
+                .lines()
+                .find(|line| line.contains("could not reopen Finder accepts"))
+                .unwrap_or_else(|| panic!("the failed open is logged:\n{logs}"));
+            assert!(
+                warning.contains("step=state_db"),
+                "the warning names the step: {warning}"
+            );
+        })
+        .await;
     }
 }
 
