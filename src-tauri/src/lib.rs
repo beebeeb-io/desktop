@@ -1017,6 +1017,10 @@ async fn restore_session_on_startup(app: &tauri::AppHandle) {
 
 /// The startup restore proper (see [`restore_session_on_startup`], which shuts the adoption window after it).
 async fn restore_session_inner(app: &tauri::AppHandle) {
+    // Spec 2026-10-10 §15 question 3: a sign-out quit between its keep step and its purge left Finder accepts closed on
+    // disk. Reopen them before this restore can start an engine.
+    #[cfg(target_os = "macos")]
+    reopen_finder_accepts_at_startup();
     #[cfg(target_os = "windows")]
     let _transition = SESSION_TRANSITION.lock().await;
     #[cfg(target_os = "windows")]
@@ -2976,6 +2980,10 @@ async fn clear_session_impl(
     sign_out_seam("before_keep").map_err(&kept_with)?;
     #[cfg(target_os = "macos")]
     let kept = keep_for_sign_out(accepted.as_ref()).map_err(&kept_with)?;
+    // Spec 2026-10-10 §15 question 3: the keep step left Finder accepts closed for the purge, which clears them with
+    // the rows. Any return before the purge has done so reopens them.
+    #[cfg(target_os = "macos")]
+    let mut reopen_accepts = AcceptsReopenOnAbort { armed: true };
     #[cfg(not(target_os = "macos"))]
     let kept: Option<sign_out::kept_set::KeptSet> = None;
     let kept_unsent = kept.as_ref().and_then(|kept| {
@@ -3098,6 +3106,9 @@ async fn clear_session_impl(
             kept.as_ref(),
         )
         .map_err(&kept_with)?;
+        // The purge cleared the rows, and the closed accepts with them.
+        #[cfg(target_os = "macos")]
+        reopen_accepts.disarm();
         #[cfg(test)]
         sign_out_seam("after_purge").map_err(&kept_with)?;
     }
@@ -3216,12 +3227,11 @@ async fn take_slot_and_stop_engine_for_sign_out(
 /// Refuses (Bug A / A2) unless the engine task is CONFIRMED terminated, or no
 /// engine is running and no earlier attempt left an unconfirmed one behind.
 ///
-/// Then upload staging: every handed-over copy is removed. Safe exactly here:
-/// the IPC listener runs inside the engine's task, so once the stop is
-/// confirmed no request can still be served, and a request that arrives
-/// later reaches no daemon, fails transiently, and the extension stages a
-/// fresh copy for the system's retry. The caller holds the engine slot, so no
-/// new engine can start in between.
+/// Then upload staging: every handed-over copy is removed. A request that arrives later reaches no daemon and fails
+/// transiently. One Finder write or change may still be running: a save, a rename, a move or a folder create in
+/// `spawn_blocking`, or a delete's synchronous enqueue, which an abort cannot stop once it started. The keep step
+/// closes accepts before it reads the queue, each of them reads that in the transaction that queues it, and a
+/// sign-out that stops reopens them (spec 2026-10-10 §5.2 step 6, §15 question 3).
 async fn stop_engine_for_sign_out(
     acct: &crate::account::AccountRuntime,
     engine_slot: &mut Option<runner::EngineRunner>,
@@ -3504,6 +3514,50 @@ fn keep_for_sign_out(
         }
         failure.message()
     })
+}
+
+/// Spec 2026-10-10 §15 question 3: reopen Finder accepts in the app's state database. Best effort: an engine start
+/// reopens them too (`engine_start_repair`).
+#[cfg(target_os = "macos")]
+fn reopen_finder_accepts_in(state_dir: &Path) {
+    if let Ok(Some(db)) = state_db_from_state_dir(state_dir)
+        && let Err(error) = db.reopen_finder_accepts()
+    {
+        tracing::warn!(%error, "could not reopen Finder accepts; the next engine start reopens them");
+    }
+}
+
+/// A sign-out quit between its keep step and its purge left accepts closed on disk: the launch reopens them first.
+#[cfg(target_os = "macos")]
+fn reopen_finder_accepts_at_startup() {
+    if let Ok(state_dir) = state_paths::beebeeb_state_dir() {
+        reopen_finder_accepts_in(&state_dir);
+    }
+}
+
+/// From a completed keep step until the purge has cleared the rows (and the key with them), any return reopens Finder
+/// accepts at once: a refused or failed purge, a test seam, a panic.
+#[cfg(target_os = "macos")]
+struct AcceptsReopenOnAbort {
+    armed: bool,
+}
+
+#[cfg(target_os = "macos")]
+impl AcceptsReopenOnAbort {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for AcceptsReopenOnAbort {
+    fn drop(&mut self) {
+        if self.armed
+            && let Ok(state_dir) = state_paths::beebeeb_state_dir()
+        {
+            reopen_finder_accepts_in(&state_dir);
+        }
+    }
 }
 
 /// Test builds only: a hook between the steps of `clear_session_impl`, per test task (`SIGN_OUT_SEAM.scope`). An
@@ -34254,6 +34308,79 @@ mod sign_out_keep_tests {
             assert!(warning.contains("step=read"), "the warning names the step: {warning}");
         })
         .await;
+    }
+
+    /// U45 (spec 2026-10-10 §15 question 3): every sign-out that ends without purging leaves Finder accepts open at
+    /// once.
+    #[tokio::test]
+    async fn a_cancelled_or_failed_sign_out_leaves_accepts_open() {
+        in_own_dirs(async {
+            use std::os::unix::fs::PermissionsExt;
+            let db = state_db_in_scratch();
+            let staged = queue_write(&db, "w1", "f1", b"bytes");
+            let (state, _acct) = signed_out_state();
+            recording_finder(&state);
+            // Cancel: the person was asked and chose Cancel, so no `clear_session` ran at all.
+            ask(&state, "macos-settings");
+            assert!(!db.finder_accepts_closed().unwrap(), "a cancelled sign-out");
+            // The gate refuses: changes wait and no `keepUnsent`.
+            assert!(sign_out_with(&state, None, no_seam()).await.is_err());
+            assert!(!db.finder_accepts_closed().unwrap(), "refused at the gate");
+            // The keep step fails: a staged copy it cannot read.
+            std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let id = ask(&state, "macos-settings");
+            let failed = sign_out_with(&state, Some(&id), no_seam()).await;
+            std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o600)).unwrap();
+            assert!(failed.unwrap_err().message.starts_with("unsent_copy_failed: "));
+            assert!(!db.finder_accepts_closed().unwrap(), "a failed keep");
+            // The purge guard refuses after a completed keep (only a test seam can add a write then).
+            let id = ask(&state, "macos-settings");
+            let seam: SignOutSeam = Arc::new(|point| {
+                if point == "after_keep" {
+                    queue_write(&state_db_in_scratch(), "late", "late", b"late");
+                }
+                Ok(())
+            });
+            assert!(sign_out_with(&state, Some(&id), seam).await.is_err());
+            assert!(!db.finder_accepts_closed().unwrap(), "a refused purge");
+        })
+        .await;
+    }
+
+    /// U45: a quit between the keep step and the purge leaves the key on disk; the next launch reopens accepts first,
+    /// before the restore can start an engine. The reopen is the first statement of `restore_session_inner`, never in
+    /// the wrapper, whose two statements the startup-restore pin holds exact.
+    #[test]
+    fn accepts_reopen_when_the_app_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = state_db::StateDb::open(state_paths::state_db_path_from_state_dir(dir.path())).unwrap();
+        db.close_finder_accepts().unwrap();
+        reopen_finder_accepts_in(dir.path());
+        assert!(!db.finder_accepts_closed().unwrap());
+        let production = super::finder_setup_command_tests::production_source();
+        let restore =
+            super::finder_setup_command_tests::body_between(&production, "async fn restore_session_inner(", "\n}\n");
+        let reopen = restore
+            .find("reopen_finder_accepts_at_startup()")
+            .expect("the launch reopens accepts");
+        assert!(
+            reopen < restore.find("restore_stored_session(").expect("the restore"),
+            "before the restore"
+        );
+        assert!(
+            reopen < restore.find("start_engine_if_possible(").expect("the engine start"),
+            "before any engine can start"
+        );
+        let first = restore
+            .lines()
+            .skip(1)
+            .map(str::trim)
+            .find(|line| !line.is_empty() && !line.starts_with("//"))
+            .unwrap();
+        assert_eq!(
+            first, "#[cfg(target_os = \"macos\")]",
+            "the reopen opens the body:\n{restore}"
+        );
     }
 }
 

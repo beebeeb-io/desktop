@@ -769,6 +769,20 @@ impl std::fmt::Display for StagedCopyGone {
 
 impl std::error::Error for StagedCopyGone {}
 
+/// A sign-out closed Finder accepts after its engine stop (spec 2026-10-10 §15 question 3). Nothing was queued; the
+/// reply is `WriteRetryLater`, so macOS keeps the change and retries. Path-free: the text reaches the extension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+pub(crate) struct AcceptsClosed;
+
+impl std::fmt::Display for AcceptsClosed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Beebeeb is signing out; this write was not queued")
+    }
+}
+
+impl std::error::Error for AcceptsClosed {}
+
 /// A content save of an item in the trash (spec §7.2): its row is `Trashing`, or the system names
 /// the trash container as its parent. Refused as a create in the trash is, so the item stays in
 /// the trash; nothing was queued. Path-free: the text reaches the extension.
@@ -2410,24 +2424,18 @@ impl EngineBridge {
                 // present on disk, server CreateFolder op pending in the queue.
                 // Spec §7.2 (final review): the row and its parent in one transaction, so no
                 // listing sees the new folder without its parent.
-                self.db.upsert_file_with_contract(
-                    &FileEntry {
-                        file_id: file_id.clone(),
-                        path: row_path,
-                        status: FileStatus::Local,
-                        size_bytes: 0,
-                        modified_at: now_secs(),
-                        content_hash: None,
-                        remote_updated_at: 0,
-                        // Not persisted by upsert_file; the contract update owns these.
-                        parent_id: None,
-                        item_kind: ItemKind::Folder,
-                    },
-                    |contract| {
-                        contract.item_kind = ItemKind::Folder;
-                        contract.parent_id = target.parent_id.clone();
-                    },
-                )?;
+                let entry = FileEntry {
+                    file_id: file_id.clone(),
+                    path: row_path,
+                    status: FileStatus::Local,
+                    size_bytes: 0,
+                    modified_at: now_secs(),
+                    content_hash: None,
+                    remote_updated_at: 0,
+                    // Not persisted by upsert_file; the contract update owns these.
+                    parent_id: None,
+                    item_kind: ItemKind::Folder,
+                };
                 let mut payload = serde_json::json!({
                     "operation": "create_folder",
                     "name_encrypted": metadata,
@@ -2436,12 +2444,19 @@ impl EngineBridge {
                 self.enqueue_finder_operation(
                     OperationKind::CreateFolder,
                     Some(file_id),
-                    target.parent_id,
+                    target.parent_id.clone(),
                     Some(rel_path),
                     payload,
                     None,
                     None,
                     None,
+                    // The row, its contract (`Folder`, under its parent) and the op in one transaction, so a
+                    // nested child dispatched later still resolves this folder as its parent, and a refused
+                    // create leaves no row.
+                    Some(crate::state_db::FinderFolderRow {
+                        entry: &entry,
+                        parent_id: target.parent_id.as_deref(),
+                    }),
                 )
             }
             FinderWriteItemKind::File => {
@@ -2471,6 +2486,7 @@ impl EngineBridge {
                     Some(rel_path),
                     payload,
                     Some(staged_path),
+                    None,
                     None,
                     None,
                 )?;
@@ -2631,6 +2647,7 @@ impl EngineBridge {
             crate::state_db::AcceptOutcome::UnknownItem => anyhow::bail!("a create always inserts its row"),
             crate::state_db::AcceptOutcome::InTrash => anyhow::bail!("a create is never refused as in the trash"),
             crate::state_db::AcceptOutcome::CopyGone => return Err(anyhow::Error::new(StagedCopyGone)),
+            crate::state_db::AcceptOutcome::AcceptsClosed => return Err(anyhow::Error::new(AcceptsClosed)),
         };
         prepared.staged.retain();
         Ok(FpWrite {
@@ -2856,6 +2873,7 @@ impl EngineBridge {
                 item_contract
                     .as_ref()
                     .and_then(|contract| contract.current_object_version_id.clone()),
+                None,
             )?;
             staged.retain();
             Ok(outcome)
@@ -2895,6 +2913,7 @@ impl EngineBridge {
                 item_contract
                     .as_ref()
                     .and_then(|contract| contract.current_object_version_id.clone()),
+                None,
             )
         }
     }
@@ -3045,6 +3064,7 @@ impl EngineBridge {
                 }));
             }
             crate::state_db::AcceptOutcome::CopyGone => return Err(anyhow::Error::new(StagedCopyGone)),
+            crate::state_db::AcceptOutcome::AcceptsClosed => return Err(anyhow::Error::new(AcceptsClosed)),
             // §7.2: refused; the staged copy is dropped with `prepared`, and nothing was queued.
             crate::state_db::AcceptOutcome::InTrash => return Err(anyhow::Error::new(ItemInTrash)),
         };
@@ -3128,6 +3148,7 @@ impl EngineBridge {
             item_contract
                 .as_ref()
                 .and_then(|contract| contract.current_object_version_id.clone()),
+            None,
         )?;
         // Task 1698: park the row `Trashing` AFTER a successful enqueue, so
         // the change feed immediately presents the item under the trash
@@ -3720,6 +3741,7 @@ impl EngineBridge {
         Ok(op)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn enqueue_finder_operation(
         &self,
         kind: OperationKind,
@@ -3730,6 +3752,7 @@ impl EngineBridge {
         payload_path: Option<String>,
         base_version: Option<i64>,
         base_object_version_id: Option<String>,
+        folder: Option<crate::state_db::FinderFolderRow<'_>>,
     ) -> anyhow::Result<FinderWriteOutcome> {
         let op_id = uuid::Uuid::new_v4().to_string();
         let now = now_secs();
@@ -3762,14 +3785,18 @@ impl EngineBridge {
             created_at: now,
             updated_at: now,
         };
-        self.db.enqueue_operation(&op)?;
-        Ok(FinderWriteOutcome::Queued {
-            op_id,
-            file_id,
-            kind,
-            ignored: false,
-            message: "queued for encrypted sync".to_string(),
-        })
+        // Spec 2026-10-10 §5.2 step 6: the sign-out's fence is read in the transaction that queues the op, and a
+        // folder's row is written in it too.
+        match self.db.enqueue_finder_change(&op, folder)? {
+            crate::state_db::FinderEnqueue::AcceptsClosed => Err(anyhow::Error::new(AcceptsClosed)),
+            crate::state_db::FinderEnqueue::Queued => Ok(FinderWriteOutcome::Queued {
+                op_id,
+                file_id,
+                kind,
+                ignored: false,
+                message: "queued for encrypted sync".to_string(),
+            }),
+        }
     }
 
     fn enqueue_pin_tree_operation(&self, file_id: &str, pinned: bool, now: i64) -> anyhow::Result<()> {
@@ -10415,6 +10442,84 @@ mod tests {
             db.list_due_operations(i64::MAX).unwrap().is_empty(),
             "not a single one of the refused writes may have reached the operation_queue"
         );
+    }
+
+    /// U45: every change the Finder IPC queues meets the sign-out's fence in the transaction that queues it. Once
+    /// accepts are closed, a rename, a move to the top level, a folder create and a delete are each refused with
+    /// `AcceptsClosed` (the extension hears `WriteRetryLater`): nothing is queued, and no row is written or changed.
+    /// Reopened, the same rename queues.
+    #[test]
+    fn every_finder_change_after_the_close_queues_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        seed_bridge_row(&bridge, "folder-a", "A", None, FileStatus::Local, 0);
+        seed_bridge_row(&bridge, "in-a", "A/x.txt", Some("folder-a"), FileStatus::Local, 0);
+        let target = |file_id: Option<&str>, parent_id: Option<&str>, filename: &str, kind: FinderWriteItemKind| {
+            FinderWriteTarget {
+                file_id: file_id.map(str::to_string),
+                parent_id: parent_id.map(str::to_string),
+                filename: filename.into(),
+                rel_path: None,
+                kind,
+                contents_path: None,
+                content_type: None,
+                base_version_identifier: None,
+            }
+        };
+        bridge.db.close_finder_accepts().unwrap();
+        let changes: [(&str, anyhow::Result<FinderWriteOutcome>); 4] = [
+            (
+                "a rename",
+                bridge.queue_finder_modify(target(
+                    Some("in-a"),
+                    Some("folder-a"),
+                    "renamed.txt",
+                    FinderWriteItemKind::File,
+                )),
+            ),
+            (
+                "a move to the top level",
+                bridge.queue_finder_modify(target(Some("in-a"), None, "x.txt", FinderWriteItemKind::File)),
+            ),
+            (
+                "a folder create",
+                bridge.queue_finder_create(target(
+                    None,
+                    Some("folder-a"),
+                    "New folder",
+                    FinderWriteItemKind::Folder,
+                )),
+            ),
+            ("a delete", bridge.queue_finder_delete("in-a", None)),
+        ];
+        for (what, result) in changes {
+            let error = result.expect_err(what);
+            assert!(error.is::<AcceptsClosed>(), "{what}: {error:#}");
+        }
+        assert!(
+            bridge.db.list_due_operations(i64::MAX).unwrap().is_empty(),
+            "nothing queued"
+        );
+        assert!(
+            bridge.db.get_file_by_path("A/New folder").unwrap().is_none(),
+            "the refused folder create left no row"
+        );
+        let row = bridge.db.get_file("in-a").unwrap().unwrap();
+        assert_eq!(
+            (row.path.as_str(), row.status),
+            ("A/x.txt", FileStatus::Local),
+            "the refused delete left the row as it was"
+        );
+        bridge.db.reopen_finder_accepts().unwrap();
+        bridge
+            .queue_finder_modify(target(
+                Some("in-a"),
+                Some("folder-a"),
+                "renamed.txt",
+                FinderWriteItemKind::File,
+            ))
+            .expect("reopened, the rename queues: the refusals above were the fence");
+        assert_eq!(bridge.db.list_due_operations(i64::MAX).unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -18846,7 +18951,8 @@ mod tests {
     /// Spec §7.2 (final review): the writers that insert a row from the server or a create write
     /// its contract in the same call. The two-call shape (`upsert_file`, then
     /// `set_file_contract_state`) is gone from production code: `set_file_contract_state` exists
-    /// for tests only, and each writer calls `upsert_file_with_contract`.
+    /// for tests only, and each writer calls `upsert_file_with_contract`. A Finder folder create
+    /// writes its row and contract through `enqueue_finder_change`, with its op.
     #[test]
     fn ingestion_writers_use_the_single_transaction_api() {
         let source = include_str!("engine_bridge.rs");
@@ -18888,7 +18994,7 @@ mod tests {
         }
         for (writer, calls) in [
             ("pub async fn refresh_shared_roots(", 1),
-            ("pub fn queue_finder_create_from(", 2),
+            ("pub fn queue_finder_create_from(", 1),
             ("fn apply_shared_metadata_file_row(", 1),
             ("fn apply_metadata_file_row(", 1),
         ] {
@@ -18898,6 +19004,17 @@ mod tests {
                 "{writer} writes each row and its contract in one call"
             );
         }
+        // Spec 2026-10-10 §5.2 step 6: a Finder folder create writes its row and its contract in the same
+        // transaction as its op, behind the sign-out's fence, so a refused create leaves no row.
+        assert!(
+            body(production, "pub fn queue_finder_create_from(").contains("Some(crate::state_db::FinderFolderRow {"),
+            "the folder branch hands its row to the fenced enqueue"
+        );
+        let fenced = body(state_db, "    pub fn enqueue_finder_change(");
+        assert!(
+            fenced.contains("upsert_file_conn(") && fenced.contains("set_file_contract_state_conn("),
+            "{fenced}"
+        );
     }
 
     /// The `parent_id` of each `PATCH /files/{file_id}` the server got, in order: `None` when the

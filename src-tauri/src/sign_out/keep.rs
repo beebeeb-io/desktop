@@ -53,10 +53,30 @@ fn category(error: &std::io::Error) -> &'static str {
     }
 }
 
+/// The keep step (spec 2026-10-10 §5.2 step 7): close Finder accepts, then [`keep_after_close`]. A keep that stops
+/// reopens them at once (§15 question 3): nothing will be purged.
+pub(crate) fn keep_unsent(inputs: KeepInputs<'_>) -> Result<KeptSet, KeepFailure> {
+    // Spec 2026-10-10 §15 question 3: a Finder accept can outlive the engine stop (`spawn_blocking`). Closing accepts
+    // in one IMMEDIATE transaction lets one already running commit first, so the read below sees it, and refuses every
+    // later one.
+    inputs
+        .db
+        .close_finder_accepts()
+        .map_err(|_| KeepFailure::Copy("close_accepts"))?;
+    let kept = keep_after_close(&inputs);
+    // ...and a keep that stops reopens them at once: nothing will be purged.
+    if kept.is_err()
+        && let Err(error) = inputs.db.reopen_finder_accepts()
+    {
+        tracing::warn!(%error, "could not reopen Finder accepts; the next engine start reopens them");
+    }
+    kept
+}
+
 /// W6: one read; refuse a late other change before any copy; refuse a missing write nobody was shown (W7); copy the
 /// copied set; flush; record (W9, W13) as the last act. A failure before the record removes the half-made folder
 /// (W8). Never deletes a queue row or a staged copy.
-pub(crate) fn keep_unsent(inputs: KeepInputs<'_>) -> Result<KeptSet, KeepFailure> {
+fn keep_after_close(inputs: &KeepInputs<'_>) -> Result<KeptSet, KeepFailure> {
     let waiting = WaitingChanges::read(inputs.db).map_err(KeepFailure::Read)?;
     let mut kept = KeptSet::default();
     for other in &waiting.others {
@@ -586,6 +606,39 @@ mod tests {
         assert_eq!(
             std::fs::read(kept.folder.unwrap().join("Work/report.docx")).unwrap(),
             b"kept"
+        );
+    }
+
+    /// U45: closing accepts is the keep step's first act, before its read; a keep that stops reopens them at once
+    /// (spec §15 question 3), and one that completes leaves them closed for the purge, which clears them with the rows.
+    #[test]
+    fn the_keep_step_closes_accepts_first_and_reopens_them_when_it_stops() {
+        let f = Fixture::new();
+        f.other("r1", "rename_file", "a");
+        assert!(matches!(f.keep(Acknowledge::Nothing), Err(KeepFailure::Unsent)));
+        assert!(!f.db.finder_accepts_closed().unwrap(), "a refused keep reopens accepts");
+        let (others, missing) = (set(&["r1"]), set(&[]));
+        f.keep(Acknowledge::Asked {
+            others: &others,
+            missing: &missing,
+        })
+        .unwrap();
+        assert!(
+            f.db.finder_accepts_closed().unwrap(),
+            "a completed keep leaves them closed for the purge"
+        );
+        // `keep_unsent`'s own body, never the rest of the file, whose tests name both calls too.
+        let source = include_str!("keep.rs");
+        let start = source.find("pub(crate) fn keep_unsent(").unwrap();
+        let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+        let close = body.find("close_finder_accepts()").expect("the close");
+        let read = body
+            .find("keep_after_close(")
+            .expect("the read, inside keep_after_close");
+        assert!(close < read, "accepts are closed before the read");
+        assert!(
+            !body.contains("WaitingChanges::read("),
+            "the read is keep_after_close's, after the close"
         );
     }
 }

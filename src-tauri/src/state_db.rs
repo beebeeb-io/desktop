@@ -59,6 +59,10 @@ const FINDER_REMOVAL_OWED_KEY: &str = "finder_removal_owed";
 /// A clear that owed no removal (a sign-out whose Finder removal was confirmed) leaves this mark: the domain is
 /// known gone, so the next account's first start, onto an empty and unowned database, owes nothing. Not account data.
 const FINDER_DOMAIN_GONE_KEY: &str = "finder_domain_gone";
+/// Spec 2026-10-10 §15 question 3, option A. Set by a sign-out's keep step after the engine stop, so a Finder accept
+/// that outlived the stop queues nothing. Cleared at once by a sign-out that stops without purging, by the purge with
+/// the account's rows, by `engine_start_repair`, and at launch.
+const FINDER_ACCEPTS_CLOSED_KEY: &str = "finder_accepts_closed";
 
 pub const LOCAL_ACTIVITY_MAX_ROWS: usize = 200;
 /// How long a provisional id keeps resolving to the server id its create landed as (spec §7.1).
@@ -1067,6 +1071,77 @@ fn has_finder_write_conn<C: std::ops::Deref<Target = Connection>>(conn: &C, file
     )
 }
 
+/// Whether a sign-out closed Finder accepts, read inside the caller's transaction (spec 2026-10-10 §15 question 3).
+fn finder_accepts_closed_conn(conn: &Connection) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sync_state WHERE key = ?1)",
+        params![FINDER_ACCEPTS_CLOSED_KEY],
+        |row| row.get(0),
+    )
+}
+
+/// [`StateDb::enqueue_operation`]'s insert on an open connection or transaction: a new op, or an op with the same id
+/// replaced.
+fn insert_operation_conn(conn: &Connection, op: &PendingOperation) -> Result<()> {
+    conn.execute(
+        "INSERT INTO operation_queue (
+                op_id, kind, file_id, parent_id, target_path, metadata_json, payload_path,
+                base_version, base_object_version_id, attempts, max_attempts, next_retry_at,
+                last_error, last_error_class, paused_reason, backup_source_key, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL, NULL, ?14, ?15, ?16)
+             ON CONFLICT(op_id) DO UPDATE SET
+                kind = excluded.kind,
+                file_id = excluded.file_id,
+                parent_id = excluded.parent_id,
+                target_path = excluded.target_path,
+                metadata_json = excluded.metadata_json,
+                payload_path = excluded.payload_path,
+                base_version = excluded.base_version,
+                base_object_version_id = excluded.base_object_version_id,
+                attempts = excluded.attempts,
+                max_attempts = excluded.max_attempts,
+                next_retry_at = excluded.next_retry_at,
+                last_error = excluded.last_error,
+                last_error_class = excluded.last_error_class,
+                paused_reason = excluded.paused_reason,
+                backup_source_key = excluded.backup_source_key,
+                updated_at = excluded.updated_at",
+        params![
+            op.op_id,
+            op.kind.as_str(),
+            op.file_id,
+            op.parent_id,
+            op.target_path,
+            op.metadata_json,
+            op.payload_path,
+            op.base_version,
+            op.base_object_version_id,
+            op.attempts,
+            op.max_attempts,
+            op.next_retry_at,
+            op.last_error,
+            op.backup_source_key,
+            op.created_at,
+            op.updated_at
+        ],
+    )?;
+    Ok(())
+}
+
+/// Spec 2026-10-10 §5.2 step 6: what a fenced Finder enqueue did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinderEnqueue {
+    Queued,
+    /// A sign-out closed Finder accepts: nothing was written.
+    AcceptsClosed,
+}
+
+/// A Finder folder create's row, written in the same transaction as its op, so a refused create leaves no row behind.
+pub struct FinderFolderRow<'a> {
+    pub entry: &'a FileEntry,
+    pub parent_id: Option<&'a str>,
+}
+
 /// Spec §7.2 (final review): the path sweeps' last step, in their transaction, after their
 /// deletes. Each row with a queued or parked File Provider write whose parent no longer names a
 /// row is re-homed at the top level ([`rehome_kept_row_conn`]). A row whose folder is still
@@ -1672,6 +1747,9 @@ pub enum AcceptOutcome {
     /// it with its copy between the copy and this transaction (spec §8.7 S6). Nothing was
     /// written; the write is retried.
     CopyGone,
+    /// A sign-out closed Finder accepts after its engine stop (spec 2026-10-10 §15 question 3). Nothing was
+    /// written; the write is retried, and macOS keeps the change until it is.
+    AcceptsClosed,
     /// A modify of an item in the trash: its row is `Trashing`, or the system names the trash
     /// container as its parent (spec §7.2). Nothing was written; the save is refused.
     InTrash,
@@ -3758,6 +3836,11 @@ impl StateDb {
         use crate::write_token::{BaseDecision, WriteToken, decide_base, mint_write_id};
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        // Spec 2026-10-10 §15 question 3: a sign-out's keep step closed accepts after its engine stop. Read in this
+        // transaction, so an accept that outlived the stop either committed before the close or queues nothing.
+        if finder_accepts_closed_conn(&tx)? {
+            return Ok(AcceptOutcome::AcceptsClosed);
+        }
         // §8.7 S6: the copy must still be journalled as unfinished. An engine-start sweep deletes
         // such a row, guarded, before it unlinks the copy, so either this transaction comes first
         // and the op then names the copy (the sweep keeps it), or the row is gone and nothing is
@@ -4453,49 +4536,35 @@ impl StateDb {
 
     pub fn enqueue_operation(&self, op: &PendingOperation) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        conn.execute(
-            "INSERT INTO operation_queue (
-                op_id, kind, file_id, parent_id, target_path, metadata_json, payload_path,
-                base_version, base_object_version_id, attempts, max_attempts, next_retry_at,
-                last_error, last_error_class, paused_reason, backup_source_key, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL, NULL, ?14, ?15, ?16)
-             ON CONFLICT(op_id) DO UPDATE SET
-                kind = excluded.kind,
-                file_id = excluded.file_id,
-                parent_id = excluded.parent_id,
-                target_path = excluded.target_path,
-                metadata_json = excluded.metadata_json,
-                payload_path = excluded.payload_path,
-                base_version = excluded.base_version,
-                base_object_version_id = excluded.base_object_version_id,
-                attempts = excluded.attempts,
-                max_attempts = excluded.max_attempts,
-                next_retry_at = excluded.next_retry_at,
-                last_error = excluded.last_error,
-                last_error_class = excluded.last_error_class,
-                paused_reason = excluded.paused_reason,
-                backup_source_key = excluded.backup_source_key,
-                updated_at = excluded.updated_at",
-            params![
-                op.op_id,
-                op.kind.as_str(),
-                op.file_id,
-                op.parent_id,
-                op.target_path,
-                op.metadata_json,
-                op.payload_path,
-                op.base_version,
-                op.base_object_version_id,
-                op.attempts,
-                op.max_attempts,
-                op.next_retry_at,
-                op.last_error,
-                op.backup_source_key,
-                op.created_at,
-                op.updated_at
-            ],
-        )?;
-        Ok(())
+        insert_operation_conn(&conn, op)
+    }
+
+    /// Spec 2026-10-10 §5.2 step 6: every change the Finder IPC queues (a rename, a move, a folder create with its
+    /// row, a delete, and the watcher's and non-macOS writes) is queued in one `BEGIN IMMEDIATE` transaction that reads
+    /// the sign-out's fence first, as `accept_finder_write` does for a save. A closed fence writes nothing.
+    /// Engine-internal enqueues (`enqueue_operation`: pins, hydrates, restores) never read it.
+    pub fn enqueue_finder_change(
+        &self,
+        op: &PendingOperation,
+        folder: Option<FinderFolderRow<'_>>,
+    ) -> Result<FinderEnqueue> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if finder_accepts_closed_conn(&tx)? {
+            return Ok(FinderEnqueue::AcceptsClosed);
+        }
+        if let Some(folder) = folder {
+            // `upsert_file_with_contract`'s two steps, in this transaction.
+            upsert_file_conn(&tx, folder.entry)?;
+            let mut contract = get_file_contract_state_conn(&tx, &folder.entry.file_id)?
+                .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+            contract.item_kind = ItemKind::Folder;
+            contract.parent_id = folder.parent_id.map(str::to_string);
+            set_file_contract_state_conn(&tx, &contract)?;
+        }
+        insert_operation_conn(&tx, op)?;
+        tx.commit()?;
+        Ok(FinderEnqueue::Queued)
     }
 
     pub fn list_due_operations(&self, now: i64) -> Result<Vec<PendingOperation>> {
@@ -4992,6 +5061,38 @@ impl StateDb {
             )?;
         }
         Ok(())
+    }
+
+    /// Spec 2026-10-10 §15 question 3: a sign-out that stops without purging reopens accepts at once.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn reopen_finder_accepts(&self) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "DELETE FROM sync_state WHERE key = ?1",
+            params![FINDER_ACCEPTS_CLOSED_KEY],
+        )?;
+        Ok(())
+    }
+
+    /// One `BEGIN IMMEDIATE` transaction: it waits for an accept transaction already running, which therefore commits
+    /// first, and every later accept reads the key in its own transaction and queues nothing.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn close_finder_accepts(&self) -> Result<()> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO sync_state (key, value) VALUES (?1, '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![FINDER_ACCEPTS_CLOSED_KEY],
+        )?;
+        tx.commit()
+    }
+
+    /// Whether accepts are closed now. Tests only: production reads the key inside the transaction that queues
+    /// (`finder_accepts_closed_conn`).
+    #[cfg(test)]
+    pub fn finder_accepts_closed(&self) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        finder_accepts_closed_conn(&conn)
     }
 
     /// Every file the rows of this database point at (queued and staged payloads, upload sessions, cached
@@ -5712,6 +5813,12 @@ impl StateDb {
         let claims_cleared = tx.execute(
             "UPDATE operation_queue SET claim_id = NULL, claimed_at = NULL WHERE claim_id IS NOT NULL",
             [],
+        )?;
+        // Spec 2026-10-10 §15 question 3: an engine that starts takes Finder writes again, whatever a stopped
+        // sign-out left closed.
+        tx.execute(
+            "DELETE FROM sync_state WHERE key = ?1",
+            params![FINDER_ACCEPTS_CLOSED_KEY],
         )?;
         // §7.1: an alias is kept 30 days; the daily sweep is the runner's.
         tx.execute(
@@ -12046,6 +12153,118 @@ mod tests {
         // Journalled and unfinished: accepted.
         db.track_staged_payload("/staged/journalled", None, false).unwrap();
         assert!(matches!(accept("/staged/journalled"), AcceptOutcome::Queued { .. }));
+    }
+
+    fn accept_late_save(db: &StateDb, payload_path: &str) -> AcceptOutcome {
+        db.accept_finder_write(
+            &FinderAccept {
+                op_id: "op-late",
+                file_id: "late",
+                kind: FinderAcceptKind::Modify {
+                    incoming_base: Some("1"),
+                },
+                parent_id: None,
+                target_path: Some("late.txt"),
+                metadata_json: "{}",
+                payload_path,
+                size_bytes: 4,
+                modified_at: 20,
+                backup_source_key: None,
+                now: 30,
+            },
+            &|_, _| Vec::new(),
+        )
+        .unwrap()
+    }
+
+    fn seeded_for_a_late_accept() -> (tempfile::TempDir, StateDb) {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_own_row(&db, "late", FileStatus::Local, 10);
+        let mut contract = db.get_file_contract_state("late").unwrap().unwrap();
+        contract.current_version = 1;
+        db.set_file_contract_state(&contract).unwrap();
+        db.track_staged_payload("/staged/late", None, false).unwrap();
+        (dir, db)
+    }
+
+    /// U45 (spec 2026-10-10, §15 question 3, option A): once a sign-out's keep step has closed Finder accepts, an
+    /// accept that outlived the engine stop queues nothing, and its staged copy's journal row stays unfinished.
+    #[test]
+    fn a_finder_accept_after_the_engine_stop_queues_nothing() {
+        let (_dir, db) = seeded_for_a_late_accept();
+        db.close_finder_accepts().unwrap();
+        assert!(matches!(
+            accept_late_save(&db, "/staged/late"),
+            AcceptOutcome::AcceptsClosed
+        ));
+        assert!(db.list_operations_for_file("late").unwrap().is_empty(), "no op");
+        let unfinished: bool = db
+            .hold_lock_for_test()
+            .query_row(
+                "SELECT completed = 0 FROM staged_payloads WHERE path = '/staged/late'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            unfinished,
+            "the journal row is left for the purge, or for the next start's sweep"
+        );
+    }
+
+    /// U45: an engine start, and a cleared account, take saves again.
+    #[test]
+    fn accepts_reopen_at_engine_start_and_with_the_cleared_account() {
+        let (_dir, db) = seeded_for_a_late_accept();
+        db.close_finder_accepts().unwrap();
+        db.engine_start_repair().unwrap();
+        assert!(!db.finder_accepts_closed().unwrap());
+        assert!(matches!(
+            accept_late_save(&db, "/staged/late"),
+            AcceptOutcome::Queued { .. }
+        ));
+        db.close_finder_accepts().unwrap();
+        db.clear_account_data(false).unwrap();
+        assert!(!db.finder_accepts_closed().unwrap());
+        db.close_finder_accepts().unwrap();
+        db.reopen_finder_accepts().unwrap();
+        assert!(
+            !db.finder_accepts_closed().unwrap(),
+            "a sign-out that stops reopens them at once"
+        );
+    }
+
+    /// U45: an accept whose transaction began first commits first, and a read after the close sees it. Two
+    /// connections to one file, as the engine and the sign-out have.
+    #[test]
+    fn an_accept_already_running_commits_before_the_close() {
+        for round in 0..50 {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("state.db");
+            let engine = StateDb::open(&path).unwrap();
+            let sign_out = StateDb::open(&path).unwrap();
+            let (started, wait_started) = std::sync::mpsc::channel();
+            let accept = std::thread::spawn(move || {
+                let mut conn = engine.hold_lock_for_test();
+                let tx = conn
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .unwrap();
+                started.send(()).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                tx.execute(
+                    "INSERT INTO operation_queue (op_id, kind, file_id) VALUES ('late', 'upload_version', 'f')",
+                    [],
+                )
+                .unwrap();
+                tx.commit().unwrap();
+            });
+            wait_started.recv().unwrap();
+            sign_out.close_finder_accepts().unwrap();
+            let rows = sign_out.waiting_rows().unwrap();
+            accept.join().unwrap();
+            assert!(rows.iter().any(|row| row.op_id == "late"), "round {round}");
+        }
     }
 
     /// Spec §8.7 S6: the sweep deletes an unfinished row only while nothing names it, so an
