@@ -6030,12 +6030,29 @@ mod tests {
         let db = crate::state_db::StateDb::open(dir.path().join("state.db")).unwrap();
         let error = anyhow::Error::new(crate::engine_bridge::AcceptsClosed);
         assert_eq!(write_refusal_category(&error), "accepts_closed");
-        for op in ["create", "modify", "delete"] {
-            let response =
-                write_outcome_response(op, &db, Err(anyhow::Error::new(crate::engine_bridge::AcceptsClosed)));
+        let ops = ["create", "modify", "delete"];
+        let logs = capture_logs(|| {
+            for op in ops {
+                let response =
+                    write_outcome_response(op, &db, Err(anyhow::Error::new(crate::engine_bridge::AcceptsClosed)));
+                assert!(
+                    matches!(response, IpcResponse::WriteRetryLater { .. }),
+                    "{op}: {response:?}"
+                );
+            }
+        });
+        // Each refusal leaves one warning with its operation and its category.
+        let refusals: Vec<&str> = logs
+            .lines()
+            .filter(|line| line.contains("Finder write refused"))
+            .collect();
+        assert_eq!(refusals.len(), ops.len(), "one refusal logged per write:\n{logs}");
+        for (line, op) in refusals.iter().zip(ops) {
             assert!(
-                matches!(response, IpcResponse::WriteRetryLater { .. }),
-                "{op}: {response:?}"
+                line.contains("WARN")
+                    && line.contains(&format!("op=\"{op}\""))
+                    && line.contains("reason=\"accepts_closed\""),
+                "{op}: {line}"
             );
         }
     }

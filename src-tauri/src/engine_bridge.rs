@@ -10522,6 +10522,27 @@ mod tests {
             ))
             .expect("reopened, the rename queues: the refusals above were the fence");
         assert_eq!(bridge.db.list_due_operations(i64::MAX).unwrap().len(), 1);
+        // Reopened, the folder create writes its row in the fenced transaction, as a folder under its parent, so a
+        // nested child resolves it as its parent.
+        bridge
+            .queue_finder_create(target(
+                None,
+                Some("folder-a"),
+                "New folder",
+                FinderWriteItemKind::Folder,
+            ))
+            .expect("reopened, the folder create queues");
+        let folder = bridge
+            .db
+            .get_file_by_path("A/New folder")
+            .unwrap()
+            .expect("the folder create's row");
+        assert_eq!(
+            (folder.item_kind, folder.parent_id.as_deref()),
+            (ItemKind::Folder, Some("folder-a")),
+            "the folder create's row is a folder, under its parent"
+        );
+        assert_eq!(bridge.db.list_due_operations(i64::MAX).unwrap().len(), 2);
     }
 
     /// U45: a person's save meets the fence too. Once accepts are closed, a File Provider create of a new file and a

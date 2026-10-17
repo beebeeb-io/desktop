@@ -642,6 +642,34 @@ mod tests {
         );
     }
 
+    /// U45 and E3: a keep step whose read of the queue fails after the close reopens Finder accepts at once, as every
+    /// keep that stops does (spec §15 question 3): nothing will be purged.
+    #[test]
+    fn a_keep_that_cannot_read_the_queue_reopens_accepts() {
+        let f = Fixture::new();
+        f.file("a", "a.txt");
+        f.write("wa", "a", "minted", Some(b"a"));
+        // A row the read cannot decode (`attempts` is not a number): the read fails, the close before it does not.
+        f.db.hold_lock_for_test()
+            .execute(
+                "INSERT INTO operation_queue (op_id, kind, file_id, attempts) VALUES ('bad', 'rename_file', 'a', 'x')",
+                [],
+            )
+            .unwrap();
+        let failure = f.keep(Acknowledge::Nothing).unwrap_err();
+        assert!(matches!(failure, KeepFailure::Read(_)), "the read failed: {failure:?}");
+        assert!(
+            failure.message().starts_with("unsent_count_failed: "),
+            "E3: {}",
+            failure.message()
+        );
+        assert!(
+            !f.db.finder_accepts_closed().unwrap(),
+            "a keep whose read failed reopens accepts"
+        );
+        assert!(!f.root().exists(), "nothing was copied");
+    }
+
     /// U45: a close that fails stops the keep step before its read and before any copy (E2, `close_accepts`), so no
     /// keep runs while Finder accepts are open.
     #[test]

@@ -5145,9 +5145,14 @@ impl StateDb {
     /// The actual decrypted bytes are what must never survive a sign-out, so
     /// this returns every `payload_path`/`cache_path` for the caller to
     /// delete from disk.
+    ///
+    /// One `BEGIN IMMEDIATE` transaction (spec 2026-10-10 §5.2 step 8): it reads before it writes, and a deferred
+    /// transaction's first write fails at once ("database is locked", no busy timeout) while another connection holds
+    /// the write lock, such as the keep step's close of Finder accepts or a Finder change that reads that fence. The
+    /// caller has deleted the files by then. Taking the lock as it begins, the purge waits for that writer.
     pub fn purge_all_local_state(&self) -> Result<LocalStatePurge> {
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
         // m-12 (spec §5.4 row 15, §10.5): a File Provider create that never landed has
         // a provisional row the server never knew. The queue is its only owner, so it
@@ -8382,6 +8387,66 @@ mod tests {
             "the row must not be left at `local` status after a sign-out purge — a \
              lingering `local` row hides real on-disk plaintext from every later cleanup pass"
         );
+    }
+
+    /// Spec 2026-10-10 §5.2 steps 7-8: a sign-out's purge can meet another writer on `state.db` (the keep step's close
+    /// of Finder accepts, or a Finder change that reads that fence in its own write transaction). The purge reads
+    /// before it writes. In a deferred transaction SQLite answers its first write "database is locked" at once while
+    /// another connection holds the write lock (a reader that asks to write is not given the busy timeout), and a
+    /// sign-out has deleted every file by then. The purge takes the write lock as it begins, so it waits as any other
+    /// writer here does.
+    #[test]
+    fn a_purge_waits_for_another_writer_instead_of_failing() {
+        let hold = std::time::Duration::from_millis(200);
+        for _ in 0..5 {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("state.db");
+            let db = StateDb::open(&path).unwrap();
+            let writer = StateDb::open(&path).unwrap();
+            db.enqueue_operation(&queued("w1", OperationKind::UploadVersion, "f1", Some("/staged/w1")))
+                .unwrap();
+            let (held, wait_held) = std::sync::mpsc::channel();
+            let holder = std::thread::spawn(move || {
+                let mut conn = writer.hold_lock_for_test();
+                let tx = conn
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .unwrap();
+                tx.execute(
+                    "INSERT INTO sync_state (key, value) VALUES (?1, '1')",
+                    params![FINDER_ACCEPTS_CLOSED_KEY],
+                )
+                .unwrap();
+                held.send(()).unwrap();
+                std::thread::sleep(hold);
+                let released = std::time::Instant::now();
+                tx.commit().unwrap();
+                released
+            });
+            wait_held.recv().unwrap();
+            let started = std::time::Instant::now();
+            let purge = db.purge_all_local_state();
+            let waited = started.elapsed();
+            let released = holder.join().unwrap();
+            if started >= released {
+                // This thread ran only after the hold had ended, so this purge never met the writer: once more.
+                continue;
+            }
+            let purge = purge.unwrap_or_else(|error| {
+                panic!("a purge that meets another writer waits for it: {error} after {waited:?}")
+            });
+            assert_eq!(
+                (purge.queued_ops_purged, purge.payload_paths),
+                (1, vec!["/staged/w1".to_string()]),
+                "the purge that waited did its work"
+            );
+            let left: i64 = db
+                .hold_lock_for_test()
+                .query_row("SELECT COUNT(*) FROM operation_queue", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(left, 0, "nothing is left queued");
+            return;
+        }
+        panic!("in 5 tries the purge never began while the other connection held the write lock");
     }
 
     fn seed_contract_row(
