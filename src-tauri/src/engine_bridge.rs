@@ -10524,6 +10524,106 @@ mod tests {
         assert_eq!(bridge.db.list_due_operations(i64::MAX).unwrap().len(), 1);
     }
 
+    /// U45: a person's save meets the fence too. Once accepts are closed, a File Provider create of a new file and a
+    /// content save of an existing one are each refused with `AcceptsClosed`, and the IPC answers `WriteRetryLater`,
+    /// which the extension reports as a transient error, so macOS keeps the change and hands it over again (an `Error`
+    /// would reach it as the definitive `cannotSynchronize`). Nothing is queued, and the refused create leaves no row.
+    #[test]
+    fn a_file_provider_save_after_the_close_is_retried_later() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        seed_bridge_row(&bridge, "in-a", "x.txt", None, FileStatus::Local, 0);
+        let contents = dir.path().join("new.txt");
+        std::fs::write(&contents, b"new bytes").unwrap();
+        bridge.db.close_finder_accepts().unwrap();
+        let saves: [(&str, &'static str, anyhow::Result<FpWrite>); 2] = [
+            (
+                "a new file",
+                "create",
+                bridge.queue_file_provider_create(finder_file_target(None, "new.txt", &contents, None)),
+            ),
+            (
+                "a save",
+                "modify",
+                bridge.queue_file_provider_modify(finder_file_target(Some("in-a"), "x.txt", &contents, None)),
+            ),
+        ];
+        for (what, op, result) in saves {
+            let error = result.err().unwrap_or_else(|| panic!("{what} ({op}): queued"));
+            assert!(error.is::<AcceptsClosed>(), "{what} ({op}): {error:#}");
+            #[cfg(unix)]
+            {
+                let response = crate::ipc_socket::write_outcome_response(op, &bridge.db, Err(error));
+                assert!(
+                    matches!(response, crate::ipc_socket::IpcResponse::WriteRetryLater { .. }),
+                    "{what} ({op}): {response:?}"
+                );
+            }
+        }
+        // Every row, due or not.
+        let queued: i64 = bridge
+            .db
+            .hold_lock_for_test()
+            .query_row("SELECT COUNT(*) FROM operation_queue", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(queued, 0, "nothing queued");
+        let rows: Vec<String> = bridge
+            .db
+            .list_files()
+            .unwrap()
+            .into_iter()
+            .map(|row| row.file_id)
+            .collect();
+        assert_eq!(rows, ["in-a"], "the refused new file left no row");
+    }
+
+    /// Spec 2026-10-10 §5.2 step 6: every change the Finder IPC queues reads the sign-out's fence in the transaction
+    /// that queues it (`accept_finder_write`, `enqueue_finder_change`). Only the engine-internal kinds the spec exempts
+    /// queue through the unfenced `enqueue_operation`: a version restore, a pin and a hydrate. The IPC's code, whose
+    /// write arms call the bridge, never calls it.
+    #[test]
+    fn only_engine_internal_enqueues_skip_the_sign_out_fence() {
+        /// The function named on `line`, when it opens one.
+        fn fn_name(line: &str) -> Option<&str> {
+            let mut rest = line.trim_start();
+            for qualifier in ["pub(crate) ", "pub(super) ", "pub ", "const ", "async ", "unsafe "] {
+                rest = rest.strip_prefix(qualifier).unwrap_or(rest);
+            }
+            rest.strip_prefix("fn ")
+                .map(|rest| rest.split(['(', '<']).next().unwrap_or(rest))
+        }
+        /// For each unfenced enqueue in the production part of `source` (before its tests module), the function it
+        /// sits in. Comment lines do not count.
+        fn unfenced(source: &str) -> Vec<&str> {
+            let production = source.split("\nmod tests {").next().unwrap();
+            let mut function = "";
+            let mut found = Vec::new();
+            for line in production.lines() {
+                if let Some(name) = fn_name(line) {
+                    function = name;
+                }
+                if line.contains("enqueue_operation(") && !line.trim_start().starts_with("//") {
+                    found.push(function);
+                }
+            }
+            found
+        }
+        assert_eq!(
+            unfenced(include_str!("engine_bridge.rs")),
+            [
+                "queue_restore_version",
+                "enqueue_pin_tree_operation",
+                "enqueue_hydrate_operation"
+            ],
+            "only a version restore, a pin and a hydrate queue without the fence"
+        );
+        assert_eq!(
+            unfenced(include_str!("ipc_socket.rs")),
+            Vec::<&str>::new(),
+            "the IPC never queues without the fence"
+        );
+    }
+
     #[tokio::test]
     async fn test_process_due_operations_records_retry_for_upload_worker_handoff() {
         let dir = tempfile::tempdir().unwrap();

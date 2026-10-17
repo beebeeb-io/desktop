@@ -34355,16 +34355,72 @@ mod sign_out_keep_tests {
             std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o600)).unwrap();
             assert!(failed.unwrap_err().message.starts_with("unsent_copy_failed: "));
             assert!(!db.finder_accepts_closed().unwrap(), "a failed keep");
-            // The purge guard refuses after a completed keep (only a test seam can add a write then).
+            // The purge guard refuses after a completed keep (only a test seam can add a write then). The seam records
+            // that the keep step left accepts closed, so the reopen checked last is the guard's.
             let id = ask(&state, "macos-settings");
-            let seam: SignOutSeam = Arc::new(|point| {
+            let closed_after_the_keep = Arc::new(std::sync::Mutex::new(None));
+            let seen = closed_after_the_keep.clone();
+            let seam: SignOutSeam = Arc::new(move |point| {
                 if point == "after_keep" {
-                    queue_write(&state_db_in_scratch(), "late", "late", b"late");
+                    let db = state_db_in_scratch();
+                    *seen.lock().unwrap() = Some(db.finder_accepts_closed().unwrap());
+                    queue_write(&db, "late", "late", b"late");
                 }
                 Ok(())
             });
-            assert!(sign_out_with(&state, Some(&id), seam).await.is_err());
+            let refused = sign_out_with(&state, Some(&id), seam).await.unwrap_err();
+            assert_eq!(
+                *closed_after_the_keep.lock().unwrap(),
+                Some(true),
+                "the completed keep left accepts closed for the purge"
+            );
+            assert_eq!(
+                refused.message,
+                coded(UNSENT_COPY_FAILED_CODE, E2_UNSENT_COPY_FAILED),
+                "the purge guard refused (E2), never wrapped"
+            );
+            assert!(
+                refused.kept_unsent.is_some(),
+                "a refusal after a completed keep carries its folder"
+            );
             assert!(!db.finder_accepts_closed().unwrap(), "a refused purge");
+        })
+        .await;
+    }
+
+    /// U45: the rule holds whatever the keep step kept. With nothing waiting, the keep step still closes accepts (an
+    /// accept could commit after its read), and a return before the purge reopens them, as after a keep that made a
+    /// folder.
+    #[tokio::test]
+    async fn a_sign_out_that_kept_nothing_and_stops_reopens_accepts() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            let (state, _acct) = signed_out_state();
+            recording_finder(&state);
+            let closed_after_the_keep = Arc::new(std::sync::Mutex::new(None));
+            let seen = closed_after_the_keep.clone();
+            let seam: SignOutSeam = Arc::new(move |point| {
+                if point == "after_keep" {
+                    *seen.lock().unwrap() = Some(state_db_in_scratch().finder_accepts_closed().unwrap());
+                    return Err("stopped by the test".to_string());
+                }
+                Ok(())
+            });
+            let failure = sign_out_with(&state, None, seam).await.unwrap_err();
+            assert_eq!(
+                (failure.message.as_str(), &failure.kept_unsent),
+                ("stopped by the test", &None),
+                "precondition: stopped right after a keep that kept nothing"
+            );
+            assert_eq!(
+                *closed_after_the_keep.lock().unwrap(),
+                Some(true),
+                "the keep step closed accepts, though nothing waited"
+            );
+            assert!(
+                !db.finder_accepts_closed().unwrap(),
+                "a sign-out that kept nothing and stopped reopens accepts"
+            );
         })
         .await;
     }
