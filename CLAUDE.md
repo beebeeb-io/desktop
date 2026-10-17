@@ -422,6 +422,20 @@ The fingerprint at time of generation is `545D7BA77EDEA7E1`.
 If the key is lost, no clients with already-installed builds can verify
 new updates — they'll need a manual reinstall to onboard the new pubkey.
 
+## Storage location (task 1919)
+
+"Europe" is the default: no country, any of our European datacenters, the server places the data.
+Below it the person can pick one live datacenter; a coming-soon datacenter is listed and cannot be picked.
+The rows are the API's: `GET /api/v1/me/region` returns `choices` (the same array as the public
+`GET /api/v1/storage-regions`), `account_region` carries it to the UI and `account_set_region` sends the row's
+`id` verbatim (`europe` or a datacenter id). The desktop keeps NO list, city or country table; it renders
+`name`, `country`, `status` and `selectable` as sent, so a datacenter the server adds or retires changes the
+rows with no desktop release. A server without `choices` falls back to its one-entry-per-continent list.
+Uploads send no region (the server reads the stored preference). One hook, `src/windows/useDataResidency.ts`,
+serves both the Windows/Linux Settings panel and the macOS Settings window (Account tab).
+Verify against a local API: `cargo test --lib real_api_region -- --ignored --nocapture --test-threads=1` with
+`BB_REAL_API_BASE`/`BB_REAL_API_TOKEN` (scratch HOME), and `tests/render-region-live-api.mjs` for the UI.
+
 ## Brand
 
 - Icons: amber rounded square with lowercase `b` (`icons/icon.png`). Replace with the production icon set via `bunx tauri icon path/to/source.png` once ready.

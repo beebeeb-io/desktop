@@ -60,12 +60,14 @@ try {
         await page.addScriptTag({ content: bundle })
         if (surface === 'settings') {
           await page.getByRole('button', { name: 'Data residency', exact: true }).click()
-          const expected = regionState === 'eu' ? 'Stored in the EU (currently Falkenstein, Germany).'
-            : regionState === 'us' ? 'Stored in North America (currently Ashburn, United States).'
+          const expected = regionState === 'eu' ? 'Stored in the EU (currently Falkenstein).'
+            : regionState === 'us' ? 'Stored in North America (currently Ashburn).'
+            : regionState === 'unknown' ? 'Your chosen location isn’t available right now. New files go wherever Beebeeb places them by default.' // task 1919: said plainly, rows stay
             : regionState === 'loading' ? 'Loading data residency…' : 'Could not load data residency'
           await page.getByText(expected, { exact: true }).waitFor()
           if (regionState === 'eu') assert.equal(await page.getByRole('button', { name: /Europe/ }).isDisabled(), true)
-          if (!['eu', 'us'].includes(regionState)) assert.doesNotMatch(await page.locator('body').innerText(), /Stored in|Falkenstein|Ashburn/)
+          if (regionState === 'unknown') assert.doesNotMatch(await page.locator('body').innerText(), /Stored in|Could not load/)
+          else if (!['eu', 'us'].includes(regionState)) assert.doesNotMatch(await page.locator('body').innerText(), /Stored in|Falkenstein|Ashburn/)
           if (regionState === 'us') assert.doesNotMatch(await page.locator('body').innerText(), /Stored in the EU/)
           assert.equal(await page.evaluate(() => window.calls.filter(c => c.name === 'account_region').length), 1)
           assert.doesNotMatch(await page.locator('body').innerText(), /Choose where|More regions|Never Display Storage Provider/)

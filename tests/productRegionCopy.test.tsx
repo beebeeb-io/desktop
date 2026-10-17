@@ -4,13 +4,20 @@ import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import ts from 'typescript'
 import { productRegionLabel } from '../src/windows/useRegion'
-import type { UserRegionResponse } from '../src/desktopApi'
+import type { StorageChoice, UserRegionResponse } from '../src/desktopApi'
+import captured from '../src-tauri/tests/fixtures/region-choices-api.json'
 
 const regions = [
   { continent: 'europe', display_name: 'Europe', city: 'Falkenstein', is_default: true },
   { continent: 'us', display_name: 'North America', city: 'Ashburn', is_default: false },
 ]
+// Task 1919: the stored preference can be a datacenter id from the captured `choices` list.
+const choices = captured.choices as StorageChoice[]
 const cases: [string, UserRegionResponse | null | undefined, string][] = [
+  ['datacenter preference', { preferred_region: 'hel1', regions, choices }, 'Stored in the EU'],
+  ['europe preference with choices', { preferred_region: 'europe', regions, choices }, 'Stored in the EU'],
+  ['datacenter that left the list', { preferred_region: 'hel1', regions, choices: choices.filter(c => c.id !== 'hel1') }, 'End-to-end encrypted'],
+  ['coming-soon datacenter id', { preferred_region: 'ede', regions, choices }, 'End-to-end encrypted'],
   ['EU', { preferred_region: 'europe', regions }, 'Stored in the EU'],
   ['US overriding EU default', { preferred_region: 'us', regions }, 'Stored in North America'],
   ['default EU', { preferred_region: null, regions }, 'Stored in the EU'],

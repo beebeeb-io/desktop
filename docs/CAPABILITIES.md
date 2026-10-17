@@ -144,7 +144,8 @@ are the obsolete CLI daemon/config/API, not the shipping shell. Its `--start-min
 | U31 | Settings Sync Files on Demand toggle | `files_on_demand=false` only skips eviction, does not hydrate all | Incomplete promised action removed on Windows; on-demand explanation remains |
 | U32 | Settings Sync Free up space | `free_up_space` | Wired; clean unpinned bytes reclaimed, never dirty/pinned; count and native allocation checked |
 | U33 | Settings Sync upload/download limit rows | configuration display | Display-only; not editable here; compact Network page owns numeric controls |
-| U34 | Data residency region choices, Retry | `account_region`, `account_set_region` | Wired; selected allowed continent persists; capacity-disabled choices explain why |
+| U34 | Data residency storage location (Windows/Linux Settings > Data residency): Europe (default, any datacenter), live datacenters, coming-soon datacenters, Retry | `account_region` (`choices` of `GET /me/region`), `account_set_region` | Wired (task 1919); the rows are the API's list (no client list, city or country table), the id is sent verbatim, a coming-soon row is listed and disabled; Rust commands and the desktop upload path proven against a local API (`cargo test real_api_region -- --ignored`), UI proven in Chromium against it (`tests/render-region-live-api.mjs`); native Windows/Linux shells not run |
+| U34a | Data residency storage location (macOS Settings > Account > Where your files are stored), same rows and commands as U34 | `account_region`, `account_set_region` | Wired (task 1919); the macOS Settings window had no region control before; native macOS app not run with a signed-in account (see task 1919 notes) |
 | U35 | Notification email preference switches (each preference returned by metadata) | `account_notification_preferences`, `account_update_notification_preferences` | Wired; read/write corresponding key, rollback on failure |
 | U36 | Local notifications conflicts/sync complete/quota warnings | `set_desktop_config` notify fields → runner/native notifications | Wired; actual OS notification permission/delivery pending |
 | U37 | Launch Start at login | `autostart_enabled`, `toggle_autostart` | Wired; verify OS registration and next login, not just toggle state |
@@ -287,8 +288,8 @@ placeholder default is unreachable for a validated NavId.
 | `account_profile` | `desktopApi.ts` | Wired (surface table above) |
 | `account_subscription` | `desktopApi.ts` | Wired (surface table above) |
 | `account_usage` | `desktopApi.ts` | Wired (surface table above) |
-| `account_region` | `windows/views/SettingsView.tsx`, `desktopApi.ts` | Wired (surface table above) |
-| `account_set_region` | `windows/views/SettingsView.tsx`, `desktopApi.ts` | Wired (surface table above) |
+| `account_region` | `windows/useDataResidency.ts` (SettingsView, MacSettings), `desktopApi.ts` | Wired (surface table above) |
+| `account_set_region` | `windows/useDataResidency.ts` (SettingsView, MacSettings), `desktopApi.ts` | Wired (surface table above) |
 | `account_activity` | `desktopApi.ts` | Wired (surface table above) |
 | `account_security_score` | `desktopApi.ts` | Wired (surface table above) |
 | `account_session_list` | `desktopApi.ts` | Wired (surface table above) |
