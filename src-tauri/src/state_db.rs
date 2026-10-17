@@ -6676,15 +6676,16 @@ fn write_owner(conn: &Connection, owner: &crate::account_binding::Identity) -> R
 }
 
 /// How many rows of an account live here: every `ACCOUNT_TABLES` row and every `sync_state` row except the
-/// owner record.
+/// owner record and the device keys (the Finder removal debt, the domain-gone mark, closed Finder accepts).
 fn account_rows(conn: &Connection) -> Result<i64> {
     let mut rows: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM sync_state WHERE key NOT IN (?1, ?2, ?3, ?4)",
+        "SELECT COUNT(*) FROM sync_state WHERE key NOT IN (?1, ?2, ?3, ?4, ?5)",
         params![
             OWNER_USER_ID_KEY,
             OWNER_EMAIL_KEY,
             FINDER_REMOVAL_OWED_KEY,
-            FINDER_DOMAIN_GONE_KEY
+            FINDER_DOMAIN_GONE_KEY,
+            FINDER_ACCEPTS_CLOSED_KEY
         ],
         |row| row.get(0),
     )?;
@@ -12233,6 +12234,68 @@ mod tests {
         assert!(
             !db.finder_accepts_closed().unwrap(),
             "a sign-out that stops reopens them at once"
+        );
+    }
+
+    /// U45: reopening accepts deletes the key and nothing else, wherever it happens: a sign-out that stops and the
+    /// launch (`reopen_finder_accepts`), and an engine start (`engine_start_repair`). The rest of `sync_state` is the
+    /// R10 owner record, a Finder removal debt and the sync cursor. Without the owner, the next engine start would find
+    /// unowned local data and reset it (`account_binding::decide`), and the waiting saves with it.
+    #[test]
+    fn reopening_accepts_clears_the_key_and_nothing_else() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let owner = crate::account_binding::Identity::new(Some("u-a"), Some("a@beebeeb.io"));
+        db.set_owner(&owner).unwrap();
+        db.set_finder_removal_owed(true).unwrap();
+        db.set_sync_cursor(12).unwrap();
+        let sync_state = |db: &StateDb| -> Vec<(String, String)> {
+            let conn = db.hold_lock_for_test();
+            let mut stmt = conn.prepare("SELECT key, value FROM sync_state ORDER BY key").unwrap();
+            let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+            rows.collect::<Result<Vec<_>>>().unwrap()
+        };
+        let before = sync_state(&db);
+        let reopened = |when: &str| {
+            assert!(!db.finder_accepts_closed().unwrap(), "{when}: the key is gone");
+            assert_eq!(db.owner().unwrap(), Some(owner.clone()), "{when}: the owner stays");
+            assert!(db.finder_removal_owed().unwrap(), "{when}: a removal debt stays");
+            assert_eq!(
+                sync_state(&db),
+                before,
+                "{when}: every other sync_state row is as it was"
+            );
+        };
+        db.close_finder_accepts().unwrap();
+        db.reopen_finder_accepts().unwrap();
+        reopened("a sign-out that stops, or the launch");
+        db.close_finder_accepts().unwrap();
+        db.engine_start_repair().unwrap();
+        reopened("an engine start");
+    }
+
+    /// The closed-accepts key is a device key, as the Finder removal debt and the domain-gone mark are: it records what
+    /// a sign-out on this Mac closed, not anything of an account. Alone, or beside the owner record, it is not account
+    /// data, so it never makes the R10 binding reset a database or the upgrade adopt one.
+    #[test]
+    fn the_closed_accepts_key_is_not_account_data() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        db.close_finder_accepts().unwrap();
+        assert!(
+            !db.has_account_data().unwrap(),
+            "the closed-accepts key is not account data"
+        );
+        db.set_owner(&crate::account_binding::Identity::new(
+            Some("u-a"),
+            Some("a@beebeeb.io"),
+        ))
+        .unwrap();
+        assert!(!db.has_account_data().unwrap(), "nor is it beside the owner record");
+        db.set_sync_cursor(12).unwrap();
+        assert!(
+            db.has_account_data().unwrap(),
+            "a sync cursor beside them is account data"
         );
     }
 

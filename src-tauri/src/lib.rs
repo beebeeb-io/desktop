@@ -21950,6 +21950,10 @@ mod finder_lock_and_sign_out_tests {
             fx.finish().await;
             assert!(!db.has_account_data().unwrap(), "no account row survives a sign-out");
             assert_eq!(db.owner().unwrap(), None, "and nobody owns what is left");
+            assert!(
+                !db.finder_accepts_closed().unwrap(),
+                "and Finder accepts are open: the purge cleared the key the keep step wrote"
+            );
         }));
     }
 
@@ -34462,16 +34466,25 @@ mod sign_out_keep_tests {
     }
 
     /// U45: the launch's reopen acts on the app's own state database (here the test's, through `in_own_dirs`), not
-    /// only on a directory its caller names.
+    /// only on a directory its caller names, and it clears the key alone: the R10 owner record and a Finder removal
+    /// debt stay, or the restore's engine start would reset the local data as unowned.
     #[tokio::test]
     async fn the_launch_reopens_accepts_in_the_apps_state_db() {
         in_own_dirs(async {
             let db = state_db_in_scratch();
+            let owner = crate::account_binding::Identity::new(Some("u-a"), Some("a@beebeeb.io"));
+            db.set_owner(&owner).unwrap();
+            db.set_finder_removal_owed(true).unwrap();
             db.close_finder_accepts().unwrap();
             reopen_finder_accepts_at_startup();
             assert!(
                 !db.finder_accepts_closed().unwrap(),
                 "the launch reopens accepts in the app's state.db"
+            );
+            assert_eq!(db.owner().unwrap(), Some(owner), "the launch's reopen leaves the owner");
+            assert!(
+                db.finder_removal_owed().unwrap(),
+                "the launch's reopen leaves a removal debt"
             );
         })
         .await;
