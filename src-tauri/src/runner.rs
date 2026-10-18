@@ -612,6 +612,103 @@ fn spawn_heartbeat_producer(
     })
 }
 
+/// Spec 2026-10-10 §6.2 (task 1887): the sign-out's send phase, as the runner sees it. Armed only while a phase runs;
+/// the runner's phase wake (`Wake::Phase`) runs the queue step alone then.
+#[derive(Default)]
+pub struct SendPhaseLink {
+    armed: AtomicBool,
+    pub(crate) wake: tokio::sync::Notify,
+    link: std::sync::OnceLock<Arc<crate::link_health::LinkMonitor>>,
+    signals: Mutex<AttemptSignals>,
+}
+
+/// What the phase's attempts met, since it was armed (§6.4: `offline`, `session`, and, by the §15 question 4 ruling,
+/// `account`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AttemptSignals {
+    pub link_failed: bool,
+    pub session_refused: bool,
+    pub account_refused: bool,
+}
+
+// The phase's side (`arm`, `disarm`, `wake`, `link_failed`, `signals`, and `EngineRunner::send_phase`) is called from
+// the sign-out flow, which only a Mac runs (W5); the runner's side (`attach`, `is_armed`, `note`) runs everywhere.
+impl SendPhaseLink {
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn arm(&self) {
+        *self.signals.lock().unwrap_or_else(|p| p.into_inner()) = AttemptSignals::default();
+        self.armed.store(true, Ordering::SeqCst);
+        self.wake.notify_one();
+    }
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn disarm(&self) {
+        self.armed.store(false, Ordering::SeqCst);
+    }
+    pub fn is_armed(&self) -> bool {
+        self.armed.load(Ordering::SeqCst)
+    }
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn wake(&self) {
+        self.wake.notify_one();
+    }
+    /// §6.1 condition 3: the link monitor has a failure since its last good answer.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn link_failed(&self) -> bool {
+        self.link.get().is_some_and(|link| link.snapshot().failure.is_some())
+    }
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn signals(&self) -> AttemptSignals {
+        *self.signals.lock().unwrap_or_else(|p| p.into_inner())
+    }
+    pub(crate) fn attach(&self, link: Arc<crate::link_health::LinkMonitor>) {
+        let _ = self.link.set(link);
+    }
+    pub(crate) fn note(&self, outcome: &crate::engine_bridge::TransferLoopOutcome) {
+        let mut signals = self.signals.lock().unwrap_or_else(|p| p.into_inner());
+        signals.link_failed |= outcome.link_failed;
+        signals.session_refused |= outcome.session_refused;
+        signals.account_refused |= outcome.account_refused;
+    }
+}
+
+/// The phase arm's gate (U35): armed, not paused, and at most once a second. (`runner.rs` imports `Duration` but not
+/// `Instant`.)
+pub(crate) fn phase_step_due(
+    armed: bool,
+    paused: bool,
+    last_run: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    armed && !paused && last_run.is_none_or(|last| now.duration_since(last) >= Duration::from_secs(1))
+}
+
+/// What woke the runner's loop (spec 2026-10-10 §6.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Wake {
+    Cancel,
+    Tick,
+    Phase,
+}
+
+/// The loop's one wait, in the order `run`'s `select!` always had (`biased`: the cancel first, then the tick), plus the
+/// send phase's wake. The phase's arm has no precondition. `select!` evaluates an `if` precondition once, when it
+/// starts waiting, so an arm disabled then cannot be woken by `notify_one` until another arm fires: a phase armed while
+/// the runner waits would get no queue step until the next tick, up to 30 s later. The `Notify` fires only when
+/// `arm()` or the phase's driver wakes it (a wake with no phase running finds `phase_step_due` false), and `notify_one`
+/// stores a permit when nobody waits, so a wake sent mid-tick is not lost.
+async fn next_wake(
+    cancel: &mut oneshot::Receiver<()>,
+    tick: &mut tokio::time::Interval,
+    send_phase: &SendPhaseLink,
+) -> Wake {
+    tokio::select! {
+        biased;
+        _ = cancel => Wake::Cancel,
+        _ = tick.tick() => Wake::Tick,
+        _ = send_phase.wake.notified() => Wake::Phase,
+    }
+}
+
 /// Owned handle to a running engine task. Drop it (or call
 /// [`Self::abort`]) to stop the engine.
 pub struct EngineRunner {
@@ -627,6 +724,8 @@ pub struct EngineRunner {
     /// [`EngineBridge`] `run` builds, so `abort()` can flip it BEFORE even
     /// sending the tick loop's cancel oneshot.
     stopping: Arc<AtomicBool>,
+    /// The sign-out's send phase (spec 2026-10-10 §6.2), shared with `run`'s loop.
+    send_phase: Arc<SendPhaseLink>,
 }
 
 impl EngineRunner {
@@ -656,6 +755,8 @@ impl EngineRunner {
         let ipc_bind_error_for_task = ipc_bind_error.clone();
         let stopping: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
         let stopping_for_task = stopping.clone();
+        let send_phase = Arc::new(SendPhaseLink::default());
+        let send_phase_for_task = send_phase.clone();
 
         let task = tokio::spawn(async move {
             run(
@@ -669,6 +770,7 @@ impl EngineRunner {
                     auth_health,
                     ipc_bind_error: ipc_bind_error_for_task,
                     stopping: stopping_for_task,
+                    send_phase: send_phase_for_task,
                 },
             )
             .await;
@@ -679,6 +781,7 @@ impl EngineRunner {
             task: Some(task),
             ipc_bind_error,
             stopping,
+            send_phase,
         }
     }
 
@@ -690,6 +793,13 @@ impl EngineRunner {
     /// instead of only after the full readiness timeout.
     pub fn ipc_bind_error_handle(&self) -> Arc<Mutex<Option<String>>> {
         self.ipc_bind_error.clone()
+    }
+
+    /// The sign-out's send phase link (spec 2026-10-10 §6.2): the phase arms it, and this runner's loop runs its queue
+    /// step while it is armed.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn send_phase(&self) -> Arc<SendPhaseLink> {
+        self.send_phase.clone()
     }
 
     /// Test-only constructor: wraps an already-spawned task in a runner
@@ -706,6 +816,7 @@ impl EngineRunner {
             task: Some(task),
             ipc_bind_error: Arc::new(Mutex::new(None)),
             stopping: Arc::new(AtomicBool::new(false)),
+            send_phase: Arc::new(SendPhaseLink::default()),
         }
     }
 
@@ -921,6 +1032,8 @@ struct RunnerControls {
     auth_health: Arc<AuthHealth>,
     ipc_bind_error: Arc<Mutex<Option<String>>>,
     stopping: Arc<AtomicBool>,
+    /// The sign-out's send phase (spec 2026-10-10 §6.2): the loop's third wake.
+    send_phase: Arc<SendPhaseLink>,
 }
 
 /// The runner task body. Acquires the lock, opens the state DB,
@@ -944,6 +1057,7 @@ async fn run(
         auth_health,
         ipc_bind_error,
         stopping,
+        send_phase,
     } = controls;
 
     // Only consumed inside the `#[cfg(unix)]` IPC block below — Windows has
@@ -1117,6 +1231,7 @@ async fn run(
         Arc::new(EngineBridge::new_with_stop_flag(db.clone(), api.clone(), stopping).with_transfers(transfers.clone()));
     // What each request saw of the link (offline vs server did not answer).
     let link = api.link();
+    send_phase.attach(link.clone());
     let tracker = Arc::new(StatusTracker::new(Some(sync_root.to_string_lossy().into_owned())));
     // `syncing` needs a pulse: the tick awaits every due upload to completion, so
     // the post-tick counts are almost always zero (see `engine_status`).
@@ -1294,12 +1409,13 @@ async fn run(
     let mut upload_staging_sweep_tick_count: u64 = 1;
     // Spec §7.1: aliases older than 30 days go once a day (engine start sweeps them too).
     let mut last_alias_sweep = std::time::Instant::now();
+    // Spec 2026-10-10 §6.2: when the send phase's wake last ran the queue step.
+    let mut last_phase_run: Option<std::time::Instant> = None;
 
     loop {
-        tokio::select! {
-            biased;
-            _ = &mut cancel => break,
-            _ = tick.tick() => {
+        match next_wake(&mut cancel, &mut tick, &send_phase).await {
+            Wake::Cancel => break,
+            Wake::Tick => {
                 // Task 1670 round 3: run BEFORE the `sync_paused` check below
                 // — bounding staged plaintext lifetime is a security property
                 // independent of whether the user paused file sync, and
@@ -1345,7 +1461,10 @@ async fn run(
                 }
                 if last_alias_sweep.elapsed() >= std::time::Duration::from_secs(86_400) {
                     // A fixed category, never the error text (spec §11).
-                    if db.sweep_aliases(now_secs(), crate::state_db::ALIAS_MAX_AGE_SECS).is_err() {
+                    if db
+                        .sweep_aliases(now_secs(), crate::state_db::ALIAS_MAX_AGE_SECS)
+                        .is_err()
+                    {
                         tracing::warn!(reason = "database", "daily alias sweep failed");
                     }
                     last_alias_sweep = std::time::Instant::now();
@@ -1389,7 +1508,12 @@ async fn run(
                             removed = outcome.removed_shared_file_ids.len(),
                             "revoked shared content removed from local Finder state"
                         );
-                        signal_working_set_owing(&mut owed_working_set_signal, &db, "shared_roots_changed", &outcome.removed_shared_file_ids);
+                        signal_working_set_owing(
+                            &mut owed_working_set_signal,
+                            &db,
+                            "shared_roots_changed",
+                            &outcome.removed_shared_file_ids,
+                        );
                     }
                     Ok(_) => {}
                     Err(e) => {
@@ -1418,35 +1542,15 @@ async fn run(
                         // (timestamp ≈ now) doesn't get auto-resolved
                         // on the very same tick.
                         sweep_auto_resolutions(&app, &bridge, &sync_root).await;
-                        let completed_sync_work = match bridge.process_due_operations(&sync_root, now_secs()).await {
-                            Ok(outcome) => {
-                                let completed = outcome.completed_op_ids.len() as u32;
-                                // Task 1697 review fix (T3): ONE signal per tick
-                                // carries the union of the local queue's
-                                // invalidations and the REMOTE ingestion applies —
-                                // in a mixed tick two signals would be redundant.
-                                let (reason, ids) = tick_working_set_signal(&outcome.invalidated_item_ids, &tick.applied_item_ids);
-                                signal_working_set_owing(&mut owed_working_set_signal, &db, reason, &ids);
-                                if !outcome.paused_op_ids.is_empty() || !outcome.retried_op_ids.is_empty() {
-                                    tracing::info!(
-                                        paused = outcome.paused_op_ids.len(),
-                                        retried = outcome.retried_op_ids.len(),
-                                        "sync operation queue processed with deferred work"
-                                    );
-                                }
-                                completed
-                            }
-                            Err(e) => {
-                                tracing::warn!(error = %e, "operation queue processing failed");
-                                // The local queue stalled, but this tick's REMOTE
-                                // ingestion may still have applied server-side
-                                // changes — Finder must hear about them anyway.
-                                if !tick.applied_item_ids.is_empty() {
-                                    signal_working_set_owing(&mut owed_working_set_signal, &db, "remote_changes_applied", &tick.applied_item_ids);
-                                }
-                                0
-                            }
-                        };
+                        let completed_sync_work = queue_step(
+                            &bridge,
+                            &sync_root,
+                            &db,
+                            &mut owed_working_set_signal,
+                            &tick.applied_item_ids,
+                            &send_phase,
+                        )
+                        .await;
                         enforce_cache_budget(&app, &bridge, &mut quota_warning_notifications);
 
                         // Windows Cloud Files: the one-shot `seed_placeholders`
@@ -1528,9 +1632,7 @@ async fn run(
                             }
                         }
 
-                        if should_notify_sync_complete
-                            && let Err(e) = crate::notify_sync_complete_impl(&app)
-                        {
+                        if should_notify_sync_complete && let Err(e) = crate::notify_sync_complete_impl(&app) {
                             tracing::warn!(error = %e, "notify_sync_complete failed");
                         }
                     }
@@ -1560,6 +1662,22 @@ async fn run(
                         refresh_status_ui_snapshot(&db, false, true);
                     }
                 }
+            }
+            // Spec 2026-10-10 §6.2: while a sign-out's send phase is armed, the tick's queue step alone, at most once a
+            // second. Never the remote tick, the sweeps or the shared-root refresh. The queue step pays its own
+            // working-set signal; there are no remote applies to merge here.
+            Wake::Phase => {
+                let now = std::time::Instant::now();
+                if !phase_step_due(
+                    send_phase.is_armed(),
+                    sync_paused.load(Ordering::Relaxed),
+                    last_phase_run,
+                    now,
+                ) {
+                    continue;
+                }
+                last_phase_run = Some(now);
+                queue_step(&bridge, &sync_root, &db, &mut owed_working_set_signal, &[], &send_phase).await;
             }
         }
     }
@@ -1987,6 +2105,53 @@ fn tick_working_set_signal(local_invalidated: &[String], remote_applied: &[Strin
         (true, true) => unreachable!("handled above"),
     };
     (reason, ids)
+}
+
+/// The tick's queue step: one run of the local operation queue and the one working-set signal it owes. `applied` is
+/// the tick's remote applies, merged into that one signal (task 1697 review fix T3). Spec 2026-10-10 §6.2 (task 1887):
+/// the send phase's wake runs this same step between ticks, with no remote applies, so the phase adds no signal site;
+/// while a phase is armed, what each attempt met is noted on its link, the tick's attempts included. Returns how many
+/// operations completed.
+async fn queue_step(
+    bridge: &Arc<EngineBridge>,
+    sync_root: &Path,
+    db: &StateDb,
+    owed_working_set_signal: &mut OwedWorkingSetSignal,
+    applied: &[String],
+    send_phase: &SendPhaseLink,
+) -> u32 {
+    match bridge.process_due_operations(sync_root, now_secs()).await {
+        Ok(outcome) => {
+            if send_phase.is_armed() {
+                send_phase.note(&outcome);
+            }
+            let completed = outcome.completed_op_ids.len() as u32;
+            // Task 1697 review fix (T3): ONE signal per tick
+            // carries the union of the local queue's
+            // invalidations and the REMOTE ingestion applies —
+            // in a mixed tick two signals would be redundant.
+            let (reason, ids) = tick_working_set_signal(&outcome.invalidated_item_ids, applied);
+            signal_working_set_owing(owed_working_set_signal, db, reason, &ids);
+            if !outcome.paused_op_ids.is_empty() || !outcome.retried_op_ids.is_empty() {
+                tracing::info!(
+                    paused = outcome.paused_op_ids.len(),
+                    retried = outcome.retried_op_ids.len(),
+                    "sync operation queue processed with deferred work"
+                );
+            }
+            completed
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "operation queue processing failed");
+            // The local queue stalled, but this tick's REMOTE
+            // ingestion may still have applied server-side
+            // changes — Finder must hear about them anyway.
+            if !applied.is_empty() {
+                signal_working_set_owing(owed_working_set_signal, db, "remote_changes_applied", applied);
+            }
+            0
+        }
+    }
 }
 
 fn now_secs() -> i64 {
@@ -2504,10 +2669,13 @@ mod tests {
     }
 
     /// The tick loop signals through the owing wrapper only, at four named sites: revoked shared content,
-    /// the tick's one signal, a tick whose queue failed (its remote applies), and a failed tick that owes a
-    /// debt. A fifth call fails here, so no signal bypasses the debt. A failed tick reaches the first (it runs
-    /// before the tick, in every iteration) and the fourth; a delivered signal pays the debt, so at most one
-    /// signal is delivered per tick.
+    /// the queue step's one signal, a queue step that failed (the tick's remote applies), and a failed tick that
+    /// owes a debt. A fifth call fails here, so no signal bypasses the debt. The queue step's two sites are in
+    /// `queue_step`, which has two callers: the tick, and the send phase's wake while a sign-out's phase is armed
+    /// (spec 2026-10-10 §6.2), which passes no remote applies. A third caller fails here too. A failed tick reaches
+    /// the first site (it runs before the tick, in every iteration) and the fourth; a delivered signal pays the debt,
+    /// so at most one signal is delivered per tick. Between ticks, an armed phase's queue step signals as well: at
+    /// most once a second, and only while the phase is armed, at most a minute.
     #[test]
     fn every_working_set_signal_in_the_tick_loop_goes_through_the_owed_wrapper() {
         use crate::source_pin::squeeze;
@@ -2534,11 +2702,23 @@ mod tests {
         );
         for site in [
             "signal_working_set_owing(&mut owed_working_set_signal, &db, \"shared_roots_changed\", &outcome.removed_shared_file_ids)",
-            "signal_working_set_owing(&mut owed_working_set_signal, &db, reason, &ids)",
-            "signal_working_set_owing(&mut owed_working_set_signal, &db, \"remote_changes_applied\", &tick.applied_item_ids)",
+            "signal_working_set_owing(owed_working_set_signal, db, reason, &ids)",
+            "signal_working_set_owing(owed_working_set_signal, db, \"remote_changes_applied\", applied)",
             "signal_working_set_owing(owed_working_set_signal, db, \"owed_debt\", &[])",
         ] {
             assert_eq!(squeezed.matches(&squeeze(site)).count(), 1, "the site {site}");
+        }
+        // The queue step's two sites are `queue_step`'s; the tick and the phase's wake call it, once each.
+        assert_eq!(
+            squeezed.matches("queue_step(").count() - squeezed.matches("fnqueue_step(").count(),
+            2,
+            "the queue step's two callers"
+        );
+        for call in [
+            "queue_step(&bridge, &sync_root, &db, &mut owed_working_set_signal, &tick.applied_item_ids, &send_phase)",
+            "queue_step(&bridge, &sync_root, &db, &mut owed_working_set_signal, &[], &send_phase)",
+        ] {
+            assert_eq!(squeezed.matches(&squeeze(call)).count(), 1, "the call {call}");
         }
         // The fourth site's helper is called once, from the failed tick's arm of `run`.
         assert_eq!(
@@ -2553,6 +2733,163 @@ mod tests {
         assert!(
             at("\"sync tick failed\"") < call && call < at("refresh_status_ui_snapshot(&db, false, true)"),
             "in the failed tick's arm"
+        );
+    }
+
+    /// U35: the phase's wake runs the tick's own queue step (`queue_step`) with no remote applies, at most once a
+    /// second, never while paused or disarmed, and never the remote tick, a sweep or the shared-root refresh. The queue
+    /// step notes what each attempt met while a phase is armed, so the tick's attempts count too, and it pays the
+    /// working-set signal, so the phase adds no signal site.
+    #[test]
+    fn the_send_phase_runs_the_queue_step_alone() {
+        use crate::source_pin::squeeze;
+        let start = std::time::Instant::now();
+        let mut last = None;
+        let mut runs = 0;
+        for tenth in 0..=600u64 {
+            let now = start + std::time::Duration::from_millis(tenth * 100);
+            if phase_step_due(true, false, last, now) {
+                runs += 1;
+                last = Some(now);
+            }
+        }
+        assert!((60..=61).contains(&runs), "{runs} runs in 60 s");
+        assert!(!phase_step_due(true, true, None, start), "not while paused");
+        assert!(!phase_step_due(false, false, None, start), "never once disarmed");
+        let source = include_str!("runner.rs").replace("\r\n", "\n");
+        let arm = &source[source.find("Wake::Phase => {").expect("the phase's arm")..];
+        let arm = &arm[..arm.find("\n            }\n").unwrap()];
+        assert!(
+            squeeze(arm).contains(&squeeze(
+                "queue_step(&bridge, &sync_root, &db, &mut owed_working_set_signal, &[], &send_phase)"
+            )),
+            "the arm runs the tick's queue step, with no remote applies:\n{arm}"
+        );
+        for denied in [
+            "process_due_operations(",
+            "signal_working_set_owing(",
+            "sync_tick_outcome(",
+            "refresh_shared_roots(",
+            "sweep_",
+            "run_known_folder_mirror(",
+        ] {
+            assert!(!arm.contains(denied), "{denied} in the arm");
+        }
+        let step = &source[source.find("async fn queue_step(").expect("the queue step")..];
+        let step = &step[..step.find("\n}\n").unwrap()];
+        assert!(
+            squeeze(step).contains("ifsend_phase.is_armed(){send_phase.note(&outcome);}"),
+            "every attempt is noted while a phase is armed:\n{step}"
+        );
+        let tick =
+            &source[source.find("Wake::Tick => {").expect("the tick's arm")..source.find("Wake::Phase => {").unwrap()];
+        assert!(
+            squeeze(tick).contains(&squeeze(
+                "queue_step(&bridge, &sync_root, &db, &mut owed_working_set_signal, &tick.applied_item_ids, &send_phase)"
+            )),
+            "the tick's queue step is the same one, so the tick's attempts count too"
+        );
+        // No precondition on the wake. `select!` reads one when it starts waiting, so an arm disabled then stays
+        // disabled until another arm fires: up to a 30 s tick.
+        let wait = &source[source.find("async fn next_wake(").expect("next_wake")..];
+        let wait = &wait[..wait.find("\n}\n").unwrap()];
+        assert!(
+            wait.contains("_ = send_phase.wake.notified() => Wake::Phase,"),
+            "{wait}"
+        );
+        assert!(
+            !wait.contains(", if "),
+            "no arm of the wait has a precondition:\n{wait}"
+        );
+        // §6.2: the arm skips its step while sync is paused, as the tick does: it reads the runner's own pause flag.
+        assert!(
+            squeeze(arm).contains(&squeeze(
+                "phase_step_due(send_phase.is_armed(), sync_paused.load(Ordering::Relaxed), last_phase_run, now)"
+            )),
+            "the arm reads the pause flag the tick reads:\n{arm}"
+        );
+        // §6.1 condition 3: the phase reads the link monitor that this runner's requests write.
+        let start = source.find("async fn run(\n    app: AppHandle").expect("run exists");
+        let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+        assert_eq!(
+            body.matches("send_phase.attach(link.clone());").count(),
+            1,
+            "run attaches its link monitor to the phase's link"
+        );
+    }
+
+    /// U35: a phase armed while the runner already waits between ticks wakes it at once, not at its next tick 30 s
+    /// on. On tokio's paused clock: time moves only when every task waits, and then straight to the next timer, so no
+    /// real time passes and a loaded machine cannot flake the bound. With a precondition on the wake, the only timers
+    /// left are the 1 s timeout and the 30 s tick, so the clock moves to the timeout and the test is red at once.
+    #[tokio::test(start_paused = true)]
+    async fn a_phase_armed_while_the_runner_waits_wakes_it_at_once() {
+        let send_phase = Arc::new(SendPhaseLink::default());
+        let (_keep_open, mut cancel) = oneshot::channel::<()>();
+        let mut tick = tokio::time::interval(TICK_INTERVAL);
+        assert_eq!(
+            next_wake(&mut cancel, &mut tick, &send_phase).await,
+            Wake::Tick,
+            "an interval's first tick is at once"
+        );
+        let waiter = {
+            let send_phase = send_phase.clone();
+            tokio::spawn(async move { next_wake(&mut cancel, &mut tick, &send_phase).await })
+        };
+        // Paused clock: the waiter runs first and starts waiting, then the clock moves 50 ms. It now waits, 29.95 s
+        // from its next tick.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let armed_at = tokio::time::Instant::now();
+        send_phase.arm();
+        let woke = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("woken within a second of the arm, not at the next tick");
+        assert_eq!(woke.unwrap(), Wake::Phase);
+        assert!(armed_at.elapsed() < Duration::from_secs(1));
+    }
+
+    /// U46's chain, link by link: what an attempt met reaches the phase's signals, signals add up within a phase, and
+    /// arming a new phase forgets the last one's.
+    #[test]
+    fn an_attempts_refusal_reaches_the_phase_signals() {
+        use crate::engine_bridge::TransferLoopOutcome;
+        let link = SendPhaseLink::default();
+        link.arm();
+        assert_eq!(link.signals(), AttemptSignals::default());
+        link.note(&TransferLoopOutcome {
+            account_refused: true,
+            ..Default::default()
+        });
+        assert_eq!(
+            link.signals(),
+            AttemptSignals {
+                account_refused: true,
+                ..Default::default()
+            }
+        );
+        link.note(&TransferLoopOutcome {
+            link_failed: true,
+            ..Default::default()
+        });
+        assert_eq!(
+            link.signals(),
+            AttemptSignals {
+                account_refused: true,
+                link_failed: true,
+                session_refused: false
+            },
+            "they add up"
+        );
+        link.note(&TransferLoopOutcome {
+            session_refused: true,
+            ..Default::default()
+        });
+        assert!(link.signals().session_refused);
+        link.arm();
+        assert_eq!(
+            link.signals(),
+            AttemptSignals::default(),
+            "a new phase starts with none"
         );
     }
 
@@ -3306,6 +3643,7 @@ mod tests {
             task: Some(task),
             ipc_bind_error: Arc::new(Mutex::new(None)),
             stopping: Arc::new(AtomicBool::new(false)),
+            send_phase: Arc::new(SendPhaseLink::default()),
         };
 
         let outcome = runner.abort().await;
@@ -3339,6 +3677,7 @@ mod tests {
             task: Some(task),
             ipc_bind_error: Arc::new(Mutex::new(None)),
             stopping: Arc::new(AtomicBool::new(false)),
+            send_phase: Arc::new(SendPhaseLink::default()),
         };
 
         // GRACEFUL_ABORT_TIMEOUT (3s) + FORCE_ABORT_TIMEOUT (2s) — the task

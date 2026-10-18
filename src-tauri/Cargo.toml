@@ -303,6 +303,10 @@ tempfile = "3"
 # Same 3.x Tauri itself merges platform configs with (already in Cargo.lock);
 # used only by the merged-config tests in src/surfaces/config_tests.rs.
 json-patch = { version = "3", default-features = false }
+# Task 1887: the send phase's wake test runs on tokio's paused clock (`#[tokio::test(start_paused = true)]`), so a
+# loaded machine cannot flake it. A feature only: `test-util` turns on tokio's own `rt`, `sync` and `time`, which
+# `[dependencies]` already has, so no crate is added and Cargo.lock is unchanged.
+tokio = { version = "1", features = ["test-util"] }
 
 # Task 1683 slice 2: `tauri::test::mock_app` runs the real `popover_snapshot` command, the
 # real status listener and the real status pulse against a mock runtime. A feature only (no new

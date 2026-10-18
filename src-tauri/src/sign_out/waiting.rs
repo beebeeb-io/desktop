@@ -172,12 +172,10 @@ impl WaitingChanges {
     }
 
     /// The progress line's unit (§2 "Waiting change"): waiting files plus other waiting changes.
-    #[allow(dead_code)] // first production caller: Task 11; no test calls it before then
     pub fn changes(&self) -> usize {
         self.files.len() + self.others.len()
     }
 
-    #[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 11
     pub fn any_live(&self) -> bool {
         self.counts().live > 0
     }
@@ -222,7 +220,6 @@ fn settle_states(writes: &mut [WaitingWrite]) {
 }
 
 /// §6.1: why a sign-out would not send first, in the spec's order.
-#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 11
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NotSending {
@@ -234,7 +231,6 @@ pub enum NotSending {
 }
 
 /// §6.1 conditions 1-4; condition 5 (something is live) is read from the queue.
-#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 11
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SendConditions {
     pub engine_running: bool,
@@ -244,10 +240,16 @@ pub struct SendConditions {
     pub sync_paused: bool,
 }
 
-/// `None`: nothing waits, or it can send. `Some(reason)`: the first condition that fails.
-#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 11
+/// `None`: nothing waits, or it can send. `Some(reason)`: the first condition that fails. Tests only: production
+/// reads a snapshot it already holds, through [`readiness`].
+#[cfg(test)]
 pub fn send_readiness(conditions: SendConditions, waiting: &WaitingChanges) -> Option<NotSending> {
-    if waiting.is_empty() {
+    readiness(conditions, waiting.is_empty(), waiting.any_live())
+}
+
+/// `send_readiness` on what a snapshot already holds (W2: no second read).
+pub fn readiness(conditions: SendConditions, nothing_waits: bool, any_live: bool) -> Option<NotSending> {
+    if nothing_waits {
         return None;
     }
     if !conditions.engine_running || !conditions.vault_unlocked {
@@ -258,7 +260,7 @@ pub fn send_readiness(conditions: SendConditions, waiting: &WaitingChanges) -> O
         Some(NotSending::Offline)
     } else if conditions.sync_paused {
         Some(NotSending::Paused)
-    } else if !waiting.any_live() {
+    } else if !any_live {
         Some(NotSending::Held)
     } else {
         None

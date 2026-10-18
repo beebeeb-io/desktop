@@ -630,7 +630,7 @@ pub struct SharedRootRefreshOutcome {
     pub removed_cache_paths: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct TransferLoopOutcome {
     pub completed_op_ids: Vec<String>,
     pub retried_op_ids: Vec<String>,
@@ -643,6 +643,11 @@ pub struct TransferLoopOutcome {
     /// said only "medium thumbnail upload with blurhash query" with no
     /// trail. Each entry is `"<op_id>: <error>"`.
     pub post_complete_errors: Vec<String>,
+    /// Spec 2026-10-10 §6.4: an attempt failed at the link level (`offline`), the server refused the session
+    /// (`session`), or, by the §15 question 4 ruling, the account refused a Finder write it can cure (`account`).
+    pub link_failed: bool,
+    pub session_refused: bool,
+    pub account_refused: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1052,6 +1057,9 @@ impl EngineBridge {
             paused_op_ids: Vec::new(),
             invalidated_item_ids: Vec::new(),
             post_complete_errors: Vec::new(),
+            link_failed: false,
+            session_refused: false,
+            account_refused: false,
         };
         #[cfg(target_os = "windows")]
         if !self.is_stopping() {
@@ -1202,6 +1210,9 @@ impl EngineBridge {
                     } else {
                         classify_operation_error(&error.to_string())
                     };
+                    outcome.link_failed |= crate::link_health::classify_error(&error).is_some();
+                    outcome.session_refused |= class == OperationFailureClass::Auth;
+                    outcome.account_refused |= finder_write && is_curable_refusal(&error);
                     // m-11: a recorded completion is never paused (a busy database reads as
                     // `Locked`), because a paused op is not listed again.
                     let transient = finder_write && finder_write_failure_is_transient(class, &error);
@@ -21313,6 +21324,78 @@ mod tests {
         s.refuse_init_with.remove(file_id);
         s.refuse_chunk_with.remove(file_id);
         s.refuse_complete_with.remove(file_id);
+    }
+
+    /// U17, the arithmetic: a change made due at the phase's start, failing every attempt, is tried at most twice in
+    /// 60 s and never parks there, for an other change (`UsesUp`) and for a Finder write's transient failure.
+    #[test]
+    fn a_phase_never_parks_what_it_made_due() {
+        for (max_attempts, start) in [(5_i64, 0_i64), (5, 2), (25, 0), (25, 22)] {
+            for count in [AttemptCount::UsesUp, AttemptCount::UpToTheBackoffCap] {
+                let mut attempts = start;
+                let mut at = 0_i64;
+                let mut tries = 0;
+                while at <= 60 {
+                    attempts = next_attempt_count(attempts, max_attempts, count);
+                    tries += 1;
+                    at += retry_delay_seconds(attempts);
+                }
+                assert!(tries <= 2, "{max_attempts}/{start}/{count:?}: {tries} tries");
+                assert!(
+                    attempts < max_attempts,
+                    "{max_attempts}/{start}/{count:?}: parked at {attempts}"
+                );
+            }
+        }
+    }
+
+    /// U46 (spec §15 question 4): one attempt that meets a refusal the account cures says so to the send phase.
+    #[tokio::test]
+    async fn a_refusal_the_account_cures_ends_the_send_phase() {
+        let refusals = [
+            quota_exceeded(),
+            object_budget_exceeded(),
+            billing_read_only(),
+            account_lapsed(),
+            plan_required(),
+            trial_cancelled_read_only(),
+        ];
+        for (index, refusal) in refusals.into_iter().enumerate() {
+            let key = [190u8 + index as u8; 32];
+            let file_id = format!("account-{index}");
+            let (dir, sync_root, server, bridge) = rule3_setup(key);
+            seed_uploaded_row(&bridge, &server, &file_id);
+            refuse(&server, Refused::Init, &file_id, refusal);
+            fp_save(&bridge, dir.path(), &file_id, "notes.txt", b"bytes", "1");
+            let outcome = bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+            assert!(
+                outcome.account_refused && !outcome.link_failed && !outcome.session_refused,
+                "{file_id}: {outcome:?}"
+            );
+            assert!(
+                bridge
+                    .db
+                    .list_operations_for_file(&file_id)
+                    .unwrap()
+                    .iter()
+                    .all(|op| op.attempts < op.max_attempts),
+                "still live"
+            );
+        }
+        let (dir, sync_root, server, bridge) = rule3_setup([199u8; 32]);
+        seed_uploaded_row(&bridge, &server, "plain-413");
+        refuse(
+            &server,
+            Refused::Init,
+            "plain-413",
+            ("413 Payload Too Large", json!({ "error": "payload_too_large" })),
+        );
+        fp_save(&bridge, dir.path(), "plain-413", "notes.txt", b"bytes", "1");
+        let outcome = bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+        assert!(
+            !outcome.account_refused,
+            "a plain 413 is counted, not an account refusal"
+        );
     }
 
     /// Spec §8.4: a refusal the person cures (free space, subscribe, pay), in the server's real

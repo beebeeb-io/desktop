@@ -11,6 +11,7 @@ pub(crate) mod kept_record;
 pub(crate) mod kept_set;
 #[cfg(target_os = "macos")]
 pub(crate) mod kept_writer;
+pub(crate) mod send_phase;
 pub(crate) mod snapshot;
 pub(crate) mod waiting;
 
@@ -26,9 +27,11 @@ pub(crate) fn crash_point(point: &str) {
     }
 }
 
-/// The sign-out flow's state in `AppState` (spec 2026-10-10 §5.1). The send phase, the late results and the flow
-/// request join it later.
+/// The sign-out flow's state in `AppState` (spec 2026-10-10 §5.1). The late results and the flow request join it
+/// later.
 #[derive(Default)]
 pub(crate) struct SignOutState {
     pub snapshots: std::sync::Arc<snapshot::SnapshotStore>,
+    /// The send phase that runs, if one does (§6): one at a time.
+    pub phase: std::sync::Mutex<Option<send_phase::RunningPhase>>,
 }

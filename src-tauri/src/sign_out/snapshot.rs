@@ -28,6 +28,8 @@ pub struct AskSnapshot {
     pub files: BTreeSet<String>,
     pub others: BTreeSet<String>,
     pub missing: BTreeSet<String>,
+    /// §6.1 condition 5: at least one waiting change is live (the count's `can_send` reads it, W2: no second read).
+    pub any_live: bool,
 }
 
 impl AskSnapshot {
@@ -50,6 +52,7 @@ impl AskSnapshot {
             files: waiting.file_ids(),
             others: waiting.other_op_ids(),
             missing: waiting.missing_op_ids(),
+            any_live: waiting.any_live(),
         }
     }
 
@@ -57,7 +60,6 @@ impl AskSnapshot {
         &self.counts.ask_id
     }
 
-    #[allow(dead_code)] // first production caller: Task 11; no test calls it before then
     pub fn is_empty(&self) -> bool {
         self.files.is_empty() && self.others.is_empty()
     }
@@ -78,12 +80,10 @@ impl SnapshotStore {
         self.newest.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    #[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 11
     pub fn record(&self, snapshot: AskSnapshot) {
         *self.lock() = Some(snapshot);
     }
 
-    #[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 11
     pub fn newest_ask_id(&self) -> Option<String> {
         self.lock().as_ref().map(|snapshot| snapshot.ask_id().to_string())
     }

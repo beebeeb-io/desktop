@@ -5095,6 +5095,21 @@ impl StateDb {
         finder_accepts_closed_conn(&conn)
     }
 
+    /// Spec 2026-10-10 §6.2: every live waiting change with `attempts + 2 < max_attempts` is made due now, once;
+    /// `attempts` unchanged. Parked, paused, hydrates, pins and completed uploads are not touched.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn make_due_for_send_phase(&self, now: i64) -> Result<usize> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "UPDATE operation_queue SET next_retry_at = ?1
+             WHERE kind NOT IN ('hydrate_file', 'pin_tree')
+               AND attempts + 2 < max_attempts
+               AND paused_reason IS NULL
+               AND op_id NOT IN (SELECT op_id FROM upload_resume WHERE completed_version IS NOT NULL)",
+            params![now],
+        )
+    }
+
     /// Every file the rows of this database point at (queued and staged payloads, upload sessions, cached
     /// copies), each path once. Read-only: the purge deletes these files FIRST and clears the rows only when
     /// every one is gone, so a file that cannot be removed leaves the rows in place for a retry.
@@ -12557,5 +12572,69 @@ mod tests {
             left,
             vec!["/staged/accepted".to_string(), "/staged/released".to_string()]
         );
+    }
+
+    /// U17, the margin; U18.
+    #[test]
+    fn the_send_phase_makes_live_changes_due_with_a_margin() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        db.hold_lock_for_test()
+            .execute_batch(
+                "INSERT INTO operation_queue (op_id, kind, file_id, attempts, max_attempts, next_retry_at, paused_reason) VALUES
+                   ('a0', 'upload_version', 'f', 0, 5, 9999, NULL),
+                   ('a2', 'rename_file', 'f', 2, 5, 9999, NULL),
+                   ('a3', 'upload_version', 'f', 3, 5, 9999, NULL),
+                   ('a4', 'upload_version', 'f', 4, 5, 9999, NULL),
+                   ('parked', 'upload_version', 'f', 5, 5, 9999, NULL),
+                   ('paused', 'upload_version', 'f', 0, 5, 9999, 'auth'),
+                   ('hydrate', 'hydrate_file', 'f', 0, 5, 9999, NULL);",
+            )
+            .unwrap();
+        assert_eq!(db.make_due_for_send_phase(100).unwrap(), 2);
+        let due: Vec<(String, i64, i64)> = {
+            let conn = db.hold_lock_for_test();
+            let mut stmt = conn
+                .prepare("SELECT op_id, next_retry_at, attempts FROM operation_queue ORDER BY op_id")
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        for (op, next, attempts) in due {
+            let expected_next = if op == "a0" || op == "a2" { 100 } else { 9999 };
+            assert_eq!(next, expected_next, "{op}");
+            let inserted = match op.as_str() {
+                "a2" => 2,
+                "a3" => 3,
+                "a4" => 4,
+                "parked" => 5,
+                _ => 0,
+            };
+            assert_eq!(attempts, inserted, "attempts never change: {op}");
+        }
+    }
+
+    #[test]
+    fn the_send_phase_never_touches_parked_or_paused_changes() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        db.hold_lock_for_test()
+            .execute_batch(
+                "INSERT INTO operation_queue (op_id, kind, file_id, attempts, max_attempts, next_retry_at, paused_reason) VALUES
+                   ('parked', 'upload_version', 'f', 25, 25, 9999, NULL), ('paused', 'create_folder', 'f', 0, 5, 9999, 'quota');",
+            )
+            .unwrap();
+        assert_eq!(db.make_due_for_send_phase(100).unwrap(), 0);
+        let untouched: i64 = db
+            .hold_lock_for_test()
+            .query_row(
+                "SELECT COUNT(*) FROM operation_queue WHERE next_retry_at = 9999 AND attempts IN (0, 25)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(untouched, 2);
     }
 }

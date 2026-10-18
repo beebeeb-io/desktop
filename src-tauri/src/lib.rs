@@ -3377,7 +3377,6 @@ fn purge_local_data_for_sign_out(
 /// unfinished list leaves the earlier folders out and the ask still counts; its warning names the step that failed,
 /// never the error: a read error quotes a line of the file, and the list's lines are kept folders' paths (W10).
 #[cfg(target_os = "macos")]
-#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 11
 fn count_ask(owner: &str) -> Result<sign_out::snapshot::AskSnapshot, String> {
     let e3 = || {
         sign_out::copy::coded(
@@ -3410,6 +3409,260 @@ fn read_waiting_changes() -> Result<sign_out::waiting::WaitingChanges, String> {
         Some(db) => sign_out::waiting::WaitingChanges::read(&db),
         None => Ok(sign_out::waiting::WaitingChanges::default()),
     }
+}
+
+/// §5.1, the contract: `sign_out_count`'s answer. Built on a Mac only; elsewhere the command's twin answers an error.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SignOutCount {
+    #[serde(flatten)]
+    counts: sign_out::snapshot::AskCounts,
+    can_send: bool,
+    not_sending: Option<sign_out::waiting::NotSending>,
+}
+
+/// §6.1 conditions 1-4 for the active account, and the running engine's phase link.
+#[cfg(target_os = "macos")]
+async fn send_conditions(state: &AppState) -> (sign_out::waiting::SendConditions, Option<Arc<runner::SendPhaseLink>>) {
+    let Ok(acct) = state.active_account() else {
+        return (
+            sign_out::waiting::SendConditions {
+                engine_running: false,
+                vault_unlocked: false,
+                session_expired: true,
+                link_failed: false,
+                sync_paused: false,
+            },
+            None,
+        );
+    };
+    let link = acct.engine.lock().await.as_ref().map(|engine| engine.send_phase());
+    let conditions = sign_out::waiting::SendConditions {
+        engine_running: link.is_some(),
+        vault_unlocked: acct.session.lock().map(|session| session.is_some()).unwrap_or(false),
+        session_expired: acct.auth_health.is_expired(),
+        link_failed: link.as_ref().is_some_and(|link| link.link_failed()),
+        sync_paused: acct.sync_paused.load(Ordering::Relaxed),
+    };
+    (conditions, link)
+}
+
+/// §5.1 step 1: one read, a snapshot owned by the calling window, and one `info` line with counts only (review I8).
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn sign_out_count(window: tauri::WebviewWindow, state: State<'_, AppState>) -> Result<SignOutCount, String> {
+    let snapshot = count_ask(window.label())?;
+    let (conditions, _) = send_conditions(&state).await;
+    let not_sending = sign_out::waiting::readiness(conditions, snapshot.is_empty(), snapshot.any_live);
+    let can_send = !snapshot.is_empty() && not_sending.is_none();
+    tracing::info!(
+        files = snapshot.counts.files,
+        copied_files = snapshot.counts.copied_files,
+        others = snapshot.counts.others,
+        missing_files = snapshot.counts.missing_files,
+        can_send,
+        not_sending = not_sending.map(|reason| format!("{reason:?}")).unwrap_or_default(),
+        earlier_folder = !snapshot.counts.earlier_folders.is_empty(),
+        "sign-out flow counted"
+    );
+    let counts = snapshot.counts.clone();
+    state.sign_out.snapshots.record(snapshot);
+    Ok(SignOutCount {
+        counts,
+        can_send,
+        not_sending,
+    })
+}
+
+/// Windows and Linux keep today's sign-out (spec 2026-10-10 W5): the flow's commands are registered everywhere,
+/// because `generate_handler!` takes no `cfg`, and say so off a Mac.
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+async fn sign_out_count(window: tauri::WebviewWindow, state: State<'_, AppState>) -> Result<SignOutCount, String> {
+    let _ = (window, state);
+    Err("This works on a Mac only.".into())
+}
+
+/// What the driver needs of a started phase.
+#[cfg(target_os = "macos")]
+struct PhaseRun {
+    owner: String,
+    link: Option<Arc<runner::SendPhaseLink>>,
+    stop: Arc<AtomicBool>,
+    closed: Arc<AtomicBool>,
+    started: std::time::Instant,
+    changes_at_start: usize,
+}
+
+/// §6.2: a stale ask refuses; a running phase starts nothing; otherwise make live changes due, arm, and register.
+#[cfg(target_os = "macos")]
+fn start_send_phase(
+    sign_out: &sign_out::SignOutState,
+    ask_id: &str,
+    owner: &str,
+    link: Option<Arc<runner::SendPhaseLink>>,
+) -> Result<Option<PhaseRun>, String> {
+    if sign_out.snapshots.newest_ask_id().as_deref() != Some(ask_id) {
+        return Err(sign_out::copy::coded(
+            sign_out::copy::UNSENT_CHANGES_CODE,
+            sign_out::copy::E1_UNSENT_CHANGES,
+        ));
+    }
+    let mut phase = sign_out.phase.lock().unwrap_or_else(|p| p.into_inner());
+    if phase.is_some() {
+        return Ok(None);
+    }
+    let changes_at_start = read_waiting_changes().map(|waiting| waiting.changes()).unwrap_or(0);
+    if let Ok(Some(db)) = state_paths::beebeeb_state_dir().and_then(|dir| state_db_from_state_dir(&dir)) {
+        let _ = db.make_due_for_send_phase(now_unix_seconds());
+    }
+    if let Some(link) = &link {
+        link.arm();
+    }
+    let (stop, closed) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+    *phase = Some(sign_out::send_phase::RunningPhase {
+        ask_id: ask_id.to_string(),
+        owner: owner.to_string(),
+        stop: stop.clone(),
+        closed: closed.clone(),
+    });
+    Ok(Some(PhaseRun {
+        owner: owner.to_string(),
+        link,
+        stop,
+        closed,
+        started: std::time::Instant::now(),
+        changes_at_start,
+    }))
+}
+
+/// The phase is over, for any reason: disarm, so the runner is back on its tick within a second.
+#[cfg(target_os = "macos")]
+fn end_send_phase(sign_out: &sign_out::SignOutState, link: Option<&runner::SendPhaseLink>) {
+    if let Some(link) = link {
+        link.disarm();
+    }
+    *sign_out.phase.lock().unwrap_or_else(|p| p.into_inner()) = None;
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn sign_out_send_start(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    ask_id: String,
+) -> Result<(), String> {
+    let (_, link) = send_conditions(&state).await;
+    if let Some(run) = start_send_phase(&state.sign_out, &ask_id, window.label(), link)? {
+        tauri::async_runtime::spawn(drive_send_phase(app, run));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+async fn sign_out_send_start(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    ask_id: String,
+) -> Result<(), String> {
+    let _ = (app, window, state, ask_id);
+    Err("This works on a Mac only.".into())
+}
+
+/// "Stop waiting" (and Esc): the phase ends `stopped`. Nothing happens when no phase runs.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn sign_out_send_stop(state: State<'_, AppState>) -> Result<(), String> {
+    if let Some(phase) = state.sign_out.phase.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
+        phase.stop.store(true, Ordering::SeqCst);
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn sign_out_send_stop(state: State<'_, AppState>) -> Result<(), String> {
+    let _ = state;
+    Err("This works on a Mac only.".into())
+}
+
+/// One observation of the world for the phase (§6.4): the queue as read, the account's conditions, and what the
+/// phase's attempts met on its link. The driver's own step, split out so a test can run it with no window.
+#[cfg(target_os = "macos")]
+fn observe_phase(
+    run: &PhaseRun,
+    waiting: &sign_out::waiting::WaitingChanges,
+    conditions: sign_out::waiting::SendConditions,
+) -> sign_out::send_phase::PhaseObservation {
+    sign_out::send_phase::PhaseObservation {
+        elapsed: run.started.elapsed(),
+        changes_left: waiting.changes(),
+        any_live: waiting.any_live(),
+        engine_running: run.link.is_some() && conditions.engine_running,
+        session_expired: conditions.session_expired,
+        link_failed: conditions.link_failed,
+        attempt: run.link.as_ref().map(|link| link.signals()).unwrap_or_default(),
+        stop_requested: run.stop.load(Ordering::SeqCst),
+        window_closed: run.closed.load(Ordering::SeqCst),
+    }
+}
+
+/// The driver: once a second, wake the runner's queue step, read the world, and end or report progress.
+#[cfg(target_os = "macos")]
+async fn drive_send_phase(app: tauri::AppHandle, run: PhaseRun) {
+    let state = app.state::<AppState>();
+    let mut phase = sign_out::send_phase::SendPhase::default();
+    let mut changes_left = run.changes_at_start;
+    let end = loop {
+        if let Some(link) = &run.link {
+            link.wake();
+        }
+        // `std::time::Duration`: `lib.rs` imports none at the crate level.
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let Ok(waiting) = read_waiting_changes() else {
+            break sign_out::send_phase::PhaseEnd::Stopped;
+        };
+        changes_left = waiting.changes();
+        let (conditions, _) = send_conditions(&state).await;
+        let observation = observe_phase(&run, &waiting, conditions);
+        match phase.observe(&observation) {
+            sign_out::send_phase::PhaseStep::Continue => {}
+            sign_out::send_phase::PhaseStep::Progress(left) => {
+                let _ = app.emit_to(
+                    run.owner.as_str(),
+                    "sign-out-send-progress",
+                    serde_json::json!({ "changesLeft": left }),
+                );
+            }
+            sign_out::send_phase::PhaseStep::End(end) => break end,
+        }
+    };
+    end_send_phase(&state.sign_out, run.link.as_deref());
+    use sign_out::send_phase::PhaseEnd;
+    let ask = match end {
+        PhaseEnd::AllSent | PhaseEnd::Closed => None,
+        _ => count_ask(&run.owner).ok().map(|snapshot| {
+            let counts = snapshot.counts.clone();
+            state.sign_out.snapshots.record(snapshot);
+            counts
+        }),
+    };
+    tracing::info!(
+        reason = end.as_str(),
+        changes_at_start = run.changes_at_start,
+        changes_left,
+        elapsed_ms = run.started.elapsed().as_millis() as u64,
+        "sign-out send phase ended"
+    );
+    let _ = app.emit_to(
+        run.owner.as_str(),
+        "sign-out-send-ended",
+        serde_json::json!({ "reason": end, "ask": ask }),
+    );
 }
 
 /// W5, the gate: one read compared with the snapshot `keep_unsent` names.
@@ -13615,6 +13868,10 @@ pub fn run() {
             kept_unsent_folder,
             dismiss_kept_unsent_folder,
             show_kept_unsent_folder,
+            // Spec 2026-10-10 §5.1 and §6: the sign-out flow's count and send phase (a Mac; elsewhere they say so).
+            sign_out_count,
+            sign_out_send_start,
+            sign_out_send_stop,
             // Spec 2026-10-06: the macOS Finder reconciler's commands (registered on every
             // platform; without a reconciler they say so).
             finder_setup_state,
@@ -33150,6 +33407,7 @@ mod sign_out_keep_tests {
     use crate::sign_out::kept_record::{saved_kept_unsent_at, unfinished_at};
     use crate::sign_out::kept_writer::SystemClone;
     use crate::sign_out::snapshot::AskSnapshot;
+    use crate::sign_out::waiting::WaitingChanges;
     use std::path::Path;
 
     /// A state dir with `state.db` where the sign-out's purge looks for it, and a config file of its own.
@@ -35027,6 +35285,150 @@ mod sign_out_keep_tests {
                 "{command} is registered once"
             );
         }
+    }
+
+    /// U34 (f), and (a)'s disarm.
+    #[tokio::test]
+    async fn the_send_phase_is_owned_by_rust() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            queue_write(&db, "w1", "f1", b"bytes");
+            // Backing off far into the future (2100): only the phase's start makes it due now (§6.2).
+            db.hold_lock_for_test()
+                .execute(
+                    "UPDATE operation_queue SET next_retry_at = 4102444800 WHERE op_id = 'w1'",
+                    [],
+                )
+                .unwrap();
+            let next_retry_at = || -> i64 {
+                db.hold_lock_for_test()
+                    .query_row(
+                        "SELECT next_retry_at FROM operation_queue WHERE op_id = 'w1'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap()
+            };
+            let state = AppState::default();
+            let id = ask(&state, "macos-settings");
+            let link = Arc::new(runner::SendPhaseLink::default());
+            let stale = start_send_phase(&state.sign_out, "stale", "macos-settings", Some(link.clone()));
+            assert!(stale.err().unwrap().starts_with("unsent_changes: "));
+            assert_eq!(next_retry_at(), 4102444800, "a refused start makes nothing due");
+            let run = start_send_phase(&state.sign_out, &id, "macos-settings", Some(link.clone())).unwrap();
+            assert!(run.is_some() && link.is_armed());
+            assert!(
+                next_retry_at() <= now_unix_seconds(),
+                "the start made the live write due now"
+            );
+            assert!(
+                start_send_phase(&state.sign_out, &id, "macos-settings", Some(link.clone()))
+                    .unwrap()
+                    .is_none(),
+                "a second start starts nothing"
+            );
+            end_send_phase(&state.sign_out, Some(&link));
+            assert!(!link.is_armed() && state.sign_out.phase.lock().unwrap().is_none());
+        })
+        .await;
+    }
+
+    /// U46, the chain past the bridge: what the runner noted on the phase's link ends the phase at the driver's first
+    /// observation of it, long before the limit: `account` for a refusal the account cures, and `offline` and
+    /// `session` for an attempt's link failure and refused session (U16 reads those from an attempt alone).
+    /// `observe_phase` is the driver's own step, so this is the driver's reading, not a copy of it.
+    #[test]
+    fn an_attempts_refusal_ends_the_phase_at_its_first_observation() {
+        use crate::engine_bridge::TransferLoopOutcome;
+        use sign_out::send_phase::{PhaseEnd, PhaseStep, SIGN_OUT_SEND_LIMIT, SendPhase};
+        let waiting = sign_out::waiting::WaitingChanges {
+            files: Vec::new(),
+            others: vec![sign_out::waiting::OtherChange {
+                op_id: "r1".into(),
+                live: true,
+            }],
+        };
+        let good = sign_out::waiting::SendConditions {
+            engine_running: true,
+            vault_unlocked: true,
+            session_expired: false,
+            link_failed: false,
+            sync_paused: false,
+        };
+        for (outcome, end) in [
+            (
+                TransferLoopOutcome {
+                    account_refused: true,
+                    ..Default::default()
+                },
+                PhaseEnd::Account,
+            ),
+            (
+                TransferLoopOutcome {
+                    link_failed: true,
+                    ..Default::default()
+                },
+                PhaseEnd::Offline,
+            ),
+            (
+                TransferLoopOutcome {
+                    session_refused: true,
+                    ..Default::default()
+                },
+                PhaseEnd::Session,
+            ),
+        ] {
+            let link = Arc::new(runner::SendPhaseLink::default());
+            link.arm();
+            let run = PhaseRun {
+                owner: "macos-settings".into(),
+                link: Some(link.clone()),
+                stop: Default::default(),
+                closed: Default::default(),
+                started: std::time::Instant::now(),
+                changes_at_start: 1,
+            };
+            let mut phase = SendPhase::default();
+            assert_eq!(
+                phase.observe(&observe_phase(&run, &waiting, good)),
+                PhaseStep::Progress(1),
+                "nothing noted yet: it runs"
+            );
+            link.note(&outcome);
+            let observation = observe_phase(&run, &waiting, good);
+            assert!(observation.elapsed < SIGN_OUT_SEND_LIMIT);
+            assert_eq!(phase.observe(&observation), PhaseStep::End(end), "{outcome:?}");
+            assert_eq!(
+                serde_json::to_value(end).unwrap(),
+                end.as_str(),
+                "the reason the ask's A5 line is chosen by"
+            );
+        }
+    }
+
+    /// §5.1, the contract: `sign_out_count`'s answer.
+    #[test]
+    fn the_count_answers_the_contract_shape() {
+        let snapshot = AskSnapshot::of(&WaitingChanges::default(), "o", Vec::new());
+        let json = serde_json::to_value(SignOutCount {
+            counts: snapshot.counts,
+            can_send: false,
+            not_sending: Some(sign_out::waiting::NotSending::Offline),
+        })
+        .unwrap();
+        for key in [
+            "askId",
+            "files",
+            "copiedFiles",
+            "others",
+            "missingFiles",
+            "earlierFolders",
+            "canSend",
+            "notSending",
+        ] {
+            assert!(json.get(key).is_some(), "{key} in {json}");
+        }
+        assert_eq!(json["notSending"], "offline");
     }
 }
 
