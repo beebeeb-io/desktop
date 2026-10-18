@@ -2769,8 +2769,8 @@ struct SignedOut {
     outcome: SignOutOutcome,
     warning: Option<ActionWarning>,
     /// Task 1882: the folder where macOS kept the Finder files that had not reached the server when the
-    /// sign-out removed the Finder location. Shown to the person in the app's alert
-    /// (`show_preserved_files_alert`), never logged.
+    /// sign-out removed the Finder location. Shown to the person in the sign-out's alert
+    /// (`surface_sign_out_folders`), never logged.
     preserved_location: Option<String>,
     /// Task 1887: the folder the sign-out's keep step copied the waiting Finder saves into (macOS). Never logged.
     kept_unsent: Option<KeptUnsent>,
@@ -2820,14 +2820,6 @@ impl From<&str> for SignOutFailure {
 impl std::fmt::Display for SignOutFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.message)
-    }
-}
-
-/// The folder a sign-out kept, whether it succeeded or failed after the removal (review I1).
-fn sign_out_kept_folder(result: &Result<SignedOut, SignOutFailure>) -> Option<&str> {
-    match result {
-        Ok(done) => done.preserved_location.as_deref(),
-        Err(failure) => failure.preserved_location.as_deref(),
     }
 }
 
@@ -3631,18 +3623,19 @@ async fn clear_session(
     .await;
     // Review I1: the alert comes first, also when the sign-out failed after the removal.
     // Review I2: and the folder is saved for the Settings › Sync row.
-    surface_kept_folder(&app, sign_out_kept_folder(&result));
+    surface_sign_out_folders(&app, &result);
     result
         .map(|done| SessionActionOutcome { warning: done.warning })
         .map_err(|failure| failure.message)
 }
 
 /// Task 1882 (spec `docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md` §5): the app's
-/// own alert after a removal that kept files — the sentence, a blank line, then the folder. A sign-out, the
-/// app-start sweep and a reconciler removal nobody waits for (an owed removal, the account binding's Repair, or one
-/// that finished after the reconciler's time limit) raise it through `surface_kept_folder`, which first saves the
-/// folder for the Settings › Sync row. `install_finder_location`'s rollback calls it too, but only Windows and Linux
-/// have that path, and nothing is kept there. Logs never carry the folder. Nothing kept → no alert.
+/// own alert after a removal that kept files — the sentence, a blank line, then the folder. The app-start sweep and a
+/// reconciler removal nobody waits for (an owed removal, the account binding's Repair, or one that finished after the
+/// reconciler's time limit) raise it through `surface_kept_folder`, which first saves the folder for the Settings ›
+/// Sync row. A sign-out puts the same body in its own alert, after its kept folder's (`surface_sign_out_folders`, task
+/// 1887). `install_finder_location`'s rollback calls it too, but only Windows and Linux have that path, and nothing is
+/// kept there. Logs never carry the folder. Nothing kept → no alert.
 ///
 /// Device K-F1 (round 2): with no parent window, `tauri-plugin-dialog` 2.7 hands this to `rfd`
 /// 0.16, which calls `CFUserNotificationDisplayAlert` on a background thread. macOS draws that
@@ -3663,9 +3656,9 @@ fn show_preserved_files_alert(app: &tauri::AppHandle, preserved_location: Option
 }
 
 /// Review I2 (lead ruling, round 2): hands a kept folder to the person on the paths that have no
-/// config of their own (sign-out, the app-start sweep, a reconciler removal): saved for the Settings › Sync row
+/// config of their own (the app-start sweep, a reconciler removal): saved for the Settings › Sync row
 /// first, with the windows told (rebase re-review I2: [`save_kept_folder_for_row`]), then the alert. Nothing kept →
-/// nothing.
+/// nothing. A sign-out surfaces its folders through [`surface_sign_out_folders`].
 fn surface_kept_folder(app: &tauri::AppHandle, preserved_location: Option<&str>) {
     surface_kept_folder_with(
         preserved_location,
@@ -3689,6 +3682,75 @@ fn surface_kept_folder_with(
     alert(location);
 }
 
+/// Spec 2026-10-10 W9 and §9: after a sign-out, ONE alert names our folder, then macOS's. Our folder was recorded by
+/// the keep step already; macOS's is saved for its row here, as before (the one route that tells the windows). Neither
+/// path is logged.
+fn surface_sign_out_folders(app: &tauri::AppHandle, result: &Result<SignedOut, SignOutFailure>) {
+    let (macos, ours) = sign_out_folders(result);
+    match macos {
+        Some(location) => save_kept_folder_for_row(app, location),
+        None if ours.is_some() => emit_kept_folder_changed(app),
+        None => {}
+    }
+    let Some((title, message)) =
+        sign_out::copy::sign_out_alert(ours.map(|kept| (kept.folder.as_str(), kept.files)), macos)
+    else {
+        return;
+    };
+    app.dialog()
+        .message(message)
+        .title(title)
+        .kind(tauri_plugin_dialog::MessageDialogKind::Info)
+        .show(|_| {
+            tracing::debug!("kept-folder alert closed");
+        });
+    tracing::debug!("kept-folder alert shown");
+}
+
+/// The two folders a sign-out's result carries, whether it succeeded or failed after the removal (task 1882):
+/// macOS's, then ours. It replaces the helper that named macOS's folder only.
+fn sign_out_folders(result: &Result<SignedOut, SignOutFailure>) -> (Option<&str>, Option<&KeptUnsent>) {
+    match result {
+        Ok(done) => (done.preserved_location.as_deref(), done.kept_unsent.as_ref()),
+        Err(failure) => (failure.preserved_location.as_deref(), failure.kept_unsent.as_ref()),
+    }
+}
+
+/// U26: "Show in Finder" reveals only the folder saved for the row.
+fn reveal_target<'a>(saved: Option<&str>, path: &'a str) -> Result<&'a str, String> {
+    if saved == Some(path) {
+        Ok(path)
+    } else {
+        Err(sign_out::copy::K3_TOAST.to_string())
+    }
+}
+
+/// The row's folder (spec 2026-10-10 §9), or none.
+#[tauri::command]
+fn kept_unsent_folder() -> Result<Option<String>, String> {
+    sign_out::kept_record::saved_kept_unsent_at(&DesktopConfig::path()?)
+}
+
+/// The row's "Dismiss": forgets the folder it showed, never deletes it (§7.3).
+#[tauri::command]
+fn dismiss_kept_unsent_folder(app: tauri::AppHandle, path: String) -> Result<finder_removal::DismissOutcome, String> {
+    let outcome = sign_out::kept_record::dismiss_saved_kept_unsent_at(&DesktopConfig::path()?, &path)?;
+    emit_kept_folder_changed(&app);
+    Ok(outcome)
+}
+
+/// "Show in Finder" (spec 2026-10-10 §7.1): the opener's reveal, never `/usr/bin/open`. On macOS it fails only when
+/// the folder is gone, which is what K3 says.
+#[tauri::command]
+fn show_kept_unsent_folder(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    let saved = sign_out::kept_record::saved_kept_unsent_at(&DesktopConfig::path()?)?;
+    let target = reveal_target(saved.as_deref(), &path)?;
+    tracing::info!("kept folder reveal requested");
+    app.opener()
+        .reveal_item_in_dir(target)
+        .map_err(|_| sign_out::copy::K3_TOAST.to_string())
+}
+
 /// Rebase re-review I2: told to every window once a kept folder was saved for the Settings › Sync row, so a Sync tab
 /// that is open reads the folder again. A removal the reconciler runs in the background (after "Try again", or one
 /// that finished after its time limit) saves the folder long after the tab's own read, and so does a Repair that the
@@ -3706,11 +3768,11 @@ fn emit_kept_folder_changed<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
 /// Device RB3-F1 (lead ruling, 2026-10-10): the ONE place a kept folder is saved for the Settings › Sync row, and
 /// every save of it tells the windows once it is saved, so a Sync tab that is open follows a Repair that another
 /// window started (the compact window's Finder page), as it follows a sign-out or a late reconciler removal. The
-/// callers are `surface_kept_folder` (sign-out, the app-start sweep, the reconciler) and macOS Repair, which has no
-/// alert of its own (1882 spec §5: the page's result line carries the folder). A save that failed is logged without
-/// the path and the windows are told anyway; the tab reads the row again and finds what is there. A source pin
-/// (`rb3_f1_every_save_of_the_rows_folder_goes_through_the_one_function_that_tells_the_windows`) fails on any other
-/// route to `remember_kept_folder`.
+/// callers are `surface_kept_folder` (the app-start sweep, the reconciler), `surface_sign_out_folders` (sign-out) and
+/// macOS Repair, which has no alert of its own (1882 spec §5: the page's result line carries the folder). A save that
+/// failed is logged without the path and the windows are told anyway; the tab reads the row again and finds what is
+/// there. A source pin (`rb3_f1_every_save_of_the_rows_folder_goes_through_the_one_function_that_tells_the_windows`)
+/// fails on any other route to `remember_kept_folder`.
 fn save_kept_folder_for_row<R: tauri::Runtime>(app: &tauri::AppHandle<R>, location: &str) {
     save_kept_folder_for_row_with(location, remember_kept_folder, || emit_kept_folder_changed(app));
 }
@@ -13549,6 +13611,10 @@ pub fn run() {
             finder_location_state,
             kept_unsynced_folder,
             dismiss_kept_unsynced_folder,
+            // Spec 2026-10-10 §9: the kept folder's own row.
+            kept_unsent_folder,
+            dismiss_kept_unsent_folder,
+            show_kept_unsent_folder,
             // Spec 2026-10-06: the macOS Finder reconciler's commands (registered on every
             // platform; without a reconciler they say so).
             finder_setup_state,
@@ -14413,7 +14479,7 @@ fn handle_desktop_menu_action(app: &tauri::AppHandle, spec: &'static DesktopMenu
                 // Finder files in the same alert as the `clear_session` command,
                 // also when it failed after the removal (review I1), and saves it for
                 // the Settings › Sync row (review I2).
-                surface_kept_folder(&app, sign_out_kept_folder(&result));
+                surface_sign_out_folders(&app, &result);
                 // FB-24 (M6): on every platform the person sees a sign-out that stopped (its error) and one that
                 // happened with a step it could not confirm (its warning); before, only Windows showed either.
                 match &result {
@@ -20617,12 +20683,14 @@ mod finder_setup_wiring_tests {
         );
         assert_eq!(notifications, 3, "the three notification builders");
         // The menu's three sign-out message dialogs, and (task 1882, rebase 2026-10-10) the kept-folder alert,
-        // `show_preserved_files_alert`, (task 1885, I2) the menu's failed-open alert, `show_menu_open_failure`, and
-        // (task 1889, fix round 2 N2) the menu's failed-pause alert, `show_menu_pause_failure`.
+        // `show_preserved_files_alert`, (task 1885, I2) the menu's failed-open alert, `show_menu_open_failure`,
+        // (task 1889, fix round 2 N2) the menu's failed-pause alert, `show_menu_pause_failure`, and (task 1887) the
+        // sign-out's kept-folders alert, `surface_sign_out_folders`.
         // None of them is a window: macOS draws a parentless alert itself.
         assert_eq!(
-            dialogs, 6,
-            "the three sign-out message dialogs, the kept-folder alert and the menu's failed-open and failed-pause alerts"
+            dialogs, 7,
+            "the three sign-out message dialogs, the two kept-folder alerts and the menu's failed-open and failed-pause \
+             alerts"
         );
     }
 
@@ -22112,13 +22180,13 @@ mod finder_lock_and_sign_out_tests {
                 let failure = result.as_ref().expect_err("sign-out refuses after the removal");
                 assert_eq!(failure.message, UNCONFIRMED_ENGINE_STOP_ERROR, "{id}");
                 assert_eq!(
-                    sign_out_kept_folder(&result),
+                    sign_out_folders(&result).0,
                     expected,
                     "{id}: the error carries the kept folder"
                 );
                 // The alert text the command and the menu raise before they return the error.
                 assert_eq!(
-                    finder_removal::kept_folder_alert(sign_out_kept_folder(&result)).map(|(_, body)| body),
+                    sign_out::copy::sign_out_alert(None, sign_out_folders(&result).0).map(|(_, body)| body),
                     expected.map(|folder| format!("{}\n\n{folder}", finder_removal::PRESERVED_FILES_SENTENCE)),
                     "{id}"
                 );
@@ -22148,7 +22216,7 @@ mod finder_lock_and_sign_out_tests {
                 let done = result.as_ref().expect("the sign-out happened");
                 assert_eq!(done.outcome, SignOutOutcome::NotSignedIn, "{id}");
                 assert_eq!(done.warning, warning, "{id}");
-                assert_eq!(sign_out_kept_folder(&result), folder, "{id}");
+                assert_eq!(sign_out_folders(&result).0, folder, "{id}");
                 fx.finish().await;
             });
         }
@@ -31739,10 +31807,10 @@ mod finder_removal_wiring_tests {
 
         // Sign-out (command and menu) and the sweep.
         let command = code_only(&item(&source, "async fn clear_session("));
-        assert!(command.contains("surface_kept_folder(&app, sign_out_kept_folder(&result));"));
+        assert!(command.contains("surface_sign_out_folders(&app, &result);"));
         let menu = &source[source.find("DesktopMenuAction::SignOut => {").expect("menu sign-out")..];
         let menu = &menu[..menu.find("DesktopMenuAction::Quit").expect("next arm")];
-        assert!(code_only(menu).contains("surface_kept_folder(&app, sign_out_kept_folder(&result));"));
+        assert!(code_only(menu).contains("surface_sign_out_folders(&app, &result);"));
         assert!(code_only(&source).contains("surface_kept_folder(&alert_app, Some(location));"));
 
         // Repair and the add rollback record into the config they save afterwards (Windows and Linux). On macOS
@@ -31946,10 +32014,10 @@ mod finder_removal_wiring_tests {
         );
         // ... and both ways out of a sign-out raise the alert, on success and on failure (I1).
         let command = code_only(&item(&source, "async fn clear_session("));
-        assert!(command.contains("surface_kept_folder(&app, sign_out_kept_folder(&result));"));
+        assert!(command.contains("surface_sign_out_folders(&app, &result);"));
         let menu = &source[source.find("DesktopMenuAction::SignOut => {").expect("menu sign-out")..];
         let menu = &menu[..menu.find("DesktopMenuAction::Quit").expect("next arm")];
-        assert!(code_only(menu).contains("surface_kept_folder(&app, sign_out_kept_folder(&result));"));
+        assert!(code_only(menu).contains("surface_sign_out_folders(&app, &result);"));
 
         // Repair: the folder goes into the result the Sync tab reads.
         let repair = code_only(&item(&source, "async fn reset_macos_integration("));
@@ -34737,6 +34805,228 @@ mod sign_out_keep_tests {
             );
         })
         .await;
+    }
+
+    /// U26.
+    #[test]
+    fn show_in_finder_reveals_only_the_saved_folder() {
+        assert_eq!(reveal_target(Some("/kept/a"), "/kept/a"), Ok("/kept/a"));
+        assert!(reveal_target(Some("/kept/a"), "/Users/a/Desktop").is_err());
+        assert!(reveal_target(None, "/kept/a").is_err());
+    }
+
+    /// U31.
+    #[test]
+    fn show_in_finder_uses_the_opener_reveal() {
+        let production = super::finder_setup_command_tests::production_source();
+        let body = super::finder_setup_command_tests::body_between(&production, "fn show_kept_unsent_folder(", "\n}\n");
+        assert!(body.contains("reveal_item_in_dir("), "{body}");
+        assert!(
+            !body.contains("Command::new(\"open\")") && !body.contains("\"/usr/bin/open\""),
+            "{body}"
+        );
+        assert!(
+            body.contains("\"kept folder reveal requested\""),
+            "D2 reads this line from stdout"
+        );
+    }
+
+    /// Everything `tracing` emits on this thread at `info` and above while `body` runs, as text: a copy of
+    /// `engine_bridge.rs`'s `capture_logs_async`. `#[tokio::test]` runs the future on the test's own thread, so a
+    /// thread-local subscriber sees all of it.
+    async fn capture_logs_async(body: impl std::future::Future<Output = ()>) -> String {
+        #[derive(Clone)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let writer = Capture(buffer.clone());
+        // tracing caches each callsite's interest for the whole process. While only ONE dispatcher is alive,
+        // tracing-core takes that interest from the registering thread's own default (`has_just_one`), so a callsite
+        // first hit by another test thread, which has no subscriber, is cached as "never" and this capture misses its
+        // events. A second live dispatcher keeps registration on the all-dispatchers path.
+        let _second_dispatcher = tracing::Dispatch::new(tracing_subscriber::registry());
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+        body.await;
+        drop(guard);
+        let bytes = buffer.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    /// U25 across a keeping sign-out: the keep step's own capture (`sign_out::keep`'s test) misses every line the
+    /// sign-out logs around it. No line of the whole sign-out names a kept path or a file name.
+    #[tokio::test]
+    async fn a_keeping_sign_out_logs_no_path_or_name() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            db.hold_lock_for_test()
+                .execute(
+                    "INSERT INTO files (file_id, path) VALUES ('secret', 'Secret Project/plan for Q4.docx')",
+                    [],
+                )
+                .unwrap();
+            queue_write(&db, "ws", "secret", b"plan"); // its `INSERT OR IGNORE` keeps the row above
+            let (state, _acct) = signed_out_state();
+            recording_finder(&state);
+            let id = ask(&state, "macos-settings");
+            let logs = capture_logs_async(async {
+                let done = sign_out_with(&state, Some(&id), no_seam()).await.unwrap();
+                assert_eq!(done.kept_unsent.map(|kept| kept.files), Some(1));
+            })
+            .await;
+            assert!(logs.contains("kept unsent changes"), "{logs}");
+            for leaked in ["Secret Project", "plan for Q4", ".docx", "Changes not sent"] {
+                assert!(!logs.contains(leaked), "{leaked} in {logs}");
+            }
+        })
+        .await;
+    }
+
+    /// W9, §9: both sign-out routes surface both folders, through one function.
+    #[test]
+    fn both_sign_out_routes_surface_both_folders() {
+        let production = super::finder_setup_command_tests::production_source();
+        let command = super::finder_setup_command_tests::body_between(&production, "async fn clear_session(", "\n}\n");
+        assert!(command.contains("surface_sign_out_folders(&app, &result)"), "{command}");
+        let menu = &production[production.find("DesktopMenuAction::SignOut =>").unwrap()..];
+        let menu = &menu[..menu.find("DesktopMenuAction::Quit").unwrap()];
+        assert!(menu.contains("surface_sign_out_folders(&app, &result)"), "{menu}");
+    }
+
+    /// W9 and §9, inside the one function both routes call: macOS's folder is saved for its row (which tells the
+    /// windows), ours (the keep step recorded it) only tells them, and the one alert names both, ours first. The
+    /// function needs the app's dialog, so its body is read; the folders it reads come out of the result, checked here
+    /// for a sign-out that completed and one that stopped after the keep step.
+    #[test]
+    fn the_sign_out_surface_names_our_folder_and_saves_macos_folder_for_its_row() {
+        let production = super::finder_setup_command_tests::production_source();
+        let surface = crate::source_pin::squeeze(super::finder_setup_command_tests::body_between(
+            &production,
+            "fn surface_sign_out_folders(",
+            "\n}\n",
+        ));
+        for step in [
+            "let (macos, ours) = sign_out_folders(result);",
+            "Some(location) => save_kept_folder_for_row(app, location),",
+            "None if ours.is_some() => emit_kept_folder_changed(app),",
+            "sign_out::copy::sign_out_alert(ours.map(|kept| (kept.folder.as_str(), kept.files)), macos)",
+        ] {
+            assert!(
+                surface.contains(&crate::source_pin::squeeze(step)),
+                "surface_sign_out_folders: {step}\n{surface}"
+            );
+        }
+        let kept = KeptUnsent {
+            folder: "/ours".into(),
+            files: 2,
+        };
+        let done: Result<SignedOut, SignOutFailure> = Ok(SignedOut {
+            preserved_location: Some("/macos".into()),
+            kept_unsent: Some(kept.clone()),
+            ..SignedOut::confirmed(SignOutOutcome::Completed)
+        });
+        assert_eq!(
+            sign_out_folders(&done),
+            (Some("/macos"), Some(&kept)),
+            "a sign-out that completed"
+        );
+        let stopped: Result<SignedOut, SignOutFailure> = Err(SignOutFailure {
+            message: "stopped after the keep step".into(),
+            preserved_location: Some("/macos".into()),
+            kept_unsent: Some(kept.clone()),
+        });
+        assert_eq!(
+            sign_out_folders(&stopped),
+            (Some("/macos"), Some(&kept)),
+            "a sign-out that stopped after the keep step"
+        );
+    }
+
+    /// §9: "Show in Finder" reveals a path only when it equals the saved record, so the webview cannot have the app
+    /// reveal any other path. U26 holds the comparison; this holds the command to it: it reads our record (never
+    /// 1882's), checks the path against it, and reveals only what the check returned.
+    #[test]
+    fn show_in_finder_reveals_only_what_the_saved_record_allows() {
+        let production = super::finder_setup_command_tests::production_source();
+        let body = crate::source_pin::squeeze(super::finder_setup_command_tests::body_between(
+            &production,
+            "fn show_kept_unsent_folder(",
+            "\n}\n",
+        ));
+        let squeeze = crate::source_pin::squeeze;
+        let read = body
+            .find(&squeeze(
+                "let saved = sign_out::kept_record::saved_kept_unsent_at(&DesktopConfig::path()?)?;",
+            ))
+            .unwrap_or_else(|| panic!("our record is read: {body}"));
+        let check = body
+            .find(&squeeze("let target = reveal_target(saved.as_deref(), &path)?;"))
+            .unwrap_or_else(|| panic!("the path is checked against it: {body}"));
+        let reveal = body
+            .find(".reveal_item_in_dir(target)")
+            .unwrap_or_else(|| panic!("only the checked path is revealed: {body}"));
+        assert!(read < check && check < reveal, "read, check, then reveal: {body}");
+        assert_eq!(body.matches("reveal_item_in_dir(").count(), 1, "one reveal: {body}");
+    }
+
+    /// §9, the row's other two commands: the row reads our record (never 1882's), its "Dismiss" goes through our
+    /// record's rule (only the folder the row showed) and then tells the windows, and the webview can call all three.
+    #[test]
+    fn the_rows_commands_use_our_record_and_are_registered() {
+        let production = super::finder_setup_command_tests::production_source();
+        let squeeze = crate::source_pin::squeeze;
+        let read = squeeze(super::finder_setup_command_tests::body_between(
+            &production,
+            "fn kept_unsent_folder(",
+            "\n}\n",
+        ));
+        assert!(
+            read.contains(&squeeze(
+                "sign_out::kept_record::saved_kept_unsent_at(&DesktopConfig::path()?)"
+            )),
+            "the row reads our record: {read}"
+        );
+        let dismiss = squeeze(super::finder_setup_command_tests::body_between(
+            &production,
+            "fn dismiss_kept_unsent_folder(",
+            "\n}\n",
+        ));
+        let cleared = dismiss
+            .find(&squeeze(
+                "sign_out::kept_record::dismiss_saved_kept_unsent_at(&DesktopConfig::path()?, &path)?;",
+            ))
+            .unwrap_or_else(|| panic!("the dismiss goes through our record's rule: {dismiss}"));
+        let told = dismiss
+            .find("emit_kept_folder_changed(&app);")
+            .unwrap_or_else(|| panic!("the windows are told: {dismiss}"));
+        assert!(cleared < told, "dismissed, then told: {dismiss}");
+        let handler = super::finder_setup_command_tests::body_between(&production, "tauri::generate_handler![", "])");
+        for command in [
+            "kept_unsent_folder",
+            "dismiss_kept_unsent_folder",
+            "show_kept_unsent_folder",
+        ] {
+            assert_eq!(
+                handler
+                    .lines()
+                    .filter(|line| line.trim() == format!("{command},"))
+                    .count(),
+                1,
+                "{command} is registered once"
+            );
+        }
     }
 }
 

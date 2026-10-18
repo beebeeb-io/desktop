@@ -272,6 +272,38 @@ mod tests {
         ids.iter().map(|id| id.to_string()).collect()
     }
 
+    /// Everything `tracing` emits on this thread while `body` runs, as text.
+    fn capture_logs(body: impl FnOnce()) -> String {
+        #[derive(Clone)]
+        struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buffer = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer = Capture(buffer.clone());
+        // tracing caches each callsite's interest for the whole process. While
+        // only ONE dispatcher is alive, tracing-core takes that interest from
+        // the registering thread's own default (`has_just_one`), so a
+        // callsite first hit by another test thread, which has no subscriber,
+        // is cached as "never" and this capture misses its events. A second
+        // live dispatcher keeps registration on the all-dispatchers path.
+        let _second_dispatcher = tracing::Dispatch::new(tracing_subscriber::registry());
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .finish();
+        tracing::subscriber::with_default(subscriber, body);
+        let bytes = buffer.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
     struct FailingClone {
         calls: Cell<usize>,
         fail_on: usize,
@@ -692,5 +724,26 @@ mod tests {
         );
         assert!(!f.event().exists(), "nothing was copied");
         assert_eq!(f.queued(), 1, "the waiting write is still queued");
+    }
+
+    /// U25.
+    #[test]
+    fn logs_never_carry_a_kept_path_or_name() {
+        let f = Fixture::new();
+        f.file("secret", "Secret Project/plan for Q4.docx");
+        f.write("ws", "secret", "minted", Some(b"plan"));
+        let logs = capture_logs(|| {
+            f.keep(Acknowledge::Nothing).unwrap();
+        });
+        assert!(logs.contains("kept unsent changes"), "{logs}");
+        for leaked in [
+            "Secret Project",
+            "plan for Q4",
+            ".docx",
+            "Changes not sent",
+            f.dir.path().to_str().unwrap(),
+        ] {
+            assert!(!logs.contains(leaked), "{leaked} in {logs}");
+        }
     }
 }

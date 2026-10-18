@@ -62,7 +62,6 @@ pub(crate) fn clear_unfinished_at(path: &Path) -> Result<(), String> {
     })
 }
 
-#[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 10
 pub(crate) fn dismiss_saved_kept_unsent_at(path: &Path, shown: &str) -> Result<DismissOutcome, String> {
     DesktopConfig::update_at(path, |cfg| {
         let cleared = dismiss_kept_unsent(cfg, shown);
