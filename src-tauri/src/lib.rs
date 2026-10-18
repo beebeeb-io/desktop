@@ -3752,12 +3752,23 @@ fn sign_out_kept_root() -> Result<PathBuf, String> {
     }
 }
 
+/// Who runs the keep step. A failed copy's log line names it: an R10 reset is not a sign-out (W12).
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+enum KeepCaller {
+    /// §5.2 step 7: a sign-out by choice.
+    SignOut,
+    /// W12: spec A's R10 reset before an engine starts.
+    Reset,
+}
+
 /// The keep step on `db` (§5.2 step 7, W12): the kept root, the config, the clone and the durable save are the app's.
-/// A failed copy is logged by its category, never a path (W10).
+/// A failed copy is logged by its category, never a path (W10), in the caller's own line.
 #[cfg(target_os = "macos")]
 fn keep_in(
     db: &state_db::StateDb,
     acknowledge: sign_out::keep::Acknowledge<'_>,
+    caller: KeepCaller,
 ) -> Result<sign_out::kept_set::KeptSet, String> {
     let failed = || {
         sign_out::copy::coded(
@@ -3778,10 +3789,16 @@ fn keep_in(
     })
     .map_err(|failure| {
         if let sign_out::keep::KeepFailure::Copy(reason) = &failure {
-            tracing::error!(
-                reason,
-                "sign-out stopped: the waiting changes could not be kept; nothing was purged"
-            );
+            match caller {
+                KeepCaller::SignOut => tracing::error!(
+                    reason,
+                    "sign-out stopped: the waiting changes could not be kept; nothing was purged"
+                ),
+                KeepCaller::Reset => tracing::error!(
+                    reason,
+                    "R10: local data reset stopped: the waiting changes could not be kept; nothing was purged"
+                ),
+            }
         }
         failure.message()
     })
@@ -3819,7 +3836,7 @@ fn keep_for_sign_out(
         },
         None => Acknowledge::Nothing,
     };
-    keep_in(&db, acknowledge).map(Some)
+    keep_in(&db, acknowledge, KeepCaller::SignOut).map(Some)
 }
 
 /// Spec 2026-10-10 §15 question 3: reopen Finder accepts in the app's state database. Best effort: an engine start
@@ -6900,7 +6917,11 @@ impl account_binding::LocalData for StateDbLocalData {
     /// any step means nothing may start.
     fn reset(&self) -> Result<(), String> {
         #[cfg(target_os = "macos")]
-        let kept = Some(keep_in(&self.db, sign_out::keep::Acknowledge::Everything)?);
+        let kept = Some(keep_in(
+            &self.db,
+            sign_out::keep::Acknowledge::Everything,
+            KeepCaller::Reset,
+        )?);
         #[cfg(not(target_os = "macos"))]
         let kept: Option<sign_out::kept_set::KeptSet> = None;
         // W12: the folder is recorded now, so it is handed on to be surfaced whether or not the purge below then
@@ -6929,9 +6950,14 @@ impl account_binding::LocalData for StateDbLocalData {
             others_dropped = kept.as_ref().map_or(0, |kept| kept.others_acknowledged.len()),
             "R10: local data reset before sync started"
         );
+        // W13: the purge cleared the queue's rows, so no write can look missing any more. Best effort (§7.3), as the
+        // sign-out's: the warning names the step that failed, `path`, `read` or `write`, never an error's text (W10).
         #[cfg(target_os = "macos")]
-        if let Err(error) = DesktopConfig::path().and_then(|path| sign_out::kept_record::clear_unfinished_at(&path)) {
-            tracing::warn!(error = %error, "could not clear the unfinished sign-out marker");
+        if let Err(step) = DesktopConfig::path()
+            .map_err(|_| "path".to_string())
+            .and_then(|path| sign_out::kept_record::clear_unfinished_at(&path))
+        {
+            tracing::warn!(step = %step, "could not clear the unfinished sign-out marker");
         }
         // On a Mac the previous account's Finder domain is still registered: the debt is recorded in the same
         // transaction that clears the rows, so no crash can leave the rows gone and the debt forgotten.
@@ -34747,12 +34773,21 @@ mod sign_out_keep_tests {
             });
             set_auth_present(&state, true);
             let id = ask(&state, "macos-settings");
-            let failure = sign_out_with(&state, Some(&id), no_seam()).await.unwrap_err();
+            let mut failure = None;
+            let logs = capture_logs_async(async {
+                failure = Some(sign_out_with(&state, Some(&id), no_seam()).await.unwrap_err());
+            })
+            .await;
+            let failure = failure.unwrap();
             std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o600)).unwrap();
             assert!(
                 failure.message.starts_with("unsent_copy_failed: "),
                 "{}",
                 failure.message
+            );
+            assert!(
+                logs.contains("sign-out stopped: the waiting changes could not be kept; nothing was purged"),
+                "the sign-out's failed keep is logged as the sign-out's: {logs}"
             );
             assert!(acct.session.lock().unwrap().is_some(), "the keys are in memory");
             // `std::time::Duration`: `lib.rs` imports no `Duration` at the crate level.
@@ -36369,6 +36404,23 @@ mod sign_out_keep_tests {
                 "purge_local_state_files_in(&self.db, self.sync_root.as_deref(), &self.staging_dirs, kept.as_ref())",
             );
             assert!(squeezed.contains(&call), "the guard is in the reset's path: {reset}");
+            // W13 and W10: the reset clears the unfinished list with the sign-out purge's own statement, so a clear
+            // that fails is logged by the step that failed, never by an error's text.
+            let marker_clear = crate::source_pin::squeeze(concat!(
+                "#[cfg(target_os = \"macos\")] if let Err(step) = DesktopConfig::path()",
+                ".map_err(|_| \"path\".to_string())",
+                ".and_then(|path| sign_out::kept_record::clear_unfinished_at(&path))",
+                " { tracing::warn!(step = %step, \"could not clear the unfinished sign-out marker\"); }",
+            ));
+            let sign_out_purge = crate::source_pin::squeeze(super::finder_setup_command_tests::body_between(
+                &production,
+                "fn purge_local_data_for_sign_out(",
+                "\n}\n",
+            ));
+            assert!(
+                sign_out_purge.contains(&marker_clear) && squeezed.contains(&marker_clear),
+                "the reset clears the marker as the sign-out does, its warning naming the step: {reset}"
+            );
             // A failing copy: the reset fails, nothing is deleted, no record.
             use std::os::unix::fs::PermissionsExt;
             clean_scratch(&db);
@@ -36376,9 +36428,21 @@ mod sign_out_keep_tests {
             std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o000)).unwrap();
             let data =
                 StateDbLocalData::for_engine_start(&LocalDataPaths::for_test(&state_dir, sync_root.path())).unwrap();
-            let failed = account_binding::LocalData::reset(&data);
-            std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o600)).unwrap();
-            assert!(failed.unwrap_err().starts_with("unsent_copy_failed: "));
+            let mut failed = None;
+            let logs = capture_logs_async(async {
+                failed = Some(account_binding::LocalData::reset(&data));
+            })
+            .await;
+            // A copy the reset deleted cannot have its permissions put back: the next line names that failure.
+            let _ = std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o600));
+            assert!(staged.exists(), "nothing deleted: the staged copy is still there");
+            assert!(failed.unwrap().unwrap_err().starts_with("unsent_copy_failed: "));
+            let stopped = "R10: local data reset stopped: the waiting changes could not be kept; nothing was purged";
+            assert!(
+                logs.contains(stopped),
+                "the reset's failed keep is logged as the reset's: {logs}"
+            );
+            assert!(!logs.contains("sign-out stopped"), "a reset is not a sign-out: {logs}");
             assert!(
                 !db.finder_accepts_closed().unwrap(),
                 "a reset that stops reopens Finder accepts (spec §15 question 3)"
@@ -36422,12 +36486,124 @@ mod sign_out_keep_tests {
             );
             let bind =
                 super::finder_setup_command_tests::body_between(&production, "fn bind_data_to_session(", "\n}\n");
+            let ran = bind.find("bind_before_engine_start(").expect("the binding runs");
             let handed = bind
                 .find("hand_on_reset_kept(state, data);")
                 .expect("the binding hands the folder on");
             assert!(
-                handed < bind.find("match bound?").expect("before it looks at the result"),
-                "{bind}"
+                ran < handed && handed < bind.find("match bound?").expect("before it looks at the result"),
+                "the folder is handed on after the binding ran, before its answer is looked at: {bind}"
+            );
+        })
+        .await;
+    }
+
+    /// W12 through the binding (U20): an R10 reset that completes, for another account's data and its waiting save,
+    /// hands its kept folder to the state, where the engine start surfaces it.
+    #[tokio::test]
+    async fn a_completed_r10_reset_hands_its_folder_on_through_the_binding() {
+        in_own_dirs(async {
+            let state_dir = state_paths::beebeeb_state_dir().unwrap();
+            let sync_root = tempfile::tempdir().unwrap();
+            let db = state_db_in_scratch();
+            let alice = account_binding::Identity::new(Some("u-alice"), Some("alice@beebeeb.io"));
+            let bob = account_binding::Identity::new(Some("u-bob"), Some("bob@beebeeb.io"));
+            db.set_owner(&alice).unwrap();
+            queue_write(&db, "w1", "f1", b"alice's save");
+            let data =
+                StateDbLocalData::for_engine_start(&LocalDataPaths::for_test(&state_dir, sync_root.path())).unwrap();
+            let state = AppState::default();
+            assert_eq!(bind_data_to_session(&state, &data, &bob), Ok(()), "the reset completed");
+            assert_eq!(db.owner().unwrap(), Some(bob), "the data is the new account's");
+            let (folder, files) = state
+                .sign_out
+                .reset_kept
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("a completed reset hands its folder on through the binding");
+            assert_eq!(files, 1);
+            assert_eq!(
+                std::fs::read(Path::new(&folder).join("f1.bin")).unwrap(),
+                b"alice's save"
+            );
+        })
+        .await;
+    }
+
+    /// W12 through the binding (U20): an R10 reset whose purge fails after a completed keep answers an error, so
+    /// nothing starts, and the binding still hands the kept folder to the state: it is recorded and on disk either way.
+    #[tokio::test]
+    async fn an_r10_reset_whose_purge_fails_hands_its_folder_on_through_the_binding() {
+        in_own_dirs(async {
+            let state_dir = state_paths::beebeeb_state_dir().unwrap();
+            let sync_root = tempfile::tempdir().unwrap();
+            let db = state_db_in_scratch();
+            let alice = account_binding::Identity::new(Some("u-alice"), Some("alice@beebeeb.io"));
+            let bob = account_binding::Identity::new(Some("u-bob"), Some("bob@beebeeb.io"));
+            db.set_owner(&alice).unwrap();
+            // A journal path that holds a directory: a removal the purge cannot make. In the test's own state dir.
+            let blocker = state_dir.join("bb-1887-blocker");
+            std::fs::create_dir_all(&blocker).unwrap();
+            db.track_staged_payload(blocker.to_str().unwrap(), None, true).unwrap();
+            queue_write(&db, "w1", "f1", b"kept, then the purge failed");
+            let data =
+                StateDbLocalData::for_engine_start(&LocalDataPaths::for_test(&state_dir, sync_root.path())).unwrap();
+            let state = AppState::default();
+            let bound = bind_data_to_session(&state, &data, &bob);
+            assert!(
+                bound
+                    .as_ref()
+                    .is_err_and(|error| error.contains("could not be removed")),
+                "the purge failed, so nothing starts: {bound:?}"
+            );
+            assert_eq!(db.owner().unwrap(), Some(alice), "no new owner over data still there");
+            let (folder, files) = state
+                .sign_out
+                .reset_kept
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("a failed purge's folder is handed on through the binding");
+            assert_eq!(files, 1);
+            assert_eq!(
+                std::fs::read(Path::new(&folder).join("f1.bin")).unwrap(),
+                b"kept, then the purge failed"
+            );
+        })
+        .await;
+    }
+
+    /// Spec §15 question 3 for the R10 reset's last step: a reset whose row clear fails, after its keep and its purge,
+    /// answers that error and reopens Finder accepts at once, as a reset whose purge fails does.
+    #[tokio::test]
+    async fn an_r10_reset_whose_row_clear_fails_reopens_finder_accepts() {
+        in_own_dirs(async {
+            let state_dir = state_paths::beebeeb_state_dir().unwrap();
+            let sync_root = tempfile::tempdir().unwrap();
+            let db = state_db_in_scratch();
+            queue_write(&db, "w1", "f1", b"a save");
+            let data =
+                StateDbLocalData::for_engine_start(&LocalDataPaths::for_test(&state_dir, sync_root.path())).unwrap();
+            // A row only the row clear deletes, and a trigger on the reset's own connection that refuses that delete.
+            data.db
+                .hold_lock_for_test()
+                .execute_batch(
+                    "INSERT INTO sync_state (key, value) VALUES ('bb-1887-clear-blocker', '1');
+                     CREATE TEMP TRIGGER bb_1887_clear_fails BEFORE DELETE ON sync_state
+                     WHEN OLD.key = 'bb-1887-clear-blocker'
+                     BEGIN SELECT RAISE(ABORT, 'the row clear fails'); END;",
+                )
+                .unwrap();
+            let error = account_binding::LocalData::reset(&data).expect_err("the row clear failed");
+            assert!(error.starts_with("clear the local data: "), "{error}");
+            assert!(
+                db.waiting_rows().unwrap().is_empty(),
+                "the keep and the purge ran first"
+            );
+            assert!(
+                !db.finder_accepts_closed().unwrap(),
+                "a reset whose row clear failed reopens Finder accepts (spec §15 question 3)"
             );
         })
         .await;
@@ -36441,12 +36617,13 @@ mod sign_out_keep_tests {
     fn the_r10_reset_folder_is_surfaced_after_the_start_returns() {
         let squeeze = crate::source_pin::squeeze;
         let production = super::finder_setup_command_tests::production_source();
+        // A function's code without its comment lines, squeezed: a comment can neither meet nor break a step.
         let body = |start: &str| {
-            squeeze(super::finder_setup_command_tests::body_between(
-                &production,
-                start,
-                "\n}\n",
-            ))
+            let code: Vec<&str> = super::finder_setup_command_tests::body_between(&production, start, "\n}\n")
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect();
+            squeeze(&code.join("\n"))
         };
         let gate = body("fn spawn_bound_engine(");
         let at = |step: &str| {
@@ -36462,9 +36639,10 @@ mod sign_out_keep_tests {
             cloned < started && started < taken && taken < surfaced,
             "clone the app, start, then take and surface: {gate}"
         );
+        let between = &gate[started..surfaced];
         assert!(
-            !gate[started..taken].contains(")?;") && gate.ends_with("started"),
-            "whatever the start returned, it is returned after the surfacing: {gate}"
+            !between.contains('?') && !between.contains("return") && gate.ends_with("started"),
+            "whatever the start returned, nothing returns before the surfacing; the start's result comes last: {gate}"
         );
         let surface = body("fn surface_reset_folder(");
         let told = surface
