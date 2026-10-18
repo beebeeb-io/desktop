@@ -3861,13 +3861,20 @@ struct KeepUnsentArg {
 /// server, the app's alert names the folder. Every frontend sign-out (Settings,
 /// the compact Account page, "Sign in again", the account switch) ends here; the menu's sign-out
 /// raises the same alert in its own handler.
+///
+/// Spec 2026-10-10 §5.1 "A late result" (macOS): Tauri passes the calling window. A result that needs showing stays
+/// pending until that window acknowledges it (`sign_out_result_ack`); if the window closes, is destroyed or reloads
+/// first, Rust shows it in the menu's dialog, and so it does when the call returns after such a close.
 #[tauri::command]
 async fn clear_session(
     app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
     state: State<'_, AppState>,
     forget_email: Option<bool>,
     keep_unsent: Option<KeepUnsentArg>,
 ) -> Result<SessionActionOutcome, String> {
+    #[cfg(target_os = "macos")]
+    state.sign_out.late_results.begin(window.label());
     let result = clear_session_impl(
         &state,
         forget_email.unwrap_or(false),
@@ -3877,9 +3884,115 @@ async fn clear_session(
     // Review I1: the alert comes first, also when the sign-out failed after the removal.
     // Review I2: and the folder is saved for the Settings › Sync row.
     surface_sign_out_folders(&app, &result);
+    #[cfg(target_os = "macos")]
+    if let Some(shown) = state
+        .sign_out
+        .late_results
+        .complete(window.label(), late_result_of(&result))
+    {
+        show_late_result(&app, shown);
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = &window;
     result
         .map(|done| SessionActionOutcome { warning: done.warning })
         .map_err(|failure| failure.message)
+}
+
+/// Spec 2026-10-10 §5.1 "A late result": what needs showing. Not `unsent_changes` (nothing changed, and a hidden window
+/// cannot show the ask), and not a completed sign-out without a warning. Read on macOS and in tests only.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn late_result_of(result: &Result<SignedOut, SignOutFailure>) -> Option<sign_out::flow_window::Shown> {
+    use sign_out::flow_window::Shown;
+    match result {
+        Err(failure)
+            if failure
+                .message
+                .starts_with(&format!("{}: ", sign_out::copy::UNSENT_CHANGES_CODE)) =>
+        {
+            None
+        }
+        Err(failure) => Some(Shown::Failure(failure.message.clone())),
+        Ok(SignedOut {
+            warning: Some(warning), ..
+        }) => Some(Shown::Warning(warning.sentence().to_string())),
+        Ok(_) => None,
+    }
+}
+
+/// The menu's own dialogs (its sign-out's "Sign-out paused" and "Signed out"), in the callback form, which does not
+/// wait for the person, so a window-event handler can raise one. With no parent window macOS draws it in its own
+/// UserNotificationCenter process, so it shows while Settings is hidden.
+#[cfg(target_os = "macos")]
+fn show_late_result(app: &tauri::AppHandle, shown: sign_out::flow_window::Shown) {
+    use sign_out::flow_window::Shown;
+    let (title, message, kind) = match shown {
+        Shown::Failure(message) => (
+            "Sign-out paused",
+            message,
+            tauri_plugin_dialog::MessageDialogKind::Error,
+        ),
+        Shown::Warning(sentence) => ("Signed out", sentence, tauri_plugin_dialog::MessageDialogKind::Info),
+    };
+    app.dialog().message(message).title(title).kind(kind).show(|_| {});
+}
+
+/// What a close of `label` did (U34): the four steps of §5.1's hook, on the flow state alone. Read on macOS and in
+/// tests only.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+struct FlowClosed {
+    // The hook acts on `show` alone; these two say what the close ended, for the tests (U34).
+    #[cfg_attr(not(test), allow(dead_code))]
+    phase_closed: bool,
+    #[cfg_attr(not(test), allow(dead_code))]
+    snapshot_dropped: bool,
+    show: Option<sign_out::flow_window::Shown>,
+}
+
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn flow_window_closed(sign_out: &sign_out::SignOutState, label: &str) -> FlowClosed {
+    let phase_closed = match sign_out.phase.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
+        Some(phase) if phase.owner == label => {
+            phase.closed.store(true, Ordering::SeqCst);
+            true
+        }
+        _ => false,
+    };
+    FlowClosed {
+        phase_closed,
+        snapshot_dropped: sign_out.snapshots.drop_owned_by(label),
+        show: sign_out.late_results.window_closed(label),
+    }
+}
+
+/// Spec 2026-10-10 §5.1 "A close ends the flow": every `CloseRequested` and `Destroyed`, and every page load `Started`,
+/// of any window.
+#[cfg(target_os = "macos")]
+fn sign_out_flow_window_closed(app: &tauri::AppHandle, label: &str) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    let closed = flow_window_closed(&state.sign_out, label);
+    let _ = app.emit_to(label, "sign-out-flow-closed", ());
+    if let Some(shown) = closed.show {
+        show_late_result(app, shown);
+    }
+}
+
+/// The webview displayed its `clear_session`'s outcome (spec 2026-10-10 F12): remove that window's pending result.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn sign_out_result_ack(window: tauri::WebviewWindow, state: State<'_, AppState>) -> Result<(), String> {
+    state.sign_out.late_results.acknowledge(window.label());
+    Ok(())
+}
+
+/// Windows and Linux keep today's sign-out (spec 2026-10-10 W5): nothing is ever pending there.
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn sign_out_result_ack(window: tauri::WebviewWindow, state: State<'_, AppState>) -> Result<(), String> {
+    let _ = (window, state);
+    Ok(())
 }
 
 /// Task 1882 (spec `docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md` §5): the app's
@@ -13868,10 +13981,12 @@ pub fn run() {
             kept_unsent_folder,
             dismiss_kept_unsent_folder,
             show_kept_unsent_folder,
-            // Spec 2026-10-10 §5.1 and §6: the sign-out flow's count and send phase (a Mac; elsewhere they say so).
+            // Spec 2026-10-10 §5.1 and §6: the sign-out flow's count and send phase (a Mac; elsewhere they say so),
+            // and the acknowledgement of a shown result (elsewhere nothing is pending, and it does nothing).
             sign_out_count,
             sign_out_send_start,
             sign_out_send_stop,
+            sign_out_result_ack,
             // Spec 2026-10-06: the macOS Finder reconciler's commands (registered on every
             // platform; without a reconciler they say so).
             finder_setup_state,
@@ -14166,6 +14281,15 @@ pub fn run() {
                 handle_desktop_menu_action(app, spec);
             }
         })
+        // Spec 2026-10-10 §5.1: a page load that starts in a window (a reload) ends its sign-out flow, as a close does.
+        .on_page_load(|webview, payload| {
+            #[cfg(target_os = "macos")]
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
+                sign_out_flow_window_closed(webview.app_handle(), webview.label());
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (webview, payload);
+        })
         // Red-dot close button → hide to tray instead of quitting
         //
         // The decision is `surfaces::policy::close_policy` (task 1683 slice 1):
@@ -14184,6 +14308,15 @@ pub fn run() {
             #[cfg(not(target_os = "windows"))]
             if let tauri::WindowEvent::Focused(true) = event {
                 tauri::async_runtime::spawn(on_app_activated(window.app_handle().clone()));
+            }
+            // Spec 2026-10-10 §5.1: a close (on macOS a hide), a destroy or a reload ends that window's sign-out flow.
+            #[cfg(target_os = "macos")]
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                sign_out_flow_window_closed(window.app_handle(), window.label());
+            }
+            #[cfg(target_os = "macos")]
+            if let tauri::WindowEvent::Destroyed = event {
+                sign_out_flow_window_closed(window.app_handle(), window.label());
             }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if surfaces::policy::close_policy(surfaces::policy::Platform::current(), window.label())
@@ -20901,7 +21034,9 @@ mod finder_setup_wiring_tests {
                 continue;
             }
             let site = enclosing_fn(&production, at);
-            if code.starts_with(".show(|") {
+            // A parentless dialog: the `.show(|…| …)` line of a chain, or a whole chain on one line
+            // (`app.dialog()…show(|_| {});`, which rustfmt keeps when it is short).
+            if code.starts_with(".show(|") || (code.starts_with("app.dialog().") && code.contains(".show(|")) {
                 dialogs += 1;
                 continue;
             }
@@ -20942,12 +21077,12 @@ mod finder_setup_wiring_tests {
         // The menu's three sign-out message dialogs, and (task 1882, rebase 2026-10-10) the kept-folder alert,
         // `show_preserved_files_alert`, (task 1885, I2) the menu's failed-open alert, `show_menu_open_failure`,
         // (task 1889, fix round 2 N2) the menu's failed-pause alert, `show_menu_pause_failure`, and (task 1887) the
-        // sign-out's kept-folders alert, `surface_sign_out_folders`.
+        // sign-out's kept-folders alert, `surface_sign_out_folders`, and a late sign-out result, `show_late_result`.
         // None of them is a window: macOS draws a parentless alert itself.
         assert_eq!(
-            dialogs, 7,
-            "the three sign-out message dialogs, the two kept-folder alerts and the menu's failed-open and failed-pause \
-             alerts"
+            dialogs, 8,
+            "the three sign-out message dialogs, the two kept-folder alerts, the menu's failed-open and failed-pause \
+             alerts and the late sign-out result"
         );
     }
 
@@ -35429,6 +35564,275 @@ mod sign_out_keep_tests {
             assert!(json.get(key).is_some(), "{key} in {json}");
         }
         assert_eq!(json["notSending"], "offline");
+    }
+
+    fn phase_owned_by(state: &AppState, owner: &str) -> Arc<std::sync::atomic::AtomicBool> {
+        let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        *state.sign_out.phase.lock().unwrap() = Some(crate::sign_out::send_phase::RunningPhase {
+            ask_id: "a".into(),
+            owner: owner.into(),
+            stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            closed: closed.clone(),
+        });
+        closed
+    }
+
+    /// U34 (b)-(e), (g), (h).
+    #[tokio::test]
+    async fn the_send_phase_is_owned_by_rust_and_a_close_ends_the_flow() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            queue_write(&db, "w1", "f1", b"bytes");
+            let state = AppState::default();
+            // (b) a close during that window's phase: ended `closed`, its snapshot dropped; a later Sign out
+            // refuses.
+            let id = ask(&state, "macos-settings");
+            let closed = phase_owned_by(&state, "macos-settings");
+            let outcome = flow_window_closed(&state.sign_out, "macos-settings");
+            assert!(outcome.phase_closed && closed.load(Ordering::SeqCst) && outcome.snapshot_dropped);
+            let refused = sign_out_with(&state, Some(&id), no_seam()).await.unwrap_err();
+            assert!(refused.message.starts_with("unsent_changes: "));
+            // (c) at the ask, no phase: the snapshot is dropped.
+            *state.sign_out.phase.lock().unwrap() = None;
+            ask(&state, "macos-settings");
+            assert!(flow_window_closed(&state.sign_out, "macos-settings").snapshot_dropped);
+            // (d) another window's close leaves a phase and a snapshot of `macos-settings` alone.
+            ask(&state, "macos-settings");
+            let closed = phase_owned_by(&state, "macos-settings");
+            for other in ["settings", "onboarding"] {
+                let outcome = flow_window_closed(&state.sign_out, other);
+                assert!(!outcome.phase_closed && !outcome.snapshot_dropped, "{other}");
+            }
+            assert!(!closed.load(Ordering::SeqCst));
+            *state.sign_out.phase.lock().unwrap() = None;
+            // (d), its other half: a close of `macos-settings` leaves a snapshot `onboarding` owns alone. (g) A close
+            // of `onboarding` drops it.
+            ask(&state, "onboarding");
+            let outcome = flow_window_closed(&state.sign_out, "macos-settings");
+            assert!(!outcome.snapshot_dropped, "(d) onboarding's snapshot stays");
+            assert!(
+                flow_window_closed(&state.sign_out, "onboarding").snapshot_dropped,
+                "(g)"
+            );
+            // (h) running when its window closes, then failing: the dialog, once.
+            state.sign_out.late_results.begin("macos-settings");
+            assert_eq!(flow_window_closed(&state.sign_out, "macos-settings").show, None);
+            assert!(
+                state
+                    .sign_out
+                    .late_results
+                    .complete(
+                        "macos-settings",
+                        Some(crate::sign_out::flow_window::Shown::Failure("x".into()))
+                    )
+                    .is_some()
+            );
+        })
+        .await;
+    }
+
+    /// U34's pins: the hook is called on every close, destroy and reload, with the window's own label; and its premise.
+    /// Each call is read inside its own arm, so one arm's call cannot stand in for the other's.
+    #[test]
+    fn every_close_destroy_and_reload_reaches_the_hook() {
+        let production = super::finder_setup_command_tests::production_source();
+        let handler = &production[production
+            .find(".on_window_event(|window, event| {")
+            .expect("the global handler")..];
+        let handler = &handler[..handler.find("\n        })\n").unwrap()];
+        let block = |source: &'static str, text: &str, opening: &str, closing: &str| -> String {
+            let at = text
+                .find(opening)
+                .unwrap_or_else(|| panic!("{source}: {opening}\n{text}"));
+            let end = text[at..]
+                .find(closing)
+                .unwrap_or_else(|| panic!("{source}: {opening} ends"));
+            text[at..at + end].to_string()
+        };
+        for arm in [
+            "if let tauri::WindowEvent::CloseRequested { .. } = event {",
+            "if let tauri::WindowEvent::Destroyed = event {",
+        ] {
+            let arm_block = block("the global handler", handler, arm, "\n            }\n");
+            assert!(
+                arm_block.contains("sign_out_flow_window_closed(window.app_handle(), window.label())"),
+                "{arm}\n{arm_block}"
+            );
+        }
+        let page_load = &production[production.find(".on_page_load(").expect("an on_page_load registration")..];
+        let page_load = &page_load[..page_load.find("\n        })\n").unwrap()];
+        let started = block(
+            "on_page_load",
+            page_load,
+            "if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {",
+            "\n            }\n",
+        );
+        assert!(
+            started.contains("sign_out_flow_window_closed(webview.app_handle(), webview.label())"),
+            "{page_load}"
+        );
+        assert_eq!(
+            surfaces::policy::close_policy(surfaces::policy::Platform::Macos, "macos-settings"),
+            surfaces::registry::ClosePolicy::Hide,
+            "the premise: a close never destroys the Settings window"
+        );
+    }
+
+    /// U32, extended: the late result is macOS only, defined and registered. It reads the first definition of each
+    /// name, so every macOS command sits above its non-macOS twin, and that item's own attribute lines, so the `cfg`
+    /// of the item above cannot stand in for its own; and each call's own statement.
+    #[test]
+    fn the_late_result_is_macos_only() {
+        let production = super::finder_setup_command_tests::production_source();
+        let macos = "#[cfg(target_os = \"macos\")]";
+        for definition in [
+            "fn sign_out_result_ack(",
+            "fn sign_out_flow_window_closed(",
+            "fn sign_out_count(",
+            "fn sign_out_send_start(",
+        ] {
+            let at = production.find(definition).unwrap_or_else(|| panic!("{definition}"));
+            let line = production[..at].rfind('\n').map_or(0, |end| end + 1);
+            let attributes: Vec<&str> = production[..line]
+                .lines()
+                .rev()
+                .map(str::trim)
+                .take_while(|above| above.starts_with("#[") || above.starts_with("///"))
+                .collect();
+            assert!(attributes.contains(&macos), "{definition}: {attributes:?}");
+        }
+        let handler = super::finder_setup_command_tests::body_between(&production, "tauri::generate_handler![", "])");
+        assert_eq!(
+            handler
+                .lines()
+                .filter(|line| line.trim() == "sign_out_result_ack,")
+                .count(),
+            1,
+            "registered once"
+        );
+        // Read squeezed, as rustfmt lays the `complete` statement over several lines.
+        let squeeze = crate::source_pin::squeeze;
+        let command = squeeze(super::finder_setup_command_tests::body_between(
+            &production,
+            "async fn clear_session(",
+            "\n}\n",
+        ));
+        for statement in [
+            "state.sign_out.late_results.begin(",
+            "if let Some(shown) = state.sign_out.late_results.complete(",
+        ] {
+            let at = command
+                .find(&squeeze(statement))
+                .unwrap_or_else(|| panic!("{statement}\n{command}"));
+            assert!(command[..at].ends_with(&squeeze(macos)), "{statement}\n{command}");
+        }
+    }
+
+    /// U44 (b) and (e), through the classification `clear_session` hands to the record (§5.1 "A late result"): a
+    /// failure and a completed sign-out's warning need showing, each with its own text; an `unsent_changes:` refusal
+    /// and a completed sign-out with no warning do not, and leave nothing for a close to show.
+    #[test]
+    fn a_late_result_is_shown_only_when_it_needs_showing() {
+        use crate::sign_out::flow_window::{LateResults, Shown};
+        let failed = |message: &str| -> Result<SignedOut, SignOutFailure> {
+            Err(SignOutFailure {
+                message: message.into(),
+                preserved_location: None,
+                kept_unsent: None,
+            })
+        };
+        let done = |warning| -> Result<SignedOut, SignOutFailure> {
+            Ok(SignedOut {
+                warning,
+                ..SignedOut::confirmed(SignOutOutcome::Completed)
+            })
+        };
+        let refused = coded(UNSENT_CHANGES_CODE, E1_UNSENT_CHANGES);
+        let not_kept = coded(UNSENT_COPY_FAILED_CODE, E2_UNSENT_COPY_FAILED);
+        let cases = [
+            (failed(&refused), None),
+            (failed(&not_kept), Some(Shown::Failure(not_kept.clone()))),
+            (
+                failed(SIGN_OUT_PURGE_FAILED),
+                Some(Shown::Failure(SIGN_OUT_PURGE_FAILED.into())),
+            ),
+            (
+                done(Some(ActionWarning::FinderRemovalUnconfirmed)),
+                Some(Shown::Warning(FINDER_SIGN_OUT_UNCONFIRMED_WARNING.into())),
+            ),
+            (done(None), None),
+        ];
+        for (result, expected) in cases {
+            assert_eq!(late_result_of(&result), expected, "{result:?}");
+            // What a close then finds: that result once, or nothing.
+            let late = LateResults::default();
+            late.begin("macos-settings");
+            assert_eq!(late.complete("macos-settings", late_result_of(&result)), None);
+            assert_eq!(
+                late.window_closed("macos-settings"),
+                expected,
+                "a close after {result:?}"
+            );
+            assert_eq!(late.window_closed("macos-settings"), None);
+        }
+    }
+
+    /// §5.1 "A late result", the glue the pure tests cannot run (it needs the app's dialog and a Wry window), read from
+    /// its source: the call's record begins before the sign-out and completes after it with the classified result,
+    /// and what that returns is shown; the hook reads the closed window's own flow state, tells that window, and shows
+    /// what it took out; the acknowledgement names the calling window; the dialog keeps the menu's two titles.
+    #[test]
+    fn the_late_result_reaches_the_dialog_from_the_call_and_the_hook() {
+        use crate::source_pin::squeeze;
+        let production = super::finder_setup_command_tests::production_source();
+        let body = |start: &str| {
+            squeeze(super::finder_setup_command_tests::body_between(
+                &production,
+                start,
+                "\n}\n",
+            ))
+        };
+        let command = body("async fn clear_session(");
+        let begin = command
+            .find(&squeeze("state.sign_out.late_results.begin(window.label());"))
+            .unwrap_or_else(|| panic!("the record begins: {command}"));
+        let sign_out = command
+            .find("clear_session_impl(")
+            .unwrap_or_else(|| panic!("the sign-out: {command}"));
+        let complete = command
+            .find(&squeeze(
+                "if let Some(shown) = state.sign_out.late_results.complete(window.label(), late_result_of(&result)) {
+                    show_late_result(&app, shown);
+                }",
+            ))
+            .unwrap_or_else(|| {
+                panic!("the record completes with the classified result, and a Some is shown: {command}")
+            });
+        assert!(
+            begin < sign_out && sign_out < complete,
+            "begin, the sign-out, then complete: {command}"
+        );
+        let hook = body("fn sign_out_flow_window_closed(");
+        for step in [
+            "let closed = flow_window_closed(&state.sign_out, label);",
+            "let _ = app.emit_to(label, \"sign-out-flow-closed\", ());",
+            "if let Some(shown) = closed.show { show_late_result(app, shown); }",
+        ] {
+            assert!(hook.contains(&squeeze(step)), "the hook: {step}\n{hook}");
+        }
+        let ack = body("fn sign_out_result_ack(");
+        assert!(
+            ack.contains(&squeeze("state.sign_out.late_results.acknowledge(window.label());")),
+            "the acknowledgement names the calling window: {ack}"
+        );
+        let dialog = body("fn show_late_result(");
+        for step in [
+            "Shown::Failure(message) => (\"Sign-out paused\", message, tauri_plugin_dialog::MessageDialogKind::Error)",
+            "Shown::Warning(sentence) => (\"Signed out\", sentence, tauri_plugin_dialog::MessageDialogKind::Info)",
+            ".message(message).title(title).kind(kind).show(",
+        ] {
+            assert!(dialog.contains(&squeeze(step)), "the dialog: {step}\n{dialog}");
+        }
     }
 }
 

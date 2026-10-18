@@ -110,10 +110,8 @@ pub struct RunningPhase {
     #[allow(dead_code)] // first production caller: none in the plan; no test reads it either
     pub ask_id: String,
     /// The label of the window that started it.
-    #[allow(dead_code)] // first production caller: Task 12; no test reads it before then
     pub owner: String,
     pub stop: Arc<AtomicBool>,
-    #[allow(dead_code)] // first production caller: Task 12; no test reads it before then
     pub closed: Arc<AtomicBool>,
 }
 

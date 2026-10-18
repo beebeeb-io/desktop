@@ -89,7 +89,6 @@ impl SnapshotStore {
     }
 
     /// A close or reload of the window `label`. Another window's snapshot is left alone.
-    #[allow(dead_code)] // first production caller: Task 12; no test calls it before then
     pub fn drop_owned_by(&self, label: &str) -> bool {
         let mut newest = self.lock();
         if newest.as_ref().is_some_and(|snapshot| snapshot.owner == label) {

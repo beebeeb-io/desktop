@@ -4,6 +4,7 @@
 #![cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 
 pub(crate) mod copy;
+pub(crate) mod flow_window;
 #[cfg(target_os = "macos")]
 pub(crate) mod keep;
 pub(crate) mod kept_names;
@@ -27,11 +28,12 @@ pub(crate) fn crash_point(point: &str) {
     }
 }
 
-/// The sign-out flow's state in `AppState` (spec 2026-10-10 §5.1). The late results and the flow request join it
-/// later.
+/// The sign-out flow's state in `AppState` (spec 2026-10-10 §5.1). The flow request joins it later.
 #[derive(Default)]
 pub(crate) struct SignOutState {
     pub snapshots: std::sync::Arc<snapshot::SnapshotStore>,
     /// The send phase that runs, if one does (§6): one at a time.
     pub phase: std::sync::Mutex<Option<send_phase::RunningPhase>>,
+    /// Each window's `clear_session` result until that window acknowledges it or Rust shows it (§5.1, "A late result").
+    pub late_results: flow_window::LateResults,
 }
