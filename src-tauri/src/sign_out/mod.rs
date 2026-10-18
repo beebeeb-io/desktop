@@ -38,4 +38,6 @@ pub(crate) struct SignOutState {
     pub late_results: flow_window::LateResults,
     /// One pending flow request from the compact page or the menu, until Settings consumes it (§5.1).
     pub flow_request: std::sync::atomic::AtomicBool,
+    /// W12: the folder an R10 reset kept and its file count, until the engine start that ran the reset surfaces it.
+    pub reset_kept: std::sync::Mutex<Option<(String, usize)>>,
 }

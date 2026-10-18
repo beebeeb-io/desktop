@@ -33,7 +33,6 @@ pub enum Acknowledge<'a> {
     /// No snapshot (the gate counted nothing): nothing but copies.
     Nothing,
     /// The R10 reset asks nobody (W12).
-    #[cfg_attr(not(test), allow(dead_code))] // first production caller: Task 14
     Everything,
 }
 
