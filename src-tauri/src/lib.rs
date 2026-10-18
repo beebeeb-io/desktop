@@ -1435,9 +1435,15 @@ struct LoginOutcome {
 }
 
 /// What the frontend needs to warn before an account switch: how many changes on this Mac have not uploaded yet.
+/// On a Mac (spec 2026-10-10 W11) also the ask snapshot the switch step renders (`unsent`), or, when the count could
+/// not be read, the coded E3 the step shows as a line (`unsent_error`); each is left out when it is `None`.
 #[derive(serde::Serialize)]
 struct AccountMismatchDto {
     pending_changes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unsent: Option<sign_out::snapshot::AskCounts>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unsent_error: Option<String>,
 }
 
 impl LoginOutcome {
@@ -1469,9 +1475,17 @@ impl LoginOutcome {
     }
 
     #[cfg_attr(target_os = "windows", allow(dead_code))]
-    fn account_mismatch(pending_changes: u64) -> Self {
+    fn account_mismatch(
+        pending_changes: u64,
+        unsent: Option<sign_out::snapshot::AskCounts>,
+        unsent_error: Option<String>,
+    ) -> Self {
         Self {
-            account_mismatch: Some(AccountMismatchDto { pending_changes }),
+            account_mismatch: Some(AccountMismatchDto {
+                pending_changes,
+                unsent,
+                unsent_error,
+            }),
             ..Self::signed_in()
         }
     }
@@ -1695,11 +1709,15 @@ async fn desktop_login(
                 } => {
                     return Ok(LoginOutcome::reauthenticated(vault_unlocked, key_replaced));
                 }
-                SignInSettlement::AccountMismatch { pending_changes } => {
+                SignInSettlement::AccountMismatch {
+                    pending_changes,
+                    unsent,
+                    unsent_error,
+                } => {
                     // Nothing on this Mac changed. The session just minted for the other account is revoked;
                     // after the switch the person signs in again.
                     let _ = revoke_desktop_session(&client, &base_url, &session_token).await;
-                    return Ok(LoginOutcome::account_mismatch(pending_changes));
+                    return Ok(LoginOutcome::account_mismatch(pending_changes, unsent, unsent_error));
                 }
                 SignInSettlement::Unconfirmed => {
                     // The server could not say whose key this Mac holds: nothing changed, the new session is
@@ -1893,13 +1911,17 @@ async fn desktop_login_2fa(
                     }
                     return Ok(LoginOutcome::reauthenticated(vault_unlocked, key_replaced));
                 }
-                SignInSettlement::AccountMismatch { pending_changes } => {
+                SignInSettlement::AccountMismatch {
+                    pending_changes,
+                    unsent,
+                    unsent_error,
+                } => {
                     // Nothing on this Mac changed. The session just minted for the other account is revoked.
                     let _ = revoke_desktop_session(&client, &base_url, &session_token).await;
                     if let Ok(mut guard) = state.pending_2fa.lock() {
                         *guard = None;
                     }
-                    return Ok(LoginOutcome::account_mismatch(pending_changes));
+                    return Ok(LoginOutcome::account_mismatch(pending_changes, unsent, unsent_error));
                 }
                 SignInSettlement::Unconfirmed => {
                     let _ = revoke_desktop_session(&client, &base_url, &session_token).await;
@@ -3484,6 +3506,35 @@ async fn sign_out_count(window: tauri::WebviewWindow, state: State<'_, AppState>
     Err("This works on a Mac only.".into())
 }
 
+/// W11: on macOS the switch step renders a snapshot, owned by the sign-in window, `onboarding`. Its one caller,
+/// `settle_sign_in`, is not built on Windows.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
+fn switch_snapshot(state: &AppState) -> Result<Option<sign_out::snapshot::AskCounts>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let snapshot = count_ask("onboarding")?;
+        // §6.4 (review I8): the switch's snapshot logs the same line as `sign_out_count`; it never sends (W11).
+        tracing::info!(
+            files = snapshot.counts.files,
+            copied_files = snapshot.counts.copied_files,
+            others = snapshot.counts.others,
+            missing_files = snapshot.counts.missing_files,
+            can_send = false,
+            not_sending = "",
+            earlier_folder = !snapshot.counts.earlier_folders.is_empty(),
+            "sign-out flow counted"
+        );
+        let counts = snapshot.counts.clone();
+        state.sign_out.snapshots.record(snapshot);
+        Ok(Some(counts))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = state;
+        Ok(None)
+    }
+}
+
 /// What the driver needs of a started phase.
 #[cfg(target_os = "macos")]
 struct PhaseRun {
@@ -3993,6 +4044,53 @@ fn sign_out_result_ack(window: tauri::WebviewWindow, state: State<'_, AppState>)
 fn sign_out_result_ack(window: tauri::WebviewWindow, state: State<'_, AppState>) -> Result<(), String> {
     let _ = (window, state);
     Ok(())
+}
+
+/// §5.1 "A flow request survives a window that has not loaded yet": one pending request. Read on macOS and in tests
+/// only.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn take_sign_out_flow_request(sign_out: &sign_out::SignOutState) -> bool {
+    sign_out.flow_request.swap(false, Ordering::SeqCst)
+}
+
+/// Entry points 2 and 5: store the request, open Settings, and tell it (it also consumes on mount).
+#[cfg(target_os = "macos")]
+fn open_sign_out_flow(app: &tauri::AppHandle) {
+    app.state::<AppState>()
+        .sign_out
+        .flow_request
+        .store(true, Ordering::SeqCst);
+    show_macos_settings_window(app);
+    let _ = app.emit_to("macos-settings", "menu:sign-out-flow", ());
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn request_sign_out_flow(app: tauri::AppHandle) -> Result<(), String> {
+    open_sign_out_flow(&app);
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn consume_sign_out_flow_request(state: State<'_, AppState>) -> bool {
+    take_sign_out_flow_request(&state.sign_out)
+}
+
+/// Windows and Linux keep today's sign-out (spec 2026-10-10 W5): there is no flow to open there.
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn request_sign_out_flow(app: tauri::AppHandle) -> Result<(), String> {
+    let _ = app;
+    Err("This works on a Mac only.".into())
+}
+
+/// Windows and Linux: no request is ever pending.
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn consume_sign_out_flow_request(state: State<'_, AppState>) -> bool {
+    let _ = state;
+    false
 }
 
 /// Task 1882 (spec `docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md` §5): the app's
@@ -6012,7 +6110,7 @@ const SIGN_IN_LOCAL_DATA_UNREADABLE: &str = "Beebeeb couldn’t read this Mac’
 
 /// What a successful authentication became on this Mac (R8).
 #[cfg(not(target_os = "windows"))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum SignInSettlement {
     Fresh,
     Reauthenticated {
@@ -6023,6 +6121,10 @@ enum SignInSettlement {
     },
     AccountMismatch {
         pending_changes: u64,
+        /// On a Mac, the ask snapshot the switch step renders (spec 2026-10-10 W11); elsewhere `None`.
+        unsent: Option<sign_out::snapshot::AskCounts>,
+        /// On a Mac, the coded E3 when the switch's count could not be read (§5.3 row 1).
+        unsent_error: Option<String>,
     },
     /// The server could not say whose key this is: nothing changed, and the new session is revoked.
     Unconfirmed,
@@ -6078,7 +6180,7 @@ async fn settle_sign_in(
         decide_sign_in_in_turn(state, &acct, &sources, profile, token, &runner::api_base_url(), turn).await?;
     match kind {
         reauth::SignInKind::Fresh => Ok(SignInSettlement::Fresh),
-        reauth::SignInKind::DifferentAccount => Ok(SignInSettlement::AccountMismatch { pending_changes }),
+        reauth::SignInKind::DifferentAccount => Ok(switch_settlement(pending_changes, switch_snapshot(state))),
         reauth::SignInKind::NeedsKeyProof | reauth::SignInKind::Unconfirmed => Ok(SignInSettlement::Unconfirmed),
         // Lead ruling 12: this computer's own record of its account could not be read. Its own sentence, not the
         // "connect to the internet" one; nothing is stored, so the caller revokes the new session.
@@ -6094,6 +6196,28 @@ async fn settle_sign_in(
         reauth::SignInKind::KeyOutdated => {
             reauth_without_the_kept_key(state, &acct, &sources, token, profile, turn).await
         }
+    }
+}
+
+/// W11 and §5.3 row 1 (spec 2026-10-10): the switch settles with what its count found: a snapshot (macOS), none
+/// (elsewhere), or E3 for the switch step to show as a line. A count that cannot be read never fails the sign-in:
+/// nothing changed, and "Sign out and switch" counts again through the gate.
+#[cfg(not(target_os = "windows"))]
+fn switch_settlement(
+    pending_changes: u64,
+    counted: Result<Option<sign_out::snapshot::AskCounts>, String>,
+) -> SignInSettlement {
+    match counted {
+        Ok(unsent) => SignInSettlement::AccountMismatch {
+            pending_changes,
+            unsent,
+            unsent_error: None,
+        },
+        Err(error) => SignInSettlement::AccountMismatch {
+            pending_changes,
+            unsent: None,
+            unsent_error: Some(error),
+        },
     }
 }
 
@@ -13987,6 +14111,10 @@ pub fn run() {
             sign_out_send_start,
             sign_out_send_stop,
             sign_out_result_ack,
+            // §5.1: the compact page's and the menu's flow request, which Settings consumes (a Mac; elsewhere there is
+            // no flow, and they say so).
+            request_sign_out_flow,
+            consume_sign_out_flow_request,
             // Spec 2026-10-06: the macOS Finder reconciler's commands (registered on every
             // platform; without a reconciler they say so).
             finder_setup_state,
@@ -14873,6 +15001,9 @@ fn handle_desktop_menu_action(app: &tauri::AppHandle, spec: &'static DesktopMenu
                 // FB-24 (M6): on every platform the person sees a sign-out that stopped (its error) and one that
                 // happened with a step it could not confirm (its warning); before, only Windows showed either.
                 match &result {
+                    // Spec 2026-10-10 §4 row 5: a waiting change opens the flow in Settings; never the error dialog.
+                    #[cfg(target_os = "macos")]
+                    Err(error) if error.message.starts_with("unsent_changes: ") => open_sign_out_flow(&app),
                     Err(error) => {
                         app.dialog()
                             .message(error.message.clone())
@@ -27608,12 +27739,12 @@ mod reauth_tests {
             ),
             (
                 "another account",
-                LoginOutcome::account_mismatch(3),
+                LoginOutcome::account_mismatch(3, None, None),
                 r#"{"requires_2fa":false,"reauthenticated":false,"vault_unlocked":false,"key_replaced":false,"account_mismatch":{"pending_changes":3}}"#,
             ),
             (
                 "another account, nothing waiting",
-                LoginOutcome::account_mismatch(0),
+                LoginOutcome::account_mismatch(0, None, None),
                 r#"{"requires_2fa":false,"reauthenticated":false,"vault_unlocked":false,"key_replaced":false,"account_mismatch":{"pending_changes":0}}"#,
             ),
         ];
@@ -27757,9 +27888,10 @@ mod reauth_tests {
         let production = production_source();
         let settle = code_of(&production, "async fn settle_sign_in(");
         assert!(
-            settle.contains(
-                "reauth::SignInKind::DifferentAccount => Ok(SignInSettlement::AccountMismatch { pending_changes }),"
-            ),
+            settle.contains(concat!(
+                "reauth::SignInKind::DifferentAccount => ",
+                "Ok(switch_settlement(pending_changes, switch_snapshot(state))),"
+            )),
             "{settle}"
         );
         assert!(settle.contains("reauth::SignInKind::NeedsKeyProof | reauth::SignInKind::Unconfirmed => Ok(SignInSettlement::Unconfirmed),"), "{settle}");
@@ -27768,12 +27900,22 @@ mod reauth_tests {
             ("desktop_login_2fa", code_of(&production, "async fn desktop_login_2fa(")),
             ("the browser handoff", browser_source()),
         ];
+        // The switch's pattern names three fields, which rustfmt lays over several lines, so its arm is read from the
+        // `=> {` that ends the pattern.
+        fn switch_arm(text: &str) -> &str {
+            let at = text
+                .find("SignInSettlement::AccountMismatch {")
+                .expect("the switch arm");
+            arm(&text[at..], "=> {")
+        }
         for (name, text) in &texts {
-            for needle in [
-                "SignInSettlement::AccountMismatch { pending_changes }",
-                "SignInSettlement::Unconfirmed",
+            for (needle, arm) in [
+                ("SignInSettlement::AccountMismatch", switch_arm(text)),
+                (
+                    "SignInSettlement::Unconfirmed",
+                    arm(text, "SignInSettlement::Unconfirmed"),
+                ),
             ] {
-                let arm = arm(text, needle);
                 for forbidden in [
                     "persist_",
                     "record_local_data_owner",
@@ -27854,13 +27996,16 @@ mod reauth_tests {
             }
         }
         let second_factor = &texts[1].1;
-        for needle in [
-            "SignInSettlement::AccountMismatch { pending_changes }",
-            "SignInSettlement::Unconfirmed",
-            "Err(failure) =>",
+        for (needle, arm) in [
+            ("SignInSettlement::AccountMismatch", switch_arm(second_factor)),
+            (
+                "SignInSettlement::Unconfirmed",
+                arm(second_factor, "SignInSettlement::Unconfirmed"),
+            ),
+            ("Err(failure) =>", arm(second_factor, "Err(failure) =>")),
         ] {
             assert!(
-                arm(second_factor, needle).contains("state.pending_2fa.lock()"),
+                arm.contains("state.pending_2fa.lock()"),
                 "the spent challenge is dropped on {needle}"
             );
         }
@@ -35832,6 +35977,248 @@ mod sign_out_keep_tests {
             ".message(message).title(title).kind(kind).show(",
         ] {
             assert!(dialog.contains(&squeeze(step)), "the dialog: {step}\n{dialog}");
+        }
+    }
+    /// U19 (macOS half; the frontend half is F8, the Linux case is F8's last line).
+    #[tokio::test]
+    async fn the_switch_carries_a_snapshot_on_macos_only() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            queue_write(&db, "w1", "f1", b"bytes");
+            queue_rename(&db, "r1");
+            let state = AppState::default();
+            let unsent = switch_snapshot(&state).unwrap().expect("a snapshot on macOS");
+            assert_eq!((unsent.files, unsent.others), (1, 1));
+            assert_eq!(
+                state.sign_out.snapshots.newest_ask_id().as_deref(),
+                Some(unsent.ask_id.as_str()),
+                "recorded as the newest"
+            );
+            assert!(state.sign_out.phase.lock().unwrap().is_none(), "no send is started");
+            let json = serde_json::to_value(LoginOutcome::account_mismatch(2, Some(unsent), None)).unwrap();
+            assert_eq!(json["account_mismatch"]["pending_changes"], 2);
+            assert!(json["account_mismatch"]["unsent"]["askId"].is_string());
+            assert!(
+                json["account_mismatch"].get("unsent_error").is_none(),
+                "absent while the count worked"
+            );
+            assert!(
+                state.sign_out.snapshots.drop_owned_by("onboarding"),
+                "owned by the window the switch step runs in"
+            );
+            let without = serde_json::to_value(LoginOutcome::account_mismatch(2, None, None)).unwrap();
+            assert_eq!(
+                without["account_mismatch"],
+                serde_json::json!({ "pending_changes": 2 }),
+                "elsewhere: unchanged"
+            );
+        })
+        .await;
+    }
+
+    /// Spec §5.3 row 1: a switch count that cannot be read is E3, a line in the switch step. The sign-in settles as a
+    /// switch, with no snapshot and the coded E3; it is never a failed sign-in.
+    #[test]
+    fn a_switch_count_that_fails_is_a_line_in_the_step() {
+        let e3 = sign_out::copy::coded(
+            sign_out::copy::UNSENT_COUNT_FAILED_CODE,
+            sign_out::copy::E3_UNSENT_COUNT_FAILED,
+        );
+        let SignInSettlement::AccountMismatch {
+            pending_changes,
+            unsent,
+            unsent_error,
+        } = switch_settlement(3, Err(e3.clone()))
+        else {
+            panic!("a switch, not a failure");
+        };
+        assert_eq!(
+            (pending_changes, unsent, unsent_error.as_deref()),
+            (3, None, Some(e3.as_str()))
+        );
+        let json = serde_json::to_value(LoginOutcome::account_mismatch(3, None, Some(e3.clone()))).unwrap();
+        assert_eq!(
+            json["account_mismatch"],
+            serde_json::json!({ "pending_changes": 3, "unsent_error": e3 })
+        );
+        let production = super::finder_setup_command_tests::production_source();
+        let settle = super::finder_setup_command_tests::body_between(&production, "async fn settle_sign_in(", "\n}\n");
+        assert!(
+            settle.contains("switch_settlement(pending_changes, switch_snapshot(state))"),
+            "{settle}"
+        );
+    }
+
+    /// U21: the menu never purges a waiting write and never shows the error dialog for it.
+    #[test]
+    fn the_menu_never_purges_a_waiting_write() {
+        let state = AppState::default();
+        state.sign_out.flow_request.store(true, Ordering::SeqCst);
+        state.sign_out.flow_request.store(true, Ordering::SeqCst);
+        assert!(take_sign_out_flow_request(&state.sign_out), "one request");
+        assert!(!take_sign_out_flow_request(&state.sign_out), "not two");
+        let production = super::finder_setup_command_tests::production_source();
+        let menu = &production[production.find("DesktopMenuAction::SignOut =>").unwrap()..];
+        let menu = &menu[..menu.find("DesktopMenuAction::Quit").unwrap()];
+        let flow = menu
+            .find("Err(error) if error.message.starts_with(\"unsent_changes: \") => open_sign_out_flow(&app),")
+            .expect("the flow arm");
+        let paused = menu.find(".title(\"Sign-out paused\")").unwrap();
+        assert!(flow < paused, "the flow arm comes before the error dialog's arm");
+        assert!(
+            menu.contains("clear_session_impl(&state, false, None)"),
+            "the menu never keeps on its own"
+        );
+    }
+
+    /// F9's Rust half: the compact page's request survives a Settings window that has not loaded yet.
+    #[test]
+    fn a_flow_request_waits_for_settings_to_consume_it() {
+        let state = AppState::default();
+        assert!(!take_sign_out_flow_request(&state.sign_out));
+        assert!(
+            !state.sign_out.flow_request.load(Ordering::SeqCst),
+            "asking when nothing waits leaves nothing"
+        );
+        state.sign_out.flow_request.store(true, Ordering::SeqCst);
+        assert!(take_sign_out_flow_request(&state.sign_out));
+    }
+
+    /// U19, from the count to the window (W11): the switch settles with the snapshot it counted (a Mac) or none
+    /// (elsewhere); both password sign-ins hand the settlement's snapshot and E3 on to `LoginOutcome`; and the browser
+    /// sign-in puts each in its `account_mismatch` event only when it is there. The sign-ins need a server, so their
+    /// text is read.
+    #[test]
+    fn the_switch_count_reaches_the_sign_in_window() {
+        let counts = sign_out::snapshot::AskCounts {
+            ask_id: "ask-1".to_string(),
+            files: 1,
+            copied_files: 1,
+            others: 1,
+            missing_files: 0,
+            earlier_folders: Vec::new(),
+        };
+        assert_eq!(
+            switch_settlement(2, Ok(Some(counts.clone()))),
+            SignInSettlement::AccountMismatch {
+                pending_changes: 2,
+                unsent: Some(counts),
+                unsent_error: None,
+            },
+            "a Mac: the snapshot rides the settlement"
+        );
+        assert_eq!(
+            switch_settlement(2, Ok(None)),
+            SignInSettlement::AccountMismatch {
+                pending_changes: 2,
+                unsent: None,
+                unsent_error: None,
+            },
+            "elsewhere: the count alone"
+        );
+        let squeeze = crate::source_pin::squeeze;
+        let production = super::finder_setup_command_tests::production_source();
+        for login in ["async fn desktop_login(", "async fn desktop_login_2fa("] {
+            let body = squeeze(super::finder_setup_command_tests::body_between(
+                &production,
+                login,
+                "\n}\n",
+            ));
+            assert!(
+                body.contains(&squeeze(
+                    "return Ok(LoginOutcome::account_mismatch(pending_changes, unsent, unsent_error));"
+                )),
+                "{login} hands both on"
+            );
+        }
+        let browser = squeeze(&include_str!("browser_login.rs").replace("\r\n", "\n"));
+        for step in [
+            "let mut payload = serde_json::json!({ \"pending_changes\": pending_changes });",
+            "if let Some(unsent) = unsent {
+                payload[\"unsent\"] = serde_json::to_value(unsent).unwrap_or(serde_json::Value::Null);
+            }",
+            "if let Some(unsent_error) = unsent_error {
+                payload[\"unsent_error\"] = serde_json::Value::String(unsent_error);
+            }",
+            "emit(app, \"account_mismatch\", payload);",
+        ] {
+            assert!(browser.contains(&squeeze(step)), "the browser sign-in's event: {step}");
+        }
+    }
+
+    /// §6.4 (review I8): the switch's count logs the line `sign_out_count` logs, with counts only. A device step reads
+    /// it to prove a change was waiting (D1).
+    #[tokio::test]
+    async fn the_switch_count_logs_counts_only() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            let staged = queue_write(&db, "w1", "f1", b"bytes");
+            queue_rename(&db, "r1");
+            let state = AppState::default();
+            let mut counted = None;
+            let logs = capture_logs(|| counted = Some(switch_snapshot(&state)));
+            assert!(counted.expect("the count ran").unwrap().is_some(), "a snapshot");
+            let line = logs
+                .lines()
+                .find(|line| line.contains("sign-out flow counted"))
+                .unwrap_or_else(|| panic!("the switch's count is logged:\n{logs}"));
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            for field in [
+                "files=1",
+                "copied_files=1",
+                "others=1",
+                "missing_files=0",
+                "can_send=false",
+                "earlier_folder=false",
+            ] {
+                assert!(fields.contains(&field), "{field}: {line}");
+            }
+            assert!(
+                !logs.contains("f1.bin") && !logs.contains(&*staged.to_string_lossy()),
+                "no name and no path:\n{logs}"
+            );
+        })
+        .await;
+    }
+
+    /// §5.1, the entry points' side of the request. They need the app's windows, so their text is read: the request is
+    /// stored before Settings opens and is told, so a window that has not loaded yet finds it when it mounts; the
+    /// compact page's command opens the flow; Settings' command takes the one request; both are registered once.
+    #[test]
+    fn a_flow_request_is_stored_before_settings_opens_and_is_told() {
+        let squeeze = crate::source_pin::squeeze;
+        let production = super::finder_setup_command_tests::production_source();
+        let body = |start: &str| {
+            squeeze(super::finder_setup_command_tests::body_between(
+                &production,
+                start,
+                "\n}\n",
+            ))
+        };
+        let open = body("fn open_sign_out_flow(");
+        let at = |step: &str| {
+            open.find(&squeeze(step))
+                .unwrap_or_else(|| panic!("open_sign_out_flow: {step}\n{open}"))
+        };
+        let stored = at("app.state::<AppState>().sign_out.flow_request.store(true, Ordering::SeqCst);");
+        let shown = at("show_macos_settings_window(app);");
+        let told = at("let _ = app.emit_to(\"macos-settings\", \"menu:sign-out-flow\", ());");
+        assert!(stored < shown && shown < told, "store, open, then tell: {open}");
+        assert!(
+            body("fn request_sign_out_flow(").contains(&squeeze("open_sign_out_flow(&app);")),
+            "the compact page's command opens the flow"
+        );
+        assert!(
+            body("fn consume_sign_out_flow_request(").contains(&squeeze("take_sign_out_flow_request(&state.sign_out)")),
+            "Settings takes the one request"
+        );
+        let handler = super::finder_setup_command_tests::body_between(&production, "tauri::generate_handler![", "])");
+        for command in ["request_sign_out_flow,", "consume_sign_out_flow_request,"] {
+            assert_eq!(
+                handler.lines().filter(|line| line.trim() == command).count(),
+                1,
+                "{command} registered once"
+            );
         }
     }
 }

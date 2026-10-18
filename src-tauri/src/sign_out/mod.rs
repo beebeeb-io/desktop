@@ -28,7 +28,7 @@ pub(crate) fn crash_point(point: &str) {
     }
 }
 
-/// The sign-out flow's state in `AppState` (spec 2026-10-10 §5.1). The flow request joins it later.
+/// The sign-out flow's state in `AppState` (spec 2026-10-10 §5.1).
 #[derive(Default)]
 pub(crate) struct SignOutState {
     pub snapshots: std::sync::Arc<snapshot::SnapshotStore>,
@@ -36,4 +36,6 @@ pub(crate) struct SignOutState {
     pub phase: std::sync::Mutex<Option<send_phase::RunningPhase>>,
     /// Each window's `clear_session` result until that window acknowledges it or Rust shows it (§5.1, "A late result").
     pub late_results: flow_window::LateResults,
+    /// One pending flow request from the compact page or the menu, until Settings consumes it (§5.1).
+    pub flow_request: std::sync::atomic::AtomicBool,
 }
