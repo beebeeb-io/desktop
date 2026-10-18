@@ -17,25 +17,25 @@ test('failed load has no invented cards and Retry loads the actual API regions',
   }
   const failed = await loadDataResidency(fetchRegion)
   expect(failed.error).toBe('Data residency is unavailable. Please try again.')
-  expect(failed.regions).toEqual([])
+  expect(failed.choices).toEqual([])
   expect(failed.preferredRegion).toBeNull()
   const retried = await loadDataResidency(fetchRegion)
   expect(calls).toBe(2)
   expect(retried.error).toBeNull()
   expect(buildDataResidencyViewState({ ...retried, saving: false }).items).toEqual([{
-    continent: 'europe', displayName: 'Europe', locationLabel: 'Local',
-    isDefault: true, selected: true, disabled: true,
+    id: 'europe', kind: 'region', displayName: 'Europe', detail: 'Local', locationLabel: 'Local',
+    isDefault: true, anyDatacenter: false, selected: true, comingSoon: false, disabled: true,
   }])
 })
 
 test('empty successful response is unavailable, without a default region', async () => {
   const state = await loadDataResidency(async () => ({ ok: true, value: { regions: [], preferred_region: null } }))
   expect(state.error).toBe('No storage regions are currently available. Please try again.')
-  expect(state.regions).toEqual([])
+  expect(state.choices).toEqual([])
 })
 
 test('unexpected invocation rejection becomes a recoverable error', async () => {
   const state = await loadDataResidency(async () => { throw new Error('invoke failed') })
   expect(state.error).toBe('Data residency is unavailable. Please try again.')
-  expect(state.regions).toEqual([])
+  expect(state.choices).toEqual([])
 })
