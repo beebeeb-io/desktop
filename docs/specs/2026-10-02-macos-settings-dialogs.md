@@ -76,6 +76,7 @@ The dialogs reuse the Settings-window system exactly: `design.css` tokens, the 1
   - **closing Settings** at the count, the send phase or the ask ends the flow with nothing changed; Settings opens next time on the Account tab with no sheet.
 - After a sign-out that kept files, one alert, “Files kept on this Mac”, names our folder first (“Beebeeb copied {n} files with changes that hadn’t reached the server to this folder on this Mac:”), then macOS's folder with 1882's sentence, unchanged.
 - **Modal mapping:** `ConfirmSheet` (Modal 400). **Shipped (PR #104):** `danger?: boolean` on `ConfirmSheet`; when set, the confirm button gets `ms-btn--danger` (`--red-ink` text). `MacSettings.tsx` passes `danger` on the Sign-out sheet. Nothing else changes.
+  - Task 1887 adds two sheets after this one, drawn in section 1 of the hifi file: the send phase on `Modal` 400 with one button, “Stop waiting”, and the ask on `Modal` 440 (as Choose folders) with “Cancel” and the red “Sign out”. “Nothing else changes” holds for this confirm sheet only. — Task 15 fix round 1, 2026-10-18 (1887, its review)
 
 ## Keyboard rules (summary)
 
@@ -84,6 +85,8 @@ The dialogs reuse the Settings-window system exactly: `design.css` tokens, the 1
 | Esc | Cancel — dismiss, no action (built) | Close (built) |
 | Enter | Trigger the focused confirm (built, PR #104) | No-op |
 | Tab | Focus trap as built; initial focus = close button | Same |
+
+The sign-out send phase (task 1887) is the exception to the Esc row: there Esc is “Stop waiting”, never Cancel, and the ask follows with no reason line. At the ask, Esc cancels and Enter on open resolves to Cancel, as above. — Task 15 fix round 1, 2026-10-18 (1887, its review)
 
 Destructive-Enter rule: on open, Enter must resolve to **Cancel** (or nothing), never the red confirm. As built (PR #104) the Return handler lives on the confirm button itself and initial focus is the close button, so both halves hold at once.
 
