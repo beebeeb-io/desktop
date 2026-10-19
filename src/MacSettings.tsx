@@ -73,6 +73,10 @@ import {
   ASK_CANCEL,
   ASK_SIGN_OUT,
   askLines,
+  K2_DISMISS,
+  K2_ROW,
+  K2_SHOW,
+  K3_TOAST,
   P0_TITLE,
   P2_HINT,
   P3_STOP,
@@ -633,6 +637,37 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
     [loadKept],
   )
 
+  // Spec 2026-10-10 §9: the folder a sign-out copied unsent changes into. Our row comes first; 1882's follows. Rust
+  // saves it before the purge and emits `kept-folder-changed`; a failed read shows no row, as 1882's.
+  const [keptUnsent, setKeptUnsent] = useState<string | null>(null)
+  const loadKeptUnsent = useCallback(async () => {
+    const result = await command<string | null>('kept_unsent_folder')
+    setKeptUnsent(result.ok ? result.value : null)
+  }, [])
+  useEffect(
+    () => subscribeKeptFolderChanged(() => void loadKeptUnsent(), { onSubscribed: () => void loadKeptUnsent() }),
+    [loadKeptUnsent],
+  )
+  // "Show in Finder" fails only when the folder is gone (K3); the row stays until Dismiss.
+  const showKeptUnsent = async () => {
+    if (keptUnsent === null) return
+    const result = await command<void>('show_kept_unsent_folder', { path: keptUnsent })
+    if (!result.ok) showToast({ variant: 'error', message: K3_TOAST })
+  }
+  const dismissKeptUnsent = async () => {
+    if (keptUnsent === null) return
+    const result = await command<DismissKeptFolderResult>('dismiss_kept_unsent_folder', { path: keptUnsent })
+    if (!result.ok) {
+      showToast({
+        variant: 'error',
+        title: 'Couldn’t dismiss that note',
+        message: result.unsupported ? commandUnavailableLabel('dismiss_kept_unsent_folder') : result.reason,
+      })
+      return
+    }
+    setKeptUnsent(keptFolderAfterDismiss(result.value))
+  }
+
   // A one-off action that gates nothing: a failure is a toast (house rule), and the row stays.
   const dismissKept = async () => {
     if (kept === null) return
@@ -768,6 +803,21 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
           </Note>
         ) : null}
         {repairResult ? <Note kind="status">{repairResult}</Note> : null}
+        {keptUnsent !== null ? (
+          <Note
+            kind="status"
+            reason={keptUnsent}
+            reasonWraps
+            actions={
+              <>
+                <Btn onClick={() => void showKeptUnsent()}>{K2_SHOW}</Btn>
+                <Btn onClick={() => void dismissKeptUnsent()}>{K2_DISMISS}</Btn>
+              </>
+            }
+          >
+            {K2_ROW}
+          </Note>
+        ) : null}
         {kept !== null ? (
           <Note
             kind="status"

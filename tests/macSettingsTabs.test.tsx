@@ -722,6 +722,11 @@ describe('Sync tab', () => {
           if (opts.keptReadFails) throw new Error('desktop.toml could not be read')
           return st.kept
         },
+        // Spec 2026-10-10 §9 (task 1887): the sign-out's own kept folder, read for the row above 1882's; none here.
+        kept_unsent_folder: () => {
+          opts.log?.push('read unsent')
+          return null
+        },
         dismiss_kept_unsynced_folder: (a: any) => {
           if (opts.dismissFails) throw new Error('disk full')
           // Like Rust (1882 r5): clears the saved folder only if it is still the one the row
@@ -1120,9 +1125,11 @@ describe('Sync tab', () => {
     test('the first read waits for the listener, so a folder saved in between is not missed', async () => {
       const log: string[] = []
       const { m, kept } = await openSync({ kept: KEPT, log })
-      expect(log).toEqual(['subscribed', 'read'])
+      // Two rows listen (task 1887: the sign-out's kept folder, then 1882's), and each reads only once its own
+      // listener is registered.
+      expect(log).toEqual(['subscribed', 'read', 'subscribed', 'read unsent'])
       expect(keptNotes(m)).toHaveLength(1)
-      expect(kept.live).toBe(1)
+      expect(kept.live).toBe(2)
       m.unmount()
       expect(kept.live).toBe(0) // and a closed tab stops listening
     })
