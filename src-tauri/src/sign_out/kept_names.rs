@@ -133,19 +133,26 @@ mod tests {
     /// U33.
     #[test]
     fn kept_root_is_the_container_or_app_support() {
-        let data = Path::new("/Users/a/Library/Containers/io.beebeeb.app/Data/Library/Application Support");
-        let sandboxed = Path::new("/Users/a/Library/Containers/io.beebeeb.app/Data/Documents");
+        // `kept_root` demands an absolute container path; `/Users/a` is not absolute on Windows (no drive), so the
+        // test's home carries one there. The logic under test is the same path-component match on both.
+        let home = if cfg!(windows) { r"C:\Users\a" } else { "/Users/a" };
+        let under_home = |rest: &str| Path::new(home).join(rest);
+        let data = under_home("Library/Containers/io.beebeeb.app/Data/Library/Application Support");
+        let data = data.as_path();
+        let sandboxed = under_home("Library/Containers/io.beebeeb.app/Data/Documents");
+        let sandboxed = sandboxed.as_path();
         assert_eq!(
             kept_root(Some(sandboxed), Some(data), APP_BUNDLE_ID),
             Some(sandboxed.join("Changes not sent"))
         );
         let fallback = Some(data.join("beebeeb").join("Changes not sent"));
         assert_eq!(
-            kept_root(Some(Path::new("/Users/a/Documents")), Some(data), APP_BUNDLE_ID),
+            kept_root(Some(under_home("Documents").as_path()), Some(data), APP_BUNDLE_ID),
             fallback,
             "unsandboxed"
         );
-        let other = Path::new("/Users/a/Library/Containers/com.example.other/Data/Documents");
+        let other = under_home("Library/Containers/com.example.other/Data/Documents");
+        let other = other.as_path();
         assert_eq!(
             kept_root(Some(other), Some(data), APP_BUNDLE_ID),
             fallback,

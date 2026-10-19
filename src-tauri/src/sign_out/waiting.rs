@@ -362,12 +362,13 @@ mod tests {
     /// U4: one `StateDb` call, one mutex hold, one transaction.
     #[test]
     fn waiting_changes_is_one_read() {
-        let state_db = include_str!("../state_db.rs");
+        // A Windows checkout may carry CRLF; the body search below is on `\n`.
+        let state_db = include_str!("../state_db.rs").replace("\r\n", "\n");
         let from = state_db.find("pub fn waiting_rows(").expect("waiting_rows");
         let body = &state_db[from..from + state_db[from..].find("\n    }\n").unwrap()];
         assert_eq!(body.matches(".lock()").count(), 1, "{body}");
         assert_eq!(body.matches("transaction(").count(), 1, "{body}");
-        let this = include_str!("waiting.rs");
+        let this = include_str!("waiting.rs").replace("\r\n", "\n");
         let from = this.find("pub fn read(db: &StateDb)").expect("read");
         let read = &this[from..from + this[from..].find("\n    }\n").unwrap()];
         assert_eq!(read.matches("db.").count(), 1, "one StateDb call: {read}");
