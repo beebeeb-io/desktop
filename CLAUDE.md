@@ -434,6 +434,35 @@ The fingerprint at time of generation is `545D7BA77EDEA7E1`.
 If the key is lost, no clients with already-installed builds can verify
 new updates — they'll need a manual reinstall to onboard the new pubkey.
 
+## Storage location (task 1919, by COUNTRY since task 2050)
+
+Guus, 2026-10-19: a storage location is a COUNTRY, never a city (cities together identify the hosting
+provider; `docs/canon/data-residency.md` in the workspace). "Europe" is the default: any of our European
+data centers, the server places the data. Below it the person can pick one live country (Germany,
+Finland); a coming-soon country (the Netherlands) is listed and cannot be picked. While a country is
+chosen, "Only store in <country>" is a switch (task 1952): when that country cannot take a new file the
+upload stops instead of going to another EU country. The switch carries to another country and ends on Europe.
+
+The rows are the API's: `GET /api/v1/me/region` returns `choices` (the same array as the public
+`GET /api/v1/storage-regions`: ids `europe` / `de` / `fi` / `nl`, `kind` `region` or `country`, `name` the
+country) and `region_strict`. `account_region` carries them to the UI and `account_set_region` sends the row's
+`id` verbatim with `regionStrict` stated. The desktop keeps NO list, city or country table; it renders `name`,
+`status` and `selectable` as sent, so a country the server adds or retires changes the rows with no desktop
+release. **No city is decoded at all**: `StorageChoice` and `RegionInfo` (Rust) have no `city` field, the
+server's deprecated `city` / `example_city` keys are ignored by serde and absent from the IPC, and
+`tests/noCityInCopy.test.ts` fails on a city name or a read of a `city` field anywhere in `src/` and
+`src-tauri/src/` (comments and `#[cfg(test)]` items excepted; it is proven red on the code before 2050 with
+`GUARD_ROOT`). An OLDER server (task 1919) sends one `kind: 'datacenter'` row per datacenter: the model folds
+those into one row per country (`foldChoices`; a datacenter with no country is dropped) and a stored `fsn1`
+still selects the Germany row. A server without `choices` falls back to its one-entry-per-continent list.
+Uploads send no region (the server reads the stored preference). One hook, `src/windows/useDataResidency.ts`,
+serves both the Windows/Linux Settings panel and the macOS Settings window (Account tab).
+Not built: a dedicated desktop message for the 409 `region_unavailable_strict` upload refusal (the engine
+keeps its generic refused-upload handling; the server's own message names the country).
+Verify against a local API built from server PR #251: `cargo test --lib real_api_region -- --ignored --nocapture --test-threads=1` with
+`BB_REAL_API_BASE`/`BB_REAL_API_TOKEN` (scratch HOME), and `tests/render-region-live-api.mjs` for the UI. The
+mocked-IPC browser run is `tests/render-location-by-country.mjs`.
+
 ## Brand
 
 - Icons: amber rounded square with lowercase `b` (`icons/icon.png`). Replace with the production icon set via `bunx tauri icon path/to/source.png` once ready.

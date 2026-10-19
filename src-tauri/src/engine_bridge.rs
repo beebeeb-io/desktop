@@ -24733,4 +24733,114 @@ mod tests {
         );
         drop(server.finish());
     }
+    /// Task 1919, against a REAL local API (ignored by default). The desktop's own code path end to end:
+    /// `ApiClient::set_preferred_region` (the call `account_set_region` makes), then the desktop's own upload
+    /// (`EngineBridge::process_due_operations` -> `POST /uploads/init`, which sends no region) and then the
+    /// file's `storage_location` as the API reports it (task 2050: by COUNTRY). A choice must land the file in a
+    /// pool of THAT country; "europe" must take the default placement; a coming-soon country must be refused and
+    /// change nothing.
+    ///
+    /// ```text
+    /// BB_REAL_API_BASE=http://127.0.0.1:39191 BB_REAL_API_TOKEN=<session token> \
+    ///   cargo test --lib real_api_region_choice -- --ignored --nocapture --test-threads=1
+    /// ```
+    #[tokio::test]
+    #[ignore = "needs a running local API with de/fi pools: BB_REAL_API_BASE and BB_REAL_API_TOKEN"]
+    async fn real_api_region_choice_upload_lands_in_the_chosen_country() {
+        let base = std::env::var("BB_REAL_API_BASE").expect("BB_REAL_API_BASE");
+        let token = std::env::var("BB_REAL_API_TOKEN").expect("BB_REAL_API_TOKEN");
+        assert!(
+            base.starts_with("http://127.0.0.1:") || base.starts_with("http://localhost:"),
+            "this test only ever talks to a local API, got {base}"
+        );
+        let master_key = [21u8; 32];
+        let api = Arc::new(ApiClient::new(base.clone(), token.clone(), master_key));
+        let http = reqwest::Client::new();
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = EngineBridge::new(Arc::new(StateDb::open(&dir.path().join("state.db")).unwrap()), api.clone());
+
+        // The list the desktop's `account_region` decodes is the API's.
+        let listed = api.account_region().await.expect("GET /me/region");
+        let ids: Vec<&str> = listed.choices.iter().map(|c| c.id.as_str()).collect();
+        println!("choices from the API: {ids:?}");
+        assert_eq!(ids, ["europe", "fi", "de", "nl"]);
+        let nl = listed.choices.iter().find(|c| c.id == "nl").unwrap();
+        assert!(!nl.selectable && nl.status == "coming_soon");
+
+        let mut op_no = 0;
+        let mut landed = Vec::new();
+        // "europe" lands in the default pool, which is a German one.
+        for (choice, expected_country) in [("fi", "Finland"), ("de", "Germany"), ("europe", "Germany")] {
+            let saved = api.set_preferred_region(Some(choice), Some(false)).await.expect("PUT /me/region");
+            assert_eq!(saved.preferred_region.as_deref(), Some(choice));
+            assert_eq!(
+                api.account_region().await.unwrap().preferred_region.as_deref(),
+                Some(choice),
+                "the stored preference reads back"
+            );
+
+            op_no += 1;
+            let payload = dir.path().join(format!("payload-{op_no}.txt"));
+            std::fs::write(&payload, format!("1919 desktop upload for {choice}")).unwrap();
+            let before: std::collections::HashSet<String> =
+                bridge.db.list_files().unwrap().into_iter().map(|f| f.file_id).collect();
+            bridge
+                .db
+                .enqueue_operation(&PendingOperation {
+                    op_id: format!("op-1919-{op_no}"),
+                    kind: OperationKind::UploadVersion,
+                    file_id: Some(format!("local-1919-{op_no}")),
+                    parent_id: None,
+                    target_path: Some(format!("rc1919-{choice}.txt")),
+                    metadata_json: Some(
+                        serde_json::json!({
+                            "operation": "create_file",
+                            "name_encrypted": "{}",
+                            "display_name": format!("rc1919-{choice}.txt"),
+                            "content_type": "text/plain"
+                        })
+                        .to_string(),
+                    ),
+                    payload_path: Some(payload.to_string_lossy().into_owned()),
+                    base_version: None,
+                    base_object_version_id: None,
+                    attempts: 0,
+                    max_attempts: 1,
+                    next_retry_at: 0,
+                    last_error: None,
+                    backup_source_key: None,
+                    created_at: 100,
+                    updated_at: 100,
+                })
+                .unwrap();
+            let outcome = bridge.process_due_operations(dir.path(), 200).await.expect("the upload pass runs");
+            assert_eq!(outcome.completed_op_ids, vec![format!("op-1919-{op_no}")], "{outcome:?}");
+
+            let after = bridge.db.list_files().unwrap();
+            let fresh: Vec<_> = after.iter().filter(|f| !before.contains(&f.file_id)).collect();
+            assert_eq!(fresh.len(), 1, "exactly one new file row per upload: {fresh:?}");
+            let file_id = fresh[0].file_id.clone();
+
+            let body: serde_json::Value = http
+                .get(format!("{base}/api/v1/files/{file_id}"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            let country = body["storage_location"]["country"].as_str().unwrap_or("<none>").to_string();
+            println!("UPLOAD choice={choice} file_id={file_id} storage_location.country={country}");
+            assert_eq!(country, expected_country, "choice {choice}: {body}");
+            landed.push((choice, file_id, country));
+        }
+
+        // A coming-soon country is refused and the stored choice is left alone.
+        let refused = api.set_preferred_region(Some("nl"), Some(false)).await.expect_err("nl must be refused");
+        println!("PUT nl -> {refused}");
+        assert!(refused.to_string().contains("region_unavailable"), "{refused}");
+        assert_eq!(api.account_region().await.unwrap().preferred_region.as_deref(), Some("europe"));
+        println!("LANDED {landed:?}");
+    }
 }

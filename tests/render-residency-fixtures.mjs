@@ -48,8 +48,8 @@ try {
                 if (regionState === 'error') throw new Error('Fixture region request failed')
                 return { preferred_region: regionState === 'us' ? 'us' : regionState === 'unknown' ? 'unknown' : null,
                   regions: [
-                    { continent: 'europe', display_name: 'Europe', city: 'Falkenstein', is_default: true, provider: 'Never Display Storage Provider' },
-                    ...(regionState === 'us' ? [{ continent: 'us', display_name: 'North America', city: 'Ashburn', is_default: false }] : []),
+                    { continent: 'europe', display_name: 'Europe', country: null, is_default: true, provider: 'Never Display Storage Provider' },
+                    ...(regionState === 'us' ? [{ continent: 'us', display_name: 'North America', country: null, is_default: false }] : []),
                   ] }
               }
               if (name.startsWith('plugin:')) return 1
@@ -60,12 +60,14 @@ try {
         await page.addScriptTag({ content: bundle })
         if (surface === 'settings') {
           await page.getByRole('button', { name: 'Data residency', exact: true }).click()
-          const expected = regionState === 'eu' ? 'Stored in the EU (currently Falkenstein, Germany).'
-            : regionState === 'us' ? 'Stored in North America (currently Ashburn, United States).'
+          const expected = regionState === 'eu' ? 'Stored in the EU. New files go to any of our European data centers.'
+            : regionState === 'us' ? 'Stored in North America.'
+            : regionState === 'unknown' ? 'Your chosen location isn’t available right now. New files go wherever Beebeeb places them by default.' // task 1919: said plainly, rows stay
             : regionState === 'loading' ? 'Loading data residency…' : 'Could not load data residency'
           await page.getByText(expected, { exact: true }).waitFor()
           if (regionState === 'eu') assert.equal(await page.getByRole('button', { name: /Europe/ }).isDisabled(), true)
-          if (!['eu', 'us'].includes(regionState)) assert.doesNotMatch(await page.locator('body').innerText(), /Stored in|Falkenstein|Ashburn/)
+          if (regionState === 'unknown') assert.doesNotMatch(await page.locator('body').innerText(), /Stored in|Could not load/)
+          else if (!['eu', 'us'].includes(regionState)) assert.doesNotMatch(await page.locator('body').innerText(), /Stored in|Falkenstein|Helsinki|Ashburn/)
           if (regionState === 'us') assert.doesNotMatch(await page.locator('body').innerText(), /Stored in the EU/)
           assert.equal(await page.evaluate(() => window.calls.filter(c => c.name === 'account_region').length), 1)
           assert.doesNotMatch(await page.locator('body').innerText(), /Choose where|More regions|Never Display Storage Provider/)
@@ -75,7 +77,7 @@ try {
           const body = await page.locator('body').innerText()
           if (!['eu', 'us'].includes(regionState)) assert.doesNotMatch(body, /Stored in|the EU|North America/)
           if (regionState === 'us') assert.doesNotMatch(body, /Stored in the EU/)
-          assert.doesNotMatch(await page.locator('body').innerText(), /Falkenstein|Germany|Ashburn|Never Display Storage Provider/)
+          assert.doesNotMatch(await page.locator('body').innerText(), /Falkenstein|Helsinki|Germany|Finland|Ashburn|Never Display Storage Provider/)
         }
         assert.deepEqual(errors, [])
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false)

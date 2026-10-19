@@ -43,6 +43,10 @@ const UnsentAskSheet = loadComponent('MacSettings.tsx', 'UnsentAskSheet', { Reac
 
 const showSignOutOutcome = loadComponent('MacSettings.tsx', 'showSignOutOutcome', { stripCode, holdSignOutWarning: accountSession.holdSignOutWarning })
 
+// The storage-location group has its own state and its own tests (macSettingsDataResidency.test.tsx); here it is a marker,
+// so the Account tab's tests read only what the Account tab itself decides.
+const DataResidencyGroup = () => createElement('div', { 'data-region-group': 'true' })
+
 const baseBindings = {
   ...accountSession,
   ...desktopApi,
@@ -55,6 +59,7 @@ const baseBindings = {
   ConfigLoadFailed,
   SendingSheet,
   UnsentAskSheet,
+  DataResidencyGroup,
   withPinned,
   finderActionButtonLabel: finderSetupCopy.finderActionButtonLabel,
   // The real one: with no event bus here it reports ready at once, so a tab opened without `keptBus` still reads.
@@ -515,6 +520,18 @@ describe('Account tab', () => {
     expect(bar[0].props['aria-valuenow']).toBe(42)
     expect(bar[0].props['aria-label']).toBe('Storage used')
     expect(bar[0].props['data-red']).toBeUndefined()
+  })
+
+  test('the storage-location group sits between the vault and sign-out, for a signed-in account only (task 1919)', async () => {
+    const m = openAccount(backend())
+    await settle(m)
+    expect(find(m, (el) => el.props['data-region-group'] === 'true')).toHaveLength(1)
+    const order = m.elements().filter((el) => el.props['data-row'] === 'vault' || el.props['data-row'] === 'signout' || el.props['data-region-group'] === 'true')
+    expect(order.map((el) => el.props['data-row'] ?? 'region')).toEqual(['vault', 'region', 'signout'])
+
+    const out = openAccount(backend({}, snapshot({ account: { logged_in: false } })))
+    await settle(out)
+    expect(find(out, (el) => el.props['data-region-group'] === 'true')).toHaveLength(0)
   })
 
   test('there is one storage source: the snapshot, never a second fetch of the usage', async () => {

@@ -11870,8 +11870,8 @@ async fn account_usage(state: State<'_, AppState>) -> Result<account_dto::Billin
     })
 }
 
-/// `GET /api/v1/me/region` — preferred region + available list. The frontend
-/// resolves the effective region's CITY from this (never the provider).
+/// `GET /api/v1/me/region` — preferred region + available list. The list is by COUNTRY (task
+/// 2050); no city and no provider reaches the frontend.
 #[tauri::command]
 async fn account_region(state: State<'_, AppState>) -> Result<account_dto::UserRegionResponse, String> {
     session_command!(async {
@@ -11882,15 +11882,17 @@ async fn account_region(state: State<'_, AppState>) -> Result<account_dto::UserR
     })
 }
 
-/// `PUT /api/v1/me/region` — set or clear the preferred storage region.
+/// `PUT /api/v1/me/region` — set or clear the preferred storage region (`europe` or a country
+/// id) and, for a country, "only store in <country>" (`region_strict`).
 #[tauri::command]
 async fn account_set_region(
     state: State<'_, AppState>,
     preferred_region: Option<String>,
+    region_strict: Option<bool>,
 ) -> Result<account_dto::SetPreferredRegionResponse, String> {
     session_command!(async {
         api_client_from_session(&state)?
-            .set_preferred_region(preferred_region.as_deref())
+            .set_preferred_region(preferred_region.as_deref(), region_strict)
             .await
             .map_err(|e| e.to_string())
     })
@@ -18315,6 +18317,67 @@ mod popover_snapshot_command_tests {
             println!("real GET /sync/ops with a wrong token: {err}");
             assert!(err.to_string().contains("401"), "{err}");
             assert_eq!(monitor.snapshot().failure, None, "a 401 is the server answering");
+        });
+    }
+
+    /// Task 1919: the two region COMMANDS the Settings windows invoke (`account_region`, `account_set_region`),
+    /// run through their real handlers against a REAL local API. Ignored by default.
+    ///
+    /// ```text
+    /// BB_REAL_API_BASE=http://127.0.0.1:39191 BB_REAL_API_TOKEN=<session token> \
+    ///   cargo test --lib real_api_region_commands -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "needs a running local API with de/fi pools: BB_REAL_API_BASE and BB_REAL_API_TOKEN"]
+    fn real_api_region_commands_list_choose_and_refuse() {
+        let base = std::env::var("BB_REAL_API_BASE").expect("BB_REAL_API_BASE");
+        let token = std::env::var("BB_REAL_API_TOKEN").expect("BB_REAL_API_TOKEN");
+        assert!(
+            base.starts_with("http://127.0.0.1:") || base.starts_with("http://localhost:"),
+            "this test only ever talks to a local API, got {base}"
+        );
+        with_isolated_env(&base, || {
+            let app = mock_app_with_account(true, true);
+            app.state::<AppState>()
+                .active_account()
+                .unwrap()
+                .session
+                .lock()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .token = token.clone();
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+
+            let listed = runtime
+                .block_on(account_region(app.state::<AppState>()))
+                .expect("account_region against the real API");
+            let ipc = serde_json::to_value(&listed).unwrap();
+            println!("account_region IPC: {}", serde_json::to_string(&ipc).unwrap());
+            let ids: Vec<&str> = listed.choices.iter().map(|c| c.id.as_str()).collect();
+            assert_eq!(ids, ["europe", "fi", "de", "nl"]);
+            assert!(!ipc.to_string().contains("provider"));
+            assert!(!ipc.to_string().contains("city"), "no city reaches the IPC");
+
+            let saved = runtime
+                .block_on(account_set_region(app.state::<AppState>(), Some("fi".into()), Some(false)))
+                .expect("account_set_region fi");
+            assert_eq!(saved.preferred_region.as_deref(), Some("fi"));
+            let read_back = runtime.block_on(account_region(app.state::<AppState>())).unwrap();
+            assert_eq!(read_back.preferred_region.as_deref(), Some("fi"));
+
+            let refused = runtime
+                .block_on(account_set_region(app.state::<AppState>(), Some("nl".into()), Some(false)))
+                .expect_err("nl is coming soon");
+            println!("account_set_region nl -> {refused}");
+            assert!(refused.contains("region_unavailable"), "{refused}");
+            let still = runtime.block_on(account_region(app.state::<AppState>())).unwrap();
+            assert_eq!(still.preferred_region.as_deref(), Some("fi"), "a refusal changes nothing");
+
+            let cleared = runtime
+                .block_on(account_set_region(app.state::<AppState>(), Some("europe".into()), Some(false)))
+                .expect("account_set_region europe");
+            assert_eq!(cleared.preferred_region.as_deref(), Some("europe"));
         });
     }
 

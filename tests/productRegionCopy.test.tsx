@@ -4,13 +4,23 @@ import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import ts from 'typescript'
 import { productRegionLabel } from '../src/windows/useRegion'
-import type { UserRegionResponse } from '../src/desktopApi'
+import type { StorageChoice, UserRegionResponse } from '../src/desktopApi'
+import captured from '../src-tauri/tests/fixtures/region-choices-country-api.json'
+import older from '../src-tauri/tests/fixtures/region-choices-older-server-api.json'
 
 const regions = [
-  { continent: 'europe', display_name: 'Europe', city: 'Falkenstein', is_default: true },
-  { continent: 'us', display_name: 'North America', city: 'Ashburn', is_default: false },
+  { continent: 'europe', display_name: 'Europe', country: null, is_default: true },
+  { continent: 'us', display_name: 'North America', country: null, is_default: false },
 ]
+// Tasks 1919 / 2050: the stored preference can be a country id from the `choices` list, or an older server's datacenter id.
+const choices = captured.choices as StorageChoice[]
+const olderChoices = older.choices as StorageChoice[]
 const cases: [string, UserRegionResponse | null | undefined, string][] = [
+  ['country preference', { preferred_region: 'fi', regions, choices }, 'Stored in the EU'],
+  ['older server datacenter preference', { preferred_region: 'hel1', regions, choices: olderChoices }, 'Stored in the EU'],
+  ['europe preference with choices', { preferred_region: 'europe', regions, choices }, 'Stored in the EU'],
+  ['country that left the list', { preferred_region: 'fi', regions, choices: choices.filter(c => c.id !== 'fi') }, 'End-to-end encrypted'],
+  ['coming-soon country id', { preferred_region: 'nl', regions, choices }, 'End-to-end encrypted'],
   ['EU', { preferred_region: 'europe', regions }, 'Stored in the EU'],
   ['US overriding EU default', { preferred_region: 'us', regions }, 'Stored in North America'],
   ['default EU', { preferred_region: null, regions }, 'Stored in the EU'],
@@ -76,7 +86,7 @@ for (const [state, response, expected] of cases) {
           const render = new Function('React', 'regionLabel', 'fileSurfaceName', 'deviceNoun', code)
           const html = renderToStaticMarkup(render(React, productRegionLabel(response), 'File Explorer', 'this PC'))
           expect(html).toContain(expected)
-          expect(html).not.toMatch(/Falkenstein|Germany|Ashburn|provider/i)
+          expect(html).not.toMatch(/Falkenstein|Helsinki|Germany|Finland|Ashburn|provider/i)
           if (expected === 'End-to-end encrypted') expect(html).not.toMatch(/Stored in|the EU|North America/)
           if (expected === 'Stored in North America') expect(html).not.toContain('the EU')
           if (expected === 'Stored in the EU') expect(html).not.toContain('North America')
