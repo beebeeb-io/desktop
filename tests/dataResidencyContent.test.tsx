@@ -7,7 +7,7 @@ const noop = () => {}
 test('failed request renders an honest error and Retry without a fabricated region', async () => {
   const state = await loadDataResidency(async () => ({ ok: false, reason: 'HTTP 500', unsupported: false }))
   const html = renderToStaticMarkup(<DataResidencyContent loading={false} loadError={state.error}
-    view={buildDataResidencyViewState({ ...state, saving: false })} onRetry={noop} onSelect={noop} />)
+    view={buildDataResidencyViewState({ ...state, saving: false })} onRetry={noop} onSelect={noop} onStrictChange={noop} />)
   expect(html).toContain('Could not load data residency')
   expect(html).toContain('Retry')
   expect(html).not.toContain('Falkenstein')
@@ -17,18 +17,18 @@ test('failed request renders an honest error and Retry without a fabricated regi
 })
 
 const regions = [
-  { continent: 'europe', display_name: 'Europe', city: 'Falkenstein', is_default: true },
-  { continent: 'us', display_name: 'North America', city: 'Ashburn', is_default: false, provider: 'Never Display Storage Provider' },
+  { continent: 'europe', display_name: 'Europe', country: null, is_default: true },
+  { continent: 'us', display_name: 'North America', country: null, is_default: false, provider: 'Never Display Storage Provider' },
 ]
 
 function renderRegion(preferredRegion: string | null, loading = false, loadError: string | null = null, metadata = regions) {
   return renderToStaticMarkup(<DataResidencyContent loading={loading} loadError={loadError}
-    view={buildDataResidencyViewState({ choices: choicesFromResponse({ regions: metadata }), preferredRegion, saving: false })} onRetry={noop} onSelect={noop} />)
+    view={buildDataResidencyViewState({ choices: choicesFromResponse({ regions: metadata }), preferredRegion, saving: false })} onRetry={noop} onSelect={noop} onStrictChange={noop} />)
 }
 
 test('US preference uses its loaded display name instead of the EU default', () => {
   const html = renderRegion('us')
-  expect(html).toContain('Stored in North America (currently Ashburn).')
+  expect(html).toContain('Stored in North America.')
   expect(html).not.toContain('Stored in the EU')
   expect(html).not.toContain('Never Display Storage Provider')
 })
@@ -36,7 +36,7 @@ test('US preference uses its loaded display name instead of the EU default', () 
 test('explicit EU preference and implicit EU default both claim EU residency', () => {
   for (const preferredRegion of ['europe', null]) {
     const html = renderRegion(preferredRegion)
-    expect(html).toContain('Stored in the EU (currently Falkenstein).')
+    expect(html).toContain('Stored in the EU. New files go to any of our European data centers.')
     expect(html).not.toContain('Stored in North America')
   }
 })
@@ -85,24 +85,24 @@ test('a stored region the list does not have is a plain note with no selected ro
   expect(html).not.toContain('aria-pressed="true"')
 })
 
-test('API region renders its actual city, EU copy and no provider or region-choice promise', () => {
-  const region = { continent: 'europe', display_name: 'Europe', city: 'Local', is_default: true, provider: 'Never Display Storage Provider' }
+test('API region renders EU copy with no city, no provider and no region-choice promise', () => {
+  const region = { continent: 'europe', display_name: 'Europe', country: null, city: 'Local', is_default: true, provider: 'Never Display Storage Provider' }
   const html = renderToStaticMarkup(<DataResidencyContent loading={false} loadError={null}
-    view={buildDataResidencyViewState({ choices: choicesFromResponse({ regions: [region] }), preferredRegion: null, saving: false })} onRetry={noop} onSelect={noop} />)
+    view={buildDataResidencyViewState({ choices: choicesFromResponse({ regions: [region] }), preferredRegion: null, saving: false })} onRetry={noop} onSelect={noop} onStrictChange={noop} />)
   expect(html).not.toContain('Never Display Storage Provider')
-  expect(html).toContain('Local')
-  expect(html).toContain('Stored in the EU (currently Local).')
+  expect(html).not.toContain('Local')
+  expect(html).toContain('Stored in the EU. New files go to any of our European data centers.')
   expect(html).toContain('disabled=""')
   expect(html).not.toContain('Choose where')
   expect(html).not.toContain('More regions')
   expect(html).not.toContain('Retry')
 })
 
-// A new EU pool must be displayed from metadata, never a hardcoded default.
-test('transparency follows the current pool city', () => {
+// A legacy list that still carries the deprecated `city` (an IPC from before 2050) shows no city.
+test('a city in the legacy list is never rendered, whatever the pool is', () => {
   const html = renderRegion(null, false, null, [
-    { continent: 'europe', display_name: 'Europe', city: 'Helsinki', is_default: true },
+    { continent: 'europe', display_name: 'Europe', country: null, city: 'Helsinki', is_default: true } as never,
   ])
-  expect(html).toContain('Stored in the EU (currently Helsinki).')
-  expect(html).not.toContain('Falkenstein')
+  expect(html).toContain('Stored in the EU. New files go to any of our European data centers.')
+  expect(html).not.toMatch(/Helsinki|Falkenstein/)
 })

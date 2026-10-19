@@ -523,6 +523,16 @@ impl Drop for ApiClient {
 // `session_zeroizes_master_key_on_drop` test.
 impl zeroize::ZeroizeOnDrop for ApiClient {}
 
+/// The `PUT /api/v1/me/region` body (task 2050): the chosen id, and `region_strict` only when the
+/// caller states it.
+fn set_region_body(preferred_region: Option<&str>, region_strict: Option<bool>) -> serde_json::Value {
+    let mut body = serde_json::json!({ "preferred_region": preferred_region });
+    if let Some(strict) = region_strict {
+        body["region_strict"] = serde_json::json!(strict);
+    }
+    body
+}
+
 impl ApiClient {
     #[cfg(any(target_os = "windows", test))]
     pub fn credential_lifetime(&self) -> std::sync::Weak<()> {
@@ -1258,24 +1268,27 @@ impl ApiClient {
     }
 
     /// `GET /api/v1/me/region` — the user's preferred region + available list.
-    /// Mirrors the webapp `getUserRegion()` contract so the desktop resolves
-    /// the effective region's CITY the same way (never the provider).
+    /// Mirrors the webapp `getUserRegion()` contract: the list is by COUNTRY
+    /// (task 2050), never a city and never the provider.
     pub async fn account_region(&self) -> anyhow::Result<crate::account_dto::UserRegionResponse> {
         self.get_typed("/api/v1/me/region").await
     }
 
-    /// `PUT /api/v1/me/region` — set or clear the user's preferred region.
+    /// `PUT /api/v1/me/region` — set or clear the user's preferred region (`europe` or a country
+    /// id). `region_strict` is "only store in <country>"; the server replaces the whole choice, so
+    /// an omitted value means false there. `None` leaves it out of the body.
     pub async fn set_preferred_region(
         &self,
         preferred_region: Option<&str>,
+        region_strict: Option<bool>,
     ) -> anyhow::Result<crate::account_dto::SetPreferredRegionResponse> {
+        let body = set_region_body(preferred_region, region_strict);
         #[cfg(test)]
-        if let Some(response) = region_set_fixture::try_handle(&self.base_url, &self.token, preferred_region)? {
+        if let Some(response) = region_set_fixture::try_handle(&self.base_url, &self.token, &body)? {
             return Ok(response);
         }
 
         let url = self.url("/api/v1/me/region");
-        let body = serde_json::json!({ "preferred_region": preferred_region });
         let resp = self.send_with_retry(|| self.client.put(&url).json(&body)).await?;
         Ok(resp.json().await?)
     }
@@ -1563,7 +1576,7 @@ mod region_set_fixture {
     pub(super) fn try_handle(
         base_url: &str,
         token: &str,
-        preferred_region: Option<&str>,
+        body: &Value,
     ) -> anyhow::Result<Option<SetPreferredRegionResponse>> {
         let Some(id) = base_url.strip_prefix("fixture://") else {
             return Ok(None);
@@ -1575,7 +1588,6 @@ mod region_set_fixture {
             .cloned()
             .with_context(|| format!("region fixture {id} missing"))?;
         let mut fixture = fixture.lock().unwrap();
-        let body = serde_json::json!({ "preferred_region": preferred_region });
         fixture.requests.push(RegionRequest {
             method: "PUT".to_string(),
             path: "/api/v1/me/region".to_string(),
@@ -1791,20 +1803,40 @@ mod tests {
     fn set_preferred_region_puts_region_and_parses_response() {
         let server = RegionMockServer::start(vec![(
             "200 OK".to_string(),
-            serde_json::json!({ "preferred_region": "us" }),
+            serde_json::json!({ "preferred_region": "de", "region_strict": true }),
         )]);
         let client = ApiClient::new(server.base_url.clone(), "tok".into(), [0u8; 32]);
 
-        let result = run_async(client.set_preferred_region(Some("us"))).unwrap();
+        let result = run_async(client.set_preferred_region(Some("de"), Some(true))).unwrap();
 
-        assert_eq!(result.preferred_region.as_deref(), Some("us"));
+        assert_eq!(result.preferred_region.as_deref(), Some("de"));
+        assert!(result.region_strict);
         let requests = server.finish();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].method, "PUT");
         assert_eq!(requests[0].path, "/api/v1/me/region");
         assert_eq!(requests[0].authorization.as_deref(), Some("Bearer tok"));
         let body: serde_json::Value = serde_json::from_slice(requests[0].body.as_bytes()).unwrap();
-        assert_eq!(body, serde_json::json!({ "preferred_region": "us" }));
+        assert_eq!(
+            body,
+            serde_json::json!({ "preferred_region": "de", "region_strict": true })
+        );
+    }
+
+    #[test]
+    fn set_preferred_region_leaves_strict_out_when_the_caller_does_not_state_it() {
+        let server = RegionMockServer::start(vec![(
+            "200 OK".to_string(),
+            serde_json::json!({ "preferred_region": "europe", "region_strict": false }),
+        )]);
+        let client = ApiClient::new(server.base_url.clone(), "tok".into(), [0u8; 32]);
+
+        let result = run_async(client.set_preferred_region(Some("europe"), None)).unwrap();
+
+        assert!(!result.region_strict);
+        let requests = server.finish();
+        let body: serde_json::Value = serde_json::from_slice(requests[0].body.as_bytes()).unwrap();
+        assert_eq!(body, serde_json::json!({ "preferred_region": "europe" }));
     }
 
     #[test]
@@ -1818,7 +1850,7 @@ mod tests {
         )]);
         let client = ApiClient::new(server.base_url.clone(), "tok".into(), [0u8; 32]);
 
-        let err = run_async(client.set_preferred_region(Some("mars")))
+        let err = run_async(client.set_preferred_region(Some("mars"), None))
             .unwrap_err()
             .to_string();
 

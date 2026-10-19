@@ -852,47 +852,60 @@ export interface ConfirmActionResult {
 }
 
 // ── Data residency / region — GET /api/v1/me/region ──────────────────────────
-// The Rust DTO maps server `available_regions` / `example_city` to IPC
-// `regions` / `city`. Provider metadata is ignored and never sent to the UI.
+// Task 2050 (Guus, 2026-10-19): storage location is a COUNTRY, never a city. The Rust DTO maps the
+// server's `available_regions` to IPC `regions`, and reads no city at all (the deprecated
+// `example_city` / `city` keys are dropped there), so nothing in this file can carry one.
+// Provider metadata is ignored and never sent to the UI.
 
 export interface RegionInfo {
   continent: string
   display_name: string
-  city: string
+  /** `example_country` of a server that speaks countries; null from an older one. */
+  country: string | null
   is_default: boolean
 }
 
 /**
- * One row of the storage-location list (task 1919): `GET /api/v1/me/region` -> `choices`, the same
- * list as the public `GET /api/v1/storage-regions`. The server owns every field: the "Europe"
- * default (`kind: 'region'`, no country, any datacenter), the live datacenters, and the datacenters
- * that are only coming soon (`selectable: false`). The client renders the list as it comes and
- * keeps no list, city or country table of its own. There is no provider field to read.
+ * One row of the storage-location list (task 1919, by country since task 2050): `GET /api/v1/me/region`
+ * -> `choices`, the same list as the public `GET /api/v1/storage-regions`. The server owns every field:
+ * the "Europe" default (`kind: 'region'`, no country, any data center), the countries we store in
+ * (`kind: 'country'`), and the countries that are only coming soon (`selectable: false`). The client
+ * renders the list as it comes and keeps no list, city or country table of its own. There is no city
+ * and no provider field to read. An older server sends one `kind: 'datacenter'` row per datacenter;
+ * the model folds those into countries (`foldChoices`).
  */
 export interface StorageChoice {
-  /** Sent back verbatim as `preferred_region`: `europe` or a datacenter id. */
+  /** Sent back verbatim as `preferred_region`: `europe` or a country id (`de`, `fi`). */
   id: string
-  kind: 'region' | 'datacenter' | (string & {})
+  kind: 'region' | 'country' | 'datacenter' | (string & {})
+  /** `Europe`, or the country's name. */
   name: string
-  city: string | null
   country: string | null
   country_code: string | null
   status: 'live' | 'coming_soon' | (string & {})
   selectable: boolean
   is_default: boolean
+  /**
+   * Client-side only (never on the wire): other stored values that mean this row. Set when an older
+   * server's datacenter rows are folded into a country, so a stored `fsn1` still selects Germany.
+   */
+  aliases?: string[]
 }
 
 export interface UserRegionResponse {
-  /** `europe`, a live datacenter id, or null (no choice, which places like `europe`). */
+  /** `europe`, a live country id, or null (no choice, which places like `europe`). */
   preferred_region: string | null
+  /** "Only store in <country>" (task 1952). False from a server that predates it. */
+  region_strict?: boolean
   /** The legacy one-entry-per-continent list. A server without `choices` sends only this. */
   regions: RegionInfo[]
-  /** The storage-location list (task 1919). Empty from a server that predates it. */
+  /** The storage-location list. Empty from a server that predates task 1919. */
   choices?: StorageChoice[]
 }
 
 export interface SetPreferredRegionResponse {
   preferred_region: string | null
+  region_strict?: boolean
 }
 
 // Coalesce concurrent readers, but never retain a previous account or failed
@@ -928,8 +941,12 @@ export function accountRegion(): Promise<CommandResult<UserRegionResponse>> {
   return command<UserRegionResponse>('account_region')
 }
 
-export function setAccountRegion(preferredRegion: string | null): Promise<CommandResult<SetPreferredRegionResponse>> {
-  return command<SetPreferredRegionResponse>('account_set_region', { preferredRegion })
+/** `regionStrict` is "only store in <country>"; send it explicitly (the server replaces the whole choice). */
+export function setAccountRegion(
+  preferredRegion: string | null,
+  regionStrict?: boolean,
+): Promise<CommandResult<SetPreferredRegionResponse>> {
+  return command<SetPreferredRegionResponse>('account_set_region', { preferredRegion, regionStrict })
 }
 
 export function accountActivity(): Promise<CommandResult<AccountActivity>> {

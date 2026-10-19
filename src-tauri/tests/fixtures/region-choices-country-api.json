@@ -1,0 +1,55 @@
+{
+    "preferred_region": null,
+    "region_strict": false,
+    "available_regions": [
+        {
+            "continent": "europe",
+            "display_name": "Europe",
+            "example_city": "Falkenstein",
+            "example_country": "Germany",
+            "is_default": true
+        }
+    ],
+    "choices": [
+        {
+            "id": "europe",
+            "kind": "region",
+            "name": "Europe",
+            "country": null,
+            "country_code": null,
+            "status": "live",
+            "selectable": true,
+            "is_default": true
+        },
+        {
+            "id": "de",
+            "kind": "country",
+            "name": "Germany",
+            "country": "Germany",
+            "country_code": "DE",
+            "status": "live",
+            "selectable": true,
+            "is_default": false
+        },
+        {
+            "id": "fi",
+            "kind": "country",
+            "name": "Finland",
+            "country": "Finland",
+            "country_code": "FI",
+            "status": "live",
+            "selectable": true,
+            "is_default": false
+        },
+        {
+            "id": "nl",
+            "kind": "country",
+            "name": "Netherlands",
+            "country": "Netherlands",
+            "country_code": "NL",
+            "status": "coming_soon",
+            "selectable": false,
+            "is_default": false
+        }
+    ]
+}

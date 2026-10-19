@@ -24413,16 +24413,17 @@ mod tests {
     /// Task 1919, against a REAL local API (ignored by default). The desktop's own code path end to end:
     /// `ApiClient::set_preferred_region` (the call `account_set_region` makes), then the desktop's own upload
     /// (`EngineBridge::process_due_operations` -> `POST /uploads/init`, which sends no region) and then the
-    /// file's `storage_location` as the API reports it. A choice must land the file in THAT datacenter's pool;
-    /// "europe" must take the default placement; a coming-soon datacenter must be refused and change nothing.
+    /// file's `storage_location` as the API reports it (task 2050: by COUNTRY). A choice must land the file in a
+    /// pool of THAT country; "europe" must take the default placement; a coming-soon country must be refused and
+    /// change nothing.
     ///
     /// ```text
     /// BB_REAL_API_BASE=http://127.0.0.1:39191 BB_REAL_API_TOKEN=<session token> \
     ///   cargo test --lib real_api_region_choice -- --ignored --nocapture --test-threads=1
     /// ```
     #[tokio::test]
-    #[ignore = "needs a running local API with fsn1/hel1/nbg1 pools: BB_REAL_API_BASE and BB_REAL_API_TOKEN"]
-    async fn real_api_region_choice_upload_lands_in_the_chosen_datacenter() {
+    #[ignore = "needs a running local API with de/fi pools: BB_REAL_API_BASE and BB_REAL_API_TOKEN"]
+    async fn real_api_region_choice_upload_lands_in_the_chosen_country() {
         let base = std::env::var("BB_REAL_API_BASE").expect("BB_REAL_API_BASE");
         let token = std::env::var("BB_REAL_API_TOKEN").expect("BB_REAL_API_TOKEN");
         assert!(
@@ -24439,19 +24440,15 @@ mod tests {
         let listed = api.account_region().await.expect("GET /me/region");
         let ids: Vec<&str> = listed.choices.iter().map(|c| c.id.as_str()).collect();
         println!("choices from the API: {ids:?}");
-        assert_eq!(ids, ["europe", "fsn1", "hel1", "nbg1", "ede"]);
-        let ede = listed.choices.iter().find(|c| c.id == "ede").unwrap();
-        assert!(!ede.selectable && ede.status == "coming_soon");
+        assert_eq!(ids, ["europe", "fi", "de", "nl"]);
+        let nl = listed.choices.iter().find(|c| c.id == "nl").unwrap();
+        assert!(!nl.selectable && nl.status == "coming_soon");
 
         let mut op_no = 0;
         let mut landed = Vec::new();
-        for (choice, expected_city) in [
-            ("hel1", "Helsinki"),
-            ("nbg1", "Nuremberg"),
-            ("europe", "Falkenstein"),
-            ("fsn1", "Falkenstein"),
-        ] {
-            let saved = api.set_preferred_region(Some(choice)).await.expect("PUT /me/region");
+        // "europe" lands in the default pool, which is a German one.
+        for (choice, expected_country) in [("fi", "Finland"), ("de", "Germany"), ("europe", "Germany")] {
+            let saved = api.set_preferred_region(Some(choice), Some(false)).await.expect("PUT /me/region");
             assert_eq!(saved.preferred_region.as_deref(), Some(choice));
             assert_eq!(
                 api.account_region().await.unwrap().preferred_region.as_deref(),
@@ -24510,17 +24507,17 @@ mod tests {
                 .json()
                 .await
                 .unwrap();
-            let city = body["storage_location"]["city"].as_str().unwrap_or("<none>").to_string();
-            println!("UPLOAD choice={choice} file_id={file_id} storage_location.city={city}");
-            assert_eq!(city, expected_city, "choice {choice}: {body}");
-            landed.push((choice, file_id, city));
+            let country = body["storage_location"]["country"].as_str().unwrap_or("<none>").to_string();
+            println!("UPLOAD choice={choice} file_id={file_id} storage_location.country={country}");
+            assert_eq!(country, expected_country, "choice {choice}: {body}");
+            landed.push((choice, file_id, country));
         }
 
-        // A coming-soon datacenter is refused and the stored choice is left alone.
-        let refused = api.set_preferred_region(Some("ede")).await.expect_err("ede must be refused");
-        println!("PUT ede -> {refused}");
+        // A coming-soon country is refused and the stored choice is left alone.
+        let refused = api.set_preferred_region(Some("nl"), Some(false)).await.expect_err("nl must be refused");
+        println!("PUT nl -> {refused}");
         assert!(refused.to_string().contains("region_unavailable"), "{refused}");
-        assert_eq!(api.account_region().await.unwrap().preferred_region.as_deref(), Some("fsn1"));
+        assert_eq!(api.account_region().await.unwrap().preferred_region.as_deref(), Some("europe"));
         println!("LANDED {landed:?}");
     }
 }

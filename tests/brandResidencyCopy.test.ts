@@ -1,4 +1,4 @@
-/** Product copy follows the effective continent; transparency may name the city. */
+/** Product copy follows the effective continent; it never names a city (task 2050). */
 import { describe, expect, test } from 'bun:test'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
