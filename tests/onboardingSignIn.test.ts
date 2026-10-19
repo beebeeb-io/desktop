@@ -124,7 +124,7 @@ describe('settledFrom (R8)', () => {
     expect(settledFrom(outcome())).toEqual({ kind: 'fresh' })
     expect(settledFrom(outcome({ reauthenticated: true, vault_unlocked: true }))).toEqual({ kind: 'reauthenticated', vaultUnlocked: true, keyReplaced: false })
     expect(settledFrom(outcome({ reauthenticated: true, vault_unlocked: false }))).toEqual({ kind: 'reauthenticated', vaultUnlocked: false, keyReplaced: false })
-    expect(settledFrom(outcome({ account_mismatch: { pending_changes: 3 } }))).toEqual({ kind: 'account_mismatch', pendingChanges: 3 })
+    expect(settledFrom(outcome({ account_mismatch: { pending_changes: 3 } }))).toEqual({ kind: 'account_mismatch', pendingChanges: 3, unsent: null, unsentError: null })
   })
 
   // FB-I1: a same-account re-sign-in whose kept vault key the server no longer accepts. The key was
@@ -160,7 +160,7 @@ describe('settledFrom (R8)', () => {
     expect(settled.filter((s) => s.kind === 'unreadable')).toEqual([])
     expect(settled).toContainEqual({ kind: 'reauthenticated', vaultUnlocked: false, keyReplaced: true })
     expect(settled).toContainEqual({ kind: 'reauthenticated', vaultUnlocked: true, keyReplaced: false })
-    expect(settled).toContainEqual({ kind: 'account_mismatch', pendingChanges: 3 })
+    expect(settled).toContainEqual({ kind: 'account_mismatch', pendingChanges: 3, unsent: null, unsentError: null })
   })
 
   // M9: Lane R always sends all five fields (lib.rs pins it), so a bundle cannot skew against it any
@@ -211,14 +211,14 @@ describe('onboardingSignIn carries what the sign-in became (R8)', () => {
     const same = await submitPassword('user@beebeeb.io', 'pw', fakeApi({ desktopLogin: async () => ({ ok: true, value: reauthenticated }) }))
     expect(same).toEqual({ ok: true, requiresTotp: false, settled: { kind: 'reauthenticated', vaultUnlocked: true, keyReplaced: false } })
     const other = await submitPassword('user@beebeeb.io', 'pw', fakeApi({ desktopLogin: async () => ({ ok: true, value: mismatch }) }))
-    expect(other).toEqual({ ok: true, requiresTotp: false, settled: { kind: 'account_mismatch', pendingChanges: 3 } })
+    expect(other).toEqual({ ok: true, requiresTotp: false, settled: { kind: 'account_mismatch', pendingChanges: 3, unsent: null, unsentError: null } })
   })
 
   test('the 2FA step reports them too (that is where a 2FA account learns it)', async () => {
     const same = await submitTotpCode('123456', fakeApi({ desktopLogin2fa: async () => ({ ok: true, value: reauthenticated }) }))
     expect(same).toEqual({ ok: true, settled: { kind: 'reauthenticated', vaultUnlocked: true, keyReplaced: false } })
     const other = await submitTotpCode('123456', fakeApi({ desktopLogin2fa: async () => ({ ok: true, value: mismatch }) }))
-    expect(other).toEqual({ ok: true, settled: { kind: 'account_mismatch', pendingChanges: 3 } })
+    expect(other).toEqual({ ok: true, settled: { kind: 'account_mismatch', pendingChanges: 3, unsent: null, unsentError: null } })
   })
 
   test('an unreadable result is an error in both steps, not a completed sign-in', async () => {

@@ -492,13 +492,20 @@ async fn run_handoff(
                 );
                 return Ok(());
             }
-            Some(crate::SignInSettlement::AccountMismatch { pending_changes }) => {
+            Some(crate::SignInSettlement::AccountMismatch {
+                pending_changes,
+                unsent,
+                unsent_error,
+            }) => {
                 let _ = crate::revoke_desktop_session(&client, &base_url, &creds.session_token).await;
-                emit(
-                    app,
-                    "account_mismatch",
-                    serde_json::json!({ "pending_changes": pending_changes }),
-                );
+                let mut payload = serde_json::json!({ "pending_changes": pending_changes });
+                if let Some(unsent) = unsent {
+                    payload["unsent"] = serde_json::to_value(unsent).unwrap_or(serde_json::Value::Null);
+                }
+                if let Some(unsent_error) = unsent_error {
+                    payload["unsent_error"] = serde_json::Value::String(unsent_error);
+                }
+                emit(app, "account_mismatch", payload);
                 return Err("account_mismatch".to_string());
             }
             Some(crate::SignInSettlement::Unconfirmed) => {

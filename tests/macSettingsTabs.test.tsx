@@ -9,6 +9,7 @@
  * React scheduling, focus, or anything on a Mac. Mutations that went red are in the task Notes.
  */
 import { afterEach, describe, expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
 import { createElement, Fragment } from 'react'
 import * as accountSession from '../src/accountSession'
 import * as desktopApi from '../src/desktopApi'
@@ -18,6 +19,9 @@ import * as finderSetup from '../src/finderSetup'
 import * as finderSetupCopy from '../src/finderSetupCopy'
 import * as model from '../src/macSettingsModel'
 import * as parts from '../src/macSettingsParts'
+import * as signOutCopy from '../src/signOutCopy'
+import { SignOutFlow, signOutFlowApi, connectSignOutFlowEvents, connectSignOutFlowMenu } from '../src/signOutFlow'
+import { stripCode } from '../src/signOutCopy'
 import { expand, loadComponent, mount, textOf, visibleErrorSurfaces, type Mounted, type TreeNode } from './fixtures/componentHarness'
 import { rustStr } from './fixtures/rustConstants'
 
@@ -33,6 +37,12 @@ function Modal(props: any) {
 const ConfirmSheet = loadComponent('MacSettings.tsx', 'ConfirmSheet', { React, Btn: parts.Btn, Modal })
 const ConfigLoadFailed = loadComponent('MacSettings.tsx', 'ConfigLoadFailed', { React, SettingsGroup: parts.SettingsGroup, Note: parts.Note, Btn: parts.Btn })
 const withPinned = loadComponent('MacSettings.tsx', 'withPinned', {})
+// Spec 2026-10-10 §5.1 (task 1887): the send phase and the ask, beside ConfirmSheet, with the copy they read.
+const SendingSheet = loadComponent('MacSettings.tsx', 'SendingSheet', { React, Btn: parts.Btn, Modal, ...signOutCopy })
+const UnsentAskSheet = loadComponent('MacSettings.tsx', 'UnsentAskSheet', { React, Btn: parts.Btn, Modal, ...signOutCopy })
+
+const showSignOutOutcome = loadComponent('MacSettings.tsx', 'showSignOutOutcome', { stripCode, holdSignOutWarning: accountSession.holdSignOutWarning })
+
 // The storage-location group has its own state and its own tests (macSettingsDataResidency.test.tsx); here it is a marker,
 // so the Account tab's tests read only what the Account tab itself decides.
 const DataResidencyGroup = () => createElement('div', { 'data-region-group': 'true' })
@@ -43,9 +53,12 @@ const baseBindings = {
   ...diagnosticsCopy,
   ...model,
   ...parts,
+  ...signOutCopy,
   Modal,
   ConfirmSheet,
   ConfigLoadFailed,
+  SendingSheet,
+  UnsentAskSheet,
   DataResidencyGroup,
   withPinned,
   finderActionButtonLabel: finderSetupCopy.finderActionButtonLabel,
@@ -131,6 +144,18 @@ function open(name: string, backend: Record<string, (args: any) => unknown>, ext
     hookModules: name === 'SyncTab' ? [useFinderSetupModule(extra.finder ?? { bus: finderBus(), copied: [] })] : undefined,
   })
   mounted.push(m)
+  return m
+}
+
+/** `AccountTab` as the root mounts it: the flow, its view and its outcome count as props (F9). */
+function openAccount(b: Record<string, (args: any) => unknown>, extra: { bindings?: Record<string, unknown> } = {}) {
+  const props: any = { flowView: { kind: 'idle' }, flowOutcomes: 0 }
+  let m: Mounted | null = null
+  props.flow = new SignOutFlow(signOutFlowApi, (view) => { props.flowView = view }, (outcome) => {
+    showSignOutOutcome(outcome, (toast: any) => m!.toasts.push(toast))
+    props.flowOutcomes += 1
+  })
+  m = open('AccountTab', b, { ...extra, props })
   return m
 }
 
@@ -436,6 +461,8 @@ describe('Account tab', () => {
     lock_vault: () => ({ warning: null }),
     unlock_vault: () => undefined,
     clear_session: () => ({ warning: null }),
+    sign_out_count: () => ({ askId: 'a0', files: 0, copiedFiles: 0, others: 0, missingFiles: 0, earlierFolders: [], canSend: false, notSending: null }),
+    sign_out_result_ack: () => null,
     'plugin:opener|open_url': () => undefined,
     ...over,
   })
@@ -448,7 +475,7 @@ describe('Account tab', () => {
 
   test('a Lock that happened with a warning: the vault reads locked, and the sentence is a neutral line, not an error', async () => {
     let unlocked = true
-    const m = open('AccountTab', backend({ lock_vault: () => { unlocked = false; return { warning: LOCK_WARNING } }, popover_snapshot: () => snapshot({ account: { vault_unlocked: unlocked }, storage: unlocked ? undefined : null }) }))
+    const m = openAccount(backend({ lock_vault: () => { unlocked = false; return { warning: LOCK_WARNING } }, popover_snapshot: () => snapshot({ account: { vault_unlocked: unlocked }, storage: unlocked ? undefined : null }) }))
     await settle(m)
     await press(m, 'Lock now')
     await settle(m)
@@ -459,7 +486,7 @@ describe('Account tab', () => {
   })
 
   test('a failed Lock is still followed by a fresh read of the account (M4)', async () => {
-    const m = open('AccountTab', backend({ lock_vault: () => { throw new Error('busy') } }))
+    const m = openAccount(backend({ lock_vault: () => { throw new Error('busy') } }))
     await settle(m)
     await press(m, 'Lock now')
     expect(m.calls.filter((c) => c.name === 'popover_snapshot')).toHaveLength(2)
@@ -467,7 +494,7 @@ describe('Account tab', () => {
 
   test('a sign-out that happened with a warning: signed out, and the sentence is a neutral line, not "Couldn’t sign out"', async () => {
     let signedIn = true
-    const m = open('AccountTab', backend({ clear_session: () => { signedIn = false; return { warning: SIGN_OUT_WARNING } }, popover_snapshot: () => snapshot({ account: { logged_in: signedIn } }) }))
+    const m = openAccount(backend({ clear_session: () => { signedIn = false; return { warning: SIGN_OUT_WARNING } }, popover_snapshot: () => snapshot({ account: { logged_in: signedIn } }) }))
     await settle(m)
     await press(m, 'Sign out…')
     await press(m, 'Sign out')
@@ -479,7 +506,7 @@ describe('Account tab', () => {
   })
 
   test('shows who is signed in, the plan, one storage figure on the Mac\'s number format, and the vault', async () => {
-    const m = open('AccountTab', backend())
+    const m = openAccount(backend())
     await settle(m)
     const text = visibleText(m)
     expect(text).toContain('sam@example.eu')
@@ -496,32 +523,32 @@ describe('Account tab', () => {
   })
 
   test('the storage-location group sits between the vault and sign-out, for a signed-in account only (task 1919)', async () => {
-    const m = open('AccountTab', backend())
+    const m = openAccount(backend())
     await settle(m)
     expect(find(m, (el) => el.props['data-region-group'] === 'true')).toHaveLength(1)
     const order = m.elements().filter((el) => el.props['data-row'] === 'vault' || el.props['data-row'] === 'signout' || el.props['data-region-group'] === 'true')
     expect(order.map((el) => el.props['data-row'] ?? 'region')).toEqual(['vault', 'region', 'signout'])
 
-    const out = open('AccountTab', backend({}, snapshot({ account: { logged_in: false } })))
+    const out = openAccount(backend({}, snapshot({ account: { logged_in: false } })))
     await settle(out)
     expect(find(out, (el) => el.props['data-region-group'] === 'true')).toHaveLength(0)
   })
 
   test('there is one storage source: the snapshot, never a second fetch of the usage', async () => {
-    const m = open('AccountTab', backend())
+    const m = openAccount(backend())
     await settle(m)
     expect(m.calls.map((c) => c.name).sort()).toEqual(['account_subscription', 'popover_snapshot'])
   })
 
   test('the storage bar turns red from 90 %', async () => {
-    const m = open('AccountTab', backend({}, snapshot({ storage: { used_bytes: 190_000_000_000, quota_bytes: 200_000_000_000, fetched_at: 1, stale: false } })))
+    const m = openAccount(backend({}, snapshot({ storage: { used_bytes: 190_000_000_000, quota_bytes: 200_000_000_000, fetched_at: 1, stale: false } })))
     await settle(m)
     expect(find(m, (el) => el.props.role === 'progressbar')[0].props['data-red']).toBe('true')
   })
 
   test('Lock now locks through lock_vault, reads the account again and shows the locked vault', async () => {
     let unlocked = true
-    const m = open('AccountTab', backend({ lock_vault: () => { unlocked = false; return { warning: null } }, popover_snapshot: () => snapshot({ account: { vault_unlocked: unlocked }, storage: unlocked ? undefined : null }) }))
+    const m = openAccount(backend({ lock_vault: () => { unlocked = false; return { warning: null } }, popover_snapshot: () => snapshot({ account: { vault_unlocked: unlocked }, storage: unlocked ? undefined : null }) }))
     await settle(m)
     await press(m, 'Lock now')
     expect(m.calls.filter((c) => c.name === 'lock_vault')).toHaveLength(1)
@@ -534,7 +561,7 @@ describe('Account tab', () => {
   })
 
   test('a failed lock is ONE toast and the vault still reads unlocked', async () => {
-    const m = open('AccountTab', backend({ lock_vault: () => { throw new Error('busy') } }))
+    const m = openAccount(backend({ lock_vault: () => { throw new Error('busy') } }))
     await settle(m)
     await press(m, 'Lock now')
     expect(m.toasts).toHaveLength(1)
@@ -544,7 +571,7 @@ describe('Account tab', () => {
   })
 
   test('Sign out… asks first: nothing is sent until the second click, and Cancel sends nothing', async () => {
-    const m = open('AccountTab', backend())
+    const m = openAccount(backend())
     await settle(m)
     expect(dialogs(m)).toHaveLength(0)
     await press(m, 'Sign out…')
@@ -562,16 +589,19 @@ describe('Account tab', () => {
 
   test('after signing out the tab reads the account again and says you are signed out', async () => {
     let signedIn = true
-    const m = open('AccountTab', backend({ clear_session: () => { signedIn = false; return { warning: null } }, popover_snapshot: () => snapshot({ account: { logged_in: signedIn, vault_unlocked: signedIn, email: signedIn ? 'sam@example.eu' : null }, storage: null }) }))
+    const m = openAccount(backend({ clear_session: () => { signedIn = false; return { warning: null } }, popover_snapshot: () => snapshot({ account: { logged_in: signedIn, vault_unlocked: signedIn, email: signedIn ? 'sam@example.eu' : null }, storage: null }) }))
     await settle(m)
     await press(m, 'Sign out…')
     await press(m, 'Sign out')
+    // The tab reads the account again in an effect of the flow's outcome count, which runs after the render that
+    // carries it, as React runs it after that commit.
+    await settle(m)
     expect(visibleText(m)).toContain('You’re signed out')
     expect(buttons(m)).toEqual([])
   })
 
   test('a failed sign-out is one toast', async () => {
-    const m = open('AccountTab', backend({ clear_session: () => { throw new Error('keychain locked') } }))
+    const m = openAccount(backend({ clear_session: () => { throw new Error('keychain locked') } }))
     await settle(m)
     await press(m, 'Sign out…')
     await press(m, 'Sign out')
@@ -581,7 +611,7 @@ describe('Account tab', () => {
 
   test('an account that cannot be read is ONE inline alert with Try again, not a toast', async () => {
     let fail = true
-    const m = open('AccountTab', backend({ popover_snapshot: () => { if (fail) throw new Error('boom'); return snapshot() } }))
+    const m = openAccount(backend({ popover_snapshot: () => { if (fail) throw new Error('boom'); return snapshot() } }))
     await settle(m)
     expect(alerts(m)).toHaveLength(1)
     expect(find(m, (el) => el.props['data-error-surface'] === 'account-load')).toHaveLength(1)
@@ -593,7 +623,7 @@ describe('Account tab', () => {
   })
 
   test('a plan that cannot be read is said plainly on the plan line, and nothing else breaks', async () => {
-    const m = open('AccountTab', backend({ account_subscription: () => { throw new Error('offline') } }))
+    const m = openAccount(backend({ account_subscription: () => { throw new Error('offline') } }))
     await settle(m)
     expect(visibleText(m)).toContain('Plan details aren’t available right now.')
     expect(visibleText(m)).toContain('84,3 GB of 200 GB')
@@ -601,18 +631,76 @@ describe('Account tab', () => {
   })
 
   test('Manage plan opens the billing page', async () => {
-    const m = open('AccountTab', backend())
+    const m = openAccount(backend())
     await settle(m)
     await press(m, 'Manage plan')
     expect(m.calls.find((c) => c.name === 'plugin:opener|open_url')?.args).toEqual({ url: desktopApi.BILLING_URL })
   })
 
   test('an ended session says so and offers no vault action', async () => {
-    const m = open('AccountTab', backend({}, snapshot({ phase: 'session_ended', account: { auth_expired: true }, storage: null })))
+    const m = openAccount(backend({}, snapshot({ phase: 'session_ended', account: { auth_expired: true }, storage: null })))
     await settle(m)
     expect(visibleText(m)).toContain('Your session ended')
     expect(buttons(m)).not.toContain('Lock now')
     expect(buttons(m)).not.toContain('Unlock')
+  })
+
+  /** F3, the sheets: Esc is Stop waiting in the phase and Cancel at the ask; Enter on open is Cancel. */
+  test('the send-phase and ask sheets map Esc and Enter as Dialog 3 does', () => {
+    const stops: string[] = []
+    const sending = SendingSheet({ changesLeft: 2, onStop: () => stops.push('stop') })
+    sending.props.onClose()
+    expect(stops).toEqual(['stop'])
+    const calls: string[] = []
+    const sheet = UnsentAskSheet({ ask: { askId: 'a', files: 1, copiedFiles: 1, others: 0, missingFiles: 0, earlierFolders: [] }, reason: null, onCancel: () => calls.push('cancel'), onSignOut: () => calls.push('sign out') })
+    sheet.props.onClose()
+    expect(calls, 'Esc cancels').toEqual(['cancel'])
+    expect(sheet.props.initialFocusRef).toBeUndefined() // focus starts on the close button, so Enter on open is Cancel
+  })
+
+  /** Dialog 3's ask as the design draws it (design/hifi/macos-settings-dialogs.html, "Ask, a missing copy and an earlier
+   *  folder"): each line its own sheet paragraph, the folders' line under the missing one, and each path a sheet
+   *  paragraph in mono, oldest first, before the other changes and the reason. */
+  test('the ask renders its lines and each earlier folder as the design draws them', () => {
+    const [older, newer] = ['/Users/sam/Library/Containers/io.beebeeb.app/Data/Documents/Changes not sent/2026-10-09 at 10.00.00', '/Users/sam/Library/Containers/io.beebeeb.app/Data/Documents/Changes not sent/2026-10-10 at 14.05.12']
+    const ask = { askId: 'a', files: 2, copiedFiles: 1, others: 1, missingFiles: 1, earlierFolders: [older, newer] }
+    const sheet = UnsentAskSheet({ ask, reason: 'offline', onCancel: () => {}, onSignOut: () => {} })
+    const body = [sheet.props.children].flat(Infinity).filter(Boolean)
+    expect(body.map((el: any) => [el.type, el.props.className, el.props.style?.fontFamily ?? null, textOf(el.props.children)])).toEqual([
+      ['p', 'ms-sheet-copy', null, signOutCopy.filesLine(2, 1, false)],
+      ['p', 'ms-sheet-copy', null, signOutCopy.A3_ONE_OF_MANY],
+      ['p', 'ms-sheet-copy', null, signOutCopy.A3E_MANY],
+      ['p', 'ms-sheet-copy', 'var(--font-mono)', older],
+      ['p', 'ms-sheet-copy', 'var(--font-mono)', newer],
+      ['p', 'ms-sheet-copy', null, signOutCopy.othersLine(1, true, false)],
+      ['p', 'ms-sheet-copy', null, signOutCopy.A5_OFFLINE],
+    ])
+  })
+
+  /** Spec 2026-10-10 §5.3 row 1 and §11: a count that cannot be read is E3, one toast in Settings, its code never
+   *  shown, and nothing signs out. */
+  test('a count that fails is one toast without its code, and nothing signs out', async () => {
+    const e3 = `unsent_count_failed: ${signOutCopy.E3_UNSENT_COUNT_FAILED}`
+    const m = openAccount(backend({ sign_out_count: () => { throw new Error(e3) } }))
+    await settle(m)
+    await press(m, 'Sign out…')
+    await press(m, 'Sign out')
+    await settle(m)
+    expect(m.toasts.map((t) => [t.title, t.message])).toEqual([['Couldn’t sign out', signOutCopy.E3_UNSENT_COUNT_FAILED]])
+    expect(m.calls.map((c) => c.name)).not.toContain('clear_session')
+  })
+
+  test('nothing waits: "Sign out" counts, then signs out with no keepUnsent', async () => {
+    const m = openAccount(backend({ clear_session: (args: any) => ({ warning: null, args }) }))
+    await settle(m)
+    await press(m, 'Sign out…')
+    await press(m, 'Sign out')
+    await settle(m)
+    const names = m.calls.map((c) => c.name)
+    // The order check alone passes for a tab that never counts (-1 is less than any index).
+    expect(names, 'it counts').toContain('sign_out_count')
+    expect(names.indexOf('sign_out_count')).toBeLessThan(names.indexOf('clear_session'))
+    expect(m.calls.find((c) => c.name === 'clear_session')?.args?.keepUnsent).toBeUndefined()
   })
 })
 
@@ -650,6 +738,11 @@ describe('Sync tab', () => {
           opts.log?.push('read')
           if (opts.keptReadFails) throw new Error('desktop.toml could not be read')
           return st.kept
+        },
+        // Spec 2026-10-10 §9 (task 1887): the sign-out's own kept folder, read for the row above 1882's; none here.
+        kept_unsent_folder: () => {
+          opts.log?.push('read unsent')
+          return null
         },
         dismiss_kept_unsynced_folder: (a: any) => {
           if (opts.dismissFails) throw new Error('disk full')
@@ -1049,9 +1142,11 @@ describe('Sync tab', () => {
     test('the first read waits for the listener, so a folder saved in between is not missed', async () => {
       const log: string[] = []
       const { m, kept } = await openSync({ kept: KEPT, log })
-      expect(log).toEqual(['subscribed', 'read'])
+      // Two rows listen (task 1887: the sign-out's kept folder, then 1882's), and each reads only once its own
+      // listener is registered.
+      expect(log).toEqual(['subscribed', 'read', 'subscribed', 'read unsent'])
       expect(keptNotes(m)).toHaveLength(1)
-      expect(kept.live).toBe(1)
+      expect(kept.live).toBe(2)
       m.unmount()
       expect(kept.live).toBe(0) // and a closed tab stops listening
     })
@@ -1335,7 +1430,7 @@ describe('MacSettings window', () => {
   const tabStub = (id: string) => () => createElement('div', { 'data-tab': id })
   const settingsStub = () => ({ state: { status: 'loading' }, save: async () => {}, reload: async () => {} })
   const openWindow = (props: any = { initialTab: 'general' }, bindings: Record<string, unknown> = {}) =>
-    open('MacSettings', {}, { props, bindings: { GeneralTab: tabStub('general'), AccountTab: tabStub('account'), SyncTab: tabStub('sync'), AboutTab: tabStub('about'), useSettingsConfig: settingsStub, listen: () => Promise.resolve(() => {}), connectNativeUpdateMenu: () => () => {}, ...bindings } })
+    open('MacSettings', {}, { props, bindings: { GeneralTab: tabStub('general'), AccountTab: tabStub('account'), SyncTab: tabStub('sync'), AboutTab: tabStub('about'), useSettingsConfig: settingsStub, listen: () => Promise.resolve(() => {}), connectNativeUpdateMenu: () => () => {}, SignOutFlow, signOutFlowApi, showSignOutOutcome, connectSignOutFlowEvents: () => () => {}, connectSignOutFlowMenu: () => () => {}, ...bindings } })
 
   const shown = (m: Mounted) => find(m, (el) => el.props['data-tab'] !== undefined).map((el) => el.props['data-tab'])
   const tabs = (m: Mounted) => find(m, (el) => el.props.role === 'tab')
@@ -1365,6 +1460,7 @@ describe('MacSettings window', () => {
         listen: (_event: string, callback: () => void) => { onMenu = callback; return Promise.resolve(() => {}) },
         connectNativeUpdateMenu: realConnectNativeUpdateMenu,
         desktopUpdateCheck,
+        SignOutFlow, signOutFlowApi, showSignOutOutcome, connectSignOutFlowEvents: () => () => {}, connectSignOutFlowMenu: () => () => {},
       },
     })
     await m.flush()
@@ -1389,6 +1485,7 @@ describe('MacSettings window', () => {
         listen: () => Promise.resolve(() => {}),
         connectNativeUpdateMenu: realConnectNativeUpdateMenu,
         desktopUpdateCheck: { check: async () => {} },
+        SignOutFlow, signOutFlowApi, showSignOutOutcome, connectSignOutFlowEvents: () => () => {}, connectSignOutFlowMenu: () => () => {},
       },
     })
     await settle(m)
@@ -1406,6 +1503,7 @@ describe('MacSettings window', () => {
         listen: () => Promise.resolve(() => {}),
         connectNativeUpdateMenu: realConnectNativeUpdateMenu,
         desktopUpdateCheck: { check: async () => {} },
+        SignOutFlow, signOutFlowApi, showSignOutOutcome, connectSignOutFlowEvents: () => () => {}, connectSignOutFlowMenu: () => () => {},
       },
     })
     await settle(m)
@@ -1456,6 +1554,55 @@ describe('MacSettings window', () => {
     expect(root.props.className).toBe('ms-shell')
     expect(find(m, (el) => /sidebar/i.test(String(el.props.className ?? '')))).toHaveLength(0)
   })
+
+  /** F9: the flow and its request live in the root. A request handled once never runs again, however
+   *  often the Account tab mounts: a request, Cancel at the ask, the Sync tab, the Account tab again → one count, no
+   *  `clear_session`. */
+  test('a handled flow request never runs again when the Account tab mounts again', async () => {
+    // First, before anything reads the flow: the tab, which mounts on every visit, never builds a flow or runs a
+    // request itself. A tab that did would get no `flow` from the root, and the behaviour below would stop on
+    // `flow.current()` of `undefined` before it reached this pin.
+    const source = readFileSync(new URL('../src/MacSettings.tsx', import.meta.url), 'utf8')
+    const start = source.indexOf('function AccountTab(')
+    expect(start, 'AccountTab is in MacSettings.tsx').toBeGreaterThan(-1)
+    const tab = source.slice(start, source.indexOf('\n}\n', start))
+    for (const banned of ['new SignOutFlow(', 'connectSignOutFlowMenu(', 'connectSignOutFlowEvents(', '.request()']) {
+      expect(tab.includes(banned), banned).toBe(false)
+    }
+    let pending = true
+    let flow: any = null
+    const accountStub = (props: any) => { flow = props.flow; return createElement('div', { 'data-tab': 'account' }) }
+    const m = open('MacSettings', {
+      consume_sign_out_flow_request: () => { const was = pending; pending = false; return was },
+      sign_out_count: () => ({ askId: 'a1', files: 1, copiedFiles: 1, others: 0, missingFiles: 0, earlierFolders: [], canSend: false, notSending: 'offline' }),
+      clear_session: () => ({ warning: null }),
+    }, {
+      props: { initialTab: 'general' },
+      bindings: {
+        GeneralTab: tabStub('general'), AccountTab: accountStub, SyncTab: tabStub('sync'), AboutTab: tabStub('about'),
+        useSettingsConfig: settingsStub,
+        listen: () => Promise.resolve(() => {}),
+        connectNativeUpdateMenu: () => () => {},
+        // `settle` runs the root's update-menu effect, which reads `desktopUpdateCheck.check`; the update-menu tests
+        // above bind it the same way.
+        desktopUpdateCheck: { check: async () => {} },
+        SignOutFlow, signOutFlowApi, connectSignOutFlowEvents, connectSignOutFlowMenu, stripCode, showSignOutOutcome,
+      },
+    })
+    await settle(m)
+    expect(shown(m)).toEqual(['account'])
+    expect(flow.current().kind).toBe('ask')
+    flow.cancel()
+    m.render()
+    tabs(m)[2].props.onClick() // Sync
+    m.render()
+    tabs(m)[1].props.onClick() // Account again: the tab mounts again
+    m.render()
+    await settle(m)
+    expect(m.calls.filter((c) => c.name === 'sign_out_count')).toHaveLength(1)
+    expect(m.calls.filter((c) => c.name === 'clear_session')).toHaveLength(0)
+    expect(flow.current().kind).toBe('idle')
+  })
 })
 
 // ── Confirmation dialogs: danger + Enter (task 1683 follow-up, ruling 2026-10-02) ──
@@ -1474,6 +1621,8 @@ describe('Confirmation dialogs: danger and Enter', () => {
     lock_vault: () => ({ warning: null }),
     unlock_vault: () => undefined,
     clear_session: () => ({ warning: null }),
+    sign_out_count: () => ({ askId: 'a0', files: 0, copiedFiles: 0, others: 0, missingFiles: 0, earlierFolders: [], canSend: false, notSending: null }),
+    sign_out_result_ack: () => null,
   })
   const repairBackend = (over: Record<string, (a: any) => unknown> = {}) => ({
     finder_setup_state: () => finder.installed,
@@ -1497,7 +1646,7 @@ describe('Confirmation dialogs: danger and Enter', () => {
   }
 
   test('the Sign out confirm renders as destructive red, Cancel stays neutral, and the order stays Cancel → Sign out', async () => {
-    const m = open('AccountTab', accountBackend())
+    const m = openAccount(accountBackend())
     await settle(m)
     await press(m, 'Sign out…')
     expect(dialogs(m)).toHaveLength(1)
@@ -1519,7 +1668,7 @@ describe('Confirmation dialogs: danger and Enter', () => {
   })
 
   test('on open a stray Return resolves to nothing: nothing is sent, and the only Enter handler in the sheet is the confirm button', async () => {
-    const m = open('AccountTab', accountBackend())
+    const m = openAccount(accountBackend())
     await settle(m)
     await press(m, 'Sign out…')
     expect(m.calls.filter((c) => c.name === 'clear_session')).toHaveLength(0)
@@ -1529,7 +1678,7 @@ describe('Confirmation dialogs: danger and Enter', () => {
   })
 
   test('Enter on the focused confirm button confirms exactly once, and preventDefault keeps the browser click from confirming twice', async () => {
-    const m = open('AccountTab', accountBackend())
+    const m = openAccount(accountBackend())
     await settle(m)
     await press(m, 'Sign out…')
     expect(keyEnter(button(m, 'Sign out'))).toBe(1)
@@ -1546,7 +1695,7 @@ describe('Confirmation dialogs: danger and Enter', () => {
   })
 
   test('a key that is not Enter does not confirm through the handler', async () => {
-    const m = open('AccountTab', accountBackend())
+    const m = openAccount(accountBackend())
     await settle(m)
     await press(m, 'Sign out…')
     button(m, 'Sign out').props.onKeyDown({ key: ' ', preventDefault: () => {} })

@@ -141,6 +141,7 @@ macOS counts the item as synced. Sign-out then purges the upload queue and its s
 that is still waiting in the upload queue at sign-out is neither in the queue nor kept by this
 mode. Repair keeps the queue (`pending_operations_preserved`), so Repair is not affected. Owner:
 the lead, as a follow-up task; spec A's R8 already removes the worst trigger ("Sign in again").
+Closed by `docs/specs/2026-10-10-macos-sign-out-waiting-writes.md` (task 1887): a sign-out by choice now copies every queued Finder save into its own kept folder before the queue is purged, and asks first. — lane for the lead, 2026-10-19 (1887)
 
 ## 4. Where the kept files end up
 

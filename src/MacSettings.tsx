@@ -25,7 +25,6 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type Ke
 import {
   accountSubscription,
   BILLING_URL,
-  clearSession,
   command,
   commandUnavailableLabel,
   lockVault,
@@ -69,6 +68,25 @@ import {
   type SettingsTab,
 } from './macSettingsModel'
 import { Btn, Note, Select, SettingRow, SettingsGroup, SettingsIcon, Switch, ToggleRow } from './macSettingsParts'
+import {
+  A0_TITLE,
+  ASK_CANCEL,
+  ASK_SIGN_OUT,
+  askLines,
+  K2_DISMISS,
+  K2_ROW,
+  K2_SHOW,
+  K3_TOAST,
+  P0_TITLE,
+  P2_HINT,
+  P3_STOP,
+  progressLine,
+  stripCode,
+  type AskCounts,
+  type EndReason,
+  type NotSending,
+} from './signOutCopy'
+import { connectSignOutFlowEvents, connectSignOutFlowMenu, SignOutFlow, signOutFlowApi, type FlowOutcome, type FlowView } from './signOutFlow'
 import { residencySummary } from './windows/dataResidencySettingsModel'
 import { useDataResidency } from './windows/useDataResidency'
 import { Modal, useToast } from './windows/ui'
@@ -359,14 +377,17 @@ function DataResidencyGroup() {
 }
 
 type AccountLoad = { status: 'loading' } | { status: 'failed' } | { status: 'ready'; snapshot: PopoverSnapshot }
-type AccountBusy = 'lock_vault' | 'unlock_vault' | 'clear_session' | null
+type AccountBusy = 'lock_vault' | 'unlock_vault' | null
 
-function AccountTab() {
+/**
+ * The sign-out runs through the window's one flow (spec 2026-10-10 §5.1), which the root owns and hands in with its
+ * view and a count of its outcomes: this tab mounts on every visit, so it builds no flow and consumes no request.
+ */
+function AccountTab({ flow, flowView, flowOutcomes }: { flow: SignOutFlow; flowView: FlowView; flowOutcomes: number }) {
   const { showToast } = useToast()
   const [load, setLoad] = useState<AccountLoad>({ status: 'loading' })
   const [plan, setPlan] = useState<Subscription | null | undefined>(undefined)
   const [busy, setBusy] = useState<AccountBusy>(null)
-  const [confirmSignOut, setConfirmSignOut] = useState(false)
   // FB-24: a Lock or a sign-out that happened but could not confirm one step. Rust's sentence, shown
   // as a neutral line (never under "Couldn’t …"), until the next action. A sign-out's sentence is held
   // outside the session boundary, because the sign-out remounts this tab (accountSession.ts).
@@ -378,9 +399,10 @@ function AccountTab() {
     setLoad(result.ok ? { status: 'ready', snapshot: result.value } : { status: 'failed' })
   }, [])
 
+  // Read again after each sign-out outcome as well: a read, so running it again on a mount is harmless.
   useEffect(() => {
     void refresh()
-  }, [refresh])
+  }, [refresh, flowOutcomes])
 
   const account = load.status === 'ready' ? load.snapshot.account : null
   const signedIn = account?.logged_in === true
@@ -401,9 +423,9 @@ function AccountTab() {
     }
   }, [signedIn, unlocked])
 
-  // One action at a time. An Err means it did not happen: one error toast. An Ok of a Lock or a
-  // sign-out may carry a warning (FB-24): its sentence becomes the neutral note. The account is read
-  // again after ANY result (M4), so the tab never keeps showing a state the action changed.
+  // One action at a time. An Err means it did not happen: one error toast. An Ok of a Lock may carry a
+  // warning (FB-24): its sentence becomes the neutral note. The account is read again after ANY result
+  // (M4), so the tab never keeps showing a state the action changed. The sign-out is the flow's.
   const run = async (name: NonNullable<AccountBusy>, send: () => Promise<CommandResult<unknown>>, failTitle: string) => {
     setBusy(name)
     setActionNote(null)
@@ -424,17 +446,6 @@ function AccountTab() {
   const lock = async () => {
     const result = await run('lock_vault', lockVault, 'Couldn’t lock the vault')
     if (result.ok) setActionNote((result.value as SessionActionOutcome).warning?.sentence ?? null)
-  }
-
-  // The sentence is held the moment the sign-out answers, before the tab reads the account again: the session
-  // boundary can remount this window at any point after the sign-out, and the remount must find it held.
-  const signOut = async () => {
-    setConfirmSignOut(false)
-    await run('clear_session', async () => {
-      const result = await clearSession()
-      if (result.ok) holdSignOutWarning(result.value.warning?.sentence ?? null)
-      return result
-    }, 'Couldn’t sign out')
   }
 
   const shownNote = actionNote ?? signOutNote
@@ -571,7 +582,7 @@ function AccountTab() {
           label="Sign out of this Mac"
           hint="You’ll need your password to sign back in."
           control={
-            <Btn disabled={busy === 'clear_session'} onClick={() => setConfirmSignOut(true)}>
+            <Btn disabled={flowView.kind !== 'idle'} onClick={() => flow.open()}>
               Sign out…
             </Btn>
           }
@@ -579,15 +590,19 @@ function AccountTab() {
       </SettingsGroup>
 
       <ConfirmSheet
-        open={confirmSignOut}
+        open={flowView.kind === 'confirm'}
         title="Sign out of this Mac?"
         confirmLabel="Sign out"
         danger
-        onCancel={() => setConfirmSignOut(false)}
-        onConfirm={() => void signOut()}
+        onCancel={() => flow.cancel()}
+        onConfirm={() => void flow.confirm()}
       >
         Sync stops until you sign in again.
       </ConfirmSheet>
+      {flowView.kind === 'sending' ? <SendingSheet changesLeft={flowView.changesLeft} onStop={() => void flow.stopWaiting()} /> : null}
+      {flowView.kind === 'ask' ? (
+        <UnsentAskSheet ask={flowView.ask} reason={flowView.reason} onCancel={() => flow.cancel()} onSignOut={() => void flow.signOutAtAsk()} />
+      ) : null}
     </>
   )
 }
@@ -646,6 +661,46 @@ function ConfirmSheet({
   )
 }
 
+/** Spec 2026-10-10 §11, P0-P3: the send phase. Esc is "Stop waiting". The count never reads 0. */
+function SendingSheet({ changesLeft, onStop }: { changesLeft: number; onStop: () => void }) {
+  return (
+    <Modal open onClose={onStop} title={P0_TITLE} maxWidth={400} footer={<div className="ms-sheet-footer"><Btn onClick={onStop}>{P3_STOP}</Btn></div>}>
+      <p className="ms-sheet-copy" aria-live="polite">{progressLine(changesLeft)}</p>
+      <p className="ms-sheet-copy">{P2_HINT}</p>
+    </Modal>
+  )
+}
+
+/** Spec 2026-10-10 §11, A0-A5: the ask. Dialog 3's keyboard rule: Enter on open is Cancel, Esc cancels. */
+function UnsentAskSheet({ ask, reason, onCancel, onSignOut }: { ask: AskCounts; reason: EndReason | NotSending | null; onCancel: () => void; onSignOut: () => void }) {
+  const lines = askLines(ask, reason, false)
+  const onConfirmKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+    if (event.key !== 'Enter') return
+    event.preventDefault()
+    onSignOut()
+  }
+  return (
+    <Modal
+      open
+      onClose={onCancel}
+      title={A0_TITLE}
+      maxWidth={440}
+      footer={
+        <div className="ms-sheet-footer">
+          <Btn onClick={onCancel}>{ASK_CANCEL}</Btn>
+          <Btn danger onKeyDown={onConfirmKeyDown} onClick={onSignOut}>{ASK_SIGN_OUT}</Btn>
+        </div>
+      }
+    >
+      {lines.paragraphs.slice(0, lines.foldersAfter).map((line) => <p key={line} className="ms-sheet-copy">{line}</p>)}
+      {lines.foldersLine ? <p className="ms-sheet-copy">{lines.foldersLine}</p> : null}
+      {/* Each path a sheet paragraph in mono, as Dialog 3's ask is drawn (design/hifi/macos-settings-dialogs.html). */}
+      {lines.folders.map((folder) => <p key={folder} className="ms-sheet-copy" style={{ fontFamily: 'var(--font-mono)' }}>{folder}</p>)}
+      {lines.paragraphs.slice(lines.foldersAfter).map((line) => <p key={line} className="ms-sheet-copy">{line}</p>)}
+    </Modal>
+  )
+}
+
 // ── Sync ────────────────────────────────────────────────────────────────────
 
 type RepairPhase = 'idle' | 'confirming' | 'busy'
@@ -697,6 +752,37 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
     () => subscribeKeptFolderChanged(() => void loadKept(), { onSubscribed: () => void loadKept() }),
     [loadKept],
   )
+
+  // Spec 2026-10-10 §9: the folder a sign-out copied unsent changes into. Our row comes first; 1882's follows. Rust
+  // saves it before the purge and emits `kept-folder-changed`; a failed read shows no row, as 1882's.
+  const [keptUnsent, setKeptUnsent] = useState<string | null>(null)
+  const loadKeptUnsent = useCallback(async () => {
+    const result = await command<string | null>('kept_unsent_folder')
+    setKeptUnsent(result.ok ? result.value : null)
+  }, [])
+  useEffect(
+    () => subscribeKeptFolderChanged(() => void loadKeptUnsent(), { onSubscribed: () => void loadKeptUnsent() }),
+    [loadKeptUnsent],
+  )
+  // "Show in Finder" fails only when the folder is gone (K3); the row stays until Dismiss.
+  const showKeptUnsent = async () => {
+    if (keptUnsent === null) return
+    const result = await command<void>('show_kept_unsent_folder', { path: keptUnsent })
+    if (!result.ok) showToast({ variant: 'error', message: K3_TOAST })
+  }
+  const dismissKeptUnsent = async () => {
+    if (keptUnsent === null) return
+    const result = await command<DismissKeptFolderResult>('dismiss_kept_unsent_folder', { path: keptUnsent })
+    if (!result.ok) {
+      showToast({
+        variant: 'error',
+        title: 'Couldn’t dismiss that note',
+        message: result.unsupported ? commandUnavailableLabel('dismiss_kept_unsent_folder') : result.reason,
+      })
+      return
+    }
+    setKeptUnsent(keptFolderAfterDismiss(result.value))
+  }
 
   // A one-off action that gates nothing: a failure is a toast (house rule), and the row stays.
   const dismissKept = async () => {
@@ -833,6 +919,21 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
           </Note>
         ) : null}
         {repairResult ? <Note kind="status">{repairResult}</Note> : null}
+        {keptUnsent !== null ? (
+          <Note
+            kind="status"
+            reason={keptUnsent}
+            reasonWraps
+            actions={
+              <>
+                <Btn onClick={() => void showKeptUnsent()}>{K2_SHOW}</Btn>
+                <Btn onClick={() => void dismissKeptUnsent()}>{K2_DISMISS}</Btn>
+              </>
+            }
+          >
+            {K2_ROW}
+          </Note>
+        ) : null}
         {kept !== null ? (
           <Note
             kind="status"
@@ -1037,6 +1138,16 @@ function AboutTab() {
 
 // ── The window ──────────────────────────────────────────────────────────────
 
+/** How the window shows a sign-out's outcome (§5.1): a failure as one toast, its code stripped (§11); a completed
+ *  sign-out's warning held for the Account tab's note, outside the session boundary (accountSession.ts). */
+function showSignOutOutcome(outcome: FlowOutcome, showToast: (toast: { variant: 'error'; title: string; message: string }) => void) {
+  if (outcome.kind === 'failed') {
+    showToast({ variant: 'error', title: 'Couldn’t sign out', message: stripCode(outcome.message) })
+  } else {
+    holdSignOutWarning(outcome.warning)
+  }
+}
+
 export default function MacSettings({ initialTab }: { initialTab?: SettingsTab }) {
   const settings = useSettingsConfig()
   // A remount after a sign-out that left a sentence opens on the Account tab, where it is shown (accountSession.ts).
@@ -1065,6 +1176,28 @@ export default function MacSettings({ initialTab }: { initialTab?: SettingsTab }
     },
     desktopUpdateCheck.check,
   ), [])
+
+  // Spec 2026-10-10 §5.1 and F9: the sign-out flow and its pending request live here, not in the Account tab, which
+  // mounts only while it is selected. A flow it owned would be new at every return to the tab, and a request it had
+  // handled would run again. The menu and the compact page hand this window a request; it runs once.
+  const { showToast } = useToast()
+  const showToastRef = useRef(showToast)
+  showToastRef.current = showToast
+  const [flowView, setFlowView] = useState<FlowView>({ kind: 'idle' })
+  const [flowOutcomes, setFlowOutcomes] = useState(0)
+  const flowRef = useRef<SignOutFlow | null>(null)
+  if (flowRef.current === null) {
+    flowRef.current = new SignOutFlow(signOutFlowApi, setFlowView, (outcome) => {
+      showSignOutOutcome(outcome, (toast) => showToastRef.current(toast))
+      setFlowOutcomes((n) => n + 1)
+    })
+  }
+  const flow = flowRef.current
+  useEffect(() => connectSignOutFlowEvents(listen, flow), [flow])
+  useEffect(() => connectSignOutFlowMenu(listen, () => command<boolean>('consume_sign_out_flow_request'), () => {
+    setTab('account')
+    void flow.request()
+  }), [flow])
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     const next = tabAfterKey(tab, event.key)
@@ -1098,7 +1231,7 @@ export default function MacSettings({ initialTab }: { initialTab?: SettingsTab }
       </div>
       <div className="ms-pane" id="ms-panel" role="tabpanel" aria-labelledby={`ms-tab-${tab}`} tabIndex={0}>
         {tab === 'general' ? <GeneralTab settings={settings} /> : null}
-        {tab === 'account' ? <AccountTab /> : null}
+        {tab === 'account' ? <AccountTab flow={flow} flowView={flowView} flowOutcomes={flowOutcomes} /> : null}
         {tab === 'sync' ? <SyncTab settings={settings} /> : null}
         {tab === 'about' ? <AboutTab /> : null}
       </div>

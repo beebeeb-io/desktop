@@ -2,7 +2,8 @@
  * R8 copy (spec 2026-10-06): everything the re-sign-in flow says that is new. The account-switch
  * warning is drawn first in design/hifi/macos-settings-dialogs.html §4 (Task 13, amended for the
  * onboarding-window Card variant); tests/reauthInPlace.test.tsx holds both to the same strings. Honest
- * about the loss: the changes that have not uploaded are removed.
+ * about the loss: on Windows and Linux the changes that have not uploaded are removed; on macOS the step is the
+ * sign-out ask of spec 2026-10-10 (A0s-A4s), and they are kept in a folder first.
  */
 export const ACCOUNT_SWITCH_TITLE = 'Switch to a different account?'
 export const ACCOUNT_SWITCH_CONFIRM = 'Sign out and switch'

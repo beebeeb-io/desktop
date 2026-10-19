@@ -59,6 +59,10 @@ const FINDER_REMOVAL_OWED_KEY: &str = "finder_removal_owed";
 /// A clear that owed no removal (a sign-out whose Finder removal was confirmed) leaves this mark: the domain is
 /// known gone, so the next account's first start, onto an empty and unowned database, owes nothing. Not account data.
 const FINDER_DOMAIN_GONE_KEY: &str = "finder_domain_gone";
+/// Spec 2026-10-10 §15 question 3, option A. Set by a sign-out's keep step after the engine stop, so a Finder accept
+/// that outlived the stop queues nothing. Cleared at once by a sign-out that stops without purging, by the purge with
+/// the account's rows, by `engine_start_repair`, and at launch.
+const FINDER_ACCEPTS_CLOSED_KEY: &str = "finder_accepts_closed";
 
 pub const LOCAL_ACTIVITY_MAX_ROWS: usize = 200;
 /// How long a provisional id keeps resolving to the server id its create landed as (spec §7.1).
@@ -868,6 +872,35 @@ pub struct ItemPresentation {
     pub version_filled: bool,
 }
 
+/// One queued operation as a sign-out reads it (spec 2026-10-10 §2, W2): every op but a hydrate or a
+/// pin, with its file's path and whether its upload has a recorded completion.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct WaitingRow {
+    pub op_id: String,
+    pub kind: OperationKind,
+    pub file_id: Option<String>,
+    pub file_path: Option<String>,
+    pub payload_path: Option<String>,
+    pub origin: Option<WriteOrigin>,
+    /// The queue's order (`rowid`): higher was queued later.
+    pub queue_order: i64,
+    pub attempts: i64,
+    pub max_attempts: i64,
+    pub paused: bool,
+    /// `upload_resume.completed_version` is set: the server has these bytes (§8 item 3).
+    pub completed: bool,
+}
+
+/// Spec 2026-10-10 §5.2 step 8: what the purge guard read. `unkept`: waiting changes the keep step did not keep or
+/// acknowledge (the purge refuses). `waiting_payloads`: every waiting write's staged copy, deleted last (W13).
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PurgeGuardRead {
+    pub unkept: Vec<String>,
+    pub waiting_payloads: Vec<String>,
+}
+
 /// [`StateDb::upsert_file`] on an open connection or transaction.
 fn upsert_file_conn<C: std::ops::Deref<Target = Connection>>(conn: &C, e: &FileEntry) -> Result<()> {
     // Task 1697: capture the OLD row before the upsert so the change log
@@ -1036,6 +1069,77 @@ fn has_finder_write_conn<C: std::ops::Deref<Target = Connection>>(conn: &C, file
         params![file_id],
         |row| row.get(0),
     )
+}
+
+/// Whether a sign-out closed Finder accepts, read inside the caller's transaction (spec 2026-10-10 §15 question 3).
+fn finder_accepts_closed_conn(conn: &Connection) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sync_state WHERE key = ?1)",
+        params![FINDER_ACCEPTS_CLOSED_KEY],
+        |row| row.get(0),
+    )
+}
+
+/// [`StateDb::enqueue_operation`]'s insert on an open connection or transaction: a new op, or an op with the same id
+/// replaced.
+fn insert_operation_conn(conn: &Connection, op: &PendingOperation) -> Result<()> {
+    conn.execute(
+        "INSERT INTO operation_queue (
+                op_id, kind, file_id, parent_id, target_path, metadata_json, payload_path,
+                base_version, base_object_version_id, attempts, max_attempts, next_retry_at,
+                last_error, last_error_class, paused_reason, backup_source_key, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL, NULL, ?14, ?15, ?16)
+             ON CONFLICT(op_id) DO UPDATE SET
+                kind = excluded.kind,
+                file_id = excluded.file_id,
+                parent_id = excluded.parent_id,
+                target_path = excluded.target_path,
+                metadata_json = excluded.metadata_json,
+                payload_path = excluded.payload_path,
+                base_version = excluded.base_version,
+                base_object_version_id = excluded.base_object_version_id,
+                attempts = excluded.attempts,
+                max_attempts = excluded.max_attempts,
+                next_retry_at = excluded.next_retry_at,
+                last_error = excluded.last_error,
+                last_error_class = excluded.last_error_class,
+                paused_reason = excluded.paused_reason,
+                backup_source_key = excluded.backup_source_key,
+                updated_at = excluded.updated_at",
+        params![
+            op.op_id,
+            op.kind.as_str(),
+            op.file_id,
+            op.parent_id,
+            op.target_path,
+            op.metadata_json,
+            op.payload_path,
+            op.base_version,
+            op.base_object_version_id,
+            op.attempts,
+            op.max_attempts,
+            op.next_retry_at,
+            op.last_error,
+            op.backup_source_key,
+            op.created_at,
+            op.updated_at
+        ],
+    )?;
+    Ok(())
+}
+
+/// Spec 2026-10-10 §5.2 step 6: what a fenced Finder enqueue did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinderEnqueue {
+    Queued,
+    /// A sign-out closed Finder accepts: nothing was written.
+    AcceptsClosed,
+}
+
+/// A Finder folder create's row, written in the same transaction as its op, so a refused create leaves no row behind.
+pub struct FinderFolderRow<'a> {
+    pub entry: &'a FileEntry,
+    pub parent_id: Option<&'a str>,
 }
 
 /// Spec §7.2 (final review): the path sweeps' last step, in their transaction, after their
@@ -1643,6 +1747,9 @@ pub enum AcceptOutcome {
     /// it with its copy between the copy and this transaction (spec §8.7 S6). Nothing was
     /// written; the write is retried.
     CopyGone,
+    /// A sign-out closed Finder accepts after its engine stop (spec 2026-10-10 §15 question 3). Nothing was
+    /// written; the write is retried, and macOS keeps the change until it is.
+    AcceptsClosed,
     /// A modify of an item in the trash: its row is `Trashing`, or the system names the trash
     /// container as its parent (spec §7.2). Nothing was written; the save is refused.
     InTrash,
@@ -3729,6 +3836,11 @@ impl StateDb {
         use crate::write_token::{BaseDecision, WriteToken, decide_base, mint_write_id};
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        // Spec 2026-10-10 §15 question 3: a sign-out's keep step closed accepts after its engine stop. Read in this
+        // transaction, so an accept that outlived the stop either committed before the close or queues nothing.
+        if finder_accepts_closed_conn(&tx)? {
+            return Ok(AcceptOutcome::AcceptsClosed);
+        }
         // §8.7 S6: the copy must still be journalled as unfinished. An engine-start sweep deletes
         // such a row, guarded, before it unlinks the copy, so either this transaction comes first
         // and the op then names the copy (the sweep keeps it), or the row is gone and nothing is
@@ -4424,49 +4536,35 @@ impl StateDb {
 
     pub fn enqueue_operation(&self, op: &PendingOperation) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        conn.execute(
-            "INSERT INTO operation_queue (
-                op_id, kind, file_id, parent_id, target_path, metadata_json, payload_path,
-                base_version, base_object_version_id, attempts, max_attempts, next_retry_at,
-                last_error, last_error_class, paused_reason, backup_source_key, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL, NULL, ?14, ?15, ?16)
-             ON CONFLICT(op_id) DO UPDATE SET
-                kind = excluded.kind,
-                file_id = excluded.file_id,
-                parent_id = excluded.parent_id,
-                target_path = excluded.target_path,
-                metadata_json = excluded.metadata_json,
-                payload_path = excluded.payload_path,
-                base_version = excluded.base_version,
-                base_object_version_id = excluded.base_object_version_id,
-                attempts = excluded.attempts,
-                max_attempts = excluded.max_attempts,
-                next_retry_at = excluded.next_retry_at,
-                last_error = excluded.last_error,
-                last_error_class = excluded.last_error_class,
-                paused_reason = excluded.paused_reason,
-                backup_source_key = excluded.backup_source_key,
-                updated_at = excluded.updated_at",
-            params![
-                op.op_id,
-                op.kind.as_str(),
-                op.file_id,
-                op.parent_id,
-                op.target_path,
-                op.metadata_json,
-                op.payload_path,
-                op.base_version,
-                op.base_object_version_id,
-                op.attempts,
-                op.max_attempts,
-                op.next_retry_at,
-                op.last_error,
-                op.backup_source_key,
-                op.created_at,
-                op.updated_at
-            ],
-        )?;
-        Ok(())
+        insert_operation_conn(&conn, op)
+    }
+
+    /// Spec 2026-10-10 §5.2 step 6: every change the Finder IPC queues (a rename, a move, a folder create with its
+    /// row, a delete, and the watcher's and non-macOS writes) is queued in one `BEGIN IMMEDIATE` transaction that reads
+    /// the sign-out's fence first, as `accept_finder_write` does for a save. A closed fence writes nothing.
+    /// Engine-internal enqueues (`enqueue_operation`: pins, hydrates, restores) never read it.
+    pub fn enqueue_finder_change(
+        &self,
+        op: &PendingOperation,
+        folder: Option<FinderFolderRow<'_>>,
+    ) -> Result<FinderEnqueue> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if finder_accepts_closed_conn(&tx)? {
+            return Ok(FinderEnqueue::AcceptsClosed);
+        }
+        if let Some(folder) = folder {
+            // `upsert_file_with_contract`'s two steps, in this transaction.
+            upsert_file_conn(&tx, folder.entry)?;
+            let mut contract = get_file_contract_state_conn(&tx, &folder.entry.file_id)?
+                .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+            contract.item_kind = ItemKind::Folder;
+            contract.parent_id = folder.parent_id.map(str::to_string);
+            set_file_contract_state_conn(&tx, &contract)?;
+        }
+        insert_operation_conn(&tx, op)?;
+        tx.commit()?;
+        Ok(FinderEnqueue::Queued)
     }
 
     pub fn list_due_operations(&self, now: i64) -> Result<Vec<PendingOperation>> {
@@ -4778,6 +4876,73 @@ impl StateDb {
         Ok(u64::try_from(rows).unwrap_or(0))
     }
 
+    /// Spec 2026-10-10 W2: the queue a sign-out counts, in ONE read (one mutex hold, one transaction), in queue
+    /// order. Hydrates and pins are downloads, never counted.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn waiting_rows(&self) -> Result<Vec<WaitingRow>> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+        let rows = {
+            let mut stmt = tx.prepare(
+                "SELECT q.op_id, q.kind, q.file_id, f.path, q.payload_path, q.write_origin, q.rowid,
+                        q.attempts, q.max_attempts, q.paused_reason IS NOT NULL,
+                        EXISTS(SELECT 1 FROM upload_resume r
+                               WHERE r.op_id = q.op_id AND r.completed_version IS NOT NULL)
+                 FROM operation_queue q LEFT JOIN files f ON f.file_id = q.file_id
+                 WHERE q.kind NOT IN ('hydrate_file', 'pin_tree')
+                 ORDER BY q.rowid",
+            )?;
+            let mapped = stmt.query_map([], |row| {
+                Ok(WaitingRow {
+                    op_id: row.get(0)?,
+                    kind: OperationKind::from_str(&row.get::<_, String>(1)?),
+                    file_id: row.get(2)?,
+                    file_path: row.get(3)?,
+                    payload_path: row.get(4)?,
+                    origin: WriteOrigin::from_db(row.get::<_, Option<String>>(5)?.as_deref()),
+                    queue_order: row.get(6)?,
+                    attempts: row.get(7)?,
+                    max_attempts: row.get(8)?,
+                    paused: row.get(9)?,
+                    completed: row.get(10)?,
+                })
+            })?;
+            mapped.collect::<Result<Vec<_>>>()?
+        };
+        tx.commit()?;
+        Ok(rows)
+    }
+
+    /// The purge guard's ONE read (spec 2026-10-10 W6, §5.2 step 8): one transaction, before any file is touched. Each
+    /// op is placed by `sign_out::waiting::op_role`, as the keep step's read places it, so the two cannot disagree on a
+    /// kind.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn unkept_waiting_changes(&self, kept: &crate::sign_out::kept_set::KeptSet) -> Result<PurgeGuardRead> {
+        use crate::sign_out::waiting::{OpRole, op_role};
+        let mut read = PurgeGuardRead::default();
+        for row in self.waiting_rows()? {
+            match op_role(&row.kind) {
+                OpRole::Download => {}
+                // A recorded completion: the server has these bytes, so nothing waits (spec §2 "Waiting write").
+                OpRole::Upload if row.completed => {}
+                OpRole::Upload => {
+                    if let Some(path) = &row.payload_path {
+                        read.waiting_payloads.push(path.clone());
+                    }
+                    if !kept.keeps(&row.op_id) {
+                        read.unkept.push(row.op_id);
+                    }
+                }
+                OpRole::OtherChange => {
+                    if !kept.others_acknowledged.contains(&row.op_id) {
+                        read.unkept.push(row.op_id);
+                    }
+                }
+            }
+        }
+        Ok(read)
+    }
+
     /// R10: does anything of an account live here, apart from the owner record itself?
     pub fn has_account_data(&self) -> Result<bool> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
@@ -4898,6 +5063,53 @@ impl StateDb {
         Ok(())
     }
 
+    /// Spec 2026-10-10 §15 question 3: a sign-out that stops without purging reopens accepts at once.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn reopen_finder_accepts(&self) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "DELETE FROM sync_state WHERE key = ?1",
+            params![FINDER_ACCEPTS_CLOSED_KEY],
+        )?;
+        Ok(())
+    }
+
+    /// One `BEGIN IMMEDIATE` transaction: it waits for an accept transaction already running, which therefore commits
+    /// first, and every later accept reads the key in its own transaction and queues nothing.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn close_finder_accepts(&self) -> Result<()> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO sync_state (key, value) VALUES (?1, '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![FINDER_ACCEPTS_CLOSED_KEY],
+        )?;
+        tx.commit()
+    }
+
+    /// Whether accepts are closed now. Tests only: production reads the key inside the transaction that queues
+    /// (`finder_accepts_closed_conn`).
+    #[cfg(test)]
+    pub fn finder_accepts_closed(&self) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        finder_accepts_closed_conn(&conn)
+    }
+
+    /// Spec 2026-10-10 §6.2: every live waiting change with `attempts + 2 < max_attempts` is made due now, once;
+    /// `attempts` unchanged. Parked, paused, hydrates, pins and completed uploads are not touched.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn make_due_for_send_phase(&self, now: i64) -> Result<usize> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "UPDATE operation_queue SET next_retry_at = ?1
+             WHERE kind NOT IN ('hydrate_file', 'pin_tree')
+               AND attempts + 2 < max_attempts
+               AND paused_reason IS NULL
+               AND op_id NOT IN (SELECT op_id FROM upload_resume WHERE completed_version IS NOT NULL)",
+            params![now],
+        )
+    }
+
     /// Every file the rows of this database point at (queued and staged payloads, upload sessions, cached
     /// copies), each path once. Read-only: the purge deletes these files FIRST and clears the rows only when
     /// every one is gone, so a file that cannot be removed leaves the rows in place for a retry.
@@ -4948,9 +5160,14 @@ impl StateDb {
     /// The actual decrypted bytes are what must never survive a sign-out, so
     /// this returns every `payload_path`/`cache_path` for the caller to
     /// delete from disk.
+    ///
+    /// One `BEGIN IMMEDIATE` transaction (spec 2026-10-10 §5.2 step 8): it reads before it writes, and a deferred
+    /// transaction's first write fails at once ("database is locked", no busy timeout) while another connection holds
+    /// the write lock, such as the keep step's close of Finder accepts or a Finder change that reads that fence. The
+    /// caller has deleted the files by then. Taking the lock as it begins, the purge waits for that writer.
     pub fn purge_all_local_state(&self) -> Result<LocalStatePurge> {
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
         // m-12 (spec §5.4 row 15, §10.5): a File Provider create that never landed has
         // a provisional row the server never knew. The queue is its only owner, so it
@@ -5612,6 +5829,13 @@ impl StateDb {
     /// references any more, for the caller to unlink (S6).
     pub fn engine_start_repair(&self) -> Result<EngineStartRepair> {
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        // Spec 2026-10-10 §15 question 3: an engine that starts takes Finder writes again, whatever a stopped
+        // sign-out left closed. A statement of its own, before the repair's transaction: a repair that fails rolls
+        // back only its own work, and the runner serves Finder writes after a failed repair too.
+        conn.execute(
+            "DELETE FROM sync_state WHERE key = ?1",
+            params![FINDER_ACCEPTS_CLOSED_KEY],
+        )?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let claims_cleared = tx.execute(
             "UPDATE operation_queue SET claim_id = NULL, claimed_at = NULL WHERE claim_id IS NOT NULL",
@@ -6472,15 +6696,16 @@ fn write_owner(conn: &Connection, owner: &crate::account_binding::Identity) -> R
 }
 
 /// How many rows of an account live here: every `ACCOUNT_TABLES` row and every `sync_state` row except the
-/// owner record.
+/// owner record and the device keys (the Finder removal debt, the domain-gone mark, closed Finder accepts).
 fn account_rows(conn: &Connection) -> Result<i64> {
     let mut rows: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM sync_state WHERE key NOT IN (?1, ?2, ?3, ?4)",
+        "SELECT COUNT(*) FROM sync_state WHERE key NOT IN (?1, ?2, ?3, ?4, ?5)",
         params![
             OWNER_USER_ID_KEY,
             OWNER_EMAIL_KEY,
             FINDER_REMOVAL_OWED_KEY,
-            FINDER_DOMAIN_GONE_KEY
+            FINDER_DOMAIN_GONE_KEY,
+            FINDER_ACCEPTS_CLOSED_KEY
         ],
         |row| row.get(0),
     )?;
@@ -8177,6 +8402,66 @@ mod tests {
             "the row must not be left at `local` status after a sign-out purge — a \
              lingering `local` row hides real on-disk plaintext from every later cleanup pass"
         );
+    }
+
+    /// Spec 2026-10-10 §5.2 steps 7-8: a sign-out's purge can meet another writer on `state.db` (the keep step's close
+    /// of Finder accepts, or a Finder change that reads that fence in its own write transaction). The purge reads
+    /// before it writes. In a deferred transaction SQLite answers its first write "database is locked" at once while
+    /// another connection holds the write lock (a reader that asks to write is not given the busy timeout), and a
+    /// sign-out has deleted every file by then. The purge takes the write lock as it begins, so it waits as any other
+    /// writer here does.
+    #[test]
+    fn a_purge_waits_for_another_writer_instead_of_failing() {
+        let hold = std::time::Duration::from_millis(200);
+        for _ in 0..5 {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("state.db");
+            let db = StateDb::open(&path).unwrap();
+            let writer = StateDb::open(&path).unwrap();
+            db.enqueue_operation(&queued("w1", OperationKind::UploadVersion, "f1", Some("/staged/w1")))
+                .unwrap();
+            let (held, wait_held) = std::sync::mpsc::channel();
+            let holder = std::thread::spawn(move || {
+                let mut conn = writer.hold_lock_for_test();
+                let tx = conn
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .unwrap();
+                tx.execute(
+                    "INSERT INTO sync_state (key, value) VALUES (?1, '1')",
+                    params![FINDER_ACCEPTS_CLOSED_KEY],
+                )
+                .unwrap();
+                held.send(()).unwrap();
+                std::thread::sleep(hold);
+                let released = std::time::Instant::now();
+                tx.commit().unwrap();
+                released
+            });
+            wait_held.recv().unwrap();
+            let started = std::time::Instant::now();
+            let purge = db.purge_all_local_state();
+            let waited = started.elapsed();
+            let released = holder.join().unwrap();
+            if started >= released {
+                // This thread ran only after the hold had ended, so this purge never met the writer: once more.
+                continue;
+            }
+            let purge = purge.unwrap_or_else(|error| {
+                panic!("a purge that meets another writer waits for it: {error} after {waited:?}")
+            });
+            assert_eq!(
+                (purge.queued_ops_purged, purge.payload_paths),
+                (1, vec!["/staged/w1".to_string()]),
+                "the purge that waited did its work"
+            );
+            let left: i64 = db
+                .hold_lock_for_test()
+                .query_row("SELECT COUNT(*) FROM operation_queue", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(left, 0, "nothing is left queued");
+            return;
+        }
+        panic!("in 5 tries the purge never began while the other connection held the write lock");
     }
 
     fn seed_contract_row(
@@ -11952,6 +12237,311 @@ mod tests {
         assert!(matches!(accept("/staged/journalled"), AcceptOutcome::Queued { .. }));
     }
 
+    fn accept_late_save(db: &StateDb, payload_path: &str) -> AcceptOutcome {
+        db.accept_finder_write(
+            &FinderAccept {
+                op_id: "op-late",
+                file_id: "late",
+                kind: FinderAcceptKind::Modify {
+                    incoming_base: Some("1"),
+                },
+                parent_id: None,
+                target_path: Some("late.txt"),
+                metadata_json: "{}",
+                payload_path,
+                size_bytes: 4,
+                modified_at: 20,
+                backup_source_key: None,
+                now: 30,
+            },
+            &|_, _| Vec::new(),
+        )
+        .unwrap()
+    }
+
+    fn seeded_for_a_late_accept() -> (tempfile::TempDir, StateDb) {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_own_row(&db, "late", FileStatus::Local, 10);
+        let mut contract = db.get_file_contract_state("late").unwrap().unwrap();
+        contract.current_version = 1;
+        db.set_file_contract_state(&contract).unwrap();
+        db.track_staged_payload("/staged/late", None, false).unwrap();
+        (dir, db)
+    }
+
+    /// U45 (spec 2026-10-10, §15 question 3, option A): once a sign-out's keep step has closed Finder accepts, an
+    /// accept that outlived the engine stop queues nothing, and its staged copy's journal row stays unfinished.
+    #[test]
+    fn a_finder_accept_after_the_engine_stop_queues_nothing() {
+        let (_dir, db) = seeded_for_a_late_accept();
+        db.close_finder_accepts().unwrap();
+        assert!(matches!(
+            accept_late_save(&db, "/staged/late"),
+            AcceptOutcome::AcceptsClosed
+        ));
+        assert!(db.list_operations_for_file("late").unwrap().is_empty(), "no op");
+        let unfinished: bool = db
+            .hold_lock_for_test()
+            .query_row(
+                "SELECT completed = 0 FROM staged_payloads WHERE path = '/staged/late'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            unfinished,
+            "the journal row is left for the purge, or for the next start's sweep"
+        );
+    }
+
+    /// U45: an engine start, and a cleared account, take saves again.
+    #[test]
+    fn accepts_reopen_at_engine_start_and_with_the_cleared_account() {
+        let (_dir, db) = seeded_for_a_late_accept();
+        db.close_finder_accepts().unwrap();
+        db.engine_start_repair().unwrap();
+        assert!(!db.finder_accepts_closed().unwrap());
+        assert!(matches!(
+            accept_late_save(&db, "/staged/late"),
+            AcceptOutcome::Queued { .. }
+        ));
+        db.close_finder_accepts().unwrap();
+        db.clear_account_data(false).unwrap();
+        assert!(!db.finder_accepts_closed().unwrap());
+        db.close_finder_accepts().unwrap();
+        db.reopen_finder_accepts().unwrap();
+        assert!(
+            !db.finder_accepts_closed().unwrap(),
+            "a sign-out that stops reopens them at once"
+        );
+    }
+
+    /// U45: reopening accepts deletes the key and nothing else, wherever it happens: a sign-out that stops and the
+    /// launch (`reopen_finder_accepts`), and an engine start (`engine_start_repair`). The rest of `sync_state` is the
+    /// R10 owner record, a Finder removal debt and the sync cursor. Without the owner, the next engine start would find
+    /// unowned local data and reset it (`account_binding::decide`), and the waiting saves with it.
+    #[test]
+    fn reopening_accepts_clears_the_key_and_nothing_else() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let owner = crate::account_binding::Identity::new(Some("u-a"), Some("a@beebeeb.io"));
+        db.set_owner(&owner).unwrap();
+        db.set_finder_removal_owed(true).unwrap();
+        db.set_sync_cursor(12).unwrap();
+        let sync_state = |db: &StateDb| -> Vec<(String, String)> {
+            let conn = db.hold_lock_for_test();
+            let mut stmt = conn.prepare("SELECT key, value FROM sync_state ORDER BY key").unwrap();
+            let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+            rows.collect::<Result<Vec<_>>>().unwrap()
+        };
+        let before = sync_state(&db);
+        let reopened = |when: &str| {
+            assert!(!db.finder_accepts_closed().unwrap(), "{when}: the key is gone");
+            assert_eq!(db.owner().unwrap(), Some(owner.clone()), "{when}: the owner stays");
+            assert!(db.finder_removal_owed().unwrap(), "{when}: a removal debt stays");
+            assert_eq!(
+                sync_state(&db),
+                before,
+                "{when}: every other sync_state row is as it was"
+            );
+        };
+        db.close_finder_accepts().unwrap();
+        db.reopen_finder_accepts().unwrap();
+        reopened("a sign-out that stops, or the launch");
+        db.close_finder_accepts().unwrap();
+        db.engine_start_repair().unwrap();
+        reopened("an engine start");
+    }
+
+    /// The closed-accepts key is a device key, as the Finder removal debt and the domain-gone mark are: it records what
+    /// a sign-out on this Mac closed, not anything of an account. Alone, or beside the owner record, it is not account
+    /// data, so it never makes the R10 binding reset a database or the upgrade adopt one.
+    #[test]
+    fn the_closed_accepts_key_is_not_account_data() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        db.close_finder_accepts().unwrap();
+        assert!(
+            !db.has_account_data().unwrap(),
+            "the closed-accepts key is not account data"
+        );
+        db.set_owner(&crate::account_binding::Identity::new(
+            Some("u-a"),
+            Some("a@beebeeb.io"),
+        ))
+        .unwrap();
+        assert!(!db.has_account_data().unwrap(), "nor is it beside the owner record");
+        db.set_sync_cursor(12).unwrap();
+        assert!(
+            db.has_account_data().unwrap(),
+            "a sync cursor beside them is account data"
+        );
+    }
+
+    /// U45: the engine start's reopen does not ride the repair's transaction. A repair that fails rolls back only its
+    /// own work; the runner logs it and serves Finder writes anyway, so accepts are open by then.
+    #[test]
+    fn a_failed_engine_start_repair_still_reopens_accepts() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        db.close_finder_accepts().unwrap();
+        // The repair's alias sweep is refused: an alias old enough to be swept, and a trigger that aborts its delete.
+        db.hold_lock_for_test()
+            .execute_batch(
+                "INSERT INTO id_aliases (provisional_id, server_id, created_at) VALUES ('p', 's', 0);
+                 CREATE TRIGGER no_sweep BEFORE DELETE ON id_aliases BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+            )
+            .unwrap();
+        assert!(db.engine_start_repair().is_err(), "the repair failed");
+        assert!(
+            !db.finder_accepts_closed().unwrap(),
+            "a failed repair still reopens accepts"
+        );
+    }
+
+    /// U45: an accept whose transaction began first commits first, and a read after the close sees it. Two
+    /// connections to one file, as the engine and the sign-out have.
+    #[test]
+    fn an_accept_already_running_commits_before_the_close() {
+        for round in 0..50 {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("state.db");
+            let engine = StateDb::open(&path).unwrap();
+            let sign_out = StateDb::open(&path).unwrap();
+            let (started, wait_started) = std::sync::mpsc::channel();
+            let accept = std::thread::spawn(move || {
+                let mut conn = engine.hold_lock_for_test();
+                let tx = conn
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .unwrap();
+                started.send(()).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                tx.execute(
+                    "INSERT INTO operation_queue (op_id, kind, file_id) VALUES ('late', 'upload_version', 'f')",
+                    [],
+                )
+                .unwrap();
+                tx.commit().unwrap();
+            });
+            wait_started.recv().unwrap();
+            sign_out.close_finder_accepts().unwrap();
+            let rows = sign_out.waiting_rows().unwrap();
+            accept.join().unwrap();
+            assert!(rows.iter().any(|row| row.op_id == "late"), "round {round}");
+        }
+    }
+
+    /// U45, the other half of the barrier: the close takes the write lock first. An accept that starts while the
+    /// close's transaction is open waits for it, then reads the key in its own transaction and queues nothing. The
+    /// close is held open by hand here (`close_finder_accepts` commits at once), so the accept starts inside it.
+    #[test]
+    fn an_accept_waiting_behind_the_close_queues_nothing() {
+        for round in 0..20 {
+            let (dir, engine) = seeded_for_a_late_accept();
+            let sign_out = StateDb::open(dir.path().join("state.db")).unwrap();
+            let mut conn = sign_out.hold_lock_for_test();
+            let close = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+            let accept = std::thread::spawn(move || {
+                let outcome = accept_late_save(&engine, "/staged/late");
+                (outcome, engine.list_operations_for_file("late").unwrap().len())
+            });
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            close
+                .execute(
+                    "INSERT INTO sync_state (key, value) VALUES (?1, '1')",
+                    params![FINDER_ACCEPTS_CLOSED_KEY],
+                )
+                .unwrap();
+            close.commit().unwrap();
+            drop(conn);
+            let (outcome, ops) = accept.join().unwrap();
+            assert!(
+                matches!(outcome, AcceptOutcome::AcceptsClosed) && ops == 0,
+                "round {round}: an accept that waited behind the close queued: {outcome:?}, {ops} op(s)"
+            );
+        }
+    }
+
+    /// U45, the same for every other Finder change: one that starts while the close holds the write lock waits for it,
+    /// then reads the key in `enqueue_finder_change`'s own transaction and queues nothing.
+    #[test]
+    fn a_finder_change_waiting_behind_the_close_queues_nothing() {
+        for round in 0..20 {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("state.db");
+            let engine = StateDb::open(&path).unwrap();
+            let sign_out = StateDb::open(&path).unwrap();
+            let mut conn = sign_out.hold_lock_for_test();
+            let close = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+            let change = std::thread::spawn(move || {
+                let outcome = engine
+                    .enqueue_finder_change(&queued_op("rename", OperationKind::RenameFile, "f"), None)
+                    .unwrap();
+                (outcome, engine.list_operations_for_file("f").unwrap().len())
+            });
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            close
+                .execute(
+                    "INSERT INTO sync_state (key, value) VALUES (?1, '1')",
+                    params![FINDER_ACCEPTS_CLOSED_KEY],
+                )
+                .unwrap();
+            close.commit().unwrap();
+            drop(conn);
+            assert_eq!(
+                change.join().unwrap(),
+                (FinderEnqueue::AcceptsClosed, 0),
+                "round {round}: a change that waited behind the close queued"
+            );
+        }
+    }
+
+    /// U45: in both fenced bodies the key is the first thing read inside the `BEGIN IMMEDIATE` transaction that queues,
+    /// never before it: a read taken before the write lock can see accepts open, wait behind the close, and then queue.
+    #[test]
+    fn the_fence_is_read_first_inside_the_transaction_that_queues() {
+        let source: Vec<&str> = include_str!("state_db.rs").lines().collect();
+        for definition in ["pub fn accept_finder_write(", "pub fn enqueue_finder_change("] {
+            let start = source
+                .iter()
+                .position(|line| line.trim_start().starts_with(definition))
+                .unwrap_or_else(|| panic!("{definition} not found"));
+            let end = start
+                + source[start..]
+                    .iter()
+                    .position(|line| *line == "    }")
+                    .expect("the body's end");
+            let body = &source[start..end];
+            let begin = body
+                .iter()
+                .position(|line| {
+                    line.contains(".transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;")
+                })
+                .unwrap_or_else(|| panic!("{definition}: no BEGIN IMMEDIATE"));
+            let first = body[begin + 1..]
+                .iter()
+                .map(|line| line.trim())
+                .find(|line| !line.is_empty() && !line.starts_with("//"))
+                .unwrap();
+            assert_eq!(
+                first, "if finder_accepts_closed_conn(&tx)? {",
+                "{definition}: the fence is the first read inside the transaction"
+            );
+            assert_eq!(
+                body.iter()
+                    .filter(|line| line.contains("finder_accepts_closed_conn("))
+                    .count(),
+                1,
+                "{definition}: one read of the fence"
+            );
+        }
+    }
+
     /// Spec §8.7 S6: the sweep deletes an unfinished row only while nothing names it, so an
     /// accept that committed first keeps its row; a released row is never this step's.
     #[test]
@@ -11982,5 +12572,69 @@ mod tests {
             left,
             vec!["/staged/accepted".to_string(), "/staged/released".to_string()]
         );
+    }
+
+    /// U17, the margin; U18.
+    #[test]
+    fn the_send_phase_makes_live_changes_due_with_a_margin() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        db.hold_lock_for_test()
+            .execute_batch(
+                "INSERT INTO operation_queue (op_id, kind, file_id, attempts, max_attempts, next_retry_at, paused_reason) VALUES
+                   ('a0', 'upload_version', 'f', 0, 5, 9999, NULL),
+                   ('a2', 'rename_file', 'f', 2, 5, 9999, NULL),
+                   ('a3', 'upload_version', 'f', 3, 5, 9999, NULL),
+                   ('a4', 'upload_version', 'f', 4, 5, 9999, NULL),
+                   ('parked', 'upload_version', 'f', 5, 5, 9999, NULL),
+                   ('paused', 'upload_version', 'f', 0, 5, 9999, 'auth'),
+                   ('hydrate', 'hydrate_file', 'f', 0, 5, 9999, NULL);",
+            )
+            .unwrap();
+        assert_eq!(db.make_due_for_send_phase(100).unwrap(), 2);
+        let due: Vec<(String, i64, i64)> = {
+            let conn = db.hold_lock_for_test();
+            let mut stmt = conn
+                .prepare("SELECT op_id, next_retry_at, attempts FROM operation_queue ORDER BY op_id")
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        for (op, next, attempts) in due {
+            let expected_next = if op == "a0" || op == "a2" { 100 } else { 9999 };
+            assert_eq!(next, expected_next, "{op}");
+            let inserted = match op.as_str() {
+                "a2" => 2,
+                "a3" => 3,
+                "a4" => 4,
+                "parked" => 5,
+                _ => 0,
+            };
+            assert_eq!(attempts, inserted, "attempts never change: {op}");
+        }
+    }
+
+    #[test]
+    fn the_send_phase_never_touches_parked_or_paused_changes() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        db.hold_lock_for_test()
+            .execute_batch(
+                "INSERT INTO operation_queue (op_id, kind, file_id, attempts, max_attempts, next_retry_at, paused_reason) VALUES
+                   ('parked', 'upload_version', 'f', 25, 25, 9999, NULL), ('paused', 'create_folder', 'f', 0, 5, 9999, 'quota');",
+            )
+            .unwrap();
+        assert_eq!(db.make_due_for_send_phase(100).unwrap(), 0);
+        let untouched: i64 = db
+            .hold_lock_for_test()
+            .query_row(
+                "SELECT COUNT(*) FROM operation_queue WHERE next_retry_at = 9999 AND attempts IN (0, 25)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(untouched, 2);
     }
 }

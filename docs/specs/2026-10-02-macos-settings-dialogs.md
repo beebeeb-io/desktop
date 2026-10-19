@@ -69,7 +69,14 @@ The dialogs reuse the Settings-window system exactly: `design.css` tokens, the 1
 - **Destructive-action treatment:** **the shipped change (PR #104).** Signing out stops sync on this Mac — a destructive consequence. The confirm button renders as `ms-btn--danger` (red fill `--red`, fixed ink `--red-ink` — paper text fails 4.5:1 on red) instead of amber-primary, so its weight matches Repair’s caution level being exceeded: Repair is reversible and amber; Sign out is not offered as reversible and is red. Because confirmations keep the safe action first, order stays Cancel → Sign out; the red fill is the guard, and Enter (built, PR #104) resolves to **Cancel** on open — the handler lives on the confirm button, not the dialog.
 - **Keyboard:** Esc cancels (built). Enter triggers the confirm only when the confirm button is focused — never on open (built, PR #104: handler on the confirm button; initial focus on the close button).
 - **Amendment — 10 Oct 2026 (task 1882):** when the sign-out kept Finder files that never reached the server, the app’s own alert (title “Files kept on this Mac”) shows the same sentence and the folder after the sheet closes. Spec: `docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md`.
+- **Amendment — 11 Oct 2026 (task 1887, spec `docs/specs/2026-10-10-macos-sign-out-waiting-writes.md`):** "Sign out" in this sheet no longer signs out at once. It counts what waits (§5.1 there), then:
+  - **nothing waits:** the sign-out runs, as before;
+  - **changes wait and the app can send:** the sheet becomes the send phase: title “Sending changes first”, body “Sending {n} changes before signing out…” (“Sending 1 change before signing out…”) and the hint “This takes at most a minute.”, one button “Stop waiting”. Esc is “Stop waiting”. The count follows the events and never reads 0;
+  - **changes still wait, or none could be sent:** the ask: title “Sign out with changes not sent?”, then A2, A3, A3e (with its folder paths in mono, one per line), A4 and at most one A5 line, each left out when its number is 0; buttons “Cancel” / “Sign out” (red, as this dialog's shipped treatment). Enter on open resolves to Cancel; Esc cancels;
+  - **closing Settings** at the count, the send phase or the ask ends the flow with nothing changed; Settings opens next time on the Account tab with no sheet.
+- After a sign-out that kept files, one alert, “Files kept on this Mac”, names our folder first (“Beebeeb copied {n} files with changes that hadn’t reached the server to this folder on this Mac:”), then macOS's folder with 1882's sentence, unchanged.
 - **Modal mapping:** `ConfirmSheet` (Modal 400). **Shipped (PR #104):** `danger?: boolean` on `ConfirmSheet`; when set, the confirm button gets `ms-btn--danger` (`--red-ink` text). `MacSettings.tsx` passes `danger` on the Sign-out sheet. Nothing else changes.
+  - Task 1887 adds two sheets after this one, drawn in section 1 of the hifi file: the send phase on `Modal` 400 with one button, “Stop waiting”, and the ask on `Modal` 440 (as Choose folders) with “Cancel” and the red “Sign out”. “Nothing else changes” holds for this confirm sheet only. — Task 15 fix round 1, 2026-10-18 (1887, its review)
 
 ## Keyboard rules (summary)
 
@@ -78,6 +85,8 @@ The dialogs reuse the Settings-window system exactly: `design.css` tokens, the 1
 | Esc | Cancel — dismiss, no action (built) | Close (built) |
 | Enter | Trigger the focused confirm (built, PR #104) | No-op |
 | Tab | Focus trap as built; initial focus = close button | Same |
+
+The sign-out send phase (task 1887) is the exception to the Esc row: there Esc is “Stop waiting”, never Cancel, and the ask follows with no reason line. At the ask, Esc cancels and Enter on open resolves to Cancel, as above. — Task 15 fix round 1, 2026-10-18 (1887, its review)
 
 Destructive-Enter rule: on open, Enter must resolve to **Cancel** (or nothing), never the red confirm. As built (PR #104) the Return handler lives on the confirm button itself and initial focus is the close button, so both halves hold at once.
 

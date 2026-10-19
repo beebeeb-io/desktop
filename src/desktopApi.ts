@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { accountSessionRevision, observeAccountSession, observeSignOutWarning, subscribeAccountSession } from './accountSession'
 import { parsePopoverSnapshot, type PopoverSnapshot } from './popoverContract'
+import type { AskCounts } from './signOutCopy'
 
 export type CommandResult<T> =
   | { ok: true; value: T }
@@ -1084,7 +1085,11 @@ export interface DesktopLoginResult {
    */
   key_replaced: boolean
   /** Another account signed in; nothing changed on this Mac. */
-  account_mismatch: { pending_changes: number } | null
+  /**
+   * On macOS also `unsent`, the switch's ask snapshot, or `unsent_error`, the coded E3 when its count failed (spec
+   * 2026-10-10 W11, §5.3 row 1).
+   */
+  account_mismatch: { pending_changes: number; unsent?: AskCounts; unsent_error?: string } | null
 }
 
 /**
@@ -1167,10 +1172,15 @@ async function sessionAction(name: 'clear_session' | 'lock_vault', args?: Record
  * stay on disk; the vault stays intact in the cloud. After this call the root
  * `sync_status` poll will return `logged_in: false` and the SignedOutGate will
  * take over. `forgetEmail` is the account switch (FB-I2): the previous account's
- * address is forgotten too, or the sign-out stops (`Err`).
+ * address is forgotten too, or the sign-out stops (`Err`). `keepUnsent` (macOS, spec
+ * 2026-10-10 §5.1) names the ask the person answered with "Sign out": Rust's gate goes on
+ * only while the queue is what that ask showed, and keeps its waiting saves first.
  */
-export function clearSession(options: { forgetEmail?: boolean } = {}): Promise<CommandResult<SessionActionOutcome>> {
-  return sessionAction('clear_session', options.forgetEmail ? { forgetEmail: true } : undefined)
+export function clearSession(options: { forgetEmail?: boolean; keepUnsent?: { askId: string } } = {}): Promise<CommandResult<SessionActionOutcome>> {
+  const args: Record<string, unknown> = {}
+  if (options.forgetEmail) args.forgetEmail = true
+  if (options.keepUnsent) args.keepUnsent = options.keepUnsent
+  return sessionAction('clear_session', Object.keys(args).length ? args : undefined)
 }
 
 /** Lock the vault. `Ok` means it is locked; its `warning` says which step could not be confirmed. */

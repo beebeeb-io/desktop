@@ -370,7 +370,7 @@ The reply is the item in the `WriteQueued` answer. "Others" means enumeration, t
 | 12 | Rename or move | held unchanged | token (reply of the metadata modify) | token; metadata version moves |
 | 13 | Trash from Finder | row `Trashing`; held unchanged | n/a | token, listed under the trash container; status never `uploading` (§9.1, m-8) |
 | 14 | Create lands (id swap) | in one transaction: S's row gets P's held columns plus produced version 1 and object id; alias P→S; ~~P's `minted_writes` re-keyed to S;~~ row P deleted (§8.6) — lead ruling, 2026-10-10 (spec r4b) | n/a | S: `0:wW`; P: deleted |
-| 15 | Sign-out by choice | held columns cleared and aliases deleted, in the purge transaction (`SD:2874-2944`); also ~~`minted_writes`, and~~ provisional rows without a contract (m-12) — lead ruling, 2026-10-10 (spec r4b) | n/a | the domain is removed (spec A) and rebuilt from `{cv}`. Queued saves are purged by design (§10.5) |
+| 15 | Sign-out by choice | held columns cleared and aliases deleted, in the purge transaction (`SD:2874-2944`); also ~~`minted_writes`, and~~ provisional rows without a contract (m-12) — lead ruling, 2026-10-10 (spec r4b) | n/a | the domain is removed (spec A) and rebuilt from `{cv}`. ~~Queued saves are purged by design (§10.5)~~ Queued saves are kept in a folder on this Mac before the purge, and the person is asked first (spec 2026-10-10, task 1887) — lane for the lead, 2026-10-19 (1887) |
 | 16 | Re-install, existing domain, `state.db` kept | nothing | n/a | unchanged |
 | 17 | Local data reset (spec A §5.6: reset, then Repair) | no held columns | n/a | `{cv}`; a stale token in the replica parses to `b` (§6.1, rule 5) |
 
@@ -1150,6 +1150,7 @@ sequenceDiagram
 - No queue decision races the runner: §8.7.
 - Parked bytes stay in the queue. What the person is then offered is 1881.
 - (4b, m-12) **The one exception is a sign-out by choice (spec A).** It purges the queue, queued saves included (`SD:2878-2883`), and removes the domain without a preserve mode (`src-tauri/macos/FileProviderBridge.m:82`). — lead ruling, 2026-10-10 (spec review)
+  - Queued saves are kept in a folder on this Mac before the purge, and the person is asked first (spec 2026-10-10, task 1887). — lane for the lead, 2026-10-19 (1887)
   - The header documents no default for the mode-less `removeDomain:` (`NSFileProviderManager.h:231-234`). A `PreserveDirtyUserData` mode exists (`NSFileProviderManager.h:24-26`).
   - **Unverified** on this macOS: what happens on disk to an item whose save is queued.
   - The purge also deletes provisional rows that have no contract, together with their aliases ~~and `minted_writes`~~. (— lead ruling, 2026-10-10 (spec r4b))

@@ -266,7 +266,7 @@ describe('what the reset after a sign-out clears and keeps', () => {
     const backend = { current: status(false) as unknown }
     const v = await openView(backend)
     try {
-      v.find('SignInStep')!.props.onDone({ kind: 'account_mismatch', pendingChanges: 2 }, 'b@beebeeb.io')
+      v.find('SignInStep')!.props.onDone({ kind: 'account_mismatch', pendingChanges: 2, unsent: null, unsentError: null }, 'b@beebeeb.io')
       await v.m.flush()
       // The warning is up; a reopen while it is up leaves it.
       await v.reopen()
@@ -287,7 +287,7 @@ describe('what the reset after a sign-out clears and keeps', () => {
     const v = await openView(backend)
     try {
       // A switch carried an address, then the same account signed in with a replaced key: the recovery step says why.
-      v.find('SignInStep')!.props.onDone({ kind: 'account_mismatch', pendingChanges: 1 }, 'b@beebeeb.io')
+      v.find('SignInStep')!.props.onDone({ kind: 'account_mismatch', pendingChanges: 1, unsent: null, unsentError: null }, 'b@beebeeb.io')
       await v.m.flush()
       v.find('AccountSwitchStep')!.props.onSwitched()
       await v.m.flush()
