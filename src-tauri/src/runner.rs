@@ -802,6 +802,14 @@ impl EngineRunner {
         self.send_phase.clone()
     }
 
+    /// Whether the runner's task is still going. A task that ended by itself (startup could not prepare or open the
+    /// state dir, or take the lock) leaves this handle in the account's slot, and a slot that is occupied is not a
+    /// running engine (PR #130 review). A runner already told to stop is not running either.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn is_running(&self) -> bool {
+        !self.stopping.load(Ordering::SeqCst) && self.task.as_ref().is_some_and(|task| !task.is_finished())
+    }
+
     /// Test-only constructor: wraps an already-spawned task in a runner
     /// handle so `lib.rs`'s sign-out tests can install a real (stoppable)
     /// engine in an account's engine slot without a Tauri `AppHandle`. The

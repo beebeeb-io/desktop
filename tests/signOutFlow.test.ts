@@ -88,6 +88,35 @@ describe('the Settings sign-out flow (spec 2026-10-10 §5.1)', () => {
     expect(h.outcomes, 'no toast for the refusal').toEqual([])
   })
 
+  /** PR #130 review, "Reset the send guard when Cancel ends the flow": the guard is per flow (§5.1 step 4), and every
+   *  way a flow ends starts the next one fresh. */
+  test('Cancel at the ask ends the flow: the next sign-out sends again', async () => {
+    const h = harness({ count: [ok(asked('a')), ok(asked('b'))] })
+    h.flow.open()
+    await h.flow.confirm()
+    const ask: AskCounts = { askId: 'c', files: 1, copiedFiles: 1, others: 0, missingFiles: 0, earlierFolders: [] }
+    await h.flow.ended({ reason: 'offline', ask })
+    h.flow.cancel()
+    expect(h.flow.current()).toEqual({ kind: 'idle' })
+    h.flow.open()
+    await h.flow.confirm()
+    expect(h.names(), 'a fresh flow runs its send phase').toEqual(['count', 'sendStart', 'count', 'sendStart'])
+    expect(h.flow.current()).toMatchObject({ kind: 'sending' })
+  })
+
+  test('a count that fails ends the flow: the next sign-out sends again', async () => {
+    const h = harness({ count: [ok(asked('a')), err('unsent_count_failed: …'), ok(asked('b'))] })
+    h.flow.open()
+    await h.flow.confirm()
+    // The phase ended without a snapshot, so the flow counts again, and that count fails.
+    await h.flow.ended({ reason: 'stopped', ask: null })
+    expect(h.flow.current()).toEqual({ kind: 'idle' })
+    h.flow.open()
+    await h.flow.confirm()
+    expect(h.names()).toEqual(['count', 'sendStart', 'count', 'count', 'sendStart'])
+    expect(h.flow.current()).toMatchObject({ kind: 'sending' })
+  })
+
   /** §5.1 "One flow at a time": a second request (the menu, the compact page) while a flow runs is consumed into it
    *  and starts nothing: no second count, no second phase. */
   test('a request while a flow runs starts nothing new', async () => {

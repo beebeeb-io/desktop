@@ -71,7 +71,7 @@ export class SignOutFlow {
 
   /** Cancel, or Esc at the confirm and at the ask. Esc during the phase is `stopWaiting`, never this. */
   cancel(): void {
-    if (this.view.kind === 'confirm' || this.view.kind === 'ask') this.set({ kind: 'idle' })
+    if (this.view.kind === 'confirm' || this.view.kind === 'ask') this.finish()
   }
 
   async stopWaiting(): Promise<void> {
@@ -101,6 +101,12 @@ export class SignOutFlow {
   /** `sign-out-flow-closed`, or a phase that ended `closed`. */
   reset(): void {
     this.generation += 1
+    this.finish()
+  }
+
+  /** Every way a flow ends (Cancel, a close, a count that fails, a sign-out that answered) lands here: the next flow
+   *  starts fresh, so the send phase runs again (§5.1: "Cancel" ends the flow; a phase starts at most once per flow). */
+  private finish(): void {
     this.sent = false
     this.set({ kind: 'idle' })
   }
@@ -111,7 +117,7 @@ export class SignOutFlow {
     const counted = await this.api.count()
     if (generation !== this.generation) return
     if (!counted.ok) {
-      this.set({ kind: 'idle' })
+      this.finish()
       this.report({ kind: 'failed', message: counted.reason })
       return
     }
@@ -135,8 +141,7 @@ export class SignOutFlow {
     const result = await this.api.clearSession(keepUnsent)
     if (generation !== this.generation) return
     if (!result.ok && result.reason.startsWith(REFUSED)) return this.count()
-    this.sent = false
-    this.set({ kind: 'idle' })
+    this.finish()
     const outcome: FlowOutcome = result.ok
       ? { kind: 'signedOut', warning: result.value.warning?.sentence ?? null }
       : { kind: 'failed', message: result.reason }

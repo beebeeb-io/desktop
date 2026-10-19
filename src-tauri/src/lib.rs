@@ -3459,7 +3459,15 @@ async fn send_conditions(state: &AppState) -> (sign_out::waiting::SendConditions
             None,
         );
     };
-    let link = acct.engine.lock().await.as_ref().map(|engine| engine.send_phase());
+    // Running, not merely present: a runner whose task ended at startup leaves its handle in the slot, and that must
+    // not advertise a send nobody would run (the count then goes straight to the engine-stopped ask).
+    let link = acct
+        .engine
+        .lock()
+        .await
+        .as_ref()
+        .filter(|engine| engine.is_running())
+        .map(|engine| engine.send_phase());
     let conditions = sign_out::waiting::SendConditions {
         engine_running: link.is_some(),
         vault_unlocked: acct.session.lock().map(|session| session.is_some()).unwrap_or(false),
@@ -35806,6 +35814,48 @@ mod sign_out_keep_tests {
             assert!(!link.is_armed() && state.sign_out.phase.lock().unwrap().is_none());
         })
         .await;
+    }
+
+    /// PR #130 review, "Do not treat a dead runner handle as a running engine": a runner whose task ended at startup
+    /// (the state dir, the database or the lock failed) leaves its handle in the slot. That is not a running engine:
+    /// `send_conditions` must say so, hand the phase no link, and the count must go straight to the honest ask
+    /// (`engine_stopped`), not offer a send nobody would run.
+    #[tokio::test]
+    async fn a_runner_that_ended_is_not_a_running_engine() {
+        use sign_out::waiting::{NotSending, readiness};
+        let state = AppState::default();
+        synthesize_single_account(&state, AccountId("dead-runner".to_string()));
+        let acct = state.active_account().unwrap();
+        *acct.session.lock().unwrap() = Some(Session {
+            token: "tok".into(),
+            master_key: [9u8; 32],
+            email: None,
+        });
+
+        // A runner whose task is still going: running, with its link.
+        let (hold, held) = tokio::sync::oneshot::channel::<()>();
+        *acct.engine.lock().await = Some(EngineRunner::for_test_with_task(tokio::spawn(async move {
+            let _ = held.await;
+        })));
+        let (conditions, link) = send_conditions(&state).await;
+        assert!(conditions.engine_running && link.is_some(), "a live runner is a running engine");
+        assert_eq!(readiness(conditions, false, true), None, "and it can send");
+
+        // The same slot, its task gone while the handle stays in it.
+        let _ = hold.send(());
+        let task = tokio::spawn(async {});
+        while !task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        *acct.engine.lock().await = Some(EngineRunner::for_test_with_task(task));
+        let (conditions, link) = send_conditions(&state).await;
+        assert!(!conditions.engine_running, "a runner whose task ended is not a running engine");
+        assert!(link.is_none(), "and the phase gets no link to arm");
+        assert_eq!(
+            readiness(conditions, false, true),
+            Some(NotSending::EngineStopped),
+            "the count goes straight to the ask with the engine-stopped line"
+        );
     }
 
     /// U46, the chain past the bridge: what the runner noted on the phase's link ends the phase at the driver's first
