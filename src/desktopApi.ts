@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { accountSessionRevision, observeAccountSession, observeSignOutWarning, subscribeAccountSession } from './accountSession'
 import { parsePopoverSnapshot, type PopoverSnapshot } from './popoverContract'
+import type { AskCounts } from './signOutCopy'
 
 export type CommandResult<T> =
   | { ok: true; value: T }
@@ -1044,7 +1045,11 @@ export interface DesktopLoginResult {
    */
   key_replaced: boolean
   /** Another account signed in; nothing changed on this Mac. */
-  account_mismatch: { pending_changes: number } | null
+  /**
+   * On macOS also `unsent`, the switch's ask snapshot, or `unsent_error`, the coded E3 when its count failed (spec
+   * 2026-10-10 W11, §5.3 row 1).
+   */
+  account_mismatch: { pending_changes: number; unsent?: AskCounts; unsent_error?: string } | null
 }
 
 /**

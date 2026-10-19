@@ -18,6 +18,7 @@ import { createElement, Fragment } from 'react'
 import * as desktopApi from '../src/desktopApi'
 import * as switchCopy from '../src/accountSwitchCopy'
 import * as signIn from '../src/onboardingSignIn'
+import * as signOutCopy from '../src/signOutCopy'
 import { FINDER_RAIL_DETAIL, FINDER_RAIL_TITLE } from '../src/finderSetupCopy'
 import { loadComponent, mount, textOf, type Mounted } from './fixtures/componentHarness'
 import { rustStr } from './fixtures/rustConstants'
@@ -145,11 +146,27 @@ describe('reauth mode', () => {
   test('another account shows the switch warning with the pending count, and nothing is cleared yet', async () => {
     const v = openView('reauth')
     await v.m.flush(); await v.m.flush()
-    v.find('SignInStep')!.props.onDone({ kind: 'account_mismatch', pendingChanges: 3 })
+    v.find('SignInStep')!.props.onDone({ kind: 'account_mismatch', pendingChanges: 3, unsent: null, unsentError: null })
     await v.m.flush()
     expect(v.find('AccountSwitchStep')!.props.pendingChanges).toBe(3)
     expect(v.m.calls.map((c) => c.name)).not.toContain('clear_session')
     expect(v.closed).toEqual([])
+  })
+
+  // Spec 2026-10-10 W11 and §5.3 row 1: on macOS the step renders the snapshot the sign-in carried, or its E3.
+  test('the switch step gets the snapshot or the E3 the sign-in carried', async () => {
+    const unsent = { askId: 'switch-1', files: 1, copiedFiles: 1, others: 0, missingFiles: 0, earlierFolders: [] }
+    let v = openView('reauth')
+    await v.m.flush(); await v.m.flush()
+    v.find('SignInStep')!.props.onDone({ kind: 'account_mismatch', pendingChanges: 1, unsent, unsentError: null })
+    await v.m.flush()
+    expect([v.find('AccountSwitchStep')!.props.unsent, v.find('AccountSwitchStep')!.props.unsentError]).toEqual([unsent, null])
+    const e3 = `unsent_count_failed: ${signOutCopy.E3_UNSENT_COUNT_FAILED}`
+    v = openView('reauth')
+    await v.m.flush(); await v.m.flush()
+    v.find('SignInStep')!.props.onDone({ kind: 'account_mismatch', pendingChanges: 2, unsent: null, unsentError: e3 })
+    await v.m.flush()
+    expect([v.find('AccountSwitchStep')!.props.unsent, v.find('AccountSwitchStep')!.props.unsentError]).toEqual([null, e3])
   })
 
   test('a sign-in that is neither (nothing local to keep) continues the normal set-up', async () => {
@@ -164,7 +181,7 @@ describe('reauth mode', () => {
   test('Cancel on the switch warning closes the reauth window and changes nothing', async () => {
     const v = openView('reauth')
     await v.m.flush(); await v.m.flush()
-    v.find('SignInStep')!.props.onDone({ kind: 'account_mismatch', pendingChanges: 2 })
+    v.find('SignInStep')!.props.onDone({ kind: 'account_mismatch', pendingChanges: 2, unsent: null, unsentError: null })
     await v.m.flush()
     v.find('AccountSwitchStep')!.props.onCancel()
     await v.m.flush()
@@ -175,7 +192,7 @@ describe('reauth mode', () => {
   test('Cancel in reauth mode: a close the window ACL refuses falls back to the DOM close', async () => {
     const v = openView('reauth', { closeRefused: true })
     await v.m.flush(); await v.m.flush()
-    v.find('SignInStep')!.props.onDone({ kind: 'account_mismatch', pendingChanges: 2 })
+    v.find('SignInStep')!.props.onDone({ kind: 'account_mismatch', pendingChanges: 2, unsent: null, unsentError: null })
     await v.m.flush()
     v.find('AccountSwitchStep')!.props.onCancel()
     await v.m.flush()
@@ -186,7 +203,7 @@ describe('reauth mode', () => {
   test('after the switch, sign-in starts over (and the view itself never signs anything out)', async () => {
     const v = openView('reauth')
     await v.m.flush(); await v.m.flush()
-    v.find('SignInStep')!.props.onDone({ kind: 'account_mismatch', pendingChanges: 2 })
+    v.find('SignInStep')!.props.onDone({ kind: 'account_mismatch', pendingChanges: 2, unsent: null, unsentError: null })
     await v.m.flush()
     v.find('AccountSwitchStep')!.props.onSwitched()
     await v.m.flush()
@@ -201,7 +218,7 @@ describe('reauth mode', () => {
     const v = openView('reauth')
     await v.m.flush(); await v.m.flush()
     expect(v.find('SignInStep')!.props.initialEmail).toBeUndefined()
-    v.find('SignInStep')!.props.onDone({ kind: 'account_mismatch', pendingChanges: 2 }, 'b@beebeeb.io')
+    v.find('SignInStep')!.props.onDone({ kind: 'account_mismatch', pendingChanges: 2, unsent: null, unsentError: null }, 'b@beebeeb.io')
     await v.m.flush()
     v.find('AccountSwitchStep')!.props.onSwitched()
     await v.m.flush()
@@ -229,7 +246,7 @@ describe('reauth mode', () => {
     })
     mounted.push(m)
     await m.flush(); await m.flush()
-    m.elements().find((el) => el.type === stubs.byName.SignInStep)!.props.onDone({ kind: 'account_mismatch', pendingChanges: 1 }, 'b@beebeeb.io')
+    m.elements().find((el) => el.type === stubs.byName.SignInStep)!.props.onDone({ kind: 'account_mismatch', pendingChanges: 1, unsent: null, unsentError: null }, 'b@beebeeb.io')
     await m.flush()
     const active = m.elements().filter((el) => String(el.props.className ?? '').split(' ').includes('active')).map((el) => textOf(el.props.children))
     expect(active).toHaveLength(1)
@@ -240,7 +257,7 @@ describe('reauth mode', () => {
     const v = openView('setup', { signedIn: false })
     await v.m.flush(); await v.m.flush()
     expect(v.shown()).toEqual(['SignInStep'])
-    v.find('SignInStep')!.props.onDone({ kind: 'account_mismatch', pendingChanges: 1 })
+    v.find('SignInStep')!.props.onDone({ kind: 'account_mismatch', pendingChanges: 1, unsent: null, unsentError: null })
     await v.m.flush()
     expect(v.shown()).toEqual(['AccountSwitchStep'])
     v.find('AccountSwitchStep')!.props.onCancel()
@@ -301,7 +318,7 @@ describe('SignInStep reports what the sign-in became', () => {
     })
     await m.flush()
     await submitPassword(m)
-    expect(done).toEqual([{ kind: 'account_mismatch', pendingChanges: 4 }])
+    expect(done).toEqual([{ kind: 'account_mismatch', pendingChanges: 4, unsent: null, unsentError: null }])
     expect(clearCalls(m)).toHaveLength(0)
   })
 
@@ -344,7 +361,7 @@ describe('SignInStep reports what the sign-in became', () => {
     await submitPassword(m)
     expect(done).toEqual([])
     await submitCode(m, '123456')
-    expect(done).toEqual([{ kind: 'account_mismatch', pendingChanges: 2 }])
+    expect(done).toEqual([{ kind: 'account_mismatch', pendingChanges: 2, unsent: null, unsentError: null }])
     expect(clearCalls(m)).toHaveLength(0)
   })
 
@@ -386,8 +403,9 @@ describe('AccountSwitchStep', () => {
     const m = mount('Onboarding.tsx', 'AccountSwitchStep', {
       backend: { clear_session: clear },
       // A sign-out answers `{warning}` (FB-24); a fixture that answers nothing is the old shape.
-      props: { pendingChanges, onSwitched: () => events.push('switched'), onCancel: () => events.push('cancelled') },
-      bindings: { ...desktopApi, ...switchCopy, Card },
+      // Linux's shape (spec 2026-10-10 §10): no snapshot and no E3, so the step is spec A's.
+      props: { pendingChanges, unsent: null, unsentError: null, onSwitched: () => events.push('switched'), onCancel: () => events.push('cancelled') },
+      bindings: { ...desktopApi, ...switchCopy, ...signOutCopy, Card },
     })
     mounted.push(m)
     return { m, events }
@@ -552,6 +570,17 @@ describe('accountSwitchCopy', () => {
     const html = readFileSync(new URL('../design/hifi/macos-settings-dialogs.html', import.meta.url), 'utf8')
     for (const text of [switchCopy.ACCOUNT_SWITCH_TITLE, switchCopy.accountSwitchBody(3), switchCopy.accountSwitchBody(0), switchCopy.ACCOUNT_SWITCH_CONFIRM, switchCopy.ACCOUNT_SWITCH_CANCEL, switchCopy.ACCOUNT_SWITCH_FAILED]) {
       expect(html).toContain(text)
+    }
+  })
+
+  // Spec 2026-10-10 §11 (design first): the macOS step's lines, as AccountSwitchStep builds them, are the ones the
+  // artefact draws in §4 (changes waiting: 1 file and 1 other change; count failed: E3), not only the struck Linux copy.
+  test('the macOS switch step says what the artefact draws', () => {
+    const html = readFileSync(new URL('../design/hifi/macos-settings-dialogs.html', import.meta.url), 'utf8')
+    const drawn = signOutCopy.askLines({ askId: 'a', files: 1, copiedFiles: 1, others: 1, missingFiles: 0, earlierFolders: [] }, null, true).paragraphs
+    expect(drawn).toHaveLength(2)
+    for (const text of [signOutCopy.A0S_TITLE, signOutCopy.A1S_LINE, ...drawn, signOutCopy.E3_UNSENT_COUNT_FAILED, signOutCopy.ASK_SWITCH]) {
+      expect(html, text).toContain(text)
     }
   })
 

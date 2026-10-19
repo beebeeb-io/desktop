@@ -15,6 +15,7 @@ import {
   type VaultItem,
 } from './desktopApi'
 import { useCapabilities } from './capabilities'
+import { A0S_TITLE, A1S_LINE, askLines, stripCode, type AskCounts, type SignOutCount } from './signOutCopy'
 import { submitPassword, submitTotpCode, type SignInSettled } from './onboardingSignIn'
 import { ACCOUNT_SWITCH_CANCEL, ACCOUNT_SWITCH_CONFIRM, ACCOUNT_SWITCH_FAILED, ACCOUNT_SWITCH_TITLE, KEY_REPLACED_RECOVERY_COPY, accountSwitchBody } from './accountSwitchCopy'
 import { classifyFinderInstallResult } from './finderInstallCard'
@@ -42,6 +43,9 @@ function OnboardingView({ mode }: { mode: 'setup' | 'reauth' }) {
   const [step, setStep] = useState<Step>('signin')
   // How many unsent changes the switch warning names; set when a sign-in turns out to be another account.
   const [pendingSwitch, setPendingSwitch] = useState(0)
+  // Spec 2026-10-10 W11: on macOS the switch step is the sign-out ask, from the snapshot the sign-in carries (or E3).
+  const [switchUnsent, setSwitchUnsent] = useState<AskCounts | null>(null)
+  const [switchUnsentError, setSwitchUnsentError] = useState<string | null>(null)
   // FT-I4: the address typed in the sign-in that turned out to be another account. After "Sign out
   // and switch" the next sign-in form opens with it, so the person who confirmed account B never sees
   // A's address (the prefill), and B's password is not tried against A's email.
@@ -148,6 +152,8 @@ function OnboardingView({ mode }: { mode: 'setup' | 'reauth' }) {
   const afterSignIn = (settled: SignInSettled, email?: string) => {
     if (settled.kind === 'account_mismatch') {
       setPendingSwitch(settled.pendingChanges)
+      setSwitchUnsent(settled.unsent)
+      setSwitchUnsentError(settled.unsentError)
       setSwitchEmail(email)
       setStep('switch')
       return
@@ -192,6 +198,8 @@ function OnboardingView({ mode }: { mode: 'setup' | 'reauth' }) {
         {step === 'switch' && (
           <AccountSwitchStep
             pendingChanges={pendingSwitch}
+            unsent={switchUnsent}
+            unsentError={switchUnsentError}
             onSwitched={() => {
               setSignInEmail(switchEmail)
               setStep('signin')
@@ -465,32 +473,86 @@ function SignInStep({ onDone, initialEmail }: { onDone: (settled: SignInSettled,
  * the step stays; it never continues to sign-in on an `Err`. Any `Ok` continues, and an `Ok` with a
  * warning (FB-24) shows the warning's sentence as a neutral note.
  *
+ * On macOS (spec 2026-10-10 W11, §5.3 row 1) the step is the sign-out ask in the switch's words, from the snapshot the
+ * sign-in carried: "Sign out and switch" keeps the waiting saves with that snapshot's `askId`; a refusal
+ * (`unsent_changes:`) counts again and re-renders the ask, with no toast; a count that cannot be read (E3) is a line in
+ * the step, never a toast. A toast or a warning Rust holds pending is acknowledged once shown (F12). A code prefix is
+ * never shown. With no snapshot (Linux) the step is spec A's, with its pending-change count.
+ *
  * Drawn in design/hifi/macos-settings-dialogs.html §4 (onboarding-window variant): no close, the
  * confirm is the filled destructive button, and focus is on Cancel when the step opens, so a stray
  * Enter cancels and can never confirm.
  */
-function AccountSwitchStep({ pendingChanges, onSwitched, onCancel }: { pendingChanges: number; onSwitched: () => void; onCancel: () => void }) {
+function AccountSwitchStep({
+  pendingChanges,
+  unsent,
+  unsentError,
+  onSwitched,
+  onCancel,
+}: {
+  pendingChanges: number
+  unsent: AskCounts | null
+  unsentError: string | null
+  onSwitched: () => void
+  onCancel: () => void
+}) {
   const { showToast } = useToast()
   const [busy, setBusy] = useState(false)
+  const [ask, setAsk] = useState<AskCounts | null>(unsent)
+  // Spec 2026-10-10 §5.3 row 1: E3, a line in this step, while the count could not be read. Deliberately inline, never
+  // a toast (the design's "count failed" Card, §4): it persists because "Sign out and switch" cannot keep anything
+  // until a count succeeds, and it is replaced by the ask when a fresh count does.
+  // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
+  const [countError, setCountError] = useState<string | null>(unsentError)
   const cancelRef = useRef<HTMLButtonElement | null>(null)
   useEffect(() => {
     cancelRef.current?.focus()
   }, [])
+  const waiting = ask !== null && (ask.files > 0 || ask.others > 0)
   const switchAccount = async () => {
     setBusy(true)
-    const result = await clearSession({ forgetEmail: true })
+    const result = await clearSession({ forgetEmail: true, keepUnsent: ask ? { askId: ask.askId } : undefined })
     setBusy(false)
     if (!result.ok) {
-      showToast({ variant: 'error', title: ACCOUNT_SWITCH_FAILED, message: result.unsupported ? commandUnavailableLabel('clear_session') : result.reason })
+      // W11: a refusal re-renders the ask from a fresh count, with no toast.
+      if (result.reason.startsWith('unsent_changes: ')) {
+        const fresh = await command<SignOutCount>('sign_out_count')
+        if (fresh.ok) {
+          setAsk(fresh.value)
+          setCountError(null)
+          return
+        }
+        setCountError(fresh.reason) // E3 again: the line, never a toast
+        return
+      }
+      // The gate's own read failed: E3 as the line; Rust holds it pending, so it is acknowledged once shown (F12).
+      if (result.reason.startsWith('unsent_count_failed: ')) {
+        setCountError(result.reason)
+        void command<void>('sign_out_result_ack')
+        return
+      }
+      showToast({ variant: 'error', title: ACCOUNT_SWITCH_FAILED, message: result.unsupported ? commandUnavailableLabel('clear_session') : stripCode(result.reason) })
+      void command<void>('sign_out_result_ack')
       return
     }
     // FB-24: the sign-out happened. A step it could not confirm is said neutrally (never under
     // "Couldn’t sign out"), and the note stays until dismissed: this step unmounts as sign-in opens.
-    if (result.value.warning) showToast({ variant: 'info', message: result.value.warning.sentence, durationMs: null })
+    if (result.value.warning) {
+      showToast({ variant: 'info', message: result.value.warning.sentence, durationMs: null })
+      void command<void>('sign_out_result_ack')
+    }
     onSwitched()
   }
+  const lines = waiting && ask ? askLines(ask, null, true) : null
+  // With no count (E3), the step says only what is known: the switch signs the other account out.
+  const copyLine = waiting || countError !== null ? A1S_LINE : accountSwitchBody(ask ? 0 : pendingChanges)
   return (
-    <Card title={ACCOUNT_SWITCH_TITLE} copy={accountSwitchBody(pendingChanges)}>
+    <Card title={waiting ? A0S_TITLE : ACCOUNT_SWITCH_TITLE} copy={copyLine}>
+      {countError !== null && !waiting ? <p className="page-copy" role="alert">{stripCode(countError)}</p> : null}
+      {lines ? lines.paragraphs.slice(0, lines.foldersAfter).map((line) => <p key={line} className="page-copy">{line}</p>) : null}
+      {lines?.foldersLine ? <p className="page-copy">{lines.foldersLine}</p> : null}
+      {lines ? lines.folders.map((folder) => <p key={folder} className="page-copy" style={{ fontFamily: 'var(--font-mono)', overflowWrap: 'anywhere' }}>{folder}</p>) : null}
+      {lines ? lines.paragraphs.slice(lines.foldersAfter).map((line) => <p key={line} className="page-copy">{line}</p>) : null}
       <div className="button-row" style={{ marginTop: 16 }}>
         <button ref={cancelRef} className="button" onClick={onCancel} disabled={busy}>
           {ACCOUNT_SWITCH_CANCEL}
