@@ -1,4 +1,5 @@
-// Task 1919: the real Data residency UI of BOTH settings windows, against a REAL local API.
+// Task 1919 (by COUNTRY since task 2050): the real Data residency UI of BOTH settings windows, against a REAL local API
+// built from server PR #251 or later (the country list). NOT RUN as part of task 2050: no such API was available.
 //
 //   BB_REAL_API_BASE=http://127.0.0.1:39191 BB_REAL_API_TOKEN=<session token> \
 //   BB_REAL_PSQL='docker exec -i beebeebio-postgres-1 psql -U beebeeb -d bb_1919_desktop -At' \
@@ -7,8 +8,8 @@
 //
 // What it is: the shipping React windows (src/main.tsx for macOS Settings, the Windows/Linux SettingsView) in
 // headless Chromium. The only synthetic part is the IPC bridge, which maps the two region commands onto the
-// real API with the same mapping the Rust DTO applies (`available_regions` -> `regions`, `example_city` ->
-// `city`; `choices` as sent) and the same error text shape. What it is NOT: the native shell, the Rust
+// real API with the same mapping the Rust DTO applies (`available_regions` -> `regions`, `example_country` ->
+// `country`, no city is read; `choices` and `region_strict` as sent) and the same error text shape. What it is NOT: the native shell, the Rust
 // commands (those run in `cargo test real_api_region`), or a Mac. It refuses any API that is not loopback.
 // Each case proves a UI action by reading the API back, not the UI, and a data change by editing the API's
 // scratch database (BB_REAL_PSQL) and reloading with no client change.
@@ -69,8 +70,9 @@ function installBackend({ host, win }) {
           const j = JSON.parse(r.text)
           return {
             preferred_region: j.preferred_region ?? null,
-            regions: j.available_regions.map((x) => ({ continent: x.continent, display_name: x.display_name, city: x.example_city, is_default: x.is_default })),
-            choices: j.choices ?? [],
+            region_strict: j.region_strict === true,
+            regions: j.available_regions.map((x) => ({ continent: x.continent, display_name: x.display_name, country: x.example_country ?? null, is_default: x.is_default })),
+            choices: (j.choices ?? []).map(({ city, ...rest }) => rest),
           }
         }
         case 'account_set_region': {
@@ -159,68 +161,75 @@ try {
     let { page, errors } = await fresh()
     const text = () => page.locator('body').innerText()
 
-    // 1. the list is the API's: five rows, in the API's order, Europe checked, Ede coming soon and disabled
+    // 1. the list is the API's: four rows, in the API's order, Europe checked, the Netherlands coming soon and disabled
     const rows = await surface.rows(page)
-    ok(rows.length === 5, `${name}: 5 rows, got ${JSON.stringify(rows)}`)
+    ok(rows.length === 4, `${name}: 4 rows, got ${JSON.stringify(rows)}`)
     ok((await surface.checked(page)).length === 1, `${name}: exactly one row checked`)
     ok(await surface.isChecked(surface.row(page, 'Europe')), `${name}: Europe is the checked default`)
     const body1 = await text()
-    ok(/Coming soon/.test(body1), `${name}: Ede says Coming soon`)
-    ok(/Stored in the EU\. New files go to any of our datacenters in Europe\./.test(body1), `${name}: Europe summary`)
-    ok(await surface.row(page, 'Ede').isDisabled(), `${name}: Ede is disabled`)
-    ok(!(await surface.row(page, 'Helsinki').isDisabled()), `${name}: Helsinki is selectable`)
+    ok(/Coming soon/.test(body1), `${name}: the Netherlands says Coming soon`)
+    ok(/Stored in the EU\. New files go to any of our European data centers\./.test(body1), `${name}: Europe summary`)
+    ok(await surface.row(page, 'Netherlands').isDisabled(), `${name}: the Netherlands is disabled`)
+    ok(!(await surface.row(page, 'Finland').isDisabled()), `${name}: Finland is selectable`)
     ok(!/hetzner|provider|endpoint/i.test(body1), `${name}: no provider words`)
+    ok(!/Falkenstein|Helsinki|Nuremberg|\bEde\b/.test(body1), `${name}: no city`)
     await page.screenshot({ path: path.join(output, 'png', `${name}-1-europe-default.png`) })
 
-    // 2. choose Helsinki: the API now holds hel1 (read from the API, not the UI)
-    await surface.row(page, 'Helsinki').click()
+    // 2. choose Finland: the API now holds fi (read from the API, not the UI)
+    await surface.row(page, 'Finland').click()
     await page.waitForFunction(() => window.__calls.some((c) => c.name === 'account_set_region'))
     await page.waitForTimeout(400)
-    ok((await serverPreference()) === 'hel1', `${name}: the API stored hel1`)
-    ok(await surface.isChecked(surface.row(page, 'Helsinki')), `${name}: Helsinki is the checked row`)
-    ok(/Stored in the EU\. New files go to Helsinki, Finland\./.test(await text()), `${name}: Helsinki summary from the payload`)
+    ok((await serverPreference()) === 'fi', `${name}: the API stored fi`)
+    ok(await surface.isChecked(surface.row(page, 'Finland')), `${name}: Finland is the checked row`)
+    ok(/Stored in the EU\. New files go to Finland\./.test(await text()), `${name}: Finland summary from the payload`)
     const sent = await page.evaluate(() => window.__calls.filter((c) => c.name === 'account_set_region').map((c) => c.args))
-    ok(JSON.stringify(sent) === JSON.stringify([{ preferredRegion: 'hel1' }]), `${name}: sent the id verbatim ${JSON.stringify(sent)}`)
-    await page.screenshot({ path: path.join(output, 'png', `${name}-2-helsinki.png`) })
+    ok(JSON.stringify(sent) === JSON.stringify([{ preferredRegion: 'fi', regionStrict: false }]), `${name}: sent the id verbatim ${JSON.stringify(sent)}`)
+    await page.screenshot({ path: path.join(output, 'png', `${name}-2-finland.png`) })
 
-    // 3. Ede cannot be chosen: nothing is sent, the API keeps hel1
-    await surface.row(page, 'Ede').click({ force: true }).catch(() => {})
+    // 3. the Netherlands cannot be chosen: nothing is sent, the API keeps fi
+    await surface.row(page, 'Netherlands').click({ force: true }).catch(() => {})
     await page.waitForTimeout(300)
-    const sentAfterEde = await page.evaluate(() => window.__calls.filter((c) => c.name === 'account_set_region').length)
-    ok(sentAfterEde === 1, `${name}: clicking Ede sent nothing (${sentAfterEde} set calls)`)
-    ok((await serverPreference()) === 'hel1', `${name}: still hel1 after Ede`)
+    const sentAfterNl = await page.evaluate(() => window.__calls.filter((c) => c.name === 'account_set_region').length)
+    ok(sentAfterNl === 1, `${name}: clicking the Netherlands sent nothing (${sentAfterNl} set calls)`)
+    ok((await serverPreference()) === 'fi', `${name}: still fi after the Netherlands`)
 
-    // 4. back to Europe: the API holds "europe"
+    // 3b. only store in Finland: the API holds region_strict
+    await page.getByRole('switch', { name: 'Only store in Finland' }).click()
+    await page.waitForTimeout(400)
+    ok(JSON.parse((await api('GET', '/api/v1/me/region')).text).region_strict === true, `${name}: the API stored region_strict`)
+    await page.screenshot({ path: path.join(output, 'png', `${name}-2b-finland-strict.png`) })
+
+    // 4. back to Europe: the API holds "europe", and strict ends with it
     await surface.row(page, 'Europe').click()
     await page.waitForTimeout(500)
     ok((await serverPreference()) === 'europe', `${name}: the API stored europe`)
+    ok(JSON.parse((await api('GET', '/api/v1/me/region')).text).region_strict === false, `${name}: strict ended with Europe`)
     ok(await surface.isChecked(surface.row(page, 'Europe')), `${name}: Europe is checked again`)
     ok(errors.length === 0, `${name}: no page errors ${JSON.stringify(errors)}`)
     await page.close()
 
-    // 5. a stored datacenter shows as chosen after a reload (read from the API), then the API data changes
-    assert.equal((await api('PUT', '/api/v1/me/region', { preferred_region: 'nbg1' })).status, 200)
+    // 5. a stored country shows as chosen after a reload (read from the API), then the API data changes
+    assert.equal((await api('PUT', '/api/v1/me/region', { preferred_region: 'de' })).status, 200)
     ;({ page, errors } = await fresh())
-    ok(await surface.isChecked(surface.row(page, 'Nuremberg')), `${name}: reload shows the stored nbg1`)
+    ok(await surface.isChecked(surface.row(page, 'Germany')), `${name}: reload shows the stored de`)
     await page.close()
 
-    // 6. NO CLIENT CHANGE: rename a datacenter and take another out of service in the API's database.
-    //    The name list is the API's: the reloaded window shows the new name and 4 rows.
+    // 6. NO CLIENT CHANGE: take Finland's datacenter out of service in the API's database. The list is the
+    //    API's: the reloaded window shows Finland iff the API still lists it as selectable.
     try {
-      sql("UPDATE datacenters SET display_name='Helsinki North' WHERE code='hel1'")
-      sql("UPDATE storage_pools SET is_healthy=FALSE WHERE region='nbg1'")
+      sql("UPDATE storage_pools SET is_healthy=FALSE WHERE region='hel1'")
       const list = JSON.parse((await api('GET', '/api/v1/storage-regions')).text)
-      const changed = JSON.stringify(list.map((x) => [x.id, x.name]))
+      const changed = JSON.stringify(list.map((x) => [x.id, x.name, x.selectable]))
       ;({ page, errors } = await fresh())
       const after = await surface.rows(page)
       await page.screenshot({ path: path.join(output, 'png', `${name}-3-api-data-changed.png`) })
-      ok(!(await text()).includes('Nuremberg') === !list.some((x) => x.id === 'nbg1') , `${name}: Nuremberg shown iff the API lists it (${changed})`)
-      ok(list.some((x) => x.name === 'Helsinki North') ? (await text()).includes('Helsinki North') : true, `${name}: the renamed datacenter shows its new name when the API serves it (${changed})`)
+      const finland = list.find((x) => x.id === 'fi')
+      ok((await text()).includes('Finland') === Boolean(finland), `${name}: Finland shown iff the API lists it (${changed})`)
+      if (finland) ok((await surface.row(page, 'Finland').isDisabled()) === !finland.selectable, `${name}: Finland disabled iff the API says not selectable (${changed})`)
       console.log(`${name}: after the API data change the API lists ${changed}; the window shows ${JSON.stringify(after)}`)
       await page.close()
     } finally {
-      sql("UPDATE datacenters SET display_name='Helsinki' WHERE code='hel1'")
-      sql("UPDATE storage_pools SET is_healthy=TRUE WHERE region='nbg1'")
+      sql("UPDATE storage_pools SET is_healthy=TRUE WHERE region='hel1'")
     }
     await api('PUT', '/api/v1/me/region', { preferred_region: null })
   }

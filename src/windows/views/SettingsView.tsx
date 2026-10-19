@@ -657,7 +657,29 @@ function RegionSelectionCard({
 
 function DataResidencyPanel() {
   const { showToast } = useToast()
-  const { loading, loadError, view, retry, select } = useDataResidency()
+  const { loading, loadError, view, retry, select, setStrict } = useDataResidency()
+
+  const handleStrict = async (next: boolean) => {
+    const pinned = view.pinned
+    const result = await setStrict(next)
+    if (result.status === 'saved' && pinned) {
+      showToast({
+        variant: 'success',
+        title: result.strict ? `Only storing in ${pinned.displayName}` : 'Other EU countries allowed',
+        message: result.strict
+          ? `If ${pinned.displayName} can’t take a new file, the upload stops.`
+          : `If ${pinned.displayName} can’t take a new file, it goes to another EU country.`,
+      })
+      return
+    }
+    if (result.status === 'error') {
+      showToast({
+        variant: 'error',
+        title: 'Failed to save storage location',
+        message: result.message || 'Please try again.',
+      })
+    }
+  }
 
   const handleSelect = async (id: string) => {
     const result = await select(id)
@@ -679,18 +701,20 @@ function DataResidencyPanel() {
     }
   }
 
-  return <DataResidencyContent loading={loading} loadError={loadError} view={view} onRetry={retry} onSelect={handleSelect} />
+  return <DataResidencyContent loading={loading} loadError={loadError} view={view} onRetry={retry} onSelect={handleSelect} onStrictChange={handleStrict} />
 }
 
-export function DataResidencyContent({ loading, loadError, view, onRetry, onSelect }: {
+export function DataResidencyContent({ loading, loadError, view, onRetry, onSelect, onStrictChange }: {
   loading: boolean
   loadError: string | null
   view: ReturnType<typeof buildDataResidencyViewState>
   onRetry: () => void
   onSelect: (id: string) => void
+  /** "Only store in <country>": offered only while a country is selected. */
+  onStrictChange: (next: boolean) => void
 }) {
   const summary = residencySummary(view)
-  // A stored datacenter that left the list is not a load failure: the rows are fine, none is selected.
+  // A stored country that left the list is not a load failure: the rows are fine, none is selected.
   const error = loadError ?? (!summary && !view.preferenceUnavailable
     ? 'Your storage region could not be determined. Please try again.'
     : null)
@@ -754,6 +778,23 @@ export function DataResidencyContent({ loading, loadError, view, onRetry, onSele
               />
             ))}
           </div>}
+
+          {!error && view.pinned && (
+            <Card style={{ padding: 14 }}>
+              <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 14 }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 650, color: T.ink2 }}>{view.pinned.strictLabel}</div>
+                  <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.55, marginTop: 3 }}>{view.pinned.strictHint}</div>
+                </div>
+                <Toggle
+                  on={view.strict}
+                  busy={view.saving}
+                  onChange={onStrictChange}
+                  label={view.pinned.strictLabel}
+                />
+              </div>
+            </Card>
+          )}
 
           {!error && !view.onlyOneRegion && <Card style={{ padding: 14, background: T.paper2 }}>
             <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>

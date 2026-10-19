@@ -250,17 +250,28 @@ function GeneralTab({ settings }: { settings: SettingsConfig }) {
 
 /**
  * The storage-location choice. The rows are the API's list (`GET /me/region` -> `choices`) through the
- * one hook the Windows panel uses: "Europe" is the default (any of our datacenters, the server places
- * the data), a live datacenter is a row to pick, a coming-soon datacenter is listed and cannot be
- * picked. This window keeps no list, city or country of its own, so a datacenter the server adds or
- * retires changes these rows with no release.
+ * one hook the Windows panel uses: "Europe" is the default (any of our European data centers, the
+ * server places the data), a live country is a row to pick, a coming-soon country is listed and cannot
+ * be picked (task 2050: by country, never a city). This window keeps no list, city or country of its
+ * own, so a country the server adds or retires changes these rows with no release. While a country is
+ * chosen, "Only store in <country>" is a switch under the rows.
  *
  * One failure, one surface: a list that did not load is the inline block with Try again; a choice the
  * server refused is a toast (a one-off action that gates nothing) and the row goes back to what is saved.
  */
 function DataResidencyGroup() {
   const { showToast } = useToast()
-  const { loading, loadError, view, retry, select } = useDataResidency()
+  const { loading, loadError, view, retry, select, setStrict } = useDataResidency()
+
+  const chooseStrict = async (next: boolean) => {
+    const result = await setStrict(next)
+    if (result.status !== 'error') return
+    showToast({
+      variant: 'error',
+      title: 'Couldn’t change where files are stored',
+      message: result.message || 'Please try again.',
+    })
+  }
 
   const choose = async (id: string) => {
     const result = await select(id)
@@ -330,6 +341,16 @@ function DataResidencyGroup() {
           </button>
         ))}
       </div>
+      {view.pinned ? (
+        <ToggleRow
+          name="region-strict"
+          label={view.pinned.strictLabel}
+          hint={view.pinned.strictHint}
+          on={view.strict}
+          disabled={view.saving}
+          onChange={(next) => void chooseStrict(next)}
+        />
+      ) : null}
       {view.onlyOneRegion ? null : (
         <Note kind="status">Existing files stay where they are. Only new files use the location you choose.</Note>
       )}

@@ -4,7 +4,7 @@ import type { CommandResult, UserRegionResponse } from '../src/desktopApi'
 
 const response: UserRegionResponse = {
   preferred_region: null,
-  regions: [{ continent: 'europe', display_name: 'Europe', city: 'Local', is_default: true }],
+  regions: [{ continent: 'europe', display_name: 'Europe', country: null, is_default: true }],
 }
 
 test('failed load has no invented cards and Retry loads the actual API regions', async () => {
@@ -19,12 +19,13 @@ test('failed load has no invented cards and Retry loads the actual API regions',
   expect(failed.error).toBe('Data residency is unavailable. Please try again.')
   expect(failed.choices).toEqual([])
   expect(failed.preferredRegion).toBeNull()
+  expect(failed.regionStrict).toBe(false)
   const retried = await loadDataResidency(fetchRegion)
   expect(calls).toBe(2)
   expect(retried.error).toBeNull()
   expect(buildDataResidencyViewState({ ...retried, saving: false }).items).toEqual([{
-    id: 'europe', kind: 'region', displayName: 'Europe', detail: 'Local', locationLabel: 'Local',
-    isDefault: true, anyDatacenter: false, selected: true, comingSoon: false, disabled: true,
+    id: 'europe', kind: 'region', displayName: 'Europe', detail: 'Any of our European data centers. We place your files.',
+    locationLabel: 'any of our European data centers', isDefault: true, selected: true, comingSoon: false, disabled: true,
   }])
 })
 

@@ -116,32 +116,36 @@ pub struct BillingUsage {
 
 // ── 2b. Data residency / region — GET /api/v1/me/region ───────────────────────
 //
-// Public API wire keys are `available_regions` / `example_city`;
-// aliases retain the desktop IPC `regions` / `city` names. The server omits
+// Task 2050 (Guus, 2026-10-19): storage location is described by COUNTRY, never by city. The wire
+// key of the legacy list is `available_regions` (alias keeps the desktop IPC name `regions`). The
+// server still sends `example_city` for one release; it is NOT read: no field here carries it, so a
+// city can neither be decoded nor reach the UI. The country is `example_country`. The server omits
 // provider metadata; ignore any legacy provider field rather than forwarding it.
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RegionInfo {
     pub continent: String,
     pub display_name: String,
-    #[serde(alias = "example_city")]
-    pub city: String,
+    /// `example_country` of a server that speaks countries; null from an older one (which sent only
+    /// the deprecated `example_city`, never read).
+    #[serde(default, alias = "example_country")]
+    pub country: Option<String>,
     pub is_default: bool,
 }
 
-/// One row of the storage-location list (task 1919): `choices` of `GET /api/v1/me/region`, the same
-/// array as the public `GET /api/v1/storage-regions`. The server owns every field. `id` is sent back
-/// verbatim as `preferred_region` (`europe` or a datacenter id). There is no provider, endpoint or
-/// pool id on the wire, and none is read: any such key a server sends is ignored here and absent
-/// from the IPC.
+/// One row of the storage-location list (task 1919, by country since task 2050): `choices` of
+/// `GET /api/v1/me/region`, the same array as the public `GET /api/v1/storage-regions`. The server
+/// owns every field. `id` is sent back verbatim as `preferred_region` (`europe` or a lower-case
+/// country code). There is no city, provider, endpoint or pool id in this struct: a `city` key an
+/// older server still sends is ignored here and absent from the IPC.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct StorageChoice {
     pub id: String,
-    /// `region` (the "Europe" default: any datacenter) or `datacenter`.
+    /// `region` (the "Europe" default: any data center), `country`, or `datacenter` (an older
+    /// server's one-row-per-datacenter list, folded into countries by the UI).
     pub kind: String,
+    /// `Europe`, or the country's name (`Germany`).
     pub name: String,
-    #[serde(default)]
-    pub city: Option<String>,
     #[serde(default)]
     pub country: Option<String>,
     #[serde(default)]
@@ -154,9 +158,14 @@ pub struct StorageChoice {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UserRegionResponse {
-    /// `europe`, a live datacenter id, or null (no choice: placed like `europe`).
+    /// `europe`, a live country id (`de`, `fi`), or null (no choice: placed like `europe`). An older
+    /// server may still hold a datacenter id here.
     #[serde(default)]
     pub preferred_region: Option<String>,
+    /// "Only store in <country>" (task 1952): when the chosen country cannot take a new file the
+    /// upload stops instead of going to another EU country. False from a server that predates it.
+    #[serde(default)]
+    pub region_strict: bool,
     #[serde(alias = "available_regions")]
     pub regions: Vec<RegionInfo>,
     /// The storage-location list. A server that predates task 1919 sends none: the IPC then carries
@@ -169,6 +178,8 @@ pub struct UserRegionResponse {
 pub struct SetPreferredRegionResponse {
     #[serde(default)]
     pub preferred_region: Option<String>,
+    #[serde(default)]
+    pub region_strict: bool,
 }
 
 // ── 3. Account activity & security score ──────────────────────────────────────
@@ -874,7 +885,7 @@ mod tests {
                 {
                     "continent": "europe",
                     "display_name": "Europe",
-                    "city": "Falkenstein",
+                    "example_country": "Germany",
                     "provider": "Never Display Storage Provider",
                     "is_default": true
                 }
@@ -883,8 +894,9 @@ mod tests {
         let r: UserRegionResponse = serde_json::from_str(json).unwrap();
         assert_eq!(r.preferred_region.as_deref(), Some("europe"));
         assert_eq!(r.regions.len(), 1);
-        assert_eq!(r.regions[0].city, "Falkenstein");
+        assert_eq!(r.regions[0].country.as_deref(), Some("Germany"));
         assert!(r.regions[0].is_default);
+        assert!(!r.region_strict, "a response without region_strict is not strict");
     }
 
     #[test]
@@ -897,7 +909,6 @@ mod tests {
                 {
                     "continent": "europe",
                     "display_name": "Europe",
-                    "city": "Falkenstein",
                     "provider": "Never Display Storage Provider",
                     "is_default": true
                 }
@@ -906,19 +917,22 @@ mod tests {
         let r: UserRegionResponse = serde_json::from_str(json).unwrap();
         assert_eq!(r.preferred_region, None);
         assert_eq!(r.regions[0].continent, "europe");
+        assert_eq!(r.regions[0].country, None);
     }
 
-    // Public API response fixture without provider metadata.
+    // Public API response fixture without provider metadata, from a server that predates task
+    // 2050: it sends only the deprecated `example_city`. That key is not read, so it cannot reach the IPC.
     #[test]
-    fn region_contract_decodes_captured_server_response_without_provider() {
-        let response: UserRegionResponse = serde_json::from_str(include_str!("../tests/fixtures/region-api.json"))
-            .expect("the real server response must decode without provider");
+    fn region_contract_decodes_older_server_response_and_drops_its_city() {
+        let response: UserRegionResponse =
+            serde_json::from_str(include_str!("../tests/fixtures/region-api-older-server.json"))
+                .expect("an older server's response must decode without provider and without a country");
         assert_eq!(response.preferred_region, None);
         assert_eq!(response.regions.len(), 1);
         let region = &response.regions[0];
         assert_eq!(region.continent, "europe");
         assert_eq!(region.display_name, "Europe");
-        assert_eq!(region.city, "Local");
+        assert_eq!(region.country, None, "example_city is never turned into a country");
         assert!(region.is_default);
         // An older server sends no `choices`: the IPC carries an empty list, never an invented one.
         assert!(response.choices.is_empty());
@@ -926,56 +940,101 @@ mod tests {
             serde_json::to_value(response).unwrap(),
             serde_json::json!({
                 "preferred_region": null,
-                "regions": [{"continent": "europe", "display_name": "Europe", "city": "Local", "is_default": true}],
+                "region_strict": false,
+                "regions": [{"continent": "europe", "display_name": "Europe", "country": null, "is_default": true}],
                 "choices": []
             })
         );
     }
 
-    // Task 1919: `GET /me/region` carries `choices`, the list the Data residency view renders.
-    // The fixture is a response captured from a real local API (a scratch DB with the fsn1, hel1
-    // and nbg1 pools loaded), not a hand-written shape.
+    // Task 2050: the server's country shape. Both the legacy list and `choices` are read by country; the
+    // `example_city` the server still sends for one release is dropped.
     #[test]
-    fn region_choices_decode_captured_server_response() {
+    fn region_country_contract_decodes_and_never_forwards_a_city() {
         let response: UserRegionResponse =
-            serde_json::from_str(include_str!("../tests/fixtures/region-choices-api.json"))
-                .expect("the captured /me/region response must decode");
+            serde_json::from_str(include_str!("../tests/fixtures/region-api-country.json")).unwrap();
+        assert_eq!(response.regions[0].country.as_deref(), Some("Germany"));
+        let ipc = serde_json::to_string(&response).unwrap();
+        assert!(!ipc.contains("Local") && !ipc.contains("city"), "{ipc}");
+    }
+
+    // Task 2050: `GET /me/region` carries `choices` by country. The fixture follows the server contract
+    // (server PR #251, regions.rs at aead1d01), not a live capture: the server is not deployed yet.
+    #[test]
+    fn region_choices_decode_country_response() {
+        let response: UserRegionResponse =
+            serde_json::from_str(include_str!("../tests/fixtures/region-choices-country-api.json"))
+                .expect("the /me/region country response must decode");
         assert_eq!(response.preferred_region, None);
+        assert!(!response.region_strict);
         let ids: Vec<&str> = response.choices.iter().map(|c| c.id.as_str()).collect();
-        assert_eq!(ids, ["europe", "fsn1", "hel1", "nbg1", "ede"]);
+        assert_eq!(ids, ["europe", "de", "fi", "nl"]);
 
         let europe = &response.choices[0];
         assert_eq!(europe.kind, "region");
         assert_eq!(europe.name, "Europe");
         assert!(europe.is_default && europe.selectable);
-        assert_eq!((europe.city.as_deref(), europe.country.as_deref()), (None, None));
+        assert_eq!((europe.country.as_deref(), europe.country_code.as_deref()), (None, None));
 
-        let helsinki = &response.choices[2];
-        assert_eq!(helsinki.kind, "datacenter");
-        assert_eq!(helsinki.city.as_deref(), Some("Helsinki"));
-        assert_eq!(helsinki.country.as_deref(), Some("Finland"));
-        assert_eq!(helsinki.country_code.as_deref(), Some("FI"));
-        assert!(helsinki.selectable && !helsinki.is_default);
+        let finland = &response.choices[2];
+        assert_eq!(finland.kind, "country");
+        assert_eq!(finland.name, "Finland");
+        assert_eq!(finland.country.as_deref(), Some("Finland"));
+        assert_eq!(finland.country_code.as_deref(), Some("FI"));
+        assert!(finland.selectable && !finland.is_default);
 
-        let ede = &response.choices[4];
-        assert_eq!(ede.status, "coming_soon");
-        assert!(!ede.selectable, "a coming-soon datacenter is listed, never selectable");
+        let nl = &response.choices[3];
+        assert_eq!(nl.status, "coming_soon");
+        assert!(!nl.selectable, "a coming-soon country is listed, never selectable");
 
         // Only the Europe entry is the default.
         assert_eq!(response.choices.iter().filter(|c| c.is_default).count(), 1);
     }
 
+    // An older server (task 1919): one `datacenter` row per datacenter, each with a `city`. It decodes, and the
+    // city is not in the IPC. The UI folds these rows into countries.
+    #[test]
+    fn region_choices_decode_older_server_datacenters_and_drop_the_city() {
+        let response: UserRegionResponse =
+            serde_json::from_str(include_str!("../tests/fixtures/region-choices-older-server-api.json"))
+                .expect("an older server's captured /me/region response must decode");
+        let ids: Vec<&str> = response.choices.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["europe", "fsn1", "hel1", "nbg1", "ede"]);
+        let hel = &response.choices[2];
+        assert_eq!(hel.kind, "datacenter");
+        assert_eq!(hel.country.as_deref(), Some("Finland"));
+        assert_eq!(hel.country_code.as_deref(), Some("FI"));
+        let ipc = serde_json::to_string(&response).unwrap();
+        assert!(!ipc.contains("\"city\""), "{ipc}");
+    }
+
+    #[test]
+    fn region_strict_decodes_on_the_get_and_the_put_response() {
+        let get: UserRegionResponse = serde_json::from_str(
+            r#"{"preferred_region":"de","region_strict":true,"available_regions":[],"choices":[]}"#,
+        )
+        .unwrap();
+        assert!(get.region_strict);
+        assert_eq!(serde_json::to_value(&get).unwrap()["region_strict"], serde_json::json!(true));
+        let put: SetPreferredRegionResponse =
+            serde_json::from_str(r#"{"preferred_region":"de","region_strict":true}"#).unwrap();
+        assert!(put.region_strict);
+        let older: SetPreferredRegionResponse = serde_json::from_str(r#"{"preferred_region":"europe"}"#).unwrap();
+        assert!(!older.region_strict);
+    }
+
     #[test]
     fn region_choices_never_forward_provider_or_endpoint_to_the_ipc() {
         let mut json: serde_json::Value =
-            serde_json::from_str(include_str!("../tests/fixtures/region-choices-api.json")).unwrap();
+            serde_json::from_str(include_str!("../tests/fixtures/region-choices-country-api.json")).unwrap();
         json["choices"][1]["provider"] = serde_json::json!("Never Display Storage Provider");
         json["choices"][1]["endpoint"] = serde_json::json!("https://never.example");
+        json["choices"][1]["city"] = serde_json::json!("Never Display City");
         let response: UserRegionResponse = serde_json::from_value(json).unwrap();
         let ipc = serde_json::to_string(&response).unwrap();
         assert!(!ipc.contains("Never Display"), "{ipc}");
         assert!(!ipc.contains("never.example"), "{ipc}");
-        assert!(!ipc.contains("provider") && !ipc.contains("endpoint"), "{ipc}");
+        assert!(!ipc.contains("provider") && !ipc.contains("endpoint") && !ipc.contains("city"), "{ipc}");
     }
 
     #[test]
@@ -995,7 +1054,7 @@ mod tests {
     #[test]
     fn region_contract_ignores_legacy_provider_in_ipc() {
         let mut json: serde_json::Value =
-            serde_json::from_str(include_str!("../tests/fixtures/region-api.json")).unwrap();
+            serde_json::from_str(include_str!("../tests/fixtures/region-api-country.json")).unwrap();
         json["available_regions"][0]["provider"] = serde_json::json!("Never Display Storage Provider");
         let response: UserRegionResponse = serde_json::from_value(json).unwrap();
         let ipc = serde_json::to_value(response).unwrap();
@@ -1030,6 +1089,7 @@ mod tests {
                     "continent": "europe",
                     "display_name": "Europe",
                     "example_city": "Falkenstein",
+                    "example_country": "Germany",
                     "provider": "Never Display Storage Provider",
                     "is_default": true
                 }
@@ -1038,8 +1098,9 @@ mod tests {
         let r: UserRegionResponse = serde_json::from_str(json).unwrap();
         assert_eq!(r.preferred_region, None);
         assert_eq!(r.regions.len(), 1);
-        assert_eq!(r.regions[0].city, "Falkenstein");
+        assert_eq!(r.regions[0].country.as_deref(), Some("Germany"));
         assert!(r.regions[0].is_default);
+        assert!(!serde_json::to_string(&r).unwrap().contains("Falkenstein"));
     }
 
     #[test]
