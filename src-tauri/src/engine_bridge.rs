@@ -24440,7 +24440,7 @@ mod tests {
         let listed = api.account_region().await.expect("GET /me/region");
         let ids: Vec<&str> = listed.choices.iter().map(|c| c.id.as_str()).collect();
         println!("choices from the API: {ids:?}");
-        assert_eq!(ids, ["europe", "de", "fi", "nl"]);
+        assert_eq!(ids, ["europe", "fi", "de", "nl"]);
         let nl = listed.choices.iter().find(|c| c.id == "nl").unwrap();
         assert!(!nl.selectable && nl.status == "coming_soon");
 

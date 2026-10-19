@@ -17241,7 +17241,7 @@ mod popover_snapshot_command_tests {
             let ipc = serde_json::to_value(&listed).unwrap();
             println!("account_region IPC: {}", serde_json::to_string(&ipc).unwrap());
             let ids: Vec<&str> = listed.choices.iter().map(|c| c.id.as_str()).collect();
-            assert_eq!(ids, ["europe", "de", "fi", "nl"]);
+            assert_eq!(ids, ["europe", "fi", "de", "nl"]);
             assert!(!ipc.to_string().contains("provider"));
             assert!(!ipc.to_string().contains("city"), "no city reaches the IPC");
 

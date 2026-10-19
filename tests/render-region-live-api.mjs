@@ -76,7 +76,10 @@ function installBackend({ host, win }) {
           }
         }
         case 'account_set_region': {
-          const r = await window.__api('PUT', '/api/v1/me/region', { preferred_region: args.preferredRegion })
+          // Same body as the Rust `set_region_body`: region_strict rides along only when the window sent it.
+          const body = { preferred_region: args.preferredRegion }
+          if (typeof args.regionStrict === 'boolean') body.region_strict = args.regionStrict
+          const r = await window.__api('PUT', '/api/v1/me/region', body)
           if (r.status !== 200) throw new Error(`HTTP ${r.status}: ${r.text}`)
           return JSON.parse(r.text)
         }
