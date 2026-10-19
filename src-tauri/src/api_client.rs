@@ -1817,7 +1817,10 @@ mod tests {
         assert_eq!(requests[0].path, "/api/v1/me/region");
         assert_eq!(requests[0].authorization.as_deref(), Some("Bearer tok"));
         let body: serde_json::Value = serde_json::from_slice(requests[0].body.as_bytes()).unwrap();
-        assert_eq!(body, serde_json::json!({ "preferred_region": "de", "region_strict": true }));
+        assert_eq!(
+            body,
+            serde_json::json!({ "preferred_region": "de", "region_strict": true })
+        );
     }
 
     #[test]

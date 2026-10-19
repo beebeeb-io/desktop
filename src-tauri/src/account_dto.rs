@@ -974,7 +974,10 @@ mod tests {
         assert_eq!(europe.kind, "region");
         assert_eq!(europe.name, "Europe");
         assert!(europe.is_default && europe.selectable);
-        assert_eq!((europe.country.as_deref(), europe.country_code.as_deref()), (None, None));
+        assert_eq!(
+            (europe.country.as_deref(), europe.country_code.as_deref()),
+            (None, None)
+        );
 
         let finland = &response.choices[2];
         assert_eq!(finland.kind, "country");
@@ -1015,7 +1018,10 @@ mod tests {
         )
         .unwrap();
         assert!(get.region_strict);
-        assert_eq!(serde_json::to_value(&get).unwrap()["region_strict"], serde_json::json!(true));
+        assert_eq!(
+            serde_json::to_value(&get).unwrap()["region_strict"],
+            serde_json::json!(true)
+        );
         let put: SetPreferredRegionResponse =
             serde_json::from_str(r#"{"preferred_region":"de","region_strict":true}"#).unwrap();
         assert!(put.region_strict);
@@ -1034,7 +1040,10 @@ mod tests {
         let ipc = serde_json::to_string(&response).unwrap();
         assert!(!ipc.contains("Never Display"), "{ipc}");
         assert!(!ipc.contains("never.example"), "{ipc}");
-        assert!(!ipc.contains("provider") && !ipc.contains("endpoint") && !ipc.contains("city"), "{ipc}");
+        assert!(
+            !ipc.contains("provider") && !ipc.contains("endpoint") && !ipc.contains("city"),
+            "{ipc}"
+        );
     }
 
     #[test]
