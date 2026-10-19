@@ -105,6 +105,11 @@ function installBackend(native: Native, extra: Record<string, (args: any) => unk
       native.revision += 2
       return { warning: SIGN_OUT_WARNING }
     },
+    // Settings' sign-out flow (spec 2026-10-10 §5.1) on a Mac: it consumes a pending flow request when it mounts (none
+    // here), counts before it signs out (nothing waits, so it signs out at once), and acknowledges a result it showed.
+    consume_sign_out_flow_request: () => false,
+    sign_out_count: () => ({ askId: 'a0', files: 0, copiedFiles: 0, others: 0, missingFiles: 0, earlierFolders: [], canSend: false, notSending: null }),
+    sign_out_result_ack: () => null,
     ...extra,
   }
   dom.window.__TAURI_INTERNALS__ = {
@@ -289,6 +294,9 @@ describe('a sign-out with an unconfirmed Finder removal, through AccountSessionB
     await press(container, 'button', 'Sign out…')
     await press(container, 'button', 'Sign out')
     await waitFor('the sign-out', () => native.calls.includes('clear_session') && container.textContent.includes('You’re signed out'))
+    // Through the window's sign-out flow (spec 2026-10-10 §5.1): one count, then the sign-out.
+    expect(native.calls.filter((name) => name === 'sign_out_count')).toHaveLength(1)
+    expect(native.calls.indexOf('sign_out_count')).toBeLessThan(native.calls.indexOf('clear_session'))
     expect(statusLines(container)).toContain(SIGN_OUT_WARNING.sentence)
 
     await waitForRemount(container, shownBefore, native)

@@ -33,10 +33,12 @@ describe('the SessionActionOutcome contract', () => {
   test('both commands answer it', () => {
     const lib = rustSource('lib.rs')
     // Task 1882 (rebase onto main): the command also takes the app handle, to raise the kept-folder alert; rustfmt
-    // puts its arguments on their own lines, so compare without whitespace.
+    // puts its arguments on their own lines, so compare without whitespace. Task 1887: and the calling window (a result
+    // that needs showing waits for that window's acknowledgement) and `keep_unsent`, which `clearSession`'s
+    // `keepUnsent` fills.
     const squeezed = lib.replace(/\s+/g, '')
     expect(squeezed).toContain(
-      'asyncfnclear_session(app:tauri::AppHandle,state:State<\'_,AppState>,forget_email:Option<bool>,)->Result<SessionActionOutcome,String>{',
+      'asyncfnclear_session(app:tauri::AppHandle,window:tauri::WebviewWindow,state:State<\'_,AppState>,forget_email:Option<bool>,keep_unsent:Option<KeepUnsentArg>,)->Result<SessionActionOutcome,String>{',
     )
     expect(lib).toContain('async fn lock_vault(state: State<\'_, AppState>) -> Result<SessionActionOutcome, String> {')
   })
@@ -225,6 +227,17 @@ describe('source contract: every caller reads the warning', () => {
         sites += 1
         continue
       }
+      if (file === 'signOutFlow.ts') {
+        // The Settings sign-out flow (task 1887): its API object only passes the call through, and the flow's own
+        // `signOut` is the one caller, a class method this function census cannot see; it reads the answer's warning.
+        const start = text.indexOf('private async signOut(')
+        expect(start, 'the flow signs out in signOut').toBeGreaterThan(-1)
+        const body = text.slice(start, text.indexOf('\n  }\n', start))
+        expect(body).toContain('this.api.clearSession(')
+        expect(body).toContain('result.value.warning')
+        sites += 1
+        continue
+      }
       // Every reference outside an import: a call, or the function handed to a runner (MacSettings).
       const code = text.replace(/^import[\s\S]*?from '[^']+'\n/gm, (imports) => ' '.repeat(imports.length))
       for (const match of code.matchAll(/\b(clearSession|lockVault)\b/g)) {
@@ -237,7 +250,8 @@ describe('source contract: every caller reads the warning', () => {
       }
     }
     expect(offenders).toEqual([])
-    // forceReauth, AccountSwitchStep, MacSettings (lock, sign-out), pages/Account (lock, sign-out), AccountView.
+    // forceReauth, AccountSwitchStep, MacSettings (lock), the Settings sign-out flow, pages/Account (lock, sign-out),
+    // AccountView.
     expect(sites).toBe(7)
   })
 })

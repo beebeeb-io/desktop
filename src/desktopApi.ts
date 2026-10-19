@@ -1127,10 +1127,15 @@ async function sessionAction(name: 'clear_session' | 'lock_vault', args?: Record
  * stay on disk; the vault stays intact in the cloud. After this call the root
  * `sync_status` poll will return `logged_in: false` and the SignedOutGate will
  * take over. `forgetEmail` is the account switch (FB-I2): the previous account's
- * address is forgotten too, or the sign-out stops (`Err`).
+ * address is forgotten too, or the sign-out stops (`Err`). `keepUnsent` (macOS, spec
+ * 2026-10-10 §5.1) names the ask the person answered with "Sign out": Rust's gate goes on
+ * only while the queue is what that ask showed, and keeps its waiting saves first.
  */
-export function clearSession(options: { forgetEmail?: boolean } = {}): Promise<CommandResult<SessionActionOutcome>> {
-  return sessionAction('clear_session', options.forgetEmail ? { forgetEmail: true } : undefined)
+export function clearSession(options: { forgetEmail?: boolean; keepUnsent?: { askId: string } } = {}): Promise<CommandResult<SessionActionOutcome>> {
+  const args: Record<string, unknown> = {}
+  if (options.forgetEmail) args.forgetEmail = true
+  if (options.keepUnsent) args.keepUnsent = options.keepUnsent
+  return sessionAction('clear_session', Object.keys(args).length ? args : undefined)
 }
 
 /** Lock the vault. `Ok` means it is locked; its `warning` says which step could not be confirmed. */
