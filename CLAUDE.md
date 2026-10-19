@@ -215,9 +215,11 @@ Beebeeb window) plus a row in
 Settings → Sync until dismissed (`kept_unsynced_folder` in `desktop.toml`; commands
 `kept_unsynced_folder` / `dismiss_kept_unsynced_folder`, which returns
 `{ cleared, current }`). Writes to `desktop.toml` take the one config-write lock in
-`config.rs`. Task 1889: `DesktopConfig` has no `save()`; the only way to write the file is
-`update_at` (or `update`, `try_update_at`, `update_held`, `ensure_account_id`, which are `update_at`): the
-read, the change and the write under the lock, so a writer cannot put back a copy it loaded earlier. A flow
+`config.rs`. Task 1889: `DesktopConfig` has no `save()`; the file is written in one place,
+`try_update_at_then`, which holds the lock across the read, the change and the write, so a writer cannot put
+back a copy it loaded earlier. The ways in are `update_at` (or `update`, `update_held`, `ensure_account_id`,
+which are `update_at`), `try_update_at`, `update_at_then`, and `update_at_durable_with`, the one save that
+flushes its write (the keep step's, task 1887). A flow
 that keeps a copy to READ across slow work (the Windows and Linux install and Repair commands) writes through
 `copy.update_held(|held| …)`, which applies the change to the file as it is now and then refreshes the copy.
 A settings write (`set_desktop_config`) is merge-only: the six speed, pause and notification fields are options like
@@ -233,6 +235,16 @@ read through `lf()`/`slash()` in `finder_removal.rs`, so they run on a Windows c
 Correction: a Mac has no Add-to-Finder rollback. Since spec A (R5) the reconciler adds Beebeeb and
 never removes a domain it added. Windows and Linux keep `install_finder_location`'s rollback, where
 there is no File Provider and nothing is kept. — lead ruling, 2026-10-10 (rebase onto spec A, Q1)
+
+**A sign-out keeps waiting Finder saves (task 1887).** On macOS `clear_session` gates on an ask snapshot
+(`sign_out_count`), and refuses with `unsent_changes:` while changes wait and the person was not asked. Settings ›
+Account sends first (`sign_out_send_start`, at most 60 s, Rust-owned, a third wake in the runner's loop), then asks.
+On "Sign out" the keep step closes Finder accepts, copies every waiting save into
+`<container>/Data/Documents/Changes not sent/<date at time>/` with `clonefile` (never overwriting), and records it
+durably in `desktop.toml` (`kept_unsent_folder`, `kept_unsent_unfinished`) before the purge, whose guard refuses
+before any deletion unless every waiting write was kept. One alert names our folder and macOS's; Settings › Sync
+shows our row with Show in Finder and Dismiss. Closing Settings ends the flow; a late result is shown in the native
+dialog. Windows and Linux are unchanged. Spec: `docs/specs/2026-10-10-macos-sign-out-waiting-writes.md`.
 
 ### Finder setup reconciler (spec `docs/specs/2026-10-06-macos-finder-setup-reconciler.md`)
 
