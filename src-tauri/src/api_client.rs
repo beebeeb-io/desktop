@@ -193,6 +193,9 @@ pub struct SyncOps {
     /// Echo of the `since` the server applied (it clamps a missing value to 0).
     #[serde(default)]
     pub since: i64,
+    /// Authoritative per-user log head; absent on servers predating task 1909.
+    #[serde(default)]
+    pub head_seq: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
