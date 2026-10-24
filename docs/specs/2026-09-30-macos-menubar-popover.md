@@ -14,7 +14,7 @@
 - ~~Gear menu: Settings… / Pause sync / Help / Quit.~~
 - Gear menu: Open Beebeeb / Settings… / Pause Sync / Check for Updates… / Help / Quit Beebeeb; "Settings…" opens the Beebeeb window on Settings (two-surface spec §6.4). — two-surface design, 2026-10-24
 - ~~Settings shrinks to 4 tabs: General / Account / Sync / About (shipped, slice 4).~~
-- Settings is a pane of the Beebeeb window, not a window: General / Account / Sync / Security / About (two-surface spec §7.8). — two-surface design, 2026-10-24
+- Settings is a ~~pane~~ mode of the Beebeeb window, not a window: General / Account / Sync / Security / About (two-surface spec §7.8), drawn in System Settings style, as a sidebar list of sections that replaces the window's sidebar while it shows (Guus's ruling 1, two-surface spec §0). — two-surface design, 2026-10-24; rulings amendment, 2026-10-24
 - ~~Fewer windows: 6→4 window kinds, 4→1 idle webviews; conflicts no longer auto-open windows.~~
 - Fewer windows: on a Mac 7→2 window kinds (popover, main), 1 idle webview; conflicts no longer auto-open windows (two-surface spec §4). — two-surface design, 2026-10-24
 

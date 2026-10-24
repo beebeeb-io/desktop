@@ -1,7 +1,9 @@
 # 2026-10-24 — macOS: two surfaces, the menu-bar popover and one Beebeeb window (task 1683)
 
-**Status:** design for Guus's review. This PR changes no code; it adds this spec and the hi-fi file, and amends three
-earlier specs in place (§2). Code starts only after Guus approves (task 1683, "Next, design before code").
+**Status:** ~~design for Guus's review.~~ Approved by Guus on 24 Oct 2026, with the four rulings in §0; slice 1 starts
+after this amendment merges. This PR changes no code; it adds this spec and the hi-fi file, and amends three
+earlier specs in place (§2). ~~Code starts only after Guus approves (task 1683, "Next, design before code").~~ — rulings
+amendment, 2026-10-24
 **Date:** 24 Oct 2026
 **Repo:** desktop. macOS only. Windows and Linux keep their windows (§12, every slice says what it leaves alone).
 **Task:** 1683 (P1, epic). This spec takes the place of the "spec B" that specs A and C deferred to
@@ -9,11 +11,31 @@ earlier specs in place (§2). Code starts only after Guus approves (task 1683, "
 becomes the only macOS surface"), revised by the ruling below to two surfaces.
 **Hi-fi:** [`design/hifi/macos-two-surface.html`](../../design/hifi/macos-two-surface.html): popover states, the
 signed-out window (sign-in, browser code, email and password, sign in again, recovery phrase, Finder, account switch),
-Home, Review with the conflict sheet, Trash, every Settings tab, the 1887 sheets and the kept alert, light and dark.
+Home, Review with the conflict sheet, Trash, ~~every Settings tab~~ every Settings section in System Settings style
+(each drawn light and dark, plus Settings while signed out), the 1887 sheets and the kept alert, light and dark.
 **Builds on, unchanged in behaviour:** spec A (Finder reconciler), spec C (first run is sign-in only; approved, not yet
 built, tasks 1747/1748), spec 2026-10-10 (task 1887, sign-out keeps waiting Finder saves), spec 2026-10-09 (task 1882).
 **Read at:** desktop `origin/main` `5ef050dd` (24 Oct 2026). `file:line` cites that tree; `lib.rs` means
 `src-tauri/src/lib.rs`, `.tsx`/`.ts` paths are under `src/`.
+
+## 0. Rulings (Guus, 2026-10-24)
+
+Guus answered the three questions of §13 and the go/no-go on 24 Oct 2026. The lead relayed them to this lane; the
+option he chose is quoted verbatim in each row, and the description after it is the lead's, as relayed. At the time of
+writing they were not yet in task 1683's file.
+
+| # | Question | Ruling (the option chosen) | What it changes here |
+| --- | --- | --- | --- |
+| 1 | Settings layout (§13 question 1) | **"System Settings style"**: a sidebar list of sections with the pane on the right, like macOS System Settings. This replaces the toolbar tabs the spec recommended. | §7.8 is rewritten: the gear switches the window's one sidebar to the Settings section list, with a back control. Rows C1, F11, F15; §7.1, §7.2, §7.6, §8.2, §9.3, §10.2, §11; slices 1, 5 and 7. |
+| 2 | Windows-shell pages that do not come to the Mac (§13 question 2) | **"Drop them (Recommended)"**: the Bandwidth chart and sessions, App Activity, the account notifications list, and the 4 switches macOS never honours stay off the Mac app (still available in the web app). | Rows E10, E15, E17, E18, E20, E29 and E30 stay Removed, now by ruling. |
+| 3 | The app menu's "Sign Out…" (§13 question 3) | **"Yes, same sheet (Recommended)"**: once the 1887 device rung (workspace task 2175) passes, the app-menu Sign Out… goes through the same confirm sheet, so there is no silent sign-out from the menu. | Rows F4 and A14, §8.1 entry point 5, and a new slice 1b gated on task 2175. |
+| 4 | Go / no-go | **"Yes, start slice 1"**: implementation starts after this amendment merges. | Status line; slice 0. |
+
+**One correction to ruling 2's description, checked against web `fc4b9aa` (24 Oct 2026).** "Still available in the web
+app" holds for the account notifications list only: the web app has its notification inbox
+(`src/components/notification-inbox.tsx`). The Bandwidth chart and live sessions (E10), App Activity (E30) and the four
+switches (E17, E18, E20, E29) are views of this device's engine. The web app has none of them; they stay in the Windows
+app, which this spec does not change. The ruling itself, "drop them" on a Mac, is unaffected.
 
 ## 1. The ruling
 
@@ -39,9 +61,11 @@ The design he refers to (30 Sep, "The macOS app becomes a menu-bar popover") ans
 3. **"The gear menu … should just navigate to the bigger screen settings":** the popover's gear menu item
    "Settings…" opens the Beebeeb window on Settings, and the gear at the bottom of the window's sidebar selects
    Settings inside the same window. Neither opens a separate Settings window.
-4. **"Should look the same as macOS apps regularly look like":** Settings is drawn as a standard macOS Settings pane:
+4. **"Should look the same as macOS apps regularly look like":** ~~Settings is drawn as a standard macOS Settings pane:
    icon tabs in the toolbar, grouped inset rows, label left, control right, footnotes under groups (§7.8; open
-   question 1 offers the System Settings variant).
+   question 1 offers the System Settings variant).~~ Settings is drawn in System Settings style (ruling 1): a sidebar
+   list of sections, the selected section's pane on the right, grouped inset rows, label left, control right,
+   footnotes under groups (§7.8). — rulings amendment, 2026-10-24
 5. **Not surfaces in this sense:** what macOS itself draws for us and that holds no Beebeeb content of its own, namely
    the status item and its tooltip, native alerts (`NSAlert`, shown by UserNotificationCenter when there is no parent
    window), notifications in Notification Center, the native menu bar, the native menus, and the system file picker.
@@ -55,7 +79,7 @@ beneath, signed "— two-surface design, 2026-10-24".
 
 | Earlier text | What changes | Amended in |
 | --- | --- | --- |
-| Popover spec: "Settings shrinks to 4 tabs … (shipped, slice 4)" | Settings is a pane in the Beebeeb window, not a window; it gains a fifth tab, Security (§7.8). | `2026-09-30-macos-menubar-popover.md` |
+| Popover spec: "Settings shrinks to 4 tabs … (shipped, slice 4)" | Settings is a ~~pane in~~ mode of the Beebeeb window, not a window; it gains a fifth ~~tab~~ section, Security, in a System Settings style sidebar list (§7.8, ruling 1). | `2026-09-30-macos-menubar-popover.md` |
 | Popover spec: state "signed out" | No signed-out popover: with no session a click opens the Beebeeb window on sign-in (spec C C-W3, kept). | same |
 | Popover ruling 2, "Dock icon … while Settings, onboarding or review is open" | A Dock icon while the Beebeeb window is open (§9.1). | same |
 | Popover ruling 4, "Version history stays, in a single review window" | Version history and conflict review are sheets in the Beebeeb window's Review section. No review window. | same |
@@ -140,7 +164,7 @@ Added).
 | A11 | Tray left click toggles the compact window | `lib.rs:15371` `setup_tray` | Valid session: toggles the popover. No session: opens the Beebeeb window on sign-in. Right click does the same (§6.2) | Moved |
 | A12 | Tray tooltip (`engine_status::tray_tooltip`) and icon | `lib.rs:15323` | Unchanged; spec C's crossed b and its tooltips when built | Kept |
 | A13 | Native menu bar (Beebeeb, File, Edit, View, Help) | `lib.rs:14930` | Kept, items retargeted: rows F1–F15 | Moved |
-| A14 | Native alerts "Sign-out paused" and "Signed out" (menu sign-out, late results) | `lib.rs` `handle_desktop_menu_action` SignOut arm; `Shown::Failure` / `Shown::Warning` | Unchanged | Kept |
+| A14 | Native alerts "Sign-out paused" and "Signed out" (menu sign-out, late results) | `lib.rs` `handle_desktop_menu_action` SignOut arm; `Shown::Failure` / `Shown::Warning` | ~~Unchanged~~ Late results (`show_late_result`): unchanged. The menu sign-out's own alerts: unchanged until slice 1b, which routes the menu through the confirm sheet (ruling 3); its results are then the Settings flow's toast and Account note (§8.1) | Kept |
 | A15 | Native alert "Files kept on this Mac" (K0/K1, 1882's sentence) | `lib.rs:4142`, `lib.rs:4186`, `sign_out/copy.rs` `sign_out_alert` | Unchanged | Kept |
 | A16 | Native alerts for a failed menu "Open in Finder" or pause | `lib.rs:15205` `show_menu_open_failure`, `show_menu_pause_failure` | Unchanged | Kept |
 | A17 | Notifications "Conflict detected", "All caught up", "Local cache nearly full" | `lib.rs:12866`, `:12884`, `notify_quota_warning_impl` | Unchanged copy; a click opens the Beebeeb window (conflict → Review, others → Home) | Kept |
@@ -173,7 +197,7 @@ Added).
 
 | # | Surface today | Source | New home | Status |
 | --- | --- | --- | --- | --- |
-| C1 | Tab strip: General, Account, Sync, About | `MacSettings.tsx:1214-1231` | Settings pane toolbar tabs, plus Security | Moved |
+| C1 | Tab strip: General, Account, Sync, About | `MacSettings.tsx:1214-1231` | ~~Settings pane toolbar tabs, plus Security~~ The Settings sidebar list in System Settings style (§7.8, ruling 1): back control, account row (Account), General, Sync, Security, About | Moved |
 | C2 | General › "Open Beebeeb at login" | `MacSettings.tsx:233-243` | Settings › General, unchanged | Moved |
 | C3 | General › "Tell me about": Conflicts, Sync finished, Local cache almost full | `MacSettings.tsx:247-259` | Settings › General, unchanged | Moved |
 | C4 | Account › header: initial, email, plan line, storage bar, Upgrade / Manage plan | `MacSettings.tsx:501-530` | Settings › Account, plus "Storage details…" (E8) | Moved |
@@ -229,17 +253,17 @@ Everything here is visible on a Mac only because of A5. Line numbers from the in
 | E7 | Account › "Disconnect this device" | `views/AccountView.tsx:349-476` | None: it is a second sign-out that skips 1887's sheet (the Rust gate refuses it, but the person sees a raw error). One sign-out: Settings › Account | Removed |
 | E8 | Insights: storage hero, by type, largest files | `views/InsightsView.tsx` | Settings › Account › "Storage details…" sheet | Moved |
 | E9 | Bandwidth › Speed test | `views/BandwidthView.tsx:674-778` | Settings › About › "Test connection speed" | Moved |
-| E10 | Bandwidth › 20-hour traffic chart and live session telemetry | `views/BandwidthView.tsx`, `BandwidthChart.tsx` | None on a Mac: engine telemetry; the popover shows live transfers (open question 2) | Removed |
+| E10 | Bandwidth › 20-hour traffic chart and live session telemetry | `views/BandwidthView.tsx`, `BandwidthChart.tsx` | None on a Mac: engine telemetry; the popover shows live transfers (~~open question 2~~ ruling 2) | Removed |
 | E11 | Selective sync tree with Apply (`set_selective_sync`) | `views/SelectiveSyncView.tsx` | None on a Mac: a Mac pins folders (Keep on this Mac, C13); this is Windows' online-only model | Removed |
 | E12 | Devices | `views/DevicesView.tsx` | Settings › Security › Devices (no revoke claim, §10) | Moved |
 | E13 | Security: score, active sessions, Revoke, Sign out everywhere else, two-factor | `views/SecurityView.tsx` | Settings › Security | Moved |
 | E14 | Activity › Timeline | `views/ActivityView.tsx` | Settings › Security › "Recent account activity" | Moved |
-| E15 | Activity › Notifications (account alerts list, no mark-as-read) | `views/ActivityView.tsx:387-405` | None on a Mac: native notifications and the popover cover alerts (open question 2) | Removed |
+| E15 | Activity › Notifications (account alerts list, no mark-as-read) | `views/ActivityView.tsx:387-405` | None on a Mac: native notifications and the popover cover alerts; the web app's notification inbox keeps the list (~~open question 2~~ ruling 2) | Removed |
 | E16 | Sidebar extras: Search, Version history, storage widget with Upgrade, region label | `WindowsApp.tsx:1599-1638`, `:1855-1917` | Search → B2; Version history → B3; storage → sidebar footer and popover header; region → Settings › Account | Moved |
-| E17 | Settings › Sync › "Keep files encrypted end-to-end" (a switch that does nothing on a Mac) | `views/SettingsView.tsx:340-367` | None: a control that does nothing; encryption state is the amber lock in the popover and on Home | Removed |
-| E18 | Settings › Sync › "Sync on metered connections" | `views/SettingsView.tsx:82-83` | None on a Mac: nothing in `src-tauri` reads `metered` (only `config.rs` stores it) | Removed |
+| E17 | Settings › Sync › "Keep files encrypted end-to-end" (a switch that does nothing on a Mac) | `views/SettingsView.tsx:340-367` | None: a control that does nothing; encryption state is the amber lock in the popover and on Home (ruling 2) | Removed |
+| E18 | Settings › Sync › "Sync on metered connections" | `views/SettingsView.tsx:82-83` | None on a Mac: nothing in `src-tauri` reads `metered` (only `config.rs` stores it) (ruling 2) | Removed |
 | E19 | Settings › Sync › read-only upload and download rate limits | `views/SettingsView.tsx:86-96` | Settings › Sync › Speed (selects) | Moved |
-| E20 | Settings › Sync › "Files on Demand" and "Show sync overlays in File Explorer" | `views/SettingsView.tsx:98-103` | None on a Mac: File Explorer concepts; a Mac is always on demand and Finder draws its own badges | Removed |
+| E20 | Settings › Sync › "Files on Demand" and "Show sync overlays in File Explorer" | `views/SettingsView.tsx:98-103` | None on a Mac: File Explorer concepts; a Mac is always on demand and Finder draws its own badges (ruling 2) | Removed |
 | E21 | Settings › Sync › "Free up space" | `views/SettingsView.tsx:383-391` | None on a Mac: Keep on this Mac and macOS's own eviction cover it; it needs `sync_root` (`lib.rs:9542-9543`), which a File Provider Mac may not have (§14) | Removed |
 | E22 | Settings › Data residency | `views/SettingsView.tsx:658-812` | Settings › Account (already there, C6) | Moved |
 | E23 | Settings › Notifications › Desktop alerts | `views/SettingsView.tsx:570-589` | Settings › General › Tell me about (already there, C3) | Moved |
@@ -248,8 +272,8 @@ Everything here is visible on a Mac only because of A5. Line numbers from the in
 | E26 | Settings › Finder integration panel | `views/SettingsView.tsx:1009-1067` | Settings › Sync › Beebeeb in Finder (already there, C10) | Moved |
 | E27 | Settings › Updates: status, check, release channel, downgrade, release-notes and confirm-downgrade dialogs | `views/SettingsView.tsx:1069-1483`, `updateCheckViewModel.ts` | Settings › About: version row (C15), "Release channel" row, downgrade row and its two sheets when a downgrade is offered | Moved |
 | E28 | Settings › Advanced › Theme | `views/SettingsView.tsx:1633-1700` | Settings › General › Appearance | Moved |
-| E29 | Settings › Advanced › Local cache limit | `views/SettingsView.tsx`, `advancedSettingsModel.ts` | None on a Mac: in `src-tauri` only the warning reads it (`runner.rs:291-300`, `lib.rs:12902-12914`), so "Cap file content stored on this device" would overclaim. "Local cache almost full" keeps the default limit | Removed |
-| E30 | Settings › Advanced › App Activity (CPU, Memory RSS, PID, samples) | `views/SettingsView.tsx:1581-1613` | None on a Mac: developer diagnostics; the support bundle is the support path (open question 2) | Removed |
+| E29 | Settings › Advanced › Local cache limit | `views/SettingsView.tsx`, `advancedSettingsModel.ts` | None on a Mac: in `src-tauri` only the warning reads it (`runner.rs:291-300`, `lib.rs:12902-12914`), so "Cap file content stored on this device" would overclaim. "Local cache almost full" keeps the default limit (ruling 2) | Removed |
+| E30 | Settings › Advanced › App Activity (CPU, Memory RSS, PID, samples) | `views/SettingsView.tsx:1581-1613` | None on a Mac: developer diagnostics; the support bundle is the support path (~~open question 2~~ ruling 2) | Removed |
 | E31 | "This feature is not available on this device." gate | `capabilities.tsx` `CapabilityAlternative` | Kept as the fallback for an unsupported route; no Mac route reaches it | Kept |
 | E32 | Its dialogs and toasts ("Delete permanently", "Restore failed", residency toasts, launch toasts, "Couldn’t save setting", release notes, confirm downgrade) | `WindowsApp.tsx`, `views/*` | With the page each belongs to, in the Beebeeb window | Moved |
 
@@ -260,18 +284,18 @@ Everything here is visible on a Mac only because of A5. Line numbers from the in
 | F1 | Beebeeb › "Preferences..." ⌘, → Settings window | "Settings…" ⌘, → the Beebeeb window, Settings | Moved |
 | F2 | Beebeeb › "Check for updates..." ⇧⌘U → Settings window, About | "Check for Updates…" ⇧⌘U → the Beebeeb window, Settings › About, and checks | Moved |
 | F3 | Beebeeb › "Pause/Resume syncing" ⇧⌘P | "Pause Sync" or "Resume Sync", the label follows the state | Moved |
-| F4 | Beebeeb › "Sign out" ⇧⌘L (1887 entry point 5) | "Sign Out…" ⇧⌘L; behaviour unchanged, its flow opens in the Beebeeb window (§8; open question 3) | Moved |
+| F4 | Beebeeb › "Sign out" ⇧⌘L (1887 entry point 5) | "Sign Out…" ⇧⌘L; ~~behaviour unchanged, its flow opens in the Beebeeb window (§8; open question 3)~~ slice 1: behaviour unchanged, its flow opens in the Beebeeb window. Slice 1b, once task 2175 passes (ruling 3): it opens the Beebeeb window on Settings › Account with the "Sign out of this Mac?" sheet, the same flow as Settings (§8.1) | Moved |
 | F5 | Beebeeb › "Quit Beebeeb" ⌘Q | Unchanged | Kept |
 | F6 | File › "Open Beebeeb folder" ⌘O | "Open in Finder" ⌘O | Moved |
 | F7 | File › "Upload files..." ⌘U | "Upload Files…" (behaviour unchanged, §14) | Moved |
 | F8 | File › "New folder..." ⇧⌘N | "New Folder…" (behaviour unchanged, §14) | Moved |
 | F9 | File › "Open web app" ⇧⌘O | "Open Web App" | Moved |
 | F10 | File › "Settings..." ⌘, (a second ⌘, binding) | None: a duplicate of F1 | Removed |
-| F11 | View › Files ⌘1, Activity ⌘2, Trash ⌘4 (into the compact window's pages) | View › Home ⌘1, Review ⌘2, Trash ⌘3 | Moved |
+| F11 | View › Files ⌘1, Activity ⌘2, Trash ⌘4 (into the compact window's pages) | View › Home ⌘1, Review ⌘2, Trash ⌘3 (each also leaves Settings) | Moved |
 | F12 | View › Zoom in, Zoom out, Actual size | Unchanged; applies to the Beebeeb window | Kept |
 | F13 | Help › Documentation, Keyboard shortcuts, Report a problem, Service status | Unchanged | Kept |
 | F14 | Edit › Cut, Copy, Paste, Select All | Unchanged | Kept |
-| F15 | (none today) | Window › Minimize ⌘M, Zoom, Close ⌘W, Bring All to Front; Beebeeb › Hide Beebeeb ⌘H, Hide Others ⌥⌘H, Show All | Added |
+| F15 | (none today) | Window › Minimize ⌘M, Zoom, Close ⌘W, Bring All to Front; Beebeeb › Hide Beebeeb ⌘H, Hide Others ⌥⌘H, Show All; View › Back ⌘[ (enabled while Settings shows; leaves it, as System Settings' View › Back does; ruling 1) | Added |
 
 ## 6. The popover
 
@@ -340,14 +364,15 @@ The 1887 ask (A0–A5) is never shown in the popover: a question with consequenc
 ### 7.1 One window
 
 Label `main`, URL `index.html?window=main&platform=macos`, `create: false`, title bar style Overlay with the title
-hidden (as `macos-settings` today), traffic lights over the sidebar. The toolbar area (52 pt; 64 pt on Settings) and
-the top of the sidebar are the drag region. One instance: every opener shows and focuses the existing window and
-navigates it (`main:navigate` event with a section and, for Settings, a tab).
+hidden (as `macos-settings` today), traffic lights over the sidebar. The toolbar area (52 pt~~; 64 pt on Settings~~,
+Settings included: ruling 1 removes the tab strip) and the top of the sidebar are the drag region. One instance: every
+opener shows and focuses the existing window and navigates it (`main:navigate` event with a section and, for
+Settings, a ~~tab~~ Settings section).
 
 ### 7.2 Size and position (the answer to "randomly in the screen")
 
-- **Default** 920 × 620 pt, **minimum** 760 × 520 pt (Settings' tabs and rows need 546 pt of content width; the
-  sidebar is 214 pt).
+- **Default** 920 × 620 pt, **minimum** 760 × 520 pt (Settings' ~~tabs and~~ rows need 546 pt of content width; the
+  sidebar is 214 pt, in Settings too, §7.8).
 - **First open:** centred on the display that holds the menu-bar icon, so it appears on the screen you were looking at.
 - **After that:** where you left it, at the size you left it: the window-state plugin restores size and position for
   `main` only, never its visibility (`StateFlags::SIZE | POSITION`; every other label is denied).
@@ -397,8 +422,11 @@ and one action, inline (ink on `--err-bg`). "Continue" is not offered: Home alre
 ### 7.6 Signed in: sidebar, Home, Review
 
 **Sidebar** (214 pt): Home ⌘1 · Review ⌘2 (count badge when > 0) · Trash ⌘3. Footer: the account initial, email and
-plan line (or "Vault locked"), and the **gear**, which selects Settings (§7.8). Arrow keys move through the list;
-Return opens. There is no Files item: files are in Finder (row E3), and the Windows shell's "Files" was a summary.
+plan line (or "Vault locked"), and the **gear**, which selects Settings (§7.8): the sidebar then shows the Settings
+section list in its place. ~~Arrow keys move through the list; Return opens.~~ ↑ and ↓ move and select, Home and End
+jump, Return and Space also select: the automatic activation the shipped Settings tabs use (`tabAfterKey`), so the
+one sidebar has one keyboard model in both of its lists (§11). There is no Files item: files are in Finder (row E3),
+and the Windows shell's "Files" was a summary. — rulings amendment, 2026-10-24
 
 **Home** (replaces "Drive status", the Windows shell's Home and Files):
 
@@ -437,19 +465,75 @@ delete removes them from Trash." Rows with Restore and "Delete…"; "Delete…" 
 ### 7.8 Settings
 
 **Reached by:** the sidebar gear, ⌘,, the app menu's "Settings…", the popover gear menu's "Settings…", and the
-openers that need a tab (Check for Updates → About; the menu's Sign Out… → Account). It is a section of the Beebeeb
-window, never a window of its own.
+openers that need a ~~tab~~ section (Check for Updates → About; the menu's Sign Out… → Account). It is a ~~section~~
+mode of the Beebeeb window, never a window of its own.
 
-**Look:** the content area becomes a standard macOS Settings pane: the toolbar shows icon tabs (General, Account,
+~~**Look:** the content area becomes a standard macOS Settings pane: the toolbar shows icon tabs (General, Account,
 Sync, Security, About), the selected tab is filled; below, grouped inset rows on `--paper-2`, label left, control
 right, a hint under the label, a small grey title above each group. This is the shipped `MacSettings.tsx` look,
 moved: its tab components mount in the Beebeeb window's content area unchanged, and `tabAfterKey` keeps the WAI-ARIA
-tab keys. The sidebar stays visible with the gear marked current.
+tab keys. The sidebar stays visible with the gear marked current.~~
 
-**Signed out:** ⌘, shows General and About only, in place of the sign-in card, with a "‹ Sign in" button in the
-toolbar; the other tabs need a session.
+~~**Signed out:** ⌘, shows General and About only, in place of the sign-in card, with a "‹ Sign in" button in the
+toolbar; the other tabs need a session.~~
 
-| Tab | Rows (top to bottom) | From |
+**Layout (ruling 1, "System Settings style").** Settings looks like macOS System Settings: a sidebar list of sections
+on the left, the selected section's pane on the right. It uses the window's one sidebar. Choosing Settings swaps the
+sidebar's contents from Home / Review / Trash to the Settings list, and the back control at the top of that list swaps
+them back. Nothing else about the window changes: the same frame, the same 214 pt sidebar column, the same 52 pt
+toolbar, the same `main` webview.
+
+**Why one sidebar that switches, and why it is still one window.** Two sidebars side by side would leave 366 pt for the
+pane at the 760 pt minimum width (760 − 214 − 180), where the rows need 546 pt, and System Settings itself has one
+sidebar. Settings stays inside the one window because it is a state of `main` that the same `main:navigate` event
+selects, so no opener, the gear, ⌘,, the menus or the popover, has a window to build.
+
+**The Settings sidebar, top to bottom:**
+
+| Row | What it shows | Selecting it |
+| --- | --- | --- |
+| Back control | A chevron and the name of where it returns to: "Home", "Review" or "Trash", whichever showed before Settings ("Home" when the window opened straight on Settings). Signed out: "Sign in". | Leaves Settings. The sidebar shows Home / Review / Trash again with that one selected, and focus goes to the gear. ⌘[ and View › Back do the same (F15). |
+| Heading | "Settings" (17 pt bold), so the swapped list says what it is; it labels the `navigation` landmark | — |
+| Account row | The account initial (32 pt), the email, and the plan line or "Vault locked": the identity the normal sidebar keeps in its footer | Account |
+| General · Sync · Security | A 22 pt tile icon and the label | that section |
+| About, after a 10 pt gap | the same | About |
+
+- **The sections are the five asked for: General, Account, Sync, Security, About.** System Settings suggested one
+  change, made here: Account is drawn as the account row at the top, as System Settings draws the Apple Account row
+  above its panes. It is still one of the five sections, and the identity stays in the same column in both modes. One
+  System Settings habit is not followed: About is not nested under General. With five sections there is no second
+  level to put it in, and the app menu's "About Beebeeb" lands on it (row A9). The gap before About sets the reference
+  section apart, the way System Settings separates its groups with space rather than lines.
+- **No search field.** System Settings needs one for more than 30 panes. Beebeeb has five, with about 30 rows.
+- **No sidebar footer in Settings.** The account moved to the top row, and the gear has nothing to do while Settings
+  shows.
+- **Brand over System Settings where they differ.** System Settings uses coloured icon squares and selects in the
+  system accent colour. Here the icons are ink on a `--paper-3` tile; the selected row is a `--paper-3` fill with
+  semibold text, the same as Home / Review / Trash; amber stays for encryption state and the one primary action
+  (§10.1). The sidebar is drawn by Beebeeb's webview, so the macOS accent does not apply to it. The gear menu is a
+  native `NSMenu` and still uses the accent.
+- **The pane.** The 52 pt toolbar shows the section's name (15 pt bold), as on Home, Review and Trash. It has no back
+  and forward arrows: System Settings uses those for pane history, and one back control is enough here. Below the
+  toolbar: grouped inset rows on `--paper-2`, label left, control right, a hint under the label, a small grey title
+  above each group, footnotes under groups. This is the shipped `MacSettings.tsx` row look, unchanged. The pane
+  scrolls; the sidebar never does (seven items).
+- **Which section opens.** ⌘, and "Settings…" open the last section used in this window, else General, as the tabs did.
+  Openers that name a section open that one.
+- **Signed out.** ⌘, or "Settings…" shows the Settings sidebar with "Sign in" as its back control, no account row, and
+  General and About only; the other sections need a session. General then leaves out "From your account", because
+  those preferences are stored with the account. The signed-out window shows a sidebar only while Settings shows. Back
+  returns to the centred sign-in card (§7.4).
+- **Leaving Settings.** The back control, ⌘[, View › Back, and ⌘1–⌘3 all leave it. Esc does not, as in System
+  Settings (§9.3).
+- **Code.** The shipped section bodies (`GeneralTab`, `AccountTab`, `SyncTab`, `AboutTab` in `MacSettings.tsx`) mount
+  in the pane unchanged; only the toolbar tab strip (`MacSettings.tsx:1214-1231`, `role="tablist"`) is replaced by the
+  sidebar list. `tabAfterKey` keeps its automatic activation, wrap, Home and End, with ↑/↓ in place of ←/→. 1887's
+  flow object and its listeners (`MacSettings.tsx:1190-1200`) move up to the window's shell (`MacApp.tsx`), so a flow
+  request reaches them whichever section shows. Their `setTab('account')` becomes selecting Settings › Account.
+
+— rulings amendment, 2026-10-24
+
+| ~~Tab~~ Section | Rows (top to bottom) | From |
 | --- | --- | --- |
 | General | "Open Beebeeb at login" · "Appearance" (System / Light / Dark; "Follow macOS.") · group "Tell me about": Conflicts, Sync finished, Local cache almost full · group "From your account": New device sign-in, Share received, File updated, Storage warning, Backup complete | C2, E28, C3, E24 |
 | Account | header (initial, email, plan line, storage bar, "Storage details…", Upgrade / Manage plan; spec C's notice line under the plan line, its link replacing the plan button) · group "Vault" · group "Where your files are stored" · "Password, email and billing" / "Changed on beebeeb.io, in your browser." / "Open beebeeb.io" · "Sign out of this Mac" | C4–C9, E6, E8, E22 |
@@ -479,7 +563,7 @@ subtitle (§10).
 | Entry point 1 (Settings › Account › Sign out…) | Settings window | Settings pane | — |
 | Entry point 2 (compact Account page) | compact window | removed with the page (B15) | — |
 | Entry points 3, 4 (Sign in again in the banner, in Versions) | `forceReauth` → `open_reauth_window` | the Beebeeb window's "Sign in again" (no purge, unchanged) | — |
-| Entry point 5 (app menu Sign out) | runs `clear_session_impl`; on `unsent_changes` opens the Settings window with a flow request | the same, but the flow request opens the Beebeeb window on Settings › Account | — |
+| Entry point 5 (app menu Sign out) | runs `clear_session_impl`; on `unsent_changes` opens the Settings window with a flow request | ~~the same, but the flow request opens the Beebeeb window on Settings › Account~~ Slice 1: the same, but the flow request opens the Beebeeb window on Settings › Account. Slice 1b, after task 2175 passes (ruling 3): the menu no longer calls `clear_session_impl`. It stores a flow request that starts at the confirm sheet (`flow.open()`, not `flow.request()`), and opens the Beebeeb window on Settings › Account, so the menu and entry point 1 are one flow. Its results are entry point 1's: the toast, the Account note, and the kept alert (1882, 1887) raised by `clear_session`. | — |
 | Entry point 6 (account switch) | onboarding window | Beebeeb window | — |
 
 ### 8.2 Rules that carry over unchanged
@@ -492,7 +576,10 @@ subtitle (§10).
   confirm sheet or the ask it is Cancel; during the count or the send phase the phase ends `closed`, nothing changed;
   after the gate the sign-out goes on and Rust shows a pending result in the native dialog. Closing now destroys the
   window (§4), which the hook already handles (spec 1887 §5.1, "A close ends the flow"). Reopening shows no sheet.
-- **Navigating away** during a sheet is impossible: the sheets are window-modal and cover the sidebar too.
+- **Navigating away** during a sheet is impossible: the sheets are window-modal and cover the sidebar too~~.~~, the
+  Settings back control included. While a sheet is open the View menu's Home, Review, Trash and Back items and the app
+  menu's "Settings…" are disabled, so ⌘1–⌘3, ⌘[ and ⌘, cannot unmount Settings › Account under its sheet; the
+  menu's "Sign Out…" brings the running flow forward (1887, "One flow at a time"). — rulings amendment, 2026-10-24
 - **Minimizing or hiding** (⌘M, ⌘H) is not a close: the phase runs on and ends within 60 s (1887, "What is not a
   close").
 - **Quitting** (⌘Q, gear menu) ends the process and the phase; nothing on this Mac changed (1887).
@@ -510,6 +597,10 @@ would otherwise have to open Settings › Sync to learn that files were kept.
 
 The 1887 device rung waived for 0.8.12 (D2–D11, D10b, D2b; `RELEASE_BLOCKERS.md`) runs on the redesigned surfaces after
 slice 1, with "the Settings window" read as "the Beebeeb window, Settings › Account" and the extra close paths (⌘W).
+
+That rung is workspace task 2175. Ruling 3 waits for it: slice 1b changes the menu's path only after 2175 passes, so
+2175's D4 (⇧⌘L) tests today's menu behaviour in the new window. Slice 1b then runs D4 again, plus D3 (Cancel keeps
+everything), on the menu's new path through the sheet. — rulings amendment, 2026-10-24
 
 ## 9. Window lifecycle, menus, keys
 
@@ -529,8 +620,10 @@ Out… · — · Hide Beebeeb · Hide Others · Show All · — · Quit Beebeeb.
 
 | Key | Action |
 | --- | --- |
-| ⌘, | the Beebeeb window on Settings (last tab used in this window, else General) |
-| ⌘1 / ⌘2 / ⌘3 | Home / Review / Trash |
+| ⌘, | the Beebeeb window on Settings (last ~~tab~~ section used in this window, else General) |
+| ⌘1 / ⌘2 / ⌘3 | Home / Review / Trash (from Settings too: the sidebar switches back) |
+| ⌘[ | in Settings: back to where Settings was entered from (View › Back; the sidebar's back control) |
+| ↑ / ↓, Home / End | in either sidebar list: move and select (automatic activation), first / last |
 | ⌘W | close (destroy) the Beebeeb window |
 | ⌘M | minimize |
 | ⌘H | hide Beebeeb |
@@ -609,25 +702,35 @@ Out… · — · Hide Beebeeb · Hide Others · Show All · — · Quit Beebeeb.
 | 43 | New: gear menu and sign-out-in-progress button | tray menu "Open Beebeeb" | "Open Beebeeb" (same words) |
 | 44 | New: sign-in screens | — | "Sign in with browser instead" (link back from the email form); "Signed in before as {email}" (Sign in again footer) |
 | 45 | New: Home | — | "Beebeeb lives in the menu bar" / "Click the b at the top of your screen to see what’s syncing. You can close this window; Beebeeb keeps running." / "Got it"; "Last checked {time}"; group titles "Needs your attention", "Storage", "Recent activity" |
-| 46 | New: Settings | — | "Appearance"; "From your account"; "Storage details…"; "Password, email and billing" / "Changed on beebeeb.io, in your browser." / "Open beebeeb.io"; "Release channel"; "Test connection speed" / "Run test"; "‹ Sign in" (signed-out Settings toolbar) |
+| 46 | New: Settings | — | "Appearance"; "From your account"; "Storage details…"; "Password, email and billing" / "Changed on beebeeb.io, in your browser." / "Open beebeeb.io"; "Release channel"; "Test connection speed" / "Run test"; ~~"‹ Sign in" (signed-out Settings toolbar)~~ "Sign in" (the signed-out Settings sidebar's back control, §7.8) |
 | 47 | Popover Finder failure title | spec A gives the sentence only | "Couldn’t add Beebeeb to Finder" (the 30 Sep title) above spec A's sentence |
+| 48 | New: Settings sidebar (ruling 1) | — | back control: a chevron and "Home", "Review", "Trash" or "Sign in" (existing words), accessible name "Back to {Home}"; the sidebar's label "Settings"; View menu "Back" ⌘[ |
 
 ## 11. Accessibility
 
 - **Keyboard.** Popover: focus starts on the first actionable element (the state's primary action, else the gear);
   Tab cycles header → body → footer; Esc closes; the gear menu is native, so arrows and type-select work. Window:
-  sidebar items are a list with arrow keys and Return; ⌘1–⌘3 and ⌘, jump; Settings tabs keep the WAI-ARIA tab model
-  (`tabAfterKey`: arrows, Home, End). Sheets trap focus and open on their close button (Esc cancels, Enter on open is
-  Cancel); the send sheet's Esc is Stop waiting.
+  ~~sidebar items are a list with arrow keys and Return; ⌘1–⌘3 and ⌘, jump; Settings tabs keep the WAI-ARIA tab model
+  (`tabAfterKey`: arrows, Home, End).~~ each sidebar list (Home / Review / Trash, and the Settings sections) is one Tab
+  stop with a roving tabindex: ↑/↓ move and select (automatic activation, `tabAfterKey`'s model with vertical
+  arrows), Home and End jump to the first and last, Return and Space also select. In Settings the Tab order is back
+  control → section list → pane. Entering Settings puts focus on the selected section; leaving it (back control, ⌘[)
+  puts focus on the gear; ⌘1–⌘3 put it on the section they chose. ⌘1–⌘3, ⌘, and ⌘[ jump. Sheets trap focus and open
+  on their close button (Esc cancels, Enter on open is Cancel); the send sheet's Esc is Stop waiting.
 - **VoiceOver.** The status item's accessibility description follows the tooltip ("Beebeeb, Up to date", "Beebeeb:
   Offline", "Beebeeb: Signed out"). The popover is a dialog labelled "Beebeeb". Activity rows read as one sentence
   ("Q3 ledger reconciliation.xlsx, uploaded, Investigations, 2 minutes ago"); direction arrows have labels ("Uploaded",
   "Downloaded"). Progress bars are `progressbar` with a value text ("62 percent, encrypting and uploading"). Count
   changes in the send phase are `aria-live="polite"` (as shipped). The sidebar is a `navigation` landmark with
-  `aria-current="page"`; the gear is a button labelled "Settings". Every icon-only button has a label (gear: "Beebeeb
+  `aria-current="page"`; the gear is a button labelled "Settings". In Settings the same landmark is labelled
+  "Settings"; the back control is a button named "Back to Home" (or Review, Trash, Sign in); the account row reads
+  "Account, {email}, {plan line}"; the selected section has `aria-current="page"`; the pane is a `main` region
+  labelled by its toolbar title (a heading). Every icon-only button has a label (gear: "Beebeeb
   menu" in the popover, "Settings" in the sidebar; Get help: "Get help, opens in your browser").
 - **Contrast, both themes, from the OKLCH tokens** (hi-fi §7 has the table): all body and hint text is ≥ 4.5 : 1
-  (`--ink-3` on `--paper-2` is 5.02 light, 5.92 dark). Error states are ink on `--err-bg` (title 16.7 light, 13.3
+  (`--ink-3` on `--paper-2` is 5.02 light, 5.92 dark). The Settings sidebar adds three pairs (ruling 1): `--ink-2` on
+  `--paper-2` 10.7 / 10.2 (section rows, back control), `--ink-2` on `--paper-3` 10.0 / 8.90 (the selected account
+  row's plan line), `--ink` on `--paper-3` 16.0 / 13.0 (selected labels). Error states are ink on `--err-bg` (title 16.7 light, 13.3
   dark; body 10.4 / 9.05) and never red text (`--red` on paper is 3.86 in light): red is only for discs, icons and the
   full storage bar, which as non-text need ≥ 3 : 1. `--ink-4` is never text (2.76 light). The amber primary is 10.6;
   the red destructive confirm keeps `--red-ink` (design.css: 5.10 / 6.13). Toasts keep slice 5's rule (text ≥ 4.5,
@@ -644,26 +747,35 @@ can run as two lanes (Rust + TypeScript) under the two-lane cap.
 
 | # | Slice | What changes | Verification rung |
 | --- | --- | --- | --- |
-| 0 | This design | spec + hi-fi + the three amendments | Guus approves (open questions answered) |
-| 1 | **The Beebeeb window and Settings in it** | Rust: `main` window config (`create: false`, Overlay title bar), `main_window_label` macOS → `main`, registry `[popover, main]`, close = destroy, window-state for `main` only with SIZE \| POSITION and the off-screen guard, activation policy (§9.1), menus F1–F15, `main-app`/`tray`/`windows-onboarding` not built on macOS (a `tauri.macos.conf.json` override or `create: false` with Windows building them), `macos-settings` retired, every 1887 owner label → `main`. TS: `MacApp.tsx` shell (sidebar, sections, `main:navigate`), the Settings pane hosting the shipped tab components, and Home's first cut (status, Finder row, storage, the kept rows). Launch and every opener that showed the compact window now show `main`; until slice 3 a tray click still shows today's compact flyout, and nothing else opens the compact window. | `cargo test` per-binary counts (registry, labels, menu specs, window-list pins, 1887 `sign_out_flow_window_closed` with `main`); `bun test` count (tabs reused, sheets, F11 flow-reset tests with `main`); tsc, eslint; Chromium renders light and dark vs the hi-fi. **Device:** ⌘, / menu / popover-less tray click open one window; close and reopen keeps the frame; unplug-display guard; then **1887's D2–D11, D10b, D2b on this build** (§8.4) |
+| 0 | This design | spec + hi-fi + the three amendments; then the rulings amendment (§0) | ~~Guus approves (open questions answered)~~ Answered 24 Oct (§0, ruling 4: "Yes, start slice 1"); slice 1 starts when this amendment merges |
+| 1 | **The Beebeeb window and Settings in it** | Rust: `main` window config (`create: false`, Overlay title bar), `main_window_label` macOS → `main`, registry `[popover, main]`, close = destroy, window-state for `main` only with SIZE \| POSITION and the off-screen guard, activation policy (§9.1), menus F1–F15, `main-app`/`tray`/`windows-onboarding` not built on macOS (a `tauri.macos.conf.json` override or `create: false` with Windows building them), `macos-settings` retired, every 1887 owner label → `main`. TS: `MacApp.tsx` shell (sidebar, sections, `main:navigate`, 1887's flow object and listeners), ~~the Settings pane hosting the shipped tab components~~ Settings in System Settings style (ruling 1, §7.8): the sidebar switching to the Settings list (back control, account row, General, Sync, About; Security joins in slice 5) and the pane hosting the shipped section bodies with the tab strip removed, and Home's first cut (status, Finder row, storage, the kept rows). Launch and every opener that showed the compact window now show `main`; until slice 3 a tray click still shows today's compact flyout, and nothing else opens the compact window. | `cargo test` per-binary counts (registry, labels, menu specs incl. View › Back, window-list pins, 1887 `sign_out_flow_window_closed` with `main`); `bun test` count (~~tabs reused~~ section bodies reused; sidebar switch and back, focus to the gear on back; ↑/↓/Home/End, ⌘[; last section remembered; the View items and ⌘, disabled while a sheet is open, §8.2; sheets; F11 flow-reset tests with `main`); tsc, eslint; Chromium renders light and dark vs the hi-fi. **Device:** ⌘, / menu / gear / popover-less tray click open one window, and Settings swaps the sidebar in that window; back and ⌘[ return; close and reopen keeps the frame; unplug-display guard; then **1887's D2–D11, D10b, D2b on this build** (§8.4, task 2175) |
+| 1b | **Sign Out… through the confirm sheet** (ruling 3) | Starts only after task 2175 passes. Rust: the menu's SignOut arm stops calling `clear_session_impl` and stores a flow request that starts at the confirm sheet; it opens `main` on Settings › Account. The menu's immediate alerts retire; late results keep `show_late_result` (A14). TS: the window shell answers that request with `flow.open()`. 1887's pins on the menu arm are updated in the same change, never deleted. | cargo (the arm calls no sign-out; the request kind; pins red first on today's arm); `bun test` (menu request opens the confirm sheet, Cancel changes nothing, focus on Cancel). **Device:** 1887 D4 (⇧⌘L) and D3 (Cancel keeps everything) on this path |
 | 2 | **Sign-in and setting up this Mac in the window** | Signed-out content (§7.4): spec C's sign-in screen and the shared browser-code component, email/2FA, Sign in again (R8), switch step, recovery phrase, Finder status → Home; `onboarding` window and `open_onboarding_window`/`open_reauth_window` route to `main` on macOS; spec C §11 removals. Spec C's Rust account view (1747) is its own lane; this slice renders today's `sync_status` and gains C-R3/C-R5/C-R11 screens when 1747 lands. | `bun test` (screen routing per state, copy pins, switch ask, focus on Cancel); cargo (open-sign-in routes to `main`; `onboarding` never built on macOS). **Device:** fresh install → sign-in → browser and password paths → recovery → Finder Ready → Home in one window; Sign in again after a revoked session keeps Finder |
 | 3 | **The popover** | `popover` window (§6.1), `PopoverApp.tsx` on `popover_snapshot` (every §6.3 state), gear `NSMenu`, click rules (§6.2), tray context menu removed on macOS, compact window not built on macOS (`App.tsx` stays for Linux). | `bun test` (state per phase fixture, precedence, footer disabling, no toast); cargo (anchor math exists from slice 1 groundwork; click routing by session). **Device:** 10 clicks on two displays, notch, blur hides, Esc, ⌘Q and ⌘, from the popover, crossed b when signed out |
 | 4 | **Review and Trash** | Review (conflict sheet, version history sheet, kind labels), `conflict_auto_opens_window(Macos) = false`, notification click → Review; Trash from the Windows shell; `ConflictWindow` not opened on macOS. | `bun test` (rows, actions, sheet keys); cargo (no conflict window on macOS; notification route). **Device:** a real conflict (Mac + web edit) resolved three ways; restore from Trash |
-| 5 | **Settings additions and the copy sweep** | Security tab; General Appearance and "From your account"; About release channel, downgrade, speed test; Account storage details and web row; every §10.2 change; a copy guard test that fails on the §10.1 word list in any string reachable on macOS (proven red on today's tree). | `bun test` incl. the guard's red-then-green; screenshots of each tab both themes. **Device:** each tab's controls write and read back |
+| 5 | **Settings additions and the copy sweep** | Security ~~tab~~ section (its sidebar row); General Appearance and "From your account"; About release channel, downgrade, speed test; Account storage details and web row; every §10.2 change; a copy guard test that fails on the §10.1 word list in any string reachable on macOS (proven red on today's tree). | `bun test` incl. the guard's red-then-green; screenshots of each ~~tab~~ section both themes. **Device:** each ~~tab's~~ section's controls write and read back |
 | 6 | **Launch and lifecycle** | Login launch shows nothing (spec C C-W1, depends on 1845 for a working login item), manual launch / `RunEvent::Reopen` → window, updater relaunch flag, first-run hint once. | cargo (pure launch-kind and relaunch-flag functions, red first). **Device:** login item launch, Dock and Finder reopen, an alpha update relaunch |
-| 7 | **Device rung on a signed alpha** (Guus or Bram) | The whole two-surface pass, light and dark, with VoiceOver on for the popover and one Settings tab. | Evidence under the workspace `_qa-evidence/1683/`; nothing ships to stable before it |
+| 7 | **Device rung on a signed alpha** (Guus or Bram) | The whole two-surface pass, light and dark, with VoiceOver on for the popover and one Settings ~~tab~~ section, including the sidebar switch and back. | Evidence under the workspace `_qa-evidence/1683/`; nothing ships to stable before it |
 
-## 13. Open questions for Guus
+## 13. ~~Open questions for Guus~~ Questions for Guus, answered 24 Oct 2026
 
-1. **Settings look.** Recommended: icon tabs in the window's toolbar (drawn), the look approved on 30 Sep, now inside
+1. ~~**Settings look.** Recommended: icon tabs in the window's toolbar (drawn), the look approved on 30 Sep, now inside
    the main window; it reuses the shipped tab components and keeps 1887's code where it is. Alternative: System
-   Settings style, where the categories replace the sidebar while you are in Settings, with a back arrow.
-2. **Windows-shell pages that do not come to the Mac.** Recommended: leave out Bandwidth's traffic chart and live
+   Settings style, where the categories replace the sidebar while you are in Settings, with a back arrow.~~
+   **Ruling 1: "System Settings style."** The alternative won. Settings is a sidebar list of sections with the pane on
+   the right, and it replaces the window's sidebar while Settings shows, with a back control (§7.8). The shipped
+   section bodies and 1887's code are kept; only the tab strip goes.
+2. ~~**Windows-shell pages that do not come to the Mac.** Recommended: leave out Bandwidth's traffic chart and live
    sessions (E10), App Activity (E30), the account notifications list (E15), and the switches a Mac never honours
-   (E17, E18, E20, E29). Alternative: keep any of them, in Settings.
-3. **The app menu's "Sign Out…".** Recommended: after 1887's device rung passes, make it open the same "Sign out of
+   (E17, E18, E20, E29). Alternative: keep any of them, in Settings.~~
+   **Answered, ruling 2: "Drop them (Recommended)."** E10, E15, E17, E18, E20, E29 and E30 stay Removed (§0 also
+   records where each still lives).
+3. ~~**The app menu's "Sign Out…".** Recommended: after 1887's device rung passes, make it open the same "Sign out of
    this Mac?" sheet as Settings, so there is one way to sign out. Until then (and in this design) it keeps today's
-   behaviour: it signs out at once when nothing waits.
+   behaviour: it signs out at once when nothing waits.~~
+   **Answered, ruling 3: "Yes, same sheet (Recommended)."** Slice 1b, after task 2175 passes (F4, §8.1, §8.4).
+
+— rulings amendment, 2026-10-24
 
 Decided here, with the reason, so they need no answer: no Files section (files are in Finder; the Windows "Files" was a
 summary); no signed-out popover (spec C already rules a click opens sign-in); the window closes by destroy (one idle
