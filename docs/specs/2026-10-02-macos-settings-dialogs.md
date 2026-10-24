@@ -3,6 +3,7 @@
 **Status:** ruling — approved by Guus (“Approve + do red/danger follow-up”); follow-ups shipped in PR #104
 **Date:** 2 Oct 2026 · amended 3 Oct 2026 (follow-ups shipped — see the amendment note at the end)
 **Design source:** `design/hifi/macos-settings-dialogs.html`
+**Amended 2026-10-24 (Guus's ruling: at most two surfaces, [two-surface spec](2026-10-24-macos-two-surface-app.md) §5.C, §8):** every dialog here keeps its copy, size, buttons and keys. Their host changes: the Settings window is retired, and they open as window-modal sheets in the Settings pane of the one Beebeeb window. Read "Settings" below as that pane, and "closing Settings" as closing the Beebeeb window. — two-surface design, 2026-10-24
 **Context:** decision file `.claude/tasks/decisions/1683-s4-undrawn-and-unbacked.md`, question 1: the three Settings dialogs built in slice 4 follow the existing `Modal` styling — acceptable as-is, or do they need their own dialog treatment before slice 6 flips the window on?
 
 ## Verdict (question 1)
@@ -73,7 +74,8 @@ The dialogs reuse the Settings-window system exactly: `design.css` tokens, the 1
   - **nothing waits:** the sign-out runs, as before;
   - **changes wait and the app can send:** the sheet becomes the send phase: title “Sending changes first”, body “Sending {n} changes before signing out…” (“Sending 1 change before signing out…”) and the hint “This takes at most a minute.”, one button “Stop waiting”. Esc is “Stop waiting”. The count follows the events and never reads 0;
   - **changes still wait, or none could be sent:** the ask: title “Sign out with changes not sent?”, then A2, A3, A3e (with its folder paths in mono, one per line), A4 and at most one A5 line, each left out when its number is 0; buttons “Cancel” / “Sign out” (red, as this dialog's shipped treatment). Enter on open resolves to Cancel; Esc cancels;
-  - **closing Settings** at the count, the send phase or the ask ends the flow with nothing changed; Settings opens next time on the Account tab with no sheet.
+  - ~~**closing Settings** at the count, the send phase or the ask ends the flow with nothing changed; Settings opens next time on the Account tab with no sheet.~~
+  - **closing the Beebeeb window** at the count, the send phase or the ask ends the flow with nothing changed; the window opens next time with no sheet, where its opener asks (two-surface spec §8.2). — two-surface design, 2026-10-24
 - After a sign-out that kept files, one alert, “Files kept on this Mac”, names our folder first (“Beebeeb copied {n} files with changes that hadn’t reached the server to this folder on this Mac:”), then macOS's folder with 1882's sentence, unchanged.
 - **Modal mapping:** `ConfirmSheet` (Modal 400). **Shipped (PR #104):** `danger?: boolean` on `ConfirmSheet`; when set, the confirm button gets `ms-btn--danger` (`--red-ink` text). `MacSettings.tsx` passes `danger` on the Sign-out sheet. Nothing else changes.
   - Task 1887 adds two sheets after this one, drawn in section 1 of the hifi file: the send phase on `Modal` 400 with one button, “Stop waiting”, and the ask on `Modal` 440 (as Choose folders) with “Cancel” and the red “Sign out”. “Nothing else changes” holds for this confirm sheet only. — Task 15 fix round 1, 2026-10-18 (1887, its review)
