@@ -1,75 +1,70 @@
-# Beebeeb Desktop 0.8.11 — the Mac app catches up
+# Beebeeb Desktop 0.8.12 — Finder saves and storage location
 
-0.8.10 went out for Windows and Linux without the Mac app. This release adds the
-macOS build and puts the test results on record. The app itself behaves the same
-as 0.8.10: the only code change is in unit-test code (below), and the rest of the
-repository change is these notes. If you use the Mac app, you last received
-0.8.9, so the changes below are new to you.
+0.8.12 brings Finder create-and-save uploads on macOS, a sign-out flow for changes
+still waiting to upload, and storage location selection by country. This is
+release preparation: task 1887's required device checks remain open, and
+`RELEASE_BLOCKERS.md` still prevents desktop publication.
 
 ### What's New
 
-- **[macOS] The Mac app is back on the current release.** Apple Silicon only,
-  macOS 14 or later. Existing Mac installs receive it through the in-app updater.
-- **[Windows] A revoked session no longer traps you (0.8.10, PR #108):** the app
-  checks its stored session once at startup. On a definitive HTTP 401 it clears
-  the stored credentials and opens the sign-in form with your email filled in.
-  Offline laptops and server errors are never signed out. Sign-out is reachable
-  again when the profile fails to load, and its errors name the real failing
-  stage.
-- **Sign-in tells you who is asking (PR #109):** the sign-in screen now says to
-  type the code shown in the app on the page it opened, and to approve only a
-  sign-in you started yourself. It used to say to check that the codes match,
-  which someone who has been phished cannot do. The sign-in request now reports
-  the client, release version, OS and hostname so the approval page can show
-  them, labelled as reported by the device. The wording change is on the Windows
-  first-run screen; the sign-in request itself is shared code.
+- **[macOS] Create and save files in Finder.** Finder writes enter a durable
+  staging queue and are sent by the desktop engine. The queue and File Provider
+  changes merged in PR #118 are included in this release candidate.
+- **[macOS] Sign out with a visible waiting-change count.** The new flow tries to
+  send waiting changes for up to 60 seconds, offers "Stop waiting", and asks before
+  continuing. When signing out with changes still waiting, it copies them to a
+  dated "Changes not sent" folder before clearing local account state. Settings
+  → Sync can show or dismiss the kept-folder notice. This implementation is
+  covered by automated tests; its required device verification is still pending
+  under task 1887 (PR #130).
+- **[macOS] Finder setup and re-sign-in.** The app checks the Finder location
+  after launch and sign-in and offers a retry when setup fails. Signing back
+  into the same account retains its local queue and Finder location; switching
+  accounts uses the account-change flow (PR #117).
+- **Storage location by country.** Europe remains the default. Settings renders
+  the countries and availability returned by the server, and "Only store in"
+  requests a strict country preference (PRs #128 and #129). A strict-country
+  upload refusal currently uses the standard upload-error handling rather than
+  a dedicated desktop message.
 
 ### Bug Fixes / Hardening
 
-- **A failing Windows test is fixed (PR #111, test only):** the Windows CI check
-  had been red since the 0.8.10 sign-out fix merged, so 0.8.10's Windows build
-  shipped while its own Windows test run read `782 passed; 1 failed`. The failing
-  test was `signout_teardown_tests::clear_session_when_already_signed_out_skips_the_engine_and_succeeds`.
-  On Windows, sign-out runs the local-state purge even when you are already signed
-  out, and the test never set up the state directory the real app sets at
-  startup. The app was not affected; the test was incomplete. After the fix the
-  same Windows check reads `783 passed; 0 failed`.
-
-- **Dead sessions (Windows):** a password change on any device revokes every
-  session, and the Windows app used to leave you behind a wall of 401s with no
-  way to sign out. Covered by the Windows session tests in the cargo run below.
-- **Phishable sign-in wording:** the approval link no longer carries the device
-  code and the screen no longer asks you to compare codes. Covered by
-  `tests/browserLoginCopy.test.ts` and the `browser_login` unit tests.
+- **Concurrent Settings changes preserve each other.** Configuration updates now
+  serialize the read, change and write; Settings sends only fields that changed.
+  This prevents an older Settings snapshot from overwriting a newer tray pause
+  or another preference update (PR #124; automated coverage in
+  `config_write_pin_tests` and `settingsWriteOnlyChangedFields.test.tsx`).
+- **[macOS] Open in Finder reports the actual result.** The app opens the
+  security-scoped File Provider URL through the native bridge and reports an
+  opening failure instead of treating a successfully spawned process as success
+  (PR #122; automated `test_1885_*` coverage).
+- **[macOS] Finder removal requests preservation of unsynced files.** Removal
+  uses macOS's preserve-dirty-data mode and surfaces a kept folder when it has
+  contents or cannot be inspected. The additional protection for acknowledged
+  but still-queued Finder saves is the task 1887 sign-out flow described above
+  (PRs #119 and #130). Its device checks remain a release gate.
 
 ### Verification
 
-- Test suite, frontend: `bun test` on this release's tree completed with
-  558 pass / 0 fail.
-- Test suite, Rust (macOS, Apple Silicon): `cargo test --locked` from `src-tauri`
-  on this release's tree completed with
-  `test result: ok. 899 passed; 0 failed; 4 ignored` for the library, plus
-  `test result: ok. 20 passed` (keychain), `test result: ok. 8 passed` (Windows
-  session wiring) and `test result: ok. 3 passed` (Windows sign-out cleanup),
-  0 failed in every binary.
-- Windows CI on the code of this release (PR #111, same tree as `main` at the
-  fix): `Rust check (Windows)` ran `783 passed; 0 failed; 2 ignored`. On 0.8.10
-  the same check ran `782 passed; 1 failed`.
-- Linux CI on the same code: `870 passed; 0 failed; 4 ignored`, after one rerun.
-  The first run failed `link_health::tests::a_refused_connection_is_offline`
-  (a local network test: it saw "server did not answer" instead of "refused")
-  and passed on the rerun with no code change. That test is not touched by this
-  release and may be flaky; it has not been investigated.
-- Release workflow check: the release workflow re-runs both suites as its own
-  gate before any installer is built.
-- Not verified: no person has exercised this release's installers on real
-  hardware yet, on any platform. The macOS build is produced after this release
-  is cut, by `scripts/release-macos-local.sh`; nothing about its signing or
-  notarization is claimed in these notes.
+- Source baseline: desktop main `680ea7ca`, including merged PR #130. This change
+  updates release notes only; it changes no application code or dependencies.
+- Automated CI on that baseline passed all 6 checks: frontend, Rust on Linux,
+  Windows and macOS, the macOS release-script shim, and File Provider Swift.
+  [Run 39310409598, attempt 2](https://github.com/beebeeb-io/desktop/actions/runs/39310409598)
+  includes a successful rerun of the Swift job after its initial hosted-runner
+  capacity cancellation. The release candidate's own CI remains pending.
+- No product build or test suite was repeated for this notes-only change. The
+  canonical release workflow still runs `bun test` and `cargo test --locked`
+  before building the required Windows and Linux artifacts.
+- Not verified: task 1887's 12 signed-device cases (D1–D11 and D10b), installation
+  and updating of 0.8.12 on physical hardware, or signing/notarization of 0.8.12
+  release artifacts. The existing signed DEBUG QA app is a functional test
+  artifact, not a public release build. No 0.8.12 release is claimed here.
 
 ### Install / Update
 
-Existing desktop installs receive this release through the in-app updater
-automatically. For a fresh Windows install, download the NSIS `setup.exe` from
-the GitHub release assets. For a fresh Mac install, download the `.dmg` (Apple
-Silicon, macOS 14 or later).
+After the release gates pass and the release is published, existing desktop
+installs receive it through the in-app updater. For a fresh Windows install,
+use the NSIS `setup.exe`; MSI remains available separately. The Mac build is
+Apple Silicon only and requires macOS 14 or later. macOS artifacts follow the
+existing local Developer ID signing, notarization and updater-signature process.
