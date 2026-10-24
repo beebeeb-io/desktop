@@ -118,7 +118,7 @@ const SURFACES = {
     async open(page) {
       await page.route('http://fixture.local/**', (r) => r.fulfill({ contentType: 'text/html', body: `<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="http://fixture.local/bundle/main.css"></head><body><div id="root"></div><script src="http://fixture.local/bundle/main.js"></script></body></html>` }))
       await page.route('http://fixture.local/bundle/**', async (r) => r.fulfill({ path: path.join(macDir, path.basename(new URL(r.request().url()).pathname)), contentType: r.request().url().endsWith('.css') ? 'text/css' : 'text/javascript' }))
-      await page.goto('http://fixture.local/?window=settings-v2&platform=macos&tab=account')
+      await page.goto('http://fixture.local/?window=main&platform=macos&tab=account')
       await page.getByRole('radiogroup').waitFor()
     },
     row: (page, name) => page.getByRole('radio', { name: new RegExp(`^${name}\\b`) }),

@@ -14,9 +14,11 @@
 //                 This is the RED: the predicate must fail with the numbers of spec section 8,
 //                 1125 vs 540 (the document scrolls, the sidebar goes with it) and 485 vs 452
 //                 (`.content` is wider than its pane). The run exits 1 when the layout is red.
-//   --target new  `?window=settings-v2&platform=macos` at 560 wide, every tab at its natural
-//                 height, a 60-character fake path in every field that can hold user data, in
-//                 light and dark. Exits 1 on the first failed assertion, else prints a count line.
+//   --target new  the Settings pane of the Beebeeb window (task 1683 slice 1: `?window=main&platform=macos&tab=<id>`)
+//                 at the window's minimum width, 760 (a 546 pt pane beside the 214 pt sidebar), every section at its
+//                 natural height, a 60-character fake path in every field that can hold user data, in light and dark.
+//                 Exits 1 on the first failed assertion, else prints a count line. (Before slice 1 this was the
+//                 560 pt Settings window at `?window=settings-v2`; tests/render-mac-app.mjs draws the whole window.)
 //
 // The predicate (`report`): the document and every element that can clip or scroll
 // (overflow other than visible, except a declared ellipsis) must have scrollWidth <= clientWidth;
@@ -166,7 +168,7 @@ function report() {
     .filter((el) => el.clientWidth > 0)
     .map((el) => ({ el: name(el), scrollWidth: el === document.documentElement ? scrolling.scrollWidth : el.scrollWidth, clientWidth: el === document.documentElement ? scrolling.clientWidth : el.clientWidth, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight }))
   const pane = document.querySelector('.ms-pane')
-  const toolbar = document.querySelector('.ms-toolbar')
+  const toolbar = document.querySelector('.mw-toolbar')
   // `scrollHeight` of a pane in a tall window is the window, not the content, so the natural
   // height is measured from the content: the bottom of the lowest in-flow child plus the pane's
   // bottom padding. A dialog (position: fixed) is not part of the content.
@@ -242,11 +244,12 @@ try {
         const fx = { ...baseFixture, ...(sc.fx ?? {}) }
         const label = `${sc.name} ${scheme}`
         // 1. Tall window: measure the natural height of this state.
-        const tall = await open('window=settings-v2&platform=macos', { width: 560, height: 1600 }, scheme, fx)
+        const tab = sc.tab.toLowerCase()
+        const url = `window=main&platform=macos&tab=${tab}`
+        const tall = await open(url, { width: 760, height: 1600 }, scheme, fx)
         let natural
         try {
-          await tall.page.waitForSelector('.ms-shell')
-          await tall.page.getByRole('tab', { name: sc.tab, exact: true }).click()
+          await tall.page.waitForSelector('.ms-pane')
           await tall.page.waitForTimeout(450)
           if (sc.act) await sc.act(tall.page)
           await tall.page.waitForTimeout(250)
@@ -259,10 +262,9 @@ try {
           check(tall.errors.length === 0, `${label}: no page errors`, tall.errors.join(' | '))
         } finally { await tall.context.close() }
         // 2. The window at exactly that height: nothing scrolls, nothing is wider than its box.
-        const fit = await open('window=settings-v2&platform=macos', { width: 560, height: natural }, scheme, fx)
+        const fit = await open(url, { width: 760, height: natural }, scheme, fx)
         try {
-          await fit.page.waitForSelector('.ms-shell')
-          await fit.page.getByRole('tab', { name: sc.tab, exact: true }).click()
+          await fit.page.waitForSelector('.ms-pane')
           await fit.page.waitForTimeout(450)
           if (sc.act) await sc.act(fit.page)
           await fit.page.waitForTimeout(250)
@@ -278,8 +280,8 @@ try {
               const tl = document.createElement('div')
               tl.setAttribute('style', 'position:absolute;left:18px;top:16px;display:flex;gap:8px')
               tl.innerHTML = ['#ff5f57', '#febc2e', '#28c840'].map((c) => `<div style="width:12px;height:12px;border-radius:50%;background:${c}"></div>`).join('')
-              document.querySelector('.ms-toolbar').style.position = 'relative'
-              document.querySelector('.ms-toolbar').appendChild(tl)
+              document.querySelector('.mw-window').style.position = 'relative'
+              document.querySelector('.mw-window').appendChild(tl)
             })
             await fit.page.evaluate(() => document.fonts.ready)
             await fit.page.screenshot({ path: path.join(output, 'png', `${sc.shot}-${scheme}.png`) })
@@ -289,10 +291,9 @@ try {
           }
         } finally { await fit.context.close() }
         // 3. A short window: the pane scrolls, the toolbar and the document do not.
-        const short = await open('window=settings-v2&platform=macos', { width: 560, height: 320 }, scheme, fx)
+        const short = await open(url, { width: 760, height: 320 }, scheme, fx)
         try {
-          await short.page.waitForSelector('.ms-shell')
-          await short.page.getByRole('tab', { name: sc.tab, exact: true }).click()
+          await short.page.waitForSelector('.ms-pane')
           await short.page.waitForTimeout(450)
           if (sc.act) await sc.act(short.page)
           await short.page.evaluate(() => { const p = document.querySelector('.ms-pane'); p.scrollTop = p.scrollHeight })

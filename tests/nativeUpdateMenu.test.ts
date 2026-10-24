@@ -18,11 +18,11 @@ test('Settings and the always-mounted update surface use the same check controll
   expect(banner).toContain('<ManualUpdateFeedback />')
 })
 
-test('the macOS Settings window drains the native menu check itself (slice 6)', () => {
-  // Slice 6 flips the Preferences/Settings menu items onto the new window,
-  // so THAT window must consume the pending request and answer inline in
-  // its About row (it mounts no ManualUpdateFeedback toast).
-  const mac = readFileSync(new URL('../src/MacSettings.tsx', import.meta.url), 'utf8')
+test('the macOS Beebeeb window drains the native menu check itself (task 1683 slice 1)', () => {
+  // The menu's "Check for Updates…" opens the Beebeeb window on Settings › About, so THAT window must consume the
+  // pending request and answer inline in the About row (it mounts no ManualUpdateFeedback toast). Before slice 1 this
+  // was the Settings window's root in MacSettings.tsx; the root moved to the window shell.
+  const mac = readFileSync(new URL('../src/MacApp.tsx', import.meta.url), 'utf8')
   expect(mac).toContain('connectNativeUpdateMenu(')
   expect(mac).toContain("'menu:check-for-updates'")
   expect(mac).toContain("command<boolean>('consume_menu_update_check')")

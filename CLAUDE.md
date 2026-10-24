@@ -246,6 +246,27 @@ before any deletion unless every waiting write was kept. One alert names our fol
 shows our row with Show in Finder and Dismiss. Closing Settings ends the flow; a late result is shown in the native
 dialog. Windows and Linux are unchanged. Spec: `docs/specs/2026-10-10-macos-sign-out-waiting-writes.md`.
 
+### The Beebeeb window on a Mac (task 1683 slice 1, spec `docs/specs/2026-10-24-macos-two-surface-app.md`)
+
+A Mac builds one app window, label `main` (`src/MacApp.tsx`, `?window=main&platform=macos`), declared alone in
+`tauri.macos.conf.json` (`create: false`, 920 × 620, minimum 760 × 520, overlay title bar); the macOS file replaces the
+shared window list, so `tray`, `windows-onboarding` and `main-app` are never built on a Mac, and the old
+`macos-settings` window is gone everywhere. Settings is a mode of `main` in System Settings style: the gear, ⌘, and the
+menus swap the one sidebar for the Settings list (back control, account row, General, Sync, About; Security is slice 5),
+and the pane hosts the section bodies of `src/MacSettings.tsx` unchanged. Every opener goes through
+`show_main_window(app, MainNav)` in `lib.rs`: it stores ONE pending request, emits `main:navigate`, and the window pulls
+it with `consume_main_navigation` (also once when it mounts). `src/mainWindowModel.ts` `navigate` is the only place a
+request becomes a view; while a sheet is open nothing navigates, and the window's `main_window_state` makes Rust disable
+View › Home, View › Back and Settings… (§8.2). Closing `main` destroys it (`surfaces::policy::close_policy`); every
+other label still hides. The window-state plugin tracks `main` only, SIZE | POSITION, in `window-state-v2.json`;
+`place_main_window` centres on the menu-bar icon's display and re-centres a frame less than half on screen. The Dock
+icon follows `surfaces::policy::dock_icon_wanted` (`main` while it exists; onboarding and conflict windows while shown).
+The macOS menu is `MACOS_MENU_SPECS` + `MACOS_MENU_LAYOUT` (Windows and Linux keep `DESKTOP_MENU_SPECS`). 1887's sign-out
+flow owner is `main`. Until slice 3 the tray click still shows the compact flyout (label `settings`,
+`surfaces::policy::compact_window_label`); until slice 2 sign-in is still the `onboarding` window, which the signed-out
+card in `main` opens. Tests: `tests/mainWindowModel.test.ts`, `tests/macApp.test.tsx`, `surfaces::{policy, registry,
+window_state, config_tests}`, `main_window_tests` in `lib.rs`; Chromium: `tests/render-mac-app.mjs`.
+
 ### Finder setup reconciler (spec `docs/specs/2026-10-06-macos-finder-setup-reconciler.md`)
 
 On macOS nobody installs the Finder location any more: there is no install button, and no macOS code

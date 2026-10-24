@@ -14,6 +14,12 @@
  *
  * What this does NOT prove: layout, or anything on a Mac. The device rung is "Settings › Account sign-out with
  * an unconfirmed Finder removal: the sentence stays".
+ *
+ * Task 1683 slice 1 (two-surface spec §8.1): the Settings window is now the Settings pane of the one Beebeeb window
+ * (`MacApp`, `?window=main&platform=macos`). The pins moved with it: the sentence still survives the remount, and the
+ * remounted window, now signed out, shows it above the sign-in card ("the window then shows sign-in (the note is held
+ * … and shown above the sign-in card)") where the Settings window showed it on its Account tab. After the next
+ * sign-in the window opens where it normally does, on Home.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
@@ -92,6 +98,12 @@ function installBackend(native: Native, extra: Record<string, (args: any) => unk
     'plugin:event|unlisten': () => null,
     get_desktop_config: () => ({ upload_kbps_limit: 0, download_kbps_limit: 0, pause_sync: false, notify_conflicts: true, notify_sync_complete: false, notify_quota_warnings: true, theme: 'dark', local_cache_limit_bytes: 0 }),
     consume_menu_update_check: () => false,
+    // The Beebeeb window (task 1683 slice 1): its request channel, what it tells Rust for the menu, and Home's reads.
+    consume_main_navigation: () => null,
+    main_window_state: () => null,
+    finder_setup_state: () => ({ setup: 'ready', reason: null, launch_location: 'applications', attempt: 1, max_attempts: 1, last_failure: null }),
+    kept_unsynced_folder: () => null,
+    kept_unsent_folder: () => null,
     popover_snapshot: snapshot,
     account_subscription: () => ({ plan: 'basic', billing_cycle: 'yearly', status: 'active', seats: 1, region: 'eu', current_period_end: '2026-10-14T12:00:00Z', quota_bytes: 1, used_bytes: 0 }),
     account_email: () => (native.loggedIn ? 'sam@example.eu' : null),
@@ -184,10 +196,32 @@ async function waitForSettled(container: MiniElement, shown: (container: MiniEle
 const SLOW = 15_000
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
-const hasTabs = (container: MiniElement) => elements(container).some((el) => el.getAttribute('role') === 'tab')
+/** The Beebeeb window is drawn and has read the account: its sidebar, or its signed-out card. */
+const hasTabs = (container: MiniElement) =>
+  elements(container).some((el) => el.tagName === 'NAV' || el.className === 'mw-signin')
+/** Signed out: the centred card, no sidebar (§7.4, until slice 2 brings sign-in into the window). */
+const showsSignIn = (container: MiniElement) =>
+  elements(container).some((el) => el.className === 'mw-signin') && !elements(container).some((el) => el.tagName === 'NAV')
+const pane = (container: MiniElement) => elements(container).find((el) => el.className === 'ms-pane mw-pane')!
+const pressLabel = (container: MiniElement, label: string) =>
+  React.act(async () => {
+    const hits = elements(container).filter((el) => el.tagName === 'BUTTON' && el.getAttribute('aria-label') === label)
+    if (hits.length !== 1) throw new Error(`expected one button labelled "${label}", found ${hits.length}`)
+    click(container, hits[0])
+  })
 const hasPage = (container: MiniElement) => elements(container).some((el) => el.tagName === 'SECTION' && el.className === 'page')
+/** What the sidebar marks as the current section. */
 const selectedTabs = (container: MiniElement) =>
-  elements(container).filter((el) => el.getAttribute('role') === 'tab' && el.getAttribute('aria-selected') === 'true').map((el) => el.textContent.trim())
+  elements(container).filter((el) => el.tagName === 'BUTTON' && el.getAttribute('aria-current') === 'page').map((el) => el.getAttribute('aria-label') ?? el.textContent.trim())
+const ACCOUNT_ROW = 'Account, sam@example.eu, Basic plan'
+/** Home, then the gear (Settings › General), then the account row (Settings › Account), as a person gets there. */
+async function openAccountByTheGear(container: MiniElement) {
+  await waitFor('the window', () => hasTabs(container) && container.textContent.includes('Basic plan'))
+  await pressLabel(container, 'Settings')
+  await waitFor('Settings', () => selectedTabs(container).includes('General'))
+  await pressLabel(container, ACCOUNT_ROW)
+  await waitFor('the account', () => container.textContent.includes('Vault is unlocked'))
+}
 const headings = (container: MiniElement) => elements(container).filter((el) => el.tagName === 'H1').map((el) => el.textContent.trim())
 
 /**
@@ -275,7 +309,7 @@ describe('a sign-out with an unconfirmed Finder removal, through AccountSessionB
   test('main.tsx mounts both windows under the boundary in the order these tests use', () => {
     const main = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8')
     expect(main).toContain('<AccountSessionBoundary><ToastProvider><CapabilityProvider>{component}</CapabilityProvider></ToastProvider></AccountSessionBoundary>')
-    expect(main).toContain("which === 'settings-v2' && platform === 'macos'")
+    expect(main).toContain("which === 'main' && platform === 'macos'")
     expect(main).toMatch(/<StrictMode>\s*\{which === 'onboarding'/)
   })
 
@@ -283,14 +317,13 @@ describe('a sign-out with an unconfirmed Finder removal, through AccountSessionB
   test('Settings › Account: the sentence is still on screen after the boundary remounts the window', async () => {
     const native: Native = { loggedIn: true, revision: 10, calls: [] }
     installBackend(native)
-    const { default: MacSettings } = await import('../src/MacSettings')
-    const container = await mountWindow('?window=settings-v2&platform=macos', <MacSettings />)
-    await waitFor('the window', () => elements(container).some((el) => el.getAttribute('role') === 'tab'))
-    await press(container, 'button', 'Account')
-    await waitFor('the account', () => container.textContent.includes('sam@example.eu'))
+    const { default: MacApp } = await import('../src/MacApp')
+    const container = await mountWindow('?window=main&platform=macos', <MacApp />)
+    await openAccountByTheGear(container)
+    await waitFor('the account', () => container.textContent.includes('Vault is unlocked'))
 
     // Only the boundary replaces this node; the sign-out itself re-renders it in place.
-    const shownBefore = elements(container).find((el) => el.className === 'ms-pane')!
+    const shownBefore = pane(container)
     await press(container, 'button', 'Sign out…')
     await press(container, 'button', 'Sign out')
     await waitFor('the sign-out', () => native.calls.includes('clear_session') && container.textContent.includes('You’re signed out'))
@@ -300,11 +333,12 @@ describe('a sign-out with an unconfirmed Finder removal, through AccountSessionB
     expect(statusLines(container)).toContain(SIGN_OUT_WARNING.sentence)
 
     await waitForRemount(container, shownBefore, native)
-    await waitForSettled(container, (c) => elements(c).some((el) => el.getAttribute('role') === 'tab'))
+    await waitForSettled(container, showsSignIn)
 
     expect(statusLines(container)).toContain(SIGN_OUT_WARNING.sentence)
-    const selected = elements(container).filter((el) => el.getAttribute('role') === 'tab' && el.getAttribute('aria-selected') === 'true')
-    expect(selected.map((el) => el.textContent.trim())).toEqual(['Account'])
+    // §8.1: signed out, the window shows the sign-in card with the sentence above it.
+    const text = container.textContent
+    expect(text.indexOf(SIGN_OUT_WARNING.sentence)).toBeLessThan(text.indexOf('Sign in to Beebeeb'))
     // Said neutrally: no alert, no "Couldn’t …".
     expect(elements(container).filter((el) => el.getAttribute('role') === 'alert')).toEqual([])
     expect(container.textContent).not.toContain('Couldn’t sign out')
@@ -336,12 +370,11 @@ describe('a sign-out with an unconfirmed Finder removal, through AccountSessionB
   test('the next sign-in clears the sentence (and the window opens where it normally does)', async () => {
     const native: Native = { loggedIn: true, revision: 30, calls: [] }
     installBackend(native)
-    const { default: MacSettings } = await import('../src/MacSettings')
-    const container = await mountWindow('?window=settings-v2&platform=macos', <MacSettings />)
-    await waitFor('the window', () => elements(container).some((el) => el.getAttribute('role') === 'tab'))
-    await press(container, 'button', 'Account')
-    await waitFor('the account', () => container.textContent.includes('sam@example.eu'))
-    const signedOut = elements(container).find((el) => el.className === 'ms-pane')!
+    const { default: MacApp } = await import('../src/MacApp')
+    const container = await mountWindow('?window=main&platform=macos', <MacApp />)
+    await openAccountByTheGear(container)
+    await waitFor('the account', () => container.textContent.includes('Vault is unlocked'))
+    const signedOut = pane(container)
     await press(container, 'button', 'Sign out…')
     await press(container, 'button', 'Sign out')
     await waitFor('the sign-out', () => native.calls.includes('clear_session'))
@@ -349,15 +382,15 @@ describe('a sign-out with an unconfirmed Finder removal, through AccountSessionB
     await waitFor('the remounted window', () => statusLines(container).includes(SIGN_OUT_WARNING.sentence))
 
     // A sign-in in another window: Rust moves the revision again and the account is signed in.
-    const beforeSignIn = elements(container).find((el) => el.className === 'ms-pane')!
+    const beforeSignIn = elements(container).find((el) => el.className === 'mw-signin')!
     native.loggedIn = true
     native.revision += 2
     await waitForRemount(container, beforeSignIn, native)
-    await waitFor('the window after the sign-in', () => elements(container).some((el) => el.getAttribute('role') === 'tab'))
+    await waitFor('the window after the sign-in', () => elements(container).some((el) => el.tagName === 'NAV'))
 
     expect(container.textContent).not.toContain(SIGN_OUT_WARNING.sentence)
-    const selected = elements(container).filter((el) => el.getAttribute('role') === 'tab' && el.getAttribute('aria-selected') === 'true')
-    expect(selected.map((el) => el.textContent.trim())).toEqual(['General'])
+    // The remounted window opens where it normally does: Home.
+    expect(selectedTabs(container)).toEqual(['Home'])
   }, SLOW)
 })
 
@@ -366,15 +399,15 @@ describe('a status read held back behind the sign-out and answered before it (ou
     const native: Native = { loggedIn: true, revision: 40, calls: [] }
     const slot = heldBehindSignOut(native, 'poll-first')
     installBackend(native, slot.handlers)
-    const { default: MacSettings } = await import('../src/MacSettings')
-    // Opened on the Account tab by its URL, so the remount comes back to it in either order: this test is about the
-    // sign-out's answer alone.
-    const container = await mountWindow('?window=settings-v2&platform=macos&tab=account', <MacSettings />)
-    await waitFor('the account', () => accountSessionRevision() === native.revision && container.textContent.includes('sam@example.eu'))
-    const shownBefore = elements(container).find((el) => el.className === 'ms-pane')!
+    const { default: MacApp } = await import('../src/MacApp')
+    const container = await mountWindow('?window=main&platform=macos', <MacApp />)
+    await waitFor('the window', () => accountSessionRevision() === native.revision && hasTabs(container))
+    await openAccountByTheGear(container)
+    await waitFor('the account', () => container.textContent.includes('Vault is unlocked'))
+    const shownBefore = pane(container)
     await press(container, 'button', 'Sign out…')
 
-    await signOutOutsideAct(container, byText(container, 'button', 'Sign out'), shownBefore, native, slot.probe, hasTabs)
+    await signOutOutsideAct(container, byText(container, 'button', 'Sign out'), shownBefore, native, slot.probe, showsSignIn)
 
     // The order really was poll-first: a status read was held back, and its revision was observed before the sign-out answered.
     expect(slot.probe.heldBack).toBeGreaterThan(0)
@@ -429,15 +462,17 @@ describe('the window follows the held sentence, in either order of the two answe
     return gate
   }
 
-  /** Settings on its General tab, then on Account with the sign-out confirm open. */
+  /** Settings › General, then Settings › Account with the sign-out confirm open. */
   async function openSettingsOnGeneral(native: Native, extra: Record<string, (args: any) => unknown> = {}) {
     const handlers = installBackend(native, extra)
-    const { default: MacSettings } = await import('../src/MacSettings')
-    const container = await mountWindow('?window=settings-v2&platform=macos', <MacSettings />)
-    await waitFor('the window', () => accountSessionRevision() === native.revision && hasTabs(container))
+    const { default: MacApp } = await import('../src/MacApp')
+    const container = await mountWindow('?window=main&platform=macos', <MacApp />)
+    await waitFor('the window', () => accountSessionRevision() === native.revision && hasTabs(container) && container.textContent.includes('Basic plan'))
+    await pressLabel(container, 'Settings')
+    await waitFor('Settings', () => selectedTabs(container).includes('General'))
     expect(selectedTabs(container)).toEqual(['General'])
-    await press(container, 'button', 'Account')
-    await waitFor('the account', () => container.textContent.includes('sam@example.eu'))
+    await pressLabel(container, ACCOUNT_ROW)
+    await waitFor('the account', () => container.textContent.includes('Vault is unlocked'))
     await press(container, 'button', 'Sign out…')
     return { container, handlers }
   }
@@ -471,27 +506,27 @@ describe('the window follows the held sentence, in either order of the two answe
     await React.act(async () => { gate.release() })
   }, SLOW)
 
-  test('Settings, the status read first: the window ends on the Account tab with the sentence on screen', async () => {
+  test('Settings, the status read first: the window ends on the sign-in card with the sentence on screen', async () => {
     const native: Native = { loggedIn: true, revision: 70, calls: [] }
     const slot = heldBehindSignOut(native, 'poll-first')
     const { container } = await openSettingsOnGeneral(native, slot.handlers)
-    const shownBefore = elements(container).find((el) => el.className === 'ms-pane')!
+    const shownBefore = pane(container)
 
-    await signOutOutsideAct(container, byText(container, 'button', 'Sign out'), shownBefore, native, slot.probe, hasTabs)
+    await signOutOutsideAct(container, byText(container, 'button', 'Sign out'), shownBefore, native, slot.probe, showsSignIn)
 
     expect(slot.probe.heldBack).toBeGreaterThan(0)
     expect(slot.probe.revisionAtAnswer).toBe(native.revision)
-    expect(selectedTabs(container)).toEqual(['Account'])
+    expect(showsSignIn(container)).toBe(true)
     expect(statusLines(container)).toContain(SIGN_OUT_WARNING.sentence)
     nothingSaysItFailed(container)
   }, SLOW)
 
-  test('Settings, the sign-out’s answer first and its read of the account answered after the remount: the window ends on the Account tab with the sentence on screen', async () => {
+  test('Settings, the sign-out’s answer first and its read of the account answered after the remount: the window ends on the sign-in card with the sentence on screen', async () => {
     const native: Native = { loggedIn: true, revision: 80, calls: [] }
     const slot = heldBehindSignOut(native, 'answer-first')
     const { container, handlers } = await openSettingsOnGeneral(native, slot.handlers)
     const gate = gateTheReadAfterSignOut(native, handlers)
-    const shownBefore = elements(container).find((el) => el.className === 'ms-pane')!
+    const shownBefore = pane(container)
 
     ;(globalThis as any).IS_REACT_ACT_ENVIRONMENT = false
     click(container, byText(container, 'button', 'Sign out'))
@@ -509,7 +544,7 @@ describe('the window follows the held sentence, in either order of the two answe
     // The order really was answer-first: the sign-out answered before this window observed its revision.
     expect(slot.probe.heldBack).toBeGreaterThan(0)
     expect(slot.probe.revisionAtAnswer).toBe(native.revision - 2)
-    expect(selectedTabs(container)).toEqual(['Account'])
+    expect(showsSignIn(container)).toBe(true)
     expect(statusLines(container)).toContain(SIGN_OUT_WARNING.sentence)
     nothingSaysItFailed(container)
   }, SLOW)

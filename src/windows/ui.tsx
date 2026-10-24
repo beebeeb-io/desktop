@@ -536,6 +536,21 @@ export function modalFocusTargetIndex(currentIndex: number, count: number, direc
 // (the fuller `role="dialog"` pattern this follows): fixed translucent
 // backdrop, centered panel, scrollable body, footer close button. Backdrop
 // click and Escape both close.
+// How many Modals are open in this webview. The macOS Beebeeb window reads it (task 1683 slice 1, two-surface spec
+// §8.2): while a sheet is open the window ignores ⌘1, ⌘[ and ⌘, and tells Rust to disable those menu items, so a
+// navigation cannot unmount the section under its sheet. Nothing else reads it.
+let openModals = 0
+const openModalListeners = new Set<() => void>()
+export const openModalCount = (): number => openModals
+export function subscribeOpenModals(listener: () => void): () => void {
+  openModalListeners.add(listener)
+  return () => { openModalListeners.delete(listener) }
+}
+function changeOpenModals(by: number) {
+  openModals += by
+  for (const listener of openModalListeners) listener()
+}
+
 export function Modal({
   open,
   onClose,
@@ -558,6 +573,12 @@ export function Modal({
   const fallbackFocusRef = useRef<HTMLButtonElement | null>(null)
   const dialogRef = useRef<HTMLDivElement | null>(null)
   const previousFocusRef = useRef<HTMLElement | null>(null)
+
+  useEffect(() => {
+    if (!open) return
+    changeOpenModals(1)
+    return () => changeOpenModals(-1)
+  }, [open])
 
   useEffect(() => {
     if (!open) return
