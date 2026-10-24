@@ -1,0 +1,984 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>Beebeeb macOS: two surfaces</title>
+<meta name="description" content="Task 1683, Guus's 24 Oct 2026 ruling: the menu-bar popover and one Beebeeb window that holds sign-in, onboarding, Home, Review, Trash and Settings. Design for review.">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<style>
+/* Tokens: copied from src/design.css (light + dark blocks) so the drawing matches the built app 1:1.
+   .theme-light / .theme-dark re-declare them on a subtree, so one figure can show both themes side by side. */
+:root,.theme-light{
+  --paper:oklch(0.985 0.004 85);--paper-2:oklch(0.968 0.006 85);--paper-3:oklch(0.945 0.008 82);
+  --line:oklch(0.90 0.008 82);--line-2:oklch(0.83 0.01 80);
+  --ink:oklch(0.18 0.01 70);--ink-2:oklch(0.34 0.012 75);--ink-3:oklch(0.52 0.01 78);--ink-4:oklch(0.68 0.008 80);
+  --amber:oklch(0.82 0.17 84);--amber-deep:oklch(0.66 0.15 72);--amber-soft:oklch(0.94 0.06 90);--amber-bg:oklch(0.97 0.03 92);
+  --amber-ink:oklch(0.18 0.01 70);--red-ink:oklch(0.14 0.01 25);
+  --red:oklch(0.62 0.21 25);--err-bg:oklch(0.965 0.025 25);--err-line:oklch(0.86 0.06 25);
+  --ok-bg:oklch(0.965 0.03 155);--ok-line:oklch(0.86 0.07 155);--ok-icon:oklch(0.56 0.14 155);
+  --warn-bg:oklch(0.965 0.025 255);--warn-line:oklch(0.86 0.05 255);--warn-icon:oklch(0.5 0.13 255);
+  --shadow-2:0 2px 4px rgba(24,20,10,0.04),0 4px 14px rgba(24,20,10,0.05);
+  --shadow-3:0 4px 10px rgba(24,20,10,0.06),0 24px 48px -12px rgba(24,20,10,0.12);
+  --win-scrim:rgba(24,20,10,0.38);
+  /* Drawing-only: the desktop wallpaper, the macOS menu bar and window chrome (drawn by macOS, not by Beebeeb). */
+  --wall-1:oklch(0.88 0.035 245);--wall-2:oklch(0.76 0.055 285);
+  --mb-bg:oklch(0.97 0.01 250 / 0.82);--mb-ink:oklch(0.18 0.01 70);--mb-hl:oklch(0.18 0.01 70 / 0.12);
+  --menu-bg:oklch(0.975 0.004 85);--tl-r:oklch(0.68 0.2 27);--tl-y:oklch(0.83 0.15 85);--tl-g:oklch(0.72 0.17 145);
+  --font-sans:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',ui-sans-serif,sans-serif;
+  --font-mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --ease:cubic-bezier(0.2,0.8,0.3,1);
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --paper:oklch(0.17 0.006 80);--paper-2:oklch(0.21 0.007 80);--paper-3:oklch(0.26 0.008 80);
+  --line:oklch(0.31 0.008 80);--line-2:oklch(0.41 0.01 80);
+  --ink:oklch(0.94 0.006 85);--ink-2:oklch(0.82 0.008 85);--ink-3:oklch(0.67 0.008 85);--ink-4:oklch(0.52 0.008 85);
+  --amber-deep:oklch(0.78 0.16 82);--amber-soft:oklch(0.36 0.08 86);--amber-bg:oklch(0.25 0.035 88);
+  --red:oklch(0.68 0.21 25);--err-bg:oklch(0.26 0.05 25);--err-line:oklch(0.38 0.08 25);
+  --ok-bg:oklch(0.26 0.04 155);--ok-line:oklch(0.38 0.07 155);--ok-icon:oklch(0.74 0.16 155);
+  --warn-bg:oklch(0.26 0.04 255);--warn-line:oklch(0.38 0.06 255);--warn-icon:oklch(0.72 0.13 255);
+  --shadow-2:0 2px 4px rgba(0,0,0,0.24),0 4px 14px rgba(0,0,0,0.18);
+  --shadow-3:0 4px 10px rgba(0,0,0,0.28),0 24px 48px -12px rgba(0,0,0,0.36);
+  --wall-1:oklch(0.32 0.04 255);--wall-2:oklch(0.2 0.04 285);
+  --mb-bg:oklch(0.2 0.01 260 / 0.82);--mb-ink:oklch(0.95 0.005 85);--mb-hl:oklch(0.95 0.005 85 / 0.16);
+  --menu-bg:oklch(0.23 0.007 80);
+  color-scheme:dark;
+}}
+:root[data-theme="dark"],.theme-dark{
+  --paper:oklch(0.17 0.006 80);--paper-2:oklch(0.21 0.007 80);--paper-3:oklch(0.26 0.008 80);
+  --line:oklch(0.31 0.008 80);--line-2:oklch(0.41 0.01 80);
+  --ink:oklch(0.94 0.006 85);--ink-2:oklch(0.82 0.008 85);--ink-3:oklch(0.67 0.008 85);--ink-4:oklch(0.52 0.008 85);
+  --amber-deep:oklch(0.78 0.16 82);--amber-soft:oklch(0.36 0.08 86);--amber-bg:oklch(0.25 0.035 88);
+  --red:oklch(0.68 0.21 25);--err-bg:oklch(0.26 0.05 25);--err-line:oklch(0.38 0.08 25);
+  --ok-bg:oklch(0.26 0.04 155);--ok-line:oklch(0.38 0.07 155);--ok-icon:oklch(0.74 0.16 155);
+  --warn-bg:oklch(0.26 0.04 255);--warn-line:oklch(0.38 0.06 255);--warn-icon:oklch(0.72 0.13 255);
+  --shadow-2:0 2px 4px rgba(0,0,0,0.24),0 4px 14px rgba(0,0,0,0.18);
+  --shadow-3:0 4px 10px rgba(0,0,0,0.28),0 24px 48px -12px rgba(0,0,0,0.36);
+  --wall-1:oklch(0.32 0.04 255);--wall-2:oklch(0.2 0.04 285);
+  --mb-bg:oklch(0.2 0.01 260 / 0.82);--mb-ink:oklch(0.95 0.005 85);--mb-hl:oklch(0.95 0.005 85 / 0.16);
+  --menu-bg:oklch(0.23 0.007 80);
+  color-scheme:dark;
+}
+:root[data-theme="light"]{color-scheme:light}
+.theme-light,.theme-dark{color:var(--ink);background:var(--paper-2)}
+
+/* ── Review-page shell (same reading column as macos-menubar-popover.html and macos-settings-dialogs.html) ── */
+*{box-sizing:border-box}
+body{margin:0;padding:32px 16px 64px;background:var(--paper-2);color:var(--ink);font:16px/1.55 var(--font-sans)}
+.wrap{max-width:1180px;margin:0 auto;display:flex;flex-direction:column;gap:64px}
+header.page{display:flex;flex-direction:column;gap:12px;max-width:72ch}
+.eyebrow{font:500 12px/1 var(--font-mono);letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3)}
+h1{font-size:clamp(28px,4vw,40px);line-height:1.1;letter-spacing:-.02em;margin:0;text-wrap:balance}
+h2{font-size:22px;letter-spacing:-.01em;margin:0 0 6px;text-wrap:balance}
+h3{font-size:16px;margin:0}
+p{margin:0}.lede{color:var(--ink-2);font-size:17px}
+blockquote{margin:0;padding:14px 16px;border-left:3px solid var(--amber);background:var(--paper);border-radius:0 8px 8px 0;font-size:15px}
+blockquote cite{display:block;margin-top:6px;font:12px var(--font-mono);color:var(--ink-3);font-style:normal}
+section.sec{display:flex;flex-direction:column;gap:18px}
+.sub{color:var(--ink-2);max-width:72ch}
+code{font:14px var(--font-mono);background:var(--paper);border:1px solid var(--line);border-radius:4px;padding:1px 5px;overflow-wrap:anywhere}
+ul.plain{margin:0;padding-left:20px;display:flex;flex-direction:column;gap:6px;max-width:76ch}
+.tbl{overflow-x:auto;border:1px solid var(--line);border-radius:10px;background:var(--paper)}
+table{border-collapse:collapse;width:100%;font-size:14.5px}
+th,td{padding:10px 14px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+tr:last-child th,tr:last-child td{border-bottom:0}
+thead th{font:500 12px var(--font-mono);text-transform:uppercase;letter-spacing:.05em;color:var(--ink-3)}
+tbody th{font-weight:600}
+.num{font-family:var(--font-mono);font-size:13.5px;font-variant-numeric:tabular-nums}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,380px),1fr));gap:28px 24px}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,760px),1fr));gap:40px 24px}
+figure.shot{margin:0;display:flex;flex-direction:column;gap:10px;min-width:0}
+figcaption{display:flex;flex-direction:column;gap:2px;font-size:14px}
+figcaption b{font-weight:600}figcaption span{color:var(--ink-3)}
+ol.qs{list-style:none;padding:0;margin:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,340px),1fr));gap:16px}
+.q{background:var(--paper);border:1px solid var(--line);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.q-head{display:flex;gap:10px;align-items:center}
+.q-n{font:500 13px var(--font-mono);width:26px;height:26px;border-radius:50%;display:grid;place-items:center;background:var(--amber-bg);color:var(--ink);border:1px solid var(--amber);flex:none}
+.rec{font-size:15px}.alt{font-size:14px;color:var(--ink-3)}
+.tag{display:inline-block;font:500 11px var(--font-mono);text-transform:uppercase;letter-spacing:.05em;color:var(--ink-2);margin-right:8px}
+.toggles{position:fixed;top:12px;right:12px;z-index:20}
+.tbtn{height:30px;padding:0 12px;border:1px solid var(--line-2);border-radius:6px;background:var(--paper);color:var(--ink);font:600 12px var(--font-sans);cursor:pointer;box-shadow:var(--shadow-3)}
+.tbtn:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+.pair{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,380px),1fr));gap:0;border:1px solid var(--line);border-radius:14px;overflow:hidden}
+.pair>div{padding:22px 18px;display:flex;justify-content:center;min-width:0}
+.pair .pw{min-width:0;width:100%;max-width:372px}
+.pair-label{font:500 11px var(--font-mono);text-transform:uppercase;letter-spacing:.06em;color:var(--ink-3);margin-bottom:10px;text-align:center}
+
+/* Big drawings (main window 920 x 620 pt) are scaled to their column by the script at the bottom. */
+.fit{width:100%;overflow:hidden;position:relative}
+.fit>*{transform-origin:top left}
+
+/* ── Icons ── */
+svg.i{width:16px;height:16px;flex:none;stroke:currentColor;fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+svg.i.s14{width:14px;height:14px}svg.i.s18{width:18px;height:18px}svg.i.s22{width:22px;height:22px}svg.i.s26{width:26px;height:26px}
+
+/* ── The desktop: wallpaper + menu bar (drawn by macOS) ── */
+.desk{position:relative;border-radius:12px;overflow:hidden;border:1px solid var(--line);background:linear-gradient(160deg,var(--wall-1),var(--wall-2));min-width:0}
+.mb{height:26px;display:flex;align-items:center;gap:16px;padding:0 12px;background:var(--mb-bg);color:var(--mb-ink);font:600 13px/1 var(--font-sans);white-space:nowrap;overflow:hidden}
+.mb-r{margin-left:auto;display:flex;align-items:center;gap:12px;font-weight:500}
+.sitem{width:26px;height:20px;border-radius:5px;display:grid;place-items:center;font:800 15px/1 var(--font-sans);color:var(--mb-ink);position:relative}
+.sitem.on{background:var(--mb-hl)}
+.sitem.crossed::after{content:"";position:absolute;width:15px;height:2.6px;border-radius:2px;background:var(--mb-ink);transform:rotate(-45deg);box-shadow:0 0 0 1px var(--mb-bg)}
+.desk-in{padding:6px 10px 14px;display:flex;justify-content:flex-end;min-width:0}
+
+/* ── Popover: 372 x 488 pt, fixed (30 Sep design, ruling kept) ── */
+.pop{width:372px;height:488px;max-width:100%;display:flex;flex-direction:column;background:var(--paper);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow-3);overflow:hidden;font-size:13px;line-height:18px;color:var(--ink);position:relative;text-align:left}
+.ph{padding:14px 16px 12px;border-bottom:1px solid var(--line)}
+.acct{display:flex;align-items:center;gap:10px;min-width:0}
+.av{width:32px;height:32px;border-radius:50%;background:var(--paper-3);border:1px solid var(--line);display:grid;place-items:center;font-weight:600;color:var(--ink-2);flex:none}
+.acct-t{min-width:0;flex:1}
+.email{font-weight:600;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.use{font-size:12px;color:var(--ink-3)}
+.gear{width:28px;height:28px;border-radius:6px;display:grid;place-items:center;color:var(--ink-2);border:0;background:transparent;flex:none}
+.gear.on{background:var(--paper-3)}
+.bar{height:4px;border-radius:2px;background:var(--paper-3);margin-top:10px;overflow:hidden}
+.bar>i{display:block;height:100%;background:var(--ink-3)}
+.bar.red>i{background:var(--red)}
+.notice-line{margin-top:10px;font-size:12px;color:var(--ink-2);display:flex;gap:8px;align-items:baseline}
+.notice-line a{color:var(--ink);font-weight:600;text-decoration:underline;text-underline-offset:2px;white-space:nowrap}
+.pb{flex:1;min-height:0;overflow:hidden;display:flex;flex-direction:column}
+.slabel{padding:12px 16px 4px;font-size:12px;font-weight:600;color:var(--ink-3)}
+.row-a{display:flex;gap:12px;align-items:center;padding:7px 16px}
+.tile{width:32px;height:32px;border-radius:7px;border:1px solid var(--line);background:var(--paper-2);display:grid;place-items:center;color:var(--ink-3);flex:none}
+.row-t{flex:1;min-width:0}
+.nm{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mt{font-size:12px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dir{color:var(--ink-3)}
+.prog{height:3px;border-radius:2px;background:var(--paper-3);margin-top:5px;overflow:hidden}
+.prog>i{display:block;height:100%;border-radius:2px;background:var(--ink-3)}
+.prog.enc>i{background:var(--amber)}
+.sumrow{padding:12px 16px 8px;border-bottom:1px solid var(--line)}
+.sumrow .top{display:flex;justify-content:space-between;font-weight:600}
+.sumrow .top span:last-child{font-weight:400;color:var(--ink-3);font-variant-numeric:tabular-nums}
+.msg{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:16px 26px;gap:8px}
+.disc{width:56px;height:56px;border-radius:50%;display:grid;place-items:center;border:1px solid var(--line-2);background:var(--paper-2);color:var(--ink-2);margin-bottom:6px}
+.disc.err{background:var(--err-bg);border-color:var(--err-line);color:var(--red)}
+.disc.enc{background:var(--amber-bg);border-color:var(--amber);color:var(--ink)}
+.disc.info{background:var(--warn-bg);border-color:var(--warn-line);color:var(--warn-icon)}
+.msg h4{margin:0;font-size:15px;line-height:20px;font-weight:700}
+.msg p{color:var(--ink-2);font-size:12.5px;line-height:18px;max-width:32ch}
+.reason{font:12px/1 var(--font-mono);color:var(--ink-2);background:var(--paper-2);border:1px solid var(--line);border-radius:5px;padding:5px 8px}
+.ps{display:flex;align-items:center;gap:8px;padding:0 16px;height:44px;border-top:1px solid var(--line);font-weight:600;flex:none}
+.okd{width:16px;height:16px;border-radius:50%;background:var(--ok-icon);color:var(--paper);display:grid;place-items:center;flex:none}
+.encl{margin-left:auto;display:flex;gap:5px;align-items:center;color:var(--ink-3);font-weight:400;font-size:12px}
+.encl svg{color:var(--amber-deep)}
+.pf{display:grid;grid-template-columns:repeat(3,1fr);border-top:1px solid var(--line);height:58px;flex:none}
+.fb{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;font:600 12px var(--font-sans);color:var(--ink);background:transparent;border:0;padding:0}
+.fb svg{color:var(--ink-2)}
+.fb[disabled]{color:var(--ink-3)}.fb[disabled] svg{color:var(--ink-3)}
+.attn{margin:8px 12px 4px;padding:10px 12px;border:1px solid var(--warn-line);background:var(--warn-bg);border-radius:9px;display:flex;align-items:center;gap:10px;font-size:12.5px}
+.attn svg{color:var(--warn-icon)}
+.attn .t{flex:1;min-width:0}.attn b{display:block;font-weight:600;font-size:13px}
+.upd{margin:0;padding:10px 16px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px;font-size:12.5px;background:var(--paper-2)}
+.upd .t{flex:1}
+.spin{width:16px;height:16px;border-radius:50%;border:2px solid var(--line-2);border-top-color:var(--ink-2);flex:none}
+@media (prefers-reduced-motion:no-preference){.spin.live{animation:sp 1s linear infinite}@keyframes sp{to{transform:rotate(360deg)}}}
+.skel{height:10px;border-radius:5px;background:var(--paper-3)}
+
+/* NSMenu (gear menu): drawn by macOS. The highlight is drawn in neutral grey here; macOS uses the system accent. */
+.nsm{position:absolute;top:46px;right:10px;width:236px;background:var(--menu-bg);border:1px solid var(--line-2);border-radius:9px;box-shadow:var(--shadow-3);padding:5px;font-size:13px;z-index:3}
+.mi{display:flex;justify-content:space-between;align-items:center;padding:3px 10px;border-radius:5px;height:24px}
+.mi.hl{background:var(--paper-3)}
+.mi .k{color:var(--ink-3);font-size:12.5px}
+.msep{height:1px;background:var(--line);margin:5px 8px}
+
+/* Buttons: the Settings-window system (macSettings.css) */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:26px;padding:0 12px;border:1px solid var(--line-2);border-radius:6px;background:var(--paper);color:var(--ink);font:600 12.5px/1 var(--font-sans);white-space:nowrap}
+.btn.pri{border-color:var(--amber);background:var(--amber);color:var(--amber-ink)}
+.btn.dan{border-color:var(--red);background:var(--red);color:var(--red-ink)}
+.btn.lg{height:32px;padding:0 16px;font-size:13px}
+.btn.full{width:100%;height:34px;font-size:13px}
+.btn.focus{outline:2px solid var(--ink);outline-offset:1px}
+.btn[disabled]{opacity:.55}
+.lnk{color:var(--ink);font-weight:600;text-decoration:underline;text-underline-offset:2px}
+
+/* ── The main window: 920 x 620 pt default, min 760 x 520 ── */
+.win{position:relative;width:920px;height:620px;border-radius:12px;border:1px solid var(--line-2);box-shadow:var(--shadow-3);overflow:hidden;background:var(--paper);display:grid;grid-template-columns:214px minmax(0,1fr);font-size:13px;line-height:18px;color:var(--ink);text-align:left}
+.win.solo{grid-template-columns:minmax(0,1fr)}
+.tl{position:absolute;top:18px;left:18px;display:flex;gap:8px;z-index:6}
+.tl i{width:12px;height:12px;border-radius:50%;background:var(--tl-r);display:block}
+.tl i:nth-child(2){background:var(--tl-y)}.tl i:nth-child(3){background:var(--tl-g)}
+.side{background:var(--paper-2);border-right:1px solid var(--line);padding:54px 10px 10px;display:flex;flex-direction:column;gap:2px;min-height:0}
+.nav{display:flex;align-items:center;gap:9px;height:30px;padding:0 9px;border-radius:7px;color:var(--ink-2);font-size:13px}
+.nav svg{color:var(--ink-3)}
+.nav.sel{background:var(--paper-3);color:var(--ink);font-weight:600}
+.nav.sel svg{color:var(--ink)}
+.nav .cnt{margin-left:auto;font-size:11.5px;color:var(--ink-2);font-variant-numeric:tabular-nums;background:var(--paper);border:1px solid var(--line);border-radius:9px;padding:0 6px;line-height:16px;font-weight:600}
+.sfoot{margin-top:auto;border-top:1px solid var(--line);padding:10px 2px 2px;display:flex;align-items:center;gap:9px}
+.sfoot .av{width:28px;height:28px;font-size:12px}
+.sfoot .t{flex:1;min-width:0}.sfoot .t .email{font-size:12.5px}
+.sfoot .gear{color:var(--ink-2)}
+.mn{display:grid;grid-template-rows:52px minmax(0,1fr);min-width:0;min-height:0}
+.tb{display:flex;align-items:center;padding:0 22px;border-bottom:1px solid var(--line);font-weight:700;font-size:15px;gap:10px;min-width:0}
+.tb .r{margin-left:auto;display:flex;gap:8px;font-weight:400}
+.ct{overflow:hidden;padding:20px 24px;min-height:0;background:var(--paper);display:flex;flex-direction:column;gap:16px}
+.solo .ct{background:var(--paper-2);display:grid;place-items:center;padding:0}
+.solo .mn{grid-template-rows:0 minmax(0,1fr)}
+
+/* Home */
+.card{background:var(--paper);border:1px solid var(--line);border-radius:12px}
+.hrow{display:flex;align-items:center;gap:12px;padding:12px 16px;min-width:0}
+.hrow+.hrow{border-top:1px solid var(--line)}
+.hrow .t{flex:1;min-width:0}
+.hrow .t b{display:block;font-weight:600}
+.hrow .t span{display:block;color:var(--ink-3);font-size:12px}
+.chip{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--ink-2);border:1px solid var(--line);border-radius:999px;padding:2px 8px;background:var(--paper);white-space:nowrap}
+.chip svg{color:var(--amber-deep)}
+.h-cols{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);gap:16px;min-height:0}
+.hint{display:flex;gap:12px;align-items:flex-start;padding:14px 16px;border:1px solid var(--line);border-radius:12px;background:var(--paper-2)}
+.hint .t{flex:1}.hint b{display:block;font-weight:600}.hint span{color:var(--ink-2);font-size:12.5px}
+.counts{display:flex;gap:18px;font-size:12px;color:var(--ink-3)}
+.counts b{color:var(--ink);font-weight:600;font-variant-numeric:tabular-nums}
+.gtitle{font-size:11.5px;font-weight:600;color:var(--ink-3);margin:0 2px 6px}
+.ktag{font:500 10.5px/1 var(--font-mono);text-transform:uppercase;letter-spacing:.05em;color:var(--ink-2);border:1px solid var(--line-2);border-radius:4px;padding:3px 5px;white-space:nowrap}
+
+/* Settings pane inside the main window: the toolbar holds the tabs, as a macOS Settings window does. */
+.tb.tabs{height:auto;min-height:64px;justify-content:center;gap:2px;align-items:flex-end;padding:0 12px 6px;font-weight:400;font-size:11.5px}
+.mn.set{grid-template-rows:64px minmax(0,1fr)}
+.stab{width:70px;height:50px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;border-radius:8px;color:var(--ink-3)}
+.stab svg{color:var(--ink-2)}
+.stab.sel{background:var(--paper-3);color:var(--ink);font-weight:600}
+.ct.set{background:var(--paper-2);gap:18px}
+.mscard{background:var(--paper);border:1px solid var(--line);border-radius:10px;min-width:0}
+.mscard>*+*{border-top:1px solid var(--line)}
+.msrow{min-height:44px;padding:9px 14px;display:flex;align-items:center;gap:16px;min-width:0}
+.msrow .t{flex:1;min-width:0}
+.msrow .l{font-size:13px;overflow-wrap:anywhere}
+.msrow .h{font-size:11.5px;line-height:16px;color:var(--ink-3);overflow-wrap:anywhere}
+.msrow .c{flex:none;display:flex;align-items:center;gap:10px}
+.sw{position:relative;width:32px;height:20px;border:1.5px solid var(--ink-3);border-radius:10px;background:var(--paper-2);flex:none}
+.sw::after{content:"";position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;background:var(--ink-3)}
+.sw.on{border-color:var(--ink);background:var(--ink)}.sw.on::after{left:14px;background:var(--paper)}
+.popup{height:24px;display:inline-flex;align-items:center;gap:18px;padding:0 8px 0 10px;border:1px solid var(--line-2);border-radius:6px;background:var(--paper);font-size:12.5px;white-space:nowrap}
+.popup::after{content:"";width:6px;height:6px;border-right:1.5px solid var(--ink-3);border-bottom:1.5px solid var(--ink-3);transform:rotate(45deg) translateY(-2px)}
+.radio{width:14px;height:14px;border-radius:50%;border:1.5px solid var(--ink-3);flex:none}
+.radio.on{border:4.5px solid var(--ink)}
+.added{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--ink-2)}
+.mstate{font-size:11.5px;color:var(--ink-3)}
+.mono{font-family:var(--font-mono);font-size:11.5px;overflow-wrap:anywhere}
+.note{padding:10px 14px;display:flex;gap:10px;align-items:flex-start}
+.note.alert{background:var(--err-bg)}
+.note .g{color:var(--warn-icon);padding-top:1px}.note.alert .g{color:var(--red)}
+.note .t{flex:1;min-width:0}.note .t b{display:block;font-weight:600}
+.note .t p{font-size:12.5px;line-height:17px;color:var(--ink-2)}
+.note .acts{margin-top:8px;display:flex;gap:8px}
+.ms-account{display:flex;gap:12px;align-items:center;padding:14px}
+.ms-account .av{width:40px;height:40px;font-size:15px}
+
+/* Sign-in card (signed out: no sidebar, the window holds one centred card) */
+.scard{width:380px;background:var(--paper);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow-2);padding:28px 28px 22px;display:flex;flex-direction:column;gap:14px}
+.mark{width:44px;height:44px;border-radius:10px;background:var(--amber);color:var(--amber-ink);display:grid;place-items:center;font:800 28px/1 var(--font-sans)}
+.scard h2{font-size:20px;line-height:26px;margin:2px 0 0;font-weight:750;letter-spacing:-.01em}
+.scard .copy{color:var(--ink-2);font-size:13px;line-height:19px}
+.scard .foot{display:flex;flex-wrap:wrap;gap:8px 16px;justify-content:space-between;align-items:center;border-top:1px solid var(--line);padding-top:14px;font-size:12.5px;color:var(--ink-3)}
+.fld{display:flex;flex-direction:column;gap:5px}
+.fld label{font-size:12px;font-weight:600;color:var(--ink-2)}
+.inp{height:30px;border:1px solid var(--line-2);border-radius:6px;background:var(--paper);padding:0 10px;display:flex;align-items:center;font-size:13px;color:var(--ink)}
+.inp.ph{color:var(--ink-3)}
+.code{font:700 26px/1 var(--font-mono);letter-spacing:.14em;text-align:center;padding:16px 10px;border:1px solid var(--amber);border-radius:10px;background:var(--amber-bg);color:var(--ink)}
+.rgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+.rw{height:28px;border:1px solid var(--line-2);border-radius:6px;display:flex;align-items:center;gap:6px;padding:0 8px;font-size:12.5px;background:var(--paper)}
+.rw i{font:500 10.5px var(--font-mono);color:var(--ink-3);font-style:normal;width:14px;text-align:right}
+.step{font:500 11px/1 var(--font-mono);text-transform:uppercase;letter-spacing:.07em;color:var(--ink-3)}
+.adding{display:flex;gap:10px;align-items:center;padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:var(--paper-2);font-size:13px}
+.fail{padding:12px 14px;border:1px solid var(--err-line);border-radius:10px;background:var(--err-bg);display:flex;gap:10px;align-items:flex-start;font-size:13px}
+.fail svg{color:var(--red)}
+
+/* Sheets: the shipped Modal (src/windows/ui.tsx), attached under the toolbar, over a window-wide scrim. */
+.scrim{position:absolute;inset:0;background:var(--win-scrim);display:flex;justify-content:center;align-items:flex-start;padding-top:60px;z-index:5}
+.modal{width:400px;max-width:100%;display:flex;flex-direction:column;background:var(--paper);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow-3);color:var(--ink);font-size:13px;line-height:18px}
+.modal.w440{width:440px}.modal.w520{width:520px}
+.mh{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px 20px;border-bottom:1px solid var(--line)}
+.mtitle{font-size:15px;font-weight:700;letter-spacing:-.01em}
+.mx{width:26px;height:26px;flex:none;display:grid;place-items:center;border:1px solid var(--line-2);border-radius:6px;background:var(--paper-2);color:var(--ink-3)}
+.mx.focus{outline:2px solid var(--ink);outline-offset:1px}
+.mbd{padding:16px 20px;display:flex;flex-direction:column;gap:10px}
+.mbd p{color:var(--ink-2);overflow-wrap:anywhere}
+.mf{display:flex;justify-content:flex-end;gap:8px;padding:12px 20px;border-top:1px solid var(--line)}
+.cmp{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.cmp>div{border:1px solid var(--line);border-radius:8px;padding:10px;background:var(--paper-2);font-size:12px;color:var(--ink-2)}
+.cmp b{display:block;color:var(--ink);font-size:12.5px;margin-bottom:4px}
+
+/* NSAlert: drawn by macOS (UserNotificationCenter), never by Beebeeb. */
+.nsa{width:280px;background:var(--menu-bg);border:1px solid var(--line-2);border-radius:12px;box-shadow:var(--shadow-3);padding:20px 16px 16px;text-align:center;font-size:12px;line-height:16px;color:var(--ink)}
+.nsa .appi{width:56px;height:56px;border-radius:13px;background:var(--amber);color:var(--amber-ink);font:800 34px/56px var(--font-sans);margin:0 auto 12px}
+.nsa h5{font-size:13px;font-weight:700;margin:0 0 8px}
+.nsa p{margin:0 0 8px;font-size:11.5px}
+.nsa .mono{font-size:10.5px}
+.nsa .ok{margin-top:6px;height:26px;border-radius:6px;border:1px solid var(--line-2);background:var(--paper);display:grid;place-items:center;font-weight:600;font-size:12.5px}
+
+/* Toast (main window only; the popover never toasts). Slice-5 rule: text >= 4.5:1, icon >= 3:1, both themes. */
+.toast{position:absolute;top:62px;right:16px;width:320px;display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border-radius:10px;border:1px solid var(--err-line);background:var(--err-bg);color:var(--ink);font-size:12.5px;box-shadow:var(--shadow-2);z-index:4}
+.toast svg{color:var(--red);margin-top:1px}.toast b{display:block;font-weight:600}.toast span{color:var(--ink-2)}
+
+.diagram{display:flex;flex-wrap:wrap;gap:16px;align-items:stretch}
+.dbox{flex:1 1 220px;border:1px solid var(--line);border-radius:12px;background:var(--paper);padding:14px 16px;display:flex;flex-direction:column;gap:6px;font-size:14px}
+.dbox b{font-size:15px}.dbox .x{color:var(--ink-3);font-size:13px}
+.dbox.gone{background:var(--paper-2);border-style:dashed}
+.dbox.gone b{text-decoration:line-through;text-decoration-thickness:1.5px;color:var(--ink-2)}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-gear" viewBox="0 0 20 20"><circle cx="10" cy="10" r="2.6"/><path d="M10 1.9v2.3M10 15.8v2.3M1.9 10h2.3M15.8 10h2.3M4.3 4.3l1.6 1.6M14.1 14.1l1.6 1.6M4.3 15.7l1.6-1.6M14.1 5.9l1.6-1.6"/><circle cx="10" cy="10" r="5.6"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 20 20"><path d="M2.5 6.2A1.7 1.7 0 0 1 4.2 4.5h3.3l1.7 1.9h6.6a1.7 1.7 0 0 1 1.7 1.7v6.7a1.7 1.7 0 0 1-1.7 1.7H4.2a1.7 1.7 0 0 1-1.7-1.7z"/></symbol>
+  <symbol id="i-globe" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7.5"/><path d="M2.5 10h15M10 2.5c2.2 2.3 3.2 4.8 3.2 7.5s-1 5.2-3.2 7.5c-2.2-2.3-3.2-4.8-3.2-7.5s1-5.2 3.2-7.5z"/></symbol>
+  <symbol id="i-db" viewBox="0 0 20 20"><ellipse cx="10" cy="5" rx="6" ry="2.4"/><path d="M4 5v10c0 1.3 2.7 2.4 6 2.4s6-1.1 6-2.4V5M4 10c0 1.3 2.7 2.4 6 2.4s6-1.1 6-2.4"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 20 20"><rect x="4" y="9" width="12" height="8.5" rx="2"/><path d="M6.8 9V6.6a3.2 3.2 0 0 1 6.4 0V9"/></symbol>
+  <symbol id="i-unlock" viewBox="0 0 20 20"><rect x="4" y="9" width="12" height="8.5" rx="2"/><path d="M6.8 9V6.6a3.2 3.2 0 0 1 6.2-1.1"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 20 20"><path d="M7.5 5v10M12.5 5v10"/></symbol>
+  <symbol id="i-play" viewBox="0 0 20 20"><path d="M7 5l8 5-8 5z"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 20 20"><path d="M16 9.5A6 6 0 0 0 5.3 6.1M4 10.5a6 6 0 0 0 10.7 3.4M5 3v3.4h3.4M15 17v-3.4h-3.4"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7.5"/><path d="M10 6v4.6M10 13.6v.1"/></symbol>
+  <symbol id="i-check" viewBox="0 0 20 20"><path d="M5 10.4l3.2 3.1L15 6.7"/></symbol>
+  <symbol id="i-up" viewBox="0 0 20 20"><path d="M10 15.5v-11M5.5 9L10 4.5 14.5 9"/></symbol>
+  <symbol id="i-down" viewBox="0 0 20 20"><path d="M10 4.5v11M5.5 11l4.5 4.5 4.5-4.5"/></symbol>
+  <symbol id="i-file" viewBox="0 0 20 20"><path d="M5 2.5h6.5L15.5 6.5v10a1 1 0 0 1-1 1h-9.5a1 1 0 0 1-1-1v-13a1 1 0 0 1 1-1z"/><path d="M11.5 2.5v4h4"/></symbol>
+  <symbol id="i-image" viewBox="0 0 20 20"><rect x="3" y="4" width="14" height="12" rx="1.6"/><circle cx="7.5" cy="8.3" r="1.4"/><path d="M3.5 14.5l4-4 3 3 2-2 4 4"/></symbol>
+  <symbol id="i-home" viewBox="0 0 20 20"><path d="M3.5 9.2L10 3.5l6.5 5.7v7.3a1 1 0 0 1-1 1h-3.3v-5h-4.4v5H4.5a1 1 0 0 1-1-1z"/></symbol>
+  <symbol id="i-review" viewBox="0 0 20 20"><path d="M3 11.5h4l1.4 2h3.2l1.4-2h4M3 11.5l2-7h10l2 7v4a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 20 20"><path d="M3.5 5.5h13M8 5.5V3.8h4v1.7M5.2 5.5l.8 11a1 1 0 0 0 1 .9h6a1 1 0 0 0 1-.9l.8-11"/></symbol>
+  <symbol id="i-user" viewBox="0 0 20 20"><circle cx="10" cy="7" r="3.3"/><path d="M3.5 17c.9-3.3 3.4-5 6.5-5s5.6 1.7 6.5 5"/></symbol>
+  <symbol id="i-info" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7.5"/><path d="M10 9v5M10 6.3v.1"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 20 20"><path d="M10 2.5l6 2.3v4.6c0 3.9-2.5 6.6-6 8.1-3.5-1.5-6-4.2-6-8.1V4.8z"/></symbol>
+  <symbol id="i-sync" viewBox="0 0 20 20"><path d="M15.5 8a6 6 0 0 0-10.6-1.6M4.5 12a6 6 0 0 0 10.6 1.6M4.5 3.5v3h3M15.5 16.5v-3h-3"/></symbol>
+  <symbol id="i-ext" viewBox="0 0 20 20"><path d="M11.5 3.5h5v5M16.5 3.5l-7 7M14.5 11.5v4a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1h4"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 20 20"><path d="M8 5l5 5-5 5"/></symbol>
+  <symbol id="i-x" viewBox="0 0 20 20"><path d="M5.5 5.5l9 9M14.5 5.5l-9 9"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7.5"/><path d="M10 5.8V10l2.8 1.8"/></symbol>
+  <symbol id="i-history" viewBox="0 0 20 20"><path d="M3.5 10a6.5 6.5 0 1 0 1.9-4.6M3.3 3.5v3.4h3.4M10 6.5V10l2.4 1.6"/></symbol>
+  <symbol id="i-key" viewBox="0 0 20 20"><circle cx="7" cy="12.5" r="3.5"/><path d="M9.5 10l7-7M14 5.5l2 2M12 7.5l1.6 1.6"/></symbol>
+</svg>
+
+<div class="toggles"><button type="button" class="tbtn" id="themeBtn">Toggle theme</button></div>
+<div class="wrap">
+
+<header class="page">
+  <span class="eyebrow">Task 1683 · two-surface redesign · design for review · 24 Oct 2026</span>
+  <h1>Two surfaces: the popover under the b, and one Beebeeb window</h1>
+  <p class="lede">Today a Mac can show four Beebeeb windows at once. After this change there are two places, and only two: the small popover that opens under the <strong>b</strong> in the menu bar, and one Beebeeb window. That window holds sign-in, setting up this Mac, Home, Review, Trash and Settings. The gear navigates to Settings inside it; nothing opens a separate window.</p>
+  <blockquote>“we already created an artifact, but how the signin is right now and that we have multiple screens doesnt make sense. So i want max 2 screens, the little one below the B in the topbar and just the app itself where you get signin, etc etc. Including settings. The gear menu described in the side menu should just navigate to the bigger screen settings and should look the same as macos apps regularly look like.”<cite>Guus, 24 Oct 2026</cite></blockquote>
+  <blockquote>“I want it more like how proton looks. Now also our version is not nicely aligned, not small, has too much info etc. Also when i just start beebeeb that window is randomly in the screen and not at the top bar. Often see too many windows going around.”<cite>Guus, 30 Sep 2026</cite></blockquote>
+  <p class="sub">Spec: <code>docs/specs/2026-10-24-macos-two-surface-app.md</code>. Every current window, page, setting and dialog is mapped there to its new home, or listed as removed with the reason: 117 found, 78 moved, 11 kept as they are, 24 removed, 4 Windows-only. Use the button at the top right to switch light and dark; section 7 shows both themes side by side.</p>
+</header>
+
+<!-- ─────────────────────────────── 0 · Before and after ─────────────────────────────── -->
+<section class="sec" aria-labelledby="s0">
+  <div><h2 id="s0">0 · From four windows to two surfaces</h2>
+  <p class="sub">What a Mac on desktop <code>main</code> could show at the same time (lead’s QA build, 24 Oct), and what replaces each one.</p></div>
+  <div class="diagram">
+    <div class="dbox gone"><b>“Beebeeb macOS Drive”</b><span class="x">The compact window, also used as the menu-bar flyout. 7 pages: Status, Finder location, Selective sync, Versions &amp; conflicts, Account &amp; security, Network, Notifications.</span></div>
+    <div class="dbox gone"><b>Settings window</b><span class="x">General, Account, Sync, About. Anchored under the icon.</span></div>
+    <div class="dbox gone"><b>“Welcome to Beebeeb”</b><span class="x">Separate onboarding window: Sign in, Set up this Mac, Finder, Choose offline folders, Review status.</span></div>
+    <div class="dbox gone"><b>The Windows shell</b><span class="x">Built from the shared config on a Mac too, with “encrypted on this PC”. Also hidden on a Mac: the Windows tray flyout and Windows first-run window, plus one conflict window per conflict.</span></div>
+  </div>
+  <div class="diagram">
+    <div class="dbox"><b>1 · The popover</b><span class="x">372 × 488 pt, always under the b. What is happening now, one action, the gear menu. Never opens anything but the Beebeeb window (plus Finder and the browser).</span></div>
+    <div class="dbox"><b>2 · The Beebeeb window</b><span class="x">One window, one webview. Signed out: sign-in and setting up this Mac. Signed in: Home, Review, Trash, and Settings behind the gear. Every sheet and question opens inside it.</span></div>
+  </div>
+  <div class="tbl"><table>
+    <thead><tr><th scope="col">On a Mac</th><th scope="col">Desktop main, 24 Oct</th><th scope="col">After</th></tr></thead>
+    <tbody>
+      <tr><th scope="row">Window kinds Beebeeb can create</th><td class="num">7 (settings, onboarding, macos-settings, main-app, tray, windows-onboarding, conflict-*)</td><td class="num">2 (popover, main)</td></tr>
+      <tr><th scope="row">Webviews alive while you work elsewhere</th><td class="num">up to 5, +1 per conflict</td><td class="num">1 (the hidden popover)</td></tr>
+      <tr><th scope="row">Beebeeb windows visible at once</th><td class="num">up to 4</td><td class="num">1 (the popover closes when you click away)</td></tr>
+      <tr><th scope="row">Windows that open by themselves</th><td class="num">onboarding at launch, compact window at launch, one per conflict</td><td class="num">only the Beebeeb window, and only on a manual launch, a first install or with no session</td></tr>
+      <tr><th scope="row">Where it opens</th><td class="num">centred, anchored, remembered or wherever it last was</td><td class="num">popover: under the b; window: where you left it, else centred on the screen with the menu bar you clicked</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- ─────────────────────────────── 1 · Popover ─────────────────────────────── -->
+<section class="sec" aria-labelledby="s1">
+  <div><h2 id="s1">1 · The popover, state by state</h2>
+  <p class="sub">Fixed at 372 × 488 pt (unchanged from 30 Sep), so it never jumps between states. Header: account and storage. Body: what is happening, or one message with one action. Footer: the same three actions every time. Counts, names and sizes are examples.</p></div>
+  <div class="grid">
+
+    <figure class="shot"><div class="desk"><div class="mb"><span>Finder</span><span style="font-weight:500">File</span><span style="font-weight:500">Edit</span><span class="mb-r"><span class="sitem on">b</span><span>Fri 09:41</span></span></div><div class="desk-in">
+      <div class="pop" role="dialog" aria-label="Beebeeb">
+        <div class="ph"><div class="acct"><div class="av">S</div><div class="acct-t"><div class="email">sam@example.eu</div><div class="use">Using 84,3 GB of 200 GB</div></div><button class="gear" aria-label="Beebeeb menu"><svg class="i s18"><use href="#i-gear"/></svg></button></div><div class="bar"><i style="width:42%"></i></div></div>
+        <div class="pb"><div class="slabel">Recent activity</div>
+          <div class="row-a"><div class="tile"><svg class="i"><use href="#i-file"/></svg></div><div class="row-t"><div class="nm">Q3 ledger reconciliation.xlsx</div><div class="mt">Investigations · 2 min ago</div></div><svg class="i s14 dir" aria-label="Uploaded"><use href="#i-up"/></svg></div>
+          <div class="row-a"><div class="tile"><svg class="i"><use href="#i-file"/></svg></div><div class="row-t"><div class="nm">Source documents, batch 12.pdf</div><div class="mt">Ledger gap · 14 min ago</div></div><svg class="i s14 dir" aria-label="Uploaded"><use href="#i-up"/></svg></div>
+          <div class="row-a"><div class="tile"><svg class="i"><use href="#i-image"/></svg></div><div class="row-t"><div class="nm">IMG_4821.HEIC</div><div class="mt">Photos · 1 hour ago</div></div><svg class="i s14 dir" aria-label="Downloaded"><use href="#i-down"/></svg></div>
+          <div class="row-a"><div class="tile"><svg class="i"><use href="#i-file"/></svg></div><div class="row-t"><div class="nm">Board notes, 29 Sept.md</div><div class="mt">Team shared · Yesterday</div></div><svg class="i s14 dir" aria-label="Downloaded"><use href="#i-down"/></svg></div>
+          <div class="row-a"><div class="tile"><svg class="i"><use href="#i-file"/></svg></div><div class="row-t"><div class="nm">Interview 07, transcript.docx</div><div class="mt">Investigations · Yesterday</div></div><svg class="i s14 dir" aria-label="Uploaded"><use href="#i-up"/></svg></div>
+        </div>
+        <div class="ps"><span class="okd"><svg class="i s14" style="stroke-width:2.4"><use href="#i-check"/></svg></span>Up to date<span class="encl"><svg class="i s14"><use href="#i-lock"/></svg>Encrypted</span></div>
+        <div class="pf"><button class="fb"><svg class="i s18"><use href="#i-folder"/></svg>Open in Finder</button><button class="fb"><svg class="i s18"><use href="#i-globe"/></svg>View online</button><button class="fb"><svg class="i s18"><use href="#i-db"/></svg>Add storage</button></div>
+      </div></div></div>
+      <figcaption><b>Up to date</b><span>As approved on 30 Sep. The storage bar is neutral (red from 90 %); amber only marks encryption.</span></figcaption></figure>
+
+    <figure class="shot"><div class="desk"><div class="mb"><span>Finder</span><span class="mb-r"><span class="sitem on">b</span><span>Fri 09:41</span></span></div><div class="desk-in">
+      <div class="pop" role="dialog" aria-label="Beebeeb">
+        <div class="ph"><div class="acct"><div class="av">S</div><div class="acct-t"><div class="email">sam@example.eu</div><div class="use">Using 84,3 GB of 200 GB</div></div><button class="gear" aria-label="Beebeeb menu"><svg class="i s18"><use href="#i-gear"/></svg></button></div><div class="bar"><i style="width:42%"></i></div></div>
+        <div class="pb">
+          <div class="sumrow"><div class="top"><span>14 files left</span><span>1,2 GB · 38 %</span></div><div class="prog" role="progressbar" aria-valuenow="38" aria-valuemin="0" aria-valuemax="100" aria-label="Sync progress"><i style="width:38%"></i></div></div>
+          <div class="row-a"><div class="tile"><svg class="i"><use href="#i-file"/></svg></div><div class="row-t"><div class="nm">Interview 09, raw audio.wav</div><div class="mt">Investigations · Encrypting and uploading · 62 %</div><div class="prog enc"><i style="width:62%"></i></div></div><svg class="i s14 dir"><use href="#i-up"/></svg></div>
+          <div class="row-a"><div class="tile"><svg class="i"><use href="#i-file"/></svg></div><div class="row-t"><div class="nm">Site visit, north wing.mov</div><div class="mt">Photos · Encrypting and uploading · 21 %</div><div class="prog enc"><i style="width:21%"></i></div></div><svg class="i s14 dir"><use href="#i-up"/></svg></div>
+          <div class="row-a"><div class="tile"><svg class="i"><use href="#i-file"/></svg></div><div class="row-t"><div class="nm">Board notes, 30 Sept.md</div><div class="mt">Team shared · Downloading · 88 %</div><div class="prog"><i style="width:88%"></i></div></div><svg class="i s14 dir"><use href="#i-down"/></svg></div>
+          <div class="slabel">Done</div>
+          <div class="row-a"><div class="tile"><svg class="i"><use href="#i-file"/></svg></div><div class="row-t"><div class="nm">Q3 ledger reconciliation.xlsx</div><div class="mt">Investigations · 2 min ago</div></div><svg class="i s14 dir"><use href="#i-up"/></svg></div>
+        </div>
+        <div class="ps"><span class="spin live" aria-hidden="true"></span>Syncing<span class="encl"><svg class="i s14"><use href="#i-lock"/></svg>Encrypted</span></div>
+        <div class="pf"><button class="fb"><svg class="i s18"><use href="#i-folder"/></svg>Open in Finder</button><button class="fb"><svg class="i s18"><use href="#i-globe"/></svg>View online</button><button class="fb"><svg class="i s18"><use href="#i-db"/></svg>Add storage</button></div>
+      </div></div></div>
+      <figcaption><b>Syncing</b><span>Files left and overall progress on top. An upload bar is amber because it is encryption happening; a download bar is neutral.</span></figcaption></figure>
+
+    <figure class="shot"><div class="desk"><div class="mb"><span>Finder</span><span class="mb-r"><span class="sitem on">b</span><span>Fri 09:41</span></span></div><div class="desk-in">
+      <div class="pop" role="dialog" aria-label="Beebeeb">
+        <div class="ph"><div class="acct"><div class="av">S</div><div class="acct-t"><div class="email">sam@example.eu</div><div class="use">Using 84,3 GB of 200 GB</div></div><button class="gear" aria-label="Beebeeb menu"><svg class="i s18"><use href="#i-gear"/></svg></button></div><div class="bar"><i style="width:42%"></i></div></div>
+        <div class="pb">
+          <div class="attn" role="status"><svg class="i s18"><use href="#i-alert"/></svg><div class="t"><b>2 files need a decision</b>Both changed on two devices.</div><button class="btn">Review…</button></div>
+          <div class="slabel">Recent activity</div>
+          <div class="row-a"><div class="tile"><svg class="i"><use href="#i-file"/></svg></div><div class="row-t"><div class="nm">Board notes, 29 Sept.md</div><div class="mt">Team shared · Changed on two devices</div></div><svg class="i s14" style="color:var(--warn-icon)"><use href="#i-alert"/></svg></div>
+          <div class="row-a"><div class="tile"><svg class="i"><use href="#i-file"/></svg></div><div class="row-t"><div class="nm">Q3 ledger reconciliation.xlsx</div><div class="mt">Investigations · 2 min ago</div></div><svg class="i s14 dir"><use href="#i-up"/></svg></div>
+          <div class="row-a"><div class="tile"><svg class="i"><use href="#i-image"/></svg></div><div class="row-t"><div class="nm">IMG_4821.HEIC</div><div class="mt">Photos · 1 hour ago</div></div><svg class="i s14 dir"><use href="#i-down"/></svg></div>
+        </div>
+        <div class="ps"><span class="okd"><svg class="i s14" style="stroke-width:2.4"><use href="#i-check"/></svg></span>Up to date<span class="encl"><svg class="i s14"><use href="#i-lock"/></svg>Encrypted</span></div>
+        <div class="pf"><button class="fb"><svg class="i s18"><use href="#i-folder"/></svg>Open in Finder</button><button class="fb"><svg class="i s18"><use href="#i-globe"/></svg>View online</button><button class="fb"><svg class="i s18"><use href="#i-db"/></svg>Add storage</button></div>
+      </div></div></div>
+      <figcaption><b>Needs a decision</b><span>Conflicts no longer open a window each. One row here, a notification, and “Review…” opens the Beebeeb window on Review.</span></figcaption></figure>
+
+    <figure class="shot"><div class="desk"><div class="mb"><span>Finder</span><span class="mb-r"><span class="sitem on">b</span><span>Fri 09:41</span></span></div><div class="desk-in">
+      <div class="pop" role="dialog" aria-label="Beebeeb">
+        <div class="ph"><div class="acct"><div class="av">S</div><div class="acct-t"><div class="email">sam@example.eu</div><div class="use">Using 84,3 GB of 200 GB</div></div><button class="gear" aria-label="Beebeeb menu"><svg class="i s18"><use href="#i-gear"/></svg></button></div><div class="bar"><i style="width:42%"></i></div></div>
+        <div class="upd"><svg class="i s18"><use href="#i-sync"/></svg><span class="t">Version 0.8.14 is available.</span><button class="btn pri">Restart to update</button></div>
+        <div class="pb"><div class="slabel">Recent activity</div>
+          <div class="row-a"><div class="tile"><svg class="i"><use href="#i-file"/></svg></div><div class="row-t"><div class="nm">Q3 ledger reconciliation.xlsx</div><div class="mt">Investigations · 2 min ago</div></div><svg class="i s14 dir"><use href="#i-up"/></svg></div>
+          <div class="row-a"><div class="tile"><svg class="i"><use href="#i-file"/></svg></div><div class="row-t"><div class="nm">Source documents, batch 12.pdf</div><div class="mt">Ledger gap · 14 min ago</div></div><svg class="i s14 dir"><use href="#i-up"/></svg></div>
+          <div class="row-a"><div class="tile"><svg class="i"><use href="#i-image"/></svg></div><div class="row-t"><div class="nm">IMG_4821.HEIC</div><div class="mt">Photos · 1 hour ago</div></div><svg class="i s14 dir"><use href="#i-down"/></svg></div>
+        </div>
+        <div class="ps"><span class="okd"><svg class="i s14" style="stroke-width:2.4"><use href="#i-check"/></svg></span>Up to date<span class="encl"><svg class="i s14"><use href="#i-lock"/></svg>Encrypted</span></div>
+        <div class="pf"><button class="fb"><svg class="i s18"><use href="#i-folder"/></svg>Open in Finder</button><button class="fb"><svg class="i s18"><use href="#i-globe"/></svg>View online</button><button class="fb"><svg class="i s18"><use href="#i-db"/></svg>Add storage</button></div>
+      </div></div></div>
+      <figcaption><b>Update available</b><span>Replaces the update toast. The same row is in Settings › About; “Check for Updates…” lives in the gear menu.</span></figcaption></figure>
+
+    <figure class="shot"><div class="desk"><div class="mb"><span>Finder</span><span class="mb-r"><span class="sitem on">b</span><span>Fri 09:41</span></span></div><div class="desk-in">
+      <div class="pop" role="dialog" aria-label="Beebeeb">
+        <div class="ph"><div class="acct"><div class="av">S</div><div class="acct-t"><div class="email">sam@example.eu</div><div class="use">Using 84,3 GB of 200 GB</div></div><button class="gear" aria-label="Beebeeb menu"><svg class="i s18"><use href="#i-gear"/></svg></button></div><div class="bar"><i style="width:42%"></i></div></div>
+        <div class="pb"><div class="msg"><div class="disc"><svg class="i s22"><use href="#i-pause"/></svg></div><h4>Sync is paused</h4><p>3 changes on this Mac are waiting. Nothing syncs until you resume.</p><button class="btn pri lg"><svg class="i s14"><use href="#i-play"/></svg>Resume sync</button></div></div>
+        <div class="pf"><button class="fb"><svg class="i s18"><use href="#i-folder"/></svg>Open in Finder</button><button class="fb"><svg class="i s18"><use href="#i-globe"/></svg>View online</button><button class="fb"><svg class="i s18"><use href="#i-db"/></svg>Add storage</button></div>
+      </div></div></div>
+      <figcaption><b>Paused</b><span>As approved. Pause also lives in the gear menu and the app menu (⇧⌘P).</span></figcaption></figure>
+
+    <figure class="shot"><div class="desk"><div class="mb"><span>Finder</span><span class="mb-r"><span class="sitem on crossed" aria-label="Beebeeb: Offline">b</span><span>Fri 09:41</span></span></div><div class="desk-in">
+      <div class="pop" role="dialog" aria-label="Beebeeb">
+        <div class="ph"><div class="acct"><div class="av">S</div><div class="acct-t"><div class="email">sam@example.eu</div><div class="use">Using 84,3 GB of 200 GB</div></div><button class="gear" aria-label="Beebeeb menu"><svg class="i s18"><use href="#i-gear"/></svg></button></div><div class="bar"><i style="width:42%"></i></div></div>
+        <div class="pb"><div class="msg"><div class="disc"><svg class="i s22"><use href="#i-globe"/></svg></div><h4>Can’t reach Beebeeb</h4><p>Check your connection. Files on this Mac are unchanged.</p><button class="btn pri lg"><svg class="i s14"><use href="#i-refresh"/></svg>Try again</button></div></div>
+        <div class="pf"><button class="fb"><svg class="i s18"><use href="#i-folder"/></svg>Open in Finder</button><button class="fb" disabled><svg class="i s18"><use href="#i-globe"/></svg>View online</button><button class="fb" disabled><svg class="i s18"><use href="#i-db"/></svg>Add storage</button></div>
+      </div></div></div>
+      <figcaption><b>Offline</b><span>Spec C’s line, with 30 Sep’s reassurance. The b is crossed (spec C, tooltip “Beebeeb: Offline”). Web actions are disabled while offline.</span></figcaption></figure>
+
+    <figure class="shot"><div class="desk"><div class="mb"><span>Finder</span><span class="mb-r"><span class="sitem on">b</span><span>Fri 09:41</span></span></div><div class="desk-in">
+      <div class="pop" role="dialog" aria-label="Beebeeb">
+        <div class="ph"><div class="acct"><div class="av">S</div><div class="acct-t"><div class="email">sam@example.eu</div><div class="use">Using 84,3 GB of 200 GB</div></div><button class="gear" aria-label="Beebeeb menu"><svg class="i s18"><use href="#i-gear"/></svg></button></div><div class="bar"><i style="width:42%"></i></div></div>
+        <div class="pb"><div class="msg"><div class="disc err"><svg class="i s22"><use href="#i-alert"/></svg></div><h4>Sync stopped</h4><p>Beebeeb couldn’t finish syncing. Files on this Mac are unchanged.</p><span class="reason">reason: server 503</span><button class="btn pri lg"><svg class="i s14"><use href="#i-refresh"/></svg>Try again</button></div></div>
+        <div class="pf"><button class="fb"><svg class="i s18"><use href="#i-folder"/></svg>Open in Finder</button><button class="fb"><svg class="i s18"><use href="#i-globe"/></svg>View online</button><button class="fb"><svg class="i s18"><use href="#i-db"/></svg>Add storage</button></div>
+      </div></div></div>
+      <figcaption><b>Error</b><span>One error surface, one action, no toast on top. Title and body in ink on paper; red only on the disc. The mono reason is at most 30 characters.</span></figcaption></figure>
+
+    <figure class="shot"><div class="desk"><div class="mb"><span>Finder</span><span class="mb-r"><span class="sitem on">b</span><span>Fri 09:41</span></span></div><div class="desk-in">
+      <div class="pop" role="dialog" aria-label="Beebeeb">
+        <div class="ph"><div class="acct"><div class="av">S</div><div class="acct-t"><div class="email">sam@example.eu</div></div><button class="gear" aria-label="Beebeeb menu"><svg class="i s18"><use href="#i-gear"/></svg></button></div></div>
+        <div class="pb"><div class="msg"><div class="disc enc"><svg class="i s22"><use href="#i-lock"/></svg></div><h4>Your vault is locked</h4><p>Sync is paused until you unlock it. Files already downloaded to this Mac stay where they are.</p><button class="btn pri lg"><svg class="i s14"><use href="#i-unlock"/></svg>Unlock vault</button></div></div>
+        <div class="pf"><button class="fb"><svg class="i s18"><use href="#i-folder"/></svg>Open in Finder</button><button class="fb"><svg class="i s18"><use href="#i-globe"/></svg>View online</button><button class="fb"><svg class="i s18"><use href="#i-db"/></svg>Add storage</button></div>
+      </div></div></div>
+      <figcaption><b>Vault locked</b><span>As approved. With the key in the Keychain, Unlock vault unlocks right here. With no key on this Mac it opens the Beebeeb window on “Set up this Mac”.</span></figcaption></figure>
+
+    <figure class="shot"><div class="desk"><div class="mb"><span>Finder</span><span class="mb-r"><span class="sitem on">b</span><span>Fri 09:41</span></span></div><div class="desk-in">
+      <div class="pop" role="dialog" aria-label="Beebeeb">
+        <div class="ph"><div class="acct"><div class="av">S</div><div class="acct-t"><div class="email">sam@example.eu</div><div class="use">Using 200 GB of 200 GB</div></div><button class="gear" aria-label="Beebeeb menu"><svg class="i s18"><use href="#i-gear"/></svg></button></div><div class="bar red"><i style="width:100%"></i></div></div>
+        <div class="pb"><div class="msg"><div class="disc err"><svg class="i s22"><use href="#i-db"/></svg></div><h4>Your storage is full</h4><p>3 changes can’t upload until you free up space or add storage. They stay on this Mac.</p><button class="btn pri lg">Add storage</button></div></div>
+        <div class="pf"><button class="fb"><svg class="i s18"><use href="#i-folder"/></svg>Open in Finder</button><button class="fb"><svg class="i s18"><use href="#i-globe"/></svg>View online</button><button class="fb"><svg class="i s18"><use href="#i-db"/></svg>Add storage</button></div>
+      </div></div></div>
+      <figcaption><b>Storage full</b><span>As approved. Uploads stop; nothing already stored is touched.</span></figcaption></figure>
+
+    <figure class="shot"><div class="desk"><div class="mb"><span>Finder</span><span class="mb-r"><span class="sitem on">b</span><span>Fri 09:41</span></span></div><div class="desk-in">
+      <div class="pop" role="dialog" aria-label="Beebeeb">
+        <div class="ph"><div class="acct"><div class="av">S</div><div class="acct-t"><div class="email">sam@example.eu</div><div class="use">Using 84,3 GB of 200 GB</div></div><button class="gear" aria-label="Beebeeb menu"><svg class="i s18"><use href="#i-gear"/></svg></button></div><div class="bar"><i style="width:42%"></i></div></div>
+        <div class="pb"><div class="msg"><div class="disc err"><svg class="i s22"><use href="#i-alert"/></svg></div><h4>Couldn’t add Beebeeb to Finder</h4><p>macOS didn’t finish adding Beebeeb to Finder.</p><span class="reason">reason: timeout</span><button class="btn pri lg"><svg class="i s14"><use href="#i-refresh"/></svg>Try again</button></div></div>
+        <div class="pf"><button class="fb" disabled><svg class="i s18"><use href="#i-folder"/></svg>Open in Finder</button><button class="fb"><svg class="i s18"><use href="#i-globe"/></svg>View online</button><button class="fb"><svg class="i s18"><use href="#i-db"/></svg>Add storage</button></div>
+      </div></div></div>
+      <figcaption><b>Finder add failed</b><span>Spec A’s sentence and action per reason (here: timeout → Try again; turned off → Open System Settings; on the disk image → Show in Finder). While adding: “Adding Beebeeb to Finder…” in the status row.</span></figcaption></figure>
+
+    <figure class="shot"><div class="desk"><div class="mb"><span>Finder</span><span class="mb-r"><span class="sitem on">b</span><span>Fri 09:41</span></span></div><div class="desk-in">
+      <div class="pop" role="dialog" aria-label="Beebeeb">
+        <div class="ph"><div class="acct"><div class="av">S</div><div class="acct-t"><div class="email">sam@example.eu</div><div class="use">Using 84,3 GB of 200 GB</div></div><button class="gear" aria-label="Beebeeb menu"><svg class="i s18"><use href="#i-gear"/></svg></button></div><div class="bar"><i style="width:42%"></i></div></div>
+        <div class="pb"><div class="msg"><div class="disc"><span class="spin live" aria-hidden="true"></span></div><h4>Sending changes first</h4><p>Sending 3 changes before signing out…</p><p>This takes at most a minute.</p><button class="btn lg">Open Beebeeb</button></div></div>
+        <div class="pf"><button class="fb"><svg class="i s18"><use href="#i-folder"/></svg>Open in Finder</button><button class="fb"><svg class="i s18"><use href="#i-globe"/></svg>View online</button><button class="fb"><svg class="i s18"><use href="#i-db"/></svg>Add storage</button></div>
+      </div></div></div>
+      <figcaption><b>Sign-out in progress</b><span>Task 1887’s send phase runs as a sheet in the Beebeeb window. If you click the b meanwhile, the popover repeats P0–P2 word for word and offers only “Open Beebeeb”: the sheet is where you stop or answer.</span></figcaption></figure>
+
+    <figure class="shot"><div class="desk"><div class="mb"><span>Finder</span><span class="mb-r"><span class="sitem on">b</span><span>Fri 09:41</span></span></div><div class="desk-in">
+      <div class="pop" role="dialog" aria-label="Beebeeb" aria-busy="true">
+        <div class="ph"><div class="acct"><div class="av">S</div><div class="acct-t"><div class="email">sam@example.eu</div><div class="skel" style="width:140px;margin-top:5px"></div></div><button class="gear" aria-label="Beebeeb menu"><svg class="i s18"><use href="#i-gear"/></svg></button></div></div>
+        <div class="pb"><div class="msg"><span class="spin live" style="width:22px;height:22px" aria-hidden="true"></span></div></div>
+        <div class="pf"><button class="fb"><svg class="i s18"><use href="#i-folder"/></svg>Open in Finder</button><button class="fb"><svg class="i s18"><use href="#i-globe"/></svg>View online</button><button class="fb"><svg class="i s18"><use href="#i-db"/></svg>Add storage</button></div>
+      </div></div></div>
+      <figcaption><b>Checking</b><span>Spec C’s busy state (C-R11): the indicator, no new words. Lasts at most 15 s.</span></figcaption></figure>
+
+    <figure class="shot"><div class="desk"><div class="mb"><span>Finder</span><span class="mb-r"><span class="sitem on">b</span><span>Fri 09:41</span></span></div><div class="desk-in">
+      <div class="pop" role="dialog" aria-label="Beebeeb">
+        <div class="ph"><div class="acct"><div class="av">S</div><div class="acct-t"><div class="email">sam@example.eu</div></div><button class="gear" aria-label="Beebeeb menu"><svg class="i s18"><use href="#i-gear"/></svg></button></div></div>
+        <div class="pb"><div class="msg"><div class="disc"><svg class="i s22"><use href="#i-db"/></svg></div><h4>Choose a plan</h4><p>Your account is ready. Choose a plan on beebeeb.io, including the free trial. Beebeeb continues here by itself.</p><button class="btn pri lg">Choose a plan on beebeeb.io</button></div></div>
+        <div class="pf"><button class="fb" disabled><svg class="i s18"><use href="#i-folder"/></svg>Open in Finder</button><button class="fb"><svg class="i s18"><use href="#i-globe"/></svg>View online</button><button class="fb"><svg class="i s18"><use href="#i-db"/></svg>Add storage</button></div>
+      </div></div></div>
+      <figcaption><b>No plan yet</b><span>Spec C (C-R5), copy as approved. After the click: “Waiting for your plan.” Finder and sync stay off until the server says the account is ready.</span></figcaption></figure>
+
+    <figure class="shot"><div class="desk"><div class="mb"><span>Finder</span><span class="mb-r"><span class="sitem on">b</span><span>Fri 09:41</span></span></div><div class="desk-in">
+      <div class="pop" role="dialog" aria-label="Beebeeb">
+        <div class="ph"><div class="acct"><div class="av">S</div><div class="acct-t"><div class="email">sam@example.eu</div></div><button class="gear" aria-label="Beebeeb menu"><svg class="i s18"><use href="#i-gear"/></svg></button></div></div>
+        <div class="pb"><div class="msg"><div class="disc"><svg class="i s22"><use href="#i-sync"/></svg></div><h4>Update Beebeeb</h4><p>This version of Beebeeb is too old to connect. Update to continue.</p><button class="btn pri lg">Update now</button></div></div>
+        <div class="pf"><button class="fb"><svg class="i s18"><use href="#i-folder"/></svg>Open in Finder</button><button class="fb"><svg class="i s18"><use href="#i-globe"/></svg>View online</button><button class="fb"><svg class="i s18"><use href="#i-db"/></svg>Add storage</button></div>
+      </div></div></div>
+      <figcaption><b>Update required</b><span>Spec C (C-R3), copy as approved. Update now runs the existing updater.</span></figcaption></figure>
+
+    <figure class="shot"><div class="desk"><div class="mb"><span>Finder</span><span class="mb-r"><span class="sitem on">b</span><span>Fri 09:41</span></span></div><div class="desk-in">
+      <div class="pop" role="dialog" aria-label="Beebeeb">
+        <div class="ph"><div class="acct"><div class="av">S</div><div class="acct-t"><div class="email">sam@example.eu</div><div class="use">Using 84,3 GB of 200 GB</div></div><button class="gear on" aria-label="Beebeeb menu" aria-expanded="true"><svg class="i s18"><use href="#i-gear"/></svg></button></div><div class="bar"><i style="width:42%"></i></div></div>
+        <div class="nsm" role="menu" aria-label="Beebeeb menu">
+          <div class="mi hl" role="menuitem">Open Beebeeb</div>
+          <div class="mi" role="menuitem">Settings…<span class="k">⌘,</span></div>
+          <div class="msep"></div>
+          <div class="mi" role="menuitem">Pause Sync<span class="k">⇧⌘P</span></div>
+          <div class="mi" role="menuitem">Check for Updates…</div>
+          <div class="msep"></div>
+          <div class="mi" role="menuitem">Help<svg class="i s14"><use href="#i-chev"/></svg></div>
+          <div class="msep"></div>
+          <div class="mi" role="menuitem">Quit Beebeeb<span class="k">⌘Q</span></div>
+        </div>
+        <div class="pb"><div class="slabel">Recent activity</div>
+          <div class="row-a"><div class="tile"><svg class="i"><use href="#i-file"/></svg></div><div class="row-t"><div class="nm">Q3 ledger reconciliation.xlsx</div><div class="mt">Investigations · 2 min ago</div></div></div>
+          <div class="row-a"><div class="tile"><svg class="i"><use href="#i-file"/></svg></div><div class="row-t"><div class="nm">Source documents, batch 12.pdf</div><div class="mt">Ledger gap · 14 min ago</div></div></div>
+          <div class="row-a"><div class="tile"><svg class="i"><use href="#i-image"/></svg></div><div class="row-t"><div class="nm">IMG_4821.HEIC</div><div class="mt">Photos · 1 hour ago</div></div></div>
+        </div>
+        <div class="ps"><span class="okd"><svg class="i s14" style="stroke-width:2.4"><use href="#i-check"/></svg></span>Up to date<span class="encl"><svg class="i s14"><use href="#i-lock"/></svg>Encrypted</span></div>
+        <div class="pf"><button class="fb"><svg class="i s18"><use href="#i-folder"/></svg>Open in Finder</button><button class="fb"><svg class="i s18"><use href="#i-globe"/></svg>View online</button><button class="fb"><svg class="i s18"><use href="#i-db"/></svg>Add storage</button></div>
+      </div></div></div>
+      <figcaption><b>Gear menu</b><span>A native menu. “Open Beebeeb” opens the window on Home; “Settings…” opens the same window on Settings. Nothing here opens another window. The macOS highlight uses your system accent colour.</span></figcaption></figure>
+
+    <figure class="shot"><div class="desk"><div class="mb"><span>Finder</span><span class="mb-r"><span class="sitem crossed" aria-label="Beebeeb: Signed out">b</span><span>Fri 09:41</span></span></div><div class="desk-in" style="justify-content:center;min-height:300px;align-items:center">
+      <div class="dbox" style="max-width:340px;flex:0 1 340px"><b>No session: no popover</b><span class="x">Signed out, session ended, or signing in: the b is crossed (spec C), and a click with either mouse button opens the Beebeeb window on its sign-in screen. The popover only exists for a signed-in Mac, so it never needs a sign-in form of its own.</span></div>
+    </div></div>
+      <figcaption><b>Signed out, session ended, signing in</b><span>Tooltips: “Beebeeb: Signed out”, “Beebeeb: Sign in again” (spec C, C-I2).</span></figcaption></figure>
+  </div>
+</section>
+
+<!-- ─────────────────────────────── 2 · Signed out: sign-in in the window ─────────────────────────────── -->
+<section class="sec" aria-labelledby="s2">
+  <div><h2 id="s2">2 · Signed out: the same window holds sign-in and setting up this Mac</h2>
+  <p class="sub">No sidebar while there is no session: one centred card, as spec C approved, in the window that later shows Home. The window title follows the screen (“Sign in to Beebeeb”). After sign-in the card becomes the next step in place; no new window opens and nothing closes by itself. Spec C’s removals stand: no five-step rail, no “Choose offline folders”, no “Control center is ready”.</p></div>
+  <div class="grid2">
+
+    <figure class="shot"><div class="fit"><div class="win solo" role="img" aria-label="Beebeeb window, Sign in to Beebeeb">
+      <div class="tl"><i></i><i></i><i></i></div><div class="mn"><div></div><div class="ct">
+        <div class="scard"><div class="mark">b</div><h2>Sign in to Beebeeb</h2>
+          <button class="btn pri full">Sign in with browser</button>
+          <div style="text-align:center"><a class="lnk" href="#s2">Use email and password</a></div>
+          <div class="foot"><span>New to Beebeeb? <a class="lnk" href="#s2">Create an account on beebeeb.io</a></span><a class="lnk" style="font-weight:500" href="#s2">Quit Beebeeb</a></div>
+        </div>
+      </div></div></div></div>
+      <figcaption><b>Sign in (spec C, C-R1)</b><span>Browser first, password second, account creation on the web. Copy exactly as spec C approved. Offline: the buttons become “Can’t reach Beebeeb. Check your connection.” + Try again.</span></figcaption></figure>
+
+    <figure class="shot"><div class="fit"><div class="win solo" role="img" aria-label="Beebeeb window, browser sign-in waiting">
+      <div class="tl"><i></i><i></i><i></i></div><div class="mn"><div></div><div class="ct">
+        <div class="scard"><div class="mark">b</div><h2>Sign in to Beebeeb</h2>
+          <p class="copy">Type this code on the page we just opened in your browser. Only approve it if you started this sign-in yourself, just now:</p>
+          <div class="code" aria-label="Sign-in code">KQ7M-4TXP</div>
+          <p class="copy" style="font-size:12px;color:var(--ink-3)">Browser didn’t open? Visit <span class="mono" style="font-size:12px;color:var(--ink)">app.beebeeb.io/cli-auth</span> in any signed-in browser, then type the code there. <a class="lnk" href="#s2">Copy link</a></p>
+          <button class="btn full" disabled>Waiting for browser…</button>
+          <div style="text-align:center"><a class="lnk" href="#s2">Use email and password</a></div>
+        </div>
+      </div></div></div></div>
+      <figcaption><b>Browser sign-in, waiting</b><span>Task 1734’s screen moved into the shared component spec C asks for; copy from <code>browserLoginCopy.ts</code>. The code is mono and sits on amber: it is part of the encrypted hand-off.</span></figcaption></figure>
+
+    <figure class="shot"><div class="fit"><div class="win solo" role="img" aria-label="Beebeeb window, email and password">
+      <div class="tl"><i></i><i></i><i></i></div><div class="mn"><div></div><div class="ct">
+        <div class="scard"><div class="mark">b</div><h2>Welcome back</h2><p class="copy">Sign in to unlock your encrypted vault.</p>
+          <div class="fld"><label>Email</label><div class="inp">sam@example.eu</div></div>
+          <div class="fld"><label>Password</label><div class="inp ph">Your password</div></div>
+          <button class="btn pri full">Sign in</button>
+          <div style="text-align:center"><a class="lnk" href="#s2">Sign in with browser instead</a></div>
+        </div>
+      </div></div></div></div>
+      <figcaption><b>Email and password</b><span>Today’s form and copy. 2FA (“Two-factor authentication”, “Enter the 6-digit code from your authenticator app.”) replaces it in the same card. The email is prefilled from the last account on this Mac.</span></figcaption></figure>
+
+    <figure class="shot"><div class="fit"><div class="win solo" role="img" aria-label="Beebeeb window, sign in again">
+      <div class="tl"><i></i><i></i><i></i></div><div class="mn"><div></div><div class="ct">
+        <div class="scard"><div class="mark">b</div><h2>Sign in again</h2><p class="copy">Sync is paused until you sign in again. Your files stay in Finder.</p>
+          <button class="btn pri full">Sign in with browser</button>
+          <div style="text-align:center"><a class="lnk" href="#s2">Use email and password</a></div>
+          <div class="foot"><span>Signed in before as sam@example.eu</span><a class="lnk" style="font-weight:500" href="#s2">Quit Beebeeb</a></div>
+        </div>
+      </div></div></div></div>
+      <figcaption><b>Session ended (spec C, C-R2)</b><span>Replaces the “You’re signed out on this device” banner. Same account: only the token is swapped (R8). Another account: the switch question below.</span></figcaption></figure>
+
+    <figure class="shot"><div class="fit"><div class="win solo" role="img" aria-label="Beebeeb window, set up this Mac">
+      <div class="tl"><i></i><i></i><i></i></div><div class="mn"><div></div><div class="ct">
+        <div class="scard" style="width:440px"><div class="mark">b</div><h2>Set up this Mac</h2><p class="copy">This Mac does not have your encryption keys yet. Restore them to continue.</p>
+          <div class="fld"><label>Recovery phrase</label>
+            <div class="rgrid">
+              <div class="rw"><i>1</i>orbit</div><div class="rw"><i>2</i>velvet</div><div class="rw"><i>3</i>canyon</div><div class="rw"><i>4</i>mirror</div>
+              <div class="rw"><i>5</i>harvest</div><div class="rw"><i>6</i>lantern</div><div class="rw"><i>7</i></div><div class="rw"><i>8</i></div>
+              <div class="rw"><i>9</i></div><div class="rw"><i>10</i></div><div class="rw"><i>11</i></div><div class="rw"><i>12</i></div>
+            </div></div>
+          <p class="copy" style="font-size:12px;color:var(--ink-3)">Paste all 12 words into any box or type them one by one. Beebeeb stores the unlocked vault key in macOS Keychain for future unlocks.</p>
+          <button class="btn pri full" disabled>Unlock vault</button>
+        </div>
+      </div></div></div></div>
+      <figcaption><b>Set up this Mac (recovery phrase)</b><span>Only when this Mac has no key. Copy unchanged. After a same-account sign-in whose key changed: “This account’s vault key was changed on another device. Enter your current recovery phrase to unlock.”</span></figcaption></figure>
+
+    <figure class="shot"><div class="fit"><div class="win solo" role="img" aria-label="Beebeeb window, adding Beebeeb to Finder">
+      <div class="tl"><i></i><i></i><i></i></div><div class="mn"><div></div><div class="ct">
+        <div style="display:flex;flex-direction:column;gap:14px;width:440px">
+        <div class="scard" style="width:440px"><div class="mark">b</div><h2>Beebeeb in Finder</h2><p class="copy">Beebeeb adds itself to Finder after sign-in.</p>
+          <div class="adding" role="status"><span class="spin live" aria-hidden="true"></span>Adding Beebeeb to Finder…</div>
+        </div>
+        <div class="scard" style="width:440px;gap:10px"><h2 style="font-size:15px;margin:0">If it fails</h2>
+          <div class="fail" role="alert"><svg class="i s18"><use href="#i-alert"/></svg><div style="flex:1"><div>Beebeeb is turned off in System Settings.</div><div style="margin-top:8px"><button class="btn">Open System Settings</button></div></div></div>
+        </div></div>
+      </div></div></div></div>
+      <figcaption><b>Finder</b><span>Not a step you complete: a status screen while spec A’s reconciler adds Beebeeb. On Ready the window moves on to Home by itself (it does not close). On a failure: spec A’s one sentence and one action, inline, ink on the error wash.</span></figcaption></figure>
+
+    <figure class="shot"><div class="fit"><div class="win solo" role="img" aria-label="Beebeeb window, switch accounts with changes not sent">
+      <div class="tl"><i></i><i></i><i></i></div><div class="mn"><div></div><div class="ct">
+        <div class="scard" style="width:460px"><div class="mark">b</div><h2>Switch accounts with changes not sent?</h2>
+          <p class="copy">This Mac is signed in to another Beebeeb account. Switching signs that account out of this Mac.</p>
+          <p class="copy">2 files changed in Finder while that account was signed in haven’t reached the server. Before switching, Beebeeb copies them to a folder on this Mac and shows you where.</p>
+          <p class="copy">1 other change (a rename, move, deletion, new folder or restore) hasn’t reached the server either. Switching drops it, and that item stays as it is on the server.</p>
+          <div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn focus">Cancel</button><button class="btn dan">Sign out and switch</button></div>
+        </div>
+      </div></div></div></div>
+      <figcaption><b>Account switch (task 1887, A0s–A4s)</b><span>Copy unchanged. Focus starts on Cancel; the red confirm needs a deliberate click. It now lives in the Beebeeb window’s sign-in flow instead of the old onboarding window.</span></figcaption></figure>
+  </div>
+</section>
+
+<!-- ─────────────────────────────── 3 · Signed in ─────────────────────────────── -->
+<section class="sec" aria-labelledby="s3">
+  <div><h2 id="s3">3 · Signed in: Home, Review, Trash</h2>
+  <p class="sub">Three places in the sidebar and the gear. Files live in Finder, so the window does not have a second file browser: the Windows shell’s “Files” page was a sync summary, and its numbers move to Home. Account, Devices, Security, Insights and Bandwidth move into Settings (section 4) or are listed as removed in the spec.</p></div>
+  <div class="grid2">
+    <figure class="shot"><div class="fit"><div class="win" role="img" aria-label="Beebeeb window, Home">
+      <div class="tl"><i></i><i></i><i></i></div>
+      <nav class="side" aria-label="Beebeeb">
+        <div class="nav sel" aria-current="page"><svg class="i"><use href="#i-home"/></svg>Home</div>
+        <div class="nav"><svg class="i"><use href="#i-review"/></svg>Review<span class="cnt">2</span></div>
+        <div class="nav"><svg class="i"><use href="#i-trash"/></svg>Trash</div>
+        <div class="sfoot"><div class="av">S</div><div class="t"><div class="email">sam@example.eu</div><div class="use" style="font-size:11.5px">Basic plan</div></div><button class="gear" aria-label="Settings"><svg class="i s18"><use href="#i-gear"/></svg></button></div>
+      </nav>
+      <div class="mn"><div class="tb">Home<span class="r"><span class="chip"><svg class="i s14"><use href="#i-lock"/></svg>End-to-end encrypted</span></span></div>
+        <div class="ct">
+          <div class="hint"><svg class="i s18" style="color:var(--ink-2);margin-top:1px"><use href="#i-info"/></svg><div class="t"><b>Beebeeb lives in the menu bar</b><span>Click the b at the top of your screen to see what’s syncing. You can close this window; Beebeeb keeps running.</span></div><button class="btn">Got it</button></div>
+          <div class="card">
+            <div class="hrow"><span class="okd" style="width:20px;height:20px"><svg class="i s14" style="stroke-width:2.4"><use href="#i-check"/></svg></span><div class="t"><b>Up to date</b><span>Last checked 1 min ago</span></div></div>
+            <div class="hrow"><div class="tile"><svg class="i"><use href="#i-folder"/></svg></div><div class="t"><b>Beebeeb in Finder</b><span>Your vault appears under Locations in Finder.</span></div><button class="btn pri lg">Open in Finder</button></div>
+            <div class="hrow"><div class="counts"><span>On this Mac <b>1 204 files</b></span><span>Online-only <b>8 311</b></span><span>Kept on this Mac <b>3 folders</b></span></div></div>
+          </div>
+          <div class="h-cols">
+            <div><div class="gtitle">Needs your attention</div><div class="card">
+              <div class="hrow"><span class="ktag">Conflict</span><div class="t"><b>Board notes, 29 Sept.md</b><span>Team shared · Changed on two devices</span></div><button class="btn">Decide…</button></div>
+              <div class="hrow"><span class="ktag">Upload</span><div class="t"><b>Site visit, north wing.mov</b><span>Photos · Couldn’t upload, will retry</span></div></div>
+            </div></div>
+            <div><div class="gtitle">Storage</div><div class="card"><div class="hrow" style="flex-direction:column;align-items:stretch;gap:8px"><div style="display:flex;justify-content:space-between"><b style="font-weight:600">84,3 GB of 200 GB</b><span style="color:var(--ink-3);font-size:12px">42 %</span></div><div class="bar" style="margin:0"><i style="width:42%"></i></div><div><button class="btn">Add storage</button></div></div></div></div>
+          </div>
+        </div></div></div></div>
+      <figcaption><b>Home</b><span>What the control centre’s “Drive status” tried to say, in plain words. The one-time hint answers “too many windows”: the b is home, this window is optional. One amber button: the primary action.</span></figcaption></figure>
+
+    <figure class="shot"><div class="fit"><div class="win" role="img" aria-label="Beebeeb window, Review with a conflict sheet">
+      <div class="tl"><i></i><i></i><i></i></div>
+      <nav class="side" aria-label="Beebeeb">
+        <div class="nav"><svg class="i"><use href="#i-home"/></svg>Home</div>
+        <div class="nav sel" aria-current="page"><svg class="i"><use href="#i-review"/></svg>Review<span class="cnt">2</span></div>
+        <div class="nav"><svg class="i"><use href="#i-trash"/></svg>Trash</div>
+        <div class="sfoot"><div class="av">S</div><div class="t"><div class="email">sam@example.eu</div><div class="use" style="font-size:11.5px">Basic plan</div></div><button class="gear" aria-label="Settings"><svg class="i s18"><use href="#i-gear"/></svg></button></div>
+      </nav>
+      <div class="mn"><div class="tb">Review<span class="r"><button class="btn"><svg class="i s14"><use href="#i-history"/></svg>Version history…</button></span></div>
+        <div class="ct">
+          <p style="color:var(--ink-2)">Files that need a decision from you, and changes Beebeeb couldn’t send yet.</p>
+          <div class="card">
+            <div class="hrow"><span class="ktag">Conflict</span><div class="t"><b>Board notes, 29 Sept.md</b><span>Team shared · today 09:12</span></div><button class="btn">Decide…</button></div>
+            <div class="hrow"><span class="ktag">Upload</span><div class="t"><b>Site visit, north wing.mov</b><span>Photos · today 08:47 · Couldn’t upload, will retry</span></div></div>
+          </div>
+        </div>
+      </div>
+      <div class="scrim"><div class="modal w520" role="dialog" aria-label="Conflict: Board notes, 29 Sept.md">
+        <div class="mh"><span class="mtitle">Conflict: Board notes, 29 Sept.md</span><span class="mx focus" aria-label="Close"><svg class="i s14"><use href="#i-x"/></svg></span></div>
+        <div class="mbd"><p>This file was modified on two devices. Choose which version to keep.</p>
+          <div class="cmp"><div><b>This Mac</b>Edited today 09:10 · 4 KB<br><span class="mono">## Agenda — added item 4</span></div><div><b>Other device</b>Edited today 09:06 · 4 KB<br><span class="mono">## Agenda — moved item 2</span></div></div></div>
+        <div class="mf"><button class="btn">Keep this Mac’s</button><button class="btn">Keep the other</button><button class="btn pri">Keep both</button></div>
+      </div></div></div></div>
+      <figcaption><b>Review, with the conflict sheet</b><span>Absorbs “Versions &amp; conflicts”, the per-conflict windows and the version-history modal. “This device” becomes “This Mac”; “Keep Mine / Theirs / Both” become plain choices. Keep both stays the safe primary.</span></figcaption></figure>
+
+    <figure class="shot"><div class="fit"><div class="win" role="img" aria-label="Beebeeb window, Trash">
+      <div class="tl"><i></i><i></i><i></i></div>
+      <nav class="side" aria-label="Beebeeb">
+        <div class="nav"><svg class="i"><use href="#i-home"/></svg>Home</div>
+        <div class="nav"><svg class="i"><use href="#i-review"/></svg>Review<span class="cnt">2</span></div>
+        <div class="nav sel" aria-current="page"><svg class="i"><use href="#i-trash"/></svg>Trash</div>
+        <div class="sfoot"><div class="av">S</div><div class="t"><div class="email">sam@example.eu</div><div class="use" style="font-size:11.5px">Basic plan</div></div><button class="gear" aria-label="Settings"><svg class="i s18"><use href="#i-gear"/></svg></button></div>
+      </nav>
+      <div class="mn"><div class="tb">Trash<span class="r"><button class="btn">Refresh</button></span></div>
+        <div class="ct">
+          <p style="color:var(--ink-2)">Deleted files in your vault. Restore puts them back through sync; permanent delete removes them from Trash.</p>
+          <div class="card">
+            <div class="hrow"><div class="tile"><svg class="i"><use href="#i-file"/></svg></div><div class="t"><b>Draft 3, interview questions.docx</b><span>File · 48 KB · deleted yesterday</span></div><button class="btn">Restore</button><button class="btn">Delete…</button></div>
+            <div class="hrow"><div class="tile"><svg class="i"><use href="#i-folder"/></svg></div><div class="t"><b>Old scans</b><span>Folder · 1,4 GB · deleted 12 Oct</span></div><button class="btn">Restore</button><button class="btn">Delete…</button></div>
+          </div>
+        </div></div></div></div>
+      <figcaption><b>Trash</b><span>Kept from the Windows shell: until task 1717, Finder’s Put Back does not restore, so this is the Mac’s restore path. “Delete…” asks for the password in a sheet, as today.</span></figcaption></figure>
+
+    <figure class="shot"><div class="fit"><div class="win" role="img" aria-label="Beebeeb window, Home while locked">
+      <div class="tl"><i></i><i></i><i></i></div>
+      <nav class="side" aria-label="Beebeeb">
+        <div class="nav sel" aria-current="page"><svg class="i"><use href="#i-home"/></svg>Home</div>
+        <div class="nav"><svg class="i"><use href="#i-review"/></svg>Review</div>
+        <div class="nav"><svg class="i"><use href="#i-trash"/></svg>Trash</div>
+        <div class="sfoot"><div class="av">S</div><div class="t"><div class="email">sam@example.eu</div><div class="use" style="font-size:11.5px">Vault locked</div></div><button class="gear" aria-label="Settings"><svg class="i s18"><use href="#i-gear"/></svg></button></div>
+      </nav>
+      <div class="mn"><div class="tb">Home</div>
+        <div class="ct"><div class="card"><div class="hrow" style="padding:22px 18px"><div class="disc enc" style="margin:0;width:44px;height:44px"><svg class="i s18"><use href="#i-lock"/></svg></div><div class="t"><b style="font-size:14px">Your vault is locked</b><span style="font-size:12.5px">Sync is paused until you unlock it. Files already downloaded to this Mac stay where they are.</span></div><button class="btn pri lg"><svg class="i s14"><use href="#i-unlock"/></svg>Unlock vault</button></div></div>
+        </div></div></div></div>
+      <figcaption><b>Home, vault locked</b><span>The popover’s sentence and button, so the two surfaces never disagree. Review and Trash need the key and show the same card.</span></figcaption></figure>
+  </div>
+</section>
+
+<!-- ─────────────────────────────── 4 · Settings ─────────────────────────────── -->
+<section class="sec" aria-labelledby="s4">
+  <div><h2 id="s4">4 · Settings, inside the window</h2>
+  <p class="sub">The gear at the bottom of the sidebar, ⌘, and the popover’s “Settings…” all land here. The content area becomes a standard macOS Settings pane: icon tabs in the toolbar, grouped inset rows, labels left and controls right, the look approved on 30 Sep. The sidebar stays, with the gear marked as current. The four shipped tabs keep their rows and copy; Security is new and collects what the Windows shell had in Account, Devices, Security and Activity.</p></div>
+  <div class="grid2">
+
+    <figure class="shot"><div class="fit"><div class="win" role="img" aria-label="Settings, General">
+      <div class="tl"><i></i><i></i><i></i></div>
+      <nav class="side" aria-label="Beebeeb"><div class="nav"><svg class="i"><use href="#i-home"/></svg>Home</div><div class="nav"><svg class="i"><use href="#i-review"/></svg>Review</div><div class="nav"><svg class="i"><use href="#i-trash"/></svg>Trash</div>
+        <div class="sfoot"><div class="av">S</div><div class="t"><div class="email">sam@example.eu</div><div class="use" style="font-size:11.5px">Basic plan</div></div><button class="gear on" aria-label="Settings" aria-current="page"><svg class="i s18"><use href="#i-gear"/></svg></button></div></nav>
+      <div class="mn set"><div class="tb tabs" role="tablist" aria-label="Settings"><div class="stab sel" role="tab" aria-selected="true"><svg class="i s18"><use href="#i-gear"/></svg>General</div><div class="stab" role="tab"><svg class="i s18"><use href="#i-user"/></svg>Account</div><div class="stab" role="tab"><svg class="i s18"><use href="#i-sync"/></svg>Sync</div><div class="stab" role="tab"><svg class="i s18"><use href="#i-shield"/></svg>Security</div><div class="stab" role="tab"><svg class="i s18"><use href="#i-info"/></svg>About</div></div>
+        <div class="ct set">
+          <div class="mscard">
+            <div class="msrow"><div class="t"><div class="l">Open Beebeeb at login</div><div class="h">Starts in the menu bar. No window opens.</div></div><div class="c"><span class="sw on" role="switch" aria-checked="true"></span></div></div>
+            <div class="msrow"><div class="t"><div class="l">Appearance</div><div class="h">Follow macOS.</div></div><div class="c"><span class="popup">System</span></div></div>
+          </div>
+          <div><div class="gtitle">Tell me about</div><div class="mscard">
+            <div class="msrow"><div class="t"><div class="l">Conflicts</div><div class="h">When two versions of a file need a decision.</div></div><div class="c"><span class="sw on"></span></div></div>
+            <div class="msrow"><div class="t"><div class="l">Sync finished</div></div><div class="c"><span class="sw"></span></div></div>
+            <div class="msrow"><div class="t"><div class="l">Local cache almost full</div></div><div class="c"><span class="sw on"></span></div></div>
+          </div></div>
+          <div><div class="gtitle">From your account</div><div class="mscard">
+            <div class="msrow"><div class="t"><div class="l">New device sign-in</div><div class="h">We cannot see your files, but we know when a new device signs in.</div></div><div class="c"><span class="sw on"></span></div></div>
+            <div class="msrow"><div class="t"><div class="l">Share received</div><div class="h">When someone grants you access to a file or folder.</div></div><div class="c"><span class="sw on"></span></div></div>
+          </div></div>
+        </div></div></div></div>
+      <figcaption><b>General</b><span>Shipped rows plus Appearance (from the Windows shell’s Advanced) and the account notification preferences (from its Notifications). Three more account rows scroll below: File updated, Storage warning, Backup complete.</span></figcaption></figure>
+
+    <figure class="shot"><div class="fit"><div class="win" role="img" aria-label="Settings, Account">
+      <div class="tl"><i></i><i></i><i></i></div>
+      <nav class="side" aria-label="Beebeeb"><div class="nav"><svg class="i"><use href="#i-home"/></svg>Home</div><div class="nav"><svg class="i"><use href="#i-review"/></svg>Review</div><div class="nav"><svg class="i"><use href="#i-trash"/></svg>Trash</div>
+        <div class="sfoot"><div class="av">S</div><div class="t"><div class="email">sam@example.eu</div><div class="use" style="font-size:11.5px">Basic plan</div></div><button class="gear on" aria-label="Settings" aria-current="page"><svg class="i s18"><use href="#i-gear"/></svg></button></div></nav>
+      <div class="mn set"><div class="tb tabs" role="tablist" aria-label="Settings"><div class="stab"><svg class="i s18"><use href="#i-gear"/></svg>General</div><div class="stab sel" aria-selected="true"><svg class="i s18"><use href="#i-user"/></svg>Account</div><div class="stab"><svg class="i s18"><use href="#i-sync"/></svg>Sync</div><div class="stab"><svg class="i s18"><use href="#i-shield"/></svg>Security</div><div class="stab"><svg class="i s18"><use href="#i-info"/></svg>About</div></div>
+        <div class="ct set">
+          <div class="mscard"><div class="ms-account"><div class="av">S</div><div style="flex:1;min-width:0"><div style="font-weight:600">sam@example.eu</div><div class="h" style="font-size:12px;color:var(--ink-3)">Basic plan · renews 14 Nov 2026</div><div class="bar" style="margin-top:8px;max-width:260px"><i style="width:42%"></i></div><div class="h" style="font-size:11.5px;color:var(--ink-3);margin-top:4px">84,3 GB of 200 GB · <a class="lnk" style="font-weight:500" href="#s4">Storage details…</a></div></div><button class="btn">Manage plan</button></div></div>
+          <div><div class="gtitle">Vault</div><div class="mscard"><div class="msrow"><div class="t"><div class="l" style="display:flex;gap:6px;align-items:center"><svg class="i s14" style="color:var(--amber-deep)"><use href="#i-unlock"/></svg>Vault is unlocked</div><div class="h">Locking stops sync until you enter your password again.</div></div><div class="c"><button class="btn">Lock now</button></div></div></div></div>
+          <div><div class="gtitle">Where your files are stored</div><div class="mscard">
+            <div class="msrow"><div class="t"><div class="l">Stored in the EU. New files go to any of our European data centers.</div></div></div>
+            <div class="msrow"><span class="radio on"></span><div class="t"><div class="l">Europe <span class="ktag">Default</span></div><div class="h">Any of our European data centers. We place your files.</div></div></div>
+            <div class="msrow"><span class="radio"></span><div class="t"><div class="l">Germany</div></div></div>
+          </div></div>
+          <div class="mscard"><div class="msrow"><div class="t"><div class="l">Password, email and billing</div><div class="h">Changed on beebeeb.io, in your browser.</div></div><div class="c"><button class="btn"><svg class="i s14"><use href="#i-ext"/></svg>Open beebeeb.io</button></div></div>
+            <div class="msrow"><div class="t"><div class="l">Sign out of this Mac</div><div class="h">You’ll need your password to sign back in.</div></div><div class="c"><button class="btn">Sign out…</button></div></div></div>
+        </div></div></div></div>
+      <figcaption><b>Account</b><span>The shipped tab. Added: “Storage details…” (Insights’ by-type and largest files, in a sheet) and the web-account row. Spec C’s notice line (trial, read-only, payment failed) sits under the plan line when the server sends one.</span></figcaption></figure>
+
+    <figure class="shot"><div class="fit"><div class="win" role="img" aria-label="Settings, Sync">
+      <div class="tl"><i></i><i></i><i></i></div>
+      <nav class="side" aria-label="Beebeeb"><div class="nav"><svg class="i"><use href="#i-home"/></svg>Home</div><div class="nav"><svg class="i"><use href="#i-review"/></svg>Review</div><div class="nav"><svg class="i"><use href="#i-trash"/></svg>Trash</div>
+        <div class="sfoot"><div class="av">S</div><div class="t"><div class="email">sam@example.eu</div><div class="use" style="font-size:11.5px">Basic plan</div></div><button class="gear on" aria-label="Settings" aria-current="page"><svg class="i s18"><use href="#i-gear"/></svg></button></div></nav>
+      <div class="mn set"><div class="tb tabs" role="tablist" aria-label="Settings"><div class="stab"><svg class="i s18"><use href="#i-gear"/></svg>General</div><div class="stab"><svg class="i s18"><use href="#i-user"/></svg>Account</div><div class="stab sel" aria-selected="true"><svg class="i s18"><use href="#i-sync"/></svg>Sync</div><div class="stab"><svg class="i s18"><use href="#i-shield"/></svg>Security</div><div class="stab"><svg class="i s18"><use href="#i-info"/></svg>About</div></div>
+        <div class="ct set">
+          <div class="mscard">
+            <div class="msrow"><div class="t"><div class="l">Beebeeb in Finder</div><div class="h">Your vault appears under Locations in Finder.</div></div><div class="c"><span class="added"><span class="okd"><svg class="i s14" style="stroke-width:2.4"><use href="#i-check"/></svg></span>Added</span><button class="btn">Repair…</button></div></div>
+            <div class="note"><svg class="i g"><use href="#i-info"/></svg><div class="t"><p>Beebeeb copied changes that had not reached the server to this folder:</p><p class="mono" style="margin-top:4px;color:var(--ink)">/Users/sam/Library/Containers/io.beebeeb.app/Data/Documents/Changes not sent/2026-10-24 at 14.05.12</p><div class="acts"><button class="btn">Show in Finder</button><button class="btn">Dismiss</button></div></div></div>
+            <div class="msrow"><div class="t"><div class="l">Keep on this Mac</div><div class="h">Everything else downloads when you open it.</div></div><div class="c"><span class="mstate">3 folders</span><button class="btn">Choose folders…</button></div></div>
+          </div>
+          <div><div class="gtitle">Speed</div><div class="mscard">
+            <div class="msrow"><div class="t"><div class="l">Upload</div></div><div class="c"><span class="popup">No limit</span></div></div>
+            <div class="msrow"><div class="t"><div class="l">Download</div></div><div class="c"><span class="popup">No limit</span></div></div>
+          </div></div>
+        </div></div></div></div>
+      <figcaption><b>Sync, with the 1887 kept-folder row</b><span>The shipped tab, unchanged. The kept rows (task 1887’s K2, then 1882’s) stay here until Dismiss, and also appear under “Needs your attention” on Home with the same words and buttons.</span></figcaption></figure>
+
+    <figure class="shot"><div class="fit"><div class="win" role="img" aria-label="Settings, Security">
+      <div class="tl"><i></i><i></i><i></i></div>
+      <nav class="side" aria-label="Beebeeb"><div class="nav"><svg class="i"><use href="#i-home"/></svg>Home</div><div class="nav"><svg class="i"><use href="#i-review"/></svg>Review</div><div class="nav"><svg class="i"><use href="#i-trash"/></svg>Trash</div>
+        <div class="sfoot"><div class="av">S</div><div class="t"><div class="email">sam@example.eu</div><div class="use" style="font-size:11.5px">Basic plan</div></div><button class="gear on" aria-label="Settings" aria-current="page"><svg class="i s18"><use href="#i-gear"/></svg></button></div></nav>
+      <div class="mn set"><div class="tb tabs" role="tablist" aria-label="Settings"><div class="stab"><svg class="i s18"><use href="#i-gear"/></svg>General</div><div class="stab"><svg class="i s18"><use href="#i-user"/></svg>Account</div><div class="stab"><svg class="i s18"><use href="#i-sync"/></svg>Sync</div><div class="stab sel" aria-selected="true"><svg class="i s18"><use href="#i-shield"/></svg>Security</div><div class="stab"><svg class="i s18"><use href="#i-info"/></svg>About</div></div>
+        <div class="ct set">
+          <div class="mscard"><div class="msrow"><div class="t"><div class="l">Authenticator app (TOTP) · On</div><div class="h">A second factor is required when you sign in. Manage or reset it on beebeeb.io.</div></div><div class="c"><button class="btn"><svg class="i s14"><use href="#i-ext"/></svg>Manage on beebeeb.io</button></div></div></div>
+          <div><div class="gtitle">Active sessions</div><div class="mscard">
+            <div class="msrow"><div class="t"><div class="l">MacBook Pro · This session</div><div class="h">Active now</div></div></div>
+            <div class="msrow"><div class="t"><div class="l">iPhone</div><div class="h">Active 2 hours ago</div></div><div class="c"><button class="btn">Revoke</button></div></div>
+            <div class="msrow"><div class="t"><div class="l">Sign out everywhere else</div><div class="h">Ends every session except this one. Those devices will need to sign in again.</div></div><div class="c"><button class="btn">Sign out all other sessions</button></div></div>
+          </div></div>
+          <div><div class="gtitle">Devices</div><div class="mscard">
+            <div class="msrow"><div class="t"><div class="l">MacBook Pro · macOS · v0.8.13</div><div class="h">last seen just now · registered 3 Sep</div></div></div>
+          </div></div>
+        </div></div></div></div>
+      <figcaption><b>Security (new)</b><span>From the Windows shell’s Security, Devices and Activity, copy kept. Removed: the Devices subtitle’s “Revoke a device to re-encrypt…”, because no such control exists. “Recent account activity” scrolls below.</span></figcaption></figure>
+
+    <figure class="shot"><div class="fit"><div class="win" role="img" aria-label="Settings, About">
+      <div class="tl"><i></i><i></i><i></i></div>
+      <nav class="side" aria-label="Beebeeb"><div class="nav"><svg class="i"><use href="#i-home"/></svg>Home</div><div class="nav"><svg class="i"><use href="#i-review"/></svg>Review</div><div class="nav"><svg class="i"><use href="#i-trash"/></svg>Trash</div>
+        <div class="sfoot"><div class="av">S</div><div class="t"><div class="email">sam@example.eu</div><div class="use" style="font-size:11.5px">Basic plan</div></div><button class="gear on" aria-label="Settings" aria-current="page"><svg class="i s18"><use href="#i-gear"/></svg></button></div></nav>
+      <div class="mn set"><div class="tb tabs" role="tablist" aria-label="Settings"><div class="stab"><svg class="i s18"><use href="#i-gear"/></svg>General</div><div class="stab"><svg class="i s18"><use href="#i-user"/></svg>Account</div><div class="stab"><svg class="i s18"><use href="#i-sync"/></svg>Sync</div><div class="stab"><svg class="i s18"><use href="#i-shield"/></svg>Security</div><div class="stab sel" aria-selected="true"><svg class="i s18"><use href="#i-info"/></svg>About</div></div>
+        <div class="ct set">
+          <div class="mscard">
+            <div class="msrow"><div class="t"><div class="l">Beebeeb for Mac</div><div class="h">Version 0.8.13 is the latest.</div></div><div class="c"><button class="btn">Check for updates</button></div></div>
+            <div class="msrow"><div class="t"><div class="l">Release channel</div><div class="h">Regular releases after validation.</div></div><div class="c"><span class="popup">Stable</span></div></div>
+          </div>
+          <div><div class="gtitle">Help</div><div class="mscard">
+            <div class="msrow"><div class="t"><div class="l">Get help</div><div class="h">Opens our support page in your browser.</div></div><div class="c"><button class="btn" aria-label="Get help, opens in your browser"><svg class="i s14"><use href="#i-ext"/></svg></button></div></div>
+            <div class="msrow"><div class="t"><div class="l">Test connection speed</div><div class="h">Measures how fast this Mac reaches Beebeeb: 5 pings, then 3 uploads and 3 downloads of 10 MB. Takes 30 to 90 seconds.</div></div><div class="c"><button class="btn">Run test</button></div></div>
+            <div class="msrow"><div class="t"><div class="l">Export a support bundle</div><div class="h">Saves a support bundle you can read before you send it: queue counts, an error code and the last error message. Paths, file and folder names and sign-in tokens are removed.</div></div><div class="c"><button class="btn">Export…</button></div></div>
+          </div></div>
+        </div></div></div></div>
+      <figcaption><b>About</b><span>Also where the app menu’s “About Beebeeb” lands, so no separate About panel opens. Added from the Windows shell: Release channel and the speed test (without “parity with the CLI”). The support-bundle hint is cut here for the drawing; the full approved text stays.</span></figcaption></figure>
+  </div>
+</section>
+
+<!-- ─────────────────────────────── 5 · 1887 sign-out flow ─────────────────────────────── -->
+<section class="sec" aria-labelledby="s5">
+  <div><h2 id="s5">5 · Sign out (task 1887), now in the Beebeeb window</h2>
+  <p class="sub">The flow moves with Settings › Account and keeps every word. Each sheet is window-modal: it covers the sidebar too, so you cannot navigate away mid-question. Closing the window ends the flow exactly as closing Settings did: closed while sending means <code>closed</code>, closed at the question means Cancel. Counts and paths are examples.</p></div>
+  <div class="grid2">
+    <figure class="shot"><div class="fit"><div class="win" role="img" aria-label="Sign out of this Mac? sheet">
+      <div class="tl"><i></i><i></i><i></i></div>
+      <nav class="side" aria-label="Beebeeb"><div class="nav"><svg class="i"><use href="#i-home"/></svg>Home</div><div class="nav"><svg class="i"><use href="#i-review"/></svg>Review</div><div class="nav"><svg class="i"><use href="#i-trash"/></svg>Trash</div><div class="sfoot"><div class="av">S</div><div class="t"><div class="email">sam@example.eu</div></div><button class="gear on"><svg class="i s18"><use href="#i-gear"/></svg></button></div></nav>
+      <div class="mn set"><div class="tb tabs"><div class="stab"><svg class="i s18"><use href="#i-gear"/></svg>General</div><div class="stab sel"><svg class="i s18"><use href="#i-user"/></svg>Account</div><div class="stab"><svg class="i s18"><use href="#i-sync"/></svg>Sync</div><div class="stab"><svg class="i s18"><use href="#i-shield"/></svg>Security</div><div class="stab"><svg class="i s18"><use href="#i-info"/></svg>About</div></div><div class="ct set"><div class="mscard"><div class="msrow"><div class="t"><div class="l">Sign out of this Mac</div><div class="h">You’ll need your password to sign back in.</div></div><div class="c"><button class="btn" disabled>Sign out…</button></div></div></div></div></div>
+      <div class="scrim"><div class="modal" role="dialog" aria-label="Sign out of this Mac?"><div class="mh"><span class="mtitle">Sign out of this Mac?</span><span class="mx focus" aria-label="Close"><svg class="i s14"><use href="#i-x"/></svg></span></div><div class="mbd"><p>Sync stops until you sign in again.</p></div><div class="mf"><button class="btn">Cancel</button><button class="btn dan">Sign out</button></div></div></div>
+    </div></div><figcaption><b>Confirm (Dialog 3)</b><span>Unchanged. Focus opens on the close button, so a stray Return cancels; the red confirm needs its own focus.</span></figcaption></figure>
+
+    <figure class="shot"><div class="fit"><div class="win" role="img" aria-label="Sending changes first sheet">
+      <div class="tl"><i></i><i></i><i></i></div>
+      <nav class="side" aria-label="Beebeeb"><div class="nav"><svg class="i"><use href="#i-home"/></svg>Home</div><div class="nav"><svg class="i"><use href="#i-review"/></svg>Review</div><div class="nav"><svg class="i"><use href="#i-trash"/></svg>Trash</div><div class="sfoot"><div class="av">S</div><div class="t"><div class="email">sam@example.eu</div></div><button class="gear on"><svg class="i s18"><use href="#i-gear"/></svg></button></div></nav>
+      <div class="mn set"><div class="tb tabs"><div class="stab"><svg class="i s18"><use href="#i-gear"/></svg>General</div><div class="stab sel"><svg class="i s18"><use href="#i-user"/></svg>Account</div><div class="stab"><svg class="i s18"><use href="#i-sync"/></svg>Sync</div><div class="stab"><svg class="i s18"><use href="#i-shield"/></svg>Security</div><div class="stab"><svg class="i s18"><use href="#i-info"/></svg>About</div></div><div class="ct set"></div></div>
+      <div class="scrim"><div class="modal" role="dialog" aria-label="Sending changes first"><div class="mh"><span class="mtitle">Sending changes first</span><span class="mx" aria-label="Close"><svg class="i s14"><use href="#i-x"/></svg></span></div><div class="mbd"><p aria-live="polite">Sending 3 changes before signing out…</p><p>This takes at most a minute.</p></div><div class="mf"><button class="btn focus">Stop waiting</button></div></div></div>
+    </div></div><figcaption><b>Send phase (P0–P3)</b><span>Unchanged. Esc is Stop waiting. The count follows the events and never reads 0. The popover mirrors it (section 1).</span></figcaption></figure>
+
+    <figure class="shot"><div class="fit"><div class="win" role="img" aria-label="Sign out with changes not sent? sheet">
+      <div class="tl"><i></i><i></i><i></i></div>
+      <nav class="side" aria-label="Beebeeb"><div class="nav"><svg class="i"><use href="#i-home"/></svg>Home</div><div class="nav"><svg class="i"><use href="#i-review"/></svg>Review</div><div class="nav"><svg class="i"><use href="#i-trash"/></svg>Trash</div><div class="sfoot"><div class="av">S</div><div class="t"><div class="email">sam@example.eu</div></div><button class="gear on"><svg class="i s18"><use href="#i-gear"/></svg></button></div></nav>
+      <div class="mn set"><div class="tb tabs"><div class="stab"><svg class="i s18"><use href="#i-gear"/></svg>General</div><div class="stab sel"><svg class="i s18"><use href="#i-user"/></svg>Account</div><div class="stab"><svg class="i s18"><use href="#i-sync"/></svg>Sync</div><div class="stab"><svg class="i s18"><use href="#i-shield"/></svg>Security</div><div class="stab"><svg class="i s18"><use href="#i-info"/></svg>About</div></div><div class="ct set"></div></div>
+      <div class="scrim"><div class="modal w440" role="dialog" aria-label="Sign out with changes not sent?"><div class="mh"><span class="mtitle">Sign out with changes not sent?</span><span class="mx focus" aria-label="Close"><svg class="i s14"><use href="#i-x"/></svg></span></div><div class="mbd"><p>2 files you changed in Finder haven’t reached the server. Before signing out, Beebeeb copies them to a folder on this Mac and shows you where.</p><p>1 other change (a rename, move, deletion, new folder or restore) hasn’t reached the server either. Signing out drops it, and that item stays as it is on the server.</p><p>This Mac can’t reach the server right now.</p></div><div class="mf"><button class="btn">Cancel</button><button class="btn dan">Sign out</button></div></div></div>
+    </div></div><figcaption><b>The ask (A0–A5)</b><span>Unchanged, at 440. Enter on open resolves to Cancel; Esc cancels. A refused sign-out (a change arrived after the count) comes straight back here from a fresh count, never as a toast.</span></figcaption></figure>
+
+    <figure class="shot"><div class="desk" style="min-height:330px"><div class="mb"><span>Finder</span><span class="mb-r"><span class="sitem crossed">b</span><span>Fri 09:43</span></span></div><div class="desk-in" style="justify-content:center;padding-top:30px">
+      <div class="nsa" role="alertdialog" aria-label="Files kept on this Mac"><div class="appi">b</div><h5>Files kept on this Mac</h5><p>Beebeeb copied 2 files with changes that hadn’t reached the server to this folder on this Mac:</p><p class="mono">/Users/sam/Library/Containers/io.beebeeb.app/Data/Documents/Changes not sent/2026-10-24 at 14.05.12</p><div class="ok">OK</div></div>
+    </div></div><figcaption><b>Kept alert (K0, K1)</b><span>Drawn by macOS, not by Beebeeb, so it is not a third window and it shows even after the Beebeeb window closed. Unchanged; 1882’s folder follows in the same alert when macOS kept one.</span></figcaption></figure>
+  </div>
+</section>
+
+<!-- ─────────────────────────────── 6 · Placement ─────────────────────────────── -->
+<section class="sec" aria-labelledby="s6">
+  <div><h2 id="s6">6 · Where things open</h2>
+  <p class="sub">The answer to “randomly in the screen”.</p></div>
+  <div class="tbl"><table>
+    <thead><tr><th scope="col">Surface</th><th scope="col">Where</th><th scope="col">When it opens by itself</th></tr></thead>
+    <tbody>
+      <tr><th scope="row">Popover</th><td>Under the b, centred on it, 6 pt below the menu bar, on the display that holds the icon; clamped 8 pt from the screen edge. Never remembered (30 Sep rule, unchanged).</td><td>Never. Only a click on the b.</td></tr>
+      <tr><th scope="row">Beebeeb window</th><td>First time: 920 × 620 pt, centred on the display whose menu bar you clicked. After that: exactly where and how big you left it. If that frame is now mostly off-screen (a display was unplugged), centred again.</td><td>A manual launch (Finder, Dock, Spotlight), a first install, and any launch with no session (sign-in). Never at login, never after an update, never for a conflict.</td></tr>
+      <tr><th scope="row">Dock icon</th><td>Shown while the Beebeeb window is open, hidden when it closes (30 Sep ruling 2, applied to the one window).</td><td>—</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- ─────────────────────────────── 7 · Both themes ─────────────────────────────── -->
+<section class="sec" aria-labelledby="s7">
+  <div><h2 id="s7">7 · Light and dark, side by side</h2>
+  <p class="sub">The same tokens swap; nothing else changes. Dark error text stays ink on the dark error wash (13.3 : 1); the red is only on the disc.</p></div>
+  <div class="pair">
+    <div class="theme-light"><div class="pw"><div class="pair-label">Light</div>
+      <div class="pop" role="img" aria-label="Popover, error, light">
+        <div class="ph"><div class="acct"><div class="av">S</div><div class="acct-t"><div class="email">sam@example.eu</div><div class="use">Using 84,3 GB of 200 GB</div></div><span class="gear"><svg class="i s18"><use href="#i-gear"/></svg></span></div><div class="bar"><i style="width:42%"></i></div></div>
+        <div class="pb"><div class="msg"><div class="disc err"><svg class="i s22"><use href="#i-alert"/></svg></div><h4>Couldn’t add Beebeeb to Finder</h4><p>macOS didn’t finish adding Beebeeb to Finder.</p><span class="reason">reason: timeout</span><span class="btn pri lg">Try again</span></div></div>
+        <div class="pf"><span class="fb" style="color:var(--ink-3)"><svg class="i s18"><use href="#i-folder"/></svg>Open in Finder</span><span class="fb"><svg class="i s18"><use href="#i-globe"/></svg>View online</span><span class="fb"><svg class="i s18"><use href="#i-db"/></svg>Add storage</span></div>
+      </div></div></div>
+    <div class="theme-dark"><div class="pw"><div class="pair-label">Dark</div>
+      <div class="pop" role="img" aria-label="Popover, error, dark">
+        <div class="ph"><div class="acct"><div class="av">S</div><div class="acct-t"><div class="email">sam@example.eu</div><div class="use">Using 84,3 GB of 200 GB</div></div><span class="gear"><svg class="i s18"><use href="#i-gear"/></svg></span></div><div class="bar"><i style="width:42%"></i></div></div>
+        <div class="pb"><div class="msg"><div class="disc err"><svg class="i s22"><use href="#i-alert"/></svg></div><h4>Couldn’t add Beebeeb to Finder</h4><p>macOS didn’t finish adding Beebeeb to Finder.</p><span class="reason">reason: timeout</span><span class="btn pri lg">Try again</span></div></div>
+        <div class="pf"><span class="fb" style="color:var(--ink-3)"><svg class="i s18"><use href="#i-folder"/></svg>Open in Finder</span><span class="fb"><svg class="i s18"><use href="#i-globe"/></svg>View online</span><span class="fb"><svg class="i s18"><use href="#i-db"/></svg>Add storage</span></div>
+      </div></div></div>
+  </div>
+  <div class="pair">
+    <div class="theme-light" style="display:block"><div class="pair-label">Light</div><div class="fit"><div class="win" role="img" aria-label="Home and toast, light">
+      <div class="tl"><i></i><i></i><i></i></div>
+      <nav class="side"><div class="nav sel"><svg class="i"><use href="#i-home"/></svg>Home</div><div class="nav"><svg class="i"><use href="#i-review"/></svg>Review<span class="cnt">2</span></div><div class="nav"><svg class="i"><use href="#i-trash"/></svg>Trash</div><div class="sfoot"><div class="av">S</div><div class="t"><div class="email">sam@example.eu</div></div><span class="gear"><svg class="i s18"><use href="#i-gear"/></svg></span></div></nav>
+      <div class="mn"><div class="tb">Home<span class="r"><span class="chip"><svg class="i s14"><use href="#i-lock"/></svg>End-to-end encrypted</span></span></div><div class="ct">
+        <div class="card"><div class="hrow"><span class="okd" style="width:20px;height:20px"><svg class="i s14" style="stroke-width:2.4"><use href="#i-check"/></svg></span><div class="t"><b>Up to date</b><span>Last checked 1 min ago</span></div></div><div class="hrow"><div class="tile"><svg class="i"><use href="#i-folder"/></svg></div><div class="t"><b>Beebeeb in Finder</b><span>Your vault appears under Locations in Finder.</span></div><span class="btn pri lg">Open in Finder</span></div></div>
+      </div></div>
+      <div class="toast" role="status"><svg class="i s18"><use href="#i-alert"/></svg><div><b>Restore failed</b><span>Couldn’t reach Beebeeb. Try again in a moment.</span></div></div>
+    </div></div></div>
+    <div class="theme-dark" style="display:block"><div class="pair-label">Dark</div><div class="fit"><div class="win" role="img" aria-label="Home and toast, dark">
+      <div class="tl"><i></i><i></i><i></i></div>
+      <nav class="side"><div class="nav sel"><svg class="i"><use href="#i-home"/></svg>Home</div><div class="nav"><svg class="i"><use href="#i-review"/></svg>Review<span class="cnt">2</span></div><div class="nav"><svg class="i"><use href="#i-trash"/></svg>Trash</div><div class="sfoot"><div class="av">S</div><div class="t"><div class="email">sam@example.eu</div></div><span class="gear"><svg class="i s18"><use href="#i-gear"/></svg></span></div></nav>
+      <div class="mn"><div class="tb">Home<span class="r"><span class="chip"><svg class="i s14"><use href="#i-lock"/></svg>End-to-end encrypted</span></span></div><div class="ct">
+        <div class="card"><div class="hrow"><span class="okd" style="width:20px;height:20px"><svg class="i s14" style="stroke-width:2.4"><use href="#i-check"/></svg></span><div class="t"><b>Up to date</b><span>Last checked 1 min ago</span></div></div><div class="hrow"><div class="tile"><svg class="i"><use href="#i-folder"/></svg></div><div class="t"><b>Beebeeb in Finder</b><span>Your vault appears under Locations in Finder.</span></div><span class="btn pri lg">Open in Finder</span></div></div>
+      </div></div>
+      <div class="toast" role="status"><svg class="i s18"><use href="#i-alert"/></svg><div><b>Restore failed</b><span>Couldn’t reach Beebeeb. Try again in a moment.</span></div></div>
+    </div></div></div>
+  </div>
+  <div class="tbl"><table>
+    <thead><tr><th scope="col">Pair (WCAG 2 contrast, computed from the OKLCH tokens)</th><th scope="col">Light</th><th scope="col">Dark</th><th scope="col">Use</th></tr></thead>
+    <tbody>
+      <tr><td>--ink on --err-bg (error title)</td><td class="num">16.7</td><td class="num">13.3</td><td>Every error title and toast title</td></tr>
+      <tr><td>--ink-2 on --err-bg (error body)</td><td class="num">10.4</td><td class="num">9.05</td><td>Error sentences</td></tr>
+      <tr><td>--ink-3 on --paper-2 (hints)</td><td class="num">5.02</td><td class="num">5.92</td><td>Row hints, meta lines</td></tr>
+      <tr><td>--amber-ink on --amber (primary button)</td><td class="num">10.6</td><td class="num">10.6</td><td>The one primary action</td></tr>
+      <tr><td>--red-ink on --red (Sign out)</td><td class="num">4.94</td><td class="num">6.25</td><td>Destructive confirm (design.css documents 5.10 and 6.13)</td></tr>
+      <tr><td>--red on --paper</td><td class="num">3.86</td><td class="num">6.00</td><td>Never text: discs, the full storage bar (non-text, ≥ 3 : 1)</td></tr>
+      <tr><td>--ink-4 on --paper</td><td class="num">2.76</td><td class="num">3.47</td><td>Never text</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- ─────────────────────────────── 8 · Questions ─────────────────────────────── -->
+<section class="sec" aria-labelledby="s8">
+  <div><h2 id="s8">8 · Three questions for you</h2><p class="sub">Everything else is decided in the spec, with the reason. A one-word answer per number is enough.</p></div>
+  <ol class="qs">
+    <li class="q"><div class="q-head"><span class="q-n">1</span><h3>How Settings looks</h3></div><p class="rec"><span class="tag">Recommended</span>Icon tabs in the window’s toolbar (as drawn): the Settings look you approved on 30 Sep, now inside the main window.</p><p class="alt">Or System Settings style: the categories replace the sidebar while you are in Settings, with a back arrow.</p></li>
+    <li class="q"><div class="q-head"><span class="q-n">2</span><h3>Windows-shell pages that don’t come to the Mac</h3></div><p class="rec"><span class="tag">Recommended</span>Leave out the 20-hour traffic chart and live session list (Bandwidth), App Activity (CPU, memory, PID), the account notifications list, and the switches a Mac never honours (metered, Files on Demand, File Explorer overlays). Each is listed in the spec with its reason.</p><p class="alt">Or keep any of them, in Settings.</p></li>
+    <li class="q"><div class="q-head"><span class="q-n">3</span><h3>The app menu’s “Sign Out…”</h3></div><p class="rec"><span class="tag">Recommended</span>After task 1887’s device check passes, make it open the same “Sign out of this Mac?” sheet as Settings, so there is one way to sign out.</p><p class="alt">Today it signs out at once when nothing is waiting. This redesign keeps that until you decide.</p></li>
+  </ol>
+</section>
+
+<section class="sec" aria-labelledby="s9">
+  <div><h2 id="s9">9 · What is not checked yet</h2></div>
+  <ul class="plain">
+    <li>These are browser drawings of macOS chrome (menu bar, traffic lights, native menu and alert). Nothing in this page has run on a Mac.</li>
+    <li>Emails, names, sizes, codes, paths and counts are invented examples. The recovery words are not a real phrase.</li>
+    <li>Whether the Windows shell’s Mac-visible pages work against a Mac’s engine (the file overview counts on Home, Free up space, the File menu’s Upload and New folder) is not determined from the code; the spec names each one.</li>
+    <li>Why the Windows shell window showed on the lead’s Mac is not confirmed: the likeliest cause, read from the code, is the shared config creating <code>main-app</code> on every platform and the window-state plugin restoring it as visible.</li>
+  </ul>
+</section>
+</div>
+
+<script>
+(function(){
+  var root=document.documentElement;
+  var btn=document.getElementById('themeBtn');
+  btn.addEventListener('click',function(){
+    var dark=root.getAttribute('data-theme')==='dark'||(!root.getAttribute('data-theme')&&window.matchMedia('(prefers-color-scheme: dark)').matches);
+    root.setAttribute('data-theme',dark?'light':'dark');
+  });
+  function fit(){
+    document.querySelectorAll('.fit').forEach(function(box){
+      var el=box.firstElementChild; if(!el) return;
+      el.style.transform='none';
+      var w=el.offsetWidth,h=el.offsetHeight,s=Math.min(1,box.clientWidth/w);
+      el.style.transform='scale('+s+')';
+      box.style.height=Math.ceil(h*s)+'px';
+    });
+  }
+  window.addEventListener('resize',fit);
+  if(document.fonts&&document.fonts.ready){document.fonts.ready.then(fit)}
+  fit();
+})();
+</script>
+</body></html>
