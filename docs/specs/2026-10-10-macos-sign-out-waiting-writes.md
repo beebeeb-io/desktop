@@ -7,8 +7,9 @@
 **Task:** 1887. It gates every desktop release that carries task 1873. 1873 is merged (desktop `main` `87c11c25`), and
 `RELEASE_BLOCKERS.md` on `main` names this gap. While that file lists an item, the release workflow (`release.yml`, step
 "Refuse while RELEASE_BLOCKERS.md lists an item") and the macOS release script (`scripts/release-macos-local.sh`,
-step 1) refuse. This task removes the item only after its device rung (§13.4) passes.
+step 1) refuse. ~~This task removes the item only after its device rung (§13.4) passes.~~
 — lead, 2026-10-11 (plan)
+**Amended 2026-10-24 (lead):** the item was removed for desktop 0.8.12 on Guus's waiver, verbatim: "Just ship 0.8.12 w/o the checks". Only D1 had run and passed. D2–D11, D10b and D2b were not run (workspace task 2175). The item goes back into `RELEASE_BLOCKERS.md` after 0.8.12, so later releases stay gated until the rung passes.
 **Revised 2026-10-11 (revision 5, plan):** the implementation plan read this spec against `main` at `184ac962` (1873
 merged after fourteen final-fix rounds, 1885 and 1889 merged). Where the code no longer matches this text, the old
 text is struck and the new text is signed "— lead, 2026-10-11 (plan)". Two gaps change the design, not only its
@@ -1728,8 +1729,9 @@ Settings always has a run on a real window (re-review 2 Q6).
 save that is not parked), and, by parking a second save first, whether a parked save is in both folders, as the
 2026-10-11 run found (§9). To park one: change the file on the web, then save it in Finder before the change reaches
 this Mac; the upload meets 409 `stale_base` and parks at once (1873 spec §8.4). A stopped API never parks a Finder
-save any more: a network failure is transient (§2, "Live"). Only after D1-D11 and D10b pass
-may the change that resolves this task remove its item from `RELEASE_BLOCKERS.md`. — lead, 2026-10-11 (plan)
+save any more: a network failure is transient (§2, "Live"). ~~Only after D1-D11 and D10b pass
+may the change that resolves this task remove its item from `RELEASE_BLOCKERS.md`.~~ — lead, 2026-10-11 (plan)
+**Amended 2026-10-24 (lead):** the item was removed for desktop 0.8.12 on Guus's waiver, verbatim: "Just ship 0.8.12 w/o the checks". Only D1 had run and passed. D2–D11, D10b and D2b were not run (workspace task 2175). The item goes back into `RELEASE_BLOCKERS.md` after 0.8.12, so later releases stay gated until the rung passes.
 
 **What no device step proves** (PR #121 reviews 1 and 2). A kill or a power loss in the middle of the purge, and a
 result that returns in the same instant as a close, cannot be driven by hand on a device reliably, so no D step claims
@@ -1762,6 +1764,7 @@ claim it.
   removed by its own change, after the device rung (§13.4) passed and its evidence is recorded, never in the same
   change as the code. The file stays, with its header and no item, so the next blocker has a place.
   — lead, 2026-10-11 (plan)
+  **Amended 2026-10-24 (lead):** the item was removed for desktop 0.8.12 on Guus's waiver, verbatim: "Just ship 0.8.12 w/o the checks". Only D1 had run and passed. D2–D11, D10b and D2b were not run (workspace task 2175). The item goes back into `RELEASE_BLOCKERS.md` after 0.8.12, so later releases stay gated until the rung passes.
 
 ## 15. Open questions
 
