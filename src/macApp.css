@@ -49,6 +49,20 @@
   padding-top: 44px;
 }
 
+/* The band beside the traffic lights (review item 7): a drag region over the sidebar's top padding. Out of flow, so
+   the list below it does not move; the sidebar is its positioning box. */
+.mw-sidebar {
+  position: relative;
+}
+
+.mw-drag-band {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 40px;
+}
+
 .mw-list {
   display: flex;
   flex-direction: column;

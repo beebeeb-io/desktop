@@ -163,9 +163,11 @@ describe('the window, signed in: Home and the sidebar (§7.6)', () => {
     expect(text).toContain('sam@example.eu')
     expect(text).toContain('Basic plan')
     expect(byLabel(m, 'Settings').props.id).toBe('mw-gear')
+    // Review item 7: the toolbar drags with its title and chip ("deep": buttons inside still click), and so does the
+    // sidebar's top band beside the traffic lights.
     const drag = find(m, (el) => el.props['data-tauri-drag-region'] !== undefined)
-    expect(drag).toHaveLength(1)
-    expect(drag[0].props.className).toBe('mw-toolbar')
+    expect(drag.map((el) => [el.props.className, el.props['data-tauri-drag-region']])).toEqual([['mw-drag-band', ''], ['mw-toolbar', 'deep']])
+    expect(navOf(m)[0].props.children[0].props.className).toBe('mw-drag-band')
     expect(find(m, (el) => el.type === 'main')[0].props['aria-labelledby']).toBe('mw-title')
   })
 
@@ -201,6 +203,9 @@ describe('Settings in System Settings style (ruling 1, §7.8)', () => {
     // One window: the same root, the same drag region; no second sidebar.
     expect(navOf(m)).toHaveLength(1)
     expect(focused.at(-1)).toBe('mw-settings-general')
+    // The Settings list keeps the drag band above its back control.
+    expect(nav[0].props.children[0].props.className).toBe('mw-drag-band')
+    expect(nav[0].props.children[0].props['data-tauri-drag-region']).toBe('')
   })
 
   test('the account row is the Account section; exactly one section body is mounted at a time', async () => {

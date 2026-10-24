@@ -9,6 +9,9 @@
 //! The visibility rule (spec §4): opening the Beebeeb window hides the popover; opening the popover leaves the window
 //! where it is (the popover floats above it and hides when it loses focus). So at most two are visible, and the
 //! popover never hides the window.
+//!
+//! The Dock icon is not decided here: the one rule is `policy::dock_icon_wanted`, which `lib.rs` wires (review item
+//! 10 on PR #134 removed this module's second, unwired copy).
 
 use super::failure::Visible;
 use std::collections::BTreeMap;
@@ -49,11 +52,6 @@ impl SurfaceKind {
             SurfaceKind::Popover => ClosePolicy::Hide,
             SurfaceKind::Main => ClosePolicy::Destroy,
         }
-    }
-
-    /// Spec §9.1: a Dock icon while the Beebeeb window is open. The popover never has one.
-    pub const fn needs_dock_icon(self) -> bool {
-        matches!(self, SurfaceKind::Main)
     }
 }
 
@@ -155,11 +153,6 @@ impl SurfaceRegistry {
 
     pub fn live_labels(&self) -> Vec<&'static str> {
         self.live.keys().map(|k| k.label()).collect()
-    }
-
-    /// Whether the app should currently have a Dock icon (activation policy `regular`) rather than `accessory`.
-    pub fn dock_icon_wanted(&self) -> bool {
-        self.live.iter().any(|(k, visible)| *visible && k.needs_dock_icon())
     }
 }
 
@@ -296,20 +289,6 @@ mod tests {
         }
         // 1 + 4 + 4^2 + ... + 4^6: proves the loop walked them all.
         assert_eq!(sequences, 5_461);
-    }
-
-    #[test]
-    fn dock_icon_only_while_the_beebeeb_window_is_visible() {
-        let mut r = SurfaceRegistry::new();
-        assert!(!r.dock_icon_wanted(), "nothing open");
-        r.open(Popover);
-        assert!(!r.dock_icon_wanted(), "the popover alone has no Dock icon");
-        r.open(Main);
-        assert!(r.dock_icon_wanted());
-        r.open(Popover); // over the window
-        assert!(r.dock_icon_wanted(), "the popover does not take the window's Dock icon away");
-        r.close(Main); // destroyed
-        assert!(!r.dock_icon_wanted());
     }
 
     #[test]

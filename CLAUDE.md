@@ -257,9 +257,12 @@ and the pane hosts the section bodies of `src/MacSettings.tsx` unchanged. Every 
 `show_main_window(app, MainNav)` in `lib.rs`: it stores ONE pending request, emits `main:navigate`, and the window pulls
 it with `consume_main_navigation` (also once when it mounts). `src/mainWindowModel.ts` `navigate` is the only place a
 request becomes a view; while a sheet is open nothing navigates, and the window's `main_window_state` makes Rust disable
-View › Home, View › Back and Settings… (§8.2). Closing `main` destroys it (`surfaces::policy::close_policy`); every
-other label still hides. The window-state plugin tracks `main` only, SIZE | POSITION, in `window-state-v2.json`;
-`place_main_window` centres on the menu-bar icon's display and re-centres a frame less than half on screen. The Dock
+View › Home, View › Back, Settings… and Check for Updates… (§8.2). Closing `main` destroys it
+(`surfaces::policy::close_policy`) and the app keeps running (`keep_running_on_exit_request` in the run loop); every
+other label still hides. A Mac does not run the window-state plugin (it stores physical numbers without their scale,
+wrong on a mixed-DPI desk): `save_main_window_frame` keeps `main`'s frame in logical points in
+`main-window-frame.json` (never a full-screen or zoomed one), and `place_main_window` plans from it, centring on the
+menu-bar icon's display and re-centring a frame less than half on screen (`surfaces::window_state`). The Dock
 icon follows `surfaces::policy::dock_icon_wanted` (`main` while it exists; onboarding and conflict windows while shown).
 The macOS menu is `MACOS_MENU_SPECS` + `MACOS_MENU_LAYOUT` (Windows and Linux keep `DESKTOP_MENU_SPECS`). 1887's sign-out
 flow owner is `main`. Until slice 3 the tray click still shows the compact flyout (label `settings`,

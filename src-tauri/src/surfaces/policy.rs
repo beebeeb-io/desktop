@@ -84,6 +84,34 @@ pub fn dock_icon_wanted<'a>(windows: impl IntoIterator<Item = (&'a str, bool)>) 
         .any(|(label, shown)| label == "main" || (shown && (label == "onboarding" || label.starts_with("conflict-"))))
 }
 
+/// Whether an `ExitRequested` is turned down (review P1 on PR #134). Tauri sends it with `code: None` when the last
+/// window is destroyed, and with `Some(code)` for `app.exit(code)` (the menu's Quit) and a restart; AppKit's own
+/// terminate (the tray menu's predefined Quit, logout) never sends it. On a Mac the Beebeeb window is destroyed on
+/// close, and the app lives on in the menu bar without it, so only the last window's close is turned down. Windows and
+/// Linux hide every window instead and keep today's exit.
+pub fn keep_running_on_exit_request(platform: Platform, code: Option<i32>) -> bool {
+    platform == Platform::Macos && code.is_none()
+}
+
+/// What the tray menu's "Hide" hides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrayHide {
+    /// Hide the app (⌘H): every Beebeeb window, unhidden by the Dock or a reopen.
+    App,
+    /// Hide one window.
+    Window(&'static str),
+}
+
+/// The tray menu's "Hide". A Mac hides the app, as ⌘H does (spec A10), which takes the Beebeeb window and the
+/// compact flyout with it; Windows and Linux hide the window "Open Beebeeb" shows there, as before.
+pub fn tray_hide(platform: Platform) -> TrayHide {
+    match platform {
+        Platform::Macos => TrayHide::App,
+        Platform::Windows => TrayHide::Window(main_window_label(platform)),
+        Platform::Linux => TrayHide::Window(compact_window_label(platform)),
+    }
+}
+
 /// Whether `handle_new_conflict` opens a conflict window by itself. Today: yes
 /// everywhere. Slice 6 makes macOS "never" (conflicts become a popover row, a
 /// badge and a notification; the user opens `review`); Windows and Linux keep
@@ -247,6 +275,33 @@ mod tests {
     }
 
     #[test]
+    fn a_mac_keeps_running_when_its_last_window_closes_and_quits_when_asked() {
+        // Review P1 on PR #134: closing the Beebeeb window (red button, ⌘W) when it is the only window made Tauri
+        // send `ExitRequested { code: None }` and the app quit: the status item gone, sync stopped. A Mac keeps
+        // running; an explicit exit (`app.exit(n)`, the menu's Quit; a restart) carries a code and still exits.
+        assert!(keep_running_on_exit_request(Platform::Macos, None));
+        for code in [Some(0), Some(1), Some(tauri::RESTART_EXIT_CODE)] {
+            assert!(!keep_running_on_exit_request(Platform::Macos, code), "{code:?}");
+        }
+        // Windows and Linux are unchanged: they hide every window on close, so this never fires there, and if it
+        // did they exit as before.
+        for platform in [Platform::Windows, Platform::Linux] {
+            assert!(!keep_running_on_exit_request(platform, None), "{platform:?}");
+            assert!(!keep_running_on_exit_request(platform, Some(0)), "{platform:?}");
+        }
+    }
+
+    #[test]
+    fn the_tray_hide_hides_the_app_on_a_mac_and_the_old_window_elsewhere() {
+        // Review item 2: "Open Beebeeb" opens `main`, so "Hide" must not hide only the compact flyout. On a Mac it is
+        // ⌘H (spec A10: "Hide → click away / ⌘H"): the Beebeeb window and the flyout go, and the Dock or a reopen
+        // brings them back. Windows and Linux are unchanged.
+        assert_eq!(tray_hide(Platform::Macos), TrayHide::App);
+        assert_eq!(tray_hide(Platform::Windows), TrayHide::Window("main-app"));
+        assert_eq!(tray_hide(Platform::Linux), TrayHide::Window("settings"));
+    }
+
+    #[test]
     fn current_platform_matches_the_build_target() {
         let expected = if cfg!(target_os = "macos") {
             Platform::Macos
@@ -365,6 +420,55 @@ mod wiring_tests {
             body[linux..].contains("show_compact_app_window_with_nav(app, compact_nav);"),
             "Linux still opens the compact window"
         );
+    }
+
+    #[test]
+    fn the_run_loop_asks_keep_running_on_exit_request_and_prevents_only_then() {
+        // Review P1: the app is built, then run with a callback; `.run(context)` alone would let the last window's
+        // close quit the app.
+        let src = lib_rs();
+        assert!(
+            !src.contains(".run(tauri::generate_context!())"),
+            "the app runs without an exit-request callback again"
+        );
+        let start = src.find(".build(tauri::generate_context!())").expect("the app is built first");
+        let run = &src[start..start + src[start..].find("\n}\n").expect("the end of run()")];
+        let asked = run
+            .find("surfaces::policy::keep_running_on_exit_request(surfaces::policy::Platform::current(), *code)")
+            .unwrap_or_else(|| panic!("the callback asks the policy:\n{run}"));
+        let prevented = run.find("api.prevent_exit();").expect("and prevents the exit");
+        assert!(asked < prevented, "{run}");
+        assert!(run.contains("tauri::RunEvent::ExitRequested { code, api, .. }"), "{run}");
+        assert_eq!(run.matches("api.prevent_exit();").count(), 1, "{run}");
+    }
+
+    #[test]
+    fn the_tray_hide_item_asks_tray_hide() {
+        let src = lib_rs();
+        let start = src.find("\"tray_hide\" =>").expect("the tray's Hide arm");
+        let arm = &src[start..start + src[start..].find("\"tray_autostart\" =>").expect("the next arm")];
+        assert!(arm.contains("surfaces::policy::tray_hide(surfaces::policy::Platform::current())"), "{arm}");
+        assert!(arm.contains("TrayHide::App => {"), "{arm}");
+        assert!(!arm.contains("get_webview_window(\"settings\")"), "a literal label again:\n{arm}");
+    }
+
+    #[test]
+    fn opening_the_window_turns_the_dock_icon_on_before_it_shows_and_activates_after() {
+        // Review item 9: Accessory → Regular, then show, then `set_focus`, which in tao is `makeKeyAndOrderFront`
+        // followed by `activateIgnoringOtherApps:` (tao util/async.rs `set_focus`): the app is activated after the
+        // switch, which is the AppKit mitigation. Both branches (an existing window, a new one) keep that order.
+        let src = lib_rs();
+        let body = item_from(&src, "fn show_main_window(");
+        let dock = body.find("set_macos_dock_icon(app, true);").expect("the Dock icon first");
+        let mut checked = 0;
+        for branch in [&body[..body.find("let Some(config)").unwrap()], &body[body.find("let Some(config)").unwrap()..]] {
+            let show = branch.find("win.show();").unwrap_or_else(|| panic!("a show in:\n{branch}"));
+            let focus = branch.find("win.set_focus();").unwrap_or_else(|| panic!("a focus in:\n{branch}"));
+            assert!(show < focus, "{branch}");
+            checked += 1;
+        }
+        assert!(dock < body.find("win.show();").unwrap());
+        assert_eq!(checked, 2);
     }
 
     #[test]

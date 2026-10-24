@@ -10266,7 +10266,15 @@ fn get_desktop_config() -> Result<config::DesktopSettings, String> {
 /// `pick_sync_root` or any other writer cannot race away a change between
 /// this load and save.
 #[tauri::command]
-fn set_desktop_config(config: config::DesktopSettings) -> Result<(), String> {
+fn set_desktop_config(app: tauri::AppHandle, config: config::DesktopSettings) -> Result<(), String> {
+    let saved = save_desktop_settings(config);
+    // F3 (review item 3): the compact flyout's Network page writes `pause_sync` here; the menu's label follows.
+    pause_state_changed(&app);
+    saved
+}
+
+/// The write behind `set_desktop_config`: one update under the config-write lock (task 1889).
+fn save_desktop_settings(config: config::DesktopSettings) -> Result<(), String> {
     DesktopConfig::update(|cfg| {
         cfg.apply_settings(config);
         (true, ())
@@ -10486,8 +10494,7 @@ async fn set_sync_paused(app: &tauri::AppHandle, paused: bool) -> Result<(), Str
     // Persist so the paused state survives a restart.
     let persisted = persist_sync_paused_at(&DesktopConfig::path()?, &acct.sync_paused, paused);
     // Two-surface F3: the menu's "Pause Sync" / "Resume Sync" follows what the file now says, also after a failure.
-    #[cfg(target_os = "macos")]
-    refresh_macos_pause_menu_label(app);
+    pause_state_changed(app);
     persisted?;
     // Notify the WebView + tray tooltip listener.
     let event_state = if paused { "paused" } else { "idle" };
@@ -13984,19 +13991,6 @@ fn valid_macos_tray_scale_factor(scale_factor: f64) -> f64 {
     }
 }
 
-// ── slice 6: the real macOS Settings window ────────────────────────────────
-//
-// The redesigned Settings window (task 1683 slice 4, `?window=settings-v2`)
-// was dev-URL-only until this slice: no window config opened it, so the
-// Preferences/Settings menu items still opened the legacy compact app window.
-// This is the flip: a configured, on-demand-built window with an overlay
-// title bar (the `.ms-toolbar` is the drag region; the traffic lights sit at
-// its left), opened top-right under the menu bar on the tray icon's display.
-//
-// `create: false` in tauri.conf.json keeps it off every platform's startup
-// set — nothing builds it except the macOS open path below, so Windows and
-// Linux never see a webview for it.
-
 // ── The Beebeeb window on a Mac (task 1683 slice 1) ──────────────────────────
 //
 // Two-surface spec `docs/specs/2026-10-24-macos-two-surface-app.md` §4, §7, §9: one window, label `main`, built on
@@ -14091,59 +14085,126 @@ fn back_in_main_window(app: &tauri::AppHandle) {
     }
 }
 
-/// The centre of the menu-bar icon, in physical desktop pixels, when macOS reports its rect.
+/// The displays in logical points (each one's physical frame over its own scale), and their scales.
 #[cfg(target_os = "macos")]
-fn macos_status_item_centre(app: &tauri::AppHandle) -> Option<(i32, i32)> {
-    let rect = app.tray_by_id("tray")?.rect().ok().flatten()?;
-    let position = rect.position.to_physical::<f64>(1.0);
-    let size = rect.size.to_physical::<f64>(1.0);
-    Some(((position.x + size.width / 2.0).round() as i32, (position.y + size.height / 2.0).round() as i32))
-}
-
-/// §7.2: centred on the icon's display the first time, then where it was left (the window-state plugin restores
-/// SIZE and POSITION for `main` only), and centred again when less than half of that frame is on a display.
-#[cfg(target_os = "macos")]
-fn place_main_window(app: &tauri::AppHandle, win: &tauri::WebviewWindow) {
-    use surfaces::window_state::{self as placement, PRect, PhysicalDisplay};
-    use tauri_plugin_window_state::WindowExt;
+fn macos_displays(win: &tauri::WebviewWindow) -> (Vec<surfaces::window_state::Display>, Vec<f64>, usize) {
+    use surfaces::window_state::{Display, PRect};
     let monitors = win.available_monitors().unwrap_or_default();
-    let displays: Vec<PhysicalDisplay> = monitors
+    let displays = monitors
         .iter()
-        .map(|m| PhysicalDisplay {
-            frame: PRect { x: m.position().x, y: m.position().y, w: m.size().width, h: m.size().height },
-            work_area: PRect {
-                x: m.work_area().position.x,
-                y: m.work_area().position.y,
-                w: m.work_area().size.width,
-                h: m.work_area().size.height,
-            },
+        .map(|m| {
+            Display::from_physical(
+                PRect { x: m.position().x, y: m.position().y, w: m.size().width, h: m.size().height },
+                PRect {
+                    x: m.work_area().position.x,
+                    y: m.work_area().position.y,
+                    w: m.work_area().size.width,
+                    h: m.work_area().size.height,
+                },
+                m.scale_factor(),
+            )
         })
         .collect();
+    let scales = monitors.iter().map(|m| m.scale_factor()).collect();
     let primary = win
         .primary_monitor()
         .ok()
         .flatten()
-        .and_then(|p| monitors.iter().position(|m| m.position() == p.position()))
+        .and_then(|p| monitors.iter().position(|m| m.name() == p.name() && m.position() == p.position()))
         .unwrap_or(0);
-    let icon = macos_status_item_centre(app).and_then(|(x, y)| placement::display_containing(x, y, &displays));
-    let move_to = |(x, y): (i32, i32)| {
-        let _ = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(x, y)));
+    (displays, scales, primary)
+}
+
+/// The menu-bar icon's rect as tray-icon reports it (points × the icon's own scale).
+#[cfg(target_os = "macos")]
+fn macos_status_item_rect(app: &tauri::AppHandle) -> Option<surfaces::window_state::PRect> {
+    let rect = app.tray_by_id("tray")?.rect().ok().flatten()?;
+    let position = rect.position.to_physical::<f64>(1.0);
+    let size = rect.size.to_physical::<f64>(1.0);
+    Some(surfaces::window_state::PRect {
+        x: position.x.round() as i32,
+        y: position.y.round() as i32,
+        w: size.width.round().max(0.0) as u32,
+        h: size.height.round().max(0.0) as u32,
+    })
+}
+
+/// Where the Beebeeb window's frame is kept (logical points), in the app's config directory.
+#[cfg(target_os = "macos")]
+fn main_frame_path(app: &tauri::AppHandle) -> Option<PathBuf> {
+    app.path()
+        .app_config_dir()
+        .ok()
+        .map(|dir| dir.join(surfaces::window_state::MAIN_FRAME_FILENAME))
+}
+
+/// Keeps the Beebeeb window's frame, when it closes and when the app quits while it is open (§7.2). A full-screen
+/// or zoomed window keeps nothing, so the last ordinary frame stays (review item 8).
+#[cfg(target_os = "macos")]
+fn save_main_window_frame(app: &tauri::AppHandle) {
+    let label = surfaces::policy::main_window_label(surfaces::policy::Platform::current());
+    let Some(win) = app.get_webview_window(label) else {
+        return;
     };
-    // First open: centred on the icon's display. A saved frame, restored next, replaces it.
-    if let (Ok(size), Some(display)) = (win.outer_size(), displays.get(icon.unwrap_or(primary))) {
-        move_to(placement::centred_origin((size.width, size.height), display));
-    }
-    if let Err(error) = win.restore_state(placement::state_flags()) {
-        tracing::warn!(%error, "main window: the saved frame could not be restored; it opens centred");
-    }
-    if let (Ok(position), Ok(size)) = (win.outer_position(), win.outer_size()) {
-        let frame = PRect { x: position.x, y: position.y, w: size.width, h: size.height };
-        if let Some(origin) = placement::main_window_origin(frame, &displays, icon, primary) {
-            tracing::info!("main window: less than half of its saved frame is on a display; centred again");
-            move_to(origin);
-        }
+    let (Ok(position), Ok(size), Ok(scale)) = (win.outer_position(), win.inner_size(), win.scale_factor()) else {
+        return;
+    };
+    let fullscreen = win.is_fullscreen().unwrap_or(false);
+    let zoomed = win.is_maximized().unwrap_or(false);
+    let Some(frame) = surfaces::window_state::frame_to_keep(
+        (position.x, position.y),
+        (size.width, size.height),
+        scale,
+        fullscreen,
+        zoomed,
+    ) else {
+        return;
+    };
+    let Some(path) = main_frame_path(app) else {
+        return;
+    };
+    let written = path
+        .parent()
+        .map(std::fs::create_dir_all)
+        .unwrap_or(Ok(()))
+        .and_then(|_| {
+            let temporary = path.with_extension("json.tmp");
+            std::fs::write(&temporary, serde_json::to_vec(&frame).unwrap_or_default())?;
+            std::fs::rename(&temporary, &path)
+        });
+    if let Err(error) = written {
+        tracing::warn!(%error, "main window: its frame could not be kept");
     }
 }
+
+/// §7.2, planned in full before any of it is applied (review item 4): the kept frame when at least half of it is on a
+/// display, else centred on the menu-bar icon's display, else on the primary one. Logical points throughout, so a
+/// mixed-DPI desk places it where it was (review item 5).
+#[cfg(target_os = "macos")]
+fn place_main_window(app: &tauri::AppHandle, win: &tauri::WebviewWindow) {
+    use surfaces::window_state as placement;
+    let (displays, scales, primary) = macos_displays(win);
+    let icon = macos_status_item_rect(app).and_then(|rect| placement::icon_display(rect, &scales, &displays));
+    let kept = main_frame_path(app)
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|json| placement::parse_kept_frame(&json));
+    let default_size = (MAIN_WINDOW_WIDTH, MAIN_WINDOW_HEIGHT);
+    let Some(frame) = placement::plan_main_window(kept, &displays, icon, primary, default_size) else {
+        tracing::warn!("main window: no display to place it on");
+        return;
+    };
+    if kept.is_some() && kept != Some(frame) {
+        tracing::info!("main window: less than half of its kept frame is on a display; centred again");
+    }
+    let _ = win.set_size(tauri::Size::Logical(tauri::LogicalSize::new(frame.w, frame.h)));
+    let _ = win.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(frame.x, frame.y)));
+}
+
+/// The Beebeeb window's default size in points (`tauri.macos.conf.json`, spec §7.2).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const MAIN_WINDOW_WIDTH: f64 = 920.0;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const MAIN_WINDOW_HEIGHT: f64 = 620.0;
 
 /// The activation policy last applied: 0 unknown (the app starts Regular), 1 Dock icon, 2 none.
 #[cfg(target_os = "macos")]
@@ -14183,13 +14244,15 @@ fn refresh_macos_dock_icon(app: &tauri::AppHandle, gone: Option<&str>) {
 }
 
 /// What the app menu may offer around the Beebeeb window (two-surface spec §8.2, F15): View › Back only while
-/// Settings shows in an open window; View › Home and Beebeeb › Settings… always, except while a sheet is open, so
-/// ⌘1, ⌘[ and ⌘, cannot unmount Settings › Account under its sheet.
+/// Settings shows in an open window; View › Home, Beebeeb › Settings… and Check for Updates… (which opens Settings ›
+/// About) always, except while a sheet is open, so ⌘1, ⌘[, ⌘, and ⇧⌘U cannot unmount Settings › Account under its
+/// sheet (review item 6 chose disabling over a second way to answer the check).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MainMenuState {
     settings: bool,
     home: bool,
     back: bool,
+    check_updates: bool,
 }
 
 #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
@@ -14199,6 +14262,7 @@ fn main_menu_state(main_open: bool, settings_showing: bool, sheet_open: bool) ->
         settings: !sheet,
         home: !sheet,
         back: main_open && settings_showing && !sheet,
+        check_updates: !sheet,
     }
 }
 
@@ -14208,6 +14272,7 @@ fn apply_macos_main_menu_state(app: &tauri::AppHandle, state: MainMenuState) {
         return;
     };
     let _ = items.settings.set_enabled(state.settings);
+    let _ = items.check_updates.set_enabled(state.check_updates);
     let _ = items.view_home.set_enabled(state.home);
     let _ = items.view_back.set_enabled(state.back);
 }
@@ -14223,20 +14288,17 @@ fn main_window_state(app: tauri::AppHandle, window: tauri::WebviewWindow, settin
     let _ = (app, window, settings_showing, sheet_open);
 }
 
-/// A window's life on a Mac, beside the global close handler: the Beebeeb window's end resets the menu and saves
-/// its frame (the plugin otherwise writes at exit only, so a crash would lose it), and every window that comes,
-/// goes or hides sets the Dock icon again (§9.1).
+/// A window's life on a Mac, beside the global close handler: the Beebeeb window keeps its frame when it closes and
+/// resets the menu when it is gone, and every window that comes, goes or hides sets the Dock icon again (§9.1).
 #[cfg(target_os = "macos")]
 fn macos_window_lifecycle(window: &tauri::Window, event: &tauri::WindowEvent) {
     let app = window.app_handle();
+    let main = window.label() == surfaces::policy::main_window_label(surfaces::policy::Platform::current());
     match event {
+        tauri::WindowEvent::CloseRequested { .. } if main => save_main_window_frame(app),
         tauri::WindowEvent::Destroyed => {
-            if window.label() == surfaces::policy::main_window_label(surfaces::policy::Platform::current()) {
+            if main {
                 apply_macos_main_menu_state(app, main_menu_state(false, false, false));
-                use tauri_plugin_window_state::AppHandleExt;
-                if let Err(error) = app.save_window_state(surfaces::window_state::state_flags()) {
-                    tracing::warn!(%error, "main window: its frame could not be saved");
-                }
             }
             refresh_macos_dock_icon(app, Some(window.label()));
         }
@@ -14245,19 +14307,9 @@ fn macos_window_lifecycle(window: &tauri::Window, event: &tauri::WindowEvent) {
     }
 }
 
-/// The window-state plugin. A Mac tracks the Beebeeb window alone, in a file of its own, size and position only,
-/// and restores it itself (`place_main_window`); Windows and Linux keep today's default file and denylist.
-#[cfg(target_os = "macos")]
-fn window_state_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
-    use surfaces::window_state as placement;
-    tauri_plugin_window_state::Builder::default()
-        .with_filename(placement::FILENAME_V2)
-        .with_filter(placement::tracks_label)
-        .with_state_flags(placement::state_flags())
-        .skip_initial_state(placement::TRACKED_LABEL)
-        .build()
-}
-
+/// The window-state plugin, on Windows and Linux only, with today's default file and denylist. A Mac does not run
+/// it (review item 5 on PR #134): it stores physical numbers without their scale, which cannot be placed back on a
+/// mixed-DPI desk, so `place_main_window` and `save_main_window_frame` keep the Beebeeb window's frame in points.
 #[cfg(not(target_os = "macos"))]
 fn window_state_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
     tauri_plugin_window_state::Builder::default()
@@ -14276,16 +14328,19 @@ pub fn run() {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .try_init();
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         // Shared state — session installed via apply_session (the
         // browser-login handoff) after login. The sync engine task reads
         // from this.
         .manage(AppState::default())
         // Task 1683 slice 2: transfer board, last engine status, cached storage summary.
         .manage(popover_data::PopoverRuntime::default())
-        .plugin(tauri_plugin_opener::init())
-        // Task 1683 slice 1: a Mac tracks the Beebeeb window alone (two-surface spec §7.2); see `window_state_plugin`.
-        .plugin(window_state_plugin())
+        .plugin(tauri_plugin_opener::init());
+    // Windows and Linux keep the window-state plugin; a Mac keeps the Beebeeb window's frame itself (task 1683 slice 1,
+    // review item 5; see `window_state_plugin`).
+    #[cfg(not(target_os = "macos"))]
+    let builder = builder.plugin(window_state_plugin());
+    builder
         // Native folder picker for the first-launch sync-root chooser.
         .plugin(tauri_plugin_dialog::init())
         // Native OS notifications — Task 11. The first conflict
@@ -14683,8 +14738,24 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             macos_window_lifecycle(window, event);
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Beebeeb desktop");
+        .build(tauri::generate_context!())
+        .expect("error while building Beebeeb desktop")
+        .run(|app, event| {
+            // Review P1 on PR #134: on a Mac the Beebeeb window is destroyed on close, and when it was the last
+            // window Tauri asks to exit (`code: None`). Beebeeb lives on in the menu bar; an explicit exit still exits.
+            if let tauri::RunEvent::ExitRequested { code, api, .. } = &event
+                && surfaces::policy::keep_running_on_exit_request(surfaces::policy::Platform::current(), *code)
+            {
+                api.prevent_exit();
+            }
+            // Task 1683 slice 1 (review item 4): a quit while the Beebeeb window is open keeps its frame.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Exit = event {
+                save_main_window_frame(app);
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = app;
+        });
 }
 
 // ── Update loop ───────────────────────────────────────────────────────────────
@@ -15105,6 +15176,21 @@ fn pause_menu_label(paused: bool) -> &'static str {
     if paused { MENU_RESUME_SYNC_LABEL } else { MENU_PAUSE_SYNC_LABEL }
 }
 
+/// F3: the label for what the file says now (an unreadable file reads as not paused, as the menu toggle does).
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn pause_menu_label_now() -> &'static str {
+    pause_menu_label(DesktopConfig::load().map(|cfg| cfg.pause_sync).unwrap_or(false))
+}
+
+/// Every pause change calls this once it is written (the menu, the tray commands, Home's Resume, and a settings
+/// write from the compact flyout's Network page): the menu's label follows the file (F3).
+fn pause_state_changed(app: &tauri::AppHandle) {
+    #[cfg(target_os = "macos")]
+    refresh_macos_pause_menu_label(app);
+    #[cfg(not(target_os = "macos"))]
+    let _ = app;
+}
+
 /// One entry of the macOS menu bar: an item from `MACOS_MENU_SPECS` by id, or one AppKit draws itself.
 #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15256,43 +15342,63 @@ fn about_metadata() -> AboutMetadata<'static> {
     }
 }
 
-/// The four menu items the app changes after it built the menu (macOS): Settings… and the View items follow the
-/// Beebeeb window (§8.2, F15), Pause Sync follows the pause (F3).
+/// The menu items the app changes after it built the menu (macOS): Settings…, Check for Updates… and the View items
+/// follow the Beebeeb window (§8.2, F15), Pause Sync follows the pause (F3).
 #[cfg(target_os = "macos")]
 struct MacosMenuItems {
     settings: MenuItem<tauri::Wry>,
+    check_updates: MenuItem<tauri::Wry>,
     toggle_sync: MenuItem<tauri::Wry>,
     view_home: MenuItem<tauri::Wry>,
     view_back: MenuItem<tauri::Wry>,
 }
 
-/// F3: the menu says "Resume Sync" while the file says paused, else "Pause Sync".
+#[cfg(target_os = "macos")]
+impl MacosMenuItems {
+    /// The one built item for `id` when it is one of these.
+    fn get(&self, id: &str) -> Option<&MenuItem<tauri::Wry>> {
+        match id {
+            MENU_PREFERENCES_ID => Some(&self.settings),
+            MENU_CHECK_UPDATES_ID => Some(&self.check_updates),
+            MENU_TOGGLE_SYNC_ID => Some(&self.toggle_sync),
+            MENU_VIEW_HOME_ID => Some(&self.view_home),
+            MENU_VIEW_BACK_ID => Some(&self.view_back),
+            _ => None,
+        }
+    }
+}
+
+/// F3: the menu says "Resume Sync" while the file says paused, else "Pause Sync". Called through
+/// `pause_state_changed` only.
 #[cfg(target_os = "macos")]
 fn refresh_macos_pause_menu_label(app: &tauri::AppHandle) {
     let Some(items) = app.try_state::<MacosMenuItems>() else {
         return;
     };
-    let paused = DesktopConfig::load().map(|cfg| cfg.pause_sync).unwrap_or(false);
-    let _ = items.toggle_sync.set_text(pause_menu_label(paused));
+    let _ = items.toggle_sync.set_text(pause_menu_label_now());
 }
 
-/// The macOS menu bar from `MACOS_MENU_LAYOUT` (task 1683 slice 1).
+/// The macOS menu bar from `MACOS_MENU_LAYOUT` (task 1683 slice 1). The items the app changes later are built from
+/// `MACOS_MENU_SPECS` first and placed where the layout names them.
 #[cfg(target_os = "macos")]
 fn setup_native_menu(app: &mut tauri::App) -> tauri::Result<()> {
     use tauri::menu::IsMenuItem;
-    let mut kept: std::collections::HashMap<&'static str, MenuItem<tauri::Wry>> = std::collections::HashMap::new();
+    let kept = MacosMenuItems {
+        settings: build_desktop_menu_item(app, desktop_menu_spec_required(MENU_PREFERENCES_ID))?,
+        check_updates: build_desktop_menu_item(app, desktop_menu_spec_required(MENU_CHECK_UPDATES_ID))?,
+        toggle_sync: build_desktop_menu_item(app, desktop_menu_spec_required(MENU_TOGGLE_SYNC_ID))?,
+        view_home: build_desktop_menu_item(app, desktop_menu_spec_required(MENU_VIEW_HOME_ID))?,
+        view_back: build_desktop_menu_item(app, desktop_menu_spec_required(MENU_VIEW_BACK_ID))?,
+    };
     let mut menus: Vec<Submenu<tauri::Wry>> = Vec::new();
     for (title, entries) in MACOS_MENU_LAYOUT {
         let mut items: Vec<Box<dyn IsMenuItem<tauri::Wry>>> = Vec::new();
         for entry in entries.iter() {
             let item: Box<dyn IsMenuItem<tauri::Wry>> = match *entry {
-                MacosMenuEntry::Item(id) => {
-                    let item = build_desktop_menu_item(app, desktop_menu_spec_required(id))?;
-                    if [MENU_PREFERENCES_ID, MENU_TOGGLE_SYNC_ID, MENU_VIEW_HOME_ID, MENU_VIEW_BACK_ID].contains(&id) {
-                        kept.insert(id, item.clone());
-                    }
-                    Box::new(item)
-                }
+                MacosMenuEntry::Item(id) => match kept.get(id) {
+                    Some(item) => Box::new(item.clone()),
+                    None => Box::new(build_desktop_menu_item(app, desktop_menu_spec_required(id))?),
+                },
                 MacosMenuEntry::About => {
                     Box::new(PredefinedMenuItem::about(app, Some("About Beebeeb"), Some(about_metadata()))?)
                 }
@@ -15325,21 +15431,10 @@ fn setup_native_menu(app: &mut tauri::App) -> tauri::Result<()> {
     let refs: Vec<&dyn IsMenuItem<tauri::Wry>> = menus.iter().map(|menu| menu as &dyn IsMenuItem<tauri::Wry>).collect();
     let menu = Menu::with_items(app, &refs)?;
     app.set_menu(menu)?;
-    let take = |id: &str| {
-        kept.get(id)
-            .cloned()
-            .ok_or_else(|| tauri::Error::AssetNotFound(format!("menu item {id}")))
-    };
-    let items = MacosMenuItems {
-        settings: take(MENU_PREFERENCES_ID)?,
-        toggle_sync: take(MENU_TOGGLE_SYNC_ID)?,
-        view_home: take(MENU_VIEW_HOME_ID)?,
-        view_back: take(MENU_VIEW_BACK_ID)?,
-    };
-    app.manage(items);
+    app.manage(kept);
     // No Beebeeb window yet: Back off, the rest on; and the pause label as the file says.
     apply_macos_main_menu_state(app.handle(), main_menu_state(false, false, false));
-    refresh_macos_pause_menu_label(app.handle());
+    pause_state_changed(app.handle());
     Ok(())
 }
 
@@ -15518,40 +15613,74 @@ mod main_window_tests {
     #[test]
     fn the_menu_around_the_window_follows_section_8_2() {
         // No window: Settings… and Home open it; Back has nothing to go back from.
-        assert_eq!(
-            main_menu_state(false, false, false),
-            MainMenuState { settings: true, home: true, back: false }
-        );
+        let on = |back| MainMenuState { settings: true, home: true, back, check_updates: true };
+        assert_eq!(main_menu_state(false, false, false), on(false));
         // Home in the window: as above.
-        assert_eq!(
-            main_menu_state(true, false, false),
-            MainMenuState { settings: true, home: true, back: false }
-        );
+        assert_eq!(main_menu_state(true, false, false), on(false));
         // Settings shows: Back on.
-        assert_eq!(
-            main_menu_state(true, true, false),
-            MainMenuState { settings: true, home: true, back: true }
-        );
-        // A sheet is open: ⌘1, ⌘[ and ⌘, are all off, so nothing unmounts the section under it.
-        assert_eq!(
-            main_menu_state(true, true, true),
-            MainMenuState { settings: false, home: false, back: false }
-        );
-        assert_eq!(
-            main_menu_state(true, false, true),
-            MainMenuState { settings: false, home: false, back: false }
-        );
+        assert_eq!(main_menu_state(true, true, false), on(true));
+        // A sheet is open: ⌘1, ⌘[, ⌘, and Check for Updates… (which opens Settings › About) are all off, so nothing
+        // unmounts the section under the sheet (review item 6: disabled with the §8.2 items, not a second answer).
+        let off = MainMenuState { settings: false, home: false, back: false, check_updates: false };
+        assert_eq!(main_menu_state(true, true, true), off);
+        assert_eq!(main_menu_state(true, false, true), off);
         // A sheet with no window cannot exist; a stale report of one never disables the openers.
-        assert_eq!(
-            main_menu_state(false, true, true),
-            MainMenuState { settings: true, home: true, back: false }
-        );
+        assert_eq!(main_menu_state(false, true, true), on(false));
     }
 
     #[test]
     fn the_pause_item_says_what_it_will_do() {
         assert_eq!(pause_menu_label(false), "Pause Sync");
         assert_eq!(pause_menu_label(true), "Resume Sync");
+    }
+
+    /// Review item 3: the label follows the file whichever way the pause was written: the menu or the tray
+    /// (`persist_sync_paused_at`) and a settings write from the compact flyout's Network page (`set_desktop_config`).
+    #[tokio::test]
+    async fn the_pause_label_follows_every_writer_of_the_pause() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        crate::config::CONFIG_DIR_OVERRIDE
+            .scope(dir.path().to_path_buf(), async {
+                assert_eq!(pause_menu_label_now(), "Pause Sync");
+                let patch: crate::config::DesktopSettings =
+                    serde_json::from_str(r#"{ "pause_sync": true }"#).expect("the Network page sends the pause");
+                save_desktop_settings(patch).expect("saved");
+                assert_eq!(pause_menu_label_now(), "Resume Sync");
+                let path = DesktopConfig::path().expect("the scoped config path");
+                let flag = std::sync::atomic::AtomicBool::new(true);
+                persist_sync_paused_at(&path, &flag, false).expect("the menu resumes");
+                assert_eq!(pause_menu_label_now(), "Pause Sync");
+            })
+            .await;
+    }
+
+    #[test]
+    fn every_pause_writer_refreshes_the_menu_label() {
+        let production = super::finder_setup_command_tests::production_source();
+        for signature in ["fn set_desktop_config(", "async fn set_sync_paused("] {
+            let body = super::finder_setup_command_tests::body_between(&production, signature, "\n}\n");
+            assert!(body.contains("pause_state_changed(&app);") || body.contains("pause_state_changed(app);"), "{signature}:\n{body}");
+        }
+        assert!(
+            !production.contains("refresh_macos_pause_menu_label(app);\n    persisted?;"),
+            "set_sync_paused refreshes through the one shared call"
+        );
+    }
+
+    #[test]
+    fn the_menu_keeps_its_four_items_from_the_table_without_a_lookup_that_can_fail() {
+        // Review item 13.
+        let production = super::finder_setup_command_tests::production_source();
+        let body = super::finder_setup_command_tests::body_between(
+            &production,
+            "#[cfg(target_os = \"macos\")]\nfn setup_native_menu(",
+            "\n}\n",
+        );
+        assert!(!body.contains("HashMap"), "{body}");
+        assert!(!body.contains("AssetNotFound"), "{body}");
+        for id in ["MENU_PREFERENCES_ID", "MENU_CHECK_UPDATES_ID", "MENU_TOGGLE_SYNC_ID", "MENU_VIEW_HOME_ID", "MENU_VIEW_BACK_ID"] {
+            assert!(body.contains(&format!("desktop_menu_spec_required({id})")), "{id}:\n{body}");
+        }
     }
 
     #[test]
@@ -16082,20 +16211,20 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
 
     tray.on_menu_event(|app, event| match event.id().as_ref() {
         "open_settings" => show_main_app_window_impl(app),
-        "tray_hide" => {
-            #[cfg(target_os = "windows")]
-            {
-                if let Some(win) = app.get_webview_window("main-app") {
+        "tray_hide" => match surfaces::policy::tray_hide(surfaces::policy::Platform::current()) {
+            // A Mac hides the app (⌘H): the Beebeeb window and the compact flyout; the Dock or a reopen unhides.
+            surfaces::policy::TrayHide::App => {
+                #[cfg(target_os = "macos")]
+                if let Err(error) = app.hide() {
+                    tracing::warn!(%error, "the tray's Hide could not hide the app");
+                }
+            }
+            surfaces::policy::TrayHide::Window(label) => {
+                if let Some(win) = app.get_webview_window(label) {
                     let _ = win.hide();
                 }
             }
-            #[cfg(not(target_os = "windows"))]
-            {
-                if let Some(win) = app.get_webview_window("settings") {
-                    let _ = win.hide();
-                }
-            }
-        }
+        },
         "tray_autostart" => {
             // Toggle autostart and rebuild the tray menu so the check
             // mark reflects the new state. TrayIcon::set_menu replaces
@@ -33896,7 +34025,7 @@ mod config_write_pin_tests {
             || async {
                 let mut settings = crate::config::DesktopSettings::from(&DesktopConfig::default());
                 settings.upload_kbps_limit = Some(1234);
-                super::set_desktop_config(settings).expect("set_desktop_config");
+                super::save_desktop_settings(settings).expect("set_desktop_config");
             },
         )
         .await;
@@ -34286,7 +34415,7 @@ mod config_write_pin_tests {
 
                 let patch: crate::config::DesktopSettings =
                     serde_json::from_str(r#"{ "upload_kbps_limit": 2000 }"#).expect("the window sends one field");
-                super::set_desktop_config(patch).expect("the speed is saved");
+                super::save_desktop_settings(patch).expect("the speed is saved");
 
                 let on_disk = DesktopConfig::load_from(&path).expect("reads back");
                 assert!(on_disk.pause_sync, "the tray's pause survived the speed change");
@@ -34470,7 +34599,9 @@ mod config_write_pin_tests {
             ("persist_sync_root_and_start_engine", held),
             ("ensure_sync_root_and_engine", update),
             ("pick_sync_root", update),
-            ("set_desktop_config", update),
+            // Task 1683 slice 1 (review item 3): the command is a wrapper that also refreshes the menu's pause label;
+            // its write moved, unchanged, to `save_desktop_settings`.
+            ("save_desktop_settings", update),
             ("set_sync_paused", "persist_sync_paused_at("),
             ("persist_sync_paused_at", "DesktopConfig::update_at_then("),
             ("set_sync_mode", update),

@@ -95,7 +95,7 @@ function accountLine(account: PopoverSnapshot['account'], plan: Subscription | n
 
 // ── Home (§7.6, first cut: status, Finder row, storage, the kept rows) ────────
 
-export function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefresh: () => void }) {
+function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefresh: () => void }) {
   const { showToast } = useToast()
   const finder = useFinderSetup()
   const kept = useKeptFolders()
@@ -257,7 +257,7 @@ export function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; o
 
 // ── Signed out (until slice 2 brings sign-in into this window) ───────────────
 
-export function SignedOutCard({
+function SignedOutCard({
   reauth,
   email,
   note,
@@ -461,7 +461,7 @@ export default function MacApp() {
   if (snapshot === null || account === null) {
     return (
       <div className="mw-window mw-window--solo">
-        <div className="mw-toolbar mw-toolbar--solo" data-tauri-drag-region />
+        <div className="mw-toolbar mw-toolbar--solo" data-tauri-drag-region="" />
         <div className="mw-solo-body">
           {snapshotFailed ? (
             <Note
@@ -504,7 +504,7 @@ export default function MacApp() {
   if (view.mode === 'main' && base !== 'home') {
     return (
       <div className="mw-window mw-window--solo">
-        <div className="mw-toolbar mw-toolbar--solo" data-tauri-drag-region />
+        <div className="mw-toolbar mw-toolbar--solo" data-tauri-drag-region="" />
         <main className="mw-solo-main" aria-labelledby="mw-title">
           <SignedOutCard reauth={base === 'reauth'} email={account.email} note={signOutNote} busy={signingIn} onSignIn={() => void signIn()} />
         </main>
@@ -537,6 +537,7 @@ export default function MacApp() {
   const sidebar =
     view.mode === 'settings' ? (
       <nav className="mw-sidebar mw-sidebar--settings" aria-label="Settings">
+        <div className="mw-drag-band" data-tauri-drag-region="" />
         <button
           type="button"
           className="mw-back"
@@ -591,6 +592,8 @@ export default function MacApp() {
       </nav>
     ) : (
       <nav className="mw-sidebar" aria-label="Beebeeb">
+        {/* The band beside the traffic lights drags the window, as the toolbar does (review item 7). */}
+        <div className="mw-drag-band" data-tauri-drag-region="" />
         <div className="mw-list">
           {MAIN_SECTIONS.map((section) => (
             <button
@@ -639,8 +642,9 @@ export default function MacApp() {
     <div className="mw-window">
       {sidebar}
       <main className="mw-main" aria-labelledby="mw-title">
-        {/* The toolbar is the window's drag handle (the overlay title bar puts the traffic lights over the sidebar). */}
-        <div className="mw-toolbar" data-tauri-drag-region>
+        {/* The toolbar is the window's drag handle, its title and chip included ("deep": a button in it still clicks).
+            The overlay title bar puts the traffic lights over the sidebar. */}
+        <div className="mw-toolbar" data-tauri-drag-region="deep">
           <h1 id="mw-title" className="mw-title">{sectionTitle(view)}</h1>
           {/* The hi-fi's Home toolbar (section 3): the encryption state, in amber, while the vault is unlocked. */}
           {view.mode === 'main' && unlocked ? (

@@ -34,7 +34,7 @@ import {
 } from './desktopApi'
 import type { PopoverSnapshot } from './popoverContract'
 import { clearSignOutWarning, heldSignOutWarning, holdSignOutWarning, subscribeSignOutWarning } from './accountSession'
-import { subscribeKeptFolderChanged, useFinderSetup } from './finderSetup'
+import { useFinderSetup } from './finderSetup'
 import { finderActionButtonLabel } from './finderSetupCopy'
 import { SUPPORT_BUNDLE_DETAIL, SUPPORT_BUNDLE_SAVED_TITLE, supportBundleSavedMessage, type ProblemReportResult } from './diagnosticsCopy'
 import {
@@ -44,8 +44,6 @@ import {
   HELP_URL,
   keepCountLabel,
   keepOnMac,
-  KEPT_FOLDER_ROW_SENTENCE,
-  keptFolderAfterDismiss,
   monoReason,
   NOTIFICATION_ROWS,
   planLine,
@@ -53,14 +51,9 @@ import {
   REPAIR_BODY,
   REPAIR_TITLE,
   repairNote,
-  SETTINGS_TABS,
-  settingsTabFromLocation,
   speedOptions,
   storageLine,
-  tabAfterKey,
   updateRow,
-  type DismissKeptFolderResult,
-  type SettingsTab,
 } from './macSettingsModel'
 import { Btn, Note, Select, SettingRow, SettingsGroup, SettingsIcon, Switch, ToggleRow } from './macSettingsParts'
 import {
@@ -68,10 +61,6 @@ import {
   ASK_CANCEL,
   ASK_SIGN_OUT,
   askLines,
-  K2_DISMISS,
-  K2_ROW,
-  K2_SHOW,
-  K3_TOAST,
   P0_TITLE,
   P2_HINT,
   P3_STOP,
@@ -81,13 +70,12 @@ import {
   type EndReason,
   type NotSending,
 } from './signOutCopy'
-import { connectSignOutFlowEvents, connectSignOutFlowMenu, SignOutFlow, signOutFlowApi, type FlowOutcome, type FlowView } from './signOutFlow'
+import { SignOutFlow, type FlowOutcome, type FlowView } from './signOutFlow'
 import { residencySummary } from './windows/dataResidencySettingsModel'
 import { useDataResidency } from './windows/useDataResidency'
 import { KeptFolderNotes, useKeptFolders } from './keptFolderRows'
 import { Modal, useToast } from './windows/ui'
-import { listen } from '@tauri-apps/api/event'
-import { connectNativeUpdateMenu, desktopUpdateCheck } from './windows/manualUpdateCheck'
+import { desktopUpdateCheck } from './windows/manualUpdateCheck'
 
 // ── Shared state: the desktop config ────────────────────────────────────────
 
