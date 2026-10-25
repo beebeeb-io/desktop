@@ -456,6 +456,125 @@ describe('Security: the authenticator row is read fresh (review P2-B) and not mo
     expect(visibleText(m)).not.toMatch(/Authenticator app \(TOTP\) · /)
   })
 
+  // Lead ruling on #147: the age of a stale answer is said, in the row's secondary text.
+  describe('an answer older than five minutes says so', () => {
+    /** The page's own minute tick (it re-renders so a shown age does not stand still), so a test can let a minute pass. */
+    function watchTicks(): { tick: () => void; live: () => number } {
+      const fns = new Set<() => void>()
+      const w = (globalThis as any).window
+      w.setInterval = (fn: () => void) => { fns.add(fn); return fns.size }
+      w.clearInterval = () => { fns.clear() }
+      return { tick: () => fns.forEach((fn) => fn()), live: () => fns.size }
+    }
+
+    test('under five minutes the row is as it was: no age', async () => {
+      const m = openSecurity()
+      watchFocus()
+      await settle(m)
+      advance(5 * MINUTE - 1000)
+      m.render()
+      expect(visibleText(m)).toContain('Authenticator app (TOTP) · On')
+      expect(visibleText(m)).not.toContain('Last checked')
+    })
+
+    test('a quiet re-check that fails after six minutes keeps the answer and adds "Last checked 6 minutes ago."', async () => {
+      let fail = false
+      const m = openSecurity(backendOf({ account_profile_fresh: () => { if (fail) throw new Error('offline'); return profile(true) } }))
+      const focus = watchFocus()
+      await settle(m)
+      fail = true
+      advance(6 * MINUTE)
+      focus.fire()
+      await settle(m)
+      expect(visibleText(m)).toContain('Authenticator app (TOTP) · On')
+      expect(visibleText(m)).toContain('A second factor is required when you sign in. Manage or reset it on beebeeb.io. Last checked 6 minutes ago.')
+      expect(visibleErrorSurfaces(m)).toEqual([])
+    })
+
+    test('from exactly five minutes, and not a second before', async () => {
+      const m = openSecurity()
+      const ticks = watchTicks()
+      watchFocus()
+      await settle(m)
+      advance(5 * MINUTE - 1000)
+      ticks.tick()
+      await settle(m)
+      expect(visibleText(m)).not.toContain('Last checked')
+      advance(1000)
+      ticks.tick()
+      await settle(m)
+      expect(visibleText(m)).toContain('Last checked 5 minutes ago.')
+    })
+
+    test('the age keeps growing while nobody looks: the page re-renders every minute', async () => {
+      const m = openSecurity(backendOf({ account_profile_fresh: () => profile(false) }))
+      const ticks = watchTicks()
+      watchFocus()
+      await settle(m)
+      expect(ticks.live()).toBe(1)
+      advance(10 * MINUTE)
+      ticks.tick()
+      await settle(m)
+      expect(visibleText(m)).toContain('Authenticator app (TOTP) · Off')
+      expect(visibleText(m)).toContain('Set it up on beebeeb.io. Last checked 10 minutes ago.')
+      advance(2 * 60 * MINUTE)
+      ticks.tick()
+      await settle(m)
+      expect(visibleText(m)).toContain('Last checked 2 hours ago.')
+    })
+
+    test('an answer that works again is fresh again: the age is gone', async () => {
+      let fail = false
+      const m = openSecurity(backendOf({ account_profile_fresh: () => { if (fail) throw new Error('offline'); return profile(true) } }))
+      const focus = watchFocus()
+      await settle(m)
+      fail = true
+      advance(6 * MINUTE)
+      focus.fire()
+      await settle(m)
+      expect(visibleText(m)).toContain('Last checked 6 minutes ago.')
+      fail = false
+      advance(MINUTE + 1000)
+      focus.fire()
+      await settle(m)
+      expect(visibleText(m)).toContain('Authenticator app (TOTP) · On')
+      expect(visibleText(m)).not.toContain('Last checked')
+    })
+
+    test('only a state that is claimed carries an age: not "Checking…", not an answer that says nothing, not the alert', async () => {
+      const unknown = openSecurity(backendOf({ account_profile_fresh: () => profile(null) }))
+      const ticks = watchTicks()
+      await settle(unknown)
+      advance(20 * MINUTE)
+      ticks.tick()
+      await settle(unknown)
+      expect(visibleText(unknown)).not.toContain('Last checked')
+      const failed = openSecurity(backendOf({ account_profile_fresh: () => { throw new Error('offline') } }))
+      const failedTicks = watchTicks()
+      await settle(failed)
+      advance(20 * MINUTE)
+      failedTicks.tick()
+      await settle(failed)
+      expect(visibleText(failed)).not.toContain('Last checked')
+    })
+
+    test('a locked vault runs no tick', async () => {
+      const m = openSecurity(backendOf(), { unlocked: false })
+      const ticks = watchTicks()
+      await settle(m)
+      expect(ticks.live()).toBe(0)
+    })
+
+    test('leaving the page stops the tick', async () => {
+      const m = openSecurity()
+      const ticks = watchTicks()
+      await settle(m)
+      expect(ticks.live()).toBe(1)
+      m.unmount()
+      expect(ticks.live()).toBe(0)
+    })
+  })
+
   test('Try again is the person asking: it reads at once, inside the minute, and its failure is the alert', async () => {
     let fail = true
     const m = openSecurity(backendOf({ account_profile_fresh: () => { if (fail) throw new Error('offline'); return profile(true) } }))

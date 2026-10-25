@@ -67,6 +67,23 @@ export function totpRowState(
   return totpState(look.value)
 }
 
+/**
+ * How old an On or Off may be before the row says so: five minutes (lead ruling on #147: "a security answer shown as current
+ * must say its age once it's stale"). The answer on screen was seen, never cached or guessed, but a look at the window that
+ * fails leaves the last one standing, and a window left alone for an hour is showing an hour-old answer.
+ */
+export const TOTP_STALE_AFTER_MS = 5 * 60_000
+
+/**
+ * "Last checked 7 minutes ago." for the row's secondary text, once the answer is `TOTP_STALE_AFTER_MS` old, else null. The
+ * wording is the Mac's (`agoLabel`: spelled out, as the sessions say it) over the shared arithmetic (`relativeTime.ts`).
+ */
+export function totpStaleNote(answeredAt: number, now: number): string | null {
+  if (now - answeredAt < TOTP_STALE_AFTER_MS) return null
+  const ago = agoLabel(new Date(answeredAt).toISOString(), now)
+  return ago === null ? null : `Last checked ${ago}.`
+}
+
 export function totpLabel(state: TotpState): string {
   return state === 'on' ? `${TOTP_LABEL} · On` : state === 'off' ? `${TOTP_LABEL} · Off` : TOTP_LABEL
 }

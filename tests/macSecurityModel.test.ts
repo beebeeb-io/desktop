@@ -19,7 +19,9 @@ import {
   totpHint,
   totpLabel,
   totpRowState,
+  totpStaleNote,
   totpState,
+  TOTP_STALE_AFTER_MS,
 } from '../src/macSecurityModel'
 
 /** A local wall-clock moment, so the day and clock words do not depend on the machine's zone. */
@@ -77,6 +79,31 @@ describe('the authenticator row', () => {
     for (const state of ['on', 'off', 'unknown', 'checking'] as const) {
       expect(`${totpLabel(state)} ${totpHint(state)} ${totpAction(state)}`).not.toMatch(/enable|disable|turn (on|off)|scan|enter (a|the) code/i)
     }
+  })
+})
+
+// Lead ruling on #147: a security answer shown as current must say its age once it is stale. When the On or Off on screen is
+// older than 5 minutes (quiet re-checks failing, or a window left alone), the row's secondary text adds "Last checked {age}".
+describe('an answer that has gone stale says how old it is', () => {
+  const MIN = 60_000
+  const answeredAt = Date.UTC(2026, 9, 25, 12, 0, 0)
+
+  test('under five minutes nothing changes, to the second', () => {
+    expect(TOTP_STALE_AFTER_MS).toBe(5 * MIN)
+    expect(totpStaleNote(answeredAt, answeredAt)).toBeNull()
+    expect(totpStaleNote(answeredAt, answeredAt + 5 * MIN - 1000)).toBeNull()
+  })
+
+  test('from five minutes it says "Last checked {age}", in the Mac\'s wording (spelled out, as the sessions say it)', () => {
+    expect(totpStaleNote(answeredAt, answeredAt + 5 * MIN)).toBe('Last checked 5 minutes ago.')
+    expect(totpStaleNote(answeredAt, answeredAt + 7 * MIN)).toBe('Last checked 7 minutes ago.')
+    expect(totpStaleNote(answeredAt, answeredAt + 60 * MIN)).toBe('Last checked 1 hour ago.')
+    expect(totpStaleNote(answeredAt, answeredAt + 3 * 60 * MIN)).toBe('Last checked 3 hours ago.')
+    expect(totpStaleNote(answeredAt, answeredAt + 3 * 24 * 60 * MIN)).toBe('Last checked 3 days ago.')
+  })
+
+  test('a clock that was put back is not an age', () => {
+    expect(totpStaleNote(answeredAt, answeredAt - 10 * MIN)).toBeNull()
   })
 })
 

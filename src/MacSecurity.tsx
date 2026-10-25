@@ -43,6 +43,7 @@ import {
   totpHint,
   totpLabel,
   totpRowState,
+  totpStaleNote,
 } from './macSecurityModel'
 import { focusById } from './focusById'
 import { ConfirmSheet } from './MacSettings'
@@ -50,11 +51,15 @@ import { Btn, Note, SettingRow, SettingsGroup, SettingsIcon } from './macSetting
 import { useToast } from './windows/ui'
 
 type Load<T> = { status: 'loading' } | { status: 'failed' } | { status: 'ready'; value: T }
+/** The authenticator's look: the answer and when it arrived (its age is said once it is five minutes old). */
+type ProfileState = { status: 'loading' } | { status: 'failed' } | { status: 'ready'; value: AccountProfile; at: number }
 type Ask = { kind: 'one'; id: string; name: string } | { kind: 'others'; count: number } | null
 
 export function SecurityTab({ unlocked }: { unlocked: boolean }) {
   const { showToast } = useToast()
-  const [profile, setProfile] = useState<Load<AccountProfile>>({ status: 'loading' })
+  const [profile, setProfile] = useState<ProfileState>({ status: 'loading' })
+  // Only here to re-render once a minute, so the age of an answer on screen does not stand still.
+  const [, setTick] = useState(0)
   const [sessions, setSessions] = useState<Load<AccountSession[]>>({ status: 'loading' })
   const [devices, setDevices] = useState<Load<ClientDevice[]>>({ status: 'loading' })
   const [activity, setActivity] = useState<Load<ActivityFeedEvent[]>>({ status: 'loading' })
@@ -77,7 +82,7 @@ export function SecurityTab({ unlocked }: { unlocked: boolean }) {
     if (how === 'asked') setProfile({ status: 'loading' })
     const result = await accountProfileFresh()
     if (mine !== latestProfile.current) return
-    if (result.ok) setProfile({ status: 'ready', value: result.value })
+    if (result.ok) setProfile({ status: 'ready', value: result.value, at: Date.now() })
     else if (how === 'asked') setProfile({ status: 'failed' })
   }, [])
   const loadSessions = useCallback(async (quiet = false) => {
@@ -103,6 +108,13 @@ export function SecurityTab({ unlocked }: { unlocked: boolean }) {
     void loadDevices()
     void loadActivity()
   }, [unlocked, loadProfile, loadSessions, loadDevices, loadActivity])
+
+  // The answer's age is said once it is five minutes old (`totpStaleNote`); a minute's tick lets it grow while nobody looks.
+  useEffect(() => {
+    if (!unlocked) return
+    const id = window.setInterval(() => setTick((n) => n + 1), 60_000)
+    return () => window.clearInterval(id)
+  }, [unlocked])
 
   // A change made on the web while this window was in the background shows the moment the window is looked at again.
   useEffect(() => {
@@ -167,6 +179,7 @@ export function SecurityTab({ unlocked }: { unlocked: boolean }) {
 
   const now = Date.now()
   const totp = totpRowState(profile)
+  const staleNote = profile.status === 'ready' && (totp === 'on' || totp === 'off') ? totpStaleNote(profile.at, now) : null
 
   const loading = (name: string) => <SettingRow name={name} label="Loading…" />
   const failed = (surface: string, title: string, retry: () => void) => (
@@ -258,7 +271,7 @@ export function SecurityTab({ unlocked }: { unlocked: boolean }) {
             name="totp"
             tall
             label={totpLabel(totp)}
-            hint={totpHint(totp)}
+            hint={staleNote ? `${totpHint(totp)} ${staleNote}` : totpHint(totp)}
             control={
               <Btn onClick={() => void openUrl(SECURITY_SETTINGS_URL)}>
                 <SettingsIcon name="external" size={13} />
