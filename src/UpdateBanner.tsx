@@ -9,6 +9,7 @@ import { useCapabilities, canInstallUpdate } from './capabilities'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { command, openUrl } from './desktopApi'
+import { MACOS_DOWNLOAD_URL, UPDATE_DOWNLOAD_HINT, UPDATE_DOWNLOAD_LABEL, updateAvailableLine } from './macUpdateCopy'
 import { T, useToast } from './windows/ui'
 
 interface UpdatePayload {
@@ -24,6 +25,8 @@ export default function UpdateBanner() {
   const { showToast } = useToast()
   const caps = useCapabilities()
   const installSupported = canInstallUpdate(caps)
+  // Task 2176: a Mac downloads its update; the App Sandbox denies the in-place install.
+  const downloadOnly = caps?.host_os === 'macos'
   const [update, setUpdate] = useState<UpdatePayload | null>(null)
   const [installState, setInstallState] = useState<InstallState>('idle')
   const [installError, setInstallError] = useState<string | null>(null)
@@ -87,10 +90,10 @@ export default function UpdateBanner() {
     showToast({
       id: 'desktop-update',
       variant: installFailed ? 'error' : 'info',
-      title: installFailed ? 'Update install failed' : `Version ${update.version} is available.`,
+      title: installFailed ? 'Update install failed' : updateAvailableLine(update.version),
       message: (
         <>
-          <span style={{ color: T.ink2 }}>{installSupported ? 'Restart to apply the update.' : caps?.update_format === 'package_manager' ? 'Update with your package manager.' : 'Download an installer to update this installation.'}</span>
+          <span style={{ color: T.ink2 }}>{downloadOnly ? UPDATE_DOWNLOAD_HINT : installSupported ? 'Restart to apply the update.' : caps?.update_format === 'package_manager' ? 'Update with your package manager.' : 'Download an installer to update this installation.'}</span>
           {' '}
           <button
             type="button"
@@ -132,7 +135,7 @@ export default function UpdateBanner() {
           )}
         </>
       ),
-      action: installSupported ? {
+      action: downloadOnly ? { label: UPDATE_DOWNLOAD_LABEL, onClick: () => { void openUrl(MACOS_DOWNLOAD_URL) } } : installSupported ? {
         label: installState === 'installing' ? 'Installing...' : installFailed ? 'Try again' : 'Restart to update',
         onClick: handleInstall,
         disabled: installState === 'installing',
@@ -140,7 +143,7 @@ export default function UpdateBanner() {
       } : { label: 'Downloads', onClick: () => { void openUrl('https://beebeeb.io/download') } },
       durationMs: null,
     })
-  }, [caps?.update_format, installSupported, handleInstall, installError, installState, releaseNotesUrl, showToast, update])
+  }, [caps?.update_format, downloadOnly, installSupported, handleInstall, installError, installState, releaseNotesUrl, showToast, update])
 
   return <ManualUpdateFeedback />
 }
