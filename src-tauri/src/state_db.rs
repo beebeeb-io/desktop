@@ -4604,6 +4604,10 @@ impl StateDb {
     /// than the retry worker's "due now" view: terminal failures whose
     /// attempts hit max_attempts must still appear in the conflict/version
     /// center instead of disappearing from the UI.
+    ///
+    /// Only an operation that HAS FAILED is in review (task 1683 slice 4, spec §7.6: "changes Beebeeb couldn't send
+    /// yet"). The query used to list every `upload_version` and `restore_version` as well, so a plain edit of an
+    /// existing file sat in Review, and on the Beebeeb window's sidebar badge, for as long as it took to upload.
     pub fn list_review_operations(&self) -> Result<Vec<PendingOperation>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let mut stmt = conn.prepare(
@@ -4612,7 +4616,6 @@ impl StateDb {
                     last_error, backup_source_key, created_at, updated_at
              FROM operation_queue
              WHERE last_error IS NOT NULL
-                OR kind IN ('upload_version', 'restore_version')
              ORDER BY updated_at DESC, created_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {

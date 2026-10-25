@@ -6846,11 +6846,10 @@ fn review_entry_for_operation(op: &PendingOperation, db: &StateDb) -> anyhow::Re
 fn classify_review_operation(op: &PendingOperation) -> (&'static str, &'static str, String, &'static str) {
     let raw_error = op.last_error.as_deref().unwrap_or("");
     let error = raw_error.to_ascii_lowercase();
-    let metadata = op.metadata_json.as_deref().unwrap_or("").to_ascii_lowercase();
-    let stale_base = error.contains("stale")
-        || error.contains("base version")
-        || metadata.contains("base_version_identifier")
-        || op.base_version.is_some();
+    // A stale base is what the failure SAYS (a parked op's reason is `stale_base`; the server's refusal names the base
+    // version). Every version upload carries a base version and its identifier, so those do not tell: with them, any
+    // failed edit of an existing file was called "changed elsewhere" (task 1683 slice 4).
+    let stale_base = error.contains("stale") || error.contains("base version");
 
     if matches!(op.kind, OperationKind::RestoreVersion) {
         return (
@@ -13017,6 +13016,10 @@ mod tests {
             (op(OperationKind::UploadFile, Some("403 forbidden"), None), "permission_failure", REVIEW_DETAIL_PERMISSION, "review_upload"),
             (op(OperationKind::UploadVersion, Some("stale base version rejected"), Some(3)), "stale_base", REVIEW_DETAIL_STALE_BASE, "review_upload"),
             (op(OperationKind::UploadFile, Some(raw), None), "failed_upload", REVIEW_DETAIL_UPLOAD, "review_upload"),
+            // A failed edit of an existing file (it carries a base version) is a failed upload unless the failure says
+            // the base is stale.
+            (op(OperationKind::UploadVersion, Some("connection refused"), Some(3)), "failed_upload", REVIEW_DETAIL_UPLOAD, "review_upload"),
+            (op(OperationKind::UploadVersion, Some("stale_base"), Some(3)), "stale_base", REVIEW_DETAIL_STALE_BASE, "review_upload"),
             (op(OperationKind::RenameFile, Some(raw), None), "metadata", REVIEW_DETAIL_RENAME_OR_MOVE, "review_upload"),
             (op(OperationKind::MoveFile, None, None), "metadata", REVIEW_DETAIL_RENAME_OR_MOVE, "review_upload"),
             (op(OperationKind::TrashFile, Some(raw), None), "delete", REVIEW_DETAIL_DELETE, "review_upload"),
@@ -13036,6 +13039,41 @@ mod tests {
         assert_eq!(entry.detail, REVIEW_DETAIL_UPLOAD);
         assert_eq!(entry.last_error.as_deref(), Some(raw));
         assert_eq!(REVIEW_DETAIL_CONFLICT, "Changed on two devices.");
+    }
+
+    /// Spec §7.6: Review is "changes Beebeeb couldn't send yet". An edit that is on its way, and has not failed, is not in
+    /// the feed (it was: the sidebar badge would have lit for every save of an existing file); the same edit is the moment
+    /// it fails.
+    #[test]
+    fn a_queued_edit_that_has_not_failed_is_not_in_review() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        let edit = |op_id: &str, kind: OperationKind, error: Option<&str>| PendingOperation {
+            op_id: op_id.into(),
+            kind,
+            file_id: Some(format!("file-{op_id}")),
+            parent_id: None,
+            target_path: Some(format!("/Work/{op_id}.txt")),
+            metadata_json: Some(r#"{"operation":"upload_version","base_version_identifier":"4:1700:12"}"#.into()),
+            payload_path: Some("/tmp/payload".into()),
+            base_version: Some(4),
+            base_object_version_id: None,
+            attempts: 0,
+            max_attempts: 25,
+            next_retry_at: 0,
+            last_error: error.map(str::to_string),
+            backup_source_key: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        for (id, kind) in [("healthy-edit", OperationKind::UploadVersion), ("healthy-restore", OperationKind::RestoreVersion)] {
+            bridge.db.enqueue_operation(&edit(id, kind, None)).unwrap();
+        }
+        assert!(bridge.version_conflict_feed().unwrap().is_empty(), "nothing has failed");
+        bridge.db.enqueue_operation(&edit("failed-edit", OperationKind::UploadVersion, Some("connection refused"))).unwrap();
+        let feed = bridge.version_conflict_feed().unwrap();
+        assert_eq!(feed.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), ["op:failed-edit"]);
+        assert_eq!(feed[0].kind, "failed_upload", "a failed edit that is not stale is a failed upload");
     }
 
     #[test]
