@@ -68,7 +68,7 @@ pub fn create_placeholder(
     size_bytes: i64,
     modified_at: i64,
     is_dir: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let parent_wide: Vec<u16> = parent_dir
         .to_string_lossy()
         .encode_utf16()
@@ -173,7 +173,7 @@ pub fn create_placeholder(
             // (0x800700B7). Treat it as success: the desired end state holds.
             const ALREADY_EXISTS: windows::core::HRESULT = windows::core::HRESULT(0x800700B7u32 as i32);
             if e.code() == ALREADY_EXISTS {
-                return Ok(());
+                return Ok(false);
             }
             return Err(anyhow::anyhow!("CfCreatePlaceholders: {e}"));
         }
@@ -183,7 +183,7 @@ pub fn create_placeholder(
     // filename (and the parent path, which can carry decrypted folder names)
     // must never reach the logs.
     tracing::debug!(file_id = %file_id, is_dir, "cloud placeholder created");
-    Ok(())
+    Ok(true)
 }
 
 /// Remove the on-disk Cloud Files placeholder at `path` as part of reconciling a
@@ -718,6 +718,13 @@ pub fn fully_on_disk(path: &std::path::Path) -> bool {
     read_os_placeholder_state(path).is_some_and(|attrs| attrs & FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS.0 == 0)
 }
 
+/// Task 1640 (review F9): [`fully_on_disk`], read through an open handle.
+fn handle_fully_on_disk(file: &std::fs::File) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    file.metadata()
+        .is_ok_and(|metadata| metadata.file_attributes() & FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS.0 == 0)
+}
+
 /// Task 1640: the Cloud Files in-sync state of the placeholder at `path`, or `None` when it is
 /// not a placeholder (a plain file an atomic save left) or cannot be read. The platform clears
 /// it when the file's bytes change; this engine sets it only on content it agrees with the
@@ -811,7 +818,7 @@ pub fn placeholder_local_entry(path: &std::path::Path) -> crate::engine_bridge::
     let info = unsafe { &*buffer.as_ptr().cast::<CF_PLACEHOLDER_STANDARD_INFO>() };
     if info.InSyncState == CF_IN_SYNC_STATE_IN_SYNC && info.ModifiedDataSize == 0 {
         LocalEntry::InSync
-    } else if info.OnDiskDataSize == 0 {
+    } else if info.OnDiskDataSize == 0 && info.ModifiedDataSize == 0 {
         LocalEntry::NothingLocal
     } else if fully_on_disk(path) {
         LocalEntry::WhollyLocal
@@ -831,7 +838,6 @@ pub fn promote_fetched_content(db: &crate::state_db::StateDb, file_id: &str, pat
     use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
-    let wholly = fully_on_disk(path);
     // share_mode(0): while this handle is open no other handle can be opened to write.
     let Ok(mut file) = std::fs::OpenOptions::new()
         .read(true)
@@ -842,6 +848,8 @@ pub fn promote_fetched_content(db: &crate::state_db::StateDb, file_id: &str, pat
     else {
         return Ok(false);
     };
+    // Review F9: read through the handle too, so it describes the file the hash then reads.
+    let wholly = handle_fully_on_disk(&file);
     let mut buffer = vec![0u64; 1024];
     // SAFETY: `file` is open for the whole call; the buffer is 8-byte aligned and its length is
     // passed, so the call writes only inside it.
@@ -900,6 +908,10 @@ pub fn stamp_if_agreed(db: &crate::state_db::StateDb, file_id: &str, path: &std:
     else {
         return Ok(false);
     };
+    // Review F9: re-read through the handle: reading a file not wholly on disk would fetch the rest.
+    if !handle_fully_on_disk(&file) {
+        return Ok(false);
+    }
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     std::io::copy(&mut file, &mut hasher)?;
@@ -962,8 +974,10 @@ pub fn read_os_placeholder_state(path: &std::path::Path) -> Option<u32> {
 /// Date Modified. `CF_UPDATE_FLAG_MARK_IN_SYNC` re-anchors the placeholder to
 /// the corrected metadata so Windows does not treat the resize as a local
 /// edit needing re-upload. We pass `None` for the file identity (keep the
-/// existing UTF-8 `file_id` blob) and no dehydrate range (the whole file is
-/// already cloud-only after the failed fetch).
+/// existing UTF-8 `file_id` blob) and no dehydrate range. The failed fetch
+/// delivered nothing, but ranges an earlier fetch put on disk may stay (task
+/// 1640 review F1/F8), so the caller marks the file's local content mixed
+/// first (`StateDb::poison_local_content`).
 ///
 /// Best-effort: opens an exclusive, write CF handle via `CfOpenFileWithOplock`
 /// and always closes it before returning. A failure here leaves the
@@ -1021,8 +1035,9 @@ pub fn resize_placeholder(path: &std::path::Path, true_size_bytes: i64) -> anyho
             // None means "do not touch the identity".
             None,
             0,
-            // No dehydrate range: the file is fully cloud-only after the failed
-            // fetch, so there is no hydrated range to invalidate.
+            // No dehydrate range. The failed fetch delivered nothing, but ranges an
+            // earlier fetch put on disk may stay (task 1640 review F1/F8): the caller
+            // marks the file's local content mixed before this resize.
             None,
             // MARK_IN_SYNC (when it was in sync): the corrected metadata IS the latest
             // truth, so don't let Windows read the resize as a local modification.

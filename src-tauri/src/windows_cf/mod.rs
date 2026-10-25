@@ -1577,7 +1577,18 @@ fn populate_placeholders(bridge: &EngineBridge, sync_root: &std::path::Path) -> 
             entry.modified_at,
             entry.is_dir(),
         ) {
-            Ok(()) => created += 1,
+            Ok(true) => {
+                created += 1;
+                // Task 1640 (review F1): created where nothing was, so no fetched bytes are on
+                // disk: a first fetch starts the file's candidate. Only a row never fetched into
+                // is marked (a fetch on the new placeholder records first), so none is forgotten.
+                if !entry.is_dir() {
+                    if let Err(e) = bridge.db().mark_no_fetched_content(&entry.file_id) {
+                        tracing::debug!(error = %e, file_id = %entry.file_id, "could not mark the new placeholder empty");
+                    }
+                }
+            }
+            Ok(false) => {}
             Err(e) => {
                 // Zero-knowledge: log the file_id only — never the decrypted
                 // plaintext filename.

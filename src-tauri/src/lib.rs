@@ -10177,7 +10177,7 @@ fn dismiss_review_entry(entry_id: String) -> Result<(), String> {
     let db = state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?;
     match db.dismiss_kept_copy(id) {
         Ok(true) => Ok(()),
-        Ok(false) => Err("This entry can be dismissed once its original is removed.".to_string()),
+        Ok(false) => Err("This entry can be dismissed once the file is closed and removed.".to_string()),
         Err(e) => Err(format!("dismiss: {e}")),
     }
 }

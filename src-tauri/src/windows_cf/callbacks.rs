@@ -179,10 +179,10 @@ pub unsafe extern "system" fn fetch_data_callback(
         tokio::select! {
             biased;
             _ = super::cancelled(&bridge) => Err(anyhow::anyhow!("vault locked")),
-            result = bridge.hydrate_file_to_memory(&file_id, required_offset == 0 && required_length >= file_size) => result,
+            result = bridge.hydrate_file_to_memory(&file_id) => result,
         }
     });
-    let buf = match buf {
+    let (buf, fetched) = match buf {
         Ok(b) => b,
         Err(e) => {
             // Do NOT log the error's inner content at info+ if it could carry
@@ -291,6 +291,15 @@ pub unsafe extern "system" fn fetch_data_callback(
             // only log.
             let whole_file = required_offset == 0 && required_length >= file_size;
             if whole_file {
+                // Task 1640 (review F1): every byte on disk is this fetch's version now, so they
+                // become the agreed content; only now, after the transfer, never before (a
+                // transfer that fails or is cut off leaves the fetch's candidate, recorded before
+                // it, which only moves down). A failure leaves that candidate: never too high.
+                if let Some(fetched) = fetched.as_ref() {
+                    if let Err(e) = bridge.record_whole_fetch(&file_id, fetched) {
+                        tracing::warn!(file_id = %file_id, error = %e, "could not record the fetched file as agreed");
+                    }
+                }
                 if let Some(path) = normalized_path(info) {
                     unsafe { mark_in_sync(&path) };
                 }
@@ -353,10 +362,11 @@ unsafe fn resolve_size_mismatch(
     // Step 1 — correct the recorded size to the authenticated length. A failure
     // here is non-fatal: the placeholder resize below is what makes the next
     // open succeed; the DB value is for cross-surface consistency + reseeding.
-    // Task 1640 (review N1, condition 1): the placeholder's content identity changed; its fetch
-    // candidate described the old one.
-    if let Err(e) = bridge.db().clear_fetched_content(file_id) {
-        tracing::debug!(file_id = %file_id, error = %e, "size resolution: could not clear the fetch candidate");
+    // Task 1640 (review F1): the resize below changes the placeholder without a fetch and does not
+    // dehydrate it, so whatever was on disk may stay in part: its agreed content and its candidate
+    // become mixed (never agreed; a change is sent on the oldest version), never reset.
+    if let Err(e) = bridge.db().poison_local_content(file_id) {
+        tracing::debug!(file_id = %file_id, error = %e, "size resolution: could not mark the local content mixed");
     }
     match bridge.db().set_size_bytes(file_id, true_size) {
         Ok(0) => {
