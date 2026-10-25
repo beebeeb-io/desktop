@@ -29,6 +29,11 @@ export const SIGN_IN_WITH_BROWSER_INSTEAD = 'Sign in with browser instead'
 
 export const SIGN_IN_AGAIN_TITLE = 'Sign in again'
 export const SIGN_IN_AGAIN_COPY = 'Sync is paused until you sign in again. Your files stay in Finder.'
+/**
+ * The same card when the session is in fact fine (an opener asked for it after one operation answered 401, as Version
+ * Center does): spec A's sentence says sync is paused, which is false there. Lead ruling, 2026-10-25 (follow-up to #143).
+ */
+export const SIGN_IN_AGAIN_REQUESTED_COPY = 'Beebeeb couldn’t send some changes with this sign-in. Sign in again to retry them.'
 export const signedInBeforeAs = (email: string): string => `Signed in before as ${email}`
 
 // ── Offline (spec C C-R7): the buttons are replaced by this line and one action ──

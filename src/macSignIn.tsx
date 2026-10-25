@@ -58,6 +58,7 @@ import {
   SET_UP_HINT,
   SET_UP_TITLE,
   SIGN_IN_AGAIN_COPY,
+  SIGN_IN_AGAIN_REQUESTED_COPY,
   SIGN_IN_AGAIN_TITLE,
   SIGN_IN_BUTTON,
   SIGN_IN_CODE_LABEL,
@@ -225,6 +226,7 @@ export function SignInWindow({
         reauth={reauth}
         email={email}
         prefillEmail={flow.email}
+        sessionFine={reauth && onBack !== undefined}
         offline={offline}
         onSettled={(settled, typedEmail) => moveFlow(afterSignIn(settled, typedEmail, reauth), onFlow)}
       />
@@ -264,12 +266,15 @@ export function SignInScreen({
   reauth,
   email,
   prefillEmail,
+  sessionFine = false,
   offline = null,
   onSettled,
 }: {
   reauth: boolean
   email: string | null
   prefillEmail: string | undefined
+  /** The requested “Sign in again” of a session that is fine: its card says what happened, not that sync is paused. */
+  sessionFine?: boolean
   offline?: OfflineState | null
   onSettled: (settled: SignInSettled, typedEmail: string) => void
 }) {
@@ -281,6 +286,7 @@ export function SignInScreen({
     <BrowserPanel
       reauth={reauth}
       email={email}
+      sessionFine={sessionFine}
       offline={offline}
       onSettled={onSettled}
       onUsePassword={() => setMethod('password')}
@@ -314,12 +320,14 @@ export function DiskImageNotice() {
 export function BrowserPanel({
   reauth,
   email,
+  sessionFine = false,
   offline,
   onSettled,
   onUsePassword,
 }: {
   reauth: boolean
   email: string | null
+  sessionFine?: boolean
   offline: OfflineState | null
   onSettled: (settled: SignInSettled, typedEmail: string) => void
   onUsePassword: () => void
@@ -369,7 +377,7 @@ export function BrowserPanel({
   }
 
   return (
-    <SignInCard title={reauth ? SIGN_IN_AGAIN_TITLE : SIGN_IN_TITLE} copy={reauth && !showCode ? SIGN_IN_AGAIN_COPY : null}>
+    <SignInCard title={reauth ? SIGN_IN_AGAIN_TITLE : SIGN_IN_TITLE} copy={reauth && !showCode ? (sessionFine ? SIGN_IN_AGAIN_REQUESTED_COPY : SIGN_IN_AGAIN_COPY) : null}>
       {!busy ? <DiskImageNotice /> : null}
       {showCode ? (
         <>
@@ -611,7 +619,7 @@ export function PasswordPanel({
  * (Finder entry removed, queue and cache purged), then a fresh sign-in; it also forgets the previous account's address
  * (`forgetEmail`, FB-I2). An `Err` means the sign-out did not happen (including `SIGN_OUT_EMAIL_NOT_FORGOTTEN`): its
  * sentence is shown verbatim as a toast and the step stays; an `Err` after the removal, with the account already out,
- * is HELD instead (a toast does not survive the remount). Any `Ok` continues, and an `Ok` with a warning (FB-24) HOLDS the
+ * is HELD instead (a toast does not survive the remount), and when the status cannot say which it is both. Any `Ok` continues, and an `Ok` with a warning (FB-24) HOLDS the
  * warning's sentence for the signed-out card (review P2-1).
  *
  * On a Mac the step is the sign-out ask in the switch's words, from the snapshot the sign-in carried: “Sign out and
@@ -677,12 +685,13 @@ export function SwitchScreen({
       const failure = result.unsupported ? commandUnavailableLabel('clear_session') : stripCode(result.reason)
       // A sign-out can fail AFTER the removal (review I1): the account is then already out, the session revision moves,
       // and `AccountSessionBoundary` remounts this window and takes a toast with it (review P2-1). Ask the status once
-      // (its answer is not guarded against a revision change); only a definite “signed out” holds the sentence for the
-      // signed-out card to show. With the account still here (or a status that cannot be read) it is a toast, and the
-      // step stays, as before.
+      // (its answer is not guarded against a revision change), and say the sentence where it will be seen:
       const status = await command<{ logged_in?: boolean }>('sync_status')
-      if (status.ok && status.value?.logged_in === false) holdSignOutWarning(failure)
-      else showToast({ variant: 'error', title: ACCOUNT_SWITCH_FAILED, message: failure })
+      const loggedIn = status.ok ? status.value?.logged_in : undefined
+      // Signed out: a remount is coming, so hold. Still signed in: the step stays, so the toast. Cannot tell (the status
+      // could not be read, or did not say): losing the sentence is the worse mistake, so both (delta review P3-5).
+      if (loggedIn !== true) holdSignOutWarning(failure)
+      if (loggedIn !== false) showToast({ variant: 'error', title: ACCOUNT_SWITCH_FAILED, message: failure })
       void command<void>('sign_out_result_ack')
       return
     }

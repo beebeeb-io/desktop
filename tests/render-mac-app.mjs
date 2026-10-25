@@ -301,7 +301,7 @@ const SCENARIOS = [
   // P2-3 a: a window reopened (⌘W destroyed the earlier one) while a password sign-in was waiting for the recovery phrase.
   { name: 'reopened-pending-setup', fx: { snapshot: snapshot({ phase: 'locked', account: { vault_unlocked: false }, storage: null }), pending: { key_replaced: false } }, has: ['Set up this Mac', 'This Mac does not have your encryption keys yet. Restore them to continue.'], hasNot: ['Your vault is locked'], noSidebar: true, card: 440, title: 'Set up this Mac' },
   // P3-1: `open_reauth_window` asks for Sign in again whatever the session says.
-  { name: 'sign-in-again-asked', fx: { nav: { to: 'reauth' } }, has: ['Sign in again', 'Signed in before as sam@example.eu'], noSidebar: true, card: 380, title: 'Sign in again' },
+  { name: 'sign-in-again-asked', fx: { nav: { to: 'reauth' } }, has: ['Sign in again', 'Beebeeb couldn’t send some changes with this sign-in. Sign in again to retry them.', 'Signed in before as sam@example.eu', 'Back to Home'], hasNot: ['Sync is paused'], noSidebar: true, card: 380, title: 'Sign in again' },
   { name: 'signed-out-settings', fx: { snapshot: snapshot({ phase: 'signed_out', account: { email: null, logged_in: false, vault_unlocked: false }, storage: null }) }, open: '&tab=general', has: ['Sign in', 'Settings', 'General', 'About', 'Open Beebeeb at login', 'Appearance', 'Tell me about'], hasNot: ['From your account'], sidebar: ['Back to Sign in', 'General', 'About'], hifi: 'hifi-s4-fig6' },
   { name: 'signed-out-about', fx: { snapshot: snapshot({ phase: 'signed_out', account: { email: null, logged_in: false, vault_unlocked: false }, storage: null }) }, open: '&tab=about', has: ['Beebeeb for Mac', 'Release channel'], hasNot: ['Test connection speed'] },
 ]
