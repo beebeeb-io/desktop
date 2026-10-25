@@ -542,6 +542,13 @@ pub unsafe extern "system" fn notify_file_close_completion_callback(
         }
     }
 
+    // Task 1640: a close by this process (the upload driver reading a synced file to compare
+    // it with its agreed content, or staging its copy) is not an edit. `ProcessInfo` is filled
+    // because the root is connected with `CF_CONNECT_FLAG_REQUIRE_PROCESS_INFO`.
+    if !info.ProcessInfo.is_null() && unsafe { (*info.ProcessInfo).ProcessId } == std::process::id() {
+        return;
+    }
+
     let Some(path) = notify_full_path(info) else {
         return;
     };

@@ -549,8 +549,14 @@ fn run_one_scan(bridge: &EngineBridge, sync_root: &std::path::Path, in_flight: &
                 return;
             }
 
+            // A new file waits in `in_flight` for its row. An edit of a tracked file (task 1640)
+            // is held back by its queued upload instead, so a later edit is seen again.
+            let tracked = crate::engine_bridge::relative_db_path(sync_root, file_path)
+                .is_some_and(|rel| matches!(bridge.db().get_file_by_path(&rel), Ok(Some(_))));
             if dispatch_local_create(bridge, sync_root, file_path, "scan") {
-                in_flight.insert(file_path.to_path_buf());
+                if !tracked {
+                    in_flight.insert(file_path.to_path_buf());
+                }
                 dispatched += 1;
             } else {
                 tracing::debug!(
@@ -705,7 +711,7 @@ async fn handle_settled_path(bridge: &EngineBridge, sync_root: &std::path::Path,
 /// uses that to record the path in its in-flight set so it is not re-dispatched
 /// before the `Uploading` DB row makes filter-3 reject it. `source` is a static
 /// tag (`"notify"` / `"scan"`) used only for log attribution.
-fn dispatch_local_create(
+pub(crate) fn dispatch_local_create(
     bridge: &EngineBridge,
     sync_root: &std::path::Path,
     path: &std::path::Path,
@@ -718,6 +724,22 @@ fn dispatch_local_create(
     // Capture size for the log before `target` is moved into the queue call.
     let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let nested = target.parent_id.is_some();
+    // Task 1640: a target with a file id is an edit of a synced file (`classify_tracked_edit`):
+    // a content modify of that file, sent with its base. Only a new file is created (and, on
+    // Windows, converted to an unsynced placeholder below).
+    if target.file_id.is_some() {
+        return match bridge.queue_finder_modify(target) {
+            Ok(FinderWriteOutcome::Queued { op_id, .. }) => {
+                tracing::info!(op_id = %op_id, size, nested, source, "upload driver: queued an edit of a synced file for encrypted upload");
+                true
+            }
+            Ok(FinderWriteOutcome::Ignored { .. }) => false,
+            Err(e) => {
+                tracing::warn!(error = %e, source, "upload driver: failed to queue an edit of a synced file");
+                false
+            }
+        };
+    }
 
     // `queue_finder_create` stages a copy of the bytes, derives the per-file key
     // inside the transfer loop via beebeeb-core, and encrypts on upload — we

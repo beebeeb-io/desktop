@@ -1217,12 +1217,13 @@ impl EngineBridge {
                     outcome.retried_op_ids.push(op.op_id);
                 }
                 // A stale base never becomes valid again: the server's version only grows
-                // (spec §8.4). Only a File Provider write parks at once; every other upload
-                // keeps today's retries.
+                // (spec §8.4). A File Provider write parks at once, and so does every other
+                // upload sent with a base (a sync-folder edit, task 1640), its bytes kept; an
+                // upload without a base keeps today's retries.
                 Err(error)
                     if !completed
                         && init_conflict_class(&error) == Some(crate::api_client::InitConflictClass::StaleBase)
-                        && claimed.write.is_some() =>
+                        && (claimed.write.is_some() || op.base_version.is_some()) =>
                 {
                     if !self
                         .db
@@ -2918,11 +2919,14 @@ impl EngineBridge {
             // the row takes the staged copy's size and modification time. The
             // content version is untouched until the upload lands.
             self.db.record_local_write(&file_id, size_bytes, modified_at)?;
+            // A landing writes an op's target path to the row: a sync-folder edit (task 1640)
+            // names the file's full relative path, so a nested file stays in its folder.
+            let target_path = target.rel_path.unwrap_or(target.filename);
             let outcome = self.enqueue_finder_operation(
                 OperationKind::UploadVersion,
                 Some(file_id),
                 target.parent_id,
-                Some(target.filename),
+                Some(target_path),
                 payload,
                 Some(staged_path),
                 base_version,
@@ -3308,21 +3312,10 @@ impl EngineBridge {
             return None;
         }
 
-        // Filter 2 — Cloud Files placeholders are engine-owned (Windows only). A
-        // reparse point under the sync root is a placeholder we minted or
-        // converted; the hydration write that fills it does NOT turn it back into
-        // a plain file, so we must never treat a placeholder write as a new
-        // upload.
-        #[cfg(target_os = "windows")]
-        if crate::windows_cf::placeholders::is_cloud_placeholder(path) {
-            tracing::debug!(
-                path = %path.display(),
-                "classify_local_path: rejected Cloud Files placeholder"
-            );
-            return None;
-        }
-
-        // Filter 3 (authoritative) — already a known server file?
+        // Filter 3 (authoritative) — already a known server file? Then it is not a new
+        // upload. Task 1640: it may be an edit of that file; `classify_tracked_edit` decides
+        // from the content this device last agreed with the server on, before filter 2, which
+        // rejects every placeholder (a synced file is one).
         let Some(rel) = relative_db_path(sync_root, path) else {
             tracing::debug!(
                 path = %path.display(),
@@ -3332,15 +3325,8 @@ impl EngineBridge {
             return None;
         };
         match self.db.get_file_by_path(&rel) {
-            Ok(Some(_existing)) => {
-                tracing::debug!(
-                    path = %path.display(),
-                    rel_path = %rel,
-                    "classify_local_path: rejected already-tracked server file"
-                );
-                return None;
-            }
-            Ok(None) => { /* genuinely new — fall through */ }
+            Ok(Some(existing)) => return self.classify_tracked_edit(path, existing, file_name, rel),
+            Ok(None) => { /* not tracked — filter 2, then new */ }
             Err(e) => {
                 tracing::warn!(
                     path = %path.display(),
@@ -3350,6 +3336,20 @@ impl EngineBridge {
                 );
                 return None;
             }
+        }
+
+        // Filter 2 — Cloud Files placeholders are engine-owned (Windows only). An
+        // untracked reparse point under the sync root is a placeholder we minted or
+        // converted whose row is not written yet; the hydration write that fills it
+        // does NOT turn it back into a plain file, so we must never treat a
+        // placeholder write as a new upload.
+        #[cfg(target_os = "windows")]
+        if crate::windows_cf::placeholders::is_cloud_placeholder(path) {
+            tracing::debug!(
+                path = %path.display(),
+                "classify_local_path: rejected Cloud Files placeholder"
+            );
+            return None;
         }
 
         // parent_id resolution: a survivor at `<parent_dir>/<name>`. If the parent
@@ -3377,6 +3377,74 @@ impl EngineBridge {
             contents_path: Some(path.to_string_lossy().into_owned()),
             content_type: beebeeb_core::media::guess_mime_type(&file_name).map(str::to_string),
             base_version_identifier: None,
+        })
+    }
+
+    /// Task 1640: a close or scan of a tracked sync-folder file is an edit when the file is a
+    /// synced (`Local`) file and its bytes differ from the content this device last agreed with
+    /// the server on. The edit is a content modify of that file, sent with the version its bytes
+    /// are based on, so the server refuses it as stale when the file changed elsewhere meanwhile
+    /// (it then parks with its bytes). Anything else is not an upload: a folder, a row in
+    /// transfer or in conflict, agreed bytes, an upload already queued, no agreed content
+    /// recorded, or an edit whose base is not known (never sent without one: it would replace
+    /// the server's version unseen).
+    fn classify_tracked_edit(
+        &self,
+        path: &Path,
+        existing: FileEntry,
+        file_name: String,
+        rel: String,
+    ) -> Option<FinderWriteTarget> {
+        if existing.is_dir() || existing.status != FileStatus::Local {
+            tracing::debug!(
+                path = %path.display(),
+                rel_path = %rel,
+                "classify_local_path: rejected already-tracked server file"
+            );
+            return None;
+        }
+        // Windows: reading a placeholder that is not wholly on disk would fetch the rest of it.
+        #[cfg(target_os = "windows")]
+        let os_in_sync = {
+            if !crate::windows_cf::placeholders::fully_on_disk(path) {
+                return None;
+            }
+            crate::windows_cf::placeholders::placeholder_in_sync(path)
+        };
+        #[cfg(not(target_os = "windows"))]
+        let os_in_sync = None;
+        let base = match sync_folder_content(&self.db, &existing.file_id, path, os_in_sync) {
+            Ok(SyncFolderContent::Changed { base: Some(base) }) => base,
+            Ok(SyncFolderContent::Changed { base: None }) => {
+                tracing::warn!(
+                    file_id = %existing.file_id,
+                    "sync folder: an edit of a synced file has no known base version; it stays local, not sent"
+                );
+                return None;
+            }
+            Ok(_) => return None,
+            Err(e) => {
+                tracing::warn!(file_id = %existing.file_id, error = %e, "sync folder: could not compare a synced file with its agreed content");
+                return None;
+            }
+        };
+        let contract = self.db.get_file_contract_state(&existing.file_id).ok().flatten();
+        tracing::debug!(
+            file_id = %existing.file_id,
+            base_version = base,
+            "classify_local_path: accepted an edit of a synced file"
+        );
+        Some(FinderWriteTarget {
+            file_id: Some(existing.file_id),
+            parent_id: contract.as_ref().and_then(|contract| contract.parent_id.clone()),
+            content_type: contract
+                .and_then(|contract| contract.content_type)
+                .or_else(|| beebeeb_core::media::guess_mime_type(&file_name).map(str::to_string)),
+            filename: file_name,
+            rel_path: Some(rel),
+            kind: FinderWriteItemKind::File,
+            contents_path: Some(path.to_string_lossy().into_owned()),
+            base_version_identifier: Some(base.to_string()),
         })
     }
 
@@ -24248,7 +24316,7 @@ mod tests {
         ];
         // (file, the call, the function it is in, lines between that function's start and the
         // call, why it queues no content on a Mac)
-        let allowed: [(&str, &str, &str, &[&str], &str); 7] = [
+        let allowed: [(&str, &str, &str, &[&str], &str); 8] = [
             (
                 "engine_bridge.rs",
                 "self.queue_finder_create_from(target, None)",
@@ -24287,9 +24355,16 @@ mod tests {
             (
                 "watcher.rs",
                 "match bridge.queue_finder_create(target) {",
-                "fn dispatch_local_create(",
+                "pub(crate) fn dispatch_local_create(",
                 &[],
                 "the upload driver, which a Mac never starts (asserted below)",
+            ),
+            (
+                "watcher.rs",
+                "return match bridge.queue_finder_modify(target) {",
+                "pub(crate) fn dispatch_local_create(",
+                &[],
+                "the upload driver's edit of a synced file (task 1640), which a Mac never starts (asserted below)",
             ),
             (
                 "watcher.rs",
@@ -24353,7 +24428,7 @@ mod tests {
                 && !sources.iter().any(|(rel, _)| rel.starts_with("windows_cf/")),
             "the module filter sees what a Mac compiles"
         );
-        let mut matched = [0usize; 7];
+        let mut matched = [0usize; 8];
         for (rel, mac) in &sources {
             let lines: Vec<&str> = mac.lines().map(str::trim).collect();
             for (i, line) in lines.iter().enumerate() {
@@ -26048,6 +26123,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn regression_1640_a_close_without_an_edit_queues_nothing() {
+        let file = "16400000-0000-4000-8000-000000000002";
+        let (_dir, sync_root, server, bridge, local) = regression_1640_synced_file([165u8; 32], file).await;
+        assert!(!crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "notify"));
+        assert!(bridge.db.list_operations_for_file(file).unwrap().is_empty());
+        assert_eq!(bridge.db.get_file(file).unwrap().unwrap().status, FileStatus::Local);
+        drop(server.finish());
+    }
+
+    #[tokio::test]
+    async fn regression_1640_an_edit_of_a_synced_file_is_queued_on_its_synced_base() {
+        let file = "16400000-0000-4000-8000-000000000003";
+        let (_dir, sync_root, server, bridge, local) = regression_1640_synced_file([166u8; 32], file).await;
+        std::fs::write(&local, b"edited in the sync folder").unwrap();
+        assert!(crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "notify"));
+        let ops = bridge.db.list_operations_for_file(file).unwrap();
+        assert_eq!(ops.len(), 1, "one upload queued");
+        assert_eq!(ops[0].kind, OperationKind::UploadVersion);
+        assert_eq!(ops[0].base_version, Some(1), "sent on the version the bytes are based on");
+        assert_eq!(ops[0].target_path.as_deref(), Some("notes.txt"), "the full relative path");
+        assert_eq!(std::fs::read(ops[0].payload_path.as_deref().unwrap()).unwrap(), b"edited in the sync folder");
+        assert_eq!(bridge.db.get_file(file).unwrap().unwrap().status, FileStatus::Uploading);
+        assert!(
+            !crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "scan"),
+            "a second close or scan queues nothing more while the upload is queued"
+        );
+        assert_eq!(bridge.db.list_operations_for_file(file).unwrap().len(), 1);
+        drop(server.finish());
+    }
+
+    #[tokio::test]
+    async fn regression_1640_an_edit_lands_as_the_next_version_and_becomes_the_agreed_content() {
+        let master_key = [167u8; 32];
+        let file = "16400000-0000-4000-8000-000000000004";
+        let (_dir, sync_root, server, bridge, local) = regression_1640_synced_file(master_key, file).await;
+        std::fs::write(&local, b"edited in the sync folder").unwrap();
+        assert!(crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "notify"));
+        drain_upload_queue(&bridge, &sync_root).await;
+        assert!(bridge.db.list_operations_for_file(file).unwrap().is_empty(), "landed");
+        let row = bridge.db.get_file(file).unwrap().unwrap();
+        assert_eq!((row.status, row.path.as_str()), (FileStatus::Local, "notes.txt"));
+        let contract = bridge.db.get_file_contract_state(file).unwrap().unwrap();
+        assert_eq!(contract.local_base_version, 2);
+        assert_eq!(
+            contract.local_hash.as_deref(),
+            Some(sha256_hex(b"edited in the sync folder").as_str()),
+            "what was sent is the agreed content now"
+        );
+        assert!(
+            !crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "notify"),
+            "the landed bytes are not an edit"
+        );
+        // The next edit goes on the version this one produced.
+        std::fs::write(&local, b"edited again").unwrap();
+        assert!(crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "notify"));
+        assert_eq!(bridge.db.list_operations_for_file(file).unwrap()[0].base_version, Some(2));
+        let state = server.finish();
+        assert_eq!(state.init_summary(), vec![(json!(file), json!(1), 201)]);
+        assert_eq!(state.latest_plaintext(file, master_key), b"edited in the sync folder");
+    }
+
+    /// The 2190 case, with the trigger: the web saves version 2 and the tick re-anchors the row
+    /// before the edit is seen. The edit is sent on 1 (not the row's 2), refused as stale, parks
+    /// with its bytes, and no hydrate writes the web's version over it. Both versions survive.
+    #[tokio::test]
+    async fn regression_1640_an_edit_made_while_the_web_saved_parks_with_its_bytes_and_is_never_overwritten() {
+        let master_key = [168u8; 32];
+        let file = "16400000-0000-4000-8000-000000000005";
+        let (_dir, sync_root, server, bridge, local) = regression_1640_synced_file(master_key, file).await;
+        regression_1640_web_saves(&server, master_key, file, b"edited on the web");
+        sync_tick_outcome(&bridge, &sync_root).await.unwrap();
+        assert_eq!(
+            bridge.db.get_file_contract_state(file).unwrap().unwrap().current_version,
+            2,
+            "precondition: the tick raised the row to the web's version"
+        );
+        std::fs::write(&local, b"edited in the sync folder").unwrap();
+        assert!(crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "notify"));
+        assert_eq!(
+            bridge.db.list_operations_for_file(file).unwrap()[0].base_version,
+            Some(1),
+            "the base is the version the bytes are based on, never the row's current one"
+        );
+        bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+        let parked = bridge.db.list_operations_for_file(file).unwrap().remove(0);
+        assert_eq!(parked.attempts, parked.max_attempts, "parked at once");
+        assert_eq!(parked.last_error.as_deref(), Some("stale_base"));
+        assert_eq!(
+            std::fs::read(parked.payload_path.as_deref().unwrap()).unwrap(),
+            b"edited in the sync folder",
+            "the parked op keeps the edit's bytes"
+        );
+        assert_eq!(bridge.db.get_file(file).unwrap().unwrap().status, FileStatus::Error);
+        let refused = bridge.hydrate_file(file, &local, &[sync_root.as_path()]).await.unwrap_err();
+        assert!(refused.is::<UnsentLocalChange>(), "{refused:#}");
+        assert_eq!(std::fs::read(&local).unwrap(), b"edited in the sync folder", "the edit stays on disk");
+        let kinds: Vec<String> = bridge
+            .version_conflict_feed()
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.kind)
+            .collect();
+        assert_eq!(kinds, vec!["stale_base".to_string()], "the person sees it");
+        let state = server.finish();
+        assert_eq!(state.init_summary(), vec![(json!(file), json!(1), 409)]);
+        assert_eq!(state.latest_plaintext(file, master_key), b"edited on the web");
+    }
+
+    #[tokio::test]
     async fn regression_1640_a_hydrate_never_writes_over_an_edit_that_is_not_queued() {
         let master_key = [169u8; 32];
         let file = "16400000-0000-4000-8000-000000000006";
@@ -26074,6 +26258,54 @@ mod tests {
         assert_eq!(contract.local_base_version, 2);
         assert_eq!(contract.local_hash.as_deref(), Some(sha256_hex(b"edited on the web").as_str()));
         drop(server.finish());
+    }
+
+    /// A nested file keeps its folder: the landing writes the op's target path to the row, and a
+    /// sync-folder edit names the full relative path (a Finder modify names the file only).
+    #[tokio::test]
+    async fn regression_1640_an_edit_of_a_nested_file_lands_in_its_folder() {
+        let master_key = [171u8; 32];
+        let file = "16400000-0000-4000-8000-000000000008";
+        let (_dir, sync_root, server, bridge) = rule3_setup(master_key);
+        bridge
+            .db
+            .upsert_file(&FileEntry {
+                file_id: "16400000-0000-4000-8000-0000000000f1".into(),
+                path: "docs".into(),
+                status: FileStatus::Local,
+                size_bytes: 0,
+                modified_at: 1_700_000_000,
+                content_hash: None,
+                remote_updated_at: 1_700_000_000,
+                parent_id: None,
+                item_kind: ItemKind::Folder,
+            })
+            .unwrap();
+        seed_uploaded_row(&bridge, &server, file);
+        let mut row = bridge.db.get_file(file).unwrap().unwrap();
+        row.path = "docs/notes.txt".into();
+        bridge.db.upsert_file(&row).unwrap();
+        let mut contract = bridge.db.get_file_contract_state(file).unwrap().unwrap();
+        contract.parent_id = Some("16400000-0000-4000-8000-0000000000f1".into());
+        bridge.db.set_file_contract_state(&contract).unwrap();
+        {
+            let mut s = server.state.lock().unwrap();
+            s.files.get_mut(file).unwrap().versions[0] = vec![regression_1640_chunk(master_key, file, b"version one")];
+            s.serve_downloads = true;
+        }
+        let local = sync_root.join("docs").join("notes.txt");
+        std::fs::create_dir_all(local.parent().unwrap()).unwrap();
+        bridge.hydrate_file(file, &local, &[sync_root.as_path()]).await.unwrap();
+        std::fs::write(&local, b"edited in a folder").unwrap();
+        assert!(crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "notify"));
+        assert_eq!(
+            bridge.db.list_operations_for_file(file).unwrap()[0].target_path.as_deref(),
+            Some("docs/notes.txt")
+        );
+        drain_upload_queue(&bridge, &sync_root).await;
+        assert_eq!(bridge.db.get_file(file).unwrap().unwrap().path, "docs/notes.txt", "still in its folder");
+        let state = server.finish();
+        assert_eq!(state.latest_plaintext(file, master_key), b"edited in a folder");
     }
 
     #[test]
