@@ -4372,7 +4372,9 @@ impl EngineBridge {
     /// separate cache file — `unpinned_local_files_for_dehydration` reconstructs
     /// the real on-disk path from `path` + sync root (see state_db comment).
     #[cfg(target_os = "windows")]
-    pub async fn hydrate_file_to_memory(&self, file_id: &str) -> anyhow::Result<(Zeroizing<Vec<u8>>, Option<FetchedVersion>)> {
+    pub async fn hydrate_file_to_memory(&self, file_id: &str) -> anyhow::Result<FetchedBytes> {
+        // Self-review #1: counted from before anything is recorded until the caller's transfer ended.
+        let ticket = self.begin_fetch(file_id);
         let legacy_version = self.legacy_download_version(file_id)?;
         self.db.set_status(file_id, FileStatus::Downloading)?;
         match self.do_hydrate_versioned(file_id, None).await {
@@ -4404,7 +4406,7 @@ impl EngineBridge {
                 // file. Byte count is still recorded for smart-cache accounting.
                 self.db.mark_cached(file_id, "", buf.len() as i64, now_secs())?;
                 let _ = self.enforce_configured_cache_limit();
-                Ok((buf, fetched))
+                Ok(FetchedBytes { bytes: buf, version: fetched, ticket })
             }
             Err(e) => {
                 let _ = self.db.set_status(file_id, FileStatus::Error);
@@ -4413,12 +4415,34 @@ impl EngineBridge {
         }
     }
 
-    /// Task 1640 (review F1): a fetch transferred the whole file (`fetched`, from
+    /// Task 1640 (review F1, design T5): a fetch transferred the whole file (`fetched`, from
     /// [`Self::hydrate_file_to_memory`]): every byte on disk is that version's now, so they are the
-    /// content this device agrees with the server on, and nothing else fetched is left.
+    /// content this device agrees with the server on, and nothing else fetched is left. Only when no
+    /// other fetch of the file overlapped this one (`ticket`, self-review #1): another fetch's bytes,
+    /// of another version, could land around this transfer. Then the candidate this fetch merged
+    /// stays (lower or mixed). `Ok(true)`: recorded.
     #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
-    pub fn record_whole_fetch(&self, file_id: &str, fetched: &FetchedVersion) -> anyhow::Result<()> {
-        Ok(self.db.record_local_baseline(file_id, fetched.version, &fetched.hash)?)
+    pub fn record_whole_fetch(&self, file_id: &str, fetched: &FetchedVersion, ticket: &FetchTicket) -> anyhow::Result<bool> {
+        if !ticket.alone() {
+            tracing::debug!(file_id = %file_id, "whole fetch overlapped by another fetch of the file; its candidate stays");
+            return Ok(false);
+        }
+        self.db.record_local_baseline(file_id, fetched.version, &fetched.hash)?;
+        Ok(true)
+    }
+
+    /// Task 1640 (self-review #1): a fetch of `file_id` starts ([`FetchTicket`]).
+    #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+    fn begin_fetch(&self, file_id: &str) -> FetchTicket {
+        let mut fetches = FETCHES_IN_FLIGHT.lock().expect("fetch activity mutex poisoned");
+        let activity = fetches.entry(file_id.to_string()).or_default();
+        activity.in_flight += 1;
+        activity.events += 1;
+        let alone_since = (activity.in_flight == 1).then_some(activity.events);
+        FetchTicket {
+            file_id: file_id.to_string(),
+            alone_since,
+        }
     }
 
     /// Core download + decrypt loop. Returns the full plaintext in a
@@ -5558,7 +5582,7 @@ pub fn version_conflict_feed_from_db(db: &StateDb) -> anyhow::Result<Vec<Version
                 let original = if kept.original_removed {
                     ""
                 } else {
-                    " The original is still open; it is removed from this PC once it is closed."
+                    " The original stays on this PC until it can be removed."
                 };
                 (
                     copy_name.clone(),
@@ -5628,6 +5652,65 @@ fn encrypted_metadata_for_name(
 pub struct FetchedVersion {
     pub version: i64,
     pub hash: String,
+}
+
+/// Task 1640: one fetch's plaintext ([`EngineBridge::hydrate_file_to_memory`]), what it served
+/// (`None`: the download named no version), and its [`FetchTicket`], held until the transfer ended.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub struct FetchedBytes {
+    pub bytes: Zeroizing<Vec<u8>>,
+    pub version: Option<FetchedVersion>,
+    pub ticket: FetchTicket,
+}
+
+/// Task 1640 (self-review #1): a file's fetches in flight, and how often one started or ended.
+#[derive(Debug, Default)]
+struct FetchActivity {
+    in_flight: usize,
+    events: u64,
+}
+
+/// Task 1640 (self-review #1; design "The fetch tracker"): every file's fetches in flight, for the
+/// whole process, not one bridge: a bridge made later in the same process (a new sign-in) sees what
+/// an earlier one still has in flight. It is empty only when the process starts, and then no fetch
+/// of an earlier process can transfer anything any more: only this process's callbacks write into
+/// its placeholders.
+static FETCHES_IN_FLIGHT: std::sync::LazyLock<std::sync::Mutex<HashMap<String, FetchActivity>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Task 1640 (self-review #1): one fetch of a file, from before it records anything until its
+/// transfer ended (when it is dropped). It is "alone" when it was the file's only fetch in flight in
+/// this process when it started, and no other fetch of the file has started or ended since.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+pub struct FetchTicket {
+    file_id: String,
+    alone_since: Option<u64>,
+}
+
+impl FetchTicket {
+    #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+    fn alone(&self) -> bool {
+        let Some(since) = self.alone_since else {
+            return false;
+        };
+        FETCHES_IN_FLIGHT
+            .lock()
+            .is_ok_and(|fetches| fetches.get(&self.file_id).is_some_and(|activity| activity.events == since))
+    }
+}
+
+impl Drop for FetchTicket {
+    fn drop(&mut self) {
+        if let Ok(mut fetches) = FETCHES_IN_FLIGHT.lock() {
+            if let Some(activity) = fetches.get_mut(&self.file_id) {
+                activity.in_flight = activity.in_flight.saturating_sub(1);
+                activity.events += 1;
+                if activity.in_flight == 0 {
+                    fetches.remove(&self.file_id);
+                }
+            }
+        }
+    }
 }
 
 /// Task 1640: what a tracked sync-folder file's bytes are (Windows: Linux runs no upload driver), against the content
@@ -8438,6 +8521,9 @@ pub(crate) enum LocalEntry {
     WhollyLocal,
     /// Some bytes are on disk and it is out of sync: reading it would fetch the rest.
     PartlyLocal,
+    /// The platform's view could not be read (self-review #5: the file is open exclusively, or the
+    /// query failed): treated as in use, kept and retried, never as partly on disk.
+    Unreadable,
 }
 
 /// Task 1640 (review P1-1): what removing one remotely deleted sync-folder entry did.
@@ -8491,6 +8577,7 @@ pub(crate) fn remove_pruned_entry(
     match local {
         LocalEntry::InSync | LocalEntry::NothingLocal => removed(std::fs::remove_file(path), in_use()),
         LocalEntry::PartlyLocal => PrunedEntry::KeptInPlace(KeptReason::PartlyLocal),
+        LocalEntry::Unreadable => in_use(),
         LocalEntry::WhollyLocal => {
             let Ok(hash) = sha256_file_hex(path) else {
                 return in_use();
@@ -8789,10 +8876,13 @@ pub(crate) fn retry_kept_originals(db: &StateDb, sync_root: &Path, local: &dyn F
             resolve(&copy);
             continue;
         }
-        // Review F2: the place still belongs to the file deleted elsewhere (no row, or its own row
-        // still being trashed)? Otherwise the file there is live: never removed or trashed again.
+        // Review F2: the file was restored on the web (its own row, live again): it is tracked by
+        // its row, never removed or trashed again. Any other row at the place (another file moved
+        // there) does not own these bytes: they are still the deleted file's placeholder, which would
+        // keep the other file's from being created, so they go as below (a change copied first); the
+        // remove is the engine's own, so nothing is trashed (self-review #4).
         match db.get_file_by_path(&copy.original_path) {
-            Ok(Some(row)) if row.file_id != copy.original_file_id || row.status != FileStatus::Trashing => {
+            Ok(Some(row)) if row.file_id == copy.original_file_id && row.status != FileStatus::Trashing => {
                 resolve(&copy);
                 continue;
             }
@@ -8820,7 +8910,10 @@ pub(crate) fn retry_kept_originals(db: &StateDb, sync_root: &Path, local: &dyn F
                 );
             }
             PrunedEntry::KeptInPlace(reason) => {
-                if copy.copy_path.is_empty() && reason != copy.reason {
+                // Self-review #5: an entry whose changes could not be copied was read wholly once; it
+                // never becomes "partly on disk", which the person may dismiss.
+                let downgrade = copy.reason == KeptReason::CopyFailed && reason == KeptReason::PartlyLocal;
+                if copy.copy_path.is_empty() && reason != copy.reason && !downgrade {
                     record_kept_copy(
                         db,
                         sync_root,
@@ -8859,7 +8952,18 @@ fn remove_empty_kept_folders(db: &StateDb, sync_root: &Path) {
             Err(_) => continue,
         }
         crate::watcher::suppress_engine_delete(&path);
-        match std::fs::remove_dir(&path) {
+        let mut removed = std::fs::remove_dir(&path);
+        // Self-review #8: once only names the sync folder ignores are left in it (a stale Office
+        // owner file, a temp file), they go with the folder; otherwise it would stay forever.
+        if removed.is_err() && only_ignored_files(&path) {
+            if let Ok(entries) = std::fs::read_dir(&path) {
+                for entry in entries.flatten() {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+            removed = std::fs::remove_dir(&path);
+        }
+        match removed {
             Ok(()) => {
                 let _ = db.forget_removed_folder(&rel);
             }
@@ -8869,6 +8973,18 @@ fn remove_empty_kept_folders(db: &StateDb, sync_root: &Path) {
             Err(_) => {}
         }
     }
+}
+
+/// Task 1640 (self-review #8): `dir` holds files only, each a name the sync folder ignores.
+fn only_ignored_files(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.into_iter().all(|entry| {
+        entry.is_ok_and(|entry| {
+            entry.file_type().is_ok_and(|kind| kind.is_file()) && entry.file_name().to_str().is_some_and(is_ignored_finder_name)
+        })
+    })
 }
 
 /// Task 1640 (review F3): whether `dir` holds only what this PC keeps from a deletion elsewhere:
@@ -27489,8 +27605,8 @@ mod tests {
         }
         let _ = &sync_root;
         assert!(bridge.db.mark_no_fetched_content(file).unwrap(), "its placeholder created where nothing was");
-        let (_, fetched) = bridge.hydrate_file_to_memory(file).await.unwrap();
-        let fetched = fetched.expect("the download names its version");
+        let fetch = bridge.hydrate_file_to_memory(file).await.unwrap();
+        let fetched = fetch.version.clone().expect("the download names its version");
         assert_eq!(fetched, FetchedVersion { version: 1, hash: sha256_hex(b"version one") });
         assert_eq!(
             bridge.db.get_file_contract_state(file).unwrap().unwrap().local_hash,
@@ -27502,8 +27618,9 @@ mod tests {
             Some((1, Some(sha256_hex(b"version one")))),
             "recorded as the candidate before the transfer"
         );
-        // The whole file was transferred.
-        bridge.record_whole_fetch(file, &fetched).unwrap();
+        // The whole file was transferred, and no other fetch overlapped it.
+        assert!(bridge.record_whole_fetch(file, &fetched, &fetch.ticket).unwrap());
+        drop(fetch);
         let contract = bridge.db.get_file_contract_state(file).unwrap().unwrap();
         assert_eq!((contract.local_base_version, contract.local_hash), (1, Some(sha256_hex(b"version one"))));
         assert_eq!(bridge.db.fetched_content(file).unwrap(), None);
@@ -27601,6 +27718,11 @@ mod tests {
         assert_eq!(db.fetched_content("f").unwrap(), Some((3, Some("h3".into()))));
         db.record_fetched_version("f", 3, "h3").unwrap();
         assert_eq!(db.fetched_content("f").unwrap(), Some((3, Some("h3".into()))), "same version: kept");
+        // Self-review #7: the same version with other bytes (a legacy download that under-claims).
+        regression_1640_new_placeholder(&db, "g", "g.txt");
+        db.record_fetched_version("g", 3, "h3").unwrap();
+        db.record_fetched_version("g", 3, "other bytes labelled 3").unwrap();
+        assert_eq!(db.fetched_content("g").unwrap(), Some((3, None)), "the same version, other bytes: mixed");
         db.record_fetched_version("f", 2, "h2").unwrap();
         assert_eq!(db.fetched_content("f").unwrap(), Some((2, None)), "another version: mixed, the lower one");
         db.record_fetched_version("f", 2, "h2").unwrap();
@@ -27975,12 +28097,14 @@ mod tests {
             s.serve_downloads = true;
         }
         assert!(bridge.db.mark_no_fetched_content(file).unwrap());
-        let (_, fetched) = bridge.hydrate_file_to_memory(file).await.unwrap();
-        assert_eq!(fetched.unwrap().version, 1);
+        let fetch = bridge.hydrate_file_to_memory(file).await.unwrap();
+        assert_eq!(fetch.version.as_ref().unwrap().version, 1);
+        drop(fetch);
         regression_1640_tick_partly_on_disk(&bridge.db, file);
         regression_1640_web_saves(&server, master_key, file, b"version two");
-        let (_, fetched) = bridge.hydrate_file_to_memory(file).await.unwrap();
-        assert_eq!(fetched.unwrap().version, 2);
+        let fetch = bridge.hydrate_file_to_memory(file).await.unwrap();
+        assert_eq!(fetch.version.as_ref().unwrap().version, 2);
+        drop(fetch);
         assert_eq!(bridge.db.fetched_content(file).unwrap(), Some((1, None)));
         let local = sync_root.join("notes.txt");
         std::fs::write(&local, b"ranges of one and two, then edited").unwrap();
@@ -28041,10 +28165,133 @@ mod tests {
         assert_eq!(state.latest_plaintext(file, master_key), b"first edit");
     }
 
+    /// Self-review #1: a whole fetch is the agreed content only when no other fetch of the file
+    /// overlapped it: one already in flight when it started, or one that started or ended before its
+    /// transfer ended, could put bytes of another version around it. Its candidate then stays.
+    #[tokio::test]
+    async fn regression_1640_a_whole_fetch_is_agreed_only_when_no_other_fetch_overlapped_it() {
+        let (_dir, _sync_root, server, bridge) = rule3_setup([188u8; 32]);
+        let one = FetchedVersion { version: 1, hash: sha256_hex(b"version one") };
+        let two = FetchedVersion { version: 2, hash: sha256_hex(b"version two") };
+        let fetch = |file: &str, fetched: &FetchedVersion| {
+            let ticket = bridge.begin_fetch(file);
+            bridge.db.record_fetched_version(file, fetched.version, &fetched.hash).unwrap();
+            ticket
+        };
+        // Alone: the whole file is version 2's.
+        regression_1640_new_placeholder(&bridge.db, "alone", "alone.txt");
+        let whole = fetch("alone", &two);
+        assert!(bridge.record_whole_fetch("alone", &two, &whole).unwrap());
+        drop(whole);
+        assert_eq!(bridge.db.get_file_contract_state("alone").unwrap().unwrap().local_hash, Some(two.hash.clone()));
+        // A range fetch of version 1 still in flight when the whole fetch started.
+        regression_1640_new_placeholder(&bridge.db, "earlier", "earlier.txt");
+        let range = fetch("earlier", &one);
+        let whole = fetch("earlier", &two);
+        assert!(!bridge.record_whole_fetch("earlier", &two, &whole).unwrap());
+        drop((range, whole));
+        // A fetch that started and ended during the whole fetch.
+        regression_1640_new_placeholder(&bridge.db, "during", "during.txt");
+        let whole = fetch("during", &two);
+        drop(fetch("during", &one));
+        assert!(!bridge.record_whole_fetch("during", &two, &whole).unwrap());
+        drop(whole);
+        // The range fetch's bytes landed after the whole fetch's: the file is never agreed, and an
+        // edit is sent on the older version.
+        let spliced = _sync_root.join("spliced.txt");
+        std::fs::write(&spliced, b"version two, with a range of version one").unwrap();
+        for id in ["earlier", "during"] {
+            assert_eq!(bridge.db.get_file_contract_state(id).unwrap().unwrap().local_hash, None, "{id}");
+            assert_eq!(bridge.db.fetched_content(id).unwrap(), Some((1, None)), "{id}: its candidate stays");
+            assert_eq!(
+                sync_folder_content(&bridge.db, id, &spliced, None).unwrap(),
+                SyncFolderContent::Changed { base: Some(1) },
+                "{id}: not agreed, the older version"
+            );
+        }
+        // A range fetch that starts after a whole fetch's agreed content: it joins it (lower or mixed).
+        drop(fetch("alone", &one));
+        assert_eq!(bridge.db.fetched_content("alone").unwrap(), Some((1, None)));
+        assert_eq!(
+            sync_folder_content(&bridge.db, "alone", &spliced, None).unwrap(),
+            SyncFolderContent::Changed { base: Some(1) }
+        );
+        // Later, alone again.
+        let whole = fetch("during", &two);
+        assert!(bridge.record_whole_fetch("during", &two, &whole).unwrap());
+        drop(server.finish());
+    }
+
+    /// Self-review #5: an entry whose platform view could not be read (open exclusively) is kept as
+    /// in use and retried, never "partly on disk" (which may be dismissed); and an entry whose changes
+    /// could not be copied never becomes "partly on disk" on a later read either.
+    #[cfg(unix)]
+    #[test]
+    fn regression_1640_an_unreadable_or_uncopied_file_is_never_dismissable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
+        let rows = db.mark_subtree_trashing("folder-docs").unwrap();
+        remove_pruned_entries(&db, &sync_root, &rows, &|_| LocalEntry::Unreadable);
+        let kept = db.list_kept_copies().unwrap();
+        assert_eq!((kept.len(), kept[0].reason, kept[0].dismissable()), (1, KeptReason::InUse, false));
+        assert!(sync_root.join("docs").join("notes.txt").exists(), "kept");
+        // Changes that could not be copied, then read as partly on disk.
+        let dir = tempfile::tempdir().unwrap();
+        let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
+        let rows = db.mark_subtree_trashing("folder-docs").unwrap();
+        std::fs::set_permissions(&sync_root, std::fs::Permissions::from_mode(0o555)).unwrap();
+        remove_pruned_entries(&db, &sync_root, &rows, &|_| LocalEntry::WhollyLocal);
+        std::fs::set_permissions(&sync_root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        retry_kept_originals(&db, &sync_root, &|_| LocalEntry::PartlyLocal);
+        let kept = db.list_kept_copies().unwrap();
+        assert_eq!((kept.len(), kept[0].reason, kept[0].dismissable()), (1, KeptReason::CopyFailed, false));
+    }
+
+    /// Self-review #8: a kept folder in which only names the sync folder ignores are left (a stale
+    /// Office owner file) is removed with them once nothing waits in it.
+    #[test]
+    fn regression_1640_a_kept_folder_left_with_ignored_names_is_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
+        let docs = sync_root.join("docs");
+        std::fs::write(docs.join("~$notes.docx"), b"owner").unwrap();
+        let rows = db.delete_file_subtree("folder-docs").unwrap();
+        remove_pruned_entries(&db, &sync_root, &rows, &|_| LocalEntry::PartlyLocal);
+        assert!(docs.exists(), "precondition: kept for the file");
+        retry_kept_originals(&db, &sync_root, &|_| LocalEntry::NothingLocal);
+        assert!(!docs.exists(), "the owner file goes with the folder");
+        assert!(db.list_removed_folders().unwrap().is_empty());
+    }
+
+    /// Self-review #2: the candidate's column has its own name, so a database from a round-2 build
+    /// (whose `fetched_version` had DEFAULT 0) reads every row as not known.
+    #[test]
+    fn regression_1640_a_round_two_database_reads_every_row_as_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        drop(StateDb::open(&path).unwrap());
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "DROP TRIGGER IF EXISTS files_cloud_only_folds_agreed_into_candidate;
+                 ALTER TABLE files DROP COLUMN fetched_min_version;
+                 ALTER TABLE files ADD COLUMN fetched_version INTEGER NOT NULL DEFAULT 0;
+                 INSERT INTO files (file_id, path, status) VALUES ('old', 'old.txt', 'local');",
+            )
+            .unwrap();
+        }
+        let db = StateDb::open(&path).unwrap();
+        db.record_fetched_version("old", 2, "h2").unwrap();
+        assert_eq!(db.fetched_content("old").unwrap(), None, "not known: no candidate over its bytes");
+        assert!(!db.mark_no_fetched_content("old").unwrap());
+    }
+
     // ── Task 1640, review F2–F7: files kept from a remote deletion ──
 
-    /// Review F2: an original that waits (in use) is never removed once its place belongs to a
-    /// file the server lists again: restored on the web, or another file moved there.
+    /// Review F2: an original that waits (in use) is never removed once the file is restored on the
+    /// web (its own row, live again). When ANOTHER file moved to the place, the bytes there are still
+    /// the deleted file's (already copied): they go, as the engine's own remove (self-review #4).
     #[cfg(unix)]
     #[test]
     fn regression_1640_a_retry_never_removes_a_file_the_server_lists_again() {
@@ -28077,11 +28324,18 @@ mod tests {
                 .unwrap();
             }
             retry_kept_originals(&db, &sync_root, &|_| LocalEntry::WhollyLocal);
-            assert_eq!(
-                std::fs::read(docs.join("notes.txt")).unwrap(),
-                b"edited, never sent",
-                "{case}: the live file stays"
-            );
+            if case == "restored on the web" {
+                assert_eq!(
+                    std::fs::read(docs.join("notes.txt")).unwrap(),
+                    b"edited, never sent",
+                    "{case}: the live file stays"
+                );
+            } else {
+                // Self-review #4: the bytes there are still the deleted file's (copied already); they go
+                // so the other file's placeholder can be created there. The remove is the engine's own.
+                assert!(!docs.join("notes.txt").exists(), "{case}: the deleted file's bytes go");
+                assert_eq!(db.get_file_by_path("docs/notes.txt").unwrap().unwrap().file_id, "file-moved-here", "{case}");
+            }
             assert!(!db.is_kept_original_pending("docs/notes.txt").unwrap(), "{case}: nothing waits any more");
             let kept = db.list_kept_copies().unwrap();
             assert_eq!(kept.len(), 1, "{case}: the copy's entry stays");

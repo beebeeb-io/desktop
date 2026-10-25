@@ -166,16 +166,25 @@ pub fn create_placeholder(
         // windows 0.58 takes the placeholder array as a `&mut [..]` slice
         // (the length is derived from it) plus an optional
         // `entriesprocessed` out-pointer — four args total, not five.
+        // A placeholder that already exists is the steady state on every
+        // tick after the first — `HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS)`
+        // (0x800700B7). Treat it as success: the desired end state holds. It
+        // is `Ok(false)`, not created: task 1640 marks a placeholder "nothing
+        // fetched on disk" only when it really was created.
+        const ALREADY_EXISTS: windows::core::HRESULT = windows::core::HRESULT(0x800700B7u32 as i32);
         let entries = std::slice::from_mut(&mut entry);
         if let Err(e) = CfCreatePlaceholders(PCWSTR(parent_wide.as_ptr()), entries, CF_CREATE_FLAG_NONE, None) {
-            // A placeholder that already exists is the steady state on every
-            // tick after the first — `HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS)`
-            // (0x800700B7). Treat it as success: the desired end state holds.
-            const ALREADY_EXISTS: windows::core::HRESULT = windows::core::HRESULT(0x800700B7u32 as i32);
             if e.code() == ALREADY_EXISTS {
                 return Ok(false);
             }
             return Err(anyhow::anyhow!("CfCreatePlaceholders: {e}"));
+        }
+        // Task 1640 (self-review #3): the entry's own result decides, not only the call's.
+        if entries[0].Result == ALREADY_EXISTS {
+            return Ok(false);
+        }
+        if entries[0].Result.is_err() {
+            return Err(anyhow::anyhow!("CfCreatePlaceholders entry: {:?}", entries[0].Result));
         }
     }
 
@@ -779,7 +788,7 @@ pub fn local_bytes_agreed(db: &crate::state_db::StateDb, file_id: &str, path: &s
 /// Task 1640 (review N2, N6): what the entry at `path` holds, as the platform reports it: in sync
 /// with no modified data, no data on disk, every byte on disk (also a plain file, which is what an
 /// atomic save leaves), or only some. Opened as the reparse point, so nothing is fetched. Anything
-/// that cannot be read reports "partly on disk", which keeps the entry.
+/// that cannot be read reports "unreadable" (self-review #5), which keeps the entry and retries it.
 pub fn placeholder_local_entry(path: &std::path::Path) -> crate::engine_bridge::LocalEntry {
     use crate::engine_bridge::LocalEntry;
     use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
@@ -793,7 +802,7 @@ pub fn placeholder_local_entry(path: &std::path::Path) -> crate::engine_bridge::
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
         .open(path)
     else {
-        return LocalEntry::PartlyLocal;
+        return LocalEntry::Unreadable;
     };
     let mut buffer = vec![0u64; 1024];
     // SAFETY: `file` is open for the whole call; the buffer is 8-byte aligned and its length is
@@ -812,7 +821,7 @@ pub fn placeholder_local_entry(path: &std::path::Path) -> crate::engine_bridge::
         Err(e) if e.code() == windows::core::HRESULT::from_win32(ERROR_NOT_A_CLOUD_FILE.0) => {
             return LocalEntry::WhollyLocal;
         }
-        Err(_) => return LocalEntry::PartlyLocal,
+        Err(_) => return LocalEntry::Unreadable,
     }
     // SAFETY: a successful CF_PLACEHOLDER_INFO_STANDARD call wrote that struct at the start.
     let info = unsafe { &*buffer.as_ptr().cast::<CF_PLACEHOLDER_STANDARD_INFO>() };

@@ -437,25 +437,29 @@ fn pending_operation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Pendi
 }
 
 /// Task 1640 (review F1): the file's agreed content joins its fetch candidate, as the
-/// `files_cloud_only_folds_agreed_content` trigger does: its bytes are no longer known to be all of
+/// `files_cloud_only_folds_agreed_into_candidate` trigger does: its bytes are no longer known to be all of
 /// that version. An agreed content with no version makes the content not known.
 fn fold_agreed_into_candidate_conn(conn: &Connection, file_id: &str) -> Result<()> {
     conn.execute(
-        "UPDATE files SET
-             fetched_hash = CASE
-                 WHEN fetched_version = 0 THEN local_hash
-                 WHEN fetched_version = local_base_version AND fetched_hash = local_hash THEN fetched_hash
-                 ELSE NULL END,
-             fetched_version = CASE
-                 WHEN local_base_version <= 0 THEN -1
-                 WHEN fetched_version = 0 THEN local_base_version
-                 ELSE MIN(fetched_version, local_base_version) END,
-             local_hash = NULL
-         WHERE file_id = ?1 AND local_hash IS NOT NULL",
+        &format!("UPDATE files SET {FOLD_AGREED_INTO_CANDIDATE} WHERE file_id = ?1 AND local_hash IS NOT NULL"),
         params![file_id],
     )?;
     Ok(())
 }
+
+/// The fold's SET clause, shared by [`fold_agreed_into_candidate_conn`] and the
+/// `files_cloud_only_folds_agreed_into_candidate` trigger (self-review #9: one definition). Every
+/// right-hand side reads the row as it was before the update.
+const FOLD_AGREED_INTO_CANDIDATE: &str = "
+    fetched_hash = CASE
+        WHEN fetched_min_version = 0 THEN local_hash
+        WHEN fetched_min_version = local_base_version AND fetched_hash = local_hash THEN fetched_hash
+        ELSE NULL END,
+    fetched_min_version = CASE
+        WHEN local_base_version <= 0 THEN -1
+        WHEN fetched_min_version = 0 THEN local_base_version
+        ELSE MIN(fetched_min_version, local_base_version) END,
+    local_hash = NULL";
 
 const KEPT_COPY_COLUMNS: &str = "id, original_file_id, original_path, copy_path, copied_hash, original_removed, reason, kept_at";
 
@@ -2279,10 +2283,12 @@ impl StateDb {
         ensure_column(&conn, "files", "current_object_version_id", "TEXT")?;
         ensure_column(&conn, "files", "local_base_version", "INTEGER NOT NULL DEFAULT 0")?;
         ensure_column(&conn, "files", "local_hash", "TEXT")?;
-        // Task 1640 (review N1, F1): what the fetches put on disk (see `record_fetched_version`). -1, the
-        // default, is "not known": every row from before this column, and every new one until its placeholder
-        // is created where nothing was.
-        ensure_column(&conn, "files", "fetched_version", "INTEGER NOT NULL DEFAULT -1")?;
+        // Task 1640 (review N1, F1): what the fetches put on disk (see `record_fetched_version` and
+        // docs/design/1640-local-content-identity.md). -1, the default, is "not known": every row from
+        // before this column, and every new one until its placeholder is created where nothing was. A
+        // new name (self-review #2): a database from a round-2 build has `fetched_version` DEFAULT 0, which
+        // no ALTER can change; that column is left unused.
+        ensure_column(&conn, "files", "fetched_min_version", "INTEGER NOT NULL DEFAULT -1")?;
         ensure_column(&conn, "files", "fetched_hash", "TEXT")?;
         ensure_column(&conn, "files", "cache_path", "TEXT")?;
         ensure_column(&conn, "files", "cache_bytes", "INTEGER NOT NULL DEFAULT 0")?;
@@ -2390,33 +2396,27 @@ impl StateDb {
                 server_id TEXT NOT NULL,
                 created_at INTEGER NOT NULL
             );
-            -- Task 1640 (review F1): a file that goes cloud-only may still hold some of its bytes
-            -- (a placeholder partly on disk reads as cloud-only on every tick, and no dehydration
-            -- is known to remove them all). Its agreed content no longer describes every byte, so
-            -- it joins the fetch candidate (`record_fetched_version`'s merge: the lower version,
-            -- mixed when they differ); nothing is forgotten. A dehydration only removes bytes, so
-            -- the candidate stays true of what is left.
-            DROP TRIGGER IF EXISTS files_cloud_only_forgets_local_content;
-            CREATE TRIGGER IF NOT EXISTS files_cloud_only_folds_agreed_content
-            AFTER UPDATE OF status ON files
-            WHEN NEW.status = 'cloud_only' AND OLD.status != 'cloud_only' AND NEW.local_hash IS NOT NULL
-            BEGIN
-                UPDATE files SET
-                    fetched_hash = CASE
-                        WHEN fetched_version = 0 THEN local_hash
-                        WHEN fetched_version = local_base_version AND fetched_hash = local_hash THEN fetched_hash
-                        ELSE NULL END,
-                    fetched_version = CASE
-                        WHEN local_base_version <= 0 THEN -1
-                        WHEN fetched_version = 0 THEN local_base_version
-                        ELSE MIN(fetched_version, local_base_version) END,
-                    local_hash = NULL
-                WHERE file_id = NEW.file_id;
-            END;
             ",
         )?;
         // Task 1640 (review F5): why a file deleted elsewhere was kept (`KeptReason`).
         ensure_column(&conn, "kept_copies", "reason", "TEXT NOT NULL DEFAULT 'copy'")?;
+        // Task 1640 (review F1, design T6): a file that goes cloud-only may still hold some of its
+        // bytes (a placeholder partly on disk reads as cloud-only on every tick, and no dehydration is
+        // known to remove them all). Its agreed content no longer describes every byte, so it joins
+        // the fetch candidate (`FOLD_AGREED_INTO_CANDIDATE`); nothing is forgotten. A dehydration only
+        // removes bytes, so the candidate stays true of what is left. The earlier triggers (round 2's
+        // wipe, and the first fold, on `fetched_version`) are dropped; a change to the fold takes a new
+        // trigger name, since `IF NOT EXISTS` keeps an existing definition.
+        conn.execute_batch(&format!(
+            "DROP TRIGGER IF EXISTS files_cloud_only_forgets_local_content;
+             DROP TRIGGER IF EXISTS files_cloud_only_folds_agreed_content;
+             CREATE TRIGGER IF NOT EXISTS files_cloud_only_folds_agreed_into_candidate
+             AFTER UPDATE OF status ON files
+             WHEN NEW.status = 'cloud_only' AND OLD.status != 'cloud_only' AND NEW.local_hash IS NOT NULL
+             BEGIN
+                 UPDATE files SET {FOLD_AGREED_INTO_CANDIDATE} WHERE file_id = NEW.file_id;
+             END;"
+        ))?;
         // Upgrade inventory: old one-shot Keep Mine rows may have no queue
         // owner. Preserve their plaintext reference before any resume purge.
         conn.execute(
@@ -2973,10 +2973,13 @@ impl StateDb {
     /// still waits to be removed by a later tick ([`KeptCopy::dismissable`]).
     pub fn dismiss_kept_copy(&self, id: i64) -> Result<bool> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        Ok(conn.execute(
-            "DELETE FROM kept_copies WHERE id = ?1 AND (original_removed = 1 OR reason = 'partly_local')",
-            params![id],
-        )? == 1)
+        let kept = conn
+            .query_row(&format!("SELECT {KEPT_COPY_COLUMNS} FROM kept_copies WHERE id = ?1"), params![id], kept_copy_from_row)
+            .optional()?;
+        if !kept.is_some_and(|kept| kept.dismissable()) {
+            return Ok(false);
+        }
+        Ok(conn.execute("DELETE FROM kept_copies WHERE id = ?1", params![id])? == 1)
     }
 
     pub fn record_local_activity(&self, input: LocalActivityEventInput) -> Result<()> {
@@ -3674,7 +3677,7 @@ impl StateDb {
     pub fn record_local_baseline(&self, file_id: &str, version: i64, hash: &str) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.execute(
-            "UPDATE files SET local_base_version = ?2, local_hash = ?3, fetched_version = 0, fetched_hash = NULL
+            "UPDATE files SET local_base_version = ?2, local_hash = ?3, fetched_min_version = 0, fetched_hash = NULL
              WHERE file_id = ?1",
             params![file_id, version, hash],
         )?;
@@ -3698,13 +3701,13 @@ impl StateDb {
         tx.execute(
             "UPDATE files SET
                  fetched_hash = CASE
-                     WHEN fetched_version = 0 THEN ?3
-                     WHEN fetched_version = ?2 AND fetched_hash IS NOT NULL THEN fetched_hash
+                     WHEN fetched_min_version = 0 THEN ?3
+                     WHEN fetched_min_version = ?2 AND fetched_hash = ?3 THEN fetched_hash
                      ELSE NULL END,
-                 fetched_version = CASE
-                     WHEN fetched_version = 0 THEN ?2
-                     WHEN fetched_version < 0 THEN -2
-                     ELSE MIN(fetched_version, ?2) END
+                 fetched_min_version = CASE
+                     WHEN fetched_min_version = 0 THEN ?2
+                     WHEN fetched_min_version < 0 THEN -2
+                     ELSE MIN(fetched_min_version, ?2) END
              WHERE file_id = ?1",
             params![file_id, version, hash],
         )?;
@@ -3717,7 +3720,7 @@ impl StateDb {
     pub fn mark_content_unknown(&self, file_id: &str) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.execute(
-            "UPDATE files SET local_hash = NULL, fetched_version = -2, fetched_hash = NULL WHERE file_id = ?1",
+            "UPDATE files SET local_hash = NULL, fetched_min_version = -2, fetched_hash = NULL WHERE file_id = ?1",
             params![file_id],
         )?;
         Ok(())
@@ -3731,8 +3734,8 @@ impl StateDb {
     pub fn mark_no_fetched_content(&self, file_id: &str) -> Result<bool> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         Ok(conn.execute(
-            "UPDATE files SET fetched_version = 0, fetched_hash = NULL
-             WHERE file_id = ?1 AND fetched_version = -1 AND local_hash IS NULL",
+            "UPDATE files SET fetched_min_version = 0, fetched_hash = NULL
+             WHERE file_id = ?1 AND fetched_min_version = -1 AND local_hash IS NULL",
             params![file_id],
         )? == 1)
     }
@@ -3743,7 +3746,7 @@ impl StateDb {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         Ok(conn
             .query_row(
-                "SELECT fetched_version, fetched_hash FROM files WHERE file_id = ?1",
+                "SELECT fetched_min_version, fetched_hash FROM files WHERE file_id = ?1",
                 params![file_id],
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
             )
@@ -3776,9 +3779,9 @@ impl StateDb {
     pub fn promote_fetched_content(&self, file_id: &str, version: i64, hash: &str) -> Result<bool> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         Ok(conn.execute(
-            "UPDATE files SET local_base_version = ?2, local_hash = ?3, fetched_version = 0, fetched_hash = NULL
+            "UPDATE files SET local_base_version = ?2, local_hash = ?3, fetched_min_version = 0, fetched_hash = NULL
              WHERE file_id = ?1 AND status = 'local' AND local_hash IS NULL
-               AND fetched_version = ?2 AND fetched_hash = ?3",
+               AND fetched_min_version = ?2 AND fetched_hash = ?3",
             params![file_id, version, hash],
         )? == 1)
     }
@@ -4598,7 +4601,7 @@ impl StateDb {
         // Task 1640 (review F1): what it sent is the whole file, so nothing fetched is left on disk.
         if input.completed_payload_hash.is_some() {
             tx.execute(
-                "UPDATE files SET fetched_version = 0, fetched_hash = NULL WHERE file_id = ?1",
+                "UPDATE files SET fetched_min_version = 0, fetched_hash = NULL WHERE file_id = ?1",
                 params![server],
             )?;
         }

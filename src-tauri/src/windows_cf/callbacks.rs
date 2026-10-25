@@ -182,7 +182,7 @@ pub unsafe extern "system" fn fetch_data_callback(
             result = bridge.hydrate_file_to_memory(&file_id) => result,
         }
     });
-    let (buf, fetched) = match buf {
+    let crate::engine_bridge::FetchedBytes { bytes: buf, version: fetched, ticket } = match buf {
         Ok(b) => b,
         Err(e) => {
             // Do NOT log the error's inner content at info+ if it could carry
@@ -296,7 +296,7 @@ pub unsafe extern "system" fn fetch_data_callback(
                 // transfer that fails or is cut off leaves the fetch's candidate, recorded before
                 // it, which only moves down). A failure leaves that candidate: never too high.
                 if let Some(fetched) = fetched.as_ref() {
-                    if let Err(e) = bridge.record_whole_fetch(&file_id, fetched) {
+                    if let Err(e) = bridge.record_whole_fetch(&file_id, fetched, &ticket) {
                         tracing::warn!(file_id = %file_id, error = %e, "could not record the fetched file as agreed");
                     }
                 }
@@ -312,6 +312,9 @@ pub unsafe extern "system" fn fetch_data_callback(
             unsafe { fail_transfer(connection_key, transfer_key, request_key, required_offset, required_length) };
         }
     }
+    // Task 1640 (self-review #1): this fetch's transfer has ended; another fetch's agreed content
+    // may now be recorded.
+    drop(ticket);
 }
 
 /// Resolve a hydration size mismatch out-of-band (task 0783, Tier-1) with a

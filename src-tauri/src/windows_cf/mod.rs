@@ -1203,8 +1203,8 @@ pub fn seed_placeholders(bridge: Arc<EngineBridge>, sync_root: &std::path::Path)
 /// currently in `CloudOnly` status and skips any with an empty `path` (so a
 /// row whose name hasn't decrypted yet is simply retried next tick once the
 /// path is populated). `create_placeholder` maps the steady-state
-/// `ERROR_ALREADY_EXISTS` to `Ok`, so re-creating an existing placeholder is a
-/// no-op rather than an error — calling this every tick is safe.
+/// `ERROR_ALREADY_EXISTS` to `Ok(false)`, so re-creating an existing placeholder
+/// is a no-op rather than an error — calling this every tick is safe.
 ///
 /// No-op (logs at debug) until [`seed_placeholders`] has stashed the bridge;
 /// the runner only calls this on ticks that run after the bridge is built, so
@@ -1216,11 +1216,9 @@ pub fn refresh_placeholders(sync_root: &std::path::Path) {
     };
     let ensured = populate_placeholders(&bridge, sync_root);
     if ensured > 0 {
-        // `ensured` counts every cloud-only row whose placeholder is now present,
-        // INCLUDING ones that already existed (re-creating an existing placeholder
-        // maps ERROR_ALREADY_EXISTS → Ok). So this is "placeholders present after
-        // refresh", not "newly added rows" — keep the wording neutral so a
-        // steady-state tick doesn't read as if new files appeared every time.
+        // `ensured` counts the placeholders created by this refresh; ones that
+        // already existed (ERROR_ALREADY_EXISTS → Ok(false)) are not counted, so
+        // a steady-state tick logs nothing.
         tracing::debug!(
             placeholders = ensured,
             sync_root = %sync_root.display(),
@@ -1504,8 +1502,8 @@ pub fn stamp_local_files_in_sync(sync_root: &std::path::Path) {
 
 /// Walk the engine bridge's DB file list and drop a cloud-only placeholder
 /// into Explorer for every file currently marked `CloudOnly`. Returns the
-/// number of placeholders successfully created (already-existing ones are
-/// counted as created since the end state is identical).
+/// number of placeholders created now (task 1640: an already-existing one
+/// is no error, but is not counted).
 ///
 /// The placeholder is created under `sync_root joined with the file's
 /// parent directory` — we mint the parent path from the stored relative
