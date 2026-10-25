@@ -44,11 +44,21 @@ pub(crate) struct PinnedRetry {
     pub base: Duration,
 }
 
+/// The budget covers the longest wait a server may ask for once (`classify::MAX_RETRY_AFTER`, 120 s) plus a margin:
+/// the API's own 429 says `Retry-After: 60` (server `rate_limit::too_many_requests`), so a 60 s budget gave up after any
+/// earlier wait plus one of them and restarted the whole file.
 const PINNED_RETRY: PinnedRetry = PinnedRetry {
     attempts: 4,
-    budget: Duration::from_secs(60),
+    budget: Duration::from_secs(180),
     base: Duration::from_secs(1),
 };
+
+/// How long to wait before attempt `attempt + 1`, after `waited` so far; `None`: give up. `asked` is the wait the
+/// server named (Retry-After), else the base doubles per attempt.
+pub(crate) fn retry_wait(retry: PinnedRetry, attempt: u32, waited: Duration, asked: Option<Duration>) -> Option<Duration> {
+    let wait = asked.unwrap_or_else(|| retry.base.saturating_mul(2u32.saturating_pow(attempt.saturating_sub(1))));
+    (attempt < retry.attempts && waited.saturating_add(wait) <= retry.budget).then_some(wait)
+}
 
 /// One attempt of the pinned route that did not give the chunk.
 enum PinnedFailure {
@@ -94,6 +104,34 @@ async fn read_capped(resp: &mut reqwest::Response, max: usize) -> Option<Vec<u8>
         body.extend_from_slice(&piece);
     }
     Some(body)
+}
+
+enum Exact {
+    Body(Vec<u8>),
+    WrongLength,
+    Broken,
+}
+
+/// Read a body that must be exactly `expected` bytes, never more than that into memory.
+async fn read_exact_len(resp: &mut reqwest::Response, expected: u64) -> Exact {
+    let mut body = Vec::new();
+    loop {
+        match resp.chunk().await {
+            Ok(Some(piece)) => {
+                if body.len() as u64 + piece.len() as u64 > expected {
+                    return Exact::WrongLength;
+                }
+                body.extend_from_slice(&piece);
+            }
+            Ok(None) => break,
+            Err(_) => return Exact::Broken,
+        }
+    }
+    if body.len() as u64 == expected {
+        Exact::Body(body)
+    } else {
+        Exact::WrongLength
+    }
 }
 
 /// Turn a finished response into what the classifier needs, reading at most `max` body bytes.
@@ -269,17 +307,14 @@ impl ApiClient {
         let mut waited = Duration::ZERO;
         let mut attempt: u32 = 1;
         loop {
-            let (wait, message) = match self.pinned_attempt(file_id, index, version, expected_len).await {
+            let (asked, message) = match self.pinned_attempt(file_id, index, version, expected_len).await {
                 Ok(bytes) => return Ok(bytes),
                 Err(PinnedFailure::Final(e)) => return Err(e),
-                Err(PinnedFailure::Again { wait, message }) => {
-                    let doubling = 2u32.saturating_pow(attempt - 1);
-                    (wait.unwrap_or_else(|| retry.base.saturating_mul(doubling)), message)
-                }
+                Err(PinnedFailure::Again { wait, message }) => (wait, message),
             };
-            if attempt >= retry.attempts || waited.saturating_add(wait) > retry.budget {
+            let Some(wait) = retry_wait(retry, attempt, waited, asked) else {
                 return Err(ChunkApiError::Failed(message));
-            }
+            };
             tracing::debug!(chunk = index, attempt, %message, "pinned API route: trying again");
             tokio::time::sleep(wait).await;
             waited += wait;
@@ -332,15 +367,14 @@ impl ApiClient {
                 _ => PinnedFailure::Final(ChunkApiError::Failed(failed)),
             });
         }
-        if resp.content_length() != Some(expected_len) {
-            return Err(PinnedFailure::Final(ChunkApiError::Failed(format!(
-                "chunk {index} through the API: a different length than the manifest"
-            ))));
-        }
+        // The body must be exactly the manifest's length: read at most that much, and check it.
         let mut resp = resp;
-        match read_capped(&mut resp, usize::try_from(expected_len).unwrap_or(usize::MAX)).await {
-            Some(bytes) if bytes.len() as u64 == expected_len => Ok(bytes),
-            _ => Err(PinnedFailure::Again {
+        match read_exact_len(&mut resp, expected_len).await {
+            Exact::Body(bytes) => Ok(bytes),
+            Exact::WrongLength => Err(PinnedFailure::Final(ChunkApiError::Failed(format!(
+                "chunk {index} through the API is not the length its version's manifest states"
+            )))),
+            Exact::Broken => Err(PinnedFailure::Again {
                 wait: None,
                 message: format!("chunk {index} through the API: the connection broke while reading"),
             }),
@@ -381,6 +415,33 @@ mod tests {
         assert_eq!(fetch_from_storage(&client, &grant).await, Err(0), "a failed fetch, no status");
         let took = started.elapsed();
         assert!(took < Duration::from_secs(4), "the idle timeout ended it, not the server's 8 s silence: {took:?}");
+    }
+
+    #[test]
+    fn the_api_s_own_429_is_waited_out_even_after_an_earlier_wait() {
+        use super::{PINNED_RETRY, retry_wait};
+        use beebeeb_core::direct_transfer as dt;
+        // The server's real answer (rate_limit::too_many_requests): this body, Retry-After: 60.
+        let body = br#"{"error":"rate_limited","message":"Too many requests. Try again in 60 seconds.","retry_after":60}"#;
+        let answer = dt::ApiAnswer::from_parts(429, Some("application/json"), body, Some("60"));
+        let dt::Outcome::Backoff(asked) = dt::classify(dt::Call::DownloadGrant, &answer) else {
+            panic!("a 429 is a backoff")
+        };
+        assert_eq!(asked, Duration::from_secs(60));
+        // A first 429: wait 60 s.
+        assert_eq!(retry_wait(PINNED_RETRY, 1, Duration::ZERO, Some(asked)), Some(asked));
+        // A 503 first (1 s), then the 429: still waited out, not a give-up that restarts the whole file.
+        assert_eq!(retry_wait(PINNED_RETRY, 2, Duration::from_secs(1), Some(asked)), Some(asked));
+        // Two 429s in a row: the second is waited out too.
+        assert_eq!(retry_wait(PINNED_RETRY, 2, asked, Some(asked)), Some(asked));
+        // The longest wait a server can ask for once (MAX_RETRY_AFTER) fits on its own.
+        assert_eq!(
+            retry_wait(PINNED_RETRY, 1, Duration::ZERO, Some(Duration::from_secs(120))),
+            Some(Duration::from_secs(120))
+        );
+        // Still bounded: a fourth attempt is never made, and a wait past the budget ends it.
+        assert_eq!(retry_wait(PINNED_RETRY, 4, Duration::ZERO, Some(Duration::from_secs(1))), None);
+        assert_eq!(retry_wait(PINNED_RETRY, 2, Duration::from_secs(150), Some(asked)), None);
     }
 
     #[tokio::test]

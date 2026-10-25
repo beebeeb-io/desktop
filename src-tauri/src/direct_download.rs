@@ -96,11 +96,11 @@ pub(crate) struct Request<'a> {
     pub download_kbps_limit: u64,
     /// Sizes the plaintext buffer only.
     pub approx_size: usize,
-    /// The version the metadata named (`download_version.object_version_id`). The first window pins
+    /// The version the metadata named, with its manifest (task 1643). The first window pins
     /// whatever is current, so landing on another version means the file was replaced after the
     /// metadata was read: a restart from fresh metadata, never the API path with the old geometry.
     /// `None`: the metadata names no version (a legacy file).
-    pub expected_version: Option<&'a str>,
+    pub pin: Option<&'a crate::download_pin::PinnedVersion>,
 }
 
 /// Where the driver reports progress: the same two numbers the API path reports.
@@ -332,11 +332,27 @@ pub(crate) async fn download(
                 Ok(()) => {
                     if !geometry_checked {
                         geometry_checked = true;
-                        let expected = request.expected_version.and_then(|v| uuid::Uuid::parse_str(v).ok());
-                        let landed = planner.pinned_version().and_then(|v| uuid::Uuid::parse_str(v).ok());
-                        if expected.is_some() && landed != expected {
-                            tracing::debug!("direct download: the grant names another version than the metadata");
-                            return Err(DirectError::VersionChanged);
+                        if let Some(pin) = request.pin {
+                            let landed = planner
+                                .pinned_version()
+                                .and_then(|v| uuid::Uuid::parse_str(v).ok())
+                                .map(|v| v.to_string());
+                            if landed.as_deref() != Some(pin.object_version_id.as_str()) {
+                                tracing::debug!("direct download: the grant names another version than the metadata");
+                                return Err(DirectError::VersionChanged);
+                            }
+                            // The same version: the grant's sizes are its manifest's, or the API path
+                            // (which checks every chunk against the manifest) serves the file.
+                            let manifest = dt::Geometry {
+                                chunk_count: pin.chunk_count,
+                                chunk_size: pin.chunk_size_bytes,
+                                encrypted_size: pin.ciphertext_size_bytes,
+                                original_size: pin.plaintext_size_bytes,
+                            };
+                            if planner.geometry() != Some(manifest) {
+                                tracing::debug!("direct download: the grant's sizes differ from the version's manifest");
+                                return Ok(Outcome::UseApi);
+                            }
                         }
                         if planner.geometry().map(|g| g.chunk_count) != Some(request.chunk_count) {
                             // The same version (or a legacy file) whose manifest and metadata
@@ -717,6 +733,15 @@ pub(crate) mod test_support {
                 "chunk_size_bytes": self.stride, "plaintext_size_bytes": self.plain.len(),
                 "ciphertext_size_bytes": self.encrypted_size(), "chunks": chunks,
             })
+        }
+    }
+
+    impl Version {
+        /// The pin a download of this version takes (task 1643).
+        pub(crate) fn pin(&self) -> crate::download_pin::PinnedVersion {
+            crate::download_pin::PinnedVersion::from_metadata(&json!({"download_version": self.manifest()}))
+                .unwrap()
+                .unwrap()
         }
     }
 
@@ -1122,7 +1147,7 @@ mod tests {
                 chunk_count,
                 download_kbps_limit: kbps,
                 approx_size: SIZE,
-                expected_version: None,
+                pin: None,
             },
             transport,
             None,
@@ -1314,7 +1339,7 @@ mod tests {
                 chunk_count: 12,
                 download_kbps_limit: 0,
                 approx_size: SIZE,
-                expected_version: None,
+                pin: None,
             },
             Transport::Auto,
             None,
@@ -1523,18 +1548,17 @@ mod tests {
         assert!(elapsed >= std::time::Duration::from_millis(800), "took {elapsed:?}");
     }
 
-    async fn run_expecting(pair: &Pair, expected: &str) -> Result<Outcome, DirectError> {
+    async fn run_pinned(pair: &Pair, pin: &crate::download_pin::PinnedVersion) -> Result<Outcome, DirectError> {
         let key = file_key(KEY, FILE_ID);
-        let chunk_count = pair.knobs().version.chunk_count();
         download(
             &client(pair),
             Request {
                 file_id: FILE_ID,
                 file_key: &key,
-                chunk_count,
+                chunk_count: pin.chunk_count,
                 download_kbps_limit: 0,
                 approx_size: SIZE,
-                expected_version: Some(expected),
+                pin: Some(pin),
             },
             Transport::Auto,
             None,
@@ -1575,16 +1599,28 @@ mod tests {
     async fn a_transfer_that_lands_on_another_version_than_the_metadata_named_restarts() {
         // The metadata named A; B (with more chunks) completed before the first grant.
         let pair = new_pair();
-        let named = pair.knobs().version.id.clone();
+        let named = pair.knobs().version.pin();
         let more = Version::new(&file_key(KEY, FILE_ID), "99999999-2222-4333-8444-555555555555", STRIDE, content(SIZE + 5000, 8));
         pair.knobs().replacement = Some(more);
         pair.knobs().grants.push_back(GrantScript::Replace);
-        assert_eq!(run_expecting(&pair, &named).await.err(), Some(DirectError::VersionChanged));
+        assert_eq!(run_pinned(&pair, &named).await.err(), Some(DirectError::VersionChanged));
         assert_eq!(pair.storage_requests(), 0, "nothing of the other version was fetched");
         // The version the metadata named: direct, as before.
         let pair = new_pair();
-        let named = pair.knobs().version.id.clone();
-        let (bytes, transport) = done(run_expecting(&pair, &named).await);
+        let named = pair.knobs().version.pin();
+        let (bytes, transport) = done(run_pinned(&pair, &named).await);
         assert_eq!((bytes, transport), (pair.plain(), FileTransport::Direct));
+    }
+
+    #[tokio::test]
+    async fn a_grant_whose_sizes_are_not_the_manifests_is_left_to_the_api_path() {
+        // Task 1643: the same version id, but the grant states other sizes than the metadata's
+        // manifest: the API path, which checks every chunk against the manifest, serves it.
+        let pair = new_pair();
+        let mut pin = pair.knobs().version.pin();
+        pin.plaintext_size_bytes += 1;
+        pin.ciphertext_size_bytes += 1;
+        uses_api(run_pinned(&pair, &pin).await);
+        assert_eq!(pair.storage_requests(), 0);
     }
 }
