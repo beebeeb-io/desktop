@@ -19,7 +19,6 @@ import * as desktopApi from '../src/desktopApi'
 import * as switchCopy from '../src/accountSwitchCopy'
 import * as signIn from '../src/onboardingSignIn'
 import * as signOutCopy from '../src/signOutCopy'
-import { FINDER_RAIL_DETAIL, FINDER_RAIL_TITLE } from '../src/finderSetupCopy'
 import { loadComponent, mount, textOf, type Mounted } from './fixtures/componentHarness'
 import { rustStr } from './fixtures/rustConstants'
 
@@ -33,7 +32,7 @@ afterEach(() => { while (mounted.length) mounted.pop()!.close() })
  *  so a rendered step is an element whose `type` is one of these functions. */
 function stepStubs() {
   const byName: Record<string, (props: any) => null> = {}
-  for (const name of ['SignInStep', 'UnlockStep', 'MacFinderStep', 'FinderInstallStep', 'PinningStep', 'ReadyStep', 'AccountSwitchStep']) {
+  for (const name of ['SignInStep', 'UnlockStep', 'FinderInstallStep', 'PinningStep', 'ReadyStep', 'AccountSwitchStep']) {
     byName[name] = () => null
   }
   return {
@@ -54,19 +53,11 @@ function openView(mode: 'setup' | 'reauth', opts: { signedIn?: boolean; closeRef
   const m = mount('Onboarding.tsx', 'OnboardingView', {
     backend: {
       sync_status: () => ({ logged_in: signedIn, vault_unlocked: signedIn, engine: 'running', sync_root: '/x', syncing: 0, cloud_only: 0, conflicts: 0 }),
-      desktop_platform: () => 'macos',
-      finder_setup_state: () => ({ setup: 'ready', reason: null, launch_location: 'applications', attempt: 1, max_attempts: 1, last_failure: null }),
     },
     props: { mode },
     bindings: {
       ...desktopApi,
-      loadFinderSetup: () => desktopApi.command('finder_setup_state'),
       getCurrentWindow: () => ({ close }),
-      // The capability snapshot (main.tsx's CapabilityProvider) and the macOS rail copy, which the
-      // view reads on every render even though the rail itself is empty here.
-      useCapabilities: () => ({ host_os: 'macos' }),
-      FINDER_RAIL_TITLE,
-      FINDER_RAIL_DETAIL,
       ...stubs.bindings,
     },
   })
@@ -231,15 +222,11 @@ describe('reauth mode', () => {
     const m = mount('Onboarding.tsx', 'OnboardingView', {
       backend: {
         sync_status: () => ({ logged_in: true, vault_unlocked: true, engine: 'running', sync_root: '/x', syncing: 0, cloud_only: 0, conflicts: 0 }),
-        desktop_platform: () => 'macos',
       },
       props: { mode: 'reauth' },
       bindings: {
         ...desktopApi,
         getCurrentWindow: () => ({ close: async () => {} }),
-        useCapabilities: () => ({ host_os: 'macos' }),
-        FINDER_RAIL_TITLE,
-        FINDER_RAIL_DETAIL,
         ...stubs.bindings,
         STEPS: [{ id: 'signin', title: 'Sign in', detail: '' }, { id: 'unlock', title: 'Set up this Mac', detail: '' }],
       },

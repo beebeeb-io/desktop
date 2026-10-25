@@ -1,26 +1,30 @@
 /**
  * The macOS Beebeeb window (task 1683 slice 1; spec `docs/specs/2026-10-24-macos-two-surface-app.md` §7, §8, §11):
- * the real `MacApp`, `HomePane` and `SignedOutCard` declarations of `src/MacApp.tsx`, executed with the component
+ * the real `MacApp` and `HomePane` declarations of `src/MacApp.tsx`, executed with the component
  * harness against a scripted backend and a scripted event bus.
  *
  * What this proves: the sidebar and its switch to the Settings list (System Settings style, ruling 1), the back
  * control and focus (§11), the keys of both lists, the last section, the one request channel (`main:navigate`), the
  * §8.2 rule that nothing navigates under a sheet and what the window tells Rust for the menu, the root behaviour that
  * moved here from the retired Settings window's tab-strip root (the update-check drain, F9's flow request handled
- * once), Home's first cut, and the signed-out card. The Settings section bodies are stubs here; their own tests are
- * tests/macSettingsTabs.test.tsx, unchanged.
+ * once), Home's first cut, and (slice 2) which screen the signed-out window shows and how the window follows a sign-in.
+ * The Settings section bodies and the sign-in screens are stubs here; their own tests are tests/macSettingsTabs.test.tsx
+ * (unchanged) and tests/macSignIn.test.tsx.
  * What it does NOT prove: layout (tests/render-mac-settings.mjs), React scheduling, real focus, or anything on a Mac.
  */
 import { afterEach, describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { createElement, Fragment } from 'react'
 import * as accountSession from '../src/accountSession'
+import * as copy from '../src/accountViewCopy'
 import * as desktopApi from '../src/desktopApi'
 import * as finderSetup from '../src/finderSetup'
 import * as finderSetupCopy from '../src/finderSetupCopy'
 import * as model from '../src/macSettingsModel'
 import * as parts from '../src/macSettingsParts'
 import * as windowModel from '../src/mainWindowModel'
+import * as signInModel from '../src/signInModel'
+import * as signInStore from '../src/signInFlowStore'
 import * as signOutCopy from '../src/signOutCopy'
 import { connectSignOutFlowEvents, connectSignOutFlowMenu, SignOutFlow, signOutFlowApi } from '../src/signOutFlow'
 import { connectNativeUpdateMenu as realConnectNativeUpdateMenu } from '../src/windows/manualUpdateCheck'
@@ -32,6 +36,7 @@ const mounted: Mounted[] = []
 afterEach(() => {
   while (mounted.length) mounted.pop()!.close()
   accountSession.clearSignOutWarning()
+  signInStore.resetSignInFlow()
 })
 
 const showSignOutOutcome = loadComponent('MacSettings.tsx', 'showSignOutOutcome', { stripCode: signOutCopy.stripCode, holdSignOutWarning: accountSession.holdSignOutWarning })
@@ -39,7 +44,8 @@ const locationSearch = loadComponent('MacApp.tsx', 'locationSearch', {})
 const focusById = (id: string) => { focused.push(id) }
 let focused: string[] = []
 const accountLine = loadComponent('MacApp.tsx', 'accountLine', { planShortLine: model.planShortLine })
-const SignedOutCard = loadComponent('MacApp.tsx', 'SignedOutCard', { React, Btn: parts.Btn, Note: parts.Note })
+/** The sign-in screens are tested in tests/macSignIn.test.tsx; here the window is only asked which one it shows. */
+const SignInWindow = (props: any) => createElement('div', { 'data-signin': 'true', 'data-props': props })
 
 /** A scripted Tauri event bus: `emit(name)` runs every listener registered for it. */
 function eventBus() {
@@ -91,11 +97,13 @@ function openWindow(opts: WindowOpts = {}) {
     ...opts.backend,
   }
   focused = []
+  titles.length = 0
   const m = mount('MacApp.tsx', 'MacApp', {
     backend: backend as any,
     expand: true,
     bindings: {
       ...accountSession,
+      ...copy,
       ...desktopApi,
       ...windowModel,
       SETTINGS_TABS: model.SETTINGS_TABS,
@@ -103,7 +111,12 @@ function openWindow(opts: WindowOpts = {}) {
       planShortLine: model.planShortLine,
       Btn: parts.Btn, Note: parts.Note, SettingsGroup: parts.SettingsGroup, SettingsIcon: parts.SettingsIcon,
       GeneralTab: tabStub('general'), AccountTab: tabStub('account'), SyncTab: tabStub('sync'), SecurityTab: tabStub('security'), AboutTab: tabStub('about'),
-      HomePane: tabStub('home'), SignedOutCard,
+      HomePane: tabStub('home'), SignInWindow,
+      ...signInModel,
+      getSignInFlow: signInStore.getSignInFlow,
+      setSignInFlow: signInStore.setSignInFlow,
+      subscribeSignInFlow: signInStore.subscribeSignInFlow,
+      setMainWindowTitle: async (title: string) => { titles.push(title) },
       useSettingsConfig: settingsStub,
       listen: bus.listen,
       connectNativeUpdateMenu: () => () => {},
@@ -125,6 +138,7 @@ function openWindow(opts: WindowOpts = {}) {
   return { m, bus, request }
 }
 
+const titles: string[] = []
 const settle = async (m: Mounted) => { await m.flush(); await m.flush(); await m.flush() }
 const find = (m: Mounted, match: (el: TreeNode) => boolean) => m.elements().filter(match)
 const shown = (m: Mounted) => find(m, (el) => el.props['data-tab'] !== undefined).map((el) => el.props['data-tab'])
@@ -503,19 +517,167 @@ describe('moved from the Settings window\'s root (task 1683 slice 4, now the win
   })
 })
 
-describe('signed out (until slice 2 brings sign-in into the window)', () => {
-  const out = () => snapshot({ phase: 'signed_out', account: { email: null, logged_in: false, vault_unlocked: false } })
+describe('the requested “Sign in again” (review P3-1; delta review P3-2)', () => {
+  const live = () => snapshot()
+  const ended = () => snapshot({ phase: 'session_ended', account: { auth_expired: true } })
+  const win = (m: Mounted) => find(m, (el) => el.props['data-signin'] !== undefined).map((el) => ({ props: el.props['data-props'] }))
 
-  test('one centred card, no sidebar; its button opens today\'s sign-in', async () => {
-    const { m } = openWindow({ snap: out, backend: { open_onboarding_window: () => null } })
+  test('a session that is fine gets the card, with a way back to Home that clears the step', async () => {
+    const { m, request } = openWindow({ snap: live })
+    await settle(m)
+    await request({ to: 'reauth' })
+    await settle(m)
+    expect(win(m)[0].props.screen).toBe('reauth')
+    expect(typeof win(m)[0].props.onBack).toBe('function')
+    win(m)[0].props.onBack()
+    m.render()
+    await settle(m)
+    expect(win(m)).toHaveLength(0)
+    expect(shown(m)).toEqual(['home'])
+    expect(signInStore.getSignInFlow()).toEqual(signInModel.IDLE_FLOW)
+  })
+
+  test('a session that really ended has no way back: the card is the one screen that helps', async () => {
+    const { m, request } = openWindow({ snap: ended })
+    await settle(m)
+    expect(win(m)[0].props.screen).toBe('reauth')
+    expect(win(m)[0].props.onBack).toBeUndefined()
+    await request({ to: 'reauth' })
+    await settle(m)
+    expect(win(m)[0].props.screen).toBe('reauth')
+    expect(win(m)[0].props.onBack).toBeUndefined()
+  })
+
+  // §8.2: under a sheet nothing navigates, and the card is a navigation: the request waits for the sheet to close.
+  test('under a sheet the request waits, and the card appears when the sheet closes, once', async () => {
+    let modals = 1
+    const { m, request } = openWindow({ snap: live, bindings: { openModalCount: () => modals } })
+    await settle(m)
+    await request({ to: 'reauth' })
+    await settle(m)
+    expect(win(m)).toHaveLength(0)
+    expect(signInStore.getSignInFlow()).toEqual(signInModel.IDLE_FLOW)
+    modals = 0
+    m.render()
+    await settle(m)
+    expect(win(m)[0].props.screen).toBe('reauth')
+    // Left again, and a later sheet does not bring it back: a held request is used once.
+    win(m)[0].props.onBack()
+    m.render()
+    await settle(m)
+    modals = 1
+    m.render()
+    await settle(m)
+    modals = 0
+    m.render()
+    await settle(m)
+    expect(win(m)).toHaveLength(0)
+  })
+
+  test('with no sheet the request is applied at once', async () => {
+    const { m, request } = openWindow({ snap: live })
+    await settle(m)
+    await request({ to: 'reauth' })
+    await settle(m)
+    expect(signInStore.getSignInFlow().step).toBe('reauth')
+  })
+})
+
+describe('a reopened window resumes a pending set-up step (review P2-3)', () => {
+  const locked = () => snapshot({ phase: 'locked', account: { vault_unlocked: false } })
+  const signedOut = () => snapshot({ phase: 'signed_out', account: { email: null, logged_in: false, vault_unlocked: false } })
+  const ended = () => snapshot({ phase: 'session_ended', account: { auth_expired: true } })
+  const win = (m: Mounted) => find(m, (el) => el.props['data-signin'] !== undefined).map((el) => ({ props: el.props['data-props'] }))
+  const asked = (m: Mounted) => m.calls.filter((c) => c.name === 'pending_setup')
+
+  test('signed in, locked, nothing in progress: it asks Rust once, and a pending step resumes at Set up this Mac', async () => {
+    const { m } = openWindow({ snap: locked, backend: { pending_setup: () => ({ key_replaced: true }) } })
+    await settle(m)
+    expect(win(m)[0].props.screen).toBe('unlock')
+    expect(signInStore.getSignInFlow()).toEqual({ ...signInModel.IDLE_FLOW, step: 'unlock', keyReplaced: true })
+    expect(asked(m)).toHaveLength(1)
+    // The reads that follow (every five seconds) do not ask again.
+    m.render()
+    await settle(m)
+    expect(asked(m)).toHaveLength(1)
+  })
+
+  test('nothing pending is Home, with the locked card', async () => {
+    const { m } = openWindow({ snap: locked, backend: { pending_setup: () => null } })
+    await settle(m)
+    expect(win(m)).toHaveLength(0)
+    expect(shown(m)).toEqual(['home'])
+    expect(signInStore.getSignInFlow()).toEqual(signInModel.IDLE_FLOW)
+  })
+
+  test('until Rust answers the window shows settling, never a flash of Home', async () => {
+    let release: (value: unknown) => void = () => {}
+    const answer = new Promise((resolve) => { release = resolve })
+    const { m } = openWindow({ snap: locked, backend: { pending_setup: () => answer } })
+    await settle(m)
+    expect(win(m)[0].props.screen).toBe('settling')
+    expect(shown(m)).toEqual([])
+    release({ key_replaced: false })
+    await settle(m)
+    expect(win(m)[0].props.screen).toBe('unlock')
+  })
+
+  test('an answer that cannot be had leaves Home: a failed ask must not trap the window on a card', async () => {
+    const { m } = openWindow({ snap: locked, backend: { pending_setup: () => { throw new Error('no answer') } } })
+    await settle(m)
+    expect(win(m)).toHaveLength(0)
+    expect(shown(m)).toEqual(['home'])
+  })
+
+  test('it asks nothing of a window that is unlocked, signed out, or whose session ended', async () => {
+    for (const snap of [() => snapshot(), signedOut, ended]) {
+      const { m } = openWindow({ snap, backend: { pending_setup: () => ({ key_replaced: false }) } })
+      await settle(m)
+      expect(asked(m)).toHaveLength(0)
+    }
+  })
+
+  test('it asks nothing while a step is in progress (the person is on a card already)', async () => {
+    signInStore.setSignInFlow({ ...signInModel.IDLE_FLOW, step: 'finder' })
+    const { m } = openWindow({ snap: locked, backend: { pending_setup: () => ({ key_replaced: false }) } })
+    await settle(m)
+    expect(asked(m)).toHaveLength(0)
+    expect(win(m)[0].props.screen).toBe('finder')
+  })
+})
+
+describe('signed out: the window shows the sign-in screens (slice 2, spec §7.4)', () => {
+  const out = () => snapshot({ phase: 'signed_out', account: { email: null, logged_in: false, vault_unlocked: false } })
+  const ended = () => snapshot({ phase: 'session_ended', account: { auth_expired: true } })
+  const locked = () => snapshot({ phase: 'locked', account: { vault_unlocked: false } })
+  /** The sign-in window's stub carries the props the shell gave it, as the section stubs do. */
+  const win = (m: Mounted) => find(m, (el) => el.props['data-signin'] !== undefined).map((el) => ({ props: el.props['data-props'] }))
+
+  test('no session: one centred card, no sidebar, the sign-in screen; nothing opens another window', async () => {
+    const { m } = openWindow({ snap: out })
     await settle(m)
     expect(navOf(m)).toHaveLength(0)
-    const card = expand(m.tree())
-    expect(textOf(card)).toContain('Sign in to Beebeeb')
-    await byLabel(m, 'Sign in').props.onClick()
+    expect(win(m)).toHaveLength(1)
+    expect(win(m)[0].props.screen).toBe('signin')
+    expect(win(m)[0].props.email).toBeNull()
+    expect(m.calls.map((c) => c.name)).not.toContain('open_onboarding_window')
+    expect(m.calls.map((c) => c.name)).not.toContain('open_reauth_window')
+  })
+
+  test('an ended session is "Sign in again" and names the account; it signs in IN this window, with nothing cleared (R8)', async () => {
+    const { m } = openWindow({ snap: ended })
     await settle(m)
-    expect(m.calls.filter((c) => c.name === 'open_onboarding_window')).toHaveLength(1)
-    expect(m.toasts).toEqual([])
+    expect(win(m)[0].props.screen).toBe('reauth')
+    expect(win(m)[0].props.email).toBe('sam@example.eu')
+    expect(m.calls.map((c) => c.name)).not.toContain('clear_session')
+    expect(m.calls.map((c) => c.name)).not.toContain('open_reauth_window')
+  })
+
+  test('a live session is Home, not the sign-in window', async () => {
+    const { m } = openWindow()
+    await settle(m)
+    expect(win(m)).toHaveLength(0)
+    expect(shown(m)).toEqual(['home'])
   })
 
   test('signed out, General and About are told so: no account preferences, no speed test', async () => {
@@ -534,33 +696,154 @@ describe('signed out (until slice 2 brings sign-in into the window)', () => {
     await request({ to: 'settings', section: 'account' })
     expect(buttonsIn(navOf(m)[0]).map(label)).toEqual(['Back to Sign in', 'General', 'About'])
     expect(shown(m)).toEqual(['general'])
+    expect(win(m)).toHaveLength(0)
     await click(m, 'Back to Sign in')
     expect(navOf(m)).toHaveLength(0)
-    expect(textOf(expand(m.tree()))).toContain('Sign in to Beebeeb')
+    expect(win(m)).toHaveLength(1)
   })
 
-  test('a held sign-out sentence is shown above the card, neutrally', async () => {
+  test('a held sign-out sentence is handed to the window to show above the card', async () => {
     accountSession.holdSignOutWarning('Beebeeb couldn’t confirm it was removed from Finder.')
     const { m } = openWindow({ snap: out })
     await settle(m)
-    const text = textOf(expand(m.tree()))
-    expect(text).toContain('Beebeeb couldn’t confirm it was removed from Finder.')
-    expect(text.indexOf('couldn’t confirm')).toBeLessThan(text.indexOf('Sign in to Beebeeb'))
-    expect(find(m, (el) => el.props.role === 'alert')).toEqual([])
+    expect(win(m)[0].props.note).toBe('Beebeeb couldn’t confirm it was removed from Finder.')
   })
 
-  test('an ended session is "Sign in again", names the account, and signs in again in place', async () => {
-    const ended = () => snapshot({ phase: 'session_ended', account: { auth_expired: true } })
-    const { m } = openWindow({ snap: ended, backend: { desktop_platform: () => 'macos', open_reauth_window: () => null } })
+  test('the flow store decides the screen once the session exists: a password sign-in with no key goes on to "Set up this Mac" instead of Home', async () => {
+    signInStore.setSignInFlow({ ...signInModel.IDLE_FLOW, step: 'unlock' })
+    const { m } = openWindow({ snap: locked })
     await settle(m)
-    const text = textOf(expand(m.tree()))
-    expect(text).toContain('Sign in again')
-    expect(text).toContain('Sync is paused until you sign in again. Your files stay in Finder.')
-    expect(text).toContain('Signed in before as sam@example.eu')
-    await byLabel(m, 'Sign in again').props.onClick()
+    expect(win(m)[0].props.screen).toBe('unlock')
+    expect(shown(m)).toEqual([])
+  })
+
+  test('…and Finder after that; when the step ends the window shows Home', async () => {
+    signInStore.setSignInFlow({ ...signInModel.IDLE_FLOW, step: 'finder' })
+    const { m } = openWindow()
     await settle(m)
-    expect(m.calls.map((c) => c.name)).toContain('open_reauth_window')
-    expect(m.calls.map((c) => c.name)).not.toContain('clear_session')
+    expect(win(m)[0].props.screen).toBe('finder')
+    signInStore.setSignInFlow(signInModel.IDLE_FLOW)
+    m.render()
+    expect(win(m)).toHaveLength(0)
+    expect(shown(m)).toEqual(['home'])
+  })
+
+  test('the account switch is a screen of this window whatever the session says', async () => {
+    signInStore.setSignInFlow({ ...signInModel.IDLE_FLOW, step: 'switch', switch: { pendingChanges: 1, unsent: null, unsentError: null } })
+    const { m } = openWindow({ snap: ended })
+    await settle(m)
+    expect(win(m)[0].props.screen).toBe('switch')
+  })
+
+  test('a step that needs a session is dropped when the window mounts and the session is gone: sign-in shows at once, and the store is reset', async () => {
+    signInStore.setSignInFlow({ ...signInModel.IDLE_FLOW, step: 'finder' })
+    const { m } = openWindow({ snap: out })
+    // The very first render with an account already shows sign-in, not one frame of a Finder screen for an account
+    // that left; the store follows on the next effect.
+    await settle(m)
+    expect(win(m)[0].props.screen).toBe('signin')
+    expect(signInStore.getSignInFlow()).toEqual(signInModel.IDLE_FLOW)
+  })
+
+  // The bug the real-browser run found. A sign-in lands in the window that is still showing the snapshot it read before
+  // it (the next read is up to five seconds away, and the boundary remounts the window within one): the step the
+  // sign-in set is the screen, and is not dropped against that stale snapshot.
+  test('a step set after the window mounted is never judged against a snapshot read before it: the stale signed-out snapshot keeps the step', async () => {
+    const { m } = openWindow({ snap: out })
+    await settle(m)
+    expect(win(m)[0].props.screen).toBe('signin')
+    win(m)[0].props.onFlow({ ...signInModel.IDLE_FLOW, step: 'unlock' })
+    m.render()
+    await settle(m)
+    expect(win(m)[0].props.screen).toBe('unlock')
+    expect(signInStore.getSignInFlow().step).toBe('unlock')
+    win(m)[0].props.onFlow({ ...signInModel.IDLE_FLOW, step: 'finder' })
+    m.render()
+    await settle(m)
+    expect(win(m)[0].props.screen).toBe('finder')
+    expect(signInStore.getSignInFlow().step).toBe('finder')
+  })
+
+  test('the flow is handed to the screens through the store, so it survives the remount a sign-in causes (AccountSessionBoundary)', async () => {
+    const { m } = openWindow({ snap: out })
+    await settle(m)
+    win(m)[0].props.onFlow({ ...signInModel.IDLE_FLOW, step: 'unlock', keyReplaced: true })
+    expect(signInStore.getSignInFlow()).toEqual({ ...signInModel.IDLE_FLOW, step: 'unlock', keyReplaced: true })
+  })
+
+  test('the window title is "Beebeeb" signed in and follows the card’s heading signed out (the card sets its own)', async () => {
+    const home = openWindow()
+    await settle(home.m)
+    expect(titles).toEqual(['Beebeeb'])
+    const card = openWindow({ snap: out })
+    await settle(card.m)
+    expect(titles).toEqual([])
+  })
+
+  test('Settings while signed out is the window titled "Beebeeb", not the sign-in card’s title', async () => {
+    const { m, request } = openWindow({ snap: out })
+    await settle(m)
+    await request({ to: 'settings', section: 'general' })
+    expect(titles).toEqual(['Beebeeb'])
+  })
+
+  describe('settling: a sign-in that is done waits for the next read, then shows what that read says', () => {
+    test('while settling it asks for a fresh read at once and shows only the screen “settling”; the first read after that ends it', async () => {
+      let calls = 0
+      let release: () => void = () => {}
+      const held = new Promise<void>((resolve) => { release = resolve })
+      const { m } = openWindow({ snap: () => (++calls === 1 ? ended() : held.then(() => snapshot())) })
+      await settle(m)
+      expect(win(m)[0].props.screen).toBe('reauth')
+      // The screen reports the sign-in as done; the old snapshot still says the session ended.
+      win(m)[0].props.onFlow(signInModel.settling())
+      m.render()
+      await settle(m)
+      expect(win(m)[0].props.screen).toBe('settling')
+      expect(calls).toBe(2)
+      release()
+      await settle(m)
+      expect(signInStore.getSignInFlow()).toEqual(signInModel.IDLE_FLOW)
+      expect(win(m)).toHaveLength(0)
+      expect(shown(m)).toEqual(['home'])
+    })
+
+    // Review P3-4: the first read already succeeded (the old card was on screen), so the window has an account and the
+    // load-failed branch below never applies; the settling screen itself said "Loading…" for as long as the reads failed.
+    test('reads that keep failing after the sign-in give the settling screen the load-failed note and a way to try again (P3-4)', async () => {
+      let calls = 0
+      const { m } = openWindow({ snap: () => (++calls === 1 ? ended() : Promise.reject(new Error('no answer'))) })
+      await settle(m)
+      win(m)[0].props.onFlow(signInModel.settling())
+      m.render()
+      await settle(m)
+      const props = win(m)[0].props
+      expect(props.screen).toBe('settling')
+      expect(props.loadFailed).toBe(true)
+      const before = calls
+      props.onRetryLoad()
+      await settle(m)
+      expect(calls).toBeGreaterThan(before)
+    })
+
+    test('while the reads work, settling does not claim a failure (P3-4)', async () => {
+      let calls = 0
+      const { m } = openWindow({ snap: () => (++calls === 1 ? ended() : new Promise(() => {})) })
+      await settle(m)
+      win(m)[0].props.onFlow(signInModel.settling())
+      m.render()
+      await settle(m)
+      expect(win(m)[0].props.screen).toBe('settling')
+      expect(win(m)[0].props.loadFailed).toBe(false)
+    })
+
+    test('a read that cannot be made does not end it: the load-failed note and Try again, nothing of the old card', async () => {
+      signInStore.setSignInFlow(signInModel.settling())
+      const { m } = openWindow({ snap: () => { throw new Error('no answer') } })
+      await settle(m)
+      expect(win(m)).toHaveLength(0)
+      expect(signInStore.getSignInFlow().step).toBe('settling')
+    })
   })
 })
 
@@ -608,6 +891,10 @@ function openHome(snap: unknown, backend: Record<string, (args: any) => unknown>
       ...model,
       ...parts,
       ...windowModel,
+      ...signInModel,
+      setSignInFlow: signInStore.setSignInFlow,
+      moveFlow: loadComponent('macSignIn.tsx', 'moveFlow', { command: desktopApi.command }),
+      ...copy,
       finderActionButtonLabel: finderSetupCopy.finderActionButtonLabel,
       finderOpenFailedToast: finderSetup.finderOpenFailedToast,
       KeptFolderNotes,
@@ -630,6 +917,7 @@ const homeText = (m: Mounted) => {
   walk(expand(m.tree()))
   return out.join(' | ')
 }
+const hasHomeButton = (m: Mounted, text: string) => find(m, (el) => el.type === 'button' && textOf(el.props.children).trim() === text).length > 0
 const homeButton = (m: Mounted, text: string) => {
   const hit = find(m, (el) => el.type === 'button' && textOf(el.props.children).trim() === text)
   if (hit.length !== 1) throw new Error(`expected one "${text}", found ${hit.length}`)
@@ -712,6 +1000,34 @@ describe('Home (§7.6, first cut: status, Finder row, storage, the kept rows)', 
     await settleHome(m)
     expect(m.calls.filter((c) => c.name === 'unlock_vault')).toHaveLength(1)
     expect(refreshed()).toBe(1)
+  })
+
+  // Review P2-3 (b): the Keychain holds a session token and no key. `unlock_vault` answers the Set up this Mac sentence
+  // (not "unlock vault key from Keychain: secret not found"), and the card offers the one thing that helps.
+  test('locked with no key on this Mac: no toast, the approved sentence, and “Use your recovery phrase” opens Set up this Mac (P2-3)', async () => {
+    const noKey = 'This Mac does not have your encryption keys yet. Restore them to continue.'
+    const { m, refreshed } = openHome(snapshot({ phase: 'locked', account: { vault_unlocked: false } }), { unlock_vault: () => { throw noKey } })
+    await settleHome(m)
+    expect(hasHomeButton(m, 'Use your recovery phrase')).toBe(false)
+    await homeButton(m, 'Unlock vault').props.onClick()
+    await settleHome(m)
+    expect(m.toasts).toEqual([])
+    expect(homeText(m)).toContain(noKey)
+    expect(refreshed()).toBe(1)
+    await homeButton(m, 'Use your recovery phrase').props.onClick()
+    expect(signInStore.getSignInFlow()).toEqual({ ...signInModel.IDLE_FLOW, step: 'unlock' })
+    // Delta review P3-1: entering Set up this Mac this way is told to Rust too (as the sign-in's own step is), or ⌘W on
+    // this path loses the resume.
+    expect(m.calls.filter((c) => c.name === 'set_pending_setup').map((c) => c.args)).toEqual([{ keyReplaced: false }])
+  })
+
+  test('any other unlock failure is still the toast, with no recovery offer (P2-3)', async () => {
+    const { m } = openHome(snapshot({ phase: 'locked', account: { vault_unlocked: false } }), { unlock_vault: () => { throw new Error('Keychain is locked') } })
+    await settleHome(m)
+    await homeButton(m, 'Unlock vault').props.onClick()
+    await settleHome(m)
+    expect(m.toasts.map((t) => t.title)).toEqual(['Couldn’t unlock the vault'])
+    expect(hasHomeButton(m, 'Use your recovery phrase')).toBe(false)
   })
 
   test('a Finder failure is one inline notice under the row, never a toast (one failure, one surface)', async () => {

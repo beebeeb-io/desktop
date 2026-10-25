@@ -1,7 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "onboarding-close",
-  "description": "Lets the macOS/Linux onboarding window close itself: after a same-account sign-in, on Cancel of the account-switch warning in reauth mode, and from the last set-up step. Tauri's core:window:default does not include allow-close. Scoped to the `onboarding` window only (least privilege); pinned by tests/onboardingCloseCapability.test.ts.",
+  "description": "Lets the Linux onboarding window close itself: after a same-account sign-in, on Cancel of the account-switch warning in reauth mode, and from the last set-up step. Tauri's core:window:default does not include allow-close. Scoped to the `onboarding` window only (least privilege) and to Linux: a Mac signs in in the Beebeeb window, which never closes itself, and never builds this window (task 1683 slice 2, two-surface spec D13); pinned by tests/onboardingCloseCapability.test.ts.",
+  "platforms": ["linux"],
   "windows": ["onboarding"],
   "permissions": ["core:window:allow-close"]
 }

@@ -99,6 +99,22 @@ describe('screenshot 3, defect 1: the toolbar can never scroll away', () => {
   })
 })
 
+// Task 1683 slice 2 (found by looking at the 760 x 520 render of "Set up this Mac"): a card taller than the window lost its
+// top, because `justify-content: center` on a scrolling flex column puts the overflow above the start where no scroll can
+// reach it. The signed-out body centres with auto margins instead, which fall to zero when the card is taller, so the
+// body scrolls from the card's top.
+describe('the signed-out body: a card taller than the window scrolls from its top', () => {
+  test('the body scrolls and does not centre with justify-content', () => {
+    expect(winDecl('.mw-solo-body', 'overflow-y')).toBe('auto')
+    expect(winDecl('.mw-solo-body', 'justify-content')).toBeUndefined()
+  })
+
+  test('the first and last child of the body centre the group with auto margins', () => {
+    expect(winDecl('.mw-solo-body > :first-child', 'margin-top')).toBe('auto')
+    expect(winDecl('.mw-solo-body > :last-child', 'margin-bottom')).toBe('auto')
+  })
+})
+
 describe('screenshot 3, defect 2: one unbreakable string cannot widen a track', () => {
   test('grid tracks are minmax(0, 1fr), never a bare 1fr', () => {
     expect(winDecl('.mw-window', 'grid-template-columns')).toBe('214px minmax(0, 1fr)')
@@ -112,7 +128,8 @@ describe('screenshot 3, defect 2: one unbreakable string cannot widen a track', 
     const missing = flexible.filter((r) => r.decls.get('min-width') !== '0').flatMap((r) => r.selectors)
     expect(missing).toEqual([])
     const windowFlexible = win.rules.filter((r) => /^1( |$)/.test(r.decls.get('flex') ?? ''))
-    expect(windowFlexible.flatMap((r) => r.selectors).sort()).toEqual(['.mw-account-text', '.mw-row-text'])
+    // Slice 2: the recovery phrase's input fills its box (`.mw-word-input`; the box clips nothing, the input is min-width: 0).
+    expect(windowFlexible.flatMap((r) => r.selectors).sort()).toEqual(['.mw-account-text', '.mw-row-text', '.mw-word-input'].sort())
     expect(windowFlexible.filter((r) => r.decls.get('min-width') !== '0').flatMap((r) => r.selectors)).toEqual([])
   })
 
@@ -129,7 +146,9 @@ describe('screenshot 3, defect 2: one unbreakable string cannot widen a track', 
     for (const selector of ['.ms-row-label', '.ms-row-hint', '.ms-account-email', '.ms-account-plan', '.ms-note-title', '.ms-note-body', '.ms-sheet-copy']) {
       expect({ selector, wrap: declOf(selector, 'overflow-wrap') }).toEqual({ selector, wrap: 'anywhere' })
     }
-    for (const selector of ['.mw-email', '.mw-plan', '.mw-title', '.mw-row-title', '.mw-row-hint', '.mw-signin-copy', '.mw-signin-foot']) {
+    // Slice 2: the sign-in cards replaced slice 1's `.mw-signin-*`; the footer names the account ("Signed in before as …"),
+    // the note and the mono line hold an address or a path.
+    for (const selector of ['.mw-email', '.mw-plan', '.mw-title', '.mw-row-title', '.mw-row-hint', '.mw-scard-title', '.mw-scard-copy', '.mw-scard-note', '.mw-scard-foot', '.mw-mono', '.mw-code']) {
       expect({ selector, wrap: winDecl(selector, 'overflow-wrap') }).toEqual({ selector, wrap: 'anywhere' })
     }
   })
@@ -143,7 +162,10 @@ describe('screenshot 3, defect 2: one unbreakable string cannot widen a track', 
   test('there is no width breakpoint: the window is one layout, so two layout models cannot compete', () => {
     expect(css.atRules.filter((a) => /width/.test(a))).toEqual([])
     expect(css.atRules).toEqual(['@media (prefers-reduced-motion: no-preference)'])
-    expect(win.atRules).toEqual([])
+    // Slice 2: the Finder status screen's spinner (hi-fi `.spin`) is the window's only animation, and it holds still for
+    // `prefers-reduced-motion` (spec §11). Neither at-rule names a width.
+    expect(win.atRules).toEqual(['@keyframes mw-spin', '@media (prefers-reduced-motion: reduce)'])
+    expect(win.atRules.filter((a) => /width/.test(a))).toEqual([])
   })
 })
 

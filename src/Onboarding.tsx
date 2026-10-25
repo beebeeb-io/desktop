@@ -9,21 +9,23 @@ import {
   lastSignedInEmail,
   loadSyncStatus,
   type CommandResult,
-  type DesktopPlatform,
   type FinderInstallState,
   type SyncStatus,
   type VaultItem,
 } from './desktopApi'
-import { useCapabilities } from './capabilities'
 import { A0S_TITLE, A1S_LINE, askLines, stripCode, type AskCounts, type SignOutCount } from './signOutCopy'
 import { submitPassword, submitTotpCode, type SignInSettled } from './onboardingSignIn'
 import { ACCOUNT_SWITCH_CANCEL, ACCOUNT_SWITCH_CONFIRM, ACCOUNT_SWITCH_FAILED, ACCOUNT_SWITCH_TITLE, KEY_REPLACED_RECOVERY_COPY, accountSwitchBody } from './accountSwitchCopy'
 import { classifyFinderInstallResult } from './finderInstallCard'
-import { loadFinderSetup, useFinderSetup } from './finderSetup'
-import { FINDER_RAIL_DETAIL, FINDER_RAIL_TITLE, FINDER_SETUP_TITLE, finderActionButtonLabel } from './finderSetupCopy'
 import { Wordmark } from './Logo'
 import { useToast } from './windows/ui'
 
+/**
+ * The first-run window of Linux (`?window=onboarding`). A Mac signs in in the Beebeeb window (`MacApp.tsx`, `macSignIn.tsx`;
+ * task 1683 slice 2, spec C §11) and never builds this window, so the macOS Finder step, its routing by the
+ * Finder reconciler, its platform fallback and its rail wording are gone from here. The five-row rail, the offline-folder
+ * step and the ready step stay for Linux (spec C §7.8). Windows has its own wizard (`WindowsFirstRun.tsx`).
+ */
 type Step = 'signin' | 'unlock' | 'finder' | 'pinning' | 'ready' | 'switch'
 const RECOVERY_WORD_COUNT = 12
 
@@ -54,31 +56,13 @@ function OnboardingView({ mode }: { mode: 'setup' | 'reauth' }) {
   // FB-I1: the same account signed in again, but its kept vault key was no longer the account's and
   // was removed. The recovery step says why it is asking.
   const [keyReplaced, setKeyReplaced] = useState(false)
-  // `null` until `desktop_platform` has answered, so the Finder step never flashes the wrong
-  // variant. A platform that cannot be read stays resolvable through the capability snapshot
-  // (below); only when both are unknown does it become 'unknown', which takes the Windows/Linux
-  // step exactly as it did before the macOS step existed (never a blank page).
-  const [platform, setPlatform] = useState<DesktopPlatform | null>(null)
-  // The snapshot's host OS (what main.tsx's HostOnboarding already routes on). A Mac whose
-  // `desktop_platform` call fails must still be a Mac here: the Windows/Linux step runs the
-  // install-era command, which no macOS code path may reach.
-  const hostOs: DesktopPlatform = useCapabilities()?.host_os ?? 'unknown'
   const regionLabel = useRegionLabel(step)
-  // On macOS the Finder row must not promise a manual install (nothing is installed by hand
-  // there). Until the platform has answered, and everywhere else, the rail is `STEPS` as written.
-  const rail = STEPS.map((item) =>
-    item.id === 'finder' && platform === 'macos' ? { ...item, title: FINDER_RAIL_TITLE, detail: FINDER_RAIL_DETAIL } : item,
-  )
 
   useEffect(() => {
     let cancelled = false
 
-    Promise.all([loadSyncStatus(), command<DesktopPlatform>('desktop_platform')]).then(async ([status, platformResult]) => {
+    void loadSyncStatus().then((status) => {
       if (cancelled) return
-      // `desktop_platform` answers first; if it failed or said 'unknown', the snapshot decides.
-      const answered: DesktopPlatform = platformResult.ok ? platformResult.value : 'unknown'
-      const resolved: DesktopPlatform = answered === 'unknown' ? hostOs : answered
-      setPlatform(resolved)
       // R8: "Sign in again" opens this window in reauth mode. It starts at sign-in whatever
       // sync_status says; nothing was cleared, so the status still reads signed in and unlocked.
       if (mode === 'reauth') return
@@ -88,22 +72,13 @@ function OnboardingView({ mode }: { mode: 'setup' | 'reauth' }) {
         setStep('unlock')
         return
       }
-
-      if (resolved === 'macos') {
-        // Spec 2026-10-06 §10: the reconciler's state, not the install-era command. Anything
-        // but Ready (adding, failed, turned off, unreadable) goes to the step that says which.
-        const finder = await loadFinderSetup()
-        if (cancelled) return
-        setStep(finder.ok && finder.value.setup === 'ready' ? 'ready' : 'finder')
-        return
-      }
       setStep(status.sync_root ? 'ready' : 'finder')
     })
 
     return () => {
       cancelled = true
     }
-  }, [hostOs, mode])
+  }, [mode])
 
   // The window outlives a sign-out: closing it only hides it, and every "Sign in" (Status, the Finder row, the menu)
   // shows and focuses this same WebView again (`open_onboarding_window`), so the flow would come back on the step it
@@ -176,7 +151,7 @@ function OnboardingView({ mode }: { mode: 'setup' | 'reauth' }) {
             <div className="brand-subtitle">Private macOS file access</div>
           </div>
           <div className="steps">
-            {rail.map((item, index) => (
+            {STEPS.map((item, index) => (
               // M8: the switch warning is part of signing in, so Sign in stays the active row there.
               <div key={item.id} className={`step-row ${step === item.id || (step === 'switch' && item.id === 'signin') ? 'active' : ''}`}>
                 <div className="step-number">{index + 1}</div>
@@ -208,13 +183,7 @@ function OnboardingView({ mode }: { mode: 'setup' | 'reauth' }) {
           />
         )}
         {step === 'unlock' && <UnlockStep onDone={() => setStep('finder')} keyReplaced={keyReplaced} />}
-        {step === 'finder' &&
-          platform !== null &&
-          (platform === 'macos' ? (
-            <MacFinderStep onDone={() => setStep('pinning')} />
-          ) : (
-            <FinderInstallStep onDone={() => setStep('pinning')} />
-          ))}
+        {step === 'finder' && <FinderInstallStep onDone={() => setStep('pinning')} />}
         {step === 'pinning' && <PinningStep onDone={() => setStep('ready')} />}
         {step === 'ready' && <ReadyStep />}
       </main>
@@ -692,92 +661,9 @@ function UnlockStep({ onDone, keyReplaced = false }: { onDone: () => void; keyRe
 }
 
 /**
- * macOS (spec 2026-10-06 §10, ruling R5): no install button. Beebeeb adds itself once the keys
- * arrive; this step shows Adding, advances by itself on Ready, and on a failure or a turned-off
- * extension shows the one notice and the one action of finderSetupCopy.ts. The notice gates the
- * step, so it is inline; a failed ACTION gates nothing, so `useFinderSetup` raises it as a toast.
- *
- * The load, the `finder-setup-changed` subscription and that toast live in `useFinderSetup`
- * (lead ruling 7b); this component only draws what the hook presents.
- */
-function MacFinderStep({ onDone }: { onDone: () => void }) {
-  const finder = useFinderSetup()
-  const [busy, setBusy] = useState(false)
-  const presentation = finder.presentation
-  const ready = presentation.kind === 'ready'
-
-  useEffect(() => {
-    if (ready) onDone()
-  }, [ready, onDone])
-
-  const act = async (send: () => Promise<unknown>) => {
-    setBusy(true)
-    try {
-      await send()
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  // Two different "Try again"s, never crossed (lead rulings 7a / c5). A failure notice asks the
-  // reconciler to check again (`run`); the unreadable state has nothing to ask yet, so its one
-  // action only reads the state again (`retry`). A notice with no action (an unconfirmed engine
-  // stop: only a relaunch helps, row 9) is its sentence alone.
-  const noticeAction = presentation.kind === 'notice' ? presentation.action : null
-  const notice =
-    presentation.kind === 'notice'
-      ? {
-          tone: presentation.tone,
-          sentence: presentation.sentence,
-          actionLabel: finderActionButtonLabel(noticeAction, presentation.actionLabel, finder.copied),
-          send: noticeAction ? () => finder.run(noticeAction) : null,
-        }
-      : presentation.kind === 'unavailable'
-        ? { tone: 'alert' as const, sentence: presentation.line, actionLabel: presentation.actionLabel, send: () => finder.retry() }
-        : null
-
-  return (
-    <Card title={FINDER_SETUP_TITLE} copy="Beebeeb appears as a system-managed Finder location. Offline folders are controlled separately.">
-      {notice ? (
-        <div
-          className={notice.tone === 'alert' ? 'notice error' : 'notice'}
-          role={notice.tone === 'alert' ? 'alert' : 'status'}
-          data-error-surface={notice.tone === 'alert' ? 'finder-setup' : undefined}
-          style={{ marginTop: 16 }}
-        >
-          <div>{notice.sentence}</div>
-          {/* Row 15: what a failed Try again said (Rust's fixed sentence, with its remedy). */}
-          {finder.actionNote ? (
-            <div role="status" style={{ marginTop: 8 }}>
-              {finder.actionNote}
-            </div>
-          ) : null}
-          {notice.send ? (
-            <div className="button-row" style={{ marginTop: 10 }}>
-              <button className="button" onClick={() => void act(notice.send!)} disabled={busy}>
-                {notice.actionLabel}
-              </button>
-            </div>
-          ) : null}
-        </div>
-      ) : presentation.kind === 'adding' || presentation.kind === 'ready' ? (
-        // Only what the reconciler said. Before its first answer, and while it rests in Missing (the
-        // keys are about to arrive in this flow), nothing is shown: never "Adding" on a guess, and the
-        // resting sentence of the other surfaces would be wrong here, where the person is signing in.
-        <div className="panel" style={{ marginTop: 16, background: 'var(--paper-2)' }}>
-          <div className="mono" style={{ fontSize: 13 }}>
-            {presentation.line}
-          </div>
-        </div>
-      ) : null}
-    </Card>
-  )
-}
-
-/**
- * Windows/Linux only since spec 2026-10-06 (macOS renders MacFinderStep). The macOS-only
- * branches (the turned-off card, its poll, the System Settings link, the macOS copy) are gone;
- * on these platforms they never rendered.
+ * Windows/Linux only since spec 2026-10-06; Linux alone mounts this window since task 1683 slice 2. The macOS-only
+ * branches (the turned-off card, its poll, the System Settings link, the macOS copy) are gone; on these platforms
+ * they never rendered. The macOS counterpart is `FinderScreen` in `macSignIn.tsx`.
  */
 function FinderInstallStep({ onDone }: { onDone: () => void }) {
   const [syncRoot, setSyncRoot] = useState<string | null>(null)

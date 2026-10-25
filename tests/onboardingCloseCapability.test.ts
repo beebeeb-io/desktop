@@ -20,6 +20,7 @@ const dir = new URL('../src-tauri/capabilities/', import.meta.url)
 interface Capability {
   identifier: string
   windows?: string[]
+  platforms?: string[]
   permissions: Array<string | { identifier: string }>
 }
 
@@ -45,6 +46,23 @@ describe('the onboarding window may close itself, and only it', () => {
     expect(cap.identifier).toBe('onboarding-close')
     expect(cap.windows).toEqual(['onboarding'])
     expect(permissionIds(cap)).toEqual(['core:window:allow-close'])
+  })
+
+  // Task 1683 slice 2 (D13): on a Mac the Beebeeb window never closes itself and the `onboarding` window is never
+  // built (sign-in is a screen of `main`), so the grant is Linux's alone. Windows builds `windows-onboarding`, which
+  // closes itself through the Rust side and was never named here.
+  test('the grant is Linux’s alone: a Mac has no onboarding window to close', () => {
+    const found = capabilities().find(({ file }) => file === 'onboarding-close.json')
+    expect(found!.cap.platforms).toEqual(['linux'])
+  })
+
+  // Spec C C-W8 / spec §10.2 row 36: the window’s title follows the heading of the card it shows, set from the page.
+  // `core:window:default` has no `allow-set-title`; the grant is named for the Beebeeb window and for it only.
+  test('exactly one capability may set a window title, and it is the Mac’s Beebeeb window', () => {
+    const granting = capabilities().filter(({ cap }) => permissionIds(cap).includes('core:window:allow-set-title'))
+    expect(granting.map(({ file }) => file)).toEqual(['macos-main.json'])
+    expect(granting[0].cap.windows).toEqual(['main'])
+    expect(granting[0].cap.platforms).toEqual(['macOS'])
   })
 
   test('no capability grants the window plugin wholesale or a broader close', () => {

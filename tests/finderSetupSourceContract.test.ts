@@ -75,7 +75,11 @@ describe('no macOS code path calls the install-era Finder commands (R5)', () => 
       ['macSettingsModel.ts', null],
       ['finderSetup.ts', null],
       ['finderSetupCopy.ts', null],
-      ['Onboarding.tsx', 'MacFinderStep'],
+      // Task 1683 slice 2: the Beebeeb window's sign-in screens replaced Onboarding's macOS step (`MacFinderStep`).
+      ['macSignIn.tsx', null],
+      ['signInModel.ts', null],
+      ['browserSignIn.ts', null],
+      ['MacApp.tsx', null],
       ['windows/views/SettingsView.tsx', 'MacFinderIntegrationPanel'],
       ['pages/Status.tsx', 'macFinderSetupState'],
     ]
@@ -100,9 +104,13 @@ describe('no macOS code path calls the install-era Finder commands (R5)', () => 
     }
   })
 
-  test('Onboarding routes macOS to MacFinderStep; the old step is not reachable there', () => {
-    expect(functionText('Onboarding.tsx', 'OnboardingView')).toMatch(/platform === 'macos' \? \(\s*<MacFinderStep/)
+  // Task 1683 slice 2: Onboarding used to route a Mac to its own Finder step. A Mac now never loads that window
+  // (`HostOnboarding` renders nothing for it, and Rust never builds it: `surfaces::policy::onboarding_surface`), so the
+  // install-era step is not reachable there by construction rather than by a branch.
+  test('the old step is not reachable on a Mac: HostOnboarding renders nothing for macOS', () => {
+    expect(functionText('main.tsx', 'HostOnboarding')).toMatch(/host_os === 'macos'\) return null/)
     expect(functionText('Onboarding.tsx', 'FinderInstallStep')).not.toContain('finder_domain_user_enabled')
+    expect(readFileSync(join(SRC, 'Onboarding.tsx'), 'utf8')).not.toMatch(/MacFinderStep|platform === 'macos'/)
   })
 
   test('the main-window Settings panel dispatches macOS to MacFinderIntegrationPanel', () => {
@@ -212,8 +220,6 @@ describe('the sweep: every call site of a Finder command, and what it does with 
       'MacApp.tsx | open_finder_location': 1,
       'MacSettings.tsx | finder.run': 1,
       'MacSettings.tsx | reset_macos_integration': 1,
-      'Onboarding.tsx | finder.run': 1,
-      'Onboarding.tsx | wrapper:loadFinderSetup': 1,
       'WindowsApp.tsx | open_finder_location': 1,
       [TRAY]: 1,
       'finderSetup.ts | finder_setup_*': 4,
@@ -221,6 +227,10 @@ describe('the sweep: every call site of a Finder command, and what it does with 
       'finderSetup.ts | wrapper:copyFinderSetupDetails': 1,
       'finderSetup.ts | wrapper:loadFinderSetup': 1,
       'finderSetup.ts | wrapper:runFinderSetupAction': 1,
+      // Task 1683 slice 2: the sign-in screens of the Beebeeb window replaced the macOS onboarding step (whose
+      // `Onboarding.tsx | finder.run` and `wrapper:loadFinderSetup` sites went with it). The disk-image notice and the
+      // Finder status screen each hand a notice's action to finder.run and discard what it returns (checked below).
+      'macSignIn.tsx | finder.run': 2,
       'pages/Shared.tsx | open_in_finder': 1,
       'pages/SyncFolder.tsx | finder.run': 1,
       'pages/SyncFolder.tsx | open_finder_location': 1,
@@ -339,7 +349,7 @@ describe('the sweep: every call site of a Finder command, and what it does with 
 
   test('nothing reads the result of finder.run: it is discarded or handed to an event handler that discards it', () => {
     const runs = sites.filter((site) => site.family === 'finder.run')
-    expect(runs).toHaveLength(5)
+    expect(runs).toHaveLength(6)
     for (const run of runs) expect(['returned', 'discarded']).toContain(run.consumption)
   })
 

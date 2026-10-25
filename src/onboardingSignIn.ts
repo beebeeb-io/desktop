@@ -39,7 +39,11 @@ export const defaultSignInApi: SignInApi = { desktopLogin, desktopLogin2fa }
 
 /** What a completed sign-in became (R8). */
 export type SignInSettled =
-  | { kind: 'fresh' }
+  /**
+   * A sign-in with no account on this Mac before. `vaultUnlocked` (spec C C-S1): the keys arrived with it, so no
+   * recovery phrase is asked. Rust's password path always says `false`; the browser path's keys are always here.
+   */
+  | { kind: 'fresh'; vaultUnlocked: boolean }
   /**
    * The account on this Mac signed in again in place. `keyReplaced` (FB-I1): the kept vault key was no
    * longer the account's, so it was removed and the recovery phrase follows; that step says why.
@@ -61,7 +65,7 @@ export type PasswordStepResult =
 export type TotpStepResult = { ok: true; settled: SignInSettled } | { ok: false; message: string }
 
 /** The switch's snapshot (spec 2026-10-10 W11), or null when absent or not whole (Linux sends none). */
-function unsentFrom(raw: unknown): AskCounts | null {
+export function unsentFrom(raw: unknown): AskCounts | null {
   if (raw === null || typeof raw !== 'object') return null
   const u = raw as Record<string, unknown>
   const whole = (n: unknown) => typeof n === 'number' && Number.isSafeInteger(n) && n >= 0
@@ -113,7 +117,7 @@ export function settledFrom(value: DesktopLoginResult | null | undefined): SignI
     return { kind: 'reauthenticated', vaultUnlocked: vault_unlocked === true, keyReplaced: key_replaced === true }
   }
   if (key_replaced) return unreadable
-  return { kind: 'fresh' }
+  return { kind: 'fresh', vaultUnlocked: vault_unlocked === true }
 }
 
 /**

@@ -6,14 +6,15 @@
 //! function of [`Platform`] and the non-macOS rows are pinned by tests.
 //! Two-surface slice 1 (task 1683, spec `docs/specs/2026-10-24-macos-two-surface-app.md`)
 //! changed the macOS rows of `main_window_label` (`main`) and `close_policy`
-//! (`main` is destroyed) and added `compact_window_label` and `dock_icon_wanted`;
+//! (`main` is destroyed) and added `compact_window_label` and `dock_icon_wanted`; slice 2 added `onboarding_surface`
+//! (a Mac signs in in the Beebeeb window) and took the `onboarding` window out of `dock_icon_wanted`;
 //! startup and the conflict auto-open keep today's macOS rows until slices 6 and 4.
 //!
 //! Every function here is CALLED by the shipping code, and `wiring_tests` proves
 //! it structurally (reads `lib.rs` and fails if a call site goes back to a
 //! literal): startup (`startup_surface`), the main-window labels
 //! (`main_window_label`, both the compact `settings` window and the Windows
-//! `main-app` shell), the global close handler (`close_policy`) and
+//! `main-app` shell), the global close handler (`close_policy`), the sign-in openers (`onboarding_surface`) and
 //! `runner::handle_new_conflict` (`conflict_auto_opens_window`). Each returns
 //! today's answer on every platform until slice 6 changes the macOS rows.
 
@@ -67,6 +68,25 @@ pub fn main_window_label(platform: Platform) -> &'static str {
     }
 }
 
+/// Where "Sign in" opens (task 1683 slice 2, two-surface spec §7.4 and §12 row 2). A Mac signs in in the Beebeeb window:
+/// the signed-out window shows sign-in itself, so the opener only shows `main`, and the `onboarding` window is never
+/// built there. Windows and Linux keep a window of their own, under the labels they always had.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnboardingSurface {
+    /// The Beebeeb window (`main`), on its signed-out screens.
+    BeebeebWindow,
+    /// A separate first-run window with this label.
+    Window(&'static str),
+}
+
+pub fn onboarding_surface(platform: Platform) -> OnboardingSurface {
+    match platform {
+        Platform::Macos => OnboardingSurface::BeebeebWindow,
+        Platform::Windows => OnboardingSurface::Window("windows-onboarding"),
+        Platform::Linux => OnboardingSurface::Window("onboarding"),
+    }
+}
+
 /// The label of the compact window (`App.tsx`): Linux's main window, and on a Mac the tray flyout until slice 3
 /// builds the popover. Never `main`: the two must not share a label.
 pub fn compact_window_label(_platform: Platform) -> &'static str {
@@ -75,13 +95,14 @@ pub fn compact_window_label(_platform: Platform) -> &'static str {
 
 /// Two-surface spec §9.1: whether a Mac should show a Dock icon (activation policy Regular) for these windows, each
 /// given as its label and whether it is shown (visible or minimized). The Beebeeb window counts whenever it exists:
-/// it is destroyed on close, and a minimized one keeps its Dock tile only while the icon stays. Onboarding and
-/// conflict windows are still separate until slices 2 and 4, hide on close, and had a Dock icon before slice 1, so
-/// they count while shown. The compact flyout and the popover never add one.
+/// it is destroyed on close, and a minimized one keeps its Dock tile only while the icon stays. Conflict windows are
+/// still separate until slice 4, hide on close, and had a Dock icon before slice 1, so they count while shown. The
+/// compact flyout and the popover never add one. Slice 2: sign-in is a screen of the Beebeeb window, so a Mac builds
+/// no `onboarding` window and none counts here.
 pub fn dock_icon_wanted<'a>(windows: impl IntoIterator<Item = (&'a str, bool)>) -> bool {
     windows
         .into_iter()
-        .any(|(label, shown)| label == "main" || (shown && (label == "onboarding" || label.starts_with("conflict-"))))
+        .any(|(label, shown)| label == "main" || (shown && label.starts_with("conflict-")))
 }
 
 /// Whether an `ExitRequested` is turned down (review P1 on PR #134). Tauri sends it with `code: None` when the last
@@ -262,16 +283,26 @@ mod tests {
     fn the_dock_icon_follows_the_beebeeb_window_and_the_legacy_decorated_windows() {
         // Two-surface spec §9.1: a Dock icon while the Beebeeb window is open, none otherwise. `main` is destroyed on
         // close, so it counts whenever it exists, minimized or hidden by ⌘H included (a minimized window's Dock tile
-        // must not vanish with the icon). Onboarding and conflict windows still exist until slices 2 and 4 and are
-        // hidden on close, so they count while shown; before slice 1 every window had a Dock icon. The compact flyout
-        // and the popover never add one.
+        // must not vanish with the icon). Conflict windows still exist until slice 4 and are hidden on close, so they
+        // count while shown. The compact flyout and the popover never add one. Slice 2: sign-in is a screen of the
+        // Beebeeb window, so a Mac never builds an `onboarding` window and it counts for nothing (it used to count
+        // while shown, as every window did before slice 1).
         assert!(!dock_icon_wanted([]));
         assert!(dock_icon_wanted([("main", false)]));
         assert!(dock_icon_wanted([("main", true)]));
-        assert!(dock_icon_wanted([("settings", true), ("onboarding", true)]));
+        assert!(dock_icon_wanted([("settings", true), ("main", true)]));
         assert!(dock_icon_wanted([("conflict-7f3a", true)]));
-        assert!(!dock_icon_wanted([("onboarding", false), ("conflict-7f3a", false)]));
-        assert!(!dock_icon_wanted([("settings", true), ("popover", true), ("tray", true)]));
+        assert!(!dock_icon_wanted([("onboarding", true), ("onboarding", false), ("conflict-7f3a", false)]));
+        assert!(!dock_icon_wanted([("settings", true), ("popover", true), ("tray", true), ("onboarding", true)]));
+    }
+
+    #[test]
+    fn a_mac_signs_in_in_the_beebeeb_window_and_windows_and_linux_keep_their_own() {
+        // Two-surface §12 row 2: `open_onboarding_window` and `open_reauth_window` route to `main` on macOS, and the
+        // `onboarding` window is never built there. The other rows are today's labels, pinned.
+        assert_eq!(onboarding_surface(Platform::Macos), OnboardingSurface::BeebeebWindow);
+        assert_eq!(onboarding_surface(Platform::Windows), OnboardingSurface::Window("windows-onboarding"));
+        assert_eq!(onboarding_surface(Platform::Linux), OnboardingSurface::Window("onboarding"));
     }
 
     #[test]
@@ -547,6 +578,64 @@ mod wiring_tests {
     fn startup_and_the_conflict_handler_still_go_through_policy() {
         assert!(lib_rs().contains("surfaces::policy::startup_surface("));
         assert!(runner_rs().contains("surfaces::policy::conflict_auto_opens_window("));
+    }
+
+    #[test]
+    fn the_sign_in_openers_route_through_onboarding_surface_and_a_mac_never_builds_the_onboarding_window() {
+        // Two-surface §12 row 2 ("cargo (open-sign-in routes to `main`; `onboarding` never built on macOS)").
+        let src = lib_rs();
+        let open = item_from(&src, "pub(crate) fn open_onboarding_window_impl(");
+        assert!(
+            open.contains("surfaces::policy::onboarding_surface(surfaces::policy::Platform::current())"),
+            "the opener asks the policy:\n{open}"
+        );
+        assert!(
+            open.contains("OnboardingSurface::BeebeebWindow => show_sign_in_in_beebeeb_window(app),"),
+            "a Mac signs in in the Beebeeb window:\n{open}"
+        );
+        assert!(!open.contains("WebviewWindowBuilder"), "the opener itself builds no window:\n{open}");
+
+        // The macOS hand-over opens `main` on Home: the window shows sign-in by itself when there is no session.
+        let mac = item_from(&src, "fn show_sign_in_in_beebeeb_window(app: &tauri::AppHandle) -> Result<(), String> {\n    show_main_window(");
+        assert!(mac.contains("show_main_window(app, MainNav::Home);"), "{mac}");
+        assert!(!mac.contains("WebviewWindowBuilder"), "{mac}");
+
+        // The only code that builds an `onboarding` window is compiled off macOS.
+        let builder_at = src
+            .find("fn open_onboarding_window_labelled(")
+            .expect("the labelled opener exists");
+        // The two lines above the signature are its attributes (no byte arithmetic: the source holds non-ASCII text).
+        let head = src[..builder_at].lines().rev().take(2).collect::<Vec<_>>().join("\n");
+        assert!(
+            head.contains("#[cfg(not(target_os = \"macos\"))]"),
+            "the window builder for sign-in is not compiled on a Mac:\n{head}"
+        );
+        let builder = item_from(&src, "fn open_onboarding_window_labelled(");
+        assert!(builder.contains("WebviewWindowBuilder::new(") && builder.contains("\"Welcome to Beebeeb\""), "{builder}");
+
+        // Sign in again (R8): macOS opens the same window and asks it for the card (`MainNav::Reauth`, review P3-1, whatever
+        // the session says); Windows keeps its refusal; Linux keeps its reload-in-mode.
+        let reauth = item_from(&src, "async fn open_reauth_window(");
+        let mac_arm = reauth
+            .find("#[cfg(target_os = \"macos\")]\n    {")
+            .map(|at| &reauth[at..])
+            .unwrap_or_else(|| panic!("a macOS arm:\n{reauth}"));
+        assert!(mac_arm.contains("show_reauth_in_beebeeb_window(&app)"), "{reauth}");
+        let others = "#[cfg(not(any(target_os = \"windows\", target_os = \"macos\")))]";
+        assert!(reauth.contains(others), "Linux keeps its own arm:\n{reauth}");
+        assert!(!mac_arm[..mac_arm.find(others).unwrap_or(mac_arm.len())].contains("WebviewWindowBuilder"), "{reauth}");
+    }
+
+    #[test]
+    fn quit_beebeeb_is_the_menus_exit() {
+        // The sign-in card's “Quit Beebeeb” (spec C §7.1): the same `app.exit(0)` as ⌘Q, which carries a code and so
+        // is not turned down by `keep_running_on_exit_request`.
+        let src = lib_rs();
+        let body = item_from(&src, "fn quit_beebeeb(");
+        assert!(body.contains("app.exit(0)"), "{body}");
+        let from = src.find("tauri::generate_handler![").expect("the command list");
+        let list = &src[from..from + src[from..].find("])").expect("the end of the command list")];
+        assert!(list.contains("quit_beebeeb,"), "registered:\n{list}");
     }
 
     #[test]
