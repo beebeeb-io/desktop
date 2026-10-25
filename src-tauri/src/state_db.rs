@@ -497,6 +497,8 @@ pub struct PrunedRow {
     /// Task 1640 (review N2): the file's agreed content when the row was read (a pruned row is
     /// gone from the table by the time its entry is removed).
     pub local_hash: Option<String>,
+    /// Task 1640 (review N1): the hash of the one version the range fetches served, when it was one.
+    pub fetched_hash: Option<String>,
 }
 
 /// One row in the `files` table.
@@ -2188,6 +2190,9 @@ impl StateDb {
         ensure_column(&conn, "files", "current_object_version_id", "TEXT")?;
         ensure_column(&conn, "files", "local_base_version", "INTEGER NOT NULL DEFAULT 0")?;
         ensure_column(&conn, "files", "local_hash", "TEXT")?;
+        // Task 1640 (review N1): what the last range fetches served (see `record_fetched_version`).
+        ensure_column(&conn, "files", "fetched_version", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_column(&conn, "files", "fetched_hash", "TEXT")?;
         ensure_column(&conn, "files", "cache_path", "TEXT")?;
         ensure_column(&conn, "files", "cache_bytes", "INTEGER NOT NULL DEFAULT 0")?;
         ensure_column(&conn, "files", "pin_state", "TEXT NOT NULL DEFAULT 'inherit'")?;
@@ -2289,6 +2294,18 @@ impl StateDb {
                 server_id TEXT NOT NULL,
                 created_at INTEGER NOT NULL
             );
+            -- Task 1640 (review N1, condition 1): a file that goes cloud-only has no local bytes
+            -- left; its agreed content and its fetch candidate describe bytes that are gone. One
+            -- trigger, so every path that dehydrates or evicts a row forgets them (the engine's and
+            -- Explorer's Free up space through the reconcile, a cache eviction, a failed fetch, the
+            -- startup repair, an untrash).
+            CREATE TRIGGER IF NOT EXISTS files_cloud_only_forgets_local_content
+            AFTER UPDATE OF status ON files
+            WHEN NEW.status = 'cloud_only' AND OLD.status != 'cloud_only'
+            BEGIN
+                UPDATE files SET local_hash = NULL, fetched_version = 0, fetched_hash = NULL
+                WHERE file_id = NEW.file_id;
+            END;
             ",
         )?;
         // Upgrade inventory: old one-shot Keep Mine rows may have no queue
@@ -2431,7 +2448,7 @@ impl StateDb {
         // (task 0806). Deepest-first ordering keeps the returned rows in the
         // children-before-parent order the placeholder remover expects.
         let root: Option<PrunedRow> = {
-            let mut stmt = tx.prepare("SELECT file_id, path, item_kind, local_hash FROM files WHERE file_id = ?1")?;
+            let mut stmt = tx.prepare("SELECT file_id, path, item_kind, local_hash, fetched_hash FROM files WHERE file_id = ?1")?;
             let mut rows = stmt.query(params![file_id])?;
             if let Some(row) = rows.next()? {
                 Some(PrunedRow {
@@ -2439,6 +2456,7 @@ impl StateDb {
                     path: row.get(1)?,
                     is_dir: ItemKind::from_str(&row.get::<_, String>(2)?) == ItemKind::Folder,
                     local_hash: row.get(3)?,
+                    fetched_hash: row.get(4)?,
                 })
             } else {
                 None
@@ -2477,7 +2495,7 @@ impl StateDb {
             if !root_path.is_empty() {
                 let descendants: Vec<PrunedRow> = {
                     let mut dstmt = tx.prepare(
-                        "SELECT file_id, path, item_kind, local_hash FROM files
+                        "SELECT file_id, path, item_kind, local_hash, fetched_hash FROM files
                          WHERE namespace = 'my_files'
                            AND substr(ltrim(path, '/'), 1, length(?1) + 1) = ?1 || '/'
                          ORDER BY length(path) DESC, path DESC",
@@ -2488,6 +2506,7 @@ impl StateDb {
                             path: r.get(1)?,
                             is_dir: ItemKind::from_str(&r.get::<_, String>(2)?) == ItemKind::Folder,
                             local_hash: r.get(3)?,
+                            fetched_hash: r.get(4)?,
                         })
                     })?;
                     drows.collect::<Result<Vec<_>>>()?
@@ -2525,7 +2544,7 @@ impl StateDb {
         let tx = conn.transaction()?;
 
         let root: Option<PrunedRow> = {
-            let mut stmt = tx.prepare("SELECT file_id, path, item_kind, local_hash FROM files WHERE file_id = ?1")?;
+            let mut stmt = tx.prepare("SELECT file_id, path, item_kind, local_hash, fetched_hash FROM files WHERE file_id = ?1")?;
             let mut rows = stmt.query(params![file_id])?;
             if let Some(row) = rows.next()? {
                 Some(PrunedRow {
@@ -2533,6 +2552,7 @@ impl StateDb {
                     path: row.get(1)?,
                     is_dir: ItemKind::from_str(&row.get::<_, String>(2)?) == ItemKind::Folder,
                     local_hash: row.get(3)?,
+                    fetched_hash: row.get(4)?,
                 })
             } else {
                 None
@@ -2572,7 +2592,7 @@ impl StateDb {
             if !root_path.is_empty() {
                 let descendants: Vec<PrunedRow> = {
                     let mut dstmt = tx.prepare(
-                        "SELECT file_id, path, item_kind, local_hash FROM files
+                        "SELECT file_id, path, item_kind, local_hash, fetched_hash FROM files
                          WHERE namespace = 'my_files'
                            AND substr(ltrim(path, '/'), 1, length(?1) + 1) = ?1 || '/'
                          ORDER BY length(path) DESC, path DESC",
@@ -2583,6 +2603,7 @@ impl StateDb {
                             path: r.get(1)?,
                             is_dir: ItemKind::from_str(&r.get::<_, String>(2)?) == ItemKind::Folder,
                             local_hash: r.get(3)?,
+                            fetched_hash: r.get(4)?,
                         })
                     })?;
                     drows.collect::<Result<Vec<_>>>()?
@@ -2607,7 +2628,7 @@ impl StateDb {
 
         // Look up the row to delete (its path + kind drives the subtree prune).
         let root: Option<PrunedRow> = {
-            let mut stmt = tx.prepare("SELECT file_id, path, item_kind, local_hash FROM files WHERE file_id = ?1")?;
+            let mut stmt = tx.prepare("SELECT file_id, path, item_kind, local_hash, fetched_hash FROM files WHERE file_id = ?1")?;
             let mut rows = stmt.query(params![file_id])?;
             if let Some(row) = rows.next()? {
                 Some(PrunedRow {
@@ -2615,6 +2636,7 @@ impl StateDb {
                     path: row.get(1)?,
                     is_dir: ItemKind::from_str(&row.get::<_, String>(2)?) == ItemKind::Folder,
                     local_hash: row.get(3)?,
+                    fetched_hash: row.get(4)?,
                 })
             } else {
                 None
@@ -2653,7 +2675,7 @@ impl StateDb {
             if !root_path.is_empty() {
                 let descendants: Vec<PrunedRow> = {
                     let mut dstmt = tx.prepare(
-                        "SELECT file_id, path, item_kind, local_hash FROM files
+                        "SELECT file_id, path, item_kind, local_hash, fetched_hash FROM files
                          WHERE substr(ltrim(path, '/'), 1, length(?1) + 1) = ?1 || '/'
                          ORDER BY length(path) DESC, path DESC",
                     )?;
@@ -2663,6 +2685,7 @@ impl StateDb {
                             path: r.get(1)?,
                             is_dir: ItemKind::from_str(&r.get::<_, String>(2)?) == ItemKind::Folder,
                             local_hash: r.get(3)?,
+                            fetched_hash: r.get(4)?,
                         })
                     })?;
                     drows.collect::<Result<Vec<_>>>()?
@@ -2957,13 +2980,14 @@ impl StateDb {
         // into the trash view); deleting them would erase trash-view rows.
         let direct_children: Vec<PrunedRow> = {
             let mut stmt =
-                tx.prepare("SELECT file_id, path, item_kind, local_hash FROM files WHERE parent_id = ?1 AND status != 'trashing'")?;
+                tx.prepare("SELECT file_id, path, item_kind, local_hash, fetched_hash FROM files WHERE parent_id = ?1 AND status != 'trashing'")?;
             let rows = stmt.query_map(params![folder_id], |r| {
                 Ok(PrunedRow {
                     file_id: r.get(0)?,
                     path: r.get(1)?,
                     is_dir: ItemKind::from_str(&r.get::<_, String>(2)?) == ItemKind::Folder,
                     local_hash: r.get(3)?,
+                    fetched_hash: r.get(4)?,
                 })
             })?;
             rows.collect::<Result<Vec<_>>>()?
@@ -2988,7 +3012,7 @@ impl StateDb {
                 if !child_path.is_empty() {
                     let descendants: Vec<PrunedRow> = {
                         let mut dstmt = tx.prepare(
-                            "SELECT file_id, path, item_kind, local_hash FROM files
+                            "SELECT file_id, path, item_kind, local_hash, fetched_hash FROM files
                              WHERE substr(ltrim(path, '/'), 1, length(?1) + 1) = ?1 || '/'
                              ORDER BY length(path) DESC, path DESC",
                         )?;
@@ -2998,6 +3022,7 @@ impl StateDb {
                                 path: r.get(1)?,
                                 is_dir: ItemKind::from_str(&r.get::<_, String>(2)?) == ItemKind::Folder,
                                 local_hash: r.get(3)?,
+                                fetched_hash: r.get(4)?,
                             })
                         })?;
                         drows.collect::<Result<Vec<_>>>()?
@@ -3243,7 +3268,7 @@ impl StateDb {
         // `file_delete` (permanent) / `file_restore` ops instead.
         let candidates: Vec<PrunedRow> = {
             let mut stmt = tx.prepare(
-                "SELECT file_id, path, item_kind, local_hash FROM files
+                "SELECT file_id, path, item_kind, local_hash, fetched_hash FROM files
                  WHERE namespace = 'my_files'
                    AND status != 'uploading'
                    AND status != 'trashing'
@@ -3260,6 +3285,7 @@ impl StateDb {
                     path: row.get(1)?,
                     is_dir: ItemKind::from_str(&row.get::<_, String>(2)?) == ItemKind::Folder,
                     local_hash: row.get(3)?,
+                    fetched_hash: row.get(4)?,
                 })
             })?;
             rows.collect::<Result<Vec<_>>>()?
@@ -3323,7 +3349,7 @@ impl StateDb {
                         // trash's content (recoverable), not dead rows; deleting
                         // them would erase the trash view's folder contents.
                         let mut dstmt = tx.prepare(
-                            "SELECT file_id, path, item_kind, local_hash FROM files
+                            "SELECT file_id, path, item_kind, local_hash, fetched_hash FROM files
                              WHERE namespace = 'my_files'
                                AND status != 'trashing'
                                AND substr(ltrim(path, '/'), 1, length(?1) + 1) = ?1 || '/'
@@ -3335,6 +3361,7 @@ impl StateDb {
                                 path: r.get(1)?,
                                 is_dir: ItemKind::from_str(&r.get::<_, String>(2)?) == ItemKind::Folder,
                                 local_hash: r.get(3)?,
+                                fetched_hash: r.get(4)?,
                             })
                         })?;
                         drows.collect::<Result<Vec<_>>>()?
@@ -3452,10 +3479,68 @@ impl StateDb {
     pub fn record_local_baseline(&self, file_id: &str, version: i64, hash: &str) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.execute(
-            "UPDATE files SET local_base_version = ?2, local_hash = ?3 WHERE file_id = ?1",
+            "UPDATE files SET local_base_version = ?2, local_hash = ?3, fetched_version = 0, fetched_hash = NULL
+             WHERE file_id = ?1",
             params![file_id, version, hash],
         )?;
         Ok(())
+    }
+
+    /// Task 1640 (review N1): a range fetch served `version`, whose whole plaintext hashes to
+    /// `hash`. The file's candidate: the first fetch sets it; another of the same version keeps it;
+    /// one of another version makes it mixed (the lower version, no hash: the bytes on disk are
+    /// none of them), and mixed it stays until a dehydration or a baseline clears it.
+    pub fn record_fetched_version(&self, file_id: &str, version: i64, hash: &str) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "UPDATE files SET
+                 fetched_hash = CASE
+                     WHEN fetched_version = 0 THEN ?3
+                     WHEN fetched_version = ?2 AND fetched_hash IS NOT NULL THEN fetched_hash
+                     ELSE NULL END,
+                 fetched_version = CASE WHEN fetched_version = 0 THEN ?2 ELSE MIN(fetched_version, ?2) END
+             WHERE file_id = ?1",
+            params![file_id, version, hash],
+        )?;
+        Ok(())
+    }
+
+    /// Task 1640 (review N1): the file's candidate, `(version, hash)`; `hash` is `None` when
+    /// mixed. `None`: no candidate.
+    pub fn fetched_content(&self, file_id: &str) -> Result<Option<(i64, Option<String>)>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT fetched_version, fetched_hash FROM files WHERE file_id = ?1",
+                params![file_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?
+            .filter(|(version, _)| *version > 0))
+    }
+
+    /// Task 1640 (review N1, condition 1): forget the candidate (the placeholder's content or
+    /// identity changed by another path than a fetch).
+    pub fn clear_fetched_content(&self, file_id: &str) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "UPDATE files SET fetched_version = 0, fetched_hash = NULL WHERE file_id = ?1",
+            params![file_id],
+        )?;
+        Ok(())
+    }
+
+    /// Task 1640 (review N1, condition 2): make the candidate the agreed content, only while the
+    /// row is still `Local` with no agreed content and the candidate is still exactly
+    /// `(version, hash)`, all in one statement. `false`: something changed; nothing was written.
+    pub fn promote_fetched_content(&self, file_id: &str, version: i64, hash: &str) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        Ok(conn.execute(
+            "UPDATE files SET local_base_version = ?2, local_hash = ?3, fetched_version = 0, fetched_hash = NULL
+             WHERE file_id = ?1 AND status = 'local' AND local_hash IS NULL
+               AND fetched_version = ?2 AND fetched_hash = ?3",
+            params![file_id, version, hash],
+        )? == 1)
     }
 
     /// Task 1640: forget the file's agreed content (a download that named no version): its bytes
@@ -3473,7 +3558,7 @@ impl StateDb {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let mut stmt = conn.prepare(
             "SELECT file_id, path FROM files
-             WHERE status = 'local' AND item_kind = 'file' AND local_hash IS NOT NULL
+             WHERE status = 'local' AND item_kind = 'file' AND (local_hash IS NOT NULL OR fetched_hash IS NOT NULL)
                AND file_id NOT IN (SELECT file_id FROM operation_queue
                                    WHERE file_id IS NOT NULL AND write_id IS NULL
                                      AND kind IN ('upload_version', 'upload_file'))

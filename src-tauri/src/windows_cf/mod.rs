@@ -1450,7 +1450,30 @@ pub fn stamp_local_files_in_sync(sync_root: &std::path::Path) {
             continue;
         }
         if placeholders::placeholder_in_sync(&local_path) == Some(true) {
-            in_sync_seen().lock().unwrap_or_else(|p| p.into_inner()).insert(file_id.clone(), fingerprint);
+            // Task 1640 (review N1): a file range fetches brought in, now whole and in sync, gets
+            // its candidate as the agreed content. Until then it is not "seen": a fetch that
+            // completes it may leave its size and time as they were.
+            let has_baseline = bridge
+                .db()
+                .get_file_contract_state(file_id)
+                .ok()
+                .flatten()
+                .is_some_and(|contract| contract.local_hash.is_some());
+            if has_baseline {
+                in_sync_seen().lock().unwrap_or_else(|p| p.into_inner()).insert(file_id.clone(), fingerprint);
+                continue;
+            }
+            checked += 1;
+            match placeholders::promote_fetched_content(bridge.db(), file_id, &local_path) {
+                Ok(true) => {
+                    in_sync_seen().lock().unwrap_or_else(|p| p.into_inner()).insert(file_id.clone(), fingerprint);
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::debug!(error = %e, "stamp_local_files_in_sync: promotion failed");
+                    errors += 1;
+                }
+            }
             continue;
         }
         checked += 1;

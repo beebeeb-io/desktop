@@ -21,6 +21,10 @@ describe('reviewEntryAction', () => {
     })
   })
 
+  test('a kept copy whose original still waits to be removed gets no button yet', () => {
+    expect(reviewEntryAction({ kind: 'kept_copy', action: 'none' })).toBeNull()
+  })
+
   test('a real conflict still gets the Review button', () => {
     expect(reviewEntryAction({ kind: 'conflict', action: 'open_conflict' })).toEqual({
       kind: 'open_conflict',

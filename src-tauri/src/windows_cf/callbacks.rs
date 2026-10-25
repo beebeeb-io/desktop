@@ -353,6 +353,11 @@ unsafe fn resolve_size_mismatch(
     // Step 1 — correct the recorded size to the authenticated length. A failure
     // here is non-fatal: the placeholder resize below is what makes the next
     // open succeed; the DB value is for cross-surface consistency + reseeding.
+    // Task 1640 (review N1, condition 1): the placeholder's content identity changed; its fetch
+    // candidate described the old one.
+    if let Err(e) = bridge.db().clear_fetched_content(file_id) {
+        tracing::debug!(file_id = %file_id, error = %e, "size resolution: could not clear the fetch candidate");
+    }
     match bridge.db().set_size_bytes(file_id, true_size) {
         Ok(0) => {
             tracing::warn!(file_id = %file_id, "size correction matched no row (file_id absent from state DB)");

@@ -220,7 +220,7 @@ export function reviewEntryAction(
   if (entry.kind === 'auth_failure') return { kind: 'sign_in_again', label: 'Sign in again' }
   if (entry.kind === 'quota_failure') return { kind: 'upgrade', label: 'Upgrade' }
   // Task 1640: a kept copy needs no decision; the person can clear it from the list.
-  if (entry.kind === 'kept_copy') return { kind: 'dismiss', label: 'Dismiss' }
+  if (entry.kind === 'kept_copy' && entry.action === 'dismiss') return { kind: 'dismiss', label: 'Dismiss' }
   return null
 }
 
