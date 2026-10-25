@@ -12,8 +12,7 @@ import {
   reviewEntryAction,
   type FileVersionEntry,
   type SyncStatus,
-  type VersionConflictEntry,
-} from '../desktopApi'
+  type VersionConflictEntry, reviewMetrics, reviewNeedsAttention } from '../desktopApi'
 import { useToast } from '../windows/ui'
 
 function formatTimestamp(value: string | number | null | undefined): string {
@@ -44,10 +43,14 @@ function kindLabel(kind: VersionConflictEntry['kind']): string {
       return 'Delete'
     case 'restore':
       return 'Restore'
+    case 'kept_copy':
+      return 'Kept copy'
     default:
       return 'Conflict'
   }
 }
+
+
 
 export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: number }) {
   const { showToast } = useToast()
@@ -62,6 +65,8 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
   const [notice, setNotice] = useState<string | null>(null)
   const [versionNotice, setVersionNotice] = useState<string | null>(null)
   const [restoring, setRestoring] = useState<string | null>(null)
+  // Task 1640: a dismissed entry reloads the feed.
+  const [reloads, setReloads] = useState(0)
 
   const selectedEntry = selected ?? entries[0] ?? null
 
@@ -91,13 +96,15 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
     return () => {
       cancelled = true
     }
-  }, [refreshSignal])
+  }, [refreshSignal, reloads])
 
   useEffect(() => {
     let cancelled = false
     const loadVersions = async () => {
-      if (!selectedEntry) {
+      // Task 1640: a kept copy's file was deleted elsewhere; it has no versions to show here.
+      if (!selectedEntry || selectedEntry.kind === 'kept_copy') {
         setVersions([])
+        setVersionNotice(null)
         return
       }
       setVersionNotice(null)
@@ -175,11 +182,21 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
     })
   }
 
-  const metrics = useMemo(() => {
-    const failed = entries.filter((entry) => entry.kind !== 'conflict').length
-    const stale = entries.filter((entry) => entry.kind === 'stale_base').length
-    return { failed, stale }
-  }, [entries])
+  const dismissEntry = async (entry: VersionConflictEntry) => {
+    const result = await command<void>('dismiss_review_entry', { entryId: entry.id })
+    if (!result.ok) {
+      showToast({
+        variant: 'error',
+        title: 'Couldn’t dismiss',
+        message: result.unsupported ? commandUnavailableLabel('dismiss_review_entry') : result.reason,
+      })
+      return
+    }
+    setReloads((value) => value + 1)
+  }
+
+  const metrics = useMemo(() => reviewMetrics(entries), [entries])
+  const needsAttention = reviewNeedsAttention(conflicts, entries)
 
   return (
     <section className="page">
@@ -192,7 +209,7 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
           </p>
         </div>
         <span className="status-pill">
-          <span className={`dot ${conflicts > 0 || entries.length > 0 ? 'error' : 'ok'}`} />
+          <span className={`dot ${needsAttention ? 'error' : 'ok'}`} />
           {refreshing ? 'Refreshing' : `${entries.length} review item${entries.length === 1 ? '' : 's'}`}
         </span>
       </div>
@@ -247,6 +264,13 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
                   if (reviewAction.kind === 'open_conflict') {
                     return (
                       <button className="button" onClick={() => void openConflict(entry)}>
+                        {reviewAction.label}
+                      </button>
+                    )
+                  }
+                  if (reviewAction.kind === 'dismiss') {
+                    return (
+                      <button className="button" onClick={() => void dismissEntry(entry)}>
                         {reviewAction.label}
                       </button>
                     )

@@ -153,6 +153,12 @@ fn take_engine_delete_suppressed(path: &Path) -> bool {
     }
 }
 
+/// Task 1640 (review-151d P3-1): the engine's own remove registered for `path` did not happen (it
+/// failed): drop its registration, so a later delete by the person is honoured.
+pub fn cancel_engine_delete_suppression(path: &Path) {
+    let _ = take_engine_delete_suppressed(path);
+}
+
 /// Drop suppression entries older than this. A registered engine delete whose
 /// NOTIFY never arrives (revert/remove failed, or the OS coalesced the event)
 /// must not linger and swallow a genuine LATER user delete of the same path.
@@ -360,7 +366,13 @@ async fn debounce_loop(
                     .collect();
                 for path in ready {
                     pending.remove(&path);
-                    handle_settled_path(&bridge, &sync_root, &path).await;
+                    // Task 1640 (review P2-5): classifying a tracked file reads and hashes it.
+                    let (settle_bridge, settle_root) = (bridge.clone(), sync_root.clone());
+                    if let Err(e) =
+                        tokio::task::spawn_blocking(move || handle_settled_path(&settle_bridge, &settle_root, &path)).await
+                    {
+                        tracing::warn!(error = %e, "upload driver: settling a closed file panicked; continuing");
+                    }
                 }
             }
         }
@@ -549,8 +561,14 @@ fn run_one_scan(bridge: &EngineBridge, sync_root: &std::path::Path, in_flight: &
                 return;
             }
 
+            // A new file waits in `in_flight` for its row. An edit of a tracked file (task 1640)
+            // is held back by its queued upload instead, so a later edit is seen again.
+            let tracked = crate::engine_bridge::relative_db_path(sync_root, file_path)
+                .is_some_and(|rel| matches!(bridge.db().get_file_by_path(&rel), Ok(Some(_))));
             if dispatch_local_create(bridge, sync_root, file_path, "scan") {
-                in_flight.insert(file_path.to_path_buf());
+                if !tracked {
+                    in_flight.insert(file_path.to_path_buf());
+                }
                 dispatched += 1;
             } else {
                 tracing::debug!(
@@ -685,7 +703,7 @@ fn walk_dir(
 /// file, enqueue its encrypted upload. Thin wrapper over [`dispatch_local_create`]
 /// — the CF NOTIFY close-completion path and the enumeration scan share the same
 /// convert→queue sequence.
-async fn handle_settled_path(bridge: &EngineBridge, sync_root: &std::path::Path, path: &std::path::Path) {
+fn handle_settled_path(bridge: &EngineBridge, sync_root: &std::path::Path, path: &std::path::Path) {
     #[cfg(target_os = "windows")]
     crate::windows_cf::upload_finalization::retry(bridge.db(), sync_root);
     let _ = dispatch_local_create(bridge, sync_root, path, "notify");
@@ -705,7 +723,7 @@ async fn handle_settled_path(bridge: &EngineBridge, sync_root: &std::path::Path,
 /// uses that to record the path in its in-flight set so it is not re-dispatched
 /// before the `Uploading` DB row makes filter-3 reject it. `source` is a static
 /// tag (`"notify"` / `"scan"`) used only for log attribution.
-fn dispatch_local_create(
+pub(crate) fn dispatch_local_create(
     bridge: &EngineBridge,
     sync_root: &std::path::Path,
     path: &std::path::Path,
@@ -718,6 +736,22 @@ fn dispatch_local_create(
     // Capture size for the log before `target` is moved into the queue call.
     let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let nested = target.parent_id.is_some();
+    // Task 1640: a target with a file id is an edit of a synced file (`classify_tracked_edit`):
+    // a content modify of that file, sent with its base. Only a new file is created (and, on
+    // Windows, converted to an unsynced placeholder below).
+    if target.file_id.is_some() {
+        return match bridge.queue_finder_modify(target) {
+            Ok(FinderWriteOutcome::Queued { op_id, .. }) => {
+                tracing::info!(op_id = %op_id, size, nested, source, "upload driver: queued an edit of a synced file for encrypted upload");
+                true
+            }
+            Ok(FinderWriteOutcome::Ignored { .. }) => false,
+            Err(e) => {
+                tracing::warn!(error = %e, source, "upload driver: failed to queue an edit of a synced file");
+                false
+            }
+        };
+    }
 
     // `queue_finder_create` stages a copy of the bytes, derives the per-file key
     // inside the transfer loop via beebeeb-core, and encrypts on upload — we
@@ -825,7 +859,7 @@ pub(crate) async fn handle_rename(
         // file to a new name — classify the TARGET as a possible new upload
         // instead (it will no-op if it is engine-owned / already tracked).
         Ok(None) => {
-            handle_settled_path(bridge, sync_root, target).await;
+            handle_settled_path(bridge, sync_root, target);
             return;
         }
         Err(e) => {

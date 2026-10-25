@@ -1203,8 +1203,8 @@ pub fn seed_placeholders(bridge: Arc<EngineBridge>, sync_root: &std::path::Path)
 /// currently in `CloudOnly` status and skips any with an empty `path` (so a
 /// row whose name hasn't decrypted yet is simply retried next tick once the
 /// path is populated). `create_placeholder` maps the steady-state
-/// `ERROR_ALREADY_EXISTS` to `Ok`, so re-creating an existing placeholder is a
-/// no-op rather than an error — calling this every tick is safe.
+/// `ERROR_ALREADY_EXISTS` to `Ok(false)`, so re-creating an existing placeholder
+/// is a no-op rather than an error — calling this every tick is safe.
 ///
 /// No-op (logs at debug) until [`seed_placeholders`] has stashed the bridge;
 /// the runner only calls this on ticks that run after the bridge is built, so
@@ -1216,11 +1216,9 @@ pub fn refresh_placeholders(sync_root: &std::path::Path) {
     };
     let ensured = populate_placeholders(&bridge, sync_root);
     if ensured > 0 {
-        // `ensured` counts every cloud-only row whose placeholder is now present,
-        // INCLUDING ones that already existed (re-creating an existing placeholder
-        // maps ERROR_ALREADY_EXISTS → Ok). So this is "placeholders present after
-        // refresh", not "newly added rows" — keep the wording neutral so a
-        // steady-state tick doesn't read as if new files appeared every time.
+        // `ensured` counts the placeholders created by this refresh; ones that
+        // already existed (ERROR_ALREADY_EXISTS → Ok(false)) are not counted, so
+        // a steady-state tick logs nothing.
         tracing::debug!(
             placeholders = ensured,
             sync_root = %sync_root.display(),
@@ -1345,34 +1343,59 @@ pub fn reconcile_placeholder_state(sync_root: &std::path::Path) {
 /// in-sync placeholder is a Windows no-op).
 const MAX_IN_SYNC_STAMPS_PER_PASS: usize = 512;
 
-/// Stamp every DB-`Local` file whose on-disk Cloud Files placeholder is NOT
-/// yet marked in-sync, so Explorer shows the green ✓ overlay for those files.
+/// Task 1640 (review N13): retry the removal of every kept copy's original that was in use when
+/// the copy was made ([`crate::engine_bridge::retry_kept_originals`]).
+#[cfg(target_os = "windows")]
+pub fn retry_kept_originals(sync_root: &std::path::Path) {
+    let Some(bridge) = bridge() else {
+        return;
+    };
+    crate::engine_bridge::retry_kept_originals(bridge.db(), sync_root, &placeholders::placeholder_local_entry);
+}
+
+/// Task 1640 (review P2-5): a file's size and modification time.
+#[cfg(target_os = "windows")]
+fn file_fingerprint(path: &std::path::Path) -> Option<(u64, std::time::SystemTime)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.len(), meta.modified().ok()?))
+}
+
+/// Task 1640 (review P2-5): the files the stamp pass found or marked in sync, by their
+/// fingerprint then: unchanged since, they are not opened again.
+#[cfg(target_os = "windows")]
+fn in_sync_seen() -> &'static std::sync::Mutex<std::collections::HashMap<String, (u64, std::time::SystemTime)>> {
+    static SEEN: OnceLock<std::sync::Mutex<std::collections::HashMap<String, (u64, std::time::SystemTime)>>> =
+        OnceLock::new();
+    SEEN.get_or_init(Default::default)
+}
+
+/// Mark in sync, in Explorer's terms, the `Local` files whose bytes are the content this device
+/// agreed with the server on, so Explorer shows the synced overlay.
 ///
 /// ## Why this is needed
 ///
-/// `CfSetInSyncState(IN_SYNC)` currently fires only from `fetch_data_callback`
-/// when a single FETCH_DATA request covers the WHOLE file
-/// (`required_offset == 0 && required_length >= file_size`). Under
-/// `CF_HYDRATION_POLICY_PARTIAL` that condition rarely holds — Windows often
-/// issues partial-range requests — so files that ARE fully local (status=Local
-/// in the DB) may never receive the ✓ overlay. Additionally, the upload path
-/// (`upload_version` / modify) transitions the DB row to `Local` but does not
-/// call `CfSetInSyncState`, so freshly-uploaded files also miss the overlay.
+/// `CfSetInSyncState(IN_SYNC)` fires from `fetch_data_callback` only when one FETCH_DATA request
+/// covers the WHOLE file, which under `CF_HYDRATION_POLICY_PARTIAL` rarely holds, and a landing
+/// marks only a create. So a file can be fully local and agreed yet out of sync.
 ///
-/// This pass drives the built-in CF overlay from DB truth: if a row is `Local`
-/// the file IS fully synced, so we stamp it in-sync regardless of how it got
-/// there. `CfSetInSyncState` on an already-in-sync placeholder is a documented
-/// Windows no-op, making the pass idempotent and safe to run every tick.
+/// ## Task 1640: only agreed bytes
 ///
-/// ## Zero-knowledge
-///
-/// Never logs a path or filename — only aggregate counts. Paths may appear at
-/// `debug` level (matching the `mark_in_sync` sibling in `callbacks.rs`).
+/// Before task 1640 this pass marked EVERY `Local` row in sync on every tick, unsent edits
+/// included, which let "Free up space" discard them. Now a file is marked only when
+/// [`placeholders::stamp_if_agreed`] finds its bytes equal to the agreed content, under one
+/// exclusive handle across the hash and the mark. An edit (the platform cleared its in-sync
+/// state), a queued upload, or a file with no agreed content recorded stays out of sync.
 ///
 /// ## Bounded
 ///
-/// At most [`MAX_IN_SYNC_STAMPS_PER_PASS`] files are stamped per call. Any
-/// remaining Local files are stamped on subsequent ticks.
+/// Candidates come from `list_stamp_candidates` (agreed content recorded, no upload queued),
+/// filtered before the cap. A file found in sync whose size and modification time have not
+/// changed is skipped without opening it; at most [`MAX_IN_SYNC_STAMPS_PER_PASS`] files that need
+/// work are handled per pass.
+///
+/// ## Zero-knowledge
+///
+/// Never logs a path or filename — only aggregate counts.
 #[cfg(target_os = "windows")]
 pub fn stamp_local_files_in_sync(sync_root: &std::path::Path) {
     // All CF symbols (CfOpenFileWithOplock, CfSetInSyncState, CfCloseHandle,
@@ -1387,81 +1410,88 @@ pub fn stamp_local_files_in_sync(sync_root: &std::path::Path) {
         return;
     };
 
-    let entries = match bridge.db().list_by_status(crate::state_db::FileStatus::Local) {
-        Ok(entries) => entries,
+    // Task 1640 (review P2-5): only rows that may be marked (agreed content recorded, no upload
+    // queued) are candidates, filtered before the cap; the cap bounds the work per pass.
+    let candidates = match bridge.db().list_stamp_candidates() {
+        Ok(candidates) => candidates,
         Err(e) => {
-            tracing::warn!(error = %e, "stamp_local_files_in_sync: could not list Local files");
+            tracing::warn!(error = %e, "stamp_local_files_in_sync: could not list candidates");
             return;
         }
     };
 
     let mut stamped: usize = 0;
     let mut errors: usize = 0;
+    let mut checked: usize = 0;
 
-    for entry in entries.iter().take(MAX_IN_SYNC_STAMPS_PER_PASS) {
-        // Directory placeholders are managed separately (pin/hydration semantics
-        // for folders differ); stamp only leaf files, consistent with how
-        // `populate_placeholders` mints file placeholders.
-        if entry.is_dir() {
-            continue;
+    for (file_id, path) in &candidates {
+        if checked >= MAX_IN_SYNC_STAMPS_PER_PASS {
+            break;
         }
-
         // Map the server-relative '/'-joined path onto the on-disk placeholder
         // path — the same safe-join that `populate_placeholders` and
         // `reconcile_placeholder_state` use.
-        let rel = entry.path.trim_matches('/');
+        let rel = path.trim_matches('/');
         if rel.is_empty() {
             continue;
         }
         let local_path = sync_root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
-
         // Skip placeholders that don't exist on disk yet. They will be
         // minted by `refresh_placeholders` (which runs before this pass) and
         // will be stamped on the next tick once they appear.
-        if !local_path.exists() {
+        let Some(fingerprint) = file_fingerprint(&local_path) else {
+            continue;
+        };
+        // A file found in sync whose size and modification time have not changed since is
+        // skipped without opening it: only files that need work count toward the cap.
+        if in_sync_seen().lock().unwrap_or_else(|p| p.into_inner()).get(file_id) == Some(&fingerprint) {
             continue;
         }
-
-        // Build the NUL-terminated UTF-16 path string that `CfOpenFileWithOplock`
-        // expects — identical to `db_placeholder_path` in callbacks.rs.
-        let path_wide: Vec<u16> = local_path
-            .to_string_lossy()
-            .encode_utf16()
-            .chain(std::iter::once(0u16))
-            .collect();
-
-        // Mirror the `mark_in_sync` pattern from callbacks.rs exactly:
-        //   CfOpenFileWithOplock → CfSetInSyncState(IN_SYNC) → CfCloseHandle.
-        // Handle is ALWAYS closed before the next iteration — via the Ok and
-        // Err branches — so there is no handle leak on error.
-        //
-        // SAFETY: `path_wide` is a NUL-terminated wide string kept alive for
-        // the duration of the unsafe block. The CF handle returned by
-        // CfOpenFileWithOplock is closed by CfCloseHandle before return.
-        // CfSetInSyncState on an already-in-sync placeholder is a no-op.
-        let handle = match unsafe {
-            CfOpenFileWithOplock(PCWSTR(path_wide.as_ptr()), CF_OPEN_FILE_FLAG_NONE)
-        } {
-            Ok(h) => h,
-            Err(e) => {
-                tracing::debug!(error = %e, "stamp_local_files_in_sync: CfOpenFileWithOplock failed");
-                errors += 1;
+        if placeholders::placeholder_in_sync(&local_path) == Some(true) {
+            // Task 1640 (review N1): a file range fetches brought in, now whole and in sync, gets
+            // its candidate as the agreed content. Until then it is not "seen": a fetch that
+            // completes it may leave its size and time as they were.
+            let has_baseline = bridge
+                .db()
+                .get_file_contract_state(file_id)
+                .ok()
+                .flatten()
+                .is_some_and(|contract| contract.local_hash.is_some());
+            if has_baseline {
+                in_sync_seen().lock().unwrap_or_else(|p| p.into_inner()).insert(file_id.clone(), fingerprint);
                 continue;
             }
-        };
-
-        if let Err(e) = unsafe {
-            CfSetInSyncState(handle, CF_IN_SYNC_STATE_IN_SYNC, CF_SET_IN_SYNC_FLAG_NONE, None)
-        } {
-            tracing::debug!(error = %e, "stamp_local_files_in_sync: CfSetInSyncState failed");
-            errors += 1;
-        } else {
-            stamped += 1;
+            checked += 1;
+            match placeholders::promote_fetched_content(bridge.db(), file_id, &local_path) {
+                Ok(true) => {
+                    in_sync_seen().lock().unwrap_or_else(|p| p.into_inner()).insert(file_id.clone(), fingerprint);
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::debug!(error = %e, "stamp_local_files_in_sync: promotion failed");
+                    errors += 1;
+                }
+            }
+            continue;
         }
-
-        // Close the handle on ALL paths (including the CfSetInSyncState error
-        // branch above — the handle is still open and must be released).
-        unsafe { CfCloseHandle(handle) };
+        checked += 1;
+        // Task 1640: only agreed content is marked in sync, under one exclusive handle (P2-4).
+        // An edit the person made (the platform cleared its in-sync state), or a file whose
+        // upload is queued, stays out of sync, so neither this engine nor Explorer's "Free up
+        // space" can discard its bytes. Before, every `Local` row was stamped on every tick.
+        match placeholders::stamp_if_agreed(bridge.db(), file_id, &local_path) {
+            Ok(true) => {
+                stamped += 1;
+                if let Some(after) = file_fingerprint(&local_path) {
+                    in_sync_seen().lock().unwrap_or_else(|p| p.into_inner()).insert(file_id.clone(), after);
+                }
+            }
+            Ok(false) => {}
+            Err(e) => {
+                tracing::debug!(error = %e, "stamp_local_files_in_sync: stamp failed");
+                errors += 1;
+            }
+        }
     }
 
     if stamped > 0 || errors > 0 {
@@ -1472,8 +1502,8 @@ pub fn stamp_local_files_in_sync(sync_root: &std::path::Path) {
 
 /// Walk the engine bridge's DB file list and drop a cloud-only placeholder
 /// into Explorer for every file currently marked `CloudOnly`. Returns the
-/// number of placeholders successfully created (already-existing ones are
-/// counted as created since the end state is identical).
+/// number of placeholders created now (task 1640: an already-existing one
+/// is no error, but is not counted).
 ///
 /// The placeholder is created under `sync_root joined with the file's
 /// parent directory` — we mint the parent path from the stored relative
@@ -1545,7 +1575,18 @@ fn populate_placeholders(bridge: &EngineBridge, sync_root: &std::path::Path) -> 
             entry.modified_at,
             entry.is_dir(),
         ) {
-            Ok(()) => created += 1,
+            Ok(true) => {
+                created += 1;
+                // Task 1640 (review F1): created where nothing was, so no fetched bytes are on
+                // disk: a first fetch starts the file's candidate. Only a row never fetched into
+                // is marked (a fetch on the new placeholder records first), so none is forgotten.
+                if !entry.is_dir() {
+                    if let Err(e) = bridge.db().mark_no_fetched_content(&entry.file_id) {
+                        tracing::debug!(error = %e, file_id = %entry.file_id, "could not mark the new placeholder empty");
+                    }
+                }
+            }
+            Ok(false) => {}
             Err(e) => {
                 // Zero-knowledge: log the file_id only — never the decrypted
                 // plaintext filename.

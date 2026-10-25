@@ -32,7 +32,7 @@ use std::sync::Mutex;
 /// R10 (spec 2026-10-06 §5.6): every table holding one account's data. `has_account_data` counts
 /// them and `clear_account_data` empties them. `every_table_is_classified_for_the_account_binding`
 /// fails when a new table is not listed here or in `DEVICE_TABLES`.
-const ACCOUNT_TABLES: [&str; 11] = [
+const ACCOUNT_TABLES: [&str; 13] = [
     "files",
     "operation_queue",
     "local_activity",
@@ -45,6 +45,10 @@ const ACCOUNT_TABLES: [&str; 11] = [
     "upload_resume",
     // A File Provider create's provisional id and the server id it landed as (spec §5.4 row 15): the account's.
     "id_aliases",
+    // Task 1640: copies kept from files deleted elsewhere (file ids and names): the account's.
+    "kept_copies",
+    // Task 1640 (review F3): folders deleted elsewhere that stay on disk for what they hold (names): the account's.
+    "removed_folders",
 ];
 /// Per-device tables: not counted as account data, emptied by a reset anyway.
 const DEVICE_TABLES: [&str; 1] = ["bandwidth_samples"];
@@ -432,6 +436,53 @@ fn pending_operation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Pendi
     })
 }
 
+/// Task 1640 (review F1): the file's agreed content joins its fetch candidate, as the
+/// `files_cloud_only_folds_agreed_into_candidate` trigger does: its bytes are no longer known to be all of
+/// that version. An agreed content with no version makes the content not known.
+fn fold_agreed_into_candidate_conn(conn: &Connection, file_id: &str) -> Result<()> {
+    conn.execute(
+        &format!("UPDATE files SET {FOLD_AGREED_INTO_CANDIDATE} WHERE file_id = ?1 AND local_hash IS NOT NULL"),
+        params![file_id],
+    )?;
+    Ok(())
+}
+
+/// The fold's SET clause, shared by [`fold_agreed_into_candidate_conn`] and the
+/// `files_cloud_only_folds_agreed_into_candidate` trigger (self-review #9: one definition). Every
+/// right-hand side reads the row as it was before the update.
+const FOLD_AGREED_INTO_CANDIDATE: &str = "
+    fetched_hash = CASE
+        WHEN fetched_min_version = 0 THEN local_hash
+        WHEN fetched_min_version = local_base_version AND fetched_hash = local_hash THEN fetched_hash
+        ELSE NULL END,
+    fetched_min_version = CASE
+        WHEN local_base_version <= 0 THEN -1
+        WHEN fetched_min_version = 0 THEN local_base_version
+        ELSE MIN(fetched_min_version, local_base_version) END,
+    local_hash = NULL";
+
+const KEPT_COPY_COLUMNS: &str = "id, original_file_id, original_path, copy_path, copied_hash, original_removed, reason, kept_at";
+
+fn kept_copy_from_row(row: &rusqlite::Row<'_>) -> Result<KeptCopy> {
+    Ok(KeptCopy {
+        id: row.get(0)?,
+        original_file_id: row.get(1)?,
+        original_path: row.get(2)?,
+        copy_path: row.get(3)?,
+        copied_hash: row.get(4)?,
+        original_removed: row.get(5)?,
+        reason: KeptReason::from_str(&row.get::<_, String>(6)?),
+        kept_at: row.get(7)?,
+    })
+}
+
+/// [`StateDb::poison_local_content`] on an existing connection.
+fn poison_local_content_conn(conn: &Connection, file_id: &str) -> Result<()> {
+    fold_agreed_into_candidate_conn(conn, file_id)?;
+    conn.execute("UPDATE files SET fetched_hash = NULL WHERE file_id = ?1", params![file_id])?;
+    Ok(())
+}
+
 /// Append one change to `fp_changes` and advance the persistent anchor
 /// cursor, on an existing connection (the public [`StateDb::record_file_change`]
 /// and the mutating row operations below share this).
@@ -492,6 +543,11 @@ pub struct PrunedRow {
     pub file_id: String,
     pub path: String,
     pub is_dir: bool,
+    /// Task 1640 (review N2): the file's agreed content when the row was read (a pruned row is
+    /// gone from the table by the time its entry is removed).
+    pub local_hash: Option<String>,
+    /// Task 1640 (review N1): the hash of the one version the range fetches served, when it was one.
+    pub fetched_hash: Option<String>,
 }
 
 /// One row in the `files` table.
@@ -628,6 +684,9 @@ pub struct LocalStatePurge {
 pub enum LocalActivityKind {
     MovedToTrash,
     Restored,
+    /// Task 1640: a file deleted elsewhere held changes this device had not sent; they were kept
+    /// as a copy beside it (`file_name` is the copy's).
+    KeptLocalCopy,
 }
 
 impl LocalActivityKind {
@@ -635,14 +694,83 @@ impl LocalActivityKind {
         match self {
             LocalActivityKind::MovedToTrash => "moved_to_trash",
             LocalActivityKind::Restored => "restored",
+            LocalActivityKind::KeptLocalCopy => "kept_local_copy",
         }
     }
 
     fn from_str(s: &str) -> Self {
         match s {
             "restored" => LocalActivityKind::Restored,
+            "kept_local_copy" => LocalActivityKind::KeptLocalCopy,
             _ => LocalActivityKind::MovedToTrash,
         }
+    }
+}
+
+/// Task 1640 (review F5): why a file deleted elsewhere was kept on this PC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeptReason {
+    /// It held changes not sent: they are kept as a copy (`copy_path`).
+    Copy,
+    /// Only part of it was on this PC, out of sync: it stays where it is.
+    PartlyLocal,
+    /// It was open (in use), so it could not be removed yet; a later tick removes it.
+    InUse,
+    /// It held changes not sent, and they could not be copied: it stays where it is.
+    CopyFailed,
+}
+
+impl KeptReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Copy => "copy",
+            Self::PartlyLocal => "partly_local",
+            Self::InUse => "in_use",
+            Self::CopyFailed => "copy_failed",
+        }
+    }
+
+    fn from_str(value: &str) -> Self {
+        match value {
+            "partly_local" => Self::PartlyLocal,
+            "in_use" => Self::InUse,
+            "copy_failed" => Self::CopyFailed,
+            _ => Self::Copy,
+        }
+    }
+}
+
+/// Task 1640 (review N9, N13): a kept copy to record, [`StateDb::record_kept_copy`].
+#[derive(Debug, Clone)]
+pub struct KeptCopyInput<'a> {
+    pub original_file_id: &'a str,
+    pub original_path: &'a str,
+    pub copy_path: &'a str,
+    pub copied_hash: &'a str,
+    pub original_removed: bool,
+    pub reason: KeptReason,
+    pub kept_at: i64,
+}
+
+/// Task 1640 (review N9, N13): one kept copy (paths relative to the sync root, '/'-joined).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeptCopy {
+    pub id: i64,
+    pub original_file_id: String,
+    pub original_path: String,
+    pub copy_path: String,
+    pub copied_hash: String,
+    pub original_removed: bool,
+    pub reason: KeptReason,
+    pub kept_at: i64,
+}
+
+impl KeptCopy {
+    /// Task 1640 (review F7): whether the person may dismiss its entry: nothing waits to be
+    /// removed, or only part of the file was on this PC and the rest can no longer be fetched,
+    /// so no tick will ever resolve it.
+    pub fn dismissable(&self) -> bool {
+        self.original_removed || self.reason == KeptReason::PartlyLocal
     }
 }
 
@@ -1806,6 +1934,9 @@ pub struct LandingInput<'a> {
     pub mime_type: Option<&'a str>,
     /// The op's staged payload, marked `completed = 1` in the release journal on every platform.
     pub completed_payload: Option<&'a str>,
+    /// The SHA-256 of that payload's plaintext, for a sync-folder upload (no write id): what this
+    /// device now agrees with the server on (task 1640). `None` leaves the file's baseline unknown.
+    pub completed_payload_hash: Option<&'a str>,
     /// Windows: a create's finalization journal row, written in the landing's own transaction
     /// so the op is never gone without it. `None` everywhere else.
     pub finalization: Option<&'a UploadFinalization>,
@@ -2152,6 +2283,13 @@ impl StateDb {
         ensure_column(&conn, "files", "current_object_version_id", "TEXT")?;
         ensure_column(&conn, "files", "local_base_version", "INTEGER NOT NULL DEFAULT 0")?;
         ensure_column(&conn, "files", "local_hash", "TEXT")?;
+        // Task 1640 (review N1, F1): what the fetches put on disk (see `record_fetched_version` and
+        // docs/design/1640-local-content-identity.md). -1, the default, is "not known": every row from
+        // before this column, and every new one until its placeholder is created where nothing was. A
+        // new name (self-review #2): a database from a round-2 build has `fetched_version` DEFAULT 0, which
+        // no ALTER can change; that column is left unused.
+        ensure_column(&conn, "files", "fetched_min_version", "INTEGER NOT NULL DEFAULT -1")?;
+        ensure_column(&conn, "files", "fetched_hash", "TEXT")?;
         ensure_column(&conn, "files", "cache_path", "TEXT")?;
         ensure_column(&conn, "files", "cache_bytes", "INTEGER NOT NULL DEFAULT 0")?;
         ensure_column(&conn, "files", "pin_state", "TEXT NOT NULL DEFAULT 'inherit'")?;
@@ -2204,6 +2342,24 @@ impl StateDb {
                 payload_path TEXT NOT NULL,
                 stamped INTEGER NOT NULL DEFAULT 0
             );
+            -- Task 1640 (review N9, N13): a file deleted elsewhere while it held changes this
+            -- device had not sent, kept as a copy (paths relative to the sync root). The review
+            -- feed lists each until it is dismissed; an original that could not be removed when
+            -- the copy was made (`original_removed = 0`) is removed by a later tick.
+            CREATE TABLE IF NOT EXISTS kept_copies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                original_file_id TEXT NOT NULL,
+                original_path TEXT NOT NULL,
+                copy_path TEXT NOT NULL,
+                copied_hash TEXT NOT NULL,
+                original_removed INTEGER NOT NULL DEFAULT 0,
+                kept_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_kept_copies_original_path ON kept_copies(original_path);
+            CREATE TABLE IF NOT EXISTS removed_folders (
+                path TEXT PRIMARY KEY,
+                removed_at INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS staged_payloads (
                 path TEXT PRIMARY KEY,
                 source_path TEXT,
@@ -2242,6 +2398,28 @@ impl StateDb {
             );
             ",
         )?;
+        // Task 1640 (review F5): why a file deleted elsewhere was kept (`KeptReason`).
+        ensure_column(&conn, "kept_copies", "reason", "TEXT NOT NULL DEFAULT 'copy'")?;
+        // Task 1640 (review-151d P2-1): the person dismissed the entry of a file still kept where it
+        // is; the row stays as a tombstone, so its folder is still the server's deletion.
+        ensure_column(&conn, "kept_copies", "dismissed", "INTEGER NOT NULL DEFAULT 0")?;
+        // Task 1640 (review F1, design T6): a file that goes cloud-only may still hold some of its
+        // bytes (a placeholder partly on disk reads as cloud-only on every tick, and no dehydration is
+        // known to remove them all). Its agreed content no longer describes every byte, so it joins
+        // the fetch candidate (`FOLD_AGREED_INTO_CANDIDATE`); nothing is forgotten. A dehydration only
+        // removes bytes, so the candidate stays true of what is left. The earlier triggers (round 2's
+        // wipe, and the first fold, on `fetched_version`) are dropped; a change to the fold takes a new
+        // trigger name, since `IF NOT EXISTS` keeps an existing definition.
+        conn.execute_batch(&format!(
+            "DROP TRIGGER IF EXISTS files_cloud_only_forgets_local_content;
+             DROP TRIGGER IF EXISTS files_cloud_only_folds_agreed_content;
+             CREATE TRIGGER IF NOT EXISTS files_cloud_only_folds_agreed_into_candidate
+             AFTER UPDATE OF status ON files
+             WHEN NEW.status = 'cloud_only' AND OLD.status != 'cloud_only' AND NEW.local_hash IS NOT NULL
+             BEGIN
+                 UPDATE files SET {FOLD_AGREED_INTO_CANDIDATE} WHERE file_id = NEW.file_id;
+             END;"
+        ))?;
         // Upgrade inventory: old one-shot Keep Mine rows may have no queue
         // owner. Preserve their plaintext reference before any resume purge.
         conn.execute(
@@ -2382,13 +2560,15 @@ impl StateDb {
         // (task 0806). Deepest-first ordering keeps the returned rows in the
         // children-before-parent order the placeholder remover expects.
         let root: Option<PrunedRow> = {
-            let mut stmt = tx.prepare("SELECT file_id, path, item_kind FROM files WHERE file_id = ?1")?;
+            let mut stmt = tx.prepare("SELECT file_id, path, item_kind, local_hash, fetched_hash FROM files WHERE file_id = ?1")?;
             let mut rows = stmt.query(params![file_id])?;
             if let Some(row) = rows.next()? {
                 Some(PrunedRow {
                     file_id: row.get(0)?,
                     path: row.get(1)?,
                     is_dir: ItemKind::from_str(&row.get::<_, String>(2)?) == ItemKind::Folder,
+                    local_hash: row.get(3)?,
+                    fetched_hash: row.get(4)?,
                 })
             } else {
                 None
@@ -2427,7 +2607,7 @@ impl StateDb {
             if !root_path.is_empty() {
                 let descendants: Vec<PrunedRow> = {
                     let mut dstmt = tx.prepare(
-                        "SELECT file_id, path, item_kind FROM files
+                        "SELECT file_id, path, item_kind, local_hash, fetched_hash FROM files
                          WHERE namespace = 'my_files'
                            AND substr(ltrim(path, '/'), 1, length(?1) + 1) = ?1 || '/'
                          ORDER BY length(path) DESC, path DESC",
@@ -2437,6 +2617,8 @@ impl StateDb {
                             file_id: r.get(0)?,
                             path: r.get(1)?,
                             is_dir: ItemKind::from_str(&r.get::<_, String>(2)?) == ItemKind::Folder,
+                            local_hash: r.get(3)?,
+                            fetched_hash: r.get(4)?,
                         })
                     })?;
                     drows.collect::<Result<Vec<_>>>()?
@@ -2474,13 +2656,15 @@ impl StateDb {
         let tx = conn.transaction()?;
 
         let root: Option<PrunedRow> = {
-            let mut stmt = tx.prepare("SELECT file_id, path, item_kind FROM files WHERE file_id = ?1")?;
+            let mut stmt = tx.prepare("SELECT file_id, path, item_kind, local_hash, fetched_hash FROM files WHERE file_id = ?1")?;
             let mut rows = stmt.query(params![file_id])?;
             if let Some(row) = rows.next()? {
                 Some(PrunedRow {
                     file_id: row.get(0)?,
                     path: row.get(1)?,
                     is_dir: ItemKind::from_str(&row.get::<_, String>(2)?) == ItemKind::Folder,
+                    local_hash: row.get(3)?,
+                    fetched_hash: row.get(4)?,
                 })
             } else {
                 None
@@ -2520,7 +2704,7 @@ impl StateDb {
             if !root_path.is_empty() {
                 let descendants: Vec<PrunedRow> = {
                     let mut dstmt = tx.prepare(
-                        "SELECT file_id, path, item_kind FROM files
+                        "SELECT file_id, path, item_kind, local_hash, fetched_hash FROM files
                          WHERE namespace = 'my_files'
                            AND substr(ltrim(path, '/'), 1, length(?1) + 1) = ?1 || '/'
                          ORDER BY length(path) DESC, path DESC",
@@ -2530,6 +2714,8 @@ impl StateDb {
                             file_id: r.get(0)?,
                             path: r.get(1)?,
                             is_dir: ItemKind::from_str(&r.get::<_, String>(2)?) == ItemKind::Folder,
+                            local_hash: r.get(3)?,
+                            fetched_hash: r.get(4)?,
                         })
                     })?;
                     drows.collect::<Result<Vec<_>>>()?
@@ -2554,13 +2740,15 @@ impl StateDb {
 
         // Look up the row to delete (its path + kind drives the subtree prune).
         let root: Option<PrunedRow> = {
-            let mut stmt = tx.prepare("SELECT file_id, path, item_kind FROM files WHERE file_id = ?1")?;
+            let mut stmt = tx.prepare("SELECT file_id, path, item_kind, local_hash, fetched_hash FROM files WHERE file_id = ?1")?;
             let mut rows = stmt.query(params![file_id])?;
             if let Some(row) = rows.next()? {
                 Some(PrunedRow {
                     file_id: row.get(0)?,
                     path: row.get(1)?,
                     is_dir: ItemKind::from_str(&row.get::<_, String>(2)?) == ItemKind::Folder,
+                    local_hash: row.get(3)?,
+                    fetched_hash: row.get(4)?,
                 })
             } else {
                 None
@@ -2599,7 +2787,7 @@ impl StateDb {
             if !root_path.is_empty() {
                 let descendants: Vec<PrunedRow> = {
                     let mut dstmt = tx.prepare(
-                        "SELECT file_id, path, item_kind FROM files
+                        "SELECT file_id, path, item_kind, local_hash, fetched_hash FROM files
                          WHERE substr(ltrim(path, '/'), 1, length(?1) + 1) = ?1 || '/'
                          ORDER BY length(path) DESC, path DESC",
                     )?;
@@ -2608,6 +2796,8 @@ impl StateDb {
                             file_id: r.get(0)?,
                             path: r.get(1)?,
                             is_dir: ItemKind::from_str(&r.get::<_, String>(2)?) == ItemKind::Folder,
+                            local_hash: r.get(3)?,
+                            fetched_hash: r.get(4)?,
                         })
                     })?;
                     drows.collect::<Result<Vec<_>>>()?
@@ -2642,6 +2832,191 @@ impl StateDb {
     /// Append a local-only activity event and prune old rows. This table is the
     /// durable recent-activity surface for events whose canonical file row may
     /// legitimately disappear from `files` during sync convergence.
+    /// Task 1640 (review N9, N13): record a kept copy; its id.
+    pub fn record_kept_copy(&self, copy: &KeptCopyInput<'_>) -> Result<i64> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "INSERT INTO kept_copies (original_file_id, original_path, copy_path, copied_hash, original_removed, reason, kept_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                copy.original_file_id,
+                copy.original_path,
+                copy.copy_path,
+                copy.copied_hash,
+                copy.original_removed,
+                copy.reason.as_str(),
+                copy.kept_at
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Task 1640 (review F6): kept copy `id` now says `copy` (the retry resolved it): one entry
+    /// per file, updated where it is.
+    pub fn update_kept_copy(&self, id: i64, copy: &KeptCopyInput<'_>) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "UPDATE kept_copies SET original_file_id = ?2, original_path = ?3, copy_path = ?4, copied_hash = ?5,
+                                    original_removed = ?6, reason = ?7, kept_at = ?8
+             WHERE id = ?1",
+            params![
+                id,
+                copy.original_file_id,
+                copy.original_path,
+                copy.copy_path,
+                copy.copied_hash,
+                copy.original_removed,
+                copy.reason.as_str(),
+                copy.kept_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Task 1640 (review F6): kept entry `id` is resolved with nothing kept (the file was removed
+    /// with no copy): its entry goes.
+    pub fn delete_kept_copy(&self, id: i64) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute("DELETE FROM kept_copies WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Task 1640: every kept copy not dismissed, newest first.
+    pub fn list_kept_copies(&self) -> Result<Vec<KeptCopy>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {KEPT_COPY_COLUMNS} FROM kept_copies WHERE dismissed = 0 ORDER BY kept_at DESC, id DESC"
+        ))?;
+        let rows = stmt.query_map([], kept_copy_from_row)?;
+        rows.collect()
+    }
+
+    /// Task 1640 (review F4): the kept entry of `rel_path` whose original still waits to be
+    /// removed, if any.
+    pub fn pending_kept_original(&self, rel_path: &str) -> Result<Option<KeptCopy>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row(
+            &format!(
+                "SELECT {KEPT_COPY_COLUMNS} FROM kept_copies WHERE original_path = ?1 AND original_removed = 0 AND dismissed = 0
+                 ORDER BY id DESC LIMIT 1"
+            ),
+            params![rel_path],
+            kept_copy_from_row,
+        )
+        .optional()
+    }
+
+    /// Task 1640 (review F3): folder `rel_path` was deleted elsewhere but stays on disk for what
+    /// it still holds. It is never created again on the server from this PC.
+    pub fn record_removed_folder(&self, rel_path: &str, now: i64) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "INSERT INTO removed_folders (path, removed_at) VALUES (?1, ?2) ON CONFLICT(path) DO NOTHING",
+            params![rel_path, now],
+        )?;
+        Ok(())
+    }
+
+    /// Task 1640 (review F3): every folder deleted elsewhere that is still on disk, deepest first.
+    pub fn list_removed_folders(&self) -> Result<Vec<String>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare("SELECT path FROM removed_folders ORDER BY length(path) DESC, path DESC")?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        rows.collect()
+    }
+
+    /// Task 1640 (review F3): folder `rel_path` is gone from disk, or the server lists it again.
+    pub fn forget_removed_folder(&self, rel_path: &str) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute("DELETE FROM removed_folders WHERE path = ?1", params![rel_path])?;
+        Ok(())
+    }
+
+    /// Task 1640 (review F3): `rel_path` is a folder deleted elsewhere that stays on disk.
+    pub fn is_removed_folder(&self, rel_path: &str) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM removed_folders WHERE path = ?1)",
+            params![rel_path],
+            |row| row.get(0),
+        )
+    }
+
+    /// Task 1640 (review F3): the outermost folder deleted elsewhere that is `rel_path` or holds it.
+    pub fn outermost_removed_folder(&self, rel_path: &str) -> Result<Option<String>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row(
+            "SELECT path FROM removed_folders
+             WHERE path = ?1 OR substr(?1, 1, length(path) + 1) = path || '/'
+             ORDER BY length(path) LIMIT 1",
+            params![rel_path],
+            |row| row.get(0),
+        )
+        .optional()
+    }
+
+    /// Task 1640 (review N13): the original of kept copy `id` is gone now.
+    pub fn mark_kept_original_removed(&self, id: i64) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute("UPDATE kept_copies SET original_removed = 1 WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Task 1640 (review N13): `rel_path` is an original whose kept copy is made but which is not
+    /// removed yet: the upload driver never sends it.
+    pub fn is_kept_original_pending(&self, rel_path: &str) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM kept_copies WHERE original_path = ?1 AND original_removed = 0 AND dismissed = 0)",
+            params![rel_path],
+            |row| row.get(0),
+        )
+    }
+
+    /// Task 1640 (review N9, F7): the person dismissed kept copy `id` (its review entry). The copy
+    /// itself stays, and so does a file kept where it is. `false`: no such entry, or its original
+    /// still waits to be removed by a later tick ([`KeptCopy::dismissable`]).
+    pub fn dismiss_kept_copy(&self, id: i64) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let kept = conn
+            .query_row(
+                &format!("SELECT {KEPT_COPY_COLUMNS} FROM kept_copies WHERE id = ?1 AND dismissed = 0"),
+                params![id],
+                kept_copy_from_row,
+            )
+            .optional()?;
+        let Some(kept) = kept.filter(KeptCopy::dismissable) else {
+            return Ok(false);
+        };
+        // Review-151d P2-1: a file still kept where it is leaves a tombstone: its folder stays the
+        // server's deletion (never created again from this PC while it holds only that file).
+        let changed = if kept.original_removed {
+            conn.execute("DELETE FROM kept_copies WHERE id = ?1", params![id])?
+        } else {
+            conn.execute("UPDATE kept_copies SET dismissed = 1 WHERE id = ?1", params![id])?
+        };
+        Ok(changed == 1)
+    }
+
+    /// Task 1640 (review-151d P2-1): `rel_path` is a file kept from a deletion elsewhere whose
+    /// original was never removed: one that waits, or one whose entry the person dismissed.
+    pub fn is_kept_original(&self, rel_path: &str) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM kept_copies WHERE original_path = ?1 AND original_removed = 0)",
+            params![rel_path],
+            |row| row.get(0),
+        )
+    }
+
+    /// Task 1640 (review-151d P2-1): the dismissed entries' tombstones, as `(id, original_path)`.
+    pub fn list_dismissed_kept_originals(&self) -> Result<Vec<(i64, String)>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare("SELECT id, original_path FROM kept_copies WHERE dismissed = 1 ORDER BY id")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect()
+    }
+
     pub fn record_local_activity(&self, input: LocalActivityEventInput) -> Result<()> {
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction()?;
@@ -2838,12 +3213,14 @@ impl StateDb {
         // into the trash view); deleting them would erase trash-view rows.
         let direct_children: Vec<PrunedRow> = {
             let mut stmt =
-                tx.prepare("SELECT file_id, path, item_kind FROM files WHERE parent_id = ?1 AND status != 'trashing'")?;
+                tx.prepare("SELECT file_id, path, item_kind, local_hash, fetched_hash FROM files WHERE parent_id = ?1 AND status != 'trashing'")?;
             let rows = stmt.query_map(params![folder_id], |r| {
                 Ok(PrunedRow {
                     file_id: r.get(0)?,
                     path: r.get(1)?,
                     is_dir: ItemKind::from_str(&r.get::<_, String>(2)?) == ItemKind::Folder,
+                    local_hash: r.get(3)?,
+                    fetched_hash: r.get(4)?,
                 })
             })?;
             rows.collect::<Result<Vec<_>>>()?
@@ -2868,7 +3245,7 @@ impl StateDb {
                 if !child_path.is_empty() {
                     let descendants: Vec<PrunedRow> = {
                         let mut dstmt = tx.prepare(
-                            "SELECT file_id, path, item_kind FROM files
+                            "SELECT file_id, path, item_kind, local_hash, fetched_hash FROM files
                              WHERE substr(ltrim(path, '/'), 1, length(?1) + 1) = ?1 || '/'
                              ORDER BY length(path) DESC, path DESC",
                         )?;
@@ -2877,6 +3254,8 @@ impl StateDb {
                                 file_id: r.get(0)?,
                                 path: r.get(1)?,
                                 is_dir: ItemKind::from_str(&r.get::<_, String>(2)?) == ItemKind::Folder,
+                                local_hash: r.get(3)?,
+                                fetched_hash: r.get(4)?,
                             })
                         })?;
                         drows.collect::<Result<Vec<_>>>()?
@@ -3122,7 +3501,7 @@ impl StateDb {
         // `file_delete` (permanent) / `file_restore` ops instead.
         let candidates: Vec<PrunedRow> = {
             let mut stmt = tx.prepare(
-                "SELECT file_id, path, item_kind FROM files
+                "SELECT file_id, path, item_kind, local_hash, fetched_hash FROM files
                  WHERE namespace = 'my_files'
                    AND status != 'uploading'
                    AND status != 'trashing'
@@ -3138,6 +3517,8 @@ impl StateDb {
                     file_id: row.get(0)?,
                     path: row.get(1)?,
                     is_dir: ItemKind::from_str(&row.get::<_, String>(2)?) == ItemKind::Folder,
+                    local_hash: row.get(3)?,
+                    fetched_hash: row.get(4)?,
                 })
             })?;
             rows.collect::<Result<Vec<_>>>()?
@@ -3201,7 +3582,7 @@ impl StateDb {
                         // trash's content (recoverable), not dead rows; deleting
                         // them would erase the trash view's folder contents.
                         let mut dstmt = tx.prepare(
-                            "SELECT file_id, path, item_kind FROM files
+                            "SELECT file_id, path, item_kind, local_hash, fetched_hash FROM files
                              WHERE namespace = 'my_files'
                                AND status != 'trashing'
                                AND substr(ltrim(path, '/'), 1, length(?1) + 1) = ?1 || '/'
@@ -3212,6 +3593,8 @@ impl StateDb {
                                 file_id: r.get(0)?,
                                 path: r.get(1)?,
                                 is_dir: ItemKind::from_str(&r.get::<_, String>(2)?) == ItemKind::Folder,
+                                local_hash: r.get(3)?,
+                                fetched_hash: r.get(4)?,
                             })
                         })?;
                         drows.collect::<Result<Vec<_>>>()?
@@ -3323,6 +3706,151 @@ impl StateDb {
         record_local_write_conn(&conn, file_id, size_bytes, modified_at)
     }
 
+    /// Task 1640: the content this device last agreed with the server on, for a sync-folder
+    /// file: the version its bytes are based on and their SHA-256. Written when a hydrate wrote
+    /// the server's bytes; a landing writes it in its own transaction (`apply_landing`).
+    pub fn record_local_baseline(&self, file_id: &str, version: i64, hash: &str) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "UPDATE files SET local_base_version = ?2, local_hash = ?3, fetched_min_version = 0, fetched_hash = NULL
+             WHERE file_id = ?1",
+            params![file_id, version, hash],
+        )?;
+        Ok(())
+    }
+
+    /// Task 1640 (review N1, F1): a fetch is about to put bytes of `version` (whose whole plaintext
+    /// hashes to `hash`) on disk. Recorded BEFORE they are transferred, so a fetch that fails or is
+    /// cancelled midway is still counted. The file's candidate: with nothing fetched on disk
+    /// (`0`), this fetch's; another of the same version keeps it; one of another version makes it
+    /// mixed (the lower version, no hash: the bytes on disk are none of them). Agreed content
+    /// joins it first (the bytes are no longer all of that version). Not known (`-1`, `-2`) stays
+    /// not known, as `-2`: fetched into since (`mark_no_fetched_content` then leaves it). The
+    /// candidate only ever moves down or becomes mixed: only a write of the whole file
+    /// (`record_local_baseline`) replaces it.
+    #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+    pub fn record_fetched_version(&self, file_id: &str, version: i64, hash: &str) -> Result<()> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+        fold_agreed_into_candidate_conn(&tx, file_id)?;
+        tx.execute(
+            "UPDATE files SET
+                 fetched_hash = CASE
+                     WHEN fetched_min_version = 0 THEN ?3
+                     WHEN fetched_min_version = ?2 AND fetched_hash = ?3 THEN fetched_hash
+                     ELSE NULL END,
+                 fetched_min_version = CASE
+                     WHEN fetched_min_version = 0 THEN ?2
+                     WHEN fetched_min_version < 0 THEN -2
+                     ELSE MIN(fetched_min_version, ?2) END
+             WHERE file_id = ?1",
+            params![file_id, version, hash],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Task 1640 (review F1): bytes of a version nobody can name are (or may be) on disk: a
+    /// download that named no version. The file's content is not known: never agreed, never sent.
+    pub fn mark_content_unknown(&self, file_id: &str) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "UPDATE files SET local_hash = NULL, fetched_min_version = -2, fetched_hash = NULL WHERE file_id = ?1",
+            params![file_id],
+        )?;
+        Ok(())
+    }
+
+    /// Task 1640 (review F1): the file's placeholder was just created where nothing was: no
+    /// fetched bytes. Only a row whose content is not known and was never fetched into since
+    /// (`-1`; a fetch makes it `-2` before it transfers) is marked, so a fetch on the new
+    /// placeholder is never forgotten. `true`: marked.
+    #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+    pub fn mark_no_fetched_content(&self, file_id: &str) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        Ok(conn.execute(
+            "UPDATE files SET fetched_min_version = 0, fetched_hash = NULL
+             WHERE file_id = ?1 AND fetched_min_version = -1 AND local_hash IS NULL",
+            params![file_id],
+        )? == 1)
+    }
+
+    /// Task 1640 (review N1): the file's candidate, `(version, hash)`; `hash` is `None` when
+    /// mixed. `None`: no candidate.
+    pub fn fetched_content(&self, file_id: &str) -> Result<Option<(i64, Option<String>)>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT fetched_min_version, fetched_hash FROM files WHERE file_id = ?1",
+                params![file_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?
+            .filter(|(version, _)| *version > 0))
+    }
+
+    /// Task 1640 (review F1): the placeholder's bytes may have changed in part without a fetch (a
+    /// resize, a download cut off by a stop): its agreed content joins the candidate, which is then
+    /// mixed: never agreed, a change sent on its version. Its version is kept (never reset).
+    pub fn poison_local_content(&self, file_id: &str) -> Result<()> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+        poison_local_content_conn(&tx, file_id)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Task 1640 (review F1): the file moved on the server; its bytes did not. Its candidate is
+    /// never promoted at the new place (it becomes mixed, its version kept); agreed content stays.
+    pub fn poison_fetched_content(&self, file_id: &str) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute("UPDATE files SET fetched_hash = NULL WHERE file_id = ?1", params![file_id])?;
+        Ok(())
+    }
+
+    /// Task 1640 (review N1, condition 2): make the candidate the agreed content, only while the
+    /// row is still `Local` with no agreed content and the candidate is still exactly
+    /// `(version, hash)`, all in one statement. `false`: something changed; nothing was written.
+    pub fn promote_fetched_content(&self, file_id: &str, version: i64, hash: &str) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        Ok(conn.execute(
+            "UPDATE files SET local_base_version = ?2, local_hash = ?3, fetched_min_version = 0, fetched_hash = NULL
+             WHERE file_id = ?1 AND status = 'local' AND local_hash IS NULL
+               AND fetched_min_version = ?2 AND fetched_hash = ?3",
+            params![file_id, version, hash],
+        )? == 1)
+    }
+
+    /// Task 1640 (review P2-5): the `Local` files the stamp pass may mark in sync: a recorded
+    /// agreed content and no sync-folder upload queued. Everything else is never marked, so it is
+    /// filtered here, before the pass's per-tick cap.
+    pub fn list_stamp_candidates(&self) -> Result<Vec<(String, String)>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT file_id, path FROM files
+             WHERE status = 'local' AND item_kind = 'file' AND (local_hash IS NOT NULL OR fetched_hash IS NOT NULL)
+               AND file_id NOT IN (SELECT file_id FROM operation_queue
+                                   WHERE file_id IS NOT NULL AND write_id IS NULL
+                                     AND kind IN ('upload_version', 'upload_file'))
+             ORDER BY file_id",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect()
+    }
+
+    /// Task 1640: a sync-folder upload of this file's content (no write id: Windows) is
+    /// queued, in any state, parked included. Its bytes are not sent until it lands.
+    pub fn sync_folder_upload_queued(&self, file_id: &str) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM operation_queue
+                            WHERE file_id = ?1 AND write_id IS NULL
+                              AND kind IN ('upload_version', 'upload_file'))",
+            params![file_id],
+            |row| row.get(0),
+        )
+    }
+
     /// The full relative path of the item `name` under `parent_id` (spec §7.2; see
     /// `relative_path_under_conn`).
     pub fn relative_path_under(&self, parent_id: Option<&str>, name: &str) -> Result<String> {
@@ -3361,6 +3889,12 @@ impl StateDb {
             let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
             rows.collect::<Result<Vec<_>>>()?
         };
+        // Task 1640 (review F1): a download cut off by the stop may have written some bytes.
+        let downloading = {
+            let mut stmt = tx.prepare("SELECT file_id FROM files WHERE status = 'downloading'")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>>>()?
+        };
         tx.execute(
             &format!(
                 "UPDATE files SET status = CASE status WHEN 'downloading' THEN 'cloud_only' ELSE 'error' END
@@ -3368,6 +3902,9 @@ impl StateDb {
             ),
             [],
         )?;
+        for file_id in &downloading {
+            poison_local_content_conn(&tx, file_id)?;
+        }
         for file_id in &reset {
             record_file_change_conn(&tx, file_id, FpChangeKind::Modified, None)?;
         }
@@ -4087,9 +4624,26 @@ impl StateDb {
         }
         contract.current_version = input.produced_version;
         contract.local_base_version = input.produced_version;
+        // Task 1640 (review-151d P3-6): a landing that could not hash what it sent records no agreed
+        // content: the previous hash would pair the new version with the old bytes (a revert to them
+        // would read as agreed). For a sync-folder upload the content is mixed at that version below.
+        contract.local_hash = input.completed_payload_hash.map(str::to_string);
         contract.current_object_version_id = Some(input.produced_object_version_id.to_string());
         contract.last_sync_at = input.now;
         set_file_contract_state_conn(&tx, &contract)?;
+        // Task 1640 (review F1): what it sent is the whole file, so nothing fetched is left on disk.
+        if input.completed_payload_hash.is_some() {
+            tx.execute(
+                "UPDATE files SET fetched_min_version = 0, fetched_hash = NULL WHERE file_id = ?1",
+                params![server],
+            )?;
+        } else if input.write_id.is_none() {
+            // Review-151d P3-6: not hashed: never agreed; a change is sent on the version that landed.
+            tx.execute(
+                "UPDATE files SET fetched_min_version = ?2, fetched_hash = NULL WHERE file_id = ?1",
+                params![server, input.produced_version],
+            )?;
+        }
         // A landing: the row's version is the one the server answered, not a snapshot fill (§6.1).
         tx.execute(
             "UPDATE files SET version_filled = 0 WHERE file_id = ?1",
@@ -9931,6 +10485,7 @@ mod tests {
             content_type: None,
             mime_type: None,
             completed_payload: None,
+            completed_payload_hash: None,
             finalization: None,
             now: 20,
         };
@@ -10073,6 +10628,7 @@ mod tests {
             content_type: None,
             mime_type: None,
             completed_payload: Some("/staged/create"),
+            completed_payload_hash: None,
             finalization: Some(&finalization),
             now: 20,
         };

@@ -174,6 +174,9 @@ export interface VersionConflictEntry {
     // Previously fell through to the generic 'failed_upload' bucket with the
     // raw HTTP error text and no "sign in again" path — see `reviewEntryAction`.
     | 'auth_failure'
+    // Task 1640: a file deleted elsewhere while it held changes not sent from this PC; they
+    // were kept as a copy beside it (informational, no action).
+    | 'kept_copy'
   status: string
   updated_at?: number
   detail: string
@@ -188,7 +191,7 @@ export interface VersionConflictEntry {
  * "Upgrade" action — same URL Windows' StorageWidget already opens. */
 export const BILLING_URL = 'https://app.beebeeb.io/billing'
 
-export type ReviewEntryActionKind = 'open_conflict' | 'upgrade' | 'sign_in_again'
+export type ReviewEntryActionKind = 'open_conflict' | 'upgrade' | 'sign_in_again' | 'dismiss'
 
 export interface ReviewEntryAction {
   kind: ReviewEntryActionKind
@@ -211,6 +214,8 @@ export function reviewEntryAction(
   if (entry.action === 'open_conflict') return { kind: 'open_conflict', label: 'Review' }
   if (entry.kind === 'auth_failure') return { kind: 'sign_in_again', label: 'Sign in again' }
   if (entry.kind === 'quota_failure') return { kind: 'upgrade', label: 'Upgrade' }
+  // Task 1640: a kept copy needs no decision; the person can clear it from the list.
+  if (entry.kind === 'kept_copy' && entry.action === 'dismiss') return { kind: 'dismiss', label: 'Dismiss' }
   return null
 }
 
@@ -1373,4 +1378,18 @@ export interface BandwidthSample {
  *  oldest-first; the caller downsamples to a fixed number of chart buckets. */
 export function getBandwidthHistory(hours?: number): Promise<CommandResult<BandwidthSample[]>> {
   return command<BandwidthSample[]>('get_bandwidth_history', { hours })
+}
+
+// 0.8.13 hand port of task 1640's count (main's reviewCounts.ts): a kept copy is changes kept
+// from a file deleted elsewhere, counted with the stale entries, never as a failed send.
+export function reviewMetrics(entries: ReadonlyArray<Pick<VersionConflictEntry, 'kind'>>): { failed: number; stale: number } {
+  return {
+    failed: entries.filter((entry) => entry.kind !== 'conflict' && entry.kind !== 'kept_copy').length,
+    stale: entries.filter((entry) => entry.kind === 'stale_base' || entry.kind === 'kept_copy').length,
+  }
+}
+
+// Task 1640: a kept copy is informational; only entries that need a decision turn the dot red.
+export function reviewNeedsAttention(conflicts: number, entries: ReadonlyArray<Pick<VersionConflictEntry, 'kind'>>): boolean {
+  return conflicts > 0 || entries.some((entry) => entry.kind !== 'kept_copy')
 }
