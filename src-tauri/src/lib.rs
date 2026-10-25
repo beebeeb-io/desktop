@@ -1323,29 +1323,47 @@ async fn start_engine_if_possible(
 
 // ── IPC commands: first-launch onboarding ────────────────────────────────────
 
-/// Open the first-launch onboarding window.
+/// Open the sign-in surface (`surfaces::policy::onboarding_surface`).
 ///
-/// The window is wide enough for the two-column onboarding shell and centred. It mounts
-/// `Onboarding.tsx` (via `?window=onboarding`) which walks the user
-/// through three steps: sign-in, sync-folder selection, and a first-sync
-/// progress view. Called from `setup` if no sync_root is configured and
-/// no session is loaded (i.e., fresh install or post-uninstall run).
-///
-/// Re-calling when the window already exists is a no-op (focus only).
+/// A Mac signs in in the Beebeeb window (task 1683 slice 2, two-surface spec §7.4): the signed-out window shows the
+/// sign-in screens itself, so this only shows `main` on Home, and the `onboarding` window is never built there.
+/// Windows keeps its wider two-column wizard (`WindowsFirstRun.tsx`, label `windows-onboarding`) and Linux the compact
+/// `Onboarding.tsx` (label `onboarding`). Re-calling when the window already exists is a no-op (focus only).
 pub(crate) fn open_onboarding_window_impl(app: &tauri::AppHandle) -> Result<(), String> {
-    // Windows uses a wider two-column layout (WindowsFirstRun.tsx) selected by
-    // the `platform=windows` query param, matching the `windows-onboarding`
-    // entry in tauri.conf.json.
-    // macOS/Linux keep the original compact single-column Onboarding.tsx (no param).
-    #[cfg(target_os = "windows")]
-    let (label, url, width, height) = (
-        "windows-onboarding",
-        "index.html?window=onboarding&platform=windows",
-        860.0_f64,
-        640.0_f64,
-    );
-    #[cfg(not(target_os = "windows"))]
-    let (label, url, width, height) = ("onboarding", "index.html?window=onboarding", 860.0_f64, 640.0_f64);
+    match surfaces::policy::onboarding_surface(surfaces::policy::Platform::current()) {
+        surfaces::policy::OnboardingSurface::BeebeebWindow => show_sign_in_in_beebeeb_window(app),
+        #[cfg(not(target_os = "macos"))]
+        surfaces::policy::OnboardingSurface::Window(label) => open_onboarding_window_labelled(app, label),
+        #[cfg(target_os = "macos")]
+        surfaces::policy::OnboardingSurface::Window(_) => Err("A Mac signs in in the Beebeeb window.".to_string()),
+    }
+}
+
+/// A Mac's sign-in: the Beebeeb window on Home, which shows sign-in by itself when there is no account, or "Sign in
+/// again" for an ended one. Nothing is cleared first; the window decides what to show from the account it reads.
+#[cfg(target_os = "macos")]
+fn show_sign_in_in_beebeeb_window(app: &tauri::AppHandle) -> Result<(), String> {
+    show_main_window(app, MainNav::Home);
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn show_sign_in_in_beebeeb_window(_app: &tauri::AppHandle) -> Result<(), String> {
+    Err("Only the macOS app signs in in the Beebeeb window.".to_string())
+}
+
+/// The first-run window of Windows and Linux. It is not compiled on a Mac, which never builds it.
+///
+/// The window is wide enough for the two-column shell and centred. It mounts `Onboarding.tsx` (`?window=onboarding`)
+/// on Linux or the Windows wizard (`platform=windows`) selected by the label, matching the `windows-onboarding` entry
+/// in tauri.conf.json.
+#[cfg(not(target_os = "macos"))]
+fn open_onboarding_window_labelled(app: &tauri::AppHandle, label: &'static str) -> Result<(), String> {
+    let (url, width, height) = if label == "windows-onboarding" {
+        ("index.html?window=onboarding&platform=windows", 860.0_f64, 640.0_f64)
+    } else {
+        ("index.html?window=onboarding", 860.0_f64, 640.0_f64)
+    };
 
     if let Some(existing) = app.get_webview_window(label) {
         let _ = existing.show();
@@ -1370,15 +1388,16 @@ pub(crate) fn open_onboarding_window_impl(app: &tauri::AppHandle) -> Result<(), 
     Ok(())
 }
 
-/// IPC wrapper so the frontend can also open the onboarding window
+/// IPC wrapper so the frontend can also open the sign-in surface
 /// (e.g., from Account page → "Switch account").
 #[tauri::command]
 async fn open_onboarding_window(app: tauri::AppHandle) -> Result<(), String> {
     open_onboarding_window_impl(&app)
 }
 
-/// R8: "Sign in again" on macOS opens sign-in in place. Nothing is cleared first, and the onboarding window starts at
-/// the sign-in step whatever `sync_status` says (`mode=reauth`).
+/// R8: "Sign in again" opens sign-in in place. Nothing is cleared first. On a Mac that is the Beebeeb window, which
+/// shows "Sign in again" for an ended account (two-surface spec §7.4); on Linux the onboarding window starts at the
+/// sign-in step whatever `sync_status` says (`mode=reauth`); Windows keeps its own flow.
 #[tauri::command]
 async fn open_reauth_window(app: tauri::AppHandle) -> Result<(), String> {
     #[cfg(target_os = "windows")]
@@ -1386,7 +1405,11 @@ async fn open_reauth_window(app: tauri::AppHandle) -> Result<(), String> {
         let _ = app;
         Err("Only available on macOS and Linux.".to_string())
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        show_sign_in_in_beebeeb_window(&app)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         const URL: &str = "index.html?window=onboarding&mode=reauth";
         if let Some(existing) = app.get_webview_window("onboarding") {
@@ -1409,6 +1432,13 @@ async fn open_reauth_window(app: tauri::AppHandle) -> Result<(), String> {
         let _ = window.set_focus();
         Ok(())
     }
+}
+
+/// The sign-in card's "Quit Beebeeb" (spec C §7.1): the same exit as the menu's Quit and ⌘Q. It carries an exit code,
+/// so `keep_running_on_exit_request` does not turn it down.
+#[tauri::command]
+fn quit_beebeeb(app: tauri::AppHandle) {
+    app.exit(0)
 }
 
 /// Result of an OPAQUE sign-in attempt handed back to the frontend.
@@ -14610,6 +14640,7 @@ pub fn run() {
             browser_login::start_browser_login,
             open_onboarding_window,
             open_reauth_window,
+            quit_beebeeb,
             // PKG-SHELL — open the Windows main app window
             show_main_app_window,
             show_main_app_settings,
