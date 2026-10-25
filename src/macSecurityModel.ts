@@ -33,6 +33,12 @@ export type TotpState = 'on' | 'off' | 'unknown' | 'checking'
 
 export const TOTP_LABEL = 'Authenticator app (TOTP)'
 
+/**
+ * The most often the window's own looks at the account (when it is focused again) ask the server for the authenticator's
+ * state: a minute. Opening the section and "Try again" always ask.
+ */
+export const PROFILE_RECHECK_MS = 60_000
+
 /** The one inline alert when the account could not be asked (one failure, one surface; Try again asks again). */
 export const TOTP_CHECK_FAILED = 'Couldn’t check your authenticator app'
 

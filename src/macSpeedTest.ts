@@ -24,10 +24,12 @@ export function createSpeedTest(
     state = next
     listeners.forEach((listener) => listener())
   }
-  // For the life of the window, as the store is: a sign-out, another account or a lock that ends the session clears it.
+  // For the life of the window, as the store is: a sign-out, another account or a lock that ends the session clears the
+  // figures. A test still running is not cleared: the host's run holds its one slot until it ends, so the row stays busy
+  // until then and only then drops what the old session measured (review P3-2).
   subscribeSession(() => {
     epoch += 1
-    if (state.phase !== 'idle') publish({ phase: 'idle' })
+    if (state.phase === 'done') publish({ phase: 'idle' })
   })
   return {
     getSnapshot: () => state,
@@ -45,7 +47,10 @@ export function createSpeedTest(
       publish({ phase: 'running' })
       // `run` is a `CommandResult` producer: `command()` turns every failure into a result and never rejects.
       const result = await run()
-      if (mine !== epoch) return null
+      if (mine !== epoch) {
+        publish({ phase: 'idle' })
+        return null
+      }
       if (!result.ok) {
         publish({ phase: 'idle' })
         return result.unsupported ? commandUnavailableLabel('run_speedtest') : result.reason

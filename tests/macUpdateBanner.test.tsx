@@ -178,6 +178,81 @@ describe('a dismissed toast stays dismissed: the banner shows it once per update
     }
   })
 
+  // PR #140 delta review, P3-1: the updater announces the same update again with every 4-hourly check, each time as a new
+  // payload object. A person who dismissed the toast for this version has answered it.
+  test('the same update announced again (every 4 hours) is not shown again, however often', async () => {
+    const events = bus()
+    const m = mount('UpdateBanner.tsx', 'UpdateBanner', {
+      backend: { install_update: () => undefined, 'plugin:opener|open_url': () => undefined },
+      expand: true,
+      bindings: { ...desktopApi, ...macUpdateCopy, ...macUpdateOffer, ManualUpdateFeedback: () => null, useCapabilities: () => caps.macos, canInstallUpdate, listen: events.listen, T },
+    })
+    mounted.push(m)
+    await m.flush()
+    for (let check = 0; check < 4; check++) {
+      events.emit('update-available', { version: '0.8.13', body: 'Fixes the sync stall.', channel: 'stable', release_notes_url: 'https://github.com/beebeeb-io/desktop/releases/tag/desktop-v0.8.13' })
+      await m.flush()
+      await m.flush()
+    }
+    expect(m.toasts.filter((t) => t.id === 'desktop-update')).toHaveLength(1)
+  })
+
+  test('on Windows and Linux too', async () => {
+    for (const name of ['windows-nsis', 'linux-appimage']) {
+      const events = bus()
+      const m = mount('UpdateBanner.tsx', 'UpdateBanner', {
+        backend: { install_update: () => undefined, 'plugin:opener|open_url': () => undefined },
+        expand: true,
+        bindings: { ...desktopApi, ...macUpdateCopy, ...macUpdateOffer, ManualUpdateFeedback: () => null, useCapabilities: () => caps[name], canInstallUpdate, listen: events.listen, T },
+      })
+      mounted.push(m)
+      await m.flush()
+      for (let check = 0; check < 3; check++) {
+        events.emit('update-available', { version: '0.8.13', body: '', channel: 'stable' })
+        await m.flush()
+        await m.flush()
+      }
+      expect(m.toasts.filter((t) => t.id === 'desktop-update'), name).toHaveLength(1)
+    }
+  })
+
+  test('the same version on another channel is another update on a Mac: its offer is another page', async () => {
+    const events = bus()
+    const m = mount('UpdateBanner.tsx', 'UpdateBanner', {
+      backend: { install_update: () => undefined, 'plugin:opener|open_url': () => undefined },
+      expand: true,
+      bindings: { ...desktopApi, ...macUpdateCopy, ...macUpdateOffer, ManualUpdateFeedback: () => null, useCapabilities: () => caps.macos, canInstallUpdate, listen: events.listen, T },
+    })
+    mounted.push(m)
+    await m.flush()
+    events.emit('update-available', { version: '0.9.0', body: '', channel: 'beta' })
+    await m.flush()
+    await m.flush()
+    events.emit('update-available', { version: '0.9.0', body: '', channel: 'alpha' })
+    await m.flush()
+    await m.flush()
+    expect(m.toasts.filter((t) => t.id === 'desktop-update')).toHaveLength(2)
+  })
+
+  test('a newer version is a new toast even when its notes address, body and offer are the same as the last one\'s', async () => {
+    const events = bus()
+    const m = mount('UpdateBanner.tsx', 'UpdateBanner', {
+      backend: { install_update: () => undefined, 'plugin:opener|open_url': () => undefined },
+      expand: true,
+      bindings: { ...desktopApi, ...macUpdateCopy, ...macUpdateOffer, ManualUpdateFeedback: () => null, useCapabilities: () => caps.macos, canInstallUpdate, listen: events.listen, T },
+    })
+    mounted.push(m)
+    await m.flush()
+    const same = { body: 'Fixes things.', channel: 'stable', release_notes_url: 'https://github.com/beebeeb-io/desktop/releases/latest' }
+    events.emit('update-available', { ...same, version: '0.8.13' })
+    await m.flush()
+    await m.flush()
+    events.emit('update-available', { ...same, version: '0.8.14' })
+    await m.flush()
+    await m.flush()
+    expect(m.toasts.filter((t) => t.id === 'desktop-update').map((t) => t.title)).toEqual(['Version 0.8.13 is available.', 'Version 0.8.14 is available.'])
+  })
+
   test('a newer update is a new toast: it is shown again for the new version', async () => {
     const events = bus()
     const m = mount('UpdateBanner.tsx', 'UpdateBanner', {

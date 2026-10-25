@@ -1,7 +1,8 @@
 /**
  * The Versions page's counters (PR #140 delta review, P3): "Changes Beebeeb couldn’t send yet" counts what failed on its way
  * to the server and nothing that is counted elsewhere on the page. A conflict is "Active conflicts", a change made on another
- * device is "Changed elsewhere", and a restore is neither: it is not a change that failed to leave this Mac.
+ * device is "Changed elsewhere", and a restore is counted nowhere: it is listed, and it is not a change that failed to leave
+ * this Mac.
  */
 import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
@@ -16,10 +17,14 @@ describe('what could not be sent yet', () => {
     }
   })
 
-  test('does not count a conflict, a change made elsewhere, or a restore: each is counted somewhere else', () => {
-    expect(reviewCounts(of('conflict')).notSent).toBe(0)
-    expect(reviewCounts(of('stale_base')).notSent).toBe(0)
-    expect(reviewCounts(of('restore')).notSent).toBe(0)
+  test('does not count a conflict or a change made elsewhere as unsent: the page counts those as conflicts and as changed elsewhere', () => {
+    expect(reviewCounts(of('conflict'))).toEqual({ notSent: 0, changedElsewhere: 0 })
+    expect(reviewCounts(of('stale_base'))).toEqual({ notSent: 0, changedElsewhere: 1 })
+  })
+
+  test('a restore is counted nowhere: it is listed on the page, not counted', () => {
+    expect(reviewCounts(of('restore'))).toEqual({ notSent: 0, changedElsewhere: 0 })
+    expect(reviewCounts(of('restore', 'restore', 'restore'))).toEqual({ notSent: 0, changedElsewhere: 0 })
   })
 
   test('a mixed list counts each entry in at most one place', () => {

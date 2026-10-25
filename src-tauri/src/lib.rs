@@ -12047,17 +12047,17 @@ async fn account_profile(state: State<'_, AppState>) -> Result<account_dto::Acco
 
 /// `GET /api/v1/auth/me`, always from the server. `account_profile` serves what the session cached at sign-in, which is only
 /// as old as the sign-in: Settings › Security shows whether the authenticator app is on, and that must be what the account
-/// says now (turned off on the web, it said On until the next sign-in; PR #140 delta review, P2-B). The answer is cached in
-/// the same turn-checked way `account_profile` caches its own, so the next reader of the cache is fresher too.
+/// says now (turned off on the web, it said On until the next sign-in; PR #140 delta review, P2-B).
+///
+/// It writes nothing: not the cache, not the session. The cached profile is an input to `identity_of_session`, which takes
+/// it only when its email is exactly the session's; a profile fetched after the email was changed on the web (the legacy
+/// path) carries the new address, and caching it would make the session lose the user id it knows (follow-up P3-6). A caller
+/// that sees the session move while this runs is told "Account changed" by the command layer, so no turn is captured here.
 #[tauri::command]
 async fn account_profile_fresh(state: State<'_, AppState>) -> Result<account_dto::AccountProfile, String> {
     session_command!(async {
-        let acct = state.active_account()?;
-        let turn = acct.session_generation();
         let api = api_client_from_session(&state)?;
-        let profile = api.account_profile().await.map_err(|e| e.to_string())?;
-        cache_profile_in_turn(&acct, &turn, profile.clone());
-        Ok(profile)
+        api.account_profile().await.map_err(|e| e.to_string())
     })
 }
 
@@ -21530,21 +21530,17 @@ mod startup_session_tests {
 
     /// PR #140 delta review, P2-B: Settings › Security says whether the authenticator is on from `account_profile_fresh`,
     /// which asks the server every time. A read of the session's cache first would be `account_profile` again, and say On
-    /// for hours after the authenticator was turned off on the web.
+    /// for hours after the authenticator was turned off on the web. And (follow-up P3-6) it only reads: a profile cached
+    /// after an email change made on the web carries an address that is not the session's, and `identity_of_session` would
+    /// drop the user id the session knows.
     #[test]
-    fn the_fresh_profile_asks_the_server_every_time_and_never_the_cache() {
+    fn the_fresh_profile_asks_the_server_every_time_and_touches_neither_the_cache_nor_the_session() {
         let production = production();
         let command = body_of(&production, "async fn account_profile_fresh(");
         assert!(command.contains("api.account_profile().await"), "it fetches:\n{command}");
-        for cache_read in ["cached_profile", ".as_ref()", "return Ok("] {
-            assert!(!command.contains(cache_read), "{cache_read}: it must not serve the cache:\n{command}");
+        for touches in ["cached_profile", ".as_ref()", "return Ok(", "cache_profile_in_turn", "session_generation", ".lock()", "acct"] {
+            assert!(!command.contains(touches), "{touches}: it must read the server and nothing else:\n{command}");
         }
-        let captured = command.find("let turn = acct.session_generation();").expect("captured");
-        assert!(captured < command.find("api.account_profile().await").unwrap(), "the turn first:\n{command}");
-        assert!(
-            command.contains("cache_profile_in_turn(&acct, &turn, profile.clone());"),
-            "what it fetched refreshes the cache, in its turn:\n{command}"
-        );
         // And Security is the one that asks it: its page does not read the cached command.
         let security = include_str!("../../src/MacSecurity.tsx").replace("\r\n", "\n");
         assert!(security.contains("accountProfileFresh()"), "Security reads the fresh profile");

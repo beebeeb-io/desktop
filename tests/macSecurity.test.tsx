@@ -8,7 +8,7 @@
  * alert with Try again, and one group failing leaves the others alone), and that a locked vault shows no account data.
  * What it does NOT prove: layout (tests/render-mac-app.mjs measures that in Chromium) or anything on a Mac.
  */
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { createElement, Fragment } from 'react'
 import * as desktopApi from '../src/desktopApi'
 import * as parts from '../src/macSettingsParts'
@@ -347,7 +347,15 @@ describe('Security: a group that did not load', () => {
   })
 })
 
-describe('Security: the authenticator row is read fresh (review P2-B)', () => {
+describe('Security: the authenticator row is read fresh (review P2-B) and not more often than a minute (review P3-4)', () => {
+  /** The page's clock, which the re-check interval reads (`Date.now()`); the real one is back after every test. */
+  const realNow = Date.now
+  let at = 1_800_000_000_000
+  const advance = (ms: number) => { at += ms }
+  beforeEach(() => { at = 1_800_000_000_000; Date.now = () => at })
+  afterEach(() => { Date.now = realNow })
+  const MINUTE = 60_000
+
   /** The `focus` listeners the page registered on the window, so a test can focus it. */
   function watchFocus(): { fire: () => void; live: () => number } {
     const listeners = new Set<() => void>()
@@ -381,6 +389,7 @@ describe('Security: the authenticator row is read fresh (review P2-B)', () => {
     await settle(m)
     expect(visibleText(m)).toContain('Authenticator app (TOTP) · On')
     on = false
+    advance(MINUTE + 1000)
     focus.fire()
     await settle(m)
     expect(called(m, 'account_profile_fresh')).toHaveLength(2)
@@ -388,17 +397,78 @@ describe('Security: the authenticator row is read fresh (review P2-B)', () => {
     expect(visibleText(m)).not.toContain('Authenticator app (TOTP) · On')
   })
 
-  test('a re-check that fails does not leave the old answer standing as current', async () => {
+  // P3-4: a failed quiet re-check changes nothing. The answer on screen was seen; an alert would pop up under a person who
+  // asked for nothing, and one failed request on a flaky connection would replace a correct row.
+  test('a re-check made by looking at the window that fails keeps the last answer and raises no alert', async () => {
     let fail = false
     const m = openSecurity(backendOf({ account_profile_fresh: () => { if (fail) throw new Error('offline'); return profile(true) } }))
     const focus = watchFocus()
     await settle(m)
     expect(visibleText(m)).toContain('Authenticator app (TOTP) · On')
     fail = true
+    advance(MINUTE + 1000)
     focus.fire()
     await settle(m)
-    expect(visibleText(m)).not.toContain('Authenticator app (TOTP) · On')
+    expect(called(m, 'account_profile_fresh')).toHaveLength(2)
+    expect(visibleText(m)).toContain('Authenticator app (TOTP) · On')
+    expect(visibleText(m)).not.toContain('Couldn’t check your authenticator app')
+    expect(visibleErrorSurfaces(m)).toEqual([])
+  })
+
+  test('looking at the window again within a minute does not ask the server again', async () => {
+    const m = openSecurity()
+    const focus = watchFocus()
+    await settle(m)
+    for (let look = 0; look < 5; look++) {
+      advance(10_000)
+      focus.fire()
+      await settle(m)
+    }
+    expect(called(m, 'account_profile_fresh')).toHaveLength(1)
+    advance(MINUTE)
+    focus.fire()
+    await settle(m)
+    expect(called(m, 'account_profile_fresh')).toHaveLength(2)
+  })
+
+  test('a first look that failed is the alert, and a later look at the window that works replaces it', async () => {
+    let fail = true
+    const m = openSecurity(backendOf({ account_profile_fresh: () => { if (fail) throw new Error('offline'); return profile(false) } }))
+    const focus = watchFocus()
+    await settle(m)
     expect(visibleText(m)).toContain('Couldn’t check your authenticator app')
+    fail = false
+    advance(MINUTE + 1000)
+    focus.fire()
+    await settle(m)
+    expect(visibleText(m)).toContain('Authenticator app (TOTP) · Off')
+    expect(visibleErrorSurfaces(m)).toEqual([])
+  })
+
+  test('a first look that failed stays the alert when the next quiet look fails too', async () => {
+    const m = openSecurity(backendOf({ account_profile_fresh: () => { throw new Error('offline') } }))
+    const focus = watchFocus()
+    await settle(m)
+    advance(MINUTE + 1000)
+    focus.fire()
+    await settle(m)
+    expect(visibleText(m)).toContain('Couldn’t check your authenticator app')
+    expect(visibleText(m)).not.toMatch(/Authenticator app \(TOTP\) · /)
+  })
+
+  test('Try again is the person asking: it reads at once, inside the minute, and its failure is the alert', async () => {
+    let fail = true
+    const m = openSecurity(backendOf({ account_profile_fresh: () => { if (fail) throw new Error('offline'); return profile(true) } }))
+    await settle(m)
+    advance(5_000)
+    await press(m, 'Try again')
+    expect(called(m, 'account_profile_fresh')).toHaveLength(2)
+    expect(visibleText(m)).toContain('Couldn’t check your authenticator app')
+    fail = false
+    advance(5_000)
+    await press(m, 'Try again')
+    expect(called(m, 'account_profile_fresh')).toHaveLength(3)
+    expect(visibleText(m)).toContain('Authenticator app (TOTP) · On')
   })
 
   test('a slow answer from an earlier look cannot overwrite a later one', async () => {
@@ -408,6 +478,7 @@ describe('Security: the authenticator row is read fresh (review P2-B)', () => {
     const m = openSecurity(backendOf({ account_profile_fresh: async () => { n += 1; if (n === 1) { await gate; return profile(true) } return profile(false) } }))
     const focus = watchFocus()
     await m.flush()
+    advance(MINUTE + 1000)
     focus.fire()
     await settle(m)
     expect(visibleText(m)).toContain('Authenticator app (TOTP) · Off')

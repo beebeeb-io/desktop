@@ -35,6 +35,7 @@ import {
   DEVICES_FOOTNOTE,
   deviceRow,
   SECURITY_SETTINGS_URL,
+  PROFILE_RECHECK_MS,
   SESSIONS_HEADING_ID,
   sessionRow,
   TOTP_CHECK_FAILED,
@@ -61,16 +62,23 @@ export function SecurityTab({ unlocked }: { unlocked: boolean }) {
   const [busy, setBusy] = useState(false)
 
   // `quiet` reads again without blanking the group first: after a revoke the rows are replaced, not flashed.
-  // The authenticator row is the account's answer NOW: read from the server (not the session's cache) when the page opens
-  // and again whenever the window is looked at, and only the latest look may answer. A look that fails leaves no answer
-  // standing: the row becomes the alert (review P2-B).
+  // The authenticator row is the account's answer, read from the server (not the session's cache; review P2-B) when the page
+  // opens, when the person asks again (Try again), and when the window is looked at again, which is at most once a minute
+  // (review P3-4). Only the latest look may answer. A look the person asked for, or the first, that fails is the alert; a
+  // look at the window that fails changes nothing: the answer on screen was seen, and an alert would come up under a person
+  // who asked for nothing.
   const latestProfile = useRef(0)
-  const loadProfile = useCallback(async (quiet = false) => {
+  const lastProfileLook = useRef(0)
+  const loadProfile = useCallback(async (how: 'asked' | 'looked' = 'asked') => {
+    const now = Date.now()
+    if (how === 'looked' && now - lastProfileLook.current < PROFILE_RECHECK_MS) return
+    lastProfileLook.current = now
     const mine = ++latestProfile.current
-    if (!quiet) setProfile({ status: 'loading' })
+    if (how === 'asked') setProfile({ status: 'loading' })
     const result = await accountProfileFresh()
     if (mine !== latestProfile.current) return
-    setProfile(result.ok ? { status: 'ready', value: result.value } : { status: 'failed' })
+    if (result.ok) setProfile({ status: 'ready', value: result.value })
+    else if (how === 'asked') setProfile({ status: 'failed' })
   }, [])
   const loadSessions = useCallback(async (quiet = false) => {
     if (!quiet) setSessions({ status: 'loading' })
@@ -99,7 +107,7 @@ export function SecurityTab({ unlocked }: { unlocked: boolean }) {
   // A change made on the web while this window was in the background shows the moment the window is looked at again.
   useEffect(() => {
     if (!unlocked) return
-    const onFocus = () => void loadProfile(true)
+    const onFocus = () => void loadProfile('looked')
     window.addEventListener('focus', onFocus)
     return () => window.removeEventListener('focus', onFocus)
   }, [unlocked, loadProfile])
