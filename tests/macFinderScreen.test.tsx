@@ -153,7 +153,9 @@ describe('FinderScreen, with the real useFinderSetup hook', () => {
       const s = openFinderScreen(failedView(reason))
       await s.settle()
       expect(notices(s.m)).toHaveLength(1)
-      expect(notices(s.m)[0].props.role).toBe(reason === 'user_disabled' ? 'status' : 'alert')
+      // Spec §7.5 and the hi-fi (“If it fails”): a failure AND a turned-off extension are drawn ink on the error wash. The
+      // shipped step drew “turned off” as a neutral status; the two-surface design replaces that, on this screen only.
+      expect(notices(s.m)[0].props.role).toBe('alert')
       expect(textOf(notices(s.m)[0].props.children)).toContain(copy.FINDER_REASON_COPY[reason].sentence)
       expect(buttons(s.m)).toEqual([copy.FINDER_ACTION_LABEL[copy.FINDER_REASON_COPY[reason].action]])
       expect(s.m.toasts).toEqual([])

@@ -46,19 +46,19 @@ describe('windowScreen: the screen per session state', () => {
     for (const account of [out, ended, live]) expect(windowScreen(account, step('switch'))).toBe('switch')
   })
 
-  test('set up this Mac and the Finder screen belong to a live session, and take over from Home', () => {
+  test('set up this Mac and the Finder screen take over from Home', () => {
     expect(windowScreen(live, step('unlock'))).toBe('unlock')
     expect(windowScreen(live, step('finder'))).toBe('finder')
   })
 
-  test('…and also while the snapshot still says the session ended (a same-account sign-in has not been read yet)', () => {
-    expect(windowScreen(ended, step('unlock'))).toBe('unlock')
-    expect(windowScreen(ended, step('finder'))).toBe('finder')
-  })
-
-  test('a step that needs a session is dropped when the session is gone (Onboarding’s “window shown again” recheck)', () => {
-    expect(windowScreen(out, step('unlock'))).toBe('signin')
-    expect(windowScreen(out, step('finder'))).toBe('signin')
+  // The bug the real-browser run found: a sign-in lands while the window still holds the snapshot it read BEFORE it
+  // (up to five seconds old). The step the sign-in set must not be read against that snapshot, or the card the person
+  // just signed in on flashes back, and a rule that dropped the step on it threw the next screen away.
+  test('a step is the screen whatever the snapshot says: the snapshot is stale for a moment after a sign-in', () => {
+    for (const account of [out, ended, live]) {
+      expect(windowScreen(account, step('unlock'))).toBe('unlock')
+      expect(windowScreen(account, step('finder'))).toBe('finder')
+    }
   })
 
   test('settling is its own screen: the sign-in finished and the next read has not landed, so the old card is not drawn again', () => {
@@ -124,6 +124,9 @@ describe('the other steps', () => {
     expect(afterFinderReady()).toEqual(IDLE_FLOW)
   })
 
+  // Onboarding’s “window shown again after a sign-out” recheck, once, where it cannot be wrong: against the first
+  // snapshot a window reads when it mounts. A sign-out moves the session revision, which remounts the window
+  // (AccountSessionBoundary), so the window that shows a flow of an account that left is always a fresh one.
   test('normalizeFlow drops a step that needs a session when there is none, and keeps the rest', () => {
     expect(normalizeFlow(out, step('unlock'))).toEqual(IDLE_FLOW)
     expect(normalizeFlow(out, step('finder'))).toEqual(IDLE_FLOW)

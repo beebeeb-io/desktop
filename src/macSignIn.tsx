@@ -114,6 +114,11 @@ export function btnClass(variant: 'plain' | 'primary' | 'danger', full = false):
   return full ? `${base} mw-btn--full` : base
 }
 
+/** The device-code page's address as a person reads it: without the scheme (hi-fi figure 2). "Copy link" copies it whole. */
+export function displayAddress(address: string): string {
+  return address.replace(/^https?:\/\//, '')
+}
+
 /** The window's title follows the heading of the card shown (spec C C-W8). */
 export function useWindowTitle(title: string) {
   useEffect(() => {
@@ -327,7 +332,7 @@ export function BrowserPanel({
           ) : null}
           {state.verificationUri && state.phase === 'waiting' ? (
             <p className="mw-scard-note">
-              {BROWSER_DID_NOT_OPEN} <span className="mw-mono">{state.verificationUri}</span> {BROWSER_DID_NOT_OPEN_HINT}{' '}
+              {BROWSER_DID_NOT_OPEN} <span className="mw-mono">{displayAddress(state.verificationUri)}</span> {BROWSER_DID_NOT_OPEN_HINT}{' '}
               <button type="button" className="mw-link" onClick={() => void copyLink(state.verificationUri!)}>{copyLabel}</button>
             </p>
           ) : null}
@@ -341,7 +346,8 @@ export function BrowserPanel({
         </>
       ) : (
         <>
-          <button type="button" className={btnClass('primary', true)} disabled={busy} onClick={() => void start()}>{primaryLabel}</button>
+          {/* Amber is the one primary action: while the handoff runs nothing can be pressed, so the button is plain. */}
+          <button type="button" className={btnClass(busy ? 'plain' : 'primary', true)} disabled={busy} onClick={() => void start()}>{primaryLabel}</button>
           <div className="mw-center">
             <button type="button" className="mw-link" onClick={onUsePassword}>{USE_EMAIL_AND_PASSWORD}</button>
           </div>
@@ -821,7 +827,9 @@ export function FinderScreen({ onReady }: { onReady: () => void }) {
   const notice =
     presentation.kind === 'notice'
       ? {
-          tone: presentation.tone,
+          // Spec §7.5 and the hi-fi: a failure and a turned-off extension are both ink on the error wash (the notice's own
+          // tone, neutral for "turned off", is what Home's Finder row and Settings › Sync draw; this screen follows the design).
+          tone: 'alert' as const,
           sentence: presentation.sentence,
           actionLabel: finderActionButtonLabel(noticeAction, presentation.actionLabel, finder.copied),
           send: noticeAction ? () => finder.run(noticeAction) : null,

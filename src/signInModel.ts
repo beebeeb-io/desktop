@@ -54,20 +54,25 @@ export interface RoutingAccount {
 export const settling = (): SignInFlow => ({ ...IDLE_FLOW, step: 'settling' })
 
 /**
- * The screen for a state. An explicit step beats the session where the session is simply not caught up (a settling
- * sign-in) or cannot tell (the switch: another account is waiting while this Mac still holds the first). A step that
- * needs a session is dropped when the session is gone, which is Onboarding's “window shown again” recheck: a window
- * brought back after a sign-out starts at sign-in, not on a Finder screen of an account that left.
+ * The screen for a state. A step is the screen, whatever the session says: the window's snapshot is read every five
+ * seconds, and a sign-in lands in a window that still holds the one it read BEFORE the sign-in, so “signed out” on that
+ * snapshot is not evidence against the step the sign-in has just set (it was: a rule that judged the step against it
+ * threw the next screen away, and showed the card the person had just signed in on again). The switch is a screen of an
+ * account that is still on this Mac while another waits; the others follow a session that is there.
  */
 export function windowScreen(account: RoutingAccount, flow: SignInFlow): WindowScreen {
-  if (flow.step === 'settling') return 'settling'
-  if (flow.step === 'switch') return 'switch'
-  if (account.logged_in && (flow.step === 'unlock' || flow.step === 'finder')) return flow.step
+  if (flow.step !== null) return flow.step
   if (!account.logged_in) return 'signin'
   return account.auth_expired ? 'reauth' : 'home'
 }
 
-/** The flow with every step that needs a session removed when there is none. Same object when nothing changes. */
+/**
+ * The flow with every step that needs a session removed when there is none (Onboarding's “window shown again after a
+ * sign-out” recheck). Same object when nothing changes. It is applied ONCE, to the first snapshot a window reads when it
+ * mounts, and never to a later one: a sign-out moves the session revision, which remounts the window
+ * (`AccountSessionBoundary`), so the window that shows a flow of an account that left is always a fresh one; a snapshot
+ * read by a window that has been up for a while may predate the step it would judge.
+ */
 export function normalizeFlow(account: RoutingAccount, flow: SignInFlow): SignInFlow {
   if (!account.logged_in && (flow.step === 'unlock' || flow.step === 'finder')) return IDLE_FLOW
   return flow

@@ -536,3 +536,56 @@ flow owner is `main`. Until slice 3 the tray click still shows the compact flyou
 `surfaces::policy::compact_window_label`); until slice 2 sign-in is still the `onboarding` window, which the signed-out
 card in `main` opens. Tests: `tests/mainWindowModel.test.ts`, `tests/macApp.test.tsx`, `surfaces::{policy, registry,
 window_state, config_tests}`, `main_window_tests` in `lib.rs`; Chromium: `tests/render-mac-app.mjs`.
+
+<a id="two-surface-slice-2"></a>
+
+## Two-surface slice 2: sign-in and setting up this Mac in the window (task 1683)
+
+Added 2026-10-25. `CLAUDE.md` keeps the evergreen rules ("macOS window rules"); this is the slice's narrative.
+
+The signed-out Beebeeb window is the hi-fi's section 2: one centred card at a time, no sidebar, the window's title
+following the card's heading. `MacApp` asks `signInModel.windowScreen(account, flow)` which one: sign in (browser first,
+then "Use email and password"), the browser code, the email form with the second factor in the same card, Sign in again
+(an ended session; same two methods, "Signed in before as {email}"), the account switch (1887, A0s to A4s, focus on
+Cancel), set up this Mac (the recovery phrase, only after a sign-in that left no key), and the Finder status, after which
+the window moves on to Home by itself. The cards are `macSignIn.tsx`; the pure routing and transitions are
+`signInModel.ts`; the words are `accountViewCopy.ts` (spec C names that module for all its screens, task 1747 adds its
+own beside these) plus the modules that already held them (`browserLoginCopy.ts`, `accountSwitchCopy.ts`,
+`signOutCopy.ts`, `finderSetupCopy.ts`).
+
+Three findings shaped it, each from reading the code or running the window rather than from the spec:
+
+1. **The flow cannot live in React state.** `main.tsx` wraps `main` in `AccountSessionBoundary`, which remounts the whole
+   tree when the session revision moves, and a sign-in moves it (the old onboarding window was the one window outside the
+   boundary). The flow is in `signInFlowStore.ts`, read with `useSyncExternalStore`, the pattern of `accountSession.ts`'s
+   held sign-out sentence.
+2. **A step is the screen, whatever the snapshot says.** Just after a sign-in the window still holds the snapshot it read
+   before (the next read is up to five seconds away). A first version dropped a session-needing step when that snapshot said
+   "signed out"; the real-browser run (`tests/render-mac-app.mjs`) showed it throwing the next screen away. The flow is now
+   judged once, against the first snapshot a window reads when it mounts (`normalizeFlow`); a sign-out always remounts the
+   window, so that is the one place "the account left" can be true of a window that shows a flow. After a same-account
+   sign-in the flow is `settling` ("Loading…") until the first read after it lands, so the old card is not drawn again.
+3. **A sign-in changes the revision during its own call**, and `main` polls `sync_status` every second (the boundary), so
+   `command()`'s "Account changed" guard could turn a successful sign-in into an error. `desktop_login`,
+   `desktop_login_2fa` and `start_browser_login` are in `ANSWER_STANDS_WHEN_THE_ACCOUNT_CHANGES` beside `clear_session` and
+   `lock_vault`; the recovery-phrase and Keychain unlocks do not move the revision and keep the guard.
+
+The browser handoff's state machine (`browserSignIn.ts`: subscribe before invoking, the phases, one settle) moved out of
+`WindowsFirstRun.tsx` and is shared; each window draws its own markup. Spec C's C-S1 asks `start_browser_login` to return
+the password path's `LoginOutcome`; 1887's pin `the_switch_count_reaches_the_sign_in_window` holds the
+`account_mismatch` event in `browser_login.rs`, so the controller maps that event to the same `SignInSettled` on the
+TypeScript side and swallows the raw code (the event and the `Err` travel separately, so it waits `MISMATCH_GRACE_MS` for
+the event if the `Err` comes first, and opens the switch step without a snapshot if it never does; Rust's gate asks again
+before anything is signed out).
+
+Rust: `surfaces::policy::onboarding_surface` (a Mac shows `main`; Windows and Linux keep their windows and labels) routes
+`open_onboarding_window` and `open_reauth_window`; the `onboarding` window is not compiled on a Mac
+(`open_onboarding_window_labelled` is `cfg(not(macos))`); `dock_icon_wanted` no longer counts it; `quit_beebeeb` is the
+card's Quit (`app.exit(0)`); `onboarding-close.json` is Linux-only and `macos-main.json` gains `core:window:allow-set-title`.
+`Onboarding.tsx` lost its macOS step, routing, platform fallback and rail wording (spec C §11); it is Linux's window, and
+the capability gate (`supportsRoute('onboarding')` is `native_credentials`, false on Linux, which fails closed) means it is
+not reachable there today either.
+
+Deviations from the hi-fi and the shipped step are listed in the PR: the Finder screen draws "turned off in System Settings"
+on the error wash (§7.5; the shipped step drew a neutral status), the in-window switch step shows an E3 that follows an ask
+(the shipped step hid it behind the stale ask), and the address is shown without its scheme.

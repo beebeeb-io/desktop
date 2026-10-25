@@ -28,9 +28,13 @@ import { rustStr } from './fixtures/rustConstants'
 
 const React = { createElement, Fragment }
 const mounted: Mounted[] = []
-afterEach(() => { while (mounted.length) mounted.pop()!.close() })
+afterEach(() => { while (mounted.length) mounted.pop()!.close(); windowTitles.length = 0 })
 
+/** Every title a card asked the window for, in order (the real `useWindowTitle` is tested at the end). */
+const windowTitles: string[] = []
+const titleSpy = (title: string) => { windowTitles.push(title) }
 const btnClass = loadComponent('macSignIn.tsx', 'btnClass', {})
+const displayAddress = loadComponent('macSignIn.tsx', 'displayAddress', {})
 const SignInCard = loadComponent('macSignIn.tsx', 'SignInCard', { React })
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
 const button = (m: Mounted, label: string) => {
@@ -73,6 +77,15 @@ describe('SignInCard: the window’s one card (hi-fi .scard)', () => {
     expect(classes(card({ title: 'T' }))).toContain('mw-scard--base')
     expect(classes(card({ title: 'T', size: 'wide' }))).toContain('mw-scard--wide')
     expect(classes(card({ title: 'T', size: 'switch' }))).toContain('mw-scard--switch')
+  })
+})
+
+describe('displayAddress: the address as a person reads it', () => {
+  test('without the scheme, and nothing else changed (the pasteboard gets the whole address)', () => {
+    expect(displayAddress('https://app.beebeeb.io/cli-auth')).toBe('app.beebeeb.io/cli-auth')
+    expect(displayAddress('http://localhost:5173/cli-auth')).toBe('localhost:5173/cli-auth')
+    expect(displayAddress('app.beebeeb.io/cli-auth')).toBe('app.beebeeb.io/cli-auth')
+    expect(displayAddress('https://app.beebeeb.io/cli-auth?code=1#x')).toBe('app.beebeeb.io/cli-auth?code=1#x')
   })
 })
 
@@ -133,6 +146,16 @@ describe('SignInWindow: one screen per state (spec §7.4)', () => {
   test('in Sign in again a settled sign-in is read as the same account (the R8 rules)', () => {
     const tree = render({ screen: 'reauth' })
     screens(tree)[0].props.onSettled({ kind: 'reauthenticated', vaultUnlocked: true, keyReplaced: false }, 'sam@example.eu')
+    expect(flows).toEqual([model.settling()])
+  })
+
+  // The case that depends on the flag: the browser path delivers the keys as a FRESH sign-in. At first sign-in that goes
+  // on to the Finder screen; in Sign in again the account is already on this Mac, so it is done (Finder is kept).
+  test('a browser sign-in is the Finder screen at first sign-in and "done" in Sign in again', () => {
+    screens(render({ screen: 'signin' }))[0].props.onSettled({ kind: 'fresh', vaultUnlocked: true }, '')
+    expect(flows).toEqual([model.afterSignIn({ kind: 'fresh', vaultUnlocked: true }, '', false)])
+    expect(flows[0].step).toBe('finder')
+    screens(render({ screen: 'reauth' }))[0].props.onSettled({ kind: 'fresh', vaultUnlocked: true }, '')
     expect(flows).toEqual([model.settling()])
   })
 
@@ -241,7 +264,8 @@ describe('BrowserPanel (hi-fi section 2, figures 1, 2 and 4; task 1734)', () => 
         btnClass,
         DiskImageNotice: Notice,
         Note: parts.Note,
-        useWindowTitle: () => {},
+        useWindowTitle: titleSpy,
+        displayAddress,
         useBrowserSignIn: () => ({ state: over.state ?? idle, start: () => { starts.push('browser') } }),
         openUrl: async (url: string) => { opened.push(url); return over.openUrl ? over.openUrl(url) : { ok: true, value: undefined } },
         writeTextToPasteboard: async (value: Promise<string>) => { written.push(await value); await over.write?.(value) },
@@ -291,6 +315,18 @@ describe('BrowserPanel (hi-fi section 2, figures 1, 2 and 4; task 1734)', () => 
     expect(button(m, 'Connecting…').props.disabled).toBe(true)
   })
 
+  // Spec §10.1: amber is the one primary action of a view. While the handoff runs nothing can be pressed, so the
+  // disabled button is the plain one (hi-fi figure 2), not a faded amber one.
+  test('the button is amber only while it can be pressed: neutral while connecting, waiting and finishing', () => {
+    for (const phase of ['connecting', 'waiting', 'authorized']) {
+      const { m } = open({ state: { phase, userCode: 'KQ7M-4TXP', verificationUri: 'https://app.beebeeb.io/cli-auth', error: null } })
+      const label = { connecting: 'Connecting…', waiting: 'Waiting for browser…', authorized: 'Finishing…' }[phase]!
+      expect({ phase, classes: classes(button(m, label)) }).toEqual({ phase, classes: ['ms-btn', 'mw-btn--full'] })
+    }
+    expect(classes(button(open().m, 'Sign in with browser'))).toEqual(['ms-btn', 'ms-btn--primary', 'mw-btn--full'])
+    expect(classes(button(open({ state: { ...idle, phase: 'error', error: 'No.' } }).m, 'Try again'))).toEqual(['ms-btn', 'ms-btn--primary', 'mw-btn--full'])
+  })
+
   test('waiting: the instruction, the code in mono, the address, “Copy link”, the disabled button and the way out (hi-fi figure 2)', () => {
     const { m } = open({ state: { phase: 'waiting', userCode: 'KQ7M-4TXP', verificationUri: 'https://app.beebeeb.io/cli-auth', error: null } })
     expect(text(m)).toContain(browserCopy.browserWaitingInstruction('waiting'))
@@ -298,7 +334,9 @@ describe('BrowserPanel (hi-fi section 2, figures 1, 2 and 4; task 1734)', () => 
     expect(textOf(code.props.children)).toBe('KQ7M-4TXP')
     expect(classes(code)).toContain('mw-code')
     expect(text(m)).toContain('Browser didn’t open? Visit')
-    expect(text(m)).toContain('https://app.beebeeb.io/cli-auth')
+    // Shown as the hi-fi draws it, without the scheme; "Copy link" copies the whole address.
+    expect(text(m)).toContain('app.beebeeb.io/cli-auth')
+    expect(text(m)).not.toContain('https://')
     expect(text(m)).toContain(browserCopy.BROWSER_DID_NOT_OPEN_HINT)
     expect(button(m, 'Waiting for browser…').props.disabled).toBe(true)
     expect(hasButton(m, 'Copy link')).toBe(true)
@@ -321,7 +359,7 @@ describe('BrowserPanel (hi-fi section 2, figures 1, 2 and 4; task 1734)', () => 
     await button(m, 'Copy link').props.onClick()
     await m.flush()
     expect(hasButton(m, 'Copied')).toBe(false)
-    expect(text(m)).toContain('https://app.beebeeb.io/cli-auth')
+    expect(text(m)).toContain('app.beebeeb.io/cli-auth')
     expect(m.toasts).toEqual([])
   })
 
@@ -435,7 +473,7 @@ describe('PasswordPanel: today’s sign-in form, unchanged, in the window (spec 
         SignInCard,
         btnClass,
         Note: parts.Note,
-        useWindowTitle: () => {},
+        useWindowTitle: titleSpy,
         requestAnimationFrame: () => 0,
       },
       expand: true,
@@ -627,7 +665,7 @@ describe('SwitchScreen: 1887’s account-switch step in the Beebeeb window (A0s 
     const m = mount('macSignIn.tsx', 'SwitchScreen', {
       backend: { clear_session: clear, ...extra },
       props: { info: { pendingChanges: 0, unsent: null, unsentError: null, ...info }, onSwitched: () => events.push('switched'), onCancel: () => events.push('cancelled') },
-      bindings: { ...desktopApi, ...switchCopy, ...signOutCopy, SignInCard, btnClass, useWindowTitle: () => {}, Note: parts.Note },
+      bindings: { ...desktopApi, ...switchCopy, ...signOutCopy, SignInCard, btnClass, useWindowTitle: titleSpy, Note: parts.Note },
       expand: true,
     })
     mounted.push(m)
@@ -839,7 +877,7 @@ describe('SetUpScreen: the recovery phrase, only when this Mac has no key (spec 
     const m = mount('macSignIn.tsx', 'SetUpScreen', {
       backend: { desktop_unlock_with_recovery_phrase: () => null, ...backend },
       props: { keyReplaced: false, onDone: () => done.push('done'), ...props },
-      bindings: { ...desktopApi, ...copy, ...switchCopy, SignInCard, btnClass, Note: parts.Note, useWindowTitle: () => {}, RECOVERY_WORD_COUNT: 12, requestAnimationFrame: () => 0 },
+      bindings: { ...desktopApi, ...copy, ...switchCopy, SignInCard, btnClass, Note: parts.Note, useWindowTitle: titleSpy, RECOVERY_WORD_COUNT: 12, requestAnimationFrame: () => 0 },
       expand: true,
     })
     mounted.push(m)
@@ -960,7 +998,7 @@ describe('FinderScreen: a status screen, not a step (spec §7.5; spec A §6.2)',
     const m = mount('macSignIn.tsx', 'FinderScreen', {
       backend: {},
       props: { onReady: () => ready.push('ready') },
-      bindings: { ...copy, SignInCard, btnClass, Note: parts.Note, Btn: parts.Btn, useWindowTitle: () => {}, finderActionButtonLabel: finderCopy.finderActionButtonLabel, useFinderSetup: () => controller },
+      bindings: { ...copy, SignInCard, btnClass, Note: parts.Note, Btn: parts.Btn, useWindowTitle: titleSpy, finderActionButtonLabel: finderCopy.finderActionButtonLabel, useFinderSetup: () => controller },
       expand: true,
     })
     mounted.push(m)
@@ -1015,13 +1053,15 @@ describe('FinderScreen: a status screen, not a step (spec §7.5; spec A §6.2)',
     expect(ready).toEqual([])
   })
 
-  test('turned off in System Settings is a status with its action, not an alert', async () => {
+  // Spec §7.5 and the hi-fi: “On a failure or a turned-off extension: spec A's one sentence and one action, inline (ink on
+  // --err-bg)”. The shipped Onboarding step drew “turned off” as a neutral status; the design wins, on this screen.
+  test('turned off in System Settings is the same inline error as a failure, with its one action', async () => {
     const { m } = open({
       ...quiet,
       presentation: { kind: 'notice', tone: 'status', reason: 'user_disabled', sentence: finderCopy.FINDER_REASON_COPY.user_disabled.sentence, action: 'open_system_settings', actionLabel: 'Open System Settings' },
     })
     await m.flush()
-    expect(m.elements().filter((el) => el.props.role === 'alert')).toHaveLength(0)
+    expect(m.elements().filter((el) => el.props.role === 'alert')).toHaveLength(1)
     expect(text(m)).toContain('Beebeeb is turned off in System Settings.')
     expect(hasButton(m, 'Open System Settings')).toBe(true)
   })
@@ -1077,6 +1117,61 @@ describe('FinderScreen: a status screen, not a step (spec §7.5; spec A §6.2)',
 })
 
 // ── The hooks ───────────────────────────────────────────────────────────────
+
+describe('every card asks for the window title that is its own heading (spec C C-W8: “the title bar follows the heading”)', () => {
+  const headingOf = (m: Mounted) => textOf(heading(m)!.props.children)
+  const base = { onSettled: () => {}, onUsePassword: () => {}, onUseBrowser: () => {}, onSwitched: () => {}, onCancel: () => {}, onDone: () => {}, onReady: () => {} }
+  const idleBrowser: any = { phase: 'idle', userCode: null, verificationUri: null, error: null }
+  const finder = { presentation: { kind: 'quiet', line: '' }, run: async () => ({ ok: true, value: undefined }), retry: async () => {}, copied: false, actionNote: null }
+  function titleOf(file: string, name: string, props: Record<string, unknown>, bindings: Record<string, unknown>, backend: Record<string, (a: any) => unknown> = {}) {
+    const m = mount(file, name, {
+      backend: { last_signed_in_email: () => null, ...backend },
+      props: { ...base, ...props },
+      bindings: { ...desktopApi, ...copy, ...switchCopy, ...signOutCopy, ...signIn, ...browserCopy, SignInCard, btnClass, displayAddress, Note: parts.Note, Btn: parts.Btn, useWindowTitle: titleSpy, requestAnimationFrame: () => 0, RECOVERY_WORD_COUNT: 12, finderActionButtonLabel: finderCopy.finderActionButtonLabel, DiskImageNotice: () => null, ...bindings },
+      expand: true,
+    })
+    mounted.push(m)
+    return m
+  }
+
+  test('sign in, sign in again, the email form, the second factor, the switch, set up this Mac and Finder', async () => {
+    const browserBindings = { useBrowserSignIn: () => ({ state: idleBrowser, start: async () => {} }) }
+    const cases: Array<[string, () => Mounted]> = [
+      ['Sign in to Beebeeb', () => titleOf('macSignIn.tsx', 'BrowserPanel', { reauth: false, email: null, offline: false }, browserBindings)],
+      ['Sign in again', () => titleOf('macSignIn.tsx', 'BrowserPanel', { reauth: true, email: 'sam@example.eu', offline: false }, browserBindings)],
+      ['Welcome back', () => titleOf('macSignIn.tsx', 'PasswordPanel', { prefillEmail: undefined }, {})],
+      ['Switch to a different account?', () => titleOf('macSignIn.tsx', 'SwitchScreen', { info: { pendingChanges: 1, unsent: null, unsentError: null } }, {})],
+      ['Set up this Mac', () => titleOf('macSignIn.tsx', 'SetUpScreen', { keyReplaced: false }, {})],
+      ['Beebeeb in Finder', () => titleOf('macSignIn.tsx', 'FinderScreen', {}, { useFinderSetup: () => finder })],
+    ]
+    for (const [expected, open] of cases) {
+      windowTitles.length = 0
+      const m = open()
+      await m.flush()
+      expect({ heading: headingOf(m), title: windowTitles.at(-1) }).toEqual({ heading: expected, title: expected })
+    }
+  })
+
+  test('the second factor’s card is titled for what it asks, not for the email form it replaced', async () => {
+    const m = titleOf('macSignIn.tsx', 'PasswordPanel', { prefillEmail: 'sam@example.eu' }, {}, {
+      desktop_login: () => ({ requires_2fa: true, reauthenticated: false, vault_unlocked: false, key_replaced: false, account_mismatch: null }),
+    })
+    await m.flush(); await m.flush()
+    m.elements().find((el) => el.type === 'input' && el.props.name === 'password')!.props.onChange({ currentTarget: { value: 'x' } })
+    m.render()
+    await m.elements().find((el) => el.type === 'form')!.props.onSubmit({ preventDefault() {} })
+    await m.flush()
+    expect(headingOf(m)).toBe('Two-factor authentication')
+    expect(windowTitles.at(-1)).toBe('Two-factor authentication')
+  })
+
+  test('the switch step’s title follows its ask: the A0s title once a snapshot says something waits', async () => {
+    const waiting = { askId: 'a1', files: 2, copiedFiles: 2, others: 1, missingFiles: 0, earlierFolders: [] }
+    const m = titleOf('macSignIn.tsx', 'SwitchScreen', { info: { pendingChanges: 3, unsent: waiting, unsentError: null } }, {})
+    await m.flush()
+    expect({ heading: headingOf(m), title: windowTitles.at(-1) }).toEqual({ heading: signOutCopy.A0S_TITLE, title: signOutCopy.A0S_TITLE })
+  })
+})
 
 describe('useBrowserSignIn: the controller as a hook (a new controller per mount, so StrictMode’s second mount is alive)', () => {
   function open() {

@@ -299,8 +299,12 @@ export default function MacApp() {
   // Signed out, only General and About exist (§7.8): a session that ends under another section moves the window to General.
   const view = coerceSettingsView(rawView, signedIn)
   const unlocked = account?.vault_unlocked === true
-  // The card to draw, or Home. A step that needs a session is dropped (below) when the session is gone.
-  const screen = account === null ? 'home' : windowScreen(account, signInFlow)
+  // The flow is checked ONCE, against the first snapshot this window reads (`normalizeFlow`): a step of an account that
+  // left is dropped, so the window shown again after a sign-out starts at sign-in. Never against a later snapshot, which
+  // may predate the step a sign-in has just set. The card to draw, or Home, follows from that.
+  const flowChecked = useRef(false)
+  const flowNow = account !== null && !flowChecked.current ? normalizeFlow(account, signInFlow) : signInFlow
+  const screen = account === null ? 'home' : windowScreen(account, flowNow)
   const sheetOpen = flowView.kind !== 'idle' || openModals > 0
 
   // The listeners below are registered once; they read the window's current state through these.
@@ -382,12 +386,13 @@ export default function MacApp() {
     reader.refresh()
   }, [reader, signInFlow.step])
 
-  // A step that needs a session is dropped when the session is gone (the window shown again after a sign-out).
+  // The one check above, kept: the store follows what the first render already showed.
   useEffect(() => {
-    if (account === null) return
-    const normalized = normalizeFlow(account, signInFlow)
-    if (normalized !== signInFlow) setSignInFlow(normalized)
-  }, [account, signInFlow])
+    if (account === null || flowChecked.current) return
+    flowChecked.current = true
+    if (flowNow !== signInFlow) setSignInFlow(flowNow)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once, for the first snapshot; later flows are not judged.
+  }, [account])
 
   // The plan needs the session; it is read again after an unlock.
   useEffect(() => {
@@ -500,7 +505,7 @@ export default function MacApp() {
       <div className="mw-window mw-window--solo">
         <div className="mw-toolbar mw-toolbar--solo" data-tauri-drag-region="" />
         <main className="mw-solo-main" aria-labelledby="mw-title">
-          <SignInWindow screen={screen} email={account.email} flow={signInFlow} note={signOutNote} onFlow={setSignInFlow} />
+          <SignInWindow screen={screen} email={account.email} flow={flowNow} note={signOutNote} onFlow={setSignInFlow} />
         </main>
       </div>
     )

@@ -257,6 +257,10 @@ describe('C-S1: a different account is the password path’s outcome, and the ra
     await started
     expect(r.settled).toEqual([])
     expect(r.timers.some((t) => t.live && t.ms === MISMATCH_GRACE_MS)).toBe(true)
+    // The `error` event that carries the raw code can arrive while the controller waits for the count: never shown.
+    r.emit({ phase: 'error', message: 'account_mismatch' })
+    expect(r.sign.state.error).toBeNull()
+    expect(r.sign.state.phase).toBe('connecting')
     r.emit(mismatch)
     expect(r.settled).toEqual([{ kind: 'account_mismatch', pendingChanges: 3, unsent: ASK, unsentError: null }])
     r.fireTimers()

@@ -1,11 +1,16 @@
-// Real-browser check of the macOS Beebeeb window (task 1683 slice 1; spec docs/specs/2026-10-24-macos-two-surface-app.md
-// §7, §8, §11; hi-fi design/hifi/macos-two-surface.html sections 3 to 5). Local evidence, not a CI gate (Playwright is
+// Real-browser check of the macOS Beebeeb window (task 1683 slices 1 and 2; spec docs/specs/2026-10-24-macos-two-surface-app.md
+// §7, §8, §11; hi-fi design/hifi/macos-two-surface.html sections 2 to 5). Local evidence, not a CI gate (Playwright is
 // not a desktop dependency); tests/macApp.test.tsx and tests/macSettingsLayout.test.ts pin the same rules in CI.
+// Slice 2 adds the signed-out cards (section 2): sign in, the browser code, the email form, the second factor, Sign in
+// again, set up this Mac, the Finder status and Home after it, and the account switch. The synthetic IPC has a working
+// event bus (the browser code and the Finder screen are driven by events) and moves the session revision on every
+// sign-in, so the real AccountSessionBoundary remounts the window exactly as it does on a Mac.
 //
 //   node tests/render-mac-app.mjs REPO OUTPUT
 //   PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs   (as the other render-*.mjs)
 //   HIFI_PNG_DIR=/path/to/hifi-figures               optional: side by side with the hi-fi's figures
 //   RENDER_LOCALE=en-US                              the browser's language; sizes follow it, and so do the expected strings
+//                                                    (hifi-sN-figK.png for sections 3 to 5, hifi-s2-figK-{light,dark}.png for section 2)
 //
 // It bundles the REAL src/main.tsx (the mount path the app uses), loads `?window=main&platform=macos` with a synthetic
 // Tauri IPC, drives the window to each state through its own controls (the gear, the sidebar, the buttons), and
@@ -101,18 +106,58 @@ function installBackend({ caps, fx }) {
   // started would read "2 min ago" for every scenario that a slow machine reaches a minute late.
   if (typeof fx.snapshot?.engine?.last_tick_ok_at === 'number') fx.snapshot.engine.last_tick_ok_at = Math.floor(Date.now() / 1000) - 70
   window.__fx = fx
+  window.__titles = []
+  // A working event bus: `listen` registers the page's callback, `__emit` is what Rust's `app.emit` does.
+  const callbacks = new Map()
+  const listeners = []
+  let callbackIds = 0
+  window.__emit = (event, payload) => {
+    for (const l of listeners.filter((entry) => entry.event === event)) callbacks.get(l.handler)?.({ event, id: l.id, payload })
+  }
+  const signedIn = (f, unlocked) => {
+    f.revision = (f.revision ?? 1) + 2 // a sign-in moves the revision; the boundary remounts the window on it
+    f.snapshot = { ...f.snapshot, phase: unlocked ? 'synced' : 'locked', account: { ...f.snapshot.account, email: 'sam@example.eu', logged_in: true, vault_unlocked: unlocked, auth_expired: false } }
+  }
   window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} }
   window.__TAURI_INTERNALS__ = {
     metadata: { currentWindow: { label: 'main' }, currentWebview: { label: 'main' } },
-    transformCallback: () => 1,
+    transformCallback: (callback) => { callbackIds += 1; callbacks.set(callbackIds, callback); return callbackIds },
     unregisterCallback() {},
     invoke: async (name, a) => {
       const f = window.__fx
       switch (name) {
+        case 'plugin:event|listen': { listeners.push({ event: a.event, handler: a.handler, id: listeners.length + 1 }); return listeners.length }
+        case 'plugin:event|unlisten': return null
+        case 'plugin:window|set_title': window.__titles.push(a.value); return null
+        case 'last_signed_in_email': return f.lastEmail ?? null
+        case 'quit_beebeeb': return null
+        case 'desktop_login':
+        case 'desktop_login_2fa': {
+          const outcome = { requires_2fa: false, reauthenticated: false, vault_unlocked: false, key_replaced: false, account_mismatch: null }
+          if (name === 'desktop_login' && f.login === 'twofa') return { ...outcome, requires_2fa: true }
+          if (f.login === 'mismatch') return { ...outcome, account_mismatch: { pending_changes: 3, unsent: { askId: 'a1', files: 2, copiedFiles: 2, others: 1, missingFiles: 0, earlierFolders: [] } } }
+          signedIn(f, false)
+          return outcome
+        }
+        case 'desktop_unlock_with_recovery_phrase': {
+          // The session is already here, so the revision does not move (an unlock moves nothing the boundary watches).
+          f.snapshot = { ...f.snapshot, phase: 'synced', account: { ...f.snapshot.account, vault_unlocked: true } }
+          return null
+        }
+        case 'start_browser_login': {
+          window.__emit('browser-login', { phase: 'connecting' })
+          window.__emit('browser-login', { phase: 'waiting', user_code: 'KQ7M-4TXP', verification_uri: 'https://app.beebeeb.io/cli-auth', expires_in: 300 })
+          if (f.browser !== 'done') return new Promise(() => {})
+          await new Promise((resolve) => setTimeout(resolve, 300))
+          window.__emit('browser-login', { phase: 'authorized' })
+          signedIn(f, true)
+          window.__emit('browser-login', { phase: 'done', email: 'sam@example.eu' })
+          return null
+        }
         case 'desktop_capabilities': return caps
         case 'desktop_platform': return 'macos'
         case 'app_version': return '0.8.12'
-        case 'sync_status': return { session_revision: 1, logged_in: f.snapshot.account.logged_in, vault_unlocked: f.snapshot.account.vault_unlocked, engine: 'running', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0, auth_expired: f.snapshot.account.auth_expired, engine_refusal: null }
+        case 'sync_status': return { session_revision: f.revision ?? 1, logged_in: f.snapshot.account.logged_in, vault_unlocked: f.snapshot.account.vault_unlocked, engine: 'running', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0, auth_expired: f.snapshot.account.auth_expired, engine_refusal: null }
         case 'popover_snapshot': return f.snapshot
         case 'account_subscription': return f.subscription
         case 'get_desktop_config': return f.config
@@ -172,11 +217,22 @@ function report() {
     barHeight: (() => { const b = document.querySelector('.mw-storage .ms-bar'); return b ? Math.round(b.getBoundingClientRect().height) : null })(),
     toolbarHeight: (() => { const t = document.querySelector('.mw-toolbar'); return t ? Math.round(t.getBoundingClientRect().height) : null })(),
     dialogs: document.querySelectorAll('[role="dialog"]').length,
+    titles: window.__titles,
+    focused: document.activeElement && document.activeElement !== document.body ? (document.activeElement.getAttribute('aria-label') ?? document.activeElement.innerText.trim()) : null,
+    codeFont: (() => { const c = document.querySelector('.mw-code'); return c ? getComputedStyle(c).fontFamily : null })(),
+    cardWidth: (() => { const c = document.querySelector('.mw-scard'); return c ? Math.round(c.getBoundingClientRect().width) : null })(),
+    cardCentred: (() => {
+      const c = document.querySelector('.mw-scard')
+      if (!c) return null
+      const r = c.getBoundingClientRect()
+      return Math.abs((r.left + r.right) / 2 - innerWidth / 2) <= 1
+    })(),
     sidebarButtons: sidebar ? [...sidebar.querySelectorAll('button')].map((b) => b.getAttribute('aria-label') ?? b.innerText.trim()) : [],
     text: document.body.innerText,
   }
 }
 
+const OUT = { snapshot: snapshot({ phase: 'signed_out', account: { email: null, logged_in: false, vault_unlocked: false }, storage: null }) }
 const gear = async (p) => { await p.getByRole('button', { name: 'Settings', exact: true }).click() }
 const section = (label) => async (p) => { await gear(p); await p.getByRole('button', { name: label }).first().click() }
 
@@ -199,10 +255,25 @@ const SCENARIOS = [
   { name: 'about-release-notes', fx: { update: { status: 'downgrade_available', current_version: '0.8.12', current_channel: 'beta', channel: 'stable', version: '0.8.11', body: 'Fixes the sync stall.\n\nNothing else changed.', release_notes_url: 'https://github.com/beebeeb-io/desktop/releases/tag/desktop-v0.8.11' } }, act: async (p) => { await section('About')(p); await p.getByRole('button', { name: 'Check for updates' }).click(); await p.getByRole('button', { name: 'Release notes' }).click(); await p.getByRole('dialog').waitFor() }, has: ['Beebeeb 0.8.11', 'Fixes the sync stall.', 'Nothing else changed.'], dialogs: 1 },
   { name: 'about-speed-test', act: async (p) => { await section('About')(p); await p.getByRole('button', { name: 'Run test' }).click(); await p.getByText('Latency 24 ms (18 to 41)').waitFor() }, has: ['Latency 24 ms (18 to 41) · Upload 35.2 Mbps · Download 94.0 Mbps'] },
   { name: 'signout-confirm', act: async (p) => { await section('Account, sam@example.eu, Basic plan')(p); await p.getByRole('button', { name: 'Sign out…' }).click(); await p.getByRole('dialog').waitFor() }, has: ['Sign out of this Mac?', 'Sync stops until you sign in again.', 'Cancel', 'Sign out'], dialogs: 1, hifi: 'hifi-s5-fig0' },
-  { name: 'signed-out', fx: { snapshot: snapshot({ phase: 'signed_out', account: { email: null, logged_in: false, vault_unlocked: false }, storage: null }) }, has: ['Sign in to Beebeeb', 'Sign in'], hasNot: ['Home', 'Settings'], noSidebar: true },
+  // ── Signed out (slice 2, hi-fi section 2): one centred card at a time, no sidebar ──
+  { name: 'signed-out', fx: OUT, has: ['Sign in to Beebeeb', 'Sign in with browser', 'Use email and password', 'New to Beebeeb?', 'Create an account on beebeeb.io', 'Quit Beebeeb'], hasNot: ['Home', 'Settings', 'daemon'], noSidebar: true, card: 380, title: 'Sign in to Beebeeb', hifiFig: 0, min: true },
+  { name: 'signin-browser-waiting', fx: OUT, act: async (p) => { await p.getByRole('button', { name: 'Sign in with browser' }).click(); await p.getByText('KQ7M-4TXP').waitFor() }, has: ['Type this code on the page we just opened in your browser.', 'KQ7M-4TXP', 'Browser didn’t open? Visit', 'app.beebeeb.io/cli-auth', 'Copy link', 'Waiting for browser…', 'Use email and password'], hasNot: ['https://'], noSidebar: true, card: 380, codeMono: true, hifiFig: 1 },
+  { name: 'signin-password', fx: { ...OUT, lastEmail: 'sam@example.eu' }, act: async (p) => { await p.getByRole('button', { name: 'Use email and password' }).click(); await p.getByLabel('Password').waitFor() }, has: ['Welcome back', 'Sign in to unlock your encrypted vault.', 'Email', 'Password', 'Sign in with browser instead'], noSidebar: true, card: 380, title: 'Welcome back', hifiFig: 2 },
+  { name: 'signin-2fa', fx: { ...OUT, lastEmail: 'sam@example.eu', login: 'twofa' }, act: async (p) => { await p.getByRole('button', { name: 'Use email and password' }).click(); await p.getByLabel('Password').fill('correct horse'); await p.getByRole('button', { name: 'Sign in', exact: true }).click(); await p.getByText('Two-factor authentication').waitFor() }, has: ['Two-factor authentication', 'Enter the 6-digit code from your authenticator app.', 'Authentication code', 'Verify', 'Use backup code'], noSidebar: true, card: 380 },
+  { name: 'session-ended', fx: { snapshot: snapshot({ phase: 'session_ended', account: { auth_expired: true } }) }, has: ['Sign in again', 'Sync is paused until you sign in again. Your files stay in Finder.', 'Signed in before as sam@example.eu', 'Sign in with browser', 'Use email and password', 'Quit Beebeeb'], hasNot: ['Create an account'], noSidebar: true, card: 380, title: 'Sign in again', hifiFig: 3 },
+  { name: 'set-up-this-mac', fx: { ...OUT, lastEmail: 'sam@example.eu', login: 'fresh' }, act: async (p) => { await p.getByRole('button', { name: 'Use email and password' }).click(); await p.getByLabel('Password').fill('correct horse'); await p.getByRole('button', { name: 'Sign in', exact: true }).click(); await p.getByText('Set up this Mac').waitFor() }, has: ['Set up this Mac', 'This Mac does not have your encryption keys yet. Restore them to continue.', 'Recovery phrase', 'Paste all 12 words into any box or type them one by one.', 'Unlock vault'], noSidebar: true, card: 440, title: 'Set up this Mac', hifiFig: 4, min: true },
+  { name: 'finder-adding', fx: { ...OUT, browser: 'done', finder: { setup: 'adding', reason: null, launch_location: 'applications', attempt: 1, max_attempts: 3, last_failure: null } }, act: async (p) => { await p.getByRole('button', { name: 'Sign in with browser' }).click(); await p.getByText('Adding Beebeeb to Finder…').waitFor() }, has: ['Beebeeb in Finder', 'Beebeeb adds itself to Finder after sign-in.', 'Adding Beebeeb to Finder…'], hasNot: ['Continue'], noSidebar: true, card: 440, title: 'Beebeeb in Finder', hifiFig: 5 },
+  { name: 'finder-failed', fx: { ...OUT, browser: 'done', finder: { setup: 'user_disabled', reason: 'user_disabled', launch_location: 'applications', attempt: 1, max_attempts: 3, last_failure: null } }, act: async (p) => { await p.getByRole('button', { name: 'Sign in with browser' }).click(); await p.getByText('Beebeeb is turned off in System Settings.').waitFor() }, has: ['Beebeeb in Finder', 'Beebeeb is turned off in System Settings.', 'Open System Settings'], hasNot: ['Continue'], noSidebar: true, card: 440 },
+  // The Finder status moves the window on to Home when the reconciler says Ready: the same window, no close, no new window.
+  { name: 'finder-ready-home', fx: { ...OUT, browser: 'done', finder: { setup: 'adding', reason: null, launch_location: 'applications', attempt: 1, max_attempts: 3, last_failure: null } }, act: async (p) => {
+    await p.getByRole('button', { name: 'Sign in with browser' }).click()
+    await p.getByText('Adding Beebeeb to Finder…').waitFor()
+    await p.evaluate(() => { const ready = { setup: 'ready', reason: null, launch_location: 'applications', attempt: 1, max_attempts: 3, last_failure: null }; window.__fx.finder = ready; window.__emit('finder-setup-changed', ready) })
+    await p.getByText('End-to-end encrypted').waitFor()
+  }, has: ['Home', 'End-to-end encrypted', 'Beebeeb in Finder', 'Your vault appears under Locations in Finder.', 'Open in Finder', 'sam@example.eu'], hasNot: ['Adding Beebeeb to Finder…', 'Continue', 'Control center'], title: 'Beebeeb' },
+  { name: 'account-switch', fx: { ...OUT, lastEmail: 'sam@example.eu', login: 'mismatch' }, act: async (p) => { await p.getByRole('button', { name: 'Use email and password' }).click(); await p.getByLabel('Password').fill('correct horse'); await p.getByRole('button', { name: 'Sign in', exact: true }).click(); await p.getByText('Switch accounts with changes not sent?').waitFor() }, has: ['Switch accounts with changes not sent?', 'This Mac is signed in to another Beebeeb account. Switching signs that account out of this Mac.', 'Cancel', 'Sign out and switch'], noSidebar: true, card: 460, focus: 'Cancel', hifiFig: 6, min: true },
   { name: 'signed-out-settings', fx: { snapshot: snapshot({ phase: 'signed_out', account: { email: null, logged_in: false, vault_unlocked: false }, storage: null }) }, open: '&tab=general', has: ['Sign in', 'Settings', 'General', 'About', 'Open Beebeeb at login', 'Appearance', 'Tell me about'], hasNot: ['From your account'], sidebar: ['Back to Sign in', 'General', 'About'], hifi: 'hifi-s4-fig6' },
   { name: 'signed-out-about', fx: { snapshot: snapshot({ phase: 'signed_out', account: { email: null, logged_in: false, vault_unlocked: false }, storage: null }) }, open: '&tab=about', has: ['Beebeeb for Mac', 'Release channel'], hasNot: ['Test connection speed'] },
-  { name: 'session-ended', fx: { snapshot: snapshot({ phase: 'session_ended', account: { auth_expired: true } }) }, has: ['Sign in again', 'Sync is paused until you sign in again. Your files stay in Finder.', 'Signed in before as sam@example.eu'], noSidebar: true },
 ]
 
 const browser = await chromium.launch({ headless: true })
@@ -222,7 +293,10 @@ try {
         const errors = []
         page.on('pageerror', (e) => errors.push(String(e)))
         page.on('console', (m) => { if (m.type() === 'error') errors.push(`console: ${m.text()}`) })
-        await page.addInitScript(installBackend, { caps, fx: structuredClone({ ...base, ...(sc.fx ?? {}) }) })
+        // "Last checked 1 min ago" must hold at every point of a long run: the check time is relative to now, per scenario.
+        const fixture = structuredClone({ ...base, ...(sc.fx ?? {}) })
+        fixture.snapshot.engine.last_tick_ok_at = Math.floor(Date.now() / 1000) - 70
+        await page.addInitScript(installBackend, { caps, fx: fixture })
         try {
           await page.goto(`${pathToFileURL(pagePath).href}?window=main&platform=macos${sc.open ?? ''}`)
           await page.waitForSelector('.mw-window', { timeout: 8000 })
@@ -242,6 +316,14 @@ try {
           if (sc.bar) check(r.barHeight === 4, `${label}: the storage bar is drawn, 4 pt tall`, `${r.barHeight}`)
           if (sc.sidebar) check(JSON.stringify(r.sidebarButtons) === JSON.stringify(sc.sidebar), `${label}: the sidebar lists ${sc.sidebar.join(', ')}`, r.sidebarButtons.join(', '))
           if (sc.dialogs !== undefined) check(r.dialogs === sc.dialogs, `${label}: ${sc.dialogs} sheet`, `${r.dialogs}`)
+          // Slice 2: the signed-out cards (hi-fi section 2).
+          if (sc.card) {
+            check(r.cardWidth === sc.card, `${label}: the card is ${sc.card} pt wide`, `${r.cardWidth}`)
+            check(r.cardCentred === true, `${label}: the card is centred in the window`)
+          }
+          if (sc.title) check(r.titles.at(-1) === sc.title, `${label}: the window is titled "${sc.title}"`, r.titles.join(' | '))
+          if (sc.codeMono) check(/JetBrains Mono|monospace/.test(r.codeFont ?? ''), `${label}: the device code is mono`, `${r.codeFont}`)
+          if (sc.focus) check(r.focused === sc.focus, `${label}: focus is on ${sc.focus}`, `${r.focused}`)
           check(errors.length === 0, `${label}: no page errors`, errors.join(' | '))
           // The native traffic lights, drawn for the PNG only (the overlay title bar puts them over the sidebar).
           await page.evaluate(() => {
@@ -259,6 +341,26 @@ try {
           await context.close()
         }
       }
+    }
+  }
+  // Section 2's figures are one screen in one theme each (hifi-s2-figK-{light,dark}.png): compare both themes.
+  if (process.env.HIFI_PNG_DIR) {
+    for (const sc of SCENARIOS.filter((s) => s.hifiFig !== undefined)) {
+      const theirs = ['light', 'dark'].map((scheme) => path.join(process.env.HIFI_PNG_DIR, `hifi-s2-fig${sc.hifiFig}-${scheme}.png`))
+      if (!theirs.every((file) => existsSync(file))) { check(false, `${sc.name}: hi-fi figures hifi-s2-fig${sc.hifiFig}-{light,dark}.png exist`); continue }
+      const ours = ['light', 'dark'].map((scheme) => path.join(output, 'png', `${sc.name}-${scheme}.png`))
+      if (!ours.every((file) => existsSync(file))) { check(false, `${sc.name}: this build's screenshots exist to compare`); continue }
+      const html = path.join(output, 'png', `compare-${sc.name}.html`)
+      await writeFile(html, `<!doctype html><meta charset="utf-8"><body style="margin:0;background:#cfccc4;font:12px monospace;color:#222;padding:16px">
+        <div style="margin-bottom:6px">hi-fi: design/hifi/macos-two-surface.html, section 2, figure ${sc.hifiFig}: light, then dark</div>
+        <div style="display:flex;gap:16px">${theirs.map((f) => `<img src="${pathToFileURL(f).href}" style="width:920px">`).join('')}</div>
+        <div style="margin:16px 0 6px">this build, Chromium 1x, 920 x 620: light, then dark</div>
+        <div style="display:flex;gap:16px">${ours.map((f) => `<img src="${pathToFileURL(f).href}">`).join('')}</div></body>`)
+      const page = await browser.newPage({ viewport: { width: 1900, height: 1200 } })
+      await page.goto(pathToFileURL(html).href)
+      await page.waitForFunction(() => [...document.images].every((i) => i.complete && i.naturalWidth > 0))
+      await page.screenshot({ path: path.join(output, 'png', `compare-${sc.name}.png`), fullPage: true })
+      await page.close()
     }
   }
   // Side by side with the hi-fi's figures (each figure holds the light and dark copies of one screen).

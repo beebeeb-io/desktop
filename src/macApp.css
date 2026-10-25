@@ -593,7 +593,6 @@
 
 .mw-link:focus-visible,
 .mw-input:focus-visible,
-.mw-word-input:focus-visible,
 .mw-scard .ms-btn:focus-visible {
   outline: 2px solid var(--ink);
   outline-offset: 2px;
@@ -721,8 +720,21 @@
   font-size: 12.5px;
 }
 
+/* Cancel is the safe choice and holds focus when the account switch opens (hi-fi `.btn.focus`): its ring shows whenever it
+   has focus, not only for keyboard focus, which a script-set focus after a click is not. */
+.mw-scard-actions .ms-btn:first-child:focus {
+  outline: 2px solid var(--ink);
+  outline-offset: 1px;
+}
+
+/* The ring is the box's, not the input's inside it (the input would ring over the index number). */
+.mw-word:focus-within {
+  outline: 2px solid var(--ink);
+  outline-offset: 1px;
+}
+
 .mw-word-input:focus-visible {
-  outline-offset: 4px;
+  outline: none;
 }
 
 /* The Finder status line while Beebeeb adds itself. */

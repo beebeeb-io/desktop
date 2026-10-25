@@ -605,12 +605,33 @@ describe('signed out: the window shows the sign-in screens (slice 2, spec §7.4)
     expect(win(m)[0].props.screen).toBe('switch')
   })
 
-  test('a step that needs a session is dropped when the session is gone: the store is reset and sign-in shows (the window shown again after a sign-out)', async () => {
+  test('a step that needs a session is dropped when the window mounts and the session is gone: sign-in shows at once, and the store is reset', async () => {
     signInStore.setSignInFlow({ ...signInModel.IDLE_FLOW, step: 'finder' })
     const { m } = openWindow({ snap: out })
+    // The very first render with an account already shows sign-in, not one frame of a Finder screen for an account
+    // that left; the store follows on the next effect.
     await settle(m)
     expect(win(m)[0].props.screen).toBe('signin')
     expect(signInStore.getSignInFlow()).toEqual(signInModel.IDLE_FLOW)
+  })
+
+  // The bug the real-browser run found. A sign-in lands in the window that is still showing the snapshot it read before
+  // it (the next read is up to five seconds away, and the boundary remounts the window within one): the step the
+  // sign-in set is the screen, and is not dropped against that stale snapshot.
+  test('a step set after the window mounted is never judged against a snapshot read before it: the stale signed-out snapshot keeps the step', async () => {
+    const { m } = openWindow({ snap: out })
+    await settle(m)
+    expect(win(m)[0].props.screen).toBe('signin')
+    win(m)[0].props.onFlow({ ...signInModel.IDLE_FLOW, step: 'unlock' })
+    m.render()
+    await settle(m)
+    expect(win(m)[0].props.screen).toBe('unlock')
+    expect(signInStore.getSignInFlow().step).toBe('unlock')
+    win(m)[0].props.onFlow({ ...signInModel.IDLE_FLOW, step: 'finder' })
+    m.render()
+    await settle(m)
+    expect(win(m)[0].props.screen).toBe('finder')
+    expect(signInStore.getSignInFlow().step).toBe('finder')
   })
 
   test('the flow is handed to the screens through the store, so it survives the remount a sign-in causes (AccountSessionBoundary)', async () => {
