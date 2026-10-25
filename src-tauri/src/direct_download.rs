@@ -455,6 +455,8 @@ pub(crate) mod test_support {
         pub target: String,
         pub headers: Vec<(String, String)>,
         pub body: Vec<u8>,
+        /// When the request's head arrived.
+        pub at: std::time::Instant,
     }
 
     impl Seen {
@@ -606,6 +608,7 @@ pub(crate) mod test_support {
                 break p + 4;
             }
         };
+        let arrived = std::time::Instant::now();
         let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
         let mut lines = head.split("\r\n");
         let mut first = lines.next().unwrap_or("").split_whitespace();
@@ -633,6 +636,7 @@ pub(crate) mod test_support {
             target,
             headers,
             body,
+            at: arrived,
         };
         let reply = handler(&request);
         seen.lock().unwrap().push(request);
@@ -1556,11 +1560,15 @@ mod tests {
         pair.knobs().storage.insert(0, vec![StorageScript::Status(503); 4].into());
         // Retry-After 2 s is longer than the 1 s the retry would wait on its own: it must be honoured.
         pair.knobs().api_chunks.insert(0, vec![ApiScript::RateLimited(2), ApiScript::Status(503)].into());
-        let started = std::time::Instant::now();
         let (bytes, transport) = done(run(&pair).await);
         assert_eq!((bytes, transport), (pair.plain(), FileTransport::Mixed));
-        assert_eq!(pair.api_chunk_requests().len(), 3, "429, 503, then the chunk");
-        assert!(started.elapsed() >= std::time::Duration::from_secs(4), "Retry-After 2 s, then the doubled 2 s");
+        let pinned = pair.api_chunk_requests();
+        assert_eq!(pinned.len(), 3, "429, 503, then the chunk");
+        // Measured between the requests the server saw: the storage renewals before them do not count.
+        let after_429 = pinned[1].at.duration_since(pinned[0].at);
+        assert!(after_429 >= std::time::Duration::from_millis(1950), "Retry-After 2 s was honoured: {after_429:?}");
+        let after_503 = pinned[2].at.duration_since(pinned[1].at);
+        assert!(after_503 >= std::time::Duration::from_millis(1950), "then the doubled 2 s: {after_503:?}");
     }
 
     #[tokio::test]
