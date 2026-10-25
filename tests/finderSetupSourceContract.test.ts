@@ -225,6 +225,9 @@ describe('the sweep: every call site of a Finder command, and what it does with 
       'MacApp.tsx | open_finder_location': 1,
       'MacSettings.tsx | finder.run': 1,
       'MacSettings.tsx | reset_macos_integration': 1,
+      // The popover uses the same mapped Finder sentences without a toast.
+      'PopoverApp.tsx | open_finder_location': 1,
+      'PopoverApp.tsx | wrapper:runFinderSetupAction': 4,
       'WindowsApp.tsx | open_finder_location': 1,
       [TRAY]: 1,
       'finderSetup.ts | finder_setup_*': 4,
@@ -253,6 +256,7 @@ describe('the sweep: every call site of a Finder command, and what it does with 
       'DesktopQuickSearch.tsx': { open_in_finder: 2 },
       'MacApp.tsx': { open_finder_location: 1 },
       'MacSettings.tsx': { reset_macos_integration: 1 },
+      'PopoverApp.tsx': { open_finder_location: 1 },
       'WindowsApp.tsx': { open_finder_location: 2 },
       'WindowsTray.tsx': { open_finder_location: 1 },
       'finderSetup.ts': { 'finder_setup_*': 7, open_login_items_and_extensions_settings: 2 },
