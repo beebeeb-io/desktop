@@ -596,3 +596,32 @@ not reachable there today either.
 Deviations from the hi-fi and the shipped step are listed in the PR: the Finder screen draws "turned off in System Settings"
 on the error wash (§7.5; the shipped step drew a neutral status), the in-window switch step shows an E3 that follows an ask
 (the shipped step hid it behind the stale ask), and the address is shown without its scheme.
+
+### The fix round after the /code-review of PR #143 (2026-10-25)
+
+The review found 0 P1, 3 P2 and 10 P3. Fixed in the PR, each red first and mutation-checked:
+
+- **P2-1, a sign-out's sentence is held, not toasted.** "Sign out and switch" with an unconfirmed Finder removal (FB-24) put
+  the warning in a toast, and the remount the sign-out causes (`AccountSessionBoundary`) took it. The switch step now holds it
+  (`accountSession.ts`, as Settings does) and the signed-out card shows it; a sign-out that failed AFTER the removal is held
+  the same way (the step asks `sync_status` once, whose answer is not guarded against a revision change, and holds only on a
+  definite "signed out"; otherwise it is today's toast). `MacApp` no longer leaves a card for Settings to show a held sentence
+  (`heldNoteGoesToSettings`). Tested under the real boundary: `tests/signInFlowBoundary.test.tsx`.
+- **P2-2, a stale switch card.** The card asks about the account that is still on this Mac; when it signs out another way,
+  `normalizeFlow` drops the step and keeps the typed address (the shape `afterSwitched` gives).
+- **P2-3, ⌘W on "Set up this Mac".** Rust keeps the pending step for the process (`AppState.pending_setup`, `set_pending_setup`,
+  `pending_setup`; forgotten in `keys_arrived`, answered only while signed in and locked); a window that opens signed in and
+  locked asks once and resumes there, saying "Loading…" until Rust answers. `unlock_vault` on a Mac with a token and no key used
+  to answer the Keychain's words ("unlock vault key from Keychain: secret not found"); it answers the approved Set up this Mac
+  sentence now, and Home's locked card offers "Use your recovery phrase". The error `unlock_vault` shows for a signed-in person
+  was NOT "Sign in before unlocking the vault." (that is only the token-missing case, where the person is no longer signed in).
+  A relaunch after quit stays task 1747 Part 2 (the Keychain signal).
+- **P3s:** `open_reauth_window` asks for "Sign in again" whatever `auth_expired` says (`MainNav::Reauth`, the flow step `reauth`);
+  an attempt id on `browser-login` events (`start_browser_login`'s `attempt_id`, a task-local read by `emit`; the controller reads
+  only its own attempt and ignores a late answer of an older one); the settling screen says the load failed and offers Try again
+  instead of "Loading…" forever, and carries the window's title; the offline "Try again" re-checks connectivity (`OfflineState`)
+  and starts no handoff; the Finder card offers "Continue to Home" while Finder is not Ready (a recorded deviation, spec §7.5);
+  a typo in `windowTitle.ts`.
+- **Deferred:** P3-5 (the switch snapshot is owned by the label `onboarding`) is task 1747 Part 1, with the 1887 pins it edits
+  (`docs/plans/2026-10-25-1747-account-view.md`); P3-3 and Q4 (a Home flash) are on the device list; P3-9 (the duplicated steps of
+  `Onboarding.tsx` and `signInModel.ts`) goes away with the next Linux sign-in work.

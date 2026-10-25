@@ -145,13 +145,13 @@ function installBackend({ caps, fx }) {
           return null
         }
         case 'start_browser_login': {
-          window.__emit('browser-login', { phase: 'connecting' })
-          window.__emit('browser-login', { phase: 'waiting', user_code: 'KQ7M-4TXP', verification_uri: 'https://app.beebeeb.io/cli-auth', expires_in: 300 })
+          window.__emit('browser-login', { attempt: a?.attempt, phase: 'connecting' })
+          window.__emit('browser-login', { attempt: a?.attempt, phase: 'waiting', user_code: 'KQ7M-4TXP', verification_uri: 'https://app.beebeeb.io/cli-auth', expires_in: 300 })
           if (f.browser !== 'done') return new Promise(() => {})
           await new Promise((resolve) => setTimeout(resolve, 300))
-          window.__emit('browser-login', { phase: 'authorized' })
+          window.__emit('browser-login', { attempt: a?.attempt, phase: 'authorized' })
           signedIn(f, true)
-          window.__emit('browser-login', { phase: 'done', email: 'sam@example.eu' })
+          window.__emit('browser-login', { attempt: a?.attempt, phase: 'done', email: 'sam@example.eu' })
           return null
         }
         case 'desktop_capabilities': return caps
@@ -181,7 +181,19 @@ function installBackend({ caps, fx }) {
         case 'run_speedtest': return f.speed
         case 'check_for_updates_now': return f.update
         case 'report_problem': return { path: '/Users/sam/Desktop/beebeeb-support.json', email_opened: true }
-        case 'consume_main_navigation': return null
+        case 'consume_main_navigation': { const nav = f.nav ?? null; f.nav = null; return nav }
+        // The fix round after the /code-review of #143: Rust's sign-out (it moves the revision, as `clear_session_impl` does),
+        // the unlock with no key, and the set-up step Rust keeps for the process.
+        case 'clear_session': {
+          f.snapshot = { ...f.snapshot, phase: 'signed_out', account: { ...f.snapshot.account, email: null, logged_in: false, vault_unlocked: false, auth_expired: false } }
+          f.revision = (f.revision ?? 1) + 2
+          if (f.clear === 'fail-after-removal') throw 'Sign-out stopped after Beebeeb was removed from Finder. Restart Beebeeb and sign in again.'
+          return { warning: f.clear === 'warning' ? { code: 'finder_removal_unconfirmed', sentence: 'You are signed out, but Beebeeb could not confirm that it was removed from Finder. If it still shows there, restart Beebeeb and sign out again.' } : null }
+        }
+        case 'unlock_vault': { if (f.unlock === 'nokey') throw 'This Mac does not have your encryption keys yet. Restore them to continue.'; return null }
+        case 'pending_setup': return f.pending ?? null
+        case 'set_pending_setup': return null
+        case 'sign_out_result_ack': return null
         case 'consume_menu_update_check': return false
         case 'consume_sign_out_flow_request': return false
         case 'main_window_state': return null
@@ -265,8 +277,8 @@ const SCENARIOS = [
   { name: 'signin-2fa', fx: { ...OUT, lastEmail: 'sam@example.eu', login: 'twofa' }, act: async (p) => { await p.getByRole('button', { name: 'Use email and password' }).click(); await p.getByLabel('Password').fill('correct horse'); await p.getByRole('button', { name: 'Sign in', exact: true }).click(); await p.getByText('Two-factor authentication').waitFor() }, has: ['Two-factor authentication', 'Enter the 6-digit code from your authenticator app.', 'Authentication code', 'Verify', 'Use backup code'], noSidebar: true, card: 380 },
   { name: 'session-ended', fx: { snapshot: snapshot({ phase: 'session_ended', account: { auth_expired: true } }) }, has: ['Sign in again', 'Sync is paused until you sign in again. Your files stay in Finder.', 'Signed in before as sam@example.eu', 'Sign in with browser', 'Use email and password', 'Quit Beebeeb'], hasNot: ['Create an account'], noSidebar: true, card: 380, title: 'Sign in again', hifiFig: 3 },
   { name: 'set-up-this-mac', fx: { ...OUT, lastEmail: 'sam@example.eu', login: 'fresh' }, act: async (p) => { await p.getByRole('button', { name: 'Use email and password' }).click(); await p.getByLabel('Password').fill('correct horse'); await p.getByRole('button', { name: 'Sign in', exact: true }).click(); await p.getByText('Set up this Mac').waitFor() }, has: ['Set up this Mac', 'This Mac does not have your encryption keys yet. Restore them to continue.', 'Recovery phrase', 'Paste all 12 words into any box or type them one by one.', 'Unlock vault'], noSidebar: true, card: 440, title: 'Set up this Mac', hifiFig: 4, min: true },
-  { name: 'finder-adding', fx: { ...OUT, browser: 'done', finder: { setup: 'adding', reason: null, launch_location: 'applications', attempt: 1, max_attempts: 3, last_failure: null } }, act: async (p) => { await p.getByRole('button', { name: 'Sign in with browser' }).click(); await p.getByText('Adding Beebeeb to Finder…').waitFor() }, has: ['Beebeeb in Finder', 'Beebeeb adds itself to Finder after sign-in.', 'Adding Beebeeb to Finder…'], hasNot: ['Continue'], noSidebar: true, card: 440, title: 'Beebeeb in Finder', hifiFig: 5 },
-  { name: 'finder-failed', fx: { ...OUT, browser: 'done', finder: { setup: 'user_disabled', reason: 'user_disabled', launch_location: 'applications', attempt: 1, max_attempts: 3, last_failure: null } }, act: async (p) => { await p.getByRole('button', { name: 'Sign in with browser' }).click(); await p.getByText('Beebeeb is turned off in System Settings.').waitFor() }, has: ['Beebeeb in Finder', 'Beebeeb is turned off in System Settings.', 'Open System Settings'], hasNot: ['Continue'], noSidebar: true, card: 440 },
+  { name: 'finder-adding', fx: { ...OUT, browser: 'done', finder: { setup: 'adding', reason: null, launch_location: 'applications', attempt: 1, max_attempts: 3, last_failure: null } }, act: async (p) => { await p.getByRole('button', { name: 'Sign in with browser' }).click(); await p.getByText('Adding Beebeeb to Finder…').waitFor() }, has: ['Beebeeb in Finder', 'Beebeeb adds itself to Finder after sign-in.', 'Adding Beebeeb to Finder…', 'Continue to Home'], noSidebar: true, card: 440, title: 'Beebeeb in Finder', hifiFig: 5 },
+  { name: 'finder-failed', fx: { ...OUT, browser: 'done', finder: { setup: 'user_disabled', reason: 'user_disabled', launch_location: 'applications', attempt: 1, max_attempts: 3, last_failure: null } }, act: async (p) => { await p.getByRole('button', { name: 'Sign in with browser' }).click(); await p.getByText('Beebeeb is turned off in System Settings.').waitFor() }, has: ['Beebeeb in Finder', 'Beebeeb is turned off in System Settings.', 'Open System Settings', 'Continue to Home'], noSidebar: true, card: 440 },
   // The Finder status moves the window on to Home when the reconciler says Ready: the same window, no close, no new window.
   { name: 'finder-ready-home', fx: { ...OUT, browser: 'done', finder: { setup: 'adding', reason: null, launch_location: 'applications', attempt: 1, max_attempts: 3, last_failure: null } }, act: async (p) => {
     await p.getByRole('button', { name: 'Sign in with browser' }).click()
@@ -275,6 +287,21 @@ const SCENARIOS = [
     await p.getByText('End-to-end encrypted').waitFor()
   }, has: ['Home', 'End-to-end encrypted', 'Beebeeb in Finder', 'Your vault appears under Locations in Finder.', 'Open in Finder', 'sam@example.eu'], hasNot: ['Adding Beebeeb to Finder…', 'Continue', 'Control center'], title: 'Beebeeb' },
   { name: 'account-switch', fx: { ...OUT, lastEmail: 'sam@example.eu', login: 'mismatch' }, act: async (p) => { await p.getByRole('button', { name: 'Use email and password' }).click(); await p.getByLabel('Password').fill('correct horse'); await p.getByRole('button', { name: 'Sign in', exact: true }).click(); await p.getByText('Switch accounts with changes not sent?').waitFor() }, has: ['Switch accounts with changes not sent?', 'This Mac is signed in to another Beebeeb account. Switching signs that account out of this Mac.', 'Cancel', 'Sign out and switch'], noSidebar: true, card: 460, focus: 'Cancel', hifiFig: 6, min: true },
+  // ── The fix round after the /code-review of #143 (real AccountSessionBoundary, in Chromium) ──
+  // P2-1: a sign-out that happened with an unconfirmed Finder removal is HELD, so the signed-out card shows it after the
+  // remount the sign-out causes (a toast did not survive it). The window stays on the card: no Settings, no sidebar.
+  { name: 'switch-signout-warning', fx: { snapshot: snapshot({ phase: 'session_ended', account: { auth_expired: true } }), lastEmail: 'sam@example.eu', login: 'mismatch', clear: 'warning' }, act: async (p) => { await p.getByRole('button', { name: 'Use email and password' }).click(); await p.getByLabel('Password').fill('correct horse'); await p.getByRole('button', { name: 'Sign in', exact: true }).click(); await p.getByText('Switch accounts with changes not sent?').waitFor(); await p.getByRole('button', { name: 'Sign out and switch' }).click(); await p.getByText('could not confirm that it was removed from Finder').waitFor() }, has: ['You are signed out, but Beebeeb could not confirm that it was removed from Finder.', 'Welcome back'], hasNot: ['Switch accounts with changes not sent?', 'Settings'], noSidebar: true, card: 380 },
+  { name: 'switch-signout-failed-after-removal', fx: { snapshot: snapshot({ phase: 'session_ended', account: { auth_expired: true } }), lastEmail: 'sam@example.eu', login: 'mismatch', clear: 'fail-after-removal' }, act: async (p) => { await p.getByRole('button', { name: 'Use email and password' }).click(); await p.getByLabel('Password').fill('correct horse'); await p.getByRole('button', { name: 'Sign in', exact: true }).click(); await p.getByText('Switch accounts with changes not sent?').waitFor(); await p.getByRole('button', { name: 'Sign out and switch' }).click(); await p.getByText('Sign-out stopped after Beebeeb was removed from Finder.').waitFor() }, has: ['Sign-out stopped after Beebeeb was removed from Finder. Restart Beebeeb and sign in again.'], hasNot: ['Switch accounts with changes not sent?'], noSidebar: true, card: 380 },
+  // P2-2: the account signs out another way (the app menu) while the switch card is up. The revision moves; the card must
+  // not come back after the remount, and the address typed for the next sign-in stays (the email form opens with it).
+  { name: 'switch-card-then-menu-sign-out', fx: { snapshot: snapshot({ phase: 'session_ended', account: { auth_expired: true } }), lastEmail: 'sam@example.eu', login: 'mismatch' }, act: async (p) => { await p.getByRole('button', { name: 'Use email and password' }).click(); await p.getByLabel('Password').fill('correct horse'); await p.getByRole('button', { name: 'Sign in', exact: true }).click(); await p.getByText('Switch accounts with changes not sent?').waitFor(); await p.evaluate(() => { const f = window.__fx; f.snapshot = { ...f.snapshot, phase: 'signed_out', account: { ...f.snapshot.account, email: null, logged_in: false, vault_unlocked: false, auth_expired: false } }; f.revision = (f.revision ?? 1) + 2 }); await p.getByText('Welcome back').waitFor() }, has: ['Welcome back', 'Sign in with browser instead'], hasNot: ['Switch accounts with changes not sent?', 'Sign out and switch'], noSidebar: true, card: 380 },
+  // P2-3 b: the Keychain holds a token and no key. The unlock says the approved sentence, and offers the phrase.
+  { name: 'locked-without-key', fx: { snapshot: snapshot({ phase: 'locked', account: { vault_unlocked: false }, storage: null }), unlock: 'nokey' }, act: async (p) => { await p.getByRole('button', { name: 'Unlock vault' }).click(); await p.getByRole('button', { name: 'Use your recovery phrase' }).waitFor() }, has: ['Your vault is locked', 'This Mac does not have your encryption keys yet. Restore them to continue.', 'Use your recovery phrase'], hasNot: ['secret not found', 'Sign in before unlocking'] },
+  { name: 'locked-without-key-phrase', fx: { snapshot: snapshot({ phase: 'locked', account: { vault_unlocked: false }, storage: null }), unlock: 'nokey' }, act: async (p) => { await p.getByRole('button', { name: 'Unlock vault' }).click(); await p.getByRole('button', { name: 'Use your recovery phrase' }).click(); await p.getByText('Set up this Mac').waitFor() }, has: ['Set up this Mac', 'Recovery phrase', 'Unlock vault'], noSidebar: true, card: 440, title: 'Set up this Mac' },
+  // P2-3 a: a window reopened (⌘W destroyed the earlier one) while a password sign-in was waiting for the recovery phrase.
+  { name: 'reopened-pending-setup', fx: { snapshot: snapshot({ phase: 'locked', account: { vault_unlocked: false }, storage: null }), pending: { key_replaced: false } }, has: ['Set up this Mac', 'This Mac does not have your encryption keys yet. Restore them to continue.'], hasNot: ['Your vault is locked'], noSidebar: true, card: 440, title: 'Set up this Mac' },
+  // P3-1: `open_reauth_window` asks for Sign in again whatever the session says.
+  { name: 'sign-in-again-asked', fx: { nav: { to: 'reauth' } }, has: ['Sign in again', 'Signed in before as sam@example.eu'], noSidebar: true, card: 380, title: 'Sign in again' },
   { name: 'signed-out-settings', fx: { snapshot: snapshot({ phase: 'signed_out', account: { email: null, logged_in: false, vault_unlocked: false }, storage: null }) }, open: '&tab=general', has: ['Sign in', 'Settings', 'General', 'About', 'Open Beebeeb at login', 'Appearance', 'Tell me about'], hasNot: ['From your account'], sidebar: ['Back to Sign in', 'General', 'About'], hifi: 'hifi-s4-fig6' },
   { name: 'signed-out-about', fx: { snapshot: snapshot({ phase: 'signed_out', account: { email: null, logged_in: false, vault_unlocked: false }, storage: null }) }, open: '&tab=about', has: ['Beebeeb for Mac', 'Release channel'], hasNot: ['Test connection speed'] },
 ]

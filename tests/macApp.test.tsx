@@ -16,6 +16,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { createElement, Fragment } from 'react'
 import * as accountSession from '../src/accountSession'
+import * as copy from '../src/accountViewCopy'
 import * as desktopApi from '../src/desktopApi'
 import * as finderSetup from '../src/finderSetup'
 import * as finderSetupCopy from '../src/finderSetupCopy'
@@ -102,6 +103,7 @@ function openWindow(opts: WindowOpts = {}) {
     expand: true,
     bindings: {
       ...accountSession,
+      ...copy,
       ...desktopApi,
       ...windowModel,
       SETTINGS_TABS: model.SETTINGS_TABS,
@@ -115,7 +117,6 @@ function openWindow(opts: WindowOpts = {}) {
       setSignInFlow: signInStore.setSignInFlow,
       subscribeSignInFlow: signInStore.subscribeSignInFlow,
       setMainWindowTitle: async (title: string) => { titles.push(title) },
-      SIGNED_IN_WINDOW_TITLE: 'Beebeeb',
       useSettingsConfig: settingsStub,
       listen: bus.listen,
       connectNativeUpdateMenu: () => () => {},
@@ -516,6 +517,69 @@ describe('moved from the Settings window\'s root (task 1683 slice 4, now the win
   })
 })
 
+describe('a reopened window resumes a pending set-up step (review P2-3)', () => {
+  const locked = () => snapshot({ phase: 'locked', account: { vault_unlocked: false } })
+  const signedOut = () => snapshot({ phase: 'signed_out', account: { email: null, logged_in: false, vault_unlocked: false } })
+  const ended = () => snapshot({ phase: 'session_ended', account: { auth_expired: true } })
+  const win = (m: Mounted) => find(m, (el) => el.props['data-signin'] !== undefined).map((el) => ({ props: el.props['data-props'] }))
+  const asked = (m: Mounted) => m.calls.filter((c) => c.name === 'pending_setup')
+
+  test('signed in, locked, nothing in progress: it asks Rust once, and a pending step resumes at Set up this Mac', async () => {
+    const { m } = openWindow({ snap: locked, backend: { pending_setup: () => ({ key_replaced: true }) } })
+    await settle(m)
+    expect(win(m)[0].props.screen).toBe('unlock')
+    expect(signInStore.getSignInFlow()).toEqual({ ...signInModel.IDLE_FLOW, step: 'unlock', keyReplaced: true })
+    expect(asked(m)).toHaveLength(1)
+    // The reads that follow (every five seconds) do not ask again.
+    m.render()
+    await settle(m)
+    expect(asked(m)).toHaveLength(1)
+  })
+
+  test('nothing pending is Home, with the locked card', async () => {
+    const { m } = openWindow({ snap: locked, backend: { pending_setup: () => null } })
+    await settle(m)
+    expect(win(m)).toHaveLength(0)
+    expect(shown(m)).toEqual(['home'])
+    expect(signInStore.getSignInFlow()).toEqual(signInModel.IDLE_FLOW)
+  })
+
+  test('until Rust answers the window shows settling, never a flash of Home', async () => {
+    let release: (value: unknown) => void = () => {}
+    const answer = new Promise((resolve) => { release = resolve })
+    const { m } = openWindow({ snap: locked, backend: { pending_setup: () => answer } })
+    await settle(m)
+    expect(win(m)[0].props.screen).toBe('settling')
+    expect(shown(m)).toEqual([])
+    release({ key_replaced: false })
+    await settle(m)
+    expect(win(m)[0].props.screen).toBe('unlock')
+  })
+
+  test('an answer that cannot be had leaves Home: a failed ask must not trap the window on a card', async () => {
+    const { m } = openWindow({ snap: locked, backend: { pending_setup: () => { throw new Error('no answer') } } })
+    await settle(m)
+    expect(win(m)).toHaveLength(0)
+    expect(shown(m)).toEqual(['home'])
+  })
+
+  test('it asks nothing of a window that is unlocked, signed out, or whose session ended', async () => {
+    for (const snap of [() => snapshot(), signedOut, ended]) {
+      const { m } = openWindow({ snap, backend: { pending_setup: () => ({ key_replaced: false }) } })
+      await settle(m)
+      expect(asked(m)).toHaveLength(0)
+    }
+  })
+
+  test('it asks nothing while a step is in progress (the person is on a card already)', async () => {
+    signInStore.setSignInFlow({ ...signInModel.IDLE_FLOW, step: 'finder' })
+    const { m } = openWindow({ snap: locked, backend: { pending_setup: () => ({ key_replaced: false }) } })
+    await settle(m)
+    expect(asked(m)).toHaveLength(0)
+    expect(win(m)[0].props.screen).toBe('finder')
+  })
+})
+
 describe('signed out: the window shows the sign-in screens (slice 2, spec §7.4)', () => {
   const out = () => snapshot({ phase: 'signed_out', account: { email: null, logged_in: false, vault_unlocked: false } })
   const ended = () => snapshot({ phase: 'session_ended', account: { auth_expired: true } })
@@ -678,6 +742,35 @@ describe('signed out: the window shows the sign-in screens (slice 2, spec §7.4)
       expect(shown(m)).toEqual(['home'])
     })
 
+    // Review P3-4: the first read already succeeded (the old card was on screen), so the window has an account and the
+    // load-failed branch below never applies; the settling screen itself said "Loading…" for as long as the reads failed.
+    test('reads that keep failing after the sign-in give the settling screen the load-failed note and a way to try again (P3-4)', async () => {
+      let calls = 0
+      const { m } = openWindow({ snap: () => (++calls === 1 ? ended() : Promise.reject(new Error('no answer'))) })
+      await settle(m)
+      win(m)[0].props.onFlow(signInModel.settling())
+      m.render()
+      await settle(m)
+      const props = win(m)[0].props
+      expect(props.screen).toBe('settling')
+      expect(props.loadFailed).toBe(true)
+      const before = calls
+      props.onRetryLoad()
+      await settle(m)
+      expect(calls).toBeGreaterThan(before)
+    })
+
+    test('while the reads work, settling does not claim a failure (P3-4)', async () => {
+      let calls = 0
+      const { m } = openWindow({ snap: () => (++calls === 1 ? ended() : new Promise(() => {})) })
+      await settle(m)
+      win(m)[0].props.onFlow(signInModel.settling())
+      m.render()
+      await settle(m)
+      expect(win(m)[0].props.screen).toBe('settling')
+      expect(win(m)[0].props.loadFailed).toBe(false)
+    })
+
     test('a read that cannot be made does not end it: the load-failed note and Try again, nothing of the old card', async () => {
       signInStore.setSignInFlow(signInModel.settling())
       const { m } = openWindow({ snap: () => { throw new Error('no answer') } })
@@ -732,6 +825,9 @@ function openHome(snap: unknown, backend: Record<string, (args: any) => unknown>
       ...model,
       ...parts,
       ...windowModel,
+      ...signInModel,
+      setSignInFlow: signInStore.setSignInFlow,
+      ...copy,
       finderActionButtonLabel: finderSetupCopy.finderActionButtonLabel,
       finderOpenFailedToast: finderSetup.finderOpenFailedToast,
       KeptFolderNotes,
@@ -754,6 +850,7 @@ const homeText = (m: Mounted) => {
   walk(expand(m.tree()))
   return out.join(' | ')
 }
+const hasHomeButton = (m: Mounted, text: string) => find(m, (el) => el.type === 'button' && textOf(el.props.children).trim() === text).length > 0
 const homeButton = (m: Mounted, text: string) => {
   const hit = find(m, (el) => el.type === 'button' && textOf(el.props.children).trim() === text)
   if (hit.length !== 1) throw new Error(`expected one "${text}", found ${hit.length}`)
@@ -836,6 +933,31 @@ describe('Home (§7.6, first cut: status, Finder row, storage, the kept rows)', 
     await settleHome(m)
     expect(m.calls.filter((c) => c.name === 'unlock_vault')).toHaveLength(1)
     expect(refreshed()).toBe(1)
+  })
+
+  // Review P2-3 (b): the Keychain holds a session token and no key. `unlock_vault` answers the Set up this Mac sentence
+  // (not "unlock vault key from Keychain: secret not found"), and the card offers the one thing that helps.
+  test('locked with no key on this Mac: no toast, the approved sentence, and “Use your recovery phrase” opens Set up this Mac (P2-3)', async () => {
+    const noKey = 'This Mac does not have your encryption keys yet. Restore them to continue.'
+    const { m, refreshed } = openHome(snapshot({ phase: 'locked', account: { vault_unlocked: false } }), { unlock_vault: () => { throw noKey } })
+    await settleHome(m)
+    expect(hasHomeButton(m, 'Use your recovery phrase')).toBe(false)
+    await homeButton(m, 'Unlock vault').props.onClick()
+    await settleHome(m)
+    expect(m.toasts).toEqual([])
+    expect(homeText(m)).toContain(noKey)
+    expect(refreshed()).toBe(1)
+    await homeButton(m, 'Use your recovery phrase').props.onClick()
+    expect(signInStore.getSignInFlow()).toEqual({ ...signInModel.IDLE_FLOW, step: 'unlock' })
+  })
+
+  test('any other unlock failure is still the toast, with no recovery offer (P2-3)', async () => {
+    const { m } = openHome(snapshot({ phase: 'locked', account: { vault_unlocked: false } }), { unlock_vault: () => { throw new Error('Keychain is locked') } })
+    await settleHome(m)
+    await homeButton(m, 'Unlock vault').props.onClick()
+    await settleHome(m)
+    expect(m.toasts.map((t) => t.title)).toEqual(['Couldn’t unlock the vault'])
+    expect(hasHomeButton(m, 'Use your recovery phrase')).toBe(false)
   })
 
   test('a Finder failure is one inline notice under the row, never a toast (one failure, one surface)', async () => {

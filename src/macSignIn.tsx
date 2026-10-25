@@ -27,6 +27,9 @@ import {
   accountSwitchBody,
 } from './accountSwitchCopy'
 import {
+  FINDER_CONTINUE_TO_HOME,
+  LOAD_FAILED_TITLE,
+  SIGNED_IN_WINDOW_TITLE,
   BACKUP_COPY,
   BACKUP_LABEL,
   BACK_BUTTON,
@@ -75,6 +78,7 @@ import {
   signedInBeforeAs,
 } from './accountViewCopy'
 import { BROWSER_DID_NOT_OPEN_HINT, browserWaitingInstruction } from './browserLoginCopy'
+import { clearSignOutWarning, holdSignOutWarning } from './accountSession'
 import { useBrowserSignIn } from './browserSignIn'
 import {
   CREATE_ACCOUNT_URL,
@@ -125,6 +129,40 @@ export function useWindowTitle(title: string) {
   }, [title])
 }
 
+/** Spec C C-R7: the Mac cannot reach Beebeeb. “Try again” re-checks the connection (the account view's retry). */
+export interface OfflineState {
+  onTryAgain: () => void
+}
+
+/**
+ * The one way a screen hands the flow on. A step that leaves “Set up this Mac” open is also told to Rust, which keeps it
+ * for the life of the process: ⌘W destroys the window and the flow store with it, and a window reopened while the recovery
+ * phrase is still owed resumes there (review P2-3; `pending_setup`). Rust forgets it when keys arrive or the account
+ * leaves, so nothing here clears it.
+ */
+export function moveFlow(next: SignInFlow, onFlow: (next: SignInFlow) => void): void {
+  if (next.step === 'unlock') void command<void>('set_pending_setup', { keyReplaced: next.keyReplaced })
+  onFlow(next)
+}
+
+/**
+ * Between a finished sign-in and the read that follows it (and while a pending set-up step is being asked for): no card,
+ * so the heading of the last one is not the window's title (review P3-8). When the reads keep failing it says so and
+ * offers to read again, instead of “Loading…” for good (review P3-4).
+ */
+export function SettlingScreen({ failed, onRetry }: { failed: boolean; onRetry: () => void }) {
+  useWindowTitle(SIGNED_IN_WINDOW_TITLE)
+  return (
+    <div className="mw-solo-body">
+      {failed ? (
+        <Note kind="alert" surface="main-load" title={LOAD_FAILED_TITLE} actions={<Btn onClick={onRetry}>{TRY_AGAIN}</Btn>} />
+      ) : (
+        <div className="ms-loading" role="status">Loading…</div>
+      )}
+    </div>
+  )
+}
+
 /** The hi-fi's `.scard`: the mark, the heading, the words, then the card's own body. */
 export function SignInCard({
   title,
@@ -155,6 +193,8 @@ export function SignInWindow({
   flow,
   note,
   offline,
+  loadFailed = false,
+  onRetryLoad,
   onFlow,
 }: {
   screen: WindowScreen
@@ -164,15 +204,14 @@ export function SignInWindow({
   /** A sign-out's held sentence (spec §8.1), shown above the card. */
   note: string | null
   /** Spec C C-R7 (task 1747's account view): the sign-in screen says it cannot reach Beebeeb. Not set until then. */
-  offline?: boolean
+  offline?: OfflineState | null
+  /** The reads of the account keep failing: the settling screen says so (review P3-4). */
+  loadFailed?: boolean
+  onRetryLoad?: () => void
   onFlow: (next: SignInFlow) => void
 }) {
   if (screen === 'settling') {
-    return (
-      <div className="mw-solo-body">
-        <div className="ms-loading" role="status">Loading…</div>
-      </div>
-    )
+    return <SettlingScreen failed={loadFailed} onRetry={onRetryLoad ?? (() => {})} />
   }
   let card: ReactNode = null
   if (screen === 'signin' || screen === 'reauth') {
@@ -183,21 +222,21 @@ export function SignInWindow({
         email={email}
         prefillEmail={flow.email}
         offline={offline}
-        onSettled={(settled, typedEmail) => onFlow(afterSignIn(settled, typedEmail, reauth))}
+        onSettled={(settled, typedEmail) => moveFlow(afterSignIn(settled, typedEmail, reauth), onFlow)}
       />
     )
   } else if (screen === 'switch') {
     card = (
       <SwitchScreen
         info={flow.switch ?? { pendingChanges: 0, unsent: null, unsentError: null }}
-        onSwitched={() => onFlow(afterSwitched(flow))}
-        onCancel={() => onFlow(afterSwitchCancelled())}
+        onSwitched={() => moveFlow(afterSwitched(flow), onFlow)}
+        onCancel={() => moveFlow(afterSwitchCancelled(), onFlow)}
       />
     )
   } else if (screen === 'unlock') {
-    card = <SetUpScreen keyReplaced={flow.keyReplaced} onDone={() => onFlow(afterUnlocked())} />
+    card = <SetUpScreen keyReplaced={flow.keyReplaced} onDone={() => moveFlow(afterUnlocked(), onFlow)} />
   } else if (screen === 'finder') {
-    card = <FinderScreen onReady={() => onFlow(afterFinderReady())} />
+    card = <FinderScreen onReady={() => moveFlow(afterFinderReady(), onFlow)} />
   }
   return (
     <div className="mw-solo-body">
@@ -216,13 +255,13 @@ export function SignInScreen({
   reauth,
   email,
   prefillEmail,
-  offline = false,
+  offline = null,
   onSettled,
 }: {
   reauth: boolean
   email: string | null
   prefillEmail: string | undefined
-  offline?: boolean
+  offline?: OfflineState | null
   onSettled: (settled: SignInSettled, typedEmail: string) => void
 }) {
   const [method, setMethod] = useState<'browser' | 'password'>(() => (prefillEmail ? 'password' : 'browser'))
@@ -272,7 +311,7 @@ export function BrowserPanel({
 }: {
   reauth: boolean
   email: string | null
-  offline: boolean
+  offline: OfflineState | null
   onSettled: (settled: SignInSettled, typedEmail: string) => void
   onUsePassword: () => void
 }) {
@@ -341,7 +380,7 @@ export function BrowserPanel({
       {offline ? (
         <>
           <p className="mw-scard-copy">{OFFLINE_LINE}</p>
-          <button type="button" className={btnClass('plain', true)} onClick={() => void start()}>{TRY_AGAIN}</button>
+          <button type="button" className={btnClass('plain', true)} onClick={() => offline.onTryAgain()}>{TRY_AGAIN}</button>
         </>
       ) : (
         <>
@@ -562,8 +601,9 @@ export function PasswordPanel({
  * Another account is signing in on this Mac. Nothing has changed yet. “Sign out and switch” is the full sign-out
  * (Finder entry removed, queue and cache purged), then a fresh sign-in; it also forgets the previous account's address
  * (`forgetEmail`, FB-I2). An `Err` means the sign-out did not happen (including `SIGN_OUT_EMAIL_NOT_FORGOTTEN`): its
- * sentence is shown verbatim as a toast and the step stays. Any `Ok` continues, and an `Ok` with a warning (FB-24) shows
- * the warning's sentence as a neutral note.
+ * sentence is shown verbatim as a toast and the step stays; an `Err` after the removal, with the account already out,
+ * is HELD instead (a toast does not survive the remount). Any `Ok` continues, and an `Ok` with a warning (FB-24) HOLDS the
+ * warning's sentence for the signed-out card (review P2-1).
  *
  * On a Mac the step is the sign-out ask in the switch's words, from the snapshot the sign-in carried: “Sign out and
  * switch” keeps the waiting saves with that snapshot's `askId`; a refusal (`unsent_changes:`) counts again and
@@ -599,6 +639,8 @@ export function SwitchScreen({
 
   const switchAccount = async () => {
     setBusy(true)
+    // The next account action clears an earlier attempt's held sentence (accountSession.ts).
+    clearSignOutWarning()
     const result = await clearSession({ forgetEmail: true, keepUnsent: ask ? { askId: ask.askId } : undefined })
     setBusy(false)
     if (!result.ok) {
@@ -623,18 +665,23 @@ export function SwitchScreen({
         void command<void>('sign_out_result_ack')
         return
       }
-      showToast({
-        variant: 'error',
-        title: ACCOUNT_SWITCH_FAILED,
-        message: result.unsupported ? commandUnavailableLabel('clear_session') : stripCode(result.reason),
-      })
+      const failure = result.unsupported ? commandUnavailableLabel('clear_session') : stripCode(result.reason)
+      // A sign-out can fail AFTER the removal (review I1): the account is then already out, the session revision moves,
+      // and `AccountSessionBoundary` remounts this window and takes a toast with it (review P2-1). Ask the status once
+      // (its answer is not guarded against a revision change); only a definite “signed out” holds the sentence for the
+      // signed-out card to show. With the account still here (or a status that cannot be read) it is a toast, and the
+      // step stays, as before.
+      const status = await command<{ logged_in?: boolean }>('sync_status')
+      if (status.ok && status.value?.logged_in === false) holdSignOutWarning(failure)
+      else showToast({ variant: 'error', title: ACCOUNT_SWITCH_FAILED, message: failure })
       void command<void>('sign_out_result_ack')
       return
     }
-    // FB-24: the sign-out happened. A step it could not confirm is said neutrally (never under “Couldn’t sign out”),
-    // and the note stays until dismissed: this step unmounts as sign-in opens.
+    // FB-24: the sign-out happened. A step it could not confirm is said neutrally (never under “Couldn’t sign out”).
+    // The sentence is HELD (accountSession.ts), not toasted: this step unmounts as sign-in opens, and the remount the
+    // sign-out causes would take a toast with it (review P2-1). The signed-out card shows it above the sign-in.
     if (result.value.warning) {
-      showToast({ variant: 'info', message: result.value.warning.sentence, durationMs: null })
+      holdSignOutWarning(result.value.warning.sentence)
       void command<void>('sign_out_result_ack')
     }
     onSwitched()
@@ -804,10 +851,14 @@ export function FinderScreen({ onReady }: { onReady: () => void }) {
   const movedOn = useRef(false)
   useWindowTitle(FINDER_CARD_TITLE)
 
-  useEffect(() => {
-    if (!ready || movedOn.current) return
+  const moveOn = () => {
+    if (movedOn.current) return
     movedOn.current = true
     onReady()
+  }
+  useEffect(() => {
+    if (ready) moveOn()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `moveOn` only reads the ref and the latest `onReady`.
   }, [ready, onReady])
 
   const act = async (send: () => Promise<unknown>) => {
@@ -857,6 +908,13 @@ export function FinderScreen({ onReady }: { onReady: () => void }) {
         <div className="mw-adding" role="status">
           <span className="mw-spinner" aria-hidden="true" />
           {presentation.line}
+        </div>
+      ) : null}
+      {/* Review P3-6 (lead ruling): a status screen is not a trap. While Finder is not Ready a way on is offered; Home shows
+          the Finder row and its action. When Finder becomes Ready the window moves on by itself, as before. */}
+      {!ready ? (
+        <div className="mw-scard-actions">
+          <button type="button" className={btnClass('plain')} onClick={moveOn}>{FINDER_CONTINUE_TO_HOME}</button>
         </div>
       ) : null}
     </SignInCard>

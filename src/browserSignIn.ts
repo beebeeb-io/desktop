@@ -44,6 +44,8 @@ export interface BrowserLoginEvent {
   user_code?: string
   verification_uri?: string
   expires_in?: number
+  /** The attempt the event belongs to: the id the controller passed to `start_browser_login`, echoed by Rust. */
+  attempt?: string
   email?: string
   message?: string
   pending_changes?: unknown
@@ -60,15 +62,21 @@ const DEFAULT_ERROR = 'Sign-in failed. Please try again.'
 
 export interface BrowserSignInDeps {
   listen: (event: string, handler: (event: { payload: BrowserLoginEvent }) => void) => Promise<() => void>
-  start: () => Promise<CommandResult<void>>
+  /** A fresh id for one attempt; Rust echoes it in every event of that attempt (review P3-2). */
+  newAttemptId: () => string
+  start: (attempt: string) => Promise<CommandResult<void>>
   setTimer: (fn: () => void, ms: number) => unknown
   clearTimer: (handle: unknown) => void
 }
 
+let attemptsStarted = 0
+
 export function browserSignInDeps(): BrowserSignInDeps {
   return {
     listen: (event, handler) => listen<BrowserLoginEvent>(event, handler),
-    start: () => command<void>('start_browser_login'),
+    newAttemptId: () => `${Date.now().toString(36)}-${(attemptsStarted += 1).toString(36)}`,
+    // Tauri reads the Rust parameter `attempt_id` as `attemptId`.
+    start: (attempt) => command<void>('start_browser_login', { attemptId: attempt }),
     setTimer: (fn, ms) => setTimeout(fn, ms),
     clearTimer: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
   }
@@ -84,6 +92,8 @@ export class BrowserSignIn {
   private detached = false
   private unlisten: (() => void) | null = null
   private mismatchTimer: unknown = null
+  /** The attempt whose events and answer this controller reads: each `start` has its own (review P3-2). */
+  private attempt: string | null = null
 
   constructor(
     private readonly deps: BrowserSignInDeps,
@@ -95,6 +105,8 @@ export class BrowserSignIn {
     if (this.running || this.disposed) return
     this.running = true
     this.terminal = false
+    const attempt = this.deps.newAttemptId()
+    this.attempt = attempt
     this.set({ phase: 'connecting', userCode: null, verificationUri: null, error: null })
     // Subscribe before invoking so no progress event is missed.
     const unlisten = await this.deps.listen(BROWSER_LOGIN_EVENT, (event) => this.onEvent(event.payload))
@@ -103,9 +115,10 @@ export class BrowserSignIn {
       return
     }
     this.unlisten = unlisten
-    const result = await this.deps.start()
-    // The done event (or a different account's) can settle the attempt before the command answers.
-    if (this.disposed || this.terminal) return
+    const result = await this.deps.start(attempt)
+    // The done event (or a different account's) can settle the attempt before the command answers. An answer of an
+    // attempt that is not the current one (the person tried again after a failure) is nobody's: it settles nothing.
+    if (this.disposed || this.terminal || this.attempt !== attempt) return
     if (result.ok) {
       this.settle({ kind: 'fresh', vaultUnlocked: true })
       return
@@ -142,6 +155,8 @@ export class BrowserSignIn {
 
   private onEvent(payload: BrowserLoginEvent): void {
     if (this.disposed || this.terminal) return
+    // Another attempt's event (a handoff that is still running in Rust, or timing out) is not this one's.
+    if (this.attempt === null || payload.attempt !== this.attempt) return
     switch (payload.phase) {
       case 'connecting':
         this.set({ ...this.state, phase: 'connecting' })

@@ -68,8 +68,15 @@ describe('the sign-in screens, word for word (spec C §7.1, §7.2; spec §10.2 r
     )
     expect(copy.FINDER_CARD_TITLE).toBe('Beebeeb in Finder')
     expect(copy.FINDER_CARD_COPY).toBe('Beebeeb adds itself to Finder after sign-in.')
-    // Not offered: a "Continue" on the Finder screen (spec §7.5: Home already shows the Finder row's state).
-    expect(Object.keys(copy).filter((key) => /continue/i.test(key) && key !== 'SET_UP_CONTINUE')).toEqual([])
+    // Spec §7.5 said no "Continue" on the Finder screen; the lead's ruling of 2026-10-25 (review P3-6) amends it: while Finder
+    // is not Ready the card offers one secondary "Continue to Home", so a failing add does not hold the person on it.
+    expect(copy.FINDER_CONTINUE_TO_HOME).toBe('Continue to Home')
+    expect(Object.keys(copy).filter((key) => /continue/i.test(key)).sort()).toEqual(['FINDER_CONTINUE_TO_HOME', 'SET_UP_CONTINUE'])
+  })
+
+  test('the recovery-phrase offer on Home’s locked card, and the window that could not read the account (review P2-3, P3-4)', () => {
+    expect(copy.USE_RECOVERY_PHRASE).toBe('Use your recovery phrase')
+    expect(copy.LOAD_FAILED_TITLE).toBe('Couldn’t load your account')
   })
 
   test('window titles follow the screen’s heading; signed in the window is "Beebeeb" (spec C C-W8, row 36)', () => {

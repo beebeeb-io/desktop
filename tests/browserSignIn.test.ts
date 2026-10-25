@@ -10,8 +10,9 @@
  * `account_mismatch` (1887’s snapshot rides in it, pinned in `lib.rs` by `the_switch_count_reaches_the_sign_in_window`)
  * and the command’s `Err("account_mismatch")`. Either can arrive first.
  */
-import { describe, expect, test } from 'bun:test'
-import { BrowserSignIn, IDLE_BROWSER_SIGN_IN, MISMATCH_GRACE_MS, type BrowserSignInState } from '../src/browserSignIn'
+import { afterEach, describe, expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
+import { BrowserSignIn, browserSignInDeps, IDLE_BROWSER_SIGN_IN, MISMATCH_GRACE_MS, type BrowserSignInState } from '../src/browserSignIn'
 import { SIGN_IN_OUTCOME_UNREADABLE } from '../src/accountSwitchCopy'
 import type { SignInSettled } from '../src/onboardingSignIn'
 import { commandUnavailableLabel, type CommandResult } from '../src/desktopApi'
@@ -25,6 +26,8 @@ function rig(start: () => Promise<CommandResult<void>> | CommandResult<void> = (
   const states: BrowserSignInState[] = []
   const settled: SignInSettled[] = []
   let unlistened = 0
+  let attemptCount = 0
+  const attempts: string[] = []
   const sign = new BrowserSignIn(
     {
       listen: async (name, handler) => {
@@ -32,8 +35,10 @@ function rig(start: () => Promise<CommandResult<void>> | CommandResult<void> = (
         handlers.set(name, handler)
         return () => { unlistened += 1 }
       },
-      start: async () => {
+      newAttemptId: () => `attempt-${++attemptCount}`,
+      start: async (attempt) => {
         log.push('start')
+        attempts.push(attempt)
         return start()
       },
       setTimer: (fn, ms) => { timers.push({ fn, ms, live: true }); return timers.length - 1 },
@@ -42,9 +47,12 @@ function rig(start: () => Promise<CommandResult<void>> | CommandResult<void> = (
     (state) => states.push(state),
     (result) => settled.push(result),
   )
-  const emit = (payload: Record<string, unknown>) => handlers.get('browser-login')!({ payload })
+  // Rust echoes the attempt id it was given in every event (review P3-2); an event is the current attempt's unless a
+  // test says otherwise.
+  const emit = (payload: Record<string, unknown>, attempt: string | null = `attempt-${attemptCount}`) =>
+    handlers.get('browser-login')!({ payload: attempt === null ? payload : { attempt, ...payload } })
   const fireTimers = () => timers.filter((t) => t.live).forEach((t) => { t.live = false; t.fn() })
-  return { sign, log, emit, states, settled, timers, fireTimers, unlistened: () => unlistened }
+  return { sign, log, emit, states, settled, timers, fireTimers, attempts, unlistened: () => unlistened }
 }
 
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
@@ -73,6 +81,92 @@ describe('starting', () => {
 
   test('the idle state is the one a screen starts from', () => {
     expect(IDLE_BROWSER_SIGN_IN).toEqual({ phase: 'idle', userCode: null, verificationUri: null, error: null })
+  })
+})
+
+// Review P3-2: Rust ran no attempt id on a Mac or Linux, so attempt 1's late timeout `error` event was read as attempt 2's.
+// Attempt 1 is still waiting in Rust when the person leaves the browser panel for the email form and comes back (a new
+// panel, a new controller, a new subscription); when attempt 1 times out, its `error` reached attempt 2's subscriber and
+// failed it. Every attempt now carries an id the controller generated: Rust echoes it in each event, and the controller
+// reads only its own.
+describe('attempts (P3-2)', () => {
+  test('the controller names the attempt when it invokes, and every attempt has its own id', async () => {
+    const r = rig(() => Promise.resolve({ ok: false, reason: 'x', unsupported: false }))
+    await r.sign.start()
+    await r.sign.start()
+    expect(r.attempts).toEqual(['attempt-1', 'attempt-2'])
+  })
+
+  test('an event of another attempt is ignored: attempt 1’s timeout cannot fail attempt 2', async () => {
+    const r = rig(() => new Promise(() => {}))
+    void r.sign.start()
+    await tick()
+    r.emit({ phase: 'waiting', user_code: 'KQ7M-4TXP', verification_uri: 'https://app.beebeeb.io/cli-auth', expires_in: 300 })
+    r.emit({ phase: 'error', message: 'Timed out waiting for the browser' }, 'attempt-0')
+    r.emit({ phase: 'done', email: 'a@example.eu' }, 'attempt-0')
+    r.emit({ phase: 'account_mismatch', pending_changes: 1 }, 'attempt-0')
+    r.emit({ phase: 'waiting', user_code: 'OTHER-CODE' }, 'attempt-0')
+    expect(r.sign.state).toEqual({ phase: 'waiting', userCode: 'KQ7M-4TXP', verificationUri: 'https://app.beebeeb.io/cli-auth', error: null })
+    expect(r.settled).toEqual([])
+  })
+
+  test('an event with no attempt at all is nobody’s and is ignored too', async () => {
+    const r = rig(() => new Promise(() => {}))
+    void r.sign.start()
+    await tick()
+    r.emit({ phase: 'error', message: 'from an unnamed attempt' }, null)
+    expect(r.sign.state.phase).toBe('connecting')
+  })
+
+  test('the current attempt’s own events still count', async () => {
+    const r = rig(() => new Promise(() => {}))
+    void r.sign.start()
+    await tick()
+    r.emit({ phase: 'done', email: 'a@example.eu' })
+    expect(r.settled).toEqual([{ kind: 'fresh', vaultUnlocked: true }])
+  })
+
+  test('a late answer of attempt 1’s command does not settle or fail attempt 2', async () => {
+    let answerFirst: (result: CommandResult<void>) => void = () => undefined
+    let calls = 0
+    const r = rig(() => (++calls === 1 ? new Promise<CommandResult<void>>((resolve) => { answerFirst = resolve }) : new Promise(() => {})))
+    void r.sign.start()
+    await tick()
+    r.emit({ phase: 'error', message: 'It did not work' }) // attempt 1 fails; the person tries again
+    expect(r.sign.state.phase).toBe('error')
+    void r.sign.start()
+    await tick()
+    expect(r.sign.state.phase).toBe('connecting')
+    // Attempt 1's command finally answers, with its own failure.
+    answerFirst({ ok: false, reason: 'Timed out waiting for the browser', unsupported: false })
+    await tick()
+    expect(r.sign.state.phase).toBe('connecting')
+    expect(r.sign.state.error).toBeNull()
+    expect(r.settled).toEqual([])
+  })
+})
+
+describe('the real deps name the attempt the way Rust reads it (P3-2)', () => {
+  const previous = (globalThis as any).window
+  afterEach(() => { (globalThis as any).window = previous })
+
+  // Tauri turns a command's `attempt_id` argument into the JavaScript key `attemptId`. A key the command does not know is
+  // dropped without a word, so the id never reached Rust and every event came back without one (a mutation run found
+  // exactly that: nothing exercised the real invoke). The Rust parameter's name is read from the source here.
+  test('start_browser_login is invoked with { attemptId }, the camelCase of the Rust parameter attempt_id', async () => {
+    const calls: Array<{ name: string; args: any }> = []
+    ;(globalThis as any).window = { __TAURI_INTERNALS__: { invoke: async (name: string, args: any) => { calls.push({ name, args }); return null } } }
+    await browserSignInDeps().start('lq3x-1')
+    expect(calls).toEqual([{ name: 'start_browser_login', args: { attemptId: 'lq3x-1' } }])
+    const rust = readFileSync(new URL('../src-tauri/src/browser_login.rs', import.meta.url), 'utf8')
+    expect(rust).toContain('attempt_id: Option<String>')
+  })
+
+  test('each id the real deps make is its own', () => {
+    const deps = browserSignInDeps()
+    const ids = new Set([deps.newAttemptId(), deps.newAttemptId(), browserSignInDeps().newAttemptId()])
+    expect(ids.size).toBe(3)
+    for (const id of ids) expect(id).toMatch(/^[A-Za-z0-9_-]{1,64}$/)
   })
 })
 

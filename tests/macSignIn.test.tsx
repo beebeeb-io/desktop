@@ -13,6 +13,7 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { createElement, Fragment } from 'react'
+import * as accountSession from '../src/accountSession'
 import * as desktopApi from '../src/desktopApi'
 import * as copy from '../src/accountViewCopy'
 import * as switchCopy from '../src/accountSwitchCopy'
@@ -28,7 +29,7 @@ import { rustStr } from './fixtures/rustConstants'
 
 const React = { createElement, Fragment }
 const mounted: Mounted[] = []
-afterEach(() => { while (mounted.length) mounted.pop()!.close(); windowTitles.length = 0 })
+afterEach(() => { while (mounted.length) mounted.pop()!.close(); windowTitles.length = 0; accountSession.clearSignOutWarning() })
 
 /** Every title a card asked the window for, in order (the real `useWindowTitle` is tested at the end). */
 const windowTitles: string[] = []
@@ -102,11 +103,16 @@ describe('btnClass: one look for every button of the window', () => {
 
 describe('SignInWindow: one screen per state (spec §7.4)', () => {
   const Stub = (name: string) => Object.defineProperty(function () { return null }, 'name', { value: name }) as (props: any) => null
-  const stubs = { SignInScreen: Stub('SignInScreen'), SwitchScreen: Stub('SwitchScreen'), SetUpScreen: Stub('SetUpScreen'), FinderScreen: Stub('FinderScreen') }
-  const SignInWindow = loadComponent('macSignIn.tsx', 'SignInWindow', { React, ...stubs, ...model, Note: parts.Note })
+  const stubs = { SignInScreen: Stub('SignInScreen'), SwitchScreen: Stub('SwitchScreen'), SetUpScreen: Stub('SetUpScreen'), FinderScreen: Stub('FinderScreen'), SettlingScreen: Stub('SettlingScreen') }
+  // `moveFlow` (the one way a screen hands the flow on) tells Rust about a step that leaves the recovery phrase open.
+  const told: Array<{ name: string; args: unknown }> = []
+  const command = (name: string, args?: unknown) => { told.push({ name, args }); return Promise.resolve({ ok: true, value: undefined }) }
+  const moveFlow = loadComponent('macSignIn.tsx', 'moveFlow', { command })
+  const SignInWindow = loadComponent('macSignIn.tsx', 'SignInWindow', { React, ...stubs, ...model, Note: parts.Note, moveFlow })
   const flows: model.SignInFlow[] = []
   const render = (props: Record<string, unknown>) => {
     flows.length = 0
+    told.length = 0
     return SignInWindow({ email: 'sam@example.eu', flow: model.IDLE_FLOW, note: null, onFlow: (next: model.SignInFlow) => flows.push(next), ...props })
   }
   const screens = (tree: any) => elementsOf(tree).filter((el) => Object.values(stubs).includes(el.type as never))
@@ -186,10 +192,76 @@ describe('SignInWindow: one screen per state (spec §7.4)', () => {
     expect(noteAt).toBeLessThan(screenAt)
   })
 
-  test('while the window waits for the read that follows a sign-in it says only "Loading…", never the old card', () => {
+  test('while the window waits for the read that follows a sign-in it shows only the settling screen, never the old card', () => {
     const tree = render({ screen: 'settling', flow: model.settling() })
-    expect(screens(tree)).toEqual([])
-    expect(textOf(tree)).toBe('Loading…')
+    expect(screens(tree).map(nameOf)).toEqual(['SettlingScreen'])
+    expect(screens(tree)[0].props.failed).toBe(false)
+  })
+
+  // Review P3-4: reads that keep failing give that screen the load-failed note and a way to read again.
+  test('…and when the reads keep failing it says so, with a way to try again (P3-4)', () => {
+    let retried = 0
+    const tree = render({ screen: 'settling', flow: model.settling(), loadFailed: true, onRetryLoad: () => { retried += 1 } })
+    const props = screens(tree)[0].props
+    expect(props.failed).toBe(true)
+    props.onRetry()
+    expect(retried).toBe(1)
+  })
+
+  // Review P2-3: a sign-in that leaves the recovery phrase open (a password sign-in on a Mac with no key) is told to Rust,
+  // which keeps the step for the life of the process: ⌘W destroys the window and the flow with it.
+  test('a sign-in that leaves Set up this Mac open tells Rust, once; every other move tells nobody (P2-3)', () => {
+    screens(render({ screen: 'signin' }))[0].props.onSettled({ kind: 'fresh', vaultUnlocked: false }, 'sam@example.eu')
+    expect(flows.map((f) => f.step)).toEqual(['unlock'])
+    expect(told).toEqual([{ name: 'set_pending_setup', args: { keyReplaced: false } }])
+    screens(render({ screen: 'reauth' }))[0].props.onSettled({ kind: 'reauthenticated', vaultUnlocked: false, keyReplaced: true }, 'sam@example.eu')
+    expect(flows.map((f) => f.step)).toEqual(['unlock'])
+    expect(told).toEqual([{ name: 'set_pending_setup', args: { keyReplaced: true } }])
+    screens(render({ screen: 'signin' }))[0].props.onSettled({ kind: 'fresh', vaultUnlocked: true }, '')
+    expect(told).toEqual([])
+    screens(render({ screen: 'unlock', flow: { ...model.IDLE_FLOW, step: 'unlock' } }))[0].props.onDone()
+    expect(told).toEqual([])
+  })
+
+  test('the offline state reaches the sign-in screen with its retry (P3-7)', () => {
+    const offline = { onTryAgain: () => {} }
+    expect(screens(render({ screen: 'signin', offline }))[0].props.offline).toBe(offline)
+  })
+})
+
+describe('SettlingScreen: the window between a finished sign-in and the read that follows it (P3-4, P3-8)', () => {
+  function open(props: Record<string, unknown>) {
+    const m = mount('macSignIn.tsx', 'SettlingScreen', {
+      backend: {},
+      props: { failed: false, onRetry: () => {}, ...props },
+      bindings: { ...copy, Note: parts.Note, Btn: parts.Btn, useWindowTitle: titleSpy },
+      expand: true,
+    })
+    mounted.push(m)
+    return m
+  }
+
+  test('it says only “Loading…” while the reads work', () => {
+    const m = open({})
+    expect(text(m)).toBe('Loading…')
+    expect(m.elements().some((el) => el.props.role === 'status')).toBe(true)
+    expect(buttonLabels(m)).toEqual([])
+  })
+
+  test('it carries the window’s title, “Beebeeb”: it is no card, and the last card’s heading would be stale (P3-8)', () => {
+    open({})
+    expect(windowTitles).toEqual(['Beebeeb'])
+  })
+
+  test('when the reads keep failing it shows the load-failed note and Try again, and Try again reads again (P3-4)', async () => {
+    let retried = 0
+    const m = open({ failed: true, onRetry: () => { retried += 1 } })
+    expect(text(m)).toContain('Couldn’t load your account')
+    expect(text(m)).not.toContain('Loading…')
+    expect(m.elements().filter((el) => el.props.role === 'alert')).toHaveLength(1)
+    await button(m, 'Try again').props.onClick()
+    expect(retried).toBe(1)
+    expect(windowTitles).toEqual(['Beebeeb'])
   })
 })
 
@@ -200,7 +272,7 @@ describe('SignInScreen: browser first, password second (C2)', () => {
   const open = (props: Record<string, unknown> = {}) => {
     const m = mount('macSignIn.tsx', 'SignInScreen', {
       backend: {},
-      props: { reauth: false, email: null, prefillEmail: undefined, offline: false, onSettled: () => {}, ...props },
+      props: { reauth: false, email: null, prefillEmail: undefined, offline: null, onSettled: () => {}, ...props },
       bindings: { BrowserPanel, PasswordPanel },
     })
     mounted.push(m)
@@ -255,7 +327,7 @@ describe('BrowserPanel (hi-fi section 2, figures 1, 2 and 4; task 1734)', () => 
     const written: string[] = []
     const m = mount('macSignIn.tsx', 'BrowserPanel', {
       backend: { quit_beebeeb: () => null, ...over.backend },
-      props: { reauth: false, email: null, offline: false, onSettled: () => {}, onUsePassword: () => starts.push('password'), ...over.props },
+      props: { reauth: false, email: null, offline: null, onSettled: () => {}, onUsePassword: () => starts.push('password'), ...over.props },
       bindings: {
         ...desktopApi,
         ...copy,
@@ -380,12 +452,23 @@ describe('BrowserPanel (hi-fi section 2, figures 1, 2 and 4; task 1734)', () => 
   })
 
   test('offline: the buttons are replaced by the sentence and “Try again”; Create account stays (spec C §7.1)', () => {
-    const { m } = open({ props: { offline: true } })
+    const { m } = open({ props: { offline: { onTryAgain: () => {} } } })
     expect(text(m)).toContain('Can’t reach Beebeeb. Check your connection.')
     expect(hasButton(m, 'Sign in with browser')).toBe(false)
     expect(hasButton(m, 'Use email and password')).toBe(false)
     expect(hasButton(m, 'Try again')).toBe(true)
     expect(text(m)).toContain('Create an account on beebeeb.io')
+  })
+
+  // Review P3-7: offline, “Try again” re-checks the connection (the account view's retry); it never starts a handoff, which
+  // would open the browser for a Mac that cannot reach Beebeeb.
+  test('offline “Try again” re-checks connectivity and starts no sign-in (P3-7)', async () => {
+    let rechecked = 0
+    const { m, starts } = open({ props: { offline: { onTryAgain: () => { rechecked += 1 } } } })
+    await button(m, 'Try again').props.onClick()
+    expect(rechecked).toBe(1)
+    expect(starts).toEqual([])
+    expect(m.calls.map((c) => c.name)).not.toContain('start_browser_login')
   })
 
   test('“Create an account” is a real link to the address; clicking it opens the system browser, not this window', async () => {
@@ -665,7 +748,7 @@ describe('SwitchScreen: 1887’s account-switch step in the Beebeeb window (A0s 
     const m = mount('macSignIn.tsx', 'SwitchScreen', {
       backend: { clear_session: clear, ...extra },
       props: { info: { pendingChanges: 0, unsent: null, unsentError: null, ...info }, onSwitched: () => events.push('switched'), onCancel: () => events.push('cancelled') },
-      bindings: { ...desktopApi, ...switchCopy, ...signOutCopy, SignInCard, btnClass, useWindowTitle: titleSpy, Note: parts.Note },
+      bindings: { ...desktopApi, ...switchCopy, ...signOutCopy, ...accountSession, SignInCard, btnClass, useWindowTitle: titleSpy, Note: parts.Note },
       expand: true,
     })
     mounted.push(m)
@@ -807,17 +890,71 @@ describe('SwitchScreen: 1887’s account-switch step in the Beebeeb window (A0s 
     expect(clearCalls(m).map((c) => c.args)).toEqual([{ forgetEmail: true, keepUnsent: { askId: 'ask-1' } }, { forgetEmail: true }])
   })
 
-  // FB-24: a sign-out that happened but could not confirm Finder's removal is Ok with a warning.
-  test('a sign-out that happened with a warning continues to sign-in, and says the warning neutrally, until dismissed', async () => {
+  // FB-24: a sign-out that happened but could not confirm Finder's removal is Ok with a warning. The sentence is HELD
+  // (accountSession.ts), not toasted: this window sits inside AccountSessionBoundary's keyed tree, so the remount that
+  // the sign-out causes took the toast with it (review P2-1). The signed-out card shows the held sentence.
+  test('a sign-out that happened with a warning continues to sign-in, and holds the warning for the signed-out card (P2-1)', async () => {
     const sentence = rustStr('lib.rs', 'FINDER_SIGN_OUT_UNCONFIRMED_WARNING')
     const { m, events } = openSwitch({ pendingChanges: 2 }, () => ({ warning: { code: 'finder_removal_unconfirmed', sentence } }), { sign_out_result_ack: () => null })
     await m.flush()
     await m.click('Sign out and switch')
     expect(events).toEqual(['switched'])
-    expect(m.toasts.map((t) => ({ variant: t.variant, title: t.title, message: t.message, durationMs: t.durationMs }))).toEqual([
-      { variant: 'info', title: undefined, message: sentence, durationMs: null },
-    ])
+    expect(accountSession.heldSignOutWarning()).toBe(sentence)
+    expect(m.toasts).toEqual([])
     expect(m.calls.map((c) => c.name)).toContain('sign_out_result_ack')
+  })
+
+  test('a sign-out without a warning holds nothing, and clears what an earlier attempt held (P2-1)', async () => {
+    accountSession.holdSignOutWarning('An earlier sentence.')
+    const { m, events } = openSwitch({ pendingChanges: 2 }, () => ({ warning: null }))
+    await m.flush()
+    await m.click('Sign out and switch')
+    expect(events).toEqual(['switched'])
+    expect(accountSession.heldSignOutWarning()).toBeNull()
+  })
+
+  // Review I1 (lib.rs, clear_session): the alert comes first "also when the sign-out failed after the removal". By then the
+  // account is signed out, the revision moves and this window is remounted: a toast would be gone with it. The step asks
+  // the status once (`sync_status`: its answer is not guarded against a revision change) and holds the sentence when the
+  // account is already out; with the account still here it is today's toast, and the step stays (below).
+  test('a sign-out that failed AFTER the removal holds its sentence for the signed-out card, not a toast (P2-1)', async () => {
+    const sentence = 'Sign-out stopped after Beebeeb was removed from Finder. Restart Beebeeb and sign in again.'
+    const { m, events } = openSwitch({ pendingChanges: 2 }, () => { throw sentence }, { sign_out_result_ack: () => null, sync_status: () => ({ logged_in: false }) })
+    await m.flush()
+    await m.click('Sign out and switch')
+    await m.flush()
+    expect(accountSession.heldSignOutWarning()).toBe(sentence)
+    expect(m.toasts).toEqual([])
+    expect(events).toEqual([])
+    const names = m.calls.map((c) => c.name)
+    expect(names.indexOf('sign_out_result_ack')).toBeGreaterThan(names.indexOf('sync_status'))
+  })
+
+  test('a sign-out that failed with the account still signed in is a toast, nothing held (P2-1)', async () => {
+    const { m } = openSwitch({ pendingChanges: 2 }, () => { throw new Error('engine busy') }, { sign_out_result_ack: () => null, sync_status: () => ({ logged_in: true }) })
+    await m.flush()
+    await m.click('Sign out and switch')
+    await m.flush()
+    expect(m.toasts.map((t) => t.title)).toEqual(['Couldn’t sign out'])
+    expect(accountSession.heldSignOutWarning()).toBeNull()
+  })
+
+  test('a status that does not say signed out is today’s toast: only a definite “signed out” holds (P2-1)', async () => {
+    const { m } = openSwitch({ pendingChanges: 2 }, () => { throw new Error('engine busy') }, { sign_out_result_ack: () => null, sync_status: () => ({}) })
+    await m.flush()
+    await m.click('Sign out and switch')
+    await m.flush()
+    expect(m.toasts.map((t) => t.title)).toEqual(['Couldn’t sign out'])
+    expect(accountSession.heldSignOutWarning()).toBeNull()
+  })
+
+  test('a status that cannot be read is today’s toast too (P2-1)', async () => {
+    const { m } = openSwitch({ pendingChanges: 2 }, () => { throw new Error('engine busy') }, { sign_out_result_ack: () => null, sync_status: () => { throw new Error('no status') } })
+    await m.flush()
+    await m.click('Sign out and switch')
+    await m.flush()
+    expect(m.toasts.map((t) => t.title)).toEqual(['Couldn’t sign out'])
+    expect(accountSession.heldSignOutWarning()).toBeNull()
   })
 
   test('an address that could not be forgotten stops the switch: the Rust sentence verbatim, and the step stays', async () => {
@@ -1068,7 +1205,7 @@ describe('FinderScreen: a status screen, not a step (spec §7.5; spec A §6.2)',
     expect(textOf(heading(m)!.props.children)).toBe('Beebeeb in Finder')
     expect(text(m)).toContain('Beebeeb adds itself to Finder after sign-in.')
     expect(text(m)).not.toContain('Adding Beebeeb to Finder…')
-    expect(buttonLabels(m)).toEqual([])
+    expect(buttonLabels(m)).toEqual(['Continue to Home'])
   })
 
   test('resting in Missing claims nothing either', async () => {
@@ -1076,7 +1213,7 @@ describe('FinderScreen: a status screen, not a step (spec §7.5; spec A §6.2)',
     await m.flush()
     expect(text(m)).not.toContain('Adding')
     expect(text(m)).not.toContain(finderCopy.FINDER_RESTING_LINE)
-    expect(buttonLabels(m)).toEqual([])
+    expect(buttonLabels(m)).toEqual(['Continue to Home'])
   })
 
   test('adding: spec A’s line, as a status', async () => {
@@ -1084,6 +1221,44 @@ describe('FinderScreen: a status screen, not a step (spec §7.5; spec A §6.2)',
     await m.flush()
     const status = m.elements().find((el) => el.props.role === 'status' && textOf(el.props.children).includes('Adding Beebeeb to Finder…'))
     expect(status).toBeDefined()
+  })
+
+  // Review P3-6 (lead ruling, 2026-10-25), amending spec §7.5 (“‘Continue’ is not offered”): the card is a status screen,
+  // and a Finder add that fails, or an extension that is off, must not hold a person on it. Home shows the Finder row.
+  test('while Finder is not Ready the card offers “Continue to Home”, a secondary button, in every state (P3-6)', async () => {
+    const states = [
+      quiet.presentation,
+      { kind: 'resting', line: finderCopy.FINDER_RESTING_LINE },
+      { kind: 'adding', line: finderCopy.FINDER_ADDING_LINE },
+      { kind: 'notice', tone: 'alert', reason: 'timeout', sentence: 'x', action: 'try_again', actionLabel: 'Try again' },
+      { kind: 'notice', tone: 'alert', reason: 'unknown', sentence: 'y', action: null, actionLabel: null },
+      { kind: 'unavailable', line: 'Beebeeb couldn’t read its Finder setup.', actionLabel: 'Try again' },
+    ]
+    for (const presentation of states) {
+      const { m } = open({ ...quiet, presentation })
+      await m.flush()
+      expect(hasButton(m, 'Continue to Home')).toBe(true)
+      expect(classes(button(m, 'Continue to Home'))).toContain('ms-btn')
+      expect(classes(button(m, 'Continue to Home'))).not.toContain('ms-btn--primary')
+    }
+  })
+
+  test('“Continue to Home” moves the window on once, and a Ready that arrives after it moves nothing again (P3-6)', async () => {
+    const { m, ready } = open({ ...quiet, presentation: { kind: 'adding', line: finderCopy.FINDER_ADDING_LINE } })
+    await m.flush()
+    await button(m, 'Continue to Home').props.onClick()
+    expect(ready).toEqual(['ready'])
+    await button(m, 'Continue to Home').props.onClick()
+    expect(ready).toEqual(['ready'])
+  })
+
+  test('the failure action stays the primary way forward: Try again is not displaced by Continue (P3-6)', async () => {
+    const { m } = open({
+      ...quiet,
+      presentation: { kind: 'notice', tone: 'alert', reason: 'timeout', sentence: finderCopy.FINDER_REASON_COPY.timeout.sentence, action: 'try_again', actionLabel: 'Try again' },
+    })
+    await m.flush()
+    expect(buttonLabels(m)).toEqual(['Try again', 'Continue to Home'])
   })
 
   test('ready moves the window on to Home by itself, once; nothing is offered, and no “Continue”', async () => {
@@ -1128,7 +1303,7 @@ describe('FinderScreen: a status screen, not a step (spec §7.5; spec A §6.2)',
       presentation: { kind: 'notice', tone: 'alert', reason: 'unknown', sentence: 'Beebeeb’s sync didn’t confirm it stopped. Quit and reopen Beebeeb before syncing again.', action: null, actionLabel: null },
     })
     await m.flush()
-    expect(buttonLabels(m)).toEqual([])
+    expect(buttonLabels(m)).toEqual(['Continue to Home'])
   })
 
   test('a note about a failed Try again is shown verbatim and neutrally', async () => {
@@ -1193,8 +1368,8 @@ describe('every card asks for the window title that is its own heading (spec C C
   test('sign in, sign in again, the email form, the second factor, the switch, set up this Mac and Finder', async () => {
     const browserBindings = { useBrowserSignIn: () => ({ state: idleBrowser, start: async () => {} }) }
     const cases: Array<[string, () => Mounted]> = [
-      ['Sign in to Beebeeb', () => titleOf('macSignIn.tsx', 'BrowserPanel', { reauth: false, email: null, offline: false }, browserBindings)],
-      ['Sign in again', () => titleOf('macSignIn.tsx', 'BrowserPanel', { reauth: true, email: 'sam@example.eu', offline: false }, browserBindings)],
+      ['Sign in to Beebeeb', () => titleOf('macSignIn.tsx', 'BrowserPanel', { reauth: false, email: null, offline: null }, browserBindings)],
+      ['Sign in again', () => titleOf('macSignIn.tsx', 'BrowserPanel', { reauth: true, email: 'sam@example.eu', offline: null }, browserBindings)],
       ['Welcome back', () => titleOf('macSignIn.tsx', 'PasswordPanel', { prefillEmail: undefined }, {})],
       ['Switch to a different account?', () => titleOf('macSignIn.tsx', 'SwitchScreen', { info: { pendingChanges: 1, unsent: null, unsentError: null } }, {})],
       ['Set up this Mac', () => titleOf('macSignIn.tsx', 'SetUpScreen', { keyReplaced: false }, {})],

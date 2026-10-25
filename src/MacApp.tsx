@@ -37,7 +37,7 @@ import {
 } from './desktopApi'
 import type { PopoverSnapshot } from './popoverContract'
 import { heldSignOutWarning, subscribeSignOutWarning } from './accountSession'
-import { SIGNED_IN_WINDOW_TITLE } from './accountViewCopy'
+import { LOAD_FAILED_TITLE, SET_UP_COPY, SIGNED_IN_WINDOW_TITLE, USE_RECOVERY_PHRASE } from './accountViewCopy'
 import { finderOpenFailedToast, useFinderSetup } from './finderSetup'
 import { finderActionButtonLabel } from './finderSetupCopy'
 import { focusById } from './focusById'
@@ -63,6 +63,7 @@ import {
   focusAfterNav,
   GEAR_ID,
   homeStatus,
+  heldNoteGoesToSettings,
   initialMainView,
   listAfterKey,
   MAIN_SECTIONS,
@@ -77,7 +78,7 @@ import {
   type MainView,
 } from './mainWindowModel'
 import { getSignInFlow, setSignInFlow, subscribeSignInFlow } from './signInFlowStore'
-import { IDLE_FLOW, normalizeFlow, windowScreen } from './signInModel'
+import { flowForNav, flowForPendingSetup, IDLE_FLOW, isNoVaultKey, normalizeFlow, setupCheckWanted, windowScreen } from './signInModel'
 import { connectSignOutFlowEvents, connectSignOutFlowMenu, SignOutFlow, signOutFlowApi, type FlowView } from './signOutFlow'
 import { setMainWindowTitle } from './windowTitle'
 import { openModalCount, subscribeOpenModals, useToast } from './windows/ui'
@@ -107,18 +108,25 @@ function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefres
   const finder = useFinderSetup()
   const kept = useKeptFolders()
   const [busy, setBusy] = useState<'open' | 'resume' | 'unlock' | null>(null)
+  // Review P2-3 b: the Keychain holds a token and no vault key, so the unlock has nothing to read. The sentence is the
+  // approved Set up this Mac one, and the card offers the recovery phrase, which is what helps.
+  const [noKey, setNoKey] = useState(false)
 
   if (!snapshot.account.vault_unlocked) {
     const unlock = async () => {
       setBusy('unlock')
+      setNoKey(false)
       const result = await command<void>('unlock_vault')
       setBusy(null)
       if (!result.ok) {
-        showToast({
-          variant: 'error',
-          title: 'Couldn’t unlock the vault',
-          message: result.unsupported ? commandUnavailableLabel('unlock_vault') : result.reason,
-        })
+        if (!result.unsupported && isNoVaultKey(result.reason)) setNoKey(true)
+        else {
+          showToast({
+            variant: 'error',
+            title: 'Couldn’t unlock the vault',
+            message: result.unsupported ? commandUnavailableLabel('unlock_vault') : result.reason,
+          })
+        }
       }
       onRefresh()
     }
@@ -136,6 +144,14 @@ function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefres
             {busy === 'unlock' ? 'Unlocking…' : 'Unlock vault'}
           </Btn>
         </div>
+        {noKey ? (
+          <Note
+            kind="status"
+            actions={<Btn onClick={() => setSignInFlow({ ...IDLE_FLOW, step: 'unlock' })}>{USE_RECOVERY_PHRASE}</Btn>}
+          >
+            {SET_UP_COPY}
+          </Note>
+        ) : null}
       </div>
     )
   }
@@ -304,7 +320,12 @@ export default function MacApp() {
   // may predate the step a sign-in has just set. The card to draw, or Home, follows from that.
   const flowChecked = useRef(false)
   const flowNow = account !== null && !flowChecked.current ? normalizeFlow(account, signInFlow) : signInFlow
-  const screen = account === null ? 'home' : windowScreen(account, flowNow)
+  // Review P2-3: a window reopened while a password sign-in was waiting for the recovery phrase (⌘W destroyed the window
+  // and its flow) asks Rust once; a pending step resumes at Set up this Mac. Until Rust answers it says “Loading…”, so
+  // Home's locked card is not drawn for a moment and then replaced.
+  const [setupAsk, setSetupAsk] = useState<'idle' | 'asking' | 'done'>('idle')
+  const askingForSetup = account !== null && setupAsk !== 'done' && setupCheckWanted(account, flowNow)
+  const screen = account === null ? 'home' : askingForSetup ? 'settling' : windowScreen(account, flowNow)
   const sheetOpen = flowView.kind !== 'idle' || openModals > 0
 
   // The listeners below are registered once; they read the window's current state through these.
@@ -312,6 +333,9 @@ export default function MacApp() {
   viewRef.current = view
   const ctxRef = useRef({ signedIn, lastSettings, sheetOpen })
   ctxRef.current = { signedIn, lastSettings, sheetOpen }
+  // Whether a sign-in card is drawn right now (set below, once `screen` and `view` are known): a held sign-out sentence
+  // is shown on the card, not by leaving it for Settings.
+  const showingCardRef = useRef(false)
   // A request can arrive before the first account read (a window Rust built for it pulls it on mount): it waits for
   // that read, because which sections exist depends on the session. Each waits as the step it is, in order.
   const loadedRef = useRef(false)
@@ -386,6 +410,17 @@ export default function MacApp() {
     reader.refresh()
   }, [reader, signInFlow.step])
 
+  useEffect(() => {
+    if (!askingForSetup || setupAsk !== 'idle') return
+    setSetupAsk('asking')
+    void command<unknown>('pending_setup').then((result) => {
+      const resumed = result.ok ? flowForPendingSetup(result.value) : null
+      // A step set while Rust was answering is the person's: never replaced by a resumed one.
+      if (resumed !== null && getSignInFlow().step === null) setSignInFlow(resumed)
+      setSetupAsk('done')
+    })
+  }, [askingForSetup, setupAsk])
+
   // The one check above, kept: the store follows what the first render already showed.
   useEffect(() => {
     if (account === null || flowChecked.current) return
@@ -416,13 +451,24 @@ export default function MacApp() {
   useEffect(() => {
     if (signOutNote === seenSignOutNote.current) return
     seenSignOutNote.current = signOutNote
-    if (signOutNote !== null && ctxRef.current.signedIn) go({ to: 'settings', section: 'account' }, true)
+    if (signOutNote !== null && heldNoteGoesToSettings({ signedIn: ctxRef.current.signedIn, showingCard: showingCardRef.current })) {
+      go({ to: 'settings', section: 'account' }, true)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `go` reads the refs above; the effect follows the note only.
   }, [signOutNote])
 
   // Every opener: the gear and the menus in Rust, the popover's gear menu from slice 3.
   useEffect(
-    () => connectMainNavigation(listen, () => command<unknown>('consume_main_navigation'), (nav) => go(nav)),
+    () =>
+      connectMainNavigation(listen, () => command<unknown>('consume_main_navigation'), (nav) => {
+        // “Sign in again” is a step of the sign-in flow, not a place (review P3-1): it waits for the first account read,
+        // which says whether there is an account to sign in again to.
+        whenLoaded(() => {
+          const next = flowForNav(nav, ctxRef.current.signedIn, getSignInFlow())
+          if (next !== getSignInFlow()) setSignInFlow(next)
+        })
+        go(nav)
+      }),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- registered once; `go` reads the refs above.
     [],
   )
@@ -467,6 +513,7 @@ export default function MacApp() {
   // title, the heading it shows.
   const loaded = account !== null
   const showingCard = loaded && view.mode === 'main' && screen !== 'home'
+  showingCardRef.current = showingCard
   useEffect(() => {
     if (loaded && !showingCard) void setMainWindowTitle(SIGNED_IN_WINDOW_TITLE)
   }, [loaded, showingCard])
@@ -487,7 +534,7 @@ export default function MacApp() {
             <Note
               kind="alert"
               surface="main-load"
-              title="Couldn’t load your account"
+              title={LOAD_FAILED_TITLE}
               actions={<Btn onClick={() => reader.refresh()}>Try again</Btn>}
             />
           ) : (
@@ -505,7 +552,15 @@ export default function MacApp() {
       <div className="mw-window mw-window--solo">
         <div className="mw-toolbar mw-toolbar--solo" data-tauri-drag-region="" />
         <main className="mw-solo-main" aria-labelledby="mw-title">
-          <SignInWindow screen={screen} email={account.email} flow={flowNow} note={signOutNote} onFlow={setSignInFlow} />
+          <SignInWindow
+            screen={screen}
+            email={account.email}
+            flow={flowNow}
+            note={signOutNote}
+            loadFailed={snapshotFailed}
+            onRetryLoad={() => reader.refresh()}
+            onFlow={setSignInFlow}
+          />
         </main>
       </div>
     )

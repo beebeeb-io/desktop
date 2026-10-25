@@ -29,7 +29,12 @@ export type MainView =
   | { mode: 'settings'; section: SettingsTab; returnTo: MainSection }
 
 /** One request to the window: from the gear, the menus (⌘1, ⌘[, ⌘,), the sign-out flow and the update check. */
-export type MainNav = { to: 'home' } | { to: 'settings'; section: SettingsTab | null } | { to: 'back' }
+export type MainNav =
+  | { to: 'home' }
+  | { to: 'settings'; section: SettingsTab | null }
+  | { to: 'back' }
+  /** “Sign in again”, asked for by an opener (`open_reauth_window`), whatever the session says (review P3-1). */
+  | { to: 'reauth' }
 
 export interface NavContext {
   signedIn: boolean
@@ -50,6 +55,7 @@ export function navigate(view: MainView, nav: MainNav, ctx: NavContext): MainVie
   if (ctx.sheetOpen) return view
   switch (nav.to) {
     case 'home':
+    case 'reauth':
       return HOME
     case 'back':
       return view.mode === 'settings' ? { mode: 'main', section: view.returnTo } : view
@@ -86,11 +92,21 @@ export function coerceSettingsView(view: MainView, signedIn: boolean): MainView 
 export function parseMainNav(raw: unknown): MainNav | null {
   if (typeof raw !== 'object' || raw === null) return null
   const value = raw as { to?: unknown; section?: unknown }
-  if (value.to === 'home' || value.to === 'back') return { to: value.to }
+  if (value.to === 'home' || value.to === 'back' || value.to === 'reauth') return { to: value.to }
   if (value.to !== 'settings') return null
   if (value.section === undefined || value.section === null) return { to: 'settings', section: null }
   const section = typeof value.section === 'string' ? parseSettingsTab(value.section) : null
   return section === null ? null : { to: 'settings', section }
+}
+
+/**
+ * Where a sign-out's held sentence (`accountSession.ts`) is shown when it becomes held while this window is mounted. A
+ * signed-in window that shows no card goes to Settings › Account, where the note lives. A window that shows a sign-in
+ * card (including the account switch, which holds its own sentence while its card is up) shows the sentence above that
+ * card (`SignInWindow`'s note) and is not moved (review P2-1).
+ */
+export function heldNoteGoesToSettings({ signedIn, showingCard }: { signedIn: boolean; showingCard: boolean }): boolean {
+  return signedIn && !showingCard
 }
 
 /** The back control's words (§7.8, §10.2 #48): where it returns to, or "Sign in" while signed out. */

@@ -106,7 +106,11 @@ function openFinderScreen(initial: FinderSetupView | 'unreadable', backend: Reco
   return { m, bus, settle, calls, done: () => done, copied }
 }
 
-const buttons = (m: Mounted) => m.elements().filter((el) => el.type === 'button').map((el) => textOf(el.props.children).trim())
+/** The reconciler's actions. “Continue to Home” (review P3-6, the lead's ruling of 2026-10-25) is the window's own way on
+ *  while Finder is not Ready; it is not one of them, and `continueButtons` reads it. */
+const allButtons = (m: Mounted) => m.elements().filter((el) => el.type === 'button').map((el) => textOf(el.props.children).trim())
+const buttons = (m: Mounted) => allButtons(m).filter((label) => label !== 'Continue to Home')
+const continueButtons = (m: Mounted) => allButtons(m).filter((label) => label === 'Continue to Home')
 const notices = (m: Mounted) => m.elements().filter((el) => el.props.role === 'alert' || el.props.role === 'status')
 const pageText = (m: Mounted) => textOf(m.elements()[0])
 const allStates: Array<FinderSetupView | 'unreadable'> = [
@@ -128,6 +132,23 @@ describe('FinderScreen, with the real useFinderSetup hook', () => {
     expect(s.done()).toBe(1)
     await s.settle()
     expect(s.done()).toBe(1)
+  })
+
+  // Review P3-6: with the real hook, every state that is not Ready has the way on; Ready moves on by itself and has none.
+  test('“Continue to Home” is there in every state but Ready, and pressing it moves the window on once (P3-6)', async () => {
+    for (const state of allStates) {
+      const s = openFinderScreen(state)
+      await s.settle()
+      const isReady = state !== 'unreadable' && state.setup === 'ready'
+      expect(continueButtons(s.m)).toEqual(isReady ? [] : ['Continue to Home'])
+      if (isReady) continue
+      const press = s.m.elements().find((el) => el.type === 'button' && textOf(el.props.children).trim() === 'Continue to Home')!
+      await press.props.onClick()
+      await s.settle()
+      expect(s.done()).toBe(1)
+      await press.props.onClick()
+      expect(s.done()).toBe(1)
+    }
   })
 
   // Must-render row 9: a failed + unknown with an engine refusal says the refusal's sentence.
@@ -317,7 +338,9 @@ describe('FinderScreen in real React', () => {
     const html = renderToString(createElement(ToastProvider, null, createElement(FinderScreen, { onReady: () => {} })))
     expect(html).toContain(copy.FINDER_SETUP_TITLE)
     expect(html).not.toContain('Adding')
-    expect(html).not.toContain('<button')
+    // The reconciler's own actions are absent; the window's way on (review P3-6) is the one button there is.
+    expect(html.match(/<button/g)).toHaveLength(1)
+    expect(html).toContain('>Continue to Home</button>')
   })
 })
 
@@ -336,7 +359,11 @@ describe('FinderScreen source contract', () => {
     expect(FORBIDDEN.filter((name) => source.includes(name))).toEqual([])
   })
 
-  test('there is no “Continue” on the Finder screen (spec §7.5: Home already shows the Finder row’s state)', () => {
-    expect(body).not.toMatch(/Continue/i)
+  // Spec §7.5 said “‘Continue’ is not offered: Home already shows the Finder row's state”. The lead's ruling of 2026-10-25
+  // (review P3-6) amends it: while Finder is not Ready the card offers ONE secondary “Continue to Home”, and no other way
+  // on (the install and “continue without” commands of the old Finder step stay absent, above).
+  test('the only “Continue” on the Finder screen is “Continue to Home”, from the copy module (P3-6)', () => {
+    expect(body).toContain('FINDER_CONTINUE_TO_HOME')
+    expect(body.replace(/FINDER_CONTINUE_TO_HOME/g, '')).not.toMatch(/Continue/i)
   })
 })

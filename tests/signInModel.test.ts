@@ -14,6 +14,10 @@ import {
   afterSignIn,
   afterSwitchCancelled,
   afterSwitched,
+  flowForNav,
+  flowForPendingSetup,
+  isNoVaultKey,
+  setupCheckWanted,
   afterUnlocked,
   normalizeFlow,
   settling,
@@ -22,6 +26,8 @@ import {
 } from '../src/signInModel'
 import { getSignInFlow, resetSignInFlow, setSignInFlow, subscribeSignInFlow } from '../src/signInFlowStore'
 import type { AskCounts } from '../src/signOutCopy'
+import * as copy from '../src/accountViewCopy'
+import { rustStr } from './fixtures/rustConstants'
 
 const out = { logged_in: false, auth_expired: false }
 const ended = { logged_in: true, auth_expired: true }
@@ -130,10 +136,97 @@ describe('the other steps', () => {
   test('normalizeFlow drops a step that needs a session when there is none, and keeps the rest', () => {
     expect(normalizeFlow(out, step('unlock'))).toEqual(IDLE_FLOW)
     expect(normalizeFlow(out, step('finder'))).toEqual(IDLE_FLOW)
-    const sw = step('switch', { email: 'b@example.eu' })
-    expect(normalizeFlow(out, sw)).toBe(sw)
+    // “Sign in again” asked for by an opener (task 1683 fix round, P3-1) is a screen of an account on this Mac.
+    expect(normalizeFlow(out, step('reauth'))).toEqual(IDLE_FLOW)
     expect(normalizeFlow(live, step('unlock'))).toEqual(step('unlock'))
+    expect(normalizeFlow(live, step('reauth'))).toEqual(step('reauth'))
     expect(normalizeFlow(out, IDLE_FLOW)).toBe(IDLE_FLOW)
+  })
+
+  // Review P2-2: the switch card is a screen of the account that is still on this Mac while another waits. When that
+  // account signed out another way (the app menu's Sign Out, the popover) the card is stale: its question has no
+  // subject. It goes, and the address FT-I4 carries to the next sign-in stays (the same flow “Sign out and switch” ends
+  // in), so the remount that a sign-out causes does not drop it either.
+  test('normalizeFlow drops a stale switch card when the account left, keeping the typed address (P2-2)', () => {
+    const sw = step('switch', { email: 'b@example.eu', switch: { pendingChanges: 3, unsent: ask, unsentError: null } })
+    expect(normalizeFlow(out, sw)).toEqual({ ...IDLE_FLOW, email: 'b@example.eu' })
+    expect(normalizeFlow(out, sw)).toEqual(afterSwitched(sw))
+    // The account is still here: the question stands, and nothing is replaced.
+    expect(normalizeFlow(live, sw)).toBe(sw)
+    expect(normalizeFlow(ended, sw)).toBe(sw)
+  })
+})
+
+// Review P3-1: `open_reauth_window` on a Mac asked for “Sign in again”, but the window only drew it when the session was
+// already marked ended; with the session still good the click ended on Home and nothing happened. The request is a flow
+// step now, so the card is shown whatever the session says (Linux's `mode=reauth`).
+describe('flowForNav: a “Sign in again” request is the card, whatever the session says (P3-1)', () => {
+  test('a signed-in window with no step in progress shows the card', () => {
+    expect(flowForNav({ to: 'reauth' }, true, IDLE_FLOW)).toEqual(step('reauth'))
+    expect(windowScreen(live, flowForNav({ to: 'reauth' }, true, IDLE_FLOW))).toBe('reauth')
+  })
+
+  test('no account on this Mac: the sign-in card is already what shows, and nothing is set', () => {
+    expect(flowForNav({ to: 'reauth' }, false, IDLE_FLOW)).toBe(IDLE_FLOW)
+  })
+
+  test('a step in progress is never replaced: the switch question, the phrase, Finder and settling stand', () => {
+    for (const s of ['switch', 'unlock', 'finder', 'settling'] as const) {
+      const flow = step(s)
+      expect(flowForNav({ to: 'reauth' }, true, flow)).toBe(flow)
+    }
+  })
+
+  test('every other request leaves the flow alone', () => {
+    for (const nav of [{ to: 'home' }, { to: 'back' }, { to: 'settings', section: null }] as const) {
+      expect(flowForNav(nav, true, IDLE_FLOW)).toBe(IDLE_FLOW)
+    }
+  })
+
+  test('the sign-in it leads to ends the step like any “Sign in again”', () => {
+    expect(afterSignIn({ kind: 'reauthenticated', vaultUnlocked: true, keyReplaced: false }, '', true)).toEqual(settling())
+  })
+})
+
+// Review P2-3: ⌘W on “Set up this Mac” destroys the window and its flow store with it; the session stays, the key was
+// never delivered, and the reopened window showed Home, whose locked card only called `unlock_vault` (nothing to read).
+// Rust keeps the pending step for the life of the process (`pending_setup`); the window asks once when it opens locked.
+describe('the pending set-up step: a window reopened while it was open (P2-3)', () => {
+  const lockedIn = { logged_in: true, auth_expired: false, vault_unlocked: false }
+
+  test('it is asked for exactly when an account is signed in, its session is good, the vault is locked, and no step is in progress', () => {
+    expect(setupCheckWanted(lockedIn, IDLE_FLOW)).toBe(true)
+    expect(setupCheckWanted({ ...lockedIn, vault_unlocked: true }, IDLE_FLOW)).toBe(false)
+    expect(setupCheckWanted({ ...lockedIn, logged_in: false }, IDLE_FLOW)).toBe(false)
+    expect(setupCheckWanted({ ...lockedIn, auth_expired: true }, IDLE_FLOW)).toBe(false)
+    for (const s of ['switch', 'unlock', 'finder', 'settling', 'reauth'] as const) expect(setupCheckWanted(lockedIn, step(s))).toBe(false)
+  })
+
+  test('a pending step resumes at Set up this Mac, saying why when the kept key was replaced; none resumes nothing', () => {
+    expect(flowForPendingSetup({ key_replaced: false })).toEqual(step('unlock'))
+    expect(flowForPendingSetup({ key_replaced: true })).toEqual(step('unlock', { keyReplaced: true }))
+    expect(flowForPendingSetup(null)).toBeNull()
+  })
+
+  test('an answer that is not the shape Rust sends resumes nothing: a wrong guess would trap the person on a card', () => {
+    for (const raw of [undefined, 'yes', 1, [], {}, { key_replaced: 'yes' }]) expect(flowForPendingSetup(raw as never)).toBeNull()
+  })
+})
+
+// The sentence `unlock_vault` answers on a Mac that holds a token and no vault key. It is the approved Set up this Mac
+// copy, so every surface that shows an unlock failure says something true; the window recognises it to offer the phrase.
+describe('isNoVaultKey (P2-3 b)', () => {
+  // The two halves of one contract, pinned equal: what Rust's `unlock_vault` says, and what the window recognises.
+  test('Rust’s sentence is the approved Set up this Mac copy, word for word', () => {
+    expect(rustStr('lib.rs', 'NO_VAULT_KEY_UNLOCK_ERROR')).toBe(copy.SET_UP_COPY)
+    expect(isNoVaultKey(rustStr('lib.rs', 'NO_VAULT_KEY_UNLOCK_ERROR'))).toBe(true)
+  })
+
+  test('only the Set up this Mac sentence is the no-key answer', () => {
+    expect(isNoVaultKey('This Mac does not have your encryption keys yet. Restore them to continue.')).toBe(true)
+    for (const reason of ['', 'Sign in before unlocking the vault.', 'unlock vault key from Keychain: secret not found', 'Account changed. Please try again.']) {
+      expect(isNoVaultKey(reason)).toBe(false)
+    }
   })
 })
 

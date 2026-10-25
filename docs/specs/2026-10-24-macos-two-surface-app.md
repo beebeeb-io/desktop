@@ -418,7 +418,12 @@ No rail, no "Choose offline folders", no "Control center is ready" (spec C §11)
 After the keys arrive, the card shows "Beebeeb in Finder" / "Beebeeb adds itself to Finder after sign-in." and spec
 A's "Adding Beebeeb to Finder…". On Ready the window **moves on to Home** with the first-run hint (§7.6); it does not
 close (this replaces spec C §7.6's "closes by itself"). On a failure or a turned-off extension: spec A's one sentence
-and one action, inline (ink on `--err-bg`). "Continue" is not offered: Home already shows the Finder row's state.
+and one action, inline (ink on `--err-bg`). ~~"Continue" is not offered: Home already shows the Finder row's state.~~
+While Finder is not Ready the card also offers one secondary button, "Continue to Home", which moves the window on at
+once; Home shows the Finder row's state and its action. A status screen is not a trap: a Finder add that fails, or an
+extension that is turned off, must not hold the person on it. — lead ruling, 2026-10-25 (review P3-6 on PR #143). **A
+recorded deviation from the hi-fi**, which draws no such button: the ruling supersedes the artefact (precedent: task 1357),
+and the hi-fi's figure 5 gains the button when the design is next redrawn.
 
 ### 7.6 Signed in: sidebar, Home, Review
 
@@ -442,7 +447,12 @@ and the Windows shell's "Files" was a summary. — rulings amendment, 2026-10-24
 - "Storage": the bar, "{used} of {quota}", "Add storage".
 - "Recent activity": the popover's rows, more of them.
 - The engine refusal sentence (`sync_status.engine_refusal`) as a status note when present.
-- Locked: one card, the popover's sentence and "Unlock vault". Review and Trash show the same card.
+- Locked: one card, the popover's sentence and "Unlock vault". Review and Trash show the same card. If the unlock finds
+  no key on this Mac (a password sign-in that was never finished with the recovery phrase), the card says the Set up this
+  Mac sentence ("This Mac does not have your encryption keys yet. Restore them to continue.") and offers one secondary
+  button, "Use your recovery phrase", which opens Set up this Mac in this window. — lead wording, 2026-10-25 (review P2-3
+  b on PR #143); a recorded deviation, the hi-fi draws no such state. A window reopened while that step was still owed
+  resumes at Set up this Mac by itself (Rust keeps the step for the life of the process; a relaunch is task 1747's Part 2).
 
 **Review** (replaces "Versions & conflicts", the conflict windows and the version-history modal):
 

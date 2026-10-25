@@ -11,14 +11,18 @@
  * remounts the window on every session change, and a sign-in is one. Onboarding avoided that by being the one window
  * outside the boundary; the Beebeeb window is inside it because 1887's sign-out relies on the remount.
  */
+import { SET_UP_COPY } from './accountViewCopy'
+import type { MainNav } from './mainWindowModel'
 import type { SignInSettled } from './onboardingSignIn'
 import type { AskCounts } from './signOutCopy'
 
 /**
  * The steps after (or beside) the sign-in screen. `null` is no step: the window follows the session alone.
  * `settling`: the sign-in is done and the next read of the session has not landed, so the old card is not drawn again.
+ * `reauth`: “Sign in again” was asked for by an opener (`open_reauth_window`), whatever the session says: the person
+ * clicked it, so the window shows it, as Linux's onboarding window does (`mode=reauth`).
  */
-export type SignInStep = 'switch' | 'unlock' | 'finder' | 'settling'
+export type SignInStep = 'switch' | 'unlock' | 'finder' | 'settling' | 'reauth'
 
 /** What the account switch step shows (1887 W11): the count, the ask snapshot, or the coded E3 when the count failed. */
 export interface SwitchInfo {
@@ -74,7 +78,12 @@ export function windowScreen(account: RoutingAccount, flow: SignInFlow): WindowS
  * read by a window that has been up for a while may predate the step it would judge.
  */
 export function normalizeFlow(account: RoutingAccount, flow: SignInFlow): SignInFlow {
-  if (!account.logged_in && (flow.step === 'unlock' || flow.step === 'finder')) return IDLE_FLOW
+  if (account.logged_in) return flow
+  if (flow.step === 'unlock' || flow.step === 'finder' || flow.step === 'reauth') return IDLE_FLOW
+  // The switch card asks about the account that is still on this Mac. When that account signed out another way (the app
+  // menu, the popover) the card is stale; it goes, and the address typed for the next sign-in stays, as when “Sign out
+  // and switch” ends the same way (review P2-2).
+  if (flow.step === 'switch') return afterSwitched(flow)
   return flow
 }
 
@@ -101,6 +110,47 @@ export function afterSignIn(settled: SignInSettled, email: string, reauth: boole
       if (!settled.vaultUnlocked) return { ...IDLE_FLOW, step: 'unlock' }
       return reauth ? settling() : { ...IDLE_FLOW, step: 'finder' }
   }
+}
+
+/**
+ * A request to the window that is a step of this flow: “Sign in again” from `open_reauth_window` (review P3-1). It shows the
+ * card whatever the session says, but only for a signed-in window with no step in progress: the switch question, the
+ * recovery phrase, Finder and settling are not replaced, and with no account on this Mac the sign-in card shows already.
+ * Every other request is the window's navigation (`mainWindowModel.navigate`), not a step.
+ */
+export function flowForNav(nav: MainNav, signedIn: boolean, flow: SignInFlow): SignInFlow {
+  if (nav.to !== 'reauth' || !signedIn || flow.step !== null) return flow
+  return { ...IDLE_FLOW, step: 'reauth' }
+}
+
+/**
+ * Whether a window that has just read its first account state should ask Rust for a pending set-up step (review P2-3):
+ * the account is signed in with a good session, the vault is locked, and no step is already in progress. Anything else
+ * has its own screen, or nothing to resume.
+ */
+export function setupCheckWanted(account: RoutingAccount & { vault_unlocked: boolean }, flow: SignInFlow): boolean {
+  return account.logged_in && !account.auth_expired && !account.vault_unlocked && flow.step === null
+}
+
+/**
+ * The flow a pending set-up step resumes at: Set up this Mac, with the reason line when the kept key was replaced.
+ * `raw` is what `pending_setup` answered; anything but `{ key_replaced: boolean }` resumes nothing (null), because a
+ * guess would put the person on a card with no way out.
+ */
+export function flowForPendingSetup(raw: unknown): SignInFlow | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const keyReplaced = (raw as { key_replaced?: unknown }).key_replaced
+  if (typeof keyReplaced !== 'boolean') return null
+  return { ...IDLE_FLOW, step: 'unlock', keyReplaced }
+}
+
+/**
+ * `unlock_vault`'s answer on a Mac that holds a session token and no vault key: Rust says the approved Set up this Mac
+ * sentence (`NO_VAULT_KEY_UNLOCK_ERROR`, pinned equal in `lib.rs`'s tests), instead of the Keychain's own words. The window
+ * recognises it to offer the recovery phrase.
+ */
+export function isNoVaultKey(reason: string): boolean {
+  return reason === SET_UP_COPY
 }
 
 /** “Sign out and switch” signed the other account out: sign-in again, with the address that was typed. */
