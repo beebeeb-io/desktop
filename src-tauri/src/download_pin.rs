@@ -149,6 +149,9 @@ pub(crate) mod tests {
     use super::*;
     use serde_json::json;
 
+    /// One malformed-manifest case: its label and the edit that breaks the manifest.
+    type Case = (&'static str, Box<dyn Fn(&mut Value)>);
+
     /// A `download_version` exactly as the server builds it.
     pub(crate) fn manifest(id: &str, stride: u64, plaintext_sizes: &[u64]) -> Value {
         let chunks: Vec<Value> = plaintext_sizes
@@ -201,7 +204,7 @@ pub(crate) mod tests {
             f(&mut dv);
             PinnedVersion::from_metadata(&json!({ "download_version": dv }))
         };
-        let cases: Vec<(&str, Box<dyn Fn(&mut Value)>)> = vec![
+        let cases: Vec<Case> = vec![
             ("no id", Box::new(|v: &mut Value| v["object_version_id"] = Value::Null)),
             ("id not a uuid", Box::new(|v: &mut Value| v["object_version_id"] = json!("v1"))),
             ("count off", Box::new(|v: &mut Value| v["chunk_count"] = json!(4))),
