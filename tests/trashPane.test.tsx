@@ -289,6 +289,51 @@ describe('Refresh (the toolbar button lives in the window; it reaches the pane a
     expect(lines(m).join(' | ')).not.toContain('Older.txt')
   })
 
+  test('a refresh still pending never puts back a row a Restore or a delete has removed since (review thread on #142)', async () => {
+    const lists: Array<(v: unknown) => void> = []
+    let first = true
+    const { m, props } = open({
+      desktop_trash_list: () => {
+        if (first) { first = false; return files() }
+        return new Promise((resolve) => { lists.push(resolve) })
+      },
+    }, 0)
+    await settle(m)
+    props.refreshSignal = 1 // Refresh: the list is asked for again and the old rows stay while it is out
+    m.render()
+    await settle(m)
+    expect(lists).toHaveLength(1)
+    await pressFirst(m, 'Restore') // t1 is restored while the refresh is still out
+    expect(rowsOf(m)).toHaveLength(1)
+    lists[0](files()) // the refresh answers with the list as it was before the restore
+    await settle(m)
+    expect(lines(m).join(' | ')).not.toContain('Draft 3')
+    expect(rowsOf(m)).toHaveLength(1)
+  })
+
+  test('the same for a permanent delete', async () => {
+    const lists: Array<(v: unknown) => void> = []
+    let first = true
+    const { m, props } = open({
+      desktop_trash_list: () => {
+        if (first) { first = false; return files() }
+        return new Promise((resolve) => { lists.push(resolve) })
+      },
+    }, 0)
+    await settle(m)
+    props.refreshSignal = 1
+    m.render()
+    await settle(m)
+    await pressFirst(m, 'Delete…')
+    await typePassword(m, 'correct horse')
+    await press(m, 'Delete permanently')
+    expect(rowsOf(m)).toHaveLength(1)
+    lists[0](files())
+    await settle(m)
+    expect(rowsOf(m)).toHaveLength(1)
+    expect(lines(m).join(' | ')).not.toContain('Draft 3')
+  })
+
   test('it exposes no Refresh button of its own: one place for it (the toolbar)', async () => {
     const { m } = open()
     await settle(m)

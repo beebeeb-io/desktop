@@ -184,6 +184,21 @@ describe('starting and stopping', () => {
     expect(feed.state().status).toBe('loading')
   })
 
+  test('a read still pending when the feed stopped never lands in the next lifetime: an account switch must not show the old account\'s rows (review thread on #142)', async () => {
+    let releaseOld: (r: CommandResult<VersionConflictEntry[]>) => void = () => {}
+    const old = new Promise<CommandResult<VersionConflictEntry[]>>((resolve) => { releaseOld = resolve })
+    const { feed, seen, settle } = harness([old, ok([entry('new-account')])])
+    const stopOld = feed.start() // the previous account's session: its read is slow
+    stopOld() // signed out, or the vault locked
+    feed.start() // the next session starts while that read is still out
+    await settle()
+    expect(feed.state().entries.map((e) => e.id)).toEqual(['new-account'])
+    releaseOld(ok([entry('old-account')]))
+    await settle()
+    expect(feed.state().entries.map((e) => e.id)).toEqual(['new-account'])
+    expect(seen.length).toBeGreaterThan(0)
+  })
+
   test('stopping twice is harmless and does not stop the other holder', () => {
     const { feed, timers } = harness([ok([])])
     const stopA = feed.start()

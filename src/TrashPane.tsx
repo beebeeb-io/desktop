@@ -60,7 +60,12 @@ export function TrashPane({ refreshSignal }: { refreshSignal: number }) {
     void reload()
   }, [refreshSignal])
 
-  const without = (id: string) => setLoad((previous) => ({ ...previous, items: previous.items.filter((row) => row.id !== id) }) as TrashLoad)
+  // A row leaves after a Restore or a delete. Any list that is still out was asked for before that and would put the row
+  // back, so it is dropped: the list on screen is the last answer, minus what was just done to it.
+  const without = (id: string) => {
+    loadRequest.current += 1
+    setLoad((previous) => ({ ...previous, items: previous.items.filter((row) => row.id !== id) }) as TrashLoad)
+  }
 
   const restore = async (item: DesktopTrashItem) => {
     setBusyId(item.id)

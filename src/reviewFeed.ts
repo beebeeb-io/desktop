@@ -42,13 +42,15 @@ type Read = () => Promise<CommandResult<VersionConflictEntry[]>>
 export class ReviewFeed {
   private current: ReviewFeedState = LOADING
   private readonly listeners = new Set<() => void>()
-  private readonly reader: SnapshotReader<CommandResult<VersionConflictEntry[]>>
+  /** One reader per lifetime (first start to last stop): a read still out when the feed stops can never land in the next. */
+  private reader: SnapshotReader<CommandResult<VersionConflictEntry[]>> | null = null
   private holders = 0
   private timer: number | null = null
 
-  constructor(read: Read, private readonly clock: Clock = windowClock) {
-    this.reader = new SnapshotReader(read, (result) => this.apply(result))
-  }
+  constructor(
+    private readonly read: Read,
+    private readonly clock: Clock = windowClock,
+  ) {}
 
   /** `useSyncExternalStore`'s `getSnapshot`: the same object until something changed. */
   state = (): ReviewFeedState => this.current
@@ -65,9 +67,14 @@ export class ReviewFeed {
   start(): () => void {
     this.holders += 1
     if (this.holders === 1) {
-      this.reader.resume()
-      this.reader.tick()
-      this.timer = this.clock.setInterval(() => this.reader.tick(), REVIEW_FEED_INTERVAL_MS)
+      // A new reader, not the old one resumed: the old one may still have a read out (a sign-out, then another account's
+      // sign-in, inside one slow read), and "skip the tick while one is pending" would let that read stand in for this
+      // lifetime's first. The old reader is stopped, so its answer lands nowhere.
+      const reader = new SnapshotReader(this.read, (result) => this.apply(result))
+      this.reader = reader
+      reader.resume()
+      reader.tick()
+      this.timer = this.clock.setInterval(() => reader.tick(), REVIEW_FEED_INTERVAL_MS)
     }
     let stopped = false
     return () => {
@@ -80,11 +87,12 @@ export class ReviewFeed {
 
   /** Reads now, whatever the timer is doing. Nothing before `start`. */
   refresh(): void {
-    this.reader.refresh()
+    this.reader?.refresh()
   }
 
   private halt(): void {
-    this.reader.stop()
+    this.reader?.stop()
+    this.reader = null
     if (this.timer !== null) this.clock.clearInterval(this.timer)
     this.timer = null
     this.set(LOADING)
