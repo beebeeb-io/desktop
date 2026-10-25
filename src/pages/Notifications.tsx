@@ -71,8 +71,8 @@ export default function Notifications() {
         showToast({
           id: 'notification-config-defaults',
           variant: 'warning',
-          title: 'Notification settings using defaults',
-          message: 'Notification preferences are not wired up yet; toggles shown are defaults and will not persist.',
+          title: 'Couldn’t load these settings',
+          message: 'Showing the default settings.',
           durationMs: 9000,
         })
       })

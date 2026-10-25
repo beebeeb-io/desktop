@@ -7,7 +7,7 @@
     "tray": "available",
     "sharing": "recipient_read_only",
     "install_format": "app",
-    "update_format": "app_bundle",
+    "update_format": "download",
     "sync_mode_selection": false,
     "metered_sync_control": false,
     "sync_overlay_control": false,

@@ -115,7 +115,9 @@ describe('onboardingSignIn.submitTotpCode', () => {
     const result = await submitTotpCode('123456', api)
     expect(result.ok).toBe(false)
     if (result.ok) throw new Error('unreachable')
-    expect(result.message).toContain('desktop_login_2fa')
+    // Spec §10.2 #24: the person is told plainly; the command's name goes to the log.
+    expect(result.message).toBe('This isn’t available in this version of Beebeeb.')
+    expect(result.message).not.toContain('desktop_login_2fa')
   })
 })
 

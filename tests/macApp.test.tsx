@@ -108,7 +108,7 @@ function openWindow(opts: WindowOpts = {}) {
       accountInitial: model.accountInitial,
       planShortLine: model.planShortLine,
       Btn: parts.Btn, Note: parts.Note, SettingsGroup: parts.SettingsGroup, SettingsIcon: parts.SettingsIcon,
-      GeneralTab: tabStub('general'), AccountTab: tabStub('account'), SyncTab: tabStub('sync'), AboutTab: tabStub('about'),
+      GeneralTab: tabStub('general'), AccountTab: tabStub('account'), SyncTab: tabStub('sync'), SecurityTab: tabStub('security'), AboutTab: tabStub('about'),
       HomePane: tabStub('home'), SignedOutCard,
       ReviewPane: tabStub('review'), TrashPane: tabStub('trash'), LockedPane: tabStub('locked'),
       reviewBadge: reviewModel.reviewBadge,
@@ -204,13 +204,13 @@ describe('the window, signed in: Home and the sidebar (§7.6)', () => {
 })
 
 describe('Settings in System Settings style (ruling 1, §7.8)', () => {
-  test('the gear swaps the sidebar for the Settings list: back to Home, the heading, the account row, General, Sync, About', async () => {
+  test('the gear swaps the sidebar for the Settings list: back to Home, the heading, the account row, General, Sync, Security, About', async () => {
     const { m } = openWindow()
     await settle(m)
     await click(m, 'Settings')
     const nav = navOf(m)
     expect(nav.map((n) => n.props['aria-label'])).toEqual(['Settings'])
-    expect(buttonsIn(nav[0]).map(label)).toEqual(['Back to Home', 'Account, sam@example.eu, Basic plan', 'General', 'Sync', 'About'])
+    expect(buttonsIn(nav[0]).map(label)).toEqual(['Back to Home', 'Account, sam@example.eu, Basic plan', 'General', 'Sync', 'Security', 'About'])
     expect(textOf(expand(nav[0].props.children))).toContain('Settings')
     expect(current(m)).toEqual(['General'])
     expect(shown(m)).toEqual(['general'])
@@ -233,6 +233,53 @@ describe('Settings in System Settings style (ruling 1, §7.8)', () => {
     await click(m, 'About')
     expect(shown(m)).toEqual(['about'])
   })
+
+  const propsOf = (m: Mounted, id: string) => find(m, (el) => el.props['data-tab'] === id)[0]?.props['data-props']
+
+  test('Security is a section between Sync and About, and the shell hands each body what it needs (slice 5)', async () => {
+    const { m } = openWindow()
+    await settle(m)
+    await click(m, 'Settings')
+    await click(m, 'Security')
+    expect(shown(m)).toEqual(['security'])
+    expect(title(m)).toBe('Security')
+    expect(current(m)).toEqual(['Security'])
+    expect(propsOf(m, 'security')).toEqual({ unlocked: true })
+    await click(m, 'General')
+    expect(propsOf(m, 'general').signedIn).toBe(true)
+    await click(m, 'About')
+    expect(propsOf(m, 'about').signedIn).toBe(true)
+    expect(propsOf(m, 'about').settings).toBeDefined()
+  })
+
+  test('a locked vault hands Security "locked", so it asks the account for nothing', async () => {
+    const { m } = openWindow({ snap: () => snapshot({ phase: 'locked', account: { vault_unlocked: false }, storage: null }) })
+    await settle(m)
+    await click(m, 'Settings')
+    await click(m, 'Security')
+    expect(propsOf(m, 'security')).toEqual({ unlocked: false })
+  })
+
+  for (const section of ['Security', 'Sync']) {
+  test(`${section} is never shown without a session: when the account signs out under it, the window falls back to General (§7.8, review P2-6)`, async () => {
+    let current: unknown = snapshot()
+    const { m } = openWindow({ snap: () => current })
+    const ticks: Array<() => void> = []
+    ;(globalThis as any).window.setInterval = (fn: () => void) => { ticks.push(fn); return 1 }
+    await settle(m)
+    await click(m, 'Settings')
+    await click(m, section)
+    expect(shown(m)).toEqual([section.toLowerCase()])
+    // The session ends while the pane is open: the next read says signed out.
+    current = snapshot({ phase: 'signed_out', account: { email: null, logged_in: false, vault_unlocked: false } })
+    expect(ticks.length).toBeGreaterThan(0)
+    ticks.forEach((tickFn) => tickFn())
+    await settle(m)
+    expect(shown(m)).toEqual(['general'])
+    expect(title(m)).toBe('General')
+    expect(buttonsIn(navOf(m)[0]).map(label)).toEqual(['Back to Sign in', 'General', 'About'])
+  })
+  }
 
   test('back returns to Home and puts focus on the gear (§11)', async () => {
     const { m } = openWindow()
@@ -274,7 +321,7 @@ describe('Settings in System Settings style (ruling 1, §7.8)', () => {
     await settle(m)
     await click(m, 'Settings')
     await click(m, 'Sync')
-    expect(buttonsIn(navOf(m)[0]).slice(1).map((b) => b.props.tabIndex)).toEqual([-1, -1, 0, -1])
+    expect(buttonsIn(navOf(m)[0]).slice(1).map((b) => b.props.tabIndex)).toEqual([-1, -1, 0, -1, -1])
   })
 
   test('⌘, opens the last section used in this window', async () => {
@@ -484,6 +531,16 @@ describe('signed out (until slice 2 brings sign-in into the window)', () => {
     await settle(m)
     expect(m.calls.filter((c) => c.name === 'open_onboarding_window')).toHaveLength(1)
     expect(m.toasts).toEqual([])
+  })
+
+  test('signed out, General and About are told so: no account preferences, no speed test', async () => {
+    const { m, request } = openWindow({ snap: out })
+    await settle(m)
+    await request({ to: 'settings', section: 'general' })
+    const props = find(m, (el) => el.props['data-tab'] === 'general')[0].props['data-props']
+    expect(props.signedIn).toBe(false)
+    await click(m, 'About')
+    expect(find(m, (el) => el.props['data-tab'] === 'about')[0].props['data-props'].signedIn).toBe(false)
   })
 
   test('⌘, shows Settings with General and About only, and the back control is "Sign in"', async () => {

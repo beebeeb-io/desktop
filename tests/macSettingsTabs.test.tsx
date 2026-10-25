@@ -17,6 +17,9 @@ import { connectNativeUpdateMenu as realConnectNativeUpdateMenu, desktopUpdateCh
 import * as diagnosticsCopy from '../src/diagnosticsCopy'
 import * as finderSetup from '../src/finderSetup'
 import * as finderSetupCopy from '../src/finderSetupCopy'
+import { createSpeedTest } from '../src/macSpeedTest'
+import * as macUpdateCopy from '../src/macUpdateCopy'
+import * as macUpdateOffer from '../src/macUpdateOffer'
 import * as model from '../src/macSettingsModel'
 import * as parts from '../src/macSettingsParts'
 import * as signOutCopy from '../src/signOutCopy'
@@ -47,12 +50,21 @@ const showSignOutOutcome = loadComponent('MacSettings.tsx', 'showSignOutOutcome'
 // The storage-location group has its own state and its own tests (macSettingsDataResidency.test.tsx); here it is a marker,
 // so the Account tab's tests read only what the Account tab itself decides.
 const DataResidencyGroup = () => createElement('div', { 'data-region-group': 'true' })
+// Slice 5: the account preferences group and the storage-details sheet are hook components with their own tests
+// (tests/macSettingsExtras.test.tsx); here they are markers, so the tabs' tests read only what the tabs decide.
+const AccountPreferencesGroup = () => createElement('div', { 'data-prefs-group': 'true' })
+const StorageDetailsSheet = (props: any) => createElement('div', { 'data-storage-sheet': String(props.open) })
+/** What the window applied as the theme, in order (`windows/theme.ts` sets the document's attributes; not under test here). */
+const appliedThemes: string[] = []
+const setDesktopThemePreference = (theme: string) => { appliedThemes.push(theme) }
 
 const baseBindings = {
   ...accountSession,
   ...desktopApi,
   ...diagnosticsCopy,
   ...model,
+  ...macUpdateCopy,
+  ...macUpdateOffer,
   ...parts,
   ...signOutCopy,
   Modal,
@@ -61,6 +73,9 @@ const baseBindings = {
   SendingSheet,
   UnsentAskSheet,
   DataResidencyGroup,
+  AccountPreferencesGroup,
+  StorageDetailsSheet,
+  setDesktopThemePreference,
   withPinned,
   KeptFolderNotes,
   finderActionButtonLabel: finderSetupCopy.finderActionButtonLabel,
@@ -72,6 +87,7 @@ const baseBindings = {
 
 const mounted: Mounted[] = []
 afterEach(() => {
+  appliedThemes.length = 0
   while (mounted.length) mounted.pop()!.close()
   // A sign-out's sentence lives in a module store (it outlives the session boundary): one test's is not the next one's.
   accountSession.clearSignOutWarning()
@@ -371,6 +387,50 @@ describe('useSettingsConfig', () => {
     expect(hook().state).toEqual({ status: 'ready', config: { ...config, notify_conflicts: false } })
   })
 
+  // Settings › General › Appearance: the window wears the saved theme, from the one place that owns the config.
+  // PR #140 review, P3: the first reading is applied. `main.tsx` applied the theme from the config command when the window
+  // opened, but that read can differ from this one (it failed, or another window saved since), and applying the same theme twice
+  // changes nothing; skipping the first reading could leave the window wearing a theme that is not the saved one.
+  test('the first reading applies the saved theme; a theme saved after that is worn at once; another key changes nothing', async () => {
+    const { m, hook } = probe({ config: { ...config, theme: 'system' } })
+    await settle(m)
+    expect(appliedThemes).toEqual(['system'])
+    await hook().save({ theme: 'dark' })
+    await settle(m)
+    expect(appliedThemes).toEqual(['system', 'dark'])
+    await hook().save({ upload_kbps_limit: 2000 })
+    await settle(m)
+    expect(appliedThemes).toEqual(['system', 'dark']) // another key changed: the theme is not applied again
+  })
+
+  test('a window that opens on a saved Dark wears Dark from the first reading, with no choice made', async () => {
+    const { m } = probe({ config: { ...config, theme: 'dark' } })
+    await settle(m)
+    expect(appliedThemes).toEqual(['dark'])
+  })
+
+  test('a theme that did not save is not kept: the config read back puts the old look back', async () => {
+    const { m, hook } = probe({ config: { ...config, theme: 'system' }, failWrites: 1 })
+    await settle(m)
+    // The choice is shown before the write answers, as in the app (React renders between the click and the IPC answer).
+    const pending = hook().save({ theme: 'dark' })
+    m.render()
+    await m.flush()
+    await pending
+    await settle(m)
+    expect(hook().state.config.theme).toBe('system')
+    expect(appliedThemes).toEqual(['system', 'dark', 'system'])
+    expect(m.toasts).toHaveLength(1)
+  })
+
+  test('a theme this app does not know is worn as System', async () => {
+    const { m, hook } = probe({ config: { ...config, theme: 'dark' } })
+    await settle(m)
+    await hook().save({ theme: 'sepia' })
+    await settle(m)
+    expect(appliedThemes).toEqual(['dark', 'system'])
+  })
+
   test('a load failure is its own state and Try again reads again', async () => {
     const { m, hook } = probe({ config, failReads: 1 })
     await m.flush()
@@ -459,6 +519,79 @@ describe('General tab', () => {
     await press(m, 'Try again')
     expect(reloads).toBe(1)
   })
+
+  // ── Task 1683 slice 5: Appearance, and "From your account" (spec §7.8 "General"; §10.2 #46; hi-fi section 4) ──
+
+  const select = (m: Mounted, name: string) => {
+    const hit = find(m, (el) => el.type === 'select' && el.props['aria-labelledby'] === `ms-${name}-label`)
+    if (hit.length !== 1) throw new Error(`expected one select "${name}", found ${hit.length}`)
+    return hit[0]
+  }
+  /** The options of the one select in the tab (the tab has a single select on General). */
+  const optionsOf = (m: Mounted, name: string) => {
+    select(m, name)
+    return find(m, (o) => o.type === 'option').map((o) => ({ value: o.props.value, label: textOf(o.props.children) }))
+  }
+  /** A settings object whose `save` behaves like the real hook: the change shows at once, and a test can put the disk's value back. */
+  const live = (over: object = {}) => {
+    const patches: any[] = []
+    const settings: any = {
+      state: { status: 'ready', config: { ...config, ...over } },
+      reload: async () => {},
+      save: async (patch: any) => { patches.push(patch); settings.state = { status: 'ready', config: { ...settings.state.config, ...patch } } },
+    }
+    return { settings, patches }
+  }
+
+  test('Appearance is a labelled select of System, Light and Dark that shows the saved theme and says what it does', async () => {
+    const m = open('GeneralTab', { autostart_enabled: () => true }, { props: { settings: ready({ theme: 'dark' }), signedIn: true } })
+    await m.flush()
+    const text = visibleText(m)
+    expect(text).toContain('Appearance')
+    expect(text).toContain('Always dark.')
+    expect(select(m, 'appearance').props.value).toBe('dark')
+    expect(optionsOf(m, 'appearance')).toEqual([{ value: 'system', label: 'System' }, { value: 'light', label: 'Light' }, { value: 'dark', label: 'Dark' }])
+    // The row sits in the first card with the login switch, as the hi-fi draws it.
+    const rows = m.elements().filter((el) => typeof el.props['data-row'] === 'string').map((el) => el.props['data-row'])
+    expect(rows.slice(0, 2)).toEqual(['login', 'appearance'])
+  })
+
+  test('"System" says it follows macOS; a theme this app does not know reads as System', async () => {
+    const system = open('GeneralTab', { autostart_enabled: () => true }, { props: { settings: ready({ theme: 'system' }), signedIn: true } })
+    await system.flush()
+    expect(visibleText(system)).toContain('Follow macOS.')
+    const unknown = open('GeneralTab', { autostart_enabled: () => true }, { props: { settings: ready({ theme: 'sepia' }), signedIn: true } })
+    await unknown.flush()
+    expect(select(unknown, 'appearance').props.value).toBe('system')
+  })
+
+  test('choosing a theme hands the window\'s config exactly that one key', async () => {
+    const { settings, patches } = live({ theme: 'system' })
+    const m = open('GeneralTab', { autostart_enabled: () => true }, { props: { settings, signedIn: true } })
+    await m.flush()
+    await select(m, 'appearance').props.onChange({ target: { value: 'light' } })
+    expect(patches).toEqual([{ theme: 'light' }])
+  })
+
+  test('before the config has loaded Appearance cannot be changed', async () => {
+    const settings = { state: { status: 'loading' }, save: async () => {}, reload: async () => {} }
+    const m = open('GeneralTab', { autostart_enabled: () => true }, { props: { settings, signedIn: true } })
+    await m.flush()
+    expect(select(m, 'appearance').props.disabled).toBe(true)
+  })
+
+  test('"From your account" follows "Tell me about" for a signed-in account, and is not there signed out (those preferences live with the account)', async () => {
+    const m = open('GeneralTab', { autostart_enabled: () => true }, { props: { settings: ready(), signedIn: true } })
+    await m.flush()
+    const order = m.elements().filter((el) => el.props['data-prefs-group'] === 'true' || el.props['aria-label'] === 'Tell me about').map((el) => el.props['aria-label'] ?? 'prefs')
+    expect(order).toEqual(['Tell me about', 'prefs'])
+
+    const out = open('GeneralTab', { autostart_enabled: () => true }, { props: { settings: ready(), signedIn: false } })
+    await out.flush()
+    expect(find(out, (el) => el.props['data-prefs-group'] === 'true')).toHaveLength(0)
+    expect(visibleText(out)).toContain('Appearance')
+    expect(visibleText(out)).toContain('Tell me about')
+  })
 })
 
 // ── Account ─────────────────────────────────────────────────────────────────
@@ -523,7 +656,8 @@ describe('Account tab', () => {
     expect(text).toContain('84,3 GB of 200 GB')
     expect(text).toContain('Vault is unlocked')
     expect(text).toContain('Locking stops sync until you enter your password again.')
-    expect(buttons(m)).toEqual(['Manage plan', 'Lock now', 'Sign out…'])
+    // Slice 5: "Storage details…" sits with the storage line, and the web row has its own button.
+    expect(buttons(m)).toEqual(['Storage details…', 'Manage plan', 'Lock now', 'Open beebeeb.io', 'Sign out…'])
     const bar = find(m, (el) => el.props.role === 'progressbar')
     expect(bar).toHaveLength(1)
     expect(bar[0].props['aria-valuenow']).toBe(42)
@@ -537,10 +671,50 @@ describe('Account tab', () => {
     expect(find(m, (el) => el.props['data-region-group'] === 'true')).toHaveLength(1)
     const order = m.elements().filter((el) => el.props['data-row'] === 'vault' || el.props['data-row'] === 'signout' || el.props['data-region-group'] === 'true')
     expect(order.map((el) => el.props['data-row'] ?? 'region')).toEqual(['vault', 'region', 'signout'])
+    // Slice 5: the web row sits with Sign out in the last card, in the hi-fi's order.
+    const tail = m.elements().filter((el) => el.props['data-row'] === 'web' || el.props['data-row'] === 'signout').map((el) => el.props['data-row'])
+    expect(tail).toEqual(['web', 'signout'])
 
     const out = openAccount(backend({}, snapshot({ account: { logged_in: false } })))
     await settle(out)
     expect(find(out, (el) => el.props['data-region-group'] === 'true')).toHaveLength(0)
+  })
+
+  test('the web row says what is changed on beebeeb.io and opens the account page there', async () => {
+    const m = openAccount(backend())
+    await settle(m)
+    const text = visibleText(m)
+    expect(text).toContain('Password, email and billing')
+    expect(text).toContain('Changed on beebeeb.io, in your browser.')
+    await press(m, 'Open beebeeb.io')
+    expect(m.calls.find((c) => c.name === 'plugin:opener|open_url')?.args).toEqual({ url: model.ACCOUNT_SETTINGS_URL })
+  })
+
+  test('"Storage details…" opens the storage sheet and nothing is read until it does', async () => {
+    const m = openAccount(backend())
+    await settle(m)
+    expect(find(m, (el) => el.props['data-storage-sheet'] === 'false')).toHaveLength(1)
+    expect(m.calls.map((c) => c.name)).not.toContain('account_storage_breakdown')
+    await press(m, 'Storage details…')
+    expect(find(m, (el) => el.props['data-storage-sheet'] === 'true')).toHaveLength(1)
+  })
+
+  test('there is no "Storage details…" without a storage line to explain, and a signed-out account has none', async () => {
+    const none = openAccount(backend({}, snapshot({ storage: null })))
+    await settle(none)
+    expect(buttons(none)).not.toContain('Storage details…')
+    const out = openAccount(backend({}, snapshot({ account: { logged_in: false } })))
+    await settle(out)
+    expect(buttons(out)).not.toContain('Storage details…')
+    expect(buttons(out)).not.toContain('Open beebeeb.io')
+  })
+
+  test('a locked vault keeps its storage line but offers no details: the breakdown needs the vault open', async () => {
+    const m = openAccount(backend({}, snapshot({ account: { vault_unlocked: false } })))
+    await settle(m)
+    expect(visibleText(m)).toContain('84,3 GB of 200 GB')
+    expect(buttons(m)).not.toContain('Storage details…')
+    expect(find(m, (el) => el.props['data-storage-sheet'] === 'true')).toHaveLength(0)
   })
 
   test('there is one storage source: the snapshot, never a second fetch of the usage', async () => {
@@ -565,7 +739,7 @@ describe('Account tab', () => {
     expect(visibleText(m)).toContain('Vault is locked')
     expect(visibleText(m)).toContain('Sync is paused until you unlock it.')
     // Locked: the plan and Manage plan need the session, so they are gone, and Unlock is the one action.
-    expect(buttons(m)).toEqual(['Unlock', 'Sign out…'])
+    expect(buttons(m)).toEqual(['Unlock', 'Open beebeeb.io', 'Sign out…'])
     expect(button(m, 'Unlock').props.className).toContain('ms-btn--primary')
   })
 
@@ -1343,14 +1517,38 @@ describe('Sync tab', () => {
 
 describe('About tab', () => {
   function updateStore(initial: any = { kind: 'idle' }) {
-    const store = { state: initial, checks: 0, getSnapshot: () => store.state, subscribe: () => () => {}, check: async () => { store.checks += 1 } }
+    const store = { state: initial, checks: 0, resets: 0, getSnapshot: () => store.state, subscribe: () => () => {}, check: async () => { store.checks += 1 }, reset: () => { store.resets += 1; store.state = { kind: 'idle' } } }
     return store
   }
-  const openAbout = async (backend: Record<string, (a: any) => unknown> = {}, store = updateStore()) => {
-    const m = open('AboutTab', { app_version: () => '0.8.6', report_problem: () => ({ path: '/tmp/bundle.json', email_opened: true }), install_update: () => undefined, 'plugin:opener|open_url': () => undefined, ...backend }, { bindings: { desktopUpdateCheck: store } })
-    await m.flush()
-    return { m, store }
+  /** A settings object whose `save` behaves like the real hook: the change shows at once. */
+  const liveSettings = (over: object = {}) => {
+    const patches: any[] = []
+    const settings: any = {
+      state: { status: 'ready', config: { ...config, release_channel: 'stable', ...over } },
+      reload: async () => {},
+      save: async (patch: any) => { patches.push(patch); settings.state = { status: 'ready', config: { ...settings.state.config, ...patch } } },
+    }
+    return { settings, patches }
   }
+  /** The in-window dialog with its close button, so a test can dismiss it. */
+  function ClosableModal(props: any) {
+    return props.open
+      ? createElement('div', { role: 'dialog', 'aria-label': props.title }, createElement('h2', null, props.title), props.children, props.footer, createElement('button', { onClick: props.onClose }, 'Close'))
+      : null
+  }
+  /** A fresh speed-test store per page, as a fresh window has; pass one to open the page again on the same window's. */
+  const openAbout = async (backend: Record<string, (a: any) => unknown> = {}, store = updateStore(), props: any = {}, speedTest = createSpeedTest(() => desktopApi.runSpeedtest())) => {
+    const { settings, patches } = liveSettings()
+    const m = open('AboutTab', { app_version: () => '0.8.6', report_problem: () => ({ path: '/tmp/bundle.json', email_opened: true }), install_update: () => undefined, run_speedtest: () => ({ latency: { min_ms: 18, avg_ms: 24, max_ms: 41 }, upload_bps: 4_400_000, download_bps: 11_750_000 }), 'plugin:opener|open_url': () => undefined, ...backend }, { props: { settings, signedIn: true, ...props }, bindings: { desktopUpdateCheck: store, desktopSpeedTest: speedTest, Modal: ClosableModal } })
+    await m.flush()
+    return { m, store, settings, patches, speedTest }
+  }
+  const aboutSelect = (m: Mounted, name: string) => {
+    const hit = find(m, (el) => el.type === 'select' && el.props['aria-labelledby'] === `ms-${name}-label`)
+    if (hit.length !== 1) throw new Error(`expected one select "${name}", found ${hit.length}`)
+    return hit[0]
+  }
+  const DOWNGRADE = { kind: 'downgrade_available', currentVersion: '0.9.1', currentChannel: 'alpha', channel: 'stable', version: '0.8.12', body: 'Fixes the sync stall.', releaseNotesUrl: 'https://github.com/beebeeb-io/desktop/releases/tag/desktop-v0.8.12' }
 
   test('the support-bundle row uses the exact copy task 1685 pinned to the Rust export, not a paraphrase', async () => {
     const { m } = await openAbout()
@@ -1361,14 +1559,17 @@ describe('About tab', () => {
     expect(textOf(hint[0].props.children)).not.toMatch(/plaintext names|without secrets/i)
   })
 
-  test('shows the version and the three things the spec lists, and nothing else to click', async () => {
+  test('shows the version, the release channel, and the three things under Help, and nothing else to click', async () => {
     const { m } = await openAbout()
     const text = visibleText(m)
     expect(text).toContain('Beebeeb for Mac')
     expect(text).toContain('Version 0.8.6')
+    expect(text).toContain('Release channel')
+    expect(text).toContain('Regular releases after validation.')
     expect(text).toContain('Get help')
+    expect(text).toContain('Test connection speed')
     expect(text).toContain('Export a support bundle')
-    expect(buttons(m)).toEqual(['Check for updates', 'Export…'])
+    expect(buttons(m)).toEqual(['Check for updates', 'Run test', 'Export…'])
     expect(find(m, (el) => el.type === 'button' && /Get help/.test(String(el.props['aria-label'])))).toHaveLength(1)
   })
 
@@ -1414,22 +1615,194 @@ describe('About tab', () => {
     expect(m.toasts).toEqual([])
   })
 
-  test('while a check runs the button is disabled; an available update turns it into Restart to update', async () => {
+  // Task 2176 (lead decision, 2026-10-24 22:47): under the App Sandbox a Mac cannot install an update in place, so About
+  // offers a download and says what to do with it. There is no "Restart to update" and `install_update` is never called.
+  const AVAILABLE = { kind: 'update_available', currentVersion: '0.8.6', channel: 'stable', version: '0.8.7' }
+
+  test('while a check runs the button is disabled; an available update turns it into Download update, with the one sentence that says what to do', async () => {
     const checking = await openAbout({}, updateStore({ kind: 'checking' }))
     expect(button(checking.m, 'Check for updates').props.disabled).toBe(true)
-    const available = await openAbout({}, updateStore({ kind: 'update_available', currentVersion: '0.8.6', channel: 'stable', version: '0.8.7' }))
-    expect(visibleText(available.m)).toContain('Version 0.8.7 is available.')
-    expect(buttons(available.m)).toContain('Restart to update')
+    const available = await openAbout({}, updateStore(AVAILABLE))
+    expect(visibleText(available.m)).toContain('Version 0.8.7 is available. Drag Beebeeb into Applications to replace this version.')
+    expect(buttons(available.m)).toContain('Download update')
     expect(buttons(available.m)).not.toContain('Check for updates')
-    await press(available.m, 'Restart to update')
-    expect(available.m.calls.filter((c) => c.name === 'install_update')).toHaveLength(1)
+    expect(buttons(available.m)).not.toContain('Restart to update')
   })
 
-  test('an update that fails to install is one error toast', async () => {
-    const { m } = await openAbout({ install_update: () => { throw new Error('signature mismatch') } }, updateStore({ kind: 'update_available', currentVersion: '0.8.6', channel: 'stable', version: '0.8.7' }))
-    await press(m, 'Restart to update')
+  test('Download update opens the newest Mac disk image in the browser and never installs in place', async () => {
+    const { m } = await openAbout({}, updateStore(AVAILABLE))
+    await press(m, 'Download update')
+    expect(m.calls.find((c) => c.name === 'plugin:opener|open_url')?.args).toEqual({ url: macUpdateCopy.MACOS_DOWNLOAD_URL })
+    expect(m.calls.filter((c) => c.name === 'install_update')).toHaveLength(0)
+    expect(m.toasts).toEqual([])
+  })
+
+  test('a beta or alpha update is a link to that release, said plainly: the stable download link is never offered for it (review P2-4)', async () => {
+    for (const [channel, word] of [['beta', 'Beta'], ['alpha', 'Alpha']] as const) {
+      const { m } = await openAbout({}, updateStore({ kind: 'update_available', currentVersion: '0.8.6', channel, version: '0.9.0-x.1' }))
+      expect(visibleText(m)).toContain('Version 0.9.0-x.1 is available.')
+      expect(visibleText(m)).toContain(`This is a${channel === 'alpha' ? 'n' : ''} ${word} release.`)
+      expect(buttons(m)).toContain('View release')
+      expect(buttons(m)).not.toContain('Download update')
+      await press(m, 'View release')
+      expect(m.calls.find((c) => c.name === 'plugin:opener|open_url')?.args).toEqual({ url: 'https://github.com/beebeeb-io/desktop/releases/tag/desktop-v0.9.0-x.1' })
+      expect(m.calls.filter((c) => c.name === 'install_update')).toHaveLength(0)
+    }
+  })
+
+  test('a download that cannot be opened is one error toast', async () => {
+    const { m } = await openAbout({ 'plugin:opener|open_url': () => { throw new Error('no browser') } }, updateStore(AVAILABLE))
+    // `openUrl` falls back to the webview's own `window.open` when the opener plugin fails; a browser has one, the harness does not.
+    ;(globalThis as any).window.open = () => null
+    await press(m, 'Download update')
     expect(m.toasts).toHaveLength(1)
-    expect(m.toasts[0]).toMatchObject({ variant: 'error', title: 'Update install failed' })
+    expect(m.toasts[0]).toMatchObject({ variant: 'error', title: 'Couldn’t open the download' })
+  })
+
+  test('the release channel is a select of Stable, Beta and Alpha; choosing one hands over exactly that key and forgets the old answer', async () => {
+    const { m, store, patches } = await openAbout({}, updateStore({ kind: 'up_to_date', currentVersion: '0.8.6', channel: 'stable' }))
+    expect(aboutSelect(m, 'channel').props.value).toBe('stable')
+    expect(find(m, (o) => o.type === 'option').map((o) => textOf(o.props.children))).toEqual(['Stable', 'Beta', 'Alpha'])
+    await aboutSelect(m, 'channel').props.onChange({ target: { value: 'beta' } })
+    await m.flush()
+    expect(patches).toEqual([{ release_channel: 'beta' }])
+    expect(store.resets).toBe(1)
+    expect(visibleText(m)).toContain('Earlier builds for release testing.')
+  })
+
+  test('a channel that is not one of the three reads as Stable, and a config that has not loaded cannot be changed', async () => {
+    const odd = await openAbout({}, updateStore(), { settings: liveSettings({ release_channel: 'nightly' }).settings })
+    expect(aboutSelect(odd.m, 'channel').props.value).toBe('stable')
+    const loading = await openAbout({}, updateStore(), { settings: { state: { status: 'loading' }, save: async () => {}, reload: async () => {} } })
+    expect(aboutSelect(loading.m, 'channel').props.disabled).toBe(true)
+  })
+
+  test('a config that failed to load is one inline alert with Try again in place of the channel row', async () => {
+    let reloads = 0
+    const { m } = await openAbout({}, updateStore(), { settings: { state: { status: 'failed' }, save: async () => {}, reload: async () => { reloads += 1 } } })
+    expect(visibleErrorSurfaces(m)).toHaveLength(1)
+    expect(find(m, (el) => el.props['data-error-surface'] === 'settings-config')).toHaveLength(1)
+    await press(m, 'Try again')
+    expect(reloads).toBe(1)
+  })
+
+  test('a channel older than this version is a row with the release notes and a link, and no button that installs it', async () => {
+    const { m } = await openAbout({}, updateStore(DOWNGRADE))
+    const text = visibleText(m)
+    expect(text).toContain('The Stable channel is at version 0.8.12')
+    expect(text).toContain('This Mac runs 0.9.1, from the Alpha channel. Read the release notes before you go back to an older version.')
+    expect(buttons(m)).toEqual(['Check for updates', 'Release notes', 'View release', 'Run test', 'Export…'])
+    expect(buttons(m).some((label) => /^Downgrade/.test(label))).toBe(false)
+    expect(find(m, (el) => el.props.role === 'dialog')).toHaveLength(0)
+    await press(m, 'View release')
+    expect(m.calls.find((c) => c.name === 'plugin:opener|open_url')?.args).toEqual({ url: DOWNGRADE.releaseNotesUrl })
+    expect(m.calls.filter((c) => c.name === 'install_channel_downgrade' || c.name === 'install_update')).toHaveLength(0)
+  })
+
+  test('Release notes opens a sheet with the notes, or says there are none, and closes', async () => {
+    const { m } = await openAbout({}, updateStore(DOWNGRADE))
+    await press(m, 'Release notes')
+    const sheet = find(m, (el) => el.props.role === 'dialog')
+    expect(sheet).toHaveLength(1)
+    expect(sheet[0].props['aria-label']).toBe('Beebeeb 0.8.12')
+    expect(textOf(expand(sheet[0]))).toContain('Fixes the sync stall.')
+    await press(m, 'Close')
+    expect(find(m, (el) => el.props.role === 'dialog')).toHaveLength(0)
+
+    const empty = await openAbout({}, updateStore({ ...DOWNGRADE, body: '' }))
+    await press(empty.m, 'Release notes')
+    expect(textOf(expand(find(empty.m, (el) => el.props.role === 'dialog')[0]))).toContain('No release notes were provided for this version.')
+  })
+
+  test('Run test runs the speed test once, says it is running, and shows one mono line of results', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const { m } = await openAbout({ run_speedtest: async () => { await gate; return { latency: { min_ms: 18, avg_ms: 24, max_ms: 41 }, upload_bps: 4_400_000, download_bps: 11_750_000 } } })
+    expect(visibleText(m)).toContain('Measures how fast this Mac reaches Beebeeb: 5 pings, then 3 uploads and 3 downloads of 10 MB. Takes 30 to 90 seconds.')
+    await m.clickNoWait('Run test')
+    expect(button(m, 'Running…').props.disabled).toBe(true)
+    await button(m, 'Running…').props.onClick?.()
+    release()
+    await settle(m)
+    expect(m.calls.filter((c) => c.name === 'run_speedtest')).toHaveLength(1)
+    expect(visibleText(m)).toContain('Latency 24 ms (18 to 41) · Upload 35.2 Mbps · Download 94.0 Mbps')
+    expect(buttons(m)).toContain('Run test')
+    expect(m.toasts).toEqual([])
+  })
+
+  test('a speed test that fails is one toast, and the row goes back to its hint', async () => {
+    const { m } = await openAbout({ run_speedtest: () => { throw new Error('vault is locked') } })
+    await press(m, 'Run test')
+    expect(m.toasts).toHaveLength(1)
+    expect(m.toasts[0]).toMatchObject({ variant: 'error', title: 'Couldn’t run the speed test' })
+    expect(visibleText(m)).toContain('Takes 30 to 90 seconds.')
+    expect(visibleErrorSurfaces(m).filter((surface) => surface.startsWith('inline'))).toEqual([])
+  })
+
+  // PR #140 review, P2-7: a run in which nothing finished in one direction is not "0.00 Mbps".
+  test('a speed test that measured nothing in either direction is the failure toast, never "0.00 Mbps"', async () => {
+    for (const result of [
+      { latency: { min_ms: 0, avg_ms: 0, max_ms: 0 }, upload_bps: 0, download_bps: 0 },
+      { latency: { min_ms: 18, avg_ms: 24, max_ms: 41 }, upload_bps: 0, download_bps: 11_750_000 },
+      { latency: { min_ms: 18, avg_ms: 24, max_ms: 41 }, upload_bps: 4_400_000, download_bps: 0 },
+    ]) {
+      const { m } = await openAbout({ run_speedtest: () => result })
+      await press(m, 'Run test')
+      expect(m.toasts).toHaveLength(1)
+      expect(m.toasts[0]).toMatchObject({ variant: 'error', title: 'Couldn’t run the speed test', message: model.SPEED_TEST_NO_FIGURES })
+      expect(visibleText(m)).not.toMatch(/Mbps|Latency/)
+      expect(visibleText(m)).toContain('Takes 30 to 90 seconds.')
+      expect(buttons(m)).toContain('Run test')
+    }
+  })
+
+  test('the host\'s own reason for a failed run is what the toast says (the pings or the transfers did not finish)', async () => {
+    const reason = 'None of the 3 downloads finished. Check your internet connection and try again.'
+    const { m } = await openAbout({ run_speedtest: () => { throw new Error(reason) } })
+    await press(m, 'Run test')
+    expect(m.toasts).toHaveLength(1)
+    expect(m.toasts[0]).toMatchObject({ variant: 'error', title: 'Couldn’t run the speed test', message: reason })
+    expect(visibleText(m)).not.toMatch(/Mbps/)
+  })
+
+  // PR #140 review, P3: a test takes up to 90 seconds; leaving About must not lose it.
+  test('a speed test goes on when About is left: opened again, the page says it is running, and its figures arrive there', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const speedTest = createSpeedTest(() => desktopApi.runSpeedtest())
+    const first = await openAbout({ run_speedtest: async () => { await gate; return { latency: { min_ms: 18, avg_ms: 24, max_ms: 41 }, upload_bps: 4_400_000, download_bps: 11_750_000 } } }, updateStore(), {}, speedTest)
+    await first.m.clickNoWait('Run test')
+    first.m.unmount()
+    first.m.close()
+
+    const second = await openAbout({ run_speedtest: () => { throw new Error('a second test must not start') } }, updateStore(), {}, speedTest)
+    expect(button(second.m, 'Running…').props.disabled).toBe(true)
+    expect(visibleText(second.m)).toContain('Testing… this takes 30 to 90 seconds.')
+    await button(second.m, 'Running…').props.onClick?.()
+    release()
+    await settle(second.m)
+    expect(second.m.calls.filter((c) => c.name === 'run_speedtest')).toHaveLength(0)
+    expect(first.m.calls.filter((c) => c.name === 'run_speedtest')).toHaveLength(1)
+    expect(visibleText(second.m)).toContain('Latency 24 ms (18 to 41) · Upload 35.2 Mbps · Download 94.0 Mbps')
+    expect(buttons(second.m)).toContain('Run test')
+  })
+
+  test('the figures of a finished test are still there when About is opened again', async () => {
+    const speedTest = createSpeedTest(() => desktopApi.runSpeedtest())
+    const first = await openAbout({}, updateStore(), {}, speedTest)
+    await press(first.m, 'Run test')
+    first.m.unmount()
+    first.m.close()
+    const second = await openAbout({}, updateStore(), {}, speedTest)
+    expect(visibleText(second.m)).toContain('Latency 24 ms (18 to 41) · Upload 35.2 Mbps · Download 94.0 Mbps')
+  })
+
+  test('signed out, the speed test is not offered (it needs the account) but the channel and the version are', async () => {
+    const { m } = await openAbout({}, updateStore(), { signedIn: false })
+    expect(visibleText(m)).not.toContain('Test connection speed')
+    expect(buttons(m)).toEqual(['Check for updates', 'Export…'])
+    expect(aboutSelect(m, 'channel').props.value).toBe('stable')
+    expect(m.calls.filter((c) => c.name === 'run_speedtest')).toHaveLength(0)
   })
 })
 

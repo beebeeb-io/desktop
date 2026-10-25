@@ -219,10 +219,6 @@ export default function Account() {
       <div className="page-header">
         <div>
           <h1 className="page-title">Account & security</h1>
-          <p className="page-copy">
-            Session token, unlock state, diagnostics, sign-out, and launch behavior. Locking clears
-            file-content access while leaving the Finder location visible.
-          </p>
         </div>
         <span className="status-pill">
           <span className={`dot ${unlocked ? 'ok' : loggedIn ? 'warn' : ''}`} />
@@ -249,21 +245,15 @@ export default function Account() {
               Open web app
             </button>
           </div>
-          <div className="row">
-            <div>
-              <div className="row-title">Session token</div>
-              <div className="row-detail">{loggedIn ? 'Stored by native session layer' : 'Missing'}</div>
-            </div>
-          </div>
         </div>
 
         <div className="panel">
           <h2 className="section-title">Vault lock</h2>
           <div className="row">
             <div>
-              <div className="row-title">Master key lifetime</div>
+              <div className="row-title">{unlocked ? 'Vault is unlocked' : 'Vault is locked'}</div>
               <div className="row-detail">
-                {unlocked ? 'Unwrapped in memory' : 'Unavailable to file operations'}
+                {unlocked ? 'Locking stops sync until you enter your password again.' : 'Sync is paused until you unlock it.'}
               </div>
             </div>
           </div>
@@ -285,7 +275,7 @@ export default function Account() {
         ) : plan.phase === 'loading' ? (
           <div className="empty-state">Loading plan…</div>
         ) : plan.phase === 'unsupported' ? (
-          <div className="notice">Plan details aren’t available in this build.</div>
+          <div className="notice">Plan details aren’t available right now.</div>
         ) : plan.phase === 'error' ? (
           <div className="notice">{plan.reason}</div>
         ) : (
@@ -368,10 +358,6 @@ export default function Account() {
 
         <div className="panel">
           <h2 className="section-title">Sign out</h2>
-          <p className="page-copy" style={{ margin: '0 0 14px' }}>
-            Signing out stops sync and removes the session. Future native wiring should also clear
-            cached plaintext and wrapped-key material.
-          </p>
           <button
             className="button danger"
             disabled={!loggedIn || busy === 'clear_session'}

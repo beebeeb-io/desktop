@@ -18,8 +18,8 @@ export const MAIN_SECTIONS = [
 ] as const
 export type MainSection = (typeof MAIN_SECTIONS)[number]['id']
 
-/** The Settings list, top to bottom (§7.8): the account row is Account, then General, Sync, About. Security is slice 5. */
-const SETTINGS_SIGNED_IN: readonly SettingsTab[] = ['account', 'general', 'sync', 'about']
+/** The Settings list, top to bottom (§7.8): the account row is Account, then General, Sync, Security and, apart, About. */
+const SETTINGS_SIGNED_IN: readonly SettingsTab[] = ['account', 'general', 'sync', 'security', 'about']
 /** Signed out, the sections that need no session (§7.8). */
 const SETTINGS_SIGNED_OUT: readonly SettingsTab[] = ['general', 'about']
 
@@ -75,6 +75,25 @@ export function navigate(view: MainView, nav: MainNav, ctx: NavContext): MainVie
       return { mode: 'settings', section, returnTo }
     }
   }
+}
+
+/**
+ * The sections that exist only with a session: signed out only General and About do (§7.8). Account is the one section
+ * that is not in this list although signed out it has no sidebar entry: it hosts the sign-out's outcome ("You’re signed
+ * out" and the held sentence) until the window remounts on the sign-in card, and coercing it would take that outcome off the
+ * screen at the moment the sign-out finishes.
+ */
+const ONLY_WITH_A_SESSION: ReadonlyArray<SettingsTab> = ['security', 'sync']
+
+/**
+ * §7.8, signed out: only General and About exist. A request is coerced by `navigate`; this is the other half: a session that
+ * ends while Settings shows a section that exists only with one (the account signs out, the session is revoked) puts the
+ * window on General instead of leaving a body up that reads an account it no longer has (PR #140 review, P2-6 and its
+ * delta review). The same object comes back when there is nothing to change.
+ */
+export function coerceSettingsView(view: MainView, signedIn: boolean): MainView {
+  if (signedIn || view.mode !== 'settings' || !ONLY_WITH_A_SESSION.includes(view.section)) return view
+  return { ...view, section: 'general' }
 }
 
 /** A `main:navigate` request as Rust serialises it; anything else is no request. */

@@ -6,6 +6,7 @@
 //   node tests/render-mac-app.mjs REPO OUTPUT
 //   PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs   (as the other render-*.mjs)
 //   HIFI_PNG_DIR=/path/to/hifi-figures               optional: side by side with the hi-fi's figures
+//   RENDER_LOCALE=en-US                              the browser's language; sizes follow it, and so do the expected strings
 //
 // It bundles the REAL src/main.tsx (the mount path the app uses), loads `?window=main&platform=macos` with a synthetic
 // Tauri IPC, drives the window to each state through its own controls (the gear, the sidebar, the buttons), and
@@ -23,6 +24,13 @@ import { pathToFileURL } from 'node:url'
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE ? pathToFileURL(process.env.PLAYWRIGHT_MODULE).href : 'playwright')
 const [repo, output] = process.argv.slice(2)
 assert(repo && output, 'usage: node tests/render-mac-app.mjs REPO OUTPUT')
+
+// The window writes sizes and counts in the language of the Mac ("84,3 GB" on a Dutch one, "84.3 GB" on an American one;
+// storageFormat.ts). The browser is given ONE language, here, and every expected number below is written with that same
+// language, so no check depends on which language that is (PR #140 review, P3: they spelled out a Dutch Mac's).
+const LOCALE = process.env.RENDER_LOCALE || 'en-US'
+const number = (value) => new Intl.NumberFormat(LOCALE, { minimumFractionDigits: 0, maximumFractionDigits: 1 }).format(value)
+const gb = (value) => `${number(value)} GB`
 await mkdir(path.join(output, 'png'), { recursive: true })
 
 const outdir = path.join(output, 'bundle')
@@ -47,20 +55,45 @@ const snapshot = (over = {}) => ({
   ...over,
   account: { email: 'sam@example.eu', logged_in: true, vault_unlocked: true, auth_expired: false, ...(over.account ?? {}) },
 })
-// "Today at hh:mm" in the page's own clock (the browser and this script share the machine's time zone).
-const todayAt = (h, m) => { const d = new Date(); d.setHours(h, m, 0, 0); return Math.floor(d.getTime() / 1000) }
+// Slice 5: Security, General's account preferences, Storage details, About's channel / update / speed test.
+const now = Date.now()
+const hoursAgo = (n) => new Date(now - n * 3_600_000).toISOString()
+const todayAt = (h, m) => { const d = new Date(); d.setHours(h, m, 0, 0); return d.toISOString() }
+const account = {
+  // The authenticator row reads the account's own `totp_enabled` (review P2-5), not a security-score factor.
+  profile: { user_id: 'u1', email: 'sam@example.eu', email_verified: true, created_at: '2026-01-01T00:00:00Z', totp_enabled: true },
+  score: { score: 4, max: 5, label: 'Good', factors: [{ key: 'email_verified', satisfied: true }, { key: 'two_factor_enabled', satisfied: true }] },
+  sessions: { sessions: [
+    { id: 's1', device_name: 'MacBook Pro', device_kind: 'desktop', country_code: 'NL', last_active_at: new Date(now).toISOString(), created_at: hoursAgo(900), is_current: true },
+    { id: 's2', device_name: 'iPhone', device_kind: 'ios', country_code: 'NL', last_active_at: hoursAgo(2), created_at: hoursAgo(700), is_current: false },
+  ] },
+  devices: { devices: [{ id: 'd1', hostname: 'MacBook Pro', platform: 'macos', bb_version: '0.8.13', last_seen: new Date(now).toISOString(), created_at: new Date(new Date().getFullYear(), 8, 3, 9).toISOString(), session_count: 1 }] },
+  feed: { events: [
+    { id: 'e1', type: 'file.trash', subject: null, details: null, where: null, created_at: todayAt(9, 12) },
+    { id: 'e2', type: 'file.downloaded', subject: null, details: null, where: null, created_at: todayAt(8, 40) },
+  ], total: 2, page: 1 },
+  prefs: { new_device_login: true, share_received: true, file_updated: false, storage_warning: true, backup_complete: false },
+  breakdown: {
+    by_category: [{ category: 'media', bytes: 60_000_000_000, file_count: 1200 }, { category: 'documents', bytes: 20_000_000_000, file_count: 3400 }, { category: 'other', bytes: 4_300_000_000, file_count: 90 }],
+    largest_files: [{ file_id: 'f1', path: 'Photos/2026/Holiday in the mountains/IMG_0001.heic', size_bytes: 3_200_000_000, category: 'media' }, { file_id: 'f2', path: 'Investigations/Q3 ledger reconciliation.xlsx', size_bytes: 12_400_000, category: 'documents' }],
+    total_files: 4690, total_bytes: 84_300_000_000,
+  },
+  speed: { latency: { min_ms: 18, avg_ms: 24, max_ms: 41 }, upload_bps: 4_400_000, download_bps: 11_750_000 },
+}
+// "Today at hh:mm" as epoch seconds (Review's and Trash's times); `todayAt` above is the same moment as an ISO string.
+const todayAtSecs = (h, m) => { const d = new Date(); d.setHours(h, m, 0, 0); return Math.floor(d.getTime() / 1000) }
 const LONG_NAME = `${'Quarterly-investigation-summary-'.repeat(4)}final.xlsx`
 const reviewEntries = [
-  { id: 'conflict:f1', file_id: 'f1', file_name: 'Board notes, 29 Sept.md', folder: 'Team shared', kind: 'conflict', status: 'needs review', updated_at: todayAt(9, 12), detail: 'Changed on two devices.', action: 'open_conflict' },
-  { id: 'op:2', file_id: 'f2', file_name: 'Site visit, north wing.mov', folder: 'Photos', kind: 'failed_upload', status: 'upload review', updated_at: todayAt(8, 47), detail: 'Couldn’t upload, will retry', action: 'review_upload' },
+  { id: 'conflict:f1', file_id: 'f1', file_name: 'Board notes, 29 Sept.md', folder: 'Team shared', kind: 'conflict', status: 'needs review', updated_at: todayAtSecs(9, 12), detail: 'Changed on two devices.', action: 'open_conflict' },
+  { id: 'op:2', file_id: 'f2', file_name: 'Site visit, north wing.mov', folder: 'Photos', kind: 'failed_upload', status: 'upload review', updated_at: todayAtSecs(8, 47), detail: 'Couldn’t upload, will retry', action: 'review_upload' },
 ]
 const reviewAllKinds = [
   ...reviewEntries,
-  { id: 'op:3', file_id: 'f3', file_name: 'Archive 2025.zip', folder: null, kind: 'quota_failure', status: 'quota blocked', updated_at: todayAt(8, 30), detail: 'This change can’t upload until you free up space or add storage. It stays on this Mac.', action: 'review_upload' },
-  { id: 'op:4', file_id: 'f4', file_name: LONG_NAME, folder: 'Quarterly investigations, shared with the whole finance team in Rotterdam', kind: 'stale_base', status: 'stale base kept local', updated_at: todayAt(8, 2), detail: 'This file changed somewhere else too. Your version is kept on this Mac.', action: 'review_upload' },
-  { id: 'op:5', file_id: 'f5', file_name: 'Plan.pdf', kind: 'auth_failure', status: 'sign-in needed', updated_at: todayAt(7, 40), detail: 'Your session has expired. Sign in again to resume syncing.', action: 'sign_in_again' },
-  { id: 'op:6', file_id: 'f6', file_name: 'Roadmap.md', folder: 'Team shared', kind: 'not_sent', status: 'not sent', updated_at: todayAt(7, 15), detail: 'The copy of this change that was waiting to be sent is gone, so it can’t be sent.', action: 'review_upload' },
-  { id: 'op:7', file_id: 'f7', file_name: 'Invoice 2026-114.pdf', folder: 'Invoices', kind: 'account_refused', status: 'plan blocked', updated_at: todayAt(7, 5), detail: 'Your plan doesn’t allow uploads right now. This change stays on this Mac and is sent once that’s resolved.', action: 'review_upload' },
+  { id: 'op:3', file_id: 'f3', file_name: 'Archive 2025.zip', folder: null, kind: 'quota_failure', status: 'quota blocked', updated_at: todayAtSecs(8, 30), detail: 'This change can’t upload until you free up space or add storage. It stays on this Mac.', action: 'review_upload' },
+  { id: 'op:4', file_id: 'f4', file_name: LONG_NAME, folder: 'Quarterly investigations, shared with the whole finance team in Rotterdam', kind: 'stale_base', status: 'stale base kept local', updated_at: todayAtSecs(8, 2), detail: 'This file changed somewhere else too. Your version is kept on this Mac.', action: 'review_upload' },
+  { id: 'op:5', file_id: 'f5', file_name: 'Plan.pdf', kind: 'auth_failure', status: 'sign-in needed', updated_at: todayAtSecs(7, 40), detail: 'Your session has expired. Sign in again to resume syncing.', action: 'sign_in_again' },
+  { id: 'op:6', file_id: 'f6', file_name: 'Roadmap.md', folder: 'Team shared', kind: 'not_sent', status: 'not sent', updated_at: todayAtSecs(7, 15), detail: 'The copy of this change that was waiting to be sent is gone, so it can’t be sent.', action: 'review_upload' },
+  { id: 'op:7', file_id: 'f7', file_name: 'Invoice 2026-114.pdf', folder: 'Invoices', kind: 'account_refused', status: 'plan blocked', updated_at: todayAtSecs(7, 5), detail: 'Your plan doesn’t allow uploads right now. This change stays on this Mac and is sent once that’s resolved.', action: 'review_upload' },
 ]
 const conflictPreview = {
   is_text: true,
@@ -68,20 +101,22 @@ const conflictPreview = {
   remote: { size_bytes: 4096, text: '## Agenda\n1. Budget\n2. Roadmap (moved up)\n3. Hiring\n4. AOB\n' },
 }
 const searchHits = { query: 'q3', index_state: 'ready', indexed_file_count: 3, results: [
-  { file_id: 'f1', name: 'Q3 ledger reconciliation.xlsx', rel_path: 'Investigations/Q3 ledger reconciliation.xlsx', status: 'synced', size_bytes: 48_000, modified_at: todayAt(9, 0), shared_with_me: false },
-  { file_id: 'f2', name: 'Q3 notes.md', rel_path: 'Q3 notes.md', status: 'synced', size_bytes: 3_000, modified_at: todayAt(8, 0), shared_with_me: false },
+  { file_id: 'f1', name: 'Q3 ledger reconciliation.xlsx', rel_path: 'Investigations/Q3 ledger reconciliation.xlsx', status: 'synced', size_bytes: 48_000, modified_at: todayAtSecs(9, 0), shared_with_me: false },
+  { file_id: 'f2', name: 'Q3 notes.md', rel_path: 'Q3 notes.md', status: 'synced', size_bytes: 3_000, modified_at: todayAtSecs(8, 0), shared_with_me: false },
 ] }
 const versionList = { file_id: 'f1', current_version: 5, versions: [
-  { id: 'v5', version_number: 5, is_current: true, created_at: new Date(todayAt(9, 0) * 1000).toISOString(), size_bytes: 52_000, restorable: true },
-  { id: 'v4', version_number: 4, is_current: false, created_at: new Date((todayAt(9, 0) - 86400) * 1000).toISOString(), size_bytes: 48_000, restorable: true },
-  { id: 'v3', version_number: 3, is_current: false, created_at: new Date((todayAt(9, 0) - 14 * 86400) * 1000).toISOString(), size_bytes: 44_000, restorable: true },
+  { id: 'v5', version_number: 5, is_current: true, created_at: new Date(todayAtSecs(9, 0) * 1000).toISOString(), size_bytes: 52_000, restorable: true },
+  { id: 'v4', version_number: 4, is_current: false, created_at: new Date((todayAtSecs(9, 0) - 86400) * 1000).toISOString(), size_bytes: 48_000, restorable: true },
+  { id: 'v3', version_number: 3, is_current: false, created_at: new Date((todayAtSecs(9, 0) - 14 * 86400) * 1000).toISOString(), size_bytes: 44_000, restorable: true },
 ] }
 const trashItems = [
-  { id: 't1', name: 'Draft 3, interview questions.docx', is_folder: false, size_bytes: 48_000, updated_at: String(todayAt(9, 0) - 86400) },
-  { id: 't2', name: 'Old scans', is_folder: true, size_bytes: 1_400_000_000, updated_at: String(todayAt(9, 0) - 13 * 86400) },
-  { id: 't3', name: LONG_NAME, is_folder: false, size_bytes: 2_300_000, updated_at: String(todayAt(9, 0)) },
+  { id: 't1', name: 'Draft 3, interview questions.docx', is_folder: false, size_bytes: 48_000, updated_at: String(todayAtSecs(9, 0) - 86400) },
+  { id: 't2', name: 'Old scans', is_folder: true, size_bytes: 1_400_000_000, updated_at: String(todayAtSecs(9, 0) - 13 * 86400) },
+  { id: 't3', name: LONG_NAME, is_folder: false, size_bytes: 2_300_000, updated_at: String(todayAtSecs(9, 0)) },
 ]
 const base = {
+  ...account,
+  update: { status: 'up_to_date', current_version: '0.8.12', channel: 'stable' },
   snapshot: snapshot(),
   review: reviewEntries, conflictPreview, search: searchHits, versions: versionList, trash: trashItems,
   finder: { setup: 'ready', reason: null, launch_location: 'applications', attempt: 1, max_attempts: 1, last_failure: null },
@@ -101,6 +136,9 @@ const base = {
 }
 
 function installBackend({ caps, fx }) {
+  // "Last checked 1 min ago" is relative to now, and now is the page's, not the script's: fixtures built when the script
+  // started would read "2 min ago" for every scenario that a slow machine reaches a minute late.
+  if (typeof fx.snapshot?.engine?.last_tick_ok_at === 'number') fx.snapshot.engine.last_tick_ok_at = Math.floor(Date.now() / 1000) - 70
   window.__fx = fx
   window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} }
   window.__TAURI_INTERNALS__ = {
@@ -133,6 +171,18 @@ function installBackend({ caps, fx }) {
         case 'desktop_search_files': return f.search
         case 'list_file_versions': return f.versions
         case 'desktop_trash_list': return f.trash
+        case 'account_profile': return f.profile
+        case 'account_profile_fresh': return f.profile
+        case 'account_security_score': return f.score
+        case 'account_session_list': return f.sessions
+        case 'account_devices': return f.devices
+        case 'account_activity_feed': return f.feed
+        case 'account_notification_preferences': return { preferences: f.prefs }
+        case 'account_update_notification_preferences': f.prefs = { ...f.prefs, ...a.update }; return { preferences: f.prefs }
+        case 'account_storage_breakdown': return f.breakdown
+        case 'run_speedtest': return f.speed
+        case 'check_for_updates_now': return f.update
+        case 'report_problem': return { path: '/Users/sam/Desktop/beebeeb-support.json', email_opened: true }
         case 'consume_main_navigation': return null
         case 'consume_menu_update_check': return false
         case 'consume_sign_out_flow_request': return false
@@ -183,14 +233,23 @@ const gear = async (p) => { await p.getByRole('button', { name: 'Settings', exac
 const section = (label) => async (p) => { await gear(p); await p.getByRole('button', { name: label }).first().click() }
 
 const SCENARIOS = [
-  { name: 'home', bar: true, has: ['Home', 'End-to-end encrypted', 'Up to date', 'Last checked 1 min ago', 'Beebeeb in Finder', 'Your vault appears under Locations in Finder.', 'Open in Finder', 'Storage', '84,3 GB of 200 GB', 'sam@example.eu', 'Basic plan'], hasNot: ['Needs your attention', 'control center', 'daemon'], hifi: 'hifi-s3-fig0' },
+  { name: 'home', bar: true, has: ['Home', 'End-to-end encrypted', 'Up to date', 'Last checked 1 min ago', 'Beebeeb in Finder', 'Your vault appears under Locations in Finder.', 'Open in Finder', 'Storage', `${gb(84.3)} of ${gb(200)}`, 'sam@example.eu', 'Basic plan'], hasNot: ['Needs your attention', 'control center', 'daemon'], hifi: 'hifi-s3-fig0' },
   { name: 'home-kept', fx: { keptUnsent: KEPT_OURS, kept: KEPT_MACOS }, has: ['Needs your attention', KEPT_OURS, KEPT_MACOS, 'Show in Finder', 'Dismiss'] },
   { name: 'home-locked', fx: { snapshot: snapshot({ phase: 'locked', account: { vault_unlocked: false }, storage: null }) }, has: ['Your vault is locked', 'Unlock vault', 'Vault locked'], hasNot: ['Beebeeb in Finder'], hifi: 'hifi-s3-fig3' },
   { name: 'home-long-email', fx: { snapshot: snapshot({ account: { email: LONG_EMAIL } }) }, has: [LONG_EMAIL] },
-  { name: 'settings-general', act: gear, has: ['Settings', 'Home', 'General', 'Open Beebeeb at login', 'Tell me about'], sidebar: ['Back to Home', 'Account, sam@example.eu, Basic plan', 'General', 'Sync', 'About'], min: true, hifi: 'hifi-s4-fig1' },
-  { name: 'settings-account', act: section('Account, sam@example.eu, Basic plan'), has: ['Account', 'sam@example.eu', 'Basic plan · renews 14 Nov 2026', 'Vault is unlocked', 'Where your files are stored', 'Europe', 'Germany', 'Sign out of this Mac', 'Sign out…'], hasNot: ['Couldn’t load storage locations'], min: true, hifi: 'hifi-s4-fig2' },
+  { name: 'settings-general', act: gear, has: ['Settings', 'Home', 'General', 'Open Beebeeb at login', 'Appearance', 'Follow macOS.', 'System', 'Tell me about', 'From your account', 'New device sign-in', 'We cannot see your files, but we know when a new device signs in.', 'Backup complete', 'When a scheduled backup finishes.'], sidebar: ['Back to Home', 'Account, sam@example.eu, Basic plan', 'General', 'Sync', 'Security', 'About'], min: true, hifi: 'hifi-s4-fig1' },
+  { name: 'settings-account', act: section('Account, sam@example.eu, Basic plan'), has: ['Account', 'sam@example.eu', 'Basic plan · renews 14 Nov 2026', 'Storage details…', 'Vault is unlocked', 'Where your files are stored', 'Europe', 'Germany', 'Password, email and billing', 'Changed on beebeeb.io, in your browser.', 'Open beebeeb.io', 'Sign out of this Mac', 'Sign out…'], hasNot: ['Couldn’t load storage locations'], min: true, hifi: 'hifi-s4-fig2' },
+  { name: 'storage-details', act: async (p) => { await section('Account, sam@example.eu, Basic plan')(p); await p.getByRole('button', { name: 'Storage details…' }).click(); await p.getByRole('dialog').waitFor(); await p.waitForFunction(() => !document.querySelector('[role="dialog"]').innerText.includes('Loading…')) }, has: ['Storage details', 'Where your storage goes, by type and by your largest files.', `${number(4690)} files · ${gb(84.3)}`, 'By type', 'Media', `${gb(60)} · ${number(1200)} files`, 'Documents', 'Other', 'Largest files', 'Photos/2026/Holiday in the mountains/IMG_0001.heic', `Media · ${gb(3.2)}`], hasNot: ['PC', 'daemon'], dialogs: 1, min: true },
   { name: 'settings-sync', act: section('Sync'), has: ['Beebeeb in Finder', 'Added', 'Repair…', 'Keep on this Mac', 'Speed'], min: true, hifi: 'hifi-s4-fig3' },
-  { name: 'settings-about', act: section('About'), has: ['Beebeeb for Mac', 'Version 0.8.12', 'Check for updates', 'Get help', 'Export a support bundle'], min: true, hifi: 'hifi-s4-fig5' },
+  { name: 'settings-security-no-totp', fx: { profile: { user_id: 'u1', email: 'sam@example.eu', email_verified: true, created_at: '2026-01-01T00:00:00Z', totp_enabled: false } }, act: section('Security'), has: ['Authenticator app (TOTP) · Off', 'Add a second factor so a stolen password alone can’t open your vault. Set it up on beebeeb.io.', 'Set up on beebeeb.io'], hasNot: ['Authenticator app (TOTP) · On', 'Manage or reset it'] },
+  { name: 'settings-security', act: section('Security'), has: ['Security', 'Authenticator app (TOTP) · On', 'A second factor is required when you sign in. Manage or reset it on beebeeb.io.', 'Manage on beebeeb.io', 'Active sessions', 'MacBook Pro · This session', 'Active now', 'iPhone', 'Active 2 hours ago', 'Revoke', 'Sign out everywhere else', 'Sign out all other sessions', 'Devices', 'MacBook Pro · macOS · v0.8.13', 'Every device holding a copy of your vault key, and the sync sessions running on each.', 'Recent account activity', 'Moved an item to trash', 'Downloaded an item'], hasNot: ['Revoke a device', 'daemon'], sidebar: ['Back to Home', 'Account, sam@example.eu, Basic plan', 'General', 'Sync', 'Security', 'About'], min: true, hifi: 'hifi-s4-fig4' },
+  { name: 'security-revoke', act: async (p) => { await section('Security')(p); await p.getByRole('button', { name: 'Revoke iPhone' }).click(); await p.getByRole('dialog').waitFor() }, has: ['Sign out this session?', 'iPhone will need to sign in again.', 'Cancel', 'Sign out'], dialogs: 1 },
+  { name: 'security-locked', fx: { snapshot: snapshot({ phase: 'locked', account: { vault_unlocked: false }, storage: null }) }, act: section('Security'), has: ['Your vault is locked', 'Unlock it to see your sessions, devices and recent activity.'], hasNot: ['Active sessions'] },
+  { name: 'settings-about', act: section('About'), has: ['Beebeeb for Mac', 'Version 0.8.12', 'Check for updates', 'Beebeeb checks for updates at launch and every 4 hours.', 'Release channel', 'Stable', 'Regular releases after validation.', 'Get help', 'Test connection speed', 'Run test', 'Export a support bundle'], hasNot: ['Restart to update', 'parity', 'CLI'], min: true, hifi: 'hifi-s4-fig5' },
+  { name: 'about-update-available', fx: { update: { status: 'update_available', current_version: '0.8.12', channel: 'stable', version: '0.8.13', body: '', release_notes_url: 'https://github.com/beebeeb-io/desktop/releases/tag/desktop-v0.8.13' } }, act: async (p) => { await section('About')(p); await p.getByRole('button', { name: 'Check for updates' }).click(); await p.getByRole('button', { name: 'Download update' }).waitFor() }, has: ['Version 0.8.13 is available. Drag Beebeeb into Applications to replace this version.', 'Download update'], hasNot: ['Restart to update', 'Check for updates'] },
+  { name: 'about-downgrade', fx: { update: { status: 'downgrade_available', current_version: '0.8.12', current_channel: 'beta', channel: 'stable', version: '0.8.11', body: 'Fixes the sync stall.\n\nNothing else changed.', release_notes_url: 'https://github.com/beebeeb-io/desktop/releases/tag/desktop-v0.8.11' }, config: { ...base.config, release_channel: 'stable' } }, act: async (p) => { await section('About')(p); await p.getByRole('button', { name: 'Check for updates' }).click(); await p.getByRole('button', { name: 'Release notes' }).waitFor() }, has: ['The Stable channel is at version 0.8.11', 'This Mac runs 0.8.12, from the Beta channel. Read the release notes before you go back to an older version.', 'Release notes', 'View release'], hasNot: ['Downgrade to'], min: true },
+  { name: 'about-release-notes', fx: { update: { status: 'downgrade_available', current_version: '0.8.12', current_channel: 'beta', channel: 'stable', version: '0.8.11', body: 'Fixes the sync stall.\n\nNothing else changed.', release_notes_url: 'https://github.com/beebeeb-io/desktop/releases/tag/desktop-v0.8.11' } }, act: async (p) => { await section('About')(p); await p.getByRole('button', { name: 'Check for updates' }).click(); await p.getByRole('button', { name: 'Release notes' }).click(); await p.getByRole('dialog').waitFor() }, has: ['Beebeeb 0.8.11', 'Fixes the sync stall.', 'Nothing else changed.'], dialogs: 1 },
+  { name: 'about-speed-test', act: async (p) => { await section('About')(p); await p.getByRole('button', { name: 'Run test' }).click(); await p.getByText('Latency 24 ms (18 to 41)').waitFor() }, has: ['Latency 24 ms (18 to 41) · Upload 35.2 Mbps · Download 94.0 Mbps'] },
   // ── Slice 4: Review ──  (the kind tag is drawn in capitals by CSS, as in the hi-fi, so `innerText` reads it in capitals)
   { name: 'review', act: review, has: ['Review', 'Files that need a decision from you, and changes Beebeeb couldn’t send yet.', 'CONFLICT', 'Board notes, 29 Sept.md', 'Team shared · today 09:12 · Changed on two devices.', 'Decide…', 'UPLOAD', 'Site visit, north wing.mov', 'Photos · today 08:47 · Couldn’t upload, will retry', 'Version history…'], hasNot: ['Local and remote both changed', 'STALE BASE', 'durable queue', 'Nothing needs your attention.'], sidebar: ['Home', 'Review, 2 need attention', 'Trash', 'Settings'], min: true },
   { name: 'review-all-kinds', fx: { review: reviewAllKinds }, act: review, has: ['CHANGED ELSEWHERE', 'STORAGE FULL', 'SIGNED OUT', 'NOT SENT', 'PLAN', 'Add storage', 'Sign in again', 'Manage plan', LONG_NAME, 'Decide…', 'Team shared · today 07:15 · The copy of this change that was waiting to be sent is gone, so it can’t be sent.', 'Invoices · today 07:05 · Your plan doesn’t allow uploads right now.'], hasNot: ['STALE BASE', 'QUOTA', 'METADATA'], min: true },
@@ -198,19 +257,20 @@ const SCENARIOS = [
   { name: 'review-unreadable', fx: { review: [...reviewEntries, { not: 'an entry' }] }, act: review, has: ['Board notes, 29 Sept.md', 'Some items couldn’t be shown.'], hasNot: ['Nothing needs your attention.'], sidebar: ['Home', 'Review, 2 need attention', 'Trash', 'Settings'] },
   { name: 'review-conflict-sheet', act: decide, has: ['Conflict: Board notes, 29 Sept.md', 'This file was modified on two devices. Choose which version to keep.', 'This Mac', 'Other device', 'Keep this Mac’s', 'Keep the other', 'Keep both', '- 4. AOB (added on this Mac)', '+ 2. Roadmap (moved up)'], hasNot: ['Keep Mine', 'This device', '✓'], dialogs: 1, min: true, hifi: 'hifi-s3-fig1' },
   { name: 'review-conflict-replace', act: async (p) => { await decide(p); await p.getByRole('button', { name: 'Keep the other' }).click(); await p.getByRole('button', { name: 'Replace this Mac’s version' }).waitFor() }, has: ['Conflict: Board notes, 29 Sept.md', 'Replace this Mac’s version? Your changes here are discarded.', 'Replace this Mac’s version', 'Keep this Mac’s', 'Keep both'], hasNot: ['Keep the other'], dialogs: 1, min: true },
-  { name: 'review-conflict-binary', fx: { conflictPreview: { is_text: false, local: { size_bytes: 4096, text: null }, remote: { size_bytes: 8192, text: null } } }, act: decide, has: ['Binary file · 4,1 KB', 'Binary file · 8,2 KB', 'Keep both'], dialogs: 1 },
+  { name: 'review-conflict-binary', fx: { conflictPreview: { is_text: false, local: { size_bytes: 4096, text: null }, remote: { size_bytes: 8192, text: null } } }, act: decide, has: [`Binary file · ${number(4.1)} KB`, `Binary file · ${number(8.2)} KB`, 'Keep both'], dialogs: 1 },
   { name: 'review-history-search', act: async (p) => { await history(p); await p.getByRole('textbox', { name: 'Search file names' }).fill('q3'); await p.getByRole('button', { name: /Q3 notes\.md/ }).waitFor() }, has: ['Version history', 'Q3 ledger reconciliation.xlsx', 'Investigations/Q3 ledger reconciliation.xlsx', 'Q3 notes.md'], dialogs: 1, min: true },
   { name: 'review-history-versions', act: async (p) => { await history(p); await p.getByRole('textbox', { name: 'Search file names' }).fill('q3'); await p.getByRole('button', { name: /Q3 ledger reconciliation/ }).click(); await p.getByRole('button', { name: 'Restore' }).first().waitFor() }, has: ['Version history', 'Q3 ledger reconciliation.xlsx', 'Version 5 is current · 2 earlier versions', 'Version 4', 'Version 3', 'Restore', 'Back'], hasNot: ['Version id', 'Queue restore'], dialogs: 1, min: true },
   { name: 'review-empty', fx: { review: [] }, act: review, has: ['Files that need a decision from you', 'Nothing needs your attention.', 'Version history…'], hasNot: ['Decide…'], sidebar: ['Home', 'Review', 'Trash', 'Settings'] },
   { name: 'review-locked', fx: { snapshot: snapshot({ phase: 'locked', account: { vault_unlocked: false }, storage: null }) }, act: review, has: ['Review', 'Your vault is locked', 'Unlock vault'], hasNot: ['Version history…', 'Nothing needs your attention.', 'Decide…'], sidebar: ['Home', 'Review', 'Trash', 'Settings'], hifi: 'hifi-s3-fig3' },
   // ── Slice 4: Trash ──
-  { name: 'trash', act: trash, has: ['Trash', 'Deleted files in your vault. Restore puts them back through sync; permanent delete removes them from Trash.', 'Draft 3, interview questions.docx', 'File · 48 KB · deleted yesterday', 'Old scans', 'Folder · 1,4 GB · deleted ', LONG_NAME, 'Restore', 'Delete…', 'Refresh'], hasNot: ['Loading…'], min: true, hifi: 'hifi-s3-fig2' },
+  { name: 'trash', act: trash, has: ['Trash', 'Deleted files in your vault. Restore puts them back through sync; permanent delete removes them from Trash.', 'Draft 3, interview questions.docx', 'File · 48 KB · deleted yesterday', 'Old scans', `Folder · ${gb(1.4)} · deleted `, LONG_NAME, 'Restore', 'Delete…', 'Refresh'], hasNot: ['Loading…'], min: true, hifi: 'hifi-s3-fig2' },
   { name: 'trash-delete-sheet', act: async (p) => { await trash(p); await p.getByRole('button', { name: 'Delete…' }).first().click(); await p.getByRole('dialog').waitFor() }, has: ['Delete permanently', 'Draft 3, interview questions.docx will be removed from Trash. This cannot be undone.', 'Cancel'], dialogs: 1, min: true },
   { name: 'trash-empty', fx: { trash: [] }, act: trash, has: ['Trash is empty', 'Deleted files will appear here.', 'Refresh'] },
   { name: 'trash-locked', fx: { snapshot: snapshot({ phase: 'locked', account: { vault_unlocked: false }, storage: null }) }, act: trash, has: ['Trash', 'Your vault is locked', 'Unlock vault'], hasNot: ['Refresh', 'Trash is empty'] },
   { name: 'signout-confirm', act: async (p) => { await section('Account, sam@example.eu, Basic plan')(p); await p.getByRole('button', { name: 'Sign out…' }).click(); await p.getByRole('dialog').waitFor() }, has: ['Sign out of this Mac?', 'Sync stops until you sign in again.', 'Cancel', 'Sign out'], dialogs: 1, hifi: 'hifi-s5-fig0' },
   { name: 'signed-out', fx: { snapshot: snapshot({ phase: 'signed_out', account: { email: null, logged_in: false, vault_unlocked: false }, storage: null }) }, has: ['Sign in to Beebeeb', 'Sign in'], hasNot: ['Home', 'Settings'], noSidebar: true },
-  { name: 'signed-out-settings', fx: { snapshot: snapshot({ phase: 'signed_out', account: { email: null, logged_in: false, vault_unlocked: false }, storage: null }) }, open: '&tab=general', has: ['Sign in', 'Settings', 'General', 'About', 'Open Beebeeb at login'], sidebar: ['Back to Sign in', 'General', 'About'], hifi: 'hifi-s4-fig6' },
+  { name: 'signed-out-settings', fx: { snapshot: snapshot({ phase: 'signed_out', account: { email: null, logged_in: false, vault_unlocked: false }, storage: null }) }, open: '&tab=general', has: ['Sign in', 'Settings', 'General', 'About', 'Open Beebeeb at login', 'Appearance', 'Tell me about'], hasNot: ['From your account'], sidebar: ['Back to Sign in', 'General', 'About'], hifi: 'hifi-s4-fig6' },
+  { name: 'signed-out-about', fx: { snapshot: snapshot({ phase: 'signed_out', account: { email: null, logged_in: false, vault_unlocked: false }, storage: null }) }, open: '&tab=about', has: ['Beebeeb for Mac', 'Release channel'], hasNot: ['Test connection speed'] },
   { name: 'session-ended', fx: { snapshot: snapshot({ phase: 'session_ended', account: { auth_expired: true } }) }, has: ['Sign in again', 'Sync is paused until you sign in again. Your files stay in Finder.', 'Signed in before as sam@example.eu'], noSidebar: true },
 ]
 
@@ -226,7 +286,7 @@ try {
       const sizes = [{ width: 920, height: 620, tag: '' }, ...(sc.min ? [{ width: 760, height: 520, tag: '-min' }] : [])]
       for (const size of sizes) {
         const label = `${sc.name}${size.tag} ${scheme}`
-        const context = await browser.newContext({ viewport: { width: size.width, height: size.height }, colorScheme: scheme, deviceScaleFactor: 1, locale: 'nl-NL' })
+        const context = await browser.newContext({ viewport: { width: size.width, height: size.height }, colorScheme: scheme, deviceScaleFactor: 1, locale: LOCALE })
         const page = await context.newPage()
         const errors = []
         page.on('pageerror', (e) => errors.push(String(e)))

@@ -12,7 +12,7 @@ import { useCapabilities } from '../capabilities'
 import { finderInstallNotice, finderInstallStateAfterAttempt, finderInstallStateWhileAttempting } from '../finderInstallCard'
 import { finderOpenFailedToast, finderRepairFailedToast, useFinderSetup } from '../finderSetup'
 import { finderActionButtonLabel, finderRepairWarningNote, finderStatusPill, type FinderSetupAction } from '../finderSetupCopy'
-import { preservedFilesLine } from '../macSettingsModel'
+import { preservedFilesLine, RESET_FINDER_BODY, RESET_FINDER_TITLE } from '../macSettingsModel'
 import { useToast } from '../windows/ui'
 
 // Inline confirm for the destructive Finder reset — no window.confirm(). Three states,
@@ -337,25 +337,25 @@ export default function SyncFolder() {
           <div className="row">
             <div>
               <div className="row-title">My files</div>
-              <div className="row-detail">Remote-first vault namespace.</div>
+              <div className="row-detail">Your vault, stored in the cloud.</div>
             </div>
           </div>
           <div className="row">
             <div>
               <div className="row-title">Shared with me</div>
-              <div className="row-detail">Shared roots appear next to owned files.</div>
+              <div className="row-detail">Shared folders appear next to your own files.</div>
             </div>
           </div>
           <div className="row">
             <div>
               <div className="row-title">Offline</div>
-              <div className="row-detail">Virtual view of pinned content.</div>
+              <div className="row-detail">Folders you choose to keep on this computer.</div>
             </div>
           </div>
           <div className="row">
             <div>
               <div className="row-title">Conflicts</div>
-              <div className="row-detail">Items needing version review.</div>
+              <div className="row-detail">Files that need a decision from you.</div>
             </div>
           </div>
         </div>
@@ -366,10 +366,6 @@ export default function SyncFolder() {
         <div className="row">
           <div>
             <div className="row-title">Reset Finder integration</div>
-            <div className="row-detail">
-              Unregisters the Finder location, turns off Start at login, clears the local socket,
-              and keeps queued uploads.
-            </div>
           </div>
           {resetPhase === 'idle' && (
             <button className="button" disabled={busy} onClick={() => setResetPhase('confirming')}>
@@ -385,9 +381,7 @@ export default function SyncFolder() {
         {resetPhase === 'confirming' && (
           <div className="notice" style={{ marginTop: 12 }}>
             <div style={{ marginBottom: 10 }}>
-              <strong>Reset Finder integration?</strong> Beebeeb will unregister the Finder location,
-              turn off Start at login, and remove the stale local socket. Queued uploads and local
-              sync state are preserved.
+              <strong>{RESET_FINDER_TITLE}</strong> {RESET_FINDER_BODY}
             </div>
             <div className="button-row">
               <button className="button danger" onClick={() => void resetFinderIntegration()}>

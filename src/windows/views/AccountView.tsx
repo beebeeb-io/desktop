@@ -28,9 +28,9 @@ import {
   type AccountProfile,
   type Subscription,
 } from '../../desktopApi'
+import { ACCOUNT_SETTINGS_URL } from '../../settingsConstants'
 import { T, Card, PageHeader, Chip, Skeleton, NavIcon, PrimaryBtn, useToast } from '../ui'
 
-const ACCOUNT_URL = 'https://app.beebeeb.io/settings/account'
 const BILLING_URL = 'https://app.beebeeb.io/billing'
 const DANGER = 'oklch(0.5 0.18 25)'
 
@@ -497,7 +497,7 @@ function Footer() {
         </div>
       </div>
       <button
-        onClick={() => void openUrl(ACCOUNT_URL)}
+        onClick={() => void openUrl(ACCOUNT_SETTINGS_URL)}
         style={{
           display: 'inline-flex',
           alignItems: 'center',
