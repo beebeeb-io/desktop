@@ -225,6 +225,14 @@ describe('SignInWindow: one screen per state (spec §7.4)', () => {
 
   // Delta review P3-2: the requested “Sign in again” of a session that is fine has no Cancel; the shell hands the card a way
   // back when that is the case (`canLeaveSignInAgain`), and the card draws it as a quiet link under itself.
+  test('a session that is fine reaches the card as such: the sentence follows the same signal as the way back (copy ruling)', () => {
+    const fine = screens(render({ screen: 'reauth', onBack: () => {} }))[0].props
+    expect(fine.sessionFine).toBe(true)
+    expect(screens(render({ screen: 'reauth' }))[0].props.sessionFine).toBe(false)
+    // The first sign-in is never “fine”, whatever handler the shell passes.
+    expect(screens(render({ screen: 'signin', onBack: () => {} }))[0].props.sessionFine).toBe(false)
+  })
+
   test('a way back is a quiet “Back to Home” under the Sign in again card, and nowhere else (P3-2)', () => {
     let left = 0
     const back = (tree: any) => elementsOf(tree).filter((el) => el.type === 'button' && textOf(el.props.children).trim() === 'Back to Home')
@@ -390,6 +398,26 @@ describe('BrowserPanel (hi-fi section 2, figures 1, 2 and 4; task 1734)', () => 
     expect(buttonLabels(m)).toEqual(['Sign in with browser', 'Use email and password', 'Quit Beebeeb'])
     expect(text(m)).not.toContain('Create an account')
     expect(text(m)).not.toContain('New to Beebeeb?')
+  })
+
+  // Lead ruling, 2026-10-25 (follow-up to #143): spec A's sentence says sync is paused, which is false when the session is
+  // fine (the card was asked for after one operation answered 401, as Version Center does). That card says what happened.
+  test('Sign in again on a session that is fine says what happened instead, and keeps the rest (copy ruling)', () => {
+    const { m } = open({ props: { reauth: true, email: 'sam@example.eu', sessionFine: true } })
+    expect(textOf(heading(m)!.props.children)).toBe('Sign in again')
+    expect(text(m)).toContain('Beebeeb couldn’t send some changes with this sign-in. Sign in again to retry them.')
+    expect(text(m)).not.toContain('Sync is paused')
+    expect(text(m)).toContain('Signed in before as sam@example.eu')
+    expect(buttonLabels(m)).toEqual(['Sign in with browser', 'Use email and password', 'Quit Beebeeb'])
+  })
+
+  test('the ended-session card keeps spec A’s sentence, and a first sign-in has none (copy ruling)', () => {
+    const ended = open({ props: { reauth: true, email: 'sam@example.eu', sessionFine: false } })
+    expect(text(ended.m)).toContain('Sync is paused until you sign in again. Your files stay in Finder.')
+    expect(text(ended.m)).not.toContain('couldn’t send some changes')
+    const first = open({ props: { reauth: false, email: null, sessionFine: true } })
+    expect(text(first.m)).not.toContain('couldn’t send some changes')
+    expect(text(first.m)).not.toContain('Sync is paused')
   })
 
   test('Sign in again never prints a missing address', () => {
@@ -955,27 +983,31 @@ describe('SwitchScreen: 1887’s account-switch step in the Beebeeb window (A0s 
     expect(accountSession.heldSignOutWarning()).toBeNull()
   })
 
-  test('a status that does not say signed out is today’s toast: only a definite “signed out” holds (P2-1)', async () => {
-    const { m } = openSwitch({ pendingChanges: 2 }, () => { throw new Error('engine busy') }, { sign_out_result_ack: () => null, sync_status: () => ({}) })
-    await m.flush()
-    await m.click('Sign out and switch')
-    await m.flush()
-    expect(m.toasts.map((t) => t.title)).toEqual(['Couldn’t sign out'])
-    expect(accountSession.heldSignOutWarning()).toBeNull()
-  })
-
-  test('a status that cannot be read is today’s toast too (P2-1)', async () => {
+  // Delta review P3-5 (follow-up): when the status itself cannot be read the step cannot tell whether a remount is coming.
+  // Losing the sentence is the worse mistake, so it is held (lead ruling: hold only; a held sentence is shown above the card
+  // whether or not a remount comes, so a toast would say the same thing twice).
+  test('a status that cannot be read holds the sentence and shows no toast (P3-5)', async () => {
     const { m } = openSwitch({ pendingChanges: 2 }, () => { throw new Error('engine busy') }, { sign_out_result_ack: () => null, sync_status: () => { throw new Error('no status') } })
     await m.flush()
     await m.click('Sign out and switch')
     await m.flush()
-    expect(m.toasts.map((t) => t.title)).toEqual(['Couldn’t sign out'])
-    expect(accountSession.heldSignOutWarning()).toBeNull()
+    expect(accountSession.heldSignOutWarning()).toBe('engine busy')
+    expect(m.toasts).toEqual([])
+    expect(m.calls.filter((c) => c.name === 'sign_out_result_ack')).toHaveLength(1)
+  })
+
+  test('a status that does not say either way is the same: held, no toast (P3-5)', async () => {
+    const { m } = openSwitch({ pendingChanges: 2 }, () => { throw new Error('engine busy') }, { sign_out_result_ack: () => null, sync_status: () => ({}) })
+    await m.flush()
+    await m.click('Sign out and switch')
+    await m.flush()
+    expect(accountSession.heldSignOutWarning()).toBe('engine busy')
+    expect(m.toasts).toEqual([])
   })
 
   test('an address that could not be forgotten stops the switch: the Rust sentence verbatim, and the step stays', async () => {
     const sentence = rustStr('lib.rs', 'SIGN_OUT_EMAIL_NOT_FORGOTTEN')
-    const { m, events } = openSwitch({ pendingChanges: 2 }, () => { throw sentence }, { sign_out_result_ack: () => null })
+    const { m, events } = openSwitch({ pendingChanges: 2 }, () => { throw sentence }, { sign_out_result_ack: () => null, sync_status: () => ({ logged_in: true }) })
     await m.flush()
     await m.click('Sign out and switch')
     expect(m.toasts.map((t) => t.message)).toEqual([sentence])
@@ -999,7 +1031,7 @@ describe('SwitchScreen: 1887’s account-switch step in the Beebeeb window (A0s 
   })
 
   test('a failed sign-out is a toast, and the switch does not happen', async () => {
-    const { m, events } = openSwitch({ pendingChanges: 1 }, () => { throw new Error('engine busy') }, { sign_out_result_ack: () => null })
+    const { m, events } = openSwitch({ pendingChanges: 1 }, () => { throw new Error('engine busy') }, { sign_out_result_ack: () => null, sync_status: () => ({ logged_in: true }) })
     await m.flush()
     await m.click('Sign out and switch')
     expect(m.toasts.map((t) => t.title)).toEqual(['Couldn’t sign out'])
@@ -1009,7 +1041,7 @@ describe('SwitchScreen: 1887’s account-switch step in the Beebeeb window (A0s 
 
   // signOutEntryPoints.test.tsx, F12: another error keeps today's toast, then acknowledges it once, after the sign-out ran.
   test('a failure is acknowledged once, after the sign-out that failed (F12)', async () => {
-    const { m } = openSwitch({ unsent: ASK }, () => { throw new Error('Sign-out paused: x') }, { sign_out_result_ack: () => null })
+    const { m } = openSwitch({ unsent: ASK }, () => { throw new Error('Sign-out paused: x') }, { sign_out_result_ack: () => null, sync_status: () => ({ logged_in: true }) })
     await m.flush()
     await m.click('Sign out and switch')
     await m.flush()

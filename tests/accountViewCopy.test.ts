@@ -78,6 +78,7 @@ describe('the sign-in screens, word for word (spec C §7.1, §7.2; spec §10.2 r
     expect(copy.USE_RECOVERY_PHRASE).toBe('Use your recovery phrase')
     expect(copy.LOAD_FAILED_TITLE).toBe('Couldn’t load your account')
     expect(copy.BACK_TO_HOME).toBe('Back to Home')
+    expect(copy.SIGN_IN_AGAIN_REQUESTED_COPY).toBe('Beebeeb couldn’t send some changes with this sign-in. Sign in again to retry them.')
   })
 
   test('window titles follow the screen’s heading; signed in the window is "Beebeeb" (spec C C-W8, row 36)', () => {
@@ -100,6 +101,10 @@ describe('the design artefact draws the same strings (design first)', () => {
     for (const text of [copy.SIGN_IN_TITLE, copy.SIGN_IN_WITH_BROWSER, copy.USE_EMAIL_AND_PASSWORD, copy.SIGN_IN_WITH_BROWSER_INSTEAD, copy.NEW_TO_BEEBEEB, copy.CREATE_ACCOUNT, copy.QUIT_BEEBEEB]) {
       expect(drawn).toContain(text)
     }
+  })
+  test('Sign in again on a session that is fine, and its way back (lead copy ruling, 2026-10-25)', () => {
+    expect(drawn).toContain(copy.SIGN_IN_AGAIN_REQUESTED_COPY)
+    expect(drawn).toContain(copy.BACK_TO_HOME)
   })
   test('Sign in again, and the footer that names the account', () => {
     expect(drawn).toContain(copy.SIGN_IN_AGAIN_TITLE)

@@ -410,6 +410,12 @@ to Beebeeb", spec C C-W8). Screens, in the order a person meets them; copy is sp
    "Back to Home" under it that leaves it; a session that really ended has no such link. A request that arrives under a
    sheet waits for the sheet to close (§8.2). — lead ruling, 2026-10-25 (delta review P3-2 on PR #143); the hi-fi draws
    no such link, a recorded deviation.
+   ~~The words of that card are spec A's: "Sync is paused until you sign in again."~~ On a session that is in fact fine
+   spec A's sentence is false, so that card reads "Beebeeb couldn’t send some changes with this sign-in. Sign in again to
+   retry them." (the per-operation 401 case, as Version Center asks for it), with the same two methods, the footer and the
+   quiet "Back to Home"; the ended-session card keeps spec A's sentence. — lead ruling, 2026-10-25 (follow-up to PR #143):
+   "spec A's 'Sync is paused until you sign in again…' is false there, so it mustn't stay." A recorded deviation from spec
+   A's wording; the hi-fi draws it as its own figure after "Account switch".
 5. **Account switch** (1887 W11): today's `AccountSwitchStep` and its A0s–A4s copy, unchanged (§8.2).
 6. **Set up this Mac** (recovery phrase), only when this Mac has no key: today's `UnlockStep`, unchanged.
 7. **Spec C's account states** that need the whole window when they hold with no Ready account behind them: Checking

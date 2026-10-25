@@ -414,6 +414,14 @@ export default function MacApp() {
     reader.refresh()
   }, [reader, signInFlow.step])
 
+  // The question is for a window that OPENS locked (delta review P3-3): a Lock can only follow keys that arrived, and keys
+  // arriving forget the step in Rust, so after a Lock nothing is owed and asking would only paint "Loading…" for a round
+  // trip. A window whose first read is not that case is done with it for good.
+  useEffect(() => {
+    if (account === null || setupAsk !== 'idle') return
+    if (!setupCheckWanted(account, flowNow)) setSetupAsk('done')
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the first read decides; `flowNow` is that read's.
+  }, [account, setupAsk])
   useEffect(() => {
     if (!askingForSetup || setupAsk !== 'idle') return
     setSetupAsk('asking')
