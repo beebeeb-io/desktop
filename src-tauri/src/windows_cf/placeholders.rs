@@ -769,6 +769,52 @@ pub fn local_bytes_agreed(db: &crate::state_db::StateDb, file_id: &str, path: &s
     )
 }
 
+/// Task 1640 (review P2-4): mark the placeholder at `path` in sync when its bytes are the agreed
+/// content, holding ONE exclusive handle across the hash and the mark (as
+/// [`complete_upload_placeholder`] does), so no write can land between them. `Ok(false)`: not
+/// marked (already in sync, not wholly on disk, an upload queued, no agreed content, other bytes,
+/// or the file is open elsewhere: the next pass tries again).
+pub fn stamp_if_agreed(db: &crate::state_db::StateDb, file_id: &str, path: &std::path::Path) -> anyhow::Result<bool> {
+    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+    if placeholder_in_sync(path) != Some(false) || !fully_on_disk(path) {
+        return Ok(false);
+    }
+    if db.sync_folder_upload_queued(file_id)? {
+        return Ok(false);
+    }
+    let Some(agreed) = db.get_file_contract_state(file_id)?.and_then(|contract| contract.local_hash) else {
+        return Ok(false);
+    };
+    // share_mode(0): while this handle is open no other handle can be opened to write.
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+        .open(path)
+    else {
+        return Ok(false);
+    };
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    if format!("{:x}", hasher.finalize()) != agreed {
+        return Ok(false);
+    }
+    // SAFETY: the handle belongs to `file`, open for the whole call.
+    unsafe {
+        CfSetInSyncState(
+            HANDLE(file.as_raw_handle()),
+            CF_IN_SYNC_STATE_IN_SYNC,
+            CF_SET_IN_SYNC_FLAG_NONE,
+            None,
+        )
+    }?;
+    Ok(true)
+}
+
 pub fn read_os_placeholder_state(path: &std::path::Path) -> Option<u32> {
     let path_wide: Vec<u16> = path
         .to_string_lossy()

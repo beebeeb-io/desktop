@@ -360,7 +360,13 @@ async fn debounce_loop(
                     .collect();
                 for path in ready {
                     pending.remove(&path);
-                    handle_settled_path(&bridge, &sync_root, &path).await;
+                    // Task 1640 (review P2-5): classifying a tracked file reads and hashes it.
+                    let (settle_bridge, settle_root) = (bridge.clone(), sync_root.clone());
+                    if let Err(e) =
+                        tokio::task::spawn_blocking(move || handle_settled_path(&settle_bridge, &settle_root, &path)).await
+                    {
+                        tracing::warn!(error = %e, "upload driver: settling a closed file panicked; continuing");
+                    }
                 }
             }
         }
@@ -691,7 +697,7 @@ fn walk_dir(
 /// file, enqueue its encrypted upload. Thin wrapper over [`dispatch_local_create`]
 /// — the CF NOTIFY close-completion path and the enumeration scan share the same
 /// convert→queue sequence.
-async fn handle_settled_path(bridge: &EngineBridge, sync_root: &std::path::Path, path: &std::path::Path) {
+fn handle_settled_path(bridge: &EngineBridge, sync_root: &std::path::Path, path: &std::path::Path) {
     #[cfg(target_os = "windows")]
     crate::windows_cf::upload_finalization::retry(bridge.db(), sync_root);
     let _ = dispatch_local_create(bridge, sync_root, path, "notify");
@@ -847,7 +853,7 @@ pub(crate) async fn handle_rename(
         // file to a new name — classify the TARGET as a possible new upload
         // instead (it will no-op if it is engine-owned / already tracked).
         Ok(None) => {
-            handle_settled_path(bridge, sync_root, target).await;
+            handle_settled_path(bridge, sync_root, target);
             return;
         }
         Err(e) => {

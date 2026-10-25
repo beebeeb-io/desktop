@@ -3351,7 +3351,24 @@ impl StateDb {
         Ok(())
     }
 
-    /// Task 1640: a sync-folder upload of this file's content (no write id: Windows, Linux) is
+    /// Task 1640 (review P2-5): the `Local` files the stamp pass may mark in sync: a recorded
+    /// agreed content and no sync-folder upload queued. Everything else is never marked, so it is
+    /// filtered here, before the pass's per-tick cap.
+    pub fn list_stamp_candidates(&self) -> Result<Vec<(String, String)>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT file_id, path FROM files
+             WHERE status = 'local' AND item_kind = 'file' AND local_hash IS NOT NULL
+               AND file_id NOT IN (SELECT file_id FROM operation_queue
+                                   WHERE file_id IS NOT NULL AND write_id IS NULL
+                                     AND kind IN ('upload_version', 'upload_file'))
+             ORDER BY file_id",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect()
+    }
+
+    /// Task 1640: a sync-folder upload of this file's content (no write id: Windows) is
     /// queued, in any state, parked included. Its bytes are not sent until it lands.
     pub fn sync_folder_upload_queued(&self, file_id: &str) -> Result<bool> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
@@ -4128,7 +4145,12 @@ impl StateDb {
         }
         contract.current_version = input.produced_version;
         contract.local_base_version = input.produced_version;
-        contract.local_hash = input.completed_payload_hash.map(str::to_string);
+        // Task 1640 (review P3-4): a landing that could not hash what it sent keeps the previous
+        // agreed content (its bytes then read as changed, never as agreed).
+        contract.local_hash = input
+            .completed_payload_hash
+            .map(str::to_string)
+            .or_else(|| contract.local_hash.take());
         contract.current_object_version_id = Some(input.produced_object_version_id.to_string());
         contract.last_sync_at = input.now;
         set_file_contract_state_conn(&tx, &contract)?;

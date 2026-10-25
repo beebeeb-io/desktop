@@ -1871,7 +1871,17 @@ impl EngineBridge {
         // Task 1640: a sync-folder upload (no write id) records what it sent as the content this
         // device now agrees with the server on. A Finder write's copy is not read again.
         let completed_payload_hash = match (claim.and_then(|c| c.write.as_ref()), payload_path.as_deref()) {
-            (None, Some(path)) => sha256_file_hex(Path::new(path)).ok(),
+            (None, Some(path)) => match sha256_file_hex(Path::new(path)) {
+                Ok(hash) => Some(hash),
+                Err(e) => {
+                    tracing::warn!(
+                        op_id = %op.op_id,
+                        error = %e,
+                        "landing: could not hash the copy that was sent; the file keeps its previous agreed content"
+                    );
+                    None
+                }
+            },
             _ => None,
         };
         let master_key = self.api.master_key();
@@ -3422,6 +3432,15 @@ impl EngineBridge {
                 );
                 return None;
             }
+            // A file hydrated before this build has no agreed content: its change is kept on
+            // disk (out of sync, so never stamped or freed) but not sent (task 2191).
+            Ok(SyncFolderContent::Unknown) if os_in_sync == Some(false) => {
+                tracing::warn!(
+                    file_id = %existing.file_id,
+                    "sync folder: a change to a file synced before this version is kept on this PC, not sent"
+                );
+                return None;
+            }
             Ok(_) => return None,
             Err(e) => {
                 tracing::warn!(file_id = %existing.file_id, error = %e, "sync folder: could not compare a synced file with its agreed content");
@@ -3449,7 +3468,7 @@ impl EngineBridge {
     }
 
     /// Task 1640: whether `dest` is `file_id`'s own place in the sync folder, under one of
-    /// `allowed_roots` (a Windows or Linux hydrate), rather than a staging copy (a Finder fetch).
+    /// `allowed_roots`, rather than a staging copy (a Finder fetch, a Linux FUSE temp file).
     fn dest_is_files_sync_folder_place(&self, file_id: &str, dest: &Path, allowed_roots: &[&Path]) -> anyhow::Result<bool> {
         let Some(entry) = self.db.get_file(file_id)? else {
             return Ok(false);
@@ -4089,8 +4108,8 @@ impl EngineBridge {
             return Err(anyhow::anyhow!("hydrate destination is not within an allowed root"));
         }
         self.ensure_shared_hydrate_path_safe(file_id)?;
-        // Task 1640: a hydrate into the file's own place in the sync folder (Windows, Linux)
-        // never writes over an unsent local change: bytes that differ from the content this
+        // Task 1640: a hydrate into the file's own place in the sync folder (on Windows, only
+        // conflict resolution reaches it) never writes over an unsent local change: bytes that differ from the content this
         // device last agreed with the server on, or whose upload is queued, are the person's
         // only copy. It refuses, and the file keeps its bytes. A Finder fetch (macOS) writes
         // to the extension's own staging copy, never there.
@@ -5503,7 +5522,7 @@ fn encrypted_metadata_for_name(
         .map_err(|e| anyhow::anyhow!("encrypt Finder metadata: {e}"))
 }
 
-/// Task 1640: what a tracked sync-folder file's bytes are (Windows, Linux), against the content
+/// Task 1640: what a tracked sync-folder file's bytes are (Windows: Linux runs no upload driver), against the content
 /// this device last agreed with the server on: `local_hash` at `local_base_version`, written by a
 /// hydrate into the sync folder and by a landing. The tick's detector is not this: it never sees
 /// the device's bytes (task 2190).
@@ -5542,7 +5561,7 @@ pub(crate) fn sync_folder_content(
     let Some(agreed) = contract.local_hash.as_deref() else {
         return Ok(SyncFolderContent::Unknown);
     };
-    if sha256_file_hex(path)? == agreed {
+    if cached_sha256_file_hex(file_id, path)? == agreed {
         return Ok(SyncFolderContent::Agreed);
     }
     Ok(SyncFolderContent::Changed {
@@ -5555,6 +5574,45 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     format!("{:x}", Sha256::digest(bytes))
 }
+
+/// Task 1640 (review P2-5): [`sha256_file_hex`] of `file_id`'s file at `path`, read again only
+/// when its size or modification time changed since the last read: a scan, a close and a stamp
+/// pass otherwise re-hashed every out-of-sync file (a plain file an atomic save left stays one)
+/// every few seconds. A cached hash is trusted only when it was taken at least
+/// [`HASH_CACHE_SETTLED`] after the file's modification time: file times are coarse (a timer
+/// tick), so a later write inside the same tick would otherwise look unchanged. A hash whose file
+/// changed while it was read is not kept. Residual: a write that keeps the size and sets the
+/// modification time back is not seen until either changes (the stamp pass and the platform's
+/// in-sync state still keep its bytes).
+pub(crate) fn cached_sha256_file_hex(file_id: &str, path: &Path) -> std::io::Result<String> {
+    type Fingerprint = (u64, std::time::SystemTime);
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<String, (Fingerprint, std::time::SystemTime, String)>>> =
+        std::sync::OnceLock::new();
+    let fingerprint = |path: &Path| -> std::io::Result<Fingerprint> {
+        let meta = std::fs::metadata(path)?;
+        Ok((meta.len(), meta.modified()?))
+    };
+    let before = fingerprint(path)?;
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some((seen, hashed_at, hash)) = cache.lock().unwrap_or_else(|p| p.into_inner()).get(file_id)
+        && *seen == before
+        && *hashed_at >= before.1 + HASH_CACHE_SETTLED
+    {
+        return Ok(hash.clone());
+    }
+    let hashed_at = std::time::SystemTime::now();
+    let hash = sha256_file_hex(path)?;
+    if fingerprint(path)? == before {
+        cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(file_id.to_string(), (before, hashed_at, hash.clone()));
+    }
+    Ok(hash)
+}
+
+/// How long after a file's modification time a hash of it must have been taken to be reused.
+const HASH_CACHE_SETTLED: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// [`sha256_hex`] of the file at `path`, read in a stream.
 pub(crate) fn sha256_file_hex(path: &Path) -> std::io::Result<String> {
@@ -26770,6 +26828,69 @@ mod tests {
         let contract = bridge.db.get_file_contract_state(file).unwrap().unwrap();
         assert_eq!((contract.local_base_version, contract.local_hash), (1, Some(sha256_hex(b"version one"))));
         drop(server.finish());
+    }
+
+
+    // ── Task 1640, review P2-5 and P3-4 ──
+
+    /// The hash of a file whose size and modification time have not changed is not read again.
+    /// Shown by the documented residual: a write that keeps both returns the earlier hash; a
+    /// change of either reads the file again.
+    #[test]
+    fn regression_1640_an_unchanged_file_is_not_hashed_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.txt");
+        std::fs::write(&path, b"first bytes").unwrap();
+        // A hash taken right after a write is not reused: a later write in the same timer tick
+        // would carry the same time.
+        assert_eq!(cached_sha256_file_hex("cache-file", &path).unwrap(), sha256_hex(b"first bytes"));
+        std::fs::write(&path, b"other bytes").unwrap();
+        assert_eq!(
+            cached_sha256_file_hex("cache-file", &path).unwrap(),
+            sha256_hex(b"other bytes"),
+            "a fresh write is read again"
+        );
+        // A settled file (its time well before the hash) is not read again.
+        let modified = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::write(&path, b"first bytes").unwrap();
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(modified).unwrap();
+        let first = cached_sha256_file_hex("cache-file", &path).unwrap();
+        assert_eq!(first, sha256_hex(b"first bytes"));
+        std::fs::write(&path, b"other bytes").unwrap();
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(modified).unwrap();
+        assert_eq!(cached_sha256_file_hex("cache-file", &path).unwrap(), first, "same size and time: the cached hash");
+        let later = modified + std::time::Duration::from_secs(5);
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(later).unwrap();
+        assert_eq!(
+            cached_sha256_file_hex("cache-file", &path).unwrap(),
+            sha256_hex(b"other bytes"),
+            "a new modification time: read again"
+        );
+    }
+
+    /// A landing that cannot hash the copy it sent keeps the file's previous agreed content
+    /// (its bytes then read as changed, never as agreed) instead of turning it Unknown.
+    #[tokio::test]
+    async fn regression_1640_a_landing_that_cannot_hash_the_sent_copy_keeps_the_previous_baseline() {
+        let master_key = [179u8; 32];
+        let file = "16400000-0000-4000-8000-000000000031";
+        let (_dir, sync_root, server, bridge, local) = regression_1640_synced_file(master_key, file).await;
+        std::fs::write(&local, b"edited in the sync folder").unwrap();
+        assert!(crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "notify"));
+        let payload = bridge.db.list_operations_for_file(file).unwrap()[0].payload_path.clone().unwrap();
+        bridge.seams.arm("landing:after_complete", move || {
+            std::fs::remove_file(&payload).unwrap();
+        });
+        drain_upload_queue(&bridge, &sync_root).await;
+        assert!(bridge.db.list_operations_for_file(file).unwrap().is_empty(), "landed");
+        let contract = bridge.db.get_file_contract_state(file).unwrap().unwrap();
+        assert_eq!(
+            (contract.local_base_version, contract.local_hash),
+            (2, Some(sha256_hex(b"version one"))),
+            "the previous agreed content is kept"
+        );
+        let state = server.finish();
+        assert_eq!(state.latest_plaintext(file, master_key), b"edited in the sync folder");
     }
 
     // ── Task 2190: a concurrent edit (this device and the web), as main behaves today ──
