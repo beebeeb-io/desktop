@@ -91,6 +91,7 @@ const baseFixture = {
   finder: FINDERS.installed, tree: tree(2), snapshot: snapshot(),
   config: { upload_kbps_limit: 0, download_kbps_limit: 5000, pause_sync: false, notify_conflicts: true, notify_sync_complete: false, notify_quota_warnings: true, theme: 'system' },
   subscription: { plan: 'basic', billing_cycle: 'yearly', status: 'active', seats: 1, region: 'eu', current_period_end: '2026-10-14T00:00:00Z', quota_bytes: 200_000_000_000, used_bytes: 84_300_000_000 },
+  prefs: { new_device_login: true, share_received: true, file_updated: false, storage_warning: true, backup_complete: false },
   repair: { removed_file_provider_domain: true, disabled_autostart: true, removed_socket: true, removed_cache_files: 0, skipped_cache_files: 0, pending_operations_preserved: 3, warnings: [] },
   update: { status: 'up_to_date', current_version: '0.8.6', channel: 'stable' },
 }
@@ -107,11 +108,15 @@ const SCENARIOS = [
   { name: 'sync-user-disabled', tab: 'Sync', fx: { finder: FINDERS.userDisabled }, has: ['Beebeeb is turned off in System Settings.', 'Open System Settings'], hasNot: ['Add to Finder', 'Login Items'], errorSurfaces: 0 },
   { name: 'sync-adding', tab: 'Sync', fx: { finder: FINDERS.adding }, has: ['Adding Beebeeb to Finder…', 'Adding…'], hasNot: ['Add to Finder', 'Try again'], errorSurfaces: 0 },
   { name: 'sync-unavailable', tab: 'Sync', fx: { finder: FINDERS.unreadable }, has: ['Couldn’t check Finder.', 'Try again'], hasNot: ['Adding', 'Add to Finder'], errorSurfaces: 0 },
-  { name: 'sync-repaired', tab: 'Sync', fx: { repair: { ...baseFixture.repair, warnings: [`Could not remove ${FAKE_PATH}`] } }, act: async (p) => { await p.getByRole('button', { name: 'Repair…' }).click(); await p.getByRole('button', { name: 'Repair', exact: true }).click(); await p.getByText('3 changes waiting to upload were kept.').waitFor() }, has: [FAKE_PATH, 'Adding…'], hasNot: ['Add to Finder'] },
+  // A repair that left something behind (a warning) says ONE fixed sentence and never the warning: it holds a path, and a
+  // path is not for the screen (task 17b, `finderRepairWarningNote`). The count of kept changes is for a clean repair.
+  { name: 'sync-repaired', tab: 'Sync', fx: { repair: { ...baseFixture.repair, warnings: [`Could not remove ${FAKE_PATH}`] } }, act: async (p) => { await p.getByRole('button', { name: 'Repair…' }).click(); await p.getByRole('button', { name: 'Repair', exact: true }).click(); await p.getByText('Beebeeb repaired its Finder location, but couldn’t remove everything it left behind.').waitFor() }, has: ['Beebeeb repaired its Finder location, but couldn’t remove everything it left behind.'], hasNot: [FAKE_PATH, 'Could not remove', 'were kept.', 'Add to Finder'] },
+  { name: 'sync-repaired-clean', tab: 'Sync', act: async (p) => { await p.getByRole('button', { name: 'Repair…' }).click(); await p.getByRole('button', { name: 'Repair', exact: true }).click(); await p.getByText('3 changes waiting to upload were kept.').waitFor() }, has: ['3 changes waiting to upload were kept.'], hasNot: ['couldn’t remove everything', 'Add to Finder'] },
   { name: 'sync-chooser', tab: 'Sync', fx: { tree: tree(12) }, act: async (p) => { await p.getByRole('button', { name: 'Choose folders…' }).click(); await p.getByRole('dialog').waitFor() }, has: ['Keep on this Mac', FAKE_TOKEN] },
   { name: 'sync-repair-confirm', tab: 'Sync', act: async (p) => { await p.getByRole('button', { name: 'Repair…' }).click(); await p.getByRole('dialog').waitFor() }, has: ['Repair Beebeeb in Finder?', 'turns off Open Beebeeb at login, then adds itself back to Finder. Files waiting to upload are kept.'], hasNot: ['You can add it back afterwards'] },
   { name: 'about', tab: 'About', shot: 'about', has: ['Beebeeb for Mac', 'Version 0.8.6', 'Get help', 'Export a support bundle', 'Paths, file and folder names and sign-in tokens are removed'] },
-  { name: 'about-update', tab: 'About', fx: { update: { status: 'update_available', current_version: '0.8.6', channel: 'stable', version: '0.8.7', body: '', release_notes_url: 'https://example.invalid' } }, act: async (p) => { await p.getByRole('button', { name: 'Check for updates' }).click(); await p.getByText('Version 0.8.7 is available.').waitFor() }, has: ['Restart to update'] },
+  // A Mac downloads its update (task 2176, two-surface spec ruling 5): "Download update", never "Restart to update".
+  { name: 'about-update', tab: 'About', fx: { update: { status: 'update_available', current_version: '0.8.6', channel: 'stable', version: '0.8.7', body: '', release_notes_url: 'https://example.invalid' } }, act: async (p) => { await p.getByRole('button', { name: 'Check for updates' }).click(); await p.getByText('Version 0.8.7 is available.').waitFor() }, has: ['Download update', 'Drag Beebeeb into Applications to replace this version.'], hasNot: ['Restart to update'] },
 ]
 
 // ── In the page ─────────────────────────────────────────────────────────────
@@ -143,6 +148,9 @@ function installBackend({ caps, fx }) {
         case 'set_recursive_pin': return null
         case 'popover_snapshot': return f.snapshot
         case 'account_subscription': return f.subscription
+        // General's "From your account" (slice 5) reads the account's own five preferences; a command this fixture does not answer
+        // returns null, and the group's read of `.preferences` then throws in the page (a fixture hole, not a product path).
+        case 'account_notification_preferences': return { preferences: f.prefs }
         case 'check_for_updates_now': return f.update
         case 'lock_vault': case 'unlock_vault': case 'clear_session': case 'open_login_items_and_extensions_settings': return null
         case 'report_problem': return { path: '/tmp/x.json', email_opened: true }
