@@ -102,6 +102,9 @@ export const FINDER_CONTINUE_TO_HOME = 'Continue to Home'
 
 export const LOAD_FAILED_TITLE = 'Couldn’t load your account'
 
+/** The quiet way out of the requested “Sign in again” card, when the session is fine (delta review P3-2; the Settings back control's wording). */
+export const BACK_TO_HOME = 'Back to Home'
+
 // ── The window's title (spec C C-W8, spec §10.2 row 36) ──────────────────────
 
 /** Signed out the title is the heading of the card shown; signed in it is the app's name. */

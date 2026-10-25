@@ -116,11 +116,27 @@ export function afterSignIn(settled: SignInSettled, email: string, reauth: boole
  * A request to the window that is a step of this flow: “Sign in again” from `open_reauth_window` (review P3-1). It shows the
  * card whatever the session says, but only for a signed-in window with no step in progress: the switch question, the
  * recovery phrase, Finder and settling are not replaced, and with no account on this Mac the sign-in card shows already.
- * Every other request is the window's navigation (`mainWindowModel.navigate`), not a step.
+ * Under a sheet nothing navigates (spec §8.2) and the card is a navigation, so the request is HELD (`held: true`): the shell
+ * keeps it and applies it when the sheet closes (delta review P3-2). Every other request is the window's navigation
+ * (`mainWindowModel.navigate`), not a step.
  */
-export function flowForNav(nav: MainNav, signedIn: boolean, flow: SignInFlow): SignInFlow {
-  if (nav.to !== 'reauth' || !signedIn || flow.step !== null) return flow
-  return { ...IDLE_FLOW, step: 'reauth' }
+export function flowForNav(
+  nav: MainNav,
+  ctx: { signedIn: boolean; sheetOpen: boolean },
+  flow: SignInFlow,
+): { flow: SignInFlow; held: boolean } {
+  if (nav.to !== 'reauth' || !ctx.signedIn || flow.step !== null) return { flow, held: false }
+  if (ctx.sheetOpen) return { flow, held: true }
+  return { flow: { ...IDLE_FLOW, step: 'reauth' }, held: false }
+}
+
+/**
+ * Whether the card the window shows can be left. The requested “Sign in again” of a session that is actually fine can: there
+ * is nothing to sign in again to, and the card would otherwise have no way out but a sign-in or closing the window (delta
+ * review P3-2). When the session really ended it is the one screen that helps, and it stays what it was.
+ */
+export function canLeaveSignInAgain(account: RoutingAccount, flow: SignInFlow): boolean {
+  return flow.step === 'reauth' && account.logged_in && !account.auth_expired
 }
 
 /**

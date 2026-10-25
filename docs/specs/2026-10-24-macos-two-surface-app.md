@@ -406,6 +406,10 @@ to Beebeeb", spec C C-W8). Screens, in the order a person meets them; copy is sp
    link back.
 4. **Sign in again** (C-R2): title "Sign in again"; "Sync is paused until you sign in again. Your files stay in
    Finder."; the same two methods; footer "Signed in before as {email}".
+   When an opener asks for it (`open_reauth_window`) and the session is in fact fine, the same card shows, with a quiet
+   "Back to Home" under it that leaves it; a session that really ended has no such link. A request that arrives under a
+   sheet waits for the sheet to close (§8.2). — lead ruling, 2026-10-25 (delta review P3-2 on PR #143); the hi-fi draws
+   no such link, a recorded deviation.
 5. **Account switch** (1887 W11): today's `AccountSwitchStep` and its A0s–A4s copy, unchanged (§8.2).
 6. **Set up this Mac** (recovery phrase), only when this Mac has no key: today's `UnlockStep`, unchanged.
 7. **Spec C's account states** that need the whole window when they hold with no Ready account behind them: Checking

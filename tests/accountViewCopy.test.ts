@@ -77,6 +77,7 @@ describe('the sign-in screens, word for word (spec C §7.1, §7.2; spec §10.2 r
   test('the recovery-phrase offer on Home’s locked card, and the window that could not read the account (review P2-3, P3-4)', () => {
     expect(copy.USE_RECOVERY_PHRASE).toBe('Use your recovery phrase')
     expect(copy.LOAD_FAILED_TITLE).toBe('Couldn’t load your account')
+    expect(copy.BACK_TO_HOME).toBe('Back to Home')
   })
 
   test('window titles follow the screen’s heading; signed in the window is "Beebeeb" (spec C C-W8, row 36)', () => {

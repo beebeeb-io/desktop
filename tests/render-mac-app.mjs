@@ -145,13 +145,13 @@ function installBackend({ caps, fx }) {
           return null
         }
         case 'start_browser_login': {
-          window.__emit('browser-login', { attempt: a?.attempt, phase: 'connecting' })
-          window.__emit('browser-login', { attempt: a?.attempt, phase: 'waiting', user_code: 'KQ7M-4TXP', verification_uri: 'https://app.beebeeb.io/cli-auth', expires_in: 300 })
+          window.__emit('browser-login', { attempt: a?.attemptId, phase: 'connecting' })
+          window.__emit('browser-login', { attempt: a?.attemptId, phase: 'waiting', user_code: 'KQ7M-4TXP', verification_uri: 'https://app.beebeeb.io/cli-auth', expires_in: 300 })
           if (f.browser !== 'done') return new Promise(() => {})
           await new Promise((resolve) => setTimeout(resolve, 300))
-          window.__emit('browser-login', { attempt: a?.attempt, phase: 'authorized' })
+          window.__emit('browser-login', { attempt: a?.attemptId, phase: 'authorized' })
           signedIn(f, true)
-          window.__emit('browser-login', { attempt: a?.attempt, phase: 'done', email: 'sam@example.eu' })
+          window.__emit('browser-login', { attempt: a?.attemptId, phase: 'done', email: 'sam@example.eu' })
           return null
         }
         case 'desktop_capabilities': return caps

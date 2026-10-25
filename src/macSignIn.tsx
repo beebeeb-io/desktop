@@ -27,6 +27,7 @@ import {
   accountSwitchBody,
 } from './accountSwitchCopy'
 import {
+  BACK_TO_HOME,
   FINDER_CONTINUE_TO_HOME,
   LOAD_FAILED_TITLE,
   SIGNED_IN_WINDOW_TITLE,
@@ -195,6 +196,7 @@ export function SignInWindow({
   offline,
   loadFailed = false,
   onRetryLoad,
+  onBack,
   onFlow,
 }: {
   screen: WindowScreen
@@ -208,6 +210,8 @@ export function SignInWindow({
   /** The reads of the account keep failing: the settling screen says so (review P3-4). */
   loadFailed?: boolean
   onRetryLoad?: () => void
+  /** The requested “Sign in again” of a session that is fine can be left (delta review P3-2): a quiet way back to Home. */
+  onBack?: () => void
   onFlow: (next: SignInFlow) => void
 }) {
   if (screen === 'settling') {
@@ -246,6 +250,11 @@ export function SignInWindow({
         </div>
       ) : null}
       {card}
+      {onBack && screen === 'reauth' ? (
+        <div className="mw-center">
+          <button type="button" className="mw-link mw-link--quiet" onClick={onBack}>{BACK_TO_HOME}</button>
+        </div>
+      ) : null}
     </div>
   )
 }

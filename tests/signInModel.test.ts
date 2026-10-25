@@ -14,6 +14,7 @@ import {
   afterSignIn,
   afterSwitchCancelled,
   afterSwitched,
+  canLeaveSignInAgain,
   flowForNav,
   flowForPendingSetup,
   isNoVaultKey,
@@ -161,30 +162,51 @@ describe('the other steps', () => {
 // already marked ended; with the session still good the click ended on Home and nothing happened. The request is a flow
 // step now, so the card is shown whatever the session says (Linux's `mode=reauth`).
 describe('flowForNav: a “Sign in again” request is the card, whatever the session says (P3-1)', () => {
+  const idle = { signedIn: true, sheetOpen: false }
+
   test('a signed-in window with no step in progress shows the card', () => {
-    expect(flowForNav({ to: 'reauth' }, true, IDLE_FLOW)).toEqual(step('reauth'))
-    expect(windowScreen(live, flowForNav({ to: 'reauth' }, true, IDLE_FLOW))).toBe('reauth')
+    expect(flowForNav({ to: 'reauth' }, idle, IDLE_FLOW)).toEqual({ flow: step('reauth'), held: false })
+    expect(windowScreen(live, flowForNav({ to: 'reauth' }, idle, IDLE_FLOW).flow)).toBe('reauth')
   })
 
-  test('no account on this Mac: the sign-in card is already what shows, and nothing is set', () => {
-    expect(flowForNav({ to: 'reauth' }, false, IDLE_FLOW)).toBe(IDLE_FLOW)
+  test('no account on this Mac: the sign-in card is already what shows, and nothing is set or held', () => {
+    expect(flowForNav({ to: 'reauth' }, { signedIn: false, sheetOpen: false }, IDLE_FLOW)).toEqual({ flow: IDLE_FLOW, held: false })
+    expect(flowForNav({ to: 'reauth' }, { signedIn: false, sheetOpen: true }, IDLE_FLOW)).toEqual({ flow: IDLE_FLOW, held: false })
   })
 
   test('a step in progress is never replaced: the switch question, the phrase, Finder and settling stand', () => {
     for (const s of ['switch', 'unlock', 'finder', 'settling'] as const) {
       const flow = step(s)
-      expect(flowForNav({ to: 'reauth' }, true, flow)).toBe(flow)
+      expect(flowForNav({ to: 'reauth' }, idle, flow)).toEqual({ flow, held: false })
     }
   })
 
-  test('every other request leaves the flow alone', () => {
+  // Delta review P3-2: under a sheet nothing navigates (§8.2), and the card is a navigation. The request waits.
+  test('under a sheet the request changes nothing and is held for when the sheet closes', () => {
+    expect(flowForNav({ to: 'reauth' }, { signedIn: true, sheetOpen: true }, IDLE_FLOW)).toEqual({ flow: IDLE_FLOW, held: true })
+  })
+
+  test('every other request leaves the flow alone and holds nothing', () => {
     for (const nav of [{ to: 'home' }, { to: 'back' }, { to: 'settings', section: null }] as const) {
-      expect(flowForNav(nav, true, IDLE_FLOW)).toBe(IDLE_FLOW)
+      expect(flowForNav(nav, idle, IDLE_FLOW)).toEqual({ flow: IDLE_FLOW, held: false })
+      expect(flowForNav(nav, { signedIn: true, sheetOpen: true }, IDLE_FLOW)).toEqual({ flow: IDLE_FLOW, held: false })
     }
   })
 
   test('the sign-in it leads to ends the step like any “Sign in again”', () => {
     expect(afterSignIn({ kind: 'reauthenticated', vaultUnlocked: true, keyReplaced: false }, '', true)).toEqual(settling())
+  })
+})
+
+// Delta review P3-2: the forced card has no Cancel. When the session is actually fine there is nothing to sign in again to,
+// so the card offers a quiet way back; when the session really ended, it is the one screen that can help, and it does not.
+describe('canLeaveSignInAgain (P3-2)', () => {
+  test('only the requested card of a session that is fine can be left', () => {
+    expect(canLeaveSignInAgain({ logged_in: true, auth_expired: false }, step('reauth'))).toBe(true)
+    expect(canLeaveSignInAgain({ logged_in: true, auth_expired: true }, step('reauth'))).toBe(false)
+    expect(canLeaveSignInAgain({ logged_in: true, auth_expired: true }, IDLE_FLOW)).toBe(false)
+    expect(canLeaveSignInAgain({ logged_in: false, auth_expired: false }, step('reauth'))).toBe(false)
+    for (const s of ['switch', 'unlock', 'finder', 'settling'] as const) expect(canLeaveSignInAgain(live, step(s))).toBe(false)
   })
 })
 

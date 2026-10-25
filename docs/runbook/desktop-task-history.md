@@ -625,3 +625,13 @@ The review found 0 P1, 3 P2 and 10 P3. Fixed in the PR, each red first and mutat
 - **Deferred:** P3-5 (the switch snapshot is owned by the label `onboarding`) is task 1747 Part 1, with the 1887 pins it edits
   (`docs/plans/2026-10-25-1747-account-view.md`); P3-3 and Q4 (a Home flash) are on the device list; P3-9 (the duplicated steps of
   `Onboarding.tsx` and `signInModel.ts`) goes away with the next Linux sign-in work.
+
+The delta review of that round (0 P1, 0 P2, 5 P3) asked for three more, done in the same PR: "Use your recovery phrase" on Home's
+locked card enters Set up this Mac through `moveFlow`, like the sign-in's own step, so ⌘W on that path still resumes (the
+boundary test closes the window and opens a fresh one); the requested "Sign in again" card has a quiet "Back to Home" when the
+session is fine (`canLeaveSignInAgain`) and a request that arrives under a sheet is held until it closes (`flowForNav` answers
+`held`); and the pending set-up step is tied to the account it was set for (`HeldSetup`, `credentials_identity`,
+`account_binding::same_account`: an identity that cannot be compared resumes nothing). Two go to a follow-up after the merge: P3-3
+(the one round trip of "Loading…" after a Lock of a window that opened unlocked) and P3-5 (the sentence of a sign-out that failed
+after the removal is lost if `sync_status` itself fails; the follow-up holds it anyway, with the toast as the fallback).
+

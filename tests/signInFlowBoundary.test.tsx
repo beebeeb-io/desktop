@@ -318,6 +318,42 @@ describe('a window reopened while Set up this Mac was owed (P2-3)', () => {
   }, SLOW)
 })
 
+describe('⌘W on Set up this Mac, reached from Home’s locked card (delta review P3-1)', () => {
+  // The sign-in's own step tells Rust (`moveFlow`); “Use your recovery phrase” entered the same card with a direct
+  // `setSignInFlow`, so Rust never learned of the step and a window reopened after ⌘W showed Home again.
+  test('Unlock vault finds no key, “Use your recovery phrase” opens the card, ⌘W, and the reopened window resumes there', async () => {
+    const noKey = 'This Mac does not have your encryption keys yet. Restore them to continue.'
+    const native: Native = { loggedIn: true, authExpired: false, revision: 90, calls: [], nav: null, locked: true, pending: null }
+    installBackend(native, {
+      unlock_vault: () => { throw noKey },
+      // Rust's `set_pending_setup`: the step is kept for the process.
+      set_pending_setup: (args: { keyReplaced: boolean }) => { native.pending = { key_replaced: args.keyReplaced }; return null },
+    })
+    const { default: MacApp } = await import('../src/MacApp')
+    const container = await mountWindow('?window=main&platform=macos', <MacApp />)
+    await waitFor('Home’s locked card', () => container.textContent.includes('Your vault is locked'))
+    expect(native.pending).toBeNull()
+
+    await press(container, 'button', 'Unlock vault')
+    await waitFor('the no-key offer', () => container.textContent.includes('Use your recovery phrase'))
+    await press(container, 'button', 'Use your recovery phrase')
+    await settled(container, (c) => card(c) !== undefined)
+    expect(headings(container)).toContain('Set up this Mac')
+    expect(native.pending).toEqual({ key_replaced: false })
+
+    // ⌘W destroys the window and, with it, the WebView's module store: a window opened again starts with none.
+    for (const root of roots) await React.act(async () => root.unmount())
+    roots = []
+    resetSignInFlow()
+    native.calls.length = 0
+    const reopened = await mountWindow('?window=main&platform=macos', <MacApp />)
+    await settled(reopened, (c) => card(c) !== undefined)
+    expect(headings(reopened)).toContain('Set up this Mac')
+    expect(reopened.textContent).not.toContain('Your vault is locked')
+    expect(native.calls.filter((name) => name === 'pending_setup')).toHaveLength(1)
+  }, SLOW)
+})
+
 describe('“Sign in again” asked for by an opener (P3-1)', () => {
   test('a signed-in window whose session is not marked ended still shows the card when open_reauth_window asks', async () => {
     const native: Native = { loggedIn: true, authExpired: false, revision: 50, calls: [], nav: { to: 'reauth' } }
@@ -329,6 +365,29 @@ describe('“Sign in again” asked for by an opener (P3-1)', () => {
     expect(headings(container)).toContain('Sign in again')
     // Not a sign-in: the account is on this Mac, so the footer names it.
     expect(container.textContent).toContain('sam@example.eu')
+  }, SLOW)
+
+  // Delta review P3-2: the forced card has no Cancel; with a session that is fine it has a quiet way back.
+  test('the card of a session that is fine has “Back to Home”, which leaves it; a really ended session has none', async () => {
+    const native: Native = { loggedIn: true, authExpired: false, revision: 55, calls: [], nav: { to: 'reauth' } }
+    installBackend(native)
+    const { default: MacApp } = await import('../src/MacApp')
+    const container = await mountWindow('?window=main&platform=macos', <MacApp />)
+    await settled(container, (c) => card(c) !== undefined)
+    expect(headings(container)).toContain('Sign in again')
+    await press(container, 'button', 'Back to Home')
+    await waitFor('Home', () => elements(container).some((el) => el.tagName === 'NAV'))
+    expect(headings(container)).not.toContain('Sign in again')
+
+    const ended: Native = { loggedIn: true, authExpired: true, revision: 56, calls: [], nav: { to: 'reauth' } }
+    installBackend(ended)
+    for (const root of roots) await React.act(async () => root.unmount())
+    roots = []
+    resetSignInFlow()
+    const second = await mountWindow('?window=main&platform=macos', <MacApp />)
+    await settled(second, (c) => card(c) !== undefined)
+    expect(headings(second)).toContain('Sign in again')
+    expect(elements(second).some((el) => el.tagName === 'BUTTON' && el.textContent.trim() === 'Back to Home')).toBe(false)
   }, SLOW)
 
   test('without the request the same window is Home', async () => {

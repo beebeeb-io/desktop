@@ -517,6 +517,72 @@ describe('moved from the Settings window\'s root (task 1683 slice 4, now the win
   })
 })
 
+describe('the requested “Sign in again” (review P3-1; delta review P3-2)', () => {
+  const live = () => snapshot()
+  const ended = () => snapshot({ phase: 'session_ended', account: { auth_expired: true } })
+  const win = (m: Mounted) => find(m, (el) => el.props['data-signin'] !== undefined).map((el) => ({ props: el.props['data-props'] }))
+
+  test('a session that is fine gets the card, with a way back to Home that clears the step', async () => {
+    const { m, request } = openWindow({ snap: live })
+    await settle(m)
+    await request({ to: 'reauth' })
+    await settle(m)
+    expect(win(m)[0].props.screen).toBe('reauth')
+    expect(typeof win(m)[0].props.onBack).toBe('function')
+    win(m)[0].props.onBack()
+    m.render()
+    await settle(m)
+    expect(win(m)).toHaveLength(0)
+    expect(shown(m)).toEqual(['home'])
+    expect(signInStore.getSignInFlow()).toEqual(signInModel.IDLE_FLOW)
+  })
+
+  test('a session that really ended has no way back: the card is the one screen that helps', async () => {
+    const { m, request } = openWindow({ snap: ended })
+    await settle(m)
+    expect(win(m)[0].props.screen).toBe('reauth')
+    expect(win(m)[0].props.onBack).toBeUndefined()
+    await request({ to: 'reauth' })
+    await settle(m)
+    expect(win(m)[0].props.screen).toBe('reauth')
+    expect(win(m)[0].props.onBack).toBeUndefined()
+  })
+
+  // §8.2: under a sheet nothing navigates, and the card is a navigation: the request waits for the sheet to close.
+  test('under a sheet the request waits, and the card appears when the sheet closes, once', async () => {
+    let modals = 1
+    const { m, request } = openWindow({ snap: live, bindings: { openModalCount: () => modals } })
+    await settle(m)
+    await request({ to: 'reauth' })
+    await settle(m)
+    expect(win(m)).toHaveLength(0)
+    expect(signInStore.getSignInFlow()).toEqual(signInModel.IDLE_FLOW)
+    modals = 0
+    m.render()
+    await settle(m)
+    expect(win(m)[0].props.screen).toBe('reauth')
+    // Left again, and a later sheet does not bring it back: a held request is used once.
+    win(m)[0].props.onBack()
+    m.render()
+    await settle(m)
+    modals = 1
+    m.render()
+    await settle(m)
+    modals = 0
+    m.render()
+    await settle(m)
+    expect(win(m)).toHaveLength(0)
+  })
+
+  test('with no sheet the request is applied at once', async () => {
+    const { m, request } = openWindow({ snap: live })
+    await settle(m)
+    await request({ to: 'reauth' })
+    await settle(m)
+    expect(signInStore.getSignInFlow().step).toBe('reauth')
+  })
+})
+
 describe('a reopened window resumes a pending set-up step (review P2-3)', () => {
   const locked = () => snapshot({ phase: 'locked', account: { vault_unlocked: false } })
   const signedOut = () => snapshot({ phase: 'signed_out', account: { email: null, logged_in: false, vault_unlocked: false } })
@@ -827,6 +893,7 @@ function openHome(snap: unknown, backend: Record<string, (args: any) => unknown>
       ...windowModel,
       ...signInModel,
       setSignInFlow: signInStore.setSignInFlow,
+      moveFlow: loadComponent('macSignIn.tsx', 'moveFlow', { command: desktopApi.command }),
       ...copy,
       finderActionButtonLabel: finderSetupCopy.finderActionButtonLabel,
       finderOpenFailedToast: finderSetup.finderOpenFailedToast,
@@ -949,6 +1016,9 @@ describe('Home (§7.6, first cut: status, Finder row, storage, the kept rows)', 
     expect(refreshed()).toBe(1)
     await homeButton(m, 'Use your recovery phrase').props.onClick()
     expect(signInStore.getSignInFlow()).toEqual({ ...signInModel.IDLE_FLOW, step: 'unlock' })
+    // Delta review P3-1: entering Set up this Mac this way is told to Rust too (as the sign-in's own step is), or ⌘W on
+    // this path loses the resume.
+    expect(m.calls.filter((c) => c.name === 'set_pending_setup').map((c) => c.args)).toEqual([{ keyReplaced: false }])
   })
 
   test('any other unlock failure is still the toast, with no recovery offer (P2-3)', async () => {

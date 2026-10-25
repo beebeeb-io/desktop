@@ -108,7 +108,7 @@ describe('SignInWindow: one screen per state (spec §7.4)', () => {
   const told: Array<{ name: string; args: unknown }> = []
   const command = (name: string, args?: unknown) => { told.push({ name, args }); return Promise.resolve({ ok: true, value: undefined }) }
   const moveFlow = loadComponent('macSignIn.tsx', 'moveFlow', { command })
-  const SignInWindow = loadComponent('macSignIn.tsx', 'SignInWindow', { React, ...stubs, ...model, Note: parts.Note, moveFlow })
+  const SignInWindow = loadComponent('macSignIn.tsx', 'SignInWindow', { React, ...stubs, ...model, Note: parts.Note, moveFlow, BACK_TO_HOME: copy.BACK_TO_HOME })
   const flows: model.SignInFlow[] = []
   const render = (props: Record<string, unknown>) => {
     flows.length = 0
@@ -221,6 +221,22 @@ describe('SignInWindow: one screen per state (spec §7.4)', () => {
     expect(told).toEqual([])
     screens(render({ screen: 'unlock', flow: { ...model.IDLE_FLOW, step: 'unlock' } }))[0].props.onDone()
     expect(told).toEqual([])
+  })
+
+  // Delta review P3-2: the requested “Sign in again” of a session that is fine has no Cancel; the shell hands the card a way
+  // back when that is the case (`canLeaveSignInAgain`), and the card draws it as a quiet link under itself.
+  test('a way back is a quiet “Back to Home” under the Sign in again card, and nowhere else (P3-2)', () => {
+    let left = 0
+    const back = (tree: any) => elementsOf(tree).filter((el) => el.type === 'button' && textOf(el.props.children).trim() === 'Back to Home')
+    const tree = render({ screen: 'reauth', onBack: () => { left += 1 } })
+    expect(back(tree)).toHaveLength(1)
+    expect(String(back(tree)[0].props.className)).toContain('mw-link--quiet')
+    back(tree)[0].props.onClick()
+    expect(left).toBe(1)
+    expect(back(render({ screen: 'reauth' }))).toHaveLength(0)
+    for (const screen of ['signin', 'switch', 'unlock', 'finder', 'settling'] as const) {
+      expect(back(render({ screen, onBack: () => {} }))).toHaveLength(0)
+    }
   })
 
   test('the offline state reaches the sign-in screen with its retry (P3-7)', () => {

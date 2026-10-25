@@ -279,7 +279,7 @@ pub struct AppState {
     pub(crate) sign_out: sign_out::SignOutState,
     /// The set-up step a password sign-in without a key left open, for the life of the process (review P2-3 on the Mac
     /// sign-in PR): see [`PendingSetup`].
-    pending_setup: Mutex<Option<PendingSetup>>,
+    pending_setup: Mutex<Option<HeldSetup>>,
 }
 
 impl AppState {
@@ -346,26 +346,63 @@ struct PendingSetup {
     key_replaced: bool,
 }
 
-fn remember_pending_setup(slot: &Mutex<Option<PendingSetup>>, key_replaced: bool) {
-    *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(PendingSetup { key_replaced });
+/// A pending step and the account it was set for. The slot outlives a sign-out (the sign-out code is untouched), so a step
+/// of account A would otherwise be answered for account B who signed in after A and is signed in and locked; it is
+/// answered only for the account it was set for (review P3-4 of the delta review).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HeldSetup {
+    step: PendingSetup,
+    account: account_binding::Identity,
 }
 
-fn forget_pending_setup(slot: &Mutex<Option<PendingSetup>>) {
+fn remember_pending_setup(slot: &Mutex<Option<HeldSetup>>, key_replaced: bool, account: account_binding::Identity) {
+    *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(HeldSetup {
+        step: PendingSetup { key_replaced },
+        account,
+    });
+}
+
+fn forget_pending_setup(slot: &Mutex<Option<HeldSetup>>) {
     *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
 }
 
-/// The pending step, if it is still true: an account is signed in and its vault is locked. Reading it does not use it up.
-fn resume_pending_setup(slot: &Mutex<Option<PendingSetup>>, signed_in: bool, vault_unlocked: bool) -> Option<PendingSetup> {
+/// The pending step, if it is still true: an account is signed in, its vault is locked, and it is the account the step was
+/// set for (`account_binding::same_account`: an identity that cannot be compared resumes nothing). Reading it does not use
+/// it up.
+fn resume_pending_setup(
+    slot: &Mutex<Option<HeldSetup>>,
+    signed_in: bool,
+    vault_unlocked: bool,
+    current: &account_binding::Identity,
+) -> Option<PendingSetup> {
     if !signed_in || vault_unlocked {
         return None;
     }
-    *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    let held = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()?;
+    (account_binding::same_account(&held.account, current) == Some(true)).then_some(held.step)
 }
 
-/// The window enters “Set up this Mac”: Rust keeps the step for the process (see [`PendingSetup`]).
+/// Who this Mac's credentials name, for a pending step: the cached profile's user id and email, else the session's or the
+/// Keychain's email (`credentials_identity`). Windows has no Beebeeb window to resume, so it names nobody there.
+fn pending_setup_identity(acct: &AccountRuntime) -> account_binding::Identity {
+    #[cfg(not(target_os = "windows"))]
+    {
+        credentials_identity(acct)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = acct;
+        account_binding::Identity::default()
+    }
+}
+
+/// The window enters “Set up this Mac”: Rust keeps the step for the process, for the account whose credentials this Mac holds
+/// (see [`PendingSetup`]).
 #[tauri::command]
-fn set_pending_setup(state: State<'_, AppState>, key_replaced: bool) {
-    remember_pending_setup(&state.pending_setup, key_replaced);
+fn set_pending_setup(state: State<'_, AppState>, key_replaced: bool) -> Result<(), String> {
+    let acct = state.active_account()?;
+    remember_pending_setup(&state.pending_setup, key_replaced, pending_setup_identity(&acct));
+    Ok(())
 }
 
 /// A window that opens signed in and locked asks whether “Set up this Mac” is still owed. `logged_in` is `sync_status`'s own
@@ -375,7 +412,12 @@ fn pending_setup(state: State<'_, AppState>) -> Result<Option<PendingSetup>, Str
     let acct = state.active_account()?;
     let vault_unlocked = acct.session.lock().map(|guard| guard.is_some()).unwrap_or(false);
     let auth_present = state.auth_present.lock().map(|guard| *guard).unwrap_or(false);
-    Ok(resume_pending_setup(&state.pending_setup, vault_unlocked || auth_present, vault_unlocked))
+    Ok(resume_pending_setup(
+        &state.pending_setup,
+        vault_unlocked || auth_present,
+        vault_unlocked,
+        &pending_setup_identity(&acct),
+    ))
 }
 
 fn keychain_error(context: &str, error: impl fmt::Display) -> String {
@@ -37574,34 +37616,63 @@ mod sign_out_keep_tests {
     /// reading it (the window may be closed again).
     #[test]
     fn a_pending_set_up_step_is_resumed_only_while_it_is_still_true() {
+        let alice = account_binding::Identity::new(Some("user-alice"), Some("alice@example.eu"));
         let slot = Mutex::new(None);
-        assert_eq!(resume_pending_setup(&slot, true, false), None, "nothing was set");
-        remember_pending_setup(&slot, true);
-        assert_eq!(resume_pending_setup(&slot, true, false), Some(PendingSetup { key_replaced: true }));
+        assert_eq!(resume_pending_setup(&slot, true, false, &alice), None, "nothing was set");
+        remember_pending_setup(&slot, true, alice.clone());
+        assert_eq!(resume_pending_setup(&slot, true, false, &alice), Some(PendingSetup { key_replaced: true }));
         assert_eq!(
-            resume_pending_setup(&slot, true, false),
+            resume_pending_setup(&slot, true, false, &alice),
             Some(PendingSetup { key_replaced: true }),
             "reading it does not use it up"
         );
-        assert_eq!(resume_pending_setup(&slot, true, true), None, "the keys are here: nothing is owed");
-        assert_eq!(resume_pending_setup(&slot, false, false), None, "nobody is signed in: nothing to resume");
-        remember_pending_setup(&slot, false);
+        assert_eq!(resume_pending_setup(&slot, true, true, &alice), None, "the keys are here: nothing is owed");
+        assert_eq!(resume_pending_setup(&slot, false, false, &alice), None, "nobody is signed in: nothing to resume");
+        remember_pending_setup(&slot, false, alice.clone());
         assert_eq!(
-            resume_pending_setup(&slot, true, false),
+            resume_pending_setup(&slot, true, false, &alice),
             Some(PendingSetup { key_replaced: false }),
             "the newest sign-in's step replaces an older one"
         );
         forget_pending_setup(&slot);
-        assert_eq!(resume_pending_setup(&slot, true, false), None);
+        assert_eq!(resume_pending_setup(&slot, true, false, &alice), None);
+    }
+
+    /// Review P3-4 of the delta review: the step belongs to the account it was set for. A signs in without a key, A signs out
+    /// (the sign-out code is untouched and leaves the slot), B signs in and is signed in and locked: B must not be sent to
+    /// A's recovery phrase. Only the same account resumes; an identity that cannot be compared resumes nothing.
+    #[test]
+    fn a_pending_set_up_step_belongs_to_the_account_it_was_set_for() {
+        let alice = account_binding::Identity::new(Some("user-alice"), Some("alice@example.eu"));
+        let bob = account_binding::Identity::new(Some("user-bob"), Some("bob@example.eu"));
+        let slot = Mutex::new(None);
+        remember_pending_setup(&slot, true, alice.clone());
+        assert_eq!(resume_pending_setup(&slot, true, false, &alice), Some(PendingSetup { key_replaced: true }));
+        assert_eq!(resume_pending_setup(&slot, true, false, &bob), None, "another account is signed in and locked");
+        assert_eq!(
+            resume_pending_setup(&slot, true, false, &account_binding::Identity::default()),
+            None,
+            "an account that cannot be named is not compared, so nothing resumes"
+        );
+        // The same user under another spelling of its email, with no user id on one side: the canonical email decides.
+        let by_email = account_binding::Identity::new(None, Some(" Alice@Example.eu "));
+        let named_by_email = Mutex::new(None);
+        remember_pending_setup(&named_by_email, false, account_binding::Identity::new(None, Some("alice@example.eu")));
+        assert_eq!(resume_pending_setup(&named_by_email, true, false, &by_email), Some(PendingSetup { key_replaced: false }));
+        // B enters the step in its turn: the slot now answers B and no longer A.
+        remember_pending_setup(&slot, false, bob.clone());
+        assert_eq!(resume_pending_setup(&slot, true, false, &bob), Some(PendingSetup { key_replaced: false }));
+        assert_eq!(resume_pending_setup(&slot, true, false, &alice), None);
     }
 
     #[test]
     fn arriving_keys_forget_the_pending_set_up_step() {
+        let alice = account_binding::Identity::new(Some("user-alice"), Some("alice@example.eu"));
         for from in [KeysFrom::Unlock, KeysFrom::SignIn] {
             let state = AppState::default();
-            remember_pending_setup(&state.pending_setup, false);
+            remember_pending_setup(&state.pending_setup, false, alice.clone());
             keys_arrived(&state, from);
-            assert_eq!(resume_pending_setup(&state.pending_setup, true, false), None, "{from:?}");
+            assert_eq!(resume_pending_setup(&state.pending_setup, true, false, &alice), None, "{from:?}");
         }
     }
 
@@ -37631,7 +37702,13 @@ mod sign_out_keep_tests {
         }
         // It asks the same thing `sync_status` does (a session in memory, or a token present) and nothing more.
         let ask = super::finder_setup_command_tests::body_between(&production, "fn pending_setup(", "\n}\n");
-        assert!(ask.contains("resume_pending_setup(&state.pending_setup, vault_unlocked || auth_present, vault_unlocked)"), "{ask}");
+        assert!(
+            ask.contains("resume_pending_setup(\n        &state.pending_setup,\n        vault_unlocked || auth_present,\n        vault_unlocked,\n        &pending_setup_identity(&acct),\n    )"),
+            "{ask}"
+        );
+        // Both commands name the account the same way: the one whose credentials this Mac holds.
+        let set = super::finder_setup_command_tests::body_between(&production, "fn set_pending_setup(", "\n}\n");
+        assert!(set.contains("pending_setup_identity(&acct)"), "{set}");
     }
 
     /// Review P2-3 b: the Keychain holds a token and no key. `unlock_vault` says the approved Set up this Mac sentence on a

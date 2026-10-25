@@ -53,7 +53,7 @@ import {
   type SettingsTab,
 } from './macSettingsModel'
 import { Btn, Note, SettingsGroup, SettingsIcon } from './macSettingsParts'
-import { SignInWindow } from './macSignIn'
+import { moveFlow, SignInWindow } from './macSignIn'
 import { AboutTab, AccountTab, GeneralTab, showSignOutOutcome, SyncTab, useSettingsConfig } from './MacSettings'
 import { SecurityTab } from './MacSecurity'
 import {
@@ -78,7 +78,7 @@ import {
   type MainView,
 } from './mainWindowModel'
 import { getSignInFlow, setSignInFlow, subscribeSignInFlow } from './signInFlowStore'
-import { flowForNav, flowForPendingSetup, IDLE_FLOW, isNoVaultKey, normalizeFlow, setupCheckWanted, windowScreen } from './signInModel'
+import { canLeaveSignInAgain, flowForNav, flowForPendingSetup, IDLE_FLOW, isNoVaultKey, normalizeFlow, setupCheckWanted, windowScreen } from './signInModel'
 import { connectSignOutFlowEvents, connectSignOutFlowMenu, SignOutFlow, signOutFlowApi, type FlowView } from './signOutFlow'
 import { setMainWindowTitle } from './windowTitle'
 import { openModalCount, subscribeOpenModals, useToast } from './windows/ui'
@@ -147,7 +147,7 @@ function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefres
         {noKey ? (
           <Note
             kind="status"
-            actions={<Btn onClick={() => setSignInFlow({ ...IDLE_FLOW, step: 'unlock' })}>{USE_RECOVERY_PHRASE}</Btn>}
+            actions={<Btn onClick={() => moveFlow({ ...IDLE_FLOW, step: 'unlock' }, setSignInFlow)}>{USE_RECOVERY_PHRASE}</Btn>}
           >
             {SET_UP_COPY}
           </Note>
@@ -336,6 +336,8 @@ export default function MacApp() {
   // Whether a sign-in card is drawn right now (set below, once `screen` and `view` are known): a held sign-out sentence
   // is shown on the card, not by leaving it for Settings.
   const showingCardRef = useRef(false)
+  // A “Sign in again” request that arrived under a sheet, applied when the sheet closes (delta review P3-2).
+  const reauthHeld = useRef(false)
   // A request can arrive before the first account read (a window Rust built for it pulls it on mount): it waits for
   // that read, because which sections exist depends on the session. Each waits as the step it is, in order.
   const loadedRef = useRef(false)
@@ -462,16 +464,26 @@ export default function MacApp() {
     () =>
       connectMainNavigation(listen, () => command<unknown>('consume_main_navigation'), (nav) => {
         // “Sign in again” is a step of the sign-in flow, not a place (review P3-1): it waits for the first account read,
-        // which says whether there is an account to sign in again to.
+        // which says whether there is an account to sign in again to, and, under a sheet, for the sheet to close (§8.2,
+        // delta review P3-2; `reauthHeld`).
         whenLoaded(() => {
-          const next = flowForNav(nav, ctxRef.current.signedIn, getSignInFlow())
-          if (next !== getSignInFlow()) setSignInFlow(next)
+          const { flow: next, held } = flowForNav(nav, { signedIn: ctxRef.current.signedIn, sheetOpen: ctxRef.current.sheetOpen }, getSignInFlow())
+          if (held) reauthHeld.current = true
+          else if (next !== getSignInFlow()) setSignInFlow(next)
         })
         go(nav)
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- registered once; `go` reads the refs above.
     [],
   )
+
+  // A “Sign in again” request that waited for a sheet is applied when the sheet closes, once (delta review P3-2).
+  useEffect(() => {
+    if (sheetOpen || !reauthHeld.current) return
+    reauthHeld.current = false
+    const { flow: next } = flowForNav({ to: 'reauth' }, { signedIn: ctxRef.current.signedIn, sheetOpen: false }, getSignInFlow())
+    if (next !== getSignInFlow()) setSignInFlow(next)
+  }, [sheetOpen])
 
   // The native "Check for Updates…": this window drains the pending request and answers inline in Settings › About's
   // row (it mounts no ManualUpdateFeedback toast). A consumed request lands on About; a plain open consumes false.
@@ -559,6 +571,7 @@ export default function MacApp() {
             note={signOutNote}
             loadFailed={snapshotFailed}
             onRetryLoad={() => reader.refresh()}
+            onBack={canLeaveSignInAgain(account, flowNow) ? () => setSignInFlow(IDLE_FLOW) : undefined}
             onFlow={setSignInFlow}
           />
         </main>
