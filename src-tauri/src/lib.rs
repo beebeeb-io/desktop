@@ -15723,6 +15723,9 @@ mod main_window_tests {
     /// Review round 2, P2-3: a pause sent with the settings (the compact flyout's Network page) pauses the engine as the
     /// menu's and the tray's do: the file, the engine's flag, the engine-status event and the menu label agree. A
     /// settings write without a pause leaves the pause alone.
+    // The mock runtime is not built on Windows (Cargo.toml: `tauri/test` is off there, after slice 1's 0xc0000139 at
+    // load); Linux and macOS run this.
+    #[cfg(not(target_os = "windows"))]
     #[tokio::test]
     async fn a_pause_sent_with_the_settings_pauses_the_engine() {
         let dir = tempfile::tempdir().expect("temp dir");
