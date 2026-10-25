@@ -197,6 +197,19 @@ describe('the answer of a command that ends the session itself stands when the r
     }
   })
 
+  // PR #146 review, P3: the hint's answer is a flag of this Mac, not of an account. A sign-in or a lock that moves the revision
+  // while the read is out must not turn it into "Account changed" (which hides the hint) or lose a "Got it".
+  test('the one-time hint\'s two commands carry no account data: their answers stand', async () => {
+    let start = 780
+    for (const [name, answer] of [['get_menu_bar_hint_seen', false], ['mark_menu_bar_hint_seen', null]] as const) {
+      const { native, seen } = await revisionMovesWhileRunning(name, answer, start)
+      const result = await command<unknown>(name)
+      expect(seen.atAnswer).toBe(native.revision)
+      expect({ name, result }).toEqual({ name, result: { ok: true, value: answer } })
+      start += 10
+    }
+  })
+
   test('any other command still says "Account changed"', async () => {
     let start = 730
     for (const name of ['account_email', 'unlock_vault', 'popover_snapshot', 'desktop_unlock_with_recovery_phrase', 'open_onboarding_window']) {

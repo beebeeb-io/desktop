@@ -22,6 +22,7 @@
 //! |---|---|
 //! | [`anchor`] | popover spec section 6 rule 2, section 9 "Mixed-DPI anchoring", open question 6 |
 //! | [`window_state`] | two-surface spec §7.2 (where the Beebeeb window opens) |
+//! | [`launch`] | two-surface spec §7.3, §12 row 6 (when the window opens by itself; the updater's relaunch flag) |
 //! | [`registry`] | two-surface spec §4 (two surfaces, the visibility rule) |
 //! | [`blur_guard`] | popover spec section 6 rule 4 |
 //! | [`failure`] | popover spec section 7 (one surface per failure) |
@@ -34,6 +35,7 @@
 pub mod anchor;
 pub mod blur_guard;
 pub mod failure;
+pub mod launch;
 pub mod phase;
 pub mod policy;
 pub mod registry;

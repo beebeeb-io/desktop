@@ -385,10 +385,10 @@ Settings, a ~~tab~~ Settings section).
 
 | Event | Beebeeb window |
 | --- | --- |
-| Login launch (spec C C-W1, C-W5) | Nothing. |
+| Login launch (spec C C-W1, C-W5) | Nothing. *Built and tested (`surfaces::launch`, slice 6); not yet reachable on a device: until task 1845 supplies the login item's signal, no launch is recognised as a login launch, so a login launch still opens the window as a manual one does.* — slice 6, 2026-10-25 |
 | Manual launch, or opening the app while it runs (Finder, Dock, Spotlight; `RunEvent::Reopen`) | Opens: sign-in with no session, else Home. |
 | First launch after install | Opens on sign-in. |
-| Updater relaunch | Nothing with a session (popover ruling 1: "not after updates"); sign-in without one. Detection: a flag the updater writes before `restart`, consumed at launch. |
+| Updater relaunch | ~~Nothing with a session (popover ruling 1: "not after updates"); sign-in without one. Detection: a flag the updater writes before `restart`, consumed at launch.~~ What the person had open, and nothing else: signed in, their Beebeeb window comes back if it was open, and nothing opens if it was not (the b only; the popover never opens after an update, popover ruling 1); signed out, sign-in. Detection: a flag (`relaunch.json` in the state directory: whether the window was open, whether an account was signed in, and when) the updater writes just before `restart`, consumed at launch, ignored when older than two minutes. — slice 6, 2026-10-25, lead's brief to the slice 6 lane (macos-beebeeb-teamlead): "a relaunch after an update shows what the user had open, nothing else"; the struck row said nothing at all with a session |
 | Session ends while it is closed | Nothing; the b is crossed. A click opens sign-in. |
 | A conflict | Nothing (a notification and a popover row). |
 
@@ -442,7 +442,7 @@ and the Windows shell's "Files" was a summary. — rulings amendment, 2026-10-24
 
 - One-time hint, after the first sign-in on this Mac: "Beebeeb lives in the menu bar" / "Click the b at the top of
   your screen to see what’s syncing. You can close this window; Beebeeb keeps running." / "Got it". Dismissed once,
-  stored in `desktop.toml`.
+  stored in `desktop.toml` (`menu_bar_hint_seen`). *Built in slice 6: first thing on an unlocked Home, never on the locked card. An install that predates it shows it once too (a Mac cannot tell it from a first sign-in), then never again.*
 - Status card: the popover's state in one row ("Up to date" · "Last checked {time}", or the syncing summary, or the
   message state's title and action); Finder row "Beebeeb in Finder" / "Your vault appears under Locations in Finder."
   with the one amber button "Open in Finder"; a counts line "On this Mac {n} files · Online-only {n} · Kept on this Mac

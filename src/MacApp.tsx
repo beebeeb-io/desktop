@@ -54,6 +54,7 @@ import {
 } from './macSettingsModel'
 import { Btn, Note, SettingsGroup, SettingsIcon } from './macSettingsParts'
 import { moveFlow, SignInWindow } from './macSignIn'
+import { MenuBarHint } from './MenuBarHint'
 import { AboutTab, AccountTab, GeneralTab, showSignOutOutcome, SyncTab, useSettingsConfig } from './MacSettings'
 import { SecurityTab } from './MacSecurity'
 import {
@@ -208,6 +209,7 @@ function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefres
 
   return (
     <div className="mw-content">
+      <MenuBarHint />
       <div className="mw-card" data-home="status">
         <div className="mw-row" data-row="status">
           <span className={`mw-status-disc mw-status-disc--${status.tone}`} aria-hidden="true">

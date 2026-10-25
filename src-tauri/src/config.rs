@@ -203,6 +203,13 @@ pub struct DesktopConfig {
     #[serde(default)]
     pub known_folder_onboarding_seen: bool,
 
+    /// `true` once the person has dismissed the Beebeeb window's one-time hint on Home, "Beebeeb lives in the menu bar"
+    /// (two-surface spec §7.6, task 1683 slice 6). Defaults `false`: a fresh install shows it once, and so does an install
+    /// that predates it (one tip, one tap, and it explains that the window is optional). Like
+    /// `known_folder_onboarding_seen` it is not in `DesktopSettings`: a Settings save must never flip it.
+    #[serde(default)]
+    pub menu_bar_hint_seen: bool,
+
     /// Last known Finder/File Provider setup status. This is persisted so
     /// a failed deferred setup remains visible after navigation or restart.
     #[serde(default)]
@@ -381,6 +388,7 @@ impl Default for DesktopConfig {
             excluded_folder_ids: None,
             known_folder_backup: Vec::new(),
             known_folder_onboarding_seen: false,
+            menu_bar_hint_seen: false,
             finder_install_status: None,
             finder_install_last_error: None,
             finder_install_last_attempt_at: None,
@@ -1164,6 +1172,31 @@ mod tests {
         let s = toml::to_string_pretty(&cfg).expect("serialize");
         let back: DesktopConfig = toml::from_str(&s).expect("parse");
         assert!(back.known_folder_onboarding_seen);
+    }
+
+    #[test]
+    fn menu_bar_hint_seen_defaults_false_and_round_trips() {
+        // A fresh config, and a file that has no such key (every install before this one): the hint is not yet seen.
+        assert!(!DesktopConfig::default().menu_bar_hint_seen);
+        let cfg: DesktopConfig = toml::from_str("").expect("parse empty toml");
+        assert!(!cfg.menu_bar_hint_seen);
+
+        let mut cfg = DesktopConfig::default();
+        cfg.menu_bar_hint_seen = true;
+        let back: DesktopConfig = toml::from_str(&toml::to_string_pretty(&cfg).expect("serialize")).expect("parse");
+        assert!(back.menu_bar_hint_seen);
+    }
+
+    #[test]
+    fn a_settings_save_never_reads_or_writes_the_menu_bar_hint() {
+        // The hint belongs to Home, not to Settings: the settings DTO has no field for it, so no save can flip it.
+        let mut cfg = DesktopConfig::default();
+        cfg.menu_bar_hint_seen = true;
+        let dto = DesktopSettings::from(&cfg);
+        assert!(!serde_json::to_string(&dto).unwrap().contains("menu_bar_hint"));
+        let mut other = DesktopConfig::default();
+        other.apply_settings(dto);
+        assert!(!other.menu_bar_hint_seen, "applying the settings of a config that had seen it leaves the hint alone");
     }
 
     #[test]

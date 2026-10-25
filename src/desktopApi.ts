@@ -451,6 +451,10 @@ const ANSWER_STANDS_WHEN_THE_ACCOUNT_CHANGES: ReadonlySet<string> = new Set([
   'desktop_login',
   'desktop_login_2fa',
   'start_browser_login',
+  // Home's one-time hint is a flag of this Mac, not of an account (PR #146 review, P3): a sign-in or a lock that moves the
+  // revision while it is read must neither hide the hint as a failed read nor lose a "Got it".
+  'get_menu_bar_hint_seen',
+  'mark_menu_bar_hint_seen',
 ])
 
 export async function command<T>(name: string, args?: Record<string, unknown>): Promise<CommandResult<T>> {
@@ -1343,6 +1347,18 @@ export function getKnownFolderOnboardingSeen(): Promise<CommandResult<boolean>> 
  *  automatically again (called on both "Back up these folders" and "Not now"). */
 export function markKnownFolderOnboardingSeen(): Promise<CommandResult<void>> {
   return command<void>('mark_known_folder_onboarding_seen')
+}
+
+// ── Task 1683 slice 6 — the Beebeeb window's one-time hint on Home ───────────
+
+/** Whether the "Beebeeb lives in the menu bar" hint on Home has been dismissed on this Mac. */
+export function getMenuBarHintSeen(): Promise<CommandResult<boolean>> {
+  return command<boolean>('get_menu_bar_hint_seen')
+}
+
+/** "Got it": the hint is never shown again. */
+export function markMenuBarHintSeen(): Promise<CommandResult<void>> {
+  return command<void>('mark_menu_bar_hint_seen')
 }
 
 // ── Task 0812 — tray flyout: click file → reveal in Explorer + open ──────────
