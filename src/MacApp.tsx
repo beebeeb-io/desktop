@@ -30,6 +30,7 @@ import {
   forceReauth,
   openUrl,
   popoverSnapshot,
+  type CommandResult,
   type Subscription,
 } from './desktopApi'
 import type { PopoverSnapshot } from './popoverContract'
@@ -64,6 +65,7 @@ import {
   sectionTitle,
   settingsButtonId,
   settingsSections,
+  SnapshotReader,
   type MainNav,
   type MainView,
 } from './mainWindowModel'
@@ -300,7 +302,6 @@ export default function MacApp() {
 
   const [snapshot, setSnapshot] = useState<PopoverSnapshot | null>(null)
   const [snapshotFailed, setSnapshotFailed] = useState(false)
-  const [snapshotReads, setSnapshotReads] = useState(0)
   const [plan, setPlan] = useState<Subscription | null | undefined>(undefined)
   const [view, setView] = useState<MainView>(() => initialMainView(locationSearch()))
   const [lastSettings, setLastSettings] = useState<SettingsTab | null>(() => (view.mode === 'settings' ? view.section : null))
@@ -361,26 +362,36 @@ export default function MacApp() {
     setFocusId(focusAfterNav(previous, next, nav))
   }
 
-  // The account and sync state: on open, every few seconds, and after each sign-out outcome.
+  // The account and sync state: on open, every few seconds, and after each sign-out outcome. The reader keeps one read
+  // in flight and never throws one away because the timer fired (a read can take 8 s, the tick is 5 s); an outcome's
+  // read wins over the reads started before it (follow-up to PR #134, auto-review thread 1).
+  const readerRef = useRef<SnapshotReader<CommandResult<PopoverSnapshot>> | null>(null)
+  if (readerRef.current === null) {
+    readerRef.current = new SnapshotReader(
+      () => popoverSnapshot(1),
+      (result) => {
+        if (result.ok) {
+          setSnapshot(result.value)
+          setSnapshotFailed(false)
+        } else {
+          setSnapshotFailed(true)
+        }
+      },
+    )
+  }
+  const reader = readerRef.current
   useEffect(() => {
-    let cancelled = false
-    void popoverSnapshot(1).then((result) => {
-      if (cancelled) return
-      if (result.ok) {
-        setSnapshot(result.value)
-        setSnapshotFailed(false)
-      } else {
-        setSnapshotFailed(true)
-      }
-    })
+    reader.resume()
+    reader.tick()
+    const id = window.setInterval(() => reader.tick(), SNAPSHOT_REFRESH_MS)
     return () => {
-      cancelled = true
+      window.clearInterval(id)
+      reader.stop()
     }
-  }, [snapshotReads, flowOutcomes])
+  }, [reader])
   useEffect(() => {
-    const id = window.setInterval(() => setSnapshotReads((n) => n + 1), SNAPSHOT_REFRESH_MS)
-    return () => window.clearInterval(id)
-  }, [])
+    if (flowOutcomes > 0) reader.refresh()
+  }, [reader, flowOutcomes])
 
   // The plan needs the session; it is read again after an unlock.
   useEffect(() => {
@@ -468,7 +479,7 @@ export default function MacApp() {
               kind="alert"
               surface="main-load"
               title="Couldn’t load your account"
-              actions={<Btn onClick={() => setSnapshotReads((n) => n + 1)}>Try again</Btn>}
+              actions={<Btn onClick={() => reader.refresh()}>Try again</Btn>}
             />
           ) : (
             <div className="ms-loading" role="status">Loading…</div>
@@ -626,7 +637,7 @@ export default function MacApp() {
 
   let pane = null
   if (view.mode === 'main') {
-    pane = <HomePane snapshot={snapshot} onRefresh={() => setSnapshotReads((n) => n + 1)} />
+    pane = <HomePane snapshot={snapshot} onRefresh={() => reader.refresh()} />
   } else {
     pane = (
       <div className="ms-pane mw-pane" id="mw-pane">

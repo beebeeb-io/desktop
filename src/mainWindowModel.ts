@@ -132,8 +132,25 @@ export interface HomeStatus {
   action: 'resume' | 'add_storage' | null
 }
 
-type StatusInput = Pick<PopoverSnapshot, 'phase' | 'pending_changes' | 'reason'> & {
+type StatusInput = Pick<PopoverSnapshot, 'phase' | 'paused' | 'storage_full' | 'pending_changes' | 'reason'> & {
   engine: Pick<PopoverSnapshot['engine'], 'state' | 'files_remaining' | 'last_tick_ok_at'>
+}
+
+const FINDER_PHASES: ReadonlySet<PopoverSnapshot['phase']> = new Set(['finder_failed', 'finder_user_disabled', 'finder_adding', 'finder_missing'])
+
+/**
+ * The sync part of the snapshot when its phase is a Finder one. The backend's `popover_phase` ranks every Finder phase
+ * above paused, storage full, offline and error (`surfaces/phase.rs`), so under a Finder phase those come from the
+ * snapshot's own fields, in the same order. Follow-up to PR #134 (auto-review thread 2): before, Home said "Up to date"
+ * from the engine alone and hid a pause and its Resume sync.
+ */
+function syncPhase(input: StatusInput): PopoverSnapshot['phase'] {
+  if (!FINDER_PHASES.has(input.phase)) return input.phase
+  if (input.paused || input.engine.state === 'paused') return 'paused'
+  if (input.storage_full) return 'storage_full'
+  if (input.engine.state === 'offline') return 'offline'
+  if (input.engine.state === 'error') return 'error'
+  return 'syncing' // `syncState` tells syncing from up to date by the engine
 }
 
 const plural = (n: number, one: string, many: string) => (n === 1 ? one : many)
@@ -162,13 +179,13 @@ function syncState(input: StatusInput, nowSeconds: number): HomeStatus {
 }
 
 /**
- * The row's words per phase, from the popover's states (§6.3). A Finder phase shows the sync state under it, because
- * Home's Finder row says the Finder part. Signed out, session ended and locked never reach here: the window shows its
- * sign-in card or the locked card instead.
+ * The row's words per phase, from the popover's states (§6.3). Under a Finder phase it says the sync part, read from
+ * the snapshot's fields (`syncPhase`), because Home's Finder row says the Finder part: both show. Signed out, session
+ * ended and locked never reach here: the window shows its sign-in card or the locked card instead.
  */
 export function homeStatus(input: StatusInput, nowSeconds: number): HomeStatus {
   const n = input.pending_changes
-  switch (input.phase) {
+  switch (syncPhase(input)) {
     case 'syncing':
       return syncState(input, nowSeconds)
     case 'paused':
@@ -237,5 +254,62 @@ export function connectMainNavigation(listen: Listen, pull: Pull, apply: (nav: M
   return () => {
     stopped = true
     unlisten?.()
+  }
+}
+
+// ── Reading the snapshot (follow-up to PR #134, auto-review thread 1) ─────────
+
+type ReadResult = { ok: boolean }
+
+/**
+ * Reads the account and sync state on a timer without ever throwing a read away because the timer fired. One read
+ * is in flight at a time: a tick while one is pending starts nothing (`popover_snapshot` can take up to 8 s, the
+ * storage fetch's timeout, and the tick is 5 s). `refresh` is for an outcome that changed the state (a sign-out, an
+ * unlock): it reads at once, even with a read in flight, and every read started before it is dropped when it
+ * finishes, whether before or after the refresh's own, so the outcome's read wins and the state from before it is
+ * never shown again. Only a refresh runs two reads at once, so the newest result is always the one applied. `stop`
+ * (the window unmounted) applies nothing more; `resume` undoes it (StrictMode remounts).
+ */
+export class SnapshotReader<R extends ReadResult> {
+  private started = 0
+  private floor = 0
+  private pending = 0
+  private stopped = true
+
+  constructor(
+    private readonly read: () => Promise<R>,
+    private readonly onResult: (result: R) => void,
+  ) {}
+
+  resume(): void {
+    this.stopped = false
+  }
+
+  stop(): void {
+    this.stopped = true
+  }
+
+  /** A timer tick, or the first read: skipped while a read is in flight. */
+  tick(): void {
+    if (this.stopped || this.pending > 0) return
+    this.start()
+  }
+
+  /** After an outcome: read now, and let nothing started before this win over it. */
+  refresh(): void {
+    if (this.stopped) return
+    this.floor = this.start()
+  }
+
+  private start(): number {
+    const sequence = ++this.started
+    this.pending += 1
+    const done = (result: R) => {
+      this.pending -= 1
+      if (this.stopped || sequence < this.floor) return
+      this.onResult(result)
+    }
+    void this.read().then(done, () => done({ ok: false } as R))
+    return sequence
   }
 }

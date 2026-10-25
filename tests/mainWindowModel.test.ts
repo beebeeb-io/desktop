@@ -253,3 +253,123 @@ describe('connectMainNavigation: Rust stores one request and pokes the window; t
     stop2()
   })
 })
+
+describe('Home › status under a Finder phase (follow-up to #134, auto-review thread 2)', () => {
+  // The backend's `popover_phase` puts a Finder phase above paused, storage full, offline and error, so under a Finder
+  // phase the row must read those from the snapshot's own fields: the Finder row says the Finder part, this row the
+  // sync part, and both show.
+  const finder = (over: Record<string, unknown> = {}) => ({
+    phase: 'finder_user_disabled', paused: false, storage_full: false, pending_changes: 0, reason: null,
+    engine: { state: 'idle', files_remaining: 0, last_tick_ok_at: 940 },
+    ...over,
+  }) as any
+
+  test('paused under a Finder phase is paused, with Resume sync', () => {
+    expect(homeStatus(finder({ paused: true, pending_changes: 2 }), 1000)).toEqual({
+      tone: 'neutral', title: 'Sync is paused', detail: '2 changes on this Mac are waiting. Nothing syncs until you resume.', reason: null, action: 'resume',
+    })
+    expect(homeStatus(finder({ phase: 'finder_missing', engine: { state: 'paused', files_remaining: 0, last_tick_ok_at: null } }), 1000)).toMatchObject({ title: 'Sync is paused', action: 'resume' })
+  })
+
+  test('storage full, offline and error show under every Finder phase too', () => {
+    for (const phase of ['finder_failed', 'finder_user_disabled', 'finder_adding', 'finder_missing']) {
+      expect(homeStatus(finder({ phase, storage_full: true, pending_changes: 1 }), 1000)).toMatchObject({ title: 'Your storage is full', action: 'add_storage' })
+      expect(homeStatus(finder({ phase, engine: { state: 'offline', files_remaining: 0, last_tick_ok_at: null } }), 1000)).toMatchObject({ title: 'Can’t reach Beebeeb' })
+      expect(homeStatus(finder({ phase, reason: { code: 'state_db_locked', detail: null }, engine: { state: 'error', files_remaining: 0, last_tick_ok_at: null } }), 1000)).toMatchObject({ title: 'Sync stopped', reason: 'reason: state_db_locked' })
+    }
+  })
+
+  test('the popover’s precedence holds among them: paused, then storage full, then offline, then error', () => {
+    const all = finder({ paused: true, storage_full: true, engine: { state: 'error', files_remaining: 0, last_tick_ok_at: null } })
+    expect(homeStatus(all, 1000).title).toBe('Sync is paused')
+    expect(homeStatus({ ...all, paused: false }, 1000).title).toBe('Your storage is full')
+  })
+
+  test('with none of them it is the sync state, as before', () => {
+    expect(homeStatus(finder(), 1000).title).toBe('Up to date')
+    expect(homeStatus(finder({ engine: { state: 'syncing', files_remaining: 2, last_tick_ok_at: null } }), 1000)).toMatchObject({ title: 'Syncing', detail: '2 files left' })
+  })
+})
+
+describe('SnapshotReader: one read in flight, ticks skipped, the newest result applied (auto-review thread 1)', () => {
+  const { SnapshotReader } = require('../src/mainWindowModel')
+  const deferred = () => {
+    let resolve: (v: unknown) => void = () => {}
+    const promise = new Promise((r) => { resolve = r })
+    return { promise, resolve }
+  }
+  const settle = async () => { for (let i = 0; i < 6; i++) await Promise.resolve() }
+
+  test('a read slower than the tick still lands: ticks while it is in flight start nothing', async () => {
+    const reads: Array<ReturnType<typeof deferred>> = []
+    const applied: unknown[] = []
+    const reader = new SnapshotReader(() => { const d = deferred(); reads.push(d); return d.promise }, (r: unknown) => applied.push(r))
+    reader.resume()
+    reader.tick()
+    reader.tick()
+    reader.tick()
+    expect(reads).toHaveLength(1)
+    reads[0].resolve({ ok: true, value: 'first' })
+    await settle()
+    expect(applied).toEqual([{ ok: true, value: 'first' }])
+    reader.tick()
+    expect(reads).toHaveLength(2)
+  })
+
+  test('a refresh after an outcome wins over a read started before it, whichever finishes first', async () => {
+    for (const order of ['refresh first', 'older first'] as const) {
+      const reads: Array<ReturnType<typeof deferred>> = []
+      const applied: unknown[] = []
+      const reader = new SnapshotReader(() => { const d = deferred(); reads.push(d); return d.promise }, (r: unknown) => applied.push(r))
+      reader.resume()
+      reader.tick()
+      reader.refresh() // the sign-out's outcome: read again now, even with one in flight
+      expect(reads).toHaveLength(2)
+      const afterOutcome = () => reads[1].resolve({ ok: true, value: 'after the outcome' })
+      const beforeOutcome = () => reads[0].resolve({ ok: true, value: 'before the outcome' })
+      for (const finish of order === 'refresh first' ? [afterOutcome, beforeOutcome] : [beforeOutcome, afterOutcome]) {
+        finish()
+        await settle()
+      }
+      // The state from before the outcome is never shown, not even for a moment.
+      expect({ order, applied }).toEqual({ order, applied: [{ ok: true, value: 'after the outcome' }] })
+    }
+  })
+
+  test('a failure is applied like a result, and a later read replaces it', async () => {
+    const reads: Array<ReturnType<typeof deferred>> = []
+    const applied: unknown[] = []
+    const reader = new SnapshotReader(() => { const d = deferred(); reads.push(d); return d.promise }, (r: unknown) => applied.push(r))
+    reader.resume()
+    reader.tick()
+    reads[0].resolve({ ok: false, reason: 'x' })
+    await settle()
+    reader.tick()
+    reads[1].resolve({ ok: true, value: 'later' })
+    await settle()
+    expect(applied).toEqual([{ ok: false, reason: 'x' }, { ok: true, value: 'later' }])
+  })
+
+  test('stopped (the window unmounted) applies nothing; resumed (StrictMode remount) applies the read in flight', async () => {
+    const reads: Array<ReturnType<typeof deferred>> = []
+    const applied: unknown[] = []
+    const reader = new SnapshotReader(() => { const d = deferred(); reads.push(d); return d.promise }, (r: unknown) => applied.push(r))
+    reader.resume()
+    reader.tick()
+    reader.stop()
+    reader.resume()
+    reader.tick() // still in flight: skipped
+    expect(reads).toHaveLength(1)
+    reads[0].resolve({ ok: true, value: 'landed' })
+    await settle()
+    expect(applied).toEqual([{ ok: true, value: 'landed' }])
+    // Unmounted with a read in flight: it finishes and nothing is applied, and no tick starts another.
+    reader.refresh()
+    reader.stop()
+    reads[1].resolve({ ok: true, value: 'after unmount' })
+    await settle()
+    reader.tick()
+    expect(applied).toEqual([{ ok: true, value: 'landed' }])
+    expect(reads).toHaveLength(2)
+  })
+})
