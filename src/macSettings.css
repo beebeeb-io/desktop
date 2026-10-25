@@ -54,6 +54,11 @@
   color: var(--ink-3);
 }
 
+/* A heading takes focus from code (after a revoke), never from a click or Tab: no ring around a title. */
+.ms-group-title:focus {
+  outline: none;
+}
+
 /* A footnote under a group's card, in the same small grey as a row's hint (System Settings draws them so). */
 .ms-footnote {
   margin: 6px 4px 0;

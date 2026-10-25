@@ -5,6 +5,7 @@
 //   node tests/render-mac-app.mjs REPO OUTPUT
 //   PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs   (as the other render-*.mjs)
 //   HIFI_PNG_DIR=/path/to/hifi-figures               optional: side by side with the hi-fi's figures
+//   RENDER_LOCALE=en-US                              the browser's language; sizes follow it, and so do the expected strings
 //
 // It bundles the REAL src/main.tsx (the mount path the app uses), loads `?window=main&platform=macos` with a synthetic
 // Tauri IPC, drives the window to each state through its own controls (the gear, the sidebar, the buttons), and
@@ -22,6 +23,13 @@ import { pathToFileURL } from 'node:url'
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE ? pathToFileURL(process.env.PLAYWRIGHT_MODULE).href : 'playwright')
 const [repo, output] = process.argv.slice(2)
 assert(repo && output, 'usage: node tests/render-mac-app.mjs REPO OUTPUT')
+
+// The window writes sizes and counts in the language of the Mac ("84,3 GB" on a Dutch one, "84.3 GB" on an American one;
+// storageFormat.ts). The browser is given ONE language, here, and every expected number below is written with that same
+// language, so no check depends on which language that is (PR #140 review, P3: they spelled out a Dutch Mac's).
+const LOCALE = process.env.RENDER_LOCALE || 'en-US'
+const number = (value) => new Intl.NumberFormat(LOCALE, { minimumFractionDigits: 0, maximumFractionDigits: 1 }).format(value)
+const gb = (value) => `${number(value)} GB`
 await mkdir(path.join(output, 'png'), { recursive: true })
 
 const outdir = path.join(output, 'bundle')
@@ -48,6 +56,8 @@ const now = Date.now()
 const hoursAgo = (n) => new Date(now - n * 3_600_000).toISOString()
 const todayAt = (h, m) => { const d = new Date(); d.setHours(h, m, 0, 0); return d.toISOString() }
 const account = {
+  // The authenticator row reads the account's own `totp_enabled` (review P2-5), not a security-score factor.
+  profile: { user_id: 'u1', email: 'sam@example.eu', email_verified: true, created_at: '2026-01-01T00:00:00Z', totp_enabled: true },
   score: { score: 4, max: 5, label: 'Good', factors: [{ key: 'email_verified', satisfied: true }, { key: 'two_factor_enabled', satisfied: true }] },
   sessions: { sessions: [
     { id: 's1', device_name: 'MacBook Pro', device_kind: 'desktop', country_code: 'NL', last_active_at: new Date(now).toISOString(), created_at: hoursAgo(900), is_current: true },
@@ -111,6 +121,7 @@ function installBackend({ caps, fx }) {
         case 'kept_unsynced_folder': return f.kept
         case 'list_remote_tree': return [{ id: 'f1', name: 'Photos', is_folder: true, excluded: false, size_bytes: 1, file_count: 1, on_disk_bytes: 0, pinned: true, children: [] }]
         case 'account_region': return f.region
+        case 'account_profile': return f.profile
         case 'account_security_score': return f.score
         case 'account_session_list': return f.sessions
         case 'account_devices': return f.devices
@@ -166,14 +177,15 @@ const gear = async (p) => { await p.getByRole('button', { name: 'Settings', exac
 const section = (label) => async (p) => { await gear(p); await p.getByRole('button', { name: label }).first().click() }
 
 const SCENARIOS = [
-  { name: 'home', bar: true, has: ['Home', 'End-to-end encrypted', 'Up to date', 'Last checked 1 min ago', 'Beebeeb in Finder', 'Your vault appears under Locations in Finder.', 'Open in Finder', 'Storage', '84,3 GB of 200 GB', 'sam@example.eu', 'Basic plan'], hasNot: ['Needs your attention', 'control center', 'daemon'], hifi: 'hifi-s3-fig0' },
+  { name: 'home', bar: true, has: ['Home', 'End-to-end encrypted', 'Up to date', 'Last checked 1 min ago', 'Beebeeb in Finder', 'Your vault appears under Locations in Finder.', 'Open in Finder', 'Storage', `${gb(84.3)} of ${gb(200)}`, 'sam@example.eu', 'Basic plan'], hasNot: ['Needs your attention', 'control center', 'daemon'], hifi: 'hifi-s3-fig0' },
   { name: 'home-kept', fx: { keptUnsent: KEPT_OURS, kept: KEPT_MACOS }, has: ['Needs your attention', KEPT_OURS, KEPT_MACOS, 'Show in Finder', 'Dismiss'] },
   { name: 'home-locked', fx: { snapshot: snapshot({ phase: 'locked', account: { vault_unlocked: false }, storage: null }) }, has: ['Your vault is locked', 'Unlock vault', 'Vault locked'], hasNot: ['Beebeeb in Finder'], hifi: 'hifi-s3-fig3' },
   { name: 'home-long-email', fx: { snapshot: snapshot({ account: { email: LONG_EMAIL } }) }, has: [LONG_EMAIL] },
   { name: 'settings-general', act: gear, has: ['Settings', 'Home', 'General', 'Open Beebeeb at login', 'Appearance', 'Follow macOS.', 'System', 'Tell me about', 'From your account', 'New device sign-in', 'We cannot see your files, but we know when a new device signs in.', 'Backup complete', 'When a scheduled backup finishes.'], sidebar: ['Back to Home', 'Account, sam@example.eu, Basic plan', 'General', 'Sync', 'Security', 'About'], min: true, hifi: 'hifi-s4-fig1' },
   { name: 'settings-account', act: section('Account, sam@example.eu, Basic plan'), has: ['Account', 'sam@example.eu', 'Basic plan · renews 14 Nov 2026', 'Storage details…', 'Vault is unlocked', 'Where your files are stored', 'Europe', 'Germany', 'Password, email and billing', 'Changed on beebeeb.io, in your browser.', 'Open beebeeb.io', 'Sign out of this Mac', 'Sign out…'], hasNot: ['Couldn’t load storage locations'], min: true, hifi: 'hifi-s4-fig2' },
-  { name: 'storage-details', act: async (p) => { await section('Account, sam@example.eu, Basic plan')(p); await p.getByRole('button', { name: 'Storage details…' }).click(); await p.getByRole('dialog').waitFor(); await p.waitForFunction(() => !document.querySelector('[role="dialog"]').innerText.includes('Loading…')) }, has: ['Storage details', 'Where your storage goes, by type and by your largest files.', '4.690 files · 84,3 GB', 'By type', 'Media', '60 GB · 1.200 files', 'Documents', 'Other', 'Largest files', 'Photos/2026/Holiday in the mountains/IMG_0001.heic', 'Media · 3,2 GB'], hasNot: ['PC', 'daemon'], dialogs: 1, min: true },
+  { name: 'storage-details', act: async (p) => { await section('Account, sam@example.eu, Basic plan')(p); await p.getByRole('button', { name: 'Storage details…' }).click(); await p.getByRole('dialog').waitFor(); await p.waitForFunction(() => !document.querySelector('[role="dialog"]').innerText.includes('Loading…')) }, has: ['Storage details', 'Where your storage goes, by type and by your largest files.', `${number(4690)} files · ${gb(84.3)}`, 'By type', 'Media', `${gb(60)} · ${number(1200)} files`, 'Documents', 'Other', 'Largest files', 'Photos/2026/Holiday in the mountains/IMG_0001.heic', `Media · ${gb(3.2)}`], hasNot: ['PC', 'daemon'], dialogs: 1, min: true },
   { name: 'settings-sync', act: section('Sync'), has: ['Beebeeb in Finder', 'Added', 'Repair…', 'Keep on this Mac', 'Speed'], min: true, hifi: 'hifi-s4-fig3' },
+  { name: 'settings-security-no-totp', fx: { profile: { user_id: 'u1', email: 'sam@example.eu', email_verified: true, created_at: '2026-01-01T00:00:00Z', totp_enabled: false } }, act: section('Security'), has: ['Authenticator app (TOTP) · Off', 'Add a second factor so a stolen password alone can’t open your vault. Set it up on beebeeb.io.', 'Set up on beebeeb.io'], hasNot: ['Authenticator app (TOTP) · On', 'Manage or reset it'] },
   { name: 'settings-security', act: section('Security'), has: ['Security', 'Authenticator app (TOTP) · On', 'A second factor is required when you sign in. Manage or reset it on beebeeb.io.', 'Manage on beebeeb.io', 'Active sessions', 'MacBook Pro · This session', 'Active now', 'iPhone', 'Active 2 hours ago', 'Revoke', 'Sign out everywhere else', 'Sign out all other sessions', 'Devices', 'MacBook Pro · macOS · v0.8.13', 'Every device holding a copy of your vault key, and the sync sessions running on each.', 'Recent account activity', 'Moved an item to trash', 'Downloaded an item'], hasNot: ['Revoke a device', 'daemon'], sidebar: ['Back to Home', 'Account, sam@example.eu, Basic plan', 'General', 'Sync', 'Security', 'About'], min: true, hifi: 'hifi-s4-fig4' },
   { name: 'security-revoke', act: async (p) => { await section('Security')(p); await p.getByRole('button', { name: 'Revoke iPhone' }).click(); await p.getByRole('dialog').waitFor() }, has: ['Sign out this session?', 'iPhone will need to sign in again.', 'Cancel', 'Sign out'], dialogs: 1 },
   { name: 'security-locked', fx: { snapshot: snapshot({ phase: 'locked', account: { vault_unlocked: false }, storage: null }) }, act: section('Security'), has: ['Your vault is locked', 'Unlock it to see your sessions, devices and recent activity.'], hasNot: ['Active sessions'] },
@@ -201,7 +213,7 @@ try {
       const sizes = [{ width: 920, height: 620, tag: '' }, ...(sc.min ? [{ width: 760, height: 520, tag: '-min' }] : [])]
       for (const size of sizes) {
         const label = `${sc.name}${size.tag} ${scheme}`
-        const context = await browser.newContext({ viewport: { width: size.width, height: size.height }, colorScheme: scheme, deviceScaleFactor: 1, locale: 'nl-NL' })
+        const context = await browser.newContext({ viewport: { width: size.width, height: size.height }, colorScheme: scheme, deviceScaleFactor: 1, locale: LOCALE })
         const page = await context.newPage()
         const errors = []
         page.on('pageerror', (e) => errors.push(String(e)))

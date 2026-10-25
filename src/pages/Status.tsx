@@ -224,7 +224,25 @@ export default function Status({ onNavigate }: { onNavigate?: (page: PageLink) =
         </span>
       </div>
 
-      <div className="grid two">
+      <div className="grid three">
+        <div className="metric">
+          <div className="metric-label">Transfer queue</div>
+          <div className="metric-value">{status.syncing}</div>
+          <div className="metric-detail">Downloads and uploads waiting now</div>
+        </div>
+        <div className="metric">
+          <div className="metric-label">Online-only</div>
+          <div className="metric-value">{status.cloud_only}</div>
+          <div className="metric-detail">Download when you open them</div>
+        </div>
+        <div className="metric">
+          <div className="metric-label">Conflicts</div>
+          <div className="metric-value">{status.conflicts}</div>
+          <div className="metric-detail">Files that need a decision from you</div>
+        </div>
+      </div>
+
+      <div className="grid two" style={{ marginTop: 14 }}>
         <div className="panel">
           <h2 className="section-title">Sync health</h2>
           <p className="page-copy" style={{ margin: '0 0 14px' }}>
@@ -247,6 +265,15 @@ export default function Status({ onNavigate }: { onNavigate?: (page: PageLink) =
             </div>
             <button className="button" onClick={() => void openSetup()}>
               {status.logged_in ? 'Open setup' : 'Sign in'}
+            </button>
+          </div>
+          <div className="row">
+            <div>
+              <div className="row-title">Vault access</div>
+              <div className="row-detail">{status.logged_in ? 'Signed in' : 'Not signed in'}</div>
+            </div>
+            <button className="button" onClick={() => onNavigate?.('account')}>
+              Account
             </button>
           </div>
         </div>

@@ -9,7 +9,8 @@ import { useCapabilities, canInstallUpdate } from './capabilities'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { command, openUrl } from './desktopApi'
-import { MACOS_DOWNLOAD_URL, UPDATE_DOWNLOAD_HINT, UPDATE_DOWNLOAD_LABEL, updateAvailableLine } from './macUpdateCopy'
+import { updateAvailableLine } from './macUpdateCopy'
+import { releasePageUrl, updateOffer } from './macUpdateOffer'
 import { T, useToast } from './windows/ui'
 
 interface UpdatePayload {
@@ -30,6 +31,8 @@ export default function UpdateBanner() {
   const [update, setUpdate] = useState<UpdatePayload | null>(null)
   const [installState, setInstallState] = useState<InstallState>('idle')
   const [installError, setInstallError] = useState<string | null>(null)
+  // What a Mac is offered for it: the newest stable image for a stable update, that release's page for another channel.
+  const offer = update && downloadOnly ? updateOffer(update.channel, update.version) : null
 
   useEffect(() => {
     let cancelled = false
@@ -80,7 +83,7 @@ export default function UpdateBanner() {
 
   const releaseNotesUrl = useMemo(() => {
     if (!update) return null
-    return update.release_notes_url ?? `https://github.com/beebeeb-io/desktop/releases/tag/desktop-v${encodeURIComponent(update.version)}`
+    return update.release_notes_url ?? releasePageUrl(update.version)
   }, [update])
 
   useEffect(() => {
@@ -93,7 +96,7 @@ export default function UpdateBanner() {
       title: installFailed ? 'Update install failed' : updateAvailableLine(update.version),
       message: (
         <>
-          <span style={{ color: T.ink2 }}>{downloadOnly ? UPDATE_DOWNLOAD_HINT : installSupported ? 'Restart to apply the update.' : caps?.update_format === 'package_manager' ? 'Update with your package manager.' : 'Download an installer to update this installation.'}</span>
+          <span style={{ color: T.ink2 }}>{offer ? offer.hint : installSupported ? 'Restart to apply the update.' : caps?.update_format === 'package_manager' ? 'Update with your package manager.' : 'Download an installer to update this installation.'}</span>
           {' '}
           <button
             type="button"
@@ -135,7 +138,7 @@ export default function UpdateBanner() {
           )}
         </>
       ),
-      action: downloadOnly ? { label: UPDATE_DOWNLOAD_LABEL, onClick: () => { void openUrl(MACOS_DOWNLOAD_URL) } } : installSupported ? {
+      action: offer ? { label: offer.label, onClick: () => { void openUrl(offer.url) } } : installSupported ? {
         label: installState === 'installing' ? 'Installing...' : installFailed ? 'Try again' : 'Restart to update',
         onClick: handleInstall,
         disabled: installState === 'installing',
@@ -143,7 +146,7 @@ export default function UpdateBanner() {
       } : { label: 'Downloads', onClick: () => { void openUrl('https://beebeeb.io/download') } },
       durationMs: null,
     })
-  }, [caps?.update_format, downloadOnly, installSupported, handleInstall, installError, installState, releaseNotesUrl, showToast, update])
+  }, [caps?.update_format, offer, installSupported, handleInstall, installError, installState, releaseNotesUrl, showToast, update])
 
   return <ManualUpdateFeedback />
 }

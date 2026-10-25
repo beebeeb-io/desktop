@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   BILLING_URL,
   command,
@@ -175,6 +175,12 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
     })
   }
 
+  const metrics = useMemo(() => {
+    const failed = entries.filter((entry) => entry.kind !== 'conflict').length
+    const stale = entries.filter((entry) => entry.kind === 'stale_base').length
+    return { failed, stale }
+  }, [entries])
+
   return (
     <section className="page">
       <div className="page-header">
@@ -189,6 +195,24 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
       </div>
 
       {notice && <div className="notice" style={{ marginBottom: 14 }}>{notice}</div>}
+
+      <div className="grid three" style={{ marginBottom: 14 }}>
+        <div className="metric">
+          <div className="metric-label">Active conflicts</div>
+          <div className="metric-value">{conflicts}</div>
+          <div className="metric-detail">Files changed in two places</div>
+        </div>
+        <div className="metric">
+          <div className="metric-label">Upload reviews</div>
+          <div className="metric-value">{metrics.failed}</div>
+          <div className="metric-detail">Changes Beebeeb couldn’t send yet</div>
+        </div>
+        <div className="metric">
+          <div className="metric-label">Changed elsewhere</div>
+          <div className="metric-value">{metrics.stale}</div>
+          <div className="metric-detail">Your changes, kept safe for you to review</div>
+        </div>
+      </div>
 
       {loading ? (
         <div className="empty-state">Loading version center...</div>

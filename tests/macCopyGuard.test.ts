@@ -10,6 +10,8 @@ import {
   describeViolation,
   mainImports,
   macRoots,
+  pardon,
+  type Pardon,
   personFacingStrings,
   reachableModules,
   rustSentencesIn,
@@ -28,16 +30,23 @@ const ROOT = process.env.GUARD_ROOT ?? fileURLToPath(new URL('..', import.meta.u
 
 /**
  * Strings that are still on a Mac because ANOTHER slice of task 1683 removes the surface they live on. Each entry names
- * its owner. A ratchet, not a pardon: when the owner removes the string the entry must go in the same change (the
- * second test below fails on a stale one), so the list only shrinks. Nothing of this slice's own may be listed.
+ * its owner and the exact number of occurrences it pardons. A ratchet, not a pardon: when the owner removes a string its
+ * entry must go in the same change (a stale entry is red, below), a second occurrence of a pardoned string is a new
+ * violation (the count is exact), and the number of entries is pinned in the test below, so pardoning one more string means
+ * changing that number in the diff where a reviewer reads it. Nothing of this slice's own may be listed.
  */
-const PENDING: ReadonlyArray<{ file: string; text: string; owner: string }> = [
+const PENDING: readonly Pardon[] = [
   // Spec C §11 removes the ready step and the pinning step of the onboarding window; slice 2 (signed-out window) deletes them.
-  { file: 'Onboarding.tsx', text: 'Open the control center.', owner: 'slice 2, signed-out window (spec C §11, rows #21 and #22)' },
-  { file: 'Onboarding.tsx', text: 'Control center is ready', owner: 'slice 2, signed-out window (spec C §11, row #21)' },
-  { file: 'Onboarding.tsx', text: 'Engine', owner: 'slice 2, signed-out window (spec C §11, row #21)' },
-  { file: 'Onboarding.tsx', text: 'Open control center', owner: 'slice 2, signed-out window (spec C §11, row #21)' },
+  { file: 'Onboarding.tsx', text: 'Open the control center.', owner: 'slice 2, signed-out window (spec C §11, rows #21 and #22)', count: 1 },
+  { file: 'Onboarding.tsx', text: 'No folders are pinned by default. You can make any folder recursively available offline now or later from the control center.', owner: 'slice 2, signed-out window (spec C §11, row #22)', count: 1 },
+  { file: 'Onboarding.tsx', text: 'Control center is ready', owner: 'slice 2, signed-out window (spec C §11, row #21)', count: 1 },
+  { file: 'Onboarding.tsx', text: 'Use the app for sync health, lock state, offline folders, shared roots, versions, conflicts, and diagnostics. Finder remains the file surface.', owner: 'slice 2, signed-out window (spec C §11, row #21)', count: 1 },
+  { file: 'Onboarding.tsx', text: 'Engine', owner: 'slice 2, signed-out window (spec C §11, row #21)', count: 1 },
+  { file: 'Onboarding.tsx', text: 'Open control center', owner: 'slice 2, signed-out window (spec C §11, row #21)', count: 1 },
 ]
+/** Raising either number is how a string is pardoned: it has to be done here, in the diff, on purpose. */
+const PENDING_ENTRIES = 6
+const PENDING_OCCURRENCES = 6
 
 describe('the guard itself', () => {
   const flagged = (source: string, file = 'x.tsx', commands: string[] = []) => violationsInSource(file, source, commands).violations.map((v) => v.rule)
@@ -74,6 +83,59 @@ describe('the guard itself', () => {
     expect(flagged('const a = <p>It hydrates, then uploads</p>')).toContain('hydrate')
     expect(flagged('const a = <p>an engineer wired this up in the genuine engineering style</p>')).toEqual(['wired'])
     expect(flagged('const a = <p>the socketed adapter and an enginery of words</p>')).toEqual([])
+  })
+
+  test('every string-valued JSX attribute is copy unless it is on the machine denylist: a custom component\'s copy, footnote, confirmLabel, detail', () => {
+    for (const name of ['copy', 'footnote', 'confirmLabel', 'detail', 'body', 'caption', 'actionLabel', 'emptyText', 'aNameNobodyHasMetYet']) {
+      expect(flagged(`const A = () => <Card ${name}="Finder remains the file surface." />`), name).toEqual(['file surface'])
+      expect(flagged(`const A = () => <Card ${name}={'the daemon wakes'} />`), `${name} as an expression`).toEqual(['daemon'])
+      expect(flagged(`const A = () => <Card ${name}={ok ? 'fine words' : 'the daemon wakes'} />`), `${name} as a ternary`).toEqual(['daemon'])
+    }
+  })
+
+  test('the machine denylist: a class, an id, a role, a link, a key, a type, data-*, a name, the SVG geometry', () => {
+    const quiet = [
+      '<div className="the daemon room" />',
+      '<div id="the daemon" role="the control center" />',
+      '<a href="https://example.com/the daemon" />',
+      '<input type="the socket" name="the engine room" />',
+      '<li key="the telemetry feed" data-row="the heartbeat monitor" />',
+      '<path d="M0 0 the daemon" viewBox="0 0 24 the hydrate" />',
+      '<Note kind="alert" surface="the control center" />',
+    ]
+    for (const jsx of quiet) expect(flagged(`const A = () => ${jsx}`), jsx).toEqual([])
+  })
+
+  test('strings inside calls and arrays are read: a call that builds copy, an array of lines, a nested ternary', () => {
+    expect(flagged(`const A = () => <Card lines={['fine words here', 'then the daemon wakes']} />`)).toEqual(['daemon'])
+    expect(flagged(`const A = () => <Card title={format('the daemon is busy', n)} />`)).toEqual(['daemon'])
+    expect(flagged(`const lines = [['one two', 'the control center'], ['three four']]`)).toEqual(['control center'])
+    expect(flagged(`const A = () => <Card copy={a ? (b ? 'fine words' : 'the socket is open') : 'other words'} />`)).toEqual(['socket'])
+    expect(flagged(`showToast({ title: 'Oops', message: fmt('the daemon is busy') })`)).toEqual(['daemon'])
+  })
+
+  test('a string inside a machine call is still not copy, even inside a copy attribute', () => {
+    expect(flagged(`const A = () => <Card copy={ok ? t('the daemon') : x.includes('the daemon here')} />`)).toEqual(['daemon'])
+  })
+
+  test('the ratchet: a pardon covers exactly its count, a repeat is a new violation, a vanished string makes the pardon stale', () => {
+    const v = (line: number, text: string, rule = 'engine') => ({ file: 'Onboarding.tsx', line, text, how: 'jsx-text', rule })
+    const one: Pardon[] = [{ file: 'Onboarding.tsx', text: 'Engine', owner: 'slice 2, signed-out window', count: 1 }]
+    expect(pardon([v(10, 'Engine')], one)).toEqual({ open: [], stale: [] })
+    // one string, two rules: still one occurrence
+    expect(pardon([v(10, 'Engine'), v(10, 'Engine', 'daemon')], one)).toEqual({ open: [], stale: [] })
+    // the same words again, on another line: pardoned once, the second is a violation
+    const second = pardon([v(10, 'Engine'), v(300, 'Engine')], one)
+    expect(second.open.map((x) => x.line)).toEqual([300])
+    expect(second.stale).toEqual([])
+    // the same words in another file are not pardoned
+    expect(pardon([{ ...v(10, 'Engine'), file: 'Other.tsx' }], one).open).toHaveLength(1)
+    // the string is gone: the pardon says so
+    expect(pardon([], one).stale).toHaveLength(1)
+    // a pardon for two that found one is stale too
+    expect(pardon([v(10, 'Engine')], [{ ...one[0], count: 2 }]).stale).toHaveLength(1)
+    // an unrelated violation is open
+    expect(pardon([v(5, 'Hydrates files')], one).open).toHaveLength(1)
   })
 
   test('machine positions are not copy: a command, a case, a comparison, a class, a type, a match, a comment', () => {
@@ -153,8 +215,7 @@ describe('the guard itself', () => {
 
 describe('what a Mac can read', () => {
   const result = scan(ROOT)
-  const key = (v: { file: string; text: string }) => `${v.file}\u0000${v.text}`
-  const pending = new Set(PENDING.map(key))
+  const left = pardon(result.violations, PENDING)
 
   test('the scan did its work: the windows a Mac mounts are all in it, and so are hundreds of strings', () => {
     for (const file of ['MacApp.tsx', 'MacSettings.tsx', 'desktopApi.ts', 'App.tsx', 'pages/Status.tsx', 'windows/ui.tsx']) {
@@ -166,13 +227,20 @@ describe('what a Mac can read', () => {
   })
 
   test('no string a person reads on a Mac holds a developer word or a raw command name (§10.1)', () => {
-    const open = result.violations.filter((v) => !pending.has(key(v)))
-    expect(open.map(describeViolation)).toEqual([])
+    expect(left.open.map(describeViolation)).toEqual([])
   })
 
-  test('every pending entry still holds, so the list shrinks the moment its owner removes the string', () => {
-    const present = new Set(result.violations.map(key))
-    expect(PENDING.filter((entry) => !present.has(key(entry))).map((entry) => `${entry.file}: ${entry.text} (${entry.owner})`)).toEqual([])
+  test('every pending entry still holds exactly, so the list shrinks the moment its owner removes a string', () => {
+    expect(left.stale).toEqual([])
+  })
+
+  test('the pardon list is pinned: its size, its total, and an owner on every entry', () => {
+    expect(PENDING).toHaveLength(PENDING_ENTRIES)
+    expect(PENDING.reduce((total, entry) => total + entry.count, 0)).toBe(PENDING_OCCURRENCES)
+    for (const entry of PENDING) {
+      expect(entry.owner.trim().length, entry.text).toBeGreaterThan(10)
+      expect(Number.isInteger(entry.count) && entry.count >= 1, entry.text).toBe(true)
+    }
   })
 
   test('a mutated copy of the real tree goes red: a developer word put in a Mac-only module, a shared one and a legacy page is found each time', () => {
@@ -190,7 +258,7 @@ describe('what a Mac can read', () => {
       }
       inject('MacSettings.tsx', 'label="Beebeeb in Finder"', 'label="Beebeeb in Finder, hydrated by the daemon"')
       expect(scan(scratch).violations.length).toBe(before + 2) // hydrate, daemon
-      inject('desktopApi.ts', 'export function commandUnavailableLabel(commandName: string): string {', 'export const SHARED_NOTE = { message: \'Telemetry from the socket heartbeat\' }\nexport function commandUnavailableLabel(commandName: string): string {')
+      inject('desktopApi.ts', 'export function commandUnavailableLabel(_commandName: string): string {', 'export const SHARED_NOTE = { message: \'Telemetry from the socket heartbeat\' }\nexport function commandUnavailableLabel(_commandName: string): string {')
       expect(scan(scratch).violations.length).toBe(before + 5) // telemetry, socket, heartbeat
       const all = scan(scratch).violations.map((v) => `${v.file}:${v.rule}`)
       expect(all).toContain('MacSettings.tsx:daemon')

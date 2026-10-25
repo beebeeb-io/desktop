@@ -10,6 +10,7 @@ import { createElement, Fragment } from 'react'
 import { canInstallUpdate, type DesktopCapabilities } from '../src/capabilities'
 import * as desktopApi from '../src/desktopApi'
 import * as macUpdateCopy from '../src/macUpdateCopy'
+import * as macUpdateOffer from '../src/macUpdateOffer'
 import { T } from '../src/windows/ui'
 import { mount, textOf, type Mounted } from './fixtures/componentHarness'
 import fixtures from './fixtures/desktop-capabilities.json'
@@ -33,7 +34,7 @@ function bus() {
   }
 }
 
-async function openBanner(host: DesktopCapabilities | null) {
+async function openBanner(host: DesktopCapabilities | null, payload: Record<string, unknown> = { version: '0.8.13', body: 'Fixes the sync stall.', channel: 'stable', release_notes_url: 'https://github.com/beebeeb-io/desktop/releases/tag/desktop-v0.8.13' }) {
   const events = bus()
   const m = mount('UpdateBanner.tsx', 'UpdateBanner', {
     backend: { install_update: () => undefined, 'plugin:opener|open_url': () => undefined },
@@ -41,6 +42,7 @@ async function openBanner(host: DesktopCapabilities | null) {
     bindings: {
       ...desktopApi,
       ...macUpdateCopy,
+      ...macUpdateOffer,
       ManualUpdateFeedback: () => null,
       useCapabilities: () => host,
       canInstallUpdate,
@@ -50,7 +52,7 @@ async function openBanner(host: DesktopCapabilities | null) {
   })
   mounted.push(m)
   await m.flush()
-  events.emit('update-available', { version: '0.8.13', body: 'Fixes the sync stall.', channel: 'stable', release_notes_url: 'https://github.com/beebeeb-io/desktop/releases/tag/desktop-v0.8.13' })
+  events.emit('update-available', payload)
   await m.flush()
   await m.flush()
   const toast = m.toasts.at(-1)
@@ -96,6 +98,25 @@ describe('a Mac downloads its update', () => {
     })(toast.message)
     await link.props.onClick()
     expect(calls(m, 'plugin:opener|open_url')[0].args).toEqual({ url: 'https://github.com/beebeeb-io/desktop/releases/tag/desktop-v0.8.13' })
+  })
+})
+
+describe('the offer follows the channel (review P2-4)', () => {
+  test('a beta or alpha banner links to that release and names the channel; a payload with no channel is not taken for stable', async () => {
+    for (const [channel, hint] of [['beta', 'This is a Beta release.'], ['alpha', 'This is an Alpha release.'], [undefined, 'This is a']] as const) {
+      const { m, toast } = await openBanner(caps.macos, { version: '0.9.0-x.1', body: '', ...(channel ? { channel } : {}) })
+      expect(textOf(toast.message)).toContain(hint)
+      expect(toast.action.label).toBe('View release')
+      await toast.action.onClick()
+      expect(calls(m, 'plugin:opener|open_url').at(-1)?.args).toEqual({ url: 'https://github.com/beebeeb-io/desktop/releases/tag/desktop-v0.9.0-x.1' })
+      expect(calls(m, 'install_update')).toEqual([])
+    }
+  })
+
+  test('a stable banner keeps the newest disk image', async () => {
+    const { m, toast } = await openBanner(caps.macos, { version: '0.8.13', body: '', channel: 'stable' })
+    await toast.action.onClick()
+    expect(calls(m, 'plugin:opener|open_url').at(-1)?.args).toEqual({ url: macUpdateCopy.MACOS_DOWNLOAD_URL })
   })
 })
 

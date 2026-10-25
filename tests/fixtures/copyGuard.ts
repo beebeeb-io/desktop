@@ -6,11 +6,14 @@
  * windows) and every module they import, transitively, from `src/`. Windows-only windows (`WindowsApp`, `WindowsTray`,
  * `WindowsFirstRun`) are not roots: spec rows A5 to A7 keep them off a Mac, and §10.2 #25 leaves their copy alone. What it reads is a PERSON-FACING string, found with the TypeScript parser, not a regex over text:
  *   - JSX text;
- *   - the value of a JSX attribute a screen reader or a tooltip speaks (`aria-label`, `title`, `placeholder`, ...);
+ *   - the value of EVERY string-valued JSX attribute, except the ones on a machine-name denylist (`className`, `id`,
+ *     `role`, `href`, `type`, `name`, `key`, `data-*`, the SVG geometry attributes, the `aria-*` relations): a custom
+ *     component's `copy="..."` or `confirmLabel="..."` is copy, and a denylist that is too short fails loud (a word list
+ *     hit in a machine value is a one-line addition here), where an allowlist that is too short fails silent;
  *   - the value of an object property named like copy (`title`, `label`, `hint`, `message`, `sentence`, ...);
- *   - any other string or template with two words in it, except where the position says it is a machine value:
- *     an import path, a `case`, a comparison, the argument of `command(...)`, `listen(...)`, `.includes(...)`,
- *     a `className`, a type.
+ *   - any other string or template with two words in it, wherever it sits (a call's argument, an array's element, a
+ *     ternary's branch), except where the position says it is a machine value: an import path, a `case`, a comparison,
+ *     the argument of `command(...)`, `listen(...)`, `.includes(...)`, a type.
  * Comments are never strings, so a comment may explain what the words used to be.
  *
  * What it checks them against. `DEVELOPER_WORDS` is the §10.1 list, word for word, plus `raw command names`: any
@@ -66,7 +69,21 @@ export const DEVELOPER_WORDS: ReadonlyArray<{ id: string; pattern: RegExp }> = [
 ]
 
 const COPY_PROPERTY = new Set(['title', 'label', 'hint', 'message', 'sentence', 'detail', 'body', 'description', 'text', 'subtitle', 'summary', 'caption', 'placeholder', 'tooltip', 'heading'])
-const COPY_ATTRIBUTE = new Set(['aria-label', 'aria-description', 'title', 'placeholder', 'alt', 'label', 'hint', 'message', 'description', 'subtitle', 'caption', 'heading', 'text'])
+/**
+ * JSX attributes whose string value is a name, a selector, a size or a relation, never words a person reads. Everything
+ * else that is a string is copy (`title`, `copy`, `footnote`, `confirmLabel`, `detail`, `body`, `aria-label`, ...), and
+ * so is a name nobody has met yet.
+ */
+const MACHINE_ATTRIBUTES = new Set([
+  'className', 'id', 'role', 'href', 'src', 'type', 'name', 'key', 'ref', 'htmlFor', 'for', 'target', 'rel', 'style', 'tabIndex',
+  'value', 'min', 'max', 'step', 'autoComplete', 'inputMode', 'lang', 'dir', 'focusable', 'preserveAspectRatio',
+  'viewBox', 'd', 'fill', 'stroke', 'strokeWidth', 'strokeLinecap', 'strokeLinejoin', 'xmlns', 'width', 'height', 'x', 'y', 'cx', 'cy', 'r', 'rx', 'ry', 'points', 'transform',
+  'aria-labelledby', 'aria-describedby', 'aria-controls', 'aria-live', 'aria-current', 'aria-haspopup', 'aria-hidden', 'aria-checked',
+  'aria-expanded', 'aria-selected', 'aria-pressed', 'aria-busy', 'aria-valuemin', 'aria-valuemax', 'aria-valuenow', 'aria-modal', 'aria-atomic',
+  // The component library's own enums and test markers: `kind="alert"`, `variant="error"`, `tone="amber"`, `surface="settings-config"`.
+  'kind', 'variant', 'tone', 'surface', 'size', 'mode', 'align', 'icon', 'color',
+])
+const isMachineAttribute = (name: string) => name.startsWith('data-') || MACHINE_ATTRIBUTES.has(name)
 /** A call whose string arguments are names, selectors or patterns, never words a person reads. */
 const MACHINE_CALLS = new Set([
   'command', 'invoke', 'listen', 'emit', 'emitTo', 'once', 'getElementById', 'querySelector', 'querySelectorAll', 'matchMedia',
@@ -183,14 +200,16 @@ export function personFacingStrings(file: string, source: string): CopyString[] 
     return ts.isIdentifier(node) || ts.isPropertyAccessExpression(node)
   }
   const claimed = new Set<ts.Node>()
-  const claim = (node: ts.Node, how: string, record = true) => {
+  /** A machine value: nothing inside it is copy, whatever it says. */
+  const claimMachine = (node: ts.Node) => {
     const mark = (n: ts.Node) => {
       claimed.add(n)
       ts.forEachChild(n, mark)
     }
-    if (record) copyIn(node, how)
     mark(node)
   }
+  /** Copy: recorded here, and the walk goes on into it, so a call or an array inside it is read too (one string found twice counts once). */
+  const claim = (node: ts.Node, how: string) => copyIn(node, how)
 
   const visit = (node: ts.Node) => {
     if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node) || ts.isLiteralTypeNode(node) || ts.isTypeNode(node)) return
@@ -199,10 +218,13 @@ export function personFacingStrings(file: string, source: string): CopyString[] 
     } else if (ts.isJsxAttribute(node) && node.initializer) {
       const name = ts.isIdentifier(node.name) ? node.name.text : node.name.getText(ast)
       const value = ts.isJsxExpression(node.initializer) ? node.initializer.expression : node.initializer
-      if (value && COPY_ATTRIBUTE.has(name)) claim(value, `attribute:${name}`)
-      // Any other attribute that is just a string (className, id, role, href, ...) is a machine value, whatever it says.
-      // An expression that is code (an arrow function, a call) is still walked: it may build copy.
-      else if (value && isStringy(value)) claim(value, `attribute:${name}`, false)
+      if (value && isMachineAttribute(name)) {
+        // A name, a selector, a size: a machine value, whatever it says. An expression that is code (an arrow function,
+        // a call) is still walked: it may build copy.
+        if (isStringy(value)) claimMachine(value)
+      } else if (value) {
+        claim(value, `attribute:${name}`)
+      }
     } else if (ts.isPropertyAssignment(node) && (ts.isIdentifier(node.name) || ts.isStringLiteral(node.name)) && COPY_PROPERTY.has(node.name.text)) {
       claim(node.initializer, `property:${node.name.text}`)
     } else if (ts.isPropertySignature(node) || ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node)) {
@@ -266,6 +288,58 @@ export function scan(repo: string, roots: readonly string[] = macRoots(repo)): {
     violations.push(...found.violations)
   }
   return { modules, strings, violations }
+}
+
+/** A string another slice still owns: pardoned for exactly `count` occurrences in `file`, and not one more. */
+export interface Pardon {
+  file: string
+  text: string
+  owner: string
+  count: number
+}
+
+const occurrence = (v: { file: string; line: number; text: string }) => `${v.file}\u0000${v.line}\u0000${v.text}`
+
+/**
+ * What the pardons leave. A pardon is for one string in one file, `count` times: a second occurrence of a pardoned string
+ * is `excess` and stays a violation (a pardon cannot be spent on a new string by repeating an old one), and a pardon whose
+ * string has fewer occurrences than it claims, or none, is `stale` (the owner removed it: delete the entry).
+ */
+export function pardon(violations: readonly Violation[], pardons: readonly Pardon[]): { open: Violation[]; stale: string[] } {
+  const seenOccurrences = new Map<string, Set<string>>()
+  for (const v of violations) {
+    const key = `${v.file}\u0000${v.text}`
+    if (!seenOccurrences.has(key)) seenOccurrences.set(key, new Set())
+    seenOccurrences.get(key)!.add(occurrence(v))
+  }
+  const allowance = new Map<string, number>()
+  const stale: string[] = []
+  for (const entry of pardons) {
+    const key = `${entry.file}\u0000${entry.text}`
+    allowance.set(key, (allowance.get(key) ?? 0) + entry.count)
+    const actual = seenOccurrences.get(key)?.size ?? 0
+    if (actual < entry.count) stale.push(`${entry.file}: ${JSON.stringify(entry.text)} (${entry.owner}): pardoned ${entry.count}, found ${actual}`)
+  }
+  const spent = new Map<string, number>()
+  const open: Violation[] = []
+  const counted = new Set<string>()
+  for (const v of violations) {
+    const key = `${v.file}\u0000${v.text}`
+    const room = allowance.get(key) ?? 0
+    const at = occurrence(v)
+    if (room === 0) {
+      open.push(v)
+      continue
+    }
+    // The first `room` distinct occurrences of the string are pardoned; any rule hit on them is pardoned with them.
+    if (!counted.has(at)) {
+      counted.add(at)
+      spent.set(key, (spent.get(key) ?? 0) + 1)
+    }
+    const order = [...(seenOccurrences.get(key) ?? [])].sort().indexOf(at)
+    if (order >= room) open.push(v)
+  }
+  return { open, stale }
 }
 
 export function describeViolation(v: Violation): string {

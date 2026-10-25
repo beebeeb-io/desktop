@@ -63,6 +63,25 @@ export function navigate(view: MainView, nav: MainNav, ctx: NavContext): MainVie
   }
 }
 
+/**
+ * The sections whose body reads the account's own data (sessions, devices, recent activity). Account is not one of them,
+ * though signed out it has no sidebar entry: it hosts the sign-out's outcome ("You’re signed out" and the held sentence)
+ * until the window remounts on the sign-in card, and coercing it would take that outcome off the screen at the moment the
+ * sign-out finishes.
+ */
+const READS_THE_ACCOUNT: ReadonlyArray<SettingsTab> = ['security']
+
+/**
+ * §7.8, signed out: only General and About exist. A request is coerced by `navigate`; this is the other half: a session that
+ * ends while Settings shows a section that reads the account (the account signs out, the session is revoked) puts the window
+ * on General instead of leaving a body up that reads an account it no longer has (PR #140 review, P2-6). The same object
+ * comes back when there is nothing to change.
+ */
+export function coerceSettingsView(view: MainView, signedIn: boolean): MainView {
+  if (signedIn || view.mode !== 'settings' || !READS_THE_ACCOUNT.includes(view.section)) return view
+  return { ...view, section: 'general' }
+}
+
 /** A `main:navigate` request as Rust serialises it; anything else is no request. */
 export function parseMainNav(raw: unknown): MainNav | null {
   if (typeof raw !== 'object' || raw === null) return null

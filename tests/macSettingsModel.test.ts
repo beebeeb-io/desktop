@@ -24,6 +24,8 @@ import {
   planLine,
   REPAIR_BODY,
   REPAIR_TITLE,
+  RESET_FINDER_BODY,
+  RESET_FINDER_TITLE,
   repairNote,
   SETTINGS_TABS,
   settingsTabFromSearch,
@@ -160,6 +162,14 @@ describe('Beebeeb in Finder (spec 2026-10-06)', () => {
     expect(REPAIR_BODY).toBe(
       'Beebeeb removes its Finder location and turns off Open Beebeeb at login, then adds itself back to Finder. Files waiting to upload are kept.',
     )
+  })
+
+  test('the Windows and Linux Finder page has its own confirmation: its login item is "Start at login", and it does not promise what a Mac does', () => {
+    expect(RESET_FINDER_TITLE).toBe('Reset Finder integration?')
+    expect(RESET_FINDER_BODY).toBe('Beebeeb will remove its Finder location and turn off Start at login. Files waiting to upload are kept.')
+    expect(RESET_FINDER_BODY).not.toContain('Open Beebeeb at login')
+    expect(RESET_FINDER_BODY).not.toContain('adds itself back')
+    expect(RESET_FINDER_BODY).not.toMatch(/socket|daemon|engine/i)
   })
 
   test('the Repair body is the one the design artefact draws, byte for byte (design before code)', () => {

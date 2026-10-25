@@ -11,6 +11,7 @@
  */
 import type { DesktopTheme, EngineRefusal, SpeedtestResult, StorageBreakdown, Subscription, VaultItem } from './desktopApi'
 import type { FinderFailureReason, FinderSetupView } from './finderSetup'
+import { ACCOUNT_SETTINGS_URL, RELEASE_CHANNELS, type ReleaseChannelId } from './settingsConstants'
 import {
   FINDER_ADDING_LINE,
   FINDER_READY_LINE,
@@ -22,7 +23,8 @@ import {
 } from './finderSetupCopy'
 import { quotaPercent, titleCasePlan, planRenewalCopy } from './planPresentation'
 import type { ManualUpdateCheckState } from './windows/updateCheckViewModel'
-import { UPDATE_DOWNLOAD_HINT, updateAvailableLine } from './macUpdateCopy'
+import { updateAvailableLine } from './macUpdateCopy'
+import { updateOffer } from './macUpdateOffer'
 import { formatStorageSize, formatStorageUsage } from './storageFormat'
 import { normalizeThemePreference } from './windows/advancedSettingsModel'
 
@@ -167,6 +169,14 @@ export function finderHint(row: FinderRow): string {
 export const REPAIR_TITLE = 'Repair Beebeeb in Finder?'
 export const REPAIR_BODY =
   'Beebeeb removes its Finder location and turns off Open Beebeeb at login, then adds itself back to Finder. Files waiting to upload are kept.'
+
+/**
+ * The same confirmation on the Windows and Linux Finder page (`pages/SyncFolder.tsx`). It is not `REPAIR_BODY`: a Mac's
+ * words are "Open Beebeeb at login" and "adds itself back", and neither is what the reset does there (PR #140 review, P3).
+ * The old sentence's "stale local socket" is the one developer word it loses.
+ */
+export const RESET_FINDER_TITLE = 'Reset Finder integration?'
+export const RESET_FINDER_BODY = 'Beebeeb will remove its Finder location and turn off Start at login. Files waiting to upload are kept.'
 
 /**
  * After a successful repair: one neutral line, or nothing when there is nothing to add. A repair's
@@ -331,8 +341,7 @@ export function storageLine(
   return { label: `${used} of ${quota}`, percent, red: percent >= STORAGE_RED_PERCENT }
 }
 
-/** Where the password, the email and the billing are changed: the web app, in the browser (spec §7.8, "Account"). */
-export const ACCOUNT_SETTINGS_URL = 'https://app.beebeeb.io/settings/account'
+export { ACCOUNT_SETTINGS_URL }
 
 // ── Account > Storage details ───────────────────────────────────────────────
 
@@ -409,7 +418,7 @@ export function updateRow(state: ManualUpdateCheckState, version: string | null)
       return { hint: `Version ${state.currentVersion} is the latest.`, action: 'check' }
     case 'update_available':
       // Task 2176: a Mac downloads an update and never installs it in place (`macUpdateCopy.ts` says why).
-      return { hint: `${updateAvailableLine(state.version)} ${UPDATE_DOWNLOAD_HINT}`, action: 'download' }
+      return { hint: `${updateAvailableLine(state.version)} ${updateOffer(state.channel, state.version).hint}`, action: 'download' }
     case 'downgrade_available':
       // The offer has its own row (`downgradeRow`), so this row keeps to the version this Mac runs.
       return { hint: current, action: 'check' }
@@ -418,14 +427,9 @@ export function updateRow(state: ManualUpdateCheckState, version: string | null)
   }
 }
 
-export type ReleaseChannelId = 'stable' | 'beta' | 'alpha'
+export type { ReleaseChannelId }
 
-/** The channels and what each is for: the Windows shell's words, kept (spec §10.2 #46: "Release channel"). */
-export const RELEASE_CHANNELS: ReadonlyArray<{ value: ReleaseChannelId; label: string; hint: string }> = [
-  { value: 'stable', label: 'Stable', hint: 'Regular releases after validation.' },
-  { value: 'beta', label: 'Beta', hint: 'Earlier builds for release testing.' },
-  { value: 'alpha', label: 'Alpha', hint: 'Earliest builds for rapid feedback.' },
-]
+export { RELEASE_CHANNELS }
 
 /** A saved channel this app does not know reads as Stable, as the updater does. */
 export function releaseChannelOf(value: unknown): ReleaseChannelId {
@@ -448,6 +452,15 @@ export function downgradeRow(state: ManualUpdateCheckState): { label: string; hi
 
 /** What the speed test does, in plain words (spec §10.2 #26: no "parity with the CLI"). */
 export const SPEED_TEST_HINT = 'Measures how fast this Mac reaches Beebeeb: 5 pings, then 3 uploads and 3 downloads of 10 MB. Takes 30 to 90 seconds.'
+
+/** What a run that measured nothing says: the host reports a failed direction as an error, and this is the same sentence for a result that still arrives without a speed (PR #140 review, P2-7). */
+export const SPEED_TEST_NO_FIGURES = 'The test finished without a speed to report. Check your internet connection and try again.'
+
+/** The plain reason a result cannot be shown, or null when it can: a direction that never moved a byte is no "0.00 Mbps". */
+export function speedTestFailure(result: SpeedtestResult): string | null {
+  const moved = (bytesPerSecond: number) => Number.isFinite(bytesPerSecond) && bytesPerSecond > 0
+  return moved(result.upload_bps) && moved(result.download_bps) ? null : SPEED_TEST_NO_FIGURES
+}
 
 /** Bytes per second as megabits per second, decimal like the CLI and the old slider: two places under 10, one above. */
 function megabits(bytesPerSecond: number): string {

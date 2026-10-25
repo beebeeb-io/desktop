@@ -27,14 +27,19 @@ const now = at(2026, 10, 25, 14, 30).getTime()
 const iso = (date: Date) => date.toISOString()
 
 describe('the authenticator row', () => {
-  test('its state comes from the score factors, the only honest source: on, off, or unknown when no factor says', () => {
-    expect(totpState({ factors: [{ key: 'email_verified', satisfied: true }, { key: 'two_factor_enabled', satisfied: true }] })).toBe('on')
-    expect(totpState({ factors: [{ key: 'totp_enabled', satisfied: true }] })).toBe('on')
-    expect(totpState({ factors: [{ key: 'two_factor_enabled', satisfied: false }] })).toBe('off')
-    expect(totpState({ factors: [{ key: 'email_verified', satisfied: true }] })).toBe('unknown')
-    expect(totpState({ factors: [] })).toBe('unknown')
+  test('its state is the account\'s own totp_enabled: on, off, or unknown when the account does not say (review P2-5)', () => {
+    expect(totpState({ totp_enabled: true })).toBe('on')
+    expect(totpState({ totp_enabled: false })).toBe('off')
+    expect(totpState({ totp_enabled: null })).toBe('unknown')
+    expect(totpState({})).toBe('unknown')
     expect(totpState(null)).toBe('unknown')
     expect(totpState(undefined)).toBe('unknown')
+  })
+
+  test('a security-score factor never decides it: "two_factor_enabled" is an authenticator OR a passkey, and ignores whether the authenticator is on', () => {
+    // The score is not an input any more: a payload that carries factors but no totp_enabled is "unknown", not "on".
+    expect(totpState({ factors: [{ key: 'two_factor_enabled', satisfied: true }] } as never)).toBe('unknown')
+    expect(totpState({ totp_enabled: false, factors: [{ key: 'two_factor_enabled', satisfied: true }] } as never)).toBe('off')
   })
 
   test('the words, per state: copy kept from the Windows shell, with "Manage" or "Set up" on beebeeb.io', () => {

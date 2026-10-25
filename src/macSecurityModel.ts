@@ -9,10 +9,17 @@
  * Dates are written in English on any Mac ("3 Sep", "Today 09:12"), like the plan line's "renews 14 Nov 2026": this app's
  * words are English, and a Dutch month name inside an English sentence reads as a mistake. Numbers (sizes) follow the Mac.
  */
-import type { AccountSession, ActivityFeedEvent, ClientDevice, SecurityScore } from './desktopApi'
+import type { AccountProfile, AccountSession, ActivityFeedEvent, ClientDevice } from './desktopApi'
+import { ageOf } from './relativeTime'
+import { SECURITY_SETTINGS_URL } from './settingsConstants'
 
-/** Where two-factor is set up and managed: the web app has the controls, this app has none (so none is promised). */
-export const SECURITY_SETTINGS_URL = 'https://app.beebeeb.io/settings/security'
+export { SECURITY_SETTINGS_URL }
+
+/**
+ * The "Active sessions" heading, which takes focus once a revoke has removed the row (or the button) that had it: a
+ * heading is where a list starts, and it stays when every row in it goes (PR #140 review, P3).
+ */
+export const SESSIONS_HEADING_ID = 'ms-security-sessions'
 
 /** The Devices subtitle (spec #29): no revoke, because no control to revoke a device exists. */
 export const DEVICES_FOOTNOTE = 'Every device holding a copy of your vault key, and the sync sessions running on each.'
@@ -27,13 +34,15 @@ export type TotpState = 'on' | 'off' | 'unknown'
 export const TOTP_LABEL = 'Authenticator app (TOTP)'
 
 /**
- * The state of two-factor, read from the security score's factors: the only honest source this app has. `unknown` when
- * the score is unavailable or none of its factors speaks about a second factor, so the row never claims On or Off.
+ * The state of the authenticator app, from the account's own `totp_enabled` (the profile). Not from the security score: its
+ * `two_factor_enabled` factor is an authenticator OR a passkey and ignores whether the authenticator is on, so a row built on
+ * it can say On when it is Off (PR #140 review, P2-5). `unknown` when the profile is unavailable or does not say, so the row
+ * never claims On or Off. (The profile is read once per session and cached by the Rust side: a change made on the web shows
+ * after the next sign-in.)
  */
-export function totpState(score: Pick<SecurityScore, 'factors'> | null | undefined): TotpState {
-  const factor = score?.factors?.find((f) => f.key === 'two_factor_enabled' || f.key === 'totp_enabled')
-  if (!factor) return 'unknown'
-  return factor.satisfied ? 'on' : 'off'
+export function totpState(profile: Pick<AccountProfile, 'totp_enabled'> | null | undefined): TotpState {
+  const enabled = profile?.totp_enabled
+  return enabled === true ? 'on' : enabled === false ? 'off' : 'unknown'
 }
 
 export function totpLabel(state: TotpState): string {
@@ -80,15 +89,19 @@ const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one :
 export function agoLabel(iso: string | null | undefined, now: number): string | null {
   const date = parse(iso)
   if (!date) return null
-  const seconds = Math.round((now - date.getTime()) / 1000)
-  if (seconds < 45) return 'just now'
-  const minutes = Math.round(seconds / 60)
-  if (minutes < 60) return `${plural(minutes, 'minute', 'minutes')} ago`
-  const hours = Math.round(minutes / 60)
-  if (hours < 24) return `${plural(hours, 'hour', 'hours')} ago`
-  const days = Math.round(hours / 24)
-  if (days < 30) return `${plural(days, 'day', 'days')} ago`
-  return dayLabel(date, now)
+  const age = ageOf(date, now, 30)
+  switch (age.unit) {
+    case 'now':
+      return 'just now'
+    case 'minute':
+      return `${plural(age.count, 'minute', 'minutes')} ago`
+    case 'hour':
+      return `${plural(age.count, 'hour', 'hours')} ago`
+    case 'day':
+      return `${plural(age.count, 'day', 'days')} ago`
+    case 'date':
+      return dayLabel(age.date, now)
+  }
 }
 
 const pad = (n: number) => String(n).padStart(2, '0')

@@ -13,7 +13,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { commandUnavailableLabel } from '../src/desktopApi'
+import { command, commandUnavailableLabel } from '../src/desktopApi'
 
 const ROOT = process.env.GUARD_ROOT ?? fileURLToPath(new URL('..', import.meta.url))
 const source = (file: string) => readFileSync(join(ROOT, 'src', file), 'utf8')
@@ -31,16 +31,16 @@ interface Row {
 const ROWS: Row[] = [
   { row: 1, what: 'Drive status intro', file: 'pages/Status.tsx', gone: ['is the control center', 'the file surface', 'can hydrate, upload, and keep versions safe'] },
   { row: 2, what: 'Drive status loading', file: 'pages/Status.tsx', gone: ['Loading daemon status…', 'Waiting for daemon status.'], present: ['Loading…'] },
-  { row: 3, what: 'Drive status metrics and rows', file: 'pages/Status.tsx', gone: ['Hydrates and uploads waiting now', 'Visible without local bytes', 'Version reviews needing action', 'Session present', 'No session token'] },
+  { row: 3, what: 'Drive status metrics and rows', file: 'pages/Status.tsx', gone: ['Hydrates and uploads waiting now', 'Visible without local bytes', 'Version reviews needing action', 'Session present', 'No session token', 'engine {'], present: ['Transfer queue', 'Downloads and uploads waiting now', 'Download when you open them', 'Files that need a decision from you', 'Vault access', 'Signed in'] },
   { row: 4, what: 'Account page sign-out paragraph', file: 'pages/Account.tsx', gone: ['Future native wiring', 'Signing out stops sync and removes the session'] },
   { row: 5, what: 'Account page intro', file: 'pages/Account.tsx', gone: ['Session token, unlock state, diagnostics', 'leaving the Finder location visible'] },
   { row: 6, what: 'Account page rows', file: 'pages/Account.tsx', gone: ['Session token', 'Stored by native session layer', 'Master key lifetime', 'Unwrapped in memory', 'Unavailable to file operations'], present: ['Vault is unlocked', 'Vault is locked'] },
   { row: 7, what: 'Selective sync intro', file: 'pages/SelectiveSync.tsx', gone: ['The drive is online-only by default', 'remote-first behavior', 'hydrated'], present: ['Folders you choose stay on this Mac. Everything else downloads when you open it.'] },
-  { row: 8, what: 'Selective sync panels and empty state', file: 'pages/SelectiveSync.tsx', gone: ['Persisted by', 'Local daemon state', 'Recursive folder toggles', 'The UI is ready for', 'this build has no folder data'], present: ['Couldn’t load your folders.', 'No folders yet.'] },
-  { row: 9, what: 'Finder location "Drive model"', file: 'pages/SyncFolder.tsx', gone: ['Drive model', 'Remote-first vault namespace.', 'Shared roots appear next to owned files.', 'Virtual view of pinned content.', 'Items needing version review.'] },
-  { row: 10, what: 'Finder repair', file: 'pages/SyncFolder.tsx', gone: ['clears the local socket', 'remove the stale local socket', 'Reset Finder integration?'], present: ['REPAIR_TITLE', 'REPAIR_BODY'] },
+  { row: 8, what: 'Selective sync panels and empty state', file: 'pages/SelectiveSync.tsx', gone: ['Persisted by', 'Local daemon state', 'Recursive folder toggles', 'The UI is ready for', 'this build has no folder data'], present: ['Couldn’t load your folders.', 'No folders yet.', 'No folders kept on this computer', 'A folder and everything inside it'] },
+  { row: 9, what: 'Finder location "Drive model"', file: 'pages/SyncFolder.tsx', gone: ['Remote-first vault namespace.', 'Shared roots appear next to owned files.', 'Virtual view of pinned content.', 'Items needing version review.'], present: ['Drive model', 'Your vault, stored in the cloud.', 'Shared folders appear next to your own files.', 'Folders you choose to keep on this computer.'] },
+  { row: 10, what: 'Finder repair', file: 'pages/SyncFolder.tsx', gone: ['clears the local socket', 'remove the stale local socket', 'Reset Finder integration?', 'REPAIR_TITLE', 'REPAIR_BODY'], present: ['RESET_FINDER_TITLE', 'RESET_FINDER_BODY'] },
   { row: 11, what: 'Versions intro', file: 'pages/VersionCenter.tsx', gone: ['Desktop writes create server-side versions', 'until the daemon can finish them'], present: ['Files that need a decision from you, and changes Beebeeb couldn’t send yet.'] },
-  { row: 12, what: 'Versions metrics', file: 'pages/VersionCenter.tsx', gone: ['Rows marked conflict by the daemon', 'Failed or queued Finder writes', 'Local bytes preserved for review'] },
+  { row: 12, what: 'Versions metrics', file: 'pages/VersionCenter.tsx', gone: ['Rows marked conflict by the daemon', 'Failed or queued Finder writes', 'Local bytes preserved for review', 'Stale-base edits'], present: ['Active conflicts', 'Files changed in two places', 'Changes Beebeeb couldn’t send yet', 'Changed elsewhere'] },
   { row: 13, what: 'Versions empty', file: 'pages/VersionCenter.tsx', gone: ['recorded in the local state DB'], present: ['Nothing needs your attention.'] },
   { row: 14, what: 'Versions history unavailable', file: 'pages/VersionCenter.tsx', gone: ['until the server list-versions route responds'], present: ['Couldn’t load this file’s versions. Try again.'] },
   { row: 15, what: 'Restore toast (Versions)', file: 'pages/VersionCenter.tsx', gone: ['will be restored by the sync engine'], present: ['goes back to version', 'on the next sync.'] },
@@ -83,11 +83,37 @@ describe('§10.2 #24: a command that is missing is said plainly, on every platfo
     expect(label).not.toMatch(/wired|build/i)
   })
 
-  test('the command name goes to the log instead, so a missing command can still be found', () => {
+  // PR #140 review, P3: the label is read while a component renders, so it must not log: every render of a notice would
+  // write the same line again. The line is written once, where the host's answer is read and the command is found missing.
+  test('reading the sentence logs nothing, however often a component renders it', () => {
     console.warn = (...args: unknown[]) => { warnings.push(args) }
-    commandUnavailableLabel('set_recursive_pin')
-    expect(warnings).toHaveLength(1)
-    expect(warnings[0]).toContain('set_recursive_pin')
+    for (let render = 0; render < 3; render++) commandUnavailableLabel('set_recursive_pin')
+    expect(warnings).toEqual([])
+  })
+
+  test('the command name goes to the log once, where the missing command is found, so it can still be found', async () => {
+    console.warn = (...args: unknown[]) => { warnings.push(args) }
+    const previous = (globalThis as any).window
+    ;(globalThis as any).window = { __TAURI_INTERNALS__: { invoke: async () => { throw new Error('unknown command set_recursive_pin') } } }
+    try {
+      const result = await command('set_recursive_pin')
+      expect(result).toMatchObject({ ok: false, unsupported: true })
+    } finally {
+      ;(globalThis as any).window = previous
+    }
+    expect(warnings).toEqual([['set_recursive_pin', 'unavailable']])
+  })
+
+  test('an ordinary failure is not a missing command and logs nothing here', async () => {
+    console.warn = (...args: unknown[]) => { warnings.push(args) }
+    const previous = (globalThis as any).window
+    ;(globalThis as any).window = { __TAURI_INTERNALS__: { invoke: async () => { throw new Error('vault is locked') } } }
+    try {
+      expect(await command('set_recursive_pin')).toMatchObject({ ok: false, unsupported: false })
+    } finally {
+      ;(globalThis as any).window = previous
+    }
+    expect(warnings).toEqual([])
   })
 })
 

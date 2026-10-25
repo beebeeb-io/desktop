@@ -12,7 +12,7 @@ import { useCapabilities } from '../capabilities'
 import { finderInstallNotice, finderInstallStateAfterAttempt, finderInstallStateWhileAttempting } from '../finderInstallCard'
 import { finderOpenFailedToast, finderRepairFailedToast, useFinderSetup } from '../finderSetup'
 import { finderActionButtonLabel, finderRepairWarningNote, finderStatusPill, type FinderSetupAction } from '../finderSetupCopy'
-import { preservedFilesLine, REPAIR_BODY, REPAIR_TITLE } from '../macSettingsModel'
+import { preservedFilesLine, RESET_FINDER_BODY, RESET_FINDER_TITLE } from '../macSettingsModel'
 import { useToast } from '../windows/ui'
 
 // Inline confirm for the destructive Finder reset — no window.confirm(). Three states,
@@ -332,6 +332,33 @@ export default function SyncFolder() {
           </div>
         </div>
 
+        <div className="panel">
+          <h2 className="section-title">Drive model</h2>
+          <div className="row">
+            <div>
+              <div className="row-title">My files</div>
+              <div className="row-detail">Your vault, stored in the cloud.</div>
+            </div>
+          </div>
+          <div className="row">
+            <div>
+              <div className="row-title">Shared with me</div>
+              <div className="row-detail">Shared folders appear next to your own files.</div>
+            </div>
+          </div>
+          <div className="row">
+            <div>
+              <div className="row-title">Offline</div>
+              <div className="row-detail">Folders you choose to keep on this computer.</div>
+            </div>
+          </div>
+          <div className="row">
+            <div>
+              <div className="row-title">Conflicts</div>
+              <div className="row-detail">Files that need a decision from you.</div>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div className="panel" style={{ marginTop: 14 }}>
@@ -354,7 +381,7 @@ export default function SyncFolder() {
         {resetPhase === 'confirming' && (
           <div className="notice" style={{ marginTop: 12 }}>
             <div style={{ marginBottom: 10 }}>
-              <strong>{REPAIR_TITLE}</strong> {REPAIR_BODY}
+              <strong>{RESET_FINDER_TITLE}</strong> {RESET_FINDER_BODY}
             </div>
             <div className="button-row">
               <button className="button danger" onClick={() => void resetFinderIntegration()}>

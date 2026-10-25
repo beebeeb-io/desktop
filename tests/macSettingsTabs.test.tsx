@@ -17,7 +17,9 @@ import { connectNativeUpdateMenu as realConnectNativeUpdateMenu, desktopUpdateCh
 import * as diagnosticsCopy from '../src/diagnosticsCopy'
 import * as finderSetup from '../src/finderSetup'
 import * as finderSetupCopy from '../src/finderSetupCopy'
+import { createSpeedTest } from '../src/macSpeedTest'
 import * as macUpdateCopy from '../src/macUpdateCopy'
+import * as macUpdateOffer from '../src/macUpdateOffer'
 import * as model from '../src/macSettingsModel'
 import * as parts from '../src/macSettingsParts'
 import * as signOutCopy from '../src/signOutCopy'
@@ -62,6 +64,7 @@ const baseBindings = {
   ...diagnosticsCopy,
   ...model,
   ...macUpdateCopy,
+  ...macUpdateOffer,
   ...parts,
   ...signOutCopy,
   Modal,
@@ -385,16 +388,25 @@ describe('useSettingsConfig', () => {
   })
 
   // Settings › General › Appearance: the window wears the saved theme, from the one place that owns the config.
-  test('the first reading applies no theme (main.tsx applied it when the window opened); a theme saved after that is worn at once', async () => {
+  // PR #140 review, P3: the first reading is applied. `main.tsx` applied the theme from the config command when the window
+  // opened, but that read can differ from this one (it failed, or another window saved since), and applying the same theme twice
+  // changes nothing; skipping the first reading could leave the window wearing a theme that is not the saved one.
+  test('the first reading applies the saved theme; a theme saved after that is worn at once; another key changes nothing', async () => {
     const { m, hook } = probe({ config: { ...config, theme: 'system' } })
     await settle(m)
-    expect(appliedThemes).toEqual([])
+    expect(appliedThemes).toEqual(['system'])
     await hook().save({ theme: 'dark' })
     await settle(m)
-    expect(appliedThemes).toEqual(['dark'])
+    expect(appliedThemes).toEqual(['system', 'dark'])
     await hook().save({ upload_kbps_limit: 2000 })
     await settle(m)
-    expect(appliedThemes).toEqual(['dark']) // another key changed: the theme is not applied again
+    expect(appliedThemes).toEqual(['system', 'dark']) // another key changed: the theme is not applied again
+  })
+
+  test('a window that opens on a saved Dark wears Dark from the first reading, with no choice made', async () => {
+    const { m } = probe({ config: { ...config, theme: 'dark' } })
+    await settle(m)
+    expect(appliedThemes).toEqual(['dark'])
   })
 
   test('a theme that did not save is not kept: the config read back puts the old look back', async () => {
@@ -407,7 +419,7 @@ describe('useSettingsConfig', () => {
     await pending
     await settle(m)
     expect(hook().state.config.theme).toBe('system')
-    expect(appliedThemes).toEqual(['dark', 'system'])
+    expect(appliedThemes).toEqual(['system', 'dark', 'system'])
     expect(m.toasts).toHaveLength(1)
   })
 
@@ -416,7 +428,7 @@ describe('useSettingsConfig', () => {
     await settle(m)
     await hook().save({ theme: 'sepia' })
     await settle(m)
-    expect(appliedThemes).toEqual(['system'])
+    expect(appliedThemes).toEqual(['dark', 'system'])
   })
 
   test('a load failure is its own state and Try again reads again', async () => {
@@ -1524,11 +1536,12 @@ describe('About tab', () => {
       ? createElement('div', { role: 'dialog', 'aria-label': props.title }, createElement('h2', null, props.title), props.children, props.footer, createElement('button', { onClick: props.onClose }, 'Close'))
       : null
   }
-  const openAbout = async (backend: Record<string, (a: any) => unknown> = {}, store = updateStore(), props: any = {}) => {
+  /** A fresh speed-test store per page, as a fresh window has; pass one to open the page again on the same window's. */
+  const openAbout = async (backend: Record<string, (a: any) => unknown> = {}, store = updateStore(), props: any = {}, speedTest = createSpeedTest(() => desktopApi.runSpeedtest())) => {
     const { settings, patches } = liveSettings()
-    const m = open('AboutTab', { app_version: () => '0.8.6', report_problem: () => ({ path: '/tmp/bundle.json', email_opened: true }), install_update: () => undefined, run_speedtest: () => ({ latency: { min_ms: 18, avg_ms: 24, max_ms: 41 }, upload_bps: 4_400_000, download_bps: 11_750_000 }), 'plugin:opener|open_url': () => undefined, ...backend }, { props: { settings, signedIn: true, ...props }, bindings: { desktopUpdateCheck: store, Modal: ClosableModal } })
+    const m = open('AboutTab', { app_version: () => '0.8.6', report_problem: () => ({ path: '/tmp/bundle.json', email_opened: true }), install_update: () => undefined, run_speedtest: () => ({ latency: { min_ms: 18, avg_ms: 24, max_ms: 41 }, upload_bps: 4_400_000, download_bps: 11_750_000 }), 'plugin:opener|open_url': () => undefined, ...backend }, { props: { settings, signedIn: true, ...props }, bindings: { desktopUpdateCheck: store, desktopSpeedTest: speedTest, Modal: ClosableModal } })
     await m.flush()
-    return { m, store, settings, patches }
+    return { m, store, settings, patches, speedTest }
   }
   const aboutSelect = (m: Mounted, name: string) => {
     const hit = find(m, (el) => el.type === 'select' && el.props['aria-labelledby'] === `ms-${name}-label`)
@@ -1624,6 +1637,19 @@ describe('About tab', () => {
     expect(m.toasts).toEqual([])
   })
 
+  test('a beta or alpha update is a link to that release, said plainly: the stable download link is never offered for it (review P2-4)', async () => {
+    for (const [channel, word] of [['beta', 'Beta'], ['alpha', 'Alpha']] as const) {
+      const { m } = await openAbout({}, updateStore({ kind: 'update_available', currentVersion: '0.8.6', channel, version: '0.9.0-x.1' }))
+      expect(visibleText(m)).toContain('Version 0.9.0-x.1 is available.')
+      expect(visibleText(m)).toContain(`This is a${channel === 'alpha' ? 'n' : ''} ${word} release.`)
+      expect(buttons(m)).toContain('View release')
+      expect(buttons(m)).not.toContain('Download update')
+      await press(m, 'View release')
+      expect(m.calls.find((c) => c.name === 'plugin:opener|open_url')?.args).toEqual({ url: 'https://github.com/beebeeb-io/desktop/releases/tag/desktop-v0.9.0-x.1' })
+      expect(m.calls.filter((c) => c.name === 'install_update')).toHaveLength(0)
+    }
+  })
+
   test('a download that cannot be opened is one error toast', async () => {
     const { m } = await openAbout({ 'plugin:opener|open_url': () => { throw new Error('no browser') } }, updateStore(AVAILABLE))
     // `openUrl` falls back to the webview's own `window.open` when the opener plugin fails; a browser has one, the harness does not.
@@ -1711,6 +1737,64 @@ describe('About tab', () => {
     expect(m.toasts[0]).toMatchObject({ variant: 'error', title: 'Couldn’t run the speed test' })
     expect(visibleText(m)).toContain('Takes 30 to 90 seconds.')
     expect(visibleErrorSurfaces(m).filter((surface) => surface.startsWith('inline'))).toEqual([])
+  })
+
+  // PR #140 review, P2-7: a run in which nothing finished in one direction is not "0.00 Mbps".
+  test('a speed test that measured nothing in either direction is the failure toast, never "0.00 Mbps"', async () => {
+    for (const result of [
+      { latency: { min_ms: 0, avg_ms: 0, max_ms: 0 }, upload_bps: 0, download_bps: 0 },
+      { latency: { min_ms: 18, avg_ms: 24, max_ms: 41 }, upload_bps: 0, download_bps: 11_750_000 },
+      { latency: { min_ms: 18, avg_ms: 24, max_ms: 41 }, upload_bps: 4_400_000, download_bps: 0 },
+    ]) {
+      const { m } = await openAbout({ run_speedtest: () => result })
+      await press(m, 'Run test')
+      expect(m.toasts).toHaveLength(1)
+      expect(m.toasts[0]).toMatchObject({ variant: 'error', title: 'Couldn’t run the speed test', message: model.SPEED_TEST_NO_FIGURES })
+      expect(visibleText(m)).not.toMatch(/Mbps|Latency/)
+      expect(visibleText(m)).toContain('Takes 30 to 90 seconds.')
+      expect(buttons(m)).toContain('Run test')
+    }
+  })
+
+  test('the host\'s own reason for a failed run is what the toast says (the pings or the transfers did not finish)', async () => {
+    const reason = 'None of the 3 downloads finished. Check your internet connection and try again.'
+    const { m } = await openAbout({ run_speedtest: () => { throw new Error(reason) } })
+    await press(m, 'Run test')
+    expect(m.toasts).toHaveLength(1)
+    expect(m.toasts[0]).toMatchObject({ variant: 'error', title: 'Couldn’t run the speed test', message: reason })
+    expect(visibleText(m)).not.toMatch(/Mbps/)
+  })
+
+  // PR #140 review, P3: a test takes up to 90 seconds; leaving About must not lose it.
+  test('a speed test goes on when About is left: opened again, the page says it is running, and its figures arrive there', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const speedTest = createSpeedTest(() => desktopApi.runSpeedtest())
+    const first = await openAbout({ run_speedtest: async () => { await gate; return { latency: { min_ms: 18, avg_ms: 24, max_ms: 41 }, upload_bps: 4_400_000, download_bps: 11_750_000 } } }, updateStore(), {}, speedTest)
+    await first.m.clickNoWait('Run test')
+    first.m.unmount()
+    first.m.close()
+
+    const second = await openAbout({ run_speedtest: () => { throw new Error('a second test must not start') } }, updateStore(), {}, speedTest)
+    expect(button(second.m, 'Running…').props.disabled).toBe(true)
+    expect(visibleText(second.m)).toContain('Testing… this takes 30 to 90 seconds.')
+    await button(second.m, 'Running…').props.onClick?.()
+    release()
+    await settle(second.m)
+    expect(second.m.calls.filter((c) => c.name === 'run_speedtest')).toHaveLength(0)
+    expect(first.m.calls.filter((c) => c.name === 'run_speedtest')).toHaveLength(1)
+    expect(visibleText(second.m)).toContain('Latency 24 ms (18 to 41) · Upload 35.2 Mbps · Download 94.0 Mbps')
+    expect(buttons(second.m)).toContain('Run test')
+  })
+
+  test('the figures of a finished test are still there when About is opened again', async () => {
+    const speedTest = createSpeedTest(() => desktopApi.runSpeedtest())
+    const first = await openAbout({}, updateStore(), {}, speedTest)
+    await press(first.m, 'Run test')
+    first.m.unmount()
+    first.m.close()
+    const second = await openAbout({}, updateStore(), {}, speedTest)
+    expect(visibleText(second.m)).toContain('Latency 24 ms (18 to 41) · Upload 35.2 Mbps · Download 94.0 Mbps')
   })
 
   test('signed out, the speed test is not offered (it needs the account) but the channel and the version are', async () => {

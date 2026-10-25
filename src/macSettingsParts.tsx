@@ -104,10 +104,14 @@ export function SettingsIcon({ name, size = 16, strokeWidth = 1.6 }: { name: str
 }
 
 /** A titled card. Children are rows and notes; the last one loses its divider in CSS. */
-export function SettingsGroup({ title, footnote, children }: { title?: string; footnote?: ReactNode; children: ReactNode }) {
+export function SettingsGroup({ title, headingId, footnote, children }: { title?: string; headingId?: string; footnote?: ReactNode; children: ReactNode }) {
   return (
     <section className="ms-group" aria-label={title}>
-      {title ? <h2 className="ms-group-title">{title}</h2> : null}
+      {title ? (
+        <h2 className="ms-group-title" id={headingId} tabIndex={headingId ? -1 : undefined}>
+          {title}
+        </h2>
+      ) : null}
       <div className="ms-card">{children}</div>
       {footnote ? <p className="ms-footnote">{footnote}</p> : null}
     </section>

@@ -4637,6 +4637,20 @@ fn now_unix_seconds() -> i64 {
         .unwrap_or_default()
 }
 
+/// What `wait_for_file_provider_ipc_ready` fails with when the local sync socket does not come up in time. It is the
+/// sentence a person reads, and it is also what a Linux or Windows install saves as `finder_install_last_error`, so the
+/// classifier below recognises this exact text as a timeout: it holds neither "timed out" nor "timeout" (two-surface spec
+/// §10.2: no "daemon", no "Timed out waiting for"), and a reworded sentence must not turn the saved category into "unknown"
+/// (PR #140 review, P2-8).
+const FINDER_IPC_NOT_READY: &str = "Beebeeb wasn’t ready in time to add its Finder location.";
+
+/// Whether a Finder-install error is a wait that ran out: the typed sentence above, or an OS error that says so.
+#[cfg(any(test, not(target_os = "macos")))]
+fn finder_install_error_is_timeout(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("timed out") || lower.contains("timeout") || error.contains(FINDER_IPC_NOT_READY)
+}
+
 // The install-era Finder state (`finder_install_*` in desktop.toml and the helpers below) is for
 // Windows and Linux only. On macOS the reconciler owns the truth (spec 2026-10-06 §6.1).
 #[cfg(not(target_os = "macos"))]
@@ -4651,7 +4665,7 @@ fn classify_finder_install_error(error: &str) -> String {
         "provisioning".to_string()
     } else if lower.contains("disabled") || lower.contains("-2011") || lower.contains("sync is not enabled") {
         "disabled".to_string()
-    } else if lower.contains("timed out") || lower.contains("timeout") {
+    } else if finder_install_error_is_timeout(error) {
         "timeout".to_string()
     } else if lower.contains("not available") || lower.contains("only available") || lower.contains("unsupported") {
         "unsupported".to_string()
@@ -5514,9 +5528,7 @@ async fn wait_for_file_provider_ipc_ready(
         }
 
         if Instant::now() >= deadline {
-            return Err(
-                "Beebeeb wasn’t ready in time to add its Finder location.".to_string(),
-            );
+            return Err(FINDER_IPC_NOT_READY.to_string());
         }
         sleep(Duration::from_millis(100)).await;
     }
@@ -12697,69 +12709,113 @@ pub struct SpeedtestLatency {
     pub max_ms: u64,
 }
 
+/// What a run measured, kept apart from how it is said: only the pings that were answered and the transfers that
+/// finished are in here. Failed ones are not zeros to average in (PR #140 review, P2-7).
+#[derive(Debug, Default)]
+struct SpeedtestSamples {
+    /// Round trips of the pings the server answered, in milliseconds.
+    ping_ms: Vec<u64>,
+    /// Bytes per second of each upload that finished.
+    up_bps: Vec<f64>,
+    /// Bytes per second of each download that finished.
+    down_bps: Vec<f64>,
+}
+
+const SPEEDTEST_NO_PING: &str = "Beebeeb didn’t answer any of the 5 pings. Check your internet connection and try again.";
+const SPEEDTEST_NO_UPLOAD: &str = "None of the 3 uploads finished. Check your internet connection and try again.";
+const SPEEDTEST_NO_DOWNLOAD: &str = "None of the 3 downloads finished. Check your internet connection and try again.";
+const SPEEDTEST_ALREADY_RUNNING: &str = "A speed test is already running.";
+
+/// A run's figures, or the plain reason there are none. A direction that never finished is not "0 Mbps" and an
+/// unanswered ping is not a latency: a run without a figure in all three is a failed run, never a result.
+fn speedtest_outcome(samples: &SpeedtestSamples) -> Result<SpeedtestResult, String> {
+    if samples.ping_ms.is_empty() {
+        return Err(SPEEDTEST_NO_PING.to_string());
+    }
+    if samples.up_bps.is_empty() {
+        return Err(SPEEDTEST_NO_UPLOAD.to_string());
+    }
+    if samples.down_bps.is_empty() {
+        return Err(SPEEDTEST_NO_DOWNLOAD.to_string());
+    }
+    let mean = |speeds: &[f64]| (speeds.iter().sum::<f64>() / speeds.len() as f64) as u64;
+    Ok(SpeedtestResult {
+        latency: SpeedtestLatency {
+            min_ms: *samples.ping_ms.iter().min().unwrap_or(&0),
+            avg_ms: samples.ping_ms.iter().sum::<u64>() / samples.ping_ms.len() as u64,
+            max_ms: *samples.ping_ms.iter().max().unwrap_or(&0),
+        },
+        upload_bps: mean(&samples.up_bps),
+        download_bps: mean(&samples.down_bps),
+    })
+}
+
+/// At most one speed test at a time: the test moves 60 MB, and a second press (the Settings page and the Bandwidth view
+/// both offer one) would halve both figures. Dropping the guard frees the slot, including when the command is cancelled.
+struct SpeedtestSlot<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl<'a> SpeedtestSlot<'a> {
+    fn take(flag: &'a std::sync::atomic::AtomicBool) -> Result<Self, String> {
+        flag.compare_exchange(false, true, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Acquire)
+            .map(|_| Self(flag))
+            .map_err(|_| SPEEDTEST_ALREADY_RUNNING.to_string())
+    }
+}
+
+impl Drop for SpeedtestSlot<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+static SPEEDTEST_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Run a network speedtest against the Beebeeb API.
 ///
 /// Parity with CLI (`repos/cli/src/commands/speedtest.rs`) and iOS
 /// (`SpeedtestScreen`): 5 latency pings + 3 × 10 MB download + 3 × 10 MB upload.
-/// Uses the authenticated session; returns `Err("vault is locked")` when none.
+/// Uses the authenticated session; returns `Err("vault is locked")` when none. A run in which nothing finished in one
+/// of the three parts is an `Err` with the reason (see [`speedtest_outcome`]), and a second run while one is going is
+/// refused.
 #[tauri::command]
 async fn run_speedtest(state: State<'_, AppState>) -> Result<SpeedtestResult, String> {
     session_command!(async {
         let api = api_client_from_session(&state)?;
+        let _slot = SpeedtestSlot::take(&SPEEDTEST_RUNNING)?;
+        let mut samples = SpeedtestSamples::default();
 
-        // Latency: 5 × GET /api/v1/health
-        let mut latencies: Vec<u64> = Vec::new();
+        // Latency: 5 × GET /api/v1/health. A ping the server did not answer has no round trip to report.
         for _ in 0..5 {
             let start = std::time::Instant::now();
-            // Ignore errors — a failed ping still has a measurable RTT and counts
-            // as a data point; the best-effort spirit matches the CLI.
-            let _ = api.ping_health().await;
-            latencies.push(start.elapsed().as_millis() as u64);
+            if api.ping_health().await.is_ok() {
+                samples.ping_ms.push(start.elapsed().as_millis() as u64);
+            }
         }
-        let min_ms = *latencies.iter().min().unwrap_or(&0);
-        let max_ms = *latencies.iter().max().unwrap_or(&0);
-        let avg_ms = latencies.iter().sum::<u64>() / latencies.len().max(1) as u64;
 
         // Upload: 3 × 10 MB POST /api/v1/speedtest
         let blob = vec![0u8; 10_000_000];
-        let mut up_speeds: Vec<f64> = Vec::new();
         for _ in 0..3 {
             let start = std::time::Instant::now();
             if api.speedtest_upload(&blob).await.is_ok() {
                 let elapsed = start.elapsed().as_secs_f64();
                 if elapsed > 0.0 {
-                    up_speeds.push(blob.len() as f64 / elapsed);
+                    samples.up_bps.push(blob.len() as f64 / elapsed);
                 }
             }
         }
-        let upload_bps = if up_speeds.is_empty() {
-            0
-        } else {
-            (up_speeds.iter().sum::<f64>() / up_speeds.len() as f64) as u64
-        };
 
         // Download: 3 × 10 MB GET /api/v1/speedtest?size=10000000
-        let mut dl_speeds: Vec<f64> = Vec::new();
         for _ in 0..3 {
             let start = std::time::Instant::now();
             if let Ok(data) = api.speedtest_download(10_000_000).await {
                 let elapsed = start.elapsed().as_secs_f64();
                 if elapsed > 0.0 {
-                    dl_speeds.push(data.len() as f64 / elapsed);
+                    samples.down_bps.push(data.len() as f64 / elapsed);
                 }
             }
         }
-        let download_bps = if dl_speeds.is_empty() {
-            0
-        } else {
-            (dl_speeds.iter().sum::<f64>() / dl_speeds.len() as f64) as u64
-        };
 
-        Ok(SpeedtestResult {
-            latency: SpeedtestLatency { min_ms, avg_ms, max_ms },
-            upload_bps,
-            download_bps,
-        })
+        speedtest_outcome(&samples)
     })
 }
 
@@ -16757,7 +16813,7 @@ mod tests {
     };
     #[cfg(not(target_os = "macos"))]
     use super::{
-        FINDER_USER_DISABLED_MESSAGE, classify_finder_install_error, clear_finder_install_failure,
+        FINDER_IPC_NOT_READY, FINDER_USER_DISABLED_MESSAGE, classify_finder_install_error, clear_finder_install_failure,
         finder_install_failure_state, finder_install_state_from_config, record_finder_install_result,
     };
     use crate::account_dto::AccountProfile;
@@ -17339,6 +17395,13 @@ mod tests {
         assert_eq!(
             classify_finder_install_error("Timed out waiting for the Beebeeb File Provider domain"),
             "timeout"
+        );
+        // The sentence the sync-socket wait fails with now reads without either word (PR #140 review, P2-8).
+        assert_eq!(classify_finder_install_error(FINDER_IPC_NOT_READY), "timeout");
+        assert_eq!(
+            classify_finder_install_error("Timed out waiting for the local Beebeeb sync daemon before installing Finder location."),
+            "timeout",
+            "a failure saved before the rewording keeps its category"
         );
     }
 
@@ -37820,3 +37883,112 @@ mod mac_update_tests {
     }
 }
 
+// ── Speed test: a run without figures is a failure, and one run at a time (PR #140 review, P2-7 / P3) ───────────────
+#[cfg(test)]
+mod speedtest_tests {
+    use super::{speedtest_outcome, SpeedtestSamples, SpeedtestSlot, SPEEDTEST_ALREADY_RUNNING, SPEEDTEST_NO_DOWNLOAD, SPEEDTEST_NO_PING, SPEEDTEST_NO_UPLOAD};
+    use std::sync::atomic::AtomicBool;
+
+    fn finished() -> SpeedtestSamples {
+        SpeedtestSamples { ping_ms: vec![20, 30, 40], up_bps: vec![4_000_000.0, 5_000_000.0], down_bps: vec![10_000_000.0, 12_000_000.0, 11_000_000.0] }
+    }
+
+    #[test]
+    fn a_run_that_finished_reports_the_means_and_the_latency_range() {
+        let result = speedtest_outcome(&finished()).expect("a run with figures in all three parts is a result");
+        assert_eq!((result.latency.min_ms, result.latency.avg_ms, result.latency.max_ms), (20, 30, 40));
+        assert_eq!(result.upload_bps, 4_500_000);
+        assert_eq!(result.download_bps, 11_000_000);
+    }
+
+    #[test]
+    fn a_run_in_which_every_ping_failed_is_a_failure_not_a_latency_of_zero() {
+        let samples = SpeedtestSamples { ping_ms: vec![], ..finished() };
+        assert_eq!(speedtest_outcome(&samples).unwrap_err(), SPEEDTEST_NO_PING);
+    }
+
+    #[test]
+    fn a_direction_that_never_finished_is_a_failure_not_zero_megabits() {
+        let no_up = SpeedtestSamples { up_bps: vec![], ..finished() };
+        assert_eq!(speedtest_outcome(&no_up).unwrap_err(), SPEEDTEST_NO_UPLOAD);
+        let no_down = SpeedtestSamples { down_bps: vec![], ..finished() };
+        assert_eq!(speedtest_outcome(&no_down).unwrap_err(), SPEEDTEST_NO_DOWNLOAD);
+        assert_eq!(speedtest_outcome(&SpeedtestSamples::default()).unwrap_err(), SPEEDTEST_NO_PING, "nothing at all names the first part that is missing");
+    }
+
+    #[test]
+    fn some_failed_transfers_do_not_fail_the_run_and_do_not_count_as_zero() {
+        // 1 of 3 uploads finished: its speed is the speed. A failed one is not a 0 in the mean.
+        let samples = SpeedtestSamples { up_bps: vec![6_000_000.0], ..finished() };
+        assert_eq!(speedtest_outcome(&samples).unwrap().upload_bps, 6_000_000);
+    }
+
+    #[test]
+    fn the_messages_are_plain_sentences_a_person_can_act_on() {
+        for message in [SPEEDTEST_NO_PING, SPEEDTEST_NO_UPLOAD, SPEEDTEST_NO_DOWNLOAD] {
+            assert!(message.ends_with("Check your internet connection and try again."), "{message}");
+        }
+    }
+
+    #[test]
+    fn a_second_test_is_refused_while_one_runs_and_the_slot_frees_when_it_ends() {
+        let flag = AtomicBool::new(false);
+        let first = SpeedtestSlot::take(&flag).expect("the first test starts");
+        assert_eq!(SpeedtestSlot::take(&flag).err().as_deref(), Some(SPEEDTEST_ALREADY_RUNNING));
+        drop(first);
+        assert!(SpeedtestSlot::take(&flag).is_ok(), "a finished (or cancelled) test frees the slot");
+    }
+
+    #[test]
+    fn the_command_takes_the_slot_before_it_sends_anything() {
+        let production = super::finder_setup_command_tests::production_source();
+        let body = super::finder_setup_command_tests::body_between(&production, "async fn run_speedtest(", "\n}\n");
+        let slot = body.find("SpeedtestSlot::take(&SPEEDTEST_RUNNING)").expect("run_speedtest takes the slot");
+        let first_request = body.find("api.ping_health()").expect("run_speedtest pings");
+        assert!(slot < first_request, "the slot comes before the first request");
+        assert!(body.contains("if api.ping_health().await.is_ok() {"), "only a ping the server answered is a round trip");
+        assert!(body.contains("speedtest_outcome(&samples)"), "the result goes through speedtest_outcome");
+    }
+}
+
+// ── The Finder install's "not ready in time" sentence keeps its category (PR #140 review, P2-8) ─────────────────────
+//
+// The sentence was reworded for people (no "daemon", no "Timed out waiting for"), and the Linux and Windows classifier
+// keyed on those words: the saved category would have become "unknown". The sentence is one constant, the classifier
+// recognises it, and these pins run on every OS (the classifier itself runs on Windows and Linux only).
+#[cfg(test)]
+mod finder_ipc_timeout_tests {
+    use super::finder_setup_command_tests::{body_between, production_source};
+    use super::{FINDER_IPC_NOT_READY, finder_install_error_is_timeout};
+
+    #[test]
+    fn the_sentence_a_person_reads_is_a_timeout_and_so_is_every_wording_that_was_saved_before() {
+        assert!(finder_install_error_is_timeout(FINDER_IPC_NOT_READY));
+        assert!(finder_install_error_is_timeout("Timed out waiting for the local Beebeeb sync daemon before installing Finder location."));
+        assert!(finder_install_error_is_timeout("Timed out waiting for the Beebeeb File Provider domain"));
+        assert!(finder_install_error_is_timeout("request timeout"));
+    }
+
+    #[test]
+    fn nothing_else_is_a_timeout() {
+        for error in [
+            "Entitlement com.apple.security.application-groups is ignored",
+            "NSFileProviderErrorDomain Code=-2011",
+            "File Provider is only available on macOS.",
+            "Beebeeb wasn’t ready to sync.",
+            "",
+        ] {
+            assert!(!finder_install_error_is_timeout(error), "{error:?}");
+        }
+    }
+
+    #[test]
+    fn the_wait_fails_with_the_constant_and_the_classifier_asks_the_predicate() {
+        let production = production_source();
+        let wait = body_between(&production, "async fn wait_for_file_provider_ipc_ready(", "\n}\n");
+        assert!(wait.contains("return Err(FINDER_IPC_NOT_READY.to_string());"), "the wait fails with the shared sentence");
+        assert!(!wait.contains("wasn’t ready in time"), "no second copy of the sentence to drift from the classifier");
+        let classifier = body_between(&production, "fn classify_finder_install_error(error: &str) -> String {", "\n}\n");
+        assert!(classifier.contains("finder_install_error_is_timeout(error)"), "the classifier asks the predicate");
+    }
+}

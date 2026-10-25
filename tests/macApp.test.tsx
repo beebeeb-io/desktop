@@ -245,6 +245,25 @@ describe('Settings in System Settings style (ruling 1, §7.8)', () => {
     expect(propsOf(m, 'security')).toEqual({ unlocked: false })
   })
 
+  test('Security is never shown without a session: when the account signs out under it, the window falls back to General (§7.8, review P2-6)', async () => {
+    let current: unknown = snapshot()
+    const { m } = openWindow({ snap: () => current })
+    const ticks: Array<() => void> = []
+    ;(globalThis as any).window.setInterval = (fn: () => void) => { ticks.push(fn); return 1 }
+    await settle(m)
+    await click(m, 'Settings')
+    await click(m, 'Security')
+    expect(shown(m)).toEqual(['security'])
+    // The session ends while the pane is open: the next read says signed out.
+    current = snapshot({ phase: 'signed_out', account: { email: null, logged_in: false, vault_unlocked: false } })
+    expect(ticks.length).toBeGreaterThan(0)
+    ticks.forEach((tickFn) => tickFn())
+    await settle(m)
+    expect(shown(m)).toEqual(['general'])
+    expect(title(m)).toBe('General')
+    expect(buttonsIn(navOf(m)[0]).map(label)).toEqual(['Back to Sign in', 'General', 'About'])
+  })
+
   test('back returns to Home and puts focus on the gear (§11)', async () => {
     const { m } = openWindow()
     await settle(m)

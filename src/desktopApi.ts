@@ -446,7 +446,11 @@ export async function command<T>(name: string, args?: Record<string, unknown>): 
     return { ok: true, value }
   } catch (error) {
     const reason = reasonFrom(error)
-    return { ok: false, reason, unsupported: isUnsupported(reason) }
+    const unsupported = isUnsupported(reason)
+    // The name of a command this build does not have is for whoever reads the log (spec §10.2 #24). It is written here,
+    // once, where the host's answer is read: `commandUnavailableLabel` is called while a component renders.
+    if (unsupported) console.warn(name, 'unavailable')
+    return { ok: false, reason, unsupported }
   }
 }
 
@@ -509,10 +513,11 @@ export function formatBytes(bytes: number): string {
 
 /**
  * What a person is told when a command is missing from the build they run (spec `2026-10-24-macos-two-surface-app.md`
- * §10.2 #24, every platform). The name of the command is for whoever reads the log, not for the screen.
+ * §10.2 #24, every platform). The name of the command is for whoever reads the log, not for the screen, and `command()`
+ * logs it when it finds the command missing; this is read while components render, so it has no side effect. The name is
+ * kept as an argument so a call site says which command it speaks for.
  */
-export function commandUnavailableLabel(commandName: string): string {
-  console.warn(commandName, 'unavailable')
+export function commandUnavailableLabel(_commandName: string): string {
   return 'This isn’t available in this version of Beebeeb.'
 }
 

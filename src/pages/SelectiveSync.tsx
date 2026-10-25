@@ -81,6 +81,23 @@ export default function SelectiveSync() {
 
       {notice && <div className="notice" style={{ marginBottom: 14 }}>{notice}</div>}
 
+      <div className="panel" style={{ marginBottom: 14 }}>
+        <div className="grid three">
+          <div>
+            <div className="metric-label">Default</div>
+            <div className="metric-detail">No folders kept on this computer</div>
+          </div>
+          <div>
+            <div className="metric-label">Scope</div>
+            <div className="metric-detail">A folder and everything inside it</div>
+          </div>
+          <div>
+            <div className="metric-label">Saved</div>
+            <div className="metric-detail">On this computer</div>
+          </div>
+        </div>
+      </div>
+
       {loading ? (
         <div className="empty-state">Loading remote tree…</div>
       ) : folderItems.length === 0 ? (

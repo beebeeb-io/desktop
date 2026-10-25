@@ -20,6 +20,7 @@ import {
   type SyncStatus,
   DEFAULT_CONFIG,
 } from '../../desktopApi'
+import { RELEASE_CHANNELS } from '../../settingsConstants'
 import {
   ALWAYS_ACCESSIBLE_SETTINGS,
   availableSettingsSections,
@@ -105,12 +106,6 @@ const SYNC_ROWS: SyncRow[] = [
 ]
 
 type ReleaseChannelValue = NonNullable<DesktopConfig['release_channel']>
-
-const RELEASE_CHANNELS: Array<{ value: ReleaseChannelValue; label: string; hint: string }> = [
-  { value: 'stable', label: 'Stable', hint: 'Regular releases after validation.' },
-  { value: 'beta', label: 'Beta', hint: 'Earlier builds for release testing.' },
-  { value: 'alpha', label: 'Alpha', hint: 'Earliest builds for rapid feedback.' },
-]
 
 const RED = 'var(--red)'
 const ACTIVITY_POLL_INTERVAL_MS = 1_500

@@ -37,6 +37,7 @@ import type { PopoverSnapshot } from './popoverContract'
 import { heldSignOutWarning, subscribeSignOutWarning } from './accountSession'
 import { finderOpenFailedToast, useFinderSetup } from './finderSetup'
 import { finderActionButtonLabel } from './finderSetupCopy'
+import { focusById } from './focusById'
 import { KeptFolderNotes, useKeptFolders } from './keptFolderRows'
 import {
   accountInitial,
@@ -53,6 +54,7 @@ import { AboutTab, AccountTab, GeneralTab, showSignOutOutcome, SyncTab, useSetti
 import { SecurityTab } from './MacSecurity'
 import {
   backLabel,
+  coerceSettingsView,
   connectMainNavigation,
   focusAfterNav,
   GEAR_ID,
@@ -83,11 +85,6 @@ function locationSearch(): string {
   } catch {
     return ''
   }
-}
-
-function focusById(id: string) {
-  if (typeof document === 'undefined') return
-  document.getElementById(id)?.focus()
 }
 
 /** The account's second line, in the sidebar footer and the Settings account row: "Vault locked" or the plan. */
@@ -304,8 +301,8 @@ export default function MacApp() {
   const [snapshot, setSnapshot] = useState<PopoverSnapshot | null>(null)
   const [snapshotFailed, setSnapshotFailed] = useState(false)
   const [plan, setPlan] = useState<Subscription | null | undefined>(undefined)
-  const [view, setView] = useState<MainView>(() => initialMainView(locationSearch()))
-  const [lastSettings, setLastSettings] = useState<SettingsTab | null>(() => (view.mode === 'settings' ? view.section : null))
+  const [rawView, setView] = useState<MainView>(() => initialMainView(locationSearch()))
+  const [lastSettings, setLastSettings] = useState<SettingsTab | null>(() => (rawView.mode === 'settings' ? rawView.section : null))
   const [focusId, setFocusId] = useState<string | null>(null)
   const [signingIn, setSigningIn] = useState(false)
   const openModals = useSyncExternalStore(subscribeOpenModals, openModalCount, openModalCount)
@@ -326,6 +323,8 @@ export default function MacApp() {
 
   const account = snapshot?.account ?? null
   const signedIn = account?.logged_in === true
+  // Signed out, only General and About exist (§7.8): a session that ends under another section moves the window to General.
+  const view = coerceSettingsView(rawView, signedIn)
   const unlocked = account?.vault_unlocked === true
   const sheetOpen = flowView.kind !== 'idle' || openModals > 0
 

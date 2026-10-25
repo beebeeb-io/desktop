@@ -125,6 +125,8 @@ export class MiniElement extends MiniNode {
   namespaceURI: string
   attributes = new Map<string, string>()
   style = styleObject()
+  /** `element.dataset.x = ...`, as the theme code writes it; a plain bag here, not mirrored into `data-*` attributes. */
+  dataset: Record<string, string> = {}
   /** Set by React for `<option selected>` and by `<select>` updates. */
   selected = false
   private ownValue: string | undefined

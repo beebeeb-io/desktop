@@ -10,7 +10,7 @@
  * The components are plain function declarations that read only their props, hooks and the bindings imported above, so the
  * tests can execute them with the component harness.
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   accountNotificationPreferences,
   accountStorageBreakdown,
@@ -101,19 +101,29 @@ type DetailsState = { status: 'loading' } | { status: 'failed' } | { status: 're
 
 /**
  * Where the storage goes, by type and by the largest files: the Windows shell's Insights, in a sheet. Nothing is read until
- * the sheet is opened, and it is read again each time it opens, so the figures are the ones of now.
+ * the sheet is opened, and it is read again each time it opens, so the figures are the ones of now. Each read has a number,
+ * and only the latest one may answer: a slow read from before the sheet was closed, or from before Try again, does not land
+ * on the figures of a later one. Closing resets the sheet, so the next opening starts from "Loading…", not from the last figures.
  */
 export function StorageDetailsSheet({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [state, setState] = useState<DetailsState>({ status: 'loading' })
+  const latest = useRef(0)
 
   const load = useCallback(async () => {
+    const mine = ++latest.current
     setState({ status: 'loading' })
     const result = await accountStorageBreakdown(STORAGE_DETAILS_LARGEST)
+    if (mine !== latest.current) return
     setState(result.ok ? { status: 'ready', details: storageDetails(result.value) } : { status: 'failed' })
   }, [])
 
   useEffect(() => {
-    if (open) void load()
+    if (open) {
+      void load()
+      return
+    }
+    latest.current += 1
+    setState({ status: 'loading' })
   }, [open, load])
 
   const details = state.status === 'ready' ? state.details : null

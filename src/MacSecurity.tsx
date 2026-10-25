@@ -3,8 +3,8 @@
  * `design/hifi/macos-two-surface.html` section 4, "Security (new)"): what the Windows shell kept in Security, Devices and
  * Activity, as the same grouped rows the other sections use.
  *
- * Four reads, none of them blocking another: the security score (only for the state of two-factor), the active sessions, the
- * devices and the last ten events. A group that did not load is ONE inline alert with Try again and leaves the other groups
+ * Four reads, none of them blocking another: the account profile (only for the state of the authenticator app), the active
+ * sessions, the devices and the last ten events. A group that did not load is ONE inline alert with Try again and leaves the other groups
  * alone; the authenticator row never claims On or Off when it could not read the score. This app has no control to turn
  * two-factor on or off, so the row says where to do that (the web app) and offers nothing it cannot do. Revoking a session
  * asks first, in the same sheet Sign out of this Mac uses; a revoke that fails is a toast (a one-off action).
@@ -19,15 +19,15 @@ import {
   accountActivityFeed,
   accountDevices,
   accountRevokeOtherSessions,
+  accountProfile,
   accountRevokeSession,
-  accountSecurityScore,
   accountSessionList,
   commandUnavailableLabel,
   openUrl,
+  type AccountProfile,
   type AccountSession,
   type ActivityFeedEvent,
   type ClientDevice,
-  type SecurityScore,
 } from './desktopApi'
 import {
   ACTIVITY_LIMIT,
@@ -35,12 +35,14 @@ import {
   DEVICES_FOOTNOTE,
   deviceRow,
   SECURITY_SETTINGS_URL,
+  SESSIONS_HEADING_ID,
   sessionRow,
   totpAction,
   totpHint,
   totpLabel,
   totpState,
 } from './macSecurityModel'
+import { focusById } from './focusById'
 import { ConfirmSheet } from './MacSettings'
 import { Btn, Note, SettingRow, SettingsGroup, SettingsIcon } from './macSettingsParts'
 import { useToast } from './windows/ui'
@@ -50,7 +52,7 @@ type Ask = { kind: 'one'; id: string; name: string } | { kind: 'others'; count: 
 
 export function SecurityTab({ unlocked }: { unlocked: boolean }) {
   const { showToast } = useToast()
-  const [score, setScore] = useState<Load<SecurityScore>>({ status: 'loading' })
+  const [profile, setProfile] = useState<Load<AccountProfile>>({ status: 'loading' })
   const [sessions, setSessions] = useState<Load<AccountSession[]>>({ status: 'loading' })
   const [devices, setDevices] = useState<Load<ClientDevice[]>>({ status: 'loading' })
   const [activity, setActivity] = useState<Load<ActivityFeedEvent[]>>({ status: 'loading' })
@@ -58,9 +60,9 @@ export function SecurityTab({ unlocked }: { unlocked: boolean }) {
   const [busy, setBusy] = useState(false)
 
   // `quiet` reads again without blanking the group first: after a revoke the rows are replaced, not flashed.
-  const loadScore = useCallback(async () => {
-    const result = await accountSecurityScore()
-    setScore(result.ok ? { status: 'ready', value: result.value } : { status: 'failed' })
+  const loadProfile = useCallback(async () => {
+    const result = await accountProfile()
+    setProfile(result.ok ? { status: 'ready', value: result.value } : { status: 'failed' })
   }, [])
   const loadSessions = useCallback(async (quiet = false) => {
     if (!quiet) setSessions({ status: 'loading' })
@@ -80,11 +82,11 @@ export function SecurityTab({ unlocked }: { unlocked: boolean }) {
 
   useEffect(() => {
     if (!unlocked) return
-    void loadScore()
+    void loadProfile()
     void loadSessions()
     void loadDevices()
     void loadActivity()
-  }, [unlocked, loadScore, loadSessions, loadDevices, loadActivity])
+  }, [unlocked, loadProfile, loadSessions, loadDevices, loadActivity])
 
   const revokeOne = async (id: string) => {
     if (busy) return
@@ -102,6 +104,8 @@ export function SecurityTab({ unlocked }: { unlocked: boolean }) {
     }
     showToast({ variant: 'success', title: 'Session signed out', message: 'That device will need to sign in again.' })
     await Promise.all([loadSessions(true), loadActivity(true)])
+    // The Revoke button that opened the question left with its row: focus goes to where the list starts.
+    focusById(SESSIONS_HEADING_ID)
   }
 
   const revokeOthers = async () => {
@@ -125,6 +129,8 @@ export function SecurityTab({ unlocked }: { unlocked: boolean }) {
       message: 'Those devices will need to sign in again.',
     })
     await Promise.all([loadSessions(true), loadActivity(true)])
+    // The button that opened the question left with the rows it ended.
+    focusById(SESSIONS_HEADING_ID)
   }
 
   if (!unlocked) {
@@ -136,7 +142,7 @@ export function SecurityTab({ unlocked }: { unlocked: boolean }) {
   }
 
   const now = Date.now()
-  const totp = totpState(score.status === 'ready' ? score.value : null)
+  const totp = totpState(profile.status === 'ready' ? profile.value : null)
 
   const loading = (name: string) => <SettingRow name={name} label="Loading…" />
   const failed = (surface: string, title: string, retry: () => void) => (
@@ -235,7 +241,7 @@ export function SecurityTab({ unlocked }: { unlocked: boolean }) {
         />
       </SettingsGroup>
 
-      <SettingsGroup title="Active sessions">{sessionRows}</SettingsGroup>
+      <SettingsGroup title="Active sessions" headingId={SESSIONS_HEADING_ID}>{sessionRows}</SettingsGroup>
 
       <SettingsGroup title="Devices" footnote={devices.status === 'ready' ? DEVICES_FOOTNOTE : undefined}>
         {deviceRows}

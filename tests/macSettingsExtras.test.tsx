@@ -164,10 +164,12 @@ describe('Storage details', () => {
   }
   function openSheet(props: { open: boolean; onClose?: () => void }, backend: Record<string, (a: any) => unknown> = {}) {
     const closed: number[] = []
+    // The same object the sheet renders from every time, so a test can close and reopen it as its parent does.
+    const merged: { open: boolean; onClose: () => void } = { onClose: () => { closed.push(1) }, ...props } as any
     const m = mount('MacSettingsExtras.tsx', 'StorageDetailsSheet', {
       backend: { account_storage_breakdown: () => breakdown, ...backend } as any,
       expand: true,
-      props: { onClose: () => { closed.push(1) }, ...props },
+      props: merged,
       bindings: {
         ...desktopApi,
         ...parts,
@@ -180,7 +182,7 @@ describe('Storage details', () => {
       },
     })
     mounted.push(m)
-    return { m, closed }
+    return { m, closed, props: merged }
   }
 
   test('closed it shows nothing and reads nothing', async () => {
@@ -241,6 +243,56 @@ describe('Storage details', () => {
     expect(called(m, 'account_storage_breakdown')).toHaveLength(2)
     expect(visibleText(m)).toContain('Media')
     expect(visibleErrorSurfaces(m)).toEqual([])
+  })
+
+  // PR #140 review, P3: a slow read must not land on a sheet that was closed and opened again.
+  test('an answer that arrives after the sheet was closed and opened again is the old one: it is dropped, the new one stays', async () => {
+    const older = { ...breakdown, total_files: 1, total_bytes: 1_000, by_category: [{ category: 'media', bytes: 1_000, file_count: 1 }], largest_files: [] }
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    let n = 0
+    const { m, props } = openSheet({ open: true }, { account_storage_breakdown: async () => { n += 1; if (n === 1) { await gate; return older } return breakdown } })
+    await m.flush()
+    props.open = false
+    await m.flush()
+    props.open = true
+    await settle(m)
+    expect(visibleText(m)).toContain('1.291 files · 84,3 GB')
+    release()
+    await settle(m)
+    expect(called(m, 'account_storage_breakdown')).toHaveLength(2)
+    expect(visibleText(m)).toContain('1.291 files · 84,3 GB')
+    expect(visibleText(m)).not.toContain('1 file · 1 kB')
+  })
+
+  test('an answer that arrives after the sheet was closed changes nothing the next opening shows', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const { m, props } = openSheet({ open: true }, { account_storage_breakdown: async () => { await gate; return breakdown } })
+    await m.flush()
+    props.open = false
+    await m.flush()
+    release()
+    await settle(m)
+    props.open = true
+    m.render()
+    expect(visibleText(m), 'the figures of the read that finished while it was closed are not shown').not.toContain('84,3 GB')
+    expect(visibleText(m)).toContain('Loading…')
+  })
+
+  test('reopened, it starts from Loading…, not from the figures it showed last time', async () => {
+    const { m, props } = openSheet({ open: true })
+    await settle(m)
+    expect(visibleText(m)).toContain('84,3 GB')
+    props.open = false
+    await settle(m)
+    props.open = true
+    m.render()
+    expect(visibleText(m)).not.toContain('84,3 GB')
+    expect(visibleText(m)).toContain('Loading…')
+    await settle(m)
+    expect(visibleText(m)).toContain('84,3 GB')
+    expect(called(m, 'account_storage_breakdown')).toHaveLength(2)
   })
 
   test('while it loads it says so and shows no figures', async () => {

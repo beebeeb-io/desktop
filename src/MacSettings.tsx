@@ -29,13 +29,11 @@ import {
   lockVault,
   openUrl,
   popoverSnapshot,
-  runSpeedtest,
   type DesktopConfig,
   type DesktopTheme,
   type CommandResult,
   type MacosIntegrationResetResult,
   type SessionActionOutcome,
-  type SpeedtestResult,
   type Subscription,
   type VaultItem,
 } from './desktopApi'
@@ -73,7 +71,8 @@ import {
 } from './macSettingsModel'
 import { Btn, ChoiceSelect, Note, Select, SettingRow, SettingsGroup, SettingsIcon, Switch, ToggleRow } from './macSettingsParts'
 import { AccountPreferencesGroup, StorageDetailsSheet } from './MacSettingsExtras'
-import { MACOS_DOWNLOAD_URL, UPDATE_DOWNLOAD_LABEL } from './macUpdateCopy'
+import { desktopSpeedTest } from './macSpeedTest'
+import { updateOffer } from './macUpdateOffer'
 import {
   A0_TITLE,
   ASK_CANCEL,
@@ -121,7 +120,6 @@ export function useSettingsConfig(): SettingsConfig {
   const { showToast } = useToast()
   const [state, setState] = useState<ConfigState>({ status: 'loading' })
   const latest = useRef<DesktopConfig | null>(null)
-  const wornTheme = useRef<DesktopTheme | null>(null)
   const queue = useRef<Promise<void>>(Promise.resolve())
   /** Changes queued behind the write that is running. Each is written as exactly this patch. */
   const pending = useRef<Array<{ patch: Partial<DesktopConfig> }>>([])
@@ -146,12 +144,11 @@ export function useSettingsConfig(): SettingsConfig {
   // The window wears the SAVED theme (Settings › General › Appearance). The config is the one source: a choice shows at once
   // because `save` changes the config first, and a write that failed, read back as the old theme, puts the old look back.
   // It lives here, with the config, so it holds on every section and not only while General is open. The first reading
-  // applies nothing: `main.tsx` applied the saved theme when the window opened.
+  // applies too: `main.tsx` applied the theme from its own read of the config when the window opened, and that read can
+  // differ from this one; applying the same theme twice changes nothing.
   const theme = state.status === 'ready' ? appearanceValue(state.config.theme) : null
   useEffect(() => {
-    if (theme === null) return
-    if (wornTheme.current !== null && wornTheme.current !== theme) setDesktopThemePreference(theme)
-    wornTheme.current = theme
+    if (theme !== null) setDesktopThemePreference(theme)
   }, [theme])
 
   const save = useCallback(
@@ -1001,17 +998,18 @@ function withPinned(items: VaultItem[], id: string, pinned: boolean): VaultItem[
 
 // ── About ───────────────────────────────────────────────────────────────────
 
-type SpeedState = { phase: 'idle' } | { phase: 'running' } | { phase: 'done'; result: SpeedtestResult }
-
 export function AboutTab({ settings, signedIn }: { settings: SettingsConfig; signedIn: boolean }) {
   const { showToast } = useToast()
   const update = useSyncExternalStore(desktopUpdateCheck.subscribe, desktopUpdateCheck.getSnapshot, desktopUpdateCheck.getSnapshot)
   const [version, setVersion] = useState<string | null>(null)
   const [exporting, setExporting] = useState(false)
   const [notesOpen, setNotesOpen] = useState(false)
-  const [speed, setSpeed] = useState<SpeedState>({ phase: 'idle' })
+  const speed = useSyncExternalStore(desktopSpeedTest.subscribe, desktopSpeedTest.getSnapshot, desktopSpeedTest.getSnapshot)
   const downgrade = update.kind === 'downgrade_available' ? update : null
   const hasDowngrade = downgrade !== null
+  // What this Mac is offered for the update it found: the newest stable image for a stable one, that release's page for
+  // another channel (`macUpdateOffer.ts`).
+  const offer = update.kind === 'update_available' ? updateOffer(update.channel, update.version) : null
 
   useEffect(() => {
     let cancelled = false
@@ -1031,11 +1029,12 @@ export function AboutTab({ settings, signedIn }: { settings: SettingsConfig; sig
   // Task 2176: the App Sandbox cannot install an update in place, so a Mac is sent to the download. There is no install
   // here, and no command that would try one.
   const downloadUpdate = async () => {
-    const result = await openUrl(MACOS_DOWNLOAD_URL)
+    if (offer === null) return
+    const result = await openUrl(offer.url)
     if (!result.ok) {
       showToast({
         variant: 'error',
-        title: 'Couldn’t open the download',
+        title: offer.stableBuild ? 'Couldn’t open the download' : 'Couldn’t open the release page',
         message: result.unsupported ? commandUnavailableLabel('open_url') : result.reason,
       })
     }
@@ -1062,21 +1061,11 @@ export function AboutTab({ settings, signedIn }: { settings: SettingsConfig; sig
     })
   }
 
-  // A one-off action that gates nothing: a failed test is a toast and the row goes back to its hint.
+  // A one-off action that gates nothing: a failed test is a toast and the row goes back to its hint. The test lives in the
+  // window's own store (`macSpeedTest.ts`), so leaving this page does not lose it.
   const runTest = async () => {
-    if (speed.phase === 'running') return
-    setSpeed({ phase: 'running' })
-    const result = await runSpeedtest()
-    if (!result.ok) {
-      setSpeed({ phase: 'idle' })
-      showToast({
-        variant: 'error',
-        title: 'Couldn’t run the speed test',
-        message: result.unsupported ? commandUnavailableLabel('run_speedtest') : result.reason,
-      })
-      return
-    }
-    setSpeed({ phase: 'done', result: result.value })
+    const failure = await desktopSpeedTest.start()
+    if (failure !== null) showToast({ variant: 'error', title: 'Couldn’t run the speed test', message: failure })
   }
 
   const config = settings.state.status === 'ready' ? settings.state.config : null
@@ -1092,7 +1081,7 @@ export function AboutTab({ settings, signedIn }: { settings: SettingsConfig; sig
   }
 
   const row = updateRow(update, version)
-  const offer = downgradeRow(update)
+  const downgradeOffer = downgradeRow(update)
 
   return (
     <>
@@ -1103,9 +1092,9 @@ export function AboutTab({ settings, signedIn }: { settings: SettingsConfig; sig
           label="Beebeeb for Mac"
           hint={row.hint}
           control={
-            row.action === 'download' ? (
+            row.action === 'download' && offer ? (
               <Btn primary onClick={() => void downloadUpdate()}>
-                {UPDATE_DOWNLOAD_LABEL}
+                {offer.label}
               </Btn>
             ) : (
               <Btn disabled={row.action === 'checking'} onClick={() => void desktopUpdateCheck.check()}>
@@ -1123,12 +1112,12 @@ export function AboutTab({ settings, signedIn }: { settings: SettingsConfig; sig
             control={<ChoiceSelect name="channel" value={channel} options={RELEASE_CHANNELS} disabled={config === null} onChange={chooseChannel} />}
           />
         )}
-        {offer && downgrade ? (
+        {downgradeOffer && downgrade ? (
           <SettingRow
             name="downgrade"
             tall
-            label={offer.label}
-            hint={offer.hint}
+            label={downgradeOffer.label}
+            hint={downgradeOffer.hint}
             control={
               <>
                 <Btn onClick={() => setNotesOpen(true)}>Release notes</Btn>
