@@ -165,6 +165,8 @@ export const CONFLICT_CHOICES: ReadonlyArray<{ choice: ConflictChoice; label: st
 export const CONFLICT_REPLACE_QUESTION = 'Use the other version here?'
 export const CONFLICT_REPLACE_LABEL = 'Use the other version'
 export const CONFLICT_REPLACE_CANCEL = 'Cancel'
+/** The id of "Cancel" in the question, which takes the focus when it appears (the button that asked has left the footer). */
+export const CONFLICT_REPLACE_CANCEL_ID = 'conflict-replace-cancel'
 /** A press this soon after the question appeared is the same press (a double click, a held Return), not an answer. */
 export const CONFLICT_REPLACE_GUARD_MS = 600
 

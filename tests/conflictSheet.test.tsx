@@ -46,6 +46,9 @@ const binaryPreview = () => ({
 const ConflictLine = loadComponent('ConflictSheet.tsx', 'ConflictLine', { React })
 const ConflictSide = loadComponent('ConflictSheet.tsx', 'ConflictSide', { React, ConflictLine, formatStorageSize })
 
+const focused: string[] = []
+beforeEach(() => { focused.length = 0 })
+
 function open(opts: { preview?: () => unknown; resolve?: (args: any) => unknown } = {}) {
   const modal = modalStub()
   const closed: string[] = []
@@ -63,6 +66,7 @@ function open(opts: { preview?: () => unknown; resolve?: (args: any) => unknown 
       Btn: parts.Btn,
       Modal: modal.Modal,
       ConflictSide, ConflictLine,
+      focusById: (id: string) => { focused.push(id) },
     },
   })
   mounted.push(m)
@@ -213,6 +217,7 @@ describe('"Keep the other" can leave this Mac with nothing of its own version, s
     const { m } = open()
     await settle(m)
     expect(noteOf(m)).toHaveLength(0)
+    expect(focused, 'nothing is focused before it asks').toEqual([])
     await press(m, 'Keep the other')
     expect(m.calls.filter((c) => c.name === 'resolve_conflict')).toEqual([])
     const note = noteOf(m)
@@ -227,8 +232,9 @@ describe('"Keep the other" can leave this Mac with nothing of its own version, s
     await settle(m)
     await press(m, 'Keep the other')
     expect(footer(m)).toEqual(['Cancel', 'Use the other version'])
-    expect(button(m, 'Cancel').props.autoFocus).toBe(true)
-    expect(button(m, 'Use the other version').props.autoFocus).toBeFalsy()
+    // The button that asked left the footer, so the focus is put on the safe answer (Return on it cancels).
+    expect(button(m, 'Cancel').props.id).toBe('conflict-replace-cancel')
+    expect(focused).toEqual(['conflict-replace-cancel'])
     expect(button(m, 'Use the other version').props.className).toContain('ms-btn--danger')
     expect(buttons(m).some((el) => el.props.className?.includes('ms-btn--primary'))).toBe(false)
   })

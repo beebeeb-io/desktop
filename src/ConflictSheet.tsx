@@ -31,10 +31,12 @@ import {
   type VersionConflictEntry,
 } from './desktopApi'
 import { diffLines, DIFF_MAX_OPS, type DiffOp } from './diffLines'
+import { focusById } from './focusById'
 import { Btn } from './macSettingsParts'
 import {
   CONFLICT_CHOICES,
   CONFLICT_REPLACE_CANCEL,
+  CONFLICT_REPLACE_CANCEL_ID,
   CONFLICT_REPLACE_GUARD_MS,
   CONFLICT_REPLACE_LABEL,
   CONFLICT_REPLACE_QUESTION,
@@ -125,6 +127,10 @@ export function ConflictSheet({
   // same press as the one that asked (a double click, a held Return), and is not an answer.
   const [confirmingRemote, setConfirmingRemote] = useState(false)
   const askedAt = useRef(0)
+  // The question's safe answer is where the focus goes (Return on it cancels): the button that asked is gone from the footer.
+  useEffect(() => {
+    if (confirmingRemote) focusById(CONFLICT_REPLACE_CANCEL_ID)
+  }, [confirmingRemote])
 
   useEffect(() => {
     let cancelled = false
@@ -190,7 +196,7 @@ export function ConflictSheet({
       footer={
         confirmingRemote ? (
           <div className="ms-sheet-footer">
-            <Btn autoFocus disabled={busy} onClick={() => setConfirmingRemote(false)}>
+            <Btn id={CONFLICT_REPLACE_CANCEL_ID} disabled={busy} onClick={() => setConfirmingRemote(false)}>
               {CONFLICT_REPLACE_CANCEL}
             </Btn>
             <Btn danger disabled={busy} onClick={useTheOther}>
