@@ -196,6 +196,11 @@ export interface VersionConflictEntry {
 /** billing/upgrade destination shared by the Plan panel and any review-row
  * "Upgrade" action — same URL Windows' StorageWidget already opens. */
 export const BILLING_URL = 'https://app.beebeeb.io/billing'
+/**
+ * Where an account is created (spec C §5.1: the built-in address; the server's own link, `signup.web_url` of the
+ * pre-account onboarding document, replaces it when task 1747's account view lands). Signup is web-only.
+ */
+export const CREATE_ACCOUNT_URL = 'https://app.beebeeb.io/signup'
 
 export type ReviewEntryActionKind = 'open_conflict' | 'upgrade' | 'manage_plan' | 'sign_in_again'
 
@@ -443,9 +448,21 @@ export function conflictContentPreview(fileId: string): Promise<CommandResult<Co
  * sign-out; for a Lock, when no Keychain session is left), and their answer is `{warning}`, with no account data
  * in it. On a Mac a status read sent during the sign-out waits behind the engine slot and is released already
  * carrying the new revision; when it is observed first, "Account changed" would report a sign-out that happened
- * as one that failed. Every other command keeps the guard.
+ * as one that failed. A sign-in is the same case from the other side (slice 2, below). Every other command keeps the
+ * guard.
  */
-const ANSWER_STANDS_WHEN_THE_ACCOUNT_CHANGES: ReadonlySet<string> = new Set(['sync_status', 'clear_session', 'lock_vault'])
+const ANSWER_STANDS_WHEN_THE_ACCOUNT_CHANGES: ReadonlySet<string> = new Set([
+  'sync_status',
+  'clear_session',
+  'lock_vault',
+  // Task 1683 slice 2: the three ways to sign in install the session, so the revision moving is the sign-in having
+  // worked. The Beebeeb window runs them under `AccountSessionBoundary`'s one-second status poll (the onboarding
+  // window did not), which can observe that revision before the sign-in's own answer arrives; "Account changed" would
+  // then report a sign-in that happened as one that failed. The answer is a LoginOutcome and carries no account data.
+  'desktop_login',
+  'desktop_login_2fa',
+  'start_browser_login',
+])
 
 export async function command<T>(name: string, args?: Record<string, unknown>): Promise<CommandResult<T>> {
   const revision = accountSessionRevision()

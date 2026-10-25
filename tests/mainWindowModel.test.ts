@@ -8,6 +8,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   backLabel,
   focusAfterNav,
+  heldNoteGoesToSettings,
   homeStatus,
   initialMainView,
   lastCheckedLine,
@@ -160,6 +161,11 @@ describe('parseMainNav: what Rust sends on main:navigate', () => {
     expect(parseMainNav({ to: 'settings' })).toEqual({ to: 'settings', section: null })
   })
 
+  // Review P3-1: `open_reauth_window` asks for “Sign in again” whatever the session says (Linux's `mode=reauth`).
+  test('“Sign in again” is a request of its own, with nothing else in it', () => {
+    expect(parseMainNav({ to: 'reauth' })).toEqual({ to: 'reauth' })
+  })
+
   test('anything else is no request', () => {
     for (const raw of [null, undefined, 'home', {}, { to: 'files' }, { to: 'settings', section: 'status' }, { to: 'settings', section: 7 }]) {
       expect(parseMainNav(raw)).toBeNull()
@@ -168,6 +174,27 @@ describe('parseMainNav: what Rust sends on main:navigate', () => {
 
   test('Security is a section a request can name (slice 5; it was the example of an unknown one in slice 1)', () => {
     expect(parseMainNav({ to: 'settings', section: 'security' })).toEqual({ to: 'settings', section: 'security' })
+  })
+})
+
+describe('navigate: “Sign in again” (review P3-1)', () => {
+  test('it leaves Settings for Home, where the card is shown, and moves nothing under a sheet', () => {
+    const inSettings: MainView = { mode: 'settings', section: 'account', returnTo: 'home' }
+    expect(navigate(inSettings, { to: 'reauth' }, signedIn)).toEqual(home)
+    expect(navigate(inSettings, { to: 'reauth' }, { ...signedIn, sheetOpen: true })).toBe(inSettings)
+  })
+})
+
+describe('where a held sign-out sentence is shown (accountSession.ts; review P2-1)', () => {
+  // A sentence that becomes held while the window is mounted brings a signed-in window to Settings › Account, where
+  // the sign-out note lives. A window that is showing a sign-in card shows the sentence above that card instead
+  // (`SignInWindow`'s note), so it is not taken away from the card: the account switch holds its own sentence while
+  // its card is up, and the remount that follows draws the signed-out card with it.
+  test('only a signed-in window that is not showing a card goes to Settings', () => {
+    expect(heldNoteGoesToSettings({ signedIn: true, showingCard: false })).toBe(true)
+    expect(heldNoteGoesToSettings({ signedIn: true, showingCard: true })).toBe(false)
+    expect(heldNoteGoesToSettings({ signedIn: false, showingCard: false })).toBe(false)
+    expect(heldNoteGoesToSettings({ signedIn: false, showingCard: true })).toBe(false)
   })
 })
 

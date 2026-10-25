@@ -537,6 +537,104 @@ flow owner is `main`. Until slice 3 the tray click still shows the compact flyou
 card in `main` opens. Tests: `tests/mainWindowModel.test.ts`, `tests/macApp.test.tsx`, `surfaces::{policy, registry,
 window_state, config_tests}`, `main_window_tests` in `lib.rs`; Chromium: `tests/render-mac-app.mjs`.
 
+<a id="two-surface-slice-2"></a>
+
+## Two-surface slice 2: sign-in and setting up this Mac in the window (task 1683)
+
+Added 2026-10-25. `CLAUDE.md` keeps the evergreen rules ("macOS window rules"); this is the slice's narrative.
+
+The signed-out Beebeeb window is the hi-fi's section 2: one centred card at a time, no sidebar, the window's title
+following the card's heading. `MacApp` asks `signInModel.windowScreen(account, flow)` which one: sign in (browser first,
+then "Use email and password"), the browser code, the email form with the second factor in the same card, Sign in again
+(an ended session; same two methods, "Signed in before as {email}"), the account switch (1887, A0s to A4s, focus on
+Cancel), set up this Mac (the recovery phrase, only after a sign-in that left no key), and the Finder status, after which
+the window moves on to Home by itself. The cards are `macSignIn.tsx`; the pure routing and transitions are
+`signInModel.ts`; the words are `accountViewCopy.ts` (spec C names that module for all its screens, task 1747 adds its
+own beside these) plus the modules that already held them (`browserLoginCopy.ts`, `accountSwitchCopy.ts`,
+`signOutCopy.ts`, `finderSetupCopy.ts`).
+
+Three findings shaped it, each from reading the code or running the window rather than from the spec:
+
+1. **The flow cannot live in React state.** `main.tsx` wraps `main` in `AccountSessionBoundary`, which remounts the whole
+   tree when the session revision moves, and a sign-in moves it (the old onboarding window was the one window outside the
+   boundary). The flow is in `signInFlowStore.ts`, read with `useSyncExternalStore`, the pattern of `accountSession.ts`'s
+   held sign-out sentence.
+2. **A step is the screen, whatever the snapshot says.** Just after a sign-in the window still holds the snapshot it read
+   before (the next read is up to five seconds away). A first version dropped a session-needing step when that snapshot said
+   "signed out"; the real-browser run (`tests/render-mac-app.mjs`) showed it throwing the next screen away. The flow is now
+   judged once, against the first snapshot a window reads when it mounts (`normalizeFlow`); a sign-out always remounts the
+   window, so that is the one place "the account left" can be true of a window that shows a flow. After a same-account
+   sign-in the flow is `settling` ("Loading…") until the first read after it lands, so the old card is not drawn again.
+3. **A sign-in changes the revision during its own call**, and `main` polls `sync_status` every second (the boundary), so
+   `command()`'s "Account changed" guard could turn a successful sign-in into an error. `desktop_login`,
+   `desktop_login_2fa` and `start_browser_login` are in `ANSWER_STANDS_WHEN_THE_ACCOUNT_CHANGES` beside `clear_session` and
+   `lock_vault`; the recovery-phrase and Keychain unlocks do not move the revision and keep the guard.
+
+A fourth, from looking at the 760 × 520 render rather than measuring it: a card taller than the window (the recovery phrase at
+the minimum size) lost its top, because `justify-content: center` on a scrolling flex column puts the overflow above the start
+where no scroll reaches it. The signed-out body centres with auto margins now, and the render checks the card's top is below
+the toolbar. And the browser handoff outlives its card: Rust moves the revision when it installs the session and emits `done`
+a few milliseconds later, and the boundary can remount the window in between, so a screen that goes away `detach`es its
+controller (told nothing more) instead of stopping it, and a late `done` still moves the flow on to the Finder screen.
+
+The browser handoff's state machine (`browserSignIn.ts`: subscribe before invoking, the phases, one settle) moved out of
+`WindowsFirstRun.tsx` and is shared; each window draws its own markup. Spec C's C-S1 asks `start_browser_login` to return
+the password path's `LoginOutcome`; 1887's pin `the_switch_count_reaches_the_sign_in_window` holds the
+`account_mismatch` event in `browser_login.rs`, so the controller maps that event to the same `SignInSettled` on the
+TypeScript side and swallows the raw code (the event and the `Err` travel separately, so it waits `MISMATCH_GRACE_MS` for
+the event if the `Err` comes first, and opens the switch step without a snapshot if it never does; Rust's gate asks again
+before anything is signed out).
+
+Rust: `surfaces::policy::onboarding_surface` (a Mac shows `main`; Windows and Linux keep their windows and labels) routes
+`open_onboarding_window` and `open_reauth_window`; the `onboarding` window is not compiled on a Mac
+(`open_onboarding_window_labelled` is `cfg(not(macos))`); `dock_icon_wanted` no longer counts it; `quit_beebeeb` is the
+card's Quit (`app.exit(0)`); `onboarding-close.json` is Linux-only and `macos-main.json` gains `core:window:allow-set-title`.
+`Onboarding.tsx` lost its macOS step, routing, platform fallback and rail wording (spec C §11); it is Linux's window, and
+the capability gate (`supportsRoute('onboarding')` is `native_credentials`, false on Linux, which fails closed) means it is
+not reachable there today either.
+
+Deviations from the hi-fi and the shipped step are listed in the PR: the Finder screen draws "turned off in System Settings"
+on the error wash (§7.5; the shipped step drew a neutral status), the in-window switch step shows an E3 that follows an ask
+(the shipped step hid it behind the stale ask), and the address is shown without its scheme.
+
+### The fix round after the /code-review of PR #143 (2026-10-25)
+
+The review found 0 P1, 3 P2 and 10 P3. Fixed in the PR, each red first and mutation-checked:
+
+- **P2-1, a sign-out's sentence is held, not toasted.** "Sign out and switch" with an unconfirmed Finder removal (FB-24) put
+  the warning in a toast, and the remount the sign-out causes (`AccountSessionBoundary`) took it. The switch step now holds it
+  (`accountSession.ts`, as Settings does) and the signed-out card shows it; a sign-out that failed AFTER the removal is held
+  the same way (the step asks `sync_status` once, whose answer is not guarded against a revision change, and holds only on a
+  definite "signed out"; otherwise it is today's toast). `MacApp` no longer leaves a card for Settings to show a held sentence
+  (`heldNoteGoesToSettings`). Tested under the real boundary: `tests/signInFlowBoundary.test.tsx`.
+- **P2-2, a stale switch card.** The card asks about the account that is still on this Mac; when it signs out another way,
+  `normalizeFlow` drops the step and keeps the typed address (the shape `afterSwitched` gives).
+- **P2-3, ⌘W on "Set up this Mac".** Rust keeps the pending step for the process (`AppState.pending_setup`, `set_pending_setup`,
+  `pending_setup`; forgotten in `keys_arrived`, answered only while signed in and locked); a window that opens signed in and
+  locked asks once and resumes there, saying "Loading…" until Rust answers. `unlock_vault` on a Mac with a token and no key used
+  to answer the Keychain's words ("unlock vault key from Keychain: secret not found"); it answers the approved Set up this Mac
+  sentence now, and Home's locked card offers "Use your recovery phrase". The error `unlock_vault` shows for a signed-in person
+  was NOT "Sign in before unlocking the vault." (that is only the token-missing case, where the person is no longer signed in).
+  A relaunch after quit stays task 1747 Part 2 (the Keychain signal).
+- **P3s:** `open_reauth_window` asks for "Sign in again" whatever `auth_expired` says (`MainNav::Reauth`, the flow step `reauth`);
+  an attempt id on `browser-login` events (`start_browser_login`'s `attempt_id`, a task-local read by `emit`; the controller reads
+  only its own attempt and ignores a late answer of an older one); the settling screen says the load failed and offers Try again
+  instead of "Loading…" forever, and carries the window's title; the offline "Try again" re-checks connectivity (`OfflineState`)
+  and starts no handoff; the Finder card offers "Continue to Home" while Finder is not Ready (a recorded deviation, spec §7.5);
+  a typo in `windowTitle.ts`.
+- **Deferred:** P3-5 (the switch snapshot is owned by the label `onboarding`) is task 1747 Part 1, with the 1887 pins it edits
+  (`docs/plans/2026-10-25-1747-account-view.md`); P3-3 and Q4 (a Home flash) are on the device list; P3-9 (the duplicated steps of
+  `Onboarding.tsx` and `signInModel.ts`) goes away with the next Linux sign-in work.
+
+The delta review of that round (0 P1, 0 P2, 5 P3) asked for three more, done in the same PR: "Use your recovery phrase" on Home's
+locked card enters Set up this Mac through `moveFlow`, like the sign-in's own step, so ⌘W on that path still resumes (the
+boundary test closes the window and opens a fresh one); the requested "Sign in again" card has a quiet "Back to Home" when the
+session is fine (`canLeaveSignInAgain`) and a request that arrives under a sheet is held until it closes (`flowForNav` answers
+`held`); and the pending set-up step is tied to the account it was set for (`HeldSetup`, `credentials_identity`,
+`account_binding::same_account`: an identity that cannot be compared resumes nothing). Two go to a follow-up after the merge: P3-3
+(the one round trip of "Loading…" after a Lock of a window that opened unlocked) and P3-5 (the sentence of a sign-out that failed
+after the removal is lost if `sync_status` itself fails; the follow-up holds it anyway, with the toast as the fallback).
+
 ---
 
 <a id="two-surface-slice-4"></a>

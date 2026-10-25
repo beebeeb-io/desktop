@@ -14,8 +14,11 @@
  * flow request reaches them whichever section shows; a request selects Settings › Account first, as the Settings
  * window's root did.
  *
- * Signed out, until slice 2 brings sign-in into this window, the window shows one centred card that opens today's
- * sign-in (the onboarding window, or "Sign in again" for an ended session). Settings then shows General and About.
+ * Signed out, the window shows one centred card at a time and no sidebar (slice 2, spec §7.4, `macSignIn.tsx`): sign in
+ * (browser first, password second), Sign in again for an ended session, the account switch, set up this Mac, and the
+ * Finder status, after which it moves on to Home. Which card follows from the session and from the sign-in FLOW
+ * (`signInModel.ts`), which lives in a module-level store because `AccountSessionBoundary` remounts this window on every
+ * session change and a sign-in is one. Settings then shows General and About.
  *
  * The components are plain function declarations that read only their props, hooks and the bindings imported here,
  * so `tests/macApp.test.tsx` can execute them with the component harness.
@@ -27,7 +30,6 @@ import {
   BILLING_URL,
   command,
   commandUnavailableLabel,
-  forceReauth,
   openUrl,
   popoverSnapshot,
   type CommandResult,
@@ -35,6 +37,7 @@ import {
 } from './desktopApi'
 import type { PopoverSnapshot } from './popoverContract'
 import { heldSignOutWarning, subscribeSignOutWarning } from './accountSession'
+import { LOAD_FAILED_TITLE, SET_UP_COPY, SIGNED_IN_WINDOW_TITLE, USE_RECOVERY_PHRASE } from './accountViewCopy'
 import { finderOpenFailedToast, useFinderSetup } from './finderSetup'
 import { finderActionButtonLabel } from './finderSetupCopy'
 import { focusById } from './focusById'
@@ -51,6 +54,7 @@ import {
 } from './macSettingsModel'
 import { LockedPane } from './LockedPane'
 import { Btn, Note, SettingsGroup, SettingsIcon } from './macSettingsParts'
+import { moveFlow, SignInWindow } from './macSignIn'
 import { AboutTab, AccountTab, GeneralTab, showSignOutOutcome, SyncTab, useSettingsConfig } from './MacSettings'
 import { SecurityTab } from './MacSecurity'
 import {
@@ -60,6 +64,7 @@ import {
   focusAfterNav,
   GEAR_ID,
   homeStatus,
+  heldNoteGoesToSettings,
   initialMainView,
   listAfterKey,
   MAIN_SECTIONS,
@@ -76,8 +81,11 @@ import {
 import { connectReviewFeed, refreshReviewFeed, reviewFeed, reviewFeedState, subscribeReviewFeed } from './reviewFeed'
 import { reviewBadge } from './reviewModel'
 import { ReviewPane } from './ReviewPane'
+import { getSignInFlow, setSignInFlow, subscribeSignInFlow } from './signInFlowStore'
+import { canLeaveSignInAgain, flowForNav, flowForPendingSetup, IDLE_FLOW, isNoVaultKey, normalizeFlow, setupCheckWanted, windowScreen } from './signInModel'
 import { connectSignOutFlowEvents, connectSignOutFlowMenu, SignOutFlow, signOutFlowApi, type FlowView } from './signOutFlow'
 import { TrashPane } from './TrashPane'
+import { setMainWindowTitle } from './windowTitle'
 import { openModalCount, subscribeOpenModals, useToast } from './windows/ui'
 import { connectNativeUpdateMenu, desktopUpdateCheck } from './windows/manualUpdateCheck'
 
@@ -105,18 +113,25 @@ function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefres
   const finder = useFinderSetup()
   const kept = useKeptFolders()
   const [busy, setBusy] = useState<'open' | 'resume' | 'unlock' | null>(null)
+  // Review P2-3 b: the Keychain holds a token and no vault key, so the unlock has nothing to read. The sentence is the
+  // approved Set up this Mac one, and the card offers the recovery phrase, which is what helps.
+  const [noKey, setNoKey] = useState(false)
 
   if (!snapshot.account.vault_unlocked) {
     const unlock = async () => {
       setBusy('unlock')
+      setNoKey(false)
       const result = await command<void>('unlock_vault')
       setBusy(null)
       if (!result.ok) {
-        showToast({
-          variant: 'error',
-          title: 'Couldn’t unlock the vault',
-          message: result.unsupported ? commandUnavailableLabel('unlock_vault') : result.reason,
-        })
+        if (!result.unsupported && isNoVaultKey(result.reason)) setNoKey(true)
+        else {
+          showToast({
+            variant: 'error',
+            title: 'Couldn’t unlock the vault',
+            message: result.unsupported ? commandUnavailableLabel('unlock_vault') : result.reason,
+          })
+        }
       }
       onRefresh()
     }
@@ -134,6 +149,14 @@ function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefres
             {busy === 'unlock' ? 'Unlocking…' : 'Unlock vault'}
           </Btn>
         </div>
+        {noKey ? (
+          <Note
+            kind="status"
+            actions={<Btn onClick={() => moveFlow({ ...IDLE_FLOW, step: 'unlock' }, setSignInFlow)}>{USE_RECOVERY_PHRASE}</Btn>}
+          >
+            {SET_UP_COPY}
+          </Note>
+        ) : null}
       </div>
     )
   }
@@ -260,41 +283,6 @@ function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefres
   )
 }
 
-// ── Signed out (until slice 2 brings sign-in into this window) ───────────────
-
-function SignedOutCard({
-  reauth,
-  email,
-  note,
-  busy,
-  onSignIn,
-}: {
-  reauth: boolean
-  email: string | null
-  note: string | null
-  busy: boolean
-  onSignIn: () => void
-}) {
-  return (
-    <div className="mw-solo-body">
-      {note ? (
-        <div className="mw-solo-note">
-          <Note kind="status">{note}</Note>
-        </div>
-      ) : null}
-      <section className="mw-signin" aria-labelledby="mw-title">
-        <div className="mw-mark" aria-hidden="true">b</div>
-        <h1 id="mw-title" className="mw-signin-title">{reauth ? 'Sign in again' : 'Sign in to Beebeeb'}</h1>
-        {reauth ? <p className="mw-signin-copy">Sync is paused until you sign in again. Your files stay in Finder.</p> : null}
-        <Btn primary disabled={busy} onClick={onSignIn}>
-          {reauth ? 'Sign in again' : 'Sign in'}
-        </Btn>
-        {reauth && email ? <p className="mw-signin-foot">Signed in before as {email}</p> : null}
-      </section>
-    </div>
-  )
-}
-
 // ── The window ───────────────────────────────────────────────────────────────
 
 export default function MacApp() {
@@ -309,7 +297,6 @@ export default function MacApp() {
   const [rawView, setView] = useState<MainView>(() => initialMainView(locationSearch()))
   const [lastSettings, setLastSettings] = useState<SettingsTab | null>(() => (rawView.mode === 'settings' ? rawView.section : null))
   const [focusId, setFocusId] = useState<string | null>(null)
-  const [signingIn, setSigningIn] = useState(false)
   const openModals = useSyncExternalStore(subscribeOpenModals, openModalCount, openModalCount)
   // Slice 4: Review's feed is one reader shared by the sidebar's badge and the Review pane. "Version history…" and
   // Trash's "Refresh" are buttons of this toolbar; the panes receive them as `historyOpen` and `refreshSignal`.
@@ -331,11 +318,24 @@ export default function MacApp() {
   }
   const flow = flowRef.current
 
+  // The sign-in flow (account switch, set up this Mac, Finder status, settling) is kept outside React: see the header.
+  const signInFlow = useSyncExternalStore(subscribeSignInFlow, getSignInFlow, getSignInFlow)
   const account = snapshot?.account ?? null
   const signedIn = account?.logged_in === true
   // Signed out, only General and About exist (§7.8): a session that ends under another section moves the window to General.
   const view = coerceSettingsView(rawView, signedIn)
   const unlocked = account?.vault_unlocked === true
+  // The flow is checked ONCE, against the first snapshot this window reads (`normalizeFlow`): a step of an account that
+  // left is dropped, so the window shown again after a sign-out starts at sign-in. Never against a later snapshot, which
+  // may predate the step a sign-in has just set. The card to draw, or Home, follows from that.
+  const flowChecked = useRef(false)
+  const flowNow = account !== null && !flowChecked.current ? normalizeFlow(account, signInFlow) : signInFlow
+  // Review P2-3: a window reopened while a password sign-in was waiting for the recovery phrase (⌘W destroyed the window
+  // and its flow) asks Rust once; a pending step resumes at Set up this Mac. Until Rust answers it says “Loading…”, so
+  // Home's locked card is not drawn for a moment and then replaced.
+  const [setupAsk, setSetupAsk] = useState<'idle' | 'asking' | 'done'>('idle')
+  const askingForSetup = account !== null && setupAsk !== 'done' && setupCheckWanted(account, flowNow)
+  const screen = account === null ? 'home' : askingForSetup ? 'settling' : windowScreen(account, flowNow)
   const sheetOpen = flowView.kind !== 'idle' || openModals > 0
 
   // The listeners below are registered once; they read the window's current state through these.
@@ -343,6 +343,11 @@ export default function MacApp() {
   viewRef.current = view
   const ctxRef = useRef({ signedIn, lastSettings, sheetOpen })
   ctxRef.current = { signedIn, lastSettings, sheetOpen }
+  // Whether a sign-in card is drawn right now (set below, once `screen` and `view` are known): a held sign-out sentence
+  // is shown on the card, not by leaving it for Settings.
+  const showingCardRef = useRef(false)
+  // A “Sign in again” request that arrived under a sheet, applied when the sheet closes (delta review P3-2).
+  const reauthHeld = useRef(false)
   // A request can arrive before the first account read (a window Rust built for it pulls it on mount): it waits for
   // that read, because which sections exist depends on the session. Each waits as the step it is, in order.
   const loadedRef = useRef(false)
@@ -376,6 +381,8 @@ export default function MacApp() {
   // in flight and never throws one away because the timer fired (a read can take 8 s, the tick is 5 s); an outcome's
   // read wins over the reads started before it (follow-up to PR #134, auto-review thread 1).
   const readerRef = useRef<SnapshotReader<CommandResult<PopoverSnapshot>> | null>(null)
+  // Set when a finished sign-in asks for a fresh read; the first read that lands after that ends the settling.
+  const awaitingSettle = useRef(false)
   if (readerRef.current === null) {
     readerRef.current = new SnapshotReader(
       () => popoverSnapshot(1),
@@ -383,6 +390,10 @@ export default function MacApp() {
         if (result.ok) {
           setSnapshot(result.value)
           setSnapshotFailed(false)
+          if (awaitingSettle.current) {
+            awaitingSettle.current = false
+            if (getSignInFlow().step === 'settling') setSignInFlow(IDLE_FLOW)
+          }
         } else {
           setSnapshotFailed(true)
         }
@@ -402,6 +413,33 @@ export default function MacApp() {
   useEffect(() => {
     if (flowOutcomes > 0) reader.refresh()
   }, [reader, flowOutcomes])
+
+  // A sign-in that finished (the same account signed in again in place) must not draw the old "Sign in again" card
+  // while the next read catches up: ask for that read now, and show only "Loading…" until it lands.
+  useEffect(() => {
+    if (signInFlow.step !== 'settling') return
+    awaitingSettle.current = true
+    reader.refresh()
+  }, [reader, signInFlow.step])
+
+  useEffect(() => {
+    if (!askingForSetup || setupAsk !== 'idle') return
+    setSetupAsk('asking')
+    void command<unknown>('pending_setup').then((result) => {
+      const resumed = result.ok ? flowForPendingSetup(result.value) : null
+      // A step set while Rust was answering is the person's: never replaced by a resumed one.
+      if (resumed !== null && getSignInFlow().step === null) setSignInFlow(resumed)
+      setSetupAsk('done')
+    })
+  }, [askingForSetup, setupAsk])
+
+  // The one check above, kept: the store follows what the first render already showed.
+  useEffect(() => {
+    if (account === null || flowChecked.current) return
+    flowChecked.current = true
+    if (flowNow !== signInFlow) setSignInFlow(flowNow)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once, for the first snapshot; later flows are not judged.
+  }, [account])
 
   // The plan needs the session; it is read again after an unlock.
   useEffect(() => {
@@ -425,16 +463,37 @@ export default function MacApp() {
   useEffect(() => {
     if (signOutNote === seenSignOutNote.current) return
     seenSignOutNote.current = signOutNote
-    if (signOutNote !== null && ctxRef.current.signedIn) go({ to: 'settings', section: 'account' }, true)
+    if (signOutNote !== null && heldNoteGoesToSettings({ signedIn: ctxRef.current.signedIn, showingCard: showingCardRef.current })) {
+      go({ to: 'settings', section: 'account' }, true)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `go` reads the refs above; the effect follows the note only.
   }, [signOutNote])
 
   // Every opener: the gear and the menus in Rust, the popover's gear menu from slice 3.
   useEffect(
-    () => connectMainNavigation(listen, () => command<unknown>('consume_main_navigation'), (nav) => go(nav)),
+    () =>
+      connectMainNavigation(listen, () => command<unknown>('consume_main_navigation'), (nav) => {
+        // “Sign in again” is a step of the sign-in flow, not a place (review P3-1): it waits for the first account read,
+        // which says whether there is an account to sign in again to, and, under a sheet, for the sheet to close (§8.2,
+        // delta review P3-2; `reauthHeld`).
+        whenLoaded(() => {
+          const { flow: next, held } = flowForNav(nav, { signedIn: ctxRef.current.signedIn, sheetOpen: ctxRef.current.sheetOpen }, getSignInFlow())
+          if (held) reauthHeld.current = true
+          else if (next !== getSignInFlow()) setSignInFlow(next)
+        })
+        go(nav)
+      }),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- registered once; `go` reads the refs above.
     [],
   )
+
+  // A “Sign in again” request that waited for a sheet is applied when the sheet closes, once (delta review P3-2).
+  useEffect(() => {
+    if (sheetOpen || !reauthHeld.current) return
+    reauthHeld.current = false
+    const { flow: next } = flowForNav({ to: 'reauth' }, { signedIn: ctxRef.current.signedIn, sheetOpen: false }, getSignInFlow())
+    if (next !== getSignInFlow()) setSignInFlow(next)
+  }, [sheetOpen])
 
   // The native "Check for Updates…": this window drains the pending request and answers inline in Settings › About's
   // row (it mounts no ManualUpdateFeedback toast). A consumed request lands on About; a plain open consumes false.
@@ -490,6 +549,15 @@ export default function MacApp() {
     void command<void>('main_window_state', menuStateFor(viewRef.current, sheetOpen))
   }, [settingsShowing, sheetOpen])
 
+  // Spec C C-W8 and spec §10.2 row 36: signed in (or in Settings) the window is "Beebeeb"; a sign-in card sets its own
+  // title, the heading it shows.
+  const loaded = account !== null
+  const showingCard = loaded && view.mode === 'main' && screen !== 'home'
+  showingCardRef.current = showingCard
+  useEffect(() => {
+    if (loaded && !showingCard) void setMainWindowTitle(SIGNED_IN_WINDOW_TITLE)
+  }, [loaded, showingCard])
+
   // §11: focus follows a navigation (the selected section, or the gear after back).
   useEffect(() => {
     if (focusId === null) return
@@ -506,7 +574,7 @@ export default function MacApp() {
             <Note
               kind="alert"
               surface="main-load"
-              title="Couldn’t load your account"
+              title={LOAD_FAILED_TITLE}
               actions={<Btn onClick={() => reader.refresh()}>Try again</Btn>}
             />
           ) : (
@@ -517,35 +585,23 @@ export default function MacApp() {
     )
   }
 
-  const base: 'home' | 'signin' | 'reauth' = !account.logged_in ? 'signin' : account.auth_expired ? 'reauth' : 'home'
   const line = accountLine(account, plan)
 
-  const signIn = async () => {
-    setSigningIn(true)
-    if (base === 'reauth') {
-      const result = await forceReauth()
-      setSigningIn(false)
-      if (!result.ok) showToast({ variant: 'error', title: 'Couldn’t start sign-in again', message: result.reason })
-      else if (result.value.warning) showToast({ variant: 'info', message: result.value.warning.sentence })
-      return
-    }
-    const opened = await command<void>('open_onboarding_window')
-    setSigningIn(false)
-    if (!opened.ok) {
-      showToast({
-        variant: 'error',
-        title: 'Couldn’t open sign-in',
-        message: opened.unsupported ? commandUnavailableLabel('open_onboarding_window') : opened.reason,
-      })
-    }
-  }
-
-  if (view.mode === 'main' && base !== 'home') {
+  if (view.mode === 'main' && screen !== 'home') {
     return (
       <div className="mw-window mw-window--solo">
         <div className="mw-toolbar mw-toolbar--solo" data-tauri-drag-region="" />
         <main className="mw-solo-main" aria-labelledby="mw-title">
-          <SignedOutCard reauth={base === 'reauth'} email={account.email} note={signOutNote} busy={signingIn} onSignIn={() => void signIn()} />
+          <SignInWindow
+            screen={screen}
+            email={account.email}
+            flow={flowNow}
+            note={signOutNote}
+            loadFailed={snapshotFailed}
+            onRetryLoad={() => reader.refresh()}
+            onBack={canLeaveSignInAgain(account, flowNow) ? () => setSignInFlow(IDLE_FLOW) : undefined}
+            onFlow={setSignInFlow}
+          />
         </main>
       </div>
     )
@@ -580,11 +636,11 @@ export default function MacApp() {
         <button
           type="button"
           className="mw-back"
-          aria-label={`Back to ${backLabel(view.returnTo, base === 'home')}`}
+          aria-label={`Back to ${backLabel(view.returnTo, screen === 'home')}`}
           onClick={() => go({ to: 'back' })}
         >
           <SettingsIcon name="back" size={14} strokeWidth={1.8} />
-          {backLabel(view.returnTo, base === 'home')}
+          {backLabel(view.returnTo, screen === 'home')}
         </button>
         <h2 className="mw-settings-heading">Settings</h2>
         {/* One Tab stop (roving tabindex): each item takes the list's keys (§11). */}

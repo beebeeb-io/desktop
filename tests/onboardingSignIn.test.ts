@@ -47,7 +47,7 @@ describe('onboardingSignIn.submitPassword', () => {
       desktopLogin: async () => ({ ok: true, value: outcome() }),
     })
     const result = await submitPassword('user@beebeeb.io', 'correct horse', api)
-    expect(result).toEqual({ ok: true, requiresTotp: false, settled: { kind: 'fresh' } })
+    expect(result).toEqual({ ok: true, requiresTotp: false, settled: { kind: 'fresh', vaultUnlocked: false } })
   })
 
   test('a wrong password surfaces the server message and never reaches requiresTotp', async () => {
@@ -74,12 +74,12 @@ describe('onboardingSignIn.submitTotpCode', () => {
     }
 
     const passwordResult = await submitPassword('user@beebeeb.io', 'correct horse', api)
-    expect(passwordResult).toEqual({ ok: true, requiresTotp: true, settled: { kind: 'fresh' } })
+    expect(passwordResult).toEqual({ ok: true, requiresTotp: true, settled: { kind: 'fresh', vaultUnlocked: false } })
     // Session must NOT be considered installed yet — the caller's UI is
     // expected to show a code prompt now, not proceed to the vault step.
 
     const totpResult = await submitTotpCode('123456', api)
-    expect(totpResult).toEqual({ ok: true, settled: { kind: 'fresh' } })
+    expect(totpResult).toEqual({ ok: true, settled: { kind: 'fresh', vaultUnlocked: false } })
 
     // Both legs of the handoff actually ran, in order — proves the code
     // prompt's `desktop_login_2fa` call really happens before sign-in is
@@ -96,7 +96,7 @@ describe('onboardingSignIn.submitTotpCode', () => {
       },
     })
     const result = await submitTotpCode('12345678', api)
-    expect(result).toEqual({ ok: true, settled: { kind: 'fresh' } })
+    expect(result).toEqual({ ok: true, settled: { kind: 'fresh', vaultUnlocked: false } })
     expect(received).toBe('12345678')
   })
 
@@ -123,10 +123,18 @@ describe('onboardingSignIn.submitTotpCode', () => {
 
 describe('settledFrom (R8)', () => {
   test('maps the outcomes', () => {
-    expect(settledFrom(outcome())).toEqual({ kind: 'fresh' })
+    expect(settledFrom(outcome())).toEqual({ kind: 'fresh', vaultUnlocked: false })
     expect(settledFrom(outcome({ reauthenticated: true, vault_unlocked: true }))).toEqual({ kind: 'reauthenticated', vaultUnlocked: true, keyReplaced: false })
     expect(settledFrom(outcome({ reauthenticated: true, vault_unlocked: false }))).toEqual({ kind: 'reauthenticated', vaultUnlocked: false, keyReplaced: false })
     expect(settledFrom(outcome({ account_mismatch: { pending_changes: 3 } }))).toEqual({ kind: 'account_mismatch', pendingChanges: 3, unsent: null, unsentError: null })
+  })
+
+  // Spec C C-S1 (the TypeScript lane's change): a FRESH result carries whether the keys arrived with it, so the window
+  // can send a sign-in that delivered them to the Finder screen instead of the recovery phrase. Rust's password path
+  // always says false today; the field is read, not assumed.
+  test('a fresh sign-in says whether its keys are here (C-S1)', () => {
+    expect(settledFrom(outcome({ vault_unlocked: true }))).toEqual({ kind: 'fresh', vaultUnlocked: true })
+    expect(settledFrom(outcome({ vault_unlocked: false }))).toEqual({ kind: 'fresh', vaultUnlocked: false })
   })
 
   // FB-I1: a same-account re-sign-in whose kept vault key the server no longer accepts. The key was
