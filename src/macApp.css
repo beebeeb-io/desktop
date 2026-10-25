@@ -459,9 +459,19 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
   gap: 14px;
   padding: 0 24px 52px;
+}
+
+/* Centred with auto margins, not `justify-content: center`: a card taller than the window (the recovery phrase at the
+   760 x 520 minimum) must scroll from its top. `justify-content: center` puts the overflow above the start, where no scroll
+   reaches it. The margins fall to zero when there is no room to spare. */
+.mw-solo-body > :first-child {
+  margin-top: auto;
+}
+
+.mw-solo-body > :last-child {
+  margin-bottom: auto;
 }
 
 .mw-solo-note {

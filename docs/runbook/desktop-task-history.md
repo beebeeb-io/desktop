@@ -570,6 +570,13 @@ Three findings shaped it, each from reading the code or running the window rathe
    `desktop_login_2fa` and `start_browser_login` are in `ANSWER_STANDS_WHEN_THE_ACCOUNT_CHANGES` beside `clear_session` and
    `lock_vault`; the recovery-phrase and Keychain unlocks do not move the revision and keep the guard.
 
+A fourth, from looking at the 760 × 520 render rather than measuring it: a card taller than the window (the recovery phrase at
+the minimum size) lost its top, because `justify-content: center` on a scrolling flex column puts the overflow above the start
+where no scroll reaches it. The signed-out body centres with auto margins now, and the render checks the card's top is below
+the toolbar. And the browser handoff outlives its card: Rust moves the revision when it installs the session and emits `done`
+a few milliseconds later, and the boundary can remount the window in between, so a screen that goes away `detach`es its
+controller (told nothing more) instead of stopping it, and a late `done` still moves the flow on to the Finder screen.
+
 The browser handoff's state machine (`browserSignIn.ts`: subscribe before invoking, the phases, one settle) moved out of
 `WindowsFirstRun.tsx` and is shared; each window draws its own markup. Spec C's C-S1 asks `start_browser_login` to return
 the password path's `LoginOutcome`; 1887's pin `the_switch_count_reaches_the_sign_in_window` holds the

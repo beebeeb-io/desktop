@@ -221,6 +221,9 @@ function report() {
     focused: document.activeElement && document.activeElement !== document.body ? (document.activeElement.getAttribute('aria-label') ?? document.activeElement.innerText.trim()) : null,
     codeFont: (() => { const c = document.querySelector('.mw-code'); return c ? getComputedStyle(c).fontFamily : null })(),
     cardWidth: (() => { const c = document.querySelector('.mw-scard'); return c ? Math.round(c.getBoundingClientRect().width) : null })(),
+    // A card taller than the window must start at the top of the body (scrolling to the rest), never lose its top.
+    cardTop: (() => { const c = document.querySelector('.mw-scard'); return c ? Math.round(c.getBoundingClientRect().top) : null })(),
+    toolbarBottom: (() => { const t = document.querySelector('.mw-toolbar'); return t ? Math.round(t.getBoundingClientRect().bottom) : null })(),
     cardCentred: (() => {
       const c = document.querySelector('.mw-scard')
       if (!c) return null
@@ -320,6 +323,7 @@ try {
           if (sc.card) {
             check(r.cardWidth === sc.card, `${label}: the card is ${sc.card} pt wide`, `${r.cardWidth}`)
             check(r.cardCentred === true, `${label}: the card is centred in the window`)
+            check(r.cardTop >= r.toolbarBottom, `${label}: the card's top is reachable, below the toolbar (a taller-than-window card scrolls from its top)`, `top ${r.cardTop}, toolbar ends ${r.toolbarBottom}`)
           }
           if (sc.title) check(r.titles.at(-1) === sc.title, `${label}: the window is titled "${sc.title}"`, r.titles.join(' | '))
           if (sc.codeMono) check(/JetBrains Mono|monospace/.test(r.codeFont ?? ''), `${label}: the device code is mono`, `${r.codeFont}`)

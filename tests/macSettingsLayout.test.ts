@@ -99,6 +99,22 @@ describe('screenshot 3, defect 1: the toolbar can never scroll away', () => {
   })
 })
 
+// Task 1683 slice 2 (found by looking at the 760 x 520 render of "Set up this Mac"): a card taller than the window lost its
+// top, because `justify-content: center` on a scrolling flex column puts the overflow above the start where no scroll can
+// reach it. The signed-out body centres with auto margins instead, which fall to zero when the card is taller, so the
+// body scrolls from the card's top.
+describe('the signed-out body: a card taller than the window scrolls from its top', () => {
+  test('the body scrolls and does not centre with justify-content', () => {
+    expect(winDecl('.mw-solo-body', 'overflow-y')).toBe('auto')
+    expect(winDecl('.mw-solo-body', 'justify-content')).toBeUndefined()
+  })
+
+  test('the first and last child of the body centre the group with auto margins', () => {
+    expect(winDecl('.mw-solo-body > :first-child', 'margin-top')).toBe('auto')
+    expect(winDecl('.mw-solo-body > :last-child', 'margin-bottom')).toBe('auto')
+  })
+})
+
 describe('screenshot 3, defect 2: one unbreakable string cannot widen a track', () => {
   test('grid tracks are minmax(0, 1fr), never a bare 1fr', () => {
     expect(winDecl('.mw-window', 'grid-template-columns')).toBe('214px minmax(0, 1fr)')
