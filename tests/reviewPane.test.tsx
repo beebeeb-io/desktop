@@ -13,7 +13,7 @@ import * as desktopApi from '../src/desktopApi'
 import * as parts from '../src/macSettingsParts'
 import * as reviewModel from '../src/reviewModel'
 import { mount, type Mounted } from './fixtures/componentHarness'
-import { button, buttons, buttonLabel, find, lines, press, settle } from './fixtures/sheetHarness'
+import { button, buttons, buttonLabel, find, lines, press, settle, visibleLabel } from './fixtures/sheetHarness'
 
 const mounted: Mounted[] = []
 afterEach(() => { while (mounted.length) mounted.pop()!.close() })
@@ -32,8 +32,9 @@ const upload: desktopApi.VersionConflictEntry = {
 const quota: desktopApi.VersionConflictEntry = { ...upload, id: 'op:3', file_id: 'f3', file_name: 'Archive.zip', kind: 'quota_failure', detail: 'This change can’t upload until you free up space or add storage. It stays on this Mac.' }
 const signedOut: desktopApi.VersionConflictEntry = { ...upload, id: 'op:4', file_id: 'f4', file_name: 'Plan.pdf', kind: 'auth_failure', action: 'sign_in_again', detail: 'Your session has expired. Sign in again to resume syncing.' }
 
-type Feed = { status: 'loading' | 'ready' | 'failed'; entries: desktopApi.VersionConflictEntry[]; reason: string | null }
-const ready = (...entries: desktopApi.VersionConflictEntry[]): Feed => ({ status: 'ready', entries, reason: null })
+type Feed = { status: 'loading' | 'ready' | 'failed'; entries: desktopApi.VersionConflictEntry[]; count: number; rejected: number; reason: string | null }
+const ready = (...entries: desktopApi.VersionConflictEntry[]): Feed => ({ status: 'ready', entries, count: entries.length, rejected: 0, reason: null })
+const without = (status: 'loading' | 'failed', reason: string | null = null): Feed => ({ status, entries: [], count: 0, rejected: 0, reason })
 
 function open(feed: Feed, extra: { historyOpen?: boolean; bindings?: Record<string, unknown> } = {}) {
   const sheets: Array<{ kind: string; props: any }> = []
@@ -62,12 +63,12 @@ const sheetsShown = (m: Mounted) => find(m, (el) => el.props['data-sheet'] !== u
 
 describe('states', () => {
   test('loading says so and shows nothing else', () => {
-    const { m } = open({ status: 'loading', entries: [], reason: null })
+    const { m } = open(without('loading'))
     expect(lines(m)).toEqual(['Loading…'])
   })
 
   test('a feed that cannot be read is one alert with the reason and a way to try again that asks the window to read again', async () => {
-    const { m, events } = open({ status: 'failed', entries: [], reason: 'state.db is locked' })
+    const { m, events } = open(without('failed', 'state.db is locked'))
     const alerts = find(m, (el) => el.props.role === 'alert')
     expect(alerts).toHaveLength(1)
     expect(lines(m)).toEqual(expect.arrayContaining(['Couldn’t load Review', 'state.db is locked']))
@@ -79,6 +80,36 @@ describe('states', () => {
     const { m } = open(ready())
     expect(lines(m)).toEqual(['Files that need a decision from you, and changes Beebeeb couldn’t send yet.', 'Nothing needs your attention.'])
     expect(buttons(m)).toHaveLength(0)
+  })
+})
+
+describe('what the list does not show (review of #142: Rust caps the feed, and an entry can fail to read)', () => {
+  const more = (m: Mounted) => find(m, (el) => el.props['data-note'] === 'more').map((el) => lines({ ...m, tree: () => el } as Mounted).join(''))
+  const unreadable = (m: Mounted) => find(m, (el) => el.props['data-note'] === 'unreadable')
+
+  test('when more wait than the list carries, the line under it says how many; when all are shown there is no line', () => {
+    expect(more(open({ ...ready(conflict, upload), count: 9 }).m)).toEqual(['7 more are waiting. They appear here as you clear these.'])
+    expect(more(open({ ...ready(conflict, upload), count: 3 }).m)).toEqual(['1 more is waiting. It appears here once you clear one of these.'])
+    expect(more(open(ready(conflict, upload)).m)).toEqual([])
+  })
+
+  test('entries that did not read are said so once, as a status; none unread, no line', () => {
+    const { m } = open({ ...ready(conflict), rejected: 2 })
+    expect(unreadable(m)).toHaveLength(1)
+    expect(unreadable(m)[0].props.role).toBe('status')
+    expect(lines(m)).toContain('Some items couldn’t be shown.')
+    expect(unreadable(open(ready(conflict)).m)).toHaveLength(0)
+  })
+
+  test('"Nothing needs your attention." is not said when something was left out: not for unread entries, not for a count the list has not caught up with', () => {
+    const allUnread = open({ ...ready(), rejected: 3 })
+    expect(lines(allUnread.m)).not.toContain('Nothing needs your attention.')
+    expect(lines(allUnread.m)).toContain('Some items couldn’t be shown.')
+    expect(find(allUnread.m, (el) => el.props.className === 'mw-card')).toHaveLength(0)
+    const behind = open({ ...ready(), count: 2 })
+    expect(lines(behind.m)).not.toContain('Nothing needs your attention.')
+    expect(more(behind.m)).toEqual(['2 more are waiting. They appear here as you clear these.'])
+    expect(lines(open(ready()).m)).toContain('Nothing needs your attention.')
   })
 })
 
@@ -104,7 +135,26 @@ describe('rows (§7.6)', () => {
 
   test('only a conflict, a storage failure and a sign-in failure have a button, labelled as the spec says', () => {
     const { m } = open(ready(conflict, upload, quota, signedOut))
-    expect(buttons(m).map(buttonLabel)).toEqual(['Decide…', 'Add storage', 'Sign in again'])
+    expect(buttons(m).map(visibleLabel)).toEqual(['Decide…', 'Add storage', 'Sign in again'])
+  })
+
+  test('"Decide…" is named for its file, so five of them are not five identical buttons to a screen reader; the visible word comes first', () => {
+    const second = { ...conflict, id: 'conflict:f9', file_id: 'f9', file_name: 'Second.md' }
+    const { m } = open(ready(conflict, upload, quota, signedOut, second))
+    expect(buttons(m).map(buttonLabel)).toEqual(['Decide…, Board notes, 29 Sept.md', 'Add storage', 'Sign in again', 'Decide…, Second.md'])
+    for (const el of buttons(m)) expect(buttonLabel(el).startsWith(visibleLabel(el))).toBe(true)
+  })
+
+  test('a plan refusal is tagged "Plan" and offers "Manage plan" (adding storage would not help); a change that was not sent is tagged "Not sent" and offers nothing', async () => {
+    const plan: desktopApi.VersionConflictEntry = { ...upload, id: 'op:8', file_id: 'f8', file_name: 'Invoice.pdf', kind: 'account_refused', status: 'plan blocked', detail: 'Your plan doesn’t allow uploads right now. This change stays on this Mac and is sent once that’s resolved.' }
+    const notSent: desktopApi.VersionConflictEntry = { ...upload, id: 'op:9', file_id: 'f9', file_name: 'Roadmap.md', kind: 'not_sent', status: 'not sent', detail: 'The copy of this change that was waiting to be sent is gone, so it can’t be sent.' }
+    const { m, urls } = open(ready(plan, notSent))
+    const text = lines(m).join(' | ')
+    expect(text).toContain('Plan')
+    expect(text).toContain('Not sent')
+    expect(buttons(m).map(buttonLabel)).toEqual(['Manage plan'])
+    await press(m, 'Manage plan')
+    expect(urls).toEqual([desktopApi.BILLING_URL])
   })
 
   test('no row button is the amber primary: Review has no single primary action, and amber is for that', () => {
@@ -134,7 +184,7 @@ describe('what each action does', () => {
   test('with two conflicts, each "Decide…" opens the sheet for its own file', async () => {
     const second = { ...conflict, id: 'conflict:f9', file_id: 'f9', file_name: 'Second.md' }
     const { m, sheets } = open(ready(conflict, second))
-    const decide = () => buttons(m).filter((el) => buttonLabel(el) === 'Decide…')
+    const decide = () => buttons(m).filter((el) => visibleLabel(el) === 'Decide…')
     expect(decide()).toHaveLength(2)
     await decide()[1].props.onClick()
     m.render()
@@ -194,7 +244,7 @@ describe('Version history… (the toolbar button lives in the window; the sheet 
   })
 
   test('and over a list that failed to load, since it does not depend on the feed', () => {
-    const { m } = open({ status: 'failed', entries: [], reason: 'x' }, { historyOpen: true })
+    const { m } = open(without('failed', 'x'), { historyOpen: true })
     expect(sheetsShown(m)).toEqual(['history'])
   })
 

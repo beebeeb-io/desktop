@@ -176,6 +176,13 @@ export interface VersionConflictEntry {
     // Previously fell through to the generic 'failed_upload' bucket with the
     // raw HTTP error text and no "sign in again" path — see `reviewEntryAction`.
     | 'auth_failure'
+    // Review of #142: read from the queue's typed columns, not from the failure's text (`engine_bridge.rs`,
+    // `classify_review_operation`). `not_sent`: a change that was parked, paused or given up and will not go on its
+    // own; `account_refused`: the plan does not allow uploads right now; `other`: a download or a pin that has not
+    // finished.
+    | 'not_sent'
+    | 'account_refused'
+    | 'other'
   status: string
   updated_at?: number
   detail: string
@@ -190,7 +197,7 @@ export interface VersionConflictEntry {
  * "Upgrade" action — same URL Windows' StorageWidget already opens. */
 export const BILLING_URL = 'https://app.beebeeb.io/billing'
 
-export type ReviewEntryActionKind = 'open_conflict' | 'upgrade' | 'sign_in_again'
+export type ReviewEntryActionKind = 'open_conflict' | 'upgrade' | 'manage_plan' | 'sign_in_again'
 
 export interface ReviewEntryAction {
   kind: ReviewEntryActionKind
@@ -213,6 +220,8 @@ export function reviewEntryAction(
   if (entry.action === 'open_conflict') return { kind: 'open_conflict', label: 'Review' }
   if (entry.kind === 'auth_failure') return { kind: 'sign_in_again', label: 'Sign in again' }
   if (entry.kind === 'quota_failure') return { kind: 'upgrade', label: 'Upgrade' }
+  // The plan, not the storage, is what blocks it (a lapsed trial, an unpaid invoice): adding storage would not help.
+  if (entry.kind === 'account_refused') return { kind: 'manage_plan', label: 'Manage plan' }
   return null
 }
 

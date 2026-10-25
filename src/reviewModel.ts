@@ -8,6 +8,7 @@
  * What stays in Rust: which entries exist, their kind, status and detail line (`version_conflict_feed_from_db`), and
  * what each conflict choice does to the files (`resolve_conflict`). This file does not classify anything again.
  */
+import { actionNamedFor } from './actionName'
 import { reviewEntryAction, type FileVersionEntry, type ReviewEntryActionKind, type VersionConflictEntry } from './desktopApi'
 import { formatStorageSize } from './storageFormat'
 import { parseWhen, whenLabel } from './whenFormat'
@@ -31,6 +32,10 @@ const KIND_LABELS: Record<string, string> = {
   // Not in the spec's table: the shipped list fell through to "Conflict" for it, which names the wrong thing on a row
   // whose button is "Sign in again". Flagged in the PR.
   auth_failure: 'Signed out',
+  // Review of #142: a change that was parked, paused or given up and will not go on its own, and the plan refusing
+  // uploads. Also not in the spec's table (flagged in the PR).
+  not_sent: 'Not sent',
+  account_refused: 'Plan',
 }
 
 export function reviewKindLabel(kind: string): string {
@@ -46,6 +51,7 @@ export interface ReviewRowAction {
 const ACTION_LABELS: Record<ReviewEntryActionKind, string> = {
   open_conflict: 'Decide…',
   upgrade: 'Add storage',
+  manage_plan: 'Manage plan',
   sign_in_again: 'Sign in again',
 }
 
@@ -56,6 +62,15 @@ const ACTION_LABELS: Record<ReviewEntryActionKind, string> = {
 export function reviewRowAction(entry: Pick<VersionConflictEntry, 'kind' | 'action'>): ReviewRowAction | null {
   const action = reviewEntryAction(entry)
   return action === null ? null : { kind: action.kind, label: ACTION_LABELS[action.kind] }
+}
+
+/**
+ * What a screen reader calls a row's button. "Decide…" is about one file, so its name says which (a list of five
+ * identical "Decide…" buttons tells nobody anything); the others act on the account, and their visible word is the name.
+ * The visible word comes first, so the name contains it (WCAG 2.5.3).
+ */
+export function reviewActionName(entry: Pick<VersionConflictEntry, 'file_name'>, action: ReviewRowAction): string {
+  return action.kind === 'open_conflict' ? actionNamedFor(action.label, entry.file_name) : action.label
 }
 
 /** "today 09:12", "yesterday 18:03", "12 Oct", "31 Dec 2025"; null when the engine has no time for the row. */
@@ -89,10 +104,33 @@ export function parseReviewEntry(raw: unknown): VersionConflictEntry | null {
   return e as unknown as VersionConflictEntry
 }
 
-/** The feed as Rust sends it: an array, of which every entry that reads is kept. Not an array is no feed (null). */
-export function parseReviewEntries(raw: unknown): VersionConflictEntry[] | null {
+/**
+ * The feed as Rust sends it: an array, of which every entry that reads is kept and every one that does not is counted
+ * (the pane says so: a Review that silently drops a row is a Review that says "Nothing needs your attention" about a
+ * file that does). Not an array is no feed (null).
+ */
+export function parseReviewFeed(raw: unknown): { entries: VersionConflictEntry[]; rejected: number } | null {
   if (!Array.isArray(raw)) return null
-  return raw.map(parseReviewEntry).filter((entry): entry is VersionConflictEntry => entry !== null)
+  const entries = raw.map(parseReviewEntry).filter((entry): entry is VersionConflictEntry => entry !== null)
+  return { entries, rejected: raw.length - entries.length }
+}
+
+/** The entries of [`parseReviewFeed`], for a reader that does not care what was refused. */
+export function parseReviewEntries(raw: unknown): VersionConflictEntry[] | null {
+  return parseReviewFeed(raw)?.entries ?? null
+}
+
+/** Shown under the rows when the answer carried entries this version of Beebeeb could not read. */
+export const REVIEW_SOME_UNREADABLE = 'Some items couldn’t be shown.'
+
+/**
+ * The line under the rows when more wait than the feed carries (the engine caps it, and the sidebar's badge counts all
+ * of them), or null when everything is shown.
+ */
+export function reviewMoreLine(count: number, shown: number): string | null {
+  const more = count - shown
+  if (!(more > 0)) return null
+  return more === 1 ? '1 more is waiting. It appears here once you clear one of these.' : `${more} more are waiting. They appear here as you clear these.`
 }
 
 /** The number on Review's sidebar row: how many things wait, only while the vault is unlocked. */
@@ -113,6 +151,15 @@ export const CONFLICT_CHOICES: ReadonlyArray<{ choice: ConflictChoice; label: st
   { choice: 'remote', label: 'Keep the other', primary: false },
   { choice: 'both', label: 'Keep both', primary: true },
 ]
+
+/**
+ * "Keep the other" is the one choice that throws something away: this Mac's file is overwritten with the other device's,
+ * and nothing keeps this Mac's version ("Keep this Mac's" leaves the other as an earlier version; "Keep both" keeps both
+ * files). So it takes a second press, on the same button, which then says what it does. Any other choice, or closing the
+ * sheet, ends the question.
+ */
+export const CONFLICT_REPLACE_QUESTION = 'Replace this Mac’s version? Your changes here are discarded.'
+export const CONFLICT_REPLACE_LABEL = 'Replace this Mac’s version'
 
 export const CONFLICT_RESOLVED_TOAST = { variant: 'success', message: 'Conflict resolved' } as const
 

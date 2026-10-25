@@ -44,6 +44,14 @@ function kindLabel(kind: VersionConflictEntry['kind']): string {
       return 'Delete'
     case 'restore':
       return 'Restore'
+    case 'auth_failure':
+      return 'Signed out'
+    case 'account_refused':
+      return 'Plan'
+    case 'not_sent':
+      return 'Not sent'
+    case 'other':
+      return 'Other'
     default:
       return 'Conflict'
   }
@@ -251,7 +259,7 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
                       </button>
                     )
                   }
-                  if (reviewAction.kind === 'upgrade') {
+                  if (reviewAction.kind === 'upgrade' || reviewAction.kind === 'manage_plan') {
                     return (
                       <button className="button amber" onClick={() => void openUrl(BILLING_URL)}>
                         {reviewAction.label}

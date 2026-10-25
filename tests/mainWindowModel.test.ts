@@ -433,4 +433,37 @@ describe('SnapshotReader: one read in flight, ticks skipped, the newest result a
     expect(applied).toEqual([{ ok: true, value: 'landed' }])
     expect(reads).toHaveLength(2)
   })
+
+  test('discard (stop for a reader that is reused): a read still out never lands after a resume, and does not hold back the next lifetime\'s first tick (review of #142)', async () => {
+    const reads: Array<ReturnType<typeof deferred>> = []
+    const applied: unknown[] = []
+    const reader = new SnapshotReader(() => { const d = deferred(); reads.push(d); return d.promise }, (r: unknown) => applied.push(r))
+    reader.resume()
+    reader.tick()
+    reader.discard() // the vault locked, or the account was switched
+    reader.resume()
+    reader.tick() // the new lifetime reads at once: the discarded read is not "in flight" for it
+    expect(reads).toHaveLength(2)
+    reads[0].resolve({ ok: true, value: 'old lifetime' })
+    await settle()
+    expect(applied).toEqual([])
+    reads[1].resolve({ ok: true, value: 'new lifetime' })
+    await settle()
+    expect(applied).toEqual([{ ok: true, value: 'new lifetime' }])
+    // The late answer of the old lifetime did not corrupt the count of reads in flight: the next tick starts a read.
+    reader.tick()
+    expect(reads).toHaveLength(3)
+  })
+
+  test('discard with nothing out, and twice, is harmless; a refresh after it reads', async () => {
+    const reads: Array<ReturnType<typeof deferred>> = []
+    const reader = new SnapshotReader(() => { const d = deferred(); reads.push(d); return d.promise }, () => {})
+    reader.discard()
+    reader.discard()
+    reader.tick()
+    expect(reads).toHaveLength(0) // stopped until resumed
+    reader.resume()
+    reader.refresh()
+    expect(reads).toHaveLength(1)
+  })
 })

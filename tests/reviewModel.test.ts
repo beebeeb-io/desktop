@@ -7,16 +7,23 @@ import { describe, expect, test } from 'bun:test'
 import { reviewEntryAction, type VersionConflictEntry } from '../src/desktopApi'
 import {
   CONFLICT_CHOICES,
+  CONFLICT_REPLACE_LABEL,
+  CONFLICT_REPLACE_QUESTION,
   CONFLICT_RESOLVED_TOAST,
   CONFLICT_SHEET_INTRO,
   CONFLICT_SIDE_LABELS,
   REVIEW_EMPTY,
   REVIEW_INTRO,
+  REVIEW_SOME_UNREADABLE,
   VERSIONS_LOAD_FAILED,
   conflictSheetTitle,
+  parseReviewEntries,
+  parseReviewFeed,
   restoreQueuedToast,
+  reviewActionName,
   reviewBadge,
   reviewKindLabel,
+  reviewMoreLine,
   reviewRowAction,
   reviewRowMeta,
   reviewWhen,
@@ -55,8 +62,14 @@ describe('the kind tags (§10.2 row 16)', () => {
     expect(reviewKindLabel('from_a_newer_engine')).toBe('Other')
   })
 
+  test('a change that was not sent, and a plan that refuses uploads, have words of their own (review of #142)', () => {
+    expect(reviewKindLabel('not_sent')).toBe('Not sent')
+    expect(reviewKindLabel('account_refused')).toBe('Plan')
+    expect(reviewKindLabel('other')).toBe('Other')
+  })
+
   test('none of the retired words survives', () => {
-    const all = ['conflict', 'failed_upload', 'quota_failure', 'permission_failure', 'stale_base', 'restore', 'metadata', 'delete', 'auth_failure'].map(reviewKindLabel)
+    const all = ['conflict', 'failed_upload', 'quota_failure', 'permission_failure', 'stale_base', 'restore', 'metadata', 'delete', 'auth_failure', 'not_sent', 'account_refused', 'other'].map(reviewKindLabel)
     for (const retired of ['Stale base', 'Metadata', 'Quota', 'Permission']) expect(all).not.toContain(retired)
   })
 })
@@ -68,14 +81,19 @@ describe('one action per row (§10.2 row 17)', () => {
     expect(reviewRowAction(entry({ kind: 'auth_failure', action: 'sign_in_again' }))).toEqual({ kind: 'sign_in_again', label: 'Sign in again' })
   })
 
+  test('a plan refusal says "Manage plan": adding storage would not help a lapsed trial', () => {
+    expect(reviewRowAction(entry({ kind: 'account_refused' }))).toEqual({ kind: 'manage_plan', label: 'Manage plan' })
+    expect(reviewEntryAction(entry({ kind: 'account_refused' }))).toEqual({ kind: 'manage_plan', label: 'Manage plan' })
+  })
+
   test('every other kind has no action: a fake button would be worse than none', () => {
-    for (const kind of ['failed_upload', 'permission_failure', 'stale_base', 'metadata', 'delete', 'restore'] as const) {
+    for (const kind of ['failed_upload', 'permission_failure', 'stale_base', 'metadata', 'delete', 'restore', 'not_sent', 'other'] as const) {
       expect(reviewRowAction(entry({ kind }))).toBeNull()
     }
   })
 
   test('it decides exactly as the shared rule does; only the words differ (Windows and Linux keep theirs)', () => {
-    const kinds = ['conflict', 'failed_upload', 'quota_failure', 'permission_failure', 'stale_base', 'restore', 'metadata', 'delete', 'auth_failure'] as const
+    const kinds = ['conflict', 'failed_upload', 'quota_failure', 'permission_failure', 'stale_base', 'restore', 'metadata', 'delete', 'auth_failure', 'not_sent', 'account_refused', 'other'] as const
     for (const kind of kinds) {
       for (const action of ['open_conflict', 'review_upload', 'restore_review', 'sign_in_again']) {
         const e = entry({ kind, action })
@@ -140,6 +158,47 @@ describe('the row\'s second line (§7.6)', () => {
   })
 })
 
+describe('what a screen reader calls a row\'s button (WCAG 2.5.3: the visible word comes first)', () => {
+  test('"Decide…" names its file; the account-wide buttons keep their word', () => {
+    const e = entry({ file_name: 'Board notes, 29 Sept.md', kind: 'conflict', action: 'open_conflict' })
+    expect(reviewActionName(e, reviewRowAction(e)!)).toBe('Decide…, Board notes, 29 Sept.md')
+    for (const kind of ['quota_failure', 'account_refused', 'auth_failure'] as const) {
+      const row = entry({ kind })
+      const action = reviewRowAction(row)!
+      expect(reviewActionName(row, action)).toBe(action.label)
+    }
+  })
+})
+
+describe('the entries Rust sends, read one by one (review of #142)', () => {
+  const good = { id: 'op:1', file_id: 'f1', file_name: 'a.md', kind: 'failed_upload', status: 's', detail: 'd', action: 'review_upload' }
+
+  test('the rows that read are kept and the rows that did not are counted, never dropped without a word', () => {
+    const feed = parseReviewFeed([good, { id: 'x' }, null, good, 'text'])!
+    expect(feed.entries).toHaveLength(2)
+    expect(feed.rejected).toBe(3)
+    expect(parseReviewFeed([good])).toEqual({ entries: [good], rejected: 0 })
+    expect(parseReviewFeed([])).toEqual({ entries: [], rejected: 0 })
+  })
+
+  test('not a list is no feed, for both readers of it', () => {
+    for (const raw of [null, undefined, {}, 'x', 4]) {
+      expect(parseReviewFeed(raw)).toBeNull()
+      expect(parseReviewEntries(raw)).toBeNull()
+    }
+    expect(parseReviewEntries([good, { id: 'x' }])).toEqual([good])
+  })
+
+  test('the words under the rows', () => {
+    expect(REVIEW_SOME_UNREADABLE).toBe('Some items couldn’t be shown.')
+    expect(reviewMoreLine(9, 2)).toBe('7 more are waiting. They appear here as you clear these.')
+    expect(reviewMoreLine(3, 2)).toBe('1 more is waiting. It appears here once you clear one of these.')
+    expect(reviewMoreLine(2, 2)).toBeNull()
+    expect(reviewMoreLine(0, 0)).toBeNull()
+    expect(reviewMoreLine(1, 4)).toBeNull() // a count that lags the list says nothing
+  })
+})
+
 describe('the sidebar badge (§7.6)', () => {
   test('a count while the vault is unlocked and something waits; nothing at zero; nothing while locked', () => {
     expect(reviewBadge(2, true)).toBe(2)
@@ -161,6 +220,11 @@ describe('the conflict sheet (§7.6, §10.2 row 35)', () => {
       { choice: 'remote', label: 'Keep the other', primary: false },
       { choice: 'both', label: 'Keep both', primary: true },
     ])
+  })
+
+  test('"Keep the other" is the choice that asks first, in these words (review of #142)', () => {
+    expect(CONFLICT_REPLACE_QUESTION).toBe('Replace this Mac’s version? Your changes here are discarded.')
+    expect(CONFLICT_REPLACE_LABEL).toBe('Replace this Mac’s version')
   })
 
   test('the success toast has no check mark (the old window printed one)', () => {

@@ -48,8 +48,8 @@ use crate::conflict::{VersionInfo, is_conflict, is_text_file};
 use crate::state_db::{
     ClaimOutcome, ClaimedOp, FileContractState, FileEntry, FileStatus, ItemKind, LocalActivityEventInput,
     LocalActivityKind, Namespace, OperationKind, OperationPauseReason, PERMISSION_OWNER, PERMISSION_READ,
-    PERMISSION_SHARE, PERMISSION_WRITE, ParkReason, PendingOperation, QueueDiagnostics, StateDb, TookOver,
-    UploadResume,
+    PERMISSION_SHARE, PERMISSION_WRITE, ParkReason, PendingOperation, QueueDiagnostics, ReviewOperation, StateDb,
+    TookOver, UploadResume,
 };
 
 // ── Wire-byte counters (P1 — live throughput) ────────────────────────────────
@@ -764,6 +764,30 @@ fn has_transport_cause(error: &anyhow::Error) -> bool {
 /// a quota refusal: never paused, never parked, so the save lands once it is cured; the app's
 /// account-state banner, not the file, says why. Any other 413, 403 or 409 keeps its rule.
 fn is_curable_refusal(error: &anyhow::Error) -> bool {
+    curable_refusal(error).is_some()
+}
+
+/// What a refusal the person cures is about (see [`is_curable_refusal`]): storage, or the account's plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CurableRefusal {
+    /// 413 `quota_exceeded`, 403 `object_budget_exceeded`: free space, or add storage.
+    Storage,
+    /// 403 `billing_read_only` and the upload gate's 409s: subscribe, or pay.
+    Account,
+}
+
+impl CurableRefusal {
+    /// The class the retrying row records (`operation_queue.last_error_class`), which Review reads: `quota` and
+    /// `account`.
+    fn class(self) -> &'static str {
+        match self {
+            CurableRefusal::Storage => "quota",
+            CurableRefusal::Account => "account",
+        }
+    }
+}
+
+fn curable_refusal(error: &anyhow::Error) -> Option<CurableRefusal> {
     use crate::api_client::{InitConflict, UploadRefusalCode as Code, UploadRefused};
     let upload_gate = |code: Option<Code>| {
         matches!(
@@ -771,19 +795,33 @@ fn is_curable_refusal(error: &anyhow::Error) -> bool {
             Some(Code::AccountLapsed | Code::PlanRequired | Code::TrialCancelledReadOnly)
         )
     };
-    error.chain().any(|cause| {
+    error.chain().find_map(|cause| {
+        if let Some(refused) = cause.downcast_ref::<UploadRefused>() {
+            match (refused.status(), refused.code) {
+                (Some(413), Some(Code::QuotaExceeded)) | (Some(403), Some(Code::ObjectBudgetExceeded)) => {
+                    return Some(CurableRefusal::Storage);
+                }
+                (Some(403), Some(Code::BillingReadOnly)) => return Some(CurableRefusal::Account),
+                (Some(409), code) if upload_gate(code) => return Some(CurableRefusal::Account),
+                _ => {}
+            }
+        }
         cause
-            .downcast_ref::<UploadRefused>()
-            .is_some_and(|refused| match (refused.status(), refused.code) {
-                (Some(413), Some(Code::QuotaExceeded)) => true,
-                (Some(403), Some(Code::ObjectBudgetExceeded | Code::BillingReadOnly)) => true,
-                (Some(409), code) => upload_gate(code),
-                _ => false,
-            })
-            || cause
-                .downcast_ref::<InitConflict>()
-                .is_some_and(|conflict| upload_gate(conflict.refusal))
+            .downcast_ref::<InitConflict>()
+            .filter(|conflict| upload_gate(conflict.refusal))
+            .map(|_| CurableRefusal::Account)
     })
+}
+
+/// The typed class a failed attempt records on the row that will be tried again, so Review says what the failure IS
+/// without reading its text: a refusal the person cures (a File Provider write only: it is the one that never uses up
+/// its attempts, §8.4, so the row can say it is sent once that is cured) and a stale base (the server's own code for
+/// "your base is not the file's version any more").
+fn retry_error_class(error: &anyhow::Error, finder_write: bool) -> Option<&'static str> {
+    if finder_write && let Some(cure) = curable_refusal(error) {
+        return Some(cure.class());
+    }
+    (init_conflict_class(error) == Some(crate::api_client::InitConflictClass::StaleBase)).then_some("stale_base")
 }
 
 /// The accept found its staged copy's journal row gone: an engine-start sweep removed the copy
@@ -1285,12 +1323,13 @@ impl EngineBridge {
                                 log_refused_upload(&op, attempts, class, false);
                             }
                             let next_retry_at = now.saturating_add(retry_delay_seconds(attempts));
-                            if !self.db.record_attempt_claimed(
+                            if !self.db.record_attempt_claimed_classified(
                                 &op.op_id,
                                 &claimed.claim_id,
                                 attempts,
                                 next_retry_at,
                                 Some(&error.to_string()),
+                                retry_error_class(&error, finder_write),
                             )? {
                                 log_queue_state_moved(&op.op_id, "attempt");
                                 continue;
@@ -3741,7 +3780,7 @@ impl EngineBridge {
     }
 
     pub fn version_conflict_feed(&self) -> anyhow::Result<Vec<VersionConflictEntry>> {
-        version_conflict_feed_from_db(self.db.as_ref())
+        version_conflict_feed_from_db(self.db.as_ref(), REVIEW_FEED_LIMIT)
     }
 
     pub fn queue_restore_version(
@@ -4954,6 +4993,39 @@ impl EngineBridge {
         Ok(conflict_name)
     }
 
+    /// The conflict sheet's choice, applied. If it fails, the conflict is still a conflict: `hydrate_file` leaves a failed
+    /// download as `Error` (right for the 24 h sweep, which retries `Error` rows itself, [`Self::auto_resolve_keep_both`]),
+    /// but a person who chose and was told "couldn't" has to find the conflict where they left it, in Review, to try
+    /// again; `Error` is not in that feed. The status is put back only if the choice began on a conflict, and only from
+    /// the state the failed attempt left, so a row something else changed meanwhile is not overwritten. Nothing is
+    /// deleted or moved back: Keep both has already kept this Mac's edits in the conflict copy beside the file.
+    pub async fn resolve_conflict_choice(
+        &self,
+        file_id: &str,
+        choice: ConflictChoice,
+        sync_root: &Path,
+    ) -> anyhow::Result<()> {
+        let was_in_conflict = self
+            .db
+            .get_file(file_id)?
+            .is_some_and(|entry| entry.status == FileStatus::Conflict);
+        let outcome = match choice {
+            ConflictChoice::Local => self.resolve_keep_mine(file_id, sync_root).await,
+            ConflictChoice::Remote => self.resolve_keep_theirs(file_id, sync_root).await,
+            ConflictChoice::Both => match self.db.get_file(file_id)? {
+                Some(entry) => self.auto_resolve_keep_both(sync_root, &entry).await.map(|_| ()),
+                None => Err(anyhow::anyhow!("no state.db row for {file_id}")),
+            },
+        };
+        if outcome.is_err()
+            && was_in_conflict
+            && let Err(put_back) = self.db.set_status_if(file_id, FileStatus::Error, FileStatus::Conflict)
+        {
+            tracing::warn!(file_id = %file_id, error = %put_back, "conflict choice failed and the conflict could not be put back in Review");
+        }
+        outcome
+    }
+
     /// Read-only content preview for the conflict-resolution window (task
     /// 1546 finding 2): reads the LOCAL file straight off disk and
     /// downloads+decrypts the CURRENT REMOTE version, without touching
@@ -5278,10 +5350,15 @@ pub fn is_ignored_finder_name(name: &str) -> bool {
         || lower.ends_with(".crdownload")
 }
 
-pub fn version_conflict_feed_from_db(db: &StateDb) -> anyhow::Result<Vec<VersionConflictEntry>> {
+/// How many things wait in Review, however many the feed carries: the sidebar badge and the pane's "N more".
+pub fn review_item_count_from_db(db: &StateDb) -> anyhow::Result<u64> {
+    Ok(db.count_conflicted_files()? + db.count_review_operations()?)
+}
+
+pub fn version_conflict_feed_from_db(db: &StateDb, limit: usize) -> anyhow::Result<Vec<VersionConflictEntry>> {
     let mut entries = Vec::new();
 
-    for file in db.list_by_status(FileStatus::Conflict)? {
+    for file in db.list_conflicted_files(limit)? {
         entries.push(VersionConflictEntry {
             id: format!("conflict:{}", file.file_id),
             file_id: file.file_id.clone(),
@@ -5299,16 +5376,18 @@ pub fn version_conflict_feed_from_db(db: &StateDb) -> anyhow::Result<Vec<Version
         });
     }
 
-    for op in db.list_review_operations()? {
-        entries.push(review_entry_for_operation(&op, db)?);
+    for review in db.list_review_operations(limit)? {
+        entries.push(review_entry_for_operation(&review, db)?);
     }
 
+    // Each half is already its newest `limit`, so the newest `limit` of both is in here.
     entries.sort_by(|a, b| {
         b.updated_at
             .unwrap_or_default()
             .cmp(&a.updated_at.unwrap_or_default())
             .then_with(|| a.id.cmp(&b.id))
     });
+    entries.truncate(limit);
     Ok(entries)
 }
 
@@ -6816,6 +6895,28 @@ fn record_moved_to_trash_activity(db: &StateDb, file_id: &str, rel_path: &str, o
 // the Beebeeb window's Review rows and on the Linux Versions page, so each is a plain sentence about what happened to the
 // change and where it is now, never the failure's own text: the raw message stays in `VersionConflictEntry::last_error`
 // (an HTTP status, a URL and a port have no business in a sentence), and the hi-fi's own line for an upload is verbatim.
+/// What the person chose in the conflict sheet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictChoice {
+    Local,
+    Remote,
+    Both,
+}
+
+impl ConflictChoice {
+    pub fn parse(choice: &str) -> Option<Self> {
+        match choice {
+            "local" => Some(Self::Local),
+            "remote" => Some(Self::Remote),
+            "both" => Some(Self::Both),
+            _ => None,
+        }
+    }
+}
+
+/// How many rows the Review feed carries at most; the window says "N more" for the rest, and its badge counts them all.
+pub const REVIEW_FEED_LIMIT: usize = 200;
+
 const REVIEW_DETAIL_CONFLICT: &str = "Changed on two devices.";
 const REVIEW_DETAIL_RESTORE: &str = "Going back to an earlier version hasn’t finished. It continues on the next sync.";
 const REVIEW_DETAIL_AUTH: &str = "Your session has expired. Sign in again to resume syncing.";
@@ -6826,22 +6927,33 @@ const REVIEW_DETAIL_UPLOAD: &str = "Couldn’t upload, will retry";
 const REVIEW_DETAIL_RENAME_OR_MOVE: &str = "A rename or move hasn’t been sent yet. It continues on the next sync.";
 const REVIEW_DETAIL_DELETE: &str = "A delete hasn’t been sent yet. It continues on the next sync.";
 const REVIEW_DETAIL_OTHER: &str = "This change hasn’t been sent yet. It continues on the next sync.";
+const REVIEW_DETAIL_DOWNLOAD: &str = "Downloading to this Mac hasn’t finished. It continues on the next sync.";
+const REVIEW_DETAIL_ACCOUNT: &str =
+    "Your plan doesn’t allow uploads right now. This change stays on this Mac and is sent once that’s resolved.";
+const REVIEW_DETAIL_PAUSED: &str = "Sending this change is paused. It stays on this Mac.";
+const REVIEW_DETAIL_KEY_REPLACED: &str =
+    "This change was made under a vault key that is no longer your account’s, so it can’t be sent. It stays on this Mac.";
+const REVIEW_DETAIL_GIVEN_UP: &str = "Beebeeb stopped trying to send this change.";
+const REVIEW_DETAIL_GIVEN_UP_DOWNLOAD: &str = "Beebeeb stopped trying to download this to this Mac.";
+const REVIEW_DETAIL_PAYLOAD_MISSING: &str =
+    "The copy of this change that was waiting to be sent is gone, so it can’t be sent.";
+const REVIEW_DETAIL_BASE_UNKNOWN: &str =
+    "Beebeeb can’t tell which version this change started from, so it wasn’t sent.";
+const REVIEW_DETAIL_PREDECESSOR_PARKED: &str = "An earlier change to this file wasn’t sent, so this one wasn’t either.";
+const REVIEW_DETAIL_PREDECESSOR_LOST: &str = "An earlier change this one depends on is gone, so it can’t be sent.";
+const REVIEW_DETAIL_REKEY_FAILED: &str =
+    "This change couldn’t be matched to the file Beebeeb now has, so it wasn’t sent.";
 
-fn review_entry_for_operation(op: &PendingOperation, db: &StateDb) -> anyhow::Result<VersionConflictEntry> {
+fn review_entry_for_operation(review: &ReviewOperation, db: &StateDb) -> anyhow::Result<VersionConflictEntry> {
+    let op = &review.op;
     let file_id = op.file_id.clone().unwrap_or_else(|| op.op_id.clone());
-    // The path the entry is about: the operation's own, else the one the state db holds for its file.
-    let path = op.target_path.clone().or_else(|| {
-        op.file_id
-            .as_deref()
-            .and_then(|id| db.get_file(id).ok().flatten())
-            .map(|entry| entry.path)
-    });
+    let path = review_path(op, db);
     let file_name = path
         .as_deref()
         .map(display_name_for_path)
         .unwrap_or_else(|| file_id.clone());
     let folder = path.as_deref().and_then(folder_name_for_path);
-    let (kind, status, detail, action) = classify_review_operation(op);
+    let (kind, status, detail, action) = classify_review_operation(review);
 
     Ok(VersionConflictEntry {
         id: format!("op:{}", op.op_id),
@@ -6860,13 +6972,35 @@ fn review_entry_for_operation(op: &PendingOperation, db: &StateDb) -> anyhow::Re
     })
 }
 
-fn classify_review_operation(op: &PendingOperation) -> (&'static str, &'static str, String, &'static str) {
-    let raw_error = op.last_error.as_deref().unwrap_or("");
-    let error = raw_error.to_ascii_lowercase();
-    // A stale base is what the failure SAYS (a parked op's reason is `stale_base`; the server's refusal names the base
-    // version). Every version upload carries a base version and its identifier, so those do not tell: with them, any
-    // failed edit of an existing file was called "changed elsewhere" (task 1683 slice 4).
-    let stale_base = error.contains("stale") || error.contains("base version");
+/// The path a Review row is about. A rename or a move is about where the file is going, so its own path; everything
+/// else is about the file, and the file's row holds where it lives. The queue cannot say: the Finder queues an edit of
+/// an existing file under the leaf it was given (`notes.txt`), so its folder would be lost. The operation's own path is
+/// what is left when the file has no row.
+fn review_path(op: &PendingOperation, db: &StateDb) -> Option<String> {
+    let of_the_file = || {
+        op.file_id
+            .as_deref()
+            .and_then(|id| db.get_file(id).ok().flatten())
+            .map(|entry| entry.path)
+    };
+    if matches!(op.kind, OperationKind::RenameFile | OperationKind::MoveFile) {
+        op.target_path.clone().or_else(of_the_file)
+    } else {
+        of_the_file().or_else(|| op.target_path.clone())
+    }
+}
+
+/// What a Review row says, kind and action included: `(kind, status, detail, action)`.
+///
+/// Read from the TYPED columns, never from the failure's text (review of #142): a park writes its reason as the class
+/// (`payload_missing`, `base_unknown`, ...), a pause writes `paused_reason` (`auth`, `quota`, ...), and a retry of a
+/// refusal the server named by code writes `quota`, `account` or `stale_base`. The text carries digits and words that
+/// are not what happened (a 403 that is a billing refusal, a port number with "401" in it). A row that carries none of
+/// them is a failure that is still being retried, or one whose attempts are used up and says so.
+fn classify_review_operation(review: &ReviewOperation) -> (&'static str, &'static str, String, &'static str) {
+    let op = &review.op;
+    let class = review.error_class.as_deref();
+    let paused = review.paused_reason.as_deref();
 
     if matches!(op.kind, OperationKind::RestoreVersion) {
         return (
@@ -6877,76 +7011,67 @@ fn classify_review_operation(op: &PendingOperation) -> (&'static str, &'static s
         );
     }
 
-    // Auth failures take priority over quota/permission/stale-base: an
-    // expired session's 401 unblocks nothing until the user signs in again,
-    // and "sign in again" is a strictly more actionable message than "your
-    // storage is full" or "permission denied" would be for the same root
-    // cause. Reuses `classify_operation_error`'s stripped-URL substring
-    // matching (task 1252 — a reqwest error's `" for url (…)"` suffix can
-    // embed a port number containing "401") instead of re-deriving a second,
-    // looser copy of the same check here (task 1546 finding 3).
-    if matches!(classify_operation_error(raw_error), OperationFailureClass::Auth) {
-        return (
-            "auth_failure",
-            "sign-in needed",
-            REVIEW_DETAIL_AUTH.to_string(),
-            "sign_in_again",
-        );
-    }
-    if error.contains("quota") || error.contains("insufficient storage") {
-        return (
-            "quota_failure",
-            "quota blocked",
-            REVIEW_DETAIL_QUOTA.to_string(),
-            "review_upload",
-        );
-    }
-    if error.contains("permission")
-        || error.contains("forbidden")
-        || error.contains("read-only")
-        || error.contains("403")
-    {
-        return (
-            "permission_failure",
-            "permission blocked",
-            REVIEW_DETAIL_PERMISSION.to_string(),
-            "review_upload",
-        );
-    }
-    if stale_base && matches!(op.kind, OperationKind::UploadVersion) {
-        return (
-            "stale_base",
-            "stale base kept local",
-            REVIEW_DETAIL_STALE_BASE.to_string(),
-            "review_upload",
-        );
+    let row = |kind, status, detail: &str, action| (kind, status, detail.to_string(), action);
+
+    // A pause says why in its own word. Auth takes priority: an expired session unblocks nothing until the person signs
+    // in again, and "sign in again" is the most actionable thing to say for it.
+    match paused {
+        Some("auth") => return row("auth_failure", "sign-in needed", REVIEW_DETAIL_AUTH, "sign_in_again"),
+        Some("quota") => return row("quota_failure", "quota blocked", REVIEW_DETAIL_QUOTA, "review_upload"),
+        Some("permission") => {
+            return row("permission_failure", "permission blocked", REVIEW_DETAIL_PERMISSION, "review_upload");
+        }
+        Some("locked") => return row("not_sent", "not sent", REVIEW_DETAIL_PAUSED, "review_upload"),
+        Some("key_replaced") => return row("not_sent", "not sent", REVIEW_DETAIL_KEY_REPLACED, "review_upload"),
+        _ => {}
     }
 
+    // A park's reason, or the class of a refusal that waiting cures. A pause's own class (`auth`, `permission`,
+    // `locked`) is not read here: the pause column is the truth about a pause, and once the pause is lifted the class
+    // stays on the row until the next attempt clears it (signing in again resumes an `auth` pause that way), so it
+    // would say "sign in again" for a row that is being retried. `quota` is both a pause and a retry class and means
+    // the same in each.
+    match class {
+        Some("quota") => return row("quota_failure", "quota blocked", REVIEW_DETAIL_QUOTA, "review_upload"),
+        Some("account") => return row("account_refused", "plan blocked", REVIEW_DETAIL_ACCOUNT, "review_upload"),
+        Some("permission_denied") => {
+            return row("permission_failure", "permission blocked", REVIEW_DETAIL_PERMISSION, "review_upload");
+        }
+        Some("stale_base") => return row("stale_base", "stale base kept local", REVIEW_DETAIL_STALE_BASE, "review_upload"),
+        Some("payload_missing") => return row("not_sent", "not sent", REVIEW_DETAIL_PAYLOAD_MISSING, "review_upload"),
+        Some("base_unknown") => return row("not_sent", "not sent", REVIEW_DETAIL_BASE_UNKNOWN, "review_upload"),
+        Some("predecessor_parked") => {
+            return row("not_sent", "not sent", REVIEW_DETAIL_PREDECESSOR_PARKED, "review_upload");
+        }
+        Some("predecessor_lost") => return row("not_sent", "not sent", REVIEW_DETAIL_PREDECESSOR_LOST, "review_upload"),
+        Some("rekey_failed") => return row("not_sent", "not sent", REVIEW_DETAIL_REKEY_FAILED, "review_upload"),
+        _ => {}
+    }
+
+    // Nothing typed: a failure that is still tried again, or one whose attempts are used up. A row that will not be
+    // tried again does not say it will.
+    let downloads = matches!(op.kind, OperationKind::HydrateFile | OperationKind::PinTree);
+    if op.attempts >= op.max_attempts {
+        return if downloads {
+            row("other", "queued review", REVIEW_DETAIL_GIVEN_UP_DOWNLOAD, "review_upload")
+        } else {
+            row("not_sent", "not sent", REVIEW_DETAIL_GIVEN_UP, "review_upload")
+        };
+    }
     match op.kind {
-        OperationKind::UploadVersion | OperationKind::UploadFile => (
-            "failed_upload",
-            "upload review",
-            REVIEW_DETAIL_UPLOAD.to_string(),
-            "review_upload",
-        ),
-        OperationKind::RenameFile | OperationKind::MoveFile => (
-            "metadata",
-            "metadata review",
-            REVIEW_DETAIL_RENAME_OR_MOVE.to_string(),
-            "review_upload",
-        ),
-        OperationKind::TrashFile => (
-            "delete",
-            "delete review",
-            REVIEW_DETAIL_DELETE.to_string(),
-            "review_upload",
-        ),
-        _ => (
-            "failed_upload",
-            "queued review",
-            REVIEW_DETAIL_OTHER.to_string(),
-            "review_upload",
-        ),
+        OperationKind::UploadVersion | OperationKind::UploadFile => {
+            row("failed_upload", "upload review", REVIEW_DETAIL_UPLOAD, "review_upload")
+        }
+        OperationKind::RenameFile | OperationKind::MoveFile => {
+            row("metadata", "metadata review", REVIEW_DETAIL_RENAME_OR_MOVE, "review_upload")
+        }
+        OperationKind::TrashFile => row("delete", "delete review", REVIEW_DETAIL_DELETE, "review_upload"),
+        OperationKind::HydrateFile | OperationKind::PinTree => {
+            row("other", "queued review", REVIEW_DETAIL_DOWNLOAD, "review_upload")
+        }
+        OperationKind::CreateFolder | OperationKind::RestoreFile | OperationKind::RestoreVersion => {
+            row("other", "queued review", REVIEW_DETAIL_OTHER, "review_upload")
+        }
     }
 }
 
@@ -8878,6 +9003,15 @@ mod tests {
         EngineBridge::new(db, api)
     }
 
+    /// An operation as the review query returns it: with the typed columns a park, a pause or a refusal wrote.
+    fn review(op: PendingOperation, error_class: Option<&str>, paused_reason: Option<&str>) -> ReviewOperation {
+        ReviewOperation {
+            op,
+            error_class: error_class.map(str::to_string),
+            paused_reason: paused_reason.map(str::to_string),
+        }
+    }
+
     #[derive(Debug, Clone)]
     struct RecordedRequest {
         method: String,
@@ -10257,9 +10391,9 @@ mod tests {
         // Task 1546 finding 3: an expired-session (401) upload failure fell
         // through to the generic `failed_upload` bucket with the raw HTTP
         // error text and no "sign in again" path. `classify_review_operation`
-        // is the function VersionCenter's list actually reads (NOT
-        // `classify_operation_error`, which already classified this
-        // correctly for backoff purposes but was never consulted here).
+        // is the function VersionCenter's list actually reads. Since task 1683
+        // (review of #142) it reads the typed columns the failure wrote, not
+        // its text: an expired session pauses the op for `auth`.
         let op = PendingOperation {
             op_id: "op-auth-1".into(),
             kind: OperationKind::UploadVersion,
@@ -10282,7 +10416,8 @@ mod tests {
             updated_at: 100,
         };
 
-        let (kind, _status, detail, action) = classify_review_operation(&op);
+        let (kind, _status, detail, action) =
+            classify_review_operation(&review(op.clone(), Some("auth"), Some("auth")));
         assert_eq!(kind, "auth_failure");
         assert_eq!(action, "sign_in_again");
         assert!(
@@ -10290,14 +10425,16 @@ mod tests {
             "detail should tell the user to sign in again, got: {detail}"
         );
 
-        // A completely unrelated failure (no 401/unauthorized/invalid-token
-        // substring) must still classify as a plain upload review, not auth —
-        // this guards against the new check being too broad.
+        // The same text with no typed class is not an auth failure: the text is not read.
+        let (kind, _status, _detail, _action) = classify_review_operation(&review(op.clone(), None, None));
+        assert_eq!(kind, "failed_upload");
+
+        // A completely unrelated failure still classifies as a plain upload review, not auth.
         let unrelated = PendingOperation {
             last_error: Some("500 Internal Server Error".to_string()),
             ..op
         };
-        let (kind, _status, _detail, _action) = classify_review_operation(&unrelated);
+        let (kind, _status, _detail, _action) = classify_review_operation(&review(unrelated, None, None));
         assert_eq!(kind, "failed_upload");
     }
 
@@ -11816,6 +11953,99 @@ mod tests {
         assert_eq!(std::fs::read(conflict_copy).unwrap(), b"local conflict bytes");
     }
 
+    /// Review of #142: a Keep the other or Keep both that fails (the network, the server) must leave the conflict where
+    /// the person can see it and try again. Before, `hydrate_file` set `Error` and the row dropped out of Review, with
+    /// the sheet closed and one toast as the only trace. The 24 h sweep keeps its `Error` rule (the test above).
+    async fn failed_choice_setup(name: &str) -> (tempfile::TempDir, PathBuf, EngineBridge, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        std::fs::write(sync_root.join(name), b"my edits on this Mac").unwrap();
+        let file_id = "bbbb0000-0000-4000-8000-000000000020".to_string();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), "http://127.0.0.1:9".into(), [16u8; 32]);
+        bridge
+            .db
+            .upsert_file(&FileEntry {
+                file_id: file_id.clone(),
+                path: name.into(),
+                status: FileStatus::Conflict,
+                size_bytes: 20,
+                modified_at: 100,
+                content_hash: Some("local-conflict-hash".into()),
+                remote_updated_at: 90,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+        (dir, sync_root, bridge, file_id)
+    }
+
+    #[tokio::test]
+    async fn a_keep_the_other_that_fails_leaves_the_conflict_in_review_and_this_macs_file_untouched() {
+        let (_dir, sync_root, bridge, file_id) = failed_choice_setup("plan.md").await;
+        bridge
+            .resolve_conflict_choice(&file_id, ConflictChoice::Remote, &sync_root)
+            .await
+            .unwrap_err();
+        assert_eq!(bridge.db.get_file(&file_id).unwrap().unwrap().status, FileStatus::Conflict);
+        let feed = bridge.version_conflict_feed().unwrap();
+        assert_eq!(feed.iter().map(|e| (e.kind.as_str(), e.action.as_str())).collect::<Vec<_>>(), [("conflict", "open_conflict")]);
+        assert_eq!(std::fs::read(sync_root.join("plan.md")).unwrap(), b"my edits on this Mac");
+        assert_eq!(review_item_count_from_db(&bridge.db).unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_keep_both_that_fails_leaves_the_conflict_in_review_and_this_macs_edits_kept_in_a_copy() {
+        let (_dir, sync_root, bridge, file_id) = failed_choice_setup("plan.md").await;
+        bridge
+            .resolve_conflict_choice(&file_id, ConflictChoice::Both, &sync_root)
+            .await
+            .unwrap_err();
+        assert_eq!(bridge.db.get_file(&file_id).unwrap().unwrap().status, FileStatus::Conflict);
+        assert_eq!(bridge.version_conflict_feed().unwrap().len(), 1);
+        let copies: Vec<_> = std::fs::read_dir(&sync_root)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| std::fs::read(p).ok().as_deref() == Some(b"my edits on this Mac".as_slice()))
+            .collect();
+        assert_eq!(copies.len(), 1, "this Mac's edits are in exactly one file: {copies:?}");
+    }
+
+    #[tokio::test]
+    async fn a_keep_this_macs_that_fails_leaves_the_conflict_in_review() {
+        let (_dir, sync_root, bridge, file_id) = failed_choice_setup("plan.md").await;
+        bridge
+            .resolve_conflict_choice(&file_id, ConflictChoice::Local, &sync_root)
+            .await
+            .unwrap_err();
+        assert_eq!(bridge.db.get_file(&file_id).unwrap().unwrap().status, FileStatus::Conflict);
+        assert_eq!(bridge.version_conflict_feed().unwrap().len(), 1);
+    }
+
+    /// The wrapper puts back only what the choice itself broke: a file that was not in conflict when the choice began
+    /// is never turned into one by a failure.
+    #[tokio::test]
+    async fn a_failed_choice_never_turns_a_file_that_was_not_in_conflict_into_one() {
+        let (_dir, sync_root, bridge, file_id) = failed_choice_setup("plan.md").await;
+        bridge.db.set_status(&file_id, FileStatus::Local).unwrap();
+        bridge
+            .resolve_conflict_choice(&file_id, ConflictChoice::Remote, &sync_root)
+            .await
+            .unwrap_err();
+        assert_ne!(bridge.db.get_file(&file_id).unwrap().unwrap().status, FileStatus::Conflict);
+        assert!(bridge.version_conflict_feed().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_conflict_sheets_three_choices_are_the_three_the_command_accepts() {
+        assert_eq!(ConflictChoice::parse("local"), Some(ConflictChoice::Local));
+        assert_eq!(ConflictChoice::parse("remote"), Some(ConflictChoice::Remote));
+        assert_eq!(ConflictChoice::parse("both"), Some(ConflictChoice::Both));
+        for other in ["", "Local", "theirs", "mine", "both "] {
+            assert_eq!(ConflictChoice::parse(other), None, "{other:?}");
+        }
+    }
+
     #[tokio::test]
     async fn test_process_due_operations_uploads_encrypted_image_thumbnails_after_complete() {
         let dir = tempfile::tempdir().unwrap();
@@ -12978,6 +13208,11 @@ mod tests {
             })
             .unwrap();
 
+        // What the engine writes when it pauses for a quota or a refusal, and when it recognises a stale base.
+        bridge.db.set_queue_classes_for_test("op-quota", Some("quota"), Some("quota")).unwrap();
+        bridge.db.set_queue_classes_for_test("op-permission", Some("permission"), Some("permission")).unwrap();
+        bridge.db.set_queue_classes_for_test("op-stale", Some("stale_base"), None).unwrap();
+
         let feed = bridge.version_conflict_feed().unwrap();
         assert!(feed.iter().any(|entry| {
             entry.kind == "conflict"
@@ -13005,9 +13240,11 @@ mod tests {
 
     /// Two-surface spec §7.6 and §10.1 (task 1683 slice 4): a Review entry's detail line is a sentence for a person, by
     /// kind, never the failure's own text. The raw message (an HTTP status, a URL with a port) stays in `last_error`.
+    /// Review of #142: the kind is read from the TYPED columns (`last_error_class`, `paused_reason`), never from the
+    /// text, and a row whose change can no longer be sent says so instead of promising a retry.
     #[test]
     fn a_review_entry_says_a_sentence_and_keeps_the_raw_failure_apart() {
-        let op = |kind: OperationKind, error: Option<&str>, base: Option<i64>| PendingOperation {
+        let op = |kind: OperationKind, error: Option<&str>, base: Option<i64>, attempts: i64| PendingOperation {
             op_id: "op-1".into(),
             kind,
             file_id: Some("f1".into()),
@@ -13017,7 +13254,7 @@ mod tests {
             payload_path: None,
             base_version: base,
             base_object_version_id: None,
-            attempts: 1,
+            attempts,
             max_attempts: 25,
             next_retry_at: 0,
             last_error: error.map(str::to_string),
@@ -13026,33 +13263,84 @@ mod tests {
             updated_at: 1,
         };
         let raw = "server returned 500 for url (http://127.0.0.1:45401/api/v1/uploads/init)";
-        let rows: Vec<(PendingOperation, &str, &str, &str)> = vec![
-            (op(OperationKind::RestoreVersion, Some(raw), None), "restore", REVIEW_DETAIL_RESTORE, "restore_review"),
-            (op(OperationKind::UploadFile, Some("401 unauthorized"), None), "auth_failure", REVIEW_DETAIL_AUTH, "sign_in_again"),
-            (op(OperationKind::UploadFile, Some("quota exceeded"), None), "quota_failure", REVIEW_DETAIL_QUOTA, "review_upload"),
-            (op(OperationKind::UploadFile, Some("403 forbidden"), None), "permission_failure", REVIEW_DETAIL_PERMISSION, "review_upload"),
-            (op(OperationKind::UploadVersion, Some("stale base version rejected"), Some(3)), "stale_base", REVIEW_DETAIL_STALE_BASE, "review_upload"),
-            (op(OperationKind::UploadFile, Some(raw), None), "failed_upload", REVIEW_DETAIL_UPLOAD, "review_upload"),
-            // A failed edit of an existing file (it carries a base version) is a failed upload unless the failure says
-            // the base is stale.
-            (op(OperationKind::UploadVersion, Some("connection refused"), Some(3)), "failed_upload", REVIEW_DETAIL_UPLOAD, "review_upload"),
-            (op(OperationKind::UploadVersion, Some("stale_base"), Some(3)), "stale_base", REVIEW_DETAIL_STALE_BASE, "review_upload"),
-            (op(OperationKind::RenameFile, Some(raw), None), "metadata", REVIEW_DETAIL_RENAME_OR_MOVE, "review_upload"),
-            (op(OperationKind::MoveFile, None, None), "metadata", REVIEW_DETAIL_RENAME_OR_MOVE, "review_upload"),
-            (op(OperationKind::TrashFile, Some(raw), None), "delete", REVIEW_DETAIL_DELETE, "review_upload"),
+        use OperationKind as K;
+        // (the row, the kind, the sentence, the action)
+        let rows: Vec<(ReviewOperation, &str, &str, &str)> = vec![
+            (review(op(K::RestoreVersion, Some(raw), None, 1), None, None), "restore", REVIEW_DETAIL_RESTORE, "restore_review"),
+            // a restore that has not failed is a row too
+            (review(op(K::RestoreVersion, None, None, 0), None, None), "restore", REVIEW_DETAIL_RESTORE, "restore_review"),
+            // paused: the pause column's word is the truth (a pause also writes it as the class, bar a hold)
+            (review(op(K::UploadFile, Some(raw), None, 1), Some("auth"), Some("auth")), "auth_failure", REVIEW_DETAIL_AUTH, "sign_in_again"),
+            (review(op(K::UploadFile, Some(raw), None, 1), None, Some("auth")), "auth_failure", REVIEW_DETAIL_AUTH, "sign_in_again"),
+            (review(op(K::UploadFile, Some(raw), None, 1), Some("quota"), Some("quota")), "quota_failure", REVIEW_DETAIL_QUOTA, "review_upload"),
+            (review(op(K::UploadFile, Some(raw), None, 1), None, Some("quota")), "quota_failure", REVIEW_DETAIL_QUOTA, "review_upload"),
+            (review(op(K::UploadFile, Some(raw), None, 1), Some("permission"), Some("permission")), "permission_failure", REVIEW_DETAIL_PERMISSION, "review_upload"),
+            (review(op(K::UploadFile, Some(raw), None, 1), None, Some("permission")), "permission_failure", REVIEW_DETAIL_PERMISSION, "review_upload"),
+            (review(op(K::UploadFile, Some(raw), None, 1), Some("locked"), Some("locked")), "not_sent", REVIEW_DETAIL_PAUSED, "review_upload"),
+            (review(op(K::UploadFile, Some(raw), None, 1), None, Some("locked")), "not_sent", REVIEW_DETAIL_PAUSED, "review_upload"),
+            // the hold keeps the `auth` class the pause wrote and changes only the pause column: the pause wins
+            (review(op(K::UploadFile, Some(raw), None, 1), Some("auth"), Some("key_replaced")), "not_sent", REVIEW_DETAIL_KEY_REPLACED, "review_upload"),
+            // signing in again lifted the pause and left its class until the next attempt: it is being retried, so it
+            // is not "sign in again" any more
+            (review(op(K::UploadFile, Some(raw), None, 1), Some("auth"), None), "failed_upload", REVIEW_DETAIL_UPLOAD, "review_upload"),
+            (review(op(K::UploadFile, Some(raw), None, 1), Some("permission"), None), "failed_upload", REVIEW_DETAIL_UPLOAD, "review_upload"),
+            (review(op(K::UploadFile, Some(raw), None, 1), Some("locked"), None), "failed_upload", REVIEW_DETAIL_UPLOAD, "review_upload"),
+            // retrying, with the class of a refusal that waiting cures (a Finder write): it names what cures it
+            (review(op(K::UploadVersion, Some(raw), Some(3), 2), Some("quota"), None), "quota_failure", REVIEW_DETAIL_QUOTA, "review_upload"),
+            (review(op(K::UploadVersion, Some(raw), Some(3), 2), Some("account"), None), "account_refused", REVIEW_DETAIL_ACCOUNT, "review_upload"),
+            (review(op(K::UploadVersion, Some(raw), Some(3), 2), Some("stale_base"), None), "stale_base", REVIEW_DETAIL_STALE_BASE, "review_upload"),
+            // parked: the edit can no longer be sent, and the row says so
+            (review(op(K::UploadVersion, Some("permission_denied"), Some(3), 25), Some("permission_denied"), None), "permission_failure", REVIEW_DETAIL_PERMISSION, "review_upload"),
+            (review(op(K::UploadVersion, Some("payload_missing"), Some(3), 25), Some("payload_missing"), None), "not_sent", REVIEW_DETAIL_PAYLOAD_MISSING, "review_upload"),
+            (review(op(K::UploadVersion, Some("base_unknown"), Some(3), 25), Some("base_unknown"), None), "not_sent", REVIEW_DETAIL_BASE_UNKNOWN, "review_upload"),
+            (review(op(K::UploadVersion, Some("predecessor_parked"), Some(3), 25), Some("predecessor_parked"), None), "not_sent", REVIEW_DETAIL_PREDECESSOR_PARKED, "review_upload"),
+            (review(op(K::UploadVersion, Some("predecessor_lost"), Some(3), 25), Some("predecessor_lost"), None), "not_sent", REVIEW_DETAIL_PREDECESSOR_LOST, "review_upload"),
+            (review(op(K::UploadVersion, Some("rekey_failed"), Some(3), 25), Some("rekey_failed"), None), "not_sent", REVIEW_DETAIL_REKEY_FAILED, "review_upload"),
+            // attempts used up with no class: it will not be tried again, and the row says that
+            (review(op(K::UploadFile, Some(raw), None, 25), None, None), "not_sent", REVIEW_DETAIL_GIVEN_UP, "review_upload"),
+            (review(op(K::RenameFile, Some(raw), None, 25), None, None), "not_sent", REVIEW_DETAIL_GIVEN_UP, "review_upload"),
+            // still retrying: the failure's text is not read, so a message that says "quota" or "403" is just a failure
+            (review(op(K::UploadFile, Some(raw), None, 1), None, None), "failed_upload", REVIEW_DETAIL_UPLOAD, "review_upload"),
+            (review(op(K::UploadFile, Some("quota exceeded"), None, 1), None, None), "failed_upload", REVIEW_DETAIL_UPLOAD, "review_upload"),
+            (review(op(K::UploadFile, Some("403 forbidden"), None, 1), None, None), "failed_upload", REVIEW_DETAIL_UPLOAD, "review_upload"),
+            (review(op(K::UploadFile, Some("401 unauthorized"), None, 1), None, None), "failed_upload", REVIEW_DETAIL_UPLOAD, "review_upload"),
+            // a failed edit of an existing file (it carries a base version) is a failed upload unless the base is stale
+            (review(op(K::UploadVersion, Some("connection refused"), Some(3), 1), None, None), "failed_upload", REVIEW_DETAIL_UPLOAD, "review_upload"),
+            (review(op(K::UploadVersion, Some("stale base version rejected"), Some(3), 1), None, None), "failed_upload", REVIEW_DETAIL_UPLOAD, "review_upload"),
+            (review(op(K::RenameFile, Some(raw), None, 1), None, None), "metadata", REVIEW_DETAIL_RENAME_OR_MOVE, "review_upload"),
+            (review(op(K::MoveFile, None, None, 0), None, None), "metadata", REVIEW_DETAIL_RENAME_OR_MOVE, "review_upload"),
+            (review(op(K::TrashFile, Some(raw), None, 1), None, None), "delete", REVIEW_DETAIL_DELETE, "review_upload"),
+            // not an upload at all: the sentence goes the way the change goes
+            (review(op(K::CreateFolder, Some(raw), None, 1), None, None), "other", REVIEW_DETAIL_OTHER, "review_upload"),
+            (review(op(K::HydrateFile, Some(raw), None, 1), None, None), "other", REVIEW_DETAIL_DOWNLOAD, "review_upload"),
+            (review(op(K::PinTree, Some(raw), None, 1), None, None), "other", REVIEW_DETAIL_DOWNLOAD, "review_upload"),
+            (review(op(K::HydrateFile, Some(raw), None, 25), None, None), "other", REVIEW_DETAIL_GIVEN_UP_DOWNLOAD, "review_upload"),
         ];
-        for (pending, kind, sentence, action) in rows {
-            let (got_kind, _status, detail, got_action) = classify_review_operation(&pending);
-            assert_eq!((got_kind, got_action), (kind, action), "{:?}", pending.kind);
-            assert_eq!(detail, sentence, "{kind}");
-            for developer in ["http", "127.0.0.1", "server returned", "url (", "worker", "queue", "endpoint", "bytes"] {
-                assert!(!detail.to_ascii_lowercase().contains(developer), "{kind}: {detail}");
+        let developer_words = ["http", "127.0.0.1", "server returned", "url (", "worker", "queue", "endpoint", "bytes"];
+        for (pending, kind, sentence, action) in &rows {
+            let label = format!("{:?} {:?}/{:?} at {}", pending.op.kind, pending.error_class, pending.paused_reason, pending.op.attempts);
+            let (got_kind, _status, detail, got_action) = classify_review_operation(pending);
+            assert_eq!((got_kind, got_action), (*kind, *action), "{label}");
+            assert_eq!(&detail, sentence, "{label}");
+            for developer in developer_words {
+                assert!(!detail.to_ascii_lowercase().contains(developer), "{label}: {detail}");
+            }
+        }
+        // A change that can no longer be sent never says it will be: no "retry" in a parked, paused or given-up row.
+        for (pending, kind, sentence, _) in &rows {
+            if *kind == "not_sent" {
+                assert!(!sentence.to_ascii_lowercase().contains("retry"), "{sentence}");
+                assert!(!sentence.contains("continues on the next sync"), "{sentence}");
+            }
+            // A download's sentence is not about sending.
+            if matches!(pending.op.kind, OperationKind::HydrateFile | OperationKind::PinTree) {
+                assert!(!sentence.contains("sent") && !sentence.contains("upload"), "{sentence}");
             }
         }
         // The failure's own text is carried on the entry for support, whatever the sentence says.
         let db_dir = tempfile::tempdir().unwrap();
         let db = StateDb::open(db_dir.path().join("state.db")).unwrap();
-        let entry = review_entry_for_operation(&op(OperationKind::UploadFile, Some(raw), None), &db).unwrap();
+        let entry = review_entry_for_operation(&review(op(K::UploadFile, Some(raw), None, 1), None, None), &db).unwrap();
         assert_eq!(entry.detail, REVIEW_DETAIL_UPLOAD);
         assert_eq!(entry.last_error.as_deref(), Some(raw));
         assert_eq!(REVIEW_DETAIL_CONFLICT, "Changed on two devices.");
@@ -13070,6 +13358,66 @@ mod tests {
         assert_eq!(folder_name_for_path("/"), None);
         // The name a row shows is still the file's.
         assert_eq!(display_name_for_path("/Team shared/Board notes.md"), "Board notes.md");
+    }
+
+    /// Review of #142: the feed is read on a 5 s poll, so it carries at most a cap of rows, newest first, and the badge
+    /// and the pane's "N more" come from a count that does not build them.
+    #[test]
+    fn the_review_feed_is_capped_newest_first_and_counted_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        for (id, at) in [("c-new", 600_i64), ("c-old", 3)] {
+            bridge
+                .db
+                .upsert_file(&FileEntry {
+                    file_id: id.into(),
+                    path: format!("/Work/{id}.md"),
+                    status: FileStatus::Conflict,
+                    size_bytes: 1,
+                    modified_at: at,
+                    content_hash: None,
+                    remote_updated_at: 1,
+                    parent_id: None,
+                    item_kind: ItemKind::File,
+                })
+                .unwrap();
+        }
+        for n in 1..=5_i64 {
+            bridge
+                .db
+                .enqueue_operation(&PendingOperation {
+                    op_id: format!("op-{n}"),
+                    kind: OperationKind::UploadFile,
+                    file_id: Some(format!("f-{n}")),
+                    parent_id: None,
+                    target_path: Some(format!("/Work/f-{n}.md")),
+                    metadata_json: None,
+                    payload_path: None,
+                    base_version: None,
+                    base_object_version_id: None,
+                    attempts: 1,
+                    max_attempts: 25,
+                    next_retry_at: 0,
+                    last_error: Some("connection refused".into()),
+                    backup_source_key: None,
+                    created_at: n,
+                    updated_at: n,
+                })
+                .unwrap();
+        }
+        let ids = |limit| {
+            version_conflict_feed_from_db(&bridge.db, limit)
+                .unwrap()
+                .into_iter()
+                .map(|e| e.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(3), ["conflict:c-new", "op:op-5", "op:op-4"]);
+        assert_eq!(ids(1), ["conflict:c-new"], "conflicts alone can fill the cap");
+        assert_eq!(ids(100).len(), 7, "under the cap, everything");
+        assert_eq!(review_item_count_from_db(&bridge.db).unwrap(), 7, "the count is of all, not of the cap");
+        const { assert!(REVIEW_FEED_LIMIT >= 100, "a cap that cuts a normal day's Review would hide work") };
+        assert_eq!(bridge.version_conflict_feed().unwrap().len(), 7);
     }
 
     /// The contract with the window: the JSON the feed produces is exactly `tests/fixtures/review-feed.entries.json`, and
@@ -13111,13 +13459,35 @@ mod tests {
             created_at: at,
             updated_at: at,
         };
+        // An edit of an existing file: the queue holds the leaf the Finder gave it, the file's row holds where it lives.
+        bridge
+            .db
+            .upsert_file(&FileEntry {
+                file_id: "f-edit".into(),
+                path: "/Team shared/Roadmap.md".into(),
+                status: FileStatus::Local,
+                size_bytes: 64,
+                modified_at: 1_790_000_100,
+                content_hash: None,
+                remote_updated_at: 90,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
         for pending in [
             op("op-upload", OperationKind::UploadFile, "f-site", "/Photos/Site visit, north wing.mov", "connection refused", 1_790_000_800),
             op("op-root", OperationKind::UploadFile, "f-root", "/Archive 2025.zip", "quota exceeded", 1_790_000_700),
             op("op-deep", OperationKind::UploadFile, "f-deep", "/Investigations/2026/Q3 ledger.xlsx", "401 unauthorized", 1_790_000_600),
+            PendingOperation { attempts: 25, base_version: Some(4), ..op("op-parked", OperationKind::UploadVersion, "f-edit", "Roadmap.md", "payload_missing", 1_790_000_500) },
+            op("op-plan", OperationKind::UploadFile, "f-plan", "/Invoices/2026.pdf", "account_lapsed", 1_790_000_400),
         ] {
             bridge.db.enqueue_operation(&pending).unwrap();
         }
+        // The typed columns the engine writes: a pause for quota, a pause for auth, a park, a refusal the plan cures.
+        bridge.db.set_queue_classes_for_test("op-root", Some("quota"), Some("quota")).unwrap();
+        bridge.db.set_queue_classes_for_test("op-deep", Some("auth"), Some("auth")).unwrap();
+        bridge.db.set_queue_classes_for_test("op-parked", Some("payload_missing"), None).unwrap();
+        bridge.db.set_queue_classes_for_test("op-plan", Some("account"), None).unwrap();
         let produced = serde_json::to_value(bridge.version_conflict_feed().unwrap()).unwrap();
         let shared: serde_json::Value = serde_json::from_str(include_str!("../../tests/fixtures/review-feed.entries.json")).unwrap();
         assert_eq!(produced, shared);
@@ -13125,7 +13495,7 @@ mod tests {
 
     /// Spec §7.6: Review is "changes Beebeeb couldn't send yet". An edit that is on its way, and has not failed, is not in
     /// the feed (it was: the sidebar badge would have lit for every save of an existing file); the same edit is the moment
-    /// it fails.
+    /// it fails. A queued restore is different: it stays visible without a failure.
     #[test]
     fn a_queued_edit_that_has_not_failed_is_not_in_review() {
         let dir = tempfile::tempdir().unwrap();
@@ -13151,11 +13521,17 @@ mod tests {
         for (id, kind) in [("healthy-edit", OperationKind::UploadVersion), ("healthy-restore", OperationKind::RestoreVersion)] {
             bridge.db.enqueue_operation(&edit(id, kind, None)).unwrap();
         }
-        assert!(bridge.version_conflict_feed().unwrap().is_empty(), "nothing has failed");
+        // A restore that is queued is a change the person asked for and has not seen land: it stays in the feed (the
+        // Versions page on Linux says "restore in progress" for it), while the healthy edit is not.
+        let waiting: Vec<_> = bridge.version_conflict_feed().unwrap().into_iter().map(|e| (e.id, e.kind)).collect();
+        assert_eq!(waiting, vec![("op:healthy-restore".to_string(), "restore".to_string())], "only the restore");
         bridge.db.enqueue_operation(&edit("failed-edit", OperationKind::UploadVersion, Some("connection refused"))).unwrap();
         let feed = bridge.version_conflict_feed().unwrap();
-        assert_eq!(feed.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), ["op:failed-edit"]);
-        assert_eq!(feed[0].kind, "failed_upload", "a failed edit that is not stale is a failed upload");
+        let mut ids: Vec<_> = feed.iter().map(|e| e.id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["op:failed-edit", "op:healthy-restore"]);
+        let failed = feed.iter().find(|e| e.id == "op:failed-edit").unwrap();
+        assert_eq!(failed.kind, "failed_upload", "a failed edit that is not stale is a failed upload");
     }
 
     #[test]
@@ -21838,6 +22214,143 @@ mod tests {
             !outcome.account_refused,
             "a plain 413 is counted, not an account refusal"
         );
+    }
+
+    /// Review of #142: a refusal the account cures is in Review by what it is, read from the typed column the retry
+    /// records, and the row says what cures it. Before, the retrying row carried no class and read "Couldn’t upload,
+    /// will retry" (quota, plan) or, from the status digits in its text, "permission" (billing).
+    #[tokio::test]
+    async fn a_refusal_the_account_cures_is_in_review_by_what_it_is() {
+        let rows = [
+            (quota_exceeded(), "quota", "quota_failure", REVIEW_DETAIL_QUOTA),
+            (object_budget_exceeded(), "quota", "quota_failure", REVIEW_DETAIL_QUOTA),
+            (billing_read_only(), "account", "account_refused", REVIEW_DETAIL_ACCOUNT),
+            (account_lapsed(), "account", "account_refused", REVIEW_DETAIL_ACCOUNT),
+            (plan_required(), "account", "account_refused", REVIEW_DETAIL_ACCOUNT),
+            (trial_cancelled_read_only(), "account", "account_refused", REVIEW_DETAIL_ACCOUNT),
+        ];
+        let mut seen = 0;
+        for (index, (refusal, class, kind, sentence)) in rows.into_iter().enumerate() {
+            let file_id = format!("cure-{index}");
+            let (dir, sync_root, server, bridge) = rule3_setup([210u8 + index as u8; 32]);
+            seed_uploaded_row(&bridge, &server, &file_id);
+            refuse(&server, Refused::Init, &file_id, refusal);
+            fp_save(&bridge, dir.path(), &file_id, "notes.txt", b"bytes", "1");
+            bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+            let listed = bridge.db.list_review_operations(10).unwrap();
+            assert_eq!(listed.len(), 1, "{file_id}: the refused save is the one row");
+            assert_eq!(
+                (listed[0].error_class.as_deref(), listed[0].paused_reason.as_deref()),
+                (Some(class), None),
+                "{file_id}: recorded by type, and not paused"
+            );
+            let feed = bridge.version_conflict_feed().unwrap();
+            assert_eq!(feed.len(), 1, "{file_id}");
+            assert_eq!((feed[0].kind.as_str(), feed[0].detail.as_str()), (kind, sentence), "{file_id}");
+            assert!(!feed[0].detail.contains("will retry"), "{file_id}: {}", feed[0].detail);
+            seen += 1;
+        }
+        assert_eq!(seen, 6);
+        // A refusal waiting does not cure is no class: it stays a failed upload that retries.
+        let (dir, sync_root, server, bridge) = rule3_setup([219u8; 32]);
+        seed_uploaded_row(&bridge, &server, "plain-413-review");
+        refuse(
+            &server,
+            Refused::Init,
+            "plain-413-review",
+            ("413 Payload Too Large", json!({ "error": "payload_too_large" })),
+        );
+        fp_save(&bridge, dir.path(), "plain-413-review", "notes.txt", b"bytes", "1");
+        bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+        let feed = bridge.version_conflict_feed().unwrap();
+        assert_eq!(feed.len(), 1);
+        assert_eq!((feed[0].kind.as_str(), feed[0].detail.as_str()), ("failed_upload", REVIEW_DETAIL_UPLOAD));
+        assert_eq!(bridge.db.list_review_operations(10).unwrap()[0].error_class, None);
+    }
+
+    /// The class a failed attempt records on the row it will try again is read from the server's own code by type, and
+    /// the "sent once that is resolved" promise is made only to a File Provider write (§8.4: it never uses up its attempts).
+    #[test]
+    fn a_retrying_row_records_the_class_the_servers_own_code_names() {
+        use crate::api_client::{InitConflict, InitConflictClass, UploadRefusalCode};
+        let conflict = |class, refusal| anyhow::Error::new(InitConflict { class, refusal });
+        let gate = conflict(InitConflictClass::Other, Some(UploadRefusalCode::AccountLapsed));
+        assert_eq!(retry_error_class(&gate, true), Some("account"));
+        assert_eq!(retry_error_class(&gate, false), None, "another upload burns its attempts: no promise");
+        let stale = conflict(InitConflictClass::StaleBase, None);
+        assert_eq!(retry_error_class(&stale, true), Some("stale_base"));
+        assert_eq!(retry_error_class(&stale, false), Some("stale_base"), "a stale base is stale for everyone");
+        let other = conflict(InitConflictClass::InProgress, None);
+        assert_eq!(retry_error_class(&other, true), None);
+        assert_eq!(retry_error_class(&anyhow::anyhow!("401 quota 403 connection refused"), true), None, "text is not read");
+        assert_eq!(curable_refusal(&gate), Some(CurableRefusal::Account));
+        assert_eq!(CurableRefusal::Storage.class(), "quota");
+        assert_eq!(CurableRefusal::Account.class(), "account");
+    }
+
+    /// Review of #142: the Finder queues an edit under the leaf it was given (`notes.txt`), so the row cannot say which
+    /// folder the file is in from the operation; the file's own row can.
+    #[tokio::test]
+    async fn the_review_row_of_a_finder_edit_names_the_files_folder_not_the_queues_leaf() {
+        let (dir, sync_root, server, bridge) = rule3_setup([218u8; 32]);
+        seed_uploaded_row(&bridge, &server, "folder-edit");
+        let mut row = bridge.db.get_file("folder-edit").unwrap().unwrap();
+        row.path = "/Work/notes.txt".into();
+        bridge.db.upsert_file(&row).unwrap();
+        refuse(&server, Refused::Init, "folder-edit", quota_exceeded());
+        fp_save(&bridge, dir.path(), "folder-edit", "notes.txt", b"bytes", "1");
+        let queued = bridge.db.list_operations_for_file("folder-edit").unwrap();
+        assert_eq!(queued[0].target_path.as_deref(), Some("notes.txt"), "the queue holds the leaf");
+        bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+        let feed = bridge.version_conflict_feed().unwrap();
+        assert_eq!(feed.len(), 1);
+        assert_eq!((feed[0].file_name.as_str(), feed[0].folder.as_deref()), ("notes.txt", Some("Work")));
+    }
+
+    /// A rename or a move is about where the file is going, so its row names the destination's folder, not the file's
+    /// row (which still says where it was).
+    #[test]
+    fn the_review_row_of_a_move_names_the_folder_it_is_moving_to() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        bridge
+            .db
+            .upsert_file(&FileEntry {
+                file_id: "f-move".into(),
+                path: "/Work/a.txt".into(),
+                status: FileStatus::Local,
+                size_bytes: 1,
+                modified_at: 1,
+                content_hash: None,
+                remote_updated_at: 1,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+        let pending = PendingOperation {
+            op_id: "op-move".into(),
+            kind: OperationKind::MoveFile,
+            file_id: Some("f-move".into()),
+            parent_id: None,
+            target_path: Some("/Archive/b.txt".into()),
+            metadata_json: None,
+            payload_path: None,
+            base_version: None,
+            base_object_version_id: None,
+            attempts: 1,
+            max_attempts: 25,
+            next_retry_at: 0,
+            last_error: Some("connection refused".into()),
+            backup_source_key: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        let entry = review_entry_for_operation(&review(pending.clone(), None, None), &bridge.db).unwrap();
+        assert_eq!((entry.file_name.as_str(), entry.folder.as_deref()), ("b.txt", Some("Archive")));
+        // With no row for the file at all, the queue's own path is what there is.
+        let orphan = PendingOperation { file_id: Some("gone".into()), kind: OperationKind::UploadFile, target_path: Some("/Inbox/c.txt".into()), ..pending };
+        let entry = review_entry_for_operation(&review(orphan, None, None), &bridge.db).unwrap();
+        assert_eq!((entry.file_name.as_str(), entry.folder.as_deref()), ("c.txt", Some("Inbox")));
     }
 
     /// Spec §8.4: a refusal the person cures (free space, subscribe, pay), in the server's real

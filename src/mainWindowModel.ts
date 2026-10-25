@@ -289,13 +289,16 @@ type ReadResult = { ok: boolean }
  * unlock): it reads at once, even with a read in flight, and every read started before it is dropped when it
  * finishes, whether before or after the refresh's own, so the outcome's read wins and the state from before it is
  * never shown again. Only a refresh runs two reads at once, so the newest result is always the one applied. `stop`
- * (the window unmounted) applies nothing more; `resume` undoes it (StrictMode remounts).
+ * (the window unmounted) applies nothing more; `resume` undoes it (StrictMode remounts). `discard` is `stop` for a
+ * reader that is reused, and drops the reads still out.
  */
 export class SnapshotReader<R extends ReadResult> {
   private started = 0
   private floor = 0
   private pending = 0
   private stopped = true
+  /** Bumped by every `stop`: a read started in an earlier lifetime never lands in a later one (StrictMode, an account switch). */
+  private lifetime = 0
 
   constructor(
     private readonly read: () => Promise<R>,
@@ -308,6 +311,19 @@ export class SnapshotReader<R extends ReadResult> {
 
   stop(): void {
     this.stopped = true
+  }
+
+  /**
+   * `stop`, and forget every read still out: none of them lands, not even after a later `resume`, and none holds back
+   * the next lifetime's first tick. For a reader that outlives what it reads for (the Review feed is one per window
+   * process, and a vault that locks or an account that is switched ends a lifetime while a read is out). `stop` is
+   * not that: it is the StrictMode seam, where the remount wants the read already under way
+   * (tests/macAppSlowSnapshot.test.tsx).
+   */
+  discard(): void {
+    this.stopped = true
+    this.lifetime += 1
+    this.pending = 0
   }
 
   /** A timer tick, or the first read: skipped while a read is in flight. */
@@ -324,8 +340,10 @@ export class SnapshotReader<R extends ReadResult> {
 
   private start(): number {
     const sequence = ++this.started
+    const lifetime = this.lifetime
     this.pending += 1
     const done = (result: R) => {
+      if (lifetime !== this.lifetime) return
       this.pending -= 1
       if (this.stopped || sequence < this.floor) return
       this.onResult(result)

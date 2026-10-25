@@ -9,11 +9,12 @@
  */
 import { afterEach, describe, expect, test } from 'bun:test'
 import * as desktopApi from '../src/desktopApi'
+import { actionNamedFor } from '../src/actionName'
 import * as parts from '../src/macSettingsParts'
 import { formatStorageSize } from '../src/storageFormat'
 import * as trashModel from '../src/trashModel'
 import { mount, type Mounted } from './fixtures/componentHarness'
-import { button, buttons, buttonLabel, find, lines, modalNow, modalStub, press, pressFirst, settle } from './fixtures/sheetHarness'
+import { button, buttons, buttonLabel, find, lines, modalNow, modalStub, press, pressFirst, settle, visibleLabel } from './fixtures/sheetHarness'
 
 const mounted: Mounted[] = []
 afterEach(() => { while (mounted.length) mounted.pop()!.close() })
@@ -38,7 +39,7 @@ function open(backend: Record<string, (args: any) => unknown> = {}, refreshSigna
     } as any,
     props,
     bindings: {
-      ...desktopApi, ...trashModel, formatStorageSize,
+      ...desktopApi, ...trashModel, formatStorageSize, actionNamedFor,
       Btn: parts.Btn, Note: parts.Note, SettingsIcon: parts.SettingsIcon,
       Modal: modal.Modal,
     },
@@ -66,6 +67,16 @@ describe('states', () => {
     const flat = (row: any) => lines({ ...m, tree: () => row } as Mounted)
     expect(flat(rowsOf(m)[0])).toEqual(['Draft 3, interview questions.docx', `File · ${formatStorageSize(48_000)} · deleted yesterday`, 'Restore', 'Delete…'])
     expect(flat(rowsOf(m)[1])).toEqual(['Old scans', 'Folder · deleted yesterday', 'Restore', 'Delete…'])
+  })
+
+  test('each row\'s buttons are named for their file, with the visible word first (a column of identical "Restore" buttons says nothing to a screen reader; review of #142)', async () => {
+    const { m } = open()
+    await settle(m)
+    const [first, second] = rowsOf(m)
+    const inRow = (n: any): any[] => (Array.isArray(n) ? n.flatMap(inRow) : n?.props ? [...(n.type === 'button' ? [n] : []), ...inRow(n.props.children)] : [])
+    expect(inRow(first).map(buttonLabel)).toEqual(['Restore, Draft 3, interview questions.docx', 'Delete…, Draft 3, interview questions.docx'])
+    expect(inRow(second).map(buttonLabel)).toEqual(['Restore, Old scans', 'Delete…, Old scans'])
+    for (const el of [...inRow(first), ...inRow(second)]) expect(buttonLabel(el).startsWith(visibleLabel(el))).toBe(true)
   })
 
   test('empty: "Trash is empty" and what will appear', async () => {
@@ -123,7 +134,7 @@ describe('Restore', () => {
     await m.clickNoWait('Restore')
     const inRow = (n: any): any[] => (Array.isArray(n) ? n.flatMap(inRow) : n?.props ? [...(n.type === 'button' ? [n] : []), ...inRow(n.props.children)] : [])
     const [first, second] = rowsOf(m)
-    expect(inRow(first).map(buttonLabel)).toEqual(['Restore', 'Delete…'])
+    expect(inRow(first).map(visibleLabel)).toEqual(['Restore', 'Delete…'])
     expect(inRow(first).every((b) => b.props.disabled === true)).toBe(true)
     expect(inRow(second).every((b) => b.props.disabled !== true)).toBe(true)
     release()

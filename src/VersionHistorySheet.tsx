@@ -29,6 +29,7 @@ import {
   type FileVersionEntry,
   type FileVersionListResponse,
 } from './desktopApi'
+import { actionNamedFor } from './actionName'
 import { Btn, Note } from './macSettingsParts'
 import { restoreQueuedToast, VERSIONS_LOAD_FAILED, versionLabel, versionLine } from './reviewModel'
 import { Modal, useToast } from './windows/ui'
@@ -205,7 +206,7 @@ export function VersionHistorySheet({ onClose }: { onClose: () => void }) {
                     <div className="mw-row-title">{versionLabel(version)}</div>
                     <div className="mw-row-hint">{versionLine(version, now)}</div>
                   </div>
-                  <Btn disabled={restoringId !== null} onClick={() => void restore(version)}>
+                  <Btn ariaLabel={restoringId === version.id ? undefined : actionNamedFor('Restore', `${versionLabel(version)}, ${file.name}`)} disabled={restoringId !== null} onClick={() => void restore(version)}>
                     {restoringId === version.id ? 'Restoring…' : 'Restore'}
                   </Btn>
                 </div>

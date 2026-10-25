@@ -569,3 +569,39 @@ pass) is task 2181, recorded in the spec's A17 and §12 row 4; (6) a row starts 
 (`VersionConflictEntry::folder`, the parent directory's name from `folder_name_for_path`; none at the vault's root), and the
 feed's JSON is pinned on both sides by `tests/fixtures/review-feed.entries.json` (Rust compares its output to it,
 `tests/reviewFeedContract.test.ts` reads it with the window's validator).
+
+### Review of #142 (2026-10-25)
+
+What the review found and what changed, so the next reader does not have to rediscover it:
+
+- **A Review row is classified from the queue's typed columns, never from the failure's text** (`classify_review_operation`).
+  `StateDb::list_review_operations` now returns `ReviewOperation` (the operation, `last_error_class`, `paused_reason`). A
+  pause says why in `paused_reason`; a park writes its reason as the class (`payload_missing`, `base_unknown`,
+  `predecessor_parked`, `predecessor_lost`, `rekey_failed`, `permission_denied`); and a retry of a refusal the server
+  names by code now records `quota` or `account` (a File Provider write only: it is the one that never uses up its
+  attempts, §8.4, so only it may be told "sent once that is resolved") or `stale_base`, through
+  `record_attempt_claimed_classified`. A pause's own class (`auth`, `permission`, `locked`) is NOT read: signing in again
+  clears `paused_reason` and leaves the class until the next attempt, which would say "sign in again" for a row that is
+  being retried. A row that will not go on its own says so (`not_sent`); a row whose attempts are used up says that; a
+  download or a pin never says it was "sent" (`other`). Not changed: a non-Finder write refused for billing is still
+  paused as `permission` by `classify_operation_error`'s text (an engine rule, outside a UI slice); it reads as a
+  permission row.
+- **The folder** of a row comes from the file's own row (`review_path`); the queue holds only the leaf the Finder gave an
+  edit. A rename or a move names where the file is going.
+- **A queued restore is in the feed without a failure**, as Linux's Versions page lists it ("restore in progress"); the
+  first filter had dropped it.
+- **A choice that fails leaves the conflict in Review** (`EngineBridge::resolve_conflict_choice`): `hydrate_file` leaves
+  `Error`, which is right for the 24 h sweep (it retries `Error` rows) and wrong for a person who chose and was told
+  "couldn't". The status goes back from `Error` to `Conflict` only if the choice began on a conflict. "Keep the other" asks
+  before it overwrites this Mac's file.
+- **The feed is polled cheaply**: the commands are `async` and read on the blocking pool; the list is capped at
+  `REVIEW_FEED_LIMIT` (200, newest first) and a separate `review_item_count` is the badge and the pane's "N more". The
+  list is read only while the Review pane watches it (`ReviewFeed.watchList`). An entry that does not parse is counted
+  and the pane says "Some items couldn’t be shown." instead of dropping it.
+- **`SnapshotReader.stop()` is unchanged** (it is the StrictMode seam: the remount wants the read already under way,
+  `tests/macAppSlowSnapshot.test.tsx` pins it). The new `discard()` is `stop` plus forgetting the reads still out, for a
+  reader that is reused: the feed's.
+- **Known duplication, kept on purpose** (Windows and Linux are unchanged): `ConflictSheet` re-implements
+  `ConflictWindow`'s diff display; `VersionHistorySheet` is the Mac's one implementation of `DesktopVersionHistory`
+  (Windows) and `pages/VersionCenter.tsx` (Linux); `LockedPane` repeats Home's inline locked card, to be folded into one in
+  the Home follow-up. Source-text pins on `lib.rs` (`main_window_tests`) fail with a message naming the command that moved.

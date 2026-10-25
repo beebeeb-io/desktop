@@ -149,7 +149,7 @@ describe('the three choices (§7.6)', () => {
     expect(choices.map((el) => String(el.props.className).includes('ms-btn--primary'))).toEqual([false, false, true])
   })
 
-  for (const [label, choice] of [['Keep this Mac’s', 'local'], ['Keep the other', 'remote'], ['Keep both', 'both']] as const) {
+  for (const [label, choice] of [['Keep this Mac’s', 'local'], ['Keep both', 'both']] as const) {
     test(`"${label}" sends "${choice}" for this file and nothing else`, async () => {
       const { m } = open()
       await settle(m)
@@ -157,6 +157,15 @@ describe('the three choices (§7.6)', () => {
       expect(m.calls.filter((c) => c.name === 'resolve_conflict').map((c) => c.args)).toEqual([{ fileId: 'f1', choice }])
     })
   }
+
+  test('"Keep the other" asks first, and the second press sends "remote" for this file and nothing else', async () => {
+    const { m } = open()
+    await settle(m)
+    await press(m, 'Keep the other')
+    expect(m.calls.filter((c) => c.name === 'resolve_conflict')).toEqual([])
+    await press(m, 'Replace this Mac’s version')
+    expect(m.calls.filter((c) => c.name === 'resolve_conflict').map((c) => c.args)).toEqual([{ fileId: 'f1', choice: 'remote' }])
+  })
 
   test('success: one "Conflict resolved" toast, the row\'s owner told, then the sheet closes (in that order)', async () => {
     const { m, closed } = open()
@@ -170,6 +179,7 @@ describe('the three choices (§7.6)', () => {
     const { m, closed } = open({ resolve: () => { throw new Error('no state.db row for f1') } })
     await settle(m)
     await press(m, 'Keep the other')
+    await press(m, 'Replace this Mac’s version')
     expect(closed).toEqual([])
     expect(m.toasts).toHaveLength(1)
     expect(m.toasts[0]).toMatchObject({ variant: 'error', title: 'Couldn’t resolve this conflict' })
@@ -183,6 +193,68 @@ describe('the three choices (§7.6)', () => {
     await press(m, 'Keep both')
     expect(m.toasts).toEqual([{ variant: 'error', title: 'Couldn’t resolve this conflict', message: desktopApi.commandUnavailableLabel('resolve_conflict') }])
     expect(closed).toEqual([])
+  })
+})
+
+describe('"Keep the other" throws this Mac\'s version away, so it asks first (review of #142; the spec is silent)', () => {
+  const noteOf = (m: Mounted) => find(m, (el) => el.props['data-note'] === 'replace')
+  const choiceLabels = (m: Mounted) => buttons(m).map(buttonLabel).filter((label) => /^Keep|^Replace/.test(label))
+
+  test('nothing is asked until it is pressed; the first press sends nothing, asks the question aloud, and the same button says what it will do', async () => {
+    const { m } = open()
+    await settle(m)
+    expect(noteOf(m)).toHaveLength(0)
+    await press(m, 'Keep the other')
+    expect(m.calls.filter((c) => c.name === 'resolve_conflict')).toEqual([])
+    const note = noteOf(m)
+    expect(note).toHaveLength(1)
+    expect(note[0].props.role).toBe('alert')
+    expect(lines(m)).toContain('Replace this Mac’s version? Your changes here are discarded.')
+    expect(choiceLabels(m)).toEqual(['Keep this Mac’s', 'Replace this Mac’s version', 'Keep both'])
+    expect(button(m, 'Replace this Mac’s version').props.className).toContain('ms-btn--danger')
+    expect(button(m, 'Keep both').props.className).toContain('ms-btn--primary')
+  })
+
+  test('another choice ends the question and does what it says: "Keep both" after arming sends "both", never "remote"', async () => {
+    const { m } = open()
+    await settle(m)
+    await press(m, 'Keep the other')
+    await press(m, 'Keep both')
+    expect(m.calls.filter((c) => c.name === 'resolve_conflict').map((c) => c.args)).toEqual([{ fileId: 'f1', choice: 'both' }])
+  })
+
+  test('"Keep this Mac\'s" after arming sends "local", never "remote"', async () => {
+    const { m } = open()
+    await settle(m)
+    await press(m, 'Keep the other')
+    await press(m, 'Keep this Mac’s')
+    expect(m.calls.filter((c) => c.name === 'resolve_conflict').map((c) => c.args)).toEqual([{ fileId: 'f1', choice: 'local' }])
+  })
+
+  test('a failed replace puts the question away: the choices are the three again, and "Keep the other" asks again', async () => {
+    let fail = true
+    const { m } = open({ resolve: () => { if (fail) throw new Error('offline'); return null } })
+    await settle(m)
+    await press(m, 'Keep the other')
+    await press(m, 'Replace this Mac’s version')
+    expect(noteOf(m)).toHaveLength(0)
+    expect(choiceLabels(m)).toEqual(['Keep this Mac’s', 'Keep the other', 'Keep both'])
+    fail = false
+    await press(m, 'Keep the other')
+    expect(m.calls.filter((c) => c.name === 'resolve_conflict')).toHaveLength(1)
+    await press(m, 'Replace this Mac’s version')
+    expect(m.calls.filter((c) => c.name === 'resolve_conflict')).toHaveLength(2)
+  })
+
+  test('while a replace is being applied the question stays away and all three are off', async () => {
+    let release: () => void = () => {}
+    const { m } = open({ resolve: () => new Promise<null>((resolve) => { release = () => resolve(null) }) })
+    await settle(m)
+    await press(m, 'Keep the other')
+    await m.clickNoWait('Replace this Mac’s version')
+    expect(buttons(m).filter((el) => /^Keep|^Replace/.test(buttonLabel(el))).every((el) => el.props.disabled === true)).toBe(true)
+    release()
+    await settle(m)
   })
 })
 

@@ -259,7 +259,8 @@ placeholder default is unreachable for a validated NavId.
 | `popover_snapshot` | `desktopApi.ts` (`popoverSnapshot`) | Not rendered by any UI yet: the macOS menu-bar popover (task 1683 slice 3) reads it once when shown; cached storage summary, no polling; leases like every credential command |
 | `free_up_space` | `windows/views/SettingsView.tsx` | Wired (surface table above) |
 | `export_diagnostics` | No TS literal | Native/internal handler; returns the redacted bundle JSON (format 2, task 1685) and is called by `report_problem`; no direct Windows TS button |
-| `list_version_conflict_center` | `pages/VersionCenter.tsx` | Compact-only; no Windows view action |
+| `list_version_conflict_center` | `pages/VersionCenter.tsx`, `reviewFeed.ts` (the macOS window's Review pane) | Linux page; the macOS Review pane (task 1683 slice 4). At most 200 rows, newest first, async on the blocking pool; no Windows view action |
+| `review_item_count` | `reviewFeed.ts` (the macOS window's Review badge) | macOS window only: how many things wait in Review, one SQL count (the list is capped, this is not) |
 | `list_file_versions` | `DesktopVersionHistory.tsx`, `pages/VersionCenter.tsx`, `desktopApi.ts` | Wired (surface table above) |
 | `restore_file_version` | `DesktopVersionHistory.tsx`, `pages/VersionCenter.tsx`, `desktopApi.ts` | Wired (surface table above) |
 | `get_sync_root` | No TS literal | Compact-only; no Windows view action |

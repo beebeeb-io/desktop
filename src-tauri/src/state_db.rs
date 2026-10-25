@@ -729,6 +729,23 @@ pub struct PendingOperation {
     pub updated_at: i64,
 }
 
+/// An operation that is in review, with the TYPED columns that say why (`operation_queue.last_error_class` and
+/// `paused_reason`; task 1683 slice 4). `PendingOperation` is built in dozens of places and carries neither, so the
+/// review query returns this instead; nothing that reads it has to look at an error message to classify a failure.
+#[derive(Debug, Clone)]
+pub struct ReviewOperation {
+    pub op: PendingOperation,
+    /// How the last attempt failed, when it was typed: a park's reason (`stale_base`, `payload_missing`, ...), a pause's
+    /// (`auth`, `quota`, ...), or the class of a refusal that waiting cures (`quota`, `account`). `None` for a plain
+    /// failed attempt.
+    pub error_class: Option<String>,
+    /// Why it is paused (`auth`, `quota`, `permission`, `locked`, `key_replaced`); `None` when it is not.
+    pub paused_reason: Option<String>,
+}
+
+/// Which operations are in review (task 1683 slice 4): failed, paused, or a restore under way.
+const REVIEW_OPERATION_FILTER: &str = "(last_error IS NOT NULL OR paused_reason IS NOT NULL OR kind = 'restore_version')";
+
 /// Drop every persisted upload session whose queued op no longer exists.
 /// Called by the bulk `operation_queue` purges so a session never outlives
 /// its op (`finish_claimed` already clears its own row).
@@ -4600,45 +4617,113 @@ impl StateDb {
         rows.collect()
     }
 
-    /// Return operations that need user-visible review. This is broader
-    /// than the retry worker's "due now" view: terminal failures whose
-    /// attempts hit max_attempts must still appear in the conflict/version
-    /// center instead of disappearing from the UI.
+    /// Return operations that need user-visible review, newest first, at most `limit`. This is broader than the retry
+    /// worker's "due now" view: terminal failures whose attempts hit max_attempts must still appear in the
+    /// conflict/version center instead of disappearing from the UI.
     ///
-    /// Only an operation that HAS FAILED is in review (task 1683 slice 4, spec §7.6: "changes Beebeeb couldn't send
-    /// yet"). The query used to list every `upload_version` and `restore_version` as well, so a plain edit of an
-    /// existing file sat in Review, and on the Beebeeb window's sidebar badge, for as long as it took to upload.
-    pub fn list_review_operations(&self) -> Result<Vec<PendingOperation>> {
+    /// In review (task 1683 slice 4, spec §7.6: "changes Beebeeb couldn't send yet"): an operation that HAS FAILED
+    /// (`last_error`), one that is PAUSED, and a RESTORE under way (so a restore in progress stays visible; Linux's
+    /// Versions page lists it too). A plain edit that is on its way is not: the query used to list every `upload_version`,
+    /// so an ordinary save sat in Review, and on the sidebar badge, for as long as it took to upload.
+    pub fn list_review_operations(&self, limit: usize) -> Result<Vec<ReviewOperation>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "SELECT op_id, kind, file_id, parent_id, target_path, metadata_json, payload_path,
                     base_version, base_object_version_id, attempts, max_attempts, next_retry_at,
-                    last_error, backup_source_key, created_at, updated_at
+                    last_error, backup_source_key, created_at, updated_at, last_error_class, paused_reason
              FROM operation_queue
-             WHERE last_error IS NOT NULL
-             ORDER BY updated_at DESC, created_at DESC",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(PendingOperation {
-                op_id: row.get(0)?,
-                kind: OperationKind::from_str(&row.get::<_, String>(1)?),
-                file_id: row.get(2)?,
-                parent_id: row.get(3)?,
-                target_path: row.get(4)?,
-                metadata_json: row.get(5)?,
-                payload_path: row.get(6)?,
-                base_version: row.get(7)?,
-                base_object_version_id: row.get(8)?,
-                attempts: row.get(9)?,
-                max_attempts: row.get(10)?,
-                next_retry_at: row.get(11)?,
-                last_error: row.get(12)?,
-                backup_source_key: row.get(13)?,
-                created_at: row.get(14)?,
-                updated_at: row.get(15)?,
+             WHERE {REVIEW_OPERATION_FILTER}
+             ORDER BY updated_at DESC, op_id ASC
+             LIMIT ?1"
+        ))?;
+        let rows = stmt.query_map(params![i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
+            Ok(ReviewOperation {
+                op: PendingOperation {
+                    op_id: row.get(0)?,
+                    kind: OperationKind::from_str(&row.get::<_, String>(1)?),
+                    file_id: row.get(2)?,
+                    parent_id: row.get(3)?,
+                    target_path: row.get(4)?,
+                    metadata_json: row.get(5)?,
+                    payload_path: row.get(6)?,
+                    base_version: row.get(7)?,
+                    base_object_version_id: row.get(8)?,
+                    attempts: row.get(9)?,
+                    max_attempts: row.get(10)?,
+                    next_retry_at: row.get(11)?,
+                    last_error: row.get(12)?,
+                    backup_source_key: row.get(13)?,
+                    created_at: row.get(14)?,
+                    updated_at: row.get(15)?,
+                },
+                error_class: row.get(16)?,
+                paused_reason: row.get(17)?,
             })
         })?;
         rows.collect()
+    }
+
+    /// How many operations are in review (the sidebar badge's number, with [`Self::count_conflicted_files`]): one
+    /// `COUNT`, not the list.
+    pub fn count_review_operations(&self) -> Result<u64> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let count: i64 = conn.query_row(
+            &format!("SELECT COUNT(*) FROM operation_queue WHERE {REVIEW_OPERATION_FILTER}"),
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as u64)
+    }
+
+    /// The files in conflict, newest first, at most `limit` (the same order the feed merges them in: time, then id).
+    pub fn list_conflicted_files(&self, limit: usize) -> Result<Vec<FileEntry>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at,
+                    parent_id, item_kind
+             FROM files WHERE status = ?1
+             ORDER BY modified_at DESC, file_id ASC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(
+            params![FileStatus::Conflict.as_str(), i64::try_from(limit).unwrap_or(i64::MAX)],
+            |row| {
+                Ok(FileEntry {
+                    file_id: row.get(0)?,
+                    path: row.get(1)?,
+                    status: FileStatus::from_str(&row.get::<_, String>(2)?),
+                    size_bytes: row.get(3)?,
+                    modified_at: row.get(4)?,
+                    content_hash: row.get(5)?,
+                    remote_updated_at: row.get(6)?,
+                    parent_id: row.get(7)?,
+                    item_kind: ItemKind::from_str(&row.get::<_, String>(8)?),
+                })
+            },
+        )?;
+        rows.collect()
+    }
+
+    /// How many files are in conflict (each is one Review row, and one conflict sheet).
+    pub fn count_conflicted_files(&self) -> Result<u64> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM files WHERE status = ?1",
+            params![FileStatus::Conflict.as_str()],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as u64)
+    }
+
+    /// Tests only: set the typed columns a park or a pause writes, without a claim.
+    #[cfg(test)]
+    pub fn set_queue_classes_for_test(&self, op_id: &str, error_class: Option<&str>, paused_reason: Option<&str>) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "UPDATE operation_queue SET last_error_class = ?2, paused_reason = ?3 WHERE op_id = ?1",
+            params![op_id, error_class, paused_reason],
+        )?;
+        Ok(())
     }
 
     /// Delete every queued operation tagged with the given backup origin
@@ -5622,14 +5707,30 @@ impl StateDb {
         next_retry_at: i64,
         last_error: Option<&str>,
     ) -> Result<bool> {
+        self.record_attempt_claimed_classified(op_id, claim_id, attempts, next_retry_at, last_error, None)
+    }
+
+    /// [`Self::record_attempt_claimed`] that also records the class of a failure the engine knows by type and waiting
+    /// cures (a Finder write refused for storage or for the plan: `quota`, `account`), so Review can say what to do about
+    /// it without reading the message. It is not a pause and not a park: the op retries on its own backoff. A plain
+    /// failed attempt passes `None` and clears any class an earlier one set.
+    pub fn record_attempt_claimed_classified(
+        &self,
+        op_id: &str,
+        claim_id: &str,
+        attempts: i64,
+        next_retry_at: i64,
+        last_error: Option<&str>,
+        error_class: Option<&str>,
+    ) -> Result<bool> {
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let n = tx.execute(
             "UPDATE operation_queue
-             SET attempts = ?3, next_retry_at = ?4, last_error = ?5, last_error_class = NULL,
+             SET attempts = ?3, next_retry_at = ?4, last_error = ?5, last_error_class = ?6,
                  paused_reason = NULL, updated_at = ?4, claim_id = NULL, claimed_at = NULL
              WHERE op_id = ?1 AND claim_id = ?2",
-            params![op_id, claim_id, attempts, next_retry_at, last_error],
+            params![op_id, claim_id, attempts, next_retry_at, last_error, error_class],
         )?;
         if n == 1 {
             // Write-keyed: an upload without a write id keeps its own rollback.
@@ -8219,6 +8320,106 @@ mod tests {
         );
     }
 
+    // ── The Review list (task 1683 slice 4; spec §7.6, review of #142) ────────────────────────────────────────────
+
+    fn review_op(op_id: &str, kind: OperationKind, error: Option<&str>, updated_at: i64) -> PendingOperation {
+        PendingOperation {
+            op_id: op_id.into(),
+            kind,
+            file_id: Some(format!("file-{op_id}")),
+            parent_id: None,
+            target_path: Some(format!("/Work/{op_id}.txt")),
+            metadata_json: None,
+            payload_path: None,
+            base_version: None,
+            base_object_version_id: None,
+            attempts: 1,
+            max_attempts: 25,
+            next_retry_at: 0,
+            last_error: error.map(str::to_string),
+            backup_source_key: None,
+            created_at: updated_at,
+            updated_at,
+        }
+    }
+
+    /// Review is what failed, what is paused, and what is being restored, and each row carries the TYPED columns that
+    /// say why (`last_error_class`, `paused_reason`), so nothing reads an error message to classify it.
+    #[test]
+    fn review_operations_are_the_failed_the_paused_and_the_restoring_with_their_typed_columns() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        db.enqueue_operation(&review_op("healthy-edit", OperationKind::UploadVersion, None, 10)).unwrap();
+        db.enqueue_operation(&review_op("restoring", OperationKind::RestoreVersion, None, 20)).unwrap();
+        db.enqueue_operation(&review_op("failed", OperationKind::UploadFile, Some("connection refused"), 30)).unwrap();
+        db.enqueue_operation(&review_op("parked", OperationKind::UploadVersion, Some("payload_missing"), 40)).unwrap();
+        db.enqueue_operation(&review_op("paused", OperationKind::UploadFile, None, 50)).unwrap();
+        db.set_queue_classes_for_test("parked", Some("payload_missing"), None).unwrap();
+        db.set_queue_classes_for_test("paused", Some("quota"), Some("quota")).unwrap();
+
+        let listed = db.list_review_operations(100).unwrap();
+        let ids: Vec<&str> = listed.iter().map(|r| r.op.op_id.as_str()).collect();
+        assert_eq!(ids, ["paused", "parked", "failed", "restoring"], "newest first; a healthy edit is not in review");
+        let by_id = |id: &str| listed.iter().find(|r| r.op.op_id == id).unwrap();
+        assert_eq!((by_id("parked").error_class.as_deref(), by_id("parked").paused_reason.as_deref()), (Some("payload_missing"), None));
+        assert_eq!((by_id("paused").error_class.as_deref(), by_id("paused").paused_reason.as_deref()), (Some("quota"), Some("quota")));
+        assert_eq!((by_id("failed").error_class.as_deref(), by_id("failed").paused_reason.as_deref()), (None, None));
+        assert_eq!(by_id("restoring").op.last_error, None, "a restore under way stays visible without an error");
+        assert_eq!(db.count_review_operations().unwrap(), 4);
+    }
+
+    /// The list is capped and the badge has its own count (review of #142: the feed is polled every 5 s).
+    #[test]
+    fn the_review_list_is_capped_and_counted_apart() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        for i in 0..7 {
+            db.enqueue_operation(&review_op(&format!("op-{i}"), OperationKind::UploadFile, Some("boom"), 100 + i)).unwrap();
+        }
+        let top = db.list_review_operations(3).unwrap();
+        assert_eq!(top.iter().map(|r| r.op.op_id.as_str()).collect::<Vec<_>>(), ["op-6", "op-5", "op-4"]);
+        assert_eq!(db.count_review_operations().unwrap(), 7, "the count is of everything, not of the page");
+        assert_eq!(db.count_conflicted_files().unwrap(), 0);
+        seed_contract_row(&db, "c1", "/Work/c1.txt", None, FileStatus::Conflict, 1);
+        seed_contract_row(&db, "c2", "/Work/c2.txt", None, FileStatus::Local, 1);
+        assert_eq!(db.count_conflicted_files().unwrap(), 1);
+        for (id, at) in [("c3", 300), ("c4", 400), ("c5", 400)] {
+            db.upsert_file(&FileEntry {
+                file_id: id.into(),
+                path: format!("/Work/{id}.txt"),
+                status: FileStatus::Conflict,
+                size_bytes: 1,
+                modified_at: at,
+                content_hash: None,
+                remote_updated_at: 1,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+        }
+        let newest: Vec<String> = db.list_conflicted_files(3).unwrap().into_iter().map(|f| f.file_id).collect();
+        assert_eq!(newest, ["c4", "c5", "c3"], "newest first, the id breaking a tie, and cut at the limit");
+        assert_eq!(db.count_conflicted_files().unwrap(), 4, "the count is of all of them");
+    }
+
+    /// A refusal waiting cures (a Finder write refused for storage or for the plan) retries without using up its
+    /// attempts, so no park or pause records why; the attempt records its class instead, and a plain failed attempt
+    /// still clears it.
+    #[test]
+    fn an_attempt_can_record_the_class_of_a_refusal_that_waiting_cures() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        db.enqueue_operation(&review_op("refused", OperationKind::MoveFile, None, 1)).unwrap();
+        let ClaimOutcome::Claimed(first) = db.claim_operation("refused", 1).unwrap() else { panic!("claimable") };
+        assert!(db.record_attempt_claimed_classified("refused", &first.claim_id, 1, 60, Some("413 quota_exceeded"), Some("quota")).unwrap());
+        let listed = db.list_review_operations(10).unwrap();
+        assert_eq!(listed[0].error_class.as_deref(), Some("quota"));
+        assert_eq!(listed[0].paused_reason, None, "it is not paused: it retries on its own");
+        let ClaimOutcome::Claimed(second) = db.claim_operation("refused", 61).unwrap() else { panic!("claimable again") };
+        assert!(db.record_attempt_claimed("refused", &second.claim_id, 2, 120, Some("HTTP 500")).unwrap());
+        assert_eq!(db.list_review_operations(10).unwrap()[0].error_class, None, "a plain failed attempt clears the class");
+    }
+
     #[test]
     fn test_cache_eviction_preserves_pinned_and_uploading_files() {
         let dir = tempdir().unwrap();
@@ -8349,7 +8550,7 @@ mod tests {
 
         // Nothing is left behind to be found by a later account's engine.
         assert!(db.list_due_operations(i64::MAX).unwrap().is_empty());
-        assert!(db.list_review_operations().unwrap().is_empty());
+        assert!(db.list_review_operations(10).unwrap().is_empty());
         assert_eq!(db.get_file("pinned").unwrap().unwrap().status, FileStatus::CloudOnly);
         assert_eq!(db.get_file_contract_state("pinned").unwrap().unwrap().cache_path, None);
         assert_eq!(

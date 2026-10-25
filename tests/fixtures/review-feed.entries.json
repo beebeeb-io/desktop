@@ -58,5 +58,35 @@
     "version_id": null,
     "base_version": null,
     "last_error": "401 unauthorized"
+  },
+  {
+    "id": "op:op-parked",
+    "file_id": "f-edit",
+    "file_name": "Roadmap.md",
+    "folder": "Team shared",
+    "kind": "not_sent",
+    "status": "not sent",
+    "updated_at": 1790000500,
+    "detail": "The copy of this change that was waiting to be sent is gone, so it can’t be sent.",
+    "action": "review_upload",
+    "op_id": "op-parked",
+    "version_id": null,
+    "base_version": 4,
+    "last_error": "payload_missing"
+  },
+  {
+    "id": "op:op-plan",
+    "file_id": "f-plan",
+    "file_name": "2026.pdf",
+    "folder": "Invoices",
+    "kind": "account_refused",
+    "status": "plan blocked",
+    "updated_at": 1790000400,
+    "detail": "Your plan doesn’t allow uploads right now. This change stays on this Mac and is sent once that’s resolved.",
+    "action": "review_upload",
+    "op_id": "op-plan",
+    "version_id": null,
+    "base_version": null,
+    "last_error": "account_lapsed"
   }
 ]

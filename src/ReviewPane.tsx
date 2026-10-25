@@ -4,8 +4,8 @@
  * the version-history modal: one row per entry of the Review feed (`list_version_conflict_center`), each with a mono
  * kind tag, the file's name, when it happened and Rust's detail line, and at most one button.
  *
- * What a button does: "Decide…" opens the conflict sheet over this section; "Add storage" opens the billing page in
- * the browser; "Sign in again" starts the in-place sign-in (R8; nothing is cleared). Every other kind has no button: a
+ * What a button does: "Decide…" opens the conflict sheet over this section; "Add storage" and "Manage plan" open the
+ * billing page in the browser; "Sign in again" starts the in-place sign-in (R8; nothing is cleared). Every other kind has no button: a
  * fake one would be worse than none (task 1546). "Version history…" is the window's toolbar button; this pane owns the
  * sheet it opens (`historyOpen`), so it is one sheet over Review whether or not anything needs a decision.
  *
@@ -21,7 +21,17 @@ import { BILLING_URL, forceReauth, openUrl, type VersionConflictEntry } from './
 import { ConflictSheet } from './ConflictSheet'
 import { Btn, Note } from './macSettingsParts'
 import type { ReviewFeedState } from './reviewFeed'
-import { REVIEW_EMPTY, REVIEW_INTRO, reviewKindLabel, reviewRowAction, reviewRowMeta, type ReviewRowAction } from './reviewModel'
+import {
+  REVIEW_EMPTY,
+  REVIEW_INTRO,
+  REVIEW_SOME_UNREADABLE,
+  reviewActionName,
+  reviewKindLabel,
+  reviewMoreLine,
+  reviewRowAction,
+  reviewRowMeta,
+  type ReviewRowAction,
+} from './reviewModel'
 import { VersionHistorySheet } from './VersionHistorySheet'
 import { useToast } from './windows/ui'
 
@@ -52,7 +62,7 @@ export function ReviewPane({
 
   const act = (entry: VersionConflictEntry, action: ReviewRowAction) => {
     if (action.kind === 'open_conflict') setDeciding(entry)
-    else if (action.kind === 'upgrade') void openUrl(BILLING_URL)
+    else if (action.kind === 'upgrade' || action.kind === 'manage_plan') void openUrl(BILLING_URL)
     else void signInAgain()
   }
 
@@ -71,14 +81,19 @@ export function ReviewPane({
       </Note>
     )
   } else {
+    const more = reviewMoreLine(feed.count, feed.entries.length)
+    // "Nothing needs your attention" is said only when nothing is waiting AND nothing was left out of this list.
+    const nothing = feed.entries.length === 0 && feed.rejected === 0 && more === null
     body = (
       <>
         <p className="mw-intro">{REVIEW_INTRO}</p>
-        <div className="mw-card">
-          {feed.entries.length === 0 ? (
+        {nothing ? (
+          <div className="mw-card">
             <div className="mw-empty">{REVIEW_EMPTY}</div>
-          ) : (
-            feed.entries.map((entry) => {
+          </div>
+        ) : feed.entries.length > 0 ? (
+          <div className="mw-card">
+            {feed.entries.map((entry) => {
               const action = reviewRowAction(entry)
               const meta = reviewRowMeta(entry, now)
               return (
@@ -88,12 +103,26 @@ export function ReviewPane({
                     <div className="mw-row-title">{entry.file_name}</div>
                     {meta ? <div className="mw-row-hint">{meta}</div> : null}
                   </div>
-                  {action ? <Btn onClick={() => act(entry, action)}>{action.label}</Btn> : null}
+                  {action ? (
+                    <Btn ariaLabel={reviewActionName(entry, action)} onClick={() => act(entry, action)}>
+                      {action.label}
+                    </Btn>
+                  ) : null}
                 </div>
               )
-            })
-          )}
-        </div>
+            })}
+          </div>
+        ) : null}
+        {more ? (
+          <p className="mw-intro" data-note="more">
+            {more}
+          </p>
+        ) : null}
+        {feed.rejected > 0 ? (
+          <p className="mw-intro" data-note="unreadable" role="status">
+            {REVIEW_SOME_UNREADABLE}
+          </p>
+        ) : null}
       </>
     )
   }

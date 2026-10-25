@@ -603,6 +603,14 @@
   overflow-wrap: anywhere;
 }
 
+/* A question the person has to answer (Keep the other asks before it overwrites this Mac's file): ink, not hint grey. */
+.mw-sheet-note[data-note='replace'] {
+  margin-top: 10px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+}
+
 .mw-sheet-empty,
 .mw-sheet-file {
   min-width: 0;

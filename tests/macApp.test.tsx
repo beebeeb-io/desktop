@@ -73,7 +73,7 @@ const settingsStub = () => ({ state: { status: 'loading' }, save: async () => {}
 
 interface WindowOpts {
   /** What the Review feed holds (slice 4). Default: loaded and empty. */
-  feed?: { status: 'loading' | 'ready' | 'failed'; entries: unknown[]; reason: string | null }
+  feed?: { status: 'loading' | 'ready' | 'failed'; entries: unknown[]; count: number; rejected: number; reason: string | null }
   snap?: () => unknown
   backend?: Record<string, (args: any) => unknown>
   bindings?: Record<string, unknown>
@@ -96,7 +96,7 @@ function openWindow(opts: WindowOpts = {}) {
   focused = []
   // Slice 4: the Review feed is a module-level store; the window reads it, starts it while there is a session and an
   // unlocked vault, and asks it to read again after a resolved conflict. These record that.
-  const feedLog = { connected: 0, disconnected: 0, refreshed: 0, listens: [] as string[] }
+  const feedLog = { connected: 0, disconnected: 0, refreshed: 0, watched: 0, unwatched: 0, listens: [] as string[] }
   const m = mount('MacApp.tsx', 'MacApp', {
     backend: backend as any,
     expand: true,
@@ -112,9 +112,10 @@ function openWindow(opts: WindowOpts = {}) {
       HomePane: tabStub('home'), SignedOutCard,
       ReviewPane: tabStub('review'), TrashPane: tabStub('trash'), LockedPane: tabStub('locked'),
       reviewBadge: reviewModel.reviewBadge,
-      reviewFeed: { stub: true },
+      // The rows are read only while Review shows them (`watchList`); the badge's count is read all the time.
+      reviewFeed: { watchList: () => { feedLog.watched += 1; return () => { feedLog.unwatched += 1 } } },
       subscribeReviewFeed: () => () => {},
-      reviewFeedState: () => opts.feed ?? { status: 'ready', entries: [], reason: null },
+      reviewFeedState: () => opts.feed ?? { status: 'ready', entries: [], count: 0, rejected: 0, reason: null },
       connectReviewFeed: () => { feedLog.connected += 1; return () => { feedLog.disconnected += 1 } },
       refreshReviewFeed: () => { feedLog.refreshed += 1 },
       useSettingsConfig: settingsStub,
@@ -688,7 +689,7 @@ describe('Home (§7.6, first cut: status, Finder row, storage, the kept rows)', 
 // ── Review and Trash (task 1683 slice 4; spec §7.6, §9.3, §8.2, §11) ─────────────────────────────────────────────
 
 const entryFixture = (id: string) => ({ id, file_id: `f-${id}`, file_name: `${id}.md`, kind: 'conflict', status: 'needs review', updated_at: 1000, detail: 'd', action: 'open_conflict' })
-const readyFeed = (n: number) => ({ status: 'ready' as const, entries: Array.from({ length: n }, (_, i) => entryFixture(`e${i}`)), reason: null })
+const readyFeed = (n: number, count = n) => ({ status: 'ready' as const, entries: Array.from({ length: n }, (_, i) => entryFixture(`e${i}`)), count, rejected: 0, reason: null })
 const badgeOf = (m: Mounted) => find(m, (el) => el.props.className === 'mw-badge').map((el) => textOf(expand(el.props.children)).trim())
 const paneProps = (m: Mounted, tab: string) => find(m, (el) => el.props['data-tab'] === tab)[0]?.props['data-props']
 
@@ -722,12 +723,22 @@ describe('the sidebar lists Home, Review and Trash (§7.6)', () => {
     expect(find(m, (el) => el.props.id === 'mw-section-review')[0].props['aria-label']).toBe('Review, 1 needs attention')
   })
 
-  test('a feed that is still loading or failed shows no number: no placeholder, no guess', async () => {
+  test('before the count has been read there is no number: no placeholder, no guess', async () => {
     for (const status of ['loading', 'failed'] as const) {
-      const { m } = openWindow({ feed: { status, entries: [], reason: null } })
+      const { m } = openWindow({ feed: { status, entries: [], count: 0, rejected: 0, reason: null } })
       await settle(m)
       expect(badgeOf(m)).toEqual([])
     }
+  })
+
+  test('the number is the COUNT of what waits, not the rows the list carries (the list is capped), and a list that fails does not hide it (review of #142)', async () => {
+    const capped = openWindow({ feed: readyFeed(2, 7) })
+    await settle(capped.m)
+    expect(badgeOf(capped.m)).toEqual(['7'])
+    expect(find(capped.m, (el) => el.props.id === 'mw-section-review')[0].props['aria-label']).toBe('Review, 7 need attention')
+    const failedList = openWindow({ feed: { status: 'failed', entries: [], count: 3, rejected: 0, reason: 'state.db is locked' } })
+    await settle(failedList.m)
+    expect(badgeOf(failedList.m)).toEqual(['3'])
   })
 })
 
@@ -858,6 +869,26 @@ describe('the Review feed is read only while there is something to read (§7.6)'
     expect(out.feedLog.connected).toBe(0)
   })
 
+  test('the rows are read only while Review shows them: watched on Review and nowhere else, never while locked or signed out, and let go with the window (review of #142: the list is the costly read)', async () => {
+    const home = openWindow()
+    await settle(home.m)
+    expect(home.feedLog.watched).toBe(0)
+    await home.request({ to: 'trash' })
+    expect(home.feedLog.watched).toBe(0)
+    await home.request({ to: 'review' })
+    expect(home.feedLog.watched).toBe(1)
+    home.m.unmount()
+    expect(home.feedLog.unwatched).toBe(1)
+    const locked = openWindow({ snap: () => snapshot({ account: { vault_unlocked: false } }) })
+    await settle(locked.m)
+    await locked.request({ to: 'review' })
+    expect(locked.feedLog.watched).toBe(0)
+    const out = openWindow({ snap: () => snapshot({ account: { logged_in: false, vault_unlocked: false } }) })
+    await settle(out.m)
+    await out.request({ to: 'review' })
+    expect(out.feedLog.watched).toBe(0)
+  })
+
   test('Review is given the feed, and a resolved conflict makes the window read it again', async () => {
     const feed = readyFeed(2)
     const { m, request, feedLog } = openWindow({ feed })
@@ -913,6 +944,34 @@ describe('the toolbar actions are the window\'s, not the panes\' (hi-fi section 
     await settle(m)
     expect(shown(m)).toEqual(['account'])
     await click(m, 'Back to Review')
+    await settle(m)
+    expect(shown(m)).toEqual(['review'])
+    expect(paneProps(m, 'review').historyOpen).toBe(false)
+  })
+
+  test('a vault that locks closes the history sheet: it is not waiting behind the locked card when the vault unlocks again (review of #142)', async () => {
+    let locked = false
+    const readers: any[] = []
+    class RecordedReader extends windowModel.SnapshotReader<any> {
+      constructor(...args: [() => Promise<any>, (result: any) => void]) {
+        super(...args)
+        readers.push(this)
+      }
+    }
+    const { m, request } = openWindow({
+      snap: () => snapshot({ account: { vault_unlocked: !locked } }),
+      bindings: { SnapshotReader: RecordedReader },
+    })
+    await settle(m)
+    await request({ to: 'review' })
+    await click(m, 'Version history…')
+    expect(paneProps(m, 'review').historyOpen).toBe(true)
+    locked = true
+    readers[0].refresh()
+    await settle(m)
+    expect(shown(m)).toEqual(['locked'])
+    locked = false
+    readers[0].refresh()
     await settle(m)
     expect(shown(m)).toEqual(['review'])
     expect(paneProps(m, 'review').historyOpen).toBe(false)

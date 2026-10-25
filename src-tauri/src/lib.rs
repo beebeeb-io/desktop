@@ -9980,18 +9980,44 @@ mod diagnostics_export_tests {
 
 // ── IPC commands: conflict/version center ───────────────────────────────────
 
+/// What the Review feed answers when its read stopped before it answered (see [`on_the_blocking_pool`]).
+const REVIEW_FEED_FAILED: &str = "Could not read Review.";
+
+/// Runs `read` over the state database on the blocking pool; `None` when there is none yet (no sync root, or the file
+/// has not been made). The Review feed is polled every 5 s by the Beebeeb window, so it opens SQLite off the main
+/// thread, where a busy database cannot freeze a window.
+async fn read_review_db<T: Send + 'static>(
+    read: impl FnOnce(&state_db::StateDb) -> anyhow::Result<T> + Send + 'static,
+) -> Result<Option<T>, String> {
+    on_the_blocking_pool(REVIEW_FEED_FAILED, move || {
+        let cfg = DesktopConfig::load()?;
+        let Some(_) = cfg.sync_root else {
+            return Ok(None);
+        };
+        let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
+        if !db_path.exists() {
+            return Ok(None);
+        }
+        let db = state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?;
+        read(&db).map(Some).map_err(|e| e.to_string())
+    })
+    .await
+}
+
+/// The Review feed: at most [`engine_bridge::REVIEW_FEED_LIMIT`] rows, newest first; [`review_item_count`] says how
+/// many wait in all.
 #[tauri::command]
-fn list_version_conflict_center() -> Result<Vec<engine_bridge::VersionConflictEntry>, String> {
-    let cfg = DesktopConfig::load()?;
-    let Some(_) = cfg.sync_root else {
-        return Ok(Vec::new());
-    };
-    let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
-    if !db_path.exists() {
-        return Ok(Vec::new());
-    }
-    let db = state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?;
-    engine_bridge::version_conflict_feed_from_db(&db).map_err(|e| e.to_string())
+async fn list_version_conflict_center() -> Result<Vec<engine_bridge::VersionConflictEntry>, String> {
+    Ok(read_review_db(|db| engine_bridge::version_conflict_feed_from_db(db, engine_bridge::REVIEW_FEED_LIMIT))
+        .await?
+        .unwrap_or_default())
+}
+
+/// How many things wait in Review, as one count (the sidebar badge and the pane's "N more"): the feed's rows are not
+/// built to count them.
+#[tauri::command]
+async fn review_item_count() -> Result<u64, String> {
+    Ok(read_review_db(engine_bridge::review_item_count_from_db).await?.unwrap_or(0))
 }
 
 fn file_versions_payload_for_frontend(body: serde_json::Value) -> Result<serde_json::Value, String> {
@@ -13033,6 +13059,9 @@ async fn notify_conflict(app: tauri::AppHandle, file_name: String, file_id: Stri
 ///   - `"remote"` → [`engine_bridge::EngineBridge::resolve_keep_theirs`]
 ///   - `"both"`   → [`engine_bridge::EngineBridge::auto_resolve_keep_both`]
 ///
+/// all through [`engine_bridge::EngineBridge::resolve_conflict_choice`], which puts the conflict back in Review if the
+/// choice fails.
+///
 /// We build a fresh `EngineBridge` per call rather than reaching into
 /// the long-lived runner. SQLite handles concurrent connections to the
 /// same DB cleanly in WAL mode; reqwest is cheap to construct; and
@@ -13049,10 +13078,9 @@ async fn resolve_conflict(
     session_command!(async {
         // Validate the choice up front so a typo on the TS side fails
         // loudly instead of silently no-opping.
-        match choice.as_str() {
-            "local" | "remote" | "both" => {}
-            _ => return Err(format!("invalid conflict choice: {choice}")),
-        }
+        let Some(picked) = engine_bridge::ConflictChoice::parse(&choice) else {
+            return Err(format!("invalid conflict choice: {choice}"));
+        };
 
         // Pull token + master_key out of the in-memory session. We
         // intentionally do NOT clone the entire Session struct — only
@@ -13078,32 +13106,11 @@ async fn resolve_conflict(
         let api = std::sync::Arc::new(api_client::ApiClient::new(runner::api_base_url(), token, master_key));
         let bridge = engine_bridge::EngineBridge::new(db, api);
 
-        let outcome: Result<(), String> = match choice.as_str() {
-            "local" => bridge
-                .resolve_keep_mine(&file_id, &sync_root)
-                .await
-                .map_err(|e| e.to_string()),
-            "remote" => bridge
-                .resolve_keep_theirs(&file_id, &sync_root)
-                .await
-                .map_err(|e| e.to_string()),
-            "both" => {
-                // auto_resolve_keep_both wants the FileEntry; look it up.
-                let entry = bridge
-                    .db()
-                    .get_file(&file_id)
-                    .map_err(|e| format!("get_file: {e}"))?
-                    .ok_or_else(|| format!("no state.db row for {file_id}"))?;
-                bridge
-                    .auto_resolve_keep_both(&sync_root, &entry)
-                    .await
-                    .map(|_| ())
-                    .map_err(|e| e.to_string())
-            }
-            // Unreachable — the validate above already caught it.
-            _ => unreachable!(),
-        };
-        outcome?;
+        // A choice that fails leaves the conflict in Review to try again (`resolve_conflict_choice`).
+        bridge
+            .resolve_conflict_choice(&file_id, picked, &sync_root)
+            .await
+            .map_err(|e| e.to_string())?;
 
         // Notify the app window so it can re-poll sync_status and
         // refresh the conflict count without waiting for the next engine
@@ -14471,6 +14478,7 @@ pub fn run() {
             free_up_space,
             export_diagnostics,
             list_version_conflict_center,
+            review_item_count,
             list_file_versions,
             restore_file_version,
             get_sync_root,
@@ -16159,6 +16167,31 @@ mod main_window_tests {
         let production = super::finder_setup_command_tests::production_source();
         let handler = super::finder_setup_command_tests::body_between(&production, "tauri::generate_handler![", "])");
         for command in ["consume_main_navigation,", "main_window_state,"] {
+            assert_eq!(handler.lines().filter(|line| line.trim() == command).count(), 1, "{command}");
+        }
+    }
+
+    /// Review of #142: the Beebeeb window reads the Review feed every 5 s, so its commands are `async` and open SQLite on
+    /// the blocking pool (a plain command runs on the main thread, where a busy database would freeze every window); the
+    /// feed carries the cap; the badge has its own count command, registered once. A source guard, because the thread a
+    /// command runs on is not observable in a unit test.
+    #[test]
+    fn the_review_feed_reads_off_the_main_thread_capped_and_the_badge_counts_apart() {
+        use crate::source_pin::squeeze;
+        let production = super::finder_setup_command_tests::production_source();
+        let body = |signature: &str| squeeze(super::finder_setup_command_tests::body_between(&production, signature, "\n}\n"));
+        assert!(
+            body("async fn list_version_conflict_center(").contains(&squeeze(
+                "read_review_db(|db| engine_bridge::version_conflict_feed_from_db(db, engine_bridge::REVIEW_FEED_LIMIT))"
+            ))
+        );
+        assert!(
+            body("async fn review_item_count(")
+                .contains(&squeeze("read_review_db(engine_bridge::review_item_count_from_db)"))
+        );
+        assert!(body("async fn read_review_db<").contains(&squeeze("on_the_blocking_pool(REVIEW_FEED_FAILED,")));
+        let handler = super::finder_setup_command_tests::body_between(&production, "tauri::generate_handler![", "])");
+        for command in ["list_version_conflict_center,", "review_item_count,"] {
             assert_eq!(handler.lines().filter(|line| line.trim() == command).count(), 1, "{command}");
         }
     }

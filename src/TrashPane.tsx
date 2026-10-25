@@ -27,6 +27,7 @@ import {
   desktopTrashRestore,
   type DesktopTrashItem,
 } from './desktopApi'
+import { actionNamedFor } from './actionName'
 import { Btn, Note, SettingsIcon } from './macSettingsParts'
 import { TRASH_EMPTY_HINT, TRASH_EMPTY_TITLE, TRASH_INTRO, trashDeleteSheetText, trashRowLine } from './trashModel'
 import { Modal, useToast } from './windows/ui'
@@ -156,10 +157,10 @@ export function TrashPane({ refreshSignal }: { refreshSignal: number }) {
                     <div className="mw-row-title">{item.name}</div>
                     <div className="mw-row-hint">{trashRowLine(item, now)}</div>
                   </div>
-                  <Btn disabled={busy} onClick={() => void restore(item)}>
+                  <Btn ariaLabel={actionNamedFor('Restore', item.name)} disabled={busy} onClick={() => void restore(item)}>
                     Restore
                   </Btn>
-                  <Btn disabled={busy} onClick={() => askToDelete(item)}>
+                  <Btn ariaLabel={actionNamedFor('Delete…', item.name)} disabled={busy} onClick={() => askToDelete(item)}>
                     Delete…
                   </Btn>
                 </div>

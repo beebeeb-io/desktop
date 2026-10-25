@@ -8,11 +8,12 @@
  */
 import { afterEach, describe, expect, test } from 'bun:test'
 import * as desktopApi from '../src/desktopApi'
+import { actionNamedFor } from '../src/actionName'
 import * as parts from '../src/macSettingsParts'
 import * as reviewModel from '../src/reviewModel'
 import { formatStorageSize } from '../src/storageFormat'
 import { mount, type Mounted } from './fixtures/componentHarness'
-import { button, buttons, buttonLabel, find, lines, modalNow, modalStub, press, settle } from './fixtures/sheetHarness'
+import { button, buttons, buttonLabel, find, lines, modalNow, modalStub, press, settle, visibleLabel } from './fixtures/sheetHarness'
 
 const mounted: Mounted[] = []
 afterEach(() => { while (mounted.length) mounted.pop()!.close() })
@@ -38,7 +39,7 @@ function open(backend: Record<string, (args: any) => unknown> = {}) {
     backend: { desktop_search_files: () => search(), list_file_versions: () => versions(), restore_file_version: () => ({ status: 'queued' }), ...backend } as any,
     props: { onClose: () => closed.push('closed') },
     bindings: {
-      ...desktopApi, ...reviewModel, formatStorageSize,
+      ...desktopApi, ...reviewModel, formatStorageSize, actionNamedFor,
       Btn: parts.Btn, Note: parts.Note, SettingsIcon: parts.SettingsIcon,
       Modal: modal.Modal,
       SEARCH_LIMIT: 12, SEARCH_DEBOUNCE_MS: 120,
@@ -132,13 +133,20 @@ describe('the versions of one file', () => {
     expect(text).toContain('Version 4')
     expect(text).toContain('Version 3')
     expect(text.indexOf('Version 4')).toBeLessThan(text.indexOf('Version 3'))
-    expect(buttons(m).filter((el) => buttonLabel(el) === 'Restore')).toHaveLength(2)
+    expect(buttons(m).filter((el) => visibleLabel(el) === 'Restore')).toHaveLength(2)
+  })
+
+  test('each Restore is named for its version and its file, with the visible word first; the one under way loses the name (it reads "Restoring…")', async () => {
+    const { m } = await pick()
+    const restores = () => buttons(m).filter((el) => visibleLabel(el) === 'Restore')
+    expect(restores().map(buttonLabel)).toEqual(['Restore, Version 4, Q3 ledger.xlsx', 'Restore, Version 3, Q3 ledger.xlsx'])
+    for (const el of restores()) expect(buttonLabel(el).startsWith('Restore')).toBe(true)
   })
 
   test('the current version is named in the summary and has no Restore: you cannot restore what you already have', async () => {
     const { m } = await pick()
     expect(lines(m).join(' | ')).toContain('Version 5 is current')
-    expect(buttons(m).filter((el) => buttonLabel(el) === 'Restore')).toHaveLength(2)
+    expect(buttons(m).filter((el) => visibleLabel(el) === 'Restore')).toHaveLength(2)
   })
 
   test('a row says when and how big, in the Mac\'s units, and never prints an internal id', async () => {
@@ -164,7 +172,7 @@ describe('the versions of one file', () => {
     await m.clickNoWait('Restore')
     const labels = buttons(m).map(buttonLabel)
     expect(labels).toContain('Restoring…')
-    expect(buttons(m).filter((el) => buttonLabel(el) === 'Restore').every((el) => el.props.disabled === true)).toBe(true)
+    expect(buttons(m).filter((el) => visibleLabel(el) === 'Restore').every((el) => el.props.disabled === true)).toBe(true)
     release()
     await settle(m)
   })
@@ -191,7 +199,7 @@ describe('the versions of one file', () => {
   test('a file with nothing earlier says so', async () => {
     const { m } = await pick({ list_file_versions: () => ({ file_id: 'f1', current_version: 1, versions: [{ id: 'v1', version_number: 1, is_current: true, created_at: null, size_bytes: 10 }] }) })
     expect(lines(m)).toEqual(expect.arrayContaining(['No earlier versions', 'Q3 ledger.xlsx has no earlier versions to go back to.']))
-    expect(buttons(m).filter((el) => buttonLabel(el) === 'Restore')).toHaveLength(0)
+    expect(buttons(m).filter((el) => visibleLabel(el) === 'Restore')).toHaveLength(0)
   })
 
   test('Back returns to the search with the query still there', async () => {

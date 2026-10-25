@@ -472,11 +472,16 @@ export default function MacApp() {
     [signedIn, unlocked],
   )
 
-  // The history sheet belongs to Review: leaving Review (the sign-out flow can force Settings › Account) closes it.
+  // The history sheet belongs to Review: leaving Review (the sign-out flow can force Settings › Account) closes it, and so
+  // does a vault that locks (Review then shows the locked card; the sheet must not be waiting behind it when the vault
+  // unlocks again).
   const inReview = view.mode === 'main' && view.section === 'review'
   useEffect(() => {
-    if (!inReview) setHistoryOpen(false)
-  }, [inReview])
+    if (!(inReview && unlocked)) setHistoryOpen(false)
+  }, [inReview, unlocked])
+
+  // The rows are read only while Review shows them; the badge's count is read all the time.
+  useEffect(() => (signedIn && unlocked && inReview ? reviewFeed.watchList() : undefined), [signedIn, unlocked, inReview])
 
   // §8.2 and F15: Rust enables View › Back only while Settings shows, and disables the navigation items and
   // Settings… while a sheet is open.
@@ -630,8 +635,9 @@ export default function MacApp() {
         <div className="mw-drag-band" data-tauri-drag-region="" />
         <div className="mw-list">
           {MAIN_SECTIONS.map((section) => {
-            // Review's number: only while the feed has answered and the vault is unlocked (no placeholder, no guess).
-            const badge = section.id === 'review' ? reviewBadge(reviewFeedNow.status === 'ready' ? reviewFeedNow.entries.length : 0, unlocked) : null
+            // Review's number: the feed's COUNT (all that wait, not the rows it carries), only once the count has been
+            // read (0 until then: no placeholder, no guess) and the vault is unlocked.
+            const badge = section.id === 'review' ? reviewBadge(reviewFeedNow.count, unlocked) : null
             return (
               <button
                 key={section.id}

@@ -13,12 +13,12 @@ import { parseReviewEntries, parseReviewEntry, reviewKindLabel, reviewRowAction,
 const fixture = JSON.parse(readFileSync(new URL('./fixtures/review-feed.entries.json', import.meta.url), 'utf8')) as unknown[]
 const now = new Date(1_790_001_000 * 1000)
 
-describe('the entries Rust sends (4 of 4)', () => {
+describe('the entries Rust sends (6 of 6)', () => {
   test('every one passes the validator, none is dropped, and the field names are the ones the type has', () => {
     const entries = parseReviewEntries(fixture)
     expect(entries).not.toBeNull()
     expect(entries!.length).toBe(fixture.length)
-    expect(entries!.map((e) => e.id)).toEqual(['conflict:f-board', 'op:op-upload', 'op:op-root', 'op:op-deep'])
+    expect(entries!.map((e) => e.id)).toEqual(['conflict:f-board', 'op:op-upload', 'op:op-root', 'op:op-deep', 'op:op-parked', 'op:op-plan'])
     const keys = fixture.map((entry) => Object.keys(entry as object).sort())
     for (const row of keys) {
       expect(row).toEqual(['action', 'base_version', 'detail', 'file_id', 'file_name', 'folder', 'id', 'kind', 'last_error', 'op_id', 'status', 'updated_at', 'version_id'])
@@ -26,11 +26,14 @@ describe('the entries Rust sends (4 of 4)', () => {
   })
 
   test('the folder is the parent directory\'s name, and a file at the root has none', () => {
-    const [board, upload, root, deep] = parseReviewEntries(fixture)!
+    const [board, upload, root, deep, parked, plan] = parseReviewEntries(fixture)!
     expect(board.folder).toBe('Team shared')
     expect(upload.folder).toBe('Photos')
     expect(root.folder).toBeNull()
     expect(deep.folder).toBe('2026')
+    // An edit of an existing file: Rust's queue holds only the leaf, and the folder still comes from the file's own row.
+    expect(parked.folder).toBe('Team shared')
+    expect(plan.folder).toBe('Invoices')
   })
 
   test('a row says folder, then when, then the detail, and a root-level file starts with when', () => {
@@ -43,8 +46,8 @@ describe('the entries Rust sends (4 of 4)', () => {
 
   test('the kinds Rust names are the kinds the window has words for, and the actions it names are the ones it can do', () => {
     const entries = parseReviewEntries(fixture)!
-    expect(entries.map((e) => reviewKindLabel(e.kind))).toEqual(['Conflict', 'Upload', 'Storage full', 'Signed out'])
-    expect(entries.map((e) => reviewRowAction(e)?.label ?? null)).toEqual(['Decide…', null, 'Add storage', 'Sign in again'])
+    expect(entries.map((e) => reviewKindLabel(e.kind))).toEqual(['Conflict', 'Upload', 'Storage full', 'Signed out', 'Not sent', 'Plan'])
+    expect(entries.map((e) => reviewRowAction(e)?.label ?? null)).toEqual(['Decide…', null, 'Add storage', 'Sign in again', null, 'Manage plan'])
   })
 })
 
@@ -91,7 +94,8 @@ describe('the feed reads through the validator', () => {
 
   test('rows from Rust come through whole; one that does not read is dropped', async () => {
     const result = await withBackend(() => [fixture[0], { id: 'x' }, fixture[2]], readReviewEntries)
-    expect(result.ok && result.value.map((e) => e.id)).toEqual(['conflict:f-board', 'op:op-root'])
+    expect(result.ok && result.value.entries.map((e) => e.id)).toEqual(['conflict:f-board', 'op:op-root'])
+    expect(result.ok && result.value.rejected).toBe(1)
   })
 
   test('an answer that is not a list is a failure the pane can show, not an empty Review', async () => {

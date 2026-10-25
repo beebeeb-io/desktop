@@ -9,6 +9,10 @@
  * (§8.2: nothing navigates under it), traps focus, closes on Esc, and OPENS ON ITS CLOSE BUTTON: Enter on open is
  * Cancel, never one of the three choices (§11, the 10-02 destructive-Enter rule applied to a choice with consequences).
  *
+ * "Keep the other" is the one choice that throws something away (this Mac's file is overwritten and nothing keeps it),
+ * so it takes a second press, on the same button, which then says what it does ("Replace this Mac’s version", with
+ * the question above it); any other choice ends the question (review of #142; the spec is silent on it).
+ *
  * While a choice is being applied nothing can close the sheet: closing would hide the outcome of a change already
  * under way. On success the sheet tells its owner (the row leaves), says "Conflict resolved" once, and closes. On
  * failure it stays open, says why once, and the choices work again.
@@ -29,6 +33,8 @@ import { diffLines, DIFF_MAX_OPS, type DiffOp } from './diffLines'
 import { Btn } from './macSettingsParts'
 import {
   CONFLICT_CHOICES,
+  CONFLICT_REPLACE_LABEL,
+  CONFLICT_REPLACE_QUESTION,
   CONFLICT_RESOLVED_TOAST,
   CONFLICT_SHEET_INTRO,
   CONFLICT_SIDE_LABELS,
@@ -111,6 +117,8 @@ export function ConflictSheet({
   const [previewLoading, setPreviewLoading] = useState(true)
   const [previewError, setPreviewError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  // "Keep the other" overwrites this Mac's file and keeps nothing of it: the first press asks, the second does it.
+  const [confirmingRemote, setConfirmingRemote] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -125,6 +133,16 @@ export function ConflictSheet({
       cancelled = true
     }
   }, [entry.file_id])
+
+  const choose = (choice: ConflictChoice) => {
+    if (choice === 'remote' && !confirmingRemote) {
+      setConfirmingRemote(true)
+      return
+    }
+    // Any other choice ends the question.
+    setConfirmingRemote(false)
+    void resolve(choice)
+  }
 
   const resolve = async (choice: ConflictChoice) => {
     setBusy(true)
@@ -158,11 +176,14 @@ export function ConflictSheet({
       maxWidth={520}
       footer={
         <div className="ms-sheet-footer">
-          {CONFLICT_CHOICES.map((item) => (
-            <Btn key={item.choice} primary={item.primary} disabled={busy} onClick={() => void resolve(item.choice)}>
-              {item.label}
-            </Btn>
-          ))}
+          {CONFLICT_CHOICES.map((item) => {
+            const replacing = item.choice === 'remote' && confirmingRemote
+            return (
+              <Btn key={item.choice} primary={item.primary} danger={replacing} disabled={busy} onClick={() => choose(item.choice)}>
+                {replacing ? CONFLICT_REPLACE_LABEL : item.label}
+              </Btn>
+            )
+          })}
         </div>
       }
     >
@@ -185,6 +206,11 @@ export function ConflictSheet({
         <ConflictSide which="local" label={CONFLICT_SIDE_LABELS.local} side={preview?.local ?? null} loading={previewLoading} isText={isText} ops={ops} only="remove" />
         <ConflictSide which="remote" label={CONFLICT_SIDE_LABELS.remote} side={preview?.remote ?? null} loading={previewLoading} isText={isText} ops={ops} only="add" />
       </div>
+      {confirmingRemote ? (
+        <div className="mw-sheet-note" role="alert" data-note="replace">
+          {CONFLICT_REPLACE_QUESTION}
+        </div>
+      ) : null}
     </Modal>
   )
 }

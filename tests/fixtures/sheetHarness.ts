@@ -47,10 +47,15 @@ export function modalNow(m: Mounted, modal: { last: () => ModalCall }): ModalCal
 export const settle = async (m: Mounted) => { await m.flush(); await m.flush(); await m.flush(); await m.flush() }
 export const find = (m: Mounted, match: (el: TreeNode) => boolean) => m.elements().filter(match)
 export const text = (m: Mounted) => textOf(expand(m.tree()))
+/** What a screen reader calls the button: its aria-label, else its text. */
 export const buttonLabel = (el: TreeNode) => el.props['aria-label'] ?? textOf(expand(el.props.children)).trim()
+/** What a sighted person reads on it, whatever name a screen reader is given. */
+export const visibleLabel = (el: TreeNode) => textOf(expand(el.props.children)).trim()
+/** A button is found by the word it shows or by the name it is given: both are how a person finds it. */
+const labelled = (el: TreeNode, label: string) => visibleLabel(el) === label || buttonLabel(el) === label
 export const buttons = (m: Mounted) => find(m, (el) => el.type === 'button')
 export function button(m: Mounted, label: string): TreeNode {
-  const hit = buttons(m).filter((el) => buttonLabel(el) === label)
+  const hit = buttons(m).filter((el) => labelled(el, label))
   if (hit.length !== 1) throw new Error(`expected one button "${label}", found ${hit.length}: ${buttons(m).map(buttonLabel).join(' | ')}`)
   return hit[0]
 }
@@ -61,7 +66,7 @@ export async function press(m: Mounted, label: string) {
 }
 /** Press the first button with this label, for labels a list repeats (one "Restore" per row). */
 export async function pressFirst(m: Mounted, label: string) {
-  const hit = buttons(m).filter((el) => buttonLabel(el) === label)
+  const hit = buttons(m).filter((el) => labelled(el, label))
   if (hit.length === 0) throw new Error(`no button "${label}": ${buttons(m).map(buttonLabel).join(' | ')}`)
   await hit[0].props.onClick()
   m.render()

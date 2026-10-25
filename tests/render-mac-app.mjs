@@ -35,9 +35,12 @@ await writeFile(pagePath, '<!doctype html><html><head><meta charset="utf-8"><met
 const LONG_EMAIL = `${'x'.repeat(48)}@example.eu` // 60 characters, no break before the @
 const KEPT_OURS = '/Users/sam/Library/Containers/io.beebeeb.app/Data/Documents/Changes not sent/2026-10-10 at 14.05.12'
 const KEPT_MACOS = '/Users/sam/Library/CloudStorage/Beebeeb-Beebeeb (10-10-2026 14.05)'
+// "Last checked 1 min ago" is relative to the moment the page asks, not the moment this script started: the run takes
+// minutes, and a fixed timestamp aged into "2 min ago" half way through it.
+const LAST_CHECKED_70_S_AGO = 'now-70s'
 const snapshot = (over = {}) => ({
   phase: 'synced', generated_at: 1000, paused: false,
-  engine: { state: 'idle', files_remaining: 0, bytes_total: 0, bytes_done: 0, last_tick_ok_at: Math.floor(Date.now() / 1000) - 70 },
+  engine: { state: 'idle', files_remaining: 0, bytes_total: 0, bytes_done: 0, last_tick_ok_at: LAST_CHECKED_70_S_AGO },
   reason: null, finder: { setup: 'ready', reason: null, reason_line: null },
   storage: { used_bytes: 84_300_000_000, quota_bytes: 200_000_000_000, fetched_at: 900, stale: false },
   storage_full: false, pending_changes: 0, conflicts: { count: 0, files: [] }, activity: [],
@@ -56,6 +59,8 @@ const reviewAllKinds = [
   { id: 'op:3', file_id: 'f3', file_name: 'Archive 2025.zip', folder: null, kind: 'quota_failure', status: 'quota blocked', updated_at: todayAt(8, 30), detail: 'This change can’t upload until you free up space or add storage. It stays on this Mac.', action: 'review_upload' },
   { id: 'op:4', file_id: 'f4', file_name: LONG_NAME, folder: 'Quarterly investigations, shared with the whole finance team in Rotterdam', kind: 'stale_base', status: 'stale base kept local', updated_at: todayAt(8, 2), detail: 'This file changed somewhere else too. Your version is kept on this Mac.', action: 'review_upload' },
   { id: 'op:5', file_id: 'f5', file_name: 'Plan.pdf', kind: 'auth_failure', status: 'sign-in needed', updated_at: todayAt(7, 40), detail: 'Your session has expired. Sign in again to resume syncing.', action: 'sign_in_again' },
+  { id: 'op:6', file_id: 'f6', file_name: 'Roadmap.md', folder: 'Team shared', kind: 'not_sent', status: 'not sent', updated_at: todayAt(7, 15), detail: 'The copy of this change that was waiting to be sent is gone, so it can’t be sent.', action: 'review_upload' },
+  { id: 'op:7', file_id: 'f7', file_name: 'Invoice 2026-114.pdf', folder: 'Invoices', kind: 'account_refused', status: 'plan blocked', updated_at: todayAt(7, 5), detail: 'Your plan doesn’t allow uploads right now. This change stays on this Mac and is sent once that’s resolved.', action: 'review_upload' },
 ]
 const conflictPreview = {
   is_text: true,
@@ -109,7 +114,8 @@ function installBackend({ caps, fx }) {
         case 'desktop_platform': return 'macos'
         case 'app_version': return '0.8.12'
         case 'sync_status': return { session_revision: 1, logged_in: f.snapshot.account.logged_in, vault_unlocked: f.snapshot.account.vault_unlocked, engine: 'running', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0, auth_expired: f.snapshot.account.auth_expired, engine_refusal: null }
-        case 'popover_snapshot': return f.snapshot
+        // (This function runs in the page: the literal is LAST_CHECKED_70_S_AGO above, and the clock is the page's.)
+        case 'popover_snapshot': return f.snapshot?.engine?.last_tick_ok_at === 'now-70s' ? { ...f.snapshot, engine: { ...f.snapshot.engine, last_tick_ok_at: Math.floor(Date.now() / 1000) - 70 } } : f.snapshot
         case 'account_subscription': return f.subscription
         case 'get_desktop_config': return f.config
         case 'desktop_config': return f.config
@@ -121,6 +127,8 @@ function installBackend({ caps, fx }) {
         case 'list_remote_tree': return [{ id: 'f1', name: 'Photos', is_folder: true, excluded: false, size_bytes: 1, file_count: 1, on_disk_bytes: 0, pinned: true, children: [] }]
         case 'account_region': return f.region
         case 'list_version_conflict_center': return f.review
+        // The count is its own read (the badge); it is the list's length unless a case says more wait than the list carries.
+        case 'review_item_count': return f.reviewCount ?? f.review.filter((e) => e && e.id).length
         case 'conflict_content_preview': return f.conflictPreview
         case 'desktop_search_files': return f.search
         case 'list_file_versions': return f.versions
@@ -185,8 +193,11 @@ const SCENARIOS = [
   { name: 'settings-about', act: section('About'), has: ['Beebeeb for Mac', 'Version 0.8.12', 'Check for updates', 'Get help', 'Export a support bundle'], min: true, hifi: 'hifi-s4-fig5' },
   // ── Slice 4: Review ──  (the kind tag is drawn in capitals by CSS, as in the hi-fi, so `innerText` reads it in capitals)
   { name: 'review', act: review, has: ['Review', 'Files that need a decision from you, and changes Beebeeb couldn’t send yet.', 'CONFLICT', 'Board notes, 29 Sept.md', 'Team shared · today 09:12 · Changed on two devices.', 'Decide…', 'UPLOAD', 'Site visit, north wing.mov', 'Photos · today 08:47 · Couldn’t upload, will retry', 'Version history…'], hasNot: ['Local and remote both changed', 'STALE BASE', 'durable queue', 'Nothing needs your attention.'], sidebar: ['Home', 'Review, 2 need attention', 'Trash', 'Settings'], min: true },
-  { name: 'review-all-kinds', fx: { review: reviewAllKinds }, act: review, has: ['CHANGED ELSEWHERE', 'STORAGE FULL', 'SIGNED OUT', 'Add storage', 'Sign in again', LONG_NAME, 'Decide…'], hasNot: ['STALE BASE', 'QUOTA', 'METADATA'], min: true },
+  { name: 'review-all-kinds', fx: { review: reviewAllKinds }, act: review, has: ['CHANGED ELSEWHERE', 'STORAGE FULL', 'SIGNED OUT', 'NOT SENT', 'PLAN', 'Add storage', 'Sign in again', 'Manage plan', LONG_NAME, 'Decide…', 'Team shared · today 07:15 · The copy of this change that was waiting to be sent is gone, so it can’t be sent.', 'Invoices · today 07:05 · Your plan doesn’t allow uploads right now.'], hasNot: ['STALE BASE', 'QUOTA', 'METADATA'], min: true },
+  { name: 'review-capped', fx: { review: reviewEntries, reviewCount: 9 }, act: review, has: ['Board notes, 29 Sept.md', '7 more are waiting. They appear here as you clear these.'], hasNot: ['Nothing needs your attention.'], sidebar: ['Home', 'Review, 9 need attention', 'Trash', 'Settings'] },
+  { name: 'review-unreadable', fx: { review: [...reviewEntries, { not: 'an entry' }] }, act: review, has: ['Board notes, 29 Sept.md', 'Some items couldn’t be shown.'], hasNot: ['Nothing needs your attention.'], sidebar: ['Home', 'Review, 2 need attention', 'Trash', 'Settings'] },
   { name: 'review-conflict-sheet', act: decide, has: ['Conflict: Board notes, 29 Sept.md', 'This file was modified on two devices. Choose which version to keep.', 'This Mac', 'Other device', 'Keep this Mac’s', 'Keep the other', 'Keep both', '- 4. AOB (added on this Mac)', '+ 2. Roadmap (moved up)'], hasNot: ['Keep Mine', 'This device', '✓'], dialogs: 1, min: true, hifi: 'hifi-s3-fig1' },
+  { name: 'review-conflict-replace', act: async (p) => { await decide(p); await p.getByRole('button', { name: 'Keep the other' }).click(); await p.getByRole('button', { name: 'Replace this Mac’s version' }).waitFor() }, has: ['Conflict: Board notes, 29 Sept.md', 'Replace this Mac’s version? Your changes here are discarded.', 'Replace this Mac’s version', 'Keep this Mac’s', 'Keep both'], hasNot: ['Keep the other'], dialogs: 1, min: true },
   { name: 'review-conflict-binary', fx: { conflictPreview: { is_text: false, local: { size_bytes: 4096, text: null }, remote: { size_bytes: 8192, text: null } } }, act: decide, has: ['Binary file · 4,1 KB', 'Binary file · 8,2 KB', 'Keep both'], dialogs: 1 },
   { name: 'review-history-search', act: async (p) => { await history(p); await p.getByRole('textbox', { name: 'Search file names' }).fill('q3'); await p.getByRole('button', { name: /Q3 notes\.md/ }).waitFor() }, has: ['Version history', 'Q3 ledger reconciliation.xlsx', 'Investigations/Q3 ledger reconciliation.xlsx', 'Q3 notes.md'], dialogs: 1, min: true },
   { name: 'review-history-versions', act: async (p) => { await history(p); await p.getByRole('textbox', { name: 'Search file names' }).fill('q3'); await p.getByRole('button', { name: /Q3 ledger reconciliation/ }).click(); await p.getByRole('button', { name: 'Restore' }).first().waitFor() }, has: ['Version history', 'Q3 ledger reconciliation.xlsx', 'Version 5 is current · 2 earlier versions', 'Version 4', 'Version 3', 'Restore', 'Back'], hasNot: ['Version id', 'Queue restore'], dialogs: 1, min: true },
