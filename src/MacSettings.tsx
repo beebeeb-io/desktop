@@ -56,7 +56,6 @@ import {
   HELP_URL,
   keepCountLabel,
   keepOnMac,
-  MAC_DOWNLOAD_URL,
   monoReason,
   NOTIFICATION_ROWS,
   planLine,
@@ -74,6 +73,7 @@ import {
 } from './macSettingsModel'
 import { Btn, ChoiceSelect, Note, Select, SettingRow, SettingsGroup, SettingsIcon, Switch, ToggleRow } from './macSettingsParts'
 import { AccountPreferencesGroup, StorageDetailsSheet } from './MacSettingsExtras'
+import { MACOS_DOWNLOAD_URL, UPDATE_DOWNLOAD_LABEL } from './macUpdateCopy'
 import {
   A0_TITLE,
   ASK_CANCEL,
@@ -1031,7 +1031,7 @@ export function AboutTab({ settings, signedIn }: { settings: SettingsConfig; sig
   // Task 2176: the App Sandbox cannot install an update in place, so a Mac is sent to the download. There is no install
   // here, and no command that would try one.
   const downloadUpdate = async () => {
-    const result = await openUrl(MAC_DOWNLOAD_URL)
+    const result = await openUrl(MACOS_DOWNLOAD_URL)
     if (!result.ok) {
       showToast({
         variant: 'error',
@@ -1105,7 +1105,7 @@ export function AboutTab({ settings, signedIn }: { settings: SettingsConfig; sig
           control={
             row.action === 'download' ? (
               <Btn primary onClick={() => void downloadUpdate()}>
-                Download update
+                {UPDATE_DOWNLOAD_LABEL}
               </Btn>
             ) : (
               <Btn disabled={row.action === 'checking'} onClick={() => void desktopUpdateCheck.check()}>

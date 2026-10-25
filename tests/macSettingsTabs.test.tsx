@@ -17,6 +17,7 @@ import { connectNativeUpdateMenu as realConnectNativeUpdateMenu, desktopUpdateCh
 import * as diagnosticsCopy from '../src/diagnosticsCopy'
 import * as finderSetup from '../src/finderSetup'
 import * as finderSetupCopy from '../src/finderSetupCopy'
+import * as macUpdateCopy from '../src/macUpdateCopy'
 import * as model from '../src/macSettingsModel'
 import * as parts from '../src/macSettingsParts'
 import * as signOutCopy from '../src/signOutCopy'
@@ -60,6 +61,7 @@ const baseBindings = {
   ...desktopApi,
   ...diagnosticsCopy,
   ...model,
+  ...macUpdateCopy,
   ...parts,
   ...signOutCopy,
   Modal,
@@ -1617,7 +1619,7 @@ describe('About tab', () => {
   test('Download update opens the newest Mac disk image in the browser and never installs in place', async () => {
     const { m } = await openAbout({}, updateStore(AVAILABLE))
     await press(m, 'Download update')
-    expect(m.calls.find((c) => c.name === 'plugin:opener|open_url')?.args).toEqual({ url: model.MAC_DOWNLOAD_URL })
+    expect(m.calls.find((c) => c.name === 'plugin:opener|open_url')?.args).toEqual({ url: macUpdateCopy.MACOS_DOWNLOAD_URL })
     expect(m.calls.filter((c) => c.name === 'install_update')).toHaveLength(0)
     expect(m.toasts).toEqual([])
   })

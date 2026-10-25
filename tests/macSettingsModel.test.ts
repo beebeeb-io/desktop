@@ -38,7 +38,6 @@ import {
   APPEARANCE_OPTIONS,
   appearanceHint,
   downgradeRow,
-  MAC_DOWNLOAD_URL,
   RELEASE_CHANNELS,
   SPEED_TEST_HINT,
   speedTestSummary,
@@ -339,10 +338,6 @@ describe('About', () => {
 
   test('Get help opens the support page the Help menu already uses', () => {
     expect(HELP_URL).toBe('https://beebeeb.io/support')
-  })
-
-  test('the download is the newest Mac disk image, through the site\'s redirect (task 2176)', () => {
-    expect(MAC_DOWNLOAD_URL).toBe('https://beebeeb.io/download/macos-dmg')
   })
 
   test('the release channels are Stable, Beta, Alpha with the Windows shell\'s hints, word for word', () => {

@@ -22,6 +22,7 @@ import {
 } from './finderSetupCopy'
 import { quotaPercent, titleCasePlan, planRenewalCopy } from './planPresentation'
 import type { ManualUpdateCheckState } from './windows/updateCheckViewModel'
+import { UPDATE_DOWNLOAD_HINT, updateAvailableLine } from './macUpdateCopy'
 import { formatStorageSize, formatStorageUsage } from './storageFormat'
 import { normalizeThemePreference } from './windows/advancedSettingsModel'
 
@@ -388,12 +389,6 @@ export function storageDetails(breakdown: StorageBreakdown, locale?: string): St
  */
 export const HELP_URL = 'https://beebeeb.io/support'
 
-/**
- * The newest Mac disk image, through the site's redirect (task 2176, lead decision of 2026-10-24: under the App Sandbox a
- * Mac cannot install an update in place, so it is offered a download).
- */
-export const MAC_DOWNLOAD_URL = 'https://beebeeb.io/download/macos-dmg'
-
 export interface UpdateRow {
   hint: string
   action: 'check' | 'checking' | 'download'
@@ -413,7 +408,8 @@ export function updateRow(state: ManualUpdateCheckState, version: string | null)
     case 'up_to_date':
       return { hint: `Version ${state.currentVersion} is the latest.`, action: 'check' }
     case 'update_available':
-      return { hint: `Version ${state.version} is available. Drag Beebeeb into Applications to replace this version.`, action: 'download' }
+      // Task 2176: a Mac downloads an update and never installs it in place (`macUpdateCopy.ts` says why).
+      return { hint: `${updateAvailableLine(state.version)} ${UPDATE_DOWNLOAD_HINT}`, action: 'download' }
     case 'downgrade_available':
       // The offer has its own row (`downgradeRow`), so this row keeps to the version this Mac runs.
       return { hint: current, action: 'check' }
