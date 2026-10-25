@@ -161,6 +161,8 @@ export interface VersionConflictEntry {
   id: string
   file_id: string
   file_name: string
+  /** The name of the directory the file sits in; null at the vault's root (Rust `folder_name_for_path`). */
+  folder?: string | null
   kind:
     | 'conflict'
     | 'failed_upload'

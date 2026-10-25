@@ -120,16 +120,23 @@ describe('when a row happened', () => {
 })
 
 describe('the row\'s second line (§7.6)', () => {
-  test('when it happened, then Rust\'s detail line verbatim, for a conflict as for any other row', () => {
-    const c = entry({ kind: 'conflict', action: 'open_conflict', detail: 'Changed on two devices.', updated_at: at(2026, 9, 25, 9, 12) })
-    expect(reviewRowMeta(c, now)).toBe('today 09:12 · Changed on two devices.')
-    expect(reviewRowMeta(entry(), now)).toBe('today 08:47 · Couldn’t upload, will retry')
+  test('the folder, when it happened, then Rust\'s detail line verbatim, for a conflict as for any other row', () => {
+    const c = entry({ kind: 'conflict', action: 'open_conflict', folder: 'Team shared', detail: 'Changed on two devices.', updated_at: at(2026, 9, 25, 9, 12) })
+    expect(reviewRowMeta(c, now)).toBe('Team shared · today 09:12 · Changed on two devices.')
+    expect(reviewRowMeta(entry({ folder: 'Photos' }), now)).toBe('Photos · today 08:47 · Couldn’t upload, will retry')
+  })
+
+  test('a file at the root of the vault has no folder: the line starts with when, never with "null" or a separator', () => {
+    for (const folder of [null, undefined, '', '  ']) {
+      expect(reviewRowMeta(entry({ folder }), now)).toBe('today 08:47 · Couldn’t upload, will retry')
+    }
   })
 
   test('without a time the line is the detail alone, and without either it is empty', () => {
     expect(reviewRowMeta(entry({ updated_at: undefined }), now)).toBe('Couldn’t upload, will retry')
     expect(reviewRowMeta(entry({ updated_at: undefined, detail: '' }), now)).toBe('')
     expect(reviewRowMeta(entry({ detail: '  ' }), now)).toBe('today 08:47')
+    expect(reviewRowMeta(entry({ folder: 'Photos', updated_at: undefined, detail: '' }), now)).toBe('Photos')
   })
 })
 

@@ -14,6 +14,7 @@
  */
 import { command, commandUnavailableLabel, type CommandResult, type VersionConflictEntry } from './desktopApi'
 import { SnapshotReader } from './mainWindowModel'
+import { parseReviewEntries } from './reviewModel'
 
 export const REVIEW_FEED_INTERVAL_MS = 5000
 
@@ -142,8 +143,18 @@ export function connectReviewFeed(feed: ReviewFeed, listen: Listen): () => void 
   }
 }
 
+/** `list_version_conflict_center`, read through the entry validator: an answer that is not a feed is a failure, not rows. */
+export async function readReviewEntries(): Promise<CommandResult<VersionConflictEntry[]>> {
+  const result = await command<unknown>('list_version_conflict_center')
+  if (!result.ok) return result
+  const entries = parseReviewEntries(result.value)
+  return entries === null
+    ? { ok: false, reason: 'Review answered in a form this version of Beebeeb cannot read.', unsupported: false }
+    : { ok: true, value: entries }
+}
+
 /** The window's one feed. */
-export const reviewFeed = new ReviewFeed(() => command<VersionConflictEntry[]>('list_version_conflict_center'))
+export const reviewFeed = new ReviewFeed(readReviewEntries)
 export const subscribeReviewFeed = reviewFeed.subscribe
 export const reviewFeedState = reviewFeed.state
 export const refreshReviewFeed = (): void => reviewFeed.refresh()

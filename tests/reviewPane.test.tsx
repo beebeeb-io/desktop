@@ -22,11 +22,11 @@ const now = new Date()
 const today = (h: number, mi: number) => new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, mi).getTime() / 1000
 
 const conflict: desktopApi.VersionConflictEntry = {
-  id: 'conflict:f1', file_id: 'f1', file_name: 'Board notes, 29 Sept.md', kind: 'conflict', status: 'needs review',
+  id: 'conflict:f1', file_id: 'f1', file_name: 'Board notes, 29 Sept.md', folder: 'Team shared', kind: 'conflict', status: 'needs review',
   updated_at: today(0, 0), detail: 'Changed on two devices.', action: 'open_conflict',
 }
 const upload: desktopApi.VersionConflictEntry = {
-  id: 'op:2', file_id: 'f2', file_name: 'Site visit, north wing.mov', kind: 'failed_upload', status: 'upload review',
+  id: 'op:2', file_id: 'f2', file_name: 'Site visit, north wing.mov', folder: 'Photos', kind: 'failed_upload', status: 'upload review',
   updated_at: today(0, 1), detail: 'Couldn’t upload, will retry', action: 'review_upload',
 }
 const quota: desktopApi.VersionConflictEntry = { ...upload, id: 'op:3', file_id: 'f3', file_name: 'Archive.zip', kind: 'quota_failure', detail: 'This change can’t upload until you free up space or add storage. It stays on this Mac.' }
@@ -88,8 +88,8 @@ describe('rows (§7.6)', () => {
     const rows = find(m, (el) => el.props['data-row'] === 'review')
     expect(rows).toHaveLength(2)
     const flat = (row: any) => lines({ ...m, tree: () => row } as Mounted)
-    expect(flat(rows[0])).toEqual(['Conflict', 'Board notes, 29 Sept.md', 'today 00:00 · Changed on two devices.', 'Decide…'])
-    expect(flat(rows[1])).toEqual(['Upload', 'Site visit, north wing.mov', 'today 00:01 · Couldn’t upload, will retry'])
+    expect(flat(rows[0])).toEqual(['Conflict', 'Board notes, 29 Sept.md', 'Team shared · today 00:00 · Changed on two devices.', 'Decide…'])
+    expect(flat(rows[1])).toEqual(['Upload', 'Site visit, north wing.mov', 'Photos · today 00:01 · Couldn’t upload, will retry'])
   })
 
   test('the renamed tags show, and the retired ones do not', () => {

@@ -637,6 +637,9 @@ pub struct VersionConflictEntry {
     pub id: String,
     pub file_id: String,
     pub file_name: String,
+    /// The display name of the directory the file sits in (`Team shared` for `/Team shared/Board notes.md`); `None` for a
+    /// file at the root of the vault. Review draws it before the time (two-surface spec §7.6, hi-fi section 3).
+    pub folder: Option<String>,
     pub kind: String,
     pub status: String,
     pub updated_at: Option<i64>,
@@ -5283,6 +5286,7 @@ pub fn version_conflict_feed_from_db(db: &StateDb) -> anyhow::Result<Vec<Version
             id: format!("conflict:{}", file.file_id),
             file_id: file.file_id.clone(),
             file_name: display_name_for_path(&file.path),
+            folder: folder_name_for_path(&file.path),
             kind: "conflict".to_string(),
             status: "needs review".to_string(),
             updated_at: Some(file.modified_at),
@@ -6786,6 +6790,17 @@ fn display_name_for_path(path: &str) -> String {
         .to_string()
 }
 
+/// The name of the directory a path sits in: `/Team shared/Board notes.md` is `Team shared`, `/a/b/c.md` is `b`. A file at
+/// the root of the vault (`/c.md`, or a bare `c.md`) has none.
+fn folder_name_for_path(path: &str) -> Option<String> {
+    Path::new(path)
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 fn record_moved_to_trash_activity(db: &StateDb, file_id: &str, rel_path: &str, occurred_at: i64) -> anyhow::Result<()> {
     db.record_local_activity(LocalActivityEventInput {
         event_type: LocalActivityKind::MovedToTrash,
@@ -6814,23 +6829,25 @@ const REVIEW_DETAIL_OTHER: &str = "This change hasn’t been sent yet. It contin
 
 fn review_entry_for_operation(op: &PendingOperation, db: &StateDb) -> anyhow::Result<VersionConflictEntry> {
     let file_id = op.file_id.clone().unwrap_or_else(|| op.op_id.clone());
-    let file_name = op
-        .target_path
+    // The path the entry is about: the operation's own, else the one the state db holds for its file.
+    let path = op.target_path.clone().or_else(|| {
+        op.file_id
+            .as_deref()
+            .and_then(|id| db.get_file(id).ok().flatten())
+            .map(|entry| entry.path)
+    });
+    let file_name = path
         .as_deref()
         .map(display_name_for_path)
-        .or_else(|| {
-            op.file_id
-                .as_deref()
-                .and_then(|id| db.get_file(id).ok().flatten())
-                .map(|entry| display_name_for_path(&entry.path))
-        })
         .unwrap_or_else(|| file_id.clone());
+    let folder = path.as_deref().and_then(folder_name_for_path);
     let (kind, status, detail, action) = classify_review_operation(op);
 
     Ok(VersionConflictEntry {
         id: format!("op:{}", op.op_id),
         file_id,
         file_name,
+        folder,
         kind: kind.to_string(),
         status: status.to_string(),
         updated_at: Some(op.updated_at),
@@ -13039,6 +13056,71 @@ mod tests {
         assert_eq!(entry.detail, REVIEW_DETAIL_UPLOAD);
         assert_eq!(entry.last_error.as_deref(), Some(raw));
         assert_eq!(REVIEW_DETAIL_CONFLICT, "Changed on two devices.");
+    }
+
+    /// The folder of a Review row (spec §7.6, hi-fi section 3): the parent directory's name, none at the vault's root.
+    #[test]
+    fn a_review_row_names_the_folder_its_file_sits_in() {
+        assert_eq!(folder_name_for_path("/Team shared/Board notes.md").as_deref(), Some("Team shared"));
+        assert_eq!(folder_name_for_path("/a/b/c.md").as_deref(), Some("b"));
+        assert_eq!(folder_name_for_path("Photos/site.mov").as_deref(), Some("Photos"));
+        assert_eq!(folder_name_for_path("/c.md"), None);
+        assert_eq!(folder_name_for_path("c.md"), None);
+        assert_eq!(folder_name_for_path(""), None);
+        assert_eq!(folder_name_for_path("/"), None);
+        // The name a row shows is still the file's.
+        assert_eq!(display_name_for_path("/Team shared/Board notes.md"), "Board notes.md");
+    }
+
+    /// The contract with the window: the JSON the feed produces is exactly `tests/fixtures/review-feed.entries.json`, and
+    /// `tests/reviewFeedContract.test.ts` reads the same file with the window's own validator and row words, so a field
+    /// either side adds, drops or renames fails one of the two.
+    #[test]
+    fn the_review_feed_is_exactly_the_shared_fixture() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        bridge
+            .db
+            .upsert_file(&FileEntry {
+                file_id: "f-board".into(),
+                path: "/Team shared/Board notes, 29 Sept.md".into(),
+                status: FileStatus::Conflict,
+                size_bytes: 64,
+                modified_at: 1_790_000_900,
+                content_hash: Some("local".into()),
+                remote_updated_at: 90,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+        let op = |op_id: &str, kind: OperationKind, file_id: &str, path: &str, error: &str, at: i64| PendingOperation {
+            op_id: op_id.into(),
+            kind,
+            file_id: Some(file_id.into()),
+            parent_id: None,
+            target_path: Some(path.into()),
+            metadata_json: None,
+            payload_path: None,
+            base_version: None,
+            base_object_version_id: None,
+            attempts: 1,
+            max_attempts: 25,
+            next_retry_at: 0,
+            last_error: Some(error.into()),
+            backup_source_key: None,
+            created_at: at,
+            updated_at: at,
+        };
+        for pending in [
+            op("op-upload", OperationKind::UploadFile, "f-site", "/Photos/Site visit, north wing.mov", "connection refused", 1_790_000_800),
+            op("op-root", OperationKind::UploadFile, "f-root", "/Archive 2025.zip", "quota exceeded", 1_790_000_700),
+            op("op-deep", OperationKind::UploadFile, "f-deep", "/Investigations/2026/Q3 ledger.xlsx", "401 unauthorized", 1_790_000_600),
+        ] {
+            bridge.db.enqueue_operation(&pending).unwrap();
+        }
+        let produced = serde_json::to_value(bridge.version_conflict_feed().unwrap()).unwrap();
+        let shared: serde_json::Value = serde_json::from_str(include_str!("../../tests/fixtures/review-feed.entries.json")).unwrap();
+        assert_eq!(produced, shared);
     }
 
     /// Spec §7.6: Review is "changes Beebeeb couldn't send yet". An edit that is on its way, and has not failed, is not in

@@ -64,12 +64,35 @@ export function reviewWhen(updatedAt: number | null | undefined, now: Date): str
 }
 
 /**
- * A row's second line: when it happened, then Rust's detail line (§7.6). The detail lines are plain sentences about what
- * happened to the change (`engine_bridge.rs`, `REVIEW_DETAIL_*`; the failure's own text is `last_error`, never shown).
+ * A row's second line (§7.6, hi-fi section 3): the folder the file sits in, when it happened, then Rust's detail line:
+ * "Photos · today 08:47 · Couldn’t upload, will retry". A file at the root of the vault has no folder. The detail lines
+ * are plain sentences about what happened to the change (`engine_bridge.rs`, `REVIEW_DETAIL_*`; the failure's own text
+ * is `last_error`, never shown).
  */
-export function reviewRowMeta(entry: Pick<VersionConflictEntry, 'updated_at' | 'detail'>, now: Date): string {
+export function reviewRowMeta(entry: Pick<VersionConflictEntry, 'updated_at' | 'detail' | 'folder'>, now: Date): string {
   const when = reviewWhen(entry.updated_at, now)
-  return [when, entry.detail.trim()].filter((part): part is string => Boolean(part)).join(' · ')
+  return [entry.folder?.trim(), when, entry.detail.trim()].filter((part): part is string => Boolean(part)).join(' · ')
+}
+
+const isText = (value: unknown): value is string => typeof value === 'string'
+const isTextOrNothing = (value: unknown): boolean => value === undefined || value === null || typeof value === 'string'
+
+/** One entry as Rust serialises it (`VersionConflictEntry`, `engine_bridge.rs`); anything else is no entry. */
+export function parseReviewEntry(raw: unknown): VersionConflictEntry | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null
+  const e = raw as Record<string, unknown>
+  const required = [e.id, e.file_id, e.file_name, e.kind, e.status, e.detail, e.action]
+  if (!required.every(isText)) return null
+  if (!(e.updated_at === undefined || e.updated_at === null || (typeof e.updated_at === 'number' && Number.isFinite(e.updated_at)))) return null
+  if (!isTextOrNothing(e.folder) || !isTextOrNothing(e.op_id) || !isTextOrNothing(e.version_id) || !isTextOrNothing(e.last_error)) return null
+  if (!(e.base_version === undefined || e.base_version === null || typeof e.base_version === 'number')) return null
+  return e as unknown as VersionConflictEntry
+}
+
+/** The feed as Rust sends it: an array, of which every entry that reads is kept. Not an array is no feed (null). */
+export function parseReviewEntries(raw: unknown): VersionConflictEntry[] | null {
+  if (!Array.isArray(raw)) return null
+  return raw.map(parseReviewEntry).filter((entry): entry is VersionConflictEntry => entry !== null)
 }
 
 /** The number on Review's sidebar row: how many things wait, only while the vault is unlocked. */

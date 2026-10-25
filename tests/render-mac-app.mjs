@@ -48,13 +48,13 @@ const snapshot = (over = {}) => ({
 const todayAt = (h, m) => { const d = new Date(); d.setHours(h, m, 0, 0); return Math.floor(d.getTime() / 1000) }
 const LONG_NAME = `${'Quarterly-investigation-summary-'.repeat(4)}final.xlsx`
 const reviewEntries = [
-  { id: 'conflict:f1', file_id: 'f1', file_name: 'Board notes, 29 Sept.md', kind: 'conflict', status: 'needs review', updated_at: todayAt(9, 12), detail: 'Changed on two devices.', action: 'open_conflict' },
-  { id: 'op:2', file_id: 'f2', file_name: 'Site visit, north wing.mov', kind: 'failed_upload', status: 'upload review', updated_at: todayAt(8, 47), detail: 'Couldn’t upload, will retry', action: 'review_upload' },
+  { id: 'conflict:f1', file_id: 'f1', file_name: 'Board notes, 29 Sept.md', folder: 'Team shared', kind: 'conflict', status: 'needs review', updated_at: todayAt(9, 12), detail: 'Changed on two devices.', action: 'open_conflict' },
+  { id: 'op:2', file_id: 'f2', file_name: 'Site visit, north wing.mov', folder: 'Photos', kind: 'failed_upload', status: 'upload review', updated_at: todayAt(8, 47), detail: 'Couldn’t upload, will retry', action: 'review_upload' },
 ]
 const reviewAllKinds = [
   ...reviewEntries,
-  { id: 'op:3', file_id: 'f3', file_name: 'Archive 2025.zip', kind: 'quota_failure', status: 'quota blocked', updated_at: todayAt(8, 30), detail: 'This change can’t upload until you free up space or add storage. It stays on this Mac.', action: 'review_upload' },
-  { id: 'op:4', file_id: 'f4', file_name: LONG_NAME, kind: 'stale_base', status: 'stale base kept local', updated_at: todayAt(8, 2), detail: 'This file changed somewhere else too. Your version is kept on this Mac.', action: 'review_upload' },
+  { id: 'op:3', file_id: 'f3', file_name: 'Archive 2025.zip', folder: null, kind: 'quota_failure', status: 'quota blocked', updated_at: todayAt(8, 30), detail: 'This change can’t upload until you free up space or add storage. It stays on this Mac.', action: 'review_upload' },
+  { id: 'op:4', file_id: 'f4', file_name: LONG_NAME, folder: 'Quarterly investigations, shared with the whole finance team in Rotterdam', kind: 'stale_base', status: 'stale base kept local', updated_at: todayAt(8, 2), detail: 'This file changed somewhere else too. Your version is kept on this Mac.', action: 'review_upload' },
   { id: 'op:5', file_id: 'f5', file_name: 'Plan.pdf', kind: 'auth_failure', status: 'sign-in needed', updated_at: todayAt(7, 40), detail: 'Your session has expired. Sign in again to resume syncing.', action: 'sign_in_again' },
 ]
 const conflictPreview = {
@@ -184,7 +184,7 @@ const SCENARIOS = [
   { name: 'settings-sync', act: section('Sync'), has: ['Beebeeb in Finder', 'Added', 'Repair…', 'Keep on this Mac', 'Speed'], min: true, hifi: 'hifi-s4-fig3' },
   { name: 'settings-about', act: section('About'), has: ['Beebeeb for Mac', 'Version 0.8.12', 'Check for updates', 'Get help', 'Export a support bundle'], min: true, hifi: 'hifi-s4-fig5' },
   // ── Slice 4: Review ──  (the kind tag is drawn in capitals by CSS, as in the hi-fi, so `innerText` reads it in capitals)
-  { name: 'review', act: review, has: ['Review', 'Files that need a decision from you, and changes Beebeeb couldn’t send yet.', 'CONFLICT', 'Board notes, 29 Sept.md', 'today 09:12 · Changed on two devices.', 'Decide…', 'UPLOAD', 'Site visit, north wing.mov', 'today 08:47 · Couldn’t upload, will retry', 'Version history…'], hasNot: ['Local and remote both changed', 'STALE BASE', 'durable queue', 'Nothing needs your attention.'], sidebar: ['Home', 'Review, 2 need attention', 'Trash', 'Settings'], min: true },
+  { name: 'review', act: review, has: ['Review', 'Files that need a decision from you, and changes Beebeeb couldn’t send yet.', 'CONFLICT', 'Board notes, 29 Sept.md', 'Team shared · today 09:12 · Changed on two devices.', 'Decide…', 'UPLOAD', 'Site visit, north wing.mov', 'Photos · today 08:47 · Couldn’t upload, will retry', 'Version history…'], hasNot: ['Local and remote both changed', 'STALE BASE', 'durable queue', 'Nothing needs your attention.'], sidebar: ['Home', 'Review, 2 need attention', 'Trash', 'Settings'], min: true },
   { name: 'review-all-kinds', fx: { review: reviewAllKinds }, act: review, has: ['CHANGED ELSEWHERE', 'STORAGE FULL', 'SIGNED OUT', 'Add storage', 'Sign in again', LONG_NAME, 'Decide…'], hasNot: ['STALE BASE', 'QUOTA', 'METADATA'], min: true },
   { name: 'review-conflict-sheet', act: decide, has: ['Conflict: Board notes, 29 Sept.md', 'This file was modified on two devices. Choose which version to keep.', 'This Mac', 'Other device', 'Keep this Mac’s', 'Keep the other', 'Keep both', '- 4. AOB (added on this Mac)', '+ 2. Roadmap (moved up)'], hasNot: ['Keep Mine', 'This device', '✓'], dialogs: 1, min: true, hifi: 'hifi-s3-fig1' },
   { name: 'review-conflict-binary', fx: { conflictPreview: { is_text: false, local: { size_bytes: 4096, text: null }, remote: { size_bytes: 8192, text: null } } }, act: decide, has: ['Binary file · 4,1 KB', 'Binary file · 8,2 KB', 'Keep both'], dialogs: 1 },

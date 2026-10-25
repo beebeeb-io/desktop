@@ -1,0 +1,62 @@
+[
+  {
+    "id": "conflict:f-board",
+    "file_id": "f-board",
+    "file_name": "Board notes, 29 Sept.md",
+    "folder": "Team shared",
+    "kind": "conflict",
+    "status": "needs review",
+    "updated_at": 1790000900,
+    "detail": "Changed on two devices.",
+    "action": "open_conflict",
+    "op_id": null,
+    "version_id": null,
+    "base_version": null,
+    "last_error": null
+  },
+  {
+    "id": "op:op-upload",
+    "file_id": "f-site",
+    "file_name": "Site visit, north wing.mov",
+    "folder": "Photos",
+    "kind": "failed_upload",
+    "status": "upload review",
+    "updated_at": 1790000800,
+    "detail": "Couldn’t upload, will retry",
+    "action": "review_upload",
+    "op_id": "op-upload",
+    "version_id": null,
+    "base_version": null,
+    "last_error": "connection refused"
+  },
+  {
+    "id": "op:op-root",
+    "file_id": "f-root",
+    "file_name": "Archive 2025.zip",
+    "folder": null,
+    "kind": "quota_failure",
+    "status": "quota blocked",
+    "updated_at": 1790000700,
+    "detail": "This change can’t upload until you free up space or add storage. It stays on this Mac.",
+    "action": "review_upload",
+    "op_id": "op-root",
+    "version_id": null,
+    "base_version": null,
+    "last_error": "quota exceeded"
+  },
+  {
+    "id": "op:op-deep",
+    "file_id": "f-deep",
+    "file_name": "Q3 ledger.xlsx",
+    "folder": "2026",
+    "kind": "auth_failure",
+    "status": "sign-in needed",
+    "updated_at": 1790000600,
+    "detail": "Your session has expired. Sign in again to resume syncing.",
+    "action": "sign_in_again",
+    "op_id": "op-deep",
+    "version_id": null,
+    "base_version": null,
+    "last_error": "401 unauthorized"
+  }
+]

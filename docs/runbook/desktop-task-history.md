@@ -565,5 +565,7 @@ reader stops, so a locked vault or a switched account never shows the previous r
 on its search field, the conflict and delete sheets on their close button (§11); (5) the notification click route exists
 and is pinned, but nothing can trigger it yet: `tauri-plugin-notification` 2.3.3 raises desktop notifications through
 `notify-rust`, which gives the app no click; the trigger (a native `UNUserNotificationCenter` delegate, needing a device
-pass) is task 2181, recorded in the spec's A17 and §12 row 4; (6) the feed carries no folder, so a row has no folder
-line (the hi-fi draws one): the smallest read is a `folder` field on `VersionConflictEntry`.
+pass) is task 2181, recorded in the spec's A17 and §12 row 4; (6) a row starts with the folder its file sits in
+(`VersionConflictEntry::folder`, the parent directory's name from `folder_name_for_path`; none at the vault's root), and the
+feed's JSON is pinned on both sides by `tests/fixtures/review-feed.entries.json` (Rust compares its output to it,
+`tests/reviewFeedContract.test.ts` reads it with the window's validator).
