@@ -183,12 +183,29 @@ const MACOS_UPLOAD_STAGING_SWEEP_EVERY_N_TICKS: u64 = 10;
 /// ```
 ///
 /// Packaged release builds ship without this variable set, so they always hit
-/// `https://api.beebeeb.io`.
+/// `https://api.beebeeb.io`. A unit-test build never does: see [`TEST_API_BASE`].
 pub(crate) fn api_base_url() -> String {
-    let base = std::env::var("BB_API_BASE").unwrap_or_default();
-    let trimmed = base.trim();
+    api_base_url_from(std::env::var("BB_API_BASE").ok().as_deref())
+}
+
+/// The production API, the default of every build but a unit-test build.
+#[cfg_attr(test, allow(dead_code))]
+const PRODUCTION_API_BASE: &str = "https://api.beebeeb.io";
+
+/// A unit-test build has no production default: with `BB_API_BASE` unset it talks to a closed
+/// loopback port, so no lib test can reach the production API (a test that needs a server starts
+/// its own and sets `BB_API_BASE`). After a CLI test once ran against the developer's live session.
+#[cfg(test)]
+const TEST_API_BASE: &str = "http://127.0.0.1:9";
+
+/// [`api_base_url`] for a given `BB_API_BASE` value.
+fn api_base_url_from(env: Option<&str>) -> String {
+    let trimmed = env.unwrap_or_default().trim();
     if trimmed.is_empty() {
-        return "https://api.beebeeb.io".to_string();
+        #[cfg(test)]
+        return TEST_API_BASE.to_string();
+        #[cfg(not(test))]
+        return PRODUCTION_API_BASE.to_string();
     }
     trimmed.trim_end_matches('/').to_string()
 }
@@ -3169,43 +3186,53 @@ mod tests {
 
     // ── api_base_url() env-override ───────────────────────────────────────────
 
+    // The value is passed in: the real env var is process-wide and a parallel test sets it.
     #[test]
     fn api_base_url_trims_trailing_slash() {
-        // The trim-slash logic is a pure string operation — test it directly
-        // without touching the real env var (which could interfere with a
-        // parallel test run).
-        let raw = "http://localhost:3001/";
-        let result = raw.trim().trim_end_matches('/').to_string();
-        assert_eq!(result, "http://localhost:3001");
+        assert_eq!(api_base_url_from(Some("http://localhost:3001/")), "http://localhost:3001");
     }
 
     #[test]
     fn api_base_url_trims_multiple_trailing_slashes() {
-        let raw = "http://localhost:3001///";
-        let result = raw.trim().trim_end_matches('/').to_string();
-        assert_eq!(result, "http://localhost:3001");
+        assert_eq!(api_base_url_from(Some("http://localhost:3001///")), "http://localhost:3001");
     }
 
     #[test]
     fn api_base_url_trims_whitespace() {
-        let raw = "  http://10.100.0.239:3001  ";
-        let result = raw.trim().trim_end_matches('/').to_string();
-        assert_eq!(result, "http://10.100.0.239:3001");
+        assert_eq!(api_base_url_from(Some("  http://10.100.0.239:3001  ")), "http://10.100.0.239:3001");
     }
 
     #[test]
-    fn api_base_url_falls_back_to_prod_when_env_unset() {
-        // When BB_API_BASE is unset (or empty), we must return the prod URL.
-        // This test only guards the empty-string branch (we cannot guarantee
-        // BB_API_BASE is unset in all environments, but an empty override is the
-        // canonical "not set" sentinel the function uses).
-        let trimmed = "";
-        let result = if trimmed.is_empty() {
-            "https://api.beebeeb.io".to_string()
-        } else {
-            trimmed.trim_end_matches('/').to_string()
-        };
-        assert_eq!(result, "https://api.beebeeb.io");
+    fn a_unit_test_build_never_defaults_to_the_production_api() {
+        for unset in [None, Some(""), Some("   ")] {
+            let base = api_base_url_from(unset);
+            assert_eq!(base, "http://127.0.0.1:9", "{unset:?}: a closed loopback port");
+            assert!(!base.contains("beebeeb.io"), "{unset:?}: {base}");
+        }
+    }
+
+    #[test]
+    fn every_other_build_defaults_to_the_production_api() {
+        // A test build cannot run the production branch, so its source is pinned: the default
+        // without BB_API_BASE is the production constant, and that constant is production.
+        assert_eq!(PRODUCTION_API_BASE, "https://api.beebeeb.io");
+        // A Windows checkout has CRLF line endings, so the source is read with them normalized. The
+        // pin also runs on a CRLF copy, so a Mac shows what Windows CI would.
+        let checkout = normalized_line_endings(include_str!("runner.rs"));
+        for source in [checkout.clone(), checkout.replace('\n', "\r\n")] {
+            let source = normalized_line_endings(&source);
+            let body = &source[source.find("fn api_base_url_from(").expect("api_base_url_from")..];
+            let body = &body[..body.find("\n}\n").expect("its end")];
+            assert!(
+                body.contains("#[cfg(not(test))]\n        return PRODUCTION_API_BASE.to_string();"),
+                "the non-test default is the production API:\n{body}"
+            );
+        }
+    }
+
+    /// Source text with CRLF line endings (a Windows checkout) as LF.
+    fn normalized_line_endings(source: &str) -> String {
+        source.replace("\r\n", "\n")
     }
 
     // ── Engine status: the tick's payload and the pulse (task 1683 slice 2) ────

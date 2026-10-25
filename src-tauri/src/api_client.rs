@@ -26,6 +26,9 @@ use std::time::Duration;
 use urlencoding::encode;
 use zeroize::Zeroize;
 
+mod direct;
+pub(crate) use direct::{ChunkApiError, GrantReply, fetch_from_storage, now_ms};
+
 // ── Writer-provenance headers (task 1436, the desktop/web half of 1392) ────────
 //
 // The server records `X-Beebeeb-Client` / `X-Beebeeb-Client-Version` on every
@@ -505,6 +508,15 @@ pub struct ApiClient {
     /// Outcome of the most recent request, read by the runner after each tick
     /// (see `link_health`). Not secret.
     link: std::sync::Arc<crate::link_health::LinkMonitor>,
+    /// Task 2173: what the server's direct-transfer discovery said, asked lazily and trusted for
+    /// at most 10 minutes (`beebeeb_core::direct_transfer::DiscoveryCache`). It lives and dies
+    /// with this client, i.e. with the signed-in session: nothing of it outlives a sign-out or
+    /// an account switch.
+    direct_discovery: tokio::sync::Mutex<beebeeb_core::direct_transfer::DiscoveryCache>,
+    /// Task 2173: the client for presigned storage links, built on first use. Never `client`:
+    /// no default headers (so no `X-Beebeeb-*`), no cookies, no `Authorization`, redirects
+    /// refused, https only (loopback http when the API itself is on loopback http).
+    storage_client: std::sync::OnceLock<Option<Client>>,
 }
 
 impl Drop for ApiClient {
@@ -557,6 +569,8 @@ impl ApiClient {
                 .build()
                 .expect("reqwest client"),
             link: std::sync::Arc::new(crate::link_health::LinkMonitor::new()),
+            direct_discovery: tokio::sync::Mutex::new(beebeeb_core::direct_transfer::DiscoveryCache::new()),
+            storage_client: std::sync::OnceLock::new(),
         }
     }
 
