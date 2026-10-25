@@ -619,7 +619,7 @@ export function PasswordPanel({
  * (Finder entry removed, queue and cache purged), then a fresh sign-in; it also forgets the previous account's address
  * (`forgetEmail`, FB-I2). An `Err` means the sign-out did not happen (including `SIGN_OUT_EMAIL_NOT_FORGOTTEN`): its
  * sentence is shown verbatim as a toast and the step stays; an `Err` after the removal, with the account already out,
- * is HELD instead (a toast does not survive the remount), and when the status cannot say which it is both. Any `Ok` continues, and an `Ok` with a warning (FB-24) HOLDS the
+ * is HELD instead (a toast does not survive the remount), and so is one whose status cannot say which it is. Any `Ok` continues, and an `Ok` with a warning (FB-24) HOLDS the
  * warning's sentence for the signed-out card (review P2-1).
  *
  * On a Mac the step is the sign-out ask in the switch's words, from the snapshot the sign-in carried: “Sign out and
@@ -688,10 +688,12 @@ export function SwitchScreen({
       // (its answer is not guarded against a revision change), and say the sentence where it will be seen:
       const status = await command<{ logged_in?: boolean }>('sync_status')
       const loggedIn = status.ok ? status.value?.logged_in : undefined
-      // Signed out: a remount is coming, so hold. Still signed in: the step stays, so the toast. Cannot tell (the status
-      // could not be read, or did not say): losing the sentence is the worse mistake, so both (delta review P3-5).
+      // Signed out: a remount is coming, so hold. Cannot tell (the status could not be read, or did not say): hold too, since
+      // losing the sentence is the worse mistake and a held sentence is shown above the card whether or not a remount
+      // comes (delta review P3-5; lead ruling: hold only, a toast would say it twice). Still signed in: the step stays, so
+      // it is today's toast; the toast is the fallback for a sentence that cannot be held, and that one can.
       if (loggedIn !== true) holdSignOutWarning(failure)
-      if (loggedIn !== false) showToast({ variant: 'error', title: ACCOUNT_SWITCH_FAILED, message: failure })
+      else showToast({ variant: 'error', title: ACCOUNT_SWITCH_FAILED, message: failure })
       void command<void>('sign_out_result_ack')
       return
     }

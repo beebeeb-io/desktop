@@ -251,7 +251,8 @@ describe('the account switch under the boundary (P2-1, P2-2)', () => {
   }, SLOW)
 
   // Delta review P3-5: the status that tells the step whether the account is out can itself fail at that moment. The step
-  // cannot tell then, so it holds the sentence anyway (and toasts it too, for a window that stays).
+  // cannot tell then, so it holds the sentence anyway, and only holds it (lead ruling): no toast, in the window that is
+  // about to be remounted or in one that stays.
   test('a sign-out that failed after the removal while the status cannot be read: the sentence is still on the card after the remount', async () => {
     const failure = 'Sign-out stopped after Beebeeb was removed from Finder. Restart Beebeeb and sign in again.'
     const native: Native = { loggedIn: true, authExpired: true, revision: 25, calls: [], nav: null }
@@ -276,12 +277,21 @@ describe('the account switch under the boundary (P2-1, P2-2)', () => {
     const shownBefore = card(container)!
 
     await press(container, 'button', 'Sign out and switch')
-    await waitFor('the sign-out', () => native.calls.includes('clear_session'))
-    await waitForRemount(container, shownBefore, native)
+    // Every frame up to the remount is looked at: a toast would be on screen for as long as the window stands.
+    let sawToast = false
+    await waitFor('the sign-out', () => {
+      sawToast ||= container.textContent.includes('Couldn’t sign out')
+      return native.calls.includes('clear_session')
+    })
+    await waitFor('the remount', () => {
+      sawToast ||= container.textContent.includes('Couldn’t sign out')
+      return accountSessionRevision() === native.revision && !container.contains(shownBefore)
+    })
     await settled(container, (c) => card(c) !== undefined && !c.textContent.includes(SWITCH_TITLE))
 
     expect(heldSignOutWarning()).toBe(failure)
     expect(statusLines(container)).toContain(failure)
+    expect(sawToast).toBe(false)
   }, SLOW)
 
   // P2-2. The account left another way (the app menu's Sign Out): nothing in this card ran.

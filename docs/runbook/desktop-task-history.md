@@ -642,5 +642,6 @@ no longer says sync is paused (it says "Beebeeb couldn’t send some changes wit
 `SIGN_IN_AGAIN_REQUESTED_COPY`, chosen by the same signal as the way back, `sessionFine`; spec §7.4 and the hi-fi amended in the same
 commit); a Lock after a window opened unlocked goes straight to Home's locked card (the `pending_setup` question is asked only of a
 window whose first read is locked); and a sign-out that fails after the removal while `sync_status` cannot be read holds its
-sentence anyway and toasts it too.
+sentence anyway, and only holds it (lead ruling: a held sentence is shown above the card whether or not a remount comes, so a
+toast would say it twice; the toast is the fallback for a sentence that cannot be held).
 
