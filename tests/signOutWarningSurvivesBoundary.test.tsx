@@ -79,6 +79,7 @@ function installBackend(native: Native, extra: Record<string, (args: any) => unk
   let callbackId = 0
   const snapshot = () => ({
     phase: 'synced',
+    sync_phase: 'synced',
     generated_at: 1000,
     account: { email: native.loggedIn ? 'sam@example.eu' : null, logged_in: native.loggedIn, vault_unlocked: native.loggedIn, auth_expired: false },
     paused: false,

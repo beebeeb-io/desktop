@@ -41,7 +41,7 @@ describe('the popover snapshot contract (task 1683 slice 2)', () => {
     expect(parsed[2]?.reason).toEqual({ code: 'timeout', detail: 'timeout after 30 s' })
   })
 
-  test('the validator refuses each way a snapshot can be wrong (9 of 9)', () => {
+  test('the validator refuses each way a snapshot can be wrong (10 of 10)', () => {
     const good = fixture('popover-snapshot.syncing.json') as Record<string, unknown>
     const broken: [string, (s: Record<string, unknown>) => void][] = [
       ['unknown phase', (s) => { s.phase = 'syncing_soon' }],
@@ -52,6 +52,7 @@ describe('the popover snapshot contract (task 1683 slice 2)', () => {
       ['a row with a bad direction', (s) => { ((s.activity as Record<string, unknown>[])[0] as Record<string, unknown>).direction = 'sideways' }],
       ['a row with a bad state', (s) => { ((s.activity as Record<string, unknown>[])[0] as Record<string, unknown>).state = 'queued' }],
       ['reason without a code', (s) => { s.reason = { detail: 'x' } }],
+      ['unknown sync phase (task 2179)', (s) => { s.sync_phase = 'finder_soon' }],
       ['a row without a path', (s) => { delete ((s.activity as Record<string, unknown>[])[0] as Record<string, unknown>).path }],
     ]
     let refused = 0
@@ -61,7 +62,7 @@ describe('the popover snapshot contract (task 1683 slice 2)', () => {
       if (parsePopoverSnapshot(copy) === null) refused += 1
       else throw new Error(`accepted a snapshot with: ${label}`)
     }
-    expect(refused).toBe(9)
+    expect(refused).toBe(10)
     expect(parsePopoverSnapshot(null)).toBeNull()
     expect(parsePopoverSnapshot('synced')).toBeNull()
     expect(parsePopoverSnapshot([])).toBeNull()

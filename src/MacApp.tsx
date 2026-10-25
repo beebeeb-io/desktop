@@ -73,8 +73,16 @@ import { connectSignOutFlowEvents, connectSignOutFlowMenu, SignOutFlow, signOutF
 import { openModalCount, subscribeOpenModals, useToast } from './windows/ui'
 import { connectNativeUpdateMenu, desktopUpdateCheck } from './windows/manualUpdateCheck'
 
-/** How often the window reads the account and sync state again while it is open. */
+/** How long after a read finishes the window reads the account and sync state again while it is open. */
 const SNAPSHOT_REFRESH_MS = 5000
+/** A snapshot read still unanswered after this long is given up (task 2179): it fails, and the next one starts. */
+const SNAPSHOT_WATCHDOG_MS = 15_000
+
+/** What the reader applies for a read that threw, rejected or never answered. */
+function snapshotReadFailure(cause: 'threw' | 'rejected' | 'timed out', error?: unknown): CommandResult<PopoverSnapshot> {
+  const reason = cause === 'timed out' ? 'Beebeeb didn’t answer in time.' : error instanceof Error ? error.message : String(error ?? cause)
+  return { ok: false, reason, unsupported: false }
+}
 
 function locationSearch(): string {
   try {
@@ -97,7 +105,7 @@ function accountLine(account: PopoverSnapshot['account'], plan: Subscription | n
 
 // ── Home (§7.6, first cut: status, Finder row, storage, the kept rows) ────────
 
-function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefresh: () => void }) {
+function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefresh: () => Promise<void> }) {
   const { showToast } = useToast()
   const finder = useFinderSetup()
   const kept = useKeptFolders()
@@ -107,7 +115,6 @@ function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefres
     const unlock = async () => {
       setBusy('unlock')
       const result = await command<void>('unlock_vault')
-      setBusy(null)
       if (!result.ok) {
         showToast({
           variant: 'error',
@@ -115,7 +122,9 @@ function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefres
           message: result.unsupported ? commandUnavailableLabel('unlock_vault') : result.reason,
         })
       }
-      onRefresh()
+      // Busy until the window shows what the unlock did (task 2179): a stale locked card never offers the button again.
+      await onRefresh()
+      setBusy(null)
     }
     return (
       <div className="mw-content">
@@ -150,7 +159,6 @@ function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefres
   const resume = async () => {
     setBusy('resume')
     const result = await command<void>('tray_resume_sync')
-    setBusy(null)
     if (!result.ok) {
       showToast({
         variant: 'error',
@@ -158,7 +166,9 @@ function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefres
         message: result.unsupported ? commandUnavailableLabel('tray_resume_sync') : result.reason,
       })
     }
-    onRefresh()
+    // Busy until the window shows what the resume did (task 2179).
+    await onRefresh()
+    setBusy(null)
   }
 
   let statusAction = null
@@ -362,9 +372,9 @@ export default function MacApp() {
     setFocusId(focusAfterNav(previous, next, nav))
   }
 
-  // The account and sync state: on open, every few seconds, and after each sign-out outcome. The reader keeps one read
-  // in flight and never throws one away because the timer fired (a read can take 8 s, the tick is 5 s); an outcome's
-  // read wins over the reads started before it (follow-up to PR #134, auto-review thread 1).
+  // The account and sync state: on open, a few seconds after each read, and after each outcome. The reader keeps one
+  // read in flight and never throws one away because the timer fired; an outcome's read wins over the reads started
+  // before it (follow-up to PR #134, auto-review thread 1; task 2179).
   const readerRef = useRef<SnapshotReader<CommandResult<PopoverSnapshot>> | null>(null)
   if (readerRef.current === null) {
     readerRef.current = new SnapshotReader(
@@ -377,20 +387,16 @@ export default function MacApp() {
           setSnapshotFailed(true)
         }
       },
+      { failure: snapshotReadFailure, watchdogMs: SNAPSHOT_WATCHDOG_MS },
     )
   }
   const reader = readerRef.current
   useEffect(() => {
-    reader.resume()
-    reader.tick()
-    const id = window.setInterval(() => reader.tick(), SNAPSHOT_REFRESH_MS)
-    return () => {
-      window.clearInterval(id)
-      reader.stop()
-    }
+    reader.start(SNAPSHOT_REFRESH_MS)
+    return () => reader.stop()
   }, [reader])
   useEffect(() => {
-    if (flowOutcomes > 0) reader.refresh()
+    if (flowOutcomes > 0) void reader.refresh()
   }, [reader, flowOutcomes])
 
   // The plan needs the session; it is read again after an unlock.
@@ -479,7 +485,7 @@ export default function MacApp() {
               kind="alert"
               surface="main-load"
               title="Couldn’t load your account"
-              actions={<Btn onClick={() => reader.refresh()}>Try again</Btn>}
+              actions={<Btn onClick={() => void reader.retry()}>Try again</Btn>}
             />
           ) : (
             <div className="ms-loading" role="status">Loading…</div>
