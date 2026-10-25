@@ -121,8 +121,7 @@ use tokio::sync::mpsc;
 // [`suppress_engine_delete`], and the debounce loop consults [`take_engine_delete_suppressed`]
 // on every `Delete` event — a hit means "engine-originated, do not propagate".
 //
-// Mirrors the existing `in_flight` CREATE-suppression set (scan_loop) and the
-// `windows_cf::NOTIFY_TX` static: an `extern "system"` callback / a deep engine
+// Mirrors the `windows_cf::NOTIFY_TX` static: an `extern "system"` callback / a deep engine
 // call site can't thread a handle, so a process-global is the simplest hop. The
 // set is small (only paths mid-delete) and self-draining (entries are consumed on
 // the matching Delete event, or swept by [`prune_stale_engine_suppressions`]).
@@ -393,24 +392,20 @@ async fn debounce_loop(
 /// SQLite DB and stages bytes) runs inside [`tokio::task::spawn_blocking`] so it
 /// never stalls the async runtime.
 ///
-/// Dedupe: `classify_local_path`'s filter-3 already rejects any path with a DB
-/// row, and `queue_finder_create` writes that row synchronously before
-/// returning — so a file queued by scan N is rejected by scan N+1. The
-/// `in_flight` set is a belt-and-braces second guard covering the in-process
-/// window between dispatch and the row being observable, and it stops repeated
-/// `convert_to_unsynced_placeholder` calls on a path already handed off. A path
-/// that disappears from disk is pruned from the set so a later same-named file
-/// can still be picked up.
+/// Dedupe: `queue_finder_create` writes the file's `Uploading` row
+/// synchronously before it returns, so a file queued by scan N is a tracked
+/// file for scan N+1: `classify_local_path` takes it to `classify_tracked_edit`,
+/// which queues nothing while its upload is queued and, once it landed, only a
+/// change of its bytes (task 1640). Task 1640 (follow-up): there used to be an
+/// `in_flight` set of the paths a scan had queued, skipped until they left the
+/// disk. Since the row is written before the queue call returns, it guarded no
+/// window, but it kept a just-uploaded file from ever being classified again, so
+/// an atomic save of it (no change notification) waited for a restart. Removed.
 async fn scan_loop(
     bridge: Arc<EngineBridge>,
     sync_root: PathBuf,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
-    // Paths this engine lifetime has already dispatched for upload. Lives across
-    // ticks so a file mid-upload isn't re-dispatched in the window before its
-    // `Uploading` DB row is observable to filter-3.
-    let mut in_flight: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-
     loop {
         // Wait one interval OR a shutdown signal. We sleep FIRST so the very
         // first scan happens one interval after startup — by then the initial
@@ -425,43 +420,25 @@ async fn scan_loop(
             _ = tokio::time::sleep(SCAN_INTERVAL) => {}
         }
 
-        // Run the blocking walk + classify + queue off the async runtime. We
-        // move the in-flight set in and get it back so it persists across ticks
-        // without a lock. `bridge`/`sync_root` are cheap to clone (Arc + PathBuf).
+        // Run the blocking walk + classify + queue off the async runtime.
+        // `bridge`/`sync_root` are cheap to clone (Arc + PathBuf).
         let bridge_for_scan = bridge.clone();
         let root_for_scan = sync_root.clone();
-        let taken = std::mem::take(&mut in_flight);
-        match tokio::task::spawn_blocking(move || {
-            let mut set = taken;
-            run_one_scan(&bridge_for_scan, &root_for_scan, &mut set);
-            set
-        })
-        .await
-        {
-            Ok(set) => in_flight = set,
-            Err(e) => {
-                // The blocking task panicked — log and continue with an empty
-                // set (filter-3 + filter-2 still prevent double uploads; the set
-                // is only an optimisation). Never let one bad scan kill the loop.
-                tracing::warn!(error = %e, "enumeration scan task panicked; continuing");
-                in_flight = std::collections::HashSet::new();
-            }
+        if let Err(e) = tokio::task::spawn_blocking(move || run_one_scan(&bridge_for_scan, &root_for_scan)).await {
+            // The blocking task panicked — log and continue. Never let one bad
+            // scan kill the loop.
+            tracing::warn!(error = %e, "enumeration scan task panicked; continuing");
         }
     }
 }
 
-/// One pass of the enumeration scan: walk the tree under `sync_root`, dispatch
-/// every genuinely-new file for upload, and keep `in_flight` in sync with disk
-/// reality (add dispatched paths, prune vanished ones). Synchronous — called
-/// inside [`tokio::task::spawn_blocking`] from [`scan_loop`].
-fn run_one_scan(bridge: &EngineBridge, sync_root: &std::path::Path, in_flight: &mut std::collections::HashSet<PathBuf>) {
-    let mut seen_on_disk: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+/// One pass of the enumeration scan: walk the tree under `sync_root` and
+/// dispatch every genuinely-new file for upload, and every change of a tracked
+/// one (task 1640). Synchronous — called inside [`tokio::task::spawn_blocking`]
+/// from [`scan_loop`].
+pub(crate) fn run_one_scan(bridge: &EngineBridge, sync_root: &std::path::Path) {
     let mut dispatched = 0usize;
-    tracing::debug!(
-        sync_root = %sync_root.display(),
-        in_flight = in_flight.len(),
-        "enumeration scan: starting pass"
-    );
+    tracing::debug!(sync_root = %sync_root.display(), "enumeration scan: starting pass");
 
     // Live known-folder-backup gate (task 0811 review fix for the disable race).
     // The mirror copies files onto disk, but it can be racing a DISABLE: a file
@@ -520,19 +497,6 @@ fn run_one_scan(bridge: &EngineBridge, sync_root: &std::path::Path, in_flight: &
                 path = %file_path.display(),
                 "enumeration scan: found file"
             );
-            seen_on_disk.insert(file_path.to_path_buf());
-
-            // Already dispatched this lifetime and not yet reflected as a DB row?
-            // Skip the redundant classify/convert. classify_local_path would also
-            // reject it once the row lands, but this avoids the work + repeated
-            // CfConvertToPlaceholder churn in the meantime.
-            if in_flight.contains(file_path) {
-                tracing::debug!(
-                    path = %file_path.display(),
-                    "enumeration scan: skipped in-flight file"
-                );
-                return;
-            }
 
             // Disable-race gate (task 0811 review fix): a file the mirror copied
             // while its folder was enabled is still on disk after a disable+purge.
@@ -549,9 +513,8 @@ fn run_one_scan(bridge: &EngineBridge, sync_root: &std::path::Path, in_flight: &
 
             // Throttle (task 0811): cap NEW enqueues per pass so a first enable of
             // a huge folder ramps up gradually instead of flooding the queue. Keep
-            // walking (so `seen_on_disk` stays complete for the prune below and
-            // parent folders keep getting scaffolded) but stop dispatching files —
-            // the next pass picks up the remainder.
+            // walking (so parent folders keep getting scaffolded) but stop
+            // dispatching files — the next pass picks up the remainder.
             if dispatched >= MAX_NEW_UPLOADS_PER_SCAN {
                 tracing::debug!(
                     path = %file_path.display(),
@@ -561,14 +524,10 @@ fn run_one_scan(bridge: &EngineBridge, sync_root: &std::path::Path, in_flight: &
                 return;
             }
 
-            // A new file waits in `in_flight` for its row. An edit of a tracked file (task 1640)
-            // is held back by its queued upload instead, so a later edit is seen again.
-            let tracked = crate::engine_bridge::relative_db_path(sync_root, file_path)
-                .is_some_and(|rel| matches!(bridge.db().get_file_by_path(&rel), Ok(Some(_))));
+            // A file queued here is a tracked file from now on (its row is written before
+            // the queue call returns): a later pass queues nothing while its upload is
+            // queued, and sends a later change of it (task 1640).
             if dispatch_local_create(bridge, sync_root, file_path, "scan") {
-                if !tracked {
-                    in_flight.insert(file_path.to_path_buf());
-                }
                 dispatched += 1;
             } else {
                 tracing::debug!(
@@ -578,13 +537,6 @@ fn run_one_scan(bridge: &EngineBridge, sync_root: &std::path::Path, in_flight: &
             }
         },
     );
-
-    // Prune in-flight entries whose files are gone (deleted, renamed, or the
-    // upload finished and the placeholder no longer matches a plain file we'd
-    // re-dispatch). We only retain entries we actually saw this walk; anything
-    // else is no longer a path we need to suppress. This keeps the set bounded
-    // and lets a NEW file at a previously-used path be picked up later.
-    in_flight.retain(|p| seen_on_disk.contains(p));
 
     if dispatched > 0 {
         tracing::debug!(dispatched, "enumeration scan queued new local files");
@@ -1075,8 +1027,7 @@ mod tests {
         let file = sync_root.join("direct-write.txt");
         fs::write(&file, b"direct explorer payload").unwrap();
 
-        let mut in_flight = HashSet::new();
-        run_one_scan(&bridge, &sync_root, &mut in_flight);
+        run_one_scan(&bridge, &sync_root);
 
         assert_uploading_row(&db, "direct-write.txt", 23);
     }
@@ -1094,15 +1045,14 @@ mod tests {
         let final_file = sync_root.join("renamed-write.txt");
         fs::write(&temp_file, b"atomic rename explorer payload").unwrap();
 
-        let mut in_flight = HashSet::new();
-        run_one_scan(&bridge, &sync_root, &mut in_flight);
+        run_one_scan(&bridge, &sync_root);
         assert!(
             db.get_file_by_path("renamed-write.txt.tmp").unwrap().is_none(),
             "temporary Explorer copy name must not be queued"
         );
 
         fs::rename(&temp_file, &final_file).unwrap();
-        run_one_scan(&bridge, &sync_root, &mut in_flight);
+        run_one_scan(&bridge, &sync_root);
 
         assert_uploading_row(&db, "renamed-write.txt", 30);
     }
