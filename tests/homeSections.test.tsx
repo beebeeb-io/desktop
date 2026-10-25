@@ -33,6 +33,7 @@ const texts = (tree: any): string[] => {
 }
 const buttonsOf = (tree: any) => els(tree).filter((el) => el.type === 'button')
 const label = (el: TreeNode) => el.props['aria-label'] ?? textOf(expand(el.props.children)).trim()
+const visible = (el: TreeNode) => textOf(expand(el.props.children)).trim()
 
 const now = new Date(2026, 9, 25, 14, 30)
 const at = (h: number, mi: number) => Math.floor(new Date(2026, 9, 25, h, mi).getTime() / 1000)
@@ -106,8 +107,14 @@ describe('HomeAttention: "Needs your attention"', () => {
   test('an action on a row is handed up with its entry', () => {
     const got: unknown[] = []
     const tree = draw(HomeAttention, { ...base, onAction: (...args: unknown[]) => got.push(args) })
-    buttonsOf(tree).filter((b) => label(b) === 'Decide…')[0].props.onClick()
+    buttonsOf(tree).filter((b) => visible(b) === 'Decide…')[0].props.onClick()
     expect(got).toEqual([[conflict, { kind: 'open_conflict', label: 'Decide…' }]])
+  })
+
+  test('"Decide…" is named for its file here too (the row is Review\'s own), the visible word first', () => {
+    const tree = draw(HomeAttention, base)
+    const decide = buttonsOf(tree).filter((b) => visible(b) === 'Decide…')[0]
+    expect(label(decide)).toBe('Decide…, Board notes, 29 Sept.md')
   })
 
   test('no entries and nothing added: no group at all', () => {

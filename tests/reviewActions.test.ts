@@ -41,6 +41,15 @@ describe('makeReviewActions', () => {
     expect(log.decided).toEqual([])
   })
 
+  test('"Manage plan" opens the billing page too: adding storage does not cure a lapsed trial (review of #142)', async () => {
+    const { act, log } = setup()
+    act(entry, { kind: 'manage_plan', label: 'Manage plan' })
+    await settle()
+    expect(log.urls).toEqual([BILLING_URL])
+    expect(log.decided).toEqual([])
+    expect(log.reauth).toBe(0)
+  })
+
   test('"Sign in again" starts the in-place sign-in and says nothing when it works', async () => {
     const { act, log } = setup()
     act(entry, { kind: 'sign_in_again', label: 'Sign in again' })

@@ -1274,24 +1274,22 @@ describe('the Review feed is read only while there is something to read (§7.6)'
     expect(out.feedLog.connected).toBe(0)
   })
 
-  test('the rows are read only while Review shows them: watched on Review and nowhere else, never while locked or signed out, and let go with the window (review of #142: the list is the costly read)', async () => {
-    const home = openWindow()
-    await settle(home.m)
-    expect(home.feedLog.watched).toBe(0)
-    await home.request({ to: 'trash' })
-    expect(home.feedLog.watched).toBe(0)
-    await home.request({ to: 'review' })
+  test('the rows are read only while something shows them: Review, and Home\'s "Needs your attention"; not Trash, never while locked or signed out, and let go with the window (review of #142: the list is the costly read)', async () => {
+    const opened = async (search: string, snap?: () => unknown) => {
+      const w = openWindow({ search, snap })
+      await settle(w.m)
+      return w
+    }
+    const home = await opened('')
     expect(home.feedLog.watched).toBe(1)
+    expect((await opened('?section=review')).feedLog.watched).toBe(1)
+    expect((await opened('?section=trash')).feedLog.watched).toBe(0)
     home.m.unmount()
     expect(home.feedLog.unwatched).toBe(1)
-    const locked = openWindow({ snap: () => snapshot({ account: { vault_unlocked: false } }) })
-    await settle(locked.m)
-    await locked.request({ to: 'review' })
-    expect(locked.feedLog.watched).toBe(0)
-    const out = openWindow({ snap: () => snapshot({ account: { logged_in: false, vault_unlocked: false } }) })
-    await settle(out.m)
-    await out.request({ to: 'review' })
-    expect(out.feedLog.watched).toBe(0)
+    for (const search of ['', '?section=review']) {
+      expect((await opened(search, () => snapshot({ account: { vault_unlocked: false } }))).feedLog.watched).toBe(0)
+      expect((await opened(search, () => snapshot({ account: { logged_in: false, vault_unlocked: false } }))).feedLog.watched).toBe(0)
+    }
   })
 
   test('Review is given the feed, and a resolved conflict makes the window read it again', async () => {
@@ -1502,7 +1500,7 @@ const m_toasts = (m: Mounted) => m.toasts
 describe('Home › "Needs your attention" holds Review\'s top three and the kept rows (§7.6, §8.3)', () => {
   test('the first three entries as Review draws them, then how many more are in Review', async () => {
     const entries = ['a', 'b', 'c', 'd', 'e'].map((id) => conflictEntry(id))
-    const { m, events } = openHome(snapshot(), {}, { feed: { status: 'ready', entries, reason: null } })
+    const { m, events } = openHome(snapshot(), {}, { feed: { status: 'ready', entries, count: entries.length, rejected: 0, reason: null } })
     await settleHome(m)
     expect(groupTitles(m)).toContain('Needs your attention')
     const text = homeText(m)
@@ -1513,8 +1511,16 @@ describe('Home › "Needs your attention" holds Review\'s top three and the kept
     expect(events).toEqual(['open-review'])
   })
 
+  test('"more in Review" counts what waits (the badge\'s number), not the rows a capped list carries (review of #142)', async () => {
+    const entries = ['a', 'b', 'c', 'd'].map((id) => conflictEntry(id))
+    const { m } = openHome(snapshot(), {}, { feed: { status: 'ready', entries, count: 250, rejected: 0, reason: null } })
+    await settleHome(m)
+    expect(hasHomeButton(m, '247 more in Review')).toBe(true)
+    expect(hasHomeButton(m, '1 more in Review')).toBe(false)
+  })
+
   test('"Decide…" opens the conflict sheet for that file, right here; resolving asks the window to read the feed again', async () => {
-    const { m, sheets, events } = openHome(snapshot(), {}, { feed: { status: 'ready', entries: [conflictEntry('a'), conflictEntry('b')], reason: null } })
+    const { m, sheets, events } = openHome(snapshot(), {}, { feed: { status: 'ready', entries: [conflictEntry('a'), conflictEntry('b')], count: 2, rejected: 0, reason: null } })
     await settleHome(m)
     const decide = find(m, (el) => el.type === 'button' && textOf(el.props.children).trim() === 'Decide…')
     expect(decide).toHaveLength(2)
@@ -1530,7 +1536,7 @@ describe('Home › "Needs your attention" holds Review\'s top three and the kept
 
   test('the kept rows keep their place in the same group, after Review\'s', async () => {
     const ours = '/Users/sam/Library/Containers/io.beebeeb.app/Data/Documents/Changes not sent/2026-10-10 at 14.05.12'
-    const { m } = openHome(snapshot(), { kept_unsent_folder: () => ours }, { feed: { status: 'ready', entries: [conflictEntry('a')], reason: null } })
+    const { m } = openHome(snapshot(), { kept_unsent_folder: () => ours }, { feed: { status: 'ready', entries: [conflictEntry('a')], count: 1, rejected: 0, reason: null } })
     await settleHome(m)
     const text = homeText(m)
     expect(groupTitles(m).filter((t) => t === 'Needs your attention')).toHaveLength(1)
@@ -1546,7 +1552,7 @@ describe('Home › "Needs your attention" holds Review\'s top three and the kept
 
   test('a feed that is still loading or failed shows no rows: Home never guesses', async () => {
     for (const status of ['loading', 'failed'] as const) {
-      const { m } = openHome(snapshot(), {}, { feed: { status, entries: [conflictEntry('a')], reason: null } })
+      const { m } = openHome(snapshot(), {}, { feed: { status, entries: [conflictEntry('a')], count: 1, rejected: 0, reason: null } })
       await settleHome(m)
       expect(groupTitles(m)).not.toContain('Needs your attention')
     }

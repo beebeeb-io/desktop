@@ -67,7 +67,7 @@ describe('the counts line (§7.6: "On this Mac {n} files · Online-only {n} · K
 })
 
 const entry = (id: string) => ({ id, file_id: `f-${id}`, file_name: `${id}.md`, kind: 'conflict', status: 's', updated_at: 1, detail: 'd', action: 'open_conflict' })
-const ready = (n: number) => ({ status: 'ready' as const, entries: Array.from({ length: n }, (_, i) => entry(`e${i}`)), reason: null })
+const ready = (n: number, count = n) => ({ status: 'ready' as const, entries: Array.from({ length: n }, (_, i) => entry(`e${i}`)), count, rejected: 0, reason: null })
 
 describe('"Needs your attention" shows the top three Review entries (§7.6)', () => {
   test('three of five, in the feed\'s order, and how many more wait in Review', () => {
@@ -83,9 +83,18 @@ describe('"Needs your attention" shows the top three Review entries (§7.6)', ()
     expect(attentionForHome(ready(3)).more).toBe(0)
   })
 
+  test('"more" is of the COUNT, the badge\'s number, not of the rows the capped list carries (review of #142)', () => {
+    expect(attentionForHome(ready(200, 250)).more).toBe(247)
+    expect(attentionForHome(ready(3, 3)).more).toBe(0)
+  })
+
+  test('a count that lags the rows never makes "more" smaller than the rows say', () => {
+    expect(attentionForHome(ready(5, 0)).more).toBe(2)
+  })
+
   test('a feed that is loading or failed shows none: Home never guesses', () => {
-    expect(attentionForHome({ status: 'loading', entries: [], reason: null })).toEqual({ entries: [], more: 0 })
-    expect(attentionForHome({ status: 'failed', entries: [], reason: 'x' })).toEqual({ entries: [], more: 0 })
+    expect(attentionForHome({ status: 'loading', entries: [], count: 4, rejected: 0, reason: null })).toEqual({ entries: [], more: 0 })
+    expect(attentionForHome({ status: 'failed', entries: [], count: 4, rejected: 0, reason: 'x' })).toEqual({ entries: [], more: 0 })
   })
 })
 

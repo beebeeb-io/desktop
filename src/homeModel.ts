@@ -54,10 +54,17 @@ export function homeCounts(overview: FileOverview | null, locale: string): HomeC
 
 // ── Needs your attention ─────────────────────────────────────────────────────
 
-/** The first three Review entries, and how many more wait in Review. A feed that has not answered shows none. */
+/**
+ * The first three Review entries, and how many more wait in Review: of the feed's COUNT, which is what the badge says, not
+ * of the rows it carries (Rust caps those, and "2 more in Review" beside a badge of 250 would be wrong). A feed that has not
+ * answered shows none.
+ */
 export function attentionForHome(feed: ReviewFeedState): { entries: VersionConflictEntry[]; more: number } {
   if (feed.status !== 'ready') return { entries: [], more: 0 }
-  return { entries: feed.entries.slice(0, HOME_ATTENTION_LIMIT), more: Math.max(0, feed.entries.length - HOME_ATTENTION_LIMIT) }
+  return {
+    entries: feed.entries.slice(0, HOME_ATTENTION_LIMIT),
+    more: Math.max(0, Math.max(feed.count, feed.entries.length) - HOME_ATTENTION_LIMIT),
+  }
 }
 
 // ── Recent activity ──────────────────────────────────────────────────────────

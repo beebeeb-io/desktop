@@ -30,6 +30,7 @@ import {
   BILLING_URL,
   command,
   commandUnavailableLabel,
+  forceReauth,
   openUrl,
   popoverSnapshot,
   type CommandResult,
@@ -571,8 +572,13 @@ export default function MacApp() {
     if (!(inReview && unlocked)) setHistoryOpen(false)
   }, [inReview, unlocked])
 
-  // The rows are read only while Review shows them; the badge's count is read all the time.
-  useEffect(() => (signedIn && unlocked && inReview ? reviewFeed.watchList() : undefined), [signedIn, unlocked, inReview])
+  // The rows are read only while something shows them (Review, or Home's "Needs your attention"); the badge's count is
+  // read all the time.
+  const inHome = view.mode === 'main' && view.section === 'home'
+  useEffect(
+    () => (signedIn && unlocked && (inReview || inHome) ? reviewFeed.watchList() : undefined),
+    [signedIn, unlocked, inReview, inHome],
+  )
 
   // §8.2 and F15: Rust enables View › Back only while Settings shows, and disables the navigation items and
   // Settings… while a sheet is open.

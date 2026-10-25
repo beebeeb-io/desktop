@@ -208,14 +208,11 @@ function installBackend({ caps, fx }) {
         case 'desktop_platform': return 'macos'
         case 'app_version': return '0.8.12'
         case 'sync_status': return { session_revision: f.revision ?? 1, logged_in: f.snapshot.account.logged_in, vault_unlocked: f.snapshot.account.vault_unlocked, engine: 'running', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0, auth_expired: f.snapshot.account.auth_expired, engine_refusal: null }
-        // (This function runs in the page.) Every "how long ago" in a snapshot moves by the time since the fixtures were made;
-        // the default snapshot's `last_tick_ok_at` is the sentinel 'now-70s' (LAST_CHECKED_70_S_AGO above): 70 s before the page asks.
+        // (This function runs in the page.) The check time is set per scenario (`fixture.snapshot.engine.last_tick_ok_at`, where the
+        // page is made); the activity rows were made at the start of the script, so each "how long ago" moves by the time since.
         case 'popover_snapshot': {
-          const now = Math.floor(Date.now() / 1000)
-          const shift = now - f.t0
-          const snap = f.snapshot
-          const lastTick = snap.engine.last_tick_ok_at === 'now-70s' ? now - 70 : snap.engine.last_tick_ok_at === null ? null : snap.engine.last_tick_ok_at + shift
-          return { ...snap, engine: { ...snap.engine, last_tick_ok_at: lastTick }, activity: snap.activity.map((row) => ({ ...row, at: row.at + shift })) }
+          const shift = Math.floor(Date.now() / 1000) - f.t0
+          return { ...f.snapshot, activity: f.snapshot.activity.map((row) => ({ ...row, at: row.at + shift })) }
         }
         case 'account_subscription': return f.subscription
         case 'get_desktop_config': return f.config
@@ -324,7 +321,7 @@ const section = (label) => async (p) => { await gear(p); await p.getByRole('butt
 
 const SCENARIOS = [
   { name: 'home', bar: true, has: ['Home', 'End-to-end encrypted', 'Up to date', 'Last checked 1 min ago', 'Beebeeb in Finder', 'Your vault appears under Locations in Finder.', 'Open in Finder', `On this Mac ${number(1204)} files`, `Online-only ${number(8311)}`, 'Kept on this Mac 3 folders', 'Needs your attention', 'CONFLICT', 'Board notes, 29 Sept.md', 'Team shared · today 09:12 · Changed on two devices.', 'Decide…', 'Storage', `${gb(84.3)} of ${gb(200)}`, 'Recent activity', 'Q3 ledger reconciliation.xlsx', 'Uploaded · Investigations · 2 minutes ago', 'Downloading · 62 % · Board · just now', 'Couldn’t sync · Photos · 3 hours ago', 'Downloaded · yesterday', 'sam@example.eu', 'Basic plan'], hasNot: ['control center', 'daemon', 'On this PC', '0 files'], min: true, hifi: 'hifi-s3-fig0' },
-  { name: 'home-many-attention', fx: { review: reviewAllKinds }, has: ['Needs your attention', 'Board notes, 29 Sept.md', 'Archive 2025.zip', '2 more in Review'], hasNot: ['Plan.pdf'] },
+  { name: 'home-many-attention', fx: { review: reviewAllKinds }, has: ['Needs your attention', 'Board notes, 29 Sept.md', 'Archive 2025.zip', `${reviewAllKinds.length - 3} more in Review`], hasNot: ['Plan.pdf'] },
   { name: 'home-decide-sheet', act: async (p) => { await p.getByRole('button', { name: 'Decide…' }).first().click(); await p.getByRole('dialog').waitFor(); await p.waitForFunction(() => !document.body.innerText.includes('Loading both versions')) }, has: ['Conflict: Board notes, 29 Sept.md', 'This Mac', 'Other device', 'Keep both'], dialogs: 1, min: true },
   { name: 'home-quiet', fx: { review: [], overview: { by_status: [], recent: [], total_files: 0, total_bytes: 0, pinned_count: 0, pinned_bytes: 0, pinned_folders: 0 }, snapshot: snapshot({ activity: [] }) }, has: ['Up to date', 'Beebeeb in Finder', 'Storage'], hasNot: ['Needs your attention', 'Recent activity', 'On this Mac', '0 files', 'Nothing needs your attention'] },
   { name: 'home-no-folder-count', fx: { overview: { by_status: [{ status: 'local', count: 1, bytes: 1 }], recent: [], total_files: 1, total_bytes: 1, pinned_count: 0, pinned_bytes: 0 } }, has: ['On this Mac 1 file', 'Online-only 0'], hasNot: ['Kept on this Mac'] },
