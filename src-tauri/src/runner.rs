@@ -3216,13 +3216,23 @@ mod tests {
         // A test build cannot run the production branch, so its source is pinned: the default
         // without BB_API_BASE is the production constant, and that constant is production.
         assert_eq!(PRODUCTION_API_BASE, "https://api.beebeeb.io");
-        let source = include_str!("runner.rs");
-        let body = &source[source.find("fn api_base_url_from(").expect("api_base_url_from")..];
-        let body = &body[..body.find("\n}\n").expect("its end")];
-        assert!(
-            body.contains("#[cfg(not(test))]\n        return PRODUCTION_API_BASE.to_string();"),
-            "the non-test default is the production API:\n{body}"
-        );
+        // A Windows checkout has CRLF line endings, so the source is read with them normalized. The
+        // pin also runs on a CRLF copy, so a Mac shows what Windows CI would.
+        let checkout = normalized_line_endings(include_str!("runner.rs"));
+        for source in [checkout.clone(), checkout.replace('\n', "\r\n")] {
+            let source = normalized_line_endings(&source);
+            let body = &source[source.find("fn api_base_url_from(").expect("api_base_url_from")..];
+            let body = &body[..body.find("\n}\n").expect("its end")];
+            assert!(
+                body.contains("#[cfg(not(test))]\n        return PRODUCTION_API_BASE.to_string();"),
+                "the non-test default is the production API:\n{body}"
+            );
+        }
+    }
+
+    /// Source text with CRLF line endings (a Windows checkout) as LF.
+    fn normalized_line_endings(source: &str) -> String {
+        source.replace("\r\n", "\n")
     }
 
     // ── Engine status: the tick's payload and the pulse (task 1683 slice 2) ────
