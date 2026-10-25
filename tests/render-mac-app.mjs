@@ -84,6 +84,9 @@ const trashItems = [
   { id: 't3', name: LONG_NAME, is_folder: false, size_bytes: 2_300_000, updated_at: String(todayAt(9, 0)) },
 ]
 const base = {
+  // When the fixtures were made: the page shifts every "how long ago" in a snapshot by the time since, so a scenario that
+  // runs minutes into this script still reads "1 min ago" and "just now", not what the clock says by then.
+  t0: Math.floor(Date.now() / 1000),
   snapshot: snapshot(),
   overview: { by_status: [{ status: 'cloud_only', count: 8311, bytes: 1 }, { status: 'local', count: 1204, bytes: 1 }], recent: [], total_files: 9515, total_bytes: 2, pinned_count: 40, pinned_bytes: 1, pinned_folders: 3 },
   review: reviewEntries, conflictPreview, search: searchHits, versions: versionList, trash: trashItems,
@@ -117,7 +120,11 @@ function installBackend({ caps, fx }) {
         case 'desktop_platform': return 'macos'
         case 'app_version': return '0.8.12'
         case 'sync_status': return { session_revision: 1, logged_in: f.snapshot.account.logged_in, vault_unlocked: f.snapshot.account.vault_unlocked, engine: 'running', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0, auth_expired: f.snapshot.account.auth_expired, engine_refusal: null }
-        case 'popover_snapshot': return f.snapshot
+        case 'popover_snapshot': {
+          const shift = Math.floor(Date.now() / 1000) - f.t0
+          const snap = f.snapshot
+          return { ...snap, engine: { ...snap.engine, last_tick_ok_at: snap.engine.last_tick_ok_at === null ? null : snap.engine.last_tick_ok_at + shift }, activity: snap.activity.map((row) => ({ ...row, at: row.at + shift })) }
+        }
         case 'account_subscription': return f.subscription
         case 'get_desktop_config': return f.config
         case 'desktop_config': return f.config

@@ -407,7 +407,8 @@
 .mw-columns {
   min-width: 0;
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  /* Attention takes the wider column: its rows carry a sentence, Storage's one number and a bar (the Home add-on). */
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
   gap: 16px;
   align-items: start;
 }
