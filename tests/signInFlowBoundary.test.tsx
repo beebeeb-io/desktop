@@ -250,6 +250,50 @@ describe('the account switch under the boundary (P2-1, P2-2)', () => {
     expect(statusLines(container)).toContain(failure)
   }, SLOW)
 
+  // Delta review P3-5: the status that tells the step whether the account is out can itself fail at that moment. The step
+  // cannot tell then, so it holds the sentence anyway, and only holds it (lead ruling): no toast, in the window that is
+  // about to be remounted or in one that stays.
+  test('a sign-out that failed after the removal while the status cannot be read: the sentence is still on the card after the remount', async () => {
+    const failure = 'Sign-out stopped after Beebeeb was removed from Finder. Restart Beebeeb and sign in again.'
+    const native: Native = { loggedIn: true, authExpired: true, revision: 25, calls: [], nav: null }
+    let statusDownUntil = 0
+    installBackend(native, {
+      clear_session: () => {
+        native.loggedIn = false
+        native.authExpired = false
+        native.revision += 2
+        statusDownUntil = Date.now() + 400
+        throw failure
+      },
+      sync_status: () => {
+        if (Date.now() < statusDownUntil) throw new Error('status unavailable')
+        return statusAnswer(native)
+      },
+    })
+    setSignInFlow({ ...IDLE_FLOW, step: 'switch', switch: { pendingChanges: 2, unsent: ASK, unsentError: null }, email: 'b@example.eu' })
+    const { default: MacApp } = await import('../src/MacApp')
+    const container = await mountWindow('?window=main&platform=macos', <MacApp />)
+    await waitFor('the switch card', () => card(container) !== undefined)
+    const shownBefore = card(container)!
+
+    await press(container, 'button', 'Sign out and switch')
+    // Every frame up to the remount is looked at: a toast would be on screen for as long as the window stands.
+    let sawToast = false
+    await waitFor('the sign-out', () => {
+      sawToast ||= container.textContent.includes('Couldn’t sign out')
+      return native.calls.includes('clear_session')
+    })
+    await waitFor('the remount', () => {
+      sawToast ||= container.textContent.includes('Couldn’t sign out')
+      return accountSessionRevision() === native.revision && !container.contains(shownBefore)
+    })
+    await settled(container, (c) => card(c) !== undefined && !c.textContent.includes(SWITCH_TITLE))
+
+    expect(heldSignOutWarning()).toBe(failure)
+    expect(statusLines(container)).toContain(failure)
+    expect(sawToast).toBe(false)
+  }, SLOW)
+
   // P2-2. The account left another way (the app menu's Sign Out): nothing in this card ran.
   test('the account signs out another way while the switch card is up: the remount shows sign-in, not the stale card, with the typed address', async () => {
     const native: Native = { loggedIn: true, authExpired: true, revision: 30, calls: [], nav: null }

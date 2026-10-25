@@ -116,18 +116,37 @@ describe('a session change clears the store', () => {
     expect(store.getSnapshot()).toEqual({ phase: 'idle' })
   })
 
-  test('a test that was running when the session changed is dropped: its figures are not shown, it asks for no toast', async () => {
+  // PR #140 delta review, P3-2: the run in the host holds its one slot until it ends, whatever the session did. The store
+  // keeps saying so (the figures are dropped, the state is not), so a second press cannot be answered "already running".
+  test('a test that was running when the session changed keeps the row busy until the host\'s run ends, then drops its figures', async () => {
     const s = session()
     let release!: () => void
     const gate = new Promise<void>((resolve) => { release = resolve })
-    const store = createSpeedTest(async () => { await gate; return ok() }, s.subscribe)
+    let runs = 0
+    const store = createSpeedTest(async () => { runs += 1; await gate; return ok() }, s.subscribe)
     const running = store.start()
-    expect(store.getSnapshot().phase).toBe('running')
     s.change()
-    expect(store.getSnapshot()).toEqual({ phase: 'idle' })
+    expect(store.getSnapshot()).toEqual({ phase: 'running' })
+    expect(await store.start()).toBeNull()
+    expect(runs).toBe(1)
     release()
     expect(await running).toBeNull()
     expect(store.getSnapshot()).toEqual({ phase: 'idle' })
+  })
+
+  test('once the old run has ended the new session may start its own', async () => {
+    const s = session()
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    let n = 0
+    const store = createSpeedTest(async () => { n += 1; if (n === 1) await gate; return ok() }, s.subscribe)
+    const old = store.start()
+    s.change()
+    release()
+    await old
+    expect(await store.start()).toBeNull()
+    expect(store.getSnapshot()).toEqual({ phase: 'done', result: RESULT })
+    expect(n).toBe(2)
   })
 
   test('a failure that arrives after the session changed is not a message for the new session either', async () => {

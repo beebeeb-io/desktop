@@ -1,7 +1,7 @@
 /**
  * The Versions page's counters (PR #140 delta review, P3; #142 review, round 2): "Changes Beebeeb couldn’t send yet" counts
  * what failed on its way to the server and nothing that is counted elsewhere on the page. A conflict is "Active conflicts", a
- * change made on another device is "Changed elsewhere", and a restore is neither. EVERY KIND Rust can send is counted in
+ * change made on another device is "Changed elsewhere", and a restore is counted nowhere (listed, not counted). EVERY KIND Rust can send is counted in
  * exactly one place: #140's list was written before #142 added `not_sent`, `account_refused` and `other`, and a given-up
  * upload was counted nowhere on Linux.
  */
@@ -43,6 +43,11 @@ describe('what could not be sent yet', () => {
     expect(reviewCounts(of('conflict')).notSent).toBe(0)
     expect(reviewCounts(of('stale_base')).notSent).toBe(0)
     expect(reviewCounts(of('restore')).notSent).toBe(0)
+  })
+
+  test('a restore is counted nowhere: it is listed on the page, not counted', () => {
+    expect(reviewCounts(of('restore'))).toEqual({ notSent: 0, changedElsewhere: 0 })
+    expect(reviewCounts(of('restore', 'restore', 'restore'))).toEqual({ notSent: 0, changedElsewhere: 0 })
   })
 
   test('a mixed list counts each entry in at most one place', () => {

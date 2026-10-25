@@ -385,10 +385,10 @@ Settings, a ~~tab~~ Settings section).
 
 | Event | Beebeeb window |
 | --- | --- |
-| Login launch (spec C C-W1, C-W5) | Nothing. |
+| Login launch (spec C C-W1, C-W5) | Nothing. *Built and tested (`surfaces::launch`, slice 6); not yet reachable on a device: until task 1845 supplies the login item's signal, no launch is recognised as a login launch, so a login launch still opens the window as a manual one does.* — slice 6, 2026-10-25 |
 | Manual launch, or opening the app while it runs (Finder, Dock, Spotlight; `RunEvent::Reopen`) | Opens: sign-in with no session, else Home. |
 | First launch after install | Opens on sign-in. |
-| Updater relaunch | Nothing with a session (popover ruling 1: "not after updates"); sign-in without one. Detection: a flag the updater writes before `restart`, consumed at launch. |
+| Updater relaunch | ~~Nothing with a session (popover ruling 1: "not after updates"); sign-in without one. Detection: a flag the updater writes before `restart`, consumed at launch.~~ What the person had open, and nothing else: signed in, their Beebeeb window comes back if it was open, and nothing opens if it was not (the b only; the popover never opens after an update, popover ruling 1); signed out, sign-in. Detection: a flag (`relaunch.json` in the state directory: whether the window was open, whether an account was signed in, and when) the updater writes just before `restart`, consumed at launch, ignored when older than two minutes. — slice 6, 2026-10-25, lead's brief to the slice 6 lane (macos-beebeeb-teamlead): "a relaunch after an update shows what the user had open, nothing else"; the struck row said nothing at all with a session |
 | Session ends while it is closed | Nothing; the b is crossed. A click opens sign-in. |
 | A conflict | Nothing (a notification and a popover row). |
 
@@ -410,6 +410,12 @@ to Beebeeb", spec C C-W8). Screens, in the order a person meets them; copy is sp
    "Back to Home" under it that leaves it; a session that really ended has no such link. A request that arrives under a
    sheet waits for the sheet to close (§8.2). — lead ruling, 2026-10-25 (delta review P3-2 on PR #143); the hi-fi draws
    no such link, a recorded deviation.
+   ~~The words of that card are spec A's: "Sync is paused until you sign in again."~~ On a session that is in fact fine
+   spec A's sentence is false, so that card reads "Beebeeb couldn’t send some changes with this sign-in. Sign in again to
+   retry them." (the per-operation 401 case, as Version Center asks for it), with the same two methods, the footer and the
+   quiet "Back to Home"; the ended-session card keeps spec A's sentence. — lead ruling, 2026-10-25 (follow-up to PR #143):
+   "spec A's 'Sync is paused until you sign in again…' is false there, so it mustn't stay." A recorded deviation from spec
+   A's wording; the hi-fi draws it as its own figure after "Account switch".
 5. **Account switch** (1887 W11): today's `AccountSwitchStep` and its A0s–A4s copy, unchanged (§8.2).
 6. **Set up this Mac** (recovery phrase), only when this Mac has no key: today's `UnlockStep`, unchanged.
 7. **Spec C's account states** that need the whole window when they hold with no Ready account behind them: Checking
@@ -442,7 +448,7 @@ and the Windows shell's "Files" was a summary. — rulings amendment, 2026-10-24
 
 - One-time hint, after the first sign-in on this Mac: "Beebeeb lives in the menu bar" / "Click the b at the top of
   your screen to see what’s syncing. You can close this window; Beebeeb keeps running." / "Got it". Dismissed once,
-  stored in `desktop.toml`.
+  stored in `desktop.toml` (`menu_bar_hint_seen`). *Built in slice 6: first thing on an unlocked Home, never on the locked card. An install that predates it shows it once too (a Mac cannot tell it from a first sign-in), then never again.*
 - Status card: the popover's state in one row ("Up to date" · "Last checked {time}", or the syncing summary, or the
   message state's title and action); Finder row "Beebeeb in Finder" / "Your vault appears under Locations in Finder."
   with the one amber button "Open in Finder"; a counts line "On this Mac {n} files · Online-only {n} · Kept on this Mac
@@ -563,7 +569,7 @@ selects, so no opener, the gear, ⌘,, the menus or the popover, has a window to
 | General | "Open Beebeeb at login" · "Appearance" (System / Light / Dark; "Follow macOS.") · group "Tell me about": Conflicts, Sync finished, Local cache almost full · group "From your account": New device sign-in, Share received, File updated, Storage warning, Backup complete | C2, E28, C3, E24 |
 | Account | header (initial, email, plan line, storage bar, "Storage details…", Upgrade / Manage plan; spec C's notice line under the plan line, its link replacing the plan button) · group "Vault" · group "Where your files are stored" · "Password, email and billing" / "Changed on beebeeb.io, in your browser." / "Open beebeeb.io" · "Sign out of this Mac" | C4–C9, E6, E8, E22 |
 | Sync | "Beebeeb in Finder" (+ Repair…, notices, the 1887 and 1882 kept rows) · "Keep on this Mac" · group "Speed": Upload, Download | C10–C14, C17, E19, E26 |
-| Security | "Authenticator app (TOTP)" with its state, read from the server each time the section opens and each time the window is looked at again (never from what the session cached at sign-in): "Checking…" until it answers, an alert with Try again when it cannot, so the row never says On for an authenticator that was turned off on the web (PR #140 delta review) — and "Manage on beebeeb.io" / "Set up on beebeeb.io" · group "Active sessions" with Revoke, and "Sign out everywhere else" · group "Devices" · group "Recent account activity" (the last 10 events) | E12–E14 |
+| Security | "Authenticator app (TOTP)" with its state, read from the server when the section opens and when the window is looked at again, at most once a minute (never from what the session cached at sign-in): "Checking…" until it answers; an alert with Try again when the first look, or one the person asked for, fails (a failed look at the window changes nothing, and the answer on screen stays), and once the On or Off shown is five minutes old the row's secondary text adds "Last checked {age}" in the Mac's wording ("Last checked 7 minutes ago.") — lead ruling on the slice 5 follow-ups, 2026-10-25 (macos-beebeeb-teamlead): "A security answer shown as current must say its age once it's stale. When the shown On/Off is older than 5 minutes because quiet re-checks failed, show it with 'Last checked {relative time}' … in the row's secondary text. Under 5 minutes, nothing changes." The age is said whatever made the answer old (a failed re-check, which asks for the render at once, or a window left alone: the first age is scheduled for the moment the answer goes stale, then the page re-renders every minute so it grows). A clock put back is not "current" either: the row says "Last checked a while ago." and the next look at the window asks again at once. Only an answer holds the next look back for a minute; a look that failed learned nothing and holds nothing back (review of #147, P3-a to P3-d), so the row never says On for an authenticator that was turned off on the web (PR #140 delta review) — and "Manage on beebeeb.io" / "Set up on beebeeb.io" · group "Active sessions" with Revoke, and "Sign out everywhere else" · group "Devices" · group "Recent account activity" (the last 10 events) | E12–E14 |
 | About | "Beebeeb for Mac" (version, Check for updates / ~~Restart to update~~ Download update, §0 ruling 5) · "Release channel" (Stable / Beta / Alpha, with their hints) · the downgrade row when one is offered (release notes and a link, never an install) · group "Help": Get help, "Test connection speed", Export a support bundle. A note under the first group: "Beebeeb checks for updates at launch and every 4 hours." — slice 5, 2026-10-25, lead-approved (macos-beebeeb-teamlead) | C15, C16, E9, E27, A9 |
 
 "Storage details…" opens a sheet with the Insights content (by type, largest files), copy unchanged except the

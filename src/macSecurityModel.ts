@@ -33,6 +33,12 @@ export type TotpState = 'on' | 'off' | 'unknown' | 'checking'
 
 export const TOTP_LABEL = 'Authenticator app (TOTP)'
 
+/**
+ * The most often the window's own looks at the account (when it is focused again) ask the server for the authenticator's
+ * state: a minute. Opening the section and "Try again" always ask.
+ */
+export const PROFILE_RECHECK_MS = 60_000
+
 /** The one inline alert when the account could not be asked (one failure, one surface; Try again asks again). */
 export const TOTP_CHECK_FAILED = 'Couldn’t check your authenticator app'
 
@@ -48,9 +54,10 @@ export function totpState(profile: Pick<AccountProfile, 'totp_enabled'> | null |
 }
 
 /**
- * What the row shows for a look at the account: "checking" while the question is out, `failed` when it could not be asked
- * (the page shows an alert, not a row: no state shows an older answer as the current one), the account's own answer
- * otherwise. The look is always the server's (`account_profile_fresh`), never the copy the session cached at sign-in, which
+ * What the row shows for a look at the account: "checking" while the question is out, `failed` when the first look, or one
+ * the person asked for, could not be asked (the page shows an alert with Try again, not a row), the account's own answer
+ * otherwise. A look at the window that fails changes nothing: the answer on screen stays, and says its age once it is five
+ * minutes old (`totpStaleNote`), so it is never shown as current when it is not. The look is always the server's (`account_profile_fresh`), never the copy the session cached at sign-in, which
  * said On for hours after the authenticator was turned off on the web (PR #140 delta review, P2-B).
  */
 export function totpRowState(
@@ -59,6 +66,26 @@ export function totpRowState(
   if (look.status === 'loading') return 'checking'
   if (look.status === 'failed') return 'failed'
   return totpState(look.value)
+}
+
+/**
+ * How old an On or Off may be before the row says so: five minutes (lead ruling on #147: "a security answer shown as current
+ * must say its age once it's stale"). The answer on screen was seen, never cached or guessed, but a look at the window that
+ * fails leaves the last one standing, and a window left alone for an hour is showing an hour-old answer.
+ */
+export const TOTP_STALE_AFTER_MS = 5 * 60_000
+
+/**
+ * "Last checked 7 minutes ago." for the row's secondary text, once the answer is `TOTP_STALE_AFTER_MS` old, else null. The
+ * wording is the Mac's (`agoLabel`: spelled out, as the sessions say it) over the shared arithmetic (`relativeTime.ts`).
+ */
+export function totpStaleNote(answeredAt: number, now: number): string | null {
+  // A clock put back (sleep, a manual change) puts `now` before the answer: nothing is current about that, and its age
+  // cannot be said in minutes (review P3-b).
+  if (now < answeredAt) return 'Last checked a while ago.'
+  if (now - answeredAt < TOTP_STALE_AFTER_MS) return null
+  const ago = agoLabel(new Date(answeredAt).toISOString(), now)
+  return ago === null ? null : `Last checked ${ago}.`
 }
 
 export function totpLabel(state: TotpState): string {

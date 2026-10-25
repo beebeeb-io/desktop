@@ -295,6 +295,31 @@ describe('Settings in System Settings style (ruling 1, §7.8)', () => {
   })
   }
 
+  // PR #140 delta review, P3-5: nothing navigates under a sheet (§8.2), and an ended session is no exception. The Repair
+  // sheet lives in Sync; taking Sync away under it would unmount the sheet and lose what the repair then says.
+  test('a session that ends under an open sheet leaves the section alone until the sheet is closed, then falls back to General', async () => {
+    let current: unknown = snapshot()
+    let modals = 0
+    const { m } = openWindow({ snap: () => current, bindings: { openModalCount: () => modals } })
+    const ticks: Array<() => void> = []
+    ;(globalThis as any).window.setInterval = (fn: () => void) => { ticks.push(fn); return 1 }
+    await settle(m)
+    await click(m, 'Settings')
+    await click(m, 'Sync')
+    expect(shown(m)).toEqual(['sync'])
+    modals = 1
+    m.render()
+    await settle(m)
+    current = snapshot({ phase: 'signed_out', account: { email: null, logged_in: false, vault_unlocked: false } })
+    ticks.forEach((tickFn) => tickFn())
+    await settle(m)
+    expect(shown(m), 'a sheet is open: the section stays').toEqual(['sync'])
+    modals = 0
+    m.render()
+    await settle(m)
+    expect(shown(m)).toEqual(['general'])
+  })
+
   test('back returns to Home and puts focus on the gear (§11)', async () => {
     const { m } = openWindow()
     await settle(m)
@@ -913,6 +938,8 @@ function openHome(snap: unknown, backend: Record<string, (args: any) => unknown>
       finderActionButtonLabel: finderSetupCopy.finderActionButtonLabel,
       finderOpenFailedToast: finderSetup.finderOpenFailedToast,
       KeptFolderNotes,
+      // The real hint has hooks and is tested on its own (tests/menuBarHint.test.tsx); here it is a marker, to pin where it is.
+      MenuBarHint: () => createElement('div', { 'data-stub': 'menu-bar-hint' }),
     },
   })
   mounted.push(m)
@@ -1002,6 +1029,24 @@ describe('Home (§7.6, first cut: status, Finder row, storage, the kept rows)', 
     await settleHome(offline.m)
     expect(homeText(offline.m)).toContain('Can’t reach Beebeeb')
     expect(find(offline.m, (el) => el.type === 'button').map((el) => textOf(el.props.children).trim())).toEqual(['Open in Finder', 'Add storage'])
+  })
+
+  // Slice 6 (spec §7.6): the one-time hint is the first thing on Home, above the status card.
+  test('the one-time hint comes first on an unlocked Home, above the status card', async () => {
+    const { m } = openHome(snapshot())
+    await settleHome(m)
+    const all = m.elements()
+    const hint = all.findIndex((el) => el.props['data-stub'] === 'menu-bar-hint')
+    const status = all.findIndex((el) => el.props['data-home'] === 'status')
+    expect(hint).toBeGreaterThanOrEqual(0)
+    expect(status).toBeGreaterThan(hint)
+    expect(all.filter((el) => el.props['data-stub'] === 'menu-bar-hint')).toHaveLength(1)
+  })
+
+  test('a locked Home is one card and has no hint: there is nothing to say about a menu bar to a vault that is locked', async () => {
+    const { m } = openHome(snapshot({ phase: 'locked', account: { vault_unlocked: false } }))
+    await settleHome(m)
+    expect(m.elements().filter((el) => el.props['data-stub'] === 'menu-bar-hint')).toHaveLength(0)
   })
 
   test('locked: one card with the popover\'s sentence and Unlock vault, nothing else', async () => {

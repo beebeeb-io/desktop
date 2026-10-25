@@ -35,13 +35,16 @@ import {
   DEVICES_FOOTNOTE,
   deviceRow,
   SECURITY_SETTINGS_URL,
+  PROFILE_RECHECK_MS,
   SESSIONS_HEADING_ID,
   sessionRow,
   TOTP_CHECK_FAILED,
+  TOTP_STALE_AFTER_MS,
   totpAction,
   totpHint,
   totpLabel,
   totpRowState,
+  totpStaleNote,
 } from './macSecurityModel'
 import { focusById } from './focusById'
 import { ConfirmSheet } from './MacSettings'
@@ -49,11 +52,15 @@ import { Btn, Note, SettingRow, SettingsGroup, SettingsIcon } from './macSetting
 import { useToast } from './windows/ui'
 
 type Load<T> = { status: 'loading' } | { status: 'failed' } | { status: 'ready'; value: T }
+/** The authenticator's look: the answer and when it arrived (its age is said once it is five minutes old). */
+type ProfileState = { status: 'loading' } | { status: 'failed' } | { status: 'ready'; value: AccountProfile; at: number }
 type Ask = { kind: 'one'; id: string; name: string } | { kind: 'others'; count: number } | null
 
 export function SecurityTab({ unlocked }: { unlocked: boolean }) {
   const { showToast } = useToast()
-  const [profile, setProfile] = useState<Load<AccountProfile>>({ status: 'loading' })
+  const [profile, setProfile] = useState<ProfileState>({ status: 'loading' })
+  // Only here to ask for a render: the age of an answer on screen must not stand still, and a failed look that sets no state still needs one.
+  const [, setTick] = useState(0)
   const [sessions, setSessions] = useState<Load<AccountSession[]>>({ status: 'loading' })
   const [devices, setDevices] = useState<Load<ClientDevice[]>>({ status: 'loading' })
   const [activity, setActivity] = useState<Load<ActivityFeedEvent[]>>({ status: 'loading' })
@@ -61,16 +68,30 @@ export function SecurityTab({ unlocked }: { unlocked: boolean }) {
   const [busy, setBusy] = useState(false)
 
   // `quiet` reads again without blanking the group first: after a revoke the rows are replaced, not flashed.
-  // The authenticator row is the account's answer NOW: read from the server (not the session's cache) when the page opens
-  // and again whenever the window is looked at, and only the latest look may answer. A look that fails leaves no answer
-  // standing: the row becomes the alert (review P2-B).
+  // The authenticator row is the account's answer, read from the server (not the session's cache; review P2-B) when the page
+  // opens, when the person asks again (Try again), and when the window is looked at again, which is at most once a minute
+  // after an ANSWER (review P3-4; a failed look learned nothing, so it holds nothing back: P3-d; and a clock put back holds
+  // nothing back either: P3-b). Only the latest look may answer. A look the person asked for, or the first, that fails is the
+  // alert; a look at the window that fails changes nothing on a row that has an answer: it was seen, and an alert would come
+  // up under a person who asked for nothing. It still asks for a render, because the answer's age may just have come due
+  // (P3-a); and on a row with no answer yet (the look it took over was out) it is the alert, never "Checking…" for good (P3-c).
   const latestProfile = useRef(0)
-  const loadProfile = useCallback(async (quiet = false) => {
+  const lastProfileLook = useRef(0)
+  const loadProfile = useCallback(async (how: 'asked' | 'looked' = 'asked') => {
+    const since = Date.now() - lastProfileLook.current
+    if (how === 'looked' && since >= 0 && since < PROFILE_RECHECK_MS) return
     const mine = ++latestProfile.current
-    if (!quiet) setProfile({ status: 'loading' })
+    if (how === 'asked') setProfile({ status: 'loading' })
     const result = await accountProfileFresh()
     if (mine !== latestProfile.current) return
-    setProfile(result.ok ? { status: 'ready', value: result.value } : { status: 'failed' })
+    if (result.ok) {
+      const at = Date.now()
+      lastProfileLook.current = at
+      setProfile({ status: 'ready', value: result.value, at })
+      return
+    }
+    setProfile((current) => (how === 'asked' || current.status !== 'ready' ? { status: 'failed' } : current))
+    setTick((n) => n + 1)
   }, [])
   const loadSessions = useCallback(async (quiet = false) => {
     if (!quiet) setSessions({ status: 'loading' })
@@ -96,10 +117,27 @@ export function SecurityTab({ unlocked }: { unlocked: boolean }) {
     void loadActivity()
   }, [unlocked, loadProfile, loadSessions, loadDevices, loadActivity])
 
+  // The answer's age is said once it is five minutes old (`totpStaleNote`): the first render is asked for at the moment it goes
+  // stale (a wake from sleep runs a late timer at once), then a minute's tick lets the age grow while nobody looks (P3-a).
+  const answeredAt = profile.status === 'ready' ? profile.at : null
+  useEffect(() => {
+    if (!unlocked || answeredAt === null) return
+    const bump = () => setTick((n) => n + 1)
+    let every: number | undefined
+    const first = window.setTimeout(() => {
+      bump()
+      every = window.setInterval(bump, 60_000)
+    }, Math.max(0, answeredAt + TOTP_STALE_AFTER_MS - Date.now()))
+    return () => {
+      window.clearTimeout(first)
+      if (every !== undefined) window.clearInterval(every)
+    }
+  }, [unlocked, answeredAt])
+
   // A change made on the web while this window was in the background shows the moment the window is looked at again.
   useEffect(() => {
     if (!unlocked) return
-    const onFocus = () => void loadProfile(true)
+    const onFocus = () => void loadProfile('looked')
     window.addEventListener('focus', onFocus)
     return () => window.removeEventListener('focus', onFocus)
   }, [unlocked, loadProfile])
@@ -159,6 +197,7 @@ export function SecurityTab({ unlocked }: { unlocked: boolean }) {
 
   const now = Date.now()
   const totp = totpRowState(profile)
+  const staleNote = profile.status === 'ready' && (totp === 'on' || totp === 'off') ? totpStaleNote(profile.at, now) : null
 
   const loading = (name: string) => <SettingRow name={name} label="Loading…" />
   const failed = (surface: string, title: string, retry: () => void) => (
@@ -250,7 +289,7 @@ export function SecurityTab({ unlocked }: { unlocked: boolean }) {
             name="totp"
             tall
             label={totpLabel(totp)}
-            hint={totpHint(totp)}
+            hint={staleNote ? `${totpHint(totp)} ${staleNote}` : totpHint(totp)}
             control={
               <Btn onClick={() => void openUrl(SECURITY_SETTINGS_URL)}>
                 <SettingsIcon name="external" size={13} />

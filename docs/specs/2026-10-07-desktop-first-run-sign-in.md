@@ -233,7 +233,7 @@ C3's launch policy applies to macOS only in spec C. Windows and Linux keep today
   - It is read from `NSAppleEventManager`'s current event during launch, through a small Objective-C function beside `src-tauri/macos/FileProviderBridge.m`.
   - **Present:** a login launch.
   - **Absent, unreadable, or launched by an unknown mechanism:** a manual launch, and the window shows. This fails safe: the only cost is a window at login for a signed-out person who has autostart on.
-  - **An updater relaunch** carries no such event, because tauri's `restart` spawns the binary directly (tauri 2.11.5 `src/process.rs:74-129`). It counts as manual.
+  - **An updater relaunch** carries no such event, because tauri's `restart` spawns the binary directly (tauri 2.11.5 `src/process.rs:74-129`). ~~It counts as manual.~~ It is recognised by the flag the updater leaves just before `restart`, not by this event, and on a Mac it shows what the person had open and nothing else. — slice 6, 2026-10-25, lead's brief to the slice 6 lane (macos-beebeeb-teamlead): "a relaunch after an update shows what the user had open, nothing else"; the struck text said an updater relaunch counts as manual / opens nothing. The updater leaves `relaunch.json`; see the [two-surface spec](2026-10-24-macos-two-surface-app.md) §7.3.
   - One pure function maps the parameter to `LaunchKind`.
   - Whether the parameter arrives under the registration the shipped build uses is a device rung (§16).
 - **C-W2** On macOS, opening the app while it is already running (from Finder, the Dock or Spotlight) is a manual launch. The app handles `RunEvent::Reopen`, which it does not today (`.run(tauri::generate_context!())`, `lib.rs:9059`).
@@ -249,7 +249,7 @@ C3's launch policy applies to macOS only in spec C. Windows and Linux keep today
   - If the state is still Checking at the end of the settle, the account window opens in the busy state.
   - A settled state other than Ready opens the account window on that state's screen, except C-R4 with the key in the Keychain, which opens the Settings window (C-W7).
   - ~~In Ready, today's launch behaviour stays: `startup_surface` opens onboarding when no `sync_root` is set, else the compact window, which now lands on the Finder location view.~~
-  - In Ready, a manual launch opens the Beebeeb window on Home; an updater relaunch opens nothing ([two-surface spec](2026-10-24-macos-two-surface-app.md) §7.3). — two-surface design, 2026-10-24
+  - In Ready, a manual launch opens the Beebeeb window on Home; ~~an updater relaunch opens nothing~~ an updater relaunch opens what the person had open, and nothing else ([two-surface spec](2026-10-24-macos-two-surface-app.md) §7.3). — two-surface design, 2026-10-24; the updater-relaunch clause amended— slice 6, 2026-10-25, lead's brief to the slice 6 lane (macos-beebeeb-teamlead): "a relaunch after an update shows what the user had open, nothing else"; the struck text said an updater relaunch counts as manual / opens nothing. The updater leaves `relaunch.json`; see the [two-surface spec](2026-10-24-macos-two-surface-app.md) §7.3.
 - **C-W5 Login launch.** It never opens a window.
 - **C-W6 Nothing else** opens the account window by itself. A window that is already open re-renders when the state changes.
 - **C-W7 The C-R4 screen is today's unlock flow; there is no new unlock UI.**
@@ -657,7 +657,7 @@ Each entry records a finding, with the ruling beneath it. Where a later ruling r
   - **Accepted as written:** the macOS startup row reads `no_sync_root` in Ready (C-W9), and Linux gets the colour crossed `.ico` (§7.8).
 - **Minor findings:** all 19 applied (M-1 to M-19).
   - M-5: spec A is cited by symbol.
-  - M-11: the updater relaunch counts as manual (C-W1).
+  - M-11: ~~the updater relaunch counts as manual (C-W1)~~ (superseded by the two-surface spec §7.3, slice 6: the updater's flag, not the login event, decides).
   - M-14: the Windows machine is not named.
 
 ### 17.3 The scoped re-review (lead rulings, 2026-10-07)

@@ -1,12 +1,13 @@
 /**
  * The counters on the Versions page that are not "Active conflicts": what could not be sent yet, and what changed elsewhere
- * (PR #140 delta review, P3). Every entry is counted in exactly one place on that page, and EVERY KIND has a place here:
- * `COUNTED_IN` is a `Record` over the kinds Rust can send (`REVIEW_ENTRY_KINDS`), so a kind added without a place does not
+ * (PR #140 delta review, P3). An entry is counted in at most one place on that page, and a restore is counted in none:
+ * restores are listed, not counted, because a restore is not a change that failed to leave this Mac. EVERY KIND has a place
+ * here: `COUNTED_IN` is a `Record` over the kinds Rust can send (`REVIEW_ENTRY_KINDS`), so a kind added without one does not
  * compile, and `tests/reviewCounts.test.ts` walks the list. (#142's review: a kind added after #140 was counted nowhere.)
  */
 import type { ReviewEntryKind, VersionConflictEntry } from './desktopApi'
 
-/** Where an entry is counted: "Active conflicts", "Upload reviews" (changes that could not be sent yet), "Changed elsewhere", or not at all because a restore is not a change that failed to leave this Mac. */
+/** Where an entry is counted: "Active conflicts", "Upload reviews" (changes that could not be sent yet), "Changed elsewhere", or nowhere (`restores`: listed, not counted). */
 export type CountedIn = 'conflicts' | 'notSent' | 'changedElsewhere' | 'restores'
 
 export const COUNTED_IN: Record<ReviewEntryKind, CountedIn> = {

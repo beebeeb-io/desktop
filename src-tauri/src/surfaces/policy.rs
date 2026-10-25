@@ -8,17 +8,18 @@
 //! changed the macOS rows of `main_window_label` (`main`) and `close_policy`
 //! (`main` is destroyed) and added `compact_window_label` and `dock_icon_wanted`; slice 2 added `onboarding_surface`
 //! (a Mac signs in in the Beebeeb window) and took the `onboarding` window out of `dock_icon_wanted`;
-//! startup keeps today's macOS row until slice 6; the conflict rows changed in slice 4 (a Mac decides a conflict in Review).
+//! slice 4 changed the conflict rows (a Mac decides a conflict in Review); slice 6 (task 1683) made a Mac's startup a
+//! function of how it was launched (`surfaces::launch`).
 //!
 //! Every function here is CALLED by the shipping code, and `wiring_tests` proves
 //! it structurally (reads `lib.rs` and fails if a call site goes back to a
 //! literal): startup (`startup_surface`), the main-window labels
 //! (`main_window_label`, both the compact `settings` window and the Windows
 //! `main-app` shell), the global close handler (`close_policy`), the sign-in openers (`onboarding_surface`),
-//! `runner::handle_new_conflict` (`conflict_auto_opens_window`) and the conflict
-//! window builder (`conflict_target`). Each returns today's answer on every
-//! platform except where a slice changed the macOS row (slice 2: sign-in; slice 4: conflicts).
+//! `runner::handle_new_conflict` (`conflict_auto_opens_window`) and the conflict window builder (`conflict_target`).
+//! Each returns today's answer on Windows and Linux.
 
+use super::launch::LaunchSource;
 use super::registry::{ClosePolicy, SurfaceKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,16 +47,34 @@ pub enum StartupSurface {
     Onboarding,
     /// Already configured: the platform's main window, shown after startup.
     MainWindow,
+    /// Nothing opens by itself: a Mac's login launch, and an update's relaunch when the person had nothing open. The b
+    /// in the menu bar is all there is (two-surface spec §7.3). Only a Mac ever answers this.
+    Nothing,
 }
 
-/// What the app opens ~300 ms after launch. Today: onboarding on first run, else
-/// the main window, on every platform. Slice 6 changes macOS to "nothing at
-/// login" (ruling 1); Windows and Linux keep this.
-pub fn startup_surface(_platform: Platform, no_sync_root: bool) -> StartupSurface {
-    if no_sync_root {
-        StartupSurface::Onboarding
-    } else {
-        StartupSurface::MainWindow
+/// What the app opens ~300 ms after launch. Windows and Linux: onboarding on first run, else the main window, however
+/// the app was started. A Mac (two-surface spec §7.3, task 1683 slice 6) follows how it was started: a manual launch
+/// opens the window (sign-in on first run), a login launch opens nothing, and an update's relaunch opens what the person
+/// had open and nothing else (sign-in if they were signed out).
+pub fn startup_surface(platform: Platform, no_sync_root: bool, source: LaunchSource) -> StartupSurface {
+    let configured_or_first_run = if no_sync_root { StartupSurface::Onboarding } else { StartupSurface::MainWindow };
+    if platform != Platform::Macos {
+        return configured_or_first_run;
+    }
+    match source {
+        LaunchSource::Manual => configured_or_first_run,
+        LaunchSource::LoginItem => StartupSurface::Nothing,
+        // A set-up Mac that was signed in gets back what it had open and nothing else. One that was signed out, or was
+        // never set up, gets sign-in: the window (or, on first run, the onboarding surface) shows it.
+        LaunchSource::UpdaterRelaunch(flag) => {
+            if no_sync_root || !flag.signed_in {
+                configured_or_first_run
+            } else if flag.window_open {
+                StartupSurface::MainWindow
+            } else {
+                StartupSurface::Nothing
+            }
+        }
     }
 }
 
@@ -199,28 +218,28 @@ mod tests {
 
     #[test]
     fn linux_still_opens_settings_after_startup() {
-        assert_eq!(startup_surface(Platform::Linux, false), StartupSurface::MainWindow);
+        assert_eq!(startup_surface(Platform::Linux, false, LaunchSource::Manual), StartupSurface::MainWindow);
         assert_eq!(main_window_label(Platform::Linux), "settings");
     }
 
     #[test]
     fn linux_first_run_still_opens_onboarding() {
-        assert_eq!(startup_surface(Platform::Linux, true), StartupSurface::Onboarding);
+        assert_eq!(startup_surface(Platform::Linux, true, LaunchSource::Manual), StartupSurface::Onboarding);
     }
 
     #[test]
     fn windows_startup_is_unchanged() {
-        assert_eq!(startup_surface(Platform::Windows, false), StartupSurface::MainWindow);
-        assert_eq!(startup_surface(Platform::Windows, true), StartupSurface::Onboarding);
+        assert_eq!(startup_surface(Platform::Windows, false, LaunchSource::Manual), StartupSurface::MainWindow);
+        assert_eq!(startup_surface(Platform::Windows, true, LaunchSource::Manual), StartupSurface::Onboarding);
         assert_eq!(main_window_label(Platform::Windows), "main-app");
     }
 
     #[test]
-    fn macos_startup_is_todays_behaviour_until_slice_6() {
-        // TODAY's startup rows. Two-surface slice 6 (nothing at login) replaces the MainWindow row for macOS and
-        // updates this test in the same commit.
-        assert_eq!(startup_surface(Platform::Macos, false), StartupSurface::MainWindow);
-        assert_eq!(startup_surface(Platform::Macos, true), StartupSurface::Onboarding);
+    fn macos_manual_launch_keeps_todays_rows() {
+        // Slice 6 (task 1683) gave a Mac a row per way of launching (`surfaces::launch`'s tests pin them all); a manual
+        // launch is the row it always had.
+        assert_eq!(startup_surface(Platform::Macos, false, LaunchSource::Manual), StartupSurface::MainWindow);
+        assert_eq!(startup_surface(Platform::Macos, true, LaunchSource::Manual), StartupSurface::Onboarding);
     }
 
     #[test]

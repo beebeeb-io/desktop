@@ -322,6 +322,39 @@
 
 /* ── Home ── */
 
+/* The one-time hint at the top of Home (hi-fi section 3, `.hint`): an info glyph, a bold line, the sentence, "Got it". */
+.mw-hint {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  background: var(--paper-2);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.mw-hint-icon {
+  flex: none;
+  margin-top: 1px;
+  color: var(--ink-2);
+  display: inline-flex;
+}
+
+.mw-hint-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.mw-hint-title {
+  font-weight: 600;
+}
+
+.mw-hint-body {
+  color: var(--ink-2);
+  font-size: 12.5px;
+}
+
 .mw-card {
   min-width: 0;
   background: var(--paper);
