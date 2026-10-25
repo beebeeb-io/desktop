@@ -96,6 +96,11 @@ pub(crate) struct Request<'a> {
     pub download_kbps_limit: u64,
     /// Sizes the plaintext buffer only.
     pub approx_size: usize,
+    /// The version the metadata named (`download_version.object_version_id`). The first window pins
+    /// whatever is current, so landing on another version means the file was replaced after the
+    /// metadata was read: a restart from fresh metadata, never the API path with the old geometry.
+    /// `None`: the metadata names no version (a legacy file).
+    pub expected_version: Option<&'a str>,
 }
 
 /// Where the driver reports progress: the same two numbers the API path reports.
@@ -327,9 +332,15 @@ pub(crate) async fn download(
                 Ok(()) => {
                     if !geometry_checked {
                         geometry_checked = true;
+                        let expected = request.expected_version.and_then(|v| uuid::Uuid::parse_str(v).ok());
+                        let landed = planner.pinned_version().and_then(|v| uuid::Uuid::parse_str(v).ok());
+                        if expected.is_some() && landed != expected {
+                            tracing::debug!("direct download: the grant names another version than the metadata");
+                            return Err(DirectError::VersionChanged);
+                        }
                         if planner.geometry().map(|g| g.chunk_count) != Some(request.chunk_count) {
-                            // The manifest and the file's metadata disagree: the API path, which
-                            // has its own checks, serves this file.
+                            // The same version (or a legacy file) whose manifest and metadata
+                            // disagree: the API path, which has its own checks, serves it.
                             tracing::debug!("direct download: manifest chunk count differs from the metadata");
                             return Ok(Outcome::UseApi);
                         }
@@ -465,9 +476,10 @@ pub(crate) mod test_support {
         status: u16,
         headers: Vec<(String, String)>,
         body: Vec<u8>,
-        /// Content-Length to state, when it must differ from the body (never, here: a mismatch is
-        /// made by sending a different body).
         hang_up: bool,
+        /// Send this many bytes of the response, then go silent for this long (a half-open
+        /// connection), then close.
+        stall: Option<(usize, std::time::Duration)>,
     }
 
     impl Reply {
@@ -477,6 +489,7 @@ pub(crate) mod test_support {
                 headers: vec![("Content-Type".into(), "application/json".into())],
                 body: value.to_string().into_bytes(),
                 hang_up: false,
+                stall: None,
             }
         }
         pub(crate) fn bytes(body: Vec<u8>) -> Self {
@@ -485,6 +498,7 @@ pub(crate) mod test_support {
                 headers: vec![("Content-Type".into(), "application/octet-stream".into())],
                 body,
                 hang_up: false,
+                stall: None,
             }
         }
         /// An empty body with no content type: axum's unknown-route answer.
@@ -494,6 +508,7 @@ pub(crate) mod test_support {
                 headers: Vec::new(),
                 body: Vec::new(),
                 hang_up: false,
+                stall: None,
             }
         }
         pub(crate) fn redirect(location: String) -> Self {
@@ -502,6 +517,7 @@ pub(crate) mod test_support {
                 headers: vec![("Location".into(), location)],
                 body: Vec::new(),
                 hang_up: false,
+                stall: None,
             }
         }
         /// Close the connection without an answer.
@@ -511,7 +527,17 @@ pub(crate) mod test_support {
                 headers: Vec::new(),
                 body: Vec::new(),
                 hang_up: true,
+                stall: None,
             }
+        }
+        /// `self`, but after `sent` bytes of it the connection goes silent for `silence`.
+        pub(crate) fn stalling(mut self, sent: usize, silence: std::time::Duration) -> Self {
+            self.stall = Some((sent, silence));
+            self
+        }
+        pub(crate) fn with_header(mut self, name: &str, value: &str) -> Self {
+            self.headers.push((name.into(), value.into()));
+            self
         }
     }
 
@@ -619,6 +645,12 @@ pub(crate) mod test_support {
         }
         out.extend_from_slice(format!("Content-Length: {}\r\nConnection: close\r\n\r\n", reply.body.len()).as_bytes());
         out.extend_from_slice(&reply.body);
+        if let Some((sent, silence)) = reply.stall {
+            let _ = stream.write_all(&out[..sent.min(out.len())]);
+            let _ = stream.flush();
+            std::thread::sleep(silence);
+            return;
+        }
         let _ = stream.write_all(&out);
         let _ = stream.flush();
     }
@@ -668,7 +700,24 @@ pub(crate) mod test_support {
         pub(crate) fn encrypted_size(&self) -> u64 {
             self.frames.iter().map(|f| f.len() as u64).sum()
         }
+        /// `download_version` exactly as the server builds it (task 1643 contract).
+        pub(crate) fn manifest(&self) -> Value {
+            let chunks: Vec<Value> = self
+                .frames
+                .iter()
+                .enumerate()
+                .map(|(i, f)| json!({"index": i, "size_bytes": f.len()}))
+                .collect();
+            json!({
+                "object_version_id": self.id, "version_number": 1, "chunk_count": self.chunk_count(),
+                "chunk_size_bytes": self.stride, "plaintext_size_bytes": self.plain.len(),
+                "ciphertext_size_bytes": self.encrypted_size(), "chunks": chunks,
+            })
+        }
     }
+
+    /// The pinned chunk route's real 409 (server `version_download::unavailable`).
+    pub(crate) const PINNED_GONE: &str = "download version unavailable; restart download from fresh metadata";
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub(crate) enum DiscoveryMode {
@@ -713,6 +762,10 @@ pub(crate) mod test_support {
         Status(u16),
         Tamper,
         HangUp,
+        /// The pinned version is gone: the server's real 409.
+        Gone,
+        /// 429 with this `Retry-After` (seconds).
+        RateLimited(u64),
     }
 
     pub(crate) struct Knobs {
@@ -727,6 +780,8 @@ pub(crate) mod test_support {
         pub link_authority: Option<String>,
         /// Grants say this transport instead of `object-download-v1`.
         pub transport_answer: Option<String>,
+        /// The metadata has no `download_version` (a legacy file).
+        pub legacy: bool,
     }
 
     pub(crate) struct Pair {
@@ -796,8 +851,13 @@ pub(crate) mod test_support {
         /// A file of `size` bytes in chunks of `stride` plaintext bytes, offered over the direct
         /// transport.
         pub(crate) fn start(master_key: [u8; 32], file_id: &str, stride: u64, size: usize) -> Self {
+            Self::start_with(master_key, file_id, stride, content(size, 7))
+        }
+
+        /// [`Self::start`] with this plaintext.
+        pub(crate) fn start_with(master_key: [u8; 32], file_id: &str, stride: u64, plain: Vec<u8>) -> Self {
             let key = file_key(master_key, file_id);
-            let version = Version::new(&key, "11111111-2222-4333-8444-555555555555", stride, content(size, 7));
+            let version = Version::new(&key, "11111111-2222-4333-8444-555555555555", stride, plain);
             let knobs = Arc::new(Mutex::new(Knobs {
                 file_id: file_id.to_string(),
                 version,
@@ -808,6 +868,7 @@ pub(crate) mod test_support {
                 api_chunks: HashMap::new(),
                 link_authority: None,
                 transport_answer: None,
+                legacy: false,
             }));
             let k = knobs.clone();
             let storage = Mock::start(Arc::new(move |req: &Seen| {
@@ -878,6 +939,7 @@ pub(crate) mod test_support {
                                 headers: vec![("Content-Type".into(), "text/html".into())],
                                 body: b"<html>gateway</html>".to_vec(),
                                 hang_up: false,
+                                stall: None,
                             };
                         }
                         Some(GrantScript::Replace) => {
@@ -895,6 +957,7 @@ pub(crate) mod test_support {
                         json!({
                             "id": k.file_id, "size_bytes": v.plain.len(), "chunk_count": v.chunk_count(),
                             "chunk_size_bytes": v.stride,
+                            "download_version": if k.legacy { Value::Null } else { v.manifest() },
                         }),
                     );
                 }
@@ -907,7 +970,7 @@ pub(crate) mod test_support {
                         .split('&')
                         .find_map(|kv| kv.strip_prefix("object_version_id="));
                     if pinned.is_some_and(|v| v != k.version.id) {
-                        return Reply::json(409, json!({"error": "version_unavailable"}));
+                        return Reply::json(409, json!({"error": PINNED_GONE}));
                     }
                     let Some(frame) = k.version.frames.get(index as usize).cloned() else {
                         return Reply::json(404, json!({"error": "not found"}));
@@ -917,6 +980,10 @@ pub(crate) mod test_support {
                         Some(ApiScript::Status(s)) => Reply::json(s, json!({"error": "scripted"})),
                         Some(ApiScript::Tamper) => Reply::bytes(tamper(&frame)),
                         Some(ApiScript::HangUp) => Reply::hang_up(),
+                        Some(ApiScript::Gone) => Reply::json(409, json!({"error": PINNED_GONE})),
+                        Some(ApiScript::RateLimited(secs)) => {
+                            Reply::json(429, json!({"error": "rate_limited"})).with_header("Retry-After", &secs.to_string())
+                        }
                     };
                 }
                 Reply::json(404, json!({"error": "not found"}))
@@ -1051,6 +1118,7 @@ mod tests {
                 chunk_count,
                 download_kbps_limit: kbps,
                 approx_size: SIZE,
+                expected_version: None,
             },
             transport,
             None,
@@ -1242,6 +1310,7 @@ mod tests {
                 chunk_count: 12,
                 download_kbps_limit: 0,
                 approx_size: SIZE,
+                expected_version: None,
             },
             Transport::Auto,
             None,
@@ -1401,12 +1470,14 @@ mod tests {
                 k.storage.insert(3, vec![StorageScript::Tamper].into());
             }
             let mixed = run(&pair).await.map(|o| matches!(o, Outcome::Done { .. }));
-            // The pinned route itself drops the connection: reqwest's error names the API URL.
+            // The pinned route itself drops the connection once (reqwest's error names the API URL);
+            // its retry gets the chunk.
             let dropped = new_pair();
             dropped.knobs().storage.insert(6, vec![StorageScript::Status(503); 4].into());
             dropped.knobs().api_chunks.insert(6, vec![ApiScript::HangUp].into());
-            uses_api(run(&dropped).await);
-            assert_eq!(dropped.api_chunk_requests().len(), 1, "the pinned route was asked");
+            let (_, transport) = done(run(&dropped).await);
+            assert_eq!(transport, FileTransport::Mixed);
+            assert_eq!(dropped.api_chunk_requests().len(), 2, "the dropped request and its retry");
             let refused = new_pair();
             refused
                 .knobs()
@@ -1425,7 +1496,7 @@ mod tests {
         }
         assert!(!logs.contains("/t/"), "no object path in the log:\n{logs}");
         assert!(!logs.contains("object_version_id="), "no API chunk URL in the log either:\n{logs}");
-        assert!(logs.contains("pinned API route failed"), "the dropped pinned request was logged:\n{logs}");
+        assert!(logs.contains("pinned API route: trying again"), "the dropped pinned request was logged:\n{logs}");
     }
 
     #[test]
@@ -1446,5 +1517,66 @@ mod tests {
         // (the reorder window is four) have been received, i.e. about 0.9 s.
         let elapsed = started.elapsed();
         assert!(elapsed >= std::time::Duration::from_millis(800), "took {elapsed:?}");
+    }
+
+    async fn run_expecting(pair: &Pair, expected: &str) -> Result<Outcome, DirectError> {
+        let key = file_key(KEY, FILE_ID);
+        let chunk_count = pair.knobs().version.chunk_count();
+        download(
+            &client(pair),
+            Request {
+                file_id: FILE_ID,
+                file_key: &key,
+                chunk_count,
+                download_kbps_limit: 0,
+                approx_size: SIZE,
+                expected_version: Some(expected),
+            },
+            Transport::Auto,
+            None,
+            &Recorder::default(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_pinned_route_409_is_a_restart_whatever_its_body() {
+        // The pinned per-chunk route answers a gone version with its own sentence (server
+        // `version_download::unavailable`), not the grant route's `version_unavailable`.
+        let pair = new_pair();
+        pair.knobs().storage.insert(0, vec![StorageScript::Status(503); 4].into());
+        pair.knobs().api_chunks.insert(0, vec![ApiScript::Gone].into());
+        assert_eq!(run(&pair).await.err(), Some(DirectError::VersionChanged));
+        assert_eq!(pair.api_chunk_requests().len(), 1, "never the file again without its pin");
+    }
+
+    #[tokio::test]
+    async fn the_pinned_route_rides_out_a_rate_limit_and_a_server_hiccup() {
+        let pair = new_pair();
+        pair.knobs().storage.insert(0, vec![StorageScript::Status(503); 4].into());
+        // Retry-After 2 s is longer than the 1 s the retry would wait on its own: it must be honoured.
+        pair.knobs().api_chunks.insert(0, vec![ApiScript::RateLimited(2), ApiScript::Status(503)].into());
+        let started = std::time::Instant::now();
+        let (bytes, transport) = done(run(&pair).await);
+        assert_eq!((bytes, transport), (pair.plain(), FileTransport::Mixed));
+        assert_eq!(pair.api_chunk_requests().len(), 3, "429, 503, then the chunk");
+        assert!(started.elapsed() >= std::time::Duration::from_secs(4), "Retry-After 2 s, then the doubled 2 s");
+    }
+
+    #[tokio::test]
+    async fn a_transfer_that_lands_on_another_version_than_the_metadata_named_restarts() {
+        // The metadata named A; B (with more chunks) completed before the first grant.
+        let pair = new_pair();
+        let named = pair.knobs().version.id.clone();
+        let more = Version::new(&file_key(KEY, FILE_ID), "99999999-2222-4333-8444-555555555555", STRIDE, content(SIZE + 5000, 8));
+        pair.knobs().replacement = Some(more);
+        pair.knobs().grants.push_back(GrantScript::Replace);
+        assert_eq!(run_expecting(&pair, &named).await.err(), Some(DirectError::VersionChanged));
+        assert_eq!(pair.storage_requests(), 0, "nothing of the other version was fetched");
+        // The version the metadata named: direct, as before.
+        let pair = new_pair();
+        let named = pair.knobs().version.id.clone();
+        let (bytes, transport) = done(run_expecting(&pair, &named).await);
+        assert_eq!((bytes, transport), (pair.plain(), FileTransport::Direct));
     }
 }

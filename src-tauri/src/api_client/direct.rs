@@ -16,10 +16,48 @@ use super::ApiClient;
 
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
 const STORAGE_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
-/// A chunk can be 256 MiB; this bounds one storage GET, not the file.
-const STORAGE_TIMEOUT: Duration = Duration::from_secs(600);
+/// A storage GET that receives nothing for this long has stalled (a half-open connection): it fails,
+/// and the planner renews or falls back, instead of the head chunk holding up the file and with it the
+/// queue. The API's per-chunk route has the same 30 s.
+const STORAGE_READ_TIMEOUT: Duration = Duration::from_secs(crate::link_health::API_REQUEST_TIMEOUT_SECS);
+/// The slowest link a storage GET's total time allows for: 128 KiB/s (about 1 Mbit/s).
+const MIN_STORAGE_BYTES_PER_SEC: u64 = 128 * 1024;
 /// An API error body worth reading: the error objects are tiny.
 const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
+
+/// The total time one storage GET of `length` bytes may take: a minute, plus the time the slowest
+/// allowed link needs for the body (chunks are up to 256 MiB, so no single constant fits).
+pub(crate) fn storage_timeout(length: u64) -> Duration {
+    Duration::from_secs(60).saturating_add(Duration::from_secs(length / MIN_STORAGE_BYTES_PER_SEC))
+}
+
+/// How hard the pinned per-chunk route is tried before the chunk, and with it the file, goes to the
+/// API path (the CLI's rule). Grants and this route share the per-user rate limiter server-side, and a
+/// download that fell back to it fetches four chunks at a time, so one 429 must not cost the transfer.
+#[derive(Clone, Copy)]
+pub(crate) struct PinnedRetry {
+    /// Attempts in all, the first one included.
+    pub attempts: u32,
+    /// The most the retries may wait in total; a wait that would pass it ends them.
+    pub budget: Duration,
+    /// The wait before the second attempt when the server named none; it doubles each time.
+    pub base: Duration,
+}
+
+const PINNED_RETRY: PinnedRetry = PinnedRetry {
+    attempts: 4,
+    budget: Duration::from_secs(60),
+    base: Duration::from_secs(1),
+};
+
+/// One attempt of the pinned route that did not give the chunk.
+enum PinnedFailure {
+    /// Not worth another try: an authorization answer, a gone version, a refusal that will repeat.
+    Final(ChunkApiError),
+    /// Could be gone in a moment: a 429, a 5xx, a held file, a network blip. `wait` is what the
+    /// server asked for, if it did.
+    Again { wait: Option<Duration>, message: String },
+}
 
 /// Unix milliseconds: the clock the planner and the discovery cache are given.
 pub(crate) fn now_ms() -> i64 {
@@ -38,7 +76,7 @@ pub(crate) enum GrantReply {
 /// Why the pinned per-chunk API route did not give a chunk.
 #[derive(Debug)]
 pub(crate) enum ChunkApiError {
-    /// 409 `version_unavailable`: the pinned version is gone.
+    /// 409: the pinned version is gone.
     Restart,
     /// 401/403 or a real (JSON) not-found: do not retry, do not fall back.
     Terminal(u16),
@@ -88,11 +126,17 @@ fn is_loopback_http(api_base: &str) -> bool {
 /// redirect, and refuses plain http unless the API itself is on loopback http. `None` if it cannot
 /// be built: the caller then stays on the API rather than use a less restricted client.
 pub(super) fn build_storage_client(api_base: &str) -> Option<Client> {
+    build_storage_client_with(api_base, STORAGE_READ_TIMEOUT)
+}
+
+/// [`build_storage_client`] with another idle timeout (tests). The total time of a GET is set per
+/// request by [`storage_timeout`], from the chunk's length.
+fn build_storage_client_with(api_base: &str, read_timeout: Duration) -> Option<Client> {
     Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .https_only(!is_loopback_http(api_base))
         .connect_timeout(STORAGE_CONNECT_TIMEOUT)
-        .timeout(STORAGE_TIMEOUT)
+        .read_timeout(read_timeout)
         .build()
         .ok()
 }
@@ -101,7 +145,12 @@ pub(super) fn build_storage_client(api_base: &str) -> Option<Client> {
 /// `length`, nothing else. The error is at most a status (0: no HTTP answer): reqwest's error
 /// text holds the URL, so it never leaves this function.
 pub(crate) async fn fetch_from_storage(client: &Client, grant: &dt::ChunkGrant) -> Result<Vec<u8>, u16> {
-    let resp = client.get(&grant.url).send().await.map_err(|_| 0u16)?;
+    let resp = client
+        .get(&grant.url)
+        .timeout(storage_timeout(grant.length))
+        .send()
+        .await
+        .map_err(|_| 0u16)?;
     let status = resp.status().as_u16();
     if status != 200 || resp.content_length() != Some(grant.length) {
         return Err(status);
@@ -195,7 +244,9 @@ impl ApiClient {
     /// `GET /api/v1/files/{id}/chunks/{index}?object_version_id=<pinned>`: one chunk of the pinned
     /// version through the API, the fallback for a chunk storage could not give and the re-fetch
     /// of one that did not authenticate. `expected_len` is the stored length the grant manifest
-    /// states for this chunk.
+    /// states for this chunk. A transient failure (429, 5xx, a held file, a network blip) is retried
+    /// a few times, honouring `Retry-After`; only when that is spent does the caller give the file
+    /// to the API path.
     pub(crate) async fn download_chunk_pinned(
         &self,
         file_id: &str,
@@ -203,6 +254,46 @@ impl ApiClient {
         version: &str,
         expected_len: u64,
     ) -> Result<Vec<u8>, ChunkApiError> {
+        self.download_chunk_pinned_with(PINNED_RETRY, file_id, index, version, expected_len)
+            .await
+    }
+
+    pub(crate) async fn download_chunk_pinned_with(
+        &self,
+        retry: PinnedRetry,
+        file_id: &str,
+        index: u32,
+        version: &str,
+        expected_len: u64,
+    ) -> Result<Vec<u8>, ChunkApiError> {
+        let mut waited = Duration::ZERO;
+        let mut attempt: u32 = 1;
+        loop {
+            let (wait, message) = match self.pinned_attempt(file_id, index, version, expected_len).await {
+                Ok(bytes) => return Ok(bytes),
+                Err(PinnedFailure::Final(e)) => return Err(e),
+                Err(PinnedFailure::Again { wait, message }) => {
+                    let doubling = 2u32.saturating_pow(attempt - 1);
+                    (wait.unwrap_or_else(|| retry.base.saturating_mul(doubling)), message)
+                }
+            };
+            if attempt >= retry.attempts || waited.saturating_add(wait) > retry.budget {
+                return Err(ChunkApiError::Failed(message));
+            }
+            tracing::debug!(chunk = index, attempt, %message, "pinned API route: trying again");
+            tokio::time::sleep(wait).await;
+            waited += wait;
+            attempt += 1;
+        }
+    }
+
+    async fn pinned_attempt(
+        &self,
+        file_id: &str,
+        index: u32,
+        version: &str,
+        expected_len: u64,
+    ) -> Result<Vec<u8>, PinnedFailure> {
         let resp = self
             .client
             .get(self.chunk_url(file_id, index))
@@ -210,35 +301,114 @@ impl ApiClient {
             .header("Authorization", format!("Bearer {}", self.token))
             .send()
             .await
-            .map_err(|e| ChunkApiError::Failed(dt::scrub(&e.without_url().to_string())))?;
+            .map_err(|e| PinnedFailure::Again {
+                wait: None,
+                message: dt::scrub(&e.without_url().to_string()),
+            })?;
         let status = resp.status();
         if !status.is_success() {
             let (answer, _) = answer_of(resp, MAX_ERROR_BODY_BYTES).await;
-            return Err(match (status.as_u16(), answer.error_code()) {
-                (401 | 403, _) => ChunkApiError::Terminal(status.as_u16()),
-                (404, Some(_)) => ChunkApiError::Terminal(404),
-                (409, Some("version_unavailable")) => ChunkApiError::Restart,
-                (code, _) => ChunkApiError::Failed(format!("chunk {index} through the API failed ({code})")),
+            let failed = format!("chunk {index} through the API failed ({})", status.as_u16());
+            // On this route a 409 means the pinned version is gone. The server's body is the sentence
+            // "download version unavailable; restart download from fresh metadata" (task 1643), not
+            // the grant route's `version_unavailable`, so the status decides. Only "another operation
+            // holds the file" is a wait.
+            if answer.status == 409 && !matches!(answer.error_code(), Some("replace_in_progress" | "commit_in_progress")) {
+                return Err(PinnedFailure::Final(ChunkApiError::Restart));
+            }
+            // Otherwise the grant's questions: authorization is final, "held" and rate limits wait, a
+            // server hiccup is tried again.
+            return Err(match dt::classify(dt::Call::DownloadGrant, &answer) {
+                dt::Outcome::Terminal(t) => PinnedFailure::Final(ChunkApiError::Terminal(t.status)),
+                dt::Outcome::Restart => PinnedFailure::Final(ChunkApiError::Restart),
+                dt::Outcome::Backoff(wait) => PinnedFailure::Again {
+                    wait: Some(wait),
+                    message: failed,
+                },
+                dt::Outcome::UseApiNow => PinnedFailure::Again {
+                    wait: None,
+                    message: failed,
+                },
+                _ => PinnedFailure::Final(ChunkApiError::Failed(failed)),
             });
         }
         if resp.content_length() != Some(expected_len) {
-            return Err(ChunkApiError::Failed(format!(
+            return Err(PinnedFailure::Final(ChunkApiError::Failed(format!(
                 "chunk {index} through the API: a different length than the manifest"
-            )));
+            ))));
         }
         let mut resp = resp;
         match read_capped(&mut resp, usize::try_from(expected_len).unwrap_or(usize::MAX)).await {
             Some(bytes) if bytes.len() as u64 == expected_len => Ok(bytes),
-            _ => Err(ChunkApiError::Failed(format!(
-                "chunk {index} through the API: the body ended early or ran long"
-            ))),
+            _ => Err(PinnedFailure::Again {
+                wait: None,
+                message: format!("chunk {index} through the API: the connection broke while reading"),
+            }),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::build_storage_client;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use super::{PinnedRetry, build_storage_client, build_storage_client_with, fetch_from_storage, storage_timeout};
+    use crate::api_client::ApiClient;
+    use crate::direct_download::test_support::{Mock, Reply, Seen};
+
+    #[test]
+    fn a_storage_get_may_take_a_minute_plus_the_slowest_link_for_its_length() {
+        assert_eq!(storage_timeout(0), Duration::from_secs(60));
+        assert_eq!(storage_timeout(4 * 1024 * 1024), Duration::from_secs(60 + 32), "a 4 MiB chunk");
+        assert_eq!(storage_timeout(256 * 1024 * 1024), Duration::from_secs(60 + 2048), "a 256 MiB chunk");
+        assert_eq!(storage_timeout(u64::MAX), Duration::from_secs(60 + u64::MAX / (128 * 1024)));
+    }
+
+    #[tokio::test]
+    async fn a_storage_connection_that_goes_silent_fails_at_the_idle_timeout() {
+        // Headers and part of the body, then nothing: a half-open connection.
+        let storage = Mock::start(Arc::new(|_: &Seen| Reply::bytes(vec![7; 64 * 1024]).stalling(1024, Duration::from_secs(8))));
+        let client = build_storage_client_with(&storage.base, Duration::from_millis(300)).expect("client");
+        let grant = beebeeb_core::direct_transfer::ChunkGrant {
+            index: 0,
+            method: "GET".into(),
+            url: format!("{}/b/k", storage.base),
+            length: 64 * 1024,
+            expires_at: "2026-10-25T00:00:00Z".into(),
+        };
+        let started = Instant::now();
+        assert_eq!(fetch_from_storage(&client, &grant).await, Err(0), "a failed fetch, no status");
+        let took = started.elapsed();
+        assert!(took < Duration::from_secs(4), "the idle timeout ended it, not the server's 8 s silence: {took:?}");
+    }
+
+    #[tokio::test]
+    async fn the_pinned_route_gives_up_after_its_attempts() {
+        let api = Mock::start(Arc::new(|_: &Seen| Reply::json(503, serde_json::json!({"error": "busy"}))));
+        let client = ApiClient::new(api.base.clone(), "token".into(), [0; 32]);
+        let fast = PinnedRetry {
+            attempts: 4,
+            budget: Duration::from_secs(60),
+            base: Duration::from_millis(10),
+        };
+        let got = client
+            .download_chunk_pinned_with(fast, "f", 0, "11111111-2222-4333-8444-555555555555", 38)
+            .await;
+        assert!(matches!(got, Err(super::ChunkApiError::Failed(_))), "{got:?}");
+        assert_eq!(api.seen().len(), 4, "four attempts, then the caller's fallback");
+        // A budget too small for the next wait ends the retries at once.
+        let api = Mock::start(Arc::new(|_: &Seen| Reply::json(503, serde_json::json!({"error": "busy"}))));
+        let client = ApiClient::new(api.base.clone(), "token".into(), [0; 32]);
+        let tight = PinnedRetry {
+            budget: Duration::from_millis(5),
+            ..fast
+        };
+        let _ = client
+            .download_chunk_pinned_with(tight, "f", 0, "11111111-2222-4333-8444-555555555555", 38)
+            .await;
+        assert_eq!(api.seen().len(), 1);
+    }
 
     #[tokio::test]
     async fn the_storage_client_is_https_only_unless_the_api_is_loopback_http() {

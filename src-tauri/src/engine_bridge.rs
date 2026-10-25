@@ -478,6 +478,16 @@ pub(crate) fn error_category(error: &(dyn std::error::Error + 'static)) -> &'sta
         if current.downcast_ref::<reqwest::Error>().is_some() {
             return "network";
         }
+        // Task 2173: a direct download's authorization answer, in the categories above.
+        if let Some(crate::direct_download::DirectError::Refused(status)) =
+            current.downcast_ref::<crate::direct_download::DirectError>()
+        {
+            return match status {
+                401 | 403 => "permission_denied",
+                404 => "not_found",
+                _ => "other",
+            };
+        }
         cause = current.source();
     }
     "other"
@@ -4348,6 +4358,10 @@ impl EngineBridge {
                 chunk_count,
                 download_kbps_limit,
                 approx_size,
+                expected_version: meta
+                    .get("download_version")
+                    .and_then(|v| v.get("object_version_id"))
+                    .and_then(|v| v.as_str()),
             },
             transport,
             self.storage_override(),
@@ -4961,54 +4975,70 @@ impl EngineBridge {
             };
         }
 
-        let meta = match self.api.get_file(file_id).await {
-            Ok(m) => m,
-            Err(e) => {
+        // Task 2173: a version that goes away mid-download restarts once from fresh metadata, as
+        // `do_hydrate` does; the size is checked again on the new version.
+        let mut restarted = false;
+        loop {
+            let meta = match self.api.get_file(file_id).await {
+                Ok(m) => m,
+                Err(e) => {
+                    return ConflictContentSide {
+                        size_bytes: None,
+                        text: None,
+                        unavailable_reason: Some(format!("Couldn't download the other device's version: {e}")),
+                    };
+                }
+            };
+            let size_bytes = meta.get("size_bytes").and_then(|v| v.as_u64());
+
+            if !is_text {
+                // Binary preview only ever shows size — never download the bytes.
                 return ConflictContentSide {
-                    size_bytes: None,
+                    size_bytes,
                     text: None,
-                    unavailable_reason: Some(format!("Couldn't download the other device's version: {e}")),
+                    unavailable_reason: None,
                 };
             }
-        };
-        let size_bytes = meta.get("size_bytes").and_then(|v| v.as_u64());
-
-        if !is_text {
-            // Binary preview only ever shows size — never download the bytes.
-            return ConflictContentSide {
-                size_bytes,
-                text: None,
-                unavailable_reason: None,
-            };
-        }
-        let within_limit = matches!(size_bytes, Some(s) if s <= CONFLICT_PREVIEW_TEXT_MAX_BYTES as u64);
-        if !within_limit {
-            return ConflictContentSide {
-                size_bytes,
-                text: None,
-                unavailable_reason: Some(match size_bytes {
-                    Some(s) => format!("File is too large to preview, {s} bytes"),
-                    None => "Couldn't determine the other device's file size".to_string(),
-                }),
-            };
-        }
-
-        match self.do_hydrate_with_meta(file_id, &meta, None).await {
-            Ok(mut bytes) => {
-                // Move the plaintext out instead of `bytes.to_vec()` — a
-                // clone would briefly hold two live copies of the remote
-                // plaintext in memory. `content_side_from_bytes` consumes
-                // the Vec by value (no further copy), and the now-empty
-                // `bytes` is zeroized below for defense in depth.
-                let side = content_side_from_bytes(std::mem::take(&mut *bytes), is_text);
-                bytes.zeroize();
-                side
+            let within_limit = matches!(size_bytes, Some(s) if s <= CONFLICT_PREVIEW_TEXT_MAX_BYTES as u64);
+            if !within_limit {
+                return ConflictContentSide {
+                    size_bytes,
+                    text: None,
+                    unavailable_reason: Some(match size_bytes {
+                        Some(s) => format!("File is too large to preview, {s} bytes"),
+                        None => "Couldn't determine the other device's file size".to_string(),
+                    }),
+                };
             }
-            Err(e) => ConflictContentSide {
-                size_bytes,
-                text: None,
-                unavailable_reason: Some(format!("Couldn't download the other device's version: {e}")),
-            },
+
+            match self.do_hydrate_with_meta(file_id, &meta, None).await {
+                Ok(mut bytes) => {
+                    // Move the plaintext out instead of `bytes.to_vec()` — a
+                    // clone would briefly hold two live copies of the remote
+                    // plaintext in memory. `content_side_from_bytes` consumes
+                    // the Vec by value (no further copy), and the now-empty
+                    // `bytes` is zeroized below for defense in depth.
+                    let side = content_side_from_bytes(std::mem::take(&mut *bytes), is_text);
+                    bytes.zeroize();
+                    return side;
+                }
+                Err(e)
+                    if !restarted
+                        && matches!(
+                            e.downcast_ref::<crate::direct_download::DirectError>(),
+                            Some(crate::direct_download::DirectError::VersionChanged)
+                        ) =>
+                {
+                    restarted = true;
+                }
+                Err(e) => {
+                    return ConflictContentSide {
+                        size_bytes,
+                        text: None,
+                        unavailable_reason: Some(format!("Couldn't download the other device's version: {e}")),
+                    };
+                }
+            }
         }
     }
 }
@@ -25055,6 +25085,60 @@ mod tests {
             let metadata = pair.api.count(|s| s.method == "GET" && s.path() == format!("/api/v1/files/{TEST_FILE_ID}"));
             assert_eq!(metadata, 2, "fresh metadata once");
             assert!(pair.api_chunk_requests().is_empty());
+        }
+
+        #[tokio::test]
+        async fn a_replace_with_more_chunks_before_the_first_window_restarts_and_never_publishes_a_truncated_file() {
+            // Review P2-2: get_file names A; B, with more chunks, completes before the first grant.
+            let dir = tempfile::tempdir().unwrap();
+            let pair = Pair::start(KEY, TEST_FILE_ID, 1024, SIZE);
+            let more = Version::new(
+                &file_key(KEY, TEST_FILE_ID),
+                "99999999-2222-4333-8444-555555555555",
+                1024,
+                content(SIZE + 5000, 9),
+            );
+            pair.knobs().replacement = Some(more.clone());
+            pair.knobs().grants.push_back(GrantScript::Replace);
+            let bridge = bridge_for(dir.path(), &pair);
+            let dest = dir.path().join("direct.bin");
+            bridge.hydrate_file(TEST_FILE_ID, &dest, &[dir.path()]).await.unwrap();
+            assert_eq!(std::fs::read(&dest).unwrap(), more.plain, "B, whole: never the old count's prefix");
+            let metadata = pair.api.count(|s| s.method == "GET" && s.path() == format!("/api/v1/files/{TEST_FILE_ID}"));
+            assert_eq!(metadata, 2, "fresh metadata once");
+            assert!(pair.api_chunk_requests().is_empty(), "the unpinned API loop never ran");
+        }
+
+        #[tokio::test]
+        async fn a_conflict_preview_restarts_once_when_the_version_goes_away() {
+            let dir = tempfile::tempdir().unwrap();
+            // 12 chunks: two grant windows, so the second one meets the replacement.
+            let pair = Pair::start_with(KEY, TEST_FILE_ID, 1024, b"remote version A ".repeat(700));
+            let b = Version::new(
+                &file_key(KEY, TEST_FILE_ID),
+                "99999999-2222-4333-8444-555555555555",
+                1024,
+                b"remote version B ".repeat(700),
+            );
+            {
+                let mut k = pair.knobs();
+                k.replacement = Some(b.clone());
+                k.grants.push_back(GrantScript::Serve);
+                k.grants.push_back(GrantScript::Replace);
+            }
+            let bridge = bridge_for(dir.path(), &pair);
+            let side = bridge.remote_content_preview(TEST_FILE_ID, true).await;
+            assert_eq!(side.unavailable_reason, None);
+            assert_eq!(side.text.as_deref(), Some(String::from_utf8(b.plain.clone()).unwrap().as_str()));
+        }
+
+        #[test]
+        fn a_refused_download_logs_by_category() {
+            use crate::direct_download::DirectError;
+            for (status, want) in [(401, "permission_denied"), (403, "permission_denied"), (404, "not_found"), (500, "other")] {
+                let e = anyhow::Error::new(DirectError::Refused(status));
+                assert_eq!(error_category(e.as_ref()), want, "{status}");
+            }
         }
 
         #[tokio::test]
