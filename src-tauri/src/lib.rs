@@ -1600,6 +1600,15 @@ impl LoginOutcome {
         }
     }
 
+    /// A browser sign-in that installed its session: the handoff carried the vault key, so the vault is unlocked (spec C
+    /// C-S1). The password paths cannot say that: they sign in without a key and the recovery phrase follows.
+    fn browser_signed_in() -> Self {
+        Self {
+            vault_unlocked: true,
+            ..Self::signed_in()
+        }
+    }
+
     #[cfg_attr(target_os = "windows", allow(dead_code))]
     fn reauthenticated(vault_unlocked: bool, key_replaced: bool) -> Self {
         Self {
@@ -3650,13 +3659,14 @@ async fn sign_out_count(window: tauri::WebviewWindow, state: State<'_, AppState>
     Err("This works on a Mac only.".into())
 }
 
-/// W11: on macOS the switch step renders a snapshot, owned by the sign-in window, `onboarding`. Its one caller,
-/// `settle_sign_in`, is not built on Windows.
+/// W11: on macOS the switch step renders a snapshot, owned by the window the step runs in: the Beebeeb window (`main`),
+/// which the app destroys on a close, so a close drops it (task 1747 Part 1, review P3-5 on #143; it was owned by the label
+/// `onboarding`, a window a Mac no longer builds). Its one caller, `settle_sign_in`, is not built on Windows.
 #[cfg_attr(target_os = "windows", allow(dead_code))]
 fn switch_snapshot(state: &AppState) -> Result<Option<sign_out::snapshot::AskCounts>, String> {
     #[cfg(target_os = "macos")]
     {
-        let snapshot = count_ask("onboarding")?;
+        let snapshot = count_ask(surfaces::policy::main_window_label(surfaces::policy::Platform::current()))?;
         // §6.4 (review I8): the switch's snapshot logs the same line as `sign_out_count`; it never sends (W11).
         tracing::info!(
             files = snapshot.counts.files,
@@ -37561,8 +37571,11 @@ mod sign_out_keep_tests {
                 "absent while the count worked"
             );
             assert!(
-                state.sign_out.snapshots.drop_owned_by("onboarding"),
-                "owned by the window the switch step runs in"
+                state
+                    .sign_out
+                    .snapshots
+                    .drop_owned_by(surfaces::policy::main_window_label(surfaces::policy::Platform::current())),
+                "owned by the window the switch step runs in (the Beebeeb window on a Mac, not the retired onboarding window)"
             );
             let without = serde_json::to_value(LoginOutcome::account_mismatch(2, None, None)).unwrap();
             assert_eq!(
@@ -37644,8 +37657,9 @@ mod sign_out_keep_tests {
 
     /// U19, from the count to the window (W11): the switch settles with the snapshot it counted (a Mac) or none
     /// (elsewhere); both password sign-ins hand the settlement's snapshot and E3 on to `LoginOutcome`; and the browser
-    /// sign-in puts each in its `account_mismatch` event only when it is there. The sign-ins need a server, so their
-    /// text is read.
+    /// sign-in hands them on in the same call (spec C C-S1, task 1747 Part 1): it returns the `LoginOutcome` the password
+    /// paths return, where it used to put each in an `account_mismatch` event and fail with a raw code. The sign-ins need
+    /// a server, so their text is read.
     #[test]
     fn the_switch_count_reaches_the_sign_in_window() {
         let counts = sign_out::snapshot::AskCounts {
@@ -37689,19 +37703,62 @@ mod sign_out_keep_tests {
                 "{login} hands both on"
             );
         }
-        let browser = squeeze(&include_str!("browser_login.rs").replace("\r\n", "\n"));
-        for step in [
-            "let mut payload = serde_json::json!({ \"pending_changes\": pending_changes });",
-            "if let Some(unsent) = unsent {
-                payload[\"unsent\"] = serde_json::to_value(unsent).unwrap_or(serde_json::Value::Null);
-            }",
-            "if let Some(unsent_error) = unsent_error {
-                payload[\"unsent_error\"] = serde_json::Value::String(unsent_error);
-            }",
-            "emit(app, \"account_mismatch\", payload);",
-        ] {
-            assert!(browser.contains(&squeeze(step)), "the browser sign-in's event: {step}");
-        }
+        // The browser handoff holds the same hand-off as the two password sign-ins, in the same call, through its returned
+        // outcome, and no raw `account_mismatch` event or error string is left in it (C-S1).
+        let browser_source = include_str!("browser_login.rs").replace("\r\n", "\n");
+        // The handoff's own code, not its tests (which hold the words of what must not be there).
+        let browser = squeeze(&browser_source[..browser_source.find("#[cfg(test)]").expect("the tests module")]);
+        assert!(
+            browser.contains(&squeeze(
+                "return Ok(crate::LoginOutcome::account_mismatch(pending_changes, unsent, unsent_error));"
+            )),
+            "the browser handoff hands both on"
+        );
+        assert!(
+            !browser.contains(concat!("\"account", "_mismatch\"")),
+            "no raw code is left in the handoff, as an event or as an error"
+        );
+    }
+
+    /// Task 1747 Part 1 (review P3-5 on #143): the switch snapshot is owned by the window the switch step runs in. On a Mac
+    /// that is `main`, which the app destroys on a close, so a close of `main` drops it, and another window's close leaves
+    /// it. It used to be owned by the label `onboarding`, a window a Mac no longer builds, so nothing dropped it.
+    #[tokio::test]
+    async fn the_switch_snapshot_is_dropped_by_the_window_it_runs_in_and_by_no_other() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            queue_write(&db, "w1", "f1", b"bytes");
+            let state = AppState::default();
+            let owner = surfaces::policy::main_window_label(surfaces::policy::Platform::current());
+            #[cfg(target_os = "macos")]
+            assert_eq!(owner, "main", "the sign-in window of a Mac is the Beebeeb window");
+            if switch_snapshot(&state).unwrap().is_some() {
+                for other in ["settings", "onboarding", "popover", "conflict-7f3a"] {
+                    assert!(
+                        !flow_window_closed(&state.sign_out, other).snapshot_dropped,
+                        "{other}: another window's close leaves the switch snapshot"
+                    );
+                }
+                assert!(state.sign_out.snapshots.newest_ask_id().is_some());
+                assert!(
+                    flow_window_closed(&state.sign_out, owner).snapshot_dropped,
+                    "the window the step runs in drops it"
+                );
+                assert_eq!(state.sign_out.snapshots.newest_ask_id(), None);
+            }
+        })
+        .await;
+    }
+
+    #[test]
+    fn the_switch_snapshot_is_counted_for_the_window_label_not_a_literal() {
+        let production = super::finder_setup_command_tests::production_source();
+        let snapshot = super::finder_setup_command_tests::body_between(&production, "fn switch_snapshot(", "\n}\n");
+        assert!(
+            snapshot.contains("count_ask(surfaces::policy::main_window_label(surfaces::policy::Platform::current()))?"),
+            "{snapshot}"
+        );
+        assert!(!snapshot.contains("\"onboarding\""), "no window label as a literal:\n{snapshot}");
     }
 
     // ---- the fix round after the /code-review of the Mac sign-in PR (task 1683 slice 2) ----
