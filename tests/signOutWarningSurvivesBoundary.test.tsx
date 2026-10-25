@@ -198,10 +198,12 @@ const SLOW = 15_000
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 /** The Beebeeb window is drawn and has read the account: its sidebar, or its signed-out card. */
 const hasTabs = (container: MiniElement) =>
-  elements(container).some((el) => el.tagName === 'NAV' || el.className === 'mw-signin')
-/** Signed out: the centred card, no sidebar (§7.4, until slice 2 brings sign-in into the window). */
+  elements(container).some((el) => el.tagName === 'NAV' || isSignInCard(el))
+/** Task 1683 slice 2: the signed-out card is the sign-in screen's (`mw-scard`, the hi-fi's `.scard`); it was slice 1's `mw-signin`. */
+const isSignInCard = (el: MiniElement) => String(el.className).split(/\s+/).includes('mw-scard')
+/** Signed out: the centred card, no sidebar (§7.4). */
 const showsSignIn = (container: MiniElement) =>
-  elements(container).some((el) => el.className === 'mw-signin') && !elements(container).some((el) => el.tagName === 'NAV')
+  elements(container).some(isSignInCard) && !elements(container).some((el) => el.tagName === 'NAV')
 const pane = (container: MiniElement) => elements(container).find((el) => el.className === 'ms-pane mw-pane')!
 const pressLabel = (container: MiniElement, label: string) =>
   React.act(async () => {
@@ -382,7 +384,7 @@ describe('a sign-out with an unconfirmed Finder removal, through AccountSessionB
     await waitFor('the remounted window', () => statusLines(container).includes(SIGN_OUT_WARNING.sentence))
 
     // A sign-in in another window: Rust moves the revision again and the account is signed in.
-    const beforeSignIn = elements(container).find((el) => el.className === 'mw-signin')!
+    const beforeSignIn = elements(container).find(isSignInCard)!
     native.loggedIn = true
     native.revision += 2
     await waitForRemount(container, beforeSignIn, native)

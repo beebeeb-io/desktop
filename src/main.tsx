@@ -9,7 +9,8 @@
  *                                    see `html.macos-flyout` in design.css,
  *                                    task 1384.
  *   • ?window=conflict             → conflict resolution (ConflictWindow.tsx)
- *   • ?window=onboarding           → first-launch flow (Onboarding.tsx, macOS)
+ *   • ?window=onboarding           → first-launch flow (Onboarding.tsx, Linux; a Mac signs in in the
+ *                                    Beebeeb window below and never builds this one)
  *   • ?window=onboarding&platform=windows
  *                                  → Windows first-run wizard (WindowsFirstRun.tsx)
  *   • ?window=tray                 → Windows 11 tray flyout (WindowsTray.tsx)
@@ -57,6 +58,9 @@ void initializeDesktopThemeFromConfig()
 
 function HostOnboarding() {
   const caps = useCapabilities()
+  // Task 1683 slice 2: a Mac signs in in the Beebeeb window and never builds this one. Were it ever loaded there, the
+  // Linux-style window below would run the install-era Finder commands, which no macOS code path may reach.
+  if (caps?.host_os === 'macos') return null
   return <CapabilityGate route="onboarding">{caps?.host_os === 'windows' ? <WindowsFirstRun /> : <Onboarding mode={params.get('mode') === 'reauth' ? 'reauth' : 'setup'} />}</CapabilityGate>
 }
 

@@ -14,8 +14,11 @@
  * flow request reaches them whichever section shows; a request selects Settings › Account first, as the Settings
  * window's root did.
  *
- * Signed out, until slice 2 brings sign-in into this window, the window shows one centred card that opens today's
- * sign-in (the onboarding window, or "Sign in again" for an ended session). Settings then shows General and About.
+ * Signed out, the window shows one centred card at a time and no sidebar (slice 2, spec §7.4, `macSignIn.tsx`): sign in
+ * (browser first, password second), Sign in again for an ended session, the account switch, set up this Mac, and the
+ * Finder status, after which it moves on to Home. Which card follows from the session and from the sign-in FLOW
+ * (`signInModel.ts`), which lives in a module-level store because `AccountSessionBoundary` remounts this window on every
+ * session change and a sign-in is one. Settings then shows General and About.
  *
  * The components are plain function declarations that read only their props, hooks and the bindings imported here,
  * so `tests/macApp.test.tsx` can execute them with the component harness.
@@ -27,7 +30,6 @@ import {
   BILLING_URL,
   command,
   commandUnavailableLabel,
-  forceReauth,
   openUrl,
   popoverSnapshot,
   type CommandResult,
@@ -35,6 +37,7 @@ import {
 } from './desktopApi'
 import type { PopoverSnapshot } from './popoverContract'
 import { heldSignOutWarning, subscribeSignOutWarning } from './accountSession'
+import { SIGNED_IN_WINDOW_TITLE } from './accountViewCopy'
 import { finderOpenFailedToast, useFinderSetup } from './finderSetup'
 import { finderActionButtonLabel } from './finderSetupCopy'
 import { focusById } from './focusById'
@@ -50,6 +53,7 @@ import {
   type SettingsTab,
 } from './macSettingsModel'
 import { Btn, Note, SettingsGroup, SettingsIcon } from './macSettingsParts'
+import { SignInWindow } from './macSignIn'
 import { AboutTab, AccountTab, GeneralTab, showSignOutOutcome, SyncTab, useSettingsConfig } from './MacSettings'
 import { SecurityTab } from './MacSecurity'
 import {
@@ -72,7 +76,10 @@ import {
   type MainNav,
   type MainView,
 } from './mainWindowModel'
+import { getSignInFlow, setSignInFlow, subscribeSignInFlow } from './signInFlowStore'
+import { IDLE_FLOW, normalizeFlow, windowScreen } from './signInModel'
 import { connectSignOutFlowEvents, connectSignOutFlowMenu, SignOutFlow, signOutFlowApi, type FlowView } from './signOutFlow'
+import { setMainWindowTitle } from './windowTitle'
 import { openModalCount, subscribeOpenModals, useToast } from './windows/ui'
 import { connectNativeUpdateMenu, desktopUpdateCheck } from './windows/manualUpdateCheck'
 
@@ -255,41 +262,6 @@ function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefres
   )
 }
 
-// ── Signed out (until slice 2 brings sign-in into this window) ───────────────
-
-function SignedOutCard({
-  reauth,
-  email,
-  note,
-  busy,
-  onSignIn,
-}: {
-  reauth: boolean
-  email: string | null
-  note: string | null
-  busy: boolean
-  onSignIn: () => void
-}) {
-  return (
-    <div className="mw-solo-body">
-      {note ? (
-        <div className="mw-solo-note">
-          <Note kind="status">{note}</Note>
-        </div>
-      ) : null}
-      <section className="mw-signin" aria-labelledby="mw-title">
-        <div className="mw-mark" aria-hidden="true">b</div>
-        <h1 id="mw-title" className="mw-signin-title">{reauth ? 'Sign in again' : 'Sign in to Beebeeb'}</h1>
-        {reauth ? <p className="mw-signin-copy">Sync is paused until you sign in again. Your files stay in Finder.</p> : null}
-        <Btn primary disabled={busy} onClick={onSignIn}>
-          {reauth ? 'Sign in again' : 'Sign in'}
-        </Btn>
-        {reauth && email ? <p className="mw-signin-foot">Signed in before as {email}</p> : null}
-      </section>
-    </div>
-  )
-}
-
 // ── The window ───────────────────────────────────────────────────────────────
 
 export default function MacApp() {
@@ -304,7 +276,6 @@ export default function MacApp() {
   const [rawView, setView] = useState<MainView>(() => initialMainView(locationSearch()))
   const [lastSettings, setLastSettings] = useState<SettingsTab | null>(() => (rawView.mode === 'settings' ? rawView.section : null))
   const [focusId, setFocusId] = useState<string | null>(null)
-  const [signingIn, setSigningIn] = useState(false)
   const openModals = useSyncExternalStore(subscribeOpenModals, openModalCount, openModalCount)
 
   // Spec 2026-10-10 §5.1 and F9: the sign-out flow and its pending request live in the shell, not in the Account
@@ -321,11 +292,15 @@ export default function MacApp() {
   }
   const flow = flowRef.current
 
+  // The sign-in flow (account switch, set up this Mac, Finder status, settling) is kept outside React: see the header.
+  const signInFlow = useSyncExternalStore(subscribeSignInFlow, getSignInFlow, getSignInFlow)
   const account = snapshot?.account ?? null
   const signedIn = account?.logged_in === true
   // Signed out, only General and About exist (§7.8): a session that ends under another section moves the window to General.
   const view = coerceSettingsView(rawView, signedIn)
   const unlocked = account?.vault_unlocked === true
+  // The card to draw, or Home. A step that needs a session is dropped (below) when the session is gone.
+  const screen = account === null ? 'home' : windowScreen(account, signInFlow)
   const sheetOpen = flowView.kind !== 'idle' || openModals > 0
 
   // The listeners below are registered once; they read the window's current state through these.
@@ -366,6 +341,8 @@ export default function MacApp() {
   // in flight and never throws one away because the timer fired (a read can take 8 s, the tick is 5 s); an outcome's
   // read wins over the reads started before it (follow-up to PR #134, auto-review thread 1).
   const readerRef = useRef<SnapshotReader<CommandResult<PopoverSnapshot>> | null>(null)
+  // Set when a finished sign-in asks for a fresh read; the first read that lands after that ends the settling.
+  const awaitingSettle = useRef(false)
   if (readerRef.current === null) {
     readerRef.current = new SnapshotReader(
       () => popoverSnapshot(1),
@@ -373,6 +350,10 @@ export default function MacApp() {
         if (result.ok) {
           setSnapshot(result.value)
           setSnapshotFailed(false)
+          if (awaitingSettle.current) {
+            awaitingSettle.current = false
+            if (getSignInFlow().step === 'settling') setSignInFlow(IDLE_FLOW)
+          }
         } else {
           setSnapshotFailed(true)
         }
@@ -392,6 +373,21 @@ export default function MacApp() {
   useEffect(() => {
     if (flowOutcomes > 0) reader.refresh()
   }, [reader, flowOutcomes])
+
+  // A sign-in that finished (the same account signed in again in place) must not draw the old "Sign in again" card
+  // while the next read catches up: ask for that read now, and show only "Loading…" until it lands.
+  useEffect(() => {
+    if (signInFlow.step !== 'settling') return
+    awaitingSettle.current = true
+    reader.refresh()
+  }, [reader, signInFlow.step])
+
+  // A step that needs a session is dropped when the session is gone (the window shown again after a sign-out).
+  useEffect(() => {
+    if (account === null) return
+    const normalized = normalizeFlow(account, signInFlow)
+    if (normalized !== signInFlow) setSignInFlow(normalized)
+  }, [account, signInFlow])
 
   // The plan needs the session; it is read again after an unlock.
   useEffect(() => {
@@ -462,6 +458,14 @@ export default function MacApp() {
     void command<void>('main_window_state', menuStateFor(viewRef.current, sheetOpen))
   }, [settingsShowing, sheetOpen])
 
+  // Spec C C-W8 and spec §10.2 row 36: signed in (or in Settings) the window is "Beebeeb"; a sign-in card sets its own
+  // title, the heading it shows.
+  const loaded = account !== null
+  const showingCard = loaded && view.mode === 'main' && screen !== 'home'
+  useEffect(() => {
+    if (loaded && !showingCard) void setMainWindowTitle(SIGNED_IN_WINDOW_TITLE)
+  }, [loaded, showingCard])
+
   // §11: focus follows a navigation (the selected section, or the gear after back).
   useEffect(() => {
     if (focusId === null) return
@@ -489,35 +493,14 @@ export default function MacApp() {
     )
   }
 
-  const base: 'home' | 'signin' | 'reauth' = !account.logged_in ? 'signin' : account.auth_expired ? 'reauth' : 'home'
   const line = accountLine(account, plan)
 
-  const signIn = async () => {
-    setSigningIn(true)
-    if (base === 'reauth') {
-      const result = await forceReauth()
-      setSigningIn(false)
-      if (!result.ok) showToast({ variant: 'error', title: 'Couldn’t start sign-in again', message: result.reason })
-      else if (result.value.warning) showToast({ variant: 'info', message: result.value.warning.sentence })
-      return
-    }
-    const opened = await command<void>('open_onboarding_window')
-    setSigningIn(false)
-    if (!opened.ok) {
-      showToast({
-        variant: 'error',
-        title: 'Couldn’t open sign-in',
-        message: opened.unsupported ? commandUnavailableLabel('open_onboarding_window') : opened.reason,
-      })
-    }
-  }
-
-  if (view.mode === 'main' && base !== 'home') {
+  if (view.mode === 'main' && screen !== 'home') {
     return (
       <div className="mw-window mw-window--solo">
         <div className="mw-toolbar mw-toolbar--solo" data-tauri-drag-region="" />
         <main className="mw-solo-main" aria-labelledby="mw-title">
-          <SignedOutCard reauth={base === 'reauth'} email={account.email} note={signOutNote} busy={signingIn} onSignIn={() => void signIn()} />
+          <SignInWindow screen={screen} email={account.email} flow={signInFlow} note={signOutNote} onFlow={setSignInFlow} />
         </main>
       </div>
     )
@@ -552,11 +535,11 @@ export default function MacApp() {
         <button
           type="button"
           className="mw-back"
-          aria-label={`Back to ${backLabel(view.returnTo, base === 'home')}`}
+          aria-label={`Back to ${backLabel(view.returnTo, screen === 'home')}`}
           onClick={() => go({ to: 'back' })}
         >
           <SettingsIcon name="back" size={14} strokeWidth={1.8} />
-          {backLabel(view.returnTo, base === 'home')}
+          {backLabel(view.returnTo, screen === 'home')}
         </button>
         <h2 className="mw-settings-heading">Settings</h2>
         {/* One Tab stop (roving tabindex): each item takes the list's keys (§11). */}

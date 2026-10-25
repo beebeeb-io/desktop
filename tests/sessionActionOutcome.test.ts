@@ -180,9 +180,26 @@ describe('the answer of a command that ends the session itself stands when the r
     expect(result).toEqual({ ok: true, value: { warning } })
   })
 
+  // Task 1683 slice 2: the sign-in runs in the Beebeeb window, which `AccountSessionBoundary` polls every second, so a
+  // status read can observe the revision a sign-in moves before the sign-in's own answer arrives. The sign-in INSTALLS
+  // the session, so the revision moving is the sign-in having worked: its answer (a LoginOutcome with no account data
+  // of the new session in it) stands, as a sign-out's does. The Keychain and recovery-phrase unlocks do not move the
+  // revision (the session is already present), so they keep the guard.
+  test('a sign-in: Ok with its outcome, for each way in (password, second factor, browser)', async () => {
+    let start = 760
+    const outcome = { requires_2fa: false, reauthenticated: false, vault_unlocked: false, key_replaced: false, account_mismatch: null }
+    for (const name of ['desktop_login', 'desktop_login_2fa', 'start_browser_login']) {
+      const { native, seen } = await revisionMovesWhileRunning(name, outcome, start)
+      const result = await command<unknown>(name)
+      expect(seen.atAnswer).toBe(native.revision)
+      expect({ name, result }).toEqual({ name, result: { ok: true, value: outcome } })
+      start += 10
+    }
+  })
+
   test('any other command still says "Account changed"', async () => {
     let start = 730
-    for (const name of ['account_email', 'unlock_vault', 'popover_snapshot', 'desktop_login']) {
+    for (const name of ['account_email', 'unlock_vault', 'popover_snapshot', 'desktop_unlock_with_recovery_phrase', 'open_onboarding_window']) {
       const { native, seen } = await revisionMovesWhileRunning(name, 'sam@example.eu', start)
       const result = await command<unknown>(name)
       expect(seen.atAnswer).toBe(native.revision)
@@ -250,8 +267,9 @@ describe('source contract: every caller reads the warning', () => {
       }
     }
     expect(offenders).toEqual([])
-    // forceReauth, AccountSwitchStep, MacSettings (lock), the Settings sign-out flow, pages/Account (lock, sign-out),
-    // AccountView.
-    expect(sites).toBe(7)
+    // forceReauth, AccountSwitchStep (Linux's onboarding window), SwitchScreen (the same step in the Beebeeb window, task
+    // 1683 slice 2: it reads `.warning`, so the census still finds no caller that drops it), MacSettings (lock), the
+    // Settings sign-out flow, pages/Account (lock, sign-out), AccountView.
+    expect(sites).toBe(8)
   })
 })
