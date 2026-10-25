@@ -10,11 +10,16 @@
  * excluded), so only `'install_' + 'finder_location'` slips through; nothing in src builds a
  * command name that way, and a review would flag the first.
  */
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, setDefaultTimeout, test } from 'bun:test'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import ts from 'typescript'
 import { censusOfSource, familyLiterals, KEPT_FOLDER_READERS, type Site, type Violation, type ViolationKind } from './fixtures/finderResultCensus'
+
+// Every test here reads, scans or copies the real source tree, which takes seconds when the machine is loaded (a gate at
+// load 60 timed three of them out at bun's default 5 s; the same tests take under 4 s together at load 14). Their results do
+// not depend on the time, so a slow run must not be a red one (PR #147, lead's gate).
+setDefaultTimeout(30_000)
 
 const SRC = new URL('../src/', import.meta.url).pathname
 const FORBIDDEN_ON_MACOS = ['install_finder_location', 'continue_without_finder_location', 'finder_location_state', 'finder_domain_user_enabled']
