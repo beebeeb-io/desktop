@@ -25354,15 +25354,32 @@ mod tests {
         struct Version {
             id: &'static str,
             plain: Vec<u8>,
+            stride: usize,
             frames: Vec<Vec<u8>>,
             retained: bool,
         }
 
         impl Version {
             fn new(id: &'static str, plain: Vec<u8>) -> Self {
+                Self::with_stride(id, plain, STRIDE)
+            }
+            fn with_stride(id: &'static str, plain: Vec<u8>, stride: usize) -> Self {
                 let key = hydration_test_key(KEY, TEST_FILE_ID);
-                let frames = plain.chunks(STRIDE).map(|c| encrypt_chunk_wire(&key, c)).collect();
-                Version { id, plain, frames, retained: true }
+                let frames = plain.chunks(stride).map(|c| encrypt_chunk_wire(&key, c)).collect();
+                Version { id, plain, stride, frames, retained: true }
+            }
+            /// The last chunk in the legacy JSON framing `decrypt_downloaded_chunk` still accepts, padded
+            /// to the manifest's exact wire size but holding `plain`: a chunk whose wire size is right and
+            /// whose plaintext is not (only the plaintext totals can see it).
+            fn with_json_last_chunk(mut self, plain: &[u8]) -> Self {
+                let key = hydration_test_key(KEY, TEST_FILE_ID);
+                let last = self.frames.len() - 1;
+                let wire = self.frames[last].len();
+                let mut json = serde_json::to_vec(&beebeeb_core::encrypt::encrypt_chunk(&key, plain).unwrap()).unwrap();
+                assert!(json.len() <= wire, "the JSON frame ({} bytes) must fit the wire size {wire}", json.len());
+                json.resize(wire, b' ');
+                self.frames[last] = json;
+                self
             }
             fn manifest(&self) -> serde_json::Value {
                 let chunks: Vec<serde_json::Value> = self
@@ -25373,7 +25390,7 @@ mod tests {
                     .collect();
                 json!({
                     "object_version_id": self.id, "version_number": 1, "chunk_count": self.frames.len(),
-                    "chunk_size_bytes": STRIDE, "plaintext_size_bytes": self.plain.len(),
+                    "chunk_size_bytes": self.stride, "plaintext_size_bytes": self.plain.len(),
                     "ciphertext_size_bytes": self.frames.iter().map(Vec::len).sum::<usize>(), "chunks": chunks,
                 })
             }
@@ -25456,7 +25473,7 @@ mod tests {
                     "200 OK",
                     json!({
                         "id": TEST_FILE_ID, "size_bytes": v.plain.len(), "chunk_count": v.frames.len(),
-                        "chunk_size_bytes": STRIDE,
+                        "chunk_size_bytes": v.stride,
                         "download_version": if s.legacy { serde_json::Value::Null } else { v.manifest() },
                     }),
                 )
@@ -25570,19 +25587,43 @@ mod tests {
         }
 
         #[test]
-        fn a_chunk_whose_size_is_not_the_manifests_is_refused() {
+        fn a_chunk_whose_size_is_not_the_manifests_is_refused_at_that_chunk() {
             let dir = tempfile::tempdir().unwrap();
             let len = 3 * STRIDE + 77;
             let a = Version::new("aaaaaaaa-0000-4000-8000-00000000000a", content(0xA1, len));
-            // B is longer in its last chunk; a server that ignored the pin would hand out B's chunks.
-            let b = Version::new("bbbbbbbb-0000-4000-8000-00000000000b", content(0xB1, len + 300));
+            // B has the same size in another stride; a server that ignored the pin would hand out B's
+            // chunks, and only their sizes give them away.
+            let b = Version::with_stride("bbbbbbbb-0000-4000-8000-00000000000b", content(0xB1, len), 1000);
             let server = Server::start(vec![a, b], vec![(1, 1, false)]);
             server.state.lock().unwrap().ignores_pin = true;
             let (result, bridge, dest) = hydrate(&server, dir.path());
-            let err = result.expect_err("a chunk of another size is refused");
-            assert!(format!("{err:#}").contains("manifest"), "{err:#}");
+            let err = format!("{:#}", result.expect_err("a chunk of another size is refused"));
+            assert!(err.contains("chunk 1 is 1028 bytes"), "refused at the chunk, by the chunk's size: {err}");
+            let chunks = server.seen().iter().filter(|r| r.contains("/chunks/")).count();
+            assert_eq!(chunks, 2, "nothing after the wrong chunk was fetched");
             assert!(!dest.exists(), "nothing is written");
             assert_eq!(bridge.db.get_file(TEST_FILE_ID).unwrap().unwrap().status, FileStatus::Error);
+        }
+
+        #[test]
+        fn a_chunk_that_decrypts_to_another_length_than_the_manifest_says_is_refused() {
+            let dir = tempfile::tempdir().unwrap();
+            let a = Version::new("aaaaaaaa-0000-4000-8000-00000000000a", content(0xA1, 3 * STRIDE + 200)).with_json_last_chunk(b"x");
+            let server = Server::start(vec![a], vec![]);
+            let (result, bridge, dest) = hydrate(&server, dir.path());
+            let err = format!("{:#}", result.expect_err("a plaintext of another size is refused"));
+            assert!(err.contains("the download is 3073 bytes, the pinned version's manifest says 3272"), "{err}");
+            assert!(!dest.exists(), "nothing is written");
+            assert_eq!(bridge.db.get_file(TEST_FILE_ID).unwrap().unwrap().status, FileStatus::Error);
+        }
+
+        #[test]
+        fn a_range_read_of_a_chunk_that_decrypts_to_another_length_is_refused() {
+            let dir = tempfile::tempdir().unwrap();
+            let a = Version::new("aaaaaaaa-0000-4000-8000-00000000000a", content(0xA1, 3 * STRIDE + 200)).with_json_last_chunk(b"x");
+            let server = Server::start(vec![a], vec![]);
+            let err = format!("{:#}", read_range(&server, dir.path(), 3 * STRIDE as u64, 200).expect_err("refused"));
+            assert!(err.contains("the range read is 1 bytes"), "{err}");
         }
 
         #[test]

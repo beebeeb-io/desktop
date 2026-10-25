@@ -202,6 +202,17 @@ pub(crate) mod tests {
             ("ciphertext total", Box::new(|v: &mut Value| v["ciphertext_size_bytes"] = json!(108))),
             ("plaintext total", Box::new(|v: &mut Value| v["plaintext_size_bytes"] = json!(24))),
             ("not an object", Box::new(|v: &mut Value| *v = json!("v1"))),
+            // Totals that add up, chunks that do not: only the stride rule sees these, and a range read
+            // maps offsets to chunks by the stride.
+            ("uneven, totals add up", Box::new(|v: &mut Value| {
+                v["chunks"][0]["size_bytes"] = json!(37);
+                v["chunks"][1]["size_bytes"] = json!(39);
+            })),
+            ("last past the stride, totals add up", Box::new(|v: &mut Value| {
+                v["chunks"][2]["size_bytes"] = json!(39);
+                v["ciphertext_size_bytes"] = json!(115);
+                v["plaintext_size_bytes"] = json!(31);
+            })),
         ];
         for (label, f) in cases {
             assert!(mutate(&*f).is_err(), "{label} must be refused");
