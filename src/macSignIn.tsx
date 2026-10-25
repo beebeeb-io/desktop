@@ -95,7 +95,6 @@ import {
   afterSwitchCancelled,
   afterSwitched,
   afterUnlocked,
-  settling,
   type SignInFlow,
   type SwitchInfo,
   type WindowScreen,
@@ -863,6 +862,3 @@ export function FinderScreen({ onReady }: { onReady: () => void }) {
     </SignInCard>
   )
 }
-
-// Referenced by the router and the tests; `settling` re-exported so the window's one import covers the flow.
-export { settling }
