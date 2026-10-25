@@ -3546,6 +3546,19 @@ impl StateDb {
         rows.collect()
     }
 
+    /// How many folders the person chose to keep on this device (Home's "Kept on this Mac {n} folders", task 1683 slice 4,
+    /// spec §7.6): folders whose OWN pin state is `pinned`. A folder or file that only inherits a pin is not counted, and
+    /// neither is a pinned file, so the number is the list the person sees in Settings › Sync › Keep on this Mac.
+    pub fn pinned_folder_count(&self) -> Result<u64> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM files WHERE item_kind = 'folder' AND pin_state = 'pinned'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as u64)
+    }
+
     /// Tests only (spec §7.2, final review): production writes a row's contract together with
     /// the row, through [`StateDb::upsert_file_with_contract`].
     #[cfg(test)]
@@ -8217,6 +8230,49 @@ mod tests {
                 .effective_pin_state(),
             PinState::Unpinned
         );
+    }
+
+    /// Home's counts line (task 1683 slice 4, spec §7.6: "Kept on this Mac {n} folders"): the folders the person
+    /// CHOSE to keep, not the folders and files that inherit the pin, and not a pinned file.
+    #[test]
+    fn pinned_folder_count_is_the_folders_chosen_not_the_ones_that_inherit() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        assert_eq!(db.pinned_folder_count().unwrap(), 0, "an empty database keeps nothing");
+        // (`seed_contract_row` writes every row as a file, and `upsert_file` leaves the kind to the contract: a folder is
+        // written the way the sync writes one, through `upsert_file_with_contract`.)
+        let seed = |file_id: &str, path: &str, item_kind: ItemKind| {
+            let entry = FileEntry {
+                file_id: file_id.into(),
+                path: path.into(),
+                status: FileStatus::CloudOnly,
+                size_bytes: 0,
+                modified_at: 0,
+                content_hash: None,
+                remote_updated_at: 0,
+                parent_id: None,
+                item_kind: item_kind.clone(),
+            };
+            db.upsert_file_with_contract(&entry, |contract| contract.item_kind = item_kind).unwrap();
+        };
+        seed("folder-a", "/Projects", ItemKind::Folder);
+        seed("nested-folder", "/Projects/Nested", ItemKind::Folder);
+        seed("file-a", "/Projects/report.txt", ItemKind::File);
+        seed("folder-b", "/Photos", ItemKind::Folder);
+        seed("file-b", "/notes.txt", ItemKind::File);
+        assert_eq!(db.pinned_folder_count().unwrap(), 0, "nothing is kept until a pin is set");
+
+        db.set_recursive_pin("folder-a", true, 1000).unwrap();
+        assert_eq!(db.pinned_folder_count().unwrap(), 1, "Nested inherits the pin of /Projects: one folder was chosen");
+
+        db.set_recursive_pin("folder-b", true, 1100).unwrap();
+        assert_eq!(db.pinned_folder_count().unwrap(), 2);
+
+        db.set_recursive_pin("file-b", true, 1200).unwrap();
+        assert_eq!(db.pinned_folder_count().unwrap(), 2, "a pinned file is not a kept folder");
+
+        db.set_recursive_pin("folder-a", false, 1300).unwrap();
+        assert_eq!(db.pinned_folder_count().unwrap(), 1, "stopping keeping a folder takes it out");
     }
 
     #[test]

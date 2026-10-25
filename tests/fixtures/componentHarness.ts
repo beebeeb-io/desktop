@@ -60,6 +60,8 @@ export interface Mounted {
   tree: () => any
   elements: () => TreeNode[]
   render: () => void
+  /** The `window.setInterval` callbacks still registered (an effect's cleanup clears its own); run one to fire its timer. */
+  intervals: () => Array<() => void>
   flush: () => Promise<void>
   /**
    * Run the cleanup every effect returned (what React does when the component unmounts).
@@ -105,10 +107,12 @@ export function mount(
   const calls: Array<{ name: string; args: any }> = []
   let cursor = 0
   let tree: any
+  let nextInterval = 1
+  const liveIntervals = new Map<number, () => void>()
   const previousWindow = (globalThis as any).window
   ;(globalThis as any).window = {
-    setInterval: () => 0,
-    clearInterval() {},
+    setInterval: (fn: () => void) => { const id = nextInterval++; liveIntervals.set(id, fn); return id },
+    clearInterval: (id: number) => { liveIntervals.delete(id) },
     // A timer fires on the next microtask (no real delay), so a debounced effect settles inside `flush`.
     setTimeout: (fn: () => void) => { queueMicrotask(fn); return 0 },
     clearTimeout() {},
@@ -188,6 +192,7 @@ export function mount(
     tree: () => tree,
     elements: () => elementsOf(view()),
     render,
+    intervals: () => [...liveIntervals.values()],
     flush,
     unmount,
     click: async (label) => { await findButton(label).props.onClick(); await flush() },

@@ -569,3 +569,19 @@ pass) is task 2181, recorded in the spec's A17 and §12 row 4; (6) a row starts 
 (`VersionConflictEntry::folder`, the parent directory's name from `folder_name_for_path`; none at the vault's root), and the
 feed's JSON is pinned on both sides by `tests/fixtures/review-feed.entries.json` (Rust compares its output to it,
 `tests/reviewFeedContract.test.ts` reads it with the window's validator).
+
+### Slice 4b: Home's counts line, "Needs your attention" and "Recent activity" (task 1683)
+
+Added 2026-10-25, on top of slice 4. Two of the counts line's three numbers had a source (the `local` and `cloud_only`
+buckets of `desktop_file_overview`, derived as the Windows shell's "On this PC" and "Online-only"); "Kept on this Mac {n}
+folders" had none: `FileOverview.pinned_count` counts effectively pinned FILES, and `list_remote_tree` / `VaultItem`
+carries no pin state (which is why Settings › Sync's Keep row says "unreported"). The smallest read was one new field,
+`FileOverview.pinned_folders`, filled by `StateDb::pinned_folder_count()` (folders whose OWN pin is `pinned`; a folder or
+file that only inherits a pin, and a pinned file, are not counted). `upsert_file` leaves `item_kind` to the contract, so
+folders are written (and seeded in tests) through `upsert_file_with_contract`. The counts line is drawn only when files
+are mirrored (a File Provider Mac without a `sync_root` answers with an empty overview, §14 item 2), and an answer without
+the field leaves that third part out instead of saying "0 folders". "Needs your attention" shows the first three entries of
+the Review feed with the same row and the same actions as Review (`ReviewEntryRow`, `makeReviewActions`), "Decide…" opens
+the conflict sheet in place, and the kept rows stay in the same group. "Recent activity" is the popover snapshot's rows,
+asked for eight at a time (`HOME_ACTIVITY_ROWS`; the popover's own default is eight, its maximum twenty). Not in this
+slice: the one-time "Beebeeb lives in the menu bar" hint (§10.2 row 45), which needs a `desktop.toml` flag.

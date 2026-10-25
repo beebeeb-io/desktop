@@ -35,12 +35,19 @@ await writeFile(pagePath, '<!doctype html><html><head><meta charset="utf-8"><met
 const LONG_EMAIL = `${'x'.repeat(48)}@example.eu` // 60 characters, no break before the @
 const KEPT_OURS = '/Users/sam/Library/Containers/io.beebeeb.app/Data/Documents/Changes not sent/2026-10-10 at 14.05.12'
 const KEPT_MACOS = '/Users/sam/Library/CloudStorage/Beebeeb-Beebeeb (10-10-2026 14.05)'
+const ago = (seconds) => Math.floor(Date.now() / 1000) - seconds
+const activityRows = () => [
+  { id: 'a1', name: 'Q3 ledger reconciliation.xlsx', folder: 'Investigations', path: 'Investigations/Q3 ledger reconciliation.xlsx', direction: 'up', state: 'done', at: ago(120), size_bytes: 48_000, done_bytes: 48_000, total_bytes: 48_000 },
+  { id: 'a2', name: 'Board pack, October.pdf', folder: 'Board', path: 'Board/Board pack, October.pdf', direction: 'down', state: 'active', at: ago(10), size_bytes: 9_000_000, done_bytes: 5_580_000, total_bytes: 9_000_000 },
+  { id: 'a3', name: 'Site visit, north wing.mov', folder: 'Photos', path: 'Photos/Site visit, north wing.mov', direction: 'up', state: 'failed', at: ago(3600 * 3), size_bytes: null, done_bytes: null, total_bytes: null },
+  { id: 'a4', name: 'notes.md', folder: '', path: 'notes.md', direction: 'down', state: 'done', at: ago(3600 * 30), size_bytes: 3_000, done_bytes: 3_000, total_bytes: 3_000 },
+]
 const snapshot = (over = {}) => ({
   phase: 'synced', generated_at: 1000, paused: false,
   engine: { state: 'idle', files_remaining: 0, bytes_total: 0, bytes_done: 0, last_tick_ok_at: Math.floor(Date.now() / 1000) - 70 },
   reason: null, finder: { setup: 'ready', reason: null, reason_line: null },
   storage: { used_bytes: 84_300_000_000, quota_bytes: 200_000_000_000, fetched_at: 900, stale: false },
-  storage_full: false, pending_changes: 0, conflicts: { count: 0, files: [] }, activity: [],
+  storage_full: false, pending_changes: 0, conflicts: { count: 0, files: [] }, activity: activityRows(),
   ...over,
   account: { email: 'sam@example.eu', logged_in: true, vault_unlocked: true, auth_expired: false, ...(over.account ?? {}) },
 })
@@ -78,6 +85,7 @@ const trashItems = [
 ]
 const base = {
   snapshot: snapshot(),
+  overview: { by_status: [{ status: 'cloud_only', count: 8311, bytes: 1 }, { status: 'local', count: 1204, bytes: 1 }], recent: [], total_files: 9515, total_bytes: 2, pinned_count: 40, pinned_bytes: 1, pinned_folders: 3 },
   review: reviewEntries, conflictPreview, search: searchHits, versions: versionList, trash: trashItems,
   finder: { setup: 'ready', reason: null, launch_location: 'applications', attempt: 1, max_attempts: 1, last_failure: null },
   config: { upload_kbps_limit: 0, download_kbps_limit: 5000, pause_sync: false, notify_conflicts: true, notify_sync_complete: false, notify_quota_warnings: true, theme: 'system' },
@@ -120,6 +128,7 @@ function installBackend({ caps, fx }) {
         case 'kept_unsynced_folder': return f.kept
         case 'list_remote_tree': return [{ id: 'f1', name: 'Photos', is_folder: true, excluded: false, size_bytes: 1, file_count: 1, on_disk_bytes: 0, pinned: true, children: [] }]
         case 'account_region': return f.region
+        case 'desktop_file_overview': return f.overview
         case 'list_version_conflict_center': return f.review
         case 'conflict_content_preview': return f.conflictPreview
         case 'desktop_search_files': return f.search
@@ -175,8 +184,12 @@ const gear = async (p) => { await p.getByRole('button', { name: 'Settings', exac
 const section = (label) => async (p) => { await gear(p); await p.getByRole('button', { name: label }).first().click() }
 
 const SCENARIOS = [
-  { name: 'home', bar: true, has: ['Home', 'End-to-end encrypted', 'Up to date', 'Last checked 1 min ago', 'Beebeeb in Finder', 'Your vault appears under Locations in Finder.', 'Open in Finder', 'Storage', '84,3 GB of 200 GB', 'sam@example.eu', 'Basic plan'], hasNot: ['Needs your attention', 'control center', 'daemon'], hifi: 'hifi-s3-fig0' },
-  { name: 'home-kept', fx: { keptUnsent: KEPT_OURS, kept: KEPT_MACOS }, has: ['Needs your attention', KEPT_OURS, KEPT_MACOS, 'Show in Finder', 'Dismiss'] },
+  { name: 'home', bar: true, has: ['Home', 'End-to-end encrypted', 'Up to date', 'Last checked 1 min ago', 'Beebeeb in Finder', 'Your vault appears under Locations in Finder.', 'Open in Finder', 'On this Mac 1.204 files', 'Online-only 8.311', 'Kept on this Mac 3 folders', 'Needs your attention', 'CONFLICT', 'Board notes, 29 Sept.md', 'Team shared · today 09:12 · Changed on two devices.', 'Decide…', 'Storage', '84,3 GB of 200 GB', 'Recent activity', 'Q3 ledger reconciliation.xlsx', 'Uploaded · Investigations · 2 minutes ago', 'Downloading · 62 % · Board · just now', 'Couldn’t sync · Photos · 3 hours ago', 'Downloaded · yesterday', 'sam@example.eu', 'Basic plan'], hasNot: ['control center', 'daemon', 'On this PC', '0 files'], min: true, hifi: 'hifi-s3-fig0' },
+  { name: 'home-many-attention', fx: { review: reviewAllKinds }, has: ['Needs your attention', 'Board notes, 29 Sept.md', 'Archive 2025.zip', '2 more in Review'], hasNot: ['Plan.pdf'] },
+  { name: 'home-decide-sheet', act: async (p) => { await p.getByRole('button', { name: 'Decide…' }).first().click(); await p.getByRole('dialog').waitFor(); await p.waitForFunction(() => !document.body.innerText.includes('Loading both versions')) }, has: ['Conflict: Board notes, 29 Sept.md', 'This Mac', 'Other device', 'Keep both'], dialogs: 1, min: true },
+  { name: 'home-quiet', fx: { review: [], overview: { by_status: [], recent: [], total_files: 0, total_bytes: 0, pinned_count: 0, pinned_bytes: 0, pinned_folders: 0 }, snapshot: snapshot({ activity: [] }) }, has: ['Up to date', 'Beebeeb in Finder', 'Storage'], hasNot: ['Needs your attention', 'Recent activity', 'On this Mac', '0 files', 'Nothing needs your attention'] },
+  { name: 'home-no-folder-count', fx: { overview: { by_status: [{ status: 'local', count: 1, bytes: 1 }], recent: [], total_files: 1, total_bytes: 1, pinned_count: 0, pinned_bytes: 0 } }, has: ['On this Mac 1 file', 'Online-only 0'], hasNot: ['Kept on this Mac'] },
+  { name: 'home-kept', fx: { keptUnsent: KEPT_OURS, kept: KEPT_MACOS }, has: ['Needs your attention', 'Board notes, 29 Sept.md', KEPT_OURS, KEPT_MACOS, 'Show in Finder', 'Dismiss'] },
   { name: 'home-locked', fx: { snapshot: snapshot({ phase: 'locked', account: { vault_unlocked: false }, storage: null }) }, has: ['Your vault is locked', 'Unlock vault', 'Vault locked'], hasNot: ['Beebeeb in Finder'], hifi: 'hifi-s3-fig3' },
   { name: 'home-long-email', fx: { snapshot: snapshot({ account: { email: LONG_EMAIL } }) }, has: [LONG_EMAIL] },
   { name: 'settings-general', act: gear, has: ['Settings', 'Home', 'General', 'Open Beebeeb at login', 'Tell me about'], sidebar: ['Back to Home', 'Account, sam@example.eu, Basic plan', 'General', 'Sync', 'About'], min: true, hifi: 'hifi-s4-fig1' },
