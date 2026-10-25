@@ -174,6 +174,9 @@ export interface VersionConflictEntry {
     // Previously fell through to the generic 'failed_upload' bucket with the
     // raw HTTP error text and no "sign in again" path — see `reviewEntryAction`.
     | 'auth_failure'
+    // Task 1640: a file deleted elsewhere while it held changes not sent from this PC; they
+    // were kept as a copy beside it (informational, no action).
+    | 'kept_copy'
   status: string
   updated_at?: number
   detail: string

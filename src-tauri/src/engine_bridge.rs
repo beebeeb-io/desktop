@@ -3704,7 +3704,7 @@ impl EngineBridge {
     /// there) so the pin path resolution uses the same containment guard as the
     /// fetch fallback. Returns `None` for an empty key or any `.`/`..`/empty
     /// segment, or if the join escapes the root.
-    #[cfg(target_os = "windows")]
+    #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
     fn placeholder_path_under(sync_root: &Path, rel_path: &str) -> Option<PathBuf> {
         let rel = rel_path.trim_matches('/');
         if rel.is_empty() {
@@ -4102,12 +4102,6 @@ impl EngineBridge {
                 return Err(anyhow::Error::new(UnsentLocalChange));
             }
         }
-        // The version the downloaded bytes are at least: read before the download, so a tick
-        // that raises the row meanwhile cannot make the baseline claim a version it is not.
-        let agreed_version = self
-            .db
-            .get_file_contract_state(file_id)?
-            .map_or(0, |contract| contract.current_version);
         // Spec §7.4.2: a hydrate never changes the status of a row with a live upload of its
         // own (a Finder upload that has not parked): no `Downloading`, `Local` or `Error`.
         // That status is the upload's, and `Error` would make the item read-only. Nor
@@ -4142,14 +4136,14 @@ impl EngineBridge {
         let transfer = self
             .transfers
             .begin(file_id, crate::transfer_progress::Direction::Down, 0);
-        let hydrated = self.do_hydrate(file_id, progress).await;
+        let hydrated = self.do_hydrate_versioned(file_id, progress).await;
         // Past the only cancellation point (the download await): every path
         // below sets the final status itself.
         if let Some(guard) = downloading_guard.as_mut() {
             guard.disarm();
         }
         match hydrated {
-            Ok(mut buf) => {
+            Ok((mut buf, downloaded_version)) => {
                 // Write the decrypted bytes to disk (this is the intentional
                 // disk-writing path — sync root / conflict resolution / FUSE).
                 // Make the destination directory if needed.
@@ -4192,13 +4186,19 @@ impl EngineBridge {
                     return Err(anyhow::anyhow!("write {}: {e}", dest_path.display()));
                 }
                 // Task 1640: the bytes just written are the content this device agrees with the
-                // server on. Recorded before the row leaves `Downloading`, so no classification
-                // sees the new bytes against the old baseline.
-                if let Some(hash) = hydrated_hash.as_deref()
-                    && let Err(e) = self.db.record_local_baseline(file_id, agreed_version, hash)
-                {
-                    set_failed();
-                    return Err(e.into());
+                // server on, at the version the download metadata named. Recorded before the row
+                // leaves `Downloading`, so no classification sees the new bytes against the old
+                // baseline. A legacy download names no version: the baseline is cleared (Unknown)
+                // rather than left naming other bytes.
+                if let Some(hash) = hydrated_hash.as_deref() {
+                    let recorded = match downloaded_version {
+                        Some(version) => self.db.record_local_baseline(file_id, version, hash),
+                        None => self.db.clear_local_baseline(file_id),
+                    };
+                    if let Err(e) = recorded {
+                        set_failed();
+                        return Err(e.into());
+                    }
                 }
 
                 // Task 1698: a Trashing row keeps its marker (viewing a file
@@ -4301,18 +4301,26 @@ impl EngineBridge {
     /// separate cache file — `unpinned_local_files_for_dehydration` reconstructs
     /// the real on-disk path from `path` + sync root (see state_db comment).
     #[cfg(target_os = "windows")]
-    pub async fn hydrate_file_to_memory(&self, file_id: &str) -> anyhow::Result<Zeroizing<Vec<u8>>> {
-        // Task 1640: see `hydrate_file`'s `agreed_version`.
-        let agreed_version = self
-            .db
-            .get_file_contract_state(file_id)?
-            .map_or(0, |contract| contract.current_version);
+    pub async fn hydrate_file_to_memory(&self, file_id: &str, whole_file: bool) -> anyhow::Result<Zeroizing<Vec<u8>>> {
         self.db.set_status(file_id, FileStatus::Downloading)?;
-        match self.do_hydrate(file_id, None).await {
-            Ok(buf) => {
-                // Task 1640: every fetch decrypts the whole file, whatever range it serves: its
-                // hash is the content this device now agrees with the server on.
-                self.db.record_local_baseline(file_id, agreed_version, &sha256_hex(&buf))?;
+        match self.do_hydrate_versioned(file_id, None).await {
+            Ok((buf, downloaded_version)) => {
+                // Task 1640: a fetch of the whole file (the placeholder held no data, so no
+                // local write) makes these bytes the content this device agrees with the server
+                // on, at the version the download metadata named. A partial range never does: the
+                // placeholder's other ranges may hold writes that were not sent. A failure to
+                // record fails the fetch, as every other failure here does.
+                if whole_file {
+                    let hash = sha256_hex(&buf);
+                    let recorded = match downloaded_version {
+                        Some(version) => self.db.record_local_baseline(file_id, version, &hash),
+                        None => self.db.clear_local_baseline(file_id),
+                    };
+                    if let Err(e) = recorded {
+                        let _ = self.db.set_status(file_id, FileStatus::Error);
+                        return Err(e.into());
+                    }
+                }
                 self.db.set_status(file_id, FileStatus::Local)?;
                 // cache_path is empty: on Windows CF the hydrated bytes live
                 // INSIDE the placeholder (the CF runtime writes them there after
@@ -4405,6 +4413,17 @@ impl EngineBridge {
         file_id: &str,
         progress: Option<&HydrateProgressFn>,
     ) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+        self.do_hydrate_versioned(file_id, progress).await.map(|(plaintext, _)| plaintext)
+    }
+
+    /// [`Self::do_hydrate`], also saying which server version the bytes are: the download
+    /// metadata's `download_version.version_number` (task 1640), `None` for a legacy file whose
+    /// metadata names no version.
+    async fn do_hydrate_versioned(
+        &self,
+        file_id: &str,
+        progress: Option<&HydrateProgressFn>,
+    ) -> anyhow::Result<(Zeroizing<Vec<u8>>, Option<i64>)> {
         let _file_uuid: uuid::Uuid = file_id
             .parse()
             .map_err(|e| anyhow::anyhow!("invalid file_id (not a UUID): {e}"))?;
@@ -4415,7 +4434,10 @@ impl EngineBridge {
         // layout since we last saw it.
         let meta = self.api.get_file(file_id).await?;
         self.with_one_restart(file_id, meta, |meta| async move {
-            self.do_hydrate_with_meta(file_id, &meta, progress).await
+            let version = meta["download_version"]["version_number"].as_i64();
+            self.do_hydrate_with_meta(file_id, &meta, progress)
+                .await
+                .map(|plaintext| (plaintext, version))
         })
         .await
     }
@@ -5412,6 +5434,9 @@ pub fn is_ignored_finder_name(name: &str) -> bool {
         || lower.ends_with(".crdownload")
 }
 
+/// How many recent kept-copy events (task 1640) the review feed lists.
+const KEPT_COPY_FEED_LIMIT: usize = 20;
+
 pub fn version_conflict_feed_from_db(db: &StateDb) -> anyhow::Result<Vec<VersionConflictEntry>> {
     let mut entries = Vec::new();
 
@@ -5434,6 +5459,28 @@ pub fn version_conflict_feed_from_db(db: &StateDb) -> anyhow::Result<Vec<Version
 
     for op in db.list_review_operations()? {
         entries.push(review_entry_for_operation(&op, db)?);
+    }
+
+    // Task 1640: a file deleted elsewhere while it held changes this device had not sent; they
+    // were kept as a copy beside it. Informational: the copy is uploaded as a new file.
+    for event in db.list_recent_local_activity(KEPT_COPY_FEED_LIMIT)? {
+        if event.event_type != LocalActivityKind::KeptLocalCopy {
+            continue;
+        }
+        entries.push(VersionConflictEntry {
+            id: format!("kept:{}", event.id),
+            file_id: event.file_id.clone().unwrap_or_default(),
+            file_name: event.file_name.clone(),
+            kind: "kept_copy".to_string(),
+            status: "kept as a copy".to_string(),
+            updated_at: Some(event.occurred_at),
+            detail: "This file was deleted elsewhere while it held changes not sent from this PC. Those changes are kept in this copy, in the same folder.".to_string(),
+            action: "none".to_string(),
+            op_id: None,
+            version_id: None,
+            base_version: None,
+            last_error: None,
+        });
     }
 
     entries.sort_by(|a, b| {
@@ -8137,7 +8184,7 @@ fn apply_snapshot(
         // placeholder. `prune_absent` returns rows CHILDREN-BEFORE-PARENTS (orphan
         // descendants of a pruned folder precede the folder), which is exactly the
         // order placeholder removal needs (leaf files before their directory).
-        remove_pruned_placeholders(sync_root, &pruned);
+        remove_pruned_placeholders(bridge.db(), sync_root, &pruned);
         // A pruned row is a REMOTE deletion Finder must see (T3).
         applied.extend(pruned.iter().map(|row| row.file_id.clone()));
     }
@@ -8160,8 +8207,102 @@ fn apply_snapshot(
 /// A row whose path can't be safely resolved under the root (empty/traversal) is
 /// skipped. Per-row failures are logged (file_id only — zero-knowledge) and never
 /// abort the sweep. No-op on macOS/Linux.
-#[cfg(target_os = "windows")]
-fn remove_pruned_placeholders(sync_root: &Path, rows: &[crate::state_db::PrunedRow]) {
+/// Task 1640 (review P1-1): what removing one remotely deleted sync-folder entry did.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PrunedEntry {
+    /// Removed: a file whose bytes are agreed (its placeholder is in sync), or an empty folder.
+    Removed,
+    /// Nothing was there.
+    Gone,
+    /// The file may have held a change that was never sent: its bytes were copied to this new
+    /// file beside it first, then the original was removed.
+    KeptCopy(PathBuf),
+    /// Left as it is: a folder that still holds something, or a file whose copy failed.
+    KeptInPlace,
+}
+
+/// Task 1640 (review P1-1): remove the local entry of a file or folder the server no longer lists
+/// (a web trash, a snapshot prune) without losing a change that was never sent. Before, this
+/// deleted whatever the entry held: an edit that was not queued, a file hydrated before task
+/// 1640, a folder's new files not uploaded yet.
+///
+/// A file the platform reports in sync holds the content this device agreed with the server on
+/// (the engine marks only agreed bytes in sync), and is removed as before. Any other file (out of
+/// sync after an edit, a plain file an atomic save left, unreadable) is copied to
+/// `<name> (this PC)<ext>` beside it, never over an existing file, and only then removed; the
+/// upload driver sends the copy as a new file. A copy that fails leaves the original. A folder is
+/// removed only when it is empty: what it still holds stays.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+pub(crate) fn remove_pruned_entry(path: &Path, is_dir: bool, in_sync: &dyn Fn(&Path) -> Option<bool>) -> PrunedEntry {
+    if std::fs::symlink_metadata(path).is_err() {
+        return PrunedEntry::Gone;
+    }
+    let removed = |result: std::io::Result<()>| match result {
+        Ok(()) => PrunedEntry::Removed,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => PrunedEntry::Gone,
+        Err(_) => PrunedEntry::KeptInPlace,
+    };
+    if is_dir {
+        return removed(std::fs::remove_dir(path));
+    }
+    if in_sync(path) == Some(true) {
+        return removed(std::fs::remove_file(path));
+    }
+    match copy_beside_as_this_pc(path) {
+        Ok(copy) => {
+            // Were the removal to fail, both stay: nothing is lost.
+            let _ = std::fs::remove_file(path);
+            PrunedEntry::KeptCopy(copy)
+        }
+        Err(_) => PrunedEntry::KeptInPlace,
+    }
+}
+
+/// Task 1640: copy `path` to a new file beside it, `<stem> (this PC)<ext>`, then
+/// `<stem> (this PC 2)<ext>` and so on: created new, never over an existing file, and flushed.
+/// A copy that fails is removed again.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+pub(crate) fn copy_beside_as_this_pc(path: &Path) -> std::io::Result<PathBuf> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "no parent folder"))?;
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
+    let ext = path.extension().and_then(|s| s.to_str());
+    for n in 1..=99 {
+        let suffix = if n == 1 { " (this PC)".to_string() } else { format!(" (this PC {n})") };
+        let name = match ext {
+            Some(ext) => format!("{stem}{suffix}.{ext}"),
+            None => format!("{stem}{suffix}"),
+        };
+        let copy = parent.join(name);
+        let mut out = match std::fs::OpenOptions::new().write(true).create_new(true).open(&copy) {
+            Ok(out) => out,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        };
+        let written = std::fs::File::open(path)
+            .and_then(|mut source| std::io::copy(&mut source, &mut out))
+            .and_then(|_| out.sync_all());
+        if let Err(e) = written {
+            drop(out);
+            let _ = std::fs::remove_file(&copy);
+            return Err(e);
+        }
+        return Ok(copy);
+    }
+    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "no free name for the copy"))
+}
+
+/// Remove the on-disk entries of `rows` (a remote deletion), each through [`remove_pruned_entry`]:
+/// a kept copy is recorded as one activity event, which the review feed shows.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+fn remove_pruned_entries(
+    db: &StateDb,
+    sync_root: &Path,
+    rows: &[crate::state_db::PrunedRow],
+    in_sync: &dyn Fn(&Path) -> Option<bool>,
+) {
     for row in rows {
         let Some(path) = EngineBridge::placeholder_path_under(sync_root, &row.path) else {
             continue;
@@ -8169,16 +8310,46 @@ fn remove_pruned_placeholders(sync_root: &Path, rows: &[crate::state_db::PrunedR
         // Register BEFORE the remove so the NOTIFY_DELETE_COMPLETION the remove
         // fires is already suppressed when it lands in the watcher.
         crate::watcher::suppress_engine_delete(&path);
-        if let Err(e) = crate::windows_cf::placeholders::delete_placeholder(&path, row.is_dir) {
-            // Zero-knowledge: never log the path — only the file_id + kind.
-            tracing::warn!(file_id = %row.file_id, is_dir = row.is_dir, error = %e, "remote-deletion reconcile: placeholder removal failed");
+        match remove_pruned_entry(&path, row.is_dir, in_sync) {
+            PrunedEntry::Removed | PrunedEntry::Gone => {}
+            PrunedEntry::KeptCopy(copy) => {
+                // Zero-knowledge: never log the path, only the file_id.
+                tracing::warn!(
+                    file_id = %row.file_id,
+                    "remote-deletion reconcile: the file held changes that were not sent; they are kept as a copy beside it"
+                );
+                let rel_path = copy
+                    .strip_prefix(sync_root)
+                    .ok()
+                    .map(|rel| rel.to_string_lossy().replace('\\', "/"));
+                let recorded = db.record_local_activity(LocalActivityEventInput {
+                    event_type: LocalActivityKind::KeptLocalCopy,
+                    file_id: Some(row.file_id.clone()),
+                    file_name: copy.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string(),
+                    rel_path,
+                    occurred_at: now_secs(),
+                });
+                if let Err(e) = recorded {
+                    tracing::warn!(file_id = %row.file_id, error = %e, "remote-deletion reconcile: could not record the kept copy");
+                }
+            }
+            PrunedEntry::KeptInPlace => tracing::warn!(
+                file_id = %row.file_id,
+                is_dir = row.is_dir,
+                "remote-deletion reconcile: kept the local entry (a folder that still holds files, or a copy that failed)"
+            ),
         }
     }
 }
 
+#[cfg(target_os = "windows")]
+fn remove_pruned_placeholders(db: &StateDb, sync_root: &Path, rows: &[crate::state_db::PrunedRow]) {
+    remove_pruned_entries(db, sync_root, rows, &crate::windows_cf::placeholders::placeholder_in_sync);
+}
+
 /// No-op stand-in on non-Windows builds so the call sites stay platform-agnostic.
 #[cfg(not(target_os = "windows"))]
-fn remove_pruned_placeholders(_sync_root: &Path, _rows: &[crate::state_db::PrunedRow]) {}
+fn remove_pruned_placeholders(_db: &StateDb, _sync_root: &Path, _rows: &[crate::state_db::PrunedRow]) {}
 
 /// Order snapshot nodes so every node appears AFTER its parent (parents-first),
 /// which lets `apply_snapshot` resolve a parent's path before its children.
@@ -8291,7 +8462,7 @@ fn apply_sync_op(
                 // immediate-parent protection cannot cover grandchildren and
                 // they drop out of the trash view.
                 let marked = bridge.db().mark_subtree_trashing(id)?;
-                remove_pruned_placeholders(sync_root, &marked);
+                remove_pruned_placeholders(bridge.db(), sync_root, &marked);
                 applied.extend(marked.iter().map(|row| row.file_id.clone()));
             }
             Some(_) => {
@@ -8300,7 +8471,7 @@ fn apply_sync_op(
                 // item is hidden locally — that part of 0802 stands), and
                 // report the ids so the working-set signal fires.
                 let marked = bridge.db().mark_subtree_trashing(id)?;
-                remove_pruned_placeholders(sync_root, &marked);
+                remove_pruned_placeholders(bridge.db(), sync_root, &marked);
                 applied.push(id.to_string());
                 applied.extend(marked.iter().map(|row| row.file_id.clone()));
             }
@@ -8314,7 +8485,7 @@ fn apply_sync_op(
                          {} orphaned child(ren) — pruned (task 0828)",
                         orphans.len()
                     );
-                    remove_pruned_placeholders(sync_root, &orphans);
+                    remove_pruned_placeholders(bridge.db(), sync_root, &orphans);
                     // The orphaned children left the mirror (T3); the folder
                     // itself never existed locally, so it contributes nothing.
                     applied.extend(orphans.iter().map(|row| row.file_id.clone()));
@@ -8327,14 +8498,14 @@ fn apply_sync_op(
                 // Trashing rows leave the trash view, live rows leave the tree
                 // (unchanged 0806 behavior for a live row).
                 let removed = bridge.db().delete_file_subtree(id)?;
-                remove_pruned_placeholders(sync_root, &removed);
+                remove_pruned_placeholders(bridge.db(), sync_root, &removed);
                 applied.push(id.to_string());
                 applied.extend(removed.iter().map(|row| row.file_id.clone()));
             }
             None => {
                 let orphans = bridge.db().delete_orphaned_children_of_absent_folder(id)?;
                 if !orphans.is_empty() {
-                    remove_pruned_placeholders(sync_root, &orphans);
+                    remove_pruned_placeholders(bridge.db(), sync_root, &orphans);
                     applied.extend(orphans.iter().map(|row| row.file_id.clone()));
                 }
             }
@@ -8366,7 +8537,7 @@ fn apply_sync_op(
                 // linger in the Trash view; direct children even become
                 // top-level trash entries after the parent leaves).
                 let flipped = bridge.db().untrash_subtree(id)?;
-                remove_pruned_placeholders(sync_root, &flipped);
+                remove_pruned_placeholders(bridge.db(), sync_root, &flipped);
                 applied.extend(flipped.iter().map(|r| r.file_id.clone()));
             }
             bridge.db().request_resnapshot()?;
@@ -15757,6 +15928,8 @@ mod tests {
         /// `GET /files/{id}` and `GET /files/{id}/chunks/{i}` answer with the file's latest
         /// version. Off: `GET /files/{id}` answers 404, as before.
         serve_downloads: bool,
+        /// The metadata names no `download_version` (a legacy file, an older server).
+        legacy_downloads: bool,
     }
 
     /// Upload mock that behaves like the server's version check: a replace
@@ -15859,6 +16032,12 @@ mod tests {
         }
     }
 
+    /// The UUID the mock names version `n` (1-based) of `file_id` by in a download manifest.
+    fn mock_object_version_id(file_id: &str, n: usize) -> String {
+        let tag = file_id.bytes().fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(u32::from(b)));
+        format!("{tag:08x}-0000-4000-8000-{n:012x}")
+    }
+
     fn versioned_server_response(
         request: &RecordedRequest,
         state: &Arc<Mutex<VersionedServerState>>,
@@ -15900,26 +16079,66 @@ mod tests {
                 ),
             };
         }
-        // `GET /files/{id}` and `GET /files/{id}/chunks/{i}`: the file's latest version, as the
-        // client uploaded it (binary chunk bodies).
+        // `GET /files/{id}[?object_version_id=]` and `GET /files/{id}/chunks/{i}[?object_version_id=]`:
+        // the file's latest version, or the pinned one, as the client uploaded it (binary chunk
+        // bodies). The metadata carries the server's `download_version` manifest (routes/files.rs,
+        // routes/version_download.rs), with the version's number.
         if s.serve_downloads
             && request.method == "GET"
             && let Some(rest) = request.path.strip_prefix("/api/v1/files/")
+            && !rest.contains("/versions")
         {
+            let (rest, query) = rest.split_once('?').unwrap_or((rest, ""));
+            let pinned = query.strip_prefix("object_version_id=").map(str::to_string);
             let (file_id, chunk) = match rest.split_once("/chunks/") {
                 Some((file_id, index)) => (file_id.to_string(), index.parse::<usize>().ok()),
                 None => (rest.to_string(), None),
             };
-            let latest = s.files.get(&file_id).and_then(|file| file.versions.last()).cloned();
+            let selected = s.files.get(&file_id).and_then(|file| match &pinned {
+                Some(pin) => (1..=file.versions.len())
+                    .find(|n| mock_object_version_id(&file_id, *n) == *pin)
+                    .map(|n| (n, file.versions[n - 1].clone())),
+                None => file.versions.last().map(|chunks| (file.versions.len(), chunks.clone())),
+            });
+            let latest = selected.as_ref().map(|(_, chunks)| chunks.clone());
             return match (latest, chunk) {
                 (Some(chunks), None) => {
+                    let version = selected.map_or(0, |(n, _)| n);
                     // nonce (12) + tag (16) per chunk.
                     let size: usize = chunks.iter().map(|chunk| chunk.len().saturating_sub(28)).sum();
+                    let wire: usize = chunks.iter().map(Vec::len).sum();
+                    if s.legacy_downloads {
+                        return (
+                            None,
+                            http_json(
+                                "200 OK",
+                                serde_json::json!({ "id": file_id, "chunk_count": chunks.len(), "size_bytes": size }),
+                            )
+                            .into_bytes(),
+                        );
+                    }
                     (
                         None,
                         http_json(
                             "200 OK",
-                            serde_json::json!({ "id": file_id, "chunk_count": chunks.len(), "size_bytes": size }),
+                            serde_json::json!({
+                                "id": file_id,
+                                "chunk_count": chunks.len(),
+                                "size_bytes": size,
+                                "download_version": {
+                                    "object_version_id": mock_object_version_id(&file_id, version),
+                                    "version_number": version,
+                                    "chunk_count": chunks.len(),
+                                    "chunk_size_bytes": 1_048_576,
+                                    "plaintext_size_bytes": size,
+                                    "ciphertext_size_bytes": wire,
+                                    "chunks": chunks
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(index, chunk)| serde_json::json!({ "index": index, "size_bytes": chunk.len() }))
+                                        .collect::<Vec<_>>(),
+                                },
+                            }),
                         )
                         .into_bytes(),
                     )
@@ -26356,6 +26575,201 @@ mod tests {
         })
         .unwrap();
         assert_eq!(content(Some(true)), SyncFolderContent::Queued, "a queued upload wins over in sync");
+    }
+
+
+    // ── Task 1640, review P1-1: a remote deletion never deletes a change that was not sent ──
+
+    /// A synced folder `docs` holding `notes.txt`, whose local bytes were edited and never sent
+    /// (no agreed content recorded, nothing queued).
+    fn regression_1640_edited_file_in_a_folder(dir: &Path) -> (StateDb, PathBuf) {
+        let db = StateDb::open(&dir.join("state.db")).unwrap();
+        let sync_root = dir.join("sync-root");
+        std::fs::create_dir_all(sync_root.join("docs")).unwrap();
+        let row = |file_id: &str, path: &str, item_kind: ItemKind| FileEntry {
+            file_id: file_id.into(),
+            path: path.into(),
+            status: FileStatus::Local,
+            size_bytes: 0,
+            modified_at: 1_700_000_000,
+            content_hash: None,
+            remote_updated_at: 1_700_000_000,
+            parent_id: None,
+            item_kind,
+        };
+        db.upsert_file_with_contract(&row("folder-docs", "docs", ItemKind::Folder), |contract| {
+            contract.item_kind = ItemKind::Folder;
+        })
+        .unwrap();
+        db.upsert_file_with_contract(&row("file-notes", "docs/notes.txt", ItemKind::File), |contract| {
+            contract.item_kind = ItemKind::File;
+            contract.parent_id = Some("folder-docs".into());
+        })
+        .unwrap();
+        std::fs::write(sync_root.join("docs").join("notes.txt"), b"edited, never sent").unwrap();
+        (db, sync_root)
+    }
+
+    fn regression_1640_assert_kept_as_a_copy(db: &StateDb, sync_root: &Path) {
+        let docs = sync_root.join("docs");
+        assert!(!docs.join("notes.txt").exists(), "the original is removed");
+        assert_eq!(
+            std::fs::read(docs.join("notes (this PC).txt")).unwrap(),
+            b"edited, never sent",
+            "the edit is kept as a copy beside it"
+        );
+        assert!(docs.is_dir(), "the folder stays: it holds the copy");
+        let kept: Vec<String> = db
+            .list_recent_local_activity(10)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.event_type == LocalActivityKind::KeptLocalCopy)
+            .map(|event| event.file_name)
+            .collect();
+        assert_eq!(kept, vec!["notes (this PC).txt".to_string()], "one activity event");
+        let feed: Vec<(String, String)> = version_conflict_feed_from_db(db)
+            .unwrap()
+            .into_iter()
+            .map(|entry| (entry.kind, entry.file_name))
+            .collect();
+        assert_eq!(feed, vec![("kept_copy".to_string(), "notes (this PC).txt".to_string())], "one review entry");
+    }
+
+    #[test]
+    fn regression_1640_a_web_trash_keeps_an_unsent_edit_as_a_this_pc_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
+        // The web trashed the folder: the `file_trash` op's rows.
+        let rows = db.mark_subtree_trashing("folder-docs").unwrap();
+        assert_eq!(rows.len(), 2, "the folder and its file");
+        remove_pruned_entries(&db, &sync_root, &rows, &|_| Some(false));
+        regression_1640_assert_kept_as_a_copy(&db, &sync_root);
+    }
+
+    #[test]
+    fn regression_1640_a_snapshot_prune_keeps_an_unsent_edit_as_a_this_pc_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
+        // A snapshot that no longer lists either (it lists another file: an empty snapshot is
+        // refused as degraded).
+        let seen: HashSet<String> = ["a-file-the-snapshot-still-lists".to_string()].into();
+        let rows = db.prune_absent(&seen, 1_800_000_000).unwrap();
+        assert_eq!(rows.len(), 2, "the folder and its file");
+        remove_pruned_entries(&db, &sync_root, &rows, &|_| Some(false));
+        regression_1640_assert_kept_as_a_copy(&db, &sync_root);
+    }
+
+    #[test]
+    fn regression_1640_a_remote_deletion_still_removes_agreed_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
+        let rows = db.mark_subtree_trashing("folder-docs").unwrap();
+        remove_pruned_entries(&db, &sync_root, &rows, &|_| Some(true));
+        assert!(!sync_root.join("docs").exists(), "agreed bytes and the then-empty folder are removed");
+        assert!(version_conflict_feed_from_db(&db).unwrap().is_empty());
+    }
+
+    #[test]
+    fn regression_1640_a_remotely_deleted_folder_keeps_what_it_still_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
+        // A new file the upload driver has not sent yet: no row at all.
+        std::fs::write(sync_root.join("docs").join("new.txt"), b"not uploaded yet").unwrap();
+        let rows = db.mark_subtree_trashing("folder-docs").unwrap();
+        remove_pruned_entries(&db, &sync_root, &rows, &|_| Some(true));
+        assert!(!sync_root.join("docs").join("notes.txt").exists(), "the agreed file is removed");
+        assert_eq!(
+            std::fs::read(sync_root.join("docs").join("new.txt")).unwrap(),
+            b"not uploaded yet",
+            "the folder stays with what it still holds"
+        );
+    }
+
+    #[test]
+    fn regression_1640_a_this_pc_copy_never_overwrites_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("notes.txt");
+        std::fs::write(&original, b"mine").unwrap();
+        std::fs::write(dir.path().join("notes (this PC).txt"), b"an earlier copy").unwrap();
+        let copy = copy_beside_as_this_pc(&original).unwrap();
+        assert_eq!(copy, dir.path().join("notes (this PC 2).txt"));
+        assert_eq!(std::fs::read(&copy).unwrap(), b"mine");
+        assert_eq!(
+            std::fs::read(dir.path().join("notes (this PC).txt")).unwrap(),
+            b"an earlier copy",
+            "the earlier copy is untouched"
+        );
+        let bare = dir.path().join("Makefile");
+        std::fs::write(&bare, b"all:").unwrap();
+        assert_eq!(copy_beside_as_this_pc(&bare).unwrap(), dir.path().join("Makefile (this PC)"));
+    }
+
+
+    // ── Task 1640, review P1-2: a baseline names the downloaded version, and only whole bytes ──
+
+    /// The tick has not seen the web's version 2 yet (the row says 1): the hydrate downloads 2,
+    /// and its baseline says 2, from the download metadata. Before, it said the row's 1 (a later
+    /// edit then parked as stale for nothing).
+    #[tokio::test]
+    async fn regression_1640_a_hydrate_records_the_downloaded_version_not_the_rows() {
+        let master_key = [176u8; 32];
+        let file = "16400000-0000-4000-8000-000000000021";
+        let (_dir, sync_root, server, bridge, local) = regression_1640_synced_file(master_key, file).await;
+        regression_1640_web_saves(&server, master_key, file, b"edited on the web");
+        assert_eq!(
+            bridge.db.get_file_contract_state(file).unwrap().unwrap().current_version,
+            1,
+            "precondition: the row has not seen version 2"
+        );
+        std::fs::remove_file(&local).unwrap();
+        bridge.hydrate_file(file, &local, &[sync_root.as_path()]).await.unwrap();
+        let contract = bridge.db.get_file_contract_state(file).unwrap().unwrap();
+        assert_eq!(
+            (contract.local_base_version, contract.local_hash),
+            (2, Some(sha256_hex(b"edited on the web"))),
+            "the baseline is the version the download named"
+        );
+        drop(server.finish());
+    }
+
+    /// A download whose metadata names no version (a legacy file) cannot say which version the
+    /// bytes are: the baseline is cleared, not left naming the bytes the file held before.
+    #[tokio::test]
+    async fn regression_1640_a_legacy_download_clears_the_baseline() {
+        let master_key = [177u8; 32];
+        let file = "16400000-0000-4000-8000-000000000022";
+        let (_dir, sync_root, server, bridge, local) = regression_1640_synced_file(master_key, file).await;
+        assert!(bridge.db.get_file_contract_state(file).unwrap().unwrap().local_hash.is_some(), "precondition");
+        regression_1640_web_saves(&server, master_key, file, b"edited on the web");
+        server.state.lock().unwrap().legacy_downloads = true;
+        std::fs::remove_file(&local).unwrap();
+        bridge.hydrate_file(file, &local, &[sync_root.as_path()]).await.unwrap();
+        assert_eq!(std::fs::read(&local).unwrap(), b"edited on the web");
+        assert_eq!(bridge.db.get_file_contract_state(file).unwrap().unwrap().local_hash, None);
+        drop(server.finish());
+    }
+
+    /// Windows: a fetch records a baseline only when it delivered the whole file; a partial range
+    /// leaves it alone (the placeholder's other ranges may hold writes that were not sent).
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn regression_1640_only_a_whole_file_fetch_records_a_baseline() {
+        let master_key = [178u8; 32];
+        let file = "16400000-0000-4000-8000-000000000023";
+        let (_dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_row(&bridge, &server, file);
+        {
+            let mut s = server.state.lock().unwrap();
+            s.files.get_mut(file).unwrap().versions[0] = vec![regression_1640_chunk(master_key, file, b"version one")];
+            s.serve_downloads = true;
+        }
+        let _ = &sync_root;
+        bridge.hydrate_file_to_memory(file, false).await.unwrap();
+        assert_eq!(bridge.db.get_file_contract_state(file).unwrap().unwrap().local_hash, None, "a range: none");
+        bridge.hydrate_file_to_memory(file, true).await.unwrap();
+        let contract = bridge.db.get_file_contract_state(file).unwrap().unwrap();
+        assert_eq!((contract.local_base_version, contract.local_hash), (1, Some(sha256_hex(b"version one"))));
+        drop(server.finish());
     }
 
     // ── Task 2190: a concurrent edit (this device and the web), as main behaves today ──

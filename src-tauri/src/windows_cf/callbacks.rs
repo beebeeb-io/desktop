@@ -179,7 +179,7 @@ pub unsafe extern "system" fn fetch_data_callback(
         tokio::select! {
             biased;
             _ = super::cancelled(&bridge) => Err(anyhow::anyhow!("vault locked")),
-            result = bridge.hydrate_file_to_memory(&file_id) => result,
+            result = bridge.hydrate_file_to_memory(&file_id, required_offset == 0 && required_length >= file_size) => result,
         }
     });
     let buf = match buf {

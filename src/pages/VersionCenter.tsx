@@ -45,6 +45,8 @@ function kindLabel(kind: VersionConflictEntry['kind']): string {
       return 'Delete'
     case 'restore':
       return 'Restore'
+    case 'kept_copy':
+      return 'Kept copy'
     default:
       return 'Conflict'
   }

@@ -628,6 +628,9 @@ pub struct LocalStatePurge {
 pub enum LocalActivityKind {
     MovedToTrash,
     Restored,
+    /// Task 1640: a file deleted elsewhere held changes this device had not sent; they were kept
+    /// as a copy beside it (`file_name` is the copy's).
+    KeptLocalCopy,
 }
 
 impl LocalActivityKind {
@@ -635,12 +638,14 @@ impl LocalActivityKind {
         match self {
             LocalActivityKind::MovedToTrash => "moved_to_trash",
             LocalActivityKind::Restored => "restored",
+            LocalActivityKind::KeptLocalCopy => "kept_local_copy",
         }
     }
 
     fn from_str(s: &str) -> Self {
         match s {
             "restored" => LocalActivityKind::Restored,
+            "kept_local_copy" => LocalActivityKind::KeptLocalCopy,
             _ => LocalActivityKind::MovedToTrash,
         }
     }
@@ -3335,6 +3340,14 @@ impl StateDb {
             "UPDATE files SET local_base_version = ?2, local_hash = ?3 WHERE file_id = ?1",
             params![file_id, version, hash],
         )?;
+        Ok(())
+    }
+
+    /// Task 1640: forget the file's agreed content (a download that named no version): its bytes
+    /// are Unknown until a hydrate or a landing records them again.
+    pub fn clear_local_baseline(&self, file_id: &str) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute("UPDATE files SET local_hash = NULL WHERE file_id = ?1", params![file_id])?;
         Ok(())
     }
 

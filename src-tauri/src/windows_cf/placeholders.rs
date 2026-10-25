@@ -825,6 +825,14 @@ pub fn read_os_placeholder_state(path: &std::path::Path) -> Option<u32> {
 /// SAFETY: `path_wide` lives for the whole call; the handle is closed on every
 /// exit path.
 pub fn resize_placeholder(path: &std::path::Path, true_size_bytes: i64) -> anyhow::Result<()> {
+    // Task 1640: marked in sync only when it already was. A placeholder out of sync may hold
+    // local writes in ranges the failed fetch did not cover; marking it in sync would let the
+    // platform free them.
+    let flags = if placeholder_in_sync(path) == Some(true) {
+        CF_UPDATE_FLAG_MARK_IN_SYNC
+    } else {
+        CF_UPDATE_FLAG_NONE
+    };
     let path_wide: Vec<u16> = path
         .to_string_lossy()
         .encode_utf16()
@@ -867,9 +875,9 @@ pub fn resize_placeholder(path: &std::path::Path, true_size_bytes: i64) -> anyho
             // No dehydrate range: the file is fully cloud-only after the failed
             // fetch, so there is no hydrated range to invalidate.
             None,
-            // MARK_IN_SYNC: the corrected metadata IS the latest truth, so don't
-            // let Windows read the resize as a local modification.
-            CF_UPDATE_FLAG_MARK_IN_SYNC,
+            // MARK_IN_SYNC (when it was in sync): the corrected metadata IS the latest
+            // truth, so don't let Windows read the resize as a local modification.
+            flags,
             None,
             None,
         );

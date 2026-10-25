@@ -10567,15 +10567,18 @@ fn tray_recent_activity_from_db(db: &state_db::StateDb) -> Vec<TrayActivityItem>
     }
 
     if let Ok(events) = db.list_recent_local_activity(TRAY_RECENT_ACTIVITY_LIMIT) {
-        for event in events
-            .into_iter()
-            .filter(|event| event.event_type == state_db::LocalActivityKind::MovedToTrash)
-        {
+        for event in events.into_iter() {
+            // Task 1640: a kept copy of changes not sent, beside a file deleted elsewhere.
+            let (status, icon) = match event.event_type {
+                state_db::LocalActivityKind::MovedToTrash => ("Moved to trash", "trash"),
+                state_db::LocalActivityKind::KeptLocalCopy => ("Your changes, kept as a copy", "file"),
+                state_db::LocalActivityKind::Restored => continue,
+            };
             items.push(TrayActivityItem {
                 id: event.file_id.unwrap_or_else(|| format!("activity-{}", event.id)),
                 name: event.file_name,
-                status: "Moved to trash".to_string(),
-                icon: "trash".to_string(),
+                status: status.to_string(),
+                icon: icon.to_string(),
                 ok: Some(true),
                 active: None,
                 progress: None,
