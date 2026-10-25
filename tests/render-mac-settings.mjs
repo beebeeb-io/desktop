@@ -80,7 +80,8 @@ const tree = (n) => [
   ...Array.from({ length: n }, (_, i) => ({ id: `g${i}`, name: `Folder ${i + 1}`, is_folder: true, excluded: false, size_bytes: 1, file_count: 1, on_disk_bytes: 0, pinned: i % 3 === 0, children: [] })),
 ]
 const snapshot = (over = {}) => ({
-  phase: 'synced', generated_at: 1000, paused: false,
+  // sync_phase: Rust's sync part of the state (task 2179); the contract refuses a snapshot without it.
+  phase: 'synced', sync_phase: 'synced', generated_at: 1000, paused: false,
   account: { email: LONG_EMAIL, logged_in: true, vault_unlocked: true, auth_expired: false, ...(over.account ?? {}) },
   engine: { state: 'idle', files_remaining: 0, bytes_total: 0, bytes_done: 0, last_tick_ok_at: 990 },
   reason: null, finder: { setup: 'ready', reason: null, reason_line: null },

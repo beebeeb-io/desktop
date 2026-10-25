@@ -73,7 +73,6 @@ pub struct PopoverRuntime {
     pub transfers: Arc<TransferBoard>,
     /// The last `engine-status` payload the listener saw.
     pub status: SharedStatusView,
-    pub storage: Arc<Mutex<StorageCache>>,
 }
 
 impl Default for PopoverRuntime {
@@ -81,7 +80,6 @@ impl Default for PopoverRuntime {
         Self {
             transfers: TransferBoard::new(),
             status: Arc::new(Mutex::new(EngineStatusView::default())),
-            storage: Arc::new(Mutex::new(StorageCache::default())),
         }
     }
 }
@@ -107,14 +105,44 @@ struct CacheEntry {
 #[derive(Debug, Default)]
 pub struct StorageCache {
     entry: Option<CacheEntry>,
-    /// The fetch in flight and the session it is for: a snapshot meanwhile waits for it
-    /// (at most [`STORAGE_WAIT`]) instead of starting another.
-    inflight: Option<(u64, tokio::sync::watch::Receiver<bool>)>,
-    /// When a fetch for a session last failed (the snapshot time it started at).
+    /// The fetch in flight: a snapshot meanwhile waits for it (at most [`STORAGE_WAIT`]) instead of
+    /// starting another, and only its answer may land (#139 review P2-3).
+    inflight: Option<Inflight>,
+    /// When a fetch for a session last failed (when its failure came, #139 review P3-9).
     failed_at: Option<(u64, i64)>,
+    /// Numbers the fetches. Kept across [`StorageCache::clear`], so a fetch from before a clear
+    /// never holds the ticket of one after it.
+    next_ticket: u64,
+}
+
+#[derive(Debug)]
+struct Inflight {
+    ticket: u64,
+    vault_epoch: u64,
+    done: tokio::sync::watch::Receiver<bool>,
 }
 
 impl StorageCache {
+    /// Forget the summary, the failure and the fetch in flight, whose answer then lands nowhere: what
+    /// sign-out leaves of the account before (task 1887's rule; #139 review P2-3).
+    pub fn clear(&mut self) {
+        *self = Self {
+            next_ticket: self.next_ticket,
+            ..Self::default()
+        };
+    }
+
+    /// Nothing cached, failed or in flight (what a sign-out leaves).
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entry.is_none() && self.failed_at.is_none() && self.inflight.is_none()
+    }
+
+    /// `ticket` is the fetch in flight: a newer session's fetch or a clear has not taken its place.
+    fn holds(&self, ticket: u64) -> bool {
+        self.inflight.as_ref().is_some_and(|inflight| inflight.ticket == ticket)
+    }
+
     /// A fetch for this session failed less than [`STORAGE_FAILURE_BACKOFF_SECS`] ago.
     fn recently_failed(&self, now: i64, vault_epoch: u64) -> bool {
         self.failed_at
@@ -154,6 +182,30 @@ impl StorageCache {
     }
 }
 
+/// [`StorageCache::clear`] through the shared handle, poisoned or not: a sign-out never fails on it.
+pub fn clear_storage(cache: &Mutex<StorageCache>) {
+    cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
+}
+
+/// One fetch's turn, ended however its task ends (an answer, a panic, a cancelled runtime): the slot
+/// is freed if it is still this fetch's, and every snapshot waiting on it is woken (#139 review P3-8).
+struct FetchTurn {
+    cache: Arc<Mutex<StorageCache>>,
+    ticket: u64,
+    done: tokio::sync::watch::Sender<bool>,
+}
+
+impl Drop for FetchTurn {
+    fn drop(&mut self) {
+        let mut guard = self.cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if guard.holds(self.ticket) {
+            guard.inflight = None;
+        }
+        drop(guard);
+        let _ = self.done.send(true);
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct StorageDto {
     pub used_bytes: i64,
@@ -179,13 +231,24 @@ impl StorageDto {
 /// otherwise nothing (the header then shows the email only).
 ///
 /// The fetch runs as a task of its own (one per session at a time) and fills the cache
-/// when it finishes, so a fetch slower than the wait still serves the next snapshot. A
-/// failed fetch is not started again for [`STORAGE_FAILURE_BACKOFF_SECS`]. No lock is held
-/// across an await.
-pub async fn cached_storage<F, Fut>(
+/// when it finishes, so a fetch slower than the wait still serves the next snapshot. Only
+/// the fetch still in flight writes: one that a newer session's fetch or a sign-out's
+/// clear replaced answers into nothing. A failed fetch is not started again for
+/// [`STORAGE_FAILURE_BACKOFF_SECS`] after its failure came. No lock is held across an await.
+pub async fn cached_storage<F, Fut>(cache: &Arc<Mutex<StorageCache>>, now: i64, vault_epoch: u64, fetch: F) -> Option<StorageDto>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<StorageUsage, String>> + Send + 'static,
+{
+    cached_storage_with(cache, now, vault_epoch, STORAGE_WAIT, fetch).await
+}
+
+/// [`cached_storage`] with the wait as an argument (#139 review P3-11: tests pass their own).
+pub async fn cached_storage_with<F, Fut>(
     cache: &Arc<Mutex<StorageCache>>,
     now: i64,
     vault_epoch: u64,
+    wait: std::time::Duration,
     fetch: F,
 ) -> Option<StorageDto>
 where
@@ -198,15 +261,30 @@ where
             return guard.answer(now, vault_epoch);
         }
         match &guard.inflight {
-            Some((epoch, running)) if *epoch == vault_epoch => running.clone(),
+            Some(inflight) if inflight.vault_epoch == vault_epoch => inflight.done.clone(),
             _ => {
                 let (done, running) = tokio::sync::watch::channel(false);
-                guard.inflight = Some((vault_epoch, running.clone()));
+                let ticket = guard.next_ticket;
+                guard.next_ticket = ticket.wrapping_add(1);
+                guard.inflight = Some(Inflight {
+                    ticket,
+                    vault_epoch,
+                    done: running.clone(),
+                });
                 let pending = fetch();
-                let cache = Arc::clone(cache);
+                let turn = FetchTurn {
+                    cache: Arc::clone(cache),
+                    ticket,
+                    done,
+                };
+                let started = tokio::time::Instant::now();
                 tokio::spawn(async move {
                     let result = pending.await;
-                    if let Ok(mut guard) = cache.lock() {
+                    // When the answer came, on the clock `now` is on (a test's paused clock too).
+                    let at = now.saturating_add(i64::try_from(started.elapsed().as_secs()).unwrap_or(i64::MAX));
+                    if let Ok(mut guard) = turn.cache.lock()
+                        && guard.holds(turn.ticket)
+                    {
                         match result {
                             Ok(usage) => {
                                 guard.put(usage, now, vault_epoch);
@@ -214,21 +292,18 @@ where
                             }
                             Err(error) => {
                                 tracing::debug!(error = %error, "storage summary refetch failed; using the last known one if any");
-                                guard.failed_at = Some((vault_epoch, now));
+                                guard.failed_at = Some((vault_epoch, at));
                             }
                         }
-                        if guard.inflight.as_ref().is_some_and(|(epoch, _)| *epoch == vault_epoch) {
-                            guard.inflight = None;
-                        }
                     }
-                    let _ = done.send(true);
+                    drop(turn);
                 });
                 running
             }
         }
     };
     // Wait for the fetch, briefly: a slower one finishes in the background either way.
-    let _ = tokio::time::timeout(STORAGE_WAIT, async {
+    let _ = tokio::time::timeout(wait, async {
         while !*finished.borrow_and_update() {
             if finished.changed().await.is_err() {
                 break;
@@ -893,7 +968,7 @@ mod tests {
     #[test]
     fn the_sync_phase_is_the_phase_with_the_finder_taken_as_ready() {
         type Set = fn(&mut SnapshotInputs);
-        let sync_states: [(&str, Set, PopoverPhase); 7] = [
+        let sync_states: [(&str, Set, PopoverPhase); 8] = [
             ("synced", |_| {}, PopoverPhase::Synced),
             ("paused", |i| i.paused = true, PopoverPhase::Paused),
             ("offline", |i| i.engine = view(json!({ "state": "offline" })), PopoverPhase::Offline),
@@ -903,6 +978,8 @@ mod tests {
             // The engine's own word is not the pause: only the live flag is (phase.rs).
             ("engine says paused, flag off", |i| i.engine = view(json!({ "state": "paused" })), PopoverPhase::Synced),
             ("syncing", |i| i.engine = view(json!({ "state": "syncing" })), PopoverPhase::Syncing),
+            // #139 review P3-13: storage full was missing from the matrix.
+            ("storage full", |i| i.backlog.paused_for_quota = 1, PopoverPhase::StorageFull),
         ];
         let setups = [
             (FinderSetup::Ready, None),
@@ -923,7 +1000,7 @@ mod tests {
                 cases += 1;
             }
         }
-        assert_eq!(cases, 35);
+        assert_eq!(cases, 40);
     }
 
     #[test]
@@ -1305,6 +1382,18 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn the_wait_is_the_callers_a_test_passes_its_own() {
+        // #139 review P3-11: the wait is an argument, so no test depends on the real STORAGE_WAIT.
+        use std::sync::atomic::AtomicUsize;
+        let cache = Arc::new(Mutex::new(StorageCache::default()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let wait = std::time::Duration::from_millis(250);
+        let started = tokio::time::Instant::now();
+        assert_eq!(cached_storage_with(&cache, 1_000, 1, wait, slow_ok(&calls, 8, 1)).await, None);
+        assert_eq!(started.elapsed(), wait);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_failed_fetch_is_not_tried_again_for_the_backoff() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let cache = Arc::new(Mutex::new(StorageCache::default()));
@@ -1327,6 +1416,100 @@ mod tests {
         // Another session is not held back by this one's failure.
         cached_storage(&cache, STORAGE_FAILURE_BACKOFF_SECS + 1, 2, failing(counting(&calls))).await;
         assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    fn slow_ok(calls: &Arc<std::sync::atomic::AtomicUsize>, secs: u64, used: i64) -> impl FnOnce() -> std::pin::Pin<Box<dyn Future<Output = Result<StorageUsage, String>> + Send>> {
+        let calls = Arc::clone(calls);
+        move || {
+            Box::pin(async move {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+                Ok(usage(used))
+            })
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_late_answer_from_an_older_session_does_not_replace_the_newer_ones_summary() {
+        // #139 review P2-3: a sign-out and a sign-in happen while session 1's fetch is still out.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = Arc::new(Mutex::new(StorageCache::default()));
+        let (old, new) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        assert_eq!(cached_storage(&cache, 1_000, 1, slow_ok(&old, 10, 1)).await, None);
+        let fresh = cached_storage(&cache, 1_001, 2, slow_ok(&new, 0, 2)).await.unwrap();
+        assert_eq!(fresh.used_bytes, 2);
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await; // session 1's answer arrives now
+        let again = cached_storage(&cache, 1_012, 2, slow_ok(&new, 0, 3)).await.unwrap();
+        assert_eq!((again.used_bytes, again.stale), (2, false), "still session 2's own summary");
+        assert_eq!((old.load(Ordering::SeqCst), new.load(Ordering::SeqCst)), (1, 1), "no extra fetch for session 2");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_late_answer_from_an_older_session_keeps_the_newer_ones_backoff() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = Arc::new(Mutex::new(StorageCache::default()));
+        let (old, new) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        assert_eq!(cached_storage(&cache, 1_000, 1, slow_ok(&old, 10, 1)).await, None);
+        let failing = { let new = Arc::clone(&new); move || async move { new.fetch_add(1, Ordering::SeqCst); Err::<StorageUsage, String>("offline".into()) } };
+        assert_eq!(cached_storage(&cache, 1_001, 2, failing).await, None);
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        let inside = { let new = Arc::clone(&new); move || async move { new.fetch_add(1, Ordering::SeqCst); Ok::<StorageUsage, String>(usage(9)) } };
+        assert_eq!(cached_storage(&cache, 1_012, 2, inside).await, None, "session 2 is still inside its backoff");
+        assert_eq!(new.load(Ordering::SeqCst), 1, "not asked again inside the backoff");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_fetch_still_running_at_sign_out_answers_into_nothing_even_after_a_new_fetch_started() {
+        // #139 review P2-3: sign-out clears the cache; the old account's fetch must not write after it, also not once a
+        // new fetch (the next sign-in, the same epoch if nothing bumped it) holds the slot.
+        use std::sync::atomic::AtomicUsize;
+        let cache = Arc::new(Mutex::new(StorageCache::default()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        assert_eq!(cached_storage(&cache, 1_000, 1, slow_ok(&calls, 10, 5)).await, None);
+        clear_storage(&cache);
+        assert!(cache.lock().unwrap().is_empty());
+        assert_eq!(cached_storage(&cache, 1_001, 1, slow_ok(&calls, 20, 6)).await, None);
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await; // the old account's answer arrives
+        assert!(cache.lock().unwrap().entry.is_none(), "the old fetch wrote nothing: {:?}", cache.lock().unwrap());
+        tokio::time::sleep(std::time::Duration::from_secs(11)).await;
+        assert_eq!(cache.lock().unwrap().entry.map(|e| e.usage.used_bytes), Some(6), "the new fetch's answer lands");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_fetch_task_that_panics_frees_the_slot_for_the_next_snapshot() {
+        // #139 review P3-8: a panicked (or cancelled) fetch task must not hold the single-flight slot forever.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = Arc::new(Mutex::new(StorageCache::default()));
+        let boom = || async {
+            if std::hint::black_box(true) {
+                panic!("the fetch panicked (on purpose, in a test)");
+            }
+            Ok::<StorageUsage, String>(usage(0))
+        };
+        assert_eq!(cached_storage(&cache, 1_000, 1, boom).await, None);
+        tokio::task::yield_now().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let next = cached_storage(&cache, 1_001, 1, slow_ok(&calls, 0, 7)).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "a new fetch, not a wait on the dead one");
+        assert_eq!(next.map(|s| s.used_bytes), Some(7));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failure_is_dated_when_it_comes_not_when_the_fetch_started() {
+        // #139 review P3-9: an 8 s fetch that fails at 1 008 keeps the next one off until 1 038, not 1 030.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = Arc::new(Mutex::new(StorageCache::default()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let slow_fail = { let calls = Arc::clone(&calls); move || async move {
+            calls.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+            Err::<StorageUsage, String>("timeout".into())
+        } };
+        assert_eq!(cached_storage(&cache, 1_000, 1, slow_fail).await, None);
+        tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+        let probe = { let calls = Arc::clone(&calls); move || async move { calls.fetch_add(1, Ordering::SeqCst); Ok::<StorageUsage, String>(usage(1)) } };
+        assert_eq!(cached_storage(&cache, 1_000 + STORAGE_FAILURE_BACKOFF_SECS + 1, 1, probe).await, None);
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "1 031 is 23 s after the failure: still inside the backoff");
     }
 
     // ── the real fetch, against a loopback API ──────────────────────────────

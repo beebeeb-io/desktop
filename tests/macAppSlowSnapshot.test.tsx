@@ -1,8 +1,9 @@
 /**
- * Follow-up to PR #134, auto-review thread 1: the Beebeeb window reads the account and sync state every 5 s, and
- * `popover_snapshot` can take up to 8 s (it awaits the storage fetch, popover_data.rs, which has an 8 s timeout and
- * fills no cache when it fails). A tick must never cancel the read in flight: while the API answers slower than the
- * tick, every result used to be thrown away and the window stayed on "Loading…".
+ * Follow-up to PR #134, auto-review thread 1: the Beebeeb window reads the account and sync state every 5 s, and a read
+ * can be slower than that. Before task 2179, `popover_snapshot` awaited the storage fetch (8 s timeout, no cache of a
+ * failure); since then it waits for it 1 s at most, but a read can still be slow. A tick must never cancel the read in
+ * flight: while the API answered slower than the tick, every result used to be thrown away and the window stayed on
+ * "Loading…".
  *
  * Mounted with the real `react-dom` on the minimal DOM (React's own effect cleanup is what cancelled the read; the
  * component harness does not run cleanups on a dependency change) and on bun's fake clock, so 20 s pass in an instant.

@@ -70,8 +70,9 @@ const snapshot = (over: { account?: Record<string, unknown>; [k: string]: unknow
   storage: { used_bytes: 84_300_000_000, quota_bytes: 200_000_000_000, fetched_at: 900, stale: false },
   storage_full: false, pending_changes: 0, conflicts: { count: 0, files: [] }, activity: [],
   ...over,
-  // Rust's sync part of the state (task 2179): the phase unless a test says otherwise.
-  sync_phase: (over.sync_phase as string | undefined) ?? (over.phase as string | undefined) ?? 'synced',
+  // Rust's sync part of the state (task 2179): the phase outside a Finder phase, and never a Finder phase itself, unless a
+  // test says otherwise (#139 review P3-13).
+  sync_phase: (over.sync_phase as string | undefined) ?? (String(over.phase ?? 'synced').startsWith('finder_') ? 'synced' : (over.phase as string | undefined) ?? 'synced'),
   account: { email: 'sam@example.eu', logged_in: true, vault_unlocked: true, auth_expired: false, ...(over.account ?? {}) },
 })
 const subscription = { plan: 'basic', billing_cycle: 'yearly', status: 'active', seats: 1, region: 'eu', current_period_end: '2026-11-14T00:00:00Z', quota_bytes: 1, used_bytes: 0 }
@@ -926,8 +927,10 @@ const useFinderSetupModule = () => ({
   },
 })
 
-function openHome(snap: unknown, backend: Record<string, (args: any) => unknown> = {}, onRefresh?: () => Promise<void>) {
+function openHome(snap: unknown, backend: Record<string, (args: any) => unknown> = {}, onRefresh?: () => Promise<boolean>) {
   let refreshed = 0
+  // The props object itself, so a test can hand HomePane its next snapshot (what the window does on every applied read).
+  const props = { snapshot: snap, onRefresh: () => { refreshed += 1; return onRefresh ? onRefresh() : Promise.resolve(true) } }
   const m = mount('MacApp.tsx', 'HomePane', {
     expand: true,
     backend: {
@@ -937,7 +940,7 @@ function openHome(snap: unknown, backend: Record<string, (args: any) => unknown>
       kept_unsent_folder: () => null,
       ...backend,
     } as any,
-    props: { snapshot: snap, onRefresh: () => { refreshed += 1; return onRefresh ? onRefresh() : Promise.resolve() } },
+    props,
     hookModules: [useFinderSetupModule(), useKeptFoldersModule()],
     bindings: {
       ...desktopApi,
@@ -954,7 +957,7 @@ function openHome(snap: unknown, backend: Record<string, (args: any) => unknown>
     },
   })
   mounted.push(m)
-  return { m, refreshed: () => refreshed }
+  return { m, refreshed: () => refreshed, props }
 }
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
 const settleHome = async (m: Mounted) => { await m.flush(); await tick(); await m.flush(); await m.flush() }
@@ -1090,7 +1093,7 @@ describe('Home (§7.6, first cut: status, Finder row, storage, the kept rows)', 
     ]
     for (const c of cases) {
       let applied: () => void = () => {}
-      const { m, refreshed } = openHome(c.snap, { [c.command]: () => null }, () => new Promise<void>((resolve) => { applied = resolve }))
+      const { m, refreshed } = openHome(c.snap, { [c.command]: () => null }, () => new Promise<boolean>((resolve) => { applied = () => resolve(true) }))
       await settleHome(m)
       const clicked = homeButton(m, c.label).props.onClick()
       await settleHome(m)
@@ -1106,6 +1109,47 @@ describe('Home (§7.6, first cut: status, Finder row, storage, the kept rows)', 
       await settleHome(m)
       expect({ command: c.command, disabled: homeButton(m, c.label).props.disabled }).toEqual({ command: c.command, disabled: false })
     }
+  })
+
+  test('a refresh that was not applied (failed, timed out, superseded) keeps the button busy until the next snapshot shows (#139 review P2-2)', async () => {
+    const cases = [
+      { snap: () => snapshot({ phase: 'locked', account: { vault_unlocked: false } }), label: 'Unlock vault', busyLabel: 'Unlocking…', command: 'unlock_vault' },
+      { snap: () => snapshot({ phase: 'paused', pending_changes: 1 }), label: 'Resume sync', busyLabel: 'Resume sync', command: 'tray_resume_sync' },
+    ]
+    for (const c of cases) {
+      const { m, props } = openHome(c.snap(), { [c.command]: () => null }, () => Promise.resolve(false))
+      await settleHome(m)
+      await homeButton(m, c.label).props.onClick()
+      m.render()
+      await settleHome(m)
+      // The read after the action did not land: the card on screen is the one from before it, so no second click.
+      expect({ command: c.command, disabled: homeButton(m, c.busyLabel).props.disabled }).toEqual({ command: c.command, disabled: true })
+      expect(m.calls.filter((call) => call.name === c.command)).toHaveLength(1)
+      // The next snapshot the window applies is from after the action (only the current epoch's reads apply).
+      props.snapshot = c.snap()
+      m.render()
+      await settleHome(m)
+      expect({ command: c.command, disabled: homeButton(m, c.label).props.disabled }).toEqual({ command: c.command, disabled: false })
+    }
+  })
+
+  test('each button has its own busy state: Open in Finder finishing does not re-enable a Resume sync still under way (#139 review P3-5)', async () => {
+    let applied: () => void = () => {}
+    const { m } = openHome(snapshot({ phase: 'paused', pending_changes: 1 }), { tray_resume_sync: () => null, open_finder_location: () => null }, () => new Promise<boolean>((resolve) => { applied = () => resolve(true) }))
+    await settleHome(m)
+    const resuming = homeButton(m, 'Resume sync').props.onClick()
+    await settleHome(m)
+    m.render()
+    expect(homeButton(m, 'Resume sync').props.disabled).toBe(true)
+    await homeButton(m, 'Open in Finder').props.onClick()
+    m.render()
+    await settleHome(m)
+    expect({ resume: homeButton(m, 'Resume sync').props.disabled, open: homeButton(m, 'Open in Finder').props.disabled }).toEqual({ resume: true, open: false })
+    applied()
+    await resuming
+    m.render()
+    await settleHome(m)
+    expect(homeButton(m, 'Resume sync').props.disabled).toBe(false)
   })
 
   test('a Finder failure is one inline notice under the row, never a toast (one failure, one surface)', async () => {

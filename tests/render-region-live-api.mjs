@@ -101,7 +101,7 @@ function installBackend({ host, win }) {
   }
 }
 const winFx = {
-  snapshot: { phase: 'synced', generated_at: 1000, paused: false, account: { email: 'region-test@beebeeb.io', logged_in: true, vault_unlocked: true, auth_expired: false },
+  snapshot: { phase: 'synced', sync_phase: 'synced', generated_at: 1000, paused: false, account: { email: 'region-test@beebeeb.io', logged_in: true, vault_unlocked: true, auth_expired: false },
     engine: { state: 'idle', files_remaining: 0, bytes_total: 0, bytes_done: 0, last_tick_ok_at: 990 }, reason: null, finder: { setup: 'ready', reason: null, reason_line: null },
     storage: { used_bytes: 10, quota_bytes: 100, fetched_at: 900, stale: false }, storage_full: false, pending_changes: 0, conflicts: { count: 0, files: [] }, activity: [] },
   subscription: { plan: 'basic', billing_cycle: 'yearly', status: 'active', seats: 1, region: 'eu', current_period_end: '2026-10-14T00:00:00Z', quota_bytes: 100, used_bytes: 10 },

@@ -222,13 +222,24 @@ describe('the first view (§7.8 "Which section opens")', () => {
 })
 
 describe('Home › status: the popover state in one row (§7.6, §6.3)', () => {
-  // `sync_phase` is the phase unless a test sets it: outside a Finder phase Rust sends the two equal.
+  // `sync_phase` as Rust sends it unless a test sets it: the phase outside a Finder phase, and never a Finder phase
+  // itself (Rust takes Finder as ready for it), so under one it defaults to "synced" (#139 review P3-13).
   const snap = (over: Record<string, unknown> = {}) => ({
     phase: 'synced', paused: false, pending_changes: 0, reason: null,
     engine: { state: 'idle', files_remaining: 0, bytes_total: 0, bytes_done: 0, last_tick_ok_at: 940 },
     ...over,
-    sync_phase: over.sync_phase ?? over.phase ?? 'synced',
+    sync_phase: over.sync_phase ?? (String(over.phase ?? 'synced').startsWith('finder_') ? 'synced' : over.phase ?? 'synced'),
   }) as any
+
+  test('the row follows sync_phase alone: syncing over an idle engine says Syncing, synced over a busy one says Up to date (#139 review P3-4)', () => {
+    // A file moving with the engine idle (the pulse is up to a second behind): Rust says syncing.
+    expect(homeStatus(snap({ phase: 'syncing', engine: { state: 'idle', files_remaining: 0, last_tick_ok_at: 940 } }), 1000)).toEqual({
+      tone: 'busy', title: 'Syncing', detail: null, reason: null, action: null,
+    })
+    expect(homeStatus(snap({ phase: 'synced', engine: { state: 'syncing', files_remaining: 3, last_tick_ok_at: 940 } }), 1000)).toEqual({
+      tone: 'ok', title: 'Up to date', detail: 'Last checked 1 min ago', reason: null, action: null,
+    })
+  })
 
   test('up to date, with when it last checked', () => {
     expect(homeStatus(snap(), 1000)).toEqual({ tone: 'ok', title: 'Up to date', detail: 'Last checked 1 min ago', reason: null, action: null })
@@ -548,7 +559,7 @@ describe('SnapshotReader: one read in flight, ticks skipped, the newest result a
     expect(reads).toHaveLength(2) // nothing in flight: a new read
   })
 
-  test('refresh resolves once its own result is applied, and a dropped or stopped read resolves too (item 2)', async () => {
+  test('refresh resolves once its own result is applied, to whether it was: a superseded or stopped read resolves false (item 2; #139 review P2-2)', async () => {
     const reads: Array<ReturnType<typeof deferred>> = []
     const events: string[] = []
     const reader = new SnapshotReader(
@@ -557,18 +568,76 @@ describe('SnapshotReader: one read in flight, ticks skipped, the newest result a
       OPTIONS,
     )
     reader.resume()
-    const first = reader.refresh().then(() => events.push('first resolved'))
-    const second = reader.refresh().then(() => events.push('second resolved'))
+    const first = reader.refresh().then((applied: boolean) => events.push(`first resolved ${applied}`))
+    const second = reader.refresh().then((applied: boolean) => events.push(`second resolved ${applied}`))
     reads[1].resolve({ ok: true, value: 'second' })
     await second
-    expect(events).toEqual(['applied second', 'second resolved'])
-    reads[0].resolve({ ok: true, value: 'first' }) // dropped: an older epoch
+    expect(events).toEqual(['applied second', 'second resolved true'])
+    reads[0].resolve({ ok: true, value: 'first' }) // superseded: an older epoch
     await first
-    expect(events).toEqual(['applied second', 'second resolved', 'first resolved'])
+    expect(events).toEqual(['applied second', 'second resolved true', 'first resolved false'])
     const third = reader.refresh()
     reader.stop()
     reads[2].resolve({ ok: true, value: 'third' })
-    await third // resolves; nothing applied after the window unmounted
+    expect(await third).toBe(false) // nothing applied after the window unmounted
     expect(events).toHaveLength(3)
+  })
+
+  test('a refresh whose read failed or timed out resolves false: the window never treats it as shown (#139 review P2-2)', async () => {
+    jest.useFakeTimers()
+    const reads: Array<ReturnType<typeof deferred>> = []
+    const applied: unknown[] = []
+    const reader = new SnapshotReader(() => { const d = deferred(); reads.push(d); return d.promise }, (r: unknown) => applied.push(r), { ...OPTIONS, watchdogMs: 1000 })
+    reader.resume()
+    const failed = reader.refresh()
+    reads[0].resolve({ ok: false, reason: 'offline' })
+    expect(await failed).toBe(false)
+    const silent = reader.refresh()
+    jest.advanceTimersByTime(1000)
+    // Raced, so a reader without its watchdog fails here at once instead of hanging the run on the fake clock.
+    expect(await Promise.race([silent, settle().then(() => 'still pending')])).toBe(false)
+    expect(applied).toEqual([{ ok: false, reason: 'offline' }, { ok: false, cause: 'timed out', error: undefined }])
+    const fine = reader.refresh()
+    reads[2].resolve({ ok: true, value: 'x' })
+    expect(await fine).toBe(true)
+  })
+
+  test('a result that throws while it is applied still resolves the refresh and schedules the next tick (#139 review P3-6)', async () => {
+    jest.useFakeTimers()
+    const reads: Array<ReturnType<typeof deferred>> = []
+    const errors: unknown[] = []
+    const realError = console.error
+    console.error = (...args: unknown[]) => { errors.push(args) }
+    try {
+      const reader = new SnapshotReader(() => { const d = deferred(); reads.push(d); return d.promise }, () => { throw new Error('render bug') }, OPTIONS)
+      reader.start(5000)
+      reads[0].resolve({ ok: true, value: 'x' })
+      await settle()
+      expect(errors).toHaveLength(1)
+      const refresh = reader.refresh()
+      reads[1].resolve({ ok: true, value: 'y' })
+      expect(await refresh).toBe(false)
+      jest.advanceTimersByTime(5000)
+      expect(reads).toHaveLength(3) // the tick after it still came
+      reader.stop()
+    } finally {
+      console.error = realError
+    }
+  })
+
+  test('retry joins a read in flight only while it is young: an older one gets a fresh read beside it (#139 review P3-7)', async () => {
+    let clock = 0
+    const reads: Array<ReturnType<typeof deferred>> = []
+    const reader = new SnapshotReader(() => { const d = deferred(); reads.push(d); return d.promise }, () => {}, { ...OPTIONS, joinMs: 2000, now: () => clock })
+    reader.resume()
+    void reader.retry()
+    clock = 1999
+    void reader.retry()
+    expect(reads).toHaveLength(1)
+    clock = 2000
+    const fresh = reader.retry()
+    expect(reads).toHaveLength(2)
+    reads[1].resolve({ ok: true, value: 'fresh' })
+    expect(await fresh).toBe(true)
   })
 })

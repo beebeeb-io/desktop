@@ -111,18 +111,36 @@ function accountLine(account: PopoverSnapshot['account'], plan: Subscription | n
 
 // ── Home (§7.6, first cut: status, Finder row, storage, the kept rows) ────────
 
-function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefresh: () => Promise<void> }) {
+type BusyKey = 'open' | 'resume' | 'unlock'
+/** `running`: the command is under way. `waiting`: it answered, but the window has not yet shown a snapshot read after
+ * it (its own refresh failed, timed out or was superseded), so the card on screen may still be the one from before. */
+type BusyState = 'running' | 'waiting'
+
+function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefresh: () => Promise<boolean> }) {
   const { showToast } = useToast()
   const finder = useFinderSetup()
   const kept = useKeptFolders()
-  const [busy, setBusy] = useState<'open' | 'resume' | 'unlock' | null>(null)
+  // One busy state per button (#139 review P3-5): Open in Finder finishing never re-enables a Resume still under way.
+  const [busy, setBusy] = useState<Partial<Record<BusyKey, BusyState>>>({})
+  const mark = (key: BusyKey, state: BusyState | null) =>
+    setBusy((current) => {
+      const next = { ...current }
+      if (state) next[key] = state
+      else delete next[key]
+      return next
+    })
   // Review P2-3 b: the Keychain holds a token and no vault key, so the unlock has nothing to read. The sentence is the
   // approved Set up this Mac one, and the card offers the recovery phrase, which is what helps.
   const [noKey, setNoKey] = useState(false)
+  // Every snapshot the window applies after an action is from after it (only the current epoch's reads apply), so it
+  // ends the wait of a button whose own refresh did not land (#139 review P2-2).
+  useEffect(() => {
+    setBusy((current) => (Object.values(current).includes('waiting') ? Object.fromEntries(Object.entries(current).filter(([, state]) => state !== 'waiting')) : current))
+  }, [snapshot])
 
   if (!snapshot.account.vault_unlocked) {
     const unlock = async () => {
-      setBusy('unlock')
+      mark('unlock', 'running')
       setNoKey(false)
       const result = await command<void>('unlock_vault')
       if (!result.ok) {
@@ -135,9 +153,10 @@ function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefres
           })
         }
       }
-      // Busy until the window shows what the unlock did (task 2179): a stale locked card never offers the button again.
-      await onRefresh()
-      setBusy(null)
+      // Busy until the window shows what the unlock did (task 2179; #139 review P2-2): a stale locked card never offers
+      // the button again, also when the refresh after it did not land.
+      const shown = await onRefresh()
+      mark('unlock', shown ? null : 'waiting')
     }
     return (
       <div className="mw-content">
@@ -149,8 +168,8 @@ function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefres
             <div className="mw-row-title">Your vault is locked</div>
             <div className="mw-row-hint">Sync is paused until you unlock it. Files already downloaded to this Mac stay where they are.</div>
           </div>
-          <Btn primary disabled={busy === 'unlock'} onClick={() => void unlock()}>
-            {busy === 'unlock' ? 'Unlocking…' : 'Unlock vault'}
+          <Btn primary disabled={busy.unlock !== undefined} onClick={() => void unlock()}>
+            {busy.unlock !== undefined ? 'Unlocking…' : 'Unlock vault'}
           </Btn>
         </div>
         {noKey ? (
@@ -171,14 +190,14 @@ function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefres
   const attention = kept.kept !== null || kept.keptUnsent !== null
 
   const openInFinder = async () => {
-    setBusy('open')
+    mark('open', 'running')
     const result = await command<void>('open_finder_location', { path: null })
-    setBusy(null)
+    mark('open', null)
     if (!result.ok) showToast(finderOpenFailedToast())
   }
 
   const resume = async () => {
-    setBusy('resume')
+    mark('resume', 'running')
     const result = await command<void>('tray_resume_sync')
     if (!result.ok) {
       showToast({
@@ -187,15 +206,15 @@ function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefres
         message: result.unsupported ? commandUnavailableLabel('tray_resume_sync') : result.reason,
       })
     }
-    // Busy until the window shows what the resume did (task 2179).
-    await onRefresh()
-    setBusy(null)
+    // Busy until the window shows what the resume did (task 2179; #139 review P2-2).
+    const shown = await onRefresh()
+    mark('resume', shown ? null : 'waiting')
   }
 
   let statusAction = null
   if (status.action === 'resume') {
     statusAction = (
-      <Btn primary disabled={busy === 'resume'} onClick={() => void resume()}>
+      <Btn primary disabled={busy.resume !== undefined} onClick={() => void resume()}>
         Resume sync
       </Btn>
     )
@@ -206,7 +225,7 @@ function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefres
   let finderControl = null
   if (row.kind === 'added') {
     finderControl = (
-      <Btn primary disabled={busy === 'open'} onClick={() => void openInFinder()}>
+      <Btn primary disabled={busy.open !== undefined} onClick={() => void openInFinder()}>
         Open in Finder
       </Btn>
     )

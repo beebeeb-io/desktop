@@ -472,9 +472,9 @@ export async function command<T>(name: string, args?: Record<string, unknown>): 
 }
 
 /**
- * Everything the menu-bar popover needs for its first frame (task 1683 slice 2).
- * Call it when the popover is shown (`popover-shown`) and after its own actions,
- * never on a timer. Not used by any rendered UI yet (slice 3).
+ * The account and sync state in one read (task 1683 slice 2): what the menu-bar popover shows, and what the macOS
+ * Beebeeb window reads every few seconds while it is open (slice 1). It never waits long on the storage summary: a
+ * fetch holds it `popover_data::STORAGE_WAIT` at most, and a failed one is not tried again for a while (task 2179).
  */
 export async function popoverSnapshot(activityLimit?: number): Promise<CommandResult<PopoverSnapshot>> {
   const result = await command<unknown>('popover_snapshot', activityLimit === undefined ? undefined : { activityLimit })
