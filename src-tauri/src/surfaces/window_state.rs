@@ -76,11 +76,13 @@ fn logical(rect: PRect, scale: f64) -> LRect {
     }
 }
 
-/// A display in logical points, built from what tauri reports (each value is that display's points × its scale).
+/// A display in logical points, built from what tauri reports (each value is that display's points × its scale), with
+/// the scale it was built with.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Display {
     pub frame: LRect,
     pub work_area: LRect,
+    pub scale: f64,
 }
 
 impl Display {
@@ -88,6 +90,7 @@ impl Display {
         Display {
             frame: logical(frame, scale),
             work_area: logical(work_area, scale),
+            scale: valid_scale(scale),
         }
     }
 
@@ -97,19 +100,34 @@ impl Display {
     }
 }
 
-/// The display holding the menu-bar icon, from tray-icon's rect (points × the icon's own scale) and each display's
-/// scale. A display claims the icon when, at its scale, the icon falls inside it and is as tall as its menu bar; the
-/// height is what tells a 2× built-in from a 1× external when the coordinates alone fit both. `None` when no
-/// display claims it, or more than one does (the caller then uses the primary display).
-pub fn icon_display(icon: PRect, scales: &[f64], displays: &[Display]) -> Option<usize> {
-    let mut claims = displays.iter().zip(scales).enumerate().filter(|(_, (display, scale))| {
-        let at = logical(icon, **scale);
-        let centre = (at.x + at.w / 2.0, at.y + at.h / 2.0);
-        let bar = display.menu_bar_height();
-        display.frame.contains(centre.0, centre.1) && (bar == 0.0 || (at.h - bar).abs() <= 6.0)
-    });
-    let first = claims.next().map(|(index, _)| index);
-    if claims.next().is_some() { None } else { first }
+/// The display holding the menu-bar icon, from tray-icon's rect (points × the icon's own scale). A display holds the
+/// icon when, read at that display's scale, the icon's centre is inside it. One holder is the answer. On a mixed-DPI
+/// desk two can hold the same numbers (2800 px is 1400 pt on a 2× built-in and 2800 pt on a 1× external to its right);
+/// then the one whose menu bar is as tall as the icon wins (review round 2, P2-4: the height only breaks a tie).
+/// `None` when no display holds it, or the tie stays (the caller then uses the primary display).
+pub fn icon_display(icon: PRect, displays: &[Display]) -> Option<usize> {
+    let read = |display: &Display| logical(icon, display.scale);
+    let holders: Vec<usize> = displays
+        .iter()
+        .enumerate()
+        .filter(|(_, display)| {
+            let at = read(display);
+            display.frame.contains(at.x + at.w / 2.0, at.y + at.h / 2.0)
+        })
+        .map(|(index, _)| index)
+        .collect();
+    if holders.len() <= 1 {
+        return holders.first().copied();
+    }
+    let fitting: Vec<usize> = holders
+        .into_iter()
+        .filter(|&index| {
+            let display = &displays[index];
+            let bar = display.menu_bar_height();
+            bar > 0.0 && (read(display).h - bar).abs() <= 6.0
+        })
+        .collect();
+    if fitting.len() == 1 { Some(fitting[0]) } else { None }
 }
 
 /// The frame that centres `size` in the display's work area. A window larger than the work area keeps its top-left
@@ -164,8 +182,9 @@ pub fn parse_kept_frame(json: &str) -> Option<LRect> {
     serde_json::from_str::<LRect>(json).ok().filter(LRect::is_usable)
 }
 
-/// The whole placement, decided before any of it is applied: the kept frame when at least half of it is on screen,
-/// else `default_size` centred on the icon's display, else on `primary`.
+/// The whole placement, decided before any of it is applied: the kept frame when at least half of it is on screen;
+/// else centred on the icon's display, else on `primary`, at the kept size (review round 2: an off-screen recovery
+/// keeps the size it was left at) or, with no kept frame, at `default_size` (the window's own config).
 pub fn plan_main_window(
     kept: Option<LRect>,
     displays: &[Display],
@@ -173,14 +192,15 @@ pub fn plan_main_window(
     primary: usize,
     default_size: (f64, f64),
 ) -> Option<LRect> {
-    if let Some(frame) = kept.filter(|frame| frame.is_usable() && mostly_on_screen(*frame, displays)) {
+    let kept = kept.filter(LRect::is_usable);
+    if let Some(frame) = kept.filter(|frame| mostly_on_screen(*frame, displays)) {
         return Some(frame);
     }
     let display = icon
         .and_then(|i| displays.get(i))
         .or_else(|| displays.get(primary))
         .or_else(|| displays.first())?;
-    Some(centred(default_size, display))
+    Some(centred(kept.map_or(default_size, |frame| (frame.w, frame.h)), display))
 }
 
 #[cfg(test)]
@@ -193,22 +213,19 @@ mod tests {
     // 1× external to its right (1920 × 1080 pt, a 25 pt menu bar). As tauri reports them: points × each one's scale.
     const BUILT_IN: f64 = 2.0;
     const EXTERNAL: f64 = 1.0;
-    fn desk() -> ([Display; 2], [f64; 2]) {
-        (
-            [
-                Display::from_physical(
-                    PRect { x: 0, y: 0, w: 3024, h: 1964 },
-                    PRect { x: 0, y: 74, w: 3024, h: 1750 },
-                    BUILT_IN,
-                ),
-                Display::from_physical(
-                    PRect { x: 1512, y: 0, w: 1920, h: 1080 },
-                    PRect { x: 1512, y: 25, w: 1920, h: 1055 },
-                    EXTERNAL,
-                ),
-            ],
-            [BUILT_IN, EXTERNAL],
-        )
+    fn desk() -> [Display; 2] {
+        [
+            Display::from_physical(
+                PRect { x: 0, y: 0, w: 3024, h: 1964 },
+                PRect { x: 0, y: 74, w: 3024, h: 1750 },
+                BUILT_IN,
+            ),
+            Display::from_physical(
+                PRect { x: 1512, y: 0, w: 1920, h: 1080 },
+                PRect { x: 1512, y: 25, w: 1920, h: 1055 },
+                EXTERNAL,
+            ),
+        ]
     }
 
     /// The status item as tray-icon reports it: its frame in points × its own display's scale.
@@ -223,39 +240,65 @@ mod tests {
 
     #[test]
     fn a_display_is_its_physical_frame_over_its_own_scale() {
-        let (d, _) = desk();
+        let d = desk();
         assert_eq!(d[0].frame, LRect { x: 0.0, y: 0.0, w: 1512.0, h: 982.0 });
+        assert_eq!((d[0].scale, d[1].scale), (BUILT_IN, EXTERNAL));
         assert_eq!(d[0].work_area, LRect { x: 0.0, y: 37.0, w: 1512.0, h: 875.0 });
         assert_eq!(d[1].frame, LRect { x: 1512.0, y: 0.0, w: 1920.0, h: 1080.0 });
     }
 
     #[test]
     fn the_icon_names_its_display_on_a_mixed_dpi_desk_on_either_display() {
-        let (d, scales) = desk();
+        let d = desk();
         // On the built-in at x = 1400 pt: physical 2800, which at 1× would also fall on the external (1512..3432 pt).
         // Only the built-in's 37 pt menu bar is as tall as the icon (74 px / 2).
-        assert_eq!(icon_display(icon_at(1400.0, 37.0, BUILT_IN), &scales, &d), Some(0));
+        assert_eq!(icon_display(icon_at(1400.0, 37.0, BUILT_IN), &d), Some(0));
         // On the external at x = 2900 pt: physical 2900, which at 2× would also fall on the built-in (1450 pt). Only
         // the external's 25 pt menu bar is as tall as the icon.
-        assert_eq!(icon_display(icon_at(2900.0, 25.0, EXTERNAL), &scales, &d), Some(1));
-        assert_eq!(icon_display(icon_at(3300.0, 25.0, EXTERNAL), &scales, &d), Some(1));
+        assert_eq!(icon_display(icon_at(2900.0, 25.0, EXTERNAL), &d), Some(1));
+        assert_eq!(icon_display(icon_at(3300.0, 25.0, EXTERNAL), &d), Some(1));
+    }
+
+    #[test]
+    fn one_display_holding_the_icon_names_it_whatever_the_icon_height() {
+        // Review round 2, P2-4: the height only breaks a tie. A single display that holds the icon is its display,
+        // also when its menu bar is not the 37 pt the notch draws (a 39 pt bar, a bigger text size).
+        let d = desk();
+        assert_eq!(icon_display(icon_at(1400.0, 39.0, BUILT_IN), &d[..1]), Some(0));
+        // On the external alone, with a 30 pt bar.
+        assert_eq!(icon_display(icon_at(1600.0, 30.0, EXTERNAL), &d[1..]), Some(0));
+        // Two 2× displays side by side: only one contains the icon at their (equal) scale, whatever its height.
+        let twins = [
+            Display::from_physical(PRect { x: 0, y: 0, w: 3024, h: 1964 }, PRect { x: 0, y: 74, w: 3024, h: 1750 }, 2.0),
+            Display::from_physical(PRect { x: 3024, y: 0, w: 3024, h: 1964 }, PRect { x: 3024, y: 50, w: 3024, h: 1774 }, 2.0),
+        ];
+        assert_eq!(icon_display(icon_at(1400.0, 40.0, 2.0), &twins), Some(0));
+        assert_eq!(icon_display(icon_at(2900.0, 40.0, 2.0), &twins), Some(1));
+    }
+
+    #[test]
+    fn off_screen_recovery_keeps_the_kept_size() {
+        // Review round 2, P3: centred again, at the size it was left, not the default.
+        let d = desk();
+        let gone = LRect { x: 4000.0, y: 100.0, w: 1000.0, h: 700.0 };
+        assert_eq!(plan_main_window(Some(gone), &d, Some(1), 0, SIZE), Some(centred((1000.0, 700.0), &d[1])));
     }
 
     #[test]
     fn an_icon_no_display_claims_or_two_displays_claim_is_unknown() {
-        let (d, scales) = desk();
-        assert_eq!(icon_display(icon_at(9000.0, 25.0, EXTERNAL), &scales, &d), None);
+        let d = desk();
+        assert_eq!(icon_display(icon_at(9000.0, 25.0, EXTERNAL), &d), None);
         // Auto-hiding menu bars: no height to tell the displays apart, and both fit, so the caller's primary decides.
         let hidden = [
             Display { work_area: d[0].frame, ..d[0] },
             Display { work_area: d[1].frame, ..d[1] },
         ];
-        assert_eq!(icon_display(icon_at(1400.0, 37.0, BUILT_IN), &scales, &hidden), None);
+        assert_eq!(icon_display(icon_at(1400.0, 37.0, BUILT_IN), &hidden), None);
     }
 
     #[test]
     fn first_open_centres_on_the_icon_display_in_points_whichever_display_holds_it() {
-        let (d, _) = desk();
+        let d = desk();
         // Built-in work area 1512 × 875 from y 37: (1512 - 920) / 2 = 296, 37 + (875 - 620) / 2 = 164.5.
         assert_eq!(plan_main_window(None, &d, Some(0), 0, SIZE), Some(LRect { x: 296.0, y: 164.5, w: 920.0, h: 620.0 }));
         // External work area 1920 × 1055 from (1512, 25): 1512 + 500, 25 + 217.5.
@@ -266,7 +309,7 @@ mod tests {
 
     #[test]
     fn a_kept_frame_on_the_external_comes_back_exactly_as_it_was_left() {
-        let (d, _) = desk();
+        let d = desk();
         // Left on the 1× external at (2200, 300) pt, 1000 × 700: what `frame_to_keep` writes from tao's numbers.
         let kept = frame_to_keep((2200, 300), (1000, 700), EXTERNAL, false, false).unwrap();
         assert_eq!(kept, LRect { x: 2200.0, y: 300.0, w: 1000.0, h: 700.0 });
@@ -279,7 +322,7 @@ mod tests {
 
     #[test]
     fn exactly_half_on_screen_is_kept_and_less_than_half_is_centred_again() {
-        let (d, _) = desk();
+        let d = desk();
         // The desk's right edge is 3432 pt.
         let at = |x| LRect { x, y: 200.0, w: 920.0, h: 620.0 };
         assert!(mostly_on_screen(at(3432.0 - 460.0), &d), "460 of 920 points on screen: half");
@@ -289,7 +332,7 @@ mod tests {
 
     #[test]
     fn a_frame_on_a_display_that_was_unplugged_is_centred_on_the_icon_display() {
-        let (d, _) = desk();
+        let d = desk();
         let gone = LRect { x: 4000.0, y: 100.0, w: 920.0, h: 620.0 };
         assert_eq!(plan_main_window(Some(gone), &d, Some(1), 0, SIZE), plan_main_window(None, &d, Some(1), 0, SIZE));
         // Unplugged with only the built-in left.
@@ -305,14 +348,14 @@ mod tests {
 
     #[test]
     fn under_the_menu_bar_counts_as_off_the_work_area() {
-        let (d, _) = desk();
+        let d = desk();
         // 620 tall, only its bottom 200 pt below the built-in's 37 pt menu bar band: less than half on screen.
         assert!(!mostly_on_screen(LRect { x: 100.0, y: 37.0 + 200.0 - 620.0, w: 920.0, h: 620.0 }, &d));
     }
 
     #[test]
     fn a_window_larger_than_the_work_area_keeps_its_title_bar_on_screen() {
-        let (d, _) = desk();
+        let d = desk();
         assert_eq!(centred((4000.0, 3000.0), &d[1]), LRect { x: 1512.0, y: 25.0, w: 4000.0, h: 3000.0 });
     }
 

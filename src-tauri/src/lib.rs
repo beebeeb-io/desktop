@@ -10266,11 +10266,24 @@ fn get_desktop_config() -> Result<config::DesktopSettings, String> {
 /// `pick_sync_root` or any other writer cannot race away a change between
 /// this load and save.
 #[tauri::command]
-fn set_desktop_config(app: tauri::AppHandle, config: config::DesktopSettings) -> Result<(), String> {
-    let saved = save_desktop_settings(config);
-    // F3 (review item 3): the compact flyout's Network page writes `pause_sync` here; the menu's label follows.
-    pause_state_changed(&app);
-    saved
+async fn set_desktop_config(app: tauri::AppHandle, config: config::DesktopSettings) -> Result<(), String> {
+    apply_desktop_settings(&app, config).await
+}
+
+/// A settings write. Every field but the pause is merged into the file in one update; a pause (the compact flyout's
+/// Network page sends one) goes the way the menu's and the tray's go, `set_sync_paused`, so the file, the engine's
+/// flag, the engine-status event and the menu's label agree (task 1683 slice 1, review round 2 P2-3). A write without
+/// a pause touches neither the pause nor the label.
+async fn apply_desktop_settings(
+    app: &tauri::AppHandle<impl tauri::Runtime>,
+    mut config: config::DesktopSettings,
+) -> Result<(), String> {
+    let pause = config.pause_sync.take();
+    save_desktop_settings(config)?;
+    if let Some(paused) = pause {
+        set_sync_paused(app, paused).await?;
+    }
+    Ok(())
 }
 
 /// The write behind `set_desktop_config`: one update under the config-write lock (task 1889).
@@ -10488,7 +10501,7 @@ fn rehydrate_sync_paused(flag: &AtomicBool, fallback: bool) {
     }
 }
 
-async fn set_sync_paused(app: &tauri::AppHandle, paused: bool) -> Result<(), String> {
+async fn set_sync_paused(app: &tauri::AppHandle<impl tauri::Runtime>, paused: bool) -> Result<(), String> {
     let state = app.state::<AppState>();
     let acct = state.active_account()?;
     // Persist so the paused state survives a restart.
@@ -14051,6 +14064,7 @@ fn show_main_window(app: &tauri::AppHandle, nav: MainNav) {
     // §9.1: the Dock icon (and with it the app menu) comes first, so it is there when the window is.
     set_macos_dock_icon(app, true);
     if let Some(win) = app.get_webview_window(label) {
+        unhide_app(app);
         let _ = win.unminimize();
         let _ = win.show();
         let _ = win.set_focus();
@@ -14064,7 +14078,8 @@ fn show_main_window(app: &tauri::AppHandle, nav: MainNav) {
     };
     match tauri::WebviewWindowBuilder::from_config(app, config).and_then(|builder| builder.build()) {
         Ok(win) => {
-            place_main_window(app, &win);
+            place_main_window(app, &win, (config.width, config.height));
+            unhide_app(app);
             let _ = win.show();
             let _ = win.set_focus();
         }
@@ -14072,6 +14087,31 @@ fn show_main_window(app: &tauri::AppHandle, nav: MainNav) {
             tracing::warn!(%error, "failed to create the Beebeeb window");
             refresh_macos_dock_icon(app, None);
         }
+    }
+}
+
+/// Unhides the app (`AppHandle::show`, NSApp `unhide:`), which the tray's Hide and ⌘H hide. Not a window: a window
+/// shown in a hidden app stays hidden, and tao's `set_focus` does nothing there, so every opener on a Mac calls this
+/// before it shows its window (review round 2, P2-2).
+#[cfg(target_os = "macos")]
+fn unhide_app(app: &tauri::AppHandle) {
+    let _ = app.show();
+}
+
+/// `RunEvent::Reopen` (double-clicking Beebeeb.app, Spotlight, the Dock; spec §7.3): the window as it was, or a new one
+/// on Home. With the window closed the app lives on in the menu bar, so this is the way back (review round 2, P2-1).
+#[cfg(target_os = "macos")]
+fn reopen_main_window(app: &tauri::AppHandle) {
+    let label = surfaces::policy::main_window_label(surfaces::policy::Platform::current());
+    match app.get_webview_window(label) {
+        Some(win) => {
+            set_macos_dock_icon(app, true);
+            unhide_app(app);
+            let _ = win.unminimize();
+            let _ = win.show();
+            let _ = win.set_focus();
+        }
+        None => show_main_window(app, MainNav::Home),
     }
 }
 
@@ -14085,9 +14125,10 @@ fn back_in_main_window(app: &tauri::AppHandle) {
     }
 }
 
-/// The displays in logical points (each one's physical frame over its own scale), and their scales.
+/// The displays in logical points (each one's physical frame over its own scale, which each `Display` keeps), and
+/// the index of the primary one.
 #[cfg(target_os = "macos")]
-fn macos_displays(win: &tauri::WebviewWindow) -> (Vec<surfaces::window_state::Display>, Vec<f64>, usize) {
+fn macos_displays(win: &tauri::WebviewWindow) -> (Vec<surfaces::window_state::Display>, usize) {
     use surfaces::window_state::{Display, PRect};
     let monitors = win.available_monitors().unwrap_or_default();
     let displays = monitors
@@ -14105,14 +14146,13 @@ fn macos_displays(win: &tauri::WebviewWindow) -> (Vec<surfaces::window_state::Di
             )
         })
         .collect();
-    let scales = monitors.iter().map(|m| m.scale_factor()).collect();
     let primary = win
         .primary_monitor()
         .ok()
         .flatten()
         .and_then(|p| monitors.iter().position(|m| m.name() == p.name() && m.position() == p.position()))
         .unwrap_or(0);
-    (displays, scales, primary)
+    (displays, primary)
 }
 
 /// The menu-bar icon's rect as tray-icon reports it (points × the icon's own scale).
@@ -14136,6 +14176,26 @@ fn main_frame_path(app: &tauri::AppHandle) -> Option<PathBuf> {
         .app_config_dir()
         .ok()
         .map(|dir| dir.join(surfaces::window_state::MAIN_FRAME_FILENAME))
+}
+
+/// The kept frame, read back. A missing, empty, partial or unreadable file, or one that is not a usable frame, is no
+/// frame: the window then opens at its default place.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn read_kept_frame(path: &Path) -> Option<surfaces::window_state::LRect> {
+    let bytes = std::fs::read(path).ok()?;
+    surfaces::window_state::parse_kept_frame(std::str::from_utf8(&bytes).ok()?)
+}
+
+/// Writes the kept frame atomically: a temporary file next to it, then a rename over it, so a crash mid-write leaves
+/// the previous frame, never half a file.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn write_kept_frame(path: &Path, frame: &surfaces::window_state::LRect) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let temporary = path.with_extension("json.tmp");
+    std::fs::write(&temporary, serde_json::to_vec(frame).map_err(std::io::Error::other)?)?;
+    std::fs::rename(&temporary, path)
 }
 
 /// Keeps the Beebeeb window's frame, when it closes and when the app quits while it is open (§7.2). A full-screen
@@ -14163,32 +14223,20 @@ fn save_main_window_frame(app: &tauri::AppHandle) {
     let Some(path) = main_frame_path(app) else {
         return;
     };
-    let written = path
-        .parent()
-        .map(std::fs::create_dir_all)
-        .unwrap_or(Ok(()))
-        .and_then(|_| {
-            let temporary = path.with_extension("json.tmp");
-            std::fs::write(&temporary, serde_json::to_vec(&frame).unwrap_or_default())?;
-            std::fs::rename(&temporary, &path)
-        });
-    if let Err(error) = written {
+    if let Err(error) = write_kept_frame(&path, &frame) {
         tracing::warn!(%error, "main window: its frame could not be kept");
     }
 }
 
 /// §7.2, planned in full before any of it is applied (review item 4): the kept frame when at least half of it is on a
-/// display, else centred on the menu-bar icon's display, else on the primary one. Logical points throughout, so a
-/// mixed-DPI desk places it where it was (review item 5).
+/// display, else at its kept size (or `default_size`, the window's own config) centred on the menu-bar icon's display,
+/// else on the primary one. Logical points throughout, so a mixed-DPI desk places it where it was (review item 5).
 #[cfg(target_os = "macos")]
-fn place_main_window(app: &tauri::AppHandle, win: &tauri::WebviewWindow) {
+fn place_main_window(app: &tauri::AppHandle, win: &tauri::WebviewWindow, default_size: (f64, f64)) {
     use surfaces::window_state as placement;
-    let (displays, scales, primary) = macos_displays(win);
-    let icon = macos_status_item_rect(app).and_then(|rect| placement::icon_display(rect, &scales, &displays));
-    let kept = main_frame_path(app)
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .and_then(|json| placement::parse_kept_frame(&json));
-    let default_size = (MAIN_WINDOW_WIDTH, MAIN_WINDOW_HEIGHT);
+    let (displays, primary) = macos_displays(win);
+    let icon = macos_status_item_rect(app).and_then(|rect| placement::icon_display(rect, &displays));
+    let kept = main_frame_path(app).and_then(|path| read_kept_frame(&path));
     let Some(frame) = placement::plan_main_window(kept, &displays, icon, primary, default_size) else {
         tracing::warn!("main window: no display to place it on");
         return;
@@ -14200,11 +14248,6 @@ fn place_main_window(app: &tauri::AppHandle, win: &tauri::WebviewWindow) {
     let _ = win.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(frame.x, frame.y)));
 }
 
-/// The Beebeeb window's default size in points (`tauri.macos.conf.json`, spec §7.2).
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-const MAIN_WINDOW_WIDTH: f64 = 920.0;
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-const MAIN_WINDOW_HEIGHT: f64 = 620.0;
 
 /// The activation policy last applied: 0 unknown (the app starts Regular), 1 Dock icon, 2 none.
 #[cfg(target_os = "macos")]
@@ -14753,6 +14796,11 @@ pub fn run() {
             if let tauri::RunEvent::Exit = event {
                 save_main_window_frame(app);
             }
+            // Review round 2, P2-1: opening the app again (Finder, Spotlight, the Dock) brings the window back.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = event {
+                reopen_main_window(app);
+            }
             #[cfg(not(target_os = "macos"))]
             let _ = app;
         });
@@ -15182,9 +15230,9 @@ fn pause_menu_label_now() -> &'static str {
     pause_menu_label(DesktopConfig::load().map(|cfg| cfg.pause_sync).unwrap_or(false))
 }
 
-/// Every pause change calls this once it is written (the menu, the tray commands, Home's Resume, and a settings
-/// write from the compact flyout's Network page): the menu's label follows the file (F3).
-fn pause_state_changed(app: &tauri::AppHandle) {
+/// Every pause change calls this once it is written, through `set_sync_paused` (the menu, the tray commands, Home's
+/// Resume, and a settings write from the compact flyout's Network page): the menu's label follows the file (F3).
+fn pause_state_changed(app: &tauri::AppHandle<impl tauri::Runtime>) {
     #[cfg(target_os = "macos")]
     refresh_macos_pause_menu_label(app);
     #[cfg(not(target_os = "macos"))]
@@ -15371,7 +15419,7 @@ impl MacosMenuItems {
 /// F3: the menu says "Resume Sync" while the file says paused, else "Pause Sync". Called through
 /// `pause_state_changed` only.
 #[cfg(target_os = "macos")]
-fn refresh_macos_pause_menu_label(app: &tauri::AppHandle) {
+fn refresh_macos_pause_menu_label(app: &tauri::AppHandle<impl tauri::Runtime>) {
     let Some(items) = app.try_state::<MacosMenuItems>() else {
         return;
     };
@@ -15656,15 +15704,90 @@ mod main_window_tests {
 
     #[test]
     fn every_pause_writer_refreshes_the_menu_label() {
+        // Every pause goes through `set_sync_paused`, which refreshes the label; a settings write only when it carries
+        // a pause (review round 2: no config read on every slider move).
         let production = super::finder_setup_command_tests::production_source();
-        for signature in ["fn set_desktop_config(", "async fn set_sync_paused("] {
-            let body = super::finder_setup_command_tests::body_between(&production, signature, "\n}\n");
-            assert!(body.contains("pause_state_changed(&app);") || body.contains("pause_state_changed(app);"), "{signature}:\n{body}");
-        }
+        let body = |signature: &str| super::finder_setup_command_tests::body_between(&production, signature, "\n}\n");
+        assert!(body("async fn set_sync_paused(").contains("pause_state_changed(app);"));
+        assert!(body("async fn set_desktop_config(").contains("apply_desktop_settings(&app, config).await"));
+        let apply = body("async fn apply_desktop_settings(");
+        assert!(apply.contains("let pause = config.pause_sync.take();"), "{apply}");
+        assert!(apply.contains("set_sync_paused(app, paused).await?;"), "{apply}");
+        assert!(!apply.contains("pause_state_changed("), "a write without a pause refreshes nothing:\n{apply}");
         assert!(
             !production.contains("refresh_macos_pause_menu_label(app);\n    persisted?;"),
             "set_sync_paused refreshes through the one shared call"
         );
+    }
+
+    /// Review round 2, P2-3: a pause sent with the settings (the compact flyout's Network page) pauses the engine as the
+    /// menu's and the tray's do: the file, the engine's flag, the engine-status event and the menu label agree. A
+    /// settings write without a pause leaves the pause alone.
+    #[tokio::test]
+    async fn a_pause_sent_with_the_settings_pauses_the_engine() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        crate::config::CONFIG_DIR_OVERRIDE
+            .scope(dir.path().to_path_buf(), async {
+                let app = tauri::test::mock_app();
+                app.manage(AppState::default());
+                synthesize_single_account(&app.state::<AppState>(), account::AccountId("acct-test".into()));
+                let flag = || app.state::<AppState>().active_account().unwrap().sync_paused.load(Ordering::Relaxed);
+                let send = |json: &str| serde_json::from_str::<crate::config::DesktopSettings>(json).unwrap();
+
+                apply_desktop_settings(app.handle(), send(r#"{ "pause_sync": true }"#)).await.expect("saved");
+                assert!(flag(), "the engine's flag is paused");
+                assert!(DesktopConfig::load().unwrap().pause_sync, "and so is the file");
+                assert_eq!(pause_menu_label_now(), "Resume Sync");
+
+                apply_desktop_settings(app.handle(), send(r#"{ "upload_kbps_limit": 1000 }"#)).await.expect("saved");
+                assert!(flag(), "a speed change leaves the pause alone");
+                assert_eq!(DesktopConfig::load().unwrap().upload_kbps_limit, 1000);
+
+                apply_desktop_settings(app.handle(), send(r#"{ "pause_sync": false }"#)).await.expect("saved");
+                assert!(!flag(), "resumed");
+                assert!(!DesktopConfig::load().unwrap().pause_sync);
+            })
+            .await;
+    }
+
+    /// Review round 2: a kept frame that is missing, empty, partial, not UTF-8, not a frame, or names a display that is
+    /// gone falls back to the default placement, and nothing panics.
+    #[test]
+    fn a_bad_kept_frame_file_is_no_frame_and_the_window_opens_at_its_default_place() {
+        use surfaces::window_state::{Display, LRect, PRect, plan_main_window};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(surfaces::window_state::MAIN_FRAME_FILENAME);
+        assert_eq!(read_kept_frame(&path), None, "missing");
+        for bad in [&b""[..], b"{\"x\":12,\"y\"", b"\xff\xfe\x00", b"null", b"{\"x\":1,\"y\":2,\"w\":0,\"h\":3}"] {
+            std::fs::write(&path, bad).unwrap();
+            assert_eq!(read_kept_frame(&path), None, "{bad:?}");
+        }
+        let built_in = Display::from_physical(PRect { x: 0, y: 0, w: 3024, h: 1964 }, PRect { x: 0, y: 74, w: 3024, h: 1750 }, 2.0);
+        let default = plan_main_window(None, &[built_in], Some(0), 0, (920.0, 620.0));
+        assert!(default.is_some());
+        // A frame left on an external display that is gone: the default place, at the kept size.
+        let gone = LRect { x: 2500.0, y: 100.0, w: 920.0, h: 620.0 };
+        write_kept_frame(&path, &gone).unwrap();
+        assert_eq!(read_kept_frame(&path), Some(gone));
+        assert_eq!(plan_main_window(read_kept_frame(&path), &[built_in], Some(0), 0, (920.0, 620.0)), default);
+    }
+
+    #[test]
+    fn the_kept_frame_is_written_whole_or_not_at_all() {
+        use surfaces::window_state::LRect;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join(surfaces::window_state::MAIN_FRAME_FILENAME);
+        let first = LRect { x: 100.0, y: 80.0, w: 920.0, h: 620.0 };
+        let second = LRect { x: 2200.0, y: 300.0, w: 1000.0, h: 700.0 };
+        write_kept_frame(&path, &first).unwrap();
+        write_kept_frame(&path, &second).unwrap();
+        assert_eq!(read_kept_frame(&path), Some(second), "the second write replaced the first");
+        assert!(!path.with_extension("json.tmp").exists(), "no temporary file is left");
+        let production = super::finder_setup_command_tests::production_source();
+        let body = super::finder_setup_command_tests::body_between(&production, "fn write_kept_frame(", "\n}\n");
+        let written = body.find("std::fs::write(&temporary,").expect("written to a temporary file");
+        let renamed = body.find("std::fs::rename(&temporary, path)").expect("then renamed over the frame");
+        assert!(written < renamed, "{body}");
     }
 
     #[test]
@@ -16426,6 +16549,9 @@ fn show_compact_app_window_with_nav(app: &tauri::AppHandle, nav: Option<&str>) {
                 }
             }
         }
+        // The tray's Hide hides the app; a window shown in a hidden app stays hidden (review round 2, P2-2).
+        #[cfg(target_os = "macos")]
+        unhide_app(app);
         let _ = win.show();
         let _ = win.set_focus();
         if let Some(nav) = nav {
@@ -16488,6 +16614,8 @@ fn show_compact_app_window_with_nav(app: &tauri::AppHandle, nav: Option<&str>) {
                 });
             }
 
+            #[cfg(target_os = "macos")]
+            unhide_app(app);
             let _ = win.show();
             let _ = win.set_focus();
             if let Some(nav) = nav {
@@ -22130,13 +22258,19 @@ mod finder_setup_wiring_tests {
             })
             .collect();
         let indent = |line: &str| line.len() - line.trim_start().len();
-        let (mut windows, mut notifications, mut dialogs) = (Vec::new(), 0, 0);
+        let (mut windows, mut notifications, mut dialogs, mut unhides) = (Vec::new(), 0, 0, 0);
         for (i, &(at, line)) in lines.iter().enumerate() {
             let code = line.trim();
             if code.starts_with("//") || !code.contains(".show(") {
                 continue;
             }
             let site = enclosing_fn(&production, at);
+            // Task 1683 slice 1 (review round 2, P2-2): unhiding the app (`AppHandle::show`) is not a window; it lives
+            // in one helper, which every macOS opener calls before it shows (and focuses) its window.
+            if site == "unhide_app" && code == "let _ = app.show();" {
+                unhides += 1;
+                continue;
+            }
             // A parentless dialog: the `.show(|…| …)` line of a chain, or a whole chain on one line
             // (`app.dialog()…show(|_| {});`, which rustfmt keeps when it is short).
             if code.starts_with(".show(|") || (code.starts_with("app.dialog().") && code.contains(".show(|")) {
@@ -22171,11 +22305,14 @@ mod finder_setup_wiring_tests {
             );
             windows.push(site);
         }
+        // 12 when f7b counted them (2026-10-09). Task 1683 slice 1 replaced the Settings window's two with the Beebeeb
+        // window's two (`show_main_window`) and added the reopen's (`reopen_main_window`): 13.
         assert_eq!(
             windows.len(),
-            12,
-            "the window show() sites f7b counted (2026-10-09): {windows:?}"
+            13,
+            "the window show() sites: {windows:?}"
         );
+        assert_eq!(unhides, 1, "the one app unhide, in unhide_app");
         assert_eq!(notifications, 3, "the three notification builders");
         // The menu's three sign-out message dialogs, and (task 1882, rebase 2026-10-10) the kept-folder alert,
         // `show_preserved_files_alert`, (task 1885, I2) the menu's failed-open alert, `show_menu_open_failure`,

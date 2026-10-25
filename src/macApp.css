@@ -34,6 +34,7 @@
 /* ── The sidebar: Home (and the account with the gear), or the Settings list ── */
 
 .mw-sidebar {
+  position: relative;
   box-sizing: border-box;
   min-width: 0;
   min-height: 0;
@@ -50,11 +51,7 @@
 }
 
 /* The band beside the traffic lights (review item 7): a drag region over the sidebar's top padding. Out of flow, so
-   the list below it does not move; the sidebar is its positioning box. */
-.mw-sidebar {
-  position: relative;
-}
-
+   the list below it does not move; the sidebar (position: relative) is its positioning box. */
 .mw-drag-band {
   position: absolute;
   top: 0;

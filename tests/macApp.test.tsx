@@ -384,6 +384,7 @@ describe('moved from the Settings window\'s root (task 1683 slice 4, now the win
   test('a handled flow request never runs again when the Account section mounts again', async () => {
     const source = readFileSync(new URL('../src/MacSettings.tsx', import.meta.url), 'utf8')
     const start = source.indexOf('function AccountTab(')
+    expect(start, 'AccountTab is in MacSettings.tsx').toBeGreaterThan(-1)
     const tab = source.slice(start, source.indexOf('\n}\n', start))
     for (const banned of ['new SignOutFlow(', 'connectSignOutFlowMenu(', 'connectSignOutFlowEvents(', '.request()']) {
       expect(tab.includes(banned), banned).toBe(false)

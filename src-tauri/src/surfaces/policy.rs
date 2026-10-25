@@ -443,6 +443,53 @@ mod wiring_tests {
     }
 
     #[test]
+    fn a_reopen_shows_the_beebeeb_window() {
+        // Review round 2, P2-1: with the window closed the app lives on in the menu bar, so double-clicking
+        // Beebeeb.app, Spotlight or the Dock must bring the window back (spec §7.3, `RunEvent::Reopen`).
+        let src = lib_rs();
+        let start = src.find(".build(tauri::generate_context!())").expect("the app is built first");
+        let run = &src[start..start + src[start..].find("\n}\n").expect("the end of run()")];
+        assert!(
+            run.contains("if let tauri::RunEvent::Reopen { .. } = event {\n                reopen_main_window(app);"),
+            "{run}"
+        );
+        let body = item_from(&src, "fn reopen_main_window(");
+        assert!(body.contains("show_main_window(app, MainNav::Home)"), "a closed window opens on Home:\n{body}");
+        assert!(body.contains("app.get_webview_window("), "an open one is shown as it is:\n{body}");
+    }
+
+    /// Every `win.show()` in `body` has an unhide of the app (`unhide_app(app)`) since the previous one: a window shown
+    /// in a hidden app stays hidden, and tao's `set_focus` does nothing there.
+    fn every_show_unhides_first(name: &str, body: &str) -> usize {
+        let mut from = 0;
+        let mut shows = 0;
+        while let Some(at) = body[from..].find("win.show()") {
+            let before = &body[from..from + at];
+            assert!(before.contains("unhide_app(app);"), "{name}: a window is shown without unhiding the app first:\n{body}");
+            from += at + "win.show()".len();
+            shows += 1;
+        }
+        shows
+    }
+
+    #[test]
+    fn opening_a_window_on_a_mac_unhides_the_app_first() {
+        // Review round 2, P2-2: the tray's Hide hides the app; every way back must unhide it.
+        let src = lib_rs();
+        assert_eq!(every_show_unhides_first("show_main_window", item_from(&src, "fn show_main_window(")), 2);
+        assert_eq!(every_show_unhides_first("reopen_main_window", item_from(&src, "fn reopen_main_window(")), 1);
+        let compact = item_from(&src, "fn show_compact_app_window_with_nav(");
+        assert_eq!(every_show_unhides_first("show_compact_app_window_with_nav", compact), 2);
+        assert!(
+            compact.matches("#[cfg(target_os = \"macos\")]\n        unhide_app(app);").count()
+                + compact.matches("#[cfg(target_os = \"macos\")]\n            unhide_app(app);").count()
+                == 2,
+            "the compact window's unhide is macOS only (Linux keeps today's open):\n{compact}"
+        );
+        assert!(item_from(&src, "fn unhide_app(").contains("let _ = app.show();"));
+    }
+
+    #[test]
     fn the_tray_hide_item_asks_tray_hide() {
         let src = lib_rs();
         let start = src.find("\"tray_hide\" =>").expect("the tray's Hide arm");
