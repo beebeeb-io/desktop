@@ -1422,6 +1422,14 @@ pub fn stamp_local_files_in_sync(sync_root: &std::path::Path) {
             continue;
         }
 
+        // Task 1640: only agreed content is marked in sync. An edit the person made (the
+        // platform cleared its in-sync state), or a file whose upload is queued, stays out of
+        // sync, so neither this engine nor Explorer's "Free up space" can discard its bytes.
+        // Before, every `Local` row was stamped on every tick, unsent edits included.
+        if !placeholders::local_bytes_agreed(bridge.db(), &entry.file_id, &local_path) {
+            continue;
+        }
+
         // Build the NUL-terminated UTF-16 path string that `CfOpenFileWithOplock`
         // expects — identical to `db_placeholder_path` in callbacks.rs.
         let path_wide: Vec<u16> = local_path

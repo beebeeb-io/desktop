@@ -416,6 +416,20 @@ impl std::fmt::Display for QueuedCopyMissing {
 
 impl std::error::Error for QueuedCopyMissing {}
 
+/// Task 1640: a hydrate that would write over a sync-folder file holding a change that is not
+/// sent (its bytes differ from the content this device last agreed with the server on, or its
+/// upload is queued). Path-free on purpose.
+#[derive(Debug)]
+pub(crate) struct UnsentLocalChange;
+
+impl std::fmt::Display for UnsentLocalChange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("this file has a change that is not uploaded yet, so it is not replaced")
+    }
+}
+
+impl std::error::Error for UnsentLocalChange {}
+
 /// §5.6 safe default: no thumbnail is fetched while the item's held write is queued. The
 /// server holds only the previous version's, and the system would cache it under the token.
 #[derive(Debug)]
@@ -1853,6 +1867,12 @@ impl EngineBridge {
         if marks_thumbnails {
             self.set_thumbnails_pending(server_file_id, true);
         }
+        // Task 1640: a sync-folder upload (no write id) records what it sent as the content this
+        // device now agrees with the server on. A Finder write's copy is not read again.
+        let completed_payload_hash = match (claim.and_then(|c| c.write.as_ref()), payload_path.as_deref()) {
+            (None, Some(path)) => sha256_file_hex(Path::new(path)).ok(),
+            _ => None,
+        };
         let master_key = self.api.master_key();
         let landed = self.db.apply_landing(
             &crate::state_db::LandingInput {
@@ -1871,6 +1891,7 @@ impl EngineBridge {
                 mime_type: mime_type.as_deref(),
                 // Always the op's payload path, whatever `release` is.
                 completed_payload: payload_path.as_deref(),
+                completed_payload_hash: completed_payload_hash.as_deref(),
                 finalization: finalization.as_ref(),
                 now: now_secs(),
             },
@@ -3359,6 +3380,17 @@ impl EngineBridge {
         })
     }
 
+    /// Task 1640: whether `dest` is `file_id`'s own place in the sync folder, under one of
+    /// `allowed_roots` (a Windows or Linux hydrate), rather than a staging copy (a Finder fetch).
+    fn dest_is_files_sync_folder_place(&self, file_id: &str, dest: &Path, allowed_roots: &[&Path]) -> anyhow::Result<bool> {
+        let Some(entry) = self.db.get_file(file_id)? else {
+            return Ok(false);
+        };
+        Ok(allowed_roots.iter().any(|root| {
+            local_file_path_under_sync_root(root, &entry.path).is_ok_and(|place| place.as_path() == dest)
+        }))
+    }
+
     /// Resolve the server folder id of `path`'s immediate parent directory, for
     /// nested uploads. Returns `None` for a root-level file (parent == sync root)
     /// or when the parent directory has no known server FOLDER row yet. The
@@ -3989,6 +4021,25 @@ impl EngineBridge {
             return Err(anyhow::anyhow!("hydrate destination is not within an allowed root"));
         }
         self.ensure_shared_hydrate_path_safe(file_id)?;
+        // Task 1640: a hydrate into the file's own place in the sync folder (Windows, Linux)
+        // never writes over an unsent local change: bytes that differ from the content this
+        // device last agreed with the server on, or whose upload is queued, are the person's
+        // only copy. It refuses, and the file keeps its bytes. A Finder fetch (macOS) writes
+        // to the extension's own staging copy, never there.
+        let in_sync_folder = self.dest_is_files_sync_folder_place(file_id, dest_path, allowed_roots)?;
+        if in_sync_folder && dest_path.exists() {
+            let content = sync_folder_content(&self.db, file_id, dest_path, None)?;
+            if matches!(content, SyncFolderContent::Changed { .. } | SyncFolderContent::Queued) {
+                tracing::warn!(file_id = %file_id, "hydrate refused: the local file holds a change that is not sent");
+                return Err(anyhow::Error::new(UnsentLocalChange));
+            }
+        }
+        // The version the downloaded bytes are at least: read before the download, so a tick
+        // that raises the row meanwhile cannot make the baseline claim a version it is not.
+        let agreed_version = self
+            .db
+            .get_file_contract_state(file_id)?
+            .map_or(0, |contract| contract.current_version);
         // Spec §7.4.2: a hydrate never changes the status of a row with a live upload of its
         // own (a Finder upload that has not parked): no `Downloading`, `Local` or `Error`.
         // That status is the upload's, and `Error` would make the item read-only. Nor
@@ -4064,12 +4115,22 @@ impl EngineBridge {
                 // file" step needed here because the primitive itself never
                 // makes one externally visible.
                 let write_result = write_hydrated_plaintext(dest_path, allowed_roots, &buf);
+                let hydrated_hash = in_sync_folder.then(|| sha256_hex(&buf));
                 // Zeroize the in-memory copy now that it is on disk (or on
                 // error) so the allocation does not linger with plaintext.
                 buf.zeroize();
                 if let Err(e) = write_result {
                     set_failed();
                     return Err(anyhow::anyhow!("write {}: {e}", dest_path.display()));
+                }
+                // Task 1640: the bytes just written are the content this device agrees with the
+                // server on. Recorded before the row leaves `Downloading`, so no classification
+                // sees the new bytes against the old baseline.
+                if let Some(hash) = hydrated_hash.as_deref()
+                    && let Err(e) = self.db.record_local_baseline(file_id, agreed_version, hash)
+                {
+                    set_failed();
+                    return Err(e.into());
                 }
 
                 // Task 1698: a Trashing row keeps its marker (viewing a file
@@ -4173,9 +4234,17 @@ impl EngineBridge {
     /// the real on-disk path from `path` + sync root (see state_db comment).
     #[cfg(target_os = "windows")]
     pub async fn hydrate_file_to_memory(&self, file_id: &str) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+        // Task 1640: see `hydrate_file`'s `agreed_version`.
+        let agreed_version = self
+            .db
+            .get_file_contract_state(file_id)?
+            .map_or(0, |contract| contract.current_version);
         self.db.set_status(file_id, FileStatus::Downloading)?;
         match self.do_hydrate(file_id, None).await {
             Ok(buf) => {
+                // Task 1640: every fetch decrypts the whole file, whatever range it serves: its
+                // hash is the content this device now agrees with the server on.
+                self.db.record_local_baseline(file_id, agreed_version, &sha256_hex(&buf))?;
                 self.db.set_status(file_id, FileStatus::Local)?;
                 // cache_path is empty: on Windows CF the hydrated bytes live
                 // INSIDE the placeholder (the CF runtime writes them there after
@@ -5317,6 +5386,67 @@ fn encrypted_metadata_for_name(
     let master_key = beebeeb_core::kdf::MasterKey::from_bytes(*master_key_bytes);
     beebeeb_core::encrypt::encrypt_name(&master_key, file_id, filename, mime_type)
         .map_err(|e| anyhow::anyhow!("encrypt Finder metadata: {e}"))
+}
+
+/// Task 1640: what a tracked sync-folder file's bytes are (Windows, Linux), against the content
+/// this device last agreed with the server on: `local_hash` at `local_base_version`, written by a
+/// hydrate into the sync folder and by a landing. The tick's detector is not this: it never sees
+/// the device's bytes (task 2190).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SyncFolderContent {
+    /// The bytes are the agreed content: they may be replaced, freed or marked in sync.
+    Agreed,
+    /// An upload of the file's content is queued (parked included): the bytes are not sent yet.
+    Queued,
+    /// The bytes differ from the agreed content and nothing is queued: a change that is not
+    /// sent. `base` is the version they are based on, `None` when it is not known.
+    Changed { base: Option<i64> },
+    /// No agreed content is recorded (a file hydrated before task 1640).
+    Unknown,
+}
+
+/// [`SyncFolderContent`] of `file_id`'s bytes at `path`. `os_in_sync` is the Cloud Files in-sync
+/// state of its placeholder (Windows; `None` elsewhere): the platform clears it when the bytes
+/// change, and this engine sets it only on agreed content, so `Some(true)` is agreed without
+/// reading the file. The file is read only when an agreed hash is recorded.
+pub(crate) fn sync_folder_content(
+    db: &StateDb,
+    file_id: &str,
+    path: &Path,
+    os_in_sync: Option<bool>,
+) -> anyhow::Result<SyncFolderContent> {
+    if db.sync_folder_upload_queued(file_id)? {
+        return Ok(SyncFolderContent::Queued);
+    }
+    if os_in_sync == Some(true) {
+        return Ok(SyncFolderContent::Agreed);
+    }
+    let Some(contract) = db.get_file_contract_state(file_id)? else {
+        return Ok(SyncFolderContent::Unknown);
+    };
+    let Some(agreed) = contract.local_hash.as_deref() else {
+        return Ok(SyncFolderContent::Unknown);
+    };
+    if sha256_file_hex(path)? == agreed {
+        return Ok(SyncFolderContent::Agreed);
+    }
+    Ok(SyncFolderContent::Changed {
+        base: Some(contract.local_base_version).filter(|version| *version > 0),
+    })
+}
+
+/// Lower-case hex SHA-256 of `bytes`: a sync-folder file's agreed content (task 1640).
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+/// [`sha256_hex`] of the file at `path`, read in a stream.
+pub(crate) fn sha256_file_hex(path: &Path) -> std::io::Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut std::fs::File::open(path)?, &mut hasher)?;
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 /// The `init` guard (spec §6.3.1), checked where the request is built: a File Provider
@@ -25855,4 +25985,145 @@ mod tests {
             assert_eq!(got, b[span].to_vec(), "the new version, after one restart");
         }
     }
+
+    // ── Task 1640: an edit of a synced sync-folder file is sent on its base and never overwritten ──
+    //
+    // The engine as Windows (and Linux) runs it: no write id, the upload driver's
+    // `dispatch_local_create` is the trigger (a close, or the scan). Before the fix an edit of a
+    // tracked file was never queued, and the next hydrate wrote the server's bytes over it.
+
+    /// One chunk of `plaintext` as the server stores it for `file_id`.
+    fn regression_1640_chunk(master_key: [u8; 32], file_id: &str, plaintext: &[u8]) -> Vec<u8> {
+        beebeeb_core::encrypt::encrypt_chunk_raw(
+            &beebeeb_core::kdf::derive_file_key(
+                &beebeeb_core::kdf::MasterKey::from_bytes(master_key),
+                file_id.as_bytes(),
+            ),
+            plaintext,
+        )
+        .unwrap()
+    }
+
+    /// The web saves `plaintext` as `file_id`'s next version, and the next snapshot lists it.
+    fn regression_1640_web_saves(server: &VersionedServerMock, master_key: [u8; 32], file_id: &str, plaintext: &[u8]) {
+        let mut s = server.state.lock().unwrap();
+        let chunk = regression_1640_chunk(master_key, file_id, plaintext);
+        let file = s.files.get_mut(file_id).unwrap();
+        file.versions.push(vec![chunk]);
+        let version = file.versions.len() as i64;
+        let mut node = snap_node(&master_key, file_id, "notes.txt", None, false, 1_700_000_500);
+        node["version_number"] = json!(version);
+        node["size_bytes"] = json!(plaintext.len());
+        s.snapshots
+            .push_back(("200 OK".into(), json!({ "seq_id": 1, "nodes": [node] })));
+    }
+
+    /// A synced file: the server holds `b"version one"` at version 1, and it was hydrated into
+    /// its place in the sync folder. Returns that place.
+    async fn regression_1640_synced_file(
+        master_key: [u8; 32],
+        file: &str,
+    ) -> (tempfile::TempDir, PathBuf, VersionedServerMock, EngineBridge, PathBuf) {
+        let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_row(&bridge, &server, file);
+        {
+            let mut s = server.state.lock().unwrap();
+            s.files.get_mut(file).unwrap().versions[0] = vec![regression_1640_chunk(master_key, file, b"version one")];
+            s.serve_downloads = true;
+        }
+        let local = sync_root.join("notes.txt");
+        bridge.hydrate_file(file, &local, &[sync_root.as_path()]).await.unwrap();
+        assert_eq!(std::fs::read(&local).unwrap(), b"version one", "precondition: hydrated");
+        (dir, sync_root, server, bridge, local)
+    }
+
+    #[tokio::test]
+    async fn regression_1640_a_hydrate_into_the_sync_folder_records_the_agreed_content() {
+        let file = "16400000-0000-4000-8000-000000000001";
+        let (_dir, _root, server, bridge, _local) = regression_1640_synced_file([164u8; 32], file).await;
+        let contract = bridge.db.get_file_contract_state(file).unwrap().unwrap();
+        assert_eq!(contract.local_base_version, 1);
+        assert_eq!(contract.local_hash.as_deref(), Some(sha256_hex(b"version one").as_str()));
+        drop(server.finish());
+    }
+
+    #[tokio::test]
+    async fn regression_1640_a_hydrate_never_writes_over_an_edit_that_is_not_queued() {
+        let master_key = [169u8; 32];
+        let file = "16400000-0000-4000-8000-000000000006";
+        let (_dir, sync_root, server, bridge, local) = regression_1640_synced_file(master_key, file).await;
+        regression_1640_web_saves(&server, master_key, file, b"edited on the web");
+        std::fs::write(&local, b"edited in the sync folder").unwrap();
+        let refused = bridge.hydrate_file(file, &local, &[sync_root.as_path()]).await.unwrap_err();
+        assert!(refused.is::<UnsentLocalChange>(), "{refused:#}");
+        assert_eq!(std::fs::read(&local).unwrap(), b"edited in the sync folder");
+        assert_eq!(bridge.db.get_file(file).unwrap().unwrap().status, FileStatus::Local, "status untouched");
+        drop(server.finish());
+    }
+
+    #[tokio::test]
+    async fn regression_1640_a_hydrate_still_refreshes_agreed_bytes() {
+        let master_key = [170u8; 32];
+        let file = "16400000-0000-4000-8000-000000000007";
+        let (_dir, sync_root, server, bridge, local) = regression_1640_synced_file(master_key, file).await;
+        regression_1640_web_saves(&server, master_key, file, b"edited on the web");
+        sync_tick_outcome(&bridge, &sync_root).await.unwrap();
+        bridge.hydrate_file(file, &local, &[sync_root.as_path()]).await.unwrap();
+        assert_eq!(std::fs::read(&local).unwrap(), b"edited on the web");
+        let contract = bridge.db.get_file_contract_state(file).unwrap().unwrap();
+        assert_eq!(contract.local_base_version, 2);
+        assert_eq!(contract.local_hash.as_deref(), Some(sha256_hex(b"edited on the web").as_str()));
+        drop(server.finish());
+    }
+
+    #[test]
+    fn regression_1640_sync_folder_content_decides_from_the_agreed_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+        let path = dir.path().join("notes.txt");
+        std::fs::write(&path, b"agreed").unwrap();
+        db.upsert_file(&FileEntry {
+            file_id: "f".into(),
+            path: "notes.txt".into(),
+            status: FileStatus::Local,
+            size_bytes: 6,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+        let content = |os_in_sync| sync_folder_content(&db, "f", &path, os_in_sync).unwrap();
+        assert_eq!(content(None), SyncFolderContent::Unknown, "no agreed content recorded");
+        assert_eq!(content(Some(true)), SyncFolderContent::Agreed, "the platform says in sync");
+        db.record_local_baseline("f", 3, &sha256_hex(b"agreed")).unwrap();
+        assert_eq!(content(None), SyncFolderContent::Agreed);
+        std::fs::write(&path, b"edited").unwrap();
+        assert_eq!(content(None), SyncFolderContent::Changed { base: Some(3) });
+        assert_eq!(content(Some(false)), SyncFolderContent::Changed { base: Some(3) });
+        db.record_local_baseline("f", 0, &sha256_hex(b"agreed")).unwrap();
+        assert_eq!(content(None), SyncFolderContent::Changed { base: None }, "no base known");
+        db.enqueue_operation(&PendingOperation {
+            op_id: "u".into(),
+            kind: OperationKind::UploadVersion,
+            file_id: Some("f".into()),
+            parent_id: None,
+            target_path: Some("notes.txt".into()),
+            metadata_json: None,
+            payload_path: Some(path.to_string_lossy().into_owned()),
+            base_version: Some(3),
+            base_object_version_id: None,
+            attempts: 0,
+            max_attempts: 25,
+            next_retry_at: 0,
+            last_error: None,
+            backup_source_key: None,
+            created_at: 0,
+            updated_at: 0,
+        })
+        .unwrap();
+        assert_eq!(content(Some(true)), SyncFolderContent::Queued, "a queued upload wins over in sync");
+    }
+
 }

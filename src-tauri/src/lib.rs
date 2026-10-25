@@ -9804,6 +9804,12 @@ fn free_up_space_windows(db: &state_db::StateDb, sync_root: &std::path::Path) ->
         // this is a single file). Best-effort: a failure here is logged (never the
         // path) and we still attempt the dehydrate, which simply no-ops/errors if
         // the file was genuinely pinned.
+        // Task 1640: never free a file whose bytes are a change that is not sent (an edit, a
+        // queued upload) or are not known to be the agreed content: they are the only copy.
+        if !crate::windows_cf::placeholders::local_bytes_agreed(db, &file_id, &canonical) {
+            tracing::warn!(file_id = %file_id, "free_up_space: the file holds a change that is not sent; keeping it local");
+            continue;
+        }
         if let Err(error) = crate::windows_cf::placeholders::set_pin_state(&canonical, false, false) {
             tracing::warn!(file_id = %file_id, error = %error, "free_up_space: OS unpin before dehydrate failed; attempting dehydrate anyway");
         }
@@ -11376,6 +11382,11 @@ fn dehydrate_excluded_subtrees_windows(
             continue;
         };
         if !allowed_roots.iter().any(|root| canonical.starts_with(root)) {
+            continue;
+        }
+        // Task 1640: an unsent change stays on disk; see `free_up_space_windows`.
+        if !crate::windows_cf::placeholders::local_bytes_agreed(db, &entry.file_id, &canonical) {
+            tracing::warn!(file_id = %entry.file_id, "set_selective_sync: the file holds a change that is not sent; keeping it local");
             continue;
         }
         match crate::windows_cf::placeholders::dehydrate_placeholder(&canonical) {

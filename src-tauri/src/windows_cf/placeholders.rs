@@ -712,6 +712,63 @@ const _: () = {
     assert!(FILE_ATTRIBUTE_UNPINNED.0 == 0x0010_0000);
 };
 
+/// Task 1640: whether every byte of the placeholder at `path` is on disk (no
+/// `RECALL_ON_DATA_ACCESS`). Reading one that is not would fetch the rest of it.
+pub fn fully_on_disk(path: &std::path::Path) -> bool {
+    read_os_placeholder_state(path).is_some_and(|attrs| attrs & FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS.0 == 0)
+}
+
+/// Task 1640: the Cloud Files in-sync state of the placeholder at `path`, or `None` when it is
+/// not a placeholder (a plain file an atomic save left) or cannot be read. The platform clears
+/// it when the file's bytes change; this engine sets it only on content it agrees with the
+/// server on. Opened as the reparse point, so nothing is fetched.
+pub fn placeholder_in_sync(path: &std::path::Path) -> Option<bool> {
+    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+        .open(path)
+        .ok()?;
+    let handle = HANDLE(file.as_raw_handle());
+    let mut buffer = vec![0u64; 1024];
+    // SAFETY: `handle` is open for the whole call (`file` outlives it); the buffer is
+    // 8-byte aligned and its length is passed, so the call writes only inside it.
+    unsafe {
+        CfGetPlaceholderInfo(
+            handle,
+            CF_PLACEHOLDER_INFO_STANDARD,
+            buffer.as_mut_ptr().cast(),
+            (buffer.len() * 8) as u32,
+            None,
+        )
+    }
+    .ok()?;
+    // SAFETY: a successful CF_PLACEHOLDER_INFO_STANDARD call wrote that struct at the start.
+    let info = unsafe { &*buffer.as_ptr().cast::<CF_PLACEHOLDER_STANDARD_INFO>() };
+    Some(info.InSyncState == CF_IN_SYNC_STATE_IN_SYNC)
+}
+
+/// Task 1640: whether the engine may mark the placeholder at `path` in sync or free its bytes:
+/// they are the content this device last agreed with the server on. A placeholder in sync is;
+/// one that is not is agreed only when it is wholly on disk and its hash is the agreed one.
+/// Anything not known to be agreed (an unsent edit, a queued upload, no agreed content
+/// recorded) is not: its bytes stay.
+pub fn local_bytes_agreed(db: &crate::state_db::StateDb, file_id: &str, path: &std::path::Path) -> bool {
+    let in_sync = placeholder_in_sync(path);
+    if in_sync != Some(true) && !fully_on_disk(path) {
+        return false;
+    }
+    matches!(
+        crate::engine_bridge::sync_folder_content(db, file_id, path, in_sync),
+        Ok(crate::engine_bridge::SyncFolderContent::Agreed)
+    )
+}
+
 pub fn read_os_placeholder_state(path: &std::path::Path) -> Option<u32> {
     let path_wide: Vec<u16> = path
         .to_string_lossy()

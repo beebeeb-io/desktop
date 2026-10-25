@@ -1806,6 +1806,9 @@ pub struct LandingInput<'a> {
     pub mime_type: Option<&'a str>,
     /// The op's staged payload, marked `completed = 1` in the release journal on every platform.
     pub completed_payload: Option<&'a str>,
+    /// The SHA-256 of that payload's plaintext, for a sync-folder upload (no write id): what this
+    /// device now agrees with the server on (task 1640). `None` leaves the file's baseline unknown.
+    pub completed_payload_hash: Option<&'a str>,
     /// Windows: a create's finalization journal row, written in the landing's own transaction
     /// so the op is never gone without it. `None` everywhere else.
     pub finalization: Option<&'a UploadFinalization>,
@@ -3323,6 +3326,31 @@ impl StateDb {
         record_local_write_conn(&conn, file_id, size_bytes, modified_at)
     }
 
+    /// Task 1640: the content this device last agreed with the server on, for a sync-folder
+    /// file: the version its bytes are based on and their SHA-256. Written when a hydrate wrote
+    /// the server's bytes; a landing writes it in its own transaction (`apply_landing`).
+    pub fn record_local_baseline(&self, file_id: &str, version: i64, hash: &str) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "UPDATE files SET local_base_version = ?2, local_hash = ?3 WHERE file_id = ?1",
+            params![file_id, version, hash],
+        )?;
+        Ok(())
+    }
+
+    /// Task 1640: a sync-folder upload of this file's content (no write id: Windows, Linux) is
+    /// queued, in any state, parked included. Its bytes are not sent until it lands.
+    pub fn sync_folder_upload_queued(&self, file_id: &str) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM operation_queue
+                            WHERE file_id = ?1 AND write_id IS NULL
+                              AND kind IN ('upload_version', 'upload_file'))",
+            params![file_id],
+            |row| row.get(0),
+        )
+    }
+
     /// The full relative path of the item `name` under `parent_id` (spec §7.2; see
     /// `relative_path_under_conn`).
     pub fn relative_path_under(&self, parent_id: Option<&str>, name: &str) -> Result<String> {
@@ -4087,6 +4115,7 @@ impl StateDb {
         }
         contract.current_version = input.produced_version;
         contract.local_base_version = input.produced_version;
+        contract.local_hash = input.completed_payload_hash.map(str::to_string);
         contract.current_object_version_id = Some(input.produced_object_version_id.to_string());
         contract.last_sync_at = input.now;
         set_file_contract_state_conn(&tx, &contract)?;
@@ -9931,6 +9960,7 @@ mod tests {
             content_type: None,
             mime_type: None,
             completed_payload: None,
+            completed_payload_hash: None,
             finalization: None,
             now: 20,
         };
@@ -10073,6 +10103,7 @@ mod tests {
             content_type: None,
             mime_type: None,
             completed_payload: Some("/staged/create"),
+            completed_payload_hash: None,
             finalization: Some(&finalization),
             now: 20,
         };
