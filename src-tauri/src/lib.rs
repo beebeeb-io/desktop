@@ -29,6 +29,7 @@ mod desktop_capabilities;
 mod desktop_search;
 mod diagnostic_redaction;
 mod direct_download;
+mod download_pin;
 mod engine_bridge;
 mod engine_status;
 mod finder_removal;

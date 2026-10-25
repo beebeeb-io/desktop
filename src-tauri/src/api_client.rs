@@ -849,14 +849,31 @@ impl ApiClient {
     /// `GET /api/v1/files/:id/chunks/:idx` — returns the raw encrypted
     /// chunk bytes. Decryption is the caller's job (`beebeeb_core`).
     pub async fn download_chunk(&self, file_id: &str, chunk_idx: u32) -> anyhow::Result<Vec<u8>> {
-        let resp = self
-            .client
-            .get(&self.chunk_url(file_id, chunk_idx))
+        self.download_chunk_of(file_id, chunk_idx, None).await
+    }
+
+    /// [`Self::download_chunk`] of one pinned version (task 1643): with `Some(id)` the request
+    /// carries `?object_version_id=<id>`, so the server serves that version or answers 409, which
+    /// comes back as [`crate::download_pin::VersionGone`] (start again from fresh metadata; never
+    /// retry without the pin).
+    pub async fn download_chunk_of(
+        &self,
+        file_id: &str,
+        chunk_idx: u32,
+        object_version_id: Option<&str>,
+    ) -> anyhow::Result<Vec<u8>> {
+        let mut request = self.client.get(self.chunk_url(file_id, chunk_idx));
+        if let Some(version) = object_version_id {
+            request = request.query(&[("object_version_id", version)]);
+        }
+        let resp = request
             .header("Authorization", format!("Bearer {}", self.token))
             .send()
-            .await?
-            .error_for_status()?;
-        Ok(resp.bytes().await?.to_vec())
+            .await?;
+        if object_version_id.is_some() && resp.status() == reqwest::StatusCode::CONFLICT {
+            return Err(anyhow::Error::new(crate::download_pin::VersionGone));
+        }
+        Ok(resp.error_for_status()?.bytes().await?.to_vec())
     }
 
     /// `GET /api/v1/files/:id/thumbnail/{variant}` — returns the raw *encrypted*
