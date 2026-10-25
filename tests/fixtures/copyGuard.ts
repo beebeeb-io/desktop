@@ -320,9 +320,7 @@ export function pardon(violations: readonly Violation[], pardons: readonly Pardo
     const actual = seenOccurrences.get(key)?.size ?? 0
     if (actual < entry.count) stale.push(`${entry.file}: ${JSON.stringify(entry.text)} (${entry.owner}): pardoned ${entry.count}, found ${actual}`)
   }
-  const spent = new Map<string, number>()
   const open: Violation[] = []
-  const counted = new Set<string>()
   for (const v of violations) {
     const key = `${v.file}\u0000${v.text}`
     const room = allowance.get(key) ?? 0
@@ -332,10 +330,6 @@ export function pardon(violations: readonly Violation[], pardons: readonly Pardo
       continue
     }
     // The first `room` distinct occurrences of the string are pardoned; any rule hit on them is pardoned with them.
-    if (!counted.has(at)) {
-      counted.add(at)
-      spent.set(key, (spent.get(key) ?? 0) + 1)
-    }
     const order = [...(seenOccurrences.get(key) ?? [])].sort().indexOf(at)
     if (order >= room) open.push(v)
   }

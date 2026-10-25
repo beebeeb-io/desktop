@@ -48,7 +48,7 @@ const trashEvent = { id: 'e1', type: 'file.trash', subject: null, details: null,
 
 function backendOf(over: Record<string, (args: any) => unknown> = {}) {
   return {
-    account_profile: () => profile(true),
+    account_profile_fresh: () => profile(true),
     account_session_list: () => sessionsOf(mac, phone),
     account_devices: () => ({ devices: [device()] }),
     account_activity_feed: () => feed([trashEvent]),
@@ -98,7 +98,7 @@ describe('Security: what it reads and shows', () => {
   test('reads the profile (for the authenticator), the sessions, the devices and the last ten events once each, and nothing else', async () => {
     const m = openSecurity()
     await settle(m)
-    expect(m.calls.map((c) => c.name).sort()).toEqual(['account_activity_feed', 'account_devices', 'account_profile', 'account_session_list'])
+    expect(m.calls.map((c) => c.name).sort()).toEqual(['account_activity_feed', 'account_devices', 'account_profile_fresh', 'account_session_list'])
     expect(called(m, 'account_activity_feed')[0].args).toEqual({ page: 1, limit: 10 })
   })
 
@@ -148,7 +148,7 @@ describe('Security: what it reads and shows', () => {
     await press(m, 'Manage on beebeeb.io')
     expect(called(m, 'plugin:opener|open_url')[0].args).toEqual({ url: securityModel.SECURITY_SETTINGS_URL })
 
-    const off = openSecurity(backendOf({ account_profile: () => profile(false) }))
+    const off = openSecurity(backendOf({ account_profile_fresh: () => profile(false) }))
     await settle(off)
     expect(visibleText(off)).toContain('Authenticator app (TOTP) · Off')
     expect(visibleText(off)).toContain('Add a second factor so a stolen password alone can’t open your vault. Set it up on beebeeb.io.')
@@ -304,14 +304,15 @@ describe('Security: revoking is asked first, and fails in one place', () => {
 
 describe('Security: a group that did not load', () => {
   const groups: Array<{ command: string; title: string; surface: string; others: string[] }> = [
-    { command: 'account_session_list', title: 'Couldn’t load your active sessions', surface: 'security-sessions', others: ['account_devices', 'account_activity_feed', 'account_profile'] },
-    { command: 'account_devices', title: 'Couldn’t load your devices', surface: 'security-devices', others: ['account_session_list', 'account_activity_feed', 'account_profile'] },
-    { command: 'account_activity_feed', title: 'Couldn’t load recent activity', surface: 'security-activity', others: ['account_session_list', 'account_devices', 'account_profile'] },
+    { command: 'account_session_list', title: 'Couldn’t load your active sessions', surface: 'security-sessions', others: ['account_devices', 'account_activity_feed', 'account_profile_fresh'] },
+    { command: 'account_devices', title: 'Couldn’t load your devices', surface: 'security-devices', others: ['account_session_list', 'account_activity_feed', 'account_profile_fresh'] },
+    { command: 'account_activity_feed', title: 'Couldn’t load recent activity', surface: 'security-activity', others: ['account_session_list', 'account_devices', 'account_profile_fresh'] },
+    { command: 'account_profile_fresh', title: 'Couldn’t check your authenticator app', surface: 'security-profile', others: ['account_session_list', 'account_devices', 'account_activity_feed'] },
   ]
   for (const group of groups) {
     test(`${group.command} failing is ONE inline alert with Try again; the other groups are untouched and Try again reads only this one`, async () => {
       let fail = true
-      const m = openSecurity(backendOf({ [group.command]: () => { if (fail) throw new Error('offline'); return group.command === 'account_session_list' ? sessionsOf(mac) : group.command === 'account_devices' ? { devices: [device()] } : feed([trashEvent]) } }))
+      const m = openSecurity(backendOf({ [group.command]: () => { if (fail) throw new Error('offline'); return group.command === 'account_session_list' ? sessionsOf(mac) : group.command === 'account_devices' ? { devices: [device()] } : group.command === 'account_profile_fresh' ? profile(true) : feed([trashEvent]) } }))
       await settle(m)
       expect(visibleErrorSurfaces(m)).toEqual([`inline: ${group.title}Try again`])
       expect(find(m, (el) => el.props['data-error-surface'] === group.surface)).toHaveLength(1)
@@ -326,20 +327,120 @@ describe('Security: a group that did not load', () => {
   }
 
   test('an account whose profile carries no totp_enabled is "unknown", not "off"', async () => {
-    const m = openSecurity(backendOf({ account_profile: () => profile(null) }))
+    const m = openSecurity(backendOf({ account_profile_fresh: () => profile(null) }))
     await settle(m)
     expect(visibleText(m)).not.toContain('Authenticator app (TOTP) ·')
     expect(buttons(m)[0]).toBe('Manage on beebeeb.io')
   })
 
-  test('a profile that cannot be read, or that does not say, leaves the authenticator row honest ("Manage…") and raises no error', async () => {
-    const m = openSecurity(backendOf({ account_profile: () => { throw new Error('offline') } }))
+
+  // PR #140 delta review, P2-B: the row is read from the server every time, and never from what the app cached at sign-in.
+  test('a profile that cannot be read is no On and no Off: the row says nothing it does not know, and the alert says so', async () => {
+    const m = openSecurity(backendOf({ account_profile_fresh: () => { throw new Error('offline') } }))
+    await settle(m)
+    expect(visibleText(m)).toContain('Couldn’t check your authenticator app')
+    expect(visibleText(m)).not.toContain('Authenticator app (TOTP) ·')
+    expect(visibleText(m)).not.toMatch(/ · On| · Off/)
+    expect(visibleText(m)).not.toContain('offline')
+    expect(m.toasts).toEqual([])
+    expect(visibleText(m)).toContain('Active sessions')
+  })
+})
+
+describe('Security: the authenticator row is read fresh (review P2-B)', () => {
+  /** The `focus` listeners the page registered on the window, so a test can focus it. */
+  function watchFocus(): { fire: () => void; live: () => number } {
+    const listeners = new Set<() => void>()
+    const w = (globalThis as any).window
+    w.addEventListener = (name: string, fn: () => void) => { if (name === 'focus') listeners.add(fn) }
+    w.removeEventListener = (name: string, fn: () => void) => { if (name === 'focus') listeners.delete(fn) }
+    return { fire: () => listeners.forEach((fn) => fn()), live: () => listeners.size }
+  }
+
+  test('it asks the server and never the session\'s cache: account_profile_fresh, and account_profile is not read', async () => {
+    const m = openSecurity()
+    await settle(m)
+    expect(called(m, 'account_profile_fresh')).toHaveLength(1)
+    expect(called(m, 'account_profile')).toHaveLength(0)
+  })
+
+  test('until the answer arrives it says "Checking…" and claims neither On nor Off', async () => {
+    const m = openSecurity(backendOf({ account_profile_fresh: () => new Promise(() => {}) }))
     await settle(m)
     expect(visibleText(m)).toContain('Authenticator app (TOTP)')
-    expect(visibleText(m)).not.toContain('Authenticator app (TOTP) ·')
-    expect(visibleText(m)).toContain('Manage two-factor authentication on beebeeb.io.')
-    expect(buttons(m)[0]).toBe('Manage on beebeeb.io')
-    expect(visibleErrorSurfaces(m)).toEqual([])
-    expect(visibleText(m)).toContain('Active sessions')
+    expect(visibleText(m)).toContain('Checking…')
+    expect(visibleText(m)).not.toMatch(/Authenticator app \(TOTP\) · /)
+    expect(visibleText(m)).not.toContain('A second factor is required')
+    expect(visibleText(m)).not.toContain('Add a second factor')
+  })
+
+  test('turned off on the web, it says Off the next time the window is looked at: the answer replaces what it said', async () => {
+    let on = true
+    const m = openSecurity(backendOf({ account_profile_fresh: () => profile(on) }))
+    const focus = watchFocus()
+    await settle(m)
+    expect(visibleText(m)).toContain('Authenticator app (TOTP) · On')
+    on = false
+    focus.fire()
+    await settle(m)
+    expect(called(m, 'account_profile_fresh')).toHaveLength(2)
+    expect(visibleText(m)).toContain('Authenticator app (TOTP) · Off')
+    expect(visibleText(m)).not.toContain('Authenticator app (TOTP) · On')
+  })
+
+  test('a re-check that fails does not leave the old answer standing as current', async () => {
+    let fail = false
+    const m = openSecurity(backendOf({ account_profile_fresh: () => { if (fail) throw new Error('offline'); return profile(true) } }))
+    const focus = watchFocus()
+    await settle(m)
+    expect(visibleText(m)).toContain('Authenticator app (TOTP) · On')
+    fail = true
+    focus.fire()
+    await settle(m)
+    expect(visibleText(m)).not.toContain('Authenticator app (TOTP) · On')
+    expect(visibleText(m)).toContain('Couldn’t check your authenticator app')
+  })
+
+  test('a slow answer from an earlier look cannot overwrite a later one', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    let n = 0
+    const m = openSecurity(backendOf({ account_profile_fresh: async () => { n += 1; if (n === 1) { await gate; return profile(true) } return profile(false) } }))
+    const focus = watchFocus()
+    await m.flush()
+    focus.fire()
+    await settle(m)
+    expect(visibleText(m)).toContain('Authenticator app (TOTP) · Off')
+    release()
+    await settle(m)
+    expect(visibleText(m)).toContain('Authenticator app (TOTP) · Off')
+    expect(visibleText(m)).not.toContain('Authenticator app (TOTP) · On')
+  })
+
+  test('Try again reads again, and only the authenticator', async () => {
+    let fail = true
+    const m = openSecurity(backendOf({ account_profile_fresh: () => { if (fail) throw new Error('offline'); return profile(false) } }))
+    await settle(m)
+    fail = false
+    await press(m, 'Try again')
+    expect(visibleText(m)).toContain('Authenticator app (TOTP) · Off')
+    expect(called(m, 'account_session_list')).toHaveLength(1)
+  })
+
+  test('a locked vault looks at nothing and listens for nothing', async () => {
+    const m = openSecurity(backendOf(), { unlocked: false })
+    const focus = watchFocus()
+    await settle(m)
+    expect(focus.live()).toBe(0)
+    expect(m.calls).toEqual([])
+  })
+
+  test('leaving the page stops listening', async () => {
+    const m = openSecurity()
+    const focus = watchFocus()
+    await settle(m)
+    expect(focus.live()).toBe(1)
+    m.unmount()
+    expect(focus.live()).toBe(0)
   })
 })

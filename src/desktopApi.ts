@@ -940,6 +940,12 @@ export function accountProfile(): Promise<CommandResult<AccountProfile>> {
   return command<AccountProfile>('account_profile')
 }
 
+/** The profile as the server says it now, not as the session cached it at sign-in (`account_profile`). Settings › Security
+ *  reads this one: whether the authenticator app is on must not be a claim that is hours old. */
+export function accountProfileFresh(): Promise<CommandResult<AccountProfile>> {
+  return command<AccountProfile>('account_profile_fresh')
+}
+
 export function accountSubscription(): Promise<CommandResult<Subscription>> {
   return command<Subscription>('account_subscription')
 }

@@ -38,11 +38,15 @@ describe('the two sidebar lists', () => {
   })
 })
 
-describe('a section that reads the account is never left up without one (§7.8, review P2-6)', () => {
+describe('a section that exists only with a session is never left up without one (§7.8, review P2-6 and its delta review)', () => {
   const security = { mode: 'settings', section: 'security', returnTo: 'home' } as const
 
   test('signed out, Security falls back to General: its sessions, devices and activity belong to an account that is gone', () => {
     expect(coerceSettingsView(security, false)).toEqual({ mode: 'settings', section: 'general', returnTo: 'home' })
+  })
+
+  test('so does Sync: signed out only General and About exist (§7.8)', () => {
+    expect(coerceSettingsView({ ...security, section: 'sync' }, false)).toEqual({ mode: 'settings', section: 'general', returnTo: 'home' })
   })
 
   test('Account stays while the sign-out finishes: it is where "You’re signed out" and the held sentence are shown until the window remounts on the sign-in card', () => {
@@ -50,8 +54,8 @@ describe('a section that reads the account is never left up without one (§7.8, 
     expect(coerceSettingsView(account, false)).toBe(account)
   })
 
-  test('the sections that read no account data stay as they are', () => {
-    for (const section of ['general', 'sync', 'about'] as const) {
+  test('the two sections a signed-out window has stay as they are', () => {
+    for (const section of ['general', 'about'] as const) {
       const view = { ...security, section }
       expect(coerceSettingsView(view, false)).toBe(view)
     }
@@ -59,6 +63,8 @@ describe('a section that reads the account is never left up without one (§7.8, 
 
   test('signed in, and anywhere but Settings, the view is returned as it is (the same object, so nothing re-renders)', () => {
     expect(coerceSettingsView(security, true)).toBe(security)
+    const sync = { ...security, section: 'sync' } as const
+    expect(coerceSettingsView(sync, true)).toBe(sync)
     const home = { mode: 'main', section: 'home' } as const
     expect(coerceSettingsView(home, false)).toBe(home)
   })

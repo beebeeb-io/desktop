@@ -29,20 +29,36 @@ export const ACTIVITY_LIMIT = 10
 
 // ── The authenticator row ───────────────────────────────────────────────────
 
-export type TotpState = 'on' | 'off' | 'unknown'
+export type TotpState = 'on' | 'off' | 'unknown' | 'checking'
 
 export const TOTP_LABEL = 'Authenticator app (TOTP)'
+
+/** The one inline alert when the account could not be asked (one failure, one surface; Try again asks again). */
+export const TOTP_CHECK_FAILED = 'Couldn’t check your authenticator app'
 
 /**
  * The state of the authenticator app, from the account's own `totp_enabled` (the profile). Not from the security score: its
  * `two_factor_enabled` factor is an authenticator OR a passkey and ignores whether the authenticator is on, so a row built on
- * it can say On when it is Off (PR #140 review, P2-5). `unknown` when the profile is unavailable or does not say, so the row
- * never claims On or Off. (The profile is read once per session and cached by the Rust side: a change made on the web shows
- * after the next sign-in.)
+ * it can say On when it is Off (PR #140 review, P2-5). `unknown` when the profile does not say, so the row never claims On
+ * or Off.
  */
-export function totpState(profile: Pick<AccountProfile, 'totp_enabled'> | null | undefined): TotpState {
+export function totpState(profile: Pick<AccountProfile, 'totp_enabled'> | null | undefined): 'on' | 'off' | 'unknown' {
   const enabled = profile?.totp_enabled
   return enabled === true ? 'on' : enabled === false ? 'off' : 'unknown'
+}
+
+/**
+ * What the row shows for a look at the account: "checking" while the question is out, `failed` when it could not be asked
+ * (the page shows an alert, not a row: no state shows an older answer as the current one), the account's own answer
+ * otherwise. The look is always the server's (`account_profile_fresh`), never the copy the session cached at sign-in, which
+ * said On for hours after the authenticator was turned off on the web (PR #140 delta review, P2-B).
+ */
+export function totpRowState(
+  look: { status: 'loading' } | { status: 'failed' } | { status: 'ready'; value: Pick<AccountProfile, 'totp_enabled'> },
+): TotpState | 'failed' {
+  if (look.status === 'loading') return 'checking'
+  if (look.status === 'failed') return 'failed'
+  return totpState(look.value)
 }
 
 export function totpLabel(state: TotpState): string {
@@ -51,6 +67,8 @@ export function totpLabel(state: TotpState): string {
 
 export function totpHint(state: TotpState): string {
   switch (state) {
+    case 'checking':
+      return 'Checking…'
     case 'on':
       return 'A second factor is required when you sign in. Manage or reset it on beebeeb.io.'
     case 'off':

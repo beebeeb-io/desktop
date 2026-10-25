@@ -18,6 +18,7 @@ import {
   totpAction,
   totpHint,
   totpLabel,
+  totpRowState,
   totpState,
 } from '../src/macSecurityModel'
 
@@ -56,8 +57,24 @@ describe('the authenticator row', () => {
     expect(SECURITY_SETTINGS_URL).toBe('https://app.beebeeb.io/settings/security')
   })
 
+  // PR #140 delta review, P2-B: the row is what the server says now. Until it answers it is "Checking…", and a failed look is
+  // not a row at all (an alert with Try again says so): no state shows an older answer as current.
+  test('the row follows the look: checking while it runs, nothing to show when it failed, the account\'s own answer otherwise', () => {
+    expect(totpRowState({ status: 'loading' })).toBe('checking')
+    expect(totpRowState({ status: 'failed' })).toBe('failed')
+    expect(totpRowState({ status: 'ready', value: { totp_enabled: true } })).toBe('on')
+    expect(totpRowState({ status: 'ready', value: { totp_enabled: false } })).toBe('off')
+    expect(totpRowState({ status: 'ready', value: { totp_enabled: null } })).toBe('unknown')
+  })
+
+  test('"Checking…" says it is checking and claims nothing; the link is the same neutral one', () => {
+    expect(totpLabel('checking')).toBe('Authenticator app (TOTP)')
+    expect(totpHint('checking')).toBe('Checking…')
+    expect(totpAction('checking')).toBe('Manage on beebeeb.io')
+  })
+
   test('there is no in-app toggle to promise: no state asks for a code or a switch', () => {
-    for (const state of ['on', 'off', 'unknown'] as const) {
+    for (const state of ['on', 'off', 'unknown', 'checking'] as const) {
       expect(`${totpLabel(state)} ${totpHint(state)} ${totpAction(state)}`).not.toMatch(/enable|disable|turn (on|off)|scan|enter (a|the) code/i)
     }
   })

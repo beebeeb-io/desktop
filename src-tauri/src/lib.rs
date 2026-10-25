@@ -11873,6 +11873,22 @@ async fn account_profile(state: State<'_, AppState>) -> Result<account_dto::Acco
     })
 }
 
+/// `GET /api/v1/auth/me`, always from the server. `account_profile` serves what the session cached at sign-in, which is only
+/// as old as the sign-in: Settings › Security shows whether the authenticator app is on, and that must be what the account
+/// says now (turned off on the web, it said On until the next sign-in; PR #140 delta review, P2-B). The answer is cached in
+/// the same turn-checked way `account_profile` caches its own, so the next reader of the cache is fresher too.
+#[tauri::command]
+async fn account_profile_fresh(state: State<'_, AppState>) -> Result<account_dto::AccountProfile, String> {
+    session_command!(async {
+        let acct = state.active_account()?;
+        let turn = acct.session_generation();
+        let api = api_client_from_session(&state)?;
+        let profile = api.account_profile().await.map_err(|e| e.to_string())?;
+        cache_profile_in_turn(&acct, &turn, profile.clone());
+        Ok(profile)
+    })
+}
+
 /// The `account_profile` command's cache (Task 12 fix round 1, item 6): written only while no session transition
 /// happened since the fetch began (`turn`), checked under the session-write lock. The cached profile IS an input to a
 /// sign-in's decision (`credentials_identity`, the `cached_profile` trace), but this one is the session's OWN record,
@@ -14542,6 +14558,7 @@ pub fn run() {
             // Wrappers over existing server endpoints (the "all pages empty"
             // fix) plus the locally-computed storage breakdown.
             account_profile,
+            account_profile_fresh,
             account_subscription,
             account_usage,
             account_region,
@@ -21268,6 +21285,29 @@ mod startup_session_tests {
             !command.contains("acct.cached_profile.lock() {"),
             "no unchecked write:\n{command}"
         );
+    }
+
+    /// PR #140 delta review, P2-B: Settings › Security says whether the authenticator is on from `account_profile_fresh`,
+    /// which asks the server every time. A read of the session's cache first would be `account_profile` again, and say On
+    /// for hours after the authenticator was turned off on the web.
+    #[test]
+    fn the_fresh_profile_asks_the_server_every_time_and_never_the_cache() {
+        let production = production();
+        let command = body_of(&production, "async fn account_profile_fresh(");
+        assert!(command.contains("api.account_profile().await"), "it fetches:\n{command}");
+        for cache_read in ["cached_profile", ".as_ref()", "return Ok("] {
+            assert!(!command.contains(cache_read), "{cache_read}: it must not serve the cache:\n{command}");
+        }
+        let captured = command.find("let turn = acct.session_generation();").expect("captured");
+        assert!(captured < command.find("api.account_profile().await").unwrap(), "the turn first:\n{command}");
+        assert!(
+            command.contains("cache_profile_in_turn(&acct, &turn, profile.clone());"),
+            "what it fetched refreshes the cache, in its turn:\n{command}"
+        );
+        // And Security is the one that asks it: its page does not read the cached command.
+        let security = include_str!("../../src/MacSecurity.tsx").replace("\r\n", "\n");
+        assert!(security.contains("accountProfileFresh()"), "Security reads the fresh profile");
+        assert!(!security.contains("accountProfile()"), "and never the cached one");
     }
 
     /// Fix round 1, item 8 (review M7): every refusal says what fits its path, each in its own sentence.

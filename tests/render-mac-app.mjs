@@ -97,6 +97,9 @@ const base = {
 }
 
 function installBackend({ caps, fx }) {
+  // "Last checked 1 min ago" is relative to now, and now is the page's, not the script's: fixtures built when the script
+  // started would read "2 min ago" for every scenario that a slow machine reaches a minute late.
+  if (typeof fx.snapshot?.engine?.last_tick_ok_at === 'number') fx.snapshot.engine.last_tick_ok_at = Math.floor(Date.now() / 1000) - 70
   window.__fx = fx
   window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} }
   window.__TAURI_INTERNALS__ = {
@@ -122,6 +125,7 @@ function installBackend({ caps, fx }) {
         case 'list_remote_tree': return [{ id: 'f1', name: 'Photos', is_folder: true, excluded: false, size_bytes: 1, file_count: 1, on_disk_bytes: 0, pinned: true, children: [] }]
         case 'account_region': return f.region
         case 'account_profile': return f.profile
+        case 'account_profile_fresh': return f.profile
         case 'account_security_score': return f.score
         case 'account_session_list': return f.sessions
         case 'account_devices': return f.devices

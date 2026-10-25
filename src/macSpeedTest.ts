@@ -5,18 +5,30 @@
  *
  * One test at a time: `start` while one runs is a no-op that says nothing (the host refuses a second one as well).
  */
+import { subscribeAccountSession } from './accountSession'
 import { commandUnavailableLabel, runSpeedtest, type CommandResult, type SpeedtestResult } from './desktopApi'
 import { speedTestFailure } from './macSettingsModel'
 
 export type SpeedTestState = { phase: 'idle' } | { phase: 'running' } | { phase: 'done'; result: SpeedtestResult }
 
-export function createSpeedTest(run: () => Promise<CommandResult<SpeedtestResult>>) {
+export function createSpeedTest(
+  run: () => Promise<CommandResult<SpeedtestResult>>,
+  /** The account session's changes. The figures belong to the account and the connection they were measured on. */
+  subscribeSession: (listener: () => void) => () => void = () => () => {},
+) {
   let state: SpeedTestState = { phase: 'idle' }
+  /** Moves on every session change: a test that began under an earlier one is not this session's and says nothing. */
+  let epoch = 0
   const listeners = new Set<() => void>()
   const publish = (next: SpeedTestState) => {
     state = next
     listeners.forEach((listener) => listener())
   }
+  // For the life of the window, as the store is: a sign-out, another account or a lock that ends the session clears it.
+  subscribeSession(() => {
+    epoch += 1
+    if (state.phase !== 'idle') publish({ phase: 'idle' })
+  })
   return {
     getSnapshot: () => state,
     subscribe: (listener: () => void) => {
@@ -29,14 +41,11 @@ export function createSpeedTest(run: () => Promise<CommandResult<SpeedtestResult
      */
     start: async (): Promise<string | null> => {
       if (state.phase === 'running') return null
+      const mine = epoch
       publish({ phase: 'running' })
-      let result: CommandResult<SpeedtestResult>
-      try {
-        result = await run()
-      } catch (error) {
-        publish({ phase: 'idle' })
-        return error instanceof Error ? error.message : String(error)
-      }
+      // `run` is a `CommandResult` producer: `command()` turns every failure into a result and never rejects.
+      const result = await run()
+      if (mine !== epoch) return null
       if (!result.ok) {
         publish({ phase: 'idle' })
         return result.unsupported ? commandUnavailableLabel('run_speedtest') : result.reason
@@ -52,4 +61,4 @@ export function createSpeedTest(run: () => Promise<CommandResult<SpeedtestResult
   }
 }
 
-export const desktopSpeedTest = createSpeedTest(runSpeedtest)
+export const desktopSpeedTest = createSpeedTest(runSpeedtest, subscribeAccountSession)

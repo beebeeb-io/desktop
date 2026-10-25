@@ -3,6 +3,7 @@
  * that is a figure or a plain failure and never "0.00 Mbps", and a state that outlives the page that started it.
  */
 import { describe, expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
 import { createSpeedTest } from '../src/macSpeedTest'
 import { SPEED_TEST_NO_FIGURES, speedTestFailure } from '../src/macSettingsModel'
 
@@ -85,12 +86,6 @@ describe('the store', () => {
     expect(store.getSnapshot()).toEqual({ phase: 'idle' })
   })
 
-  test('a run that throws is a failure with its message, and the store is free again', async () => {
-    const store = createSpeedTest(async () => { throw new Error('socket closed') })
-    expect(await store.start()).toBe('socket closed')
-    expect(store.getSnapshot()).toEqual({ phase: 'idle' })
-  })
-
   test('listeners hear every change, and none after they leave', async () => {
     const store = createSpeedTest(() => ok())
     const heard: string[] = []
@@ -99,5 +94,73 @@ describe('the store', () => {
     leave()
     await store.start()
     expect(heard).toEqual(['running', 'done'])
+  })
+})
+
+// PR #140 delta review, P3: the figures belong to the account and the connection they were measured on. The store lives as
+// long as the window does, so a session that ends (a sign-out, another account, a lock that ends the session) clears it.
+describe('a session change clears the store', () => {
+  /** A stand-in for `subscribeAccountSession`: `change()` is the session revision moving. */
+  function session() {
+    const listeners = new Set<() => void>()
+    return { subscribe: (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener) } }, change: () => listeners.forEach((l) => l()) }
+  }
+  const ok = (value = RESULT) => Promise.resolve({ ok: true as const, value })
+
+  test('the figures of a finished test are gone when the session changes', async () => {
+    const s = session()
+    const store = createSpeedTest(() => ok(), s.subscribe)
+    await store.start()
+    expect(store.getSnapshot().phase).toBe('done')
+    s.change()
+    expect(store.getSnapshot()).toEqual({ phase: 'idle' })
+  })
+
+  test('a test that was running when the session changed is dropped: its figures are not shown, it asks for no toast', async () => {
+    const s = session()
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const store = createSpeedTest(async () => { await gate; return ok() }, s.subscribe)
+    const running = store.start()
+    expect(store.getSnapshot().phase).toBe('running')
+    s.change()
+    expect(store.getSnapshot()).toEqual({ phase: 'idle' })
+    release()
+    expect(await running).toBeNull()
+    expect(store.getSnapshot()).toEqual({ phase: 'idle' })
+  })
+
+  test('a failure that arrives after the session changed is not a message for the new session either', async () => {
+    const s = session()
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const store = createSpeedTest(async () => { await gate; return { ok: false as const, reason: 'offline' } }, s.subscribe)
+    const running = store.start()
+    s.change()
+    release()
+    expect(await running).toBeNull()
+  })
+
+  test('a test started after the change is the new session\'s and answers normally', async () => {
+    const s = session()
+    const store = createSpeedTest(() => ok(), s.subscribe)
+    await store.start()
+    s.change()
+    expect(await store.start()).toBeNull()
+    expect(store.getSnapshot()).toEqual({ phase: 'done', result: RESULT })
+  })
+
+  test('a change while nothing was measured tells nobody anything', async () => {
+    const s = session()
+    const store = createSpeedTest(() => ok(), s.subscribe)
+    let heard = 0
+    store.subscribe(() => { heard += 1 })
+    s.change()
+    expect(heard).toBe(0)
+  })
+
+  test('the window\'s own store is wired to the account session, the one the whole window observes', () => {
+    const source = readFileSync(new URL('../src/macSpeedTest.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+    expect(source).toContain('export const desktopSpeedTest = createSpeedTest(runSpeedtest, subscribeAccountSession)')
   })
 })

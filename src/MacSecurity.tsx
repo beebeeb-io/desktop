@@ -14,12 +14,12 @@
  * The component is a plain function declaration that reads only its props, hooks and the bindings imported above, so
  * `tests/macSecurity.test.tsx` can execute it with the component harness.
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   accountActivityFeed,
   accountDevices,
   accountRevokeOtherSessions,
-  accountProfile,
+  accountProfileFresh,
   accountRevokeSession,
   accountSessionList,
   commandUnavailableLabel,
@@ -37,10 +37,11 @@ import {
   SECURITY_SETTINGS_URL,
   SESSIONS_HEADING_ID,
   sessionRow,
+  TOTP_CHECK_FAILED,
   totpAction,
   totpHint,
   totpLabel,
-  totpState,
+  totpRowState,
 } from './macSecurityModel'
 import { focusById } from './focusById'
 import { ConfirmSheet } from './MacSettings'
@@ -60,8 +61,15 @@ export function SecurityTab({ unlocked }: { unlocked: boolean }) {
   const [busy, setBusy] = useState(false)
 
   // `quiet` reads again without blanking the group first: after a revoke the rows are replaced, not flashed.
-  const loadProfile = useCallback(async () => {
-    const result = await accountProfile()
+  // The authenticator row is the account's answer NOW: read from the server (not the session's cache) when the page opens
+  // and again whenever the window is looked at, and only the latest look may answer. A look that fails leaves no answer
+  // standing: the row becomes the alert (review P2-B).
+  const latestProfile = useRef(0)
+  const loadProfile = useCallback(async (quiet = false) => {
+    const mine = ++latestProfile.current
+    if (!quiet) setProfile({ status: 'loading' })
+    const result = await accountProfileFresh()
+    if (mine !== latestProfile.current) return
     setProfile(result.ok ? { status: 'ready', value: result.value } : { status: 'failed' })
   }, [])
   const loadSessions = useCallback(async (quiet = false) => {
@@ -87,6 +95,14 @@ export function SecurityTab({ unlocked }: { unlocked: boolean }) {
     void loadDevices()
     void loadActivity()
   }, [unlocked, loadProfile, loadSessions, loadDevices, loadActivity])
+
+  // A change made on the web while this window was in the background shows the moment the window is looked at again.
+  useEffect(() => {
+    if (!unlocked) return
+    const onFocus = () => void loadProfile(true)
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
+  }, [unlocked, loadProfile])
 
   const revokeOne = async (id: string) => {
     if (busy) return
@@ -142,7 +158,7 @@ export function SecurityTab({ unlocked }: { unlocked: boolean }) {
   }
 
   const now = Date.now()
-  const totp = totpState(profile.status === 'ready' ? profile.value : null)
+  const totp = totpRowState(profile)
 
   const loading = (name: string) => <SettingRow name={name} label="Loading…" />
   const failed = (surface: string, title: string, retry: () => void) => (
@@ -227,18 +243,22 @@ export function SecurityTab({ unlocked }: { unlocked: boolean }) {
   return (
     <>
       <SettingsGroup>
-        <SettingRow
-          name="totp"
-          tall
-          label={totpLabel(totp)}
-          hint={totpHint(totp)}
-          control={
-            <Btn onClick={() => void openUrl(SECURITY_SETTINGS_URL)}>
-              <SettingsIcon name="external" size={13} />
-              {totpAction(totp)}
-            </Btn>
-          }
-        />
+        {totp === 'failed' ? (
+          failed('security-profile', TOTP_CHECK_FAILED, () => void loadProfile())
+        ) : (
+          <SettingRow
+            name="totp"
+            tall
+            label={totpLabel(totp)}
+            hint={totpHint(totp)}
+            control={
+              <Btn onClick={() => void openUrl(SECURITY_SETTINGS_URL)}>
+                <SettingsIcon name="external" size={13} />
+                {totpAction(totp)}
+              </Btn>
+            }
+          />
+        )}
       </SettingsGroup>
 
       <SettingsGroup title="Active sessions" headingId={SESSIONS_HEADING_ID}>{sessionRows}</SettingsGroup>

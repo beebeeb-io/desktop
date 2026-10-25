@@ -32,7 +32,12 @@ export default function UpdateBanner() {
   const [installState, setInstallState] = useState<InstallState>('idle')
   const [installError, setInstallError] = useState<string | null>(null)
   // What a Mac is offered for it: the newest stable image for a stable update, that release's page for another channel.
+  // The toast's effect depends on the offer's three strings and not on the object: a new object every render would show
+  // the toast again on every render, and `App.tsx`'s 5 s status poll renders this banner (review P2-A).
   const offer = update && downloadOnly ? updateOffer(update.channel, update.version) : null
+  const offerLabel = offer?.label ?? null
+  const offerUrl = offer?.url ?? null
+  const offerHint = offer?.hint ?? null
 
   useEffect(() => {
     let cancelled = false
@@ -96,7 +101,7 @@ export default function UpdateBanner() {
       title: installFailed ? 'Update install failed' : updateAvailableLine(update.version),
       message: (
         <>
-          <span style={{ color: T.ink2 }}>{offer ? offer.hint : installSupported ? 'Restart to apply the update.' : caps?.update_format === 'package_manager' ? 'Update with your package manager.' : 'Download an installer to update this installation.'}</span>
+          <span style={{ color: T.ink2 }}>{offerHint !== null ? offerHint : installSupported ? 'Restart to apply the update.' : caps?.update_format === 'package_manager' ? 'Update with your package manager.' : 'Download an installer to update this installation.'}</span>
           {' '}
           <button
             type="button"
@@ -138,7 +143,7 @@ export default function UpdateBanner() {
           )}
         </>
       ),
-      action: offer ? { label: offer.label, onClick: () => { void openUrl(offer.url) } } : installSupported ? {
+      action: offerLabel !== null && offerUrl !== null ? { label: offerLabel, onClick: () => { void openUrl(offerUrl) } } : installSupported ? {
         label: installState === 'installing' ? 'Installing...' : installFailed ? 'Try again' : 'Restart to update',
         onClick: handleInstall,
         disabled: installState === 'installing',
@@ -146,7 +151,7 @@ export default function UpdateBanner() {
       } : { label: 'Downloads', onClick: () => { void openUrl('https://beebeeb.io/download') } },
       durationMs: null,
     })
-  }, [caps?.update_format, offer, installSupported, handleInstall, installError, installState, releaseNotesUrl, showToast, update])
+  }, [caps?.update_format, offerHint, offerLabel, offerUrl, installSupported, handleInstall, installError, installState, releaseNotesUrl, showToast, update])
 
   return <ManualUpdateFeedback />
 }

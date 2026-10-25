@@ -141,3 +141,58 @@ describe('Windows and Linux are unchanged', () => {
     expect(calls(m, 'install_update')).toEqual([])
   })
 })
+
+// PR #140 delta review, P2-A: `App.tsx` re-renders the banner every 5 s (its status poll). The toast is shown again, with
+// the same id, whenever the effect that shows it runs, and a person who dismissed it must not see it come back.
+describe('a dismissed toast stays dismissed: the banner shows it once per update, not once per render', () => {
+  const shownCount = (m: Mounted) => m.toasts.filter((t) => t.id === 'desktop-update').length
+
+  test('on a Mac, however often the banner renders again, the toast is shown once', async () => {
+    const { m } = await openBanner(caps.macos)
+    const afterTheUpdate = shownCount(m)
+    for (let tick = 0; tick < 6; tick++) {
+      m.render()
+      await m.flush()
+    }
+    expect(afterTheUpdate).toBe(1)
+    expect(shownCount(m)).toBe(1)
+  })
+
+  test('on a beta update, whose offer is a link to the release, the same', async () => {
+    const { m } = await openBanner(caps.macos, { version: '0.9.0', body: '', channel: 'beta' })
+    for (let tick = 0; tick < 6; tick++) {
+      m.render()
+      await m.flush()
+    }
+    expect(shownCount(m)).toBe(1)
+  })
+
+  test('on Windows and Linux, the same', async () => {
+    for (const name of ['windows-nsis', 'linux-appimage', 'linux-deb']) {
+      const { m } = await openBanner(caps[name])
+      for (let tick = 0; tick < 6; tick++) {
+        m.render()
+        await m.flush()
+      }
+      expect(shownCount(m), name).toBe(1)
+    }
+  })
+
+  test('a newer update is a new toast: it is shown again for the new version', async () => {
+    const events = bus()
+    const m = mount('UpdateBanner.tsx', 'UpdateBanner', {
+      backend: { install_update: () => undefined, 'plugin:opener|open_url': () => undefined },
+      expand: true,
+      bindings: { ...desktopApi, ...macUpdateCopy, ...macUpdateOffer, ManualUpdateFeedback: () => null, useCapabilities: () => caps.macos, canInstallUpdate, listen: events.listen, T },
+    })
+    mounted.push(m)
+    await m.flush()
+    events.emit('update-available', { version: '0.8.13', body: '', channel: 'stable' })
+    await m.flush()
+    await m.flush()
+    events.emit('update-available', { version: '0.8.14', body: '', channel: 'stable' })
+    await m.flush()
+    await m.flush()
+    expect(m.toasts.filter((t) => t.id === 'desktop-update').map((t) => t.title)).toEqual(['Version 0.8.13 is available.', 'Version 0.8.14 is available.'])
+  })
+})
