@@ -6,7 +6,7 @@ import { useCapabilities, canInstallUpdate } from './capabilities'
  * a stalled updater never leaves the action stuck in progress.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { command, openUrl } from './desktopApi'
 import { updateAvailableLine } from './macUpdateCopy'
@@ -31,6 +31,9 @@ export default function UpdateBanner() {
   const [update, setUpdate] = useState<UpdatePayload | null>(null)
   const [installState, setInstallState] = useState<InstallState>('idle')
   const [installError, setInstallError] = useState<string | null>(null)
+  // The install state belongs to a version: the 4-hourly announcement of the same one must not reset a failed install to
+  // "Restart to update" and show the toast again (review P3-e).
+  const announcedVersion = useRef<string | null>(null)
   // What a Mac is offered for it: the newest stable image for a stable update, that release's page for another channel.
   // The toast's effect depends on the offer's three strings and not on the object: a new object every render would show
   // the toast again on every render, and `App.tsx`'s 5 s status poll renders this banner (review P2-A).
@@ -45,8 +48,11 @@ export default function UpdateBanner() {
     const unlisten = listen<UpdatePayload>('update-available', (event) => {
       if (cancelled) return
       setUpdate(event.payload)
-      setInstallState('idle')
-      setInstallError(null)
+      if (announcedVersion.current !== event.payload.version) {
+        announcedVersion.current = event.payload.version
+        setInstallState('idle')
+        setInstallError(null)
+      }
     })
 
     return () => {

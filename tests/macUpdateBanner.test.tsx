@@ -234,6 +234,58 @@ describe('a dismissed toast stays dismissed: the banner shows it once per update
     expect(m.toasts.filter((t) => t.id === 'desktop-update')).toHaveLength(2)
   })
 
+  // Review P3-e (Windows and Linux): the install state belongs to the version. The 4-hourly announcement of the same version
+  // after a failed install must not reset it to "Restart to update" and show the toast again.
+  test('after a failed install, the same version announced again keeps the failure and shows nothing again', async () => {
+    const events = bus()
+    const m = mount('UpdateBanner.tsx', 'UpdateBanner', {
+      backend: { install_update: () => { throw new Error('disk is full') }, 'plugin:opener|open_url': () => undefined },
+      expand: true,
+      bindings: { ...desktopApi, ...macUpdateCopy, ...macUpdateOffer, ManualUpdateFeedback: () => null, useCapabilities: () => caps['windows-nsis'], canInstallUpdate, listen: events.listen, T },
+    })
+    mounted.push(m)
+    await m.flush()
+    const announce = { version: '0.8.13', body: '', channel: 'stable' }
+    events.emit('update-available', announce)
+    await m.flush()
+    await m.flush()
+    await m.toasts.at(-1).action.onClick()
+    await m.flush()
+    await m.flush()
+    const afterFailure = m.toasts.filter((t) => t.id === 'desktop-update')
+    expect(afterFailure.at(-1).title).toBe('Update install failed')
+    for (let check = 0; check < 3; check++) {
+      events.emit('update-available', { ...announce })
+      await m.flush()
+      await m.flush()
+    }
+    expect(m.toasts.filter((t) => t.id === 'desktop-update')).toHaveLength(afterFailure.length)
+    expect(m.toasts.filter((t) => t.id === 'desktop-update').at(-1).title).toBe('Update install failed')
+  })
+
+  test('a newer version is a fresh start: the failure of the old one is not carried over', async () => {
+    const events = bus()
+    const m = mount('UpdateBanner.tsx', 'UpdateBanner', {
+      backend: { install_update: () => { throw new Error('disk is full') }, 'plugin:opener|open_url': () => undefined },
+      expand: true,
+      bindings: { ...desktopApi, ...macUpdateCopy, ...macUpdateOffer, ManualUpdateFeedback: () => null, useCapabilities: () => caps['windows-nsis'], canInstallUpdate, listen: events.listen, T },
+    })
+    mounted.push(m)
+    await m.flush()
+    events.emit('update-available', { version: '0.8.13', body: '', channel: 'stable' })
+    await m.flush()
+    await m.flush()
+    await m.toasts.at(-1).action.onClick()
+    await m.flush()
+    await m.flush()
+    events.emit('update-available', { version: '0.8.14', body: '', channel: 'stable' })
+    await m.flush()
+    await m.flush()
+    const last = m.toasts.filter((t) => t.id === 'desktop-update').at(-1)
+    expect(last.title).toBe('Version 0.8.14 is available.')
+    expect(last.action.label).toBe('Restart to update')
+  })
+
   test('a newer version is a new toast even when its notes address, body and offer are the same as the last one\'s', async () => {
     const events = bus()
     const m = mount('UpdateBanner.tsx', 'UpdateBanner', {

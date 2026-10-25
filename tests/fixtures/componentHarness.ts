@@ -95,6 +95,12 @@ export function mount(
     props?: any
     expand?: boolean
     hookModules?: HookModule[]
+    /**
+     * Re-render at the end of a `flush` only when a state setter changed a value (`Object.is`), as React does. Without it a
+     * `flush` always re-renders, which hides a handler that forgot to set state: the test sees the new world anyway
+     * (PR #147 review, P3-a). Off by default: the tests written before it lean on the always-render behaviour.
+     */
+    honestRender?: boolean
   },
 ): Mounted {
   const states: any[] = []
@@ -123,13 +129,21 @@ export function mount(
       },
     },
   }
+  let dirty = false
   const toastApi = { showToast: (toast: any) => toasts.push(toast), dismissToast() {}, clearToasts() {} }
   const controlledHooks: Record<string, unknown> = {
     React: { createElement, Fragment },
     useState(initial: any) {
       const index = cursor++
       if (!(index in states)) states[index] = typeof initial === 'function' ? initial() : initial
-      return [states[index], (next: any) => { states[index] = typeof next === 'function' ? next(states[index]) : next }]
+      return [
+        states[index],
+        (next: any) => {
+          const value = typeof next === 'function' ? next(states[index]) : next
+          if (!Object.is(value, states[index])) dirty = true
+          states[index] = value
+        },
+      ]
     },
     useEffect(fn: any, next: any[]) {
       const index = cursor++
@@ -173,7 +187,8 @@ export function mount(
       }
       await Promise.resolve()
     }
-    render()
+    if (!opts.honestRender || dirty) render()
+    dirty = false
   }
   const unmount = () => {
     for (const cleanup of cleanups.values()) cleanup()

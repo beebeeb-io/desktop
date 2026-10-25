@@ -102,8 +102,10 @@ describe('an answer that has gone stale says how old it is', () => {
     expect(totpStaleNote(answeredAt, answeredAt + 3 * 24 * 60 * MIN)).toBe('Last checked 3 days ago.')
   })
 
-  test('a clock that was put back is not an age', () => {
-    expect(totpStaleNote(answeredAt, answeredAt - 10 * MIN)).toBeNull()
+  // Review P3-b: a clock put back is not "current" either. The age cannot be computed, so the row says only that it was a while ago.
+  test('a clock that was put back is stale, and says "Last checked a while ago."', () => {
+    expect(totpStaleNote(answeredAt, answeredAt - 10 * MIN)).toBe('Last checked a while ago.')
+    expect(totpStaleNote(answeredAt, answeredAt - 1)).toBe('Last checked a while ago.')
   })
 })
 
