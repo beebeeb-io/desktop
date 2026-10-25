@@ -107,6 +107,8 @@ Test fixtures: `docs/NATIVE_PARITY_FIXTURES.md` (task 1612) — test-only `nativ
 
 Every request from the daemon `ApiClient` and every ad-hoc `reqwest::Client` in Tauri commands carries `X-Beebeeb-Client: desktop` + `X-Beebeeb-Client-Version` (`api_client::provenance_headers()`; mirrors CLI's `build_client`). Version sent is `BEEBEEB_RELEASE_VERSION` (release.yml), falling back to `CARGO_PKG_VERSION` — not raw Cargo's `0.1.0`.
 
+**Direct S3 downloads (task 2173):** a whole-file hydrate (`EngineBridge::hydrate_whole_file`) fetches encrypted chunks straight from storage through grant windows when discovery offers `object-download-v1` (`src/direct_download.rs` drives core's `beebeeb_core::direct_transfer` planner; HTTP in `src/api_client/direct.rs`). Rules: discovery cache and storage client live in the `ApiClient` (one signed-in session); `X-Beebeeb-Capabilities` only on the grant POST; storage links through the separate storage client only (no default headers, no redirects, https only unless the API is loopback http); a storage failure is a status number, never reqwest's text (it holds the signed URL); chunk RANGES, thumbnails, versions and uploads stay on the API. `BB_TRANSPORT=api` (wins) or `desktop.toml` `transport = "api"` forces the API path.
+
 ## Sync engine
 
 `src-tauri` owns the background Rust sync runtime; no protocol duplication in TypeScript. Conflicts: never silently drop a version — default `KeepBoth` (loser renamed `file (Device, HH:MM).ext`). Watcher debounce 100 ms.

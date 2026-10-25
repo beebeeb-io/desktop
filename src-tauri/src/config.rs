@@ -258,6 +258,12 @@ pub struct DesktopConfig {
     /// content; eviction only removes unpinned files. `0` means Unlimited.
     #[serde(default = "default_local_cache_limit_bytes")]
     pub local_cache_limit_bytes: i64,
+    /// Task 2173: `"api"` forces today's API transport for file downloads; absent or `"auto"`
+    /// uses direct storage transfers when the server offers them. A support switch, edited by
+    /// hand (a Mac app does not see a shell's `BB_TRANSPORT`, which wins when set). Not in
+    /// `DesktopSettings`, so a settings save never touches it; absent from the file while unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
 
     // ── Desktop update channel ────────────────────────────────────────
     //
@@ -385,6 +391,7 @@ impl Default for DesktopConfig {
             sync_overlays: None,
             theme: DesktopTheme::System,
             local_cache_limit_bytes: DEFAULT_LOCAL_CACHE_LIMIT_BYTES,
+            transport: None,
             release_channel: ReleaseChannel::Stable,
             installed_release_channel: None,
             kept_unsynced_folder: None,

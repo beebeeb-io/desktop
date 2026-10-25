@@ -247,6 +247,11 @@ pub(crate) struct Seams {
     hooks: std::sync::Mutex<HashMap<&'static str, SeamHook>>,
     /// Staging bases this bridge uses instead of the process's (`stage_under`, macOS tests).
     staging_bases: std::sync::Mutex<Option<FinderStagingBases>>,
+    /// The download transport this bridge uses (task 2173). Unset: `Auto`, so a test never reads
+    /// the developer's `BB_TRANSPORT` or `desktop.toml`.
+    transport: std::sync::Mutex<Option<crate::direct_download::Transport>>,
+    /// Every direct storage fetch fails with this status, without a request (task 2173).
+    storage_fail: std::sync::Mutex<Option<u16>>,
 }
 
 #[cfg(test)]
@@ -275,6 +280,16 @@ impl Seams {
 
     fn staging_bases(&self) -> Option<FinderStagingBases> {
         self.staging_bases.lock().unwrap().clone()
+    }
+
+    /// From now on this bridge downloads with `transport` (task 2173).
+    pub(crate) fn use_transport(&self, transport: crate::direct_download::Transport) {
+        *self.transport.lock().unwrap() = Some(transport);
+    }
+
+    /// From now on every direct storage fetch of this bridge fails with `status` (task 2173).
+    pub(crate) fn fail_storage(&self, status: u16) {
+        *self.storage_fail.lock().unwrap() = Some(status);
     }
 }
 
@@ -4252,7 +4267,20 @@ impl EngineBridge {
         // `cloud_only` may have been re-uploaded with a new chunk
         // layout since we last saw it.
         let meta = self.api.get_file(file_id).await?;
-        self.do_hydrate_with_meta(file_id, &meta, progress).await
+        match self.do_hydrate_with_meta(file_id, &meta, progress).await {
+            // Task 2173: the version a direct download pinned went away mid-transfer. Nothing of
+            // it was kept; start once more from fresh metadata (never mix versions).
+            Err(e) if matches!(
+                e.downcast_ref::<crate::direct_download::DirectError>(),
+                Some(crate::direct_download::DirectError::VersionChanged)
+            ) =>
+            {
+                tracing::debug!("direct download: the file changed while it was downloading; restarting once");
+                let meta = self.api.get_file(file_id).await?;
+                self.do_hydrate_with_meta(file_id, &meta, progress).await
+            }
+            other => other,
+        }
     }
 
     /// Shared core of [`Self::do_hydrate`] and [`Self::remote_content_preview`]
@@ -4272,6 +4300,21 @@ impl EngineBridge {
         meta: &serde_json::Value,
         progress: Option<&HydrateProgressFn>,
     ) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+        self.hydrate_whole_file(file_id, meta, progress)
+            .await
+            .map(|(plaintext, _)| plaintext)
+    }
+
+    /// [`Self::do_hydrate_with_meta`], also saying which transport carried the file. Task 2173:
+    /// straight from object storage when the server offers it and the handshake succeeds
+    /// ([`crate::direct_download`]); `UseApi` means nothing of that attempt was kept, and the file
+    /// goes through the API's per-chunk route below, as it always did.
+    async fn hydrate_whole_file(
+        &self,
+        file_id: &str,
+        meta: &serde_json::Value,
+        progress: Option<&HydrateProgressFn>,
+    ) -> anyhow::Result<(Zeroizing<Vec<u8>>, crate::direct_download::FileTransport)> {
         let chunk_count = meta
             .get("chunk_count")
             .and_then(|v| v.as_i64())
@@ -4279,10 +4322,10 @@ impl EngineBridge {
 
         let file_key = self.file_key_for_download(file_id).await?;
 
-        // Rate-limit ceiling for downloads.
-        let download_kbps_limit = crate::config::DesktopConfig::load()
-            .map(|c| c.download_kbps_limit)
-            .unwrap_or(0);
+        // Rate-limit ceiling for downloads, and the transport (task 2173).
+        let config = crate::config::DesktopConfig::load().ok();
+        let download_kbps_limit = config.as_ref().map(|c| c.download_kbps_limit).unwrap_or(0);
+        let transport = self.download_transport(config.as_ref().and_then(|c| c.transport.as_deref()));
 
         // Walk chunks. Pre-allocate roughly the file size if known,
         // but fall back to defaults — chunks are encrypted so the
@@ -4290,6 +4333,31 @@ impl EngineBridge {
         // Use Zeroizing so that if we bail mid-loop (network error,
         // decrypt error) the partial plaintext is still wiped.
         let approx_size = meta.get("size_bytes").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+
+        let report = HydrateReport {
+            bridge: self,
+            file_id,
+            total: approx_size as u64,
+            progress,
+        };
+        let direct = crate::direct_download::download(
+            &self.api,
+            crate::direct_download::Request {
+                file_id,
+                file_key: &file_key,
+                chunk_count,
+                download_kbps_limit,
+                approx_size,
+            },
+            transport,
+            self.storage_override(),
+            &report,
+        )
+        .await?;
+        if let crate::direct_download::Outcome::Done { plaintext, transport } = direct {
+            tracing::debug!(transport = transport.as_str(), "download finished");
+            return Ok((plaintext, transport));
+        }
 
         self.download_and_decrypt_chunk_range(
             file_id,
@@ -4300,6 +4368,32 @@ impl EngineBridge {
             progress,
         )
         .await
+        .map(|plaintext| (plaintext, crate::direct_download::FileTransport::Api))
+    }
+
+    /// The download transport: `BB_TRANSPORT`, else `desktop.toml`'s `transport`, else `auto`
+    /// (task 2173). A test bridge takes the one its test set, else `auto`.
+    fn download_transport(&self, configured: Option<&str>) -> crate::direct_download::Transport {
+        #[cfg(test)]
+        {
+            let _ = configured;
+            self.seams
+                .transport
+                .lock()
+                .unwrap()
+                .unwrap_or(crate::direct_download::Transport::Auto)
+        }
+        #[cfg(not(test))]
+        crate::direct_download::Transport::selected(configured)
+    }
+
+    /// A test's storage stand-in (task 2173); production always fetches.
+    fn storage_override(&self) -> Option<crate::direct_download::Storage<'static>> {
+        #[cfg(test)]
+        if let Some(status) = *self.seams.storage_fail.lock().unwrap() {
+            return Some(crate::direct_download::Storage::Fail(status));
+        }
+        None
     }
 
     /// Download + decrypt chunk indices `[range.start, range.end)` for
@@ -5677,7 +5771,7 @@ fn metadata_display_name(metadata: &serde_json::Value, op: &PendingOperation) ->
         .or_else(|| op.target_path.as_deref().map(display_name_for_path))
 }
 
-fn decrypt_downloaded_chunk(
+pub(crate) fn decrypt_downloaded_chunk(
     file_key: &beebeeb_core::kdf::FileKey,
     chunk_bytes: &[u8],
 ) -> Result<Vec<u8>, beebeeb_core::CoreError> {
@@ -5794,6 +5888,35 @@ pub(crate) fn local_file_path_under_sync_root(sync_root: &Path, rel_path: &str) 
 /// Called synchronously from the download loop, so it must be cheap and must
 /// not block (the IPC handler just pushes onto a channel).
 pub(crate) type HydrateProgressFn = dyn Fn(u64, u64) + Send + Sync;
+
+/// Where a direct download (task 2173) reports: the same wire counter, transfer board and
+/// progress callback the API path's chunk loop feeds.
+struct HydrateReport<'a> {
+    bridge: &'a EngineBridge,
+    file_id: &'a str,
+    /// The server's plaintext size (the API path's `total`).
+    total: u64,
+    progress: Option<&'a HydrateProgressFn>,
+}
+
+impl crate::direct_download::Progress for HydrateReport<'_> {
+    fn received(&self, wire_bytes: u64) {
+        self.bridge.wire.download_bytes.fetch_add(wire_bytes, Ordering::Relaxed);
+    }
+
+    fn decrypted(&self, plaintext_bytes: u64) {
+        self.decrypted_bytes(plaintext_bytes);
+    }
+}
+
+impl HydrateReport<'_> {
+    fn decrypted_bytes(&self, done: u64) {
+        self.bridge.transfers.report(self.file_id, done, self.total);
+        if let Some(report) = self.progress {
+            report(done, self.total);
+        }
+    }
+}
 
 /// Restores a row's status if [`EngineBridge::hydrate_file_with_progress`] is
 /// dropped mid-download (the IPC client hung up and the future was cancelled).
@@ -11080,7 +11203,8 @@ mod tests {
         let master_key = [14u8; 32];
         let file_key = hydration_test_key(master_key, TEST_FILE_ID);
         // 1 metadata GET + 1 chunk GET.
-        let server = HydrationMockServer::start(file_key, vec![Vec::new()], 2);
+        // + 1 discovery GET (task 2173): this server has no direct route (a JSON 404), so the API path serves it.
+        let server = HydrationMockServer::start(file_key, vec![Vec::new()], 3);
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
         seed_bridge_row(&bridge, TEST_FILE_ID, "/empty.txt", None, FileStatus::CloudOnly, 0);
 
@@ -11111,7 +11235,9 @@ mod tests {
         let master_key = [21u8; 32];
         let file_key = hydration_test_key(master_key, TEST_FILE_ID);
         let remote_chunks = vec![b"remote version text".to_vec()];
-        let server = HydrationMockServer::start(file_key, remote_chunks, 2);
+        // 1 metadata GET + 1 chunk GET
+        // + 1 discovery GET (task 2173): this server has no direct route (a JSON 404), so the API path serves it.
+        let server = HydrationMockServer::start(file_key, remote_chunks, 3);
 
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
         bridge
@@ -11161,7 +11287,9 @@ mod tests {
 
         let master_key = [22u8; 32];
         let file_key = hydration_test_key(master_key, TEST_FILE_ID);
-        let server = HydrationMockServer::start(file_key, vec![b"remote only".to_vec()], 2);
+        // 1 metadata GET + 1 chunk GET
+        // + 1 discovery GET (task 2173): this server has no direct route (a JSON 404), so the API path serves it.
+        let server = HydrationMockServer::start(file_key, vec![b"remote only".to_vec()], 3);
 
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
         bridge
@@ -11260,7 +11388,9 @@ mod tests {
 
         let master_key = [24u8; 32];
         let file_key = hydration_test_key(master_key, TEST_FILE_ID);
-        let server = HydrationMockServer::start(file_key, vec![b"remote version text".to_vec()], 2);
+        // 1 metadata GET + 1 chunk GET
+        // + 1 discovery GET (task 2173): this server has no direct route (a JSON 404), so the API path serves it.
+        let server = HydrationMockServer::start(file_key, vec![b"remote version text".to_vec()], 3);
 
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
         bridge
@@ -11878,7 +12008,8 @@ mod tests {
         let file_key = hydration_test_key(master_key, TEST_FILE_ID);
         let chunks: Vec<Vec<u8>> = vec![vec![b'a'; 10], vec![b'b'; 10], vec![b'c'; 10]];
         // 1 metadata GET + 3 chunk GETs.
-        let server = HydrationMockServer::start(file_key, chunks, 4);
+        // + 1 discovery GET (task 2173): this server has no direct route (a JSON 404), so the API path serves it.
+        let server = HydrationMockServer::start(file_key, chunks, 5);
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
         seed_bridge_row(
             &bridge,
@@ -11933,7 +12064,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let master_key = [9u8; 32];
         let file_key = hydration_test_key(master_key, TEST_FILE_ID);
-        let server = HydrationMockServer::start(file_key, vec![vec![b'x'; 12]], 2);
+        // 1 metadata GET + 1 chunk GET
+        // + 1 discovery GET (task 2173): this server has no direct route (a JSON 404), so the API path serves it.
+        let server = HydrationMockServer::start(file_key, vec![vec![b'x'; 12]], 3);
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
         seed_bridge_row(&bridge, TEST_FILE_ID, "one.bin", None, FileStatus::CloudOnly, 12);
         let dest = dir.path().join("one.bin");
@@ -14522,8 +14655,9 @@ mod tests {
         assert!(!dest.exists(), "a cancelled hydrate must not write plaintext to disk");
         let served = server.stop_and_count();
         assert!(
-            served <= 2,
-            "the daemon must stop fetching after the hang-up: metadata + at most the in-flight chunk, got {served}"
+            served <= 3,
+            "the daemon must stop fetching after the hang-up: metadata + discovery (task 2173; this server has \
+             no direct route) + at most the in-flight chunk, got {served}"
         );
     }
 
@@ -15086,7 +15220,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let master_key = [7u8; 32];
         let file_key = hydration_test_key(master_key, TEST_FILE_ID);
-        let server = HydrationMockServer::start(file_key, vec![vec![b't'; 8]], 2);
+        // 1 metadata GET + 1 chunk GET
+        // + 1 discovery GET (task 2173): this server has no direct route (a JSON 404), so the API path serves it.
+        let server = HydrationMockServer::start(file_key, vec![vec![b't'; 8]], 3);
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
         seed_bridge_row(&bridge, TEST_FILE_ID, "trash-view.txt", None, FileStatus::Trashing, 8);
         let dest = dir.path().join("trash-view.txt");
@@ -23516,9 +23652,20 @@ mod tests {
             1,
             "one fetch reached the server: {fetch:?}"
         );
+        // Task 2173: plus at most one discovery request (this server has no direct route).
         assert!(
-            fetch.iter().all(|(m, path)| m == "GET" && path.starts_with(&metadata)),
+            fetch
+                .iter()
+                .all(|(m, path)| m == "GET" && (path.starts_with(&metadata) || path == "/api/v1/transfer/capabilities")),
             "nothing but that fetch: {fetch:?}"
+        );
+        assert!(
+            fetch
+                .iter()
+                .filter(|(_, path)| path == "/api/v1/transfer/capabilities")
+                .count()
+                <= 1,
+            "discovery at most once: {fetch:?}"
         );
     }
 
@@ -24842,5 +24989,186 @@ mod tests {
         assert!(refused.to_string().contains("region_unavailable"), "{refused}");
         assert_eq!(api.account_region().await.unwrap().preferred_region.as_deref(), Some("europe"));
         println!("LANDED {landed:?}");
+    }
+
+    /// Task 2173: the engine's whole-file hydrate over the direct transport, against a loopback API
+    /// and storage pair that speaks the contract (`direct_download::test_support`).
+    mod direct_download_engine {
+        use super::*;
+        use crate::direct_download::test_support::{GrantScript, Pair, SECRET, SIGNATURE, Version, capture_logs, content, file_key};
+        use crate::direct_download::{FileTransport, Transport};
+
+        const KEY: [u8; 32] = [31; 32];
+        const SIZE: usize = 10 * 1024 + 77;
+
+        fn bridge_for(dir: &Path, pair: &Pair) -> EngineBridge {
+            let bridge = test_bridge_with_api(&dir.join("state.db"), pair.api.base.clone(), KEY);
+            seed_bridge_row(&bridge, TEST_FILE_ID, "/direct.bin", None, FileStatus::CloudOnly, SIZE as i64);
+            bridge
+        }
+
+        #[tokio::test]
+        async fn a_direct_hydrate_writes_the_same_bytes_and_reports_like_the_api_path() {
+            let dir = tempfile::tempdir().unwrap();
+            let pair = Pair::start(KEY, TEST_FILE_ID, 1024, SIZE);
+            let bridge = bridge_for(dir.path(), &pair);
+            let reports: Arc<Mutex<Vec<(u64, u64)>>> = Arc::default();
+            let seen = reports.clone();
+            let progress = move |done: u64, total: u64| seen.lock().unwrap().push((done, total));
+            let dest = dir.path().join("direct.bin");
+            bridge
+                .hydrate_file_with_progress(TEST_FILE_ID, &dest, &[dir.path()], Some(&progress))
+                .await
+                .unwrap();
+            assert_eq!(std::fs::read(&dest).unwrap(), pair.plain(), "byte-identical on disk");
+            assert_eq!(pair.storage_requests(), 11);
+            assert!(pair.api_chunk_requests().is_empty(), "no chunk through the API");
+            let encrypted = pair.knobs().version.encrypted_size();
+            assert_eq!(bridge.wire.download_bytes.load(Ordering::Relaxed), encrypted, "wire bytes counted");
+            let reports = reports.lock().unwrap().clone();
+            let total = SIZE as u64;
+            assert_eq!(reports.first(), Some(&(0, total)), "the start, as on the API path");
+            assert_eq!(reports.last(), Some(&(total, total)));
+            assert_eq!(reports.len(), 12, "the start, then once per chunk");
+            assert_eq!(bridge.db.get_file(TEST_FILE_ID).unwrap().unwrap().status, FileStatus::Local);
+        }
+
+        #[tokio::test]
+        async fn a_version_replaced_mid_download_restarts_once_from_fresh_metadata() {
+            let dir = tempfile::tempdir().unwrap();
+            let pair = Pair::start(KEY, TEST_FILE_ID, 1024, SIZE);
+            let replacement = Version::new(
+                &file_key(KEY, TEST_FILE_ID),
+                "99999999-2222-4333-8444-555555555555",
+                1024,
+                content(SIZE + 5000, 9),
+            );
+            {
+                let mut k = pair.knobs();
+                k.replacement = Some(replacement.clone());
+                k.grants.push_back(GrantScript::Serve);
+                k.grants.push_back(GrantScript::Replace);
+            }
+            let bridge = bridge_for(dir.path(), &pair);
+            let plaintext = bridge.do_hydrate(TEST_FILE_ID, None).await.unwrap();
+            assert_eq!(&*plaintext, replacement.plain.as_slice(), "the new version, whole, never mixed");
+            let metadata = pair.api.count(|s| s.method == "GET" && s.path() == format!("/api/v1/files/{TEST_FILE_ID}"));
+            assert_eq!(metadata, 2, "fresh metadata once");
+            assert!(pair.api_chunk_requests().is_empty());
+        }
+
+        #[tokio::test]
+        async fn forcing_the_api_transport_keeps_the_old_requests() {
+            let dir = tempfile::tempdir().unwrap();
+            let pair = Pair::start(KEY, TEST_FILE_ID, 1024, SIZE);
+            let bridge = bridge_for(dir.path(), &pair);
+            bridge.seams.use_transport(Transport::Api);
+            let meta = bridge.api.get_file(TEST_FILE_ID).await.unwrap();
+            let (plaintext, transport) = bridge.hydrate_whole_file(TEST_FILE_ID, &meta, None).await.unwrap();
+            assert_eq!((plaintext.to_vec(), transport), (pair.plain(), FileTransport::Api));
+            assert_eq!(pair.discovery_requests(), 0);
+            assert!(pair.grant_requests().is_empty());
+            let chunks = pair.api_chunk_requests();
+            assert_eq!(chunks.len(), 11);
+            assert!(chunks.iter().all(|r| r.query().is_empty()), "today's unpinned route, unchanged");
+        }
+
+        #[tokio::test]
+        async fn a_range_read_stays_on_the_api() {
+            let dir = tempfile::tempdir().unwrap();
+            let pair = Pair::start(KEY, TEST_FILE_ID, 1024, SIZE);
+            let bridge = bridge_for(dir.path(), &pair);
+            let range = bridge.hydrate_file_range(TEST_FILE_ID, 1024, 10).await.unwrap().unwrap();
+            assert_eq!(&*range.data, &pair.plain()[1024..2048]);
+            assert_eq!(pair.discovery_requests(), 0, "a range read never asks for windows");
+            assert_eq!(pair.api_chunk_requests().len(), 1);
+            assert_eq!(pair.storage_requests(), 0);
+        }
+
+        fn real_env(name: &str) -> String {
+            std::env::var(name)
+                .unwrap_or_else(|_| panic!("{name} must be set (see the test's doc); this test never passes vacuously"))
+        }
+
+        /// The desktop engine against a REAL local server: the API path, the direct path and a
+        /// forced fallback (every storage fetch fails, so every chunk is renewed three times against
+        /// the real grant route and then fetched through the real pinned per-chunk route) all return
+        /// the same bytes. Ignored by default; it starts nothing and refuses any non-loopback URL.
+        ///
+        /// ```text
+        /// BB_REAL_SERVER_URL=http://127.0.0.1:3994   # beebeeb-api, its own Postgres, Redis, MinIO
+        /// BB_REAL_SESSION_TOKEN=<token>              # a session of a fresh test account
+        /// BB_REAL_FILE_ID=<id>                       # a file that account uploaded with a zero master key
+        /// BB_REAL_SHA256=<hex>                       # the sha256 of its plaintext
+        /// BB_REAL_EXPECT_TRANSPORT=direct|api        # what the auto run must use
+        /// BB_REAL_REPORT=<file>                      # optional: result lines are appended here
+        /// ```
+        #[tokio::test(flavor = "current_thread")]
+        #[ignore = "needs a running server and MinIO: set BB_REAL_SERVER_URL, BB_REAL_SESSION_TOKEN, BB_REAL_FILE_ID, BB_REAL_SHA256, BB_REAL_EXPECT_TRANSPORT"]
+        async fn real_server_api_direct_and_forced_fallback_return_identical_bytes() {
+            use sha2::Digest;
+            let url = real_env("BB_REAL_SERVER_URL");
+            assert!(
+                url.starts_with("http://127.0.0.1:") || url.starts_with("http://localhost:"),
+                "refusing to run against {url}: only a loopback http server"
+            );
+            let token = real_env("BB_REAL_SESSION_TOKEN");
+            let file_id = real_env("BB_REAL_FILE_ID");
+            let want = real_env("BB_REAL_SHA256");
+            let expect = real_env("BB_REAL_EXPECT_TRANSPORT");
+            assert!(expect == "direct" || expect == "api", "BB_REAL_EXPECT_TRANSPORT is direct or api");
+            let fallback = if expect == "direct" { "mixed" } else { "api" };
+            // (label, transport, every storage fetch fails, transport the run must report)
+            let cells = [
+                ("auto", Transport::Auto, false, expect.as_str()),
+                ("forced-api", Transport::Api, false, "api"),
+                ("forced-fallback", Transport::Auto, true, fallback),
+            ];
+            let (report, logs) = capture_logs(async {
+                let mut report = Vec::new();
+                for (label, transport, fail_storage, expected) in cells {
+                    let dir = tempfile::tempdir().unwrap();
+                    let db = Arc::new(StateDb::open(dir.path().join("state.db")).unwrap());
+                    // A fresh client per cell: each asks discovery itself. The 32 zero bytes are the
+                    // test account's master key (the server never sees it).
+                    let api = Arc::new(ApiClient::new(url.clone(), token.clone(), [0u8; 32]));
+                    let bridge = EngineBridge::new(db, api);
+                    bridge.seams.use_transport(transport);
+                    if fail_storage {
+                        bridge.seams.fail_storage(503);
+                    }
+                    let meta = bridge.api.get_file(&file_id).await.expect("file metadata");
+                    let started = std::time::Instant::now();
+                    let (plaintext, used) = bridge
+                        .hydrate_whole_file(&file_id, &meta, None)
+                        .await
+                        .unwrap_or_else(|e| panic!("{label}: {e:#}"));
+                    let got: String = sha2::Sha256::digest(&*plaintext).iter().map(|b| format!("{b:02x}")).collect();
+                    let line = format!(
+                        "{label}: transport={} sha256={got} bytes={} wire={} ms={}",
+                        used.as_str(),
+                        plaintext.len(),
+                        bridge.wire.download_bytes.load(Ordering::Relaxed),
+                        started.elapsed().as_millis()
+                    );
+                    println!("{line}");
+                    assert_eq!(got, want, "{label}: different bytes");
+                    assert_eq!(used.as_str(), expected, "{label}: another transport");
+                    report.push(line);
+                }
+                report
+            })
+            .await;
+            let leaks = logs.lines().filter(|l| l.contains(SIGNATURE) || l.contains(SECRET)).count();
+            let line = format!("log lines captured={} with {SIGNATURE}={leaks}", logs.lines().count());
+            println!("{line}");
+            assert_eq!(leaks, 0, "a signed link reached the log");
+            if let Ok(path) = std::env::var("BB_REAL_REPORT") {
+                let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
+                for l in report.iter().chain(std::iter::once(&line)) {
+                    writeln!(f, "{l}").unwrap();
+                }
+            }
+        }
     }
 }
