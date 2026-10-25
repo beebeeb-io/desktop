@@ -129,6 +129,9 @@ const trashItems = [
 const base = {
   ...account,
   update: { status: 'up_to_date', current_version: '0.8.12', channel: 'stable' },
+  // When the fixtures were made: the page shifts every "how long ago" in a snapshot by the time since, so a scenario that
+  // runs minutes into this script still reads "1 min ago" and "just now", not what the clock says by then.
+  t0: Math.floor(Date.now() / 1000),
   snapshot: snapshot(),
   overview: { by_status: [{ status: 'cloud_only', count: 8311, bytes: 1 }, { status: 'local', count: 1204, bytes: 1 }], recent: [], total_files: 9515, total_bytes: 2, pinned_count: 40, pinned_bytes: 1, pinned_folders: 3 },
   review: reviewEntries, conflictPreview, search: searchHits, versions: versionList, trash: trashItems,
@@ -205,8 +208,15 @@ function installBackend({ caps, fx }) {
         case 'desktop_platform': return 'macos'
         case 'app_version': return '0.8.12'
         case 'sync_status': return { session_revision: f.revision ?? 1, logged_in: f.snapshot.account.logged_in, vault_unlocked: f.snapshot.account.vault_unlocked, engine: 'running', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0, auth_expired: f.snapshot.account.auth_expired, engine_refusal: null }
-        // (This function runs in the page: the literal is LAST_CHECKED_70_S_AGO above, and the clock is the page's.)
-        case 'popover_snapshot': return f.snapshot?.engine?.last_tick_ok_at === 'now-70s' ? { ...f.snapshot, engine: { ...f.snapshot.engine, last_tick_ok_at: Math.floor(Date.now() / 1000) - 70 } } : f.snapshot
+        // (This function runs in the page.) Every "how long ago" in a snapshot moves by the time since the fixtures were made;
+        // the default snapshot's `last_tick_ok_at` is the sentinel 'now-70s' (LAST_CHECKED_70_S_AGO above): 70 s before the page asks.
+        case 'popover_snapshot': {
+          const now = Math.floor(Date.now() / 1000)
+          const shift = now - f.t0
+          const snap = f.snapshot
+          const lastTick = snap.engine.last_tick_ok_at === 'now-70s' ? now - 70 : snap.engine.last_tick_ok_at === null ? null : snap.engine.last_tick_ok_at + shift
+          return { ...snap, engine: { ...snap.engine, last_tick_ok_at: lastTick }, activity: snap.activity.map((row) => ({ ...row, at: row.at + shift })) }
+        }
         case 'account_subscription': return f.subscription
         case 'get_desktop_config': return f.config
         case 'desktop_config': return f.config
