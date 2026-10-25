@@ -44,6 +44,20 @@ impl std::fmt::Display for VersionGone {
 
 impl std::error::Error for VersionGone {}
 
+/// The version a download was bound to went away, and the fresh metadata names no version to bind the restart to
+/// (`download_version: null`: the current version is not servable right now). An error, never an unpinned download:
+/// a restart keeps the binding the first attempt had (task 1643, review of #138).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PinLost;
+
+impl std::fmt::Display for PinLost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the file changed while it was downloading, and its new version cannot be downloaded yet")
+    }
+}
+
+impl std::error::Error for PinLost {}
+
 /// Why a `download_version` could not be used. The download is refused: a manifest the client cannot
 /// check is never downloaded against, and never silently replaced by an unpinned download.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

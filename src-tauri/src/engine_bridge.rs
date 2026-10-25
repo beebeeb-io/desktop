@@ -4277,13 +4277,31 @@ impl EngineBridge {
         // `cloud_only` may have been re-uploaded with a new chunk
         // layout since we last saw it.
         let meta = self.api.get_file(file_id).await?;
-        match self.do_hydrate_with_meta(file_id, &meta, progress).await {
-            // Tasks 1643 + 2173: the version this download was bound to went away mid-transfer.
-            // Nothing of it was kept; start once more from fresh metadata (never mix versions).
+        self.with_one_restart(file_id, meta, |meta| async move {
+            self.do_hydrate_with_meta(file_id, &meta, progress).await
+        })
+        .await
+    }
+
+    /// Tasks 1643 + 2173: run one download `attempt` on `meta`, and when the version it was bound to went away
+    /// ([`crate::download_pin::VersionGone`]) run it ONCE more on fresh metadata; nothing of the first attempt is kept,
+    /// and versions are never mixed. The restart keeps the binding: when the first attempt was pinned and the fresh
+    /// metadata names no version (`download_version: null`), it is [`crate::download_pin::PinLost`], never an unpinned
+    /// download. The one copy of this rule (whole-file hydrate, range read, conflict preview).
+    async fn with_one_restart<T, F, Fut>(&self, file_id: &str, meta: serde_json::Value, attempt: F) -> anyhow::Result<T>
+    where
+        F: Fn(serde_json::Value) -> Fut,
+        Fut: std::future::Future<Output = anyhow::Result<T>>,
+    {
+        let first_was_pinned = crate::download_pin::PinnedVersion::from_metadata(&meta)?.is_some();
+        match attempt(meta).await {
             Err(e) if e.downcast_ref::<crate::download_pin::VersionGone>().is_some() => {
                 tracing::debug!("download: the file changed while it was downloading; restarting once");
-                let meta = self.api.get_file(file_id).await?;
-                self.do_hydrate_with_meta(file_id, &meta, progress).await
+                let fresh = self.api.get_file(file_id).await?;
+                if first_was_pinned && crate::download_pin::PinnedVersion::from_metadata(&fresh)?.is_none() {
+                    return Err(anyhow::Error::new(crate::download_pin::PinLost));
+                }
+                attempt(fresh).await
             }
             other => other,
         }
@@ -4474,19 +4492,29 @@ impl EngineBridge {
 
         for i in range {
             let chunk_start = std::time::Instant::now();
-            let chunk_bytes = self
-                .api
-                .download_chunk_of(file_id, i, pin.map(|p| p.object_version_id.as_str()))
-                .await?;
-            let wire_len = chunk_bytes.len() as u64;
-            if let Some(pin) = pin {
-                let expected = pin
-                    .wire_size(i)
-                    .ok_or_else(|| anyhow::anyhow!("chunk {i} is outside the pinned version"))?;
-                if wire_len != expected {
-                    anyhow::bail!("chunk {i} is {wire_len} bytes, the pinned version's manifest says {expected}");
+            let chunk_bytes = match pin {
+                // Task 1643: the pinned route (shared with the direct path's fallback): exactly the manifest's
+                // length, a transient failure tried again, a 409 = the version is gone, no URL in an error.
+                Some(pin) => {
+                    let expected = pin
+                        .wire_size(i)
+                        .ok_or_else(|| anyhow::anyhow!("chunk {i} is outside the pinned version"))?;
+                    self.api
+                        .download_chunk_pinned(file_id, i, &pin.object_version_id, expected)
+                        .await
+                        .map_err(|e| match e {
+                            crate::api_client::ChunkApiError::Restart => {
+                                anyhow::Error::new(crate::download_pin::VersionGone)
+                            }
+                            crate::api_client::ChunkApiError::Terminal(status) => {
+                                anyhow::Error::new(crate::direct_download::DirectError::Refused(status))
+                            }
+                            crate::api_client::ChunkApiError::Failed(message) => anyhow::anyhow!(message),
+                        })?
                 }
-            }
+                None => self.api.download_chunk(file_id, i).await?,
+            };
+            let wire_len = chunk_bytes.len() as u64;
             // Decrypt into a temporary buffer, copy into the accumulator,
             // then zeroize the temporary. This limits live plaintext to
             // the accumulator + one chunk at any moment.
@@ -4555,114 +4583,122 @@ impl EngineBridge {
             .parse()
             .map_err(|e| anyhow::anyhow!("invalid file_id (not a UUID): {e}"))?;
 
-        // Task 1643: the range is planned on, and read from, one pinned version. A version that goes
-        // away mid-read starts the read again, once, from fresh metadata.
-        let mut restarted = false;
-        loop {
-            let meta = self.api.get_file(file_id).await?;
-            let pin = crate::download_pin::PinnedVersion::from_metadata(&meta)?;
-            let (chunk_count, size_bytes, chunk_size_bytes) = match &pin {
-                Some(pin) => (
-                    u64::from(pin.chunk_count),
-                    Some(pin.plaintext_size_bytes),
-                    Some(pin.chunk_size_bytes),
-                ),
-                None => (
-                    meta.get("chunk_count").and_then(|v| v.as_i64()).unwrap_or(0) as u64,
-                    meta.get("size_bytes").and_then(|v| v.as_u64()),
-                    meta.get("chunk_size_bytes").and_then(|v| v.as_u64()),
-                ),
-            };
-
-            let (Some(size_bytes), Some(chunk_size_bytes), true) = (size_bytes, chunk_size_bytes, chunk_count > 0)
-            else {
-                // Missing metadata — caller falls back to the whole-file path.
-                return Ok(None);
-            };
-            if chunk_size_bytes == 0 {
-                return Ok(None);
-            }
-
-            // Clamp the requested range to the file's real extent before computing
-            // covering chunks, so a stale/over-wide CF request never derives an
-            // out-of-bounds chunk index.
-            let range_end = required_offset.saturating_add(required_length).min(size_bytes);
-            if range_end <= required_offset {
-                // Degenerate/empty range — nothing to hydrate.
-                return Ok(Some(HydratedRange {
-                    data: Zeroizing::new(Vec::new()),
-                    range_start_bytes: required_offset,
-                    covers_whole_file: size_bytes == 0,
-                }));
-            }
-
-            let Some(plan) = plan_hydration_chunk_range(
-                size_bytes,
-                chunk_count,
-                chunk_size_bytes,
-                required_offset,
-                required_length,
-            )?
-            else {
-                return Ok(None);
-            };
-
-            self.db.set_status(file_id, FileStatus::Downloading)?;
-
-            let file_key = self.file_key_for_download(file_id).await?;
-            let download_kbps_limit = crate::config::DesktopConfig::load()
-                .map(|c| c.download_kbps_limit)
-                .unwrap_or(0);
-
-            let chunks = plan.first_chunk..plan.last_chunk_exclusive;
-            let read = self
-                .download_and_decrypt_chunk_range(
-                    file_id,
-                    &file_key,
-                    chunks.clone(),
-                    download_kbps_limit,
-                    plan.covering_span_hint,
-                    None,
-                    pin.as_ref(),
-                )
-                .await
-                .and_then(|data| {
-                    // Task 1643: exactly the pinned version's plaintext for those chunks.
-                    match pin.as_ref().map(|pin| pin.plaintext_size_of(chunks.clone())) {
-                        Some(want) if want != Some(data.len() as u64) => anyhow::bail!(
-                            "the range read is {} bytes, the pinned version's manifest says {want:?}",
-                            data.len()
-                        ),
-                        _ => Ok(data),
-                    }
-                });
-            match read {
-                Ok(data) => {
-                    // Only a whole-file covering range is evidence the file is fully
-                    // cached; a partial range leaves the row `Downloading` for the
-                    // caller (the CF callback) to resolve based on what CF itself
-                    // reports (see `windows_cf::callbacks`).
-                    if plan.covers_whole_file {
-                        self.db.set_status(file_id, FileStatus::Local)?;
-                        self.db.mark_cached(file_id, "", data.len() as i64, now_secs())?;
-                        let _ = self.enforce_configured_cache_limit();
-                    }
-                    return Ok(Some(HydratedRange {
-                        data,
-                        range_start_bytes: plan.range_start_bytes,
-                        covers_whole_file: plan.covers_whole_file,
-                    }));
-                }
-                Err(e) if !restarted && e.downcast_ref::<crate::download_pin::VersionGone>().is_some() => {
-                    tracing::debug!("range read: the file changed while it was downloading; restarting once");
-                    restarted = true;
-                }
-                Err(e) => {
-                    let _ = self.db.set_status(file_id, FileStatus::Error);
-                    return Err(e);
-                }
-            }
+        // Task 1643: the range is planned on, and read from, one pinned version; a version that goes away
+        // mid-read starts the read again, once, from fresh metadata (`with_one_restart`).
+        let meta = self.api.get_file(file_id).await?;
+        let read = self
+            .with_one_restart(file_id, meta, |meta| async move {
+                self.range_attempt(file_id, required_offset, required_length, &meta).await
+            })
+            .await;
+        if read.is_err() {
+            // Every failing exit (a second pass's own error too) ends with the row in Error, never left on
+            // Downloading, and the placeholder never in sync.
+            let _ = self.db.set_status_if(file_id, FileStatus::Downloading, FileStatus::Error);
         }
+        read
+    }
+
+    /// One pass of [`Self::hydrate_file_range`] on `meta`.
+    #[cfg(any(target_os = "windows", test))]
+    async fn range_attempt(
+        &self,
+        file_id: &str,
+        required_offset: u64,
+        required_length: u64,
+        meta: &serde_json::Value,
+    ) -> anyhow::Result<Option<HydratedRange>> {
+        let pin = crate::download_pin::PinnedVersion::from_metadata(meta)?;
+        let (chunk_count, size_bytes, chunk_size_bytes) = match &pin {
+            Some(pin) => (
+                u64::from(pin.chunk_count),
+                Some(pin.plaintext_size_bytes),
+                Some(pin.chunk_size_bytes),
+            ),
+            None => (
+                meta.get("chunk_count").and_then(|v| v.as_i64()).unwrap_or(0) as u64,
+                meta.get("size_bytes").and_then(|v| v.as_u64()),
+                meta.get("chunk_size_bytes").and_then(|v| v.as_u64()),
+            ),
+        };
+
+        let (Some(size_bytes), Some(chunk_size_bytes), true) = (size_bytes, chunk_size_bytes, chunk_count > 0)
+        else {
+            // Missing metadata — caller falls back to the whole-file path.
+            return Ok(None);
+        };
+        if chunk_size_bytes == 0 {
+            return Ok(None);
+        }
+
+        // Clamp the requested range to the file's real extent before computing
+        // covering chunks, so a stale/over-wide CF request never derives an
+        // out-of-bounds chunk index.
+        let range_end = required_offset.saturating_add(required_length).min(size_bytes);
+        if range_end <= required_offset {
+            // Degenerate/empty range — nothing to hydrate.
+            return Ok(Some(HydratedRange {
+                data: Zeroizing::new(Vec::new()),
+                range_start_bytes: required_offset,
+                covers_whole_file: size_bytes == 0,
+            }));
+        }
+
+        let Some(plan) = plan_hydration_chunk_range(
+            size_bytes,
+            chunk_count,
+            chunk_size_bytes,
+            required_offset,
+            required_length,
+        )?
+        else {
+            return Ok(None);
+        };
+
+        self.db.set_status(file_id, FileStatus::Downloading)?;
+
+        let file_key = self.file_key_for_download(file_id).await?;
+        let download_kbps_limit = crate::config::DesktopConfig::load()
+            .map(|c| c.download_kbps_limit)
+            .unwrap_or(0);
+
+        let chunks = plan.first_chunk..plan.last_chunk_exclusive;
+        let read = self
+            .download_and_decrypt_chunk_range(
+                file_id,
+                &file_key,
+                chunks.clone(),
+                download_kbps_limit,
+                plan.covering_span_hint,
+                None,
+                pin.as_ref(),
+            )
+            .await
+            .and_then(|data| {
+                // Task 1643: exactly the pinned version's plaintext for those chunks.
+                match pin.as_ref().map(|pin| pin.plaintext_size_of(chunks.clone())) {
+                    Some(want) if want != Some(data.len() as u64) => anyhow::bail!(
+                        "the range read is {} bytes, the pinned version's manifest says {want:?}",
+                        data.len()
+                    ),
+                    _ => Ok(data),
+                }
+            });
+        let data = read?;
+        // Only a whole-file covering range is evidence the file is fully
+        // cached; a partial range leaves the row `Downloading` for the
+        // caller (the CF callback) to resolve based on what CF itself
+        // reports (see `windows_cf::callbacks`).
+        if plan.covers_whole_file {
+            self.db.set_status(file_id, FileStatus::Local)?;
+            self.db.mark_cached(file_id, "", data.len() as i64, now_secs())?;
+            let _ = self.enforce_configured_cache_limit();
+        }
+        Ok(Some(HydratedRange {
+            data,
+            range_start_bytes: plan.range_start_bytes,
+            covers_whole_file: plan.covers_whole_file,
+        }))
     }
 
     /// Fetch the encrypted server thumbnail for `file_id`, decrypt it **in
@@ -5039,72 +5075,72 @@ impl EngineBridge {
     /// `do_hydrate` re-fetch it, so the small-file path costs exactly the
     /// metadata GET + the chunk GETs it always cost.
     async fn remote_content_preview(&self, file_id: &str, is_text: bool) -> ConflictContentSide {
+        let unavailable = |reason: String| ConflictContentSide {
+            size_bytes: None,
+            text: None,
+            unavailable_reason: Some(reason),
+        };
         if let Err(e) = file_id.parse::<uuid::Uuid>() {
-            return ConflictContentSide {
-                size_bytes: None,
+            return unavailable(format!("invalid file_id (not a UUID): {e}"));
+        }
+        let meta = match self.api.get_file(file_id).await {
+            Ok(m) => m,
+            Err(e) => return unavailable(format!("Couldn't download the other device's version: {e}")),
+        };
+        // Tasks 1643 + 2173: a version that goes away mid-download restarts once from fresh metadata, as
+        // `do_hydrate` does, and the size is checked again on the new version.
+        self.with_one_restart(file_id, meta, |meta| async move { self.preview_attempt(file_id, is_text, &meta).await })
+            .await
+            .unwrap_or_else(|e| unavailable(format!("Couldn't download the other device's version: {e}")))
+    }
+
+    /// One pass of [`Self::remote_content_preview`] on `meta`. `Err` only for what the restart handles (the version
+    /// went away) or what ends it; every other failure is the side's own "unavailable" line.
+    async fn preview_attempt(&self, file_id: &str, is_text: bool, meta: &serde_json::Value) -> anyhow::Result<ConflictContentSide> {
+        // Task 1643: the size of the version that would be downloaded. While a replace runs, the top-level
+        // `size_bytes` can be another version's.
+        let size_bytes = match crate::download_pin::PinnedVersion::from_metadata(meta)? {
+            Some(pin) => Some(pin.plaintext_size_bytes),
+            None => meta.get("size_bytes").and_then(|v| v.as_u64()),
+        };
+
+        if !is_text {
+            // Binary preview only ever shows size — never download the bytes.
+            return Ok(ConflictContentSide {
+                size_bytes,
                 text: None,
-                unavailable_reason: Some(format!("invalid file_id (not a UUID): {e}")),
-            };
+                unavailable_reason: None,
+            });
+        }
+        let within_limit = matches!(size_bytes, Some(s) if s <= CONFLICT_PREVIEW_TEXT_MAX_BYTES as u64);
+        if !within_limit {
+            return Ok(ConflictContentSide {
+                size_bytes,
+                text: None,
+                unavailable_reason: Some(match size_bytes {
+                    Some(s) => format!("File is too large to preview, {s} bytes"),
+                    None => "Couldn't determine the other device's file size".to_string(),
+                }),
+            });
         }
 
-        // Task 2173: a version that goes away mid-download restarts once from fresh metadata, as
-        // `do_hydrate` does; the size is checked again on the new version.
-        let mut restarted = false;
-        loop {
-            let meta = match self.api.get_file(file_id).await {
-                Ok(m) => m,
-                Err(e) => {
-                    return ConflictContentSide {
-                        size_bytes: None,
-                        text: None,
-                        unavailable_reason: Some(format!("Couldn't download the other device's version: {e}")),
-                    };
-                }
-            };
-            let size_bytes = meta.get("size_bytes").and_then(|v| v.as_u64());
-
-            if !is_text {
-                // Binary preview only ever shows size — never download the bytes.
-                return ConflictContentSide {
-                    size_bytes,
-                    text: None,
-                    unavailable_reason: None,
-                };
+        match self.do_hydrate_with_meta(file_id, meta, None).await {
+            Ok(mut bytes) => {
+                // Move the plaintext out instead of `bytes.to_vec()` — a
+                // clone would briefly hold two live copies of the remote
+                // plaintext in memory. `content_side_from_bytes` consumes
+                // the Vec by value (no further copy), and the now-empty
+                // `bytes` is zeroized below for defense in depth.
+                let side = content_side_from_bytes(std::mem::take(&mut *bytes), is_text);
+                bytes.zeroize();
+                Ok(side)
             }
-            let within_limit = matches!(size_bytes, Some(s) if s <= CONFLICT_PREVIEW_TEXT_MAX_BYTES as u64);
-            if !within_limit {
-                return ConflictContentSide {
-                    size_bytes,
-                    text: None,
-                    unavailable_reason: Some(match size_bytes {
-                        Some(s) => format!("File is too large to preview, {s} bytes"),
-                        None => "Couldn't determine the other device's file size".to_string(),
-                    }),
-                };
-            }
-
-            match self.do_hydrate_with_meta(file_id, &meta, None).await {
-                Ok(mut bytes) => {
-                    // Move the plaintext out instead of `bytes.to_vec()` — a
-                    // clone would briefly hold two live copies of the remote
-                    // plaintext in memory. `content_side_from_bytes` consumes
-                    // the Vec by value (no further copy), and the now-empty
-                    // `bytes` is zeroized below for defense in depth.
-                    let side = content_side_from_bytes(std::mem::take(&mut *bytes), is_text);
-                    bytes.zeroize();
-                    return side;
-                }
-                Err(e) if !restarted && e.downcast_ref::<crate::download_pin::VersionGone>().is_some() => {
-                    restarted = true;
-                }
-                Err(e) => {
-                    return ConflictContentSide {
-                        size_bytes,
-                        text: None,
-                        unavailable_reason: Some(format!("Couldn't download the other device's version: {e}")),
-                    };
-                }
-            }
+            Err(e) if e.downcast_ref::<crate::download_pin::VersionGone>().is_some() => Err(e),
+            Err(e) => Ok(ConflictContentSide {
+                size_bytes,
+                text: None,
+                unavailable_reason: Some(format!("Couldn't download the other device's version: {e}")),
+            }),
         }
     }
 }
@@ -8936,7 +8972,6 @@ mod tests {
     /// the headers arrive as `None` instead of a panic (task 1670 issue 3: the
     /// cancelled-hydrate test hangs the daemon up while it is connecting, and on
     /// a busy CI runner that can land before the request line is sent).
-    #[cfg(unix)]
     fn read_http_request_or_hangup(stream: &mut std::net::TcpStream) -> Option<RecordedRequest> {
         let mut buffer = Vec::new();
         let mut temp = [0u8; 4096];
@@ -25226,16 +25261,32 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn a_legacy_file_is_downloaded_unpinned_on_both_paths() {
+        async fn a_legacy_file_takes_no_metadata_pin_on_either_path() {
+            // `download_version: null`: the client invents no pin. The API path is today's unpinned route; the direct
+            // path is bound by the planner's own pin, the version the first grant window names.
             let dir = tempfile::tempdir().unwrap();
             let pair = Pair::start(KEY, TEST_FILE_ID, 1024, SIZE);
             pair.knobs().legacy = true;
             let bridge = bridge_for(dir.path(), &pair);
             bridge.seams.use_transport(Transport::Api);
             let meta = bridge.api.get_file(TEST_FILE_ID).await.unwrap();
-            let (plaintext, _) = bridge.hydrate_whole_file(TEST_FILE_ID, &meta, None).await.unwrap();
-            assert_eq!(plaintext.to_vec(), pair.plain());
-            assert!(pair.api_chunk_requests().iter().all(|r| r.query().is_empty()), "no pin is invented");
+            let (plaintext, transport) = bridge.hydrate_whole_file(TEST_FILE_ID, &meta, None).await.unwrap();
+            assert_eq!((plaintext.to_vec(), transport), (pair.plain(), FileTransport::Api));
+            assert!(pair.api_chunk_requests().iter().all(|r| r.query().is_empty()), "API path: no pin is invented");
+
+            let dir = tempfile::tempdir().unwrap();
+            let pair = Pair::start(KEY, TEST_FILE_ID, 1024, SIZE);
+            pair.knobs().legacy = true;
+            let bridge = bridge_for(dir.path(), &pair);
+            let meta = bridge.api.get_file(TEST_FILE_ID).await.unwrap();
+            let (plaintext, transport) = bridge.hydrate_whole_file(TEST_FILE_ID, &meta, None).await.unwrap();
+            assert_eq!((plaintext.to_vec(), transport), (pair.plain(), FileTransport::Direct));
+            let windows: Vec<serde_json::Value> =
+                pair.grant_requests().iter().map(|r| serde_json::from_slice(&r.body).unwrap()).collect();
+            assert_eq!(windows[0]["object_version_id"], serde_json::Value::Null, "the first window pins nothing itself");
+            let planner_pin = pair.knobs().version.id.clone();
+            assert!(windows[1..].iter().all(|w| w["object_version_id"] == planner_pin.as_str()), "later windows: the planner's pin");
+            assert!(pair.api_chunk_requests().is_empty());
         }
 
         #[tokio::test]
@@ -25411,7 +25462,21 @@ mod tests {
             /// A server bug for one test: pinned chunk requests are answered from the current version.
             ignores_pin: bool,
             legacy: bool,
+            /// A pruning commit also leaves the file with no servable version yet: the metadata after it says
+            /// `download_version: null` (review of #138, P2).
+            null_manifest_on_commit: bool,
+            /// What the next chunk requests get instead of their chunk, one each, in order.
+            faults: std::collections::VecDeque<Fault>,
+            /// The metadata's top-level `size_bytes`, when it must differ from the version's (a replace running).
+            size_bytes_override: Option<usize>,
             seen: Vec<String>,
+        }
+
+        #[derive(Clone, Copy)]
+        enum Fault {
+            /// The server's real 429 (`rate_limit::too_many_requests`) with this Retry-After.
+            RateLimited(u64),
+            Status(u16),
         }
 
         struct Server {
@@ -25428,6 +25493,9 @@ mod tests {
                     chunk_requests: 0,
                     ignores_pin: false,
                     legacy: false,
+                    null_manifest_on_commit: false,
+                    faults: std::collections::VecDeque::new(),
+                    size_bytes_override: None,
                     seen: Vec::new(),
                 }));
                 let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -25472,7 +25540,7 @@ mod tests {
                 return http_json(
                     "200 OK",
                     json!({
-                        "id": TEST_FILE_ID, "size_bytes": v.plain.len(), "chunk_count": v.frames.len(),
+                        "id": TEST_FILE_ID, "size_bytes": s.size_bytes_override.unwrap_or(v.plain.len()), "chunk_count": v.frames.len(),
                         "chunk_size_bytes": v.stride,
                         "download_version": if s.legacy { serde_json::Value::Null } else { v.manifest() },
                     }),
@@ -25480,6 +25548,25 @@ mod tests {
                 .into_bytes();
             }
             if let Some(index) = path.strip_prefix(&format!("{file}/chunks/")).and_then(|i| i.parse::<usize>().ok()) {
+                match s.faults.pop_front() {
+                    Some(Fault::RateLimited(secs)) => {
+                        let body = json!({
+                            "error": "rate_limited",
+                            "message": format!("Too many requests. Try again in {secs} seconds."),
+                            "retry_after": secs,
+                        })
+                        .to_string();
+                        return format!(
+                            "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nRetry-After: {secs}\r\nX-RateLimit-Limit: 600\r\nX-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: {secs}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .into_bytes();
+                    }
+                    Some(Fault::Status(status)) => {
+                        return http_json(&format!("{status} Scripted"), json!({"error": "scripted"})).into_bytes();
+                    }
+                    None => {}
+                }
                 let served = match pin {
                     Some(id) if !s.ignores_pin => s.versions.iter().position(|v| v.id == id && v.retained),
                     _ => Some(s.current),
@@ -25496,6 +25583,9 @@ mod tests {
                         if prune {
                             let old = s.current;
                             s.versions[old].retained = false;
+                            if s.null_manifest_on_commit {
+                                s.legacy = true;
+                            }
                         }
                         s.current = next;
                     }
@@ -25598,7 +25688,7 @@ mod tests {
             server.state.lock().unwrap().ignores_pin = true;
             let (result, bridge, dest) = hydrate(&server, dir.path());
             let err = format!("{:#}", result.expect_err("a chunk of another size is refused"));
-            assert!(err.contains("chunk 1 is 1028 bytes"), "refused at the chunk, by the chunk's size: {err}");
+            assert!(err.contains("chunk 1 through the API is not the length its version's manifest states"), "refused at the chunk, by the chunk's size: {err}");
             let chunks = server.seen().iter().filter(|r| r.contains("/chunks/")).count();
             assert_eq!(chunks, 2, "nothing after the wrong chunk was fetched");
             assert!(!dest.exists(), "nothing is written");
@@ -25638,6 +25728,99 @@ mod tests {
             let chunks: Vec<String> = server.seen().into_iter().filter(|r| r.contains("/chunks/")).collect();
             assert_eq!(chunks.len(), 4);
             assert!(chunks.iter().all(|r| !r.contains('?')), "no pin is invented: {chunks:?}");
+        }
+
+        // ── review of #138 ──
+
+        fn no_unpinned_chunk_request(server: &Server) {
+            let unpinned: Vec<String> = server.seen().into_iter().filter(|r| r.contains("/chunks/") && !r.contains("?object_version_id=")).collect();
+            assert!(unpinned.is_empty(), "never a chunk without its pin: {unpinned:?}");
+        }
+
+        #[test]
+        fn a_restart_whose_fresh_metadata_names_no_version_is_an_error_never_an_unpinned_download() {
+            let dir = tempfile::tempdir().unwrap();
+            let (versions, _) = three_versions();
+            let server = Server::start(versions, vec![(1, 1, true)]);
+            server.state.lock().unwrap().null_manifest_on_commit = true;
+            let (result, bridge, dest) = hydrate(&server, dir.path());
+            let err = result.expect_err("an error, not an unpinned second attempt");
+            assert!(err.downcast_ref::<crate::download_pin::PinLost>().is_some(), "{err:#}");
+            assert!(!dest.exists(), "nothing is written");
+            assert_eq!(bridge.db.get_file(TEST_FILE_ID).unwrap().unwrap().status, FileStatus::Error);
+            no_unpinned_chunk_request(&server);
+        }
+
+        #[test]
+        fn a_range_read_whose_restart_finds_no_version_errs_and_leaves_the_row_in_error() {
+            let dir = tempfile::tempdir().unwrap();
+            let (versions, _) = three_versions();
+            let server = Server::start(versions, vec![(1, 1, true)]);
+            server.state.lock().unwrap().null_manifest_on_commit = true;
+            let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base.clone(), KEY);
+            seed_bridge_row(&bridge, TEST_FILE_ID, "/pinned.bin", None, FileStatus::CloudOnly, 0);
+            let read = tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(async { bridge.hydrate_file_range(TEST_FILE_ID, STRIDE as u64, 2 * STRIDE as u64).await });
+            let err = read.err().expect("an error");
+            assert!(err.downcast_ref::<crate::download_pin::PinLost>().is_some(), "{err:#}");
+            assert_eq!(
+                bridge.db.get_file(TEST_FILE_ID).unwrap().unwrap().status,
+                FileStatus::Error,
+                "never left on Downloading"
+            );
+            no_unpinned_chunk_request(&server);
+        }
+
+        #[test]
+        fn a_conflict_preview_whose_restart_finds_no_version_shows_no_text_and_fetches_nothing_unpinned() {
+            let dir = tempfile::tempdir().unwrap();
+            let (versions, _) = three_versions();
+            let server = Server::start(versions, vec![(1, 1, true)]);
+            server.state.lock().unwrap().null_manifest_on_commit = true;
+            let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base.clone(), KEY);
+            let side = tokio::runtime::Runtime::new().unwrap().block_on(bridge.remote_content_preview(TEST_FILE_ID, true));
+            assert_eq!(side.text, None);
+            assert!(side.unavailable_reason.as_deref().is_some_and(|r| r.contains("cannot be downloaded yet")), "{side:?}");
+            no_unpinned_chunk_request(&server);
+        }
+
+        #[test]
+        fn the_pinned_api_path_rides_out_the_servers_own_429() {
+            let dir = tempfile::tempdir().unwrap();
+            let (versions, [a, ..]) = three_versions();
+            let server = Server::start(versions, vec![]);
+            server.state.lock().unwrap().faults.push_back(Fault::RateLimited(1));
+            let (result, _bridge, dest) = hydrate(&server, dir.path());
+            result.expect("the 429 is waited out, not a failed download");
+            assert_eq!(std::fs::read(&dest).unwrap(), a);
+            assert_eq!(server.seen().iter().filter(|r| r.contains("/chunks/")).count(), 5, "4 chunks and one retry");
+        }
+
+        #[test]
+        fn a_pinned_api_failure_names_no_url() {
+            let dir = tempfile::tempdir().unwrap();
+            let (versions, _) = three_versions();
+            let server = Server::start(versions, vec![]);
+            server.state.lock().unwrap().faults.push_back(Fault::Status(400));
+            let (result, _bridge, _dest) = hydrate(&server, dir.path());
+            let err = format!("{:#}", result.expect_err("a refused chunk"));
+            assert!(!err.contains("object_version_id") && !err.contains("http://"), "no URL in the error: {err}");
+            assert!(err.contains("chunk 0"), "{err}");
+        }
+
+        #[test]
+        fn a_conflict_preview_checks_the_size_of_the_version_it_would_download() {
+            let dir = tempfile::tempdir().unwrap();
+            // The pinned version is over the preview limit; the top-level size says it is tiny (a replace running).
+            let big = Version::new("aaaaaaaa-0000-4000-8000-00000000000a", content(0xA1, CONFLICT_PREVIEW_TEXT_MAX_BYTES + 1));
+            let server = Server::start(vec![big], vec![]);
+            server.state.lock().unwrap().size_bytes_override = Some(100);
+            let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base.clone(), KEY);
+            let side = tokio::runtime::Runtime::new().unwrap().block_on(bridge.remote_content_preview(TEST_FILE_ID, true));
+            assert_eq!(side.size_bytes, Some(CONFLICT_PREVIEW_TEXT_MAX_BYTES as u64 + 1));
+            assert!(side.unavailable_reason.as_deref().is_some_and(|r| r.starts_with("File is too large to preview")), "{side:?}");
+            assert_eq!(server.seen().iter().filter(|r| r.contains("/chunks/")).count(), 0, "nothing downloaded");
         }
 
         fn read_range(server: &Server, dir: &Path, offset: u64, length: u64) -> anyhow::Result<Vec<u8>> {
