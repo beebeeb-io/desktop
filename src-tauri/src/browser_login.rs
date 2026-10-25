@@ -91,13 +91,35 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// server yet fails fast with an actionable error instead of an infinite spinner.
 const DEVICE_CODE_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Emit a structured progress event to all windows. Non-fatal on failure.
-fn emit(app: &tauri::AppHandle, phase: &str, payload: serde_json::Value) {
+tokio::task_local! {
+    /// The attempt the running handoff belongs to (review P3-2 on the Mac sign-in PR): the id the window gave
+    /// `start_browser_login`, echoed in every event of that attempt. A task-local so `emit`'s callers are unchanged: it is
+    /// set once around the whole command and read where an event is built.
+    static ATTEMPT: Option<String>;
+}
+
+/// The attempt id the window sent, if it is one that is safe to echo: 1 to 64 ASCII letters, digits, `-` or `_`. Anything
+/// else is treated as no id at all (the events then carry none, and the window ignores them as nobody's).
+fn attempt_id(raw: Option<String>) -> Option<String> {
+    raw.filter(|id| (1..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'))
+}
+
+/// One `browser-login` event's body: the payload, its `phase`, and the attempt it belongs to when there is one.
+fn event_body(payload: serde_json::Value, phase: &str, attempt: Option<&str>) -> serde_json::Value {
     let mut body = payload;
     if let Some(obj) = body.as_object_mut() {
         obj.insert("phase".to_string(), serde_json::Value::String(phase.to_string()));
+        if let Some(attempt) = attempt {
+            obj.insert("attempt".to_string(), serde_json::Value::String(attempt.to_string()));
+        }
     }
-    let _ = app.emit(EVENT, body);
+    body
+}
+
+/// Emit a structured progress event to all windows. Non-fatal on failure.
+fn emit(app: &tauri::AppHandle, phase: &str, payload: serde_json::Value) {
+    let attempt = ATTEMPT.try_with(|attempt| attempt.clone()).ok().flatten();
+    let _ = app.emit(EVENT, event_body(payload, phase, attempt.as_deref()));
 }
 
 /// Build the `wss://…/api/v1/auth/cli` URL from the engine's API base.
@@ -242,30 +264,41 @@ fn signin_log(line: &str) {
 ///
 /// The whole handoff is bounded by the server's 300s code expiry; on timeout we
 /// emit `error` and return `Err` so the UI can offer "try again".
+///
+/// `attempt_id` is the window's id for this attempt (review P3-2): every event of it carries it back, so a window that
+/// tries again while an earlier handoff is still running (and later times out) is not failed by the earlier one's events.
 #[tauri::command]
-pub async fn start_browser_login(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    bc!("[bb-signin] start_browser_login: command entry");
-    #[cfg(target_os = "windows")]
-    let attempt = crate::AUTH_ATTEMPTS.begin()?;
-    let work = run_handoff(
-        &app,
-        &state,
-        #[cfg(target_os = "windows")]
-        &attempt,
-    );
-    #[cfg(target_os = "windows")]
-    let result = attempt.run(work).await;
-    #[cfg(not(target_os = "windows"))]
-    let result = work.await;
-    match result {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            tracing::error!(error = %e, "browser-login: sign-in failed");
-            signin_log(&format!("error {e}"));
-            emit(&app, "error", serde_json::json!({ "message": e }));
-            Err(e)
-        }
-    }
+pub async fn start_browser_login(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    attempt_id: Option<String>,
+) -> Result<(), String> {
+    ATTEMPT
+        .scope(self::attempt_id(attempt_id), async {
+            bc!("[bb-signin] start_browser_login: command entry");
+            #[cfg(target_os = "windows")]
+            let attempt = crate::AUTH_ATTEMPTS.begin()?;
+            let work = run_handoff(
+                &app,
+                &state,
+                #[cfg(target_os = "windows")]
+                &attempt,
+            );
+            #[cfg(target_os = "windows")]
+            let result = attempt.run(work).await;
+            #[cfg(not(target_os = "windows"))]
+            let result = work.await;
+            match result {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    tracing::error!(error = %e, "browser-login: sign-in failed");
+                    signin_log(&format!("error {e}"));
+                    emit(&app, "error", serde_json::json!({ "message": e }));
+                    Err(e)
+                }
+            }
+        })
+        .await
 }
 
 async fn run_handoff(
@@ -635,6 +668,50 @@ mod tests {
     use super::*;
     use std::pin::Pin;
     use std::task::{Context, Poll};
+
+    /// Review P3-2: every event of an attempt carries the attempt id the window gave it, and a window that sent none (or
+    /// one that is not an id) gets events with none, which the window ignores as nobody's.
+    #[test]
+    fn an_event_carries_the_attempt_it_belongs_to() {
+        let body = event_body(serde_json::json!({ "user_code": "KQ7M-4TXP" }), "waiting", Some("lq3x-1"));
+        assert_eq!(body, serde_json::json!({ "user_code": "KQ7M-4TXP", "phase": "waiting", "attempt": "lq3x-1" }));
+        let none = event_body(serde_json::json!({}), "connecting", None);
+        assert_eq!(none, serde_json::json!({ "phase": "connecting" }));
+    }
+
+    #[test]
+    fn only_a_plain_id_is_echoed() {
+        assert_eq!(attempt_id(Some("lq3x-1_A".to_string())), Some("lq3x-1_A".to_string()));
+        assert_eq!(attempt_id(Some("a".repeat(64))), Some("a".repeat(64)));
+        for refused in [Some(String::new()), Some("a".repeat(65)), Some("a b".to_string()), Some("a\nb".to_string()), Some("é".to_string()), None] {
+            assert_eq!(attempt_id(refused.clone()), None, "{refused:?}");
+        }
+    }
+
+    /// `emit` reads the attempt from the task-local that `start_browser_login` sets around the whole command, so no event
+    /// builder has to be handed it; outside the command (a test, any other caller) there is none.
+    #[tokio::test]
+    async fn the_attempt_is_visible_to_emit_inside_the_command_and_nowhere_else() {
+        assert_eq!(ATTEMPT.try_with(|attempt| attempt.clone()).ok().flatten(), None);
+        let inside = ATTEMPT
+            .scope(Some("lq3x-2".to_string()), async { ATTEMPT.try_with(|attempt| attempt.clone()).ok().flatten() })
+            .await;
+        assert_eq!(inside.as_deref(), Some("lq3x-2"));
+    }
+
+    #[test]
+    fn the_command_scopes_the_attempt_around_its_whole_body_and_emit_reads_it() {
+        let source = include_str!("browser_login.rs").replace("\r\n", "\n");
+        let command = &source[source.find("pub async fn start_browser_login(").expect("the command")..];
+        let command = &command[..command.find("\n}\n").expect("its end")];
+        assert!(command.contains("attempt_id: Option<String>"), "the window names the attempt:\n{command}");
+        assert!(command.contains("ATTEMPT\n        .scope(self::attempt_id(attempt_id), async {"), "{command}");
+        // The error event of a failed handoff is inside the scope too, so a timed-out attempt's `error` carries its id.
+        assert!(command.find("ATTEMPT").unwrap() < command.find("emit(&app, \"error\"").unwrap());
+        let emit = &source[source.find("fn emit(app: &tauri::AppHandle").expect("emit")..];
+        let emit = &emit[..emit.find("\n}\n").unwrap()];
+        assert!(emit.contains("ATTEMPT.try_with(") && emit.contains("event_body("), "{emit}");
+    }
 
     /// Task 1436 (Codex review on PR #39): `build_ws_request` — the function
     /// `run_handoff` actually calls to build the `/api/v1/auth/cli` WebSocket

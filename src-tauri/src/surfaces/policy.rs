@@ -613,13 +613,14 @@ mod wiring_tests {
         let builder = item_from(&src, "fn open_onboarding_window_labelled(");
         assert!(builder.contains("WebviewWindowBuilder::new(") && builder.contains("\"Welcome to Beebeeb\""), "{builder}");
 
-        // Sign in again (R8): macOS opens the same window; Windows keeps its refusal; Linux keeps its reload-in-mode.
+        // Sign in again (R8): macOS opens the same window and asks it for the card (`MainNav::Reauth`, review P3-1, whatever
+        // the session says); Windows keeps its refusal; Linux keeps its reload-in-mode.
         let reauth = item_from(&src, "async fn open_reauth_window(");
         let mac_arm = reauth
             .find("#[cfg(target_os = \"macos\")]\n    {")
             .map(|at| &reauth[at..])
             .unwrap_or_else(|| panic!("a macOS arm:\n{reauth}"));
-        assert!(mac_arm.contains("show_sign_in_in_beebeeb_window(&app)"), "{reauth}");
+        assert!(mac_arm.contains("show_reauth_in_beebeeb_window(&app)"), "{reauth}");
         let others = "#[cfg(not(any(target_os = \"windows\", target_os = \"macos\")))]";
         assert!(reauth.contains(others), "Linux keeps its own arm:\n{reauth}");
         assert!(!mac_arm[..mac_arm.find(others).unwrap_or(mac_arm.len())].contains("WebviewWindowBuilder"), "{reauth}");

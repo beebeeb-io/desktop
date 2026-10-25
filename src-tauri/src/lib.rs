@@ -277,6 +277,9 @@ pub struct AppState {
     pub finder_setup: std::sync::OnceLock<finder_setup::driver::FinderSetupHandle>,
     /// The sign-out flow's state (spec 2026-10-10 §5.1): the newest ask snapshot, which the gate compares with.
     pub(crate) sign_out: sign_out::SignOutState,
+    /// The set-up step a password sign-in without a key left open, for the life of the process (review P2-3 on the Mac
+    /// sign-in PR): see [`PendingSetup`].
+    pending_setup: Mutex<Option<PendingSetup>>,
 }
 
 impl AppState {
@@ -321,8 +324,58 @@ impl Default for AppState {
             menu_zoom_scale: Mutex::new(1.0),
             finder_setup: std::sync::OnceLock::new(),
             sign_out: sign_out::SignOutState::default(),
+            pending_setup: Mutex::new(None),
         }
     }
+}
+
+/// The step a password sign-in on a Mac with no vault key leaves open: “Set up this Mac”, the recovery phrase. The Beebeeb
+/// window keeps its sign-in flow in a module store, and ⌘W destroys the window and the store with it, while the session
+/// stays and the key was never delivered; a window opened again then showed Home, whose locked card had nothing to unlock
+/// from (review P2-3). The window tells Rust when it enters the step (`set_pending_setup`) and asks once when it opens
+/// signed in and locked (`pending_setup`). Held for the life of the process: a relaunch is the Keychain signal of task
+/// 1747's Part 2.
+///
+/// It is forgotten the moment keys arrive on this Mac ([`keys_arrived`]: every unlock and every sign-in that puts a session
+/// in memory), and it is answered only while it is still true (an account signed in, its vault locked), so a sign-out or
+/// any other way the account leaves makes it inert without touching the sign-out code; the next sign-in sets it again or
+/// brings keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+struct PendingSetup {
+    /// The kept key was replaced (spec §5.6), so the card says why the phrase is asked.
+    key_replaced: bool,
+}
+
+fn remember_pending_setup(slot: &Mutex<Option<PendingSetup>>, key_replaced: bool) {
+    *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(PendingSetup { key_replaced });
+}
+
+fn forget_pending_setup(slot: &Mutex<Option<PendingSetup>>) {
+    *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+}
+
+/// The pending step, if it is still true: an account is signed in and its vault is locked. Reading it does not use it up.
+fn resume_pending_setup(slot: &Mutex<Option<PendingSetup>>, signed_in: bool, vault_unlocked: bool) -> Option<PendingSetup> {
+    if !signed_in || vault_unlocked {
+        return None;
+    }
+    *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The window enters “Set up this Mac”: Rust keeps the step for the process (see [`PendingSetup`]).
+#[tauri::command]
+fn set_pending_setup(state: State<'_, AppState>, key_replaced: bool) {
+    remember_pending_setup(&state.pending_setup, key_replaced);
+}
+
+/// A window that opens signed in and locked asks whether “Set up this Mac” is still owed. `logged_in` is `sync_status`'s own
+/// reading: a session in memory, or a token in the credential store.
+#[tauri::command]
+fn pending_setup(state: State<'_, AppState>) -> Result<Option<PendingSetup>, String> {
+    let acct = state.active_account()?;
+    let vault_unlocked = acct.session.lock().map(|guard| guard.is_some()).unwrap_or(false);
+    let auth_present = state.auth_present.lock().map(|guard| *guard).unwrap_or(false);
+    Ok(resume_pending_setup(&state.pending_setup, vault_unlocked || auth_present, vault_unlocked))
 }
 
 fn keychain_error(context: &str, error: impl fmt::Display) -> String {
@@ -1352,6 +1405,15 @@ fn show_sign_in_in_beebeeb_window(_app: &tauri::AppHandle) -> Result<(), String>
     Err("Only the macOS app signs in in the Beebeeb window.".to_string())
 }
 
+/// R8: “Sign in again” on a Mac. Unlike the sign-in above, which lets the window decide from the account it reads, this
+/// asks the window for the card: a click on “Sign in again” always lands on it, even when the session was marked ended and
+/// has since recovered (review P3-1). Nothing is cleared first.
+#[cfg(target_os = "macos")]
+fn show_reauth_in_beebeeb_window(app: &tauri::AppHandle) -> Result<(), String> {
+    show_main_window(app, MainNav::Reauth);
+    Ok(())
+}
+
 /// The first-run window of Windows and Linux. It is not compiled on a Mac, which never builds it.
 ///
 /// The window is wide enough for the two-column shell and centred. It mounts `Onboarding.tsx` (`?window=onboarding`)
@@ -1407,7 +1469,7 @@ async fn open_reauth_window(app: tauri::AppHandle) -> Result<(), String> {
     }
     #[cfg(target_os = "macos")]
     {
-        show_sign_in_in_beebeeb_window(&app)
+        show_reauth_in_beebeeb_window(&app)
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
@@ -4365,6 +4427,23 @@ fn install_keychain_session(
     Ok(())
 }
 
+/// What `unlock_vault` says on a Mac that holds a session token and no vault key (the first password sign-in that was never
+/// finished with the recovery phrase): the approved Set up this Mac sentence, which the Beebeeb window recognises to offer the
+/// phrase (`isNoVaultKey`, pinned equal in `tests/signInModel.test.ts`). Without it the person read the Keychain's own
+/// words, "unlock vault key from Keychain: secret not found". Windows and Linux keep what they showed.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const NO_VAULT_KEY_UNLOCK_ERROR: &str = "This Mac does not have your encryption keys yet. Restore them to continue.";
+
+/// The same test the startup restore applies to this failure (`error.contains("secret not found")`, in
+/// `restore_session_inner`): the token is there and the key is not.
+fn unlock_failure(error: String) -> String {
+    #[cfg(target_os = "macos")]
+    if error.contains("secret not found") {
+        return NO_VAULT_KEY_UNLOCK_ERROR.to_string();
+    }
+    error
+}
+
 /// Restore a Keychain-backed session into memory and start the engine for the
 /// configured sync root. Keychain may show the OS unlock prompt depending on
 /// the user's security settings. Until the user calls this command, hydration
@@ -4405,7 +4484,8 @@ async fn unlock_vault(app: tauri::AppHandle, state: State<'_, AppState>) -> Resu
         // session goes into memory in its turn only.
         let mut turn = acct.session_generation();
         let email = acct.auth_email.lock().ok().and_then(|guard| guard.clone());
-        let session = load_session_from_keychain(acct.id.as_str(), email)?
+        let session = load_session_from_keychain(acct.id.as_str(), email)
+            .map_err(unlock_failure)?
             .ok_or_else(|| "Sign in before unlocking the vault.".to_string())?;
         install_keychain_session(&state, &acct, &mut turn, session)?;
         tracing::info!("vault unlocked from Keychain");
@@ -5744,6 +5824,8 @@ enum KeysFrom {
 /// memory call this right after the engine start, whatever its outcome.
 /// `finder_setup_wiring_tests` keeps that list complete.
 fn keys_arrived(state: &AppState, from: KeysFrom) {
+    // Keys are here: no recovery phrase is owed any more (review P2-3).
+    forget_pending_setup(&state.pending_setup);
     if from == KeysFrom::SignIn {
         lifecycle_log::event(lifecycle_log::LifecycleEvent::SignedIn);
     }
@@ -14150,6 +14232,10 @@ enum MainNav {
     Settings { section: Option<&'static str> },
     /// Out of Settings, to where it was entered from (⌘[, View › Back).
     Back,
+    /// “Sign in again”, asked for by `open_reauth_window`: the window shows that card whatever the session says, as
+    /// Linux's onboarding window does (`mode=reauth`), so the click always lands on it (review P3-1).
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    Reauth,
 }
 
 impl MainNav {
@@ -14521,6 +14607,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             app_version,
             consume_main_navigation,
+            set_pending_setup,
+            pending_setup,
             main_window_state,
             check_for_updates_now,
             consume_menu_update_check,
@@ -37477,6 +37565,123 @@ mod sign_out_keep_tests {
         ] {
             assert!(browser.contains(&squeeze(step)), "the browser sign-in's event: {step}");
         }
+    }
+
+    // ---- the fix round after the /code-review of the Mac sign-in PR (task 1683 slice 2) ----
+
+    /// Review P2-3: ⌘W destroys the window and its flow with it, and a window opened again must be able to resume “Set up
+    /// this Mac”. Rust keeps the step for the process, answers it only while it is still true, and does not use it up by
+    /// reading it (the window may be closed again).
+    #[test]
+    fn a_pending_set_up_step_is_resumed_only_while_it_is_still_true() {
+        let slot = Mutex::new(None);
+        assert_eq!(resume_pending_setup(&slot, true, false), None, "nothing was set");
+        remember_pending_setup(&slot, true);
+        assert_eq!(resume_pending_setup(&slot, true, false), Some(PendingSetup { key_replaced: true }));
+        assert_eq!(
+            resume_pending_setup(&slot, true, false),
+            Some(PendingSetup { key_replaced: true }),
+            "reading it does not use it up"
+        );
+        assert_eq!(resume_pending_setup(&slot, true, true), None, "the keys are here: nothing is owed");
+        assert_eq!(resume_pending_setup(&slot, false, false), None, "nobody is signed in: nothing to resume");
+        remember_pending_setup(&slot, false);
+        assert_eq!(
+            resume_pending_setup(&slot, true, false),
+            Some(PendingSetup { key_replaced: false }),
+            "the newest sign-in's step replaces an older one"
+        );
+        forget_pending_setup(&slot);
+        assert_eq!(resume_pending_setup(&slot, true, false), None);
+    }
+
+    #[test]
+    fn arriving_keys_forget_the_pending_set_up_step() {
+        for from in [KeysFrom::Unlock, KeysFrom::SignIn] {
+            let state = AppState::default();
+            remember_pending_setup(&state.pending_setup, false);
+            keys_arrived(&state, from);
+            assert_eq!(resume_pending_setup(&state.pending_setup, true, false), None, "{from:?}");
+        }
+    }
+
+    /// The window reads `{ "key_replaced": bool }` strictly (`flowForPendingSetup`), and an absent step is JSON null.
+    #[test]
+    fn the_pending_set_up_step_is_the_json_the_window_reads() {
+        assert_eq!(
+            serde_json::to_value(PendingSetup { key_replaced: true }).unwrap(),
+            serde_json::json!({ "key_replaced": true })
+        );
+        assert_eq!(serde_json::to_value(Option::<PendingSetup>::None).unwrap(), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn the_pending_set_up_commands_are_registered_and_touch_no_secret() {
+        let production = super::finder_setup_command_tests::production_source();
+        let handler = super::finder_setup_command_tests::body_between(&production, "tauri::generate_handler![", "])");
+        // Whole lines: `set_pending_setup,` contains `pending_setup,`, so a substring test cannot tell the two apart.
+        for name in ["set_pending_setup,", "pending_setup,"] {
+            assert!(handler.lines().any(|line| line.trim() == name), "{name} is registered");
+        }
+        for signature in ["fn set_pending_setup(", "fn pending_setup("] {
+            let body = super::finder_setup_command_tests::body_between(&production, signature, "\n}\n");
+            for forbidden in ["keychain", "Keychain", "master_key", "token"] {
+                assert!(!body.contains(forbidden), "{signature} must not touch {forbidden}:\n{body}");
+            }
+        }
+        // It asks the same thing `sync_status` does (a session in memory, or a token present) and nothing more.
+        let ask = super::finder_setup_command_tests::body_between(&production, "fn pending_setup(", "\n}\n");
+        assert!(ask.contains("resume_pending_setup(&state.pending_setup, vault_unlocked || auth_present, vault_unlocked)"), "{ask}");
+    }
+
+    /// Review P2-3 b: the Keychain holds a token and no key. `unlock_vault` says the approved Set up this Mac sentence on a
+    /// Mac (the window recognises it; `tests/signInModel.test.ts` pins the TypeScript copy equal), not the Keychain's words.
+    #[test]
+    fn unlock_vault_says_the_set_up_sentence_when_the_key_is_not_there() {
+        let keychain = "unlock vault key from Keychain: secret not found".to_string();
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(unlock_failure(keychain), NO_VAULT_KEY_UNLOCK_ERROR);
+            assert_eq!(
+                NO_VAULT_KEY_UNLOCK_ERROR,
+                "This Mac does not have your encryption keys yet. Restore them to continue."
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(unlock_failure(keychain.clone()), keychain, "Windows and Linux keep what they showed");
+        // Any other failure is shown as it is.
+        for other in ["load session from Keychain: the Keychain is locked", "Sign in before unlocking the vault.", ""] {
+            assert_eq!(unlock_failure(other.to_string()), other);
+        }
+    }
+
+    #[test]
+    fn unlock_vault_maps_only_the_keychain_load_and_never_the_session_it_installs() {
+        let production = super::finder_setup_command_tests::production_source();
+        let unlock = super::finder_setup_command_tests::body_between(&production, "async fn unlock_vault(", "\n}\n");
+        assert!(
+            unlock.contains("load_session_from_keychain(acct.id.as_str(), email)\n            .map_err(unlock_failure)?"),
+            "{unlock}"
+        );
+        // The startup restore's own test of the same failure is untouched: it reads the Keychain's words.
+        let restore = super::finder_setup_command_tests::body_between(&production, "async fn restore_session_inner(", "\n}\n");
+        assert!(!restore.contains("unlock_failure"), "{restore}");
+    }
+
+    /// Review P3-1: `open_reauth_window` on a Mac asks the window for “Sign in again”, whatever the session says; the
+    /// sign-in itself still lets the window decide.
+    #[test]
+    fn open_reauth_window_asks_the_beebeeb_window_for_sign_in_again() {
+        assert_eq!(serde_json::to_value(MainNav::Reauth).unwrap(), serde_json::json!({ "to": "reauth" }));
+        let production = super::finder_setup_command_tests::production_source();
+        let window = super::finder_setup_command_tests::body_between(&production, "async fn open_reauth_window(", "\n}\n");
+        let mac = super::finder_setup_command_tests::body_between(window, "#[cfg(target_os = \"macos\")]\n    {", "\n    }\n");
+        assert!(mac.contains("show_reauth_in_beebeeb_window(&app)"), "{mac}");
+        let ask = super::finder_setup_command_tests::body_between(&production, "fn show_reauth_in_beebeeb_window(", "\n}\n");
+        assert!(ask.contains("show_main_window(app, MainNav::Reauth);"), "{ask}");
+        // The plain sign-in is unchanged: Home, and the window decides.
+        let plain = super::finder_setup_command_tests::body_between(&production, "fn show_sign_in_in_beebeeb_window(app", "\n}\n");
+        assert!(plain.contains("show_main_window(app, MainNav::Home);"), "{plain}");
     }
 
     /// §6.4 (review I8): the switch's count logs the line `sign_out_count` logs, with counts only. A device step reads
