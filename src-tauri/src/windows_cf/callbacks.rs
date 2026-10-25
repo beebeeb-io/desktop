@@ -182,7 +182,7 @@ pub unsafe extern "system" fn fetch_data_callback(
             result = bridge.hydrate_file_to_memory(&file_id) => result,
         }
     });
-    let buf = match buf {
+    let crate::engine_bridge::FetchedBytes { bytes: buf, version: fetched, ticket } = match buf {
         Ok(b) => b,
         Err(e) => {
             // Do NOT log the error's inner content at info+ if it could carry
@@ -291,6 +291,15 @@ pub unsafe extern "system" fn fetch_data_callback(
             // only log.
             let whole_file = required_offset == 0 && required_length >= file_size;
             if whole_file {
+                // Task 1640 (review F1): every byte on disk is this fetch's version now, so they
+                // become the agreed content; only now, after the transfer, never before (a
+                // transfer that fails or is cut off leaves the fetch's candidate, recorded before
+                // it, which only moves down). A failure leaves that candidate: never too high.
+                if let Some(fetched) = fetched.as_ref() {
+                    if let Err(e) = bridge.record_whole_fetch(&file_id, fetched, &ticket) {
+                        tracing::warn!(file_id = %file_id, error = %e, "could not record the fetched file as agreed");
+                    }
+                }
                 if let Some(path) = normalized_path(info) {
                     unsafe { mark_in_sync(&path) };
                 }
@@ -303,6 +312,9 @@ pub unsafe extern "system" fn fetch_data_callback(
             unsafe { fail_transfer(connection_key, transfer_key, request_key, required_offset, required_length) };
         }
     }
+    // Task 1640 (self-review #1): this fetch's transfer has ended; another fetch's agreed content
+    // may now be recorded.
+    drop(ticket);
 }
 
 /// Resolve a hydration size mismatch out-of-band (task 0783, Tier-1) with a
@@ -353,6 +365,12 @@ unsafe fn resolve_size_mismatch(
     // Step 1 — correct the recorded size to the authenticated length. A failure
     // here is non-fatal: the placeholder resize below is what makes the next
     // open succeed; the DB value is for cross-surface consistency + reseeding.
+    // Task 1640 (review F1): the resize below changes the placeholder without a fetch and does not
+    // dehydrate it, so whatever was on disk may stay in part: its agreed content and its candidate
+    // become mixed (never agreed; a change is sent on the oldest version), never reset.
+    if let Err(e) = bridge.db().poison_local_content(file_id) {
+        tracing::debug!(file_id = %file_id, error = %e, "size resolution: could not mark the local content mixed");
+    }
     match bridge.db().set_size_bytes(file_id, true_size) {
         Ok(0) => {
             tracing::warn!(file_id = %file_id, "size correction matched no row (file_id absent from state DB)");
@@ -540,6 +558,13 @@ pub unsafe extern "system" fn notify_file_close_completion_callback(
             // Deleted on close — leave it to the delete-completion callback.
             return;
         }
+    }
+
+    // Task 1640: a close by this process (the upload driver reading a synced file to compare
+    // it with its agreed content, or staging its copy) is not an edit. `ProcessInfo` is filled
+    // because the root is connected with `CF_CONNECT_FLAG_REQUIRE_PROCESS_INFO`.
+    if !info.ProcessInfo.is_null() && unsafe { (*info.ProcessInfo).ProcessId } == std::process::id() {
+        return;
     }
 
     let Some(path) = notify_full_path(info) else {

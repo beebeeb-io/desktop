@@ -174,6 +174,9 @@ export interface VersionConflictEntry {
     // Previously fell through to the generic 'failed_upload' bucket with the
     // raw HTTP error text and no "sign in again" path — see `reviewEntryAction`.
     | 'auth_failure'
+    // Task 1640: a file deleted elsewhere while it held changes not sent from this PC; they
+    // were kept as a copy beside it (informational, no action).
+    | 'kept_copy'
   status: string
   updated_at?: number
   detail: string
@@ -193,7 +196,7 @@ export const BILLING_URL = 'https://app.beebeeb.io/billing'
  */
 export const CREATE_ACCOUNT_URL = 'https://app.beebeeb.io/signup'
 
-export type ReviewEntryActionKind = 'open_conflict' | 'upgrade' | 'sign_in_again'
+export type ReviewEntryActionKind = 'open_conflict' | 'upgrade' | 'sign_in_again' | 'dismiss'
 
 export interface ReviewEntryAction {
   kind: ReviewEntryActionKind
@@ -216,6 +219,8 @@ export function reviewEntryAction(
   if (entry.action === 'open_conflict') return { kind: 'open_conflict', label: 'Review' }
   if (entry.kind === 'auth_failure') return { kind: 'sign_in_again', label: 'Sign in again' }
   if (entry.kind === 'quota_failure') return { kind: 'upgrade', label: 'Upgrade' }
+  // Task 1640: a kept copy needs no decision; the person can clear it from the list.
+  if (entry.kind === 'kept_copy' && entry.action === 'dismiss') return { kind: 'dismiss', label: 'Dismiss' }
   return null
 }
 

@@ -9804,6 +9804,12 @@ fn free_up_space_windows(db: &state_db::StateDb, sync_root: &std::path::Path) ->
         // this is a single file). Best-effort: a failure here is logged (never the
         // path) and we still attempt the dehydrate, which simply no-ops/errors if
         // the file was genuinely pinned.
+        // Task 1640: never free a file whose bytes are a change that is not sent (an edit, a
+        // queued upload) or are not known to be the agreed content: they are the only copy.
+        if !crate::windows_cf::placeholders::local_bytes_agreed(db, &file_id, &canonical) {
+            tracing::warn!(file_id = %file_id, "free_up_space: the file holds a change that is not sent; keeping it local");
+            continue;
+        }
         if let Err(error) = crate::windows_cf::placeholders::set_pin_state(&canonical, false, false) {
             tracing::warn!(file_id = %file_id, error = %error, "free_up_space: OS unpin before dehydrate failed; attempting dehydrate anyway");
         }
@@ -10158,6 +10164,22 @@ fn list_version_conflict_center() -> Result<Vec<engine_bridge::VersionConflictEn
     }
     let db = state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?;
     engine_bridge::version_conflict_feed_from_db(&db).map_err(|e| e.to_string())
+}
+
+/// Task 1640 (review N9): dismiss one informational review entry (`kept:<id>`, a kept copy). The
+/// copy itself stays where it is.
+#[tauri::command]
+fn dismiss_review_entry(entry_id: String) -> Result<(), String> {
+    let Some(id) = entry_id.strip_prefix("kept:").and_then(|id| id.parse::<i64>().ok()) else {
+        return Err("This entry can’t be dismissed.".to_string());
+    };
+    let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
+    let db = state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?;
+    match db.dismiss_kept_copy(id) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err("This entry can be dismissed once the file is closed and removed.".to_string()),
+        Err(e) => Err(format!("dismiss: {e}")),
+    }
 }
 
 fn file_versions_payload_for_frontend(body: serde_json::Value) -> Result<serde_json::Value, String> {
@@ -10561,15 +10583,18 @@ fn tray_recent_activity_from_db(db: &state_db::StateDb) -> Vec<TrayActivityItem>
     }
 
     if let Ok(events) = db.list_recent_local_activity(TRAY_RECENT_ACTIVITY_LIMIT) {
-        for event in events
-            .into_iter()
-            .filter(|event| event.event_type == state_db::LocalActivityKind::MovedToTrash)
-        {
+        for event in events.into_iter() {
+            // Task 1640: a kept copy of changes not sent, beside a file deleted elsewhere.
+            let (status, icon) = match event.event_type {
+                state_db::LocalActivityKind::MovedToTrash => ("Moved to trash", "trash"),
+                state_db::LocalActivityKind::KeptLocalCopy => ("Your changes, kept as a copy", "file"),
+                state_db::LocalActivityKind::Restored => continue,
+            };
             items.push(TrayActivityItem {
                 id: event.file_id.unwrap_or_else(|| format!("activity-{}", event.id)),
                 name: event.file_name,
-                status: "Moved to trash".to_string(),
-                icon: "trash".to_string(),
+                status: status.to_string(),
+                icon: icon.to_string(),
                 ok: Some(true),
                 active: None,
                 progress: None,
@@ -11376,6 +11401,11 @@ fn dehydrate_excluded_subtrees_windows(
             continue;
         };
         if !allowed_roots.iter().any(|root| canonical.starts_with(root)) {
+            continue;
+        }
+        // Task 1640: an unsent change stays on disk; see `free_up_space_windows`.
+        if !crate::windows_cf::placeholders::local_bytes_agreed(db, &entry.file_id, &canonical) {
+            tracing::warn!(file_id = %entry.file_id, "set_selective_sync: the file holds a change that is not sent; keeping it local");
             continue;
         }
         match crate::windows_cf::placeholders::dehydrate_placeholder(&canonical) {
@@ -14735,6 +14765,7 @@ pub fn run() {
             free_up_space,
             export_diagnostics,
             list_version_conflict_center,
+            dismiss_review_entry,
             list_file_versions,
             restore_file_version,
             get_sync_root,

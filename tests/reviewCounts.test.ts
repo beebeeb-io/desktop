@@ -32,6 +32,10 @@ describe('what could not be sent yet', () => {
     expect(counts).toEqual({ notSent: 3, changedElsewhere: 1 })
   })
 
+  test('a kept copy (task 1640) is changed elsewhere, never not-sent', () => {
+    expect(reviewCounts(of('kept_copy'))).toEqual({ notSent: 0, changedElsewhere: 1 })
+  })
+
   test('an empty page counts nothing', () => {
     expect(reviewCounts([])).toEqual({ notSent: 0, changedElsewhere: 0 })
   })
@@ -43,6 +47,10 @@ describe('the page uses it', () => {
     expect(page).toContain('reviewCounts(entries)')
     expect(page).not.toContain("entry.kind !== 'conflict'")
     expect(page).toContain('metrics.notSent')
+    // Task 1640: a kept copy loads no versions and does not turn the dot red; it can be dismissed.
+    expect(page).toContain("selectedEntry.kind === 'kept_copy'")
+    expect(page).toContain("entries.some((entry) => entry.kind !== 'kept_copy')")
+    expect(page).toContain("'dismiss_review_entry'")
     expect(page).toContain('metrics.changedElsewhere')
   })
 })

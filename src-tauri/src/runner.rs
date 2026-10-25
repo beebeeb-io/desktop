@@ -1602,8 +1602,20 @@ async fn run(
                         // on disk). Idempotent — CfSetInSyncState on an already-
                         // in-sync placeholder is a Windows no-op. Bounded at
                         // MAX_IN_SYNC_STAMPS_PER_PASS files per tick.
+                        // Task 1640 (review P2-5): the pass may hash a file; off the async workers.
                         #[cfg(target_os = "windows")]
-                        crate::windows_cf::stamp_local_files_in_sync(&sync_root);
+                        {
+                            let stamp_root = sync_root.clone();
+                            if let Err(e) = tokio::task::spawn_blocking(move || {
+                                crate::windows_cf::stamp_local_files_in_sync(&stamp_root);
+                                // Task 1640 (review N13): kept copies whose original was in use.
+                                crate::windows_cf::retry_kept_originals(&stamp_root);
+                            })
+                            .await
+                            {
+                                tracing::warn!(error = %e, "stamp pass panicked; continuing");
+                            }
+                        }
 
                         let syncing_after_tick = sync_in_flight_count(&db);
                         let unresolved_after_tick = unresolved_sync_issue_count(&db);
