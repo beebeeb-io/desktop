@@ -43,7 +43,32 @@ const snapshot = (over = {}) => ({
   ...over,
   account: { email: 'sam@example.eu', logged_in: true, vault_unlocked: true, auth_expired: false, ...(over.account ?? {}) },
 })
+// Slice 5: Security, General's account preferences, Storage details, About's channel / update / speed test.
+const now = Date.now()
+const hoursAgo = (n) => new Date(now - n * 3_600_000).toISOString()
+const todayAt = (h, m) => { const d = new Date(); d.setHours(h, m, 0, 0); return d.toISOString() }
+const account = {
+  score: { score: 4, max: 5, label: 'Good', factors: [{ key: 'email_verified', satisfied: true }, { key: 'two_factor_enabled', satisfied: true }] },
+  sessions: { sessions: [
+    { id: 's1', device_name: 'MacBook Pro', device_kind: 'desktop', country_code: 'NL', last_active_at: new Date(now).toISOString(), created_at: hoursAgo(900), is_current: true },
+    { id: 's2', device_name: 'iPhone', device_kind: 'ios', country_code: 'NL', last_active_at: hoursAgo(2), created_at: hoursAgo(700), is_current: false },
+  ] },
+  devices: { devices: [{ id: 'd1', hostname: 'MacBook Pro', platform: 'macos', bb_version: '0.8.13', last_seen: new Date(now).toISOString(), created_at: new Date(new Date().getFullYear(), 8, 3, 9).toISOString(), session_count: 1 }] },
+  feed: { events: [
+    { id: 'e1', type: 'file.trash', subject: null, details: null, where: null, created_at: todayAt(9, 12) },
+    { id: 'e2', type: 'file.downloaded', subject: null, details: null, where: null, created_at: todayAt(8, 40) },
+  ], total: 2, page: 1 },
+  prefs: { new_device_login: true, share_received: true, file_updated: false, storage_warning: true, backup_complete: false },
+  breakdown: {
+    by_category: [{ category: 'media', bytes: 60_000_000_000, file_count: 1200 }, { category: 'documents', bytes: 20_000_000_000, file_count: 3400 }, { category: 'other', bytes: 4_300_000_000, file_count: 90 }],
+    largest_files: [{ file_id: 'f1', path: 'Photos/2026/Holiday in the mountains/IMG_0001.heic', size_bytes: 3_200_000_000, category: 'media' }, { file_id: 'f2', path: 'Investigations/Q3 ledger reconciliation.xlsx', size_bytes: 12_400_000, category: 'documents' }],
+    total_files: 4690, total_bytes: 84_300_000_000,
+  },
+  speed: { latency: { min_ms: 18, avg_ms: 24, max_ms: 41 }, upload_bps: 4_400_000, download_bps: 11_750_000 },
+}
 const base = {
+  ...account,
+  update: { status: 'up_to_date', current_version: '0.8.12', channel: 'stable' },
   snapshot: snapshot(),
   finder: { setup: 'ready', reason: null, launch_location: 'applications', attempt: 1, max_attempts: 1, last_failure: null },
   config: { upload_kbps_limit: 0, download_kbps_limit: 5000, pause_sync: false, notify_conflicts: true, notify_sync_complete: false, notify_quota_warnings: true, theme: 'system' },
@@ -86,6 +111,16 @@ function installBackend({ caps, fx }) {
         case 'kept_unsynced_folder': return f.kept
         case 'list_remote_tree': return [{ id: 'f1', name: 'Photos', is_folder: true, excluded: false, size_bytes: 1, file_count: 1, on_disk_bytes: 0, pinned: true, children: [] }]
         case 'account_region': return f.region
+        case 'account_security_score': return f.score
+        case 'account_session_list': return f.sessions
+        case 'account_devices': return f.devices
+        case 'account_activity_feed': return f.feed
+        case 'account_notification_preferences': return { preferences: f.prefs }
+        case 'account_update_notification_preferences': f.prefs = { ...f.prefs, ...a.update }; return { preferences: f.prefs }
+        case 'account_storage_breakdown': return f.breakdown
+        case 'run_speedtest': return f.speed
+        case 'check_for_updates_now': return f.update
+        case 'report_problem': return { path: '/Users/sam/Desktop/beebeeb-support.json', email_opened: true }
         case 'consume_main_navigation': return null
         case 'consume_menu_update_check': return false
         case 'consume_sign_out_flow_request': return false
@@ -135,13 +170,22 @@ const SCENARIOS = [
   { name: 'home-kept', fx: { keptUnsent: KEPT_OURS, kept: KEPT_MACOS }, has: ['Needs your attention', KEPT_OURS, KEPT_MACOS, 'Show in Finder', 'Dismiss'] },
   { name: 'home-locked', fx: { snapshot: snapshot({ phase: 'locked', account: { vault_unlocked: false }, storage: null }) }, has: ['Your vault is locked', 'Unlock vault', 'Vault locked'], hasNot: ['Beebeeb in Finder'], hifi: 'hifi-s3-fig3' },
   { name: 'home-long-email', fx: { snapshot: snapshot({ account: { email: LONG_EMAIL } }) }, has: [LONG_EMAIL] },
-  { name: 'settings-general', act: gear, has: ['Settings', 'Home', 'General', 'Open Beebeeb at login', 'Tell me about'], sidebar: ['Back to Home', 'Account, sam@example.eu, Basic plan', 'General', 'Sync', 'About'], min: true, hifi: 'hifi-s4-fig1' },
-  { name: 'settings-account', act: section('Account, sam@example.eu, Basic plan'), has: ['Account', 'sam@example.eu', 'Basic plan · renews 14 Nov 2026', 'Vault is unlocked', 'Where your files are stored', 'Europe', 'Germany', 'Sign out of this Mac', 'Sign out…'], hasNot: ['Couldn’t load storage locations'], min: true, hifi: 'hifi-s4-fig2' },
+  { name: 'settings-general', act: gear, has: ['Settings', 'Home', 'General', 'Open Beebeeb at login', 'Appearance', 'Follow macOS.', 'System', 'Tell me about', 'From your account', 'New device sign-in', 'We cannot see your files, but we know when a new device signs in.', 'Backup complete', 'When a scheduled backup finishes.'], sidebar: ['Back to Home', 'Account, sam@example.eu, Basic plan', 'General', 'Sync', 'Security', 'About'], min: true, hifi: 'hifi-s4-fig1' },
+  { name: 'settings-account', act: section('Account, sam@example.eu, Basic plan'), has: ['Account', 'sam@example.eu', 'Basic plan · renews 14 Nov 2026', 'Storage details…', 'Vault is unlocked', 'Where your files are stored', 'Europe', 'Germany', 'Password, email and billing', 'Changed on beebeeb.io, in your browser.', 'Open beebeeb.io', 'Sign out of this Mac', 'Sign out…'], hasNot: ['Couldn’t load storage locations'], min: true, hifi: 'hifi-s4-fig2' },
+  { name: 'storage-details', act: async (p) => { await section('Account, sam@example.eu, Basic plan')(p); await p.getByRole('button', { name: 'Storage details…' }).click(); await p.getByRole('dialog').waitFor(); await p.waitForFunction(() => !document.querySelector('[role="dialog"]').innerText.includes('Loading…')) }, has: ['Storage details', 'Where your storage goes, by type and by your largest files.', '4.690 files · 84,3 GB', 'By type', 'Media', '60 GB · 1.200 files', 'Documents', 'Other', 'Largest files', 'Photos/2026/Holiday in the mountains/IMG_0001.heic', 'Media · 3,2 GB'], hasNot: ['PC', 'daemon'], dialogs: 1, min: true },
   { name: 'settings-sync', act: section('Sync'), has: ['Beebeeb in Finder', 'Added', 'Repair…', 'Keep on this Mac', 'Speed'], min: true, hifi: 'hifi-s4-fig3' },
-  { name: 'settings-about', act: section('About'), has: ['Beebeeb for Mac', 'Version 0.8.12', 'Check for updates', 'Get help', 'Export a support bundle'], min: true, hifi: 'hifi-s4-fig5' },
+  { name: 'settings-security', act: section('Security'), has: ['Security', 'Authenticator app (TOTP) · On', 'A second factor is required when you sign in. Manage or reset it on beebeeb.io.', 'Manage on beebeeb.io', 'Active sessions', 'MacBook Pro · This session', 'Active now', 'iPhone', 'Active 2 hours ago', 'Revoke', 'Sign out everywhere else', 'Sign out all other sessions', 'Devices', 'MacBook Pro · macOS · v0.8.13', 'Every device holding a copy of your vault key, and the sync sessions running on each.', 'Recent account activity', 'Moved an item to trash', 'Downloaded an item'], hasNot: ['Revoke a device', 'daemon'], sidebar: ['Back to Home', 'Account, sam@example.eu, Basic plan', 'General', 'Sync', 'Security', 'About'], min: true, hifi: 'hifi-s4-fig4' },
+  { name: 'security-revoke', act: async (p) => { await section('Security')(p); await p.getByRole('button', { name: 'Revoke iPhone' }).click(); await p.getByRole('dialog').waitFor() }, has: ['Sign out this session?', 'iPhone will need to sign in again.', 'Cancel', 'Sign out'], dialogs: 1 },
+  { name: 'security-locked', fx: { snapshot: snapshot({ phase: 'locked', account: { vault_unlocked: false }, storage: null }) }, act: section('Security'), has: ['Your vault is locked', 'Unlock it to see your sessions, devices and recent activity.'], hasNot: ['Active sessions'] },
+  { name: 'settings-about', act: section('About'), has: ['Beebeeb for Mac', 'Version 0.8.12', 'Check for updates', 'Beebeeb checks for updates at launch and every 4 hours.', 'Release channel', 'Stable', 'Regular releases after validation.', 'Get help', 'Test connection speed', 'Run test', 'Export a support bundle'], hasNot: ['Restart to update', 'parity', 'CLI'], min: true, hifi: 'hifi-s4-fig5' },
+  { name: 'about-update-available', fx: { update: { status: 'update_available', current_version: '0.8.12', channel: 'stable', version: '0.8.13', body: '', release_notes_url: 'https://github.com/beebeeb-io/desktop/releases/tag/desktop-v0.8.13' } }, act: async (p) => { await section('About')(p); await p.getByRole('button', { name: 'Check for updates' }).click(); await p.getByRole('button', { name: 'Download update' }).waitFor() }, has: ['Version 0.8.13 is available. Drag Beebeeb into Applications to replace this version.', 'Download update'], hasNot: ['Restart to update', 'Check for updates'] },
+  { name: 'about-downgrade', fx: { update: { status: 'downgrade_available', current_version: '0.8.12', current_channel: 'beta', channel: 'stable', version: '0.8.11', body: 'Fixes the sync stall.\n\nNothing else changed.', release_notes_url: 'https://github.com/beebeeb-io/desktop/releases/tag/desktop-v0.8.11' }, config: { ...base.config, release_channel: 'stable' } }, act: async (p) => { await section('About')(p); await p.getByRole('button', { name: 'Check for updates' }).click(); await p.getByRole('button', { name: 'Release notes' }).waitFor() }, has: ['The Stable channel is at version 0.8.11', 'This Mac runs 0.8.12, from the Beta channel. Read the release notes before you go back to an older version.', 'Release notes', 'View release'], hasNot: ['Downgrade to'], min: true },
+  { name: 'about-release-notes', fx: { update: { status: 'downgrade_available', current_version: '0.8.12', current_channel: 'beta', channel: 'stable', version: '0.8.11', body: 'Fixes the sync stall.\n\nNothing else changed.', release_notes_url: 'https://github.com/beebeeb-io/desktop/releases/tag/desktop-v0.8.11' } }, act: async (p) => { await section('About')(p); await p.getByRole('button', { name: 'Check for updates' }).click(); await p.getByRole('button', { name: 'Release notes' }).click(); await p.getByRole('dialog').waitFor() }, has: ['Beebeeb 0.8.11', 'Fixes the sync stall.', 'Nothing else changed.'], dialogs: 1 },
+  { name: 'about-speed-test', act: async (p) => { await section('About')(p); await p.getByRole('button', { name: 'Run test' }).click(); await p.getByText('Latency 24 ms (18 to 41)').waitFor() }, has: ['Latency 24 ms (18 to 41) · Upload 35.2 Mbps · Download 94.0 Mbps'] },
   { name: 'signout-confirm', act: async (p) => { await section('Account, sam@example.eu, Basic plan')(p); await p.getByRole('button', { name: 'Sign out…' }).click(); await p.getByRole('dialog').waitFor() }, has: ['Sign out of this Mac?', 'Sync stops until you sign in again.', 'Cancel', 'Sign out'], dialogs: 1, hifi: 'hifi-s5-fig0' },
   { name: 'signed-out', fx: { snapshot: snapshot({ phase: 'signed_out', account: { email: null, logged_in: false, vault_unlocked: false }, storage: null }) }, has: ['Sign in to Beebeeb', 'Sign in'], hasNot: ['Home', 'Settings'], noSidebar: true },
-  { name: 'signed-out-settings', fx: { snapshot: snapshot({ phase: 'signed_out', account: { email: null, logged_in: false, vault_unlocked: false }, storage: null }) }, open: '&tab=general', has: ['Sign in', 'Settings', 'General', 'About', 'Open Beebeeb at login'], sidebar: ['Back to Sign in', 'General', 'About'], hifi: 'hifi-s4-fig6' },
+  { name: 'signed-out-settings', fx: { snapshot: snapshot({ phase: 'signed_out', account: { email: null, logged_in: false, vault_unlocked: false }, storage: null }) }, open: '&tab=general', has: ['Sign in', 'Settings', 'General', 'About', 'Open Beebeeb at login', 'Appearance', 'Tell me about'], hasNot: ['From your account'], sidebar: ['Back to Sign in', 'General', 'About'], hifi: 'hifi-s4-fig6' },
+  { name: 'signed-out-about', fx: { snapshot: snapshot({ phase: 'signed_out', account: { email: null, logged_in: false, vault_unlocked: false }, storage: null }) }, open: '&tab=about', has: ['Beebeeb for Mac', 'Release channel'], hasNot: ['Test connection speed'] },
   { name: 'session-ended', fx: { snapshot: snapshot({ phase: 'session_ended', account: { auth_expired: true } }) }, has: ['Sign in again', 'Sync is paused until you sign in again. Your files stay in Finder.', 'Signed in before as sam@example.eu'], noSidebar: true },
 ]
 

@@ -5515,7 +5515,7 @@ async fn wait_for_file_provider_ipc_ready(
 
         if Instant::now() >= deadline {
             return Err(
-                "Timed out waiting for the local Beebeeb sync daemon before installing Finder location.".to_string(),
+                "Beebeeb wasn’t ready in time to add its Finder location.".to_string(),
             );
         }
         sleep(Duration::from_millis(100)).await;
@@ -11748,7 +11748,7 @@ fn set_recursive_pin(item_id: String, pinned: bool) -> Result<engine_bridge::Pin
         .ok_or_else(|| "Choose a sync folder before changing offline availability.".to_string())?;
     let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
     if !db_path.exists() {
-        return Err("The local sync database has not been created yet. Start the daemon once before changing offline availability.".to_string());
+        return Err("Beebeeb hasn’t started syncing on this Mac yet. Try again once it has.".to_string());
     }
 
     let db = std::sync::Arc::new(state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?);

@@ -72,6 +72,7 @@ const ICON_PATHS: Record<string, ReactNode> = {
   ),
   folder: <path transform="scale(1.2)" d="M2.5 6.2A1.7 1.7 0 0 1 4.2 4.5h3.3l1.7 1.9h6.6a1.7 1.7 0 0 1 1.7 1.7v6.7a1.7 1.7 0 0 1-1.7 1.7H4.2a1.7 1.7 0 0 1-1.7-1.7z" />,
   back: <path transform="scale(1.2)" d="M12.5 4.5L7 10l5.5 5.5" />,
+  shield: <path transform="scale(1.2)" d="M10 2.5l6 2.3v4.6c0 3.9-2.5 6.6-6 8.1-3.5-1.5-6-4.2-6-8.1V4.8z" />,
   chevDown: <path d="m6 9 6 6 6-6" />,
   alert: (
     <>
@@ -103,11 +104,12 @@ export function SettingsIcon({ name, size = 16, strokeWidth = 1.6 }: { name: str
 }
 
 /** A titled card. Children are rows and notes; the last one loses its divider in CSS. */
-export function SettingsGroup({ title, children }: { title?: string; children: ReactNode }) {
+export function SettingsGroup({ title, footnote, children }: { title?: string; footnote?: ReactNode; children: ReactNode }) {
   return (
     <section className="ms-group" aria-label={title}>
       {title ? <h2 className="ms-group-title">{title}</h2> : null}
       <div className="ms-card">{children}</div>
+      {footnote ? <p className="ms-footnote">{footnote}</p> : null}
     </section>
   )
 }
@@ -273,6 +275,39 @@ export function Select({
   )
 }
 
+/**
+ * A native select over named choices (Appearance, Release channel): the same control and the same look as `Select`, whose
+ * values are numbers. Real keyboard and VoiceOver behaviour; the design's chevron laid over it.
+ */
+export function ChoiceSelect({
+  name,
+  value,
+  options,
+  onChange,
+  disabled,
+}: {
+  name: string
+  value: string
+  options: ReadonlyArray<{ value: string; label: string }>
+  onChange: (value: string) => void
+  disabled?: boolean
+}) {
+  return (
+    <span className="ms-select">
+      <select aria-labelledby={`ms-${name}-label`} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)}>
+        {options.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+      <span className="ms-select-chevron" aria-hidden="true">
+        <SettingsIcon name="chevDown" size={13} />
+      </span>
+    </span>
+  )
+}
+
 /** A block under a row inside the same card. `alert` is a failure (once, inline); `status` is neutral. */
 export function Note({
   kind,
@@ -282,11 +317,14 @@ export function Note({
   reason,
   reasonWraps,
   actions,
+  mono = false,
 }: {
   kind: 'alert' | 'status'
   /** Names the failure's one surface, for tests that count error surfaces. */
   surface?: string
   title?: string
+  /** The body is a machine value (a measurement, a path): set in the mono face, and it wraps. */
+  mono?: boolean
   children?: ReactNode
   reason?: string | null
   /** The mono line wraps instead of ending in "…" (a path the person must be able to read in full). */
@@ -306,7 +344,7 @@ export function Note({
       ) : null}
       <div className="ms-note-text">
         {title ? <div className="ms-note-title">{title}</div> : null}
-        {children ? <div className="ms-note-body">{children}</div> : null}
+        {children ? <div className={mono ? 'ms-note-body ms-mono ms-mono--wrap' : 'ms-note-body'}>{children}</div> : null}
         {reason ? <div className={reasonWraps ? 'ms-mono ms-mono--wrap' : 'ms-mono'}>{reason}</div> : null}
         {actions ? <div className="ms-note-actions">{actions}</div> : null}
       </div>

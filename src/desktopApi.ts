@@ -507,8 +507,13 @@ export function formatBytes(bytes: number): string {
   return `${(bytes / 1_000_000_000_000).toFixed(1)} TB`
 }
 
+/**
+ * What a person is told when a command is missing from the build they run (spec `2026-10-24-macos-two-surface-app.md`
+ * §10.2 #24, every platform). The name of the command is for whoever reads the log, not for the screen.
+ */
 export function commandUnavailableLabel(commandName: string): string {
-  return `${commandName} is not wired in this build yet.`
+  console.warn(commandName, 'unavailable')
+  return 'This isn’t available in this version of Beebeeb.'
 }
 
 // ── Account data layer (PKG-DATA, commit 39f18963) ──────────────────────────

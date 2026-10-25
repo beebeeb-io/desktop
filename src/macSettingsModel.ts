@@ -9,7 +9,7 @@
  * Its section bodies (`MacSettings.tsx`) are hosted by the Beebeeb window's Settings pane (`MacApp.tsx`, task 1683
  * slice 1, two-surface spec §7.8).
  */
-import type { EngineRefusal, Subscription, VaultItem } from './desktopApi'
+import type { DesktopTheme, EngineRefusal, SpeedtestResult, StorageBreakdown, Subscription, VaultItem } from './desktopApi'
 import type { FinderFailureReason, FinderSetupView } from './finderSetup'
 import {
   FINDER_ADDING_LINE,
@@ -22,7 +22,8 @@ import {
 } from './finderSetupCopy'
 import { quotaPercent, titleCasePlan, planRenewalCopy } from './planPresentation'
 import type { ManualUpdateCheckState } from './windows/updateCheckViewModel'
-import { formatStorageUsage } from './storageFormat'
+import { formatStorageSize, formatStorageUsage } from './storageFormat'
+import { normalizeThemePreference } from './windows/advancedSettingsModel'
 
 // ── Tabs ────────────────────────────────────────────────────────────────────
 
@@ -30,6 +31,7 @@ export const SETTINGS_TABS = [
   { id: 'general', label: 'General', icon: 'settings' },
   { id: 'account', label: 'Account', icon: 'users' },
   { id: 'sync', label: 'Sync', icon: 'refresh' },
+  { id: 'security', label: 'Security', icon: 'shield' },
   { id: 'about', label: 'About', icon: 'info' },
 ] as const
 
@@ -328,6 +330,56 @@ export function storageLine(
   return { label: `${used} of ${quota}`, percent, red: percent >= STORAGE_RED_PERCENT }
 }
 
+/** Where the password, the email and the billing are changed: the web app, in the browser (spec §7.8, "Account"). */
+export const ACCOUNT_SETTINGS_URL = 'https://app.beebeeb.io/settings/account'
+
+// ── Account > Storage details ───────────────────────────────────────────────
+
+/** Spec §10.2 #30: the Insights subtitle, without the PC and without a claim about what is encrypted where. */
+export const STORAGE_DETAILS_SUBTITLE = 'Where your storage goes, by type and by your largest files.'
+
+/** How many of the largest files the sheet lists. */
+export const STORAGE_DETAILS_LARGEST = 10
+
+const CATEGORY_ORDER = ['media', 'documents', 'other'] as const
+const CATEGORY_LABEL = { media: 'Media', documents: 'Documents', other: 'Other' } as const
+
+function fileCountLabel(count: number, locale?: string): string {
+  let formatted: string
+  try {
+    formatted = new Intl.NumberFormat(locale).format(count)
+  } catch {
+    formatted = new Intl.NumberFormat('en').format(count)
+  }
+  return `${formatted} ${count === 1 ? 'file' : 'files'}`
+}
+
+export interface StorageDetails {
+  /** Nothing is stored yet: the sheet says so instead of drawing a table of zeros. */
+  empty: boolean
+  /** `1.291 files · 84,3 GB` */
+  total: string
+  types: Array<{ key: (typeof CATEGORY_ORDER)[number]; label: string; size: string; files: string }>
+  largest: Array<{ id: string; path: string; hint: string }>
+}
+
+/** The Insights content (by type, largest files) in a Mac's words and number format. */
+export function storageDetails(breakdown: StorageBreakdown, locale?: string): StorageDetails {
+  const byKey = new Map(breakdown.by_category.map((row) => [row.category, row]))
+  return {
+    empty: breakdown.total_files === 0 && breakdown.total_bytes === 0,
+    total: `${fileCountLabel(breakdown.total_files, locale)} · ${formatStorageSize(breakdown.total_bytes, locale)}`,
+    types: CATEGORY_ORDER.map((key) => {
+      const row = byKey.get(key)
+      return { key, label: CATEGORY_LABEL[key], size: formatStorageSize(row?.bytes ?? 0, locale), files: fileCountLabel(row?.file_count ?? 0, locale) }
+    }),
+    largest: [...breakdown.largest_files]
+      .sort((a, b) => b.size_bytes - a.size_bytes)
+      .slice(0, STORAGE_DETAILS_LARGEST)
+      .map((file) => ({ id: file.file_id, path: file.path, hint: `${CATEGORY_LABEL[file.category]} · ${formatStorageSize(file.size_bytes, locale)}` })),
+  }
+}
+
 // ── About ───────────────────────────────────────────────────────────────────
 
 /**
@@ -336,9 +388,15 @@ export function storageLine(
  */
 export const HELP_URL = 'https://beebeeb.io/support'
 
+/**
+ * The newest Mac disk image, through the site's redirect (task 2176, lead decision of 2026-10-24: under the App Sandbox a
+ * Mac cannot install an update in place, so it is offered a download).
+ */
+export const MAC_DOWNLOAD_URL = 'https://beebeeb.io/download/macos-dmg'
+
 export interface UpdateRow {
   hint: string
-  action: 'check' | 'checking' | 'install'
+  action: 'check' | 'checking' | 'download'
 }
 
 /**
@@ -355,15 +413,77 @@ export function updateRow(state: ManualUpdateCheckState, version: string | null)
     case 'up_to_date':
       return { hint: `Version ${state.currentVersion} is the latest.`, action: 'check' }
     case 'update_available':
-      return { hint: `Version ${state.version} is available.`, action: 'install' }
+      return { hint: `Version ${state.version} is available. Drag Beebeeb into Applications to replace this version.`, action: 'download' }
     case 'downgrade_available':
-      return { hint: `${current}${current ? ' · ' : ''}The ${state.channel} channel is at ${state.version}.`, action: 'check' }
+      // The offer has its own row (`downgradeRow`), so this row keeps to the version this Mac runs.
+      return { hint: current, action: 'check' }
     case 'error':
       return { hint: 'Couldn’t check for updates. Try again in a moment.', action: 'check' }
   }
 }
 
+export type ReleaseChannelId = 'stable' | 'beta' | 'alpha'
+
+/** The channels and what each is for: the Windows shell's words, kept (spec §10.2 #46: "Release channel"). */
+export const RELEASE_CHANNELS: ReadonlyArray<{ value: ReleaseChannelId; label: string; hint: string }> = [
+  { value: 'stable', label: 'Stable', hint: 'Regular releases after validation.' },
+  { value: 'beta', label: 'Beta', hint: 'Earlier builds for release testing.' },
+  { value: 'alpha', label: 'Alpha', hint: 'Earliest builds for rapid feedback.' },
+]
+
+/** A saved channel this app does not know reads as Stable, as the updater does. */
+export function releaseChannelOf(value: unknown): ReleaseChannelId {
+  return RELEASE_CHANNELS.find((channel) => channel.value === value)?.value ?? 'stable'
+}
+
+const channelLabel = (id: ReleaseChannelId) => RELEASE_CHANNELS.find((channel) => channel.value === id)?.label ?? 'Stable'
+
+/**
+ * The row for a selected channel that carries an older version than the one running. It informs and links; it offers no
+ * install, because nothing on a Mac installs in place (task 2176). Null for every other state.
+ */
+export function downgradeRow(state: ManualUpdateCheckState): { label: string; hint: string } | null {
+  if (state.kind !== 'downgrade_available') return null
+  return {
+    label: `The ${channelLabel(state.channel)} channel is at version ${state.version}`,
+    hint: `This Mac runs ${state.currentVersion}, from the ${channelLabel(state.currentChannel)} channel. Read the release notes before you go back to an older version.`,
+  }
+}
+
+/** What the speed test does, in plain words (spec §10.2 #26: no "parity with the CLI"). */
+export const SPEED_TEST_HINT = 'Measures how fast this Mac reaches Beebeeb: 5 pings, then 3 uploads and 3 downloads of 10 MB. Takes 30 to 90 seconds.'
+
+/** Bytes per second as megabits per second, decimal like the CLI and the old slider: two places under 10, one above. */
+function megabits(bytesPerSecond: number): string {
+  const mbps = (bytesPerSecond * 8) / 1_000_000
+  if (mbps < 0.01) return '0.00'
+  return mbps < 10 ? mbps.toFixed(2) : mbps.toFixed(1)
+}
+
+/** The result as one mono line: `Latency 24 ms (18 to 41) · Upload 35.2 Mbps · Download 94.0 Mbps`. */
+export function speedTestSummary(result: SpeedtestResult): string {
+  const { min_ms, avg_ms, max_ms } = result.latency
+  return `Latency ${avg_ms} ms (${min_ms} to ${max_ms}) · Upload ${megabits(result.upload_bps)} Mbps · Download ${megabits(result.download_bps)} Mbps`
+}
+
 // ── General ─────────────────────────────────────────────────────────────────
+
+export const APPEARANCE_OPTIONS: ReadonlyArray<{ value: DesktopTheme; label: string }> = [
+  { value: 'system', label: 'System' },
+  { value: 'light', label: 'Light' },
+  { value: 'dark', label: 'Dark' },
+]
+
+/** A theme this app does not know reads as System. */
+export function appearanceValue(theme: unknown): DesktopTheme {
+  return normalizeThemePreference(theme)
+}
+
+/** The hint under Appearance: System follows macOS (spec §7.8), the other two say what they hold still. */
+export function appearanceHint(theme: unknown): string {
+  const value = appearanceValue(theme)
+  return value === 'light' ? 'Always light.' : value === 'dark' ? 'Always dark.' : 'Follow macOS.'
+}
 
 export type NotificationKey = 'notify_conflicts' | 'notify_sync_complete' | 'notify_quota_warnings'
 

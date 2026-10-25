@@ -27,9 +27,9 @@ const signedIn: NavContext = { signedIn: true, lastSettings: null, sheetOpen: fa
 const signedOut: NavContext = { signedIn: false, lastSettings: null, sheetOpen: false }
 
 describe('the two sidebar lists', () => {
-  test('signed in: Home in the window sidebar; the Settings list is Account, General, Sync, About (Security is slice 5)', () => {
+  test('signed in: Home in the window sidebar; the Settings list is Account, General, Sync, Security, About (slice 5 adds Security)', () => {
     expect(MAIN_SECTIONS.map((s) => s.label)).toEqual(['Home'])
-    expect(settingsSections(true)).toEqual(['account', 'general', 'sync', 'about'])
+    expect(settingsSections(true)).toEqual(['account', 'general', 'sync', 'security', 'about'])
   })
 
   test('signed out: Settings shows General and About only (§7.8)', () => {
@@ -87,9 +87,13 @@ describe('parseMainNav: what Rust sends on main:navigate', () => {
   })
 
   test('anything else is no request', () => {
-    for (const raw of [null, undefined, 'home', {}, { to: 'files' }, { to: 'settings', section: 'security' }, { to: 'settings', section: 7 }]) {
+    for (const raw of [null, undefined, 'home', {}, { to: 'files' }, { to: 'settings', section: 'status' }, { to: 'settings', section: 7 }]) {
       expect(parseMainNav(raw)).toBeNull()
     }
+  })
+
+  test('Security is a section a request can name (slice 5; it was the example of an unknown one in slice 1)', () => {
+    expect(parseMainNav({ to: 'settings', section: 'security' })).toEqual({ to: 'settings', section: 'security' })
   })
 })
 
@@ -122,7 +126,7 @@ describe('focus (§11)', () => {
 })
 
 describe('the keys of either sidebar list (§7.6, §11: ↑/↓ move and select, Home and End jump)', () => {
-  const list = ['account', 'general', 'sync', 'about'] as const
+  const list = ['account', 'general', 'sync', 'security', 'about'] as const
   test('down and up move and wrap, Home and End jump', () => {
     expect(listAfterKey(list, 'general', 'ArrowDown')).toBe('sync')
     expect(listAfterKey(list, 'about', 'ArrowDown')).toBe('account')

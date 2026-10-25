@@ -83,8 +83,8 @@ export default function Bandwidth() {
         showToast({
           id: 'bandwidth-config-defaults',
           variant: 'warning',
-          title: 'Bandwidth settings using defaults',
-          message: 'Limits are not wired up yet; values shown are defaults and will not persist.',
+          title: 'Couldn’t load these settings',
+          message: 'Showing the default settings.',
           durationMs: 9000,
         })
       })

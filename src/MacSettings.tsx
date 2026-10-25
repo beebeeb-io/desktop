@@ -13,6 +13,10 @@
  * the manual update check answers inline in its own row because this window does not mount the update toast. A
  * one-off action that gates nothing (a switch that did not save, a failed lock) is a toast, as the house rule says.
  *
+ * Slice 5 adds Appearance and "From your account" to General, "Storage details…" and the web row to Account, and the release
+ * channel, the downgrade row and the speed test to About (Security is its own file, `MacSecurity.tsx`). About offers a
+ * download, never an install: the App Sandbox cannot install an update in place (task 2176).
+ *
  * The components are plain function declarations that read only their props, hooks and the bindings imported above,
  * so `tests/macSettingsTabs.test.tsx` can execute them with the component harness and read what a user would read.
  */
@@ -25,10 +29,13 @@ import {
   lockVault,
   openUrl,
   popoverSnapshot,
+  runSpeedtest,
   type DesktopConfig,
+  type DesktopTheme,
   type CommandResult,
   type MacosIntegrationResetResult,
   type SessionActionOutcome,
+  type SpeedtestResult,
   type Subscription,
   type VaultItem,
 } from './desktopApi'
@@ -38,24 +45,35 @@ import { useFinderSetup } from './finderSetup'
 import { finderActionButtonLabel } from './finderSetupCopy'
 import { SUPPORT_BUNDLE_DETAIL, SUPPORT_BUNDLE_SAVED_TITLE, supportBundleSavedMessage, type ProblemReportResult } from './diagnosticsCopy'
 import {
+  ACCOUNT_SETTINGS_URL,
   accountInitial,
+  APPEARANCE_OPTIONS,
+  appearanceHint,
+  appearanceValue,
+  downgradeRow,
   finderHint,
   finderRow,
   HELP_URL,
   keepCountLabel,
   keepOnMac,
+  MAC_DOWNLOAD_URL,
   monoReason,
   NOTIFICATION_ROWS,
   planLine,
   preservedFilesNote,
+  RELEASE_CHANNELS,
+  releaseChannelOf,
   REPAIR_BODY,
   REPAIR_TITLE,
   repairNote,
+  SPEED_TEST_HINT,
   speedOptions,
+  speedTestSummary,
   storageLine,
   updateRow,
 } from './macSettingsModel'
-import { Btn, Note, Select, SettingRow, SettingsGroup, SettingsIcon, Switch, ToggleRow } from './macSettingsParts'
+import { Btn, ChoiceSelect, Note, Select, SettingRow, SettingsGroup, SettingsIcon, Switch, ToggleRow } from './macSettingsParts'
+import { AccountPreferencesGroup, StorageDetailsSheet } from './MacSettingsExtras'
 import {
   A0_TITLE,
   ASK_CANCEL,
@@ -76,6 +94,7 @@ import { useDataResidency } from './windows/useDataResidency'
 import { KeptFolderNotes, useKeptFolders } from './keptFolderRows'
 import { Modal, useToast } from './windows/ui'
 import { desktopUpdateCheck } from './windows/manualUpdateCheck'
+import { setDesktopThemePreference } from './windows/theme'
 
 // ── Shared state: the desktop config ────────────────────────────────────────
 
@@ -102,6 +121,7 @@ export function useSettingsConfig(): SettingsConfig {
   const { showToast } = useToast()
   const [state, setState] = useState<ConfigState>({ status: 'loading' })
   const latest = useRef<DesktopConfig | null>(null)
+  const wornTheme = useRef<DesktopTheme | null>(null)
   const queue = useRef<Promise<void>>(Promise.resolve())
   /** Changes queued behind the write that is running. Each is written as exactly this patch. */
   const pending = useRef<Array<{ patch: Partial<DesktopConfig> }>>([])
@@ -122,6 +142,17 @@ export function useSettingsConfig(): SettingsConfig {
   useEffect(() => {
     void reload()
   }, [reload])
+
+  // The window wears the SAVED theme (Settings › General › Appearance). The config is the one source: a choice shows at once
+  // because `save` changes the config first, and a write that failed, read back as the old theme, puts the old look back.
+  // It lives here, with the config, so it holds on every section and not only while General is open. The first reading
+  // applies nothing: `main.tsx` applied the saved theme when the window opened.
+  const theme = state.status === 'ready' ? appearanceValue(state.config.theme) : null
+  useEffect(() => {
+    if (theme === null) return
+    if (wornTheme.current !== null && wornTheme.current !== theme) setDesktopThemePreference(theme)
+    wornTheme.current = theme
+  }, [theme])
 
   const save = useCallback(
     (patch: Partial<DesktopConfig>): Promise<void> => {
@@ -179,7 +210,7 @@ function ConfigLoadFailed({ onRetry }: { onRetry: () => void }) {
 
 // ── General ─────────────────────────────────────────────────────────────────
 
-export function GeneralTab({ settings }: { settings: SettingsConfig }) {
+export function GeneralTab({ settings, signedIn }: { settings: SettingsConfig; signedIn: boolean }) {
   const { showToast } = useToast()
   const [login, setLogin] = useState<boolean | null>(null)
   const [loginUnreadable, setLoginUnreadable] = useState(false)
@@ -211,6 +242,8 @@ export function GeneralTab({ settings }: { settings: SettingsConfig }) {
   }
 
   const config = settings.state.status === 'ready' ? settings.state.config : null
+  const theme = appearanceValue(config?.theme)
+  const loaded = config !== null
 
   return (
     <>
@@ -223,6 +256,21 @@ export function GeneralTab({ settings }: { settings: SettingsConfig }) {
           on={login === true}
           disabled={login === null}
           onChange={() => void toggleLogin()}
+        />
+        <SettingRow
+          name="appearance"
+          tall
+          label="Appearance"
+          hint={appearanceHint(theme)}
+          control={
+            <ChoiceSelect
+              name="appearance"
+              value={theme}
+              options={APPEARANCE_OPTIONS}
+              disabled={!loaded}
+              onChange={(next) => void settings.save({ theme: next as DesktopTheme })}
+            />
+          }
         />
       </SettingsGroup>
       {settings.state.status === 'failed' ? (
@@ -242,6 +290,8 @@ export function GeneralTab({ settings }: { settings: SettingsConfig }) {
           ))}
         </SettingsGroup>
       )}
+      {/* Stored with the account, so there is nothing to show before sign-in (spec §7.8, "Signed out"). */}
+      {signedIn ? <AccountPreferencesGroup /> : null}
     </>
   )
 }
@@ -372,6 +422,7 @@ export function AccountTab({ flow, flowView, flowOutcomes }: { flow: SignOutFlow
   const [load, setLoad] = useState<AccountLoad>({ status: 'loading' })
   const [plan, setPlan] = useState<Subscription | null | undefined>(undefined)
   const [busy, setBusy] = useState<AccountBusy>(null)
+  const [detailsOpen, setDetailsOpen] = useState(false)
   // FB-24: a Lock or a sign-out that happened but could not confirm one step. Rust's sentence, shown
   // as a neutral line (never under "Couldn’t …"), until the next action. A sign-out's sentence is held
   // outside the session boundary, because the sign-out remounts this tab (accountSession.ts).
@@ -504,6 +555,12 @@ export function AccountTab({ flow, flowView, flowOutcomes }: { flow: SignOutFlow
                   <div className="ms-bar-fill" style={{ width: `${storage.percent}%` }} />
                 </div>
                 <span className="ms-storage-label">{storage.label}</span>
+                {/* The Insights content, in a sheet: reading it needs the vault open (as the plan does). */}
+                {unlocked ? (
+                  <button type="button" className="ms-link" onClick={() => setDetailsOpen(true)}>
+                    Storage details…
+                  </button>
+                ) : null}
               </div>
             ) : null}
           </div>
@@ -561,6 +618,18 @@ export function AccountTab({ flow, flowView, flowOutcomes }: { flow: SignOutFlow
 
       <SettingsGroup>
         <SettingRow
+          name="web"
+          tall
+          label="Password, email and billing"
+          hint="Changed on beebeeb.io, in your browser."
+          control={
+            <Btn onClick={() => void openUrl(ACCOUNT_SETTINGS_URL)}>
+              <SettingsIcon name="external" size={13} />
+              Open beebeeb.io
+            </Btn>
+          }
+        />
+        <SettingRow
           name="signout"
           tall
           label="Sign out of this Mac"
@@ -572,6 +641,8 @@ export function AccountTab({ flow, flowView, flowOutcomes }: { flow: SignOutFlow
           }
         />
       </SettingsGroup>
+
+      <StorageDetailsSheet open={detailsOpen} onClose={() => setDetailsOpen(false)} />
 
       <ConfirmSheet
         open={flowView.kind === 'confirm'}
@@ -603,7 +674,7 @@ export function AccountTab({ flow, flowView, flowOutcomes }: { flow: SignOutFlow
  * Cancel and never reaches the confirm. `preventDefault` keeps the browser's native
  * Enter-activates-a-focused-button click from firing the confirm a second time.
  */
-function ConfirmSheet({
+export function ConfirmSheet({
   open,
   title,
   confirmLabel,
@@ -930,12 +1001,17 @@ function withPinned(items: VaultItem[], id: string, pinned: boolean): VaultItem[
 
 // ── About ───────────────────────────────────────────────────────────────────
 
-export function AboutTab() {
+type SpeedState = { phase: 'idle' } | { phase: 'running' } | { phase: 'done'; result: SpeedtestResult }
+
+export function AboutTab({ settings, signedIn }: { settings: SettingsConfig; signedIn: boolean }) {
   const { showToast } = useToast()
   const update = useSyncExternalStore(desktopUpdateCheck.subscribe, desktopUpdateCheck.getSnapshot, desktopUpdateCheck.getSnapshot)
   const [version, setVersion] = useState<string | null>(null)
-  const [installing, setInstalling] = useState(false)
   const [exporting, setExporting] = useState(false)
+  const [notesOpen, setNotesOpen] = useState(false)
+  const [speed, setSpeed] = useState<SpeedState>({ phase: 'idle' })
+  const downgrade = update.kind === 'downgrade_available' ? update : null
+  const hasDowngrade = downgrade !== null
 
   useEffect(() => {
     let cancelled = false
@@ -947,15 +1023,20 @@ export function AboutTab() {
     }
   }, [])
 
-  const installUpdate = async () => {
-    setInstalling(true)
-    const result = await command<void>('install_update')
-    setInstalling(false)
+  // The notes belong to the offer on screen: when the offer goes (a new check, another channel) they close with it.
+  useEffect(() => {
+    if (!hasDowngrade) setNotesOpen(false)
+  }, [hasDowngrade])
+
+  // Task 2176: the App Sandbox cannot install an update in place, so a Mac is sent to the download. There is no install
+  // here, and no command that would try one.
+  const downloadUpdate = async () => {
+    const result = await openUrl(MAC_DOWNLOAD_URL)
     if (!result.ok) {
       showToast({
         variant: 'error',
-        title: 'Update install failed',
-        message: result.unsupported ? commandUnavailableLabel('install_update') : result.reason,
+        title: 'Couldn’t open the download',
+        message: result.unsupported ? commandUnavailableLabel('open_url') : result.reason,
       })
     }
   }
@@ -981,20 +1062,50 @@ export function AboutTab() {
     })
   }
 
+  // A one-off action that gates nothing: a failed test is a toast and the row goes back to its hint.
+  const runTest = async () => {
+    if (speed.phase === 'running') return
+    setSpeed({ phase: 'running' })
+    const result = await runSpeedtest()
+    if (!result.ok) {
+      setSpeed({ phase: 'idle' })
+      showToast({
+        variant: 'error',
+        title: 'Couldn’t run the speed test',
+        message: result.unsupported ? commandUnavailableLabel('run_speedtest') : result.reason,
+      })
+      return
+    }
+    setSpeed({ phase: 'done', result: result.value })
+  }
+
+  const config = settings.state.status === 'ready' ? settings.state.config : null
+  const channel = releaseChannelOf(config?.release_channel)
+  const channelHint = RELEASE_CHANNELS.find((entry) => entry.value === channel)?.hint
+
+  // Another channel is another answer: what the last check said was about the old one.
+  const chooseChannel = (next: string) => {
+    const id = releaseChannelOf(next)
+    if (id === channel) return
+    desktopUpdateCheck.reset()
+    void settings.save({ release_channel: id })
+  }
+
   const row = updateRow(update, version)
+  const offer = downgradeRow(update)
 
   return (
     <>
-      <SettingsGroup>
+      <SettingsGroup footnote="Beebeeb checks for updates at launch and every 4 hours.">
         <SettingRow
           name="version"
           tall
           label="Beebeeb for Mac"
           hint={row.hint}
           control={
-            row.action === 'install' ? (
-              <Btn primary disabled={installing} onClick={() => void installUpdate()}>
-                {installing ? 'Installing…' : 'Restart to update'}
+            row.action === 'download' ? (
+              <Btn primary onClick={() => void downloadUpdate()}>
+                Download update
               </Btn>
             ) : (
               <Btn disabled={row.action === 'checking'} onClick={() => void desktopUpdateCheck.check()}>
@@ -1003,7 +1114,34 @@ export function AboutTab() {
             )
           }
         />
+        {settings.state.status === 'failed' ? null : (
+          <SettingRow
+            name="channel"
+            tall
+            label="Release channel"
+            hint={channelHint}
+            control={<ChoiceSelect name="channel" value={channel} options={RELEASE_CHANNELS} disabled={config === null} onChange={chooseChannel} />}
+          />
+        )}
+        {offer && downgrade ? (
+          <SettingRow
+            name="downgrade"
+            tall
+            label={offer.label}
+            hint={offer.hint}
+            control={
+              <>
+                <Btn onClick={() => setNotesOpen(true)}>Release notes</Btn>
+                <Btn onClick={() => void openUrl(downgrade.releaseNotesUrl)}>
+                  <SettingsIcon name="external" size={13} />
+                  View release
+                </Btn>
+              </>
+            }
+          />
+        ) : null}
       </SettingsGroup>
+      {settings.state.status === 'failed' ? <ConfigLoadFailed onRetry={() => void settings.reload()} /> : null}
       <SettingsGroup title="Help">
         <SettingRow
           name="help"
@@ -1015,6 +1153,22 @@ export function AboutTab() {
             </button>
           }
         />
+        {signedIn ? (
+          <>
+            <SettingRow
+              name="speed"
+              tall
+              label="Test connection speed"
+              hint={speed.phase === 'running' ? 'Testing… this takes 30 to 90 seconds.' : SPEED_TEST_HINT}
+              control={
+                <Btn disabled={speed.phase === 'running'} onClick={() => void runTest()}>
+                  {speed.phase === 'running' ? 'Running…' : 'Run test'}
+                </Btn>
+              }
+            />
+            {speed.phase === 'done' ? <Note kind="status" mono>{speedTestSummary(speed.result)}</Note> : null}
+          </>
+        ) : null}
         <SettingRow
           name="bundle"
           tall
@@ -1027,6 +1181,11 @@ export function AboutTab() {
           }
         />
       </SettingsGroup>
+      {downgrade ? (
+        <Modal open={notesOpen} onClose={() => setNotesOpen(false)} title={`Beebeeb ${downgrade.version}`} maxWidth={440}>
+          <p className="ms-sheet-copy ms-notes">{downgrade.body.trim() || 'No release notes were provided for this version.'}</p>
+        </Modal>
+      ) : null}
     </>
   )
 }

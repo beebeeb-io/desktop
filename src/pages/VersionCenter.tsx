@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   BILLING_URL,
   command,
@@ -162,7 +162,7 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
     if (result.ok) {
       showToast({
         title: 'Restore queued',
-        message: `${selectedEntry.file_name} version ${version.version_number ?? version.id} will be restored by the sync engine.`,
+        message: `${selectedEntry.file_name} goes back to version ${version.version_number ?? version.id} on the next sync.`,
         variant: 'success',
       })
       return
@@ -175,21 +175,12 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
     })
   }
 
-  const metrics = useMemo(() => {
-    const failed = entries.filter((entry) => entry.kind !== 'conflict').length
-    const stale = entries.filter((entry) => entry.kind === 'stale_base').length
-    return { failed, stale }
-  }, [entries])
-
   return (
     <section className="page">
       <div className="page-header">
         <div>
           <h1 className="page-title">Versions & conflicts</h1>
-          <p className="page-copy">
-            Desktop writes create server-side versions. Stale-base edits, upload failures, quota
-            errors, and restore actions stay visible here until the daemon can finish them.
-          </p>
+          <p className="page-copy">Files that need a decision from you, and changes Beebeeb couldn’t send yet.</p>
         </div>
         <span className="status-pill">
           <span className={`dot ${conflicts > 0 || entries.length > 0 ? 'error' : 'ok'}`} />
@@ -199,30 +190,10 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
 
       {notice && <div className="notice" style={{ marginBottom: 14 }}>{notice}</div>}
 
-      <div className="grid three" style={{ marginBottom: 14 }}>
-        <div className="metric">
-          <div className="metric-label">Active conflicts</div>
-          <div className="metric-value">{conflicts}</div>
-          <div className="metric-detail">Rows marked conflict by the daemon</div>
-        </div>
-        <div className="metric">
-          <div className="metric-label">Upload reviews</div>
-          <div className="metric-value">{metrics.failed}</div>
-          <div className="metric-detail">Failed or queued Finder writes</div>
-        </div>
-        <div className="metric">
-          <div className="metric-label">Stale-base edits</div>
-          <div className="metric-value">{metrics.stale}</div>
-          <div className="metric-detail">Local bytes preserved for review</div>
-        </div>
-      </div>
-
       {loading ? (
         <div className="empty-state">Loading version center...</div>
       ) : entries.length === 0 ? (
-        <div className="empty-state">
-          No conflicts, failed writes, or restore reviews are recorded in the local state DB.
-        </div>
+        <div className="empty-state">Nothing needs your attention.</div>
       ) : (
         <div className="grid two">
           <div className="panel">
@@ -280,9 +251,7 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
                 </div>
                 {versionNotice && <div className="notice" style={{ margin: '0 0 12px' }}>{versionNotice}</div>}
                 {versions.length === 0 ? (
-                  <div className="empty-state">
-                    Version history is unavailable for this file until the server list-versions route responds.
-                  </div>
+                  <div className="empty-state">Couldn’t load this file’s versions. Try again.</div>
                 ) : (
                   versions.map((version) => {
                     const versionId = restoreVersionId(version)

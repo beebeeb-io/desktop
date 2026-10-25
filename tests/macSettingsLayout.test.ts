@@ -207,7 +207,8 @@ describe('the mount: the Beebeeb window at ?window=main&platform=macos only (tas
       return found.sort()
     }
     expect(importersOf(/^\s*import [^\n]*['"]\.{1,2}\/(?:[\w/]*\/)?(?:MacApp|macApp\.css|macSettings\.css)['"]/m)).toEqual(['main.tsx'])
-    expect(importersOf(/^\s*import [^\n]*['"]\.{1,2}\/(?:[\w/]*\/)?MacSettings['"]/m)).toEqual(['MacApp.tsx'])
+    // Security is a Settings section in a file of its own (slice 5) and reuses the sheet the other sections use.
+    expect(importersOf(/^\s*import [^\n]*['"]\.{1,2}\/(?:[\w/]*\/)?MacSettings['"]/m)).toEqual(['MacApp.tsx', 'MacSecurity.tsx'])
   })
 
   test('the window never asks the browser: no window.confirm, no alert', () => {

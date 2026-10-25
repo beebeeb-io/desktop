@@ -14,8 +14,8 @@ import type { PopoverSnapshot } from './popoverContract'
 export const MAIN_SECTIONS = [{ id: 'home', label: 'Home', icon: 'home' }] as const
 export type MainSection = (typeof MAIN_SECTIONS)[number]['id']
 
-/** The Settings list, top to bottom (§7.8): the account row is Account, then General, Sync, About. Security is slice 5. */
-const SETTINGS_SIGNED_IN: readonly SettingsTab[] = ['account', 'general', 'sync', 'about']
+/** The Settings list, top to bottom (§7.8): the account row is Account, then General, Sync, Security and, apart, About. */
+const SETTINGS_SIGNED_IN: readonly SettingsTab[] = ['account', 'general', 'sync', 'security', 'about']
 /** Signed out, the sections that need no session (§7.8). */
 const SETTINGS_SIGNED_OUT: readonly SettingsTab[] = ['general', 'about']
 

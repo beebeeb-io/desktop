@@ -5,8 +5,8 @@
  * One window (label `main`), one sidebar. Signed in, the sidebar holds Home (Review and Trash join with their panes
  * in slice 4) and, in its footer, the account and the gear. The gear, ⌘, and the menus swap the sidebar for the
  * Settings list in System Settings style (ruling 1): a back control that names where it returns to, the heading, the
- * account row (Account), General, Sync and, after a gap, About. Security joins in slice 5. The pane hosts the shipped
- * section bodies of `MacSettings.tsx` unchanged.
+ * account row (Account), General, Sync, Security and, after a gap, About. The pane hosts the section bodies of
+ * `MacSettings.tsx` and `MacSecurity.tsx`.
  *
  * Every opener reaches the window through one request (`main:navigate`, `mainWindowModel.navigate`). While a sheet is
  * open nothing navigates (§8.2) and Rust disables View › Home, View › Back and Settings…, so ⌘1, ⌘[ and ⌘, cannot
@@ -50,6 +50,7 @@ import {
 } from './macSettingsModel'
 import { Btn, Note, SettingsGroup, SettingsIcon } from './macSettingsParts'
 import { AboutTab, AccountTab, GeneralTab, showSignOutOutcome, SyncTab, useSettingsConfig } from './MacSettings'
+import { SecurityTab } from './MacSecurity'
 import {
   backLabel,
   connectMainNavigation,
@@ -641,10 +642,11 @@ export default function MacApp() {
   } else {
     pane = (
       <div className="ms-pane mw-pane" id="mw-pane">
-        {view.section === 'general' ? <GeneralTab settings={settings} /> : null}
+        {view.section === 'general' ? <GeneralTab settings={settings} signedIn={signedIn} /> : null}
         {view.section === 'account' ? <AccountTab flow={flow} flowView={flowView} flowOutcomes={flowOutcomes} /> : null}
         {view.section === 'sync' ? <SyncTab settings={settings} /> : null}
-        {view.section === 'about' ? <AboutTab /> : null}
+        {view.section === 'security' ? <SecurityTab unlocked={unlocked} /> : null}
+        {view.section === 'about' ? <AboutTab settings={settings} signedIn={signedIn} /> : null}
       </div>
     )
   }
