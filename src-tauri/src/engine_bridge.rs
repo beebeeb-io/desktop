@@ -27896,6 +27896,21 @@ mod tests {
         let other = dir.path().join("other.txt");
         std::fs::write(&other, b"ranges of one and two, then edited").unwrap();
         assert_eq!(sync_folder_content(&db, "g", &other, None).unwrap(), SyncFolderContent::Changed { base: Some(1) });
+        // A person's write into a partly hydrated file (a dirty partial placeholder), ticks around it:
+        // its bytes are not the candidate's, so they are a change on the candidate's version.
+        regression_1640_new_placeholder(&db, "w", "written.txt");
+        regression_1640_fetch(&db, "w", 3, b"version three");
+        regression_1640_tick_partly_on_disk(&db, "w");
+        let written = dir.path().join("written.txt");
+        std::fs::write(&written, b"part of version three, then written over").unwrap();
+        db.set_status("w", FileStatus::Local).unwrap();
+        regression_1640_tick_partly_on_disk(&db, "w");
+        assert_eq!(db.fetched_content("w").unwrap(), Some((3, Some(sha256_hex(b"version three")))), "the write kept it");
+        assert_eq!(
+            sync_folder_content(&db, "w", &written, None).unwrap(),
+            SyncFolderContent::Changed { base: Some(3) },
+            "a write: a change on the candidate's version, never agreed"
+        );
     }
 
     /// Review F1, the other two ways a candidate was reset while bytes stayed: the size resolution
@@ -27997,6 +28012,33 @@ mod tests {
         );
         assert_eq!(bridge.db.fetched_content(file).unwrap(), None, "the sent file replaced it");
         drop(server.finish());
+    }
+
+    /// A landing records what it SENT. Bytes saved after the staging copy was taken are not the
+    /// agreed content: they read as a change on the version that landed.
+    #[tokio::test]
+    async fn regression_1640_a_landing_whose_disk_changed_after_staging_is_not_agreed() {
+        let master_key = [187u8; 32];
+        let file = "16400000-0000-4000-8000-000000000053";
+        let (_dir, sync_root, server, bridge, local) = regression_1640_synced_file(master_key, file).await;
+        std::fs::write(&local, b"first edit").unwrap();
+        assert!(crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "notify"));
+        // Saved again after the staging copy, before the upload ran; its event is not seen yet.
+        std::fs::write(&local, b"second edit, after staging").unwrap();
+        drain_upload_queue(&bridge, &sync_root).await;
+        let contract = bridge.db.get_file_contract_state(file).unwrap().unwrap();
+        assert_eq!(
+            (contract.local_base_version, contract.local_hash),
+            (2, Some(sha256_hex(b"first edit"))),
+            "what was sent is the agreed content"
+        );
+        assert_eq!(
+            sync_folder_content(&bridge.db, file, &local, None).unwrap(),
+            SyncFolderContent::Changed { base: Some(2) },
+            "the later bytes: a change on the version that landed, never agreed"
+        );
+        let state = server.finish();
+        assert_eq!(state.latest_plaintext(file, master_key), b"first edit");
     }
 
     // ── Task 1640, review F2–F7: files kept from a remote deletion ──
