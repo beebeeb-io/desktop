@@ -854,6 +854,62 @@ describe('SwitchScreen: 1887’s account-switch step in the Beebeeb window (A0s 
     expect(events).toEqual([])
   })
 
+  // signOutEntryPoints.test.tsx, F12: another error keeps today's toast, then acknowledges it once, after the sign-out ran.
+  test('a failure is acknowledged once, after the sign-out that failed (F12)', async () => {
+    const { m } = openSwitch({ unsent: ASK }, () => { throw new Error('Sign-out paused: x') }, { sign_out_result_ack: () => null })
+    await m.flush()
+    await m.click('Sign out and switch')
+    await m.flush()
+    const names = m.calls.map((c) => c.name)
+    expect(m.toasts.map((t) => t.title)).toEqual(['Couldn’t sign out'])
+    expect(names.filter((name) => name === 'sign_out_result_ack')).toHaveLength(1)
+    expect(names.indexOf('sign_out_result_ack')).toBeGreaterThan(names.indexOf('clear_session'))
+  })
+
+  // signOutEntryPoints.test.tsx, §5.3 row 1 (plan review M8): a count that failed is E3, a line in the step, never a toast.
+  // "Sign out and switch" then counts again through the gate; a re-count that fails is the same line, and one that
+  // succeeds replaces the line with the ask.
+  test('a count that failed shows E3 as a line, a failed re-count is the same line, and a fresh count replaces it', async () => {
+    const e3 = `unsent_count_failed: ${signOutCopy.E3_UNSENT_COUNT_FAILED}`
+    let counts = 0
+    const { m } = openSwitch({ pendingChanges: 2, unsentError: e3 }, () => { throw new Error('unsent_changes: Some changes…') }, {
+      sign_out_count: () => {
+        counts += 1
+        if (counts === 1) throw new Error(e3)
+        return { askId: 'switch-3', files: 1, copiedFiles: 1, others: 1, missingFiles: 0, earlierFolders: [], canSend: false, notSending: null }
+      },
+    })
+    await m.flush()
+    expect(text(m)).toContain(signOutCopy.E3_UNSENT_COUNT_FAILED)
+    expect(text(m)).not.toContain('unsent_count_failed')
+    expect(textOf(heading(m)!.props.children)).toBe(switchCopy.ACCOUNT_SWITCH_TITLE)
+    await m.click('Sign out and switch')
+    await m.flush()
+    expect(m.toasts).toEqual([])
+    expect(text(m)).toContain(signOutCopy.E3_UNSENT_COUNT_FAILED) // the re-count failed too: still the line
+    await m.click('Sign out and switch')
+    await m.flush()
+    expect(m.toasts).toEqual([])
+    expect(textOf(heading(m)!.props.children)).toBe(signOutCopy.A0S_TITLE)
+    expect(text(m)).not.toContain(signOutCopy.E3_UNSENT_COUNT_FAILED)
+    expect(clearCalls(m).map((c) => c.args)).toEqual([{ forgetEmail: true }, { forgetEmail: true }])
+  })
+
+  // The case the E3 line's clearing exists for: the fresh count succeeds and says NOTHING waits, so the ask is not shown
+  // and only `countError` could still put the old line on screen.
+  test('a fresh count that finds nothing waiting clears the E3 line: the plain step, never a stale failure', async () => {
+    const e3 = `unsent_count_failed: ${signOutCopy.E3_UNSENT_COUNT_FAILED}`
+    const empty = { askId: 'switch-4', files: 0, copiedFiles: 0, others: 0, missingFiles: 0, earlierFolders: [], canSend: false, notSending: null }
+    const { m } = openSwitch({ pendingChanges: 2, unsentError: e3 }, () => { throw new Error('unsent_changes: Some changes…') }, { sign_out_count: () => empty })
+    await m.flush()
+    expect(text(m)).toContain(signOutCopy.E3_UNSENT_COUNT_FAILED)
+    await m.click('Sign out and switch')
+    await m.flush()
+    expect(text(m)).not.toContain(signOutCopy.E3_UNSENT_COUNT_FAILED)
+    expect(textOf(heading(m)!.props.children)).toBe(switchCopy.ACCOUNT_SWITCH_TITLE)
+    expect(text(m)).toContain(switchCopy.accountSwitchBody(0))
+  })
+
   test('the confirm is the red destructive button, never the amber one; Cancel is the plain button', async () => {
     const { m } = openSwitch({ pendingChanges: 3 })
     await m.flush()
