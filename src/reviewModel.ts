@@ -9,7 +9,7 @@
  * what each conflict choice does to the files (`resolve_conflict`). This file does not classify anything again.
  */
 import { actionNamedFor } from './actionName'
-import { reviewEntryAction, type FileVersionEntry, type ReviewEntryActionKind, type VersionConflictEntry } from './desktopApi'
+import { reviewEntryAction, type FileVersionEntry, type ReviewEntryActionKind, type ReviewEntryKind, type VersionConflictEntry } from './desktopApi'
 import { formatStorageSize } from './storageFormat'
 import { parseWhen, whenLabel } from './whenFormat'
 
@@ -20,7 +20,7 @@ export const VERSIONS_LOAD_FAILED = 'Couldn’t load this file’s versions. Try
 // ── Rows ─────────────────────────────────────────────────────────────────────
 
 /** §10.2 row 16: Conflict, Upload, Delete and Restore are unchanged; the other four are plain words. */
-const KIND_LABELS: Record<string, string> = {
+const KIND_LABELS: Record<ReviewEntryKind, string> = {
   conflict: 'Conflict',
   failed_upload: 'Upload',
   delete: 'Delete',
@@ -36,10 +36,13 @@ const KIND_LABELS: Record<string, string> = {
   // uploads. Also not in the spec's table (flagged in the PR).
   not_sent: 'Not sent',
   account_refused: 'Plan',
+  // A download or a pin that has not finished (and a kind of change the list has no other word for). Also what a kind this
+  // build has never heard of is called.
+  other: 'Other',
 }
 
 export function reviewKindLabel(kind: string): string {
-  return KIND_LABELS[kind] ?? 'Other'
+  return (KIND_LABELS as Record<string, string | undefined>)[kind] ?? 'Other'
 }
 
 export interface ReviewRowAction {
@@ -153,13 +156,17 @@ export const CONFLICT_CHOICES: ReadonlyArray<{ choice: ConflictChoice; label: st
 ]
 
 /**
- * "Keep the other" is the one choice that throws something away: this Mac's file is overwritten with the other device's,
- * and nothing keeps this Mac's version ("Keep this Mac's" leaves the other as an earlier version; "Keep both" keeps both
- * files). So it takes a second press, on the same button, which then says what it does. Any other choice, or closing the
- * sheet, ends the question.
+ * "Keep the other" is the one choice that can leave this Mac with nothing of its own version: it downloads the other device's
+ * file over the one the app keeps for this conflict. So it asks first, in words that claim only what the question is: "Use
+ * the other version here?", with "Cancel" first (focused) and "Use the other version" as the one red button. Any other choice,
+ * or closing the sheet, ends the question. The final copy is set after the device rung (task 2190): which file the choice
+ * acts on, the app's own copy or the Finder item, is what that rung reads.
  */
-export const CONFLICT_REPLACE_QUESTION = 'Replace this Mac’s version? Your changes here are discarded.'
-export const CONFLICT_REPLACE_LABEL = 'Replace this Mac’s version'
+export const CONFLICT_REPLACE_QUESTION = 'Use the other version here?'
+export const CONFLICT_REPLACE_LABEL = 'Use the other version'
+export const CONFLICT_REPLACE_CANCEL = 'Cancel'
+/** A press this soon after the question appeared is the same press (a double click, a held Return), not an answer. */
+export const CONFLICT_REPLACE_GUARD_MS = 600
 
 export const CONFLICT_RESOLVED_TOAST = { variant: 'success', message: 'Conflict resolved' } as const
 

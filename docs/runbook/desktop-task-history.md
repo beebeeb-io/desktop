@@ -703,3 +703,26 @@ What the review found and what changed, so the next reader does not have to redi
   `ConflictWindow`'s diff display; `VersionHistorySheet` is the Mac's one implementation of `DesktopVersionHistory`
   (Windows) and `pages/VersionCenter.tsx` (Linux); `LockedPane` repeats Home's inline locked card, to be folded into one in
   the Home follow-up. Source-text pins on `lib.rs` (`main_window_tests`) fail with a message naming the command that moved.
+
+### Review of #142, round 2 (2026-10-25)
+
+The delta review of the first round found three P2 and some P3s; each is a real hole of the round that "fixed" the first.
+
+- **A kept copy is never replaced.** `auto_resolve_keep_both` named this Mac's copy `{stem} (conflict - {host} - {date}){ext}` and
+  `rename`d to it, which replaces whatever is there: a Keep both tried again after a late failure (the first round made that
+  retry possible: a failed choice stays in Review), or the 24 h sweep on a day a person had already kept a copy, destroyed
+  the first copy, which held this Mac's edits. The name is now the first of `conflict_copy_candidates` that nothing is at (a
+  counter after the date: `... 2)`, `3`, ...; a dangling link counts as taken). Tests: the first copy survives, a retry keeps
+  every copy.
+- **A kept copy is this Mac's version while the original is gone.** After a Keep both whose download failed, the conflict is
+  open again and this Mac's file is under the copy's name. The sheet's preview reads the copy (`kept_copy_of`: the newest
+  `{stem} (conflict - ...){ext}` beside the original, and only when the original is absent), and "Keep this Mac's" puts the
+  copy back at the original path (a rename that replaces nothing: the path is vacant) before it sends it, so the file is
+  where the sync expects it when the upload lands.
+- **The question is claim-free** ("Use the other version here?", "Cancel" focused, then the one red "Use the other version"),
+  because which file a choice acts on (the app's own copy under `<sync_root>/<path>`, or the Finder item) is read by the device
+  rung of task 2190, not decided here. The spec says so. An answer within 600 ms of the question is the same press.
+- **Every kind is counted once** on Linux's Versions page: `COUNTED_IN` is a `Record` over `REVIEW_ENTRY_KINDS`; the list is
+  pinned on both sides by `tests/fixtures/review-feed.kinds.json`; a kind a newer engine sends is counted with what did not go.
+- Smaller: a conflict is never cut by the cap (decisions sort first, then newest); "N more" does not count the entries that
+  did not read; a paused download does not say "sending"; the feed's lifetime includes the session revision.

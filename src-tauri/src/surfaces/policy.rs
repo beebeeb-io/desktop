@@ -96,10 +96,10 @@ pub fn compact_window_label(_platform: Platform) -> &'static str {
 
 /// Two-surface spec §9.1: whether a Mac should show a Dock icon (activation policy Regular) for these windows, each
 /// given as its label and whether it is shown (visible or minimized). The Beebeeb window counts whenever it exists:
-/// it is destroyed on close, and a minimized one keeps its Dock tile only while the icon stays. Conflict windows are
-/// still separate until slice 4, hide on close, and had a Dock icon before slice 1, so they count while shown. The
-/// compact flyout and the popover never add one. Slice 2: sign-in is a screen of the Beebeeb window, so a Mac builds
-/// no `onboarding` window and none counts here.
+/// it is destroyed on close, and a minimized one keeps its Dock tile only while the icon stays. Conflict windows hide on
+/// close and had a Dock icon before slice 1, so they count while shown (Windows and Linux; since slice 4 a Mac builds none:
+/// a conflict is decided in Review). The compact flyout and the popover never add one. Slice 2: sign-in is a screen
+/// of the Beebeeb window, so a Mac builds no `onboarding` window and none counts here.
 pub fn dock_icon_wanted<'a>(windows: impl IntoIterator<Item = (&'a str, bool)>) -> bool {
     windows
         .into_iter()

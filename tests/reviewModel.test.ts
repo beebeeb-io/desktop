@@ -4,9 +4,11 @@
  * sheet's choices and the restore toast. Nothing here renders; tests/reviewPane.test.tsx runs the pane.
  */
 import { describe, expect, test } from 'bun:test'
-import { reviewEntryAction, type VersionConflictEntry } from '../src/desktopApi'
+import { REVIEW_ENTRY_KINDS, reviewEntryAction, type VersionConflictEntry } from '../src/desktopApi'
 import {
   CONFLICT_CHOICES,
+  CONFLICT_REPLACE_CANCEL,
+  CONFLICT_REPLACE_GUARD_MS,
   CONFLICT_REPLACE_LABEL,
   CONFLICT_REPLACE_QUESTION,
   CONFLICT_RESOLVED_TOAST,
@@ -65,6 +67,13 @@ describe('the kind tags (§10.2 row 16)', () => {
   test('a change that was not sent, and a plan that refuses uploads, have words of their own (review of #142)', () => {
     expect(reviewKindLabel('not_sent')).toBe('Not sent')
     expect(reviewKindLabel('account_refused')).toBe('Plan')
+    expect(reviewKindLabel('other')).toBe('Other')
+  })
+
+  test('every kind Rust can send has a tag of its own (only "other" is called Other)', () => {
+    for (const kind of REVIEW_ENTRY_KINDS) {
+      if (kind !== 'other') expect(reviewKindLabel(kind), kind).not.toBe('Other')
+    }
     expect(reviewKindLabel('other')).toBe('Other')
   })
 
@@ -222,9 +231,14 @@ describe('the conflict sheet (§7.6, §10.2 row 35)', () => {
     ])
   })
 
-  test('"Keep the other" is the choice that asks first, in these words (review of #142)', () => {
-    expect(CONFLICT_REPLACE_QUESTION).toBe('Replace this Mac’s version? Your changes here are discarded.')
-    expect(CONFLICT_REPLACE_LABEL).toBe('Replace this Mac’s version')
+  test('"Keep the other" asks first, in a question that claims only what it asks (the device rung of task 2190 sets the final copy)', () => {
+    expect(CONFLICT_REPLACE_QUESTION).toBe('Use the other version here?')
+    expect(CONFLICT_REPLACE_LABEL).toBe('Use the other version')
+    expect(CONFLICT_REPLACE_CANCEL).toBe('Cancel')
+    expect(CONFLICT_REPLACE_GUARD_MS).toBe(600)
+    for (const claim of ['discard', 'Replace', 'overwrite', 'Finder', 'this Mac’s version']) {
+      expect(`${CONFLICT_REPLACE_QUESTION} ${CONFLICT_REPLACE_LABEL}`, claim).not.toContain(claim)
+    }
   })
 
   test('the success toast has no check mark (the old window printed one)', () => {

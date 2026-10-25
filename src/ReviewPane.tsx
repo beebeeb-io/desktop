@@ -81,7 +81,9 @@ export function ReviewPane({
       </Note>
     )
   } else {
-    const more = reviewMoreLine(feed.count, feed.entries.length)
+    // What waits and is neither drawn nor accounted for: the count includes the entries that did not read (the note below says
+    // those), so they are not "more" as well.
+    const more = reviewMoreLine(feed.count - feed.rejected, feed.entries.length)
     // "Nothing needs your attention" is said only when nothing is waiting AND nothing was left out of this list.
     const nothing = feed.entries.length === 0 && feed.rejected === 0 && more === null
     body = (

@@ -93,6 +93,12 @@ describe('what the list does not show (review of #142: Rust caps the feed, and a
     expect(more(open(ready(conflict, upload)).m)).toEqual([])
   })
 
+  test('"more" is what waits that is neither drawn nor said to be unreadable: the unread entries are in the count, and are not "more" as well', () => {
+    expect(more(open({ ...ready(conflict), count: 4, rejected: 2 }).m)).toEqual(['1 more is waiting. It appears here once you clear one of these.'])
+    expect(more(open({ ...ready(conflict), count: 3, rejected: 2 }).m)).toEqual([])
+    expect(more(open({ ...ready(conflict), count: 9, rejected: 2 }).m)).toEqual(['6 more are waiting. They appear here as you clear these.'])
+  })
+
   test('entries that did not read are said so once, as a status; none unread, no line', () => {
     const { m } = open({ ...ready(conflict), rejected: 2 })
     expect(unreadable(m)).toHaveLength(1)

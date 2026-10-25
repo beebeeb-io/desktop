@@ -9,9 +9,10 @@
  * (§8.2: nothing navigates under it), traps focus, closes on Esc, and OPENS ON ITS CLOSE BUTTON: Enter on open is
  * Cancel, never one of the three choices (§11, the 10-02 destructive-Enter rule applied to a choice with consequences).
  *
- * "Keep the other" is the one choice that throws something away (this Mac's file is overwritten and nothing keeps it),
- * so it takes a second press, on the same button, which then says what it does ("Replace this Mac’s version", with
- * the question above it); any other choice ends the question (review of #142; the spec is silent on it).
+ * "Keep the other" is the one choice that can leave this Mac with nothing of its own version, so it asks first: the
+ * question "Use the other version here?" above the footer, which then holds "Cancel" (focused) and the one red "Use the
+ * other version". The question is claim-free on purpose: which file the choice acts on is what the device rung of task
+ * 2190 reads. Closing the sheet ends the question too (review of #142; the spec was silent on it).
  *
  * While a choice is being applied nothing can close the sheet: closing would hide the outcome of a change already
  * under way. On success the sheet tells its owner (the row leaves), says "Conflict resolved" once, and closes. On
@@ -20,7 +21,7 @@
  * The components are plain function declarations that read only their props, hooks and the bindings imported here, so
  * `tests/conflictSheet.test.tsx` can execute them with the component harness.
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   command,
   commandUnavailableLabel,
@@ -33,6 +34,8 @@ import { diffLines, DIFF_MAX_OPS, type DiffOp } from './diffLines'
 import { Btn } from './macSettingsParts'
 import {
   CONFLICT_CHOICES,
+  CONFLICT_REPLACE_CANCEL,
+  CONFLICT_REPLACE_GUARD_MS,
   CONFLICT_REPLACE_LABEL,
   CONFLICT_REPLACE_QUESTION,
   CONFLICT_RESOLVED_TOAST,
@@ -117,8 +120,11 @@ export function ConflictSheet({
   const [previewLoading, setPreviewLoading] = useState(true)
   const [previewError, setPreviewError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  // "Keep the other" overwrites this Mac's file and keeps nothing of it: the first press asks, the second does it.
+  // "Keep the other" can leave this Mac with nothing of its own version: it asks first (the question, "Cancel", and the one
+  // red "Use the other version"). A press on the answer within `CONFLICT_REPLACE_GUARD_MS` of the question appearing is the
+  // same press as the one that asked (a double click, a held Return), and is not an answer.
   const [confirmingRemote, setConfirmingRemote] = useState(false)
+  const askedAt = useRef(0)
 
   useEffect(() => {
     let cancelled = false
@@ -135,13 +141,20 @@ export function ConflictSheet({
   }, [entry.file_id])
 
   const choose = (choice: ConflictChoice) => {
-    if (choice === 'remote' && !confirmingRemote) {
+    if (choice === 'remote') {
+      askedAt.current = Date.now()
       setConfirmingRemote(true)
       return
     }
     // Any other choice ends the question.
     setConfirmingRemote(false)
     void resolve(choice)
+  }
+
+  const useTheOther = () => {
+    if (Date.now() - askedAt.current < CONFLICT_REPLACE_GUARD_MS) return
+    setConfirmingRemote(false)
+    void resolve('remote')
   }
 
   const resolve = async (choice: ConflictChoice) => {
@@ -175,16 +188,24 @@ export function ConflictSheet({
       ariaLabel={title}
       maxWidth={520}
       footer={
-        <div className="ms-sheet-footer">
-          {CONFLICT_CHOICES.map((item) => {
-            const replacing = item.choice === 'remote' && confirmingRemote
-            return (
-              <Btn key={item.choice} primary={item.primary} danger={replacing} disabled={busy} onClick={() => choose(item.choice)}>
-                {replacing ? CONFLICT_REPLACE_LABEL : item.label}
+        confirmingRemote ? (
+          <div className="ms-sheet-footer">
+            <Btn autoFocus disabled={busy} onClick={() => setConfirmingRemote(false)}>
+              {CONFLICT_REPLACE_CANCEL}
+            </Btn>
+            <Btn danger disabled={busy} onClick={useTheOther}>
+              {CONFLICT_REPLACE_LABEL}
+            </Btn>
+          </div>
+        ) : (
+          <div className="ms-sheet-footer">
+            {CONFLICT_CHOICES.map((item) => (
+              <Btn key={item.choice} primary={item.primary} disabled={busy} onClick={() => choose(item.choice)}>
+                {item.label}
               </Btn>
-            )
-          })}
-        </div>
+            ))}
+          </div>
+        )
       }
     >
       <p className="ms-sheet-copy">{CONFLICT_SHEET_INTRO}</p>

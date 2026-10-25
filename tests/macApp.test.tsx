@@ -1262,6 +1262,22 @@ describe('the Review feed is read only while there is something to read (§7.6)'
     expect(out.feedLog.watched).toBe(0)
   })
 
+  test('the feed is a new one when the session\'s revision moves, though the account is still signed in and unlocked (a sign-out and a sign-in as the same account between two reads; review of #142, round 2)', async () => {
+    const { m, feedLog, request } = openWindow()
+    await settle(m)
+    await request({ to: 'review' })
+    const connected = feedLog.connected
+    const watched = feedLog.watched
+    accountSession.observeAccountSession((accountSession.accountSessionRevision() ?? 0) + 1)
+    m.render()
+    await settle(m)
+    expect(feedLog.connected).toBe(connected + 1)
+    expect(feedLog.watched).toBe(watched + 1)
+    m.render()
+    await settle(m)
+    expect(feedLog.connected, 'and not again when nothing moved').toBe(connected + 1)
+  })
+
   test('Review is given the feed, and a resolved conflict makes the window read it again', async () => {
     const feed = readyFeed(2)
     const { m, request, feedLog } = openWindow({ feed })

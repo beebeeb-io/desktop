@@ -229,6 +229,7 @@ export function Btn({
   danger = false,
   onKeyDown,
   ariaLabel,
+  autoFocus,
 }: {
   children: ReactNode
   onClick?: () => void
@@ -238,6 +239,8 @@ export function Btn({
   danger?: boolean
   onKeyDown?: (event: KeyboardEvent<HTMLButtonElement>) => void
   ariaLabel?: string
+  /** Focus this button when it appears (a question whose safe answer is this one). */
+  autoFocus?: boolean
 }) {
   const variant = danger ? 'ms-btn--danger' : primary ? 'ms-btn--primary' : null
   return (
@@ -248,6 +251,7 @@ export function Btn({
       onKeyDown={onKeyDown}
       disabled={disabled}
       aria-label={ariaLabel}
+      autoFocus={autoFocus}
     >
       {children}
     </button>

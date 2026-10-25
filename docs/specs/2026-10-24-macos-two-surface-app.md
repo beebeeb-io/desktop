@@ -466,11 +466,17 @@ and the Windows shell's "Files" was a summary. — rulings amendment, 2026-10-24
 - **Conflict sheet** (520 pt, from `ConflictWindow.tsx`): "Conflict: {file}" / "This file was modified on two
   devices. Choose which version to keep."; side-by-side "This Mac" / "Other device" (the text diff as today);
   "Keep this Mac’s", "Keep the other", amber "Keep both". Esc and the close button cancel. On success the sheet closes,
-  the row leaves, and a success toast says "Conflict resolved". "Keep the other" is the one choice that throws something
-  away (this Mac's file is overwritten and nothing keeps it), so it asks first: the same button becomes the red
-  "Replace this Mac’s version" with "Replace this Mac’s version? Your changes here are discarded." above it, and any
-  other choice ends the question. If a choice fails, the conflict stays in Review, still a conflict, to try again.
-  — slice 4, 2026-10-25, review of #142, the lead's option
+  the row leaves, and a success toast says "Conflict resolved". "Keep the other" is the one choice that can leave this Mac with nothing of its own version
+  (it downloads the other device's file over the one the app keeps for this conflict), so it asks first: the question
+  "Use the other version here?" above the footer, and the footer is then "Cancel" (focused) and the one red "Use the
+  other version"; closing the sheet ends the question too. A press on the answer within 600 ms of the question appearing
+  is the same press (a double click, a held Return) and is ignored. The question claims nothing about which file is
+  replaced: **the final copy is set after the device rung (task 2190)**, which reads whether the choices act on the app's
+  own copy under `<sync_root>/<path>` or on the Finder item. Keep both and the 24 h sweep never delete: this Mac's file is
+  renamed to a conflict copy first (`{name} (conflict - {device} - {date}).{ext}`, with a counter when that name is taken:
+  a retry never replaces a copy already kept), and if the download then fails the conflict stays in Review, where "Keep
+  this Mac's" puts the kept copy back and sends it. If a choice fails, the conflict stays in Review, still a conflict, to
+  try again. — slice 4, 2026-10-25, review of #142 (round 2: the wording and the copy name)
 - **Version history…** (toolbar button): a sheet that searches file names and lists versions with "Restore" (today's
   `DesktopVersionHistory` and VersionCenter's list, one implementation).
 - Empty: "Nothing needs your attention."
@@ -691,7 +697,7 @@ Out… · — · Hide Beebeeb · Hide Others · Show All · — · Quit Beebeeb.
 | 13 | Versions empty | "No conflicts, failed writes, or restore reviews are recorded in the local state DB." | "Nothing needs your attention." |
 | 14 | Versions history unavailable | "Version history is unavailable for this file until the server list-versions route responds." | "Couldn’t load this file’s versions. Try again." |
 | 15 | Restore toast | "Restore queued" / "{file} version {n} will be restored by the sync engine." | "Restore queued" / "{file} goes back to version {n} on the next sync." |
-| 16 | Review kind tags | "Stale base", "Metadata", "Quota", "Permission" | "Changed elsewhere", "Rename or move", "Storage full", "No permission" (Conflict, Upload, Delete, Restore unchanged). Added in slice 4, review of #142: "Signed out" (a sign-in failure; the shipped list called it Conflict), "Not sent" (a change that was parked, paused or given up and will not go on its own), "Plan" (the plan refuses uploads right now) |
+| 16 | Review kind tags | "Stale base", "Metadata", "Quota", "Permission" | "Changed elsewhere", "Rename or move", "Storage full", "No permission" (Conflict, Upload, Delete, Restore unchanged). Added in slice 4, review of #142: "Signed out" (a sign-in failure; the shipped list called it Conflict), "Not sent" (a change that was parked, paused or given up and will not go on its own), "Plan" (the plan refuses uploads right now), "Other" (a download or a pin that has not finished, a change the list has no other word for, and a kind a newer engine sends) |
 | 17 | Review actions (`reviewEntryAction`) | "Review" (conflict), "Upgrade" (quota) | "Decide…", "Add storage" ("Sign in again" unchanged); "Manage plan" for a plan refusal, which opens the billing page: adding storage does not cure a lapsed trial |
 | 18 | Notifications page toast | "Notification preferences are not wired up yet; toggles shown are defaults and will not persist." | removed (the Settings rows read the real config; failure: "Couldn’t load these settings") |
 | 19 | Bandwidth page toast | "Limits are not wired up yet; values shown are defaults and will not persist." | removed |

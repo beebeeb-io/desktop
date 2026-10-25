@@ -4841,6 +4841,13 @@ impl EngineBridge {
             encrypted_metadata_for_name(self.api.master_key(), file_id, &file_name, content_type.as_deref())?;
 
         let local_path = local_file_path_under_sync_root(sync_root, &entry.path)?;
+        // A Keep both whose download failed moved this Mac's file to a conflict copy and left the conflict open. Keep this
+        // Mac's puts that copy back at its own name (a rename that replaces nothing: the path is vacant) and sends it, so
+        // the file is where the sync expects it when the upload lands and the choice does not fail on a file that "is gone".
+        if let Some(kept) = kept_copy_of(&local_path) {
+            std::fs::rename(&kept, &local_path)
+                .map_err(|e| anyhow::anyhow!("put {} back at {}: {e}", kept.display(), local_path.display()))?;
+        }
         let staged =
             crate::staged_payload::StagedPayload::copy(self.db.clone(), &local_path, self.finder_staging_root()?)?;
         let staged_path = staged.path().to_string();
@@ -4966,18 +4973,13 @@ impl EngineBridge {
             return Ok(entry.path.clone());
         }
 
-        let host = hostname::get()
-            .map(|h| h.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "device".into());
-        let date = chrono::Utc::now().format("%Y-%m-%d");
-        let stem = original.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
-        let ext = original
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| format!(".{e}"))
+        // A name that nothing is at: a rename replaces whatever is there, and a copy that was kept an hour ago (a retry, or
+        // this sweep on the day a person already kept one) holds somebody's edits (review of #142, round 2).
+        let conflict_path = unused_conflict_copy_path(&original);
+        let conflict_name = conflict_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let conflict_name = format!("{stem} (conflict - {host} - {date}){ext}");
-        let conflict_path = original.with_file_name(&conflict_name);
 
         std::fs::rename(&original, &conflict_path)
             .map_err(|e| anyhow::anyhow!("rename {} -> {}: {e}", original.display(), conflict_path.display()))?;
@@ -5084,6 +5086,8 @@ impl EngineBridge {
             }
         };
 
+        // A Keep both whose download failed moved this Mac's file to a conflict copy: that copy is this Mac's version.
+        let local_path = kept_copy_of(&local_path).unwrap_or(local_path);
         let size_bytes = match std::fs::metadata(&local_path) {
             Ok(m) => m.len(),
             Err(e) => {
@@ -5380,11 +5384,13 @@ pub fn version_conflict_feed_from_db(db: &StateDb, limit: usize) -> anyhow::Resu
         entries.push(review_entry_for_operation(&review, db)?);
     }
 
-    // Each half is already its newest `limit`, so the newest `limit` of both is in here.
+    // A decision comes first (the pane's intro: "Files that need a decision from you, and changes Beebeeb couldn't send
+    // yet"), so the cap can never cut a conflict for a newer failure; then newest first. Each half is already its own
+    // newest `limit`, so the first `limit` of the merge is in here.
     entries.sort_by(|a, b| {
-        b.updated_at
-            .unwrap_or_default()
-            .cmp(&a.updated_at.unwrap_or_default())
+        (b.kind == "conflict")
+            .cmp(&(a.kind == "conflict"))
+            .then_with(|| b.updated_at.unwrap_or_default().cmp(&a.updated_at.unwrap_or_default()))
             .then_with(|| a.id.cmp(&b.id))
     });
     entries.truncate(limit);
@@ -6091,6 +6097,51 @@ fn plan_hydration_chunk_range(
         covering_span_hint,
         covers_whole_file: first_chunk == 0 && last_chunk == chunk_count - 1,
     }))
+}
+
+/// The names a conflict copy of `original` can take, in the order they are tried: `{stem} (conflict - {host} - {date}){ext}`,
+/// then the same with a counter (`... {date} 2){ext}`, `3`, ...). Several can exist beside one file: a Keep both that is tried
+/// again after a late failure, or the 24 h sweep on the day a person already kept a copy, must find a name that is free.
+fn conflict_copy_candidates(original: &Path) -> impl Iterator<Item = PathBuf> {
+    let host = hostname::get().map(|h| h.to_string_lossy().to_string()).unwrap_or_else(|_| "device".into());
+    let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let stem = original.file_stem().and_then(|s| s.to_str()).unwrap_or("file").to_string();
+    let ext = original.extension().and_then(|e| e.to_str()).map(|e| format!(".{e}")).unwrap_or_default();
+    let original = original.to_path_buf();
+    (1_u32..).map(move |attempt| {
+        let counter = if attempt == 1 { String::new() } else { format!(" {attempt}") };
+        original.with_file_name(format!("{stem} (conflict - {host} - {date}{counter}){ext}"))
+    })
+}
+
+/// The first conflict copy name that nothing is at (not even a dangling link), so a rename to it replaces nothing.
+fn unused_conflict_copy_path(original: &Path) -> PathBuf {
+    conflict_copy_candidates(original)
+        .find(|candidate| std::fs::symlink_metadata(candidate).is_err())
+        .expect("the counter never runs out")
+}
+
+/// The conflict copy a Keep both left beside `original` when the original is gone (a Keep both whose download failed): the
+/// newest of them, which is this Mac's version. `None` when there is none, or when the original is there.
+fn kept_copy_of(original: &Path) -> Option<PathBuf> {
+    if std::fs::symlink_metadata(original).is_ok() {
+        return None;
+    }
+    let stem = original.file_stem()?.to_str()?;
+    let ext = original.extension().and_then(|e| e.to_str()).map(|e| format!(".{e}")).unwrap_or_default();
+    let prefix = format!("{stem} (conflict - ");
+    let suffix = format!("){ext}");
+    std::fs::read_dir(original.parent()?)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with(&prefix) && name.ends_with(&suffix) && entry.file_type().is_ok_and(|kind| kind.is_file())
+        })
+        .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
+        .max_by_key(|(modified, _)| *modified)
+        .map(|(_, path)| path)
 }
 
 pub(crate) fn local_file_path_under_sync_root(sync_root: &Path, rel_path: &str) -> anyhow::Result<PathBuf> {
@@ -6928,6 +6979,7 @@ const REVIEW_DETAIL_RENAME_OR_MOVE: &str = "A rename or move hasn’t been sent 
 const REVIEW_DETAIL_DELETE: &str = "A delete hasn’t been sent yet. It continues on the next sync.";
 const REVIEW_DETAIL_OTHER: &str = "This change hasn’t been sent yet. It continues on the next sync.";
 const REVIEW_DETAIL_DOWNLOAD: &str = "Downloading to this Mac hasn’t finished. It continues on the next sync.";
+const REVIEW_DETAIL_DOWNLOAD_PAUSED: &str = "Downloading to this Mac is paused.";
 const REVIEW_DETAIL_ACCOUNT: &str =
     "Your plan doesn’t allow uploads right now. This change stays on this Mac and is sent once that’s resolved.";
 const REVIEW_DETAIL_PAUSED: &str = "Sending this change is paused. It stays on this Mac.";
@@ -7013,6 +7065,12 @@ fn classify_review_operation(review: &ReviewOperation) -> (&'static str, &'stati
 
     let row = |kind, status, detail: &str, action| (kind, status, detail.to_string(), action);
 
+    // A download that is paused is not "sending" (review of #142, round 2). A lost session is the same for both, and said first.
+    let downloads = matches!(op.kind, OperationKind::HydrateFile | OperationKind::PinTree);
+    if downloads && matches!(paused, Some("quota" | "permission" | "locked" | "key_replaced")) {
+        return row("other", "queued review", REVIEW_DETAIL_DOWNLOAD_PAUSED, "review_upload");
+    }
+
     // A pause says why in its own word. Auth takes priority: an expired session unblocks nothing until the person signs
     // in again, and "sign in again" is the most actionable thing to say for it.
     match paused {
@@ -7050,7 +7108,6 @@ fn classify_review_operation(review: &ReviewOperation) -> (&'static str, &'stati
 
     // Nothing typed: a failure that is still tried again, or one whose attempts are used up. A row that will not be
     // tried again does not say it will.
-    let downloads = matches!(op.kind, OperationKind::HydrateFile | OperationKind::PinTree);
     if op.attempts >= op.max_attempts {
         return if downloads {
             row("other", "queued review", REVIEW_DETAIL_GIVEN_UP_DOWNLOAD, "review_upload")
@@ -11953,6 +12010,107 @@ mod tests {
         assert_eq!(std::fs::read(conflict_copy).unwrap(), b"local conflict bytes");
     }
 
+    /// Review of #142, round 2 (P2-B, data loss): a Keep both names this Mac's copy `{stem} (conflict - {host} - {date})`,
+    /// and `rename` replaces whatever is at the new name. A retry after a late failure, or the sweep on the same day, then
+    /// destroyed the first copy: this Mac's edits. A copy is never put over a file that is there.
+    #[tokio::test]
+    async fn a_conflict_copy_never_replaces_a_file_that_is_already_there() {
+        let (_dir, sync_root, bridge, file_id) = failed_choice_setup("plan.md").await;
+        let original = sync_root.join("plan.md");
+        let mut names = conflict_copy_candidates(&original);
+        let (first, second) = (names.next().unwrap(), names.next().unwrap());
+        std::fs::write(&first, b"an earlier copy of this file").unwrap();
+        let entry = bridge.db.get_file(&file_id).unwrap().unwrap();
+
+        bridge.auto_resolve_keep_both(&sync_root, &entry).await.unwrap_err(); // the download fails: nothing to reach
+        assert_eq!(std::fs::read(&first).unwrap(), b"an earlier copy of this file", "the first copy is untouched");
+        assert_eq!(std::fs::read(&second).unwrap(), b"my edits on this Mac", "this Mac's edits are in the next free name");
+        assert!(!original.exists(), "the original path is vacant for the other version");
+    }
+
+    /// The retry the failed-choice change invites: Keep both whose download failed late (the other version is already at
+    /// the original path), then Keep both again. Every copy survives, in its own name.
+    #[tokio::test]
+    async fn a_keep_both_retried_after_a_late_failure_keeps_every_copy() {
+        let (_dir, sync_root, bridge, file_id) = failed_choice_setup("plan.md").await;
+        let original = sync_root.join("plan.md");
+        let entry = bridge.db.get_file(&file_id).unwrap().unwrap();
+        bridge.auto_resolve_keep_both(&sync_root, &entry).await.unwrap_err();
+        // The download got as far as writing the file before it failed.
+        std::fs::write(&original, b"the other device's version, half written").unwrap();
+        bridge.auto_resolve_keep_both(&sync_root, &entry).await.unwrap_err();
+        // And once more, with the original gone again: it collapses to a download and moves nothing.
+        bridge.auto_resolve_keep_both(&sync_root, &entry).await.unwrap_err();
+
+        let mut names = conflict_copy_candidates(&original);
+        let (first, second) = (names.next().unwrap(), names.next().unwrap());
+        assert_eq!(std::fs::read(&first).unwrap(), b"my edits on this Mac");
+        assert_eq!(std::fs::read(&second).unwrap(), b"the other device's version, half written");
+        let copies = std::fs::read_dir(&sync_root).unwrap().count();
+        assert_eq!(copies, 2, "two copies, no original, nothing else was made or lost");
+    }
+
+    /// P3-1: a Keep both whose download failed leaves this Mac's file under the copy's name, and the sheet is open on the
+    /// conflict again. It must show this Mac's version, not "couldn't locate the local file".
+    #[tokio::test]
+    async fn the_preview_shows_this_macs_version_from_its_kept_copy_when_the_original_is_gone() {
+        let (_dir, sync_root, bridge, file_id) = failed_choice_setup("plan.md").await;
+        let entry = bridge.db.get_file(&file_id).unwrap().unwrap();
+        bridge.auto_resolve_keep_both(&sync_root, &entry).await.unwrap_err();
+        assert!(!sync_root.join("plan.md").exists());
+        let preview = bridge.conflict_content_preview(&file_id, &sync_root).await.unwrap();
+        assert_eq!(preview.local.text.as_deref(), Some("my edits on this Mac"));
+        assert_eq!(preview.local.unavailable_reason, None);
+    }
+
+    /// ... and "Keep this Mac's" then works: the kept copy goes back to its own name (nothing is overwritten) and is what
+    /// is sent, instead of the choice failing and the person believing their edits are gone.
+    #[tokio::test]
+    async fn keep_this_macs_after_a_failed_keep_both_puts_the_kept_copy_back_and_sends_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let original = sync_root.join("plan.md");
+        std::fs::write(&original, b"my edits on this Mac").unwrap();
+        let db_path = dir.path().join("state.db");
+        let file_id = "server-file-1";
+        let offline = test_bridge_with_api(&db_path, "http://127.0.0.1:9".into(), [17u8; 32]);
+        offline
+            .db
+            .upsert_file(&FileEntry {
+                file_id: file_id.into(),
+                path: "plan.md".into(),
+                status: FileStatus::Conflict,
+                size_bytes: 20,
+                modified_at: 100,
+                content_hash: Some("local-conflict-hash".into()),
+                remote_updated_at: 90,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+        let mut contract = offline.db.get_file_contract_state(file_id).unwrap().unwrap();
+        contract.content_type = Some("text/markdown".into());
+        contract.current_version = 3;
+        contract.local_base_version = 2;
+        offline.db.set_file_contract_state(&contract).unwrap();
+        let entry = offline.db.get_file(file_id).unwrap().unwrap();
+        offline.auto_resolve_keep_both(&sync_root, &entry).await.unwrap_err();
+        assert!(!original.exists());
+
+        let server = UploadMockServer::start(false);
+        let online = test_bridge_with_api(&db_path, server.base_url.clone(), [17u8; 32]);
+        online.resolve_conflict_choice(file_id, ConflictChoice::Local, &sync_root).await.unwrap();
+
+        assert_eq!(std::fs::read(&original).unwrap(), b"my edits on this Mac", "this Mac's file is back where it was");
+        assert_eq!(online.db.get_file(file_id).unwrap().unwrap().status, FileStatus::Local);
+        let copies: Vec<_> = std::fs::read_dir(&sync_root).unwrap().map(|e| e.unwrap().path()).collect();
+        assert_eq!(copies, vec![original.clone()], "the copy was moved back, not left beside it");
+        let requests = server.finish();
+        assert_eq!(requests.len(), 4, "the upload went out");
+        assert_eq!(requests[0].path, "/api/v1/uploads/init");
+    }
+
     /// Review of #142: a Keep the other or Keep both that fails (the network, the server) must leave the conflict where
     /// the person can see it and try again. Before, `hydrate_file` set `Error` and the row dropped out of Review, with
     /// the sheet closed and one toast as the only trace. The 24 h sweep keeps its `Error` rule (the test above).
@@ -13315,6 +13473,11 @@ mod tests {
             (review(op(K::HydrateFile, Some(raw), None, 1), None, None), "other", REVIEW_DETAIL_DOWNLOAD, "review_upload"),
             (review(op(K::PinTree, Some(raw), None, 1), None, None), "other", REVIEW_DETAIL_DOWNLOAD, "review_upload"),
             (review(op(K::HydrateFile, Some(raw), None, 25), None, None), "other", REVIEW_DETAIL_GIVEN_UP_DOWNLOAD, "review_upload"),
+            // a download that is paused is not "sending" either (review of #142, round 2); a lost session is the same for both
+            (review(op(K::HydrateFile, Some(raw), None, 1), Some("locked"), Some("locked")), "other", REVIEW_DETAIL_DOWNLOAD_PAUSED, "review_upload"),
+            (review(op(K::PinTree, Some(raw), None, 1), Some("quota"), Some("quota")), "other", REVIEW_DETAIL_DOWNLOAD_PAUSED, "review_upload"),
+            (review(op(K::HydrateFile, Some(raw), None, 1), Some("permission"), Some("permission")), "other", REVIEW_DETAIL_DOWNLOAD_PAUSED, "review_upload"),
+            (review(op(K::HydrateFile, Some(raw), None, 1), Some("auth"), Some("auth")), "auth_failure", REVIEW_DETAIL_AUTH, "sign_in_again"),
         ];
         let developer_words = ["http", "127.0.0.1", "server returned", "url (", "worker", "queue", "endpoint", "bytes"];
         for (pending, kind, sentence, action) in &rows {
@@ -13333,8 +13496,8 @@ mod tests {
                 assert!(!sentence.contains("continues on the next sync"), "{sentence}");
             }
             // A download's sentence is not about sending.
-            if matches!(pending.op.kind, OperationKind::HydrateFile | OperationKind::PinTree) {
-                assert!(!sentence.contains("sent") && !sentence.contains("upload"), "{sentence}");
+            if matches!(pending.op.kind, OperationKind::HydrateFile | OperationKind::PinTree) && *kind == "other" {
+                assert!(!sentence.contains("sent") && !sentence.contains("upload") && !sentence.contains("Sending"), "{sentence}");
             }
         }
         // The failure's own text is carried on the entry for support, whatever the sentence says.
@@ -13412,12 +13575,151 @@ mod tests {
                 .map(|e| e.id)
                 .collect::<Vec<_>>()
         };
-        assert_eq!(ids(3), ["conflict:c-new", "op:op-5", "op:op-4"]);
+        // A decision comes before everything else (the intro says so), then newest first: a cap never hides it.
+        assert_eq!(ids(3), ["conflict:c-new", "conflict:c-old", "op:op-5"]);
         assert_eq!(ids(1), ["conflict:c-new"], "conflicts alone can fill the cap");
         assert_eq!(ids(100).len(), 7, "under the cap, everything");
         assert_eq!(review_item_count_from_db(&bridge.db).unwrap(), 7, "the count is of all, not of the cap");
         const { assert!(REVIEW_FEED_LIMIT >= 100, "a cap that cuts a normal day's Review would hide work") };
         assert_eq!(bridge.version_conflict_feed().unwrap().len(), 7);
+    }
+
+    /// The kinds a Review entry can have are the shared list `tests/fixtures/review-feed.kinds.json`, which the window walks
+    /// (`tests/reviewCounts.test.ts`: every kind has a tag and is counted in one place). A kind added here without that file
+    /// fails this; a kind added to the file without a row here fails it too.
+    #[test]
+    fn the_kinds_review_can_have_are_the_shared_list() {
+        use OperationKind as K;
+        let pending = |kind: OperationKind| PendingOperation {
+            op_id: "op-1".into(),
+            kind,
+            file_id: Some("f1".into()),
+            parent_id: None,
+            target_path: Some("/Work/a.txt".into()),
+            metadata_json: None,
+            payload_path: None,
+            base_version: Some(3),
+            base_object_version_id: None,
+            attempts: 1,
+            max_attempts: 25,
+            next_retry_at: 0,
+            last_error: Some("boom".into()),
+            backup_source_key: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        let cases: Vec<(OperationKind, Option<&str>, Option<&str>)> = vec![
+            (K::RestoreVersion, None, None),
+            (K::UploadFile, Some("auth"), Some("auth")),
+            (K::UploadFile, Some("quota"), Some("quota")),
+            (K::UploadFile, Some("account"), None),
+            (K::UploadFile, Some("permission"), Some("permission")),
+            (K::UploadVersion, Some("stale_base"), None),
+            (K::UploadVersion, Some("payload_missing"), None),
+            (K::UploadFile, None, None),
+            (K::RenameFile, None, None),
+            (K::TrashFile, None, None),
+            (K::HydrateFile, None, None),
+        ];
+        let mut got: std::collections::BTreeSet<String> = cases
+            .into_iter()
+            .map(|(kind, class, paused)| classify_review_operation(&review(pending(kind), class, paused)).0.to_string())
+            .collect();
+        got.insert("conflict".to_string()); // the conflict rows are built in the feed, not classified
+        let shared: std::collections::BTreeSet<String> =
+            serde_json::from_str::<Vec<String>>(include_str!("../../tests/fixtures/review-feed.kinds.json"))
+                .unwrap()
+                .into_iter()
+                .collect();
+        assert_eq!(got, shared);
+    }
+
+    /// The kept copy is only ever this Mac's version when the original is GONE: with the original there, Keep this Mac's
+    /// would rename a copy over it. Of several copies the newest is the one; names that are not copies are not.
+    #[test]
+    fn a_kept_copy_is_found_only_when_the_original_is_gone_and_the_newest_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("plan.md");
+        let copy = |name: &str, bytes: &[u8], age_secs: u64| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            let when = std::time::SystemTime::now() - std::time::Duration::from_secs(age_secs);
+            std::fs::File::options().write(true).open(&path).unwrap().set_modified(when).unwrap();
+            path
+        };
+        assert_eq!(kept_copy_of(&original), None, "nothing beside it");
+        let old = copy("plan (conflict - mac - 2026-10-01).md", b"old", 5_000);
+        let new = copy("plan (conflict - mac - 2026-10-24 2).md", b"new", 100);
+        copy("plan (conflict - mac - 2026-10-24).txt", b"another extension", 10);
+        copy("other (conflict - mac - 2026-10-24).md", b"another file", 10);
+        copy("plan notes.md", b"not a copy", 10);
+        assert_eq!(kept_copy_of(&original), Some(new.clone()), "the newest copy of this file, by its own name and extension");
+        std::fs::remove_file(&new).unwrap();
+        assert_eq!(kept_copy_of(&original), Some(old));
+        std::fs::write(&original, b"the original is there").unwrap();
+        assert_eq!(kept_copy_of(&original), None, "with the original there, nothing is moved over it");
+        // No extension: the name has none to match.
+        let bare = dir.path().join("Makefile");
+        std::fs::write(dir.path().join("Makefile (conflict - mac - 2026-10-24)"), b"x").unwrap();
+        assert_eq!(kept_copy_of(&bare), Some(dir.path().join("Makefile (conflict - mac - 2026-10-24)")));
+    }
+
+    /// A dangling link at a copy's name is a name that is taken: a rename onto it would replace it.
+    #[test]
+    #[cfg(unix)]
+    fn a_name_with_a_dangling_link_is_not_free() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("plan.md");
+        let first = conflict_copy_candidates(&original).next().unwrap();
+        std::os::unix::fs::symlink(dir.path().join("nowhere"), &first).unwrap();
+        assert!(!first.exists(), "it points at nothing");
+        assert_ne!(unused_conflict_copy_path(&original), first);
+    }
+
+    /// Review of #142, round 2 (P3-5): a conflict is a decision, and the cap must never cut one for a newer failure.
+    #[test]
+    fn a_conflict_is_never_cut_by_the_cap_for_newer_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        bridge
+            .db
+            .upsert_file(&FileEntry {
+                file_id: "c-old".into(),
+                path: "/Work/c-old.md".into(),
+                status: FileStatus::Conflict,
+                size_bytes: 1,
+                modified_at: 1,
+                content_hash: None,
+                remote_updated_at: 1,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+        for n in 10..=14_i64 {
+            bridge
+                .db
+                .enqueue_operation(&PendingOperation {
+                    op_id: format!("op-{n}"),
+                    kind: OperationKind::UploadFile,
+                    file_id: Some(format!("f-{n}")),
+                    parent_id: None,
+                    target_path: Some(format!("/Work/f-{n}.md")),
+                    metadata_json: None,
+                    payload_path: None,
+                    base_version: None,
+                    base_object_version_id: None,
+                    attempts: 1,
+                    max_attempts: 25,
+                    next_retry_at: 0,
+                    last_error: Some("connection refused".into()),
+                    backup_source_key: None,
+                    created_at: n,
+                    updated_at: n,
+                })
+                .unwrap();
+        }
+        let ids: Vec<_> = version_conflict_feed_from_db(&bridge.db, 3).unwrap().into_iter().map(|e| e.id).collect();
+        assert_eq!(ids, ["conflict:c-old", "op:op-14", "op:op-13"], "the oldest row is the decision, and it stays");
     }
 
     /// The contract with the window: the JSON the feed produces is exactly `tests/fixtures/review-feed.entries.json`, and

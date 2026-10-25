@@ -157,32 +157,39 @@ export interface SharedRoot {
   finder_path?: string | null
 }
 
+/**
+ * Every kind of Review entry Rust sends (`classify_review_operation` and the conflict rows in `engine_bridge.rs`; the list is
+ * pinned on both sides by `tests/fixtures/review-feed.kinds.json`). A list, not only a type, so a test can walk it: a kind
+ * that is added must be given a tag (`reviewModel`) and be counted somewhere (`reviewCounts`), or a test fails.
+ *
+ * `auth_failure` (task 1546 finding 3) is a 401 / expired session, which used to fall through to `failed_upload` with the raw
+ * text and no "sign in again" path (see `reviewEntryAction`). Since #142, kinds are read from the queue's typed columns,
+ * not from the failure's text: `not_sent` is a change that was parked, paused or given up and will not go on its own;
+ * `account_refused` is the plan refusing uploads right now; `other` is a download or a pin that has not finished.
+ */
+export const REVIEW_ENTRY_KINDS = [
+  'conflict',
+  'failed_upload',
+  'quota_failure',
+  'permission_failure',
+  'stale_base',
+  'restore',
+  'metadata',
+  'delete',
+  'auth_failure',
+  'not_sent',
+  'account_refused',
+  'other',
+] as const
+export type ReviewEntryKind = (typeof REVIEW_ENTRY_KINDS)[number]
+
 export interface VersionConflictEntry {
   id: string
   file_id: string
   file_name: string
   /** The name of the directory the file sits in; null at the vault's root (Rust `folder_name_for_path`). */
   folder?: string | null
-  kind:
-    | 'conflict'
-    | 'failed_upload'
-    | 'quota_failure'
-    | 'permission_failure'
-    | 'stale_base'
-    | 'restore'
-    | 'metadata'
-    | 'delete'
-    // Task 1546 finding 3: a 401/unauthorized/invalid-token operation failure.
-    // Previously fell through to the generic 'failed_upload' bucket with the
-    // raw HTTP error text and no "sign in again" path — see `reviewEntryAction`.
-    | 'auth_failure'
-    // Review of #142: read from the queue's typed columns, not from the failure's text (`engine_bridge.rs`,
-    // `classify_review_operation`). `not_sent`: a change that was parked, paused or given up and will not go on its
-    // own; `account_refused`: the plan does not allow uploads right now; `other`: a download or a pin that has not
-    // finished.
-    | 'not_sent'
-    | 'account_refused'
-    | 'other'
+  kind: ReviewEntryKind
   status: string
   updated_at?: number
   detail: string

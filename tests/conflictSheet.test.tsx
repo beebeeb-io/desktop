@@ -6,7 +6,7 @@
  * can close it while a choice is being applied, and that it opens on its close button so Enter on open is Cancel.
  * What it does NOT prove: the engine's resolve itself (src-tauri), focus in a real webview, layout.
  */
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { createElement, Fragment } from 'react'
 import * as desktopApi from '../src/desktopApi'
 import { diffLines, DIFF_MAX_OPS } from '../src/diffLines'
@@ -19,6 +19,13 @@ import { button, buttons, buttonLabel, find, lines, modalNow, modalStub, press, 
 const React = { createElement, Fragment }
 const mounted: Mounted[] = []
 afterEach(() => { while (mounted.length) mounted.pop()!.close() })
+// The question "Use the other version here?" ignores an answer that comes within a moment of it (the same press, twice): the
+// clock is ours, so a test says when the person answers.
+const realNow = Date.now
+let clock = 1_000_000
+beforeEach(() => { clock = 1_000_000; Date.now = () => clock })
+afterEach(() => { Date.now = realNow })
+const aMomentLater = () => { clock += reviewModel.CONFLICT_REPLACE_GUARD_MS + 100 }
 
 const entry: desktopApi.VersionConflictEntry = {
   id: 'conflict:f1', file_id: 'f1', file_name: 'Board notes, 29 Sept.md', kind: 'conflict', status: 'needs review',
@@ -163,7 +170,8 @@ describe('the three choices (§7.6)', () => {
     await settle(m)
     await press(m, 'Keep the other')
     expect(m.calls.filter((c) => c.name === 'resolve_conflict')).toEqual([])
-    await press(m, 'Replace this Mac’s version')
+    aMomentLater()
+    await press(m, 'Use the other version')
     expect(m.calls.filter((c) => c.name === 'resolve_conflict').map((c) => c.args)).toEqual([{ fileId: 'f1', choice: 'remote' }])
   })
 
@@ -179,7 +187,8 @@ describe('the three choices (§7.6)', () => {
     const { m, closed } = open({ resolve: () => { throw new Error('no state.db row for f1') } })
     await settle(m)
     await press(m, 'Keep the other')
-    await press(m, 'Replace this Mac’s version')
+    aMomentLater()
+    await press(m, 'Use the other version')
     expect(closed).toEqual([])
     expect(m.toasts).toHaveLength(1)
     expect(m.toasts[0]).toMatchObject({ variant: 'error', title: 'Couldn’t resolve this conflict' })
@@ -196,11 +205,11 @@ describe('the three choices (§7.6)', () => {
   })
 })
 
-describe('"Keep the other" throws this Mac\'s version away, so it asks first (review of #142; the spec is silent)', () => {
+describe('"Keep the other" can leave this Mac with nothing of its own version, so it asks first (review of #142)', () => {
   const noteOf = (m: Mounted) => find(m, (el) => el.props['data-note'] === 'replace')
-  const choiceLabels = (m: Mounted) => buttons(m).map(buttonLabel).filter((label) => /^Keep|^Replace/.test(label))
+  const footer = (m: Mounted) => buttons(m).map(buttonLabel).filter((label) => label !== 'Close')
 
-  test('nothing is asked until it is pressed; the first press sends nothing, asks the question aloud, and the same button says what it will do', async () => {
+  test('nothing is asked until it is pressed; the first press sends nothing and asks, aloud, a question that claims nothing about which file', async () => {
     const { m } = open()
     await settle(m)
     expect(noteOf(m)).toHaveLength(0)
@@ -209,50 +218,82 @@ describe('"Keep the other" throws this Mac\'s version away, so it asks first (re
     const note = noteOf(m)
     expect(note).toHaveLength(1)
     expect(note[0].props.role).toBe('alert')
-    expect(lines(m)).toContain('Replace this Mac’s version? Your changes here are discarded.')
-    expect(choiceLabels(m)).toEqual(['Keep this Mac’s', 'Replace this Mac’s version', 'Keep both'])
-    expect(button(m, 'Replace this Mac’s version').props.className).toContain('ms-btn--danger')
-    expect(button(m, 'Keep both').props.className).toContain('ms-btn--primary')
+    expect(lines(m)).toContain('Use the other version here?')
+    expect(lines(m).join(' ')).not.toMatch(/discard|Replace|overwrite|Finder/)
   })
 
-  test('another choice ends the question and does what it says: "Keep both" after arming sends "both", never "remote"', async () => {
+  test('the answer is Cancel (first, and focused) or "Use the other version" (the one red button): the three choices are put away', async () => {
     const { m } = open()
     await settle(m)
     await press(m, 'Keep the other')
-    await press(m, 'Keep both')
-    expect(m.calls.filter((c) => c.name === 'resolve_conflict').map((c) => c.args)).toEqual([{ fileId: 'f1', choice: 'both' }])
+    expect(footer(m)).toEqual(['Cancel', 'Use the other version'])
+    expect(button(m, 'Cancel').props.autoFocus).toBe(true)
+    expect(button(m, 'Use the other version').props.autoFocus).toBeFalsy()
+    expect(button(m, 'Use the other version').props.className).toContain('ms-btn--danger')
+    expect(buttons(m).some((el) => el.props.className?.includes('ms-btn--primary'))).toBe(false)
   })
 
-  test('"Keep this Mac\'s" after arming sends "local", never "remote"', async () => {
+  test('Cancel sends nothing and puts the question away: the three choices are back, and "Keep the other" asks again', async () => {
     const { m } = open()
     await settle(m)
     await press(m, 'Keep the other')
-    await press(m, 'Keep this Mac’s')
-    expect(m.calls.filter((c) => c.name === 'resolve_conflict').map((c) => c.args)).toEqual([{ fileId: 'f1', choice: 'local' }])
+    aMomentLater()
+    await press(m, 'Cancel')
+    expect(m.calls.filter((c) => c.name === 'resolve_conflict')).toEqual([])
+    expect(noteOf(m)).toHaveLength(0)
+    expect(footer(m)).toEqual(['Keep this Mac’s', 'Keep the other', 'Keep both'])
+    await press(m, 'Keep the other')
+    expect(noteOf(m)).toHaveLength(1)
   })
 
-  test('a failed replace puts the question away: the choices are the three again, and "Keep the other" asks again', async () => {
+  test('the press that asked is not the answer: a second activation within a moment (a double click, a held Return) is ignored', async () => {
+    const { m } = open()
+    await settle(m)
+    await press(m, 'Keep the other')
+    clock += reviewModel.CONFLICT_REPLACE_GUARD_MS - 1
+    await press(m, 'Use the other version')
+    expect(m.calls.filter((c) => c.name === 'resolve_conflict')).toEqual([])
+    expect(noteOf(m)).toHaveLength(1) // still asking
+    clock += 1
+    await press(m, 'Use the other version')
+    expect(m.calls.filter((c) => c.name === 'resolve_conflict').map((c) => c.args)).toEqual([{ fileId: 'f1', choice: 'remote' }])
+  })
+
+  test('"Keep this Mac\'s" and "Keep both" never ask, and send their own choice', async () => {
+    for (const [label, choice] of [['Keep this Mac’s', 'local'], ['Keep both', 'both']] as const) {
+      const { m } = open()
+      await settle(m)
+      await press(m, label)
+      expect(noteOf(m)).toHaveLength(0)
+      expect(m.calls.filter((c) => c.name === 'resolve_conflict').map((c) => c.args)).toEqual([{ fileId: 'f1', choice }])
+    }
+  })
+
+  test('a failed answer puts the question away: the three choices are back, and "Keep the other" asks again', async () => {
     let fail = true
     const { m } = open({ resolve: () => { if (fail) throw new Error('offline'); return null } })
     await settle(m)
     await press(m, 'Keep the other')
-    await press(m, 'Replace this Mac’s version')
+    aMomentLater()
+    await press(m, 'Use the other version')
     expect(noteOf(m)).toHaveLength(0)
-    expect(choiceLabels(m)).toEqual(['Keep this Mac’s', 'Keep the other', 'Keep both'])
+    expect(footer(m)).toEqual(['Keep this Mac’s', 'Keep the other', 'Keep both'])
     fail = false
     await press(m, 'Keep the other')
     expect(m.calls.filter((c) => c.name === 'resolve_conflict')).toHaveLength(1)
-    await press(m, 'Replace this Mac’s version')
+    aMomentLater()
+    await press(m, 'Use the other version')
     expect(m.calls.filter((c) => c.name === 'resolve_conflict')).toHaveLength(2)
   })
 
-  test('while a replace is being applied the question stays away and all three are off', async () => {
+  test('while the answer is being applied both buttons are off', async () => {
     let release: () => void = () => {}
     const { m } = open({ resolve: () => new Promise<null>((resolve) => { release = () => resolve(null) }) })
     await settle(m)
     await press(m, 'Keep the other')
-    await m.clickNoWait('Replace this Mac’s version')
-    expect(buttons(m).filter((el) => /^Keep|^Replace/.test(buttonLabel(el))).every((el) => el.props.disabled === true)).toBe(true)
+    aMomentLater()
+    await m.clickNoWait('Use the other version')
+    expect(buttons(m).filter((el) => ['Cancel', 'Use the other version'].includes(buttonLabel(el))).every((el) => el.props.disabled === true)).toBe(true)
     release()
     await settle(m)
   })

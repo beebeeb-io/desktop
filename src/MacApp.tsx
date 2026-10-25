@@ -36,7 +36,7 @@ import {
   type Subscription,
 } from './desktopApi'
 import type { PopoverSnapshot } from './popoverContract'
-import { heldSignOutWarning, subscribeSignOutWarning } from './accountSession'
+import { accountSessionRevision, heldSignOutWarning, subscribeAccountSession, subscribeSignOutWarning } from './accountSession'
 import { LOAD_FAILED_TITLE, SET_UP_COPY, SIGNED_IN_WINDOW_TITLE, USE_RECOVERY_PHRASE } from './accountViewCopy'
 import { finderOpenFailedToast, useFinderSetup } from './finderSetup'
 import { finderActionButtonLabel } from './finderSetupCopy'
@@ -525,10 +525,13 @@ export default function MacApp() {
   )
 
   // The Review feed is read only while there is a session and an unlocked vault: a locked vault, or another account,
-  // never sees the last one's rows (the feed drops them when the last reader stops).
+  // never sees the last one's rows (the feed drops them when the last reader stops). The session's revision is part of the
+  // lifetime: a sign-out and a sign-in as the same account between two reads change neither `signedIn` nor `unlocked`, and
+  // the feed must still be a new one (review of #142, round 2).
+  const sessionRevision = useSyncExternalStore(subscribeAccountSession, accountSessionRevision, accountSessionRevision)
   useEffect(
     () => (signedIn && unlocked ? connectReviewFeed(reviewFeed, listen) : undefined),
-    [signedIn, unlocked],
+    [signedIn, unlocked, sessionRevision],
   )
 
   // The history sheet belongs to Review: leaving Review (the sign-out flow can force Settings › Account) closes it, and so
@@ -540,7 +543,10 @@ export default function MacApp() {
   }, [inReview, unlocked])
 
   // The rows are read only while Review shows them; the badge's count is read all the time.
-  useEffect(() => (signedIn && unlocked && inReview ? reviewFeed.watchList() : undefined), [signedIn, unlocked, inReview])
+  useEffect(
+    () => (signedIn && unlocked && inReview ? reviewFeed.watchList() : undefined),
+    [signedIn, unlocked, inReview, sessionRevision],
+  )
 
   // §8.2 and F15: Rust enables View › Back only while Settings shows, and disables the navigation items and
   // Settings… while a sheet is open.
