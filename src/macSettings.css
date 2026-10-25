@@ -1,13 +1,15 @@
 /*
- * macOS Settings window (task 1683 slice 4). Imported by main.tsx; every rule is scoped to a
- * `.ms-` class, so it cannot touch another window.
+ * macOS Settings sections (task 1683 slice 4), hosted since task 1683 slice 1 by the Settings pane of the Beebeeb
+ * window (MacApp.tsx, macApp.css). Imported by main.tsx; every rule is scoped to a `.ms-` class, so it cannot touch
+ * another window. The window shell and its sidebar list (which replaced the toolbar tab strip, ruling 1) are
+ * macApp.css's `.mw-` rules.
  *
  * Colours are design.css tokens only (tests/noHardcodedThemeColors scans this file too). The
  * mock's `--ok` is `--ok-icon`, its `--on-amber` is `--amber-ink`; both already exist.
  *
  * The layout rules below are the ones that stop screenshot 3 from coming back (spec section 8):
- *   1. The shell is `height: 100vh; overflow: hidden`. Only `.ms-pane` scrolls, so the toolbar
- *      can never scroll away (the empty sidebar).
+ *   1. Only `.ms-pane` scrolls (the window, `.mw-window`, is `height: 100vh; overflow: hidden`), so the
+ *      toolbar can never scroll away.
  *   2. Grid tracks are `minmax(0, 1fr)` and every flex text block is `min-width: 0`, so one
  *      unbreakable string cannot widen a track (the clipped headings).
  *   3. Anything that can hold user data wraps with `overflow-wrap: anywhere`.
@@ -15,68 +17,7 @@
  * measures them in Chromium with a 60-character path in every data field.
  */
 
-.ms-shell {
-  box-sizing: border-box;
-  height: 100vh;
-  overflow: hidden;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: auto minmax(0, 1fr);
-  min-width: 0;
-  background: var(--paper-2);
-  color: var(--ink);
-  font-family: var(--font-sans);
-  font-size: 13px;
-  line-height: 18px;
-}
-
-/* ── Toolbar: four tabs, centred, 74 pt tall (the native traffic lights sit at its left). ── */
-
-.ms-toolbar {
-  box-sizing: border-box;
-  height: 74px;
-  min-width: 0;
-  display: flex;
-  justify-content: center;
-  align-items: flex-end;
-  gap: 4px;
-  padding-bottom: 6px;
-  background: var(--paper);
-  border-bottom: 1px solid var(--line);
-}
-
-.ms-tab {
-  box-sizing: border-box;
-  width: 76px;
-  height: 52px;
-  flex: 0 0 auto;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  padding: 0;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--ink-3);
-  font-size: 11.5px;
-  line-height: 14px;
-  font-weight: 400;
-  cursor: pointer;
-}
-
-.ms-tab:hover {
-  background: var(--paper-2);
-}
-
-.ms-tab[aria-selected='true'] {
-  background: var(--paper-3);
-  color: var(--ink);
-  font-weight: 600;
-}
-
-/* ── The content pane: the only scroll container in the window. ── */
+/* ── The content pane: the only scroll container in the Settings pane. ── */
 
 .ms-pane {
   box-sizing: border-box;
@@ -616,7 +557,6 @@
 
 /* ── Focus and motion ── */
 
-.ms-tab:focus-visible,
 .ms-btn:focus-visible,
 .ms-switch:focus-visible,
 .ms-choice:focus-visible,

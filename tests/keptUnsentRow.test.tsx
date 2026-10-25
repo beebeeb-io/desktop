@@ -16,6 +16,7 @@ import { KEPT_FOLDER_ROW_SENTENCE } from '../src/macSettingsModel'
 import * as parts from '../src/macSettingsParts'
 import * as copy from '../src/signOutCopy'
 import { expand, loadComponent, mount, textOf, type Mounted, type TreeNode } from './fixtures/componentHarness'
+import { KeptFolderNotes, useKeptFoldersModule } from './fixtures/keptFolderHarness'
 
 /** The in-window dialog, reduced to what a user sees (as tests/macSettingsTabs.test.tsx draws it). */
 function Modal(props: any) {
@@ -38,6 +39,7 @@ const baseBindings = {
   Modal,
   ConfirmSheet,
   withPinned,
+  KeptFolderNotes,
   finderActionButtonLabel: finderSetupCopy.finderActionButtonLabel,
   // The real one: with no event bus here it reports ready at once, so the rows read on mount.
   subscribeKeptFolderChanged: finderSetup.subscribeKeptFolderChanged,
@@ -95,7 +97,7 @@ function open(name: string, b: Record<string, (args: any) => unknown>) {
     expand: true,
     props: { settings },
     bindings: baseBindings,
-    hookModules: [useFinderSetupModule()],
+    hookModules: [useFinderSetupModule(), useKeptFoldersModule()],
   })
   mounted.push(m)
   return m

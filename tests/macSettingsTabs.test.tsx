@@ -24,6 +24,7 @@ import { SignOutFlow, signOutFlowApi, connectSignOutFlowEvents, connectSignOutFl
 import { stripCode } from '../src/signOutCopy'
 import { expand, loadComponent, mount, textOf, visibleErrorSurfaces, type Mounted, type TreeNode } from './fixtures/componentHarness'
 import { rustStr } from './fixtures/rustConstants'
+import { KeptFolderNotes, useKeptFoldersModule } from './fixtures/keptFolderHarness'
 
 const React = { createElement, Fragment }
 
@@ -61,6 +62,7 @@ const baseBindings = {
   UnsentAskSheet,
   DataResidencyGroup,
   withPinned,
+  KeptFolderNotes,
   finderActionButtonLabel: finderSetupCopy.finderActionButtonLabel,
   // The real one: with no event bus here it reports ready at once, so a tab opened without `keptBus` still reads.
   subscribeKeptFolderChanged: finderSetup.subscribeKeptFolderChanged,
@@ -141,7 +143,14 @@ function open(name: string, backend: Record<string, (args: any) => unknown>, ext
     expand: true,
     props: extra.props,
     bindings: { ...baseBindings, ...extra.bindings },
-    hookModules: name === 'SyncTab' ? [useFinderSetupModule(extra.finder ?? { bus: finderBus(), copied: [] })] : undefined,
+    // Task 1683 slice 1: the kept-folder rows are one hook and one component shared with Home (src/keptFolderRows.tsx);
+    // a scripted `subscribeKeptFolderChanged` in `extra.bindings` is what that hook reads.
+    hookModules: name === 'SyncTab'
+      ? [
+          useFinderSetupModule(extra.finder ?? { bus: finderBus(), copied: [] }),
+          useKeptFoldersModule(extra.bindings?.subscribeKeptFolderChanged ? { subscribeKeptFolderChanged: extra.bindings.subscribeKeptFolderChanged } : {}),
+        ]
+      : undefined,
   })
   mounted.push(m)
   return m
@@ -1425,185 +1434,11 @@ describe('About tab', () => {
 })
 
 // ── The window ──────────────────────────────────────────────────────────────
-
-describe('MacSettings window', () => {
-  const tabStub = (id: string) => () => createElement('div', { 'data-tab': id })
-  const settingsStub = () => ({ state: { status: 'loading' }, save: async () => {}, reload: async () => {} })
-  const openWindow = (props: any = { initialTab: 'general' }, bindings: Record<string, unknown> = {}) =>
-    open('MacSettings', {}, { props, bindings: { GeneralTab: tabStub('general'), AccountTab: tabStub('account'), SyncTab: tabStub('sync'), AboutTab: tabStub('about'), useSettingsConfig: settingsStub, listen: () => Promise.resolve(() => {}), connectNativeUpdateMenu: () => () => {}, SignOutFlow, signOutFlowApi, showSignOutOutcome, connectSignOutFlowEvents: () => () => {}, connectSignOutFlowMenu: () => () => {}, ...bindings } })
-
-  const shown = (m: Mounted) => find(m, (el) => el.props['data-tab'] !== undefined).map((el) => el.props['data-tab'])
-  const tabs = (m: Mounted) => find(m, (el) => el.props.role === 'tab')
-
-  test('four tabs in a tablist, the first selected, and exactly one tab mounted at a time', () => {
-    const m = openWindow()
-    expect(tabs(m).map((t) => textOf(t.props.children).trim())).toEqual(['General', 'Account', 'Sync', 'About'])
-    expect(tabs(m).map((t) => t.props['aria-selected'])).toEqual([true, false, false, false])
-    expect(shown(m)).toEqual(['general'])
-    expect(find(m, (el) => el.props.role === 'tablist')).toHaveLength(1)
-  })
-
-  test('the window drains the native update-check menu request on mount (slice 6)', async () => {
-    // Slice 6 flips the Preferences/Settings menu items and "Check for
-    // updates…" onto this window: a native menu event must make the WINDOW
-    // consume the pending request (the controller then runs the check the
-    // About row renders — that behavior is nativeUpdateSettings's). Wired
-    // through the real helper with a scripted backend (the consume handler
-    // must live in the BACKEND: function-valued props are component props,
-    // not command handlers).
-    let onMenu: () => void = () => {}
-    const m = open('MacSettings', { consume_menu_update_check: () => false }, {
-      props: { initialTab: 'general' },
-      bindings: {
-        GeneralTab: tabStub('general'), AccountTab: tabStub('account'), SyncTab: tabStub('sync'), AboutTab: tabStub('about'),
-        useSettingsConfig: settingsStub,
-        listen: (_event: string, callback: () => void) => { onMenu = callback; return Promise.resolve(() => {}) },
-        connectNativeUpdateMenu: realConnectNativeUpdateMenu,
-        desktopUpdateCheck,
-        SignOutFlow, signOutFlowApi, showSignOutOutcome, connectSignOutFlowEvents: () => () => {}, connectSignOutFlowMenu: () => () => {},
-      },
-    })
-    await m.flush()
-    // The helper drains once as soon as it is listening (the cold-window case:
-    // the request may have been stored before this webview subscribed).
-    expect(m.calls.filter((c) => c.name === 'consume_menu_update_check')).toHaveLength(1)
-    onMenu()
-    await m.flush()
-    expect(m.calls.filter((c) => c.name === 'consume_menu_update_check')).toHaveLength(2)
-  })
-
-  test('a consumed menu update-check lands the window on the About tab', async () => {
-    // "Check for updates…" must show its progress and result. The row that
-    // renders them lives in the About tab, so the window must switch there
-    // exactly when the pending menu request is consumed — not on a plain
-    // open (which consumes false and keeps the General tab).
-    const m = open('MacSettings', { consume_menu_update_check: () => true }, {
-      props: { initialTab: 'general' },
-      bindings: {
-        GeneralTab: tabStub('general'), AccountTab: tabStub('account'), SyncTab: tabStub('sync'), AboutTab: tabStub('about'),
-        useSettingsConfig: settingsStub,
-        listen: () => Promise.resolve(() => {}),
-        connectNativeUpdateMenu: realConnectNativeUpdateMenu,
-        desktopUpdateCheck: { check: async () => {} },
-        SignOutFlow, signOutFlowApi, showSignOutOutcome, connectSignOutFlowEvents: () => () => {}, connectSignOutFlowMenu: () => () => {},
-      },
-    })
-    await settle(m)
-    expect(m.calls.filter((c) => c.name === 'consume_menu_update_check')).toHaveLength(1)
-    expect(tabs(m).map((t) => t.props['aria-selected'])).toEqual([false, false, false, true])
-    expect(shown(m)).toEqual(['about'])
-  })
-
-  test('a plain open consumes nothing and stays on the General tab', async () => {
-    const m = open('MacSettings', { consume_menu_update_check: () => false }, {
-      props: { initialTab: 'general' },
-      bindings: {
-        GeneralTab: tabStub('general'), AccountTab: tabStub('account'), SyncTab: tabStub('sync'), AboutTab: tabStub('about'),
-        useSettingsConfig: settingsStub,
-        listen: () => Promise.resolve(() => {}),
-        connectNativeUpdateMenu: realConnectNativeUpdateMenu,
-        desktopUpdateCheck: { check: async () => {} },
-        SignOutFlow, signOutFlowApi, showSignOutOutcome, connectSignOutFlowEvents: () => () => {}, connectSignOutFlowMenu: () => () => {},
-      },
-    })
-    await settle(m)
-    expect(m.calls.filter((c) => c.name === 'consume_menu_update_check')).toHaveLength(1)
-    expect(tabs(m).map((t) => t.props['aria-selected'])).toEqual([true, false, false, false])
-    expect(shown(m)).toEqual(['general'])
-  })
-
-  test('clicking a tab swaps the panel and moves selection and the one tab stop', () => {
-    const m = openWindow()
-    tabs(m)[2].props.onClick()
-    m.render()
-    expect(shown(m)).toEqual(['sync'])
-    expect(tabs(m).map((t) => t.props['aria-selected'])).toEqual([false, false, true, false])
-    expect(tabs(m).map((t) => t.props.tabIndex)).toEqual([-1, -1, 0, -1])
-    const panel = find(m, (el) => el.props.role === 'tabpanel')[0]
-    expect(panel.props['aria-labelledby']).toBe('ms-tab-sync')
-    expect(tabs(m)[2].props.id).toBe('ms-tab-sync')
-  })
-
-  test('the arrow keys move between tabs and the window consumes only those keys', () => {
-    const m = openWindow()
-    const tablist = find(m, (el) => el.props.role === 'tablist')[0]
-    let prevented = 0
-    tablist.props.onKeyDown({ key: 'ArrowRight', preventDefault: () => { prevented += 1 } })
-    m.render()
-    expect(shown(m)).toEqual(['account'])
-    tablist.props.onKeyDown({ key: 'Tab', preventDefault: () => { prevented += 1 } })
-    m.render()
-    expect(shown(m)).toEqual(['account'])
-    expect(prevented).toBe(1)
-  })
-
-  test('the toolbar is the drag region, so the window can be moved by it', () => {
-    const m = openWindow()
-    expect(find(m, (el) => el.props['data-tauri-drag-region'] !== undefined)).toHaveLength(1)
-    expect(find(m, (el) => el.props.role === 'tablist')[0].props['data-tauri-drag-region']).toBeDefined()
-  })
-
-  test('an initial tab from the caller wins; with none, the URL decides', () => {
-    expect(shown(openWindow({ initialTab: 'about' }))).toEqual(['about'])
-    expect(shown(openWindow({}, { settingsTabFromLocation: () => 'sync' }))).toEqual(['sync'])
-  })
-
-  test('the shell is the only layout root and has no sidebar', () => {
-    const m = openWindow()
-    const root = m.tree()
-    expect(root.props.className).toBe('ms-shell')
-    expect(find(m, (el) => /sidebar/i.test(String(el.props.className ?? '')))).toHaveLength(0)
-  })
-
-  /** F9: the flow and its request live in the root. A request handled once never runs again, however
-   *  often the Account tab mounts: a request, Cancel at the ask, the Sync tab, the Account tab again → one count, no
-   *  `clear_session`. */
-  test('a handled flow request never runs again when the Account tab mounts again', async () => {
-    // First, before anything reads the flow: the tab, which mounts on every visit, never builds a flow or runs a
-    // request itself. A tab that did would get no `flow` from the root, and the behaviour below would stop on
-    // `flow.current()` of `undefined` before it reached this pin.
-    const source = readFileSync(new URL('../src/MacSettings.tsx', import.meta.url), 'utf8')
-    const start = source.indexOf('function AccountTab(')
-    expect(start, 'AccountTab is in MacSettings.tsx').toBeGreaterThan(-1)
-    const tab = source.slice(start, source.indexOf('\n}\n', start))
-    for (const banned of ['new SignOutFlow(', 'connectSignOutFlowMenu(', 'connectSignOutFlowEvents(', '.request()']) {
-      expect(tab.includes(banned), banned).toBe(false)
-    }
-    let pending = true
-    let flow: any = null
-    const accountStub = (props: any) => { flow = props.flow; return createElement('div', { 'data-tab': 'account' }) }
-    const m = open('MacSettings', {
-      consume_sign_out_flow_request: () => { const was = pending; pending = false; return was },
-      sign_out_count: () => ({ askId: 'a1', files: 1, copiedFiles: 1, others: 0, missingFiles: 0, earlierFolders: [], canSend: false, notSending: 'offline' }),
-      clear_session: () => ({ warning: null }),
-    }, {
-      props: { initialTab: 'general' },
-      bindings: {
-        GeneralTab: tabStub('general'), AccountTab: accountStub, SyncTab: tabStub('sync'), AboutTab: tabStub('about'),
-        useSettingsConfig: settingsStub,
-        listen: () => Promise.resolve(() => {}),
-        connectNativeUpdateMenu: () => () => {},
-        // `settle` runs the root's update-menu effect, which reads `desktopUpdateCheck.check`; the update-menu tests
-        // above bind it the same way.
-        desktopUpdateCheck: { check: async () => {} },
-        SignOutFlow, signOutFlowApi, connectSignOutFlowEvents, connectSignOutFlowMenu, stripCode, showSignOutOutcome,
-      },
-    })
-    await settle(m)
-    expect(shown(m)).toEqual(['account'])
-    expect(flow.current().kind).toBe('ask')
-    flow.cancel()
-    m.render()
-    tabs(m)[2].props.onClick() // Sync
-    m.render()
-    tabs(m)[1].props.onClick() // Account again: the tab mounts again
-    m.render()
-    await settle(m)
-    expect(m.calls.filter((c) => c.name === 'sign_out_count')).toHaveLength(1)
-    expect(m.calls.filter((c) => c.name === 'clear_session')).toHaveLength(0)
-    expect(flow.current().kind).toBe('idle')
-  })
-})
+//
+// Task 1683 slice 1: the Settings window's tab-strip root is gone. The sections are hosted by the Beebeeb window's
+// Settings pane (src/MacApp.tsx), and the root's tests moved with its behaviour to tests/macApp.test.tsx: the
+// update-check drain and its landing on About, F9 (a handled flow request never runs again when Account mounts again),
+// the drag region, one section mounted at a time, and the keys (now ↑/↓ on the sidebar list).
 
 // ── Confirmation dialogs: danger + Enter (task 1683 follow-up, ruling 2026-10-02) ──
 //

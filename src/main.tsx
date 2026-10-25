@@ -16,10 +16,9 @@
  *   • ?window=main-app&platform=windows
  *                                  → Windows main app shell (WindowsApp.tsx) —
  *                                    sidebar + content router hosting the data views
- *   • ?window=settings-v2&platform=macos
- *                                  → the new macOS Settings window (MacSettings.tsx,
- *                                    task 1683 slice 4). Reachable only by this URL until
- *                                    slice 6 flips macOS to it; no window config creates it.
+ *   • ?window=main&platform=macos  → the Beebeeb window on a Mac (MacApp.tsx, task 1683
+ *                                    slice 1): Home and Settings in one window, label `main`,
+ *                                    built on demand from tauri.macos.conf.json.
  *
  * Single HTML entry keeps the bundle layout simple — inactive components are
  * tree-shaken. The tray and main app windows are opened by the Rust side via
@@ -37,12 +36,13 @@ import Onboarding from './Onboarding'
 import WindowsTray from './WindowsTray'
 import WindowsFirstRun from './WindowsFirstRun'
 import WindowsApp from './WindowsApp'
-import MacSettings from './MacSettings'
+import MacApp from './MacApp'
 import { initializeDesktopThemeFromConfig } from './windows/theme'
 import { ToastProvider } from './windows/ui'
 import { CapabilityProvider, CapabilityGate, useCapabilities } from './capabilities'
 import './design.css'
 import './macSettings.css'
+import './macApp.css'
 
 const container = document.getElementById('root')
 if (!container) {
@@ -74,8 +74,8 @@ if (which === 'conflict') {
   component = <HostOnboarding />
 } else if (which === 'main-app' && platform === 'windows') {
   component = <WindowsApp />
-} else if (which === 'settings-v2' && platform === 'macos') {
-  component = <MacSettings />
+} else if (which === 'main' && platform === 'macos') {
+  component = <MacApp />
 } else {
   if (platform === 'macos') {
     // This window also serves as the macOS tray flyout (task 1384). Below

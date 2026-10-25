@@ -5,8 +5,9 @@
 //! Tauri merges `tauri.<platform>.conf.json` into `tauri.conf.json` as an RFC
 //! 7396 JSON Merge Patch (`tauri_utils::config::parse::read_from` calls
 //! `json_patch::merge`), which REPLACES arrays wholesale. That is the whole
-//! reason the macOS config can drop `tray`, `windows-onboarding` and `main-app`
-//! by declaring its own `app.windows`. Only the bundled result needs a Mac.
+//! reason the macOS config drops `tray`, `windows-onboarding` and `main-app` by
+//! declaring its own `app.windows` (two-surface slice 1: `main` alone). Only the
+//! bundled result needs a Mac.
 
 use super::registry::MACOS_LABELS;
 use serde_json::{Value, json};
@@ -43,17 +44,26 @@ fn merged_config(target: &str) -> Value {
     config
 }
 
-// The base config's window list since slice 6 (the Settings flip): the three
-// Windows-shell windows are still declared and created at startup on every
-// platform (the P3 defect the registry-mirroring part of slice 6 owns), plus
-// `macos-settings` — which is `create: false`, so it is declared and
-// capability-covered but built only on demand by the macOS open path.
-const BASE_WINDOWS: [&str; 4] = ["tray", "windows-onboarding", "main-app", "macos-settings"];
+// The base config's window list: the three Windows-shell windows, created at startup on Windows and Linux. The
+// retired `macos-settings` window (two-surface slice 1) is gone from it; macOS replaces the whole list with its own.
+const BASE_WINDOWS: [&str; 3] = ["tray", "windows-onboarding", "main-app"];
+
+/// The one window the macOS config declares (two-surface spec §4, §7.1, slice 1).
+const MACOS_WINDOWS: [&str; 1] = ["main"];
+
+fn window(config: &Value, label: &str) -> Value {
+    config
+        .pointer("/app/windows")
+        .and_then(Value::as_array)
+        .and_then(|ws| ws.iter().find(|w| w.get("label").and_then(Value::as_str) == Some(label)))
+        .cloned()
+        .unwrap_or_else(|| panic!("no window {label}"))
+}
 
 #[test]
 fn the_merge_replaces_arrays_wholesale() {
-    // The semantics slice 6 relies on, proven with a synthetic patch so it does
-    // not depend on what the real macOS file says today.
+    // The semantics the macOS file relies on, proven with a synthetic patch so it does not depend on what the real
+    // macOS file says.
     let mut config = read_json(&manifest_dir().join("tauri.conf.json"));
     assert_eq!(window_labels(&config), BASE_WINDOWS);
     let patch = json!({ "app": { "windows": [ { "label": "popover" } ] } });
@@ -65,24 +75,15 @@ fn the_merge_replaces_arrays_wholesale() {
 }
 
 #[test]
-fn unmerged_config_lists_the_shell_windows_and_the_ondemand_settings_window() {
+fn the_unmerged_config_lists_the_windows_shell_windows_only() {
     let base = read_json(&manifest_dir().join("tauri.conf.json"));
     assert_eq!(window_labels(&base), BASE_WINDOWS);
-    // The Settings window must never be created at startup: it is built on
-    // demand by `show_macos_settings_window` (macOS only).
-    let settings = base
-        .pointer("/app/windows")
-        .and_then(Value::as_array)
-        .and_then(|ws| ws.iter().find(|w| w.get("label").and_then(Value::as_str) == Some("macos-settings")))
-        .and_then(|w| w.get("create"))
-        .and_then(Value::as_bool);
-    assert_eq!(settings, Some(false), "macos-settings must be create: false");
 }
 
 #[test]
 fn windows_and_linux_merge_to_the_unmerged_window_list() {
-    // There is no tauri.windows.conf.json or tauri.linux.conf.json, so their
-    // builds see the base file. If one is added it must not drop these labels.
+    // There is no tauri.windows.conf.json or tauri.linux.conf.json, so their builds see the base file. If one is
+    // added it must not drop these labels.
     for target in ["windows", "linux"] {
         assert_eq!(window_labels(&merged_config(target)), BASE_WINDOWS, "{target}");
     }
@@ -101,24 +102,38 @@ fn only_the_macos_platform_file_exists() {
 }
 
 #[test]
-fn macos_merge_still_creates_the_startup_windows_and_merges_the_platform_file() {
+fn macos_builds_only_the_beebeeb_window_and_only_on_demand() {
+    // Spec §3's cause of the stray Windows shell on a Mac: `main-app`, `tray` and `windows-onboarding` were in the
+    // shared list and built hidden on every platform. The macOS file replaces the list, so a Mac declares `main`
+    // alone, `create: false`, built by `show_main_window` when an opener needs it.
     let merged = merged_config("macos");
-    // The startup-created Windows-shell windows are still in the merged list
-    // on macOS (the P3 defect — the registry-mirroring part of slice 6 owns
-    // it). The added `macos-settings` entry is `create: false`, so the flip
-    // adds no idle webview; it is only ever built on demand.
-    assert_eq!(window_labels(&merged), BASE_WINDOWS);
-    // Prove the real macOS file WAS merged and not silently skipped: its
-    // template-icon patch is visible in the result, and absent from the base.
+    assert_eq!(window_labels(&merged), MACOS_WINDOWS);
+    let main = window(&merged, "main");
+    assert_eq!(main.get("create"), Some(&Value::Bool(false)));
+    assert_eq!(main.get("visible"), Some(&Value::Bool(false)));
+    // Prove the real macOS file WAS merged and not silently skipped: its template-icon patch is visible in the
+    // result, and absent from the base.
     let base = read_json(&manifest_dir().join("tauri.conf.json"));
     assert_eq!(base.pointer("/app/trayIcon/iconAsTemplate"), Some(&Value::Bool(false)));
     assert_eq!(merged.pointer("/app/trayIcon/iconAsTemplate"), Some(&Value::Bool(true)));
 }
 
 #[test]
-#[ignore = "slice 6 (the flip) gives tauri.macos.conf.json its own app.windows; remove this ignore then"]
-fn macos_merge_lists_only_the_popover() {
-    assert_eq!(window_labels(&merged_config("macos")), ["popover"]);
+fn the_beebeeb_window_is_the_size_and_chrome_of_spec_section_7() {
+    let main = window(&merged_config("macos"), "main");
+    let expect = |key: &str, value: Value| assert_eq!(main.get(key), Some(&value), "{key}");
+    expect("url", json!("index.html?window=main&platform=macos"));
+    expect("title", json!("Beebeeb"));
+    expect("width", json!(920));
+    expect("height", json!(620));
+    expect("minWidth", json!(760));
+    expect("minHeight", json!(520));
+    expect("resizable", json!(true));
+    expect("decorations", json!(true));
+    expect("titleBarStyle", json!("Overlay"));
+    expect("hiddenTitle", json!(true));
+    // §7.2: no Beebeeb code positions it but the rule in `place_main_window`; the config never centres it itself.
+    expect("center", json!(false));
 }
 
 // -- capabilities -----------------------------------------------------------
@@ -230,39 +245,44 @@ fn glob_match_behaves() {
 }
 
 #[test]
-fn review_does_not_match_the_conflict_glob() {
-    // Spec section 2: `review` is not covered by `conflict-*`, so it needs its
-    // own capability entry.
-    let (_, patterns) = granted_window_patterns("macOS");
-    assert!(patterns.iter().any(|p| p == "conflict-*"));
-    assert!(!glob_match("conflict-*", "review"));
-}
-
-#[test]
 fn every_window_the_shipping_config_creates_is_covered_on_every_platform() {
-    // tray, windows-onboarding, main-app and the on-demand macos-settings
-    // (config) plus the dynamic conflict-<file_id> windows: a window with no
-    // capability cannot `invoke` or `listen`, and fails silently.
-    // macOS creates the same startup labels today (the P3 defect), so it is
-    // in the loop; a capability file that dropped one of them for macOS must
-    // fail here.
+    // Each platform's config windows plus the windows built in code (the compact `settings` window, `onboarding` and
+    // the `conflict-<file_id>` windows): a window with no capability cannot `invoke` or `listen`, and fails silently.
     for platform in ["macOS", "windows", "linux"] {
-        let mut labels: Vec<&str> = BASE_WINDOWS.to_vec();
-        labels.extend(["settings", "onboarding", "conflict-7f3a-0001"]);
+        let target = if platform == "macOS" { "macos" } else { platform };
+        let config = merged_config(target);
+        let mut labels: Vec<String> = window_labels(&config);
+        labels.extend(["settings", "onboarding", "conflict-7f3a-0001"].map(str::to_owned));
+        let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
         assert_eq!(uncovered(platform, &labels), Vec::<String>::new(), "{platform}");
     }
 }
 
 #[test]
-fn registry_labels_covered_today_are_settings_and_onboarding_only() {
-    // The pinned gap. Slice 6 adds `popover` and `review` to the capability
-    // file, which makes this assertion fail on purpose: delete it then and
-    // un-ignore `every_macos_registry_label_is_covered`.
-    assert_eq!(uncovered("macOS", &MACOS_LABELS), ["popover", "review"]);
+fn the_beebeeb_window_is_granted_on_macos_only() {
+    // `main` is a Mac label; Windows and Linux get no grant for a window they never build.
+    assert_eq!(uncovered("macOS", &["main"]), Vec::<String>::new());
+    for platform in ["windows", "linux"] {
+        assert_eq!(uncovered(platform, &["main"]), ["main"], "{platform}");
+    }
 }
 
 #[test]
-#[ignore = "slice 6 adds capability entries for popover and review; remove this ignore then"]
+fn the_retired_settings_window_is_granted_nowhere() {
+    for platform in ["macOS", "windows", "linux"] {
+        assert_eq!(uncovered(platform, &["macos-settings"]), ["macos-settings"], "{platform}");
+    }
+}
+
+#[test]
+fn registry_labels_covered_today_are_main_only() {
+    // The pinned gap: slice 3 builds the popover and adds its capability, which makes this fail on purpose; delete
+    // it then and un-ignore `every_macos_registry_label_is_covered`.
+    assert_eq!(uncovered("macOS", &MACOS_LABELS), ["popover"]);
+}
+
+#[test]
+#[ignore = "two-surface slice 3 adds the popover window and its capability; remove this ignore then"]
 fn every_macos_registry_label_is_covered() {
     assert_eq!(uncovered("macOS", &MACOS_LABELS), Vec::<String>::new());
 }

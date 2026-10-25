@@ -1,28 +1,32 @@
-//! Pure surface logic for the macOS menu-bar popover redesign (task 1683,
-//! slice 1; spec `docs/specs/2026-09-30-macos-menubar-popover.md`).
+//! Pure surface logic for the macOS app (task 1683): the 30 Sep popover spec
+//! (`docs/specs/2026-09-30-macos-menubar-popover.md`) and, since slice 1 of the
+//! two-surface design (`docs/specs/2026-10-24-macos-two-surface-app.md`), the
+//! popover plus the one Beebeeb window `main`.
 //!
 //! Nothing in here touches a window, an `AppHandle` or the OS. Every decision
-//! the new macOS shell will make is a plain function of plain inputs so it is
-//! compiled and TESTED on Linux CI (the macOS job only runs `cargo check`).
-//! Slice 6 (the flip) wires these into the window code; until then the only
-//! callers in the shipping build are the two platform-neutral policy functions
-//! in [`policy`], which reproduce today's behaviour on every platform.
+//! the macOS shell makes is a plain function of plain inputs so it is compiled
+//! and TESTED on Linux CI (the macOS job only runs `cargo check`). `lib.rs` wires
+//! `policy` (labels, close, the Dock icon, the exit request, the tray's Hide) and
+//! `window_state` (the Beebeeb window's placement); the rest is groundwork for the
+//! popover (slice 3).
 //!
-//! Units: all geometry in [`anchor`] is LOGICAL points with a top-left origin
-//! and y growing down (tao's convention). Converting AppKit's bottom-left
-//! origin, and physical pixels, is the caller's job in slice 6. The one place
-//! physical pixels appear is [`window_state`], because that is what
-//! `tauri-plugin-window-state` stores.
+//! Units: [`anchor`] is in LOGICAL points with a top-left origin and y growing
+//! down (tao's convention). [`window_state`] is in logical points too: on a Mac
+//! tao and tray-icon report positions as points × the scale of the window or
+//! display they belong to, so it divides each display's physical numbers by that
+//! display's own scale, and the Beebeeb window keeps its frame in points (a Mac
+//! does not run the window-state plugin, which stores physical numbers without
+//! their scale).
 //!
 //! | module | spec |
 //! |---|---|
-//! | [`anchor`] | section 6 rule 2, section 9 "Mixed-DPI anchoring", open question 6 |
-//! | [`window_state`] | section 6 rule 8 (window-state v2) |
-//! | [`registry`] | section 2 (window inventory), section 6 rules 3, 6, 7, 10 |
-//! | [`blur_guard`] | section 6 rule 4 |
-//! | [`failure`] | section 7 (one surface per failure) |
-//! | [`phase`] | section 3 "State machine", section 9 "Popover phase" |
-//! | [`policy`] | section 11 (Windows and Linux impact) |
+//! | [`anchor`] | popover spec section 6 rule 2, section 9 "Mixed-DPI anchoring", open question 6 |
+//! | [`window_state`] | two-surface spec §7.2 (where the Beebeeb window opens) |
+//! | [`registry`] | two-surface spec §4 (two surfaces, the visibility rule) |
+//! | [`blur_guard`] | popover spec section 6 rule 4 |
+//! | [`failure`] | popover spec section 7 (one surface per failure) |
+//! | [`phase`] | popover spec section 3 "State machine", section 9 "Popover phase" |
+//! | [`policy`] | popover spec section 11 (Windows and Linux impact); two-surface §4, §7.3, §9.1 |
 //!
 //! `combined_tests` (test-only) drives the registry, the failure reducer and the
 //! phase reducer together: each is correct alone and they can still disagree.

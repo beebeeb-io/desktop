@@ -46,20 +46,31 @@ describe('tabs', () => {
     expect(parseSettingsTab('sync')).toBe('sync')
     expect(parseSettingsTab('SYNC')).toBeNull()
     expect(parseSettingsTab(null)).toBeNull()
-    expect(settingsTabFromSearch('?window=settings-v2&tab=about')).toBe('about')
+    expect(settingsTabFromSearch('?window=main&platform=macos&tab=about')).toBe('about')
     expect(settingsTabFromSearch('?tab=status')).toBe('general')
     expect(settingsTabFromSearch('')).toBe('general')
   })
 
-  test('arrow keys move and wrap, Home and End jump, other keys are left alone', () => {
-    expect(tabAfterKey('general', 'ArrowRight')).toBe('account')
-    expect(tabAfterKey('about', 'ArrowRight')).toBe('general')
-    expect(tabAfterKey('general', 'ArrowLeft')).toBe('about')
-    expect(tabAfterKey('sync', 'ArrowLeft')).toBe('account')
+  // Task 1683 slice 1 (two-surface spec §7.8, ruling 1): the tabs became the Settings sidebar list, so the same
+  // automatic activation, wrap, Home and End run on ↑ and ↓ in place of ← and →, over the list's own order.
+  test('up and down move and wrap, Home and End jump, other keys (left and right included) are left alone', () => {
+    expect(tabAfterKey('general', 'ArrowDown')).toBe('account')
+    expect(tabAfterKey('about', 'ArrowDown')).toBe('general')
+    expect(tabAfterKey('general', 'ArrowUp')).toBe('about')
+    expect(tabAfterKey('sync', 'ArrowUp')).toBe('account')
     expect(tabAfterKey('sync', 'Home')).toBe('general')
     expect(tabAfterKey('sync', 'End')).toBe('about')
     expect(tabAfterKey('sync', 'Enter')).toBeNull()
-    expect(tabAfterKey('sync', 'ArrowDown')).toBeNull()
+    expect(tabAfterKey('sync', 'ArrowRight')).toBeNull()
+    expect(tabAfterKey('sync', 'ArrowLeft')).toBeNull()
+  })
+
+  test('the keys follow the order of the list they are given (the sidebar draws Account first)', () => {
+    const sidebar = ['account', 'general', 'sync', 'about'] as const
+    expect(tabAfterKey('account', 'ArrowDown', sidebar)).toBe('general')
+    expect(tabAfterKey('account', 'ArrowUp', sidebar)).toBe('about')
+    expect(tabAfterKey('sync', 'Home', sidebar)).toBe('account')
+    expect(tabAfterKey('general', 'ArrowUp', ['general', 'about'])).toBe('about')
   })
 })
 
@@ -310,5 +321,14 @@ describe('About', () => {
 
   test('Get help opens the support page the Help menu already uses', () => {
     expect(HELP_URL).toBe('https://beebeeb.io/support')
+  })
+})
+
+describe('the short plan line (the Beebeeb window sidebar, task 1683 slice 1)', () => {
+  test('the plan name only, never a date; nothing without a plan', async () => {
+    const { planShortLine } = await import('../src/macSettingsModel')
+    expect(planShortLine({ plan: 'basic' })).toBe('Basic plan')
+    expect(planShortLine(null)).toBeNull()
+    expect(planShortLine({ plan: '' })).toBeNull()
   })
 })

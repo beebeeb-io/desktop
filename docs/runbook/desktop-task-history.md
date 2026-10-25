@@ -504,3 +504,35 @@ This repo has a knowledge graph at graphify-out/.
 ## Keep shared docs in sync
 
 When you add/change/remove endpoints, types, build commands, or dependencies: update the relevant skill file in `/Users/guuslangelaar/Development/Beebeeb/beebeeb.io/.claude/skills/` (beebeeb-api.md, beebeeb-designs.md, beebeeb-stack.md, beebeeb-dev.md). Other agents depend on these being accurate.
+
+---
+
+<a id="two-surface-slice-1"></a>
+
+## Two-surface slice 1: the Beebeeb window (task 1683, PR #134)
+
+Added 2026-10-25 when PR #134 merged main's distillation. `CLAUDE.md` keeps the evergreen rules ("macOS window
+rules"); this is the slice's narrative as it stood in `CLAUDE.md` on the branch.
+
+A Mac builds one app window, label `main` (`src/MacApp.tsx`, `?window=main&platform=macos`), declared alone in
+`tauri.macos.conf.json` (`create: false`, 920 × 620, minimum 760 × 520, overlay title bar); the macOS file replaces the
+shared window list, so `tray`, `windows-onboarding` and `main-app` are never built on a Mac, and the old
+`macos-settings` window is gone everywhere. Settings is a mode of `main` in System Settings style: the gear, ⌘, and the
+menus swap the one sidebar for the Settings list (back control, account row, General, Sync, About; Security is slice 5),
+and the pane hosts the section bodies of `src/MacSettings.tsx` unchanged. Every opener goes through
+`show_main_window(app, MainNav)` in `lib.rs`: it stores ONE pending request, emits `main:navigate`, and the window pulls
+it with `consume_main_navigation` (also once when it mounts). `src/mainWindowModel.ts` `navigate` is the only place a
+request becomes a view; while a sheet is open nothing navigates, and the window's `main_window_state` makes Rust disable
+View › Home, View › Back, Settings… and Check for Updates… (§8.2). Closing `main` destroys it
+(`surfaces::policy::close_policy`) and the app keeps running (`keep_running_on_exit_request` in the run loop); opening
+the app again (`RunEvent::Reopen`) brings it back, and every opener unhides the app first; every
+other label still hides. A Mac does not run the window-state plugin (it stores physical numbers without their scale,
+wrong on a mixed-DPI desk): `save_main_window_frame` keeps `main`'s frame in logical points in
+`main-window-frame.json` (never a full-screen or zoomed one), and `place_main_window` plans from it, centring on the
+menu-bar icon's display and re-centring a frame less than half on screen (`surfaces::window_state`). The Dock
+icon follows `surfaces::policy::dock_icon_wanted` (`main` while it exists; onboarding and conflict windows while shown).
+The macOS menu is `MACOS_MENU_SPECS` + `MACOS_MENU_LAYOUT` (Windows and Linux keep `DESKTOP_MENU_SPECS`). 1887's sign-out
+flow owner is `main`. Until slice 3 the tray click still shows the compact flyout (label `settings`,
+`surfaces::policy::compact_window_label`); until slice 2 sign-in is still the `onboarding` window, which the signed-out
+card in `main` opens. Tests: `tests/mainWindowModel.test.ts`, `tests/macApp.test.tsx`, `surfaces::{policy, registry,
+window_state, config_tests}`, `main_window_tests` in `lib.rs`; Chromium: `tests/render-mac-app.mjs`.

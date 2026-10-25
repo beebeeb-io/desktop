@@ -61,6 +61,17 @@ const ICON_PATHS: Record<string, ReactNode> = {
     </>
   ),
   check: <path d="M20 6 9 17l-5-5" />,
+  // The Beebeeb window's own icons (task 1683 slice 1), drawn on design/hifi/macos-two-surface.html's 20-unit grid.
+  home: <path transform="scale(1.2)" d="M3.5 9.2L10 3.5l6.5 5.7v7.3a1 1 0 0 1-1 1h-3.3v-5h-4.4v5H4.5a1 1 0 0 1-1-1z" />,
+  gear: (
+    <g transform="scale(1.2)">
+      <circle cx="10" cy="10" r="2.6" />
+      <path d="M10 1.9v2.3M10 15.8v2.3M1.9 10h2.3M15.8 10h2.3M4.3 4.3l1.6 1.6M14.1 14.1l1.6 1.6M4.3 15.7l1.6-1.6M14.1 5.9l1.6-1.6" />
+      <circle cx="10" cy="10" r="5.6" />
+    </g>
+  ),
+  folder: <path transform="scale(1.2)" d="M2.5 6.2A1.7 1.7 0 0 1 4.2 4.5h3.3l1.7 1.9h6.6a1.7 1.7 0 0 1 1.7 1.7v6.7a1.7 1.7 0 0 1-1.7 1.7H4.2a1.7 1.7 0 0 1-1.7-1.7z" />,
+  back: <path transform="scale(1.2)" d="M12.5 4.5L7 10l5.5 5.5" />,
   chevDown: <path d="m6 9 6 6 6-6" />,
   alert: (
     <>

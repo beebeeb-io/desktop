@@ -148,10 +148,11 @@ describe('the mixed pages take the reconciler from useFinderSetup and never run 
  * null root disables "Open folder" and sends no command, so the tray cannot reach it on a Mac.)
  */
 describe('a failed Open in Finder on a Mac is mapped once (task 17b)', () => {
-  test('both macOS call sites take the toast from finderOpenFailedToast and never write the sentence themselves', () => {
+  test('every macOS call site takes the toast from finderOpenFailedToast and never writes the sentence itself', () => {
     for (const [file, fn] of [
       ['pages/SyncFolder.tsx', 'SyncFolder'],
       ['WindowsApp.tsx', 'SyncFolderCard'],
+      ['MacApp.tsx', 'HomePane'],
     ] as const) {
       const body = functionText(file, fn)
       expect(body).toContain('finderOpenFailedToast()')
@@ -205,6 +206,10 @@ describe('the sweep: every call site of a Finder command, and what it does with 
   test('call sites: the pinned count of invocations per file and command', () => {
     expect(column((group) => group.length)).toEqual({
       'DesktopQuickSearch.tsx | open_in_finder': 1,
+      // Task 1683 slice 1: Home in the Beebeeb window. Its Open in Finder takes the toast from finderOpenFailedToast and
+      // never reads the reason; its notice's action discards finder.run's result (both checked below).
+      'MacApp.tsx | finder.run': 1,
+      'MacApp.tsx | open_finder_location': 1,
       'MacSettings.tsx | finder.run': 1,
       'MacSettings.tsx | reset_macos_integration': 1,
       'Onboarding.tsx | finder.run': 1,
@@ -231,6 +236,7 @@ describe('the sweep: every call site of a Finder command, and what it does with 
     )
     expect(literals).toEqual({
       'DesktopQuickSearch.tsx': { open_in_finder: 2 },
+      'MacApp.tsx': { open_finder_location: 1 },
       'MacSettings.tsx': { reset_macos_integration: 1 },
       'WindowsApp.tsx': { open_finder_location: 2 },
       'WindowsTray.tsx': { open_finder_location: 1 },
@@ -333,7 +339,7 @@ describe('the sweep: every call site of a Finder command, and what it does with 
 
   test('nothing reads the result of finder.run: it is discarded or handed to an event handler that discards it', () => {
     const runs = sites.filter((site) => site.family === 'finder.run')
-    expect(runs).toHaveLength(4)
+    expect(runs).toHaveLength(5)
     for (const run of runs) expect(['returned', 'discarded']).toContain(run.consumption)
   })
 

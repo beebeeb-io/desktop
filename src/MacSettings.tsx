@@ -1,25 +1,20 @@
 /**
- * The macOS Settings window (task 1683 slice 4; spec
- * `docs/specs/2026-09-30-macos-menubar-popover.md` section 5, artboards j, k, l, m).
+ * The macOS Settings sections (task 1683 slice 4; spec `docs/specs/2026-09-30-macos-menubar-popover.md` section 5),
+ * hosted since task 1683 slice 1 by the Settings pane of the one Beebeeb window (`MacApp.tsx`; spec
+ * `docs/specs/2026-10-24-macos-two-surface-app.md` §7.8, System Settings style). The bodies are the shipped ones,
+ * unchanged: only the toolbar tab strip went, replaced by the window's sidebar list, and 1887's flow object and its
+ * listeners moved up to the window's shell.
  *
- * One window, four tabs (General, Account, Sync, About), sized to its content. It replaces the
- * 680 x 540 sidebar window whose layout broke in screenshot 3. It is mounted ONLY at
- * `?window=settings-v2&platform=macos` (main.tsx) until slice 6 flips macOS to it; no config
- * creates a window for it yet, so nothing a user sees today changes.
+ * Layout contract (spec section 8; `macSettings.css`, pinned by tests/macSettingsLayout.test.ts and the Chromium run
+ * in tests/render-mac-settings.mjs): only the content pane scrolls; grid tracks are `minmax(0, 1fr)`; every flex text
+ * block is `min-width: 0`; text that can hold user data wraps anywhere.
  *
- * Layout contract (spec section 8; `macSettings.css`, pinned by tests/macSettingsLayout.test.ts
- * and the Chromium run in tests/render-mac-settings.mjs): the shell is `height: 100vh;
- * overflow: hidden` and only the content pane scrolls; grid tracks are `minmax(0, 1fr)`; every
- * flex text block is `min-width: 0`; text that can hold user data wraps anywhere.
+ * One failure, one surface (spec section 7): a Finder failure is the inline block under its row, never also a toast;
+ * the manual update check answers inline in its own row because this window does not mount the update toast. A
+ * one-off action that gates nothing (a switch that did not save, a failed lock) is a toast, as the house rule says.
  *
- * One failure, one surface (spec section 7): a Finder failure is the inline block under its
- * row, never also a toast; the manual update check answers inline in its own row because this
- * window does not mount the update toast. A one-off action that gates nothing (a switch that
- * did not save, a failed lock) is a toast, as the house rule says.
- *
- * The components are plain function declarations that read only their props, hooks and the
- * bindings imported above, so `tests/macSettingsTabs.test.tsx` can execute them with the
- * component harness and read what a user would read.
+ * The components are plain function declarations that read only their props, hooks and the bindings imported above,
+ * so `tests/macSettingsTabs.test.tsx` can execute them with the component harness and read what a user would read.
  */
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type KeyboardEvent } from 'react'
 import {
@@ -39,7 +34,7 @@ import {
 } from './desktopApi'
 import type { PopoverSnapshot } from './popoverContract'
 import { clearSignOutWarning, heldSignOutWarning, holdSignOutWarning, subscribeSignOutWarning } from './accountSession'
-import { subscribeKeptFolderChanged, useFinderSetup } from './finderSetup'
+import { useFinderSetup } from './finderSetup'
 import { finderActionButtonLabel } from './finderSetupCopy'
 import { SUPPORT_BUNDLE_DETAIL, SUPPORT_BUNDLE_SAVED_TITLE, supportBundleSavedMessage, type ProblemReportResult } from './diagnosticsCopy'
 import {
@@ -49,8 +44,6 @@ import {
   HELP_URL,
   keepCountLabel,
   keepOnMac,
-  KEPT_FOLDER_ROW_SENTENCE,
-  keptFolderAfterDismiss,
   monoReason,
   NOTIFICATION_ROWS,
   planLine,
@@ -58,14 +51,9 @@ import {
   REPAIR_BODY,
   REPAIR_TITLE,
   repairNote,
-  SETTINGS_TABS,
-  settingsTabFromLocation,
   speedOptions,
   storageLine,
-  tabAfterKey,
   updateRow,
-  type DismissKeptFolderResult,
-  type SettingsTab,
 } from './macSettingsModel'
 import { Btn, Note, Select, SettingRow, SettingsGroup, SettingsIcon, Switch, ToggleRow } from './macSettingsParts'
 import {
@@ -73,10 +61,6 @@ import {
   ASK_CANCEL,
   ASK_SIGN_OUT,
   askLines,
-  K2_DISMISS,
-  K2_ROW,
-  K2_SHOW,
-  K3_TOAST,
   P0_TITLE,
   P2_HINT,
   P3_STOP,
@@ -86,12 +70,12 @@ import {
   type EndReason,
   type NotSending,
 } from './signOutCopy'
-import { connectSignOutFlowEvents, connectSignOutFlowMenu, SignOutFlow, signOutFlowApi, type FlowOutcome, type FlowView } from './signOutFlow'
+import { SignOutFlow, type FlowOutcome, type FlowView } from './signOutFlow'
 import { residencySummary } from './windows/dataResidencySettingsModel'
 import { useDataResidency } from './windows/useDataResidency'
+import { KeptFolderNotes, useKeptFolders } from './keptFolderRows'
 import { Modal, useToast } from './windows/ui'
-import { listen } from '@tauri-apps/api/event'
-import { connectNativeUpdateMenu, desktopUpdateCheck } from './windows/manualUpdateCheck'
+import { desktopUpdateCheck } from './windows/manualUpdateCheck'
 
 // ── Shared state: the desktop config ────────────────────────────────────────
 
@@ -114,7 +98,7 @@ export interface SettingsConfig {
  * not what was clicked; the changes still queued behind the failure are applied on top of what that read found, so
  * a later change survives an earlier one failing.
  */
-function useSettingsConfig(): SettingsConfig {
+export function useSettingsConfig(): SettingsConfig {
   const { showToast } = useToast()
   const [state, setState] = useState<ConfigState>({ status: 'loading' })
   const latest = useRef<DesktopConfig | null>(null)
@@ -195,7 +179,7 @@ function ConfigLoadFailed({ onRetry }: { onRetry: () => void }) {
 
 // ── General ─────────────────────────────────────────────────────────────────
 
-function GeneralTab({ settings }: { settings: SettingsConfig }) {
+export function GeneralTab({ settings }: { settings: SettingsConfig }) {
   const { showToast } = useToast()
   const [login, setLogin] = useState<boolean | null>(null)
   const [loginUnreadable, setLoginUnreadable] = useState(false)
@@ -383,7 +367,7 @@ type AccountBusy = 'lock_vault' | 'unlock_vault' | null
  * The sign-out runs through the window's one flow (spec 2026-10-10 §5.1), which the root owns and hands in with its
  * view and a count of its outcomes: this tab mounts on every visit, so it builds no flow and consumes no request.
  */
-function AccountTab({ flow, flowView, flowOutcomes }: { flow: SignOutFlow; flowView: FlowView; flowOutcomes: number }) {
+export function AccountTab({ flow, flowView, flowOutcomes }: { flow: SignOutFlow; flowView: FlowView; flowOutcomes: number }) {
   const { showToast } = useToast()
   const [load, setLoad] = useState<AccountLoad>({ status: 'loading' })
   const [plan, setPlan] = useState<Subscription | null | undefined>(undefined)
@@ -705,7 +689,7 @@ function UnsentAskSheet({ ask, reason, onCancel, onSignOut }: { ask: AskCounts; 
 
 type RepairPhase = 'idle' | 'confirming' | 'busy'
 
-function SyncTab({ settings }: { settings: SettingsConfig }) {
+export function SyncTab({ settings }: { settings: SettingsConfig }) {
   const { showToast } = useToast()
   // The Finder row is the reconciler's state, read and followed by the one shared hook (lead
   // ruling 7b): it loads, follows `finder-setup-changed` (no polling), and toasts a failed ACTION.
@@ -715,12 +699,6 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
   const [repair, setRepair] = useState<RepairPhase>('idle')
   const [repairFailed, setRepairFailed] = useState(false)
   const [repairResult, setRepairResult] = useState<string | null>(null)
-  // Task 1882 round 2 (review I2, lead ruling): where macOS last kept Finder files that had not
-  // reached the server, after a sign-out, a Repair, another reconciler removal or the app-start sweep. Rust
-  // saves it in desktop.toml; this row shows it until the person dismisses it, so a tab switch,
-  // closing Settings or a restart cannot lose it. Rebase re-review I2: Rust says when it saved one
-  // (`kept-folder-changed`), and the row reads it again then.
-  const [kept, setKept] = useState<string | null>(null)
   const [tree, setTree] = useState<VaultItem[] | null>(null)
   const [treeLoadFailed, setTreeLoadFailed] = useState(false)
   const [chooser, setChooser] = useState(false)
@@ -733,73 +711,14 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
     else setTreeLoadFailed(true)
   }, [])
 
-  // A failed read shows no row: the folder stays saved, and the next open shows it again.
-  const loadKept = useCallback(async () => {
-    const result = await command<string | null>('kept_unsynced_folder')
-    const note = result.ok ? preservedFilesNote({ preserved_location: result.value }) : null
-    setKept(note ? note.path : null)
-  }, [])
-
   useEffect(() => {
     void loadTree()
   }, [loadTree])
 
-  // Rebase re-review I2: a removal the reconciler runs in the background (its Try again can start an owed one, and
-  // one can finish after the reconciler's time limit) saves the folder long after this tab opened. Rust then emits
-  // `kept-folder-changed`, and the row reads the folder again. The first read waits for the listener, so a folder
-  // saved between the two is not missed.
-  useEffect(
-    () => subscribeKeptFolderChanged(() => void loadKept(), { onSubscribed: () => void loadKept() }),
-    [loadKept],
-  )
-
-  // Spec 2026-10-10 §9: the folder a sign-out copied unsent changes into. Our row comes first; 1882's follows. Rust
-  // saves it before the purge and emits `kept-folder-changed`; a failed read shows no row, as 1882's.
-  const [keptUnsent, setKeptUnsent] = useState<string | null>(null)
-  const loadKeptUnsent = useCallback(async () => {
-    const result = await command<string | null>('kept_unsent_folder')
-    setKeptUnsent(result.ok ? result.value : null)
-  }, [])
-  useEffect(
-    () => subscribeKeptFolderChanged(() => void loadKeptUnsent(), { onSubscribed: () => void loadKeptUnsent() }),
-    [loadKeptUnsent],
-  )
-  // "Show in Finder" fails only when the folder is gone (K3); the row stays until Dismiss.
-  const showKeptUnsent = async () => {
-    if (keptUnsent === null) return
-    const result = await command<void>('show_kept_unsent_folder', { path: keptUnsent })
-    if (!result.ok) showToast({ variant: 'error', message: K3_TOAST })
-  }
-  const dismissKeptUnsent = async () => {
-    if (keptUnsent === null) return
-    const result = await command<DismissKeptFolderResult>('dismiss_kept_unsent_folder', { path: keptUnsent })
-    if (!result.ok) {
-      showToast({
-        variant: 'error',
-        title: 'Couldn’t dismiss that note',
-        message: result.unsupported ? commandUnavailableLabel('dismiss_kept_unsent_folder') : result.reason,
-      })
-      return
-    }
-    setKeptUnsent(keptFolderAfterDismiss(result.value))
-  }
-
-  // A one-off action that gates nothing: a failure is a toast (house rule), and the row stays.
-  const dismissKept = async () => {
-    if (kept === null) return
-    const result = await command<DismissKeptFolderResult>('dismiss_kept_unsynced_folder', { path: kept })
-    if (!result.ok) {
-      showToast({
-        variant: 'error',
-        title: 'Couldn’t dismiss that note',
-        message: result.unsupported ? commandUnavailableLabel('dismiss_kept_unsynced_folder') : result.reason,
-      })
-      return
-    }
-    // 1882 r5: the row goes only if Rust cleared the folder it showed. If a newer folder was kept
-    // since the row was drawn, nothing was dismissed, and the row shows the newer one.
-    setKept(keptFolderAfterDismiss(result.value))
-  }
+  // Task 1882 and task 1887: the two "files were kept" rows. One hook and one component, shared with Home's "Needs your
+  // attention" (two-surface spec §8.3), so both read the same state and a dismiss in either place clears both.
+  const keptFolders = useKeptFolders()
+  const { loadKept, setKept } = keptFolders
 
   const runRepair = async () => {
     setRepair('busy')
@@ -919,31 +838,7 @@ function SyncTab({ settings }: { settings: SettingsConfig }) {
           </Note>
         ) : null}
         {repairResult ? <Note kind="status">{repairResult}</Note> : null}
-        {keptUnsent !== null ? (
-          <Note
-            kind="status"
-            reason={keptUnsent}
-            reasonWraps
-            actions={
-              <>
-                <Btn onClick={() => void showKeptUnsent()}>{K2_SHOW}</Btn>
-                <Btn onClick={() => void dismissKeptUnsent()}>{K2_DISMISS}</Btn>
-              </>
-            }
-          >
-            {K2_ROW}
-          </Note>
-        ) : null}
-        {kept !== null ? (
-          <Note
-            kind="status"
-            reason={kept}
-            reasonWraps
-            actions={<Btn onClick={() => void dismissKept()}>Dismiss</Btn>}
-          >
-            {KEPT_FOLDER_ROW_SENTENCE}
-          </Note>
-        ) : null}
+        <KeptFolderNotes folders={keptFolders} />
         <SettingRow
           name="keep"
           tall
@@ -1035,7 +930,7 @@ function withPinned(items: VaultItem[], id: string, pinned: boolean): VaultItem[
 
 // ── About ───────────────────────────────────────────────────────────────────
 
-function AboutTab() {
+export function AboutTab() {
   const { showToast } = useToast()
   const update = useSyncExternalStore(desktopUpdateCheck.subscribe, desktopUpdateCheck.getSnapshot, desktopUpdateCheck.getSnapshot)
   const [version, setVersion] = useState<string | null>(null)
@@ -1140,101 +1035,10 @@ function AboutTab() {
 
 /** How the window shows a sign-out's outcome (§5.1): a failure as one toast, its code stripped (§11); a completed
  *  sign-out's warning held for the Account tab's note, outside the session boundary (accountSession.ts). */
-function showSignOutOutcome(outcome: FlowOutcome, showToast: (toast: { variant: 'error'; title: string; message: string }) => void) {
+export function showSignOutOutcome(outcome: FlowOutcome, showToast: (toast: { variant: 'error'; title: string; message: string }) => void) {
   if (outcome.kind === 'failed') {
     showToast({ variant: 'error', title: 'Couldn’t sign out', message: stripCode(outcome.message) })
   } else {
     holdSignOutWarning(outcome.warning)
   }
-}
-
-export default function MacSettings({ initialTab }: { initialTab?: SettingsTab }) {
-  const settings = useSettingsConfig()
-  // A remount after a sign-out that left a sentence opens on the Account tab, where it is shown (accountSession.ts).
-  const [tab, setTab] = useState<SettingsTab>(() => initialTab ?? (heldSignOutWarning() !== null ? 'account' : settingsTabFromLocation()))
-  // And a sentence that becomes held after this window mounted brings it to the Account tab too: the boundary's
-  // remount and the sign-out's answer arrive in either order.
-  const signOutNote = useSyncExternalStore(subscribeSignOutWarning, heldSignOutWarning, heldSignOutWarning)
-  const seenSignOutNote = useRef(signOutNote)
-  useEffect(() => {
-    if (signOutNote === seenSignOutNote.current) return
-    seenSignOutNote.current = signOutNote
-    if (signOutNote !== null) setTab('account')
-  }, [signOutNote])
-
-  // Slice 6: this window is the surface the native "Check for updates…" menu item opens on
-  // macOS, so it drains the pending request itself and answers inline in the About tab's row
-  // (it mounts no ManualUpdateFeedback toast). A consumed request also lands the window on
-  // the About tab — that is where the progress and result are rendered; a plain open
-  // consumes false and keeps the General tab.
-  useEffect(() => connectNativeUpdateMenu(
-    (callback) => listen('menu:check-for-updates', callback),
-    async () => {
-      const result = await command<boolean>('consume_menu_update_check')
-      if (result.ok && result.value) setTab('about')
-      return result
-    },
-    desktopUpdateCheck.check,
-  ), [])
-
-  // Spec 2026-10-10 §5.1 and F9: the sign-out flow and its pending request live here, not in the Account tab, which
-  // mounts only while it is selected. A flow it owned would be new at every return to the tab, and a request it had
-  // handled would run again. The menu and the compact page hand this window a request; it runs once.
-  const { showToast } = useToast()
-  const showToastRef = useRef(showToast)
-  showToastRef.current = showToast
-  const [flowView, setFlowView] = useState<FlowView>({ kind: 'idle' })
-  const [flowOutcomes, setFlowOutcomes] = useState(0)
-  const flowRef = useRef<SignOutFlow | null>(null)
-  if (flowRef.current === null) {
-    flowRef.current = new SignOutFlow(signOutFlowApi, setFlowView, (outcome) => {
-      showSignOutOutcome(outcome, (toast) => showToastRef.current(toast))
-      setFlowOutcomes((n) => n + 1)
-    })
-  }
-  const flow = flowRef.current
-  useEffect(() => connectSignOutFlowEvents(listen, flow), [flow])
-  useEffect(() => connectSignOutFlowMenu(listen, () => command<boolean>('consume_sign_out_flow_request'), () => {
-    setTab('account')
-    void flow.request()
-  }), [flow])
-
-  const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    const next = tabAfterKey(tab, event.key)
-    if (next === null) return
-    event.preventDefault()
-    setTab(next)
-    if (typeof document !== 'undefined') document.getElementById(`ms-tab-${next}`)?.focus()
-  }
-
-  return (
-    <div className="ms-shell">
-      {/* The toolbar is the window's drag handle (the macOS window is meant to use an overlay
-          title bar, so the native traffic lights sit at its left). The tabs inside stay clickable. */}
-      <div className="ms-toolbar" data-tauri-drag-region role="tablist" aria-label="Settings" tabIndex={-1} onKeyDown={onKeyDown}>
-        {SETTINGS_TABS.map((entry) => (
-          <button
-            key={entry.id}
-            type="button"
-            role="tab"
-            id={`ms-tab-${entry.id}`}
-            className="ms-tab"
-            aria-selected={tab === entry.id}
-            aria-controls="ms-panel"
-            tabIndex={tab === entry.id ? 0 : -1}
-            onClick={() => setTab(entry.id)}
-          >
-            <SettingsIcon name={entry.icon} size={20} strokeWidth={1.5} />
-            {entry.label}
-          </button>
-        ))}
-      </div>
-      <div className="ms-pane" id="ms-panel" role="tabpanel" aria-labelledby={`ms-tab-${tab}`} tabIndex={0}>
-        {tab === 'general' ? <GeneralTab settings={settings} /> : null}
-        {tab === 'account' ? <AccountTab flow={flow} flowView={flowView} flowOutcomes={flowOutcomes} /> : null}
-        {tab === 'sync' ? <SyncTab settings={settings} /> : null}
-        {tab === 'about' ? <AboutTab /> : null}
-      </div>
-    </div>
-  )
 }

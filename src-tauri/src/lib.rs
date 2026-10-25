@@ -4087,15 +4087,16 @@ fn take_sign_out_flow_request(sign_out: &sign_out::SignOutState) -> bool {
     sign_out.flow_request.swap(false, Ordering::SeqCst)
 }
 
-/// Entry points 2 and 5: store the request, open Settings, and tell it (it also consumes on mount).
+/// Entry points 2 and 5: store the request, open the Beebeeb window on Settings › Account (task 1683 slice 1,
+/// two-surface spec §8.1), and tell it (it also consumes on mount).
 #[cfg(target_os = "macos")]
 fn open_sign_out_flow(app: &tauri::AppHandle) {
     app.state::<AppState>()
         .sign_out
         .flow_request
         .store(true, Ordering::SeqCst);
-    show_macos_settings_window(app);
-    let _ = app.emit_to("macos-settings", "menu:sign-out-flow", ());
+    show_main_window(app, MainNav::settings(Some("account")));
+    let _ = app.emit_to("main", "menu:sign-out-flow", ());
 }
 
 #[cfg(target_os = "macos")]
@@ -10265,7 +10266,28 @@ fn get_desktop_config() -> Result<config::DesktopSettings, String> {
 /// `pick_sync_root` or any other writer cannot race away a change between
 /// this load and save.
 #[tauri::command]
-fn set_desktop_config(config: config::DesktopSettings) -> Result<(), String> {
+async fn set_desktop_config(app: tauri::AppHandle, config: config::DesktopSettings) -> Result<(), String> {
+    apply_desktop_settings(&app, config).await
+}
+
+/// A settings write. Every field but the pause is merged into the file in one update; a pause (the compact flyout's
+/// Network page sends one) goes the way the menu's and the tray's go, `set_sync_paused`, so the file, the engine's
+/// flag, the engine-status event and the menu's label agree (task 1683 slice 1, review round 2 P2-3). A write without
+/// a pause touches neither the pause nor the label.
+async fn apply_desktop_settings(
+    app: &tauri::AppHandle<impl tauri::Runtime>,
+    mut config: config::DesktopSettings,
+) -> Result<(), String> {
+    let pause = config.pause_sync.take();
+    save_desktop_settings(config)?;
+    if let Some(paused) = pause {
+        set_sync_paused(app, paused).await?;
+    }
+    Ok(())
+}
+
+/// The write behind `set_desktop_config`: one update under the config-write lock (task 1889).
+fn save_desktop_settings(config: config::DesktopSettings) -> Result<(), String> {
     DesktopConfig::update(|cfg| {
         cfg.apply_settings(config);
         (true, ())
@@ -10479,11 +10501,14 @@ fn rehydrate_sync_paused(flag: &AtomicBool, fallback: bool) {
     }
 }
 
-async fn set_sync_paused(app: &tauri::AppHandle, paused: bool) -> Result<(), String> {
+async fn set_sync_paused(app: &tauri::AppHandle<impl tauri::Runtime>, paused: bool) -> Result<(), String> {
     let state = app.state::<AppState>();
     let acct = state.active_account()?;
     // Persist so the paused state survives a restart.
-    persist_sync_paused_at(&DesktopConfig::path()?, &acct.sync_paused, paused)?;
+    let persisted = persist_sync_paused_at(&DesktopConfig::path()?, &acct.sync_paused, paused);
+    // Two-surface F3: the menu's "Pause Sync" / "Resume Sync" follows what the file now says, also after a failure.
+    pause_state_changed(app);
+    persisted?;
     // Notify the WebView + tray tooltip listener.
     let event_state = if paused { "paused" } else { "idle" };
     let _ = app.emit("engine-status", serde_json::json!({ "state": event_state }));
@@ -13979,189 +14004,363 @@ fn valid_macos_tray_scale_factor(scale_factor: f64) -> f64 {
     }
 }
 
-// ── slice 6: the real macOS Settings window ────────────────────────────────
+// ── The Beebeeb window on a Mac (task 1683 slice 1) ──────────────────────────
 //
-// The redesigned Settings window (task 1683 slice 4, `?window=settings-v2`)
-// was dev-URL-only until this slice: no window config opened it, so the
-// Preferences/Settings menu items still opened the legacy compact app window.
-// This is the flip: a configured, on-demand-built window with an overlay
-// title bar (the `.ms-toolbar` is the drag region; the traffic lights sit at
-// its left), opened top-right under the menu bar on the tray icon's display.
-//
-// `create: false` in tauri.conf.json keeps it off every platform's startup
-// set — nothing builds it except the macOS open path below, so Windows and
-// Linux never see a webview for it.
+// Two-surface spec `docs/specs/2026-10-24-macos-two-surface-app.md` §4, §7, §9: one window, label `main`, built on
+// demand from `tauri.macos.conf.json` (`create: false`) and destroyed when closed (`surfaces::policy::close_policy`).
+// It replaced the anchored Settings window (`macos-settings`), whose placement code retired with it. Every opener
+// shows and focuses the one window and navigates it through one request: Rust stores the latest `MainNav`, emits
+// `main:navigate`, and the window pulls it with `consume_main_navigation`. The window also pulls once as soon as it
+// listens, so a window built for the request still gets it.
 
-/// Logical width of the real macOS Settings window (the harness renders it
-/// at 560; see `tests/render-mac-settings.mjs`).
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-const MACOS_SETTINGS_V2_WIDTH: f64 = 560.0;
+/// The event that tells the Beebeeb window a request is waiting (`src/mainWindowModel.ts` `MAIN_NAVIGATE_EVENT`).
+const MAIN_NAVIGATE_EVENT: &str = "main:navigate";
 
-/// Pure anchor math for the Settings window: right-aligns the window's edge
-/// with the status item's right edge (the design's "top-right under the menu
-/// bar") and puts its top edge `MACOS_TRAY_FLYOUT_GAP` points below the
-/// icon's bottom edge, clamped so it never runs off either edge of the
-/// containing monitor. Same units and scale handling as
-/// `macos_tray_flyout_position`; pass `f64::NEG_INFINITY`/`f64::INFINITY`
-/// for the screen bounds to skip clamping.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn macos_settings_window_position(
-    icon_x: f64,
-    icon_y: f64,
-    icon_width: f64,
-    icon_height: f64,
-    window_width_logical: f64,
-    scale_factor: f64,
-    screen_min_x: f64,
-    screen_max_x: f64,
-) -> tauri::PhysicalPosition<i32> {
-    let scale_factor = valid_macos_tray_scale_factor(scale_factor);
-    let physical_window_width = window_width_logical * scale_factor;
-    let physical_gap = MACOS_TRAY_FLYOUT_GAP as f64 * scale_factor;
+/// One request to the Beebeeb window, serialised as `src/mainWindowModel.ts`'s `MainNav` reads it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "to", rename_all = "lowercase")]
+enum MainNav {
+    /// Home, and out of Settings (⌘1).
+    Home,
+    /// Settings on a section (`account`, `general`, `sync`, `about`); `None` opens the last section used in this
+    /// window, else General (§7.8).
+    Settings { section: Option<&'static str> },
+    /// Out of Settings, to where it was entered from (⌘[, View › Back).
+    Back,
+}
 
-    let ideal_x = icon_x + icon_width - physical_window_width;
-    let max_x = (screen_max_x - physical_window_width).max(screen_min_x);
-
-    tauri::PhysicalPosition {
-        x: ideal_x.clamp(screen_min_x, max_x).round() as i32,
-        y: (icon_y + icon_height + physical_gap).round() as i32,
+impl MainNav {
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    const fn settings(section: Option<&'static str>) -> MainNav {
+        MainNav::Settings { section }
     }
 }
 
-/// Resolves the Settings window's anchor from the tray icon's current rect
-/// (queried on demand, not from a click event — Settings opens from the app
-/// menu, which has no icon rect). Same monitor/scale resolution as
-/// `macos_tray_flyout_anchor`; `None` means "no tray icon and no scale
-/// factor" and the caller degrades to centering.
-#[cfg(target_os = "macos")]
-fn macos_settings_anchor(app: &tauri::AppHandle) -> Option<tauri::PhysicalPosition<i32>> {
-    let rect = app.tray_by_id("tray")?.rect().ok().flatten()?;
-    let provisional = rect.position.to_physical::<f64>(1.0);
-    let monitor = macos_monitor_containing_physical_point(app, provisional.x, provisional.y);
+/// The latest request, kept until the window pulls it: one slot, so a burst of openers lands on the last one.
+static MAIN_NAV_PENDING: std::sync::Mutex<Option<MainNav>> = std::sync::Mutex::new(None);
 
-    let scale_factor = match monitor
-        .as_ref()
-        .map(|m| m.scale_factor())
-        .filter(|s| s.is_finite() && *s > 0.0)
-    {
-        Some(scale_factor) => scale_factor,
-        None => {
-            let primary_scale = app
-                .primary_monitor()
-                .ok()
-                .flatten()
-                .map(|m| m.scale_factor())
-                .filter(|s| s.is_finite() && *s > 0.0);
-            match primary_scale {
-                Some(scale_factor) => {
-                    tracing::warn!(
-                        icon_x = provisional.x,
-                        icon_y = provisional.y,
-                        scale_factor,
-                        "macos settings window: no monitor found under the tray icon; falling back to the primary monitor's scale factor"
-                    );
-                    scale_factor
-                }
-                None => {
-                    tracing::warn!(
-                        icon_x = provisional.x,
-                        icon_y = provisional.y,
-                        "macos settings window: no monitor and no primary-monitor scale factor available; falling back to 1.0 (window may mis-position)"
-                    );
-                    1.0
-                }
-            }
-        }
-    };
-
-    let icon_position = rect.position.to_physical::<f64>(scale_factor);
-    let icon_size = rect.size.to_physical::<f64>(scale_factor);
-    let (screen_min_x, screen_max_x) = match &monitor {
-        Some(m) => {
-            let position = m.position();
-            let size = m.size();
-            (position.x as f64, position.x as f64 + size.width as f64)
-        }
-        None => (f64::NEG_INFINITY, f64::INFINITY),
-    };
-
-    let result = macos_settings_window_position(
-        icon_position.x,
-        icon_position.y,
-        icon_size.width,
-        icon_size.height,
-        MACOS_SETTINGS_V2_WIDTH,
-        scale_factor,
-        screen_min_x,
-        screen_max_x,
-    );
-
-    tracing::info!(
-        icon_x = icon_position.x,
-        icon_y = icon_position.y,
-        scale_factor,
-        monitor_found = monitor.is_some(),
-        result_x = result.x,
-        result_y = result.y,
-        "macos settings window: computed anchor position"
-    );
-    Some(result)
+fn store_main_nav(slot: &std::sync::Mutex<Option<MainNav>>, nav: MainNav) {
+    *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(nav);
 }
 
-/// Opens (or focuses) the real macOS Settings window. The window never
-/// remembers its position: every open re-anchors it under the tray icon
-/// (top-right, on the icon's display). Built on demand from its
-/// `tauri.conf.json` entry (`create: false`), so no idle webview exists
-/// before the first open.
-#[cfg(target_os = "macos")]
-fn show_macos_settings_window(app: &tauri::AppHandle) {
-    const LABEL: &str = "macos-settings";
+fn take_main_nav(slot: &std::sync::Mutex<Option<MainNav>>, label: &str) -> Option<MainNav> {
+    if label != surfaces::policy::main_window_label(surfaces::policy::Platform::current()) {
+        return None;
+    }
+    slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take()
+}
 
-    let anchor = macos_settings_anchor(app);
-    if let Some(win) = app.get_webview_window(LABEL) {
-        match anchor {
-            Some(position) => {
-                let _ = win.set_position(tauri::Position::Physical(position));
-            }
-            None => {
-                tracing::warn!("macos settings window: no anchor available; leaving the existing window where it is");
-            }
-        }
+/// The Beebeeb window pulls the request it was told about (or the one it was built for).
+#[tauri::command]
+fn consume_main_navigation(window: tauri::WebviewWindow) -> Option<MainNav> {
+    take_main_nav(&MAIN_NAV_PENDING, window.label())
+}
+
+/// Opens (or shows and focuses) the Beebeeb window and asks it to show `nav`.
+#[cfg(target_os = "macos")]
+fn show_main_window(app: &tauri::AppHandle, nav: MainNav) {
+    let label = surfaces::policy::main_window_label(surfaces::policy::Platform::current());
+    store_main_nav(&MAIN_NAV_PENDING, nav);
+    // §9.1: the Dock icon (and with it the app menu) comes first, so it is there when the window is.
+    set_macos_dock_icon(app, true);
+    if let Some(win) = app.get_webview_window(label) {
+        unhide_app(app);
+        let _ = win.unminimize();
         let _ = win.show();
         let _ = win.set_focus();
+        let _ = win.emit(MAIN_NAVIGATE_EVENT, ());
         return;
     }
-
-    let Some(config) = app.config().app.windows.iter().find(|window| window.label == LABEL) else {
-        tracing::warn!("macos settings window: no tauri.conf.json entry named {LABEL}; cannot open Settings");
+    let Some(config) = app.config().app.windows.iter().find(|window| window.label == label) else {
+        tracing::warn!("main window: no tauri.macos.conf.json entry named {label}; cannot open the Beebeeb window");
+        refresh_macos_dock_icon(app, None);
         return;
     };
-
-    match tauri::WebviewWindowBuilder::from_config(app, config) {
-        Ok(builder) => match builder.build() {
-            Ok(win) => {
-                match anchor {
-                    Some(position) => {
-                        let _ = win.set_position(tauri::Position::Physical(position));
-                    }
-                    None => {
-                        tracing::warn!("macos settings window: no anchor available; centering on the primary display");
-                        let _ = win.center();
-                    }
-                }
-                let _ = win.show();
-                let _ = win.set_focus();
-            }
-            Err(error) => {
-                tracing::warn!(%error, "failed to create macos settings window");
-            }
-        },
+    match tauri::WebviewWindowBuilder::from_config(app, config).and_then(|builder| builder.build()) {
+        Ok(win) => {
+            place_main_window(app, &win, (config.width, config.height));
+            unhide_app(app);
+            let _ = win.show();
+            let _ = win.set_focus();
+        }
         Err(error) => {
-            tracing::warn!(%error, "failed to load the macos settings window config");
+            tracing::warn!(%error, "failed to create the Beebeeb window");
+            refresh_macos_dock_icon(app, None);
         }
     }
 }
 
+/// Unhides the app (`AppHandle::show`, NSApp `unhide:`), which the tray's Hide and ⌘H hide. Not a window: a window
+/// shown in a hidden app stays hidden, and tao's `set_focus` does nothing there, so every opener on a Mac calls this
+/// before it shows its window (review round 2, P2-2).
+#[cfg(target_os = "macos")]
+fn unhide_app(app: &tauri::AppHandle) {
+    let _ = app.show();
+}
+
+/// `RunEvent::Reopen` (double-clicking Beebeeb.app, Spotlight, the Dock; spec §7.3): the window as it was, or a new one
+/// on Home. With the window closed the app lives on in the menu bar, so this is the way back (review round 2, P2-1).
+#[cfg(target_os = "macos")]
+fn reopen_main_window(app: &tauri::AppHandle) {
+    let label = surfaces::policy::main_window_label(surfaces::policy::Platform::current());
+    match app.get_webview_window(label) {
+        Some(win) => {
+            set_macos_dock_icon(app, true);
+            unhide_app(app);
+            let _ = win.unminimize();
+            let _ = win.show();
+            let _ = win.set_focus();
+        }
+        None => show_main_window(app, MainNav::Home),
+    }
+}
+
+/// View › Back (⌘[): only an open window has somewhere to go back from; it never opens one.
+#[cfg(target_os = "macos")]
+fn back_in_main_window(app: &tauri::AppHandle) {
+    let label = surfaces::policy::main_window_label(surfaces::policy::Platform::current());
+    if let Some(win) = app.get_webview_window(label) {
+        store_main_nav(&MAIN_NAV_PENDING, MainNav::Back);
+        let _ = win.emit(MAIN_NAVIGATE_EVENT, ());
+    }
+}
+
+/// The displays in logical points (each one's physical frame over its own scale, which each `Display` keeps), and
+/// the index of the primary one.
+#[cfg(target_os = "macos")]
+fn macos_displays(win: &tauri::WebviewWindow) -> (Vec<surfaces::window_state::Display>, usize) {
+    use surfaces::window_state::{Display, PRect};
+    let monitors = win.available_monitors().unwrap_or_default();
+    let displays = monitors
+        .iter()
+        .map(|m| {
+            Display::from_physical(
+                PRect { x: m.position().x, y: m.position().y, w: m.size().width, h: m.size().height },
+                PRect {
+                    x: m.work_area().position.x,
+                    y: m.work_area().position.y,
+                    w: m.work_area().size.width,
+                    h: m.work_area().size.height,
+                },
+                m.scale_factor(),
+            )
+        })
+        .collect();
+    let primary = win
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .and_then(|p| monitors.iter().position(|m| m.name() == p.name() && m.position() == p.position()))
+        .unwrap_or(0);
+    (displays, primary)
+}
+
+/// The menu-bar icon's rect as tray-icon reports it (points × the icon's own scale).
+#[cfg(target_os = "macos")]
+fn macos_status_item_rect(app: &tauri::AppHandle) -> Option<surfaces::window_state::PRect> {
+    let rect = app.tray_by_id("tray")?.rect().ok().flatten()?;
+    let position = rect.position.to_physical::<f64>(1.0);
+    let size = rect.size.to_physical::<f64>(1.0);
+    Some(surfaces::window_state::PRect {
+        x: position.x.round() as i32,
+        y: position.y.round() as i32,
+        w: size.width.round().max(0.0) as u32,
+        h: size.height.round().max(0.0) as u32,
+    })
+}
+
+/// Where the Beebeeb window's frame is kept (logical points), in the app's config directory.
+#[cfg(target_os = "macos")]
+fn main_frame_path(app: &tauri::AppHandle) -> Option<PathBuf> {
+    app.path()
+        .app_config_dir()
+        .ok()
+        .map(|dir| dir.join(surfaces::window_state::MAIN_FRAME_FILENAME))
+}
+
+/// The kept frame, read back. A missing, empty, partial or unreadable file, or one that is not a usable frame, is no
+/// frame: the window then opens at its default place.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn read_kept_frame(path: &Path) -> Option<surfaces::window_state::LRect> {
+    let bytes = std::fs::read(path).ok()?;
+    surfaces::window_state::parse_kept_frame(std::str::from_utf8(&bytes).ok()?)
+}
+
+/// Writes the kept frame atomically: a temporary file next to it, then a rename over it, so a crash mid-write leaves
+/// the previous frame, never half a file.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn write_kept_frame(path: &Path, frame: &surfaces::window_state::LRect) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let temporary = path.with_extension("json.tmp");
+    std::fs::write(&temporary, serde_json::to_vec(frame).map_err(std::io::Error::other)?)?;
+    std::fs::rename(&temporary, path)
+}
+
+/// Keeps the Beebeeb window's frame, when it closes and when the app quits while it is open (§7.2). A full-screen
+/// or zoomed window keeps nothing, so the last ordinary frame stays (review item 8).
+#[cfg(target_os = "macos")]
+fn save_main_window_frame(app: &tauri::AppHandle) {
+    let label = surfaces::policy::main_window_label(surfaces::policy::Platform::current());
+    let Some(win) = app.get_webview_window(label) else {
+        return;
+    };
+    let (Ok(position), Ok(size), Ok(scale)) = (win.outer_position(), win.inner_size(), win.scale_factor()) else {
+        return;
+    };
+    let fullscreen = win.is_fullscreen().unwrap_or(false);
+    let zoomed = win.is_maximized().unwrap_or(false);
+    let Some(frame) = surfaces::window_state::frame_to_keep(
+        (position.x, position.y),
+        (size.width, size.height),
+        scale,
+        fullscreen,
+        zoomed,
+    ) else {
+        return;
+    };
+    let Some(path) = main_frame_path(app) else {
+        return;
+    };
+    if let Err(error) = write_kept_frame(&path, &frame) {
+        tracing::warn!(%error, "main window: its frame could not be kept");
+    }
+}
+
+/// §7.2, planned in full before any of it is applied (review item 4): the kept frame when at least half of it is on a
+/// display, else at its kept size (or `default_size`, the window's own config) centred on the menu-bar icon's display,
+/// else on the primary one. Logical points throughout, so a mixed-DPI desk places it where it was (review item 5).
+#[cfg(target_os = "macos")]
+fn place_main_window(app: &tauri::AppHandle, win: &tauri::WebviewWindow, default_size: (f64, f64)) {
+    use surfaces::window_state as placement;
+    let (displays, primary) = macos_displays(win);
+    let icon = macos_status_item_rect(app).and_then(|rect| placement::icon_display(rect, &displays));
+    let kept = main_frame_path(app).and_then(|path| read_kept_frame(&path));
+    let Some(frame) = placement::plan_main_window(kept, &displays, icon, primary, default_size) else {
+        tracing::warn!("main window: no display to place it on");
+        return;
+    };
+    if kept.is_some() && kept != Some(frame) {
+        tracing::info!("main window: less than half of its kept frame is on a display; centred again");
+    }
+    let _ = win.set_size(tauri::Size::Logical(tauri::LogicalSize::new(frame.w, frame.h)));
+    let _ = win.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(frame.x, frame.y)));
+}
+
+
+/// The activation policy last applied: 0 unknown (the app starts Regular), 1 Dock icon, 2 none.
+#[cfg(target_os = "macos")]
+static MACOS_DOCK_ICON: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// §9.1: Regular (a Dock icon and the app menu) or Accessory (neither). Applied only when it changes.
+#[cfg(target_os = "macos")]
+fn set_macos_dock_icon(app: &tauri::AppHandle, wanted: bool) {
+    let next = if wanted { 1 } else { 2 };
+    if MACOS_DOCK_ICON.swap(next, Ordering::SeqCst) == next {
+        return;
+    }
+    let policy = if wanted {
+        tauri::ActivationPolicy::Regular
+    } else {
+        tauri::ActivationPolicy::Accessory
+    };
+    if let Err(error) = app.set_activation_policy(policy) {
+        tracing::warn!(%error, wanted, "could not change the Dock icon");
+    }
+}
+
+/// The Dock icon for the windows that exist now, leaving out `gone` (a window being destroyed or hidden).
+#[cfg(target_os = "macos")]
+fn refresh_macos_dock_icon(app: &tauri::AppHandle, gone: Option<&str>) {
+    let windows: Vec<(String, bool)> = app
+        .webview_windows()
+        .into_iter()
+        .filter(|(label, _)| Some(label.as_str()) != gone)
+        .map(|(label, window)| {
+            let shown = window.is_visible().unwrap_or(false) || window.is_minimized().unwrap_or(false);
+            (label, shown)
+        })
+        .collect();
+    let wanted = surfaces::policy::dock_icon_wanted(windows.iter().map(|(label, shown)| (label.as_str(), *shown)));
+    set_macos_dock_icon(app, wanted);
+}
+
+/// What the app menu may offer around the Beebeeb window (two-surface spec §8.2, F15): View › Back only while
+/// Settings shows in an open window; View › Home, Beebeeb › Settings… and Check for Updates… (which opens Settings ›
+/// About) always, except while a sheet is open, so ⌘1, ⌘[, ⌘, and ⇧⌘U cannot unmount Settings › Account under its
+/// sheet (review item 6 chose disabling over a second way to answer the check).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MainMenuState {
+    settings: bool,
+    home: bool,
+    back: bool,
+    check_updates: bool,
+}
+
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn main_menu_state(main_open: bool, settings_showing: bool, sheet_open: bool) -> MainMenuState {
+    let sheet = main_open && sheet_open;
+    MainMenuState {
+        settings: !sheet,
+        home: !sheet,
+        back: main_open && settings_showing && !sheet,
+        check_updates: !sheet,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn apply_macos_main_menu_state(app: &tauri::AppHandle, state: MainMenuState) {
+    let Some(items) = app.try_state::<MacosMenuItems>() else {
+        return;
+    };
+    let _ = items.settings.set_enabled(state.settings);
+    let _ = items.check_updates.set_enabled(state.check_updates);
+    let _ = items.view_home.set_enabled(state.home);
+    let _ = items.view_back.set_enabled(state.back);
+}
+
+/// The Beebeeb window says whether Settings shows and whether a sheet is open; the menu follows (§8.2, F15).
+#[tauri::command]
+fn main_window_state(app: tauri::AppHandle, window: tauri::WebviewWindow, settings_showing: bool, sheet_open: bool) {
+    #[cfg(target_os = "macos")]
+    if window.label() == surfaces::policy::main_window_label(surfaces::policy::Platform::current()) {
+        apply_macos_main_menu_state(&app, main_menu_state(true, settings_showing, sheet_open));
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, window, settings_showing, sheet_open);
+}
+
+/// A window's life on a Mac, beside the global close handler: the Beebeeb window keeps its frame when it closes and
+/// resets the menu when it is gone, and every window that comes, goes or hides sets the Dock icon again (§9.1).
+#[cfg(target_os = "macos")]
+fn macos_window_lifecycle(window: &tauri::Window, event: &tauri::WindowEvent) {
+    let app = window.app_handle();
+    let main = window.label() == surfaces::policy::main_window_label(surfaces::policy::Platform::current());
+    match event {
+        tauri::WindowEvent::CloseRequested { .. } if main => save_main_window_frame(app),
+        tauri::WindowEvent::Destroyed => {
+            if main {
+                apply_macos_main_menu_state(app, main_menu_state(false, false, false));
+            }
+            refresh_macos_dock_icon(app, Some(window.label()));
+        }
+        tauri::WindowEvent::Focused(true) => refresh_macos_dock_icon(app, None),
+        _ => {}
+    }
+}
+
+/// The window-state plugin, on Windows and Linux only, with today's default file and denylist. A Mac does not run
+/// it (review item 5 on PR #134): it stores physical numbers without their scale, which cannot be placed back on a
+/// mixed-DPI desk, so `place_main_window` and `save_main_window_frame` keep the Beebeeb window's frame in points.
+#[cfg(not(target_os = "macos"))]
+fn window_state_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    tauri_plugin_window_state::Builder::default()
+        .with_denylist(window_state_denylist_labels())
+        .build()
+}
+
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn window_state_denylist_labels() -> &'static [&'static str] {
     &["tray", "windows-onboarding"]
 }
@@ -14172,19 +14371,19 @@ pub fn run() {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .try_init();
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         // Shared state — session installed via apply_session (the
         // browser-login handoff) after login. The sync engine task reads
         // from this.
         .manage(AppState::default())
         // Task 1683 slice 2: transfer board, last engine status, cached storage summary.
         .manage(popover_data::PopoverRuntime::default())
-        .plugin(tauri_plugin_opener::init())
-        .plugin(
-            tauri_plugin_window_state::Builder::default()
-                .with_denylist(window_state_denylist_labels())
-                .build(),
-        )
+        .plugin(tauri_plugin_opener::init());
+    // Windows and Linux keep the window-state plugin; a Mac keeps the Beebeeb window's frame itself (task 1683 slice 1,
+    // review item 5; see `window_state_plugin`).
+    #[cfg(not(target_os = "macos"))]
+    let builder = builder.plugin(window_state_plugin());
+    builder
         // Native folder picker for the first-launch sync-root chooser.
         .plugin(tauri_plugin_dialog::init())
         // Native OS notifications — Task 11. The first conflict
@@ -14198,6 +14397,8 @@ pub fn run() {
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec![])))
         .invoke_handler(tauri::generate_handler![
             app_version,
+            consume_main_navigation,
+            main_window_state,
             check_for_updates_now,
             consume_menu_update_check,
             install_update,
@@ -14541,13 +14742,9 @@ pub fn run() {
             #[cfg(not(target_os = "macos"))]
             let _ = (webview, payload);
         })
-        // Red-dot close button → hide to tray instead of quitting
-        //
-        // The decision is `surfaces::policy::close_policy` (task 1683 slice 1):
-        // Hide for every label on every platform today, so this is a refactor,
-        // not a change. Slice 6 makes macOS label-aware (onboarding and review
-        // are destroyed) by flipping `MACOS_LABEL_AWARE_CLOSE`, not by editing
-        // this closure.
+        // Red-dot close button: what happens is `surfaces::policy::close_policy`. Windows and Linux hide every
+        // window (to the tray), as before. On a Mac the Beebeeb window (`main`) is destroyed (two-surface spec §4,
+        // task 1683 slice 1) and every other window is hidden, as before.
         .on_window_event(|window, event| {
             // Spec §7: one read-only userEnabled check when the app becomes active.
             if let tauri::WindowEvent::Focused(true) = event
@@ -14575,11 +14772,38 @@ pub fn run() {
                 {
                     api.prevent_close();
                     let _ = window.hide();
+                    // Two-surface §9.1: a hidden onboarding or conflict window no longer holds the Dock icon.
+                    #[cfg(target_os = "macos")]
+                    refresh_macos_dock_icon(window.app_handle(), Some(window.label()));
                 }
             }
+            // Task 1683 slice 1: the Beebeeb window's end resets the menu and saves its frame; the Dock icon follows.
+            #[cfg(target_os = "macos")]
+            macos_window_lifecycle(window, event);
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Beebeeb desktop");
+        .build(tauri::generate_context!())
+        .expect("error while building Beebeeb desktop")
+        .run(|app, event| {
+            // Review P1 on PR #134: on a Mac the Beebeeb window is destroyed on close, and when it was the last
+            // window Tauri asks to exit (`code: None`). Beebeeb lives on in the menu bar; an explicit exit still exits.
+            if let tauri::RunEvent::ExitRequested { code, api, .. } = &event
+                && surfaces::policy::keep_running_on_exit_request(surfaces::policy::Platform::current(), *code)
+            {
+                api.prevent_exit();
+            }
+            // Task 1683 slice 1 (review item 4): a quit while the Beebeeb window is open keeps its frame.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Exit = event {
+                save_main_window_frame(app);
+            }
+            // Review round 2, P2-1: opening the app again (Finder, Spotlight, the Dock) brings the window back.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = event {
+                reopen_main_window(app);
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = app;
+        });
 }
 
 // ── Update loop ───────────────────────────────────────────────────────────────
@@ -14654,6 +14878,9 @@ const MENU_VIEW_ACTIVITY_ID: &str = "menu_view_activity";
 #[cfg(test)]
 const MENU_VIEW_SHARED_ID: &str = "menu_view_shared";
 const MENU_VIEW_TRASH_ID: &str = "menu_view_trash";
+// The Beebeeb window's View items on a Mac (task 1683 slice 1, two-surface F11 and F15).
+const MENU_VIEW_HOME_ID: &str = "menu_view_home";
+const MENU_VIEW_BACK_ID: &str = "menu_view_back";
 const MENU_ZOOM_IN_ID: &str = "menu_zoom_in";
 const MENU_ZOOM_OUT_ID: &str = "menu_zoom_out";
 const MENU_ZOOM_RESET_ID: &str = "menu_zoom_reset";
@@ -14706,6 +14933,13 @@ impl DesktopMenuView {
     }
 }
 
+/// Where a View item takes the Beebeeb window (macOS only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MainMenuNav {
+    Home,
+    Back,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MenuZoomAction {
     In,
@@ -14725,6 +14959,8 @@ enum DesktopMenuAction {
     NewFolder,
     OpenWebApp,
     OpenView(DesktopMenuView),
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    NavigateMain(MainMenuNav),
     Zoom(MenuZoomAction),
     OpenExternal(&'static str),
     ReportProblem,
@@ -14861,13 +15097,240 @@ const DESKTOP_MENU_SPECS: &[DesktopMenuSpec] = &[
     },
 ];
 
+/// The macOS menu (task 1683 slice 1; two-surface spec §5.F rows F1-F15, §9.2): macOS title case and the ellipsis
+/// character, one ⌘, (F10's duplicate File › Settings is gone), the View items of the Beebeeb window. Review (⌘2) and
+/// Trash (⌘3) join with their panes in slice 4. Windows and Linux keep `DESKTOP_MENU_SPECS`, unchanged.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+const MACOS_MENU_SPECS: &[DesktopMenuSpec] = &[
+    DesktopMenuSpec {
+        id: MENU_PREFERENCES_ID,
+        label: "Settings…",
+        accelerator: Some("CmdOrCtrl+Comma"),
+        action: DesktopMenuAction::OpenSettings,
+    },
+    DesktopMenuSpec {
+        id: MENU_CHECK_UPDATES_ID,
+        label: "Check for Updates…",
+        accelerator: Some("CmdOrCtrl+Shift+U"),
+        action: DesktopMenuAction::CheckForUpdates,
+    },
+    DesktopMenuSpec {
+        id: MENU_TOGGLE_SYNC_ID,
+        // F3: the label follows the state (`refresh_macos_pause_menu_label`); this is the unpaused one.
+        label: MENU_PAUSE_SYNC_LABEL,
+        accelerator: Some("CmdOrCtrl+Shift+P"),
+        action: DesktopMenuAction::ToggleSync,
+    },
+    DesktopMenuSpec {
+        id: MENU_SIGN_OUT_ID,
+        // F4, slice 1: behaviour unchanged (slice 1b routes it through the confirm sheet once task 2175 passes).
+        label: "Sign Out…",
+        accelerator: Some("CmdOrCtrl+Shift+L"),
+        action: DesktopMenuAction::SignOut,
+    },
+    DesktopMenuSpec {
+        id: MENU_QUIT_ID,
+        label: "Quit Beebeeb",
+        accelerator: Some("CmdOrCtrl+Q"),
+        action: DesktopMenuAction::Quit,
+    },
+    DesktopMenuSpec {
+        id: MENU_OPEN_FOLDER_ID,
+        label: "Open in Finder",
+        accelerator: Some("CmdOrCtrl+O"),
+        action: DesktopMenuAction::OpenFolder,
+    },
+    DesktopMenuSpec {
+        id: MENU_UPLOAD_FILES_ID,
+        label: "Upload Files…",
+        accelerator: Some("CmdOrCtrl+U"),
+        action: DesktopMenuAction::UploadFiles,
+    },
+    DesktopMenuSpec {
+        id: MENU_NEW_FOLDER_ID,
+        label: "New Folder…",
+        accelerator: Some("CmdOrCtrl+Shift+N"),
+        action: DesktopMenuAction::NewFolder,
+    },
+    DesktopMenuSpec {
+        id: MENU_OPEN_WEB_APP_ID,
+        label: "Open Web App",
+        accelerator: Some("CmdOrCtrl+Shift+O"),
+        action: DesktopMenuAction::OpenWebApp,
+    },
+    DesktopMenuSpec {
+        id: MENU_VIEW_HOME_ID,
+        label: "Home",
+        accelerator: Some("CmdOrCtrl+Digit1"),
+        action: DesktopMenuAction::NavigateMain(MainMenuNav::Home),
+    },
+    DesktopMenuSpec {
+        id: MENU_VIEW_BACK_ID,
+        label: "Back",
+        accelerator: Some("CmdOrCtrl+BracketLeft"),
+        action: DesktopMenuAction::NavigateMain(MainMenuNav::Back),
+    },
+    // F12 and F13: the zoom and Help items are unchanged, words included.
+    DesktopMenuSpec {
+        id: MENU_ZOOM_IN_ID,
+        label: "Zoom in",
+        accelerator: Some("CmdOrCtrl+Equal"),
+        action: DesktopMenuAction::Zoom(MenuZoomAction::In),
+    },
+    DesktopMenuSpec {
+        id: MENU_ZOOM_OUT_ID,
+        label: "Zoom out",
+        accelerator: Some("CmdOrCtrl+Minus"),
+        action: DesktopMenuAction::Zoom(MenuZoomAction::Out),
+    },
+    DesktopMenuSpec {
+        id: MENU_ZOOM_RESET_ID,
+        label: "Actual size",
+        accelerator: Some("CmdOrCtrl+Digit0"),
+        action: DesktopMenuAction::Zoom(MenuZoomAction::Reset),
+    },
+    DesktopMenuSpec {
+        id: MENU_HELP_DOCS_ID,
+        label: "Documentation",
+        accelerator: None,
+        action: DesktopMenuAction::OpenExternal(DOCUMENTATION_URL),
+    },
+    DesktopMenuSpec {
+        id: MENU_HELP_SHORTCUTS_ID,
+        label: "Keyboard shortcuts",
+        accelerator: Some("CmdOrCtrl+Slash"),
+        action: DesktopMenuAction::OpenExternal(KEYBOARD_SHORTCUTS_URL),
+    },
+    DesktopMenuSpec {
+        id: MENU_HELP_REPORT_ID,
+        label: "Report a problem",
+        accelerator: None,
+        action: DesktopMenuAction::ReportProblem,
+    },
+    DesktopMenuSpec {
+        id: MENU_HELP_STATUS_ID,
+        label: "Service status",
+        accelerator: None,
+        action: DesktopMenuAction::OpenExternal(SERVICE_STATUS_URL),
+    },
+];
+
+/// F3's two labels.
+const MENU_PAUSE_SYNC_LABEL: &str = "Pause Sync";
+const MENU_RESUME_SYNC_LABEL: &str = "Resume Sync";
+
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn pause_menu_label(paused: bool) -> &'static str {
+    if paused { MENU_RESUME_SYNC_LABEL } else { MENU_PAUSE_SYNC_LABEL }
+}
+
+/// F3: the label for what the file says now (an unreadable file reads as not paused, as the menu toggle does).
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn pause_menu_label_now() -> &'static str {
+    pause_menu_label(DesktopConfig::load().map(|cfg| cfg.pause_sync).unwrap_or(false))
+}
+
+/// Every pause change calls this once it is written, through `set_sync_paused` (the menu, the tray commands, Home's
+/// Resume, and a settings write from the compact flyout's Network page): the menu's label follows the file (F3).
+fn pause_state_changed(app: &tauri::AppHandle<impl tauri::Runtime>) {
+    #[cfg(target_os = "macos")]
+    refresh_macos_pause_menu_label(app);
+    #[cfg(not(target_os = "macos"))]
+    let _ = app;
+}
+
+/// One entry of the macOS menu bar: an item from `MACOS_MENU_SPECS` by id, or one AppKit draws itself.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MacosMenuEntry {
+    Item(&'static str),
+    About,
+    Hide,
+    HideOthers,
+    ShowAll,
+    Cut,
+    Copy,
+    Paste,
+    SelectAll,
+    Minimize,
+    Zoom,
+    Close,
+    BringAllToFront,
+    Separator,
+}
+
+/// The macOS menu bar, top to bottom per menu (§9.2: "About Beebeeb · Settings… · Check for Updates… · Pause Sync ·
+/// — · Sign Out… · — · Hide Beebeeb · Hide Others · Show All · — · Quit Beebeeb"; F15's Window menu and View › Back).
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+const MACOS_MENU_LAYOUT: &[(&str, &[MacosMenuEntry])] = {
+    use MacosMenuEntry::*;
+    &[
+        (
+            "Beebeeb",
+            &[
+                About,
+                Item(MENU_PREFERENCES_ID),
+                Item(MENU_CHECK_UPDATES_ID),
+                Item(MENU_TOGGLE_SYNC_ID),
+                Separator,
+                Item(MENU_SIGN_OUT_ID),
+                Separator,
+                Hide,
+                HideOthers,
+                ShowAll,
+                Separator,
+                Item(MENU_QUIT_ID),
+            ],
+        ),
+        (
+            "File",
+            &[
+                Item(MENU_OPEN_FOLDER_ID),
+                Item(MENU_UPLOAD_FILES_ID),
+                Item(MENU_NEW_FOLDER_ID),
+                Separator,
+                Item(MENU_OPEN_WEB_APP_ID),
+            ],
+        ),
+        ("Edit", &[Cut, Copy, Paste, SelectAll]),
+        (
+            "View",
+            &[
+                Item(MENU_VIEW_HOME_ID),
+                Separator,
+                Item(MENU_VIEW_BACK_ID),
+                Separator,
+                Item(MENU_ZOOM_IN_ID),
+                Item(MENU_ZOOM_OUT_ID),
+                Item(MENU_ZOOM_RESET_ID),
+            ],
+        ),
+        ("Window", &[Minimize, Zoom, Close, Separator, BringAllToFront]),
+        (
+            "Help",
+            &[
+                Item(MENU_HELP_DOCS_ID),
+                Item(MENU_HELP_SHORTCUTS_ID),
+                Item(MENU_HELP_REPORT_ID),
+                Separator,
+                Item(MENU_HELP_STATUS_ID),
+            ],
+        ),
+    ]
+};
+
 #[cfg(test)]
 fn desktop_menu_specs() -> &'static [DesktopMenuSpec] {
     DESKTOP_MENU_SPECS
 }
 
+/// The menu table this build installs: a Mac's own, else the shared one (Windows, Linux).
+fn installed_menu_specs() -> &'static [DesktopMenuSpec] {
+    if cfg!(target_os = "macos") { MACOS_MENU_SPECS } else { DESKTOP_MENU_SPECS }
+}
+
 fn desktop_menu_spec(id: &str) -> Option<&'static DesktopMenuSpec> {
-    DESKTOP_MENU_SPECS.iter().find(|spec| spec.id == id)
+    installed_menu_specs().iter().find(|spec| spec.id == id)
 }
 
 fn desktop_menu_spec_required(id: &str) -> &'static DesktopMenuSpec {
@@ -14927,6 +15390,103 @@ fn about_metadata() -> AboutMetadata<'static> {
     }
 }
 
+/// The menu items the app changes after it built the menu (macOS): Settings…, Check for Updates… and the View items
+/// follow the Beebeeb window (§8.2, F15), Pause Sync follows the pause (F3).
+#[cfg(target_os = "macos")]
+struct MacosMenuItems {
+    settings: MenuItem<tauri::Wry>,
+    check_updates: MenuItem<tauri::Wry>,
+    toggle_sync: MenuItem<tauri::Wry>,
+    view_home: MenuItem<tauri::Wry>,
+    view_back: MenuItem<tauri::Wry>,
+}
+
+#[cfg(target_os = "macos")]
+impl MacosMenuItems {
+    /// The one built item for `id` when it is one of these.
+    fn get(&self, id: &str) -> Option<&MenuItem<tauri::Wry>> {
+        match id {
+            MENU_PREFERENCES_ID => Some(&self.settings),
+            MENU_CHECK_UPDATES_ID => Some(&self.check_updates),
+            MENU_TOGGLE_SYNC_ID => Some(&self.toggle_sync),
+            MENU_VIEW_HOME_ID => Some(&self.view_home),
+            MENU_VIEW_BACK_ID => Some(&self.view_back),
+            _ => None,
+        }
+    }
+}
+
+/// F3: the menu says "Resume Sync" while the file says paused, else "Pause Sync". Called through
+/// `pause_state_changed` only.
+#[cfg(target_os = "macos")]
+fn refresh_macos_pause_menu_label(app: &tauri::AppHandle<impl tauri::Runtime>) {
+    let Some(items) = app.try_state::<MacosMenuItems>() else {
+        return;
+    };
+    let _ = items.toggle_sync.set_text(pause_menu_label_now());
+}
+
+/// The macOS menu bar from `MACOS_MENU_LAYOUT` (task 1683 slice 1). The items the app changes later are built from
+/// `MACOS_MENU_SPECS` first and placed where the layout names them.
+#[cfg(target_os = "macos")]
+fn setup_native_menu(app: &mut tauri::App) -> tauri::Result<()> {
+    use tauri::menu::IsMenuItem;
+    let kept = MacosMenuItems {
+        settings: build_desktop_menu_item(app, desktop_menu_spec_required(MENU_PREFERENCES_ID))?,
+        check_updates: build_desktop_menu_item(app, desktop_menu_spec_required(MENU_CHECK_UPDATES_ID))?,
+        toggle_sync: build_desktop_menu_item(app, desktop_menu_spec_required(MENU_TOGGLE_SYNC_ID))?,
+        view_home: build_desktop_menu_item(app, desktop_menu_spec_required(MENU_VIEW_HOME_ID))?,
+        view_back: build_desktop_menu_item(app, desktop_menu_spec_required(MENU_VIEW_BACK_ID))?,
+    };
+    let mut menus: Vec<Submenu<tauri::Wry>> = Vec::new();
+    for (title, entries) in MACOS_MENU_LAYOUT {
+        let mut items: Vec<Box<dyn IsMenuItem<tauri::Wry>>> = Vec::new();
+        for entry in entries.iter() {
+            let item: Box<dyn IsMenuItem<tauri::Wry>> = match *entry {
+                MacosMenuEntry::Item(id) => match kept.get(id) {
+                    Some(item) => Box::new(item.clone()),
+                    None => Box::new(build_desktop_menu_item(app, desktop_menu_spec_required(id))?),
+                },
+                MacosMenuEntry::About => {
+                    Box::new(PredefinedMenuItem::about(app, Some("About Beebeeb"), Some(about_metadata()))?)
+                }
+                MacosMenuEntry::Hide => Box::new(PredefinedMenuItem::hide(app, Some("Hide Beebeeb"))?),
+                MacosMenuEntry::HideOthers => Box::new(PredefinedMenuItem::hide_others(app, Some("Hide Others"))?),
+                MacosMenuEntry::ShowAll => Box::new(PredefinedMenuItem::show_all(app, Some("Show All"))?),
+                MacosMenuEntry::Cut => Box::new(PredefinedMenuItem::cut(app, None)?),
+                MacosMenuEntry::Copy => Box::new(PredefinedMenuItem::copy(app, None)?),
+                MacosMenuEntry::Paste => Box::new(PredefinedMenuItem::paste(app, None)?),
+                MacosMenuEntry::SelectAll => Box::new(PredefinedMenuItem::select_all(app, None)?),
+                MacosMenuEntry::Minimize => Box::new(PredefinedMenuItem::minimize(app, Some("Minimize"))?),
+                MacosMenuEntry::Zoom => Box::new(PredefinedMenuItem::maximize(app, Some("Zoom"))?),
+                MacosMenuEntry::Close => Box::new(PredefinedMenuItem::close_window(app, Some("Close"))?),
+                MacosMenuEntry::BringAllToFront => {
+                    Box::new(PredefinedMenuItem::bring_all_to_front(app, Some("Bring All to Front"))?)
+                }
+                MacosMenuEntry::Separator => Box::new(PredefinedMenuItem::separator(app)?),
+            };
+            items.push(item);
+        }
+        let refs: Vec<&dyn IsMenuItem<tauri::Wry>> = items.iter().map(|item| item.as_ref()).collect();
+        let submenu = Submenu::with_items(app, *title, true, &refs)?;
+        if *title == "Window" {
+            let _ = submenu.set_as_windows_menu_for_nsapp();
+        } else if *title == "Help" {
+            let _ = submenu.set_as_help_menu_for_nsapp();
+        }
+        menus.push(submenu);
+    }
+    let refs: Vec<&dyn IsMenuItem<tauri::Wry>> = menus.iter().map(|menu| menu as &dyn IsMenuItem<tauri::Wry>).collect();
+    let menu = Menu::with_items(app, &refs)?;
+    app.set_menu(menu)?;
+    app.manage(kept);
+    // No Beebeeb window yet: Back off, the rest on; and the pause label as the file says.
+    apply_macos_main_menu_state(app.handle(), main_menu_state(false, false, false));
+    pause_state_changed(app.handle());
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
 fn setup_native_menu(app: &mut tauri::App) -> tauri::Result<()> {
     let preferences = build_desktop_menu_item(app, desktop_menu_spec_required(MENU_PREFERENCES_ID))?;
     let check_updates = build_desktop_menu_item(app, desktop_menu_spec_required(MENU_CHECK_UPDATES_ID))?;
@@ -15032,9 +15592,8 @@ fn update_check_window_label() -> &'static str {
     if cfg!(target_os = "windows") {
         "main-app"
     } else if cfg!(target_os = "macos") {
-        // Slice 6: the real macOS Settings window drains the pending menu
-        // check in its About tab's update row.
-        "macos-settings"
+        // Task 1683 slice 1: the Beebeeb window drains the pending menu check in Settings › About's update row.
+        "main"
     } else {
         "settings"
     }
@@ -15042,8 +15601,9 @@ fn update_check_window_label() -> &'static str {
 
 fn request_menu_update_check(app: &tauri::AppHandle) {
     MENU_UPDATE_CHECK_PENDING.store(true, Ordering::SeqCst);
+    // F2: the Beebeeb window on Settings › About, which checks and answers in its row.
     #[cfg(target_os = "macos")]
-    show_macos_settings_window(app);
+    show_main_window(app, MainNav::settings(Some("about")));
     #[cfg(not(target_os = "macos"))]
     show_main_app_window_with_nav(app, Some("settings"));
     if let Some(window) = app.get_webview_window(update_check_window_label()) {
@@ -15063,6 +15623,377 @@ fn take_menu_update_check(pending: &AtomicBool, label: &str) -> bool {
     label == update_check_window_label() && pending.swap(false, Ordering::SeqCst)
 }
 
+/// Task 1683 slice 1 (two-surface spec `docs/specs/2026-10-24-macos-two-surface-app.md`): the Beebeeb window's request
+/// slot, what the menu may offer around it, and the macOS menu bar (§5.F rows F1-F15, §9.2). Pure, so they run on
+/// every platform; the window code that uses them is macOS only.
+#[cfg(test)]
+mod main_window_tests {
+    use super::*;
+
+    #[test]
+    fn a_request_serialises_as_the_window_reads_it() {
+        // `src/mainWindowModel.ts` `parseMainNav` reads exactly these three shapes.
+        let json = |nav: MainNav| serde_json::to_value(nav).unwrap();
+        assert_eq!(json(MainNav::Home), serde_json::json!({ "to": "home" }));
+        assert_eq!(json(MainNav::Back), serde_json::json!({ "to": "back" }));
+        assert_eq!(
+            json(MainNav::settings(Some("about"))),
+            serde_json::json!({ "to": "settings", "section": "about" })
+        );
+        assert_eq!(json(MainNav::settings(None)), serde_json::json!({ "to": "settings", "section": null }));
+    }
+
+    #[test]
+    fn the_slot_keeps_the_latest_request_and_gives_it_to_the_beebeeb_window_once() {
+        let slot = std::sync::Mutex::new(None);
+        let main = surfaces::policy::main_window_label(surfaces::policy::Platform::current());
+        store_main_nav(&slot, MainNav::Home);
+        store_main_nav(&slot, MainNav::settings(Some("account")));
+        for other in ["settings", "onboarding", "tray", "main-app", "conflict-1"] {
+            if other != main {
+                assert_eq!(take_main_nav(&slot, other), None, "{other} must not take the window's request");
+            }
+        }
+        assert_eq!(take_main_nav(&slot, main), Some(MainNav::settings(Some("account"))));
+        assert_eq!(take_main_nav(&slot, main), None, "taken once");
+    }
+
+    #[test]
+    fn the_menu_around_the_window_follows_section_8_2() {
+        // No window: Settings… and Home open it; Back has nothing to go back from.
+        let on = |back| MainMenuState { settings: true, home: true, back, check_updates: true };
+        assert_eq!(main_menu_state(false, false, false), on(false));
+        // Home in the window: as above.
+        assert_eq!(main_menu_state(true, false, false), on(false));
+        // Settings shows: Back on.
+        assert_eq!(main_menu_state(true, true, false), on(true));
+        // A sheet is open: ⌘1, ⌘[, ⌘, and Check for Updates… (which opens Settings › About) are all off, so nothing
+        // unmounts the section under the sheet (review item 6: disabled with the §8.2 items, not a second answer).
+        let off = MainMenuState { settings: false, home: false, back: false, check_updates: false };
+        assert_eq!(main_menu_state(true, true, true), off);
+        assert_eq!(main_menu_state(true, false, true), off);
+        // A sheet with no window cannot exist; a stale report of one never disables the openers.
+        assert_eq!(main_menu_state(false, true, true), on(false));
+    }
+
+    #[test]
+    fn the_pause_item_says_what_it_will_do() {
+        assert_eq!(pause_menu_label(false), "Pause Sync");
+        assert_eq!(pause_menu_label(true), "Resume Sync");
+    }
+
+    /// Review item 3: the label follows the file whichever way the pause was written: the menu or the tray
+    /// (`persist_sync_paused_at`) and a settings write from the compact flyout's Network page (`set_desktop_config`).
+    #[tokio::test]
+    async fn the_pause_label_follows_every_writer_of_the_pause() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        crate::config::CONFIG_DIR_OVERRIDE
+            .scope(dir.path().to_path_buf(), async {
+                assert_eq!(pause_menu_label_now(), "Pause Sync");
+                let patch: crate::config::DesktopSettings =
+                    serde_json::from_str(r#"{ "pause_sync": true }"#).expect("the Network page sends the pause");
+                save_desktop_settings(patch).expect("saved");
+                assert_eq!(pause_menu_label_now(), "Resume Sync");
+                let path = DesktopConfig::path().expect("the scoped config path");
+                let flag = std::sync::atomic::AtomicBool::new(true);
+                persist_sync_paused_at(&path, &flag, false).expect("the menu resumes");
+                assert_eq!(pause_menu_label_now(), "Pause Sync");
+            })
+            .await;
+    }
+
+    #[test]
+    fn every_pause_writer_refreshes_the_menu_label() {
+        // Every pause goes through `set_sync_paused`, which refreshes the label; a settings write only when it carries
+        // a pause (review round 2: no config read on every slider move).
+        let production = super::finder_setup_command_tests::production_source();
+        let body = |signature: &str| super::finder_setup_command_tests::body_between(&production, signature, "\n}\n");
+        assert!(body("async fn set_sync_paused(").contains("pause_state_changed(app);"));
+        assert!(body("async fn set_desktop_config(").contains("apply_desktop_settings(&app, config).await"));
+        let apply = body("async fn apply_desktop_settings(");
+        assert!(apply.contains("let pause = config.pause_sync.take();"), "{apply}");
+        assert!(apply.contains("set_sync_paused(app, paused).await?;"), "{apply}");
+        assert!(!apply.contains("pause_state_changed("), "a write without a pause refreshes nothing:\n{apply}");
+        assert!(
+            !production.contains("refresh_macos_pause_menu_label(app);\n    persisted?;"),
+            "set_sync_paused refreshes through the one shared call"
+        );
+    }
+
+    /// Review round 2, P2-3: a pause sent with the settings (the compact flyout's Network page) pauses the engine as the
+    /// menu's and the tray's do: the file, the engine's flag, the engine-status event and the menu label agree. A
+    /// settings write without a pause leaves the pause alone.
+    // The mock runtime is not built on Windows (Cargo.toml: `tauri/test` is off there, after slice 1's 0xc0000139 at
+    // load); Linux and macOS run this.
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn a_pause_sent_with_the_settings_pauses_the_engine() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        crate::config::CONFIG_DIR_OVERRIDE
+            .scope(dir.path().to_path_buf(), async {
+                let app = tauri::test::mock_app();
+                app.manage(AppState::default());
+                synthesize_single_account(&app.state::<AppState>(), account::AccountId("acct-test".into()));
+                let flag = || app.state::<AppState>().active_account().unwrap().sync_paused.load(Ordering::Relaxed);
+                let send = |json: &str| serde_json::from_str::<crate::config::DesktopSettings>(json).unwrap();
+
+                apply_desktop_settings(app.handle(), send(r#"{ "pause_sync": true }"#)).await.expect("saved");
+                assert!(flag(), "the engine's flag is paused");
+                assert!(DesktopConfig::load().unwrap().pause_sync, "and so is the file");
+                assert_eq!(pause_menu_label_now(), "Resume Sync");
+
+                apply_desktop_settings(app.handle(), send(r#"{ "upload_kbps_limit": 1000 }"#)).await.expect("saved");
+                assert!(flag(), "a speed change leaves the pause alone");
+                assert_eq!(DesktopConfig::load().unwrap().upload_kbps_limit, 1000);
+
+                apply_desktop_settings(app.handle(), send(r#"{ "pause_sync": false }"#)).await.expect("saved");
+                assert!(!flag(), "resumed");
+                assert!(!DesktopConfig::load().unwrap().pause_sync);
+            })
+            .await;
+    }
+
+    /// Review round 2: a kept frame that is missing, empty, partial, not UTF-8, not a frame, or names a display that is
+    /// gone falls back to the default placement, and nothing panics.
+    #[test]
+    fn a_bad_kept_frame_file_is_no_frame_and_the_window_opens_at_its_default_place() {
+        use surfaces::window_state::{Display, LRect, PRect, plan_main_window};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(surfaces::window_state::MAIN_FRAME_FILENAME);
+        assert_eq!(read_kept_frame(&path), None, "missing");
+        for bad in [&b""[..], b"{\"x\":12,\"y\"", b"\xff\xfe\x00", b"null", b"{\"x\":1,\"y\":2,\"w\":0,\"h\":3}"] {
+            std::fs::write(&path, bad).unwrap();
+            assert_eq!(read_kept_frame(&path), None, "{bad:?}");
+        }
+        let built_in = Display::from_physical(PRect { x: 0, y: 0, w: 3024, h: 1964 }, PRect { x: 0, y: 74, w: 3024, h: 1750 }, 2.0);
+        let default = plan_main_window(None, &[built_in], Some(0), 0, (920.0, 620.0));
+        assert!(default.is_some());
+        // A frame left on an external display that is gone: the default place, at the kept size.
+        let gone = LRect { x: 2500.0, y: 100.0, w: 920.0, h: 620.0 };
+        write_kept_frame(&path, &gone).unwrap();
+        assert_eq!(read_kept_frame(&path), Some(gone));
+        assert_eq!(plan_main_window(read_kept_frame(&path), &[built_in], Some(0), 0, (920.0, 620.0)), default);
+    }
+
+    #[test]
+    fn the_kept_frame_is_written_whole_or_not_at_all() {
+        use surfaces::window_state::LRect;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join(surfaces::window_state::MAIN_FRAME_FILENAME);
+        let first = LRect { x: 100.0, y: 80.0, w: 920.0, h: 620.0 };
+        let second = LRect { x: 2200.0, y: 300.0, w: 1000.0, h: 700.0 };
+        write_kept_frame(&path, &first).unwrap();
+        write_kept_frame(&path, &second).unwrap();
+        assert_eq!(read_kept_frame(&path), Some(second), "the second write replaced the first");
+        assert!(!path.with_extension("json.tmp").exists(), "no temporary file is left");
+        let production = super::finder_setup_command_tests::production_source();
+        let body = super::finder_setup_command_tests::body_between(&production, "fn write_kept_frame(", "\n}\n");
+        let written = body.find("std::fs::write(&temporary,").expect("written to a temporary file");
+        let renamed = body.find("std::fs::rename(&temporary, path)").expect("then renamed over the frame");
+        assert!(written < renamed, "{body}");
+    }
+
+    #[test]
+    fn the_menu_keeps_its_four_items_from_the_table_without_a_lookup_that_can_fail() {
+        // Review item 13.
+        let production = super::finder_setup_command_tests::production_source();
+        let body = super::finder_setup_command_tests::body_between(
+            &production,
+            "#[cfg(target_os = \"macos\")]\nfn setup_native_menu(",
+            "\n}\n",
+        );
+        assert!(!body.contains("HashMap"), "{body}");
+        assert!(!body.contains("AssetNotFound"), "{body}");
+        for id in ["MENU_PREFERENCES_ID", "MENU_CHECK_UPDATES_ID", "MENU_TOGGLE_SYNC_ID", "MENU_VIEW_HOME_ID", "MENU_VIEW_BACK_ID"] {
+            assert!(body.contains(&format!("desktop_menu_spec_required({id})")), "{id}:\n{body}");
+        }
+    }
+
+    #[test]
+    fn a_route_named_opener_asks_for_settings_or_home() {
+        assert_eq!(main_nav_for_route(Some("settings")), MainNav::settings(None));
+        assert_eq!(main_nav_for_route(None), MainNav::Home);
+        assert_eq!(main_nav_for_route(Some("finder")), MainNav::Home);
+    }
+
+    fn mac(id: &str) -> &'static DesktopMenuSpec {
+        MACOS_MENU_SPECS
+            .iter()
+            .find(|spec| spec.id == id)
+            .unwrap_or_else(|| panic!("no macOS menu item {id}"))
+    }
+
+    #[test]
+    fn the_macos_items_have_the_words_keys_and_targets_of_f1_to_f11() {
+        let rows: [(&str, &str, Option<&str>, DesktopMenuAction); 11] = [
+            (MENU_PREFERENCES_ID, "Settings…", Some("CmdOrCtrl+Comma"), DesktopMenuAction::OpenSettings),
+            (MENU_CHECK_UPDATES_ID, "Check for Updates…", Some("CmdOrCtrl+Shift+U"), DesktopMenuAction::CheckForUpdates),
+            (MENU_TOGGLE_SYNC_ID, "Pause Sync", Some("CmdOrCtrl+Shift+P"), DesktopMenuAction::ToggleSync),
+            (MENU_SIGN_OUT_ID, "Sign Out…", Some("CmdOrCtrl+Shift+L"), DesktopMenuAction::SignOut),
+            (MENU_QUIT_ID, "Quit Beebeeb", Some("CmdOrCtrl+Q"), DesktopMenuAction::Quit),
+            (MENU_OPEN_FOLDER_ID, "Open in Finder", Some("CmdOrCtrl+O"), DesktopMenuAction::OpenFolder),
+            (MENU_UPLOAD_FILES_ID, "Upload Files…", Some("CmdOrCtrl+U"), DesktopMenuAction::UploadFiles),
+            (MENU_NEW_FOLDER_ID, "New Folder…", Some("CmdOrCtrl+Shift+N"), DesktopMenuAction::NewFolder),
+            (MENU_OPEN_WEB_APP_ID, "Open Web App", Some("CmdOrCtrl+Shift+O"), DesktopMenuAction::OpenWebApp),
+            (
+                MENU_VIEW_HOME_ID,
+                "Home",
+                Some("CmdOrCtrl+Digit1"),
+                DesktopMenuAction::NavigateMain(MainMenuNav::Home),
+            ),
+            (
+                MENU_VIEW_BACK_ID,
+                "Back",
+                Some("CmdOrCtrl+BracketLeft"),
+                DesktopMenuAction::NavigateMain(MainMenuNav::Back),
+            ),
+        ];
+        for (id, label, accelerator, action) in rows {
+            let spec = mac(id);
+            assert_eq!((spec.label, spec.accelerator, spec.action), (label, accelerator, action), "{id}");
+        }
+    }
+
+    #[test]
+    fn the_zoom_and_help_items_keep_their_words_f12_f13() {
+        // "Unchanged": the same words, keys and targets as the shared table.
+        for id in [
+            MENU_ZOOM_IN_ID,
+            MENU_ZOOM_OUT_ID,
+            MENU_ZOOM_RESET_ID,
+            MENU_HELP_DOCS_ID,
+            MENU_HELP_SHORTCUTS_ID,
+            MENU_HELP_REPORT_ID,
+            MENU_HELP_STATUS_ID,
+        ] {
+            let shared = DESKTOP_MENU_SPECS.iter().find(|spec| spec.id == id).unwrap();
+            let spec = mac(id);
+            assert_eq!(
+                (spec.label, spec.accelerator, spec.action),
+                (shared.label, shared.accelerator, shared.action),
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
+    fn macos_binds_each_key_once_and_drops_the_legacy_items_f10_f11() {
+        let mut keys: Vec<&str> = MACOS_MENU_SPECS.iter().filter_map(|spec| spec.accelerator).collect();
+        let total = keys.len();
+        keys.sort();
+        keys.dedup();
+        assert_eq!(keys.len(), total, "a key is bound twice: {keys:?}");
+        let ids: Vec<&str> = MACOS_MENU_SPECS.iter().map(|spec| spec.id).collect();
+        // F10: File › Settings (the second ⌘,) is gone. F11: Files ⌘1, Activity ⌘2, Trash ⌘4 are gone.
+        for gone in [MENU_SETTINGS_ID, MENU_VIEW_FILES_ID, MENU_VIEW_ACTIVITY_ID, MENU_VIEW_TRASH_ID, MENU_VIEW_SHARED_ID] {
+            assert!(!ids.contains(&gone), "{gone}");
+        }
+        assert!(!MACOS_MENU_SPECS.iter().any(|spec| matches!(spec.action, DesktopMenuAction::OpenView(_))));
+        for spec in MACOS_MENU_SPECS {
+            assert!(!spec.label.contains("..."), "{}: macOS uses the ellipsis character", spec.id);
+        }
+    }
+
+    fn entries(title: &str) -> &'static [MacosMenuEntry] {
+        MACOS_MENU_LAYOUT
+            .iter()
+            .find(|(t, _)| *t == title)
+            .map(|(_, e)| *e)
+            .unwrap_or_else(|| panic!("no {title} menu"))
+    }
+
+    #[test]
+    fn the_macos_menu_bar_is_the_order_of_section_9_2_and_f15() {
+        use MacosMenuEntry::*;
+        let titles: Vec<&str> = MACOS_MENU_LAYOUT.iter().map(|(t, _)| *t).collect();
+        assert_eq!(titles, ["Beebeeb", "File", "Edit", "View", "Window", "Help"]);
+        assert_eq!(
+            entries("Beebeeb"),
+            [
+                About,
+                Item(MENU_PREFERENCES_ID),
+                Item(MENU_CHECK_UPDATES_ID),
+                Item(MENU_TOGGLE_SYNC_ID),
+                Separator,
+                Item(MENU_SIGN_OUT_ID),
+                Separator,
+                Hide,
+                HideOthers,
+                ShowAll,
+                Separator,
+                Item(MENU_QUIT_ID),
+            ]
+        );
+        assert_eq!(
+            entries("File"),
+            [
+                Item(MENU_OPEN_FOLDER_ID),
+                Item(MENU_UPLOAD_FILES_ID),
+                Item(MENU_NEW_FOLDER_ID),
+                Separator,
+                Item(MENU_OPEN_WEB_APP_ID),
+            ]
+        );
+        assert_eq!(entries("Edit"), [Cut, Copy, Paste, SelectAll]);
+        assert_eq!(
+            entries("View"),
+            [
+                Item(MENU_VIEW_HOME_ID),
+                Separator,
+                Item(MENU_VIEW_BACK_ID),
+                Separator,
+                Item(MENU_ZOOM_IN_ID),
+                Item(MENU_ZOOM_OUT_ID),
+                Item(MENU_ZOOM_RESET_ID),
+            ]
+        );
+        assert_eq!(entries("Window"), [Minimize, Zoom, Close, Separator, BringAllToFront]);
+    }
+
+    #[test]
+    fn every_macos_item_is_in_the_menu_bar_exactly_once_and_every_entry_has_an_item() {
+        let mut placed: Vec<&str> = MACOS_MENU_LAYOUT
+            .iter()
+            .flat_map(|(_, e)| e.iter())
+            .filter_map(|entry| match entry {
+                MacosMenuEntry::Item(id) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        for id in &placed {
+            mac(id);
+        }
+        placed.sort();
+        let mut specs: Vec<&str> = MACOS_MENU_SPECS.iter().map(|spec| spec.id).collect();
+        specs.sort();
+        assert_eq!(placed, specs);
+    }
+
+    #[test]
+    fn the_installed_table_is_the_platforms_own() {
+        // By content: a `const` slice has no fixed address to compare.
+        let ids = |table: &[DesktopMenuSpec]| table.iter().map(|spec| (spec.id, spec.label)).collect::<Vec<_>>();
+        let installed = ids(installed_menu_specs());
+        if cfg!(target_os = "macos") {
+            assert_eq!(installed, ids(MACOS_MENU_SPECS));
+            assert_eq!(desktop_menu_spec(MENU_PREFERENCES_ID).unwrap().label, "Settings…");
+            assert!(desktop_menu_spec(MENU_SETTINGS_ID).is_none());
+        } else {
+            assert_eq!(installed, ids(DESKTOP_MENU_SPECS));
+            assert_eq!(desktop_menu_spec(MENU_PREFERENCES_ID).unwrap().label, "Preferences...");
+        }
+    }
+
+    #[test]
+    fn the_window_commands_are_registered_once() {
+        let production = super::finder_setup_command_tests::production_source();
+        let handler = super::finder_setup_command_tests::body_between(&production, "tauri::generate_handler![", "])");
+        for command in ["consume_main_navigation,", "main_window_state,"] {
+            assert_eq!(handler.lines().filter(|line| line.trim() == command).count(), 1, "{command}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod menu_update_check_tests {
     use super::*;
@@ -15080,22 +16011,23 @@ mod menu_update_check_tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn menu_update_check_targets_the_macos_settings_window() {
-        // Slice 6: on macOS the native "Check for updates…" item opens the
-        // new real Settings window, so that window must be the one the
-        // pending request targets and the About tab's row answers inline.
-        assert_eq!(update_check_window_label(), "macos-settings");
+    fn menu_update_check_targets_the_beebeeb_window() {
+        // Task 1683 slice 1 (F2): on macOS "Check for Updates…" opens the Beebeeb window on Settings › About, so
+        // that window must be the one the pending request targets, and the About row answers inline.
+        assert_eq!(update_check_window_label(), "main");
+        assert_eq!(
+            update_check_window_label(),
+            surfaces::policy::main_window_label(surfaces::policy::Platform::Macos)
+        );
     }
 }
 
 fn handle_desktop_menu_action(app: &tauri::AppHandle, spec: &'static DesktopMenuSpec) {
     match spec.action {
         DesktopMenuAction::OpenSettings => {
+            // F1: the Beebeeb window on Settings (the last section used in it, else General).
             #[cfg(target_os = "macos")]
-            {
-                // Slice 6: the real macOS Settings window.
-                show_macos_settings_window(app);
-            }
+            show_main_window(app, MainNav::settings(None));
             #[cfg(not(target_os = "macos"))]
             show_main_app_window_with_nav(app, Some("settings"));
         }
@@ -15180,6 +16112,16 @@ fn handle_desktop_menu_action(app: &tauri::AppHandle, spec: &'static DesktopMenu
         DesktopMenuAction::NewFolder => log_menu_result(spec.id, create_folder_in_sync_root_impl(app).map(|_| ())),
         DesktopMenuAction::OpenWebApp => log_menu_result(spec.id, open_external_url(app, WEB_APP_URL)),
         DesktopMenuAction::OpenView(view) => log_menu_result(spec.id, open_menu_view(app, view)),
+        // F11 and F15: View › Home opens the Beebeeb window on Home; View › Back leaves Settings in an open window.
+        DesktopMenuAction::NavigateMain(nav) => {
+            #[cfg(target_os = "macos")]
+            match nav {
+                MainMenuNav::Home => show_main_window(app, MainNav::Home),
+                MainMenuNav::Back => back_in_main_window(app),
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = nav;
+        }
         DesktopMenuAction::Zoom(action) => log_menu_result(spec.id, apply_menu_zoom(app, action)),
         DesktopMenuAction::OpenExternal(url) => log_menu_result(spec.id, open_external_url(app, url)),
         DesktopMenuAction::ReportProblem => {
@@ -15267,7 +16209,12 @@ fn apply_menu_zoom(app: &tauri::AppHandle, action: MenuZoomAction) -> Result<(),
 
     if !applied {
         show_main_app_window_impl(app);
-        for label in ["main-app", "settings"] {
+        // A Mac's main window is the Beebeeb window (F12); Windows and Linux keep today's order.
+        #[cfg(target_os = "macos")]
+        let labels = ["main"];
+        #[cfg(not(target_os = "macos"))]
+        let labels = ["main-app", "settings"];
+        for label in labels {
             if let Some(window) = app.get_webview_window(label) {
                 window
                     .set_zoom(scale)
@@ -15390,20 +16337,20 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
 
     tray.on_menu_event(|app, event| match event.id().as_ref() {
         "open_settings" => show_main_app_window_impl(app),
-        "tray_hide" => {
-            #[cfg(target_os = "windows")]
-            {
-                if let Some(win) = app.get_webview_window("main-app") {
+        "tray_hide" => match surfaces::policy::tray_hide(surfaces::policy::Platform::current()) {
+            // A Mac hides the app (⌘H): the Beebeeb window and the compact flyout; the Dock or a reopen unhides.
+            surfaces::policy::TrayHide::App => {
+                #[cfg(target_os = "macos")]
+                if let Err(error) = app.hide() {
+                    tracing::warn!(%error, "the tray's Hide could not hide the app");
+                }
+            }
+            surfaces::policy::TrayHide::Window(label) => {
+                if let Some(win) = app.get_webview_window(label) {
                     let _ = win.hide();
                 }
             }
-            #[cfg(not(target_os = "windows"))]
-            {
-                if let Some(win) = app.get_webview_window("settings") {
-                    let _ = win.hide();
-                }
-            }
-        }
+        },
         "tray_autostart" => {
             // Toggle autostart and rebuild the tray menu so the check
             // mark reflects the new state. TrayIcon::set_menu replaces
@@ -15554,7 +16501,7 @@ fn show_compact_app_window_impl(app: &tauri::AppHandle) {
 #[cfg(not(target_os = "windows"))]
 fn show_compact_app_window_with_nav(app: &tauri::AppHandle, nav: Option<&str>) {
     let (label, width, height, resizable) = (
-        surfaces::policy::main_window_label(surfaces::policy::Platform::current()),
+        surfaces::policy::compact_window_label(surfaces::policy::Platform::current()),
         MACOS_SETTINGS_WINDOW_WIDTH,
         MACOS_SETTINGS_WINDOW_HEIGHT,
         false,
@@ -15605,6 +16552,9 @@ fn show_compact_app_window_with_nav(app: &tauri::AppHandle, nav: Option<&str>) {
                 }
             }
         }
+        // The tray's Hide hides the app; a window shown in a hidden app stays hidden (review round 2, P2-2).
+        #[cfg(target_os = "macos")]
+        unhide_app(app);
         let _ = win.show();
         let _ = win.set_focus();
         if let Some(nav) = nav {
@@ -15667,6 +16617,8 @@ fn show_compact_app_window_with_nav(app: &tauri::AppHandle, nav: Option<&str>) {
                 });
             }
 
+            #[cfg(target_os = "macos")]
+            unhide_app(app);
             let _ = win.show();
             let _ = win.set_focus();
             if let Some(nav) = nav {
@@ -15676,6 +16628,16 @@ fn show_compact_app_window_with_nav(app: &tauri::AppHandle, nav: Option<&str>) {
         Err(error) => {
             tracing::warn!(%error, "failed to create compact app window");
         }
+    }
+}
+
+/// What a route-named opener (`show_main_app_window_with_nav`) asks of the Beebeeb window on a Mac: "settings"
+/// opens Settings (the last section used), anything else Home.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn main_nav_for_route(nav: Option<&str>) -> MainNav {
+    match nav {
+        Some("settings") => MainNav::settings(None),
+        _ => MainNav::Home,
     }
 }
 
@@ -15695,11 +16657,16 @@ fn show_main_app_window_impl(app: &tauri::AppHandle) {
 /// declared `visible: false` in tauri.conf.json, so the explicit `show()` +
 /// `set_focus()` are required.
 fn show_main_app_window_with_nav(app: &tauri::AppHandle, nav: Option<&str>) {
-    #[cfg(not(target_os = "windows"))]
+    // Task 1683 slice 1 (two-surface spec §7): on a Mac every opener that showed the compact window shows the Beebeeb
+    // window, on Settings for "settings" and on Home otherwise. Until slice 3 only the tray click still shows the
+    // compact flyout.
+    #[cfg(target_os = "macos")]
+    show_main_window(app, main_nav_for_route(nav));
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        // No dedicated main-app window outside Windows — reuse the compact app.
-        // There is no separate compact Settings page; Preferences and Settings
-        // both intentionally focus the same compact app window.
+        // No dedicated main-app window on Linux: reuse the compact app. There is no separate compact Settings page;
+        // Preferences and Settings both intentionally focus the same compact app window.
         let compact_nav = match nav {
             Some("settings") | None => None,
             Some(other) => Some(other),
@@ -16882,57 +17849,9 @@ mod tests {
         assert_eq!(super::valid_macos_tray_scale_factor(f64::INFINITY), 1.0);
     }
 
-    // ── slice 6: the Settings window anchors top-right under the menu bar ──
-
-    #[test]
-    fn macos_settings_window_position_aligns_right_edges_under_the_icon() {
-        // The design ruling (spec Q6): Settings opens top-right under the
-        // menu bar on the icon's display. The status item already sits in
-        // the menu bar's top-right region, so the window's RIGHT edge
-        // aligns with the icon's right edge and its top sits
-        // MACOS_TRAY_FLYOUT_GAP below the icon's bottom (the menu bar's
-        // bottom edge).
-        let position = super::macos_settings_window_position(1_000.0, 0.0, 24.0, 22.0, 560.0, 1.0, 0.0, 2_560.0);
-
-        assert_eq!(position.x, 464); // icon right edge 1024 - 560
-        assert_eq!(position.y, 28); // 0 + 22 + 6 gap
-    }
-
-    #[test]
-    fn macos_settings_window_position_scales_with_dpi() {
-        let position = super::macos_settings_window_position(2_000.0, 0.0, 48.0, 44.0, 560.0, 2.0, 0.0, 5_120.0);
-
-        assert_eq!(position.x, 928); // right edge 2048 - (560*2)
-        assert_eq!(position.y, 56); // 0 + 44 + 6*2 gap
-    }
-
-    #[test]
-    fn macos_settings_window_position_clamps_to_right_screen_edge() {
-        // The icon's right edge itself sits at the monitor's right edge, so
-        // right-aligning would push the window off-screen: clamp to the
-        // monitor instead.
-        let position = super::macos_settings_window_position(2_540.0, 0.0, 24.0, 22.0, 560.0, 1.0, 0.0, 2_560.0);
-
-        assert_eq!(position.x, 2_000); // 2560 - 560
-        assert_eq!(position.y, 28);
-    }
-
-    #[test]
-    fn macos_settings_window_position_clamps_to_left_screen_edge() {
-        let position = super::macos_settings_window_position(-1_400.0, 0.0, 24.0, 22.0, 560.0, 1.0, -1_440.0, 0.0);
-
-        assert_eq!(position.x, -1_440);
-        assert_eq!(position.y, 28);
-    }
-
-    #[test]
-    fn macos_settings_window_position_unbounded_when_no_monitor_found() {
-        let position =
-            super::macos_settings_window_position(500.0, 0.0, 24.0, 22.0, 560.0, 1.0, f64::NEG_INFINITY, f64::INFINITY);
-
-        assert_eq!(position.x, -36); // icon right edge 524 - 560, unclamped
-        assert_eq!(position.y, 28);
-    }
+    // The anchored Settings window's placement math and its five tests retired with that window (task 1683 slice
+    // 1, two-surface spec §2: "The anchored Settings placement (slice 6) retires"). The Beebeeb window's placement is
+    // `surfaces::window_state` and its tests.
 
     #[test]
     fn macos_window_mode_is_popover_when_anchor_present() {
@@ -21342,13 +22261,19 @@ mod finder_setup_wiring_tests {
             })
             .collect();
         let indent = |line: &str| line.len() - line.trim_start().len();
-        let (mut windows, mut notifications, mut dialogs) = (Vec::new(), 0, 0);
+        let (mut windows, mut notifications, mut dialogs, mut unhides) = (Vec::new(), 0, 0, 0);
         for (i, &(at, line)) in lines.iter().enumerate() {
             let code = line.trim();
             if code.starts_with("//") || !code.contains(".show(") {
                 continue;
             }
             let site = enclosing_fn(&production, at);
+            // Task 1683 slice 1 (review round 2, P2-2): unhiding the app (`AppHandle::show`) is not a window; it lives
+            // in one helper, which every macOS opener calls before it shows (and focuses) its window.
+            if site == "unhide_app" && code == "let _ = app.show();" {
+                unhides += 1;
+                continue;
+            }
             // A parentless dialog: the `.show(|…| …)` line of a chain, or a whole chain on one line
             // (`app.dialog()…show(|_| {});`, which rustfmt keeps when it is short).
             if code.starts_with(".show(|") || (code.starts_with("app.dialog().") && code.contains(".show(|")) {
@@ -21383,11 +22308,14 @@ mod finder_setup_wiring_tests {
             );
             windows.push(site);
         }
+        // 12 when f7b counted them (2026-10-09). Task 1683 slice 1 replaced the Settings window's two with the Beebeeb
+        // window's two (`show_main_window`) and added the reopen's (`reopen_main_window`): 13.
         assert_eq!(
             windows.len(),
-            12,
-            "the window show() sites f7b counted (2026-10-09): {windows:?}"
+            13,
+            "the window show() sites: {windows:?}"
         );
+        assert_eq!(unhides, 1, "the one app unhide, in unhide_app");
         assert_eq!(notifications, 3, "the three notification builders");
         // The menu's three sign-out message dialogs, and (task 1882, rebase 2026-10-10) the kept-folder alert,
         // `show_preserved_files_alert`, (task 1885, I2) the menu's failed-open alert, `show_menu_open_failure`,
@@ -33237,7 +34165,7 @@ mod config_write_pin_tests {
             || async {
                 let mut settings = crate::config::DesktopSettings::from(&DesktopConfig::default());
                 settings.upload_kbps_limit = Some(1234);
-                super::set_desktop_config(settings).expect("set_desktop_config");
+                super::save_desktop_settings(settings).expect("set_desktop_config");
             },
         )
         .await;
@@ -33627,7 +34555,7 @@ mod config_write_pin_tests {
 
                 let patch: crate::config::DesktopSettings =
                     serde_json::from_str(r#"{ "upload_kbps_limit": 2000 }"#).expect("the window sends one field");
-                super::set_desktop_config(patch).expect("the speed is saved");
+                super::save_desktop_settings(patch).expect("the speed is saved");
 
                 let on_disk = DesktopConfig::load_from(&path).expect("reads back");
                 assert!(on_disk.pause_sync, "the tray's pause survived the speed change");
@@ -33811,7 +34739,9 @@ mod config_write_pin_tests {
             ("persist_sync_root_and_start_engine", held),
             ("ensure_sync_root_and_engine", update),
             ("pick_sync_root", update),
-            ("set_desktop_config", update),
+            // Task 1683 slice 1 (review item 3): the command is a wrapper that also refreshes the menu's pause label;
+            // its write moved, unchanged, to `save_desktop_settings`.
+            ("save_desktop_settings", update),
             ("set_sync_paused", "persist_sync_paused_at("),
             ("persist_sync_paused_at", "DesktopConfig::update_at_then("),
             ("set_sync_mode", update),
@@ -34729,7 +35659,7 @@ mod sign_out_keep_tests {
             queue_write(&db, "c1", "notes", b"notes");
             let (state, _acct) = signed_out_state();
             recording_finder(&state);
-            let id = ask(&state, "macos-settings");
+            let id = ask(&state, "main");
             let done = sign_out_with(&state, Some(&id), no_seam()).await.unwrap();
             let kept = done.kept_unsent.expect("a kept folder");
             let folder = Path::new(&kept.folder);
@@ -34843,7 +35773,7 @@ mod sign_out_keep_tests {
                 email: None,
             });
             set_auth_present(&state, true);
-            let id = ask(&state, "macos-settings");
+            let id = ask(&state, "main");
             let mut failure = None;
             let logs = capture_logs_async(async {
                 failure = Some(sign_out_with(&state, Some(&id), no_seam()).await.unwrap_err());
@@ -34881,14 +35811,14 @@ mod sign_out_keep_tests {
             let staged = queue_write(&db, "w1", "f1", b"bytes");
             let (state, _acct) = signed_out_state();
             recording_finder(&state);
-            let id = ask(&state, "macos-settings");
+            let id = ask(&state, "main");
             std::fs::remove_file(&staged).unwrap();
             let failure = sign_out_with(&state, Some(&id), no_seam()).await.unwrap_err();
             assert!(
                 failure.message.starts_with("unsent_changes: "),
                 "the gate refuses, the ask is shown again"
             );
-            let fresh = count_ask("macos-settings").unwrap();
+            let fresh = count_ask("main").unwrap();
             assert_eq!(fresh.counts.missing_files, 1);
         })
         .await;
@@ -34905,7 +35835,7 @@ mod sign_out_keep_tests {
             std::fs::remove_file(&gone).unwrap();
             let (state, _acct) = signed_out_state();
             recording_finder(&state);
-            let id = ask(&state, "macos-settings");
+            let id = ask(&state, "main");
             let done = sign_out_with(&state, Some(&id), no_seam())
                 .await
                 .expect("the ask showed the missing write, so the sign-out completes");
@@ -34928,7 +35858,7 @@ mod sign_out_keep_tests {
                 queue_write(&db, "w1", "f1", b"bytes");
                 let (state, _acct) = signed_out_state();
                 recording_finder(&state);
-                let id = ask(&state, "macos-settings");
+                let id = ask(&state, "main");
                 let seam: SignOutSeam = Arc::new(move |at| {
                     if at == point {
                         Err("aborted by the test".into())
@@ -35017,12 +35947,12 @@ mod sign_out_keep_tests {
             queue_rename(&db, "r1");
             let (state, _acct) = signed_out_state();
             recording_finder(&state);
-            let id = ask(&state, "macos-settings");
+            let id = ask(&state, "main");
             let store = state.sign_out.snapshots.clone();
             let seam: SignOutSeam = Arc::new(move |point| {
                 if point == "before_keep" {
                     queue_rename(&state_db_in_scratch(), "r2");
-                    store.record(count_ask("macos-settings").unwrap()); // S′ holds both renames
+                    store.record(count_ask("main").unwrap()); // S′ holds both renames
                 }
                 Ok(())
             });
@@ -35033,11 +35963,11 @@ mod sign_out_keep_tests {
             db.hold_lock_for_test()
                 .execute("DELETE FROM operation_queue WHERE op_id = 'r2'", [])
                 .unwrap();
-            let id = ask(&state, "macos-settings");
+            let id = ask(&state, "main");
             let store = state.sign_out.snapshots.clone();
             let seam: SignOutSeam = Arc::new(move |point| {
                 if point == "before_keep" {
-                    store.record(count_ask("macos-settings").unwrap());
+                    store.record(count_ask("main").unwrap());
                 }
                 Ok(())
             });
@@ -35059,7 +35989,7 @@ mod sign_out_keep_tests {
             queue_write(&db, "w1", "f1", b"already signed out");
             let (state, _acct) = signed_out_state();
             recording_finder(&state);
-            let id = ask(&state, "macos-settings");
+            let id = ask(&state, "main");
             let done = sign_out_with(&state, Some(&id), no_seam()).await.unwrap();
             assert_eq!(
                 done.outcome,
@@ -35084,7 +36014,7 @@ mod sign_out_keep_tests {
             queue_write(&db, "w1", "f1", b"bytes");
             let (state, _acct) = signed_out_state();
             recording_finder(&state);
-            let id = ask(&state, "macos-settings");
+            let id = ask(&state, "main");
             let seam: SignOutSeam = Arc::new(|point| {
                 if point == "after_keep" {
                     queue_write(&state_db_in_scratch(), "late", "late", b"late"); // only a test seam can add one now
@@ -35113,7 +36043,7 @@ mod sign_out_keep_tests {
             queue_write(&db, "w1", "f1", b"once");
             let (state, _acct) = signed_out_state();
             recording_finder(&state);
-            let id = ask(&state, "macos-settings");
+            let id = ask(&state, "main");
             let (store, same_ask) = (state.sign_out.snapshots.clone(), id.clone());
             let second_gate = Arc::new(std::sync::Mutex::new(None));
             let seen = second_gate.clone();
@@ -35182,7 +36112,7 @@ mod sign_out_keep_tests {
                 email: None,
             });
             set_auth_present(&state, true);
-            let id = ask(&state, "macos-settings");
+            let id = ask(&state, "main");
             let store = state.sign_out.snapshots.clone();
             let seam: SignOutSeam = Arc::new(move |point| {
                 if point == "before_keep" {
@@ -35380,7 +36310,7 @@ mod sign_out_keep_tests {
             recording_finder(&state);
             // Cancel: the person was asked and chose Cancel, so no `clear_session` ran at all. The ask itself closes
             // nothing.
-            ask(&state, "macos-settings");
+            ask(&state, "main");
             assert!(
                 !db.finder_accepts_closed().unwrap(),
                 "a cancelled sign-out: the ask closes nothing"
@@ -35390,14 +36320,14 @@ mod sign_out_keep_tests {
             assert!(!db.finder_accepts_closed().unwrap(), "refused at the gate");
             // The keep step fails: a staged copy it cannot read.
             std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o000)).unwrap();
-            let id = ask(&state, "macos-settings");
+            let id = ask(&state, "main");
             let failed = sign_out_with(&state, Some(&id), no_seam()).await;
             std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o600)).unwrap();
             assert!(failed.unwrap_err().message.starts_with("unsent_copy_failed: "));
             assert!(!db.finder_accepts_closed().unwrap(), "a failed keep");
             // The purge guard refuses after a completed keep (only a test seam can add a write then). The seam records
             // that the keep step left accepts closed, so the reopen checked last is the guard's.
-            let id = ask(&state, "macos-settings");
+            let id = ask(&state, "main");
             let closed_after_the_keep = Arc::new(std::sync::Mutex::new(None));
             let seen = closed_after_the_keep.clone();
             let seam: SignOutSeam = Arc::new(move |point| {
@@ -35621,7 +36551,7 @@ mod sign_out_keep_tests {
             queue_write(&db, "ws", "secret", b"plan"); // its `INSERT OR IGNORE` keeps the row above
             let (state, _acct) = signed_out_state();
             recording_finder(&state);
-            let id = ask(&state, "macos-settings");
+            let id = ask(&state, "main");
             let logs = capture_logs_async(async {
                 let done = sign_out_with(&state, Some(&id), no_seam()).await.unwrap();
                 assert_eq!(done.kept_unsent.map(|kept| kept.files), Some(1));
@@ -35793,19 +36723,19 @@ mod sign_out_keep_tests {
                     .unwrap()
             };
             let state = AppState::default();
-            let id = ask(&state, "macos-settings");
+            let id = ask(&state, "main");
             let link = Arc::new(runner::SendPhaseLink::default());
-            let stale = start_send_phase(&state.sign_out, "stale", "macos-settings", Some(link.clone()));
+            let stale = start_send_phase(&state.sign_out, "stale", "main", Some(link.clone()));
             assert!(stale.err().unwrap().starts_with("unsent_changes: "));
             assert_eq!(next_retry_at(), 4102444800, "a refused start makes nothing due");
-            let run = start_send_phase(&state.sign_out, &id, "macos-settings", Some(link.clone())).unwrap();
+            let run = start_send_phase(&state.sign_out, &id, "main", Some(link.clone())).unwrap();
             assert!(run.is_some() && link.is_armed());
             assert!(
                 next_retry_at() <= now_unix_seconds(),
                 "the start made the live write due now"
             );
             assert!(
-                start_send_phase(&state.sign_out, &id, "macos-settings", Some(link.clone()))
+                start_send_phase(&state.sign_out, &id, "main", Some(link.clone()))
                     .unwrap()
                     .is_none(),
                 "a second start starts nothing"
@@ -35906,7 +36836,7 @@ mod sign_out_keep_tests {
             let link = Arc::new(runner::SendPhaseLink::default());
             link.arm();
             let run = PhaseRun {
-                owner: "macos-settings".into(),
+                owner: "main".into(),
                 link: Some(link.clone()),
                 stop: Default::default(),
                 closed: Default::default(),
@@ -35976,43 +36906,43 @@ mod sign_out_keep_tests {
             let state = AppState::default();
             // (b) a close during that window's phase: ended `closed`, its snapshot dropped; a later Sign out
             // refuses.
-            let id = ask(&state, "macos-settings");
-            let closed = phase_owned_by(&state, "macos-settings");
-            let outcome = flow_window_closed(&state.sign_out, "macos-settings");
+            let id = ask(&state, "main");
+            let closed = phase_owned_by(&state, "main");
+            let outcome = flow_window_closed(&state.sign_out, "main");
             assert!(outcome.phase_closed && closed.load(Ordering::SeqCst) && outcome.snapshot_dropped);
             let refused = sign_out_with(&state, Some(&id), no_seam()).await.unwrap_err();
             assert!(refused.message.starts_with("unsent_changes: "));
             // (c) at the ask, no phase: the snapshot is dropped.
             *state.sign_out.phase.lock().unwrap() = None;
-            ask(&state, "macos-settings");
-            assert!(flow_window_closed(&state.sign_out, "macos-settings").snapshot_dropped);
-            // (d) another window's close leaves a phase and a snapshot of `macos-settings` alone.
-            ask(&state, "macos-settings");
-            let closed = phase_owned_by(&state, "macos-settings");
+            ask(&state, "main");
+            assert!(flow_window_closed(&state.sign_out, "main").snapshot_dropped);
+            // (d) another window's close leaves a phase and a snapshot of `main` alone.
+            ask(&state, "main");
+            let closed = phase_owned_by(&state, "main");
             for other in ["settings", "onboarding"] {
                 let outcome = flow_window_closed(&state.sign_out, other);
                 assert!(!outcome.phase_closed && !outcome.snapshot_dropped, "{other}");
             }
             assert!(!closed.load(Ordering::SeqCst));
             *state.sign_out.phase.lock().unwrap() = None;
-            // (d), its other half: a close of `macos-settings` leaves a snapshot `onboarding` owns alone. (g) A close
+            // (d), its other half: a close of `main` leaves a snapshot `onboarding` owns alone. (g) A close
             // of `onboarding` drops it.
             ask(&state, "onboarding");
-            let outcome = flow_window_closed(&state.sign_out, "macos-settings");
+            let outcome = flow_window_closed(&state.sign_out, "main");
             assert!(!outcome.snapshot_dropped, "(d) onboarding's snapshot stays");
             assert!(
                 flow_window_closed(&state.sign_out, "onboarding").snapshot_dropped,
                 "(g)"
             );
             // (h) running when its window closes, then failing: the dialog, once.
-            state.sign_out.late_results.begin("macos-settings");
-            assert_eq!(flow_window_closed(&state.sign_out, "macos-settings").show, None);
+            state.sign_out.late_results.begin("main");
+            assert_eq!(flow_window_closed(&state.sign_out, "main").show, None);
             assert!(
                 state
                     .sign_out
                     .late_results
                     .complete(
-                        "macos-settings",
+                        "main",
                         Some(crate::sign_out::flow_window::Shown::Failure("x".into()))
                     )
                     .is_some()
@@ -36061,10 +36991,13 @@ mod sign_out_keep_tests {
             started.contains("sign_out_flow_window_closed(webview.app_handle(), webview.label())"),
             "{page_load}"
         );
+        // Task 1683 slice 1 (two-surface §8.2): the flow's window is now the Beebeeb window, and a close destroys
+        // it. The premise moved: the hook runs on `CloseRequested` AND on `Destroyed` (both arms pinned above), so a
+        // destroyed window still ends its flow; spec 1887 §5.1, "A close ends the flow", already covers a destroy.
         assert_eq!(
-            surfaces::policy::close_policy(surfaces::policy::Platform::Macos, "macos-settings"),
-            surfaces::registry::ClosePolicy::Hide,
-            "the premise: a close never destroys the Settings window"
+            surfaces::policy::close_policy(surfaces::policy::Platform::Macos, "main"),
+            surfaces::registry::ClosePolicy::Destroy,
+            "the premise: a close destroys the Beebeeb window"
         );
     }
 
@@ -36156,14 +37089,14 @@ mod sign_out_keep_tests {
             assert_eq!(late_result_of(&result), expected, "{result:?}");
             // What a close then finds: that result once, or nothing.
             let late = LateResults::default();
-            late.begin("macos-settings");
-            assert_eq!(late.complete("macos-settings", late_result_of(&result)), None);
+            late.begin("main");
+            assert_eq!(late.complete("main", late_result_of(&result)), None);
             assert_eq!(
-                late.window_closed("macos-settings"),
+                late.window_closed("main"),
                 expected,
                 "a close after {result:?}"
             );
-            assert_eq!(late.window_closed("macos-settings"), None);
+            assert_eq!(late.window_closed("main"), None);
         }
     }
 
@@ -36446,8 +37379,9 @@ mod sign_out_keep_tests {
                 .unwrap_or_else(|| panic!("open_sign_out_flow: {step}\n{open}"))
         };
         let stored = at("app.state::<AppState>().sign_out.flow_request.store(true, Ordering::SeqCst);");
-        let shown = at("show_macos_settings_window(app);");
-        let told = at("let _ = app.emit_to(\"macos-settings\", \"menu:sign-out-flow\", ());");
+        // Task 1683 slice 1 (two-surface §8.1, §8.2): the flow's owner is the Beebeeb window, on Settings › Account.
+        let shown = at("show_main_window(app, MainNav::settings(Some(\"account\")));");
+        let told = at("let _ = app.emit_to(\"main\", \"menu:sign-out-flow\", ());");
         assert!(stored < shown && shown < told, "store, open, then tell: {open}");
         assert!(
             body("fn request_sign_out_flow(").contains(&squeeze("open_sign_out_flow(&app);")),

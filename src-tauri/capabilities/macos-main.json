@@ -1,0 +1,22 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "macos-main",
+  "description": "The macOS Beebeeb window (`main`, task 1683 slice 1; spec docs/specs/2026-10-24-macos-two-surface-app.md §4, §7): Home and Settings in one window. macOS only, because no other platform builds it. The default capability's grants except `window-state:default` (a Mac does not run the window-state plugin; the window keeps its own frame): its toolbar and sidebar top are a `data-tauri-drag-region` (start-dragging), and it reads and listens like every other app window.",
+  "platforms": [
+    "macOS"
+  ],
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "core:window:allow-hide",
+    "core:window:allow-minimize",
+    "core:window:allow-start-dragging",
+    "opener:default",
+    "updater:default",
+    "autostart:default",
+    "dialog:allow-open",
+    "notification:default"
+  ]
+}

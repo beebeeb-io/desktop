@@ -91,6 +91,11 @@ Test fixtures: `docs/NATIVE_PARITY_FIXTURES.md` (task 1612) — test-only `nativ
 - **Local data belongs to one account (R10):** `state.db` records the owner; every engine start goes through `spawn_bound_engine` (`account_binding::bind_before_engine_start` first): same account keeps everything; another account's data or owner-less data resets before anything starts (Windows refuses instead); an incomparable owner stops the start; a failed reset/purge stops. Pin: `every_engine_start_is_bound_first`.
 - **Zombie domain correction (1698):** the `DOMAIN_IDENTIFIER` comment about `io.beebeeb.desktop.FileProvider` was wrong (folder is `Beebeeb-Beebeeb`; `getDomains` sees only the calling provider's domains); a pre-rename dev-Mac domain is cleared once by the one-off helper (spec §11), not by the app.
 
+## macOS window rules (task 1683, spec `docs/specs/2026-10-24-macos-two-surface-app.md`)
+- **One app window, `main`** (`src/MacApp.tsx`), declared alone in `tauri.macos.conf.json` (`create: false`): a Mac never builds `tray`/`windows-onboarding`/`main-app`, Settings is a mode of `main` (System Settings style), `macos-settings` is retired. Until slice 3 the tray click shows the compact flyout (`settings`); until slice 2 sign-in is the `onboarding` window. 1887's sign-out flow owner is `main`.
+- **Every opener calls `show_main_window(app, MainNav)`** (unhides the app, stores ONE request, emits `main:navigate`, pulled by `consume_main_navigation`); `src/mainWindowModel.ts` `navigate` is the only place a request becomes a view; under a sheet nothing navigates and `main_window_state` disables View › Home/Back, Settings…, Check for Updates…. macOS menu: `MACOS_MENU_SPECS` + `MACOS_MENU_LAYOUT` (Windows/Linux keep `DESKTOP_MENU_SPECS`).
+- **Closing `main` destroys it and the app keeps running** (`keep_running_on_exit_request`); `RunEvent::Reopen` brings it back; Dock icon per `surfaces::policy::dock_icon_wanted`. No window-state plugin on a Mac: the frame is kept in logical points (`main-window-frame.json`, never full screen/zoomed) and placed by `surfaces::window_state`. A settings pause goes through `set_sync_paused`. (history: docs/runbook/desktop-task-history.md#two-surface-slice-1)
+
 ## Adding commands (Rust → JS bridge)
 
 1. Add a `#[tauri::command]` function in `src-tauri/src/lib.rs`.

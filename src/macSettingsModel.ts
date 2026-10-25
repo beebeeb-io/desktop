@@ -6,8 +6,8 @@
  * decision the window makes about what to say: which row shows which state, which sentence
  * a Finder failure gets, how a speed limit is written, what the plan line reads.
  *
- * The window itself (`MacSettings.tsx`) is mounted only at `?window=settings-v2&platform=macos`
- * until slice 6 flips macOS to it; nothing rendered today imports this file.
+ * Its section bodies (`MacSettings.tsx`) are hosted by the Beebeeb window's Settings pane (`MacApp.tsx`, task 1683
+ * slice 1, two-surface spec §7.8).
  */
 import type { EngineRefusal, Subscription, VaultItem } from './desktopApi'
 import type { FinderFailureReason, FinderSetupView } from './finderSetup'
@@ -56,21 +56,32 @@ export function settingsTabFromLocation(): SettingsTab {
 }
 
 /**
- * Keyboard model of the tab strip (WAI-ARIA tabs, automatic activation): left and right move
- * and wrap, Home and End jump. Any other key returns null so the handler leaves it alone.
+ * Keyboard model of the Settings list (task 1683 slice 1, two-surface spec §7.8 and §11): the shipped tab strip's
+ * automatic activation, with ↑ and ↓ in place of ← and → because the tabs became the sidebar list (ruling 1). Down
+ * and up move and wrap, Home and End jump, over `order` (the list as drawn; the tab order by default). Any other key
+ * returns null so the handler leaves it alone.
  */
-export function tabAfterKey(current: SettingsTab, key: string): SettingsTab | null {
-  const index = SETTINGS_TABS.findIndex((tab) => tab.id === current)
+export function tabAfterKey(
+  current: SettingsTab,
+  key: string,
+  order: readonly SettingsTab[] = SETTINGS_TABS.map((tab) => tab.id),
+): SettingsTab | null {
+  return listAfterKey(order, current, key)
+}
+
+/** The same keys over any vertical list: the Beebeeb window's own sidebar uses them too (two-surface spec §7.6). */
+export function listAfterKey<T>(list: readonly T[], current: T, key: string): T | null {
+  const index = list.indexOf(current)
   if (index < 0) return null
   switch (key) {
-    case 'ArrowRight':
-      return SETTINGS_TABS[(index + 1) % SETTINGS_TABS.length].id
-    case 'ArrowLeft':
-      return SETTINGS_TABS[(index - 1 + SETTINGS_TABS.length) % SETTINGS_TABS.length].id
+    case 'ArrowDown':
+      return list[(index + 1) % list.length]
+    case 'ArrowUp':
+      return list[(index - 1 + list.length) % list.length]
     case 'Home':
-      return SETTINGS_TABS[0].id
+      return list[0]
     case 'End':
-      return SETTINGS_TABS[SETTINGS_TABS.length - 1].id
+      return list[list.length - 1]
     default:
       return null
   }
@@ -297,6 +308,11 @@ export function planLine(sub: Pick<Subscription, 'plan' | 'status' | 'current_pe
   if (!date || date.startsWith('No renewal')) return plan
   const verb = ['active', 'trialing'].includes(sub.status.toLowerCase()) ? 'renews' : 'ends'
   return `${plan} · ${verb} ${date}`
+}
+
+/** `Basic plan`: the short line under the account in the Beebeeb window's sidebar (two-surface hi-fi, section 4). */
+export function planShortLine(sub: Pick<Subscription, 'plan'> | null | undefined): string | null {
+  return sub?.plan ? `${titleCasePlan(sub.plan)} plan` : null
 }
 
 /** The storage red threshold, spec section 3: neutral, and red from 90 % up. */
