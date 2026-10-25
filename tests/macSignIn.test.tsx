@@ -1175,13 +1175,13 @@ describe('every card asks for the window title that is its own heading (spec C C
 
 describe('useBrowserSignIn: the controller as a hook (a new controller per mount, so StrictMode’s second mount is alive)', () => {
   function open() {
-    const created: Array<{ started: number; disposed: number; onState: (s: unknown) => void; onSettled: (s: unknown) => void }> = []
+    const created: Array<{ started: number; detached: number; onState: (s: unknown) => void; onSettled: (s: unknown) => void }> = []
     class FakeBrowserSignIn {
       started = 0
-      disposed = 0
+      detached = 0
       constructor(_deps: unknown, public onState: (s: unknown) => void, public onSettled: (s: unknown) => void) { created.push(this) }
       async start() { this.started += 1 }
-      dispose() { this.disposed += 1 }
+      detach() { this.detached += 1 }
     }
     const settled: unknown[] = []
     const idle = { phase: 'idle', userCode: null, verificationUri: null, error: null }
@@ -1219,11 +1219,12 @@ describe('useBrowserSignIn: the controller as a hook (a new controller per mount
     expect(settled).toEqual([{ kind: 'fresh', vaultUnlocked: true }])
   })
 
-  test('leaving the screen disposes the controller', async () => {
+  // The attempt is not over when its card goes (see tests/browserSignIn.test.ts): the controller is detached, not stopped.
+  test('leaving the screen detaches the controller; it does not stop the handoff', async () => {
     const { m, created } = open()
     await m.flush()
     m.unmount()
-    expect(created[0].disposed).toBe(1)
+    expect(created[0].detached).toBe(1)
   })
 })
 

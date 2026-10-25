@@ -80,6 +80,8 @@ export class BrowserSignIn {
   /** The attempt reached an outcome (settled or failed): later signals of it are ignored. */
   private terminal = false
   private disposed = false
+  /** The screen went away; the attempt carries on to its end (`detach`). */
+  private detached = false
   private unlisten: (() => void) | null = null
   private mismatchTimer: unknown = null
 
@@ -120,6 +122,18 @@ export class BrowserSignIn {
     this.fail(result.unsupported ? commandUnavailableLabel('start_browser_login') : result.reason)
   }
 
+  /**
+   * The screen that started the attempt went away: a remount, or the person moved on. The attempt is NOT over. Rust
+   * moves the session revision when it installs the session and emits `done` some milliseconds later, and
+   * `AccountSessionBoundary`'s one-second poll can remount the window in between; the person is signed in, so `done`
+   * must still move the flow on (to the Finder screen), or the browser path, the main one, would often skip it. A
+   * detached controller is not told anything any more; it stays listening only until its attempt ends.
+   */
+  detach(): void {
+    this.detached = true
+  }
+
+  /** A hard stop: nothing is reported, nothing settles, nothing is listened to. */
   dispose(): void {
     this.disposed = true
     this.cancelMismatchTimer()
@@ -211,13 +225,13 @@ export class BrowserSignIn {
 
   private set(next: BrowserSignInState): void {
     this.state = next
-    if (!this.disposed) this.onState(next)
+    if (!this.disposed && !this.detached) this.onState(next)
   }
 }
 
 /**
- * The controller as a hook: a new controller for every mount (React's StrictMode mounts, unmounts and mounts again, and
- * a disposed controller stays disposed), released when the screen goes. `onSettled` may change between renders.
+ * The controller as a hook: a new controller for every mount (React's StrictMode mounts, unmounts and mounts again),
+ * detached when the screen goes (the attempt itself is not stopped). `onSettled` may change between renders.
  */
 export function useBrowserSignIn({ onSettled }: { onSettled: (settled: SignInSettled) => void }) {
   const [state, setState] = useState<BrowserSignInState>(IDLE_BROWSER_SIGN_IN)
@@ -229,7 +243,8 @@ export function useBrowserSignIn({ onSettled }: { onSettled: (settled: SignInSet
     const next = new BrowserSignIn(browserSignInDeps(), setState, (settled) => settledRef.current(settled))
     controller.current = next
     return () => {
-      next.dispose()
+      // The card going away does not end the handoff (see `detach`): the last `onSettled` still carries it on.
+      next.detach()
       controller.current = null
     }
   }, [])

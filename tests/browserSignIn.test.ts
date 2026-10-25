@@ -284,6 +284,74 @@ describe('C-S1: a different account is the password path’s outcome, and the ra
   })
 })
 
+// The bug this describes: Rust moves the session revision when it installs the session and emits `done` some milliseconds
+// later, and AccountSessionBoundary (a one-second poll) can remount the window in between. The card that started the
+// handoff is then gone, but the person IS signed in: `done` must still move the flow on (to the Finder screen), or the
+// browser path, the main one, would often skip it. So a screen that goes away DETACHES: it stops being told, and the
+// attempt carries on to its end (a controller of a gone screen stays listening only until then).
+describe('a screen that goes away mid-handoff (a remount, or the person moved on)', () => {
+  test('the done event still settles, once, and the listener is released then', async () => {
+    const r = rig(() => new Promise(() => {}))
+    void r.sign.start()
+    await tick()
+    r.sign.detach()
+    expect(r.unlistened()).toBe(0)
+    r.emit({ phase: 'done', email: 'sam@example.eu' })
+    expect(r.settled).toEqual([{ kind: 'fresh', vaultUnlocked: true }])
+    expect(r.unlistened()).toBe(1)
+  })
+
+  test('the command’s Ok settles it too, when the event was missed', async () => {
+    let finish: (value: CommandResult<void>) => void = () => {}
+    const r = rig(() => new Promise((resolve) => { finish = resolve }))
+    const started = r.sign.start()
+    await tick()
+    r.sign.detach()
+    finish({ ok: true, value: undefined })
+    await started
+    expect(r.settled).toEqual([{ kind: 'fresh', vaultUnlocked: true }])
+  })
+
+  test('a different account still reaches the switch step', async () => {
+    const r = rig(() => new Promise(() => {}))
+    void r.sign.start()
+    await tick()
+    r.sign.detach()
+    r.emit({ phase: 'account_mismatch', pending_changes: 3, unsent: ASK })
+    expect(r.settled).toEqual([{ kind: 'account_mismatch', pendingChanges: 3, unsent: ASK, unsentError: null }])
+  })
+
+  test('it reports no more state to the screen that is gone', async () => {
+    const r = rig(() => new Promise(() => {}))
+    void r.sign.start()
+    await tick()
+    const reported = r.states.length
+    r.sign.detach()
+    r.emit({ phase: 'waiting', user_code: 'AAAA-BBBB' })
+    r.emit({ phase: 'authorized' })
+    expect(r.states).toHaveLength(reported)
+  })
+
+  test('an error ends it quietly: nothing settles and the listener is released', async () => {
+    const r = rig(() => new Promise(() => {}))
+    void r.sign.start()
+    await tick()
+    r.sign.detach()
+    r.emit({ phase: 'error', message: 'The browser took too long.' })
+    expect(r.settled).toEqual([])
+    expect(r.unlistened()).toBe(1)
+  })
+
+  test('detaching before the subscription landed does not stop it from settling', async () => {
+    const r = rig()
+    const started = r.sign.start()
+    r.sign.detach()
+    await started
+    expect(r.settled).toEqual([{ kind: 'fresh', vaultUnlocked: true }])
+    expect(r.unlistened()).toBe(1)
+  })
+})
+
 describe('leaving the screen', () => {
   test('dispose stops listening and ignores everything that arrives afterwards', async () => {
     const r = rig(() => new Promise(() => {}))
