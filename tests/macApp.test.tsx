@@ -41,6 +41,7 @@ afterEach(() => {
 
 const showSignOutOutcome = loadComponent('MacSettings.tsx', 'showSignOutOutcome', { stripCode: signOutCopy.stripCode, holdSignOutWarning: accountSession.holdSignOutWarning })
 const locationSearch = loadComponent('MacApp.tsx', 'locationSearch', {})
+const snapshotReadFailure = loadComponent('MacApp.tsx', 'snapshotReadFailure', {})
 const focusById = (id: string) => { focused.push(id) }
 let focused: string[] = []
 const accountLine = loadComponent('MacApp.tsx', 'accountLine', { planShortLine: model.planShortLine })
@@ -69,6 +70,8 @@ const snapshot = (over: { account?: Record<string, unknown>; [k: string]: unknow
   storage: { used_bytes: 84_300_000_000, quota_bytes: 200_000_000_000, fetched_at: 900, stale: false },
   storage_full: false, pending_changes: 0, conflicts: { count: 0, files: [] }, activity: [],
   ...over,
+  // Rust's sync part of the state (task 2179): the phase unless a test says otherwise.
+  sync_phase: (over.sync_phase as string | undefined) ?? (over.phase as string | undefined) ?? 'synced',
   account: { email: 'sam@example.eu', logged_in: true, vault_unlocked: true, auth_expired: false, ...(over.account ?? {}) },
 })
 const subscription = { plan: 'basic', billing_cycle: 'yearly', status: 'active', seats: 1, region: 'eu', current_period_end: '2026-11-14T00:00:00Z', quota_bytes: 1, used_bytes: 0 }
@@ -129,6 +132,8 @@ function openWindow(opts: WindowOpts = {}) {
       locationSearch: () => opts.search ?? '',
       focusById, accountLine,
       SNAPSHOT_REFRESH_MS: 5000,
+      SNAPSHOT_WATCHDOG_MS: 15_000,
+      snapshotReadFailure,
       ...opts.bindings,
     },
   })
@@ -164,6 +169,54 @@ const click = async (m: Mounted, text: string) => { await byLabel(m, text).props
 const title = (m: Mounted) => textOf(find(m, (el) => el.props.id === 'mw-title')[0]?.props.children).trim()
 const current = (m: Mounted) => find(m, (el) => el.props['aria-current'] === 'page').map(label)
 const menuStates = (m: Mounted) => m.calls.filter((c) => c.name === 'main_window_state').map((c) => c.args)
+
+describe('the window reads the state again after each outcome: the three refresh wirings (task 2179 item 8)', () => {
+  const reads = (m: Mounted) => m.calls.filter((c) => c.name === 'popover_snapshot').length
+  const propsOf = (m: Mounted, tab: string) => find(m, (el) => el.props['data-tab'] === tab)[0]?.props['data-props']
+
+  test('Home\'s onRefresh is the reader\'s refresh: a read at once, resolved when the result is applied', async () => {
+    const { m } = openWindow()
+    await settle(m)
+    const before = reads(m)
+    expect(before).toBe(1)
+    const onRefresh = propsOf(m, 'home').onRefresh
+    await onRefresh()
+    expect(reads(m)).toBe(before + 1)
+  })
+
+  test('a sign-out flow\'s outcome reads the state at once (the flowOutcomes effect)', async () => {
+    const { m, request } = openWindow({ backend: { sign_out_count: () => { throw new Error('count failed') } } })
+    await settle(m)
+    await request({ to: 'settings', section: 'account' })
+    const before = reads(m)
+    await propsOf(m, 'account').flow.request() // the count fails: a "failed" outcome, reported
+    m.render()
+    await settle(m)
+    expect(m.toasts.length).toBeGreaterThan(0) // the outcome was shown
+    expect(reads(m)).toBe(before + 1)
+  })
+
+  test('"Try again" on a failed first read reads at once; clicks while it runs join it (item 7)', async () => {
+    let answer: () => unknown = () => { throw new Error('API unreachable') }
+    let release: () => void = () => {}
+    const { m } = openWindow({ snap: () => answer() })
+    await settle(m)
+    expect(textOf(expand(m.tree()))).toContain('Couldn’t load your account')
+    const before = reads(m)
+    answer = () => new Promise((resolve) => { release = () => resolve(snapshot()) })
+    const button = byLabel(m, 'Try again')
+    button.props.onClick()
+    button.props.onClick()
+    button.props.onClick()
+    await settle(m)
+    expect(reads(m)).toBe(before + 1)
+    release()
+    await settle(m)
+    m.render()
+    await settle(m)
+    expect(textOf(expand(m.tree()))).not.toContain('Couldn’t load your account')
+  })
+})
 
 describe('the window, signed in: Home and the sidebar (§7.6)', () => {
   test('Home in the sidebar, selected; the footer has the account and the gear; the toolbar names the section and is the drag region', async () => {
@@ -898,7 +951,7 @@ const useFinderSetupModule = () => ({
   },
 })
 
-function openHome(snap: unknown, backend: Record<string, (args: any) => unknown> = {}) {
+function openHome(snap: unknown, backend: Record<string, (args: any) => unknown> = {}, onRefresh?: () => Promise<void>) {
   let refreshed = 0
   const m = mount('MacApp.tsx', 'HomePane', {
     expand: true,
@@ -909,7 +962,7 @@ function openHome(snap: unknown, backend: Record<string, (args: any) => unknown>
       kept_unsent_folder: () => null,
       ...backend,
     } as any,
-    props: { snapshot: snap, onRefresh: () => { refreshed += 1 } },
+    props: { snapshot: snap, onRefresh: () => { refreshed += 1; return onRefresh ? onRefresh() : Promise.resolve() } },
     hookModules: [useFinderSetupModule(), useKeptFoldersModule()],
     bindings: {
       ...desktopApi,
@@ -1073,6 +1126,31 @@ describe('Home (§7.6, first cut: status, Finder row, storage, the kept rows)', 
     await settleHome(m)
     expect(m.toasts.map((t) => t.title)).toEqual(['Couldn’t unlock the vault'])
     expect(hasHomeButton(m, 'Use your recovery phrase')).toBe(false)
+  })
+
+  test('Unlock vault and Resume sync stay busy until the refreshed state shows, so a second click sends nothing (task 2179 item 2)', async () => {
+    const cases = [
+      { snap: snapshot({ phase: 'locked', account: { vault_unlocked: false } }), label: 'Unlock vault', busyLabel: 'Unlocking…', command: 'unlock_vault' },
+      { snap: snapshot({ phase: 'paused', pending_changes: 1 }), label: 'Resume sync', busyLabel: 'Resume sync', command: 'tray_resume_sync' },
+    ]
+    for (const c of cases) {
+      let applied: () => void = () => {}
+      const { m, refreshed } = openHome(c.snap, { [c.command]: () => null }, () => new Promise<void>((resolve) => { applied = resolve }))
+      await settleHome(m)
+      const clicked = homeButton(m, c.label).props.onClick()
+      await settleHome(m)
+      m.render()
+      await settleHome(m)
+      // The command answered and the refresh is under way, its snapshot not applied yet: still busy.
+      expect(m.calls.filter((call) => call.name === c.command)).toHaveLength(1)
+      expect(refreshed()).toBe(1)
+      expect({ command: c.command, disabled: homeButton(m, c.busyLabel).props.disabled }).toEqual({ command: c.command, disabled: true })
+      applied()
+      await clicked
+      m.render()
+      await settleHome(m)
+      expect({ command: c.command, disabled: homeButton(m, c.label).props.disabled }).toEqual({ command: c.command, disabled: false })
+    }
   })
 
   test('a Finder failure is one inline notice under the row, never a toast (one failure, one surface)', async () => {
