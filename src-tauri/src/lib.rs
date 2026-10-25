@@ -11246,6 +11246,24 @@ fn mark_known_folder_onboarding_seen() -> Result<(), String> {
     })
 }
 
+/// Whether the Beebeeb window's one-time hint on Home ("Beebeeb lives in the menu bar", two-surface spec §7.6) has been
+/// dismissed. `false` for a fresh install and for a `desktop.toml` that has no such key.
+#[tauri::command]
+fn get_menu_bar_hint_seen() -> Result<bool, String> {
+    Ok(DesktopConfig::load()?.menu_bar_hint_seen)
+}
+
+/// "Got it" on that hint: it is never shown again. Idempotent, and a write only when it changes something. One update, so
+/// it lands next to any other save in flight (task 1889).
+#[tauri::command]
+fn mark_menu_bar_hint_seen() -> Result<(), String> {
+    DesktopConfig::update(|cfg| {
+        let changed = !cfg.menu_bar_hint_seen;
+        cfg.menu_bar_hint_seen = true;
+        (changed, ())
+    })
+}
+
 /// Resolve and dehydrate the local, unpinned files under each newly-excluded
 /// folder. Returns total bytes reclaimed. Shared by Windows (real CF
 /// dehydrate) and non-Windows (DB-only flip) via the inner cfg blocks —
@@ -13839,6 +13857,8 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
             });
 
             record_installed_release_channel(channel).map_err(|e| format!("record installed release channel: {e}"))?;
+            #[cfg(target_os = "macos")]
+            note_updater_relaunch(&app);
             app.restart();
         }
         None => {
@@ -13916,6 +13936,8 @@ async fn install_channel_downgrade(app: tauri::AppHandle, version: String) -> Re
     });
 
     record_installed_release_channel(channel).map_err(|e| format!("record installed release channel: {e}"))?;
+    #[cfg(target_os = "macos")]
+    note_updater_relaunch(&app);
     app.restart()
 }
 
@@ -14351,18 +14373,63 @@ fn unhide_app(app: &tauri::AppHandle) {
 
 /// `RunEvent::Reopen` (double-clicking Beebeeb.app, Spotlight, the Dock; spec §7.3): the window as it was, or a new one
 /// on Home. With the window closed the app lives on in the menu bar, so this is the way back (review round 2, P2-1).
+/// Which of the two is `surfaces::launch::reopen_action`.
 #[cfg(target_os = "macos")]
 fn reopen_main_window(app: &tauri::AppHandle) {
     let label = surfaces::policy::main_window_label(surfaces::policy::Platform::current());
-    match app.get_webview_window(label) {
-        Some(win) => {
+    let window = app.get_webview_window(label);
+    match (surfaces::launch::reopen_action(window.is_some()), window) {
+        (surfaces::launch::ReopenAction::BringForward, Some(win)) => {
             set_macos_dock_icon(app, true);
             unhide_app(app);
             let _ = win.unminimize();
             let _ = win.show();
             let _ = win.set_focus();
         }
-        None => show_main_window(app, MainNav::Home),
+        _ => show_main_window(app, MainNav::Home),
+    }
+}
+
+/// How this launch happened (two-surface spec §7.3, task 1683 slice 6): the login item's signal (the one seam task 1845
+/// plugs into, `surfaces::launch::login_item_signal`) and the flag the updater left just before it restarted the app,
+/// which this launch consumes. A Mac only: Windows and Linux are launched the way they always were.
+#[cfg(target_os = "macos")]
+fn launch_source_now() -> surfaces::launch::LaunchSource {
+    let now = u64::try_from(now_unix_seconds()).unwrap_or(0);
+    let flag = state_paths::beebeeb_state_dir()
+        .ok()
+        .and_then(|dir| surfaces::launch::take_relaunch_flag(&dir, now));
+    surfaces::launch::launch_source(surfaces::launch::login_item_signal(), flag, now)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn launch_source_now() -> surfaces::launch::LaunchSource {
+    surfaces::launch::LaunchSource::Manual
+}
+
+/// Leaves the flag the next launch reads, just before the updater restarts the app: whether the Beebeeb window is open and
+/// whether an account is signed in. A failure is logged and the restart goes on; the next launch then opens what a manual
+/// one does.
+#[cfg(target_os = "macos")]
+fn note_updater_relaunch(app: &tauri::AppHandle) {
+    let label = surfaces::policy::main_window_label(surfaces::policy::Platform::current());
+    let window_open = app.get_webview_window(label).is_some();
+    let state = app.state::<AppState>();
+    let vault_unlocked = state
+        .active_account()
+        .ok()
+        .and_then(|acct| acct.session.lock().ok().map(|guard| guard.is_some()))
+        .unwrap_or(false);
+    let auth_present = state.auth_present.lock().map(|guard| *guard).unwrap_or(false);
+    let flag = surfaces::launch::RelaunchFlag {
+        written_at: u64::try_from(now_unix_seconds()).unwrap_or(0),
+        window_open,
+        signed_in: vault_unlocked || auth_present,
+    };
+    let written = state_paths::beebeeb_state_dir()
+        .and_then(|dir| surfaces::launch::write_relaunch_flag(&dir, &flag).map_err(|e| e.to_string()));
+    if let Err(error) = written {
+        tracing::warn!(%error, "could not leave the relaunch flag; the next launch opens as a manual one");
     }
 }
 
@@ -14751,6 +14818,8 @@ pub fn run() {
             // Task 0804 — known-folder backup first-run onboarding prompt
             get_known_folder_onboarding_seen,
             mark_known_folder_onboarding_seen,
+            get_menu_bar_hint_seen,
+            mark_menu_bar_hint_seen,
             list_shared_roots,
             list_vault_folders,
             list_remote_tree,
@@ -14954,31 +15023,42 @@ pub fn run() {
             // App windows stay hidden (visible:false in tauri.conf.json) until
             // onboarding or the configured-startup path opens the right one.
             let no_sync_root = DesktopConfig::load().map(|c| c.sync_root.is_none()).unwrap_or(true);
-            // The decision is `surfaces::policy::startup_surface` (task 1683 slice 1):
-            // identical on every platform today, so this is a refactor, not a change.
-            if surfaces::policy::startup_surface(surfaces::policy::Platform::current(), no_sync_root)
-                == surfaces::policy::StartupSurface::Onboarding
-            {
-                let h = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    // Small delay so the tray and menu are fully initialised first.
-                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                    if let Err(e) = open_onboarding_window_impl(&h) {
-                        tracing::warn!(error = %e, "failed to open onboarding window");
-                    }
-                });
-            } else {
-                // Already configured — show the main app window after startup
-                // settles. On Windows this is the full sidebar/content shell
-                // (`main-app`); on macOS/Linux `show_main_app_window_impl`
-                // delegates to the compact app window, so behaviour there
-                // is unchanged. The short delay mirrors onboarding and avoids
-                // racing Tauri's window setup.
-                let h = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                    show_main_app_window_impl(&h);
-                });
+            // The decision is `surfaces::policy::startup_surface`: Windows and Linux ignore how the app was started; a Mac
+            // follows it (task 1683 slice 6, two-surface spec §7.3). How it was started is `launch_source_now()`.
+            let launch_source = launch_source_now();
+            tracing::info!(?launch_source, no_sync_root, "launch");
+            match surfaces::policy::startup_surface(surfaces::policy::Platform::current(), no_sync_root, launch_source) {
+                surfaces::policy::StartupSurface::Onboarding => {
+                    let h = app.handle().clone();
+                    tauri::async_runtime::spawn(async move {
+                        // Small delay so the tray and menu are fully initialised first.
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                        if let Err(e) = open_onboarding_window_impl(&h) {
+                            tracing::warn!(error = %e, "failed to open onboarding window");
+                        }
+                    });
+                }
+                surfaces::policy::StartupSurface::MainWindow => {
+                    // Already configured — show the main app window after startup
+                    // settles. On Windows this is the full sidebar/content shell
+                    // (`main-app`); on macOS/Linux `show_main_app_window_impl`
+                    // delegates to the compact app window, so behaviour there
+                    // is unchanged. The short delay mirrors onboarding and avoids
+                    // racing Tauri's window setup.
+                    let h = app.handle().clone();
+                    tauri::async_runtime::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                        show_main_app_window_impl(&h);
+                    });
+                }
+                // A Mac's login launch, or an update's relaunch with nothing open: the b in the menu bar is all there is.
+                surfaces::policy::StartupSurface::Nothing => {
+                    // The app starts Regular (a Dock icon and the app menu), and Accessory is otherwise applied only from window
+                    // events: with no window to open, nothing would ever take them away (PR #146 review, P2).
+                    #[cfg(target_os = "macos")]
+                    set_macos_dock_icon(app.handle(), false);
+                    tracing::info!("nothing opens by itself on this launch");
+                }
             }
 
             Ok(())
@@ -34283,7 +34363,7 @@ mod config_write_pin_tests {
 
     /// Every `.rs` file under `src` as `(name relative to src, production text)`: LF line ends, test modules
     /// dropped, and lines that are comments dropped.
-    fn production_files() -> Vec<(String, String)> {
+    pub(super) fn production_files() -> Vec<(String, String)> {
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut files = Vec::new();
         let mut stack = vec![src.clone()];
@@ -34360,6 +34440,20 @@ mod config_write_pin_tests {
     /// are both on disk afterwards. This is the behaviour the converted sites share; the pin below holds the rest.
     #[tokio::test]
     async fn test_1889_the_real_writers_land_next_to_a_save_that_was_in_flight() {
+        let on_disk = with_a_save_in_flight(
+            |_| {},
+            || async {
+                super::mark_menu_bar_hint_seen().expect("mark_menu_bar_hint_seen");
+            },
+        )
+        .await;
+        assert_eq!(
+            on_disk.kept_unsynced_folder.as_deref(),
+            Some(KEPT),
+            "mark_menu_bar_hint_seen: the folder"
+        );
+        assert!(on_disk.menu_bar_hint_seen, "mark_menu_bar_hint_seen: its change");
+
         let on_disk = with_a_save_in_flight(
             |_| {},
             || async {
@@ -35015,7 +35109,7 @@ mod config_write_pin_tests {
         let update = "DesktopConfig::update(";
         let held = ".update_held(";
         // (the item, what it must contain). None loads a copy of its own: load, change and write are one update.
-        let sites: [(&str, &str); 16] = [
+        let sites: [(&str, &str); 17] = [
             ("persist_last_signed_in_email", update),
             ("forget_last_signed_in_email", "DesktopConfig::try_update_at("),
             ("persist_finder_install_result", held),
@@ -35033,6 +35127,7 @@ mod config_write_pin_tests {
             ("set_selective_sync", update),
             ("set_known_folder_backup", update),
             ("mark_known_folder_onboarding_seen", update),
+            ("mark_menu_bar_hint_seen", update),
             ("record_installed_release_channel", update),
         ];
         for (name, must) in sites {
@@ -38343,5 +38438,115 @@ mod finder_ipc_timeout_tests {
         assert!(!wait.contains("wasn’t ready in time"), "no second copy of the sentence to drift from the classifier");
         let classifier = body_between(&production, "fn classify_finder_install_error(error: &str) -> String {", "\n}\n");
         assert!(classifier.contains("finder_install_error_is_timeout(error)"), "the classifier asks the predicate");
+    }
+}
+
+// ── Task 1683 slice 6: launch and lifecycle (two-surface spec §7.3, §12 row 6) ────────────────────────────────────
+//
+// The decisions are plain functions in `surfaces::launch` and `surfaces::policy::startup_surface`, tested there. These pins
+// hold the wiring: the startup reads how the app was launched, nothing else decides it, the updater leaves its flag before
+// every restart, and the login item's mechanism is what it was (task 1845 owns changing it).
+#[cfg(test)]
+mod launch_wiring_tests {
+    use super::config_write_pin_tests::production_files;
+    use super::finder_setup_command_tests::{body_between, macos_compiled, production_source};
+
+    #[test]
+    fn startup_asks_the_policy_with_how_the_app_was_launched_and_handles_every_answer() {
+        let production = production_source();
+        let setup = &production[production.find(".setup(|app| {").expect("setup()")..];
+        let ask = setup.find("let launch_source = launch_source_now();").expect("setup reads how the app was launched");
+        let policy = setup.find("surfaces::policy::startup_surface(").expect("setup asks the policy");
+        assert!(ask < policy, "the launch is read before the policy is asked");
+        assert!(
+            setup[policy..].starts_with("surfaces::policy::startup_surface(surfaces::policy::Platform::current(), no_sync_root, launch_source)"),
+            "the policy gets the platform, whether this is a first run, and the launch"
+        );
+        for answer in ["StartupSurface::Onboarding =>", "StartupSurface::MainWindow =>", "StartupSurface::Nothing =>"] {
+            assert!(setup.contains(answer), "setup handles {answer}");
+        }
+        let nothing = &setup[setup.find("StartupSurface::Nothing =>").unwrap()..];
+        let nothing = &nothing[..nothing.find("\n                }\n").expect("the arm ends")];
+        assert!(!nothing.contains("show_") && !nothing.contains("open_"), "a launch that shows nothing opens nothing:\n{nothing}");
+    }
+
+    /// PR #146 review, P2: the app starts Regular (a Dock icon and the app menu) and Accessory is applied only from window
+    /// events, so a launch that opens no window must switch it itself: a Dock icon and a menu bar with no window behind
+    /// them are a Beebeeb that looks open and has nothing to show.
+    #[test]
+    fn a_launch_that_opens_nothing_takes_the_dock_icon_and_the_app_menu_away() {
+        let production = production_source();
+        let setup = &production[production.find(".setup(|app| {").expect("setup()")..];
+        let arm = &setup[setup.find("StartupSurface::Nothing =>").unwrap()..];
+        let arm = &arm[..arm.find("\n                }\n").expect("the arm ends")];
+        assert!(
+            arm.contains("#[cfg(target_os = \"macos\")]\n                    set_macos_dock_icon(app.handle(), false);"),
+            "the Nothing arm sets Accessory, on a Mac only:\n{arm}"
+        );
+    }
+
+    #[test]
+    fn how_the_app_was_launched_comes_from_the_one_seam_and_the_flag_and_from_nothing_else() {
+        let production = macos_compiled(&production_source());
+        let body = body_between(&production, "fn launch_source_now() -> surfaces::launch::LaunchSource {", "\n}\n");
+        assert!(body.contains("surfaces::launch::take_relaunch_flag("), "the flag is consumed here");
+        assert!(body.contains("surfaces::launch::login_item_signal()"), "the login item's word comes from the seam");
+        assert_eq!(
+            production.matches("login_item_signal()").count(),
+            1,
+            "the seam is read in one place; a second reader is a second opinion on how the app was launched"
+        );
+        // Every production file, not only lib.rs (PR #146 review, P3): a guess at a login launch belongs to task 1845's
+        // seam, `surfaces/launch.rs`, and to nothing else under `src-tauri/src`. `getppid(` is a call, not the letters.
+        let files = production_files();
+        assert!(files.len() > 20 && files.iter().any(|(name, _)| name == "surfaces/launch.rs"), "the scan found the tree");
+        for (name, text) in files.iter().filter(|(name, _)| name != "surfaces/launch.rs") {
+            for guess in ["XPC_SERVICE_NAME", "--autostart", "LaunchedAsLogInItem", "getppid("] {
+                assert!(!text.contains(guess), "{name}: {guess}: a guess at a login launch belongs to task 1845's seam, not here");
+            }
+        }
+    }
+
+    #[test]
+    fn the_updater_leaves_its_flag_before_every_restart_and_there_are_only_these_restarts() {
+        // Every production file (PR #146 review, P3): a restart anywhere in `src-tauri/src` is a relaunch with no flag.
+        let files = production_files();
+        let restarts: Vec<&str> = files
+            .iter()
+            .flat_map(|(name, text)| {
+                [".restart(", "process::restart", "request_restart", ".relaunch("]
+                    .into_iter()
+                    .flat_map(move |needle| text.matches(needle).map(move |_| name.as_str()))
+            })
+            .collect();
+        assert_eq!(restarts, ["lib.rs", "lib.rs"], "a third restart is a relaunch with no flag: decide it here, on purpose");
+        let production = macos_compiled(&production_source());
+        assert_eq!(production.matches("app.restart(").count(), 2);
+        assert_eq!(production.matches("note_updater_relaunch(&app);").count(), 2);
+        for signature in ["async fn install_update(", "async fn install_channel_downgrade("] {
+            let body = body_between(&production, signature, "\n}\n");
+            let note = body.find("note_updater_relaunch(&app);").unwrap_or_else(|| panic!("{signature} leaves the flag"));
+            let restart = body.find("app.restart(").unwrap_or_else(|| panic!("{signature} restarts"));
+            assert!(note < restart, "{signature}: the flag first, then the restart");
+        }
+    }
+
+    #[test]
+    fn opening_the_app_again_asks_reopen_action() {
+        let production = macos_compiled(&production_source());
+        let body = body_between(&production, "fn reopen_main_window(", "\n}\n");
+        assert!(body.contains("surfaces::launch::reopen_action("));
+        assert!(body.contains("show_main_window(app, MainNav::Home)"), "no window: Home");
+    }
+
+    #[test]
+    fn the_login_items_mechanism_is_the_one_it_was_and_task_1845_changes_it_on_purpose() {
+        let production = production_source();
+        assert_eq!(
+            production.matches(".plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec![])))").count(),
+            1,
+            "slice 6 does not touch how the login item is registered: a LaunchAgent that passes no argument"
+        );
+        assert!(production.contains("fn toggle_autostart("), "and the switch that registers it is still there");
     }
 }
