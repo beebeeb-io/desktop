@@ -2,11 +2,11 @@
  * The Beebeeb window on a Mac (task 1683 slice 1; spec `docs/specs/2026-10-24-macos-two-surface-app.md` §7, §8, §11;
  * hi-fi `design/hifi/macos-two-surface.html` sections 3 to 5).
  *
- * One window (label `main`), one sidebar. Signed in, the sidebar holds Home (Review and Trash join with their panes
- * in slice 4) and, in its footer, the account and the gear. The gear, ⌘, and the menus swap the sidebar for the
- * Settings list in System Settings style (ruling 1): a back control that names where it returns to, the heading, the
- * account row (Account), General, Sync and, after a gap, About. Security joins in slice 5. The pane hosts the shipped
- * section bodies of `MacSettings.tsx` unchanged.
+ * One window (label `main`), one sidebar. Signed in, the sidebar holds Home, Review and Trash (slice 4: Review shows how
+ * many things wait; both need the vault unlocked and show the locked card without it) and, in its footer, the account
+ * and the gear. The gear, ⌘, and the menus swap the sidebar for the Settings list in System Settings style (ruling 1):
+ * a back control that names where it returns to, the heading, the account row (Account), General, Sync and, after a
+ * gap, About. Security joins in slice 5. The pane hosts the shipped section bodies of `MacSettings.tsx` unchanged.
  *
  * Every opener reaches the window through one request (`main:navigate`, `mainWindowModel.navigate`). While a sheet is
  * open nothing navigates (§8.2) and Rust disables View › Home, View › Back and Settings…, so ⌘1, ⌘[ and ⌘, cannot
@@ -48,6 +48,7 @@ import {
   storageLine,
   type SettingsTab,
 } from './macSettingsModel'
+import { LockedPane } from './LockedPane'
 import { Btn, Note, SettingsGroup, SettingsIcon } from './macSettingsParts'
 import { AboutTab, AccountTab, GeneralTab, showSignOutOutcome, SyncTab, useSettingsConfig } from './MacSettings'
 import {
@@ -69,7 +70,11 @@ import {
   type MainNav,
   type MainView,
 } from './mainWindowModel'
+import { connectReviewFeed, refreshReviewFeed, reviewFeed, reviewFeedState, subscribeReviewFeed } from './reviewFeed'
+import { reviewBadge } from './reviewModel'
+import { ReviewPane } from './ReviewPane'
 import { connectSignOutFlowEvents, connectSignOutFlowMenu, SignOutFlow, signOutFlowApi, type FlowView } from './signOutFlow'
+import { TrashPane } from './TrashPane'
 import { openModalCount, subscribeOpenModals, useToast } from './windows/ui'
 import { connectNativeUpdateMenu, desktopUpdateCheck } from './windows/manualUpdateCheck'
 
@@ -308,6 +313,11 @@ export default function MacApp() {
   const [focusId, setFocusId] = useState<string | null>(null)
   const [signingIn, setSigningIn] = useState(false)
   const openModals = useSyncExternalStore(subscribeOpenModals, openModalCount, openModalCount)
+  // Slice 4: Review's feed is one reader shared by the sidebar's badge and the Review pane. "Version history…" and
+  // Trash's "Refresh" are buttons of this toolbar; the panes receive them as `historyOpen` and `refreshSignal`.
+  const reviewFeedNow = useSyncExternalStore(subscribeReviewFeed, reviewFeedState, reviewFeedState)
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const [trashRefresh, setTrashRefresh] = useState(0)
 
   // Spec 2026-10-10 §5.1 and F9: the sign-out flow and its pending request live in the shell, not in the Account
   // section, which mounts only while it is selected. A flow it owned would be new at every return to it, and a
@@ -455,6 +465,19 @@ export default function MacApp() {
     [flow],
   )
 
+  // The Review feed is read only while there is a session and an unlocked vault: a locked vault, or another account,
+  // never sees the last one's rows (the feed drops them when the last reader stops).
+  useEffect(
+    () => (signedIn && unlocked ? connectReviewFeed(reviewFeed, listen) : undefined),
+    [signedIn, unlocked],
+  )
+
+  // The history sheet belongs to Review: leaving Review (the sign-out flow can force Settings › Account) closes it.
+  const inReview = view.mode === 'main' && view.section === 'review'
+  useEffect(() => {
+    if (!inReview) setHistoryOpen(false)
+  }, [inReview])
+
   // §8.2 and F15: Rust enables View › Back only while Settings shows, and disables the navigation items and
   // Settings… while a sheet is open.
   const settingsShowing = view.mode === 'settings'
@@ -529,7 +552,7 @@ export default function MacApp() {
     const next = listAfterKey(ids, view.section, event.key)
     if (next === null) return
     event.preventDefault()
-    go({ to: 'home' })
+    go({ to: next })
     focusById(mainButtonId(next))
   }
 
@@ -606,21 +629,27 @@ export default function MacApp() {
         {/* The band beside the traffic lights drags the window, as the toolbar does (review item 7). */}
         <div className="mw-drag-band" data-tauri-drag-region="" />
         <div className="mw-list">
-          {MAIN_SECTIONS.map((section) => (
-            <button
-              key={section.id}
-              type="button"
-              id={mainButtonId(section.id)}
-              className="mw-nav"
-              aria-current={view.section === section.id ? 'page' : undefined}
-              tabIndex={view.section === section.id ? 0 : -1}
-              onKeyDown={onMainListKey}
-              onClick={() => go({ to: 'home' })}
-            >
-              <SettingsIcon name={section.icon} size={16} />
-              {section.label}
-            </button>
-          ))}
+          {MAIN_SECTIONS.map((section) => {
+            // Review's number: only while the feed has answered and the vault is unlocked (no placeholder, no guess).
+            const badge = section.id === 'review' ? reviewBadge(reviewFeedNow.status === 'ready' ? reviewFeedNow.entries.length : 0, unlocked) : null
+            return (
+              <button
+                key={section.id}
+                type="button"
+                id={mainButtonId(section.id)}
+                className="mw-nav"
+                aria-current={view.section === section.id ? 'page' : undefined}
+                aria-label={badge === null ? undefined : `${section.label}, ${badge} ${badge === 1 ? 'needs' : 'need'} attention`}
+                tabIndex={view.section === section.id ? 0 : -1}
+                onKeyDown={onMainListKey}
+                onClick={() => go({ to: section.id })}
+              >
+                <SettingsIcon name={section.icon} size={16} />
+                {section.label}
+                {badge === null ? null : <span className="mw-badge" aria-hidden="true">{badge}</span>}
+              </button>
+            )
+          })}
         </div>
         <div className="mw-foot">
           <span className="mw-avatar" aria-hidden="true">{accountInitial(account.email)}</span>
@@ -637,7 +666,16 @@ export default function MacApp() {
 
   let pane = null
   if (view.mode === 'main') {
-    pane = <HomePane snapshot={snapshot} onRefresh={() => reader.refresh()} />
+    if (view.section === 'home') {
+      pane = <HomePane snapshot={snapshot} onRefresh={() => reader.refresh()} />
+    } else if (!unlocked) {
+      // §7.6: Review and Trash need the key and show Home's locked card.
+      pane = <LockedPane onRefresh={() => reader.refresh()} />
+    } else if (view.section === 'review') {
+      pane = <ReviewPane feed={reviewFeedNow} historyOpen={historyOpen} onHistoryClose={() => setHistoryOpen(false)} onChanged={refreshReviewFeed} />
+    } else {
+      pane = <TrashPane refreshSignal={trashRefresh} />
+    }
   } else {
     pane = (
       <div className="ms-pane mw-pane" id="mw-pane">
@@ -657,12 +695,28 @@ export default function MacApp() {
             The overlay title bar puts the traffic lights over the sidebar. */}
         <div className="mw-toolbar" data-tauri-drag-region="deep">
           <h1 id="mw-title" className="mw-title">{sectionTitle(view)}</h1>
-          {/* The hi-fi's Home toolbar (section 3): the encryption state, in amber, while the vault is unlocked. */}
-          {view.mode === 'main' && unlocked ? (
+          {/* The hi-fi's Home toolbar (section 3): the encryption state, in amber, while the vault is unlocked. Review
+              and Trash draw their own buttons there instead (slice 4). */}
+          {view.mode === 'main' && view.section === 'home' && unlocked ? (
             <span className="mw-chip">
               <SettingsIcon name="lock" size={13} />
               End-to-end encrypted
             </span>
+          ) : null}
+          {/* Hi-fi section 3: the section's own buttons sit at the right of the toolbar, neutral (the amber is for the
+              one primary action of a view, and neither of these is it). */}
+          {view.mode === 'main' && unlocked && view.section === 'review' ? (
+            <div className="mw-toolbar-actions">
+              <Btn onClick={() => setHistoryOpen(true)}>
+                <SettingsIcon name="history" size={14} />
+                Version history…
+              </Btn>
+            </div>
+          ) : null}
+          {view.mode === 'main' && unlocked && view.section === 'trash' ? (
+            <div className="mw-toolbar-actions">
+              <Btn onClick={() => setTrashRefresh((n) => n + 1)}>Refresh</Btn>
+            </div>
           ) : null}
         </div>
         {pane}

@@ -1,5 +1,6 @@
-// Real-browser check of the macOS Beebeeb window (task 1683 slice 1; spec docs/specs/2026-10-24-macos-two-surface-app.md
-// §7, §8, §11; hi-fi design/hifi/macos-two-surface.html sections 3 to 5). Local evidence, not a CI gate (Playwright is
+// Real-browser check of the macOS Beebeeb window (task 1683 slices 1 and 4; spec docs/specs/2026-10-24-macos-two-surface-app.md
+// §7, §8, §11; hi-fi design/hifi/macos-two-surface.html sections 3 to 5). Slice 4 adds Review (rows, badge, the conflict
+// and version-history sheets, empty and locked) and Trash (rows, the delete sheet, empty and locked). Local evidence, not a CI gate (Playwright is
 // not a desktop dependency); tests/macApp.test.tsx and tests/macSettingsLayout.test.ts pin the same rules in CI.
 //
 //   node tests/render-mac-app.mjs REPO OUTPUT
@@ -43,8 +44,41 @@ const snapshot = (over = {}) => ({
   ...over,
   account: { email: 'sam@example.eu', logged_in: true, vault_unlocked: true, auth_expired: false, ...(over.account ?? {}) },
 })
+// "Today at hh:mm" in the page's own clock (the browser and this script share the machine's time zone).
+const todayAt = (h, m) => { const d = new Date(); d.setHours(h, m, 0, 0); return Math.floor(d.getTime() / 1000) }
+const LONG_NAME = `${'Quarterly-investigation-summary-'.repeat(4)}final.xlsx`
+const reviewEntries = [
+  { id: 'conflict:f1', file_id: 'f1', file_name: 'Board notes, 29 Sept.md', kind: 'conflict', status: 'needs review', updated_at: todayAt(9, 12), detail: 'Changed on two devices.', action: 'open_conflict' },
+  { id: 'op:2', file_id: 'f2', file_name: 'Site visit, north wing.mov', kind: 'failed_upload', status: 'upload review', updated_at: todayAt(8, 47), detail: 'Couldn’t upload, will retry', action: 'review_upload' },
+]
+const reviewAllKinds = [
+  ...reviewEntries,
+  { id: 'op:3', file_id: 'f3', file_name: 'Archive 2025.zip', kind: 'quota_failure', status: 'quota blocked', updated_at: todayAt(8, 30), detail: 'This change can’t upload until you free up space or add storage. It stays on this Mac.', action: 'review_upload' },
+  { id: 'op:4', file_id: 'f4', file_name: LONG_NAME, kind: 'stale_base', status: 'stale base kept local', updated_at: todayAt(8, 2), detail: 'This file changed somewhere else too. Your version is kept on this Mac.', action: 'review_upload' },
+  { id: 'op:5', file_id: 'f5', file_name: 'Plan.pdf', kind: 'auth_failure', status: 'sign-in needed', updated_at: todayAt(7, 40), detail: 'Your session has expired. Sign in again to resume syncing.', action: 'sign_in_again' },
+]
+const conflictPreview = {
+  is_text: true,
+  local: { size_bytes: 4096, text: '## Agenda\n1. Budget\n2. Hiring\n3. Roadmap\n4. AOB (added on this Mac)\n' },
+  remote: { size_bytes: 4096, text: '## Agenda\n1. Budget\n2. Roadmap (moved up)\n3. Hiring\n4. AOB\n' },
+}
+const searchHits = { query: 'q3', index_state: 'ready', indexed_file_count: 3, results: [
+  { file_id: 'f1', name: 'Q3 ledger reconciliation.xlsx', rel_path: 'Investigations/Q3 ledger reconciliation.xlsx', status: 'synced', size_bytes: 48_000, modified_at: todayAt(9, 0), shared_with_me: false },
+  { file_id: 'f2', name: 'Q3 notes.md', rel_path: 'Q3 notes.md', status: 'synced', size_bytes: 3_000, modified_at: todayAt(8, 0), shared_with_me: false },
+] }
+const versionList = { file_id: 'f1', current_version: 5, versions: [
+  { id: 'v5', version_number: 5, is_current: true, created_at: new Date(todayAt(9, 0) * 1000).toISOString(), size_bytes: 52_000, restorable: true },
+  { id: 'v4', version_number: 4, is_current: false, created_at: new Date((todayAt(9, 0) - 86400) * 1000).toISOString(), size_bytes: 48_000, restorable: true },
+  { id: 'v3', version_number: 3, is_current: false, created_at: new Date((todayAt(9, 0) - 14 * 86400) * 1000).toISOString(), size_bytes: 44_000, restorable: true },
+] }
+const trashItems = [
+  { id: 't1', name: 'Draft 3, interview questions.docx', is_folder: false, size_bytes: 48_000, updated_at: String(todayAt(9, 0) - 86400) },
+  { id: 't2', name: 'Old scans', is_folder: true, size_bytes: 1_400_000_000, updated_at: String(todayAt(9, 0) - 13 * 86400) },
+  { id: 't3', name: LONG_NAME, is_folder: false, size_bytes: 2_300_000, updated_at: String(todayAt(9, 0)) },
+]
 const base = {
   snapshot: snapshot(),
+  review: reviewEntries, conflictPreview, search: searchHits, versions: versionList, trash: trashItems,
   finder: { setup: 'ready', reason: null, launch_location: 'applications', attempt: 1, max_attempts: 1, last_failure: null },
   config: { upload_kbps_limit: 0, download_kbps_limit: 5000, pause_sync: false, notify_conflicts: true, notify_sync_complete: false, notify_quota_warnings: true, theme: 'system' },
   subscription: { plan: 'basic', billing_cycle: 'yearly', status: 'active', seats: 1, region: 'eu', current_period_end: '2026-11-14T00:00:00Z', quota_bytes: 200_000_000_000, used_bytes: 84_300_000_000 },
@@ -86,6 +120,11 @@ function installBackend({ caps, fx }) {
         case 'kept_unsynced_folder': return f.kept
         case 'list_remote_tree': return [{ id: 'f1', name: 'Photos', is_folder: true, excluded: false, size_bytes: 1, file_count: 1, on_disk_bytes: 0, pinned: true, children: [] }]
         case 'account_region': return f.region
+        case 'list_version_conflict_center': return f.review
+        case 'conflict_content_preview': return f.conflictPreview
+        case 'desktop_search_files': return f.search
+        case 'list_file_versions': return f.versions
+        case 'desktop_trash_list': return f.trash
         case 'consume_main_navigation': return null
         case 'consume_menu_update_check': return false
         case 'consume_sign_out_flow_request': return false
@@ -127,6 +166,11 @@ function report() {
   }
 }
 
+const nav = (name) => async (p) => { await p.locator('.mw-sidebar').getByRole('button', { name }).first().click() }
+const review = nav(/^Review/)
+const decide = async (p) => { await review(p); await p.getByRole('button', { name: 'Decide…' }).click(); await p.getByRole('dialog').waitFor(); await p.waitForFunction(() => !document.body.innerText.includes('Loading both versions')) }
+const history = async (p) => { await review(p); await p.getByRole('button', { name: 'Version history…' }).click(); await p.getByRole('dialog').waitFor() }
+const trash = nav('Trash')
 const gear = async (p) => { await p.getByRole('button', { name: 'Settings', exact: true }).click() }
 const section = (label) => async (p) => { await gear(p); await p.getByRole('button', { name: label }).first().click() }
 
@@ -139,6 +183,20 @@ const SCENARIOS = [
   { name: 'settings-account', act: section('Account, sam@example.eu, Basic plan'), has: ['Account', 'sam@example.eu', 'Basic plan · renews 14 Nov 2026', 'Vault is unlocked', 'Where your files are stored', 'Europe', 'Germany', 'Sign out of this Mac', 'Sign out…'], hasNot: ['Couldn’t load storage locations'], min: true, hifi: 'hifi-s4-fig2' },
   { name: 'settings-sync', act: section('Sync'), has: ['Beebeeb in Finder', 'Added', 'Repair…', 'Keep on this Mac', 'Speed'], min: true, hifi: 'hifi-s4-fig3' },
   { name: 'settings-about', act: section('About'), has: ['Beebeeb for Mac', 'Version 0.8.12', 'Check for updates', 'Get help', 'Export a support bundle'], min: true, hifi: 'hifi-s4-fig5' },
+  // ── Slice 4: Review ──  (the kind tag is drawn in capitals by CSS, as in the hi-fi, so `innerText` reads it in capitals)
+  { name: 'review', act: review, has: ['Review', 'Files that need a decision from you, and changes Beebeeb couldn’t send yet.', 'CONFLICT', 'Board notes, 29 Sept.md', 'today 09:12 · Changed on two devices.', 'Decide…', 'UPLOAD', 'Site visit, north wing.mov', 'today 08:47 · Couldn’t upload, will retry', 'Version history…'], hasNot: ['Local and remote both changed', 'STALE BASE', 'durable queue', 'Nothing needs your attention.'], sidebar: ['Home', 'Review, 2 need attention', 'Trash', 'Settings'], min: true },
+  { name: 'review-all-kinds', fx: { review: reviewAllKinds }, act: review, has: ['CHANGED ELSEWHERE', 'STORAGE FULL', 'SIGNED OUT', 'Add storage', 'Sign in again', LONG_NAME, 'Decide…'], hasNot: ['STALE BASE', 'QUOTA', 'METADATA'], min: true },
+  { name: 'review-conflict-sheet', act: decide, has: ['Conflict: Board notes, 29 Sept.md', 'This file was modified on two devices. Choose which version to keep.', 'This Mac', 'Other device', 'Keep this Mac’s', 'Keep the other', 'Keep both', '- 4. AOB (added on this Mac)', '+ 2. Roadmap (moved up)'], hasNot: ['Keep Mine', 'This device', '✓'], dialogs: 1, min: true, hifi: 'hifi-s3-fig1' },
+  { name: 'review-conflict-binary', fx: { conflictPreview: { is_text: false, local: { size_bytes: 4096, text: null }, remote: { size_bytes: 8192, text: null } } }, act: decide, has: ['Binary file · 4,1 KB', 'Binary file · 8,2 KB', 'Keep both'], dialogs: 1 },
+  { name: 'review-history-search', act: async (p) => { await history(p); await p.getByRole('textbox', { name: 'Search file names' }).fill('q3'); await p.getByRole('button', { name: /Q3 notes\.md/ }).waitFor() }, has: ['Version history', 'Q3 ledger reconciliation.xlsx', 'Investigations/Q3 ledger reconciliation.xlsx', 'Q3 notes.md'], dialogs: 1, min: true },
+  { name: 'review-history-versions', act: async (p) => { await history(p); await p.getByRole('textbox', { name: 'Search file names' }).fill('q3'); await p.getByRole('button', { name: /Q3 ledger reconciliation/ }).click(); await p.getByRole('button', { name: 'Restore' }).first().waitFor() }, has: ['Version history', 'Q3 ledger reconciliation.xlsx', 'Version 5 is current · 2 earlier versions', 'Version 4', 'Version 3', 'Restore', 'Back'], hasNot: ['Version id', 'Queue restore'], dialogs: 1, min: true },
+  { name: 'review-empty', fx: { review: [] }, act: review, has: ['Files that need a decision from you', 'Nothing needs your attention.', 'Version history…'], hasNot: ['Decide…'], sidebar: ['Home', 'Review', 'Trash', 'Settings'] },
+  { name: 'review-locked', fx: { snapshot: snapshot({ phase: 'locked', account: { vault_unlocked: false }, storage: null }) }, act: review, has: ['Review', 'Your vault is locked', 'Unlock vault'], hasNot: ['Version history…', 'Nothing needs your attention.', 'Decide…'], sidebar: ['Home', 'Review', 'Trash', 'Settings'], hifi: 'hifi-s3-fig3' },
+  // ── Slice 4: Trash ──
+  { name: 'trash', act: trash, has: ['Trash', 'Deleted files in your vault. Restore puts them back through sync; permanent delete removes them from Trash.', 'Draft 3, interview questions.docx', 'File · 48 KB · deleted yesterday', 'Old scans', 'Folder · 1,4 GB · deleted ', LONG_NAME, 'Restore', 'Delete…', 'Refresh'], hasNot: ['Loading…'], min: true, hifi: 'hifi-s3-fig2' },
+  { name: 'trash-delete-sheet', act: async (p) => { await trash(p); await p.getByRole('button', { name: 'Delete…' }).first().click(); await p.getByRole('dialog').waitFor() }, has: ['Delete permanently', 'Draft 3, interview questions.docx will be removed from Trash. This cannot be undone.', 'Cancel'], dialogs: 1, min: true },
+  { name: 'trash-empty', fx: { trash: [] }, act: trash, has: ['Trash is empty', 'Deleted files will appear here.', 'Refresh'] },
+  { name: 'trash-locked', fx: { snapshot: snapshot({ phase: 'locked', account: { vault_unlocked: false }, storage: null }) }, act: trash, has: ['Trash', 'Your vault is locked', 'Unlock vault'], hasNot: ['Refresh', 'Trash is empty'] },
   { name: 'signout-confirm', act: async (p) => { await section('Account, sam@example.eu, Basic plan')(p); await p.getByRole('button', { name: 'Sign out…' }).click(); await p.getByRole('dialog').waitFor() }, has: ['Sign out of this Mac?', 'Sync stops until you sign in again.', 'Cancel', 'Sign out'], dialogs: 1, hifi: 'hifi-s5-fig0' },
   { name: 'signed-out', fx: { snapshot: snapshot({ phase: 'signed_out', account: { email: null, logged_in: false, vault_unlocked: false }, storage: null }) }, has: ['Sign in to Beebeeb', 'Sign in'], hasNot: ['Home', 'Settings'], noSidebar: true },
   { name: 'signed-out-settings', fx: { snapshot: snapshot({ phase: 'signed_out', account: { email: null, logged_in: false, vault_unlocked: false }, storage: null }) }, open: '&tab=general', has: ['Sign in', 'Settings', 'General', 'About', 'Open Beebeeb at login'], sidebar: ['Back to Sign in', 'General', 'About'], hifi: 'hifi-s4-fig6' },

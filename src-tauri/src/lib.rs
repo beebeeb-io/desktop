@@ -12817,6 +12817,15 @@ pub(crate) fn open_conflict_window_impl(
     file_name: &str,
     is_text: bool,
 ) -> Result<(), String> {
+    // Two-surface spec §12 slice 4 (rows A8, A17): a Mac never builds a conflict window. It decides a conflict in the
+    // Beebeeb window's Review, whoever asks: the engine's automatic path (`runner::handle_new_conflict`) and the
+    // `open_conflict_window` command both end here. Windows and Linux keep `ConflictWindow`.
+    if surfaces::policy::conflict_target(surfaces::policy::Platform::current()) == surfaces::policy::ConflictTarget::Review {
+        #[cfg(target_os = "macos")]
+        show_main_window(app, MainNav::Review);
+        return Ok(());
+    }
+
     let label = format!("conflict-{file_id}");
 
     // If the user already has the window open for this file, just
@@ -12888,6 +12897,41 @@ fn should_show_sync_complete_notification(config: Result<DesktopConfig, String>)
 
 fn should_show_quota_warning_notification(config: Result<DesktopConfig, String>) -> bool {
     config.map(|c| c.notify_quota_warnings).unwrap_or(true)
+}
+
+/// The notifications this app raises (two-surface spec A17: "Conflict detected", "All caught up", "Local cache nearly
+/// full"), by kind, so that where a click on one goes is one table (`main_nav_for_notification`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Nothing constructs a kind outside the tests yet: no click reaches the app (see `activate_notification`).
+#[allow(dead_code)]
+enum AppNotification {
+    Conflict,
+    SyncComplete,
+    LocalCacheNearlyFull,
+}
+
+/// Where a click on a notification opens the Beebeeb window (A17): a conflict to Review, everything else to Home.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn main_nav_for_notification(kind: AppNotification) -> MainNav {
+    match kind {
+        AppNotification::Conflict => MainNav::Review,
+        AppNotification::SyncComplete | AppNotification::LocalCacheNearlyFull => MainNav::Home,
+    }
+}
+
+/// A click on one of our notifications: the Beebeeb window opens where the notification pointed.
+///
+/// NO CALLER YET, and that is stated rather than hidden: `tauri-plugin-notification` 2.3.3 raises desktop notifications
+/// through `notify-rust`, which hands this app no click (its action callbacks are mobile-only), so nothing can tell the
+/// app that a notification was clicked. The route is built and pinned so the trigger can be added without touching it:
+/// either a native `UNUserNotificationCenter` delegate in `FileProviderBridge.m`, or sending these three notifications
+/// through `mac-notification-sys` with `wait_for_click` on a worker thread. Both change how notifications are
+/// delivered and need a device pass, which is why this slice does not guess at one. Until then a conflict reaches the
+/// person by the notification (unchanged copy), Review's badge, ⌘2 and the View menu.
+#[cfg(target_os = "macos")]
+#[allow(dead_code)]
+fn activate_notification(app: &tauri::AppHandle, kind: AppNotification) {
+    show_main_window(app, main_nav_for_notification(kind))
 }
 
 pub(crate) fn notify_conflict_impl(app: &tauri::AppHandle, file_name: &str) -> Result<(), String> {
@@ -14024,6 +14068,12 @@ const MAIN_NAVIGATE_EVENT: &str = "main:navigate";
 enum MainNav {
     /// Home, and out of Settings (⌘1).
     Home,
+    /// Review (⌘2): the files that need a decision. A conflict's notification points here (spec A17).
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    Review,
+    /// Trash (⌘3).
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    Trash,
     /// Settings on a section (`account`, `general`, `sync`, `about`); `None` opens the last section used in this
     /// window, else General (§7.8).
     Settings { section: Option<&'static str> },
@@ -14289,13 +14339,15 @@ fn refresh_macos_dock_icon(app: &tauri::AppHandle, gone: Option<&str>) {
 }
 
 /// What the app menu may offer around the Beebeeb window (two-surface spec §8.2, F15): View › Back only while
-/// Settings shows in an open window; View › Home, Beebeeb › Settings… and Check for Updates… (which opens Settings ›
-/// About) always, except while a sheet is open, so ⌘1, ⌘[, ⌘, and ⇧⌘U cannot unmount Settings › Account under its
-/// sheet (review item 6 chose disabling over a second way to answer the check).
+/// Settings shows in an open window; View › Home, Review and Trash (`sections`), Beebeeb › Settings… and Check for
+/// Updates… (which opens Settings › About) always, except while a sheet is open, so ⌘1, ⌘2, ⌘3, ⌘[, ⌘, and ⇧⌘U cannot
+/// unmount the section under its sheet: Settings › Account under the sign-out sheets, Review under the conflict and
+/// version-history sheets, Trash under the delete sheet (review item 6 of slice 1 chose disabling over a second way to
+/// answer the check).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MainMenuState {
     settings: bool,
-    home: bool,
+    sections: bool,
     back: bool,
     check_updates: bool,
 }
@@ -14305,7 +14357,7 @@ fn main_menu_state(main_open: bool, settings_showing: bool, sheet_open: bool) ->
     let sheet = main_open && sheet_open;
     MainMenuState {
         settings: !sheet,
-        home: !sheet,
+        sections: !sheet,
         back: main_open && settings_showing && !sheet,
         check_updates: !sheet,
     }
@@ -14318,7 +14370,9 @@ fn apply_macos_main_menu_state(app: &tauri::AppHandle, state: MainMenuState) {
     };
     let _ = items.settings.set_enabled(state.settings);
     let _ = items.check_updates.set_enabled(state.check_updates);
-    let _ = items.view_home.set_enabled(state.home);
+    let _ = items.view_home.set_enabled(state.sections);
+    let _ = items.view_review.set_enabled(state.sections);
+    let _ = items.view_trash.set_enabled(state.sections);
     let _ = items.view_back.set_enabled(state.back);
 }
 
@@ -14882,6 +14936,10 @@ const MENU_VIEW_SHARED_ID: &str = "menu_view_shared";
 const MENU_VIEW_TRASH_ID: &str = "menu_view_trash";
 // The Beebeeb window's View items on a Mac (task 1683 slice 1, two-surface F11 and F15).
 const MENU_VIEW_HOME_ID: &str = "menu_view_home";
+// Review ⌘2 and Trash ⌘3 (slice 4). Not `MENU_VIEW_TRASH_ID`: that is Windows and Linux's Trash page (⌘4), a different
+// item with a different target, which a Mac's table does not have.
+const MENU_VIEW_REVIEW_ID: &str = "menu_view_review";
+const MENU_VIEW_MAIN_TRASH_ID: &str = "menu_view_main_trash";
 const MENU_VIEW_BACK_ID: &str = "menu_view_back";
 const MENU_ZOOM_IN_ID: &str = "menu_zoom_in";
 const MENU_ZOOM_OUT_ID: &str = "menu_zoom_out";
@@ -14939,6 +14997,8 @@ impl DesktopMenuView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MainMenuNav {
     Home,
+    Review,
+    Trash,
     Back,
 }
 
@@ -15100,8 +15160,8 @@ const DESKTOP_MENU_SPECS: &[DesktopMenuSpec] = &[
 ];
 
 /// The macOS menu (task 1683 slice 1; two-surface spec §5.F rows F1-F15, §9.2): macOS title case and the ellipsis
-/// character, one ⌘, (F10's duplicate File › Settings is gone), the View items of the Beebeeb window. Review (⌘2) and
-/// Trash (⌘3) join with their panes in slice 4. Windows and Linux keep `DESKTOP_MENU_SPECS`, unchanged.
+/// character, one ⌘, (F10's duplicate File › Settings is gone), the View items of the Beebeeb window: Home ⌘1, Review ⌘2
+/// and Trash ⌘3 (slice 4), Back ⌘[. Windows and Linux keep `DESKTOP_MENU_SPECS`, unchanged.
 #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 const MACOS_MENU_SPECS: &[DesktopMenuSpec] = &[
     DesktopMenuSpec {
@@ -15165,6 +15225,18 @@ const MACOS_MENU_SPECS: &[DesktopMenuSpec] = &[
         label: "Home",
         accelerator: Some("CmdOrCtrl+Digit1"),
         action: DesktopMenuAction::NavigateMain(MainMenuNav::Home),
+    },
+    DesktopMenuSpec {
+        id: MENU_VIEW_REVIEW_ID,
+        label: "Review",
+        accelerator: Some("CmdOrCtrl+Digit2"),
+        action: DesktopMenuAction::NavigateMain(MainMenuNav::Review),
+    },
+    DesktopMenuSpec {
+        id: MENU_VIEW_MAIN_TRASH_ID,
+        label: "Trash",
+        accelerator: Some("CmdOrCtrl+Digit3"),
+        action: DesktopMenuAction::NavigateMain(MainMenuNav::Trash),
     },
     DesktopMenuSpec {
         id: MENU_VIEW_BACK_ID,
@@ -15299,6 +15371,8 @@ const MACOS_MENU_LAYOUT: &[(&str, &[MacosMenuEntry])] = {
             "View",
             &[
                 Item(MENU_VIEW_HOME_ID),
+                Item(MENU_VIEW_REVIEW_ID),
+                Item(MENU_VIEW_MAIN_TRASH_ID),
                 Separator,
                 Item(MENU_VIEW_BACK_ID),
                 Separator,
@@ -15400,6 +15474,8 @@ struct MacosMenuItems {
     check_updates: MenuItem<tauri::Wry>,
     toggle_sync: MenuItem<tauri::Wry>,
     view_home: MenuItem<tauri::Wry>,
+    view_review: MenuItem<tauri::Wry>,
+    view_trash: MenuItem<tauri::Wry>,
     view_back: MenuItem<tauri::Wry>,
 }
 
@@ -15412,6 +15488,8 @@ impl MacosMenuItems {
             MENU_CHECK_UPDATES_ID => Some(&self.check_updates),
             MENU_TOGGLE_SYNC_ID => Some(&self.toggle_sync),
             MENU_VIEW_HOME_ID => Some(&self.view_home),
+            MENU_VIEW_REVIEW_ID => Some(&self.view_review),
+            MENU_VIEW_MAIN_TRASH_ID => Some(&self.view_trash),
             MENU_VIEW_BACK_ID => Some(&self.view_back),
             _ => None,
         }
@@ -15438,6 +15516,8 @@ fn setup_native_menu(app: &mut tauri::App) -> tauri::Result<()> {
         check_updates: build_desktop_menu_item(app, desktop_menu_spec_required(MENU_CHECK_UPDATES_ID))?,
         toggle_sync: build_desktop_menu_item(app, desktop_menu_spec_required(MENU_TOGGLE_SYNC_ID))?,
         view_home: build_desktop_menu_item(app, desktop_menu_spec_required(MENU_VIEW_HOME_ID))?,
+        view_review: build_desktop_menu_item(app, desktop_menu_spec_required(MENU_VIEW_REVIEW_ID))?,
+        view_trash: build_desktop_menu_item(app, desktop_menu_spec_required(MENU_VIEW_MAIN_TRASH_ID))?,
         view_back: build_desktop_menu_item(app, desktop_menu_spec_required(MENU_VIEW_BACK_ID))?,
     };
     let mut menus: Vec<Submenu<tauri::Wry>> = Vec::new();
@@ -15634,9 +15714,11 @@ mod main_window_tests {
 
     #[test]
     fn a_request_serialises_as_the_window_reads_it() {
-        // `src/mainWindowModel.ts` `parseMainNav` reads exactly these three shapes.
+        // `src/mainWindowModel.ts` `parseMainNav` reads exactly these shapes (Review and Trash joined in slice 4).
         let json = |nav: MainNav| serde_json::to_value(nav).unwrap();
         assert_eq!(json(MainNav::Home), serde_json::json!({ "to": "home" }));
+        assert_eq!(json(MainNav::Review), serde_json::json!({ "to": "review" }));
+        assert_eq!(json(MainNav::Trash), serde_json::json!({ "to": "trash" }));
         assert_eq!(json(MainNav::Back), serde_json::json!({ "to": "back" }));
         assert_eq!(
             json(MainNav::settings(Some("about"))),
@@ -15662,16 +15744,17 @@ mod main_window_tests {
 
     #[test]
     fn the_menu_around_the_window_follows_section_8_2() {
-        // No window: Settings… and Home open it; Back has nothing to go back from.
-        let on = |back| MainMenuState { settings: true, home: true, back, check_updates: true };
+        // No window: Settings… and the sections (Home, Review, Trash) open it; Back has nothing to go back from.
+        let on = |back| MainMenuState { settings: true, sections: true, back, check_updates: true };
         assert_eq!(main_menu_state(false, false, false), on(false));
         // Home in the window: as above.
         assert_eq!(main_menu_state(true, false, false), on(false));
         // Settings shows: Back on.
         assert_eq!(main_menu_state(true, true, false), on(true));
-        // A sheet is open: ⌘1, ⌘[, ⌘, and Check for Updates… (which opens Settings › About) are all off, so nothing
-        // unmounts the section under the sheet (review item 6: disabled with the §8.2 items, not a second answer).
-        let off = MainMenuState { settings: false, home: false, back: false, check_updates: false };
+        // A sheet is open: ⌘1, ⌘2, ⌘3, ⌘[, ⌘, and Check for Updates… (which opens Settings › About) are all off, so
+        // nothing unmounts the section under the sheet (review item 6: disabled with the §8.2 items, not a second
+        // answer). Slice 4: a conflict sheet over Review and a password sheet over Trash are such sheets.
+        let off = MainMenuState { settings: false, sections: false, back: false, check_updates: false };
         assert_eq!(main_menu_state(true, true, true), off);
         assert_eq!(main_menu_state(true, false, true), off);
         // A sheet with no window cannot exist; a stale report of one never disables the openers.
@@ -15806,7 +15889,15 @@ mod main_window_tests {
         );
         assert!(!body.contains("HashMap"), "{body}");
         assert!(!body.contains("AssetNotFound"), "{body}");
-        for id in ["MENU_PREFERENCES_ID", "MENU_CHECK_UPDATES_ID", "MENU_TOGGLE_SYNC_ID", "MENU_VIEW_HOME_ID", "MENU_VIEW_BACK_ID"] {
+        for id in [
+            "MENU_PREFERENCES_ID",
+            "MENU_CHECK_UPDATES_ID",
+            "MENU_TOGGLE_SYNC_ID",
+            "MENU_VIEW_HOME_ID",
+            "MENU_VIEW_REVIEW_ID",
+            "MENU_VIEW_MAIN_TRASH_ID",
+            "MENU_VIEW_BACK_ID",
+        ] {
             assert!(body.contains(&format!("desktop_menu_spec_required({id})")), "{id}:\n{body}");
         }
     }
@@ -15816,6 +15907,58 @@ mod main_window_tests {
         assert_eq!(main_nav_for_route(Some("settings")), MainNav::settings(None));
         assert_eq!(main_nav_for_route(None), MainNav::Home);
         assert_eq!(main_nav_for_route(Some("finder")), MainNav::Home);
+        // Slice 4: the retired compact pages that were Versions & conflicts and Trash now have homes in the window.
+        assert_eq!(main_nav_for_route(Some("review")), MainNav::Review);
+        assert_eq!(main_nav_for_route(Some("trash")), MainNav::Trash);
+    }
+
+    /// Two-surface A17 and §12 slice 4: a click on a notification opens the Beebeeb window where the notification
+    /// pointed: a conflict to Review, everything else to Home.
+    #[test]
+    fn a_notification_opens_the_window_where_it_pointed() {
+        assert_eq!(main_nav_for_notification(AppNotification::Conflict), MainNav::Review);
+        assert_eq!(main_nav_for_notification(AppNotification::SyncComplete), MainNav::Home);
+        assert_eq!(main_nav_for_notification(AppNotification::LocalCacheNearlyFull), MainNav::Home);
+    }
+
+    #[test]
+    fn the_three_notification_builders_each_name_their_kind_and_the_route_uses_the_same_table() {
+        // `notify_conflict_impl` is the conflict one: it is the kind whose route is Review, so a change to the
+        // notification's wording or builder stays tied to the route it opens.
+        let production = super::finder_setup_command_tests::production_source();
+        let conflict = super::finder_setup_command_tests::body_between(&production, "pub(crate) fn notify_conflict_impl(", "\n}\n");
+        assert!(conflict.contains(".title(\"Conflict detected\")"), "{conflict}");
+        let activate = super::finder_setup_command_tests::body_between(&production, "fn activate_notification(", "\n}\n");
+        assert!(activate.contains("show_main_window(app, main_nav_for_notification(kind))"), "{activate}");
+    }
+
+    /// §8.2 (slice 4): the sheet rule reaches all three View items. A conflict sheet over Review or a password sheet over
+    /// Trash would otherwise lose its section to ⌘1, ⌘2 or ⌘3. The menu is built from real Tauri items (macOS only), so
+    /// the words of the one function that sets them are the pin.
+    #[test]
+    fn the_sheet_rule_reaches_every_view_item() {
+        let production = super::finder_setup_command_tests::production_source();
+        let apply = super::finder_setup_command_tests::body_between(&production, "fn apply_macos_main_menu_state(", "\n}\n");
+        for item in ["view_home", "view_review", "view_trash"] {
+            assert!(apply.contains(&format!("items.{item}.set_enabled(state.sections)")), "{item}:\n{apply}");
+        }
+        assert!(apply.contains("items.view_back.set_enabled(state.back)"), "{apply}");
+    }
+
+    /// F11 and F15 (slice 4): ⌘2 and ⌘3 open the Beebeeb window on Review and Trash; the menu is the only caller of
+    /// these two arms, so the arm's words are the pin.
+    #[test]
+    fn the_view_menu_opens_review_and_trash_in_the_beebeeb_window() {
+        let production = super::finder_setup_command_tests::production_source();
+        let arm = super::finder_setup_command_tests::body_between(&production, "DesktopMenuAction::NavigateMain(nav) => {", "DesktopMenuAction::Zoom");
+        for line in [
+            "MainMenuNav::Home => show_main_window(app, MainNav::Home),",
+            "MainMenuNav::Review => show_main_window(app, MainNav::Review),",
+            "MainMenuNav::Trash => show_main_window(app, MainNav::Trash),",
+            "MainMenuNav::Back => back_in_main_window(app),",
+        ] {
+            assert!(arm.contains(line), "{line}\n{arm}");
+        }
     }
 
     fn mac(id: &str) -> &'static DesktopMenuSpec {
@@ -15827,7 +15970,7 @@ mod main_window_tests {
 
     #[test]
     fn the_macos_items_have_the_words_keys_and_targets_of_f1_to_f11() {
-        let rows: [(&str, &str, Option<&str>, DesktopMenuAction); 11] = [
+        let rows: [(&str, &str, Option<&str>, DesktopMenuAction); 13] = [
             (MENU_PREFERENCES_ID, "Settings…", Some("CmdOrCtrl+Comma"), DesktopMenuAction::OpenSettings),
             (MENU_CHECK_UPDATES_ID, "Check for Updates…", Some("CmdOrCtrl+Shift+U"), DesktopMenuAction::CheckForUpdates),
             (MENU_TOGGLE_SYNC_ID, "Pause Sync", Some("CmdOrCtrl+Shift+P"), DesktopMenuAction::ToggleSync),
@@ -15842,6 +15985,18 @@ mod main_window_tests {
                 "Home",
                 Some("CmdOrCtrl+Digit1"),
                 DesktopMenuAction::NavigateMain(MainMenuNav::Home),
+            ),
+            (
+                MENU_VIEW_REVIEW_ID,
+                "Review",
+                Some("CmdOrCtrl+Digit2"),
+                DesktopMenuAction::NavigateMain(MainMenuNav::Review),
+            ),
+            (
+                MENU_VIEW_MAIN_TRASH_ID,
+                "Trash",
+                Some("CmdOrCtrl+Digit3"),
+                DesktopMenuAction::NavigateMain(MainMenuNav::Trash),
             ),
             (
                 MENU_VIEW_BACK_ID,
@@ -15876,6 +16031,17 @@ mod main_window_tests {
                 "{id}"
             );
         }
+    }
+
+    #[test]
+    fn the_windows_and_linux_trash_item_is_not_the_macs() {
+        // Windows and Linux keep View › Trash ⌘4 (it opens their Trash page); a Mac's ⌘3 is a different item with a
+        // different target, so neither table can break the other's key or pin.
+        assert_ne!(MENU_VIEW_TRASH_ID, MENU_VIEW_MAIN_TRASH_ID);
+        let shared = DESKTOP_MENU_SPECS.iter().find(|spec| spec.id == MENU_VIEW_TRASH_ID).unwrap();
+        assert_eq!(shared.accelerator, Some("CmdOrCtrl+Digit4"));
+        assert!(matches!(shared.action, DesktopMenuAction::OpenView(DesktopMenuView::Trash)));
+        assert!(DESKTOP_MENU_SPECS.iter().all(|spec| spec.id != MENU_VIEW_MAIN_TRASH_ID && spec.id != MENU_VIEW_REVIEW_ID));
     }
 
     #[test]
@@ -15941,6 +16107,8 @@ mod main_window_tests {
             entries("View"),
             [
                 Item(MENU_VIEW_HOME_ID),
+                Item(MENU_VIEW_REVIEW_ID),
+                Item(MENU_VIEW_MAIN_TRASH_ID),
                 Separator,
                 Item(MENU_VIEW_BACK_ID),
                 Separator,
@@ -16119,6 +16287,8 @@ fn handle_desktop_menu_action(app: &tauri::AppHandle, spec: &'static DesktopMenu
             #[cfg(target_os = "macos")]
             match nav {
                 MainMenuNav::Home => show_main_window(app, MainNav::Home),
+                MainMenuNav::Review => show_main_window(app, MainNav::Review),
+                MainMenuNav::Trash => show_main_window(app, MainNav::Trash),
                 MainMenuNav::Back => back_in_main_window(app),
             }
             #[cfg(not(target_os = "macos"))]
@@ -16634,11 +16804,13 @@ fn show_compact_app_window_with_nav(app: &tauri::AppHandle, nav: Option<&str>) {
 }
 
 /// What a route-named opener (`show_main_app_window_with_nav`) asks of the Beebeeb window on a Mac: "settings"
-/// opens Settings (the last section used), anything else Home.
+/// opens Settings (the last section used), "review" and "trash" (slice 4) their sections, anything else Home.
 #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 fn main_nav_for_route(nav: Option<&str>) -> MainNav {
     match nav {
         Some("settings") => MainNav::settings(None),
+        Some("review") => MainNav::Review,
+        Some("trash") => MainNav::Trash,
         _ => MainNav::Home,
     }
 }

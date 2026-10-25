@@ -2247,8 +2247,8 @@ fn enforce_cache_budget(
 /// underlying state DB has already been updated and the conflict won't
 /// be silently dropped.
 fn handle_new_conflict(app: &AppHandle, c: &ConflictDetected) {
-    // `conflict_auto_opens_window` is true on every platform today (task 1683
-    // slice 1 pins that for Windows and Linux); slice 6 makes macOS false.
+    // `conflict_auto_opens_window` is true for Windows and Linux (task 1683 slice 1 pins that) and false on a Mac since
+    // slice 4: a Mac gets the notification and the event below, and decides the conflict in Review.
     if crate::surfaces::policy::conflict_auto_opens_window(crate::surfaces::policy::Platform::current()) {
         if let Err(e) = crate::open_conflict_window_impl(app, &c.file_id, &c.file_name, c.is_text) {
             tracing::warn!(error = %e, file_id = %c.file_id, "open_conflict_window failed");

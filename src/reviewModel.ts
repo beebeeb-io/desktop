@@ -1,0 +1,118 @@
+/**
+ * Review's pure decisions (task 1683 slice 4; spec `docs/specs/2026-10-24-macos-two-surface-app.md` §7.6 and §10.2
+ * rows 11 to 17 and 35): the kind tags, the one action a row has, when and what a row says, the sidebar badge, the
+ * conflict sheet's words and choices, and the version-history copy. Nothing here touches React or Tauri, so
+ * `tests/reviewModel.test.ts` pins each decision; `ReviewPane.tsx`, `ConflictSheet.tsx` and `VersionHistorySheet.tsx`
+ * only draw them.
+ *
+ * What stays in Rust: which entries exist, their kind, status and detail line (`version_conflict_feed_from_db`), and
+ * what each conflict choice does to the files (`resolve_conflict`). This file does not classify anything again.
+ */
+import { reviewEntryAction, type FileVersionEntry, type ReviewEntryActionKind, type VersionConflictEntry } from './desktopApi'
+import { formatStorageSize } from './storageFormat'
+import { parseWhen, whenLabel } from './whenFormat'
+
+export const REVIEW_INTRO = 'Files that need a decision from you, and changes Beebeeb couldn’t send yet.'
+export const REVIEW_EMPTY = 'Nothing needs your attention.'
+export const VERSIONS_LOAD_FAILED = 'Couldn’t load this file’s versions. Try again.'
+
+// ── Rows ─────────────────────────────────────────────────────────────────────
+
+/** §10.2 row 16: Conflict, Upload, Delete and Restore are unchanged; the other four are plain words. */
+const KIND_LABELS: Record<string, string> = {
+  conflict: 'Conflict',
+  failed_upload: 'Upload',
+  delete: 'Delete',
+  restore: 'Restore',
+  stale_base: 'Changed elsewhere',
+  metadata: 'Rename or move',
+  quota_failure: 'Storage full',
+  permission_failure: 'No permission',
+  // Not in the spec's table: the shipped list fell through to "Conflict" for it, which names the wrong thing on a row
+  // whose button is "Sign in again". Flagged in the PR.
+  auth_failure: 'Signed out',
+}
+
+export function reviewKindLabel(kind: string): string {
+  return KIND_LABELS[kind] ?? 'Other'
+}
+
+export interface ReviewRowAction {
+  kind: ReviewEntryActionKind
+  label: string
+}
+
+/** §10.2 row 17: "Review" is "Decide…" and "Upgrade" is "Add storage"; "Sign in again" is unchanged. */
+const ACTION_LABELS: Record<ReviewEntryActionKind, string> = {
+  open_conflict: 'Decide…',
+  upgrade: 'Add storage',
+  sign_in_again: 'Sign in again',
+}
+
+/**
+ * The one button a row has, if any. The decision is `reviewEntryAction`'s (shared with the Versions page Linux keeps);
+ * only the words differ on a Mac.
+ */
+export function reviewRowAction(entry: Pick<VersionConflictEntry, 'kind' | 'action'>): ReviewRowAction | null {
+  const action = reviewEntryAction(entry)
+  return action === null ? null : { kind: action.kind, label: ACTION_LABELS[action.kind] }
+}
+
+/** "today 09:12", "yesterday 18:03", "12 Oct", "31 Dec 2025"; null when the engine has no time for the row. */
+export function reviewWhen(updatedAt: number | null | undefined, now: Date): string | null {
+  return whenLabel(updatedAt, now)
+}
+
+/**
+ * A row's second line: when it happened, then Rust's detail line (§7.6). The detail lines are plain sentences about what
+ * happened to the change (`engine_bridge.rs`, `REVIEW_DETAIL_*`; the failure's own text is `last_error`, never shown).
+ */
+export function reviewRowMeta(entry: Pick<VersionConflictEntry, 'updated_at' | 'detail'>, now: Date): string {
+  const when = reviewWhen(entry.updated_at, now)
+  return [when, entry.detail.trim()].filter((part): part is string => Boolean(part)).join(' · ')
+}
+
+/** The number on Review's sidebar row: how many things wait, only while the vault is unlocked. */
+export function reviewBadge(count: number, unlocked: boolean): number | null {
+  return unlocked && count > 0 ? count : null
+}
+
+// ── The conflict sheet (§7.6, §10.2 row 35) ──────────────────────────────────
+
+export type ConflictChoice = 'local' | 'remote' | 'both'
+
+export const CONFLICT_SHEET_INTRO = 'This file was modified on two devices. Choose which version to keep.'
+export const CONFLICT_SIDE_LABELS = { local: 'This Mac', remote: 'Other device' } as const
+
+/** The three choices in the order of the hi-fi; "Keep both" is the safe one and the amber primary. */
+export const CONFLICT_CHOICES: ReadonlyArray<{ choice: ConflictChoice; label: string; primary: boolean }> = [
+  { choice: 'local', label: 'Keep this Mac’s', primary: false },
+  { choice: 'remote', label: 'Keep the other', primary: false },
+  { choice: 'both', label: 'Keep both', primary: true },
+]
+
+export const CONFLICT_RESOLVED_TOAST = { variant: 'success', message: 'Conflict resolved' } as const
+
+export function conflictSheetTitle(fileName: string): string {
+  return `Conflict: ${fileName}`
+}
+
+// ── Version history (§7.6, §10.2 rows 14 and 15) ─────────────────────────────
+
+/** "Version 4", "Version 5 · current", or "Earlier version" when the server sent no number (never an id). */
+export function versionLabel(version: FileVersionEntry): string {
+  if (version.version_number == null) return version.is_current ? 'Current version' : 'Earlier version'
+  return version.is_current ? `Version ${version.version_number} · current` : `Version ${version.version_number}`
+}
+
+/** "yesterday 08:00 · 48 KB", leaving out whatever the server did not say. */
+export function versionLine(version: FileVersionEntry, now: Date, locale?: string): string {
+  const when = parseWhen(version.created_at) === null ? null : whenLabel(version.created_at, now)
+  const size = typeof version.size_bytes === 'number' ? formatStorageSize(version.size_bytes, locale) : null
+  return [when, size].filter((part): part is string => Boolean(part)).join(' · ')
+}
+
+export function restoreQueuedToast(fileName: string, versionNumber: number | null | undefined) {
+  const to = versionNumber == null ? 'an earlier version' : `version ${versionNumber}`
+  return { variant: 'success', title: 'Restore queued', message: `${fileName} goes back to ${to} on the next sync.` } as const
+}

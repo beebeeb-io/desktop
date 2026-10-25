@@ -72,6 +72,16 @@ const ICON_PATHS: Record<string, ReactNode> = {
   ),
   folder: <path transform="scale(1.2)" d="M2.5 6.2A1.7 1.7 0 0 1 4.2 4.5h3.3l1.7 1.9h6.6a1.7 1.7 0 0 1 1.7 1.7v6.7a1.7 1.7 0 0 1-1.7 1.7H4.2a1.7 1.7 0 0 1-1.7-1.7z" />,
   back: <path transform="scale(1.2)" d="M12.5 4.5L7 10l5.5 5.5" />,
+  // Review, Trash, Version history and a file: slice 4, drawn on the same 20-unit grid as the hi-fi's symbols.
+  review: <path transform="scale(1.2)" d="M3 11.5h4l1.4 2h3.2l1.4-2h4M3 11.5l2-7h10l2 7v4a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z" />,
+  trash: <path transform="scale(1.2)" d="M3.5 5.5h13M8 5.5V3.8h4v1.7M5.2 5.5l.8 11a1 1 0 0 0 1 .9h6a1 1 0 0 0 1-.9l.8-11" />,
+  history: <path transform="scale(1.2)" d="M3.5 10a6.5 6.5 0 1 0 1.9-4.6M3.3 3.5v3.4h3.4M10 6.5V10l2.4 1.6" />,
+  file: (
+    <g transform="scale(1.2)">
+      <path d="M5 2.5h6.5L15.5 6.5v10a1 1 0 0 1-1 1h-9.5a1 1 0 0 1-1-1v-13a1 1 0 0 1 1-1z" />
+      <path d="M11.5 2.5v4h4" />
+    </g>
+  ),
   chevDown: <path d="m6 9 6 6 6-6" />,
   alert: (
     <>

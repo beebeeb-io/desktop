@@ -5286,7 +5286,7 @@ pub fn version_conflict_feed_from_db(db: &StateDb) -> anyhow::Result<Vec<Version
             kind: "conflict".to_string(),
             status: "needs review".to_string(),
             updated_at: Some(file.modified_at),
-            detail: "Local and remote both changed from the last synced base.".to_string(),
+            detail: REVIEW_DETAIL_CONFLICT.to_string(),
             action: "open_conflict".to_string(),
             op_id: None,
             version_id: None,
@@ -6797,6 +6797,21 @@ fn record_moved_to_trash_activity(db: &StateDb, file_id: &str, rel_path: &str, o
     Ok(())
 }
 
+// The detail line of a Review entry, by kind (two-surface spec §7.6, §10.1, task 1683 slice 4). A person reads these on
+// the Beebeeb window's Review rows and on the Linux Versions page, so each is a plain sentence about what happened to the
+// change and where it is now, never the failure's own text: the raw message stays in `VersionConflictEntry::last_error`
+// (an HTTP status, a URL and a port have no business in a sentence), and the hi-fi's own line for an upload is verbatim.
+const REVIEW_DETAIL_CONFLICT: &str = "Changed on two devices.";
+const REVIEW_DETAIL_RESTORE: &str = "Going back to an earlier version hasn’t finished. It continues on the next sync.";
+const REVIEW_DETAIL_AUTH: &str = "Your session has expired. Sign in again to resume syncing.";
+const REVIEW_DETAIL_QUOTA: &str = "This change can’t upload until you free up space or add storage. It stays on this Mac.";
+const REVIEW_DETAIL_PERMISSION: &str = "You don’t have permission to change this here. The change stays on this Mac.";
+const REVIEW_DETAIL_STALE_BASE: &str = "This file changed somewhere else too. Your version is kept on this Mac.";
+const REVIEW_DETAIL_UPLOAD: &str = "Couldn’t upload, will retry";
+const REVIEW_DETAIL_RENAME_OR_MOVE: &str = "A rename or move hasn’t been sent yet. It continues on the next sync.";
+const REVIEW_DETAIL_DELETE: &str = "A delete hasn’t been sent yet. It continues on the next sync.";
+const REVIEW_DETAIL_OTHER: &str = "This change hasn’t been sent yet. It continues on the next sync.";
+
 fn review_entry_for_operation(op: &PendingOperation, db: &StateDb) -> anyhow::Result<VersionConflictEntry> {
     let file_id = op.file_id.clone().unwrap_or_else(|| op.op_id.clone());
     let file_name = op
@@ -6841,8 +6856,7 @@ fn classify_review_operation(op: &PendingOperation) -> (&'static str, &'static s
         return (
             "restore",
             "restore review",
-            "Restore is queued or failed; the server restore endpoint creates a new current version when it succeeds."
-                .to_string(),
+            REVIEW_DETAIL_RESTORE.to_string(),
             "restore_review",
         );
     }
@@ -6859,7 +6873,7 @@ fn classify_review_operation(op: &PendingOperation) -> (&'static str, &'static s
         return (
             "auth_failure",
             "sign-in needed",
-            "Your session has expired. Sign in again to resume syncing.".to_string(),
+            REVIEW_DETAIL_AUTH.to_string(),
             "sign_in_again",
         );
     }
@@ -6867,9 +6881,7 @@ fn classify_review_operation(op: &PendingOperation) -> (&'static str, &'static s
         return (
             "quota_failure",
             "quota blocked",
-            op.last_error
-                .clone()
-                .unwrap_or_else(|| "Upload is blocked by account storage quota.".to_string()),
+            REVIEW_DETAIL_QUOTA.to_string(),
             "review_upload",
         );
     }
@@ -6881,9 +6893,7 @@ fn classify_review_operation(op: &PendingOperation) -> (&'static str, &'static s
         return (
             "permission_failure",
             "permission blocked",
-            op.last_error
-                .clone()
-                .unwrap_or_else(|| "Write is blocked by folder permissions.".to_string()),
+            REVIEW_DETAIL_PERMISSION.to_string(),
             "review_upload",
         );
     }
@@ -6891,7 +6901,7 @@ fn classify_review_operation(op: &PendingOperation) -> (&'static str, &'static s
         return (
             "stale_base",
             "stale base kept local",
-            "Local bytes are preserved in the durable queue and need version review before retry.".to_string(),
+            REVIEW_DETAIL_STALE_BASE.to_string(),
             "review_upload",
         );
     }
@@ -6900,33 +6910,25 @@ fn classify_review_operation(op: &PendingOperation) -> (&'static str, &'static s
         OperationKind::UploadVersion | OperationKind::UploadFile => (
             "failed_upload",
             "upload review",
-            op.last_error
-                .clone()
-                .unwrap_or_else(|| "Upload is queued for the encrypted transfer worker.".to_string()),
+            REVIEW_DETAIL_UPLOAD.to_string(),
             "review_upload",
         ),
         OperationKind::RenameFile | OperationKind::MoveFile => (
             "metadata",
             "metadata review",
-            op.last_error
-                .clone()
-                .unwrap_or_else(|| "Rename or move is queued for metadata sync.".to_string()),
+            REVIEW_DETAIL_RENAME_OR_MOVE.to_string(),
             "review_upload",
         ),
         OperationKind::TrashFile => (
             "delete",
             "delete review",
-            op.last_error
-                .clone()
-                .unwrap_or_else(|| "Delete is queued as a trash/soft-delete operation.".to_string()),
+            REVIEW_DETAIL_DELETE.to_string(),
             "review_upload",
         ),
         _ => (
             "failed_upload",
             "queued review",
-            op.last_error
-                .clone()
-                .unwrap_or_else(|| "Operation is queued for a worker that is not attached yet.".to_string()),
+            REVIEW_DETAIL_OTHER.to_string(),
             "review_upload",
         ),
     }
@@ -12979,8 +12981,61 @@ mod tests {
             entry.kind == "stale_base"
                 && entry.file_name == "stale.txt"
                 && entry.base_version == Some(7)
-                && entry.detail.contains("preserved")
+                && entry.detail == REVIEW_DETAIL_STALE_BASE
+                // The failure's own text is not the sentence, and is still carried for support.
+                && entry.last_error.as_deref() == Some("stale base version rejected")
         }));
+    }
+
+    /// Two-surface spec §7.6 and §10.1 (task 1683 slice 4): a Review entry's detail line is a sentence for a person, by
+    /// kind, never the failure's own text. The raw message (an HTTP status, a URL with a port) stays in `last_error`.
+    #[test]
+    fn a_review_entry_says_a_sentence_and_keeps_the_raw_failure_apart() {
+        let op = |kind: OperationKind, error: Option<&str>, base: Option<i64>| PendingOperation {
+            op_id: "op-1".into(),
+            kind,
+            file_id: Some("f1".into()),
+            parent_id: None,
+            target_path: Some("/Work/a.txt".into()),
+            metadata_json: None,
+            payload_path: None,
+            base_version: base,
+            base_object_version_id: None,
+            attempts: 1,
+            max_attempts: 25,
+            next_retry_at: 0,
+            last_error: error.map(str::to_string),
+            backup_source_key: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        let raw = "server returned 500 for url (http://127.0.0.1:45401/api/v1/uploads/init)";
+        let rows: Vec<(PendingOperation, &str, &str, &str)> = vec![
+            (op(OperationKind::RestoreVersion, Some(raw), None), "restore", REVIEW_DETAIL_RESTORE, "restore_review"),
+            (op(OperationKind::UploadFile, Some("401 unauthorized"), None), "auth_failure", REVIEW_DETAIL_AUTH, "sign_in_again"),
+            (op(OperationKind::UploadFile, Some("quota exceeded"), None), "quota_failure", REVIEW_DETAIL_QUOTA, "review_upload"),
+            (op(OperationKind::UploadFile, Some("403 forbidden"), None), "permission_failure", REVIEW_DETAIL_PERMISSION, "review_upload"),
+            (op(OperationKind::UploadVersion, Some("stale base version rejected"), Some(3)), "stale_base", REVIEW_DETAIL_STALE_BASE, "review_upload"),
+            (op(OperationKind::UploadFile, Some(raw), None), "failed_upload", REVIEW_DETAIL_UPLOAD, "review_upload"),
+            (op(OperationKind::RenameFile, Some(raw), None), "metadata", REVIEW_DETAIL_RENAME_OR_MOVE, "review_upload"),
+            (op(OperationKind::MoveFile, None, None), "metadata", REVIEW_DETAIL_RENAME_OR_MOVE, "review_upload"),
+            (op(OperationKind::TrashFile, Some(raw), None), "delete", REVIEW_DETAIL_DELETE, "review_upload"),
+        ];
+        for (pending, kind, sentence, action) in rows {
+            let (got_kind, _status, detail, got_action) = classify_review_operation(&pending);
+            assert_eq!((got_kind, got_action), (kind, action), "{:?}", pending.kind);
+            assert_eq!(detail, sentence, "{kind}");
+            for developer in ["http", "127.0.0.1", "server returned", "url (", "worker", "queue", "endpoint", "bytes"] {
+                assert!(!detail.to_ascii_lowercase().contains(developer), "{kind}: {detail}");
+            }
+        }
+        // The failure's own text is carried on the entry for support, whatever the sentence says.
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(db_dir.path().join("state.db")).unwrap();
+        let entry = review_entry_for_operation(&op(OperationKind::UploadFile, Some(raw), None), &db).unwrap();
+        assert_eq!(entry.detail, REVIEW_DETAIL_UPLOAD);
+        assert_eq!(entry.last_error.as_deref(), Some(raw));
+        assert_eq!(REVIEW_DETAIL_CONFLICT, "Changed on two devices.");
     }
 
     #[test]

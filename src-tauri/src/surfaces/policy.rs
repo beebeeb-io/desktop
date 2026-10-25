@@ -7,15 +7,16 @@
 //! Two-surface slice 1 (task 1683, spec `docs/specs/2026-10-24-macos-two-surface-app.md`)
 //! changed the macOS rows of `main_window_label` (`main`) and `close_policy`
 //! (`main` is destroyed) and added `compact_window_label` and `dock_icon_wanted`;
-//! startup and the conflict auto-open keep today's macOS rows until slices 6 and 4.
+//! startup keeps today's macOS row until slice 6; the conflict rows changed in slice 4 (a Mac decides a conflict in Review).
 //!
 //! Every function here is CALLED by the shipping code, and `wiring_tests` proves
 //! it structurally (reads `lib.rs` and fails if a call site goes back to a
 //! literal): startup (`startup_surface`), the main-window labels
 //! (`main_window_label`, both the compact `settings` window and the Windows
 //! `main-app` shell), the global close handler (`close_policy`) and
-//! `runner::handle_new_conflict` (`conflict_auto_opens_window`). Each returns
-//! today's answer on every platform until slice 6 changes the macOS rows.
+//! `runner::handle_new_conflict` (`conflict_auto_opens_window`) and the conflict
+//! window builder (`conflict_target`). Each returns today's answer on every
+//! platform except where a slice changed the macOS row (slice 4: conflicts).
 
 use super::registry::{ClosePolicy, SurfaceKind};
 
@@ -112,12 +113,29 @@ pub fn tray_hide(platform: Platform) -> TrayHide {
     }
 }
 
-/// Whether `handle_new_conflict` opens a conflict window by itself. Today: yes
-/// everywhere. Slice 6 makes macOS "never" (conflicts become a popover row, a
-/// badge and a notification; the user opens `review`); Windows and Linux keep
-/// opening the window.
-pub fn conflict_auto_opens_window(_platform: Platform) -> bool {
-    true
+/// Whether `handle_new_conflict` opens a conflict window by itself. Windows and Linux: yes. macOS: never (two-surface
+/// spec §12 slice 4, rows A8 and A17): a conflict is a notification and a row in the Beebeeb window's Review, which the
+/// person opens (popover row from slice 3, the sidebar, ⌘2).
+pub fn conflict_auto_opens_window(platform: Platform) -> bool {
+    conflict_target(platform) == ConflictTarget::Window
+}
+
+/// Where a conflict is decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictTarget {
+    /// `ConflictWindow`, one window per conflict (Windows and Linux, unchanged).
+    Window,
+    /// The Beebeeb window's Review section and its conflict sheet (macOS). No conflict window is ever built.
+    Review,
+}
+
+/// The one answer to "where does a conflict go": `open_conflict_window_impl` asks it before it builds anything, so the
+/// engine's automatic path and the `open_conflict_window` command cannot disagree.
+pub fn conflict_target(platform: Platform) -> ConflictTarget {
+    match platform {
+        Platform::Macos => ConflictTarget::Review,
+        Platform::Windows | Platform::Linux => ConflictTarget::Window,
+    }
 }
 
 /// Two-surface slice 1: on a Mac the close handler is label-aware, so the Beebeeb window is destroyed on close
@@ -210,10 +228,27 @@ mod tests {
     }
 
     #[test]
-    fn macos_conflict_is_todays_behaviour_until_slice_6() {
-        // TODAY's row; slice 6 flips it to false (conflicts never open a window
-        // by themselves) and updates this test in the same commit.
-        assert!(conflict_auto_opens_window(Platform::Macos));
+    fn macos_conflict_never_opens_a_window_by_itself() {
+        // Two-surface spec §12 slice 4 (rows A8, A17): a conflict is a notification and a row in Review, never a
+        // window. (This was TODAY's `true` until slice 4; the test that pinned it moved with the flip.)
+        assert!(!conflict_auto_opens_window(Platform::Macos));
+    }
+
+    #[test]
+    fn a_conflict_is_decided_in_review_on_a_mac_and_in_its_own_window_elsewhere() {
+        // Windows and Linux keep `ConflictWindow`; a Mac never builds it, whoever asks (`open_conflict_window`
+        // is still a registered command, and the compact flyout's Versions page can call it).
+        assert_eq!(conflict_target(Platform::Macos), ConflictTarget::Review);
+        assert_eq!(conflict_target(Platform::Windows), ConflictTarget::Window);
+        assert_eq!(conflict_target(Platform::Linux), ConflictTarget::Window);
+    }
+
+    #[test]
+    fn the_automatic_opening_and_the_target_agree_on_every_platform() {
+        // A platform that opens a window by itself opens exactly the window the target names.
+        for platform in [Platform::Macos, Platform::Windows, Platform::Linux] {
+            assert_eq!(conflict_auto_opens_window(platform), conflict_target(platform) == ConflictTarget::Window, "{platform:?}");
+        }
     }
 
     #[test]
@@ -547,6 +582,32 @@ mod wiring_tests {
     fn startup_and_the_conflict_handler_still_go_through_policy() {
         assert!(lib_rs().contains("surfaces::policy::startup_surface("));
         assert!(runner_rs().contains("surfaces::policy::conflict_auto_opens_window("));
+    }
+
+    #[test]
+    fn no_path_builds_a_conflict_window_on_a_mac() {
+        // The one place a `conflict-<id>` window is built asks the policy where a conflict is decided first, and the
+        // Mac's answer comes before the builder: the automatic path (`handle_new_conflict`) and the command
+        // (`open_conflict_window`) both end here, so one pin covers both.
+        let src = lib_rs();
+        let body = item_from(&src, "pub(crate) fn open_conflict_window_impl(");
+        let asked = body.find("surfaces::policy::conflict_target(").expect("the policy is asked");
+        let review = body.find("MainNav::Review").expect("a Mac is sent to Review");
+        let built = body.find("WebviewWindowBuilder::new(").expect("the other platforms still build the window");
+        assert!(asked < review && review < built, "{body}");
+        // ...and it LEAVES there: the Mac's branch returns straight after it opens Review, or it would be sent to Review
+        // and get the window as well. (The existing-window branch further down has its own `return`, so the pin names
+        // the statement that follows the Review request.)
+        let words: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            words.contains("show_main_window(app, MainNav::Review); return Ok(());"),
+            "the Mac branch does not return right after opening Review:\n{body}"
+        );
+        assert_eq!(
+            src.matches("format!(\"conflict-{file_id}\")").count(),
+            1,
+            "a second place builds a conflict window label"
+        );
     }
 
     #[test]
