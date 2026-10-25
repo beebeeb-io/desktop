@@ -645,3 +645,16 @@ window whose first read is locked); and a sign-out that fails after the removal 
 sentence anyway, and only holds it (lead ruling: a held sentence is shown above the card whether or not a remount comes, so a
 toast would say it twice; the toast is the fallback for a sentence that cannot be held).
 
+### 1747 Part 2: the Keychain-presence signal and the interrupted first run (2026-10-25)
+
+`vault_unlock_route` (macOS) answers `keychain` or `recovery_phrase` from `keychain_vault_key_present`, the helper that serves the
+sign-in traces: the item's attributes in the id-keyed and the legacy layout, never the key, and a Keychain that cannot be read counts
+as holding one (so the route is `keychain` and the existing unlock error reaches the person, rather than a path that would
+overwrite a key). It is its own command, not a field of `sync_status` (D5), and keeps the revision guard. The Beebeeb window asks
+it with `pending_setup` when it opens signed in and locked, and `windowScreen` takes the answer as a third argument: `settling`
+while it is out, Set up this Mac by state when there is no key (D4: the interrupted first run, a password sign-in on a Mac with
+no key whose window was closed or whose app was quit before the phrase, used to land on a Home whose "Unlock vault" has nothing
+to read; Rust's pending step does not survive a quit, the Keychain does). Home's "Unlock vault" and Settings › Account's "Unlock"
+(plan O4: an inference from D4, not a ruling; the PR asks the lead to confirm it) ask again at the click. The route is spent
+once the keys arrive (`unlocked`, or the Finder step, which Finder-ready leaves for Home before the next snapshot read), so a
+later Lock shows Home's locked card; a window that opens unlocked and is then locked asks nothing (the P3-3 rule).

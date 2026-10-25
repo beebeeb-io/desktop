@@ -212,7 +212,9 @@ describe('the answer of a command that ends the session itself stands when the r
 
   test('any other command still says "Account changed"', async () => {
     let start = 730
-    for (const name of ['account_email', 'unlock_vault', 'popover_snapshot', 'desktop_unlock_with_recovery_phrase', 'open_onboarding_window']) {
+    // `vault_unlock_route` (1747 Part 2, item 15) is an answer about the ACTIVE account's Keychain: one that arrives after the
+    // session moved is refused, so a window never routes the next account by the previous one's key.
+    for (const name of ['account_email', 'unlock_vault', 'popover_snapshot', 'desktop_unlock_with_recovery_phrase', 'open_onboarding_window', 'vault_unlock_route']) {
       const { native, seen } = await revisionMovesWhileRunning(name, 'sam@example.eu', start)
       const result = await command<unknown>(name)
       expect(seen.atAnswer).toBe(native.revision)
