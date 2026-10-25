@@ -9505,15 +9505,18 @@ async fn desktop_storage_summary(state: State<'_, AppState>) -> Result<DesktopSt
 }
 
 /// Everything the menu-bar popover needs for its first frame, in one call (task 1683
-/// slice 2, spec section 9). The UI calls it when the popover is shown (the
-/// `popover-shown` event) and after its own actions; nothing polls it.
+/// slice 2, spec section 9). The popover calls it when it is shown (the `popover-shown`
+/// event) and after its own actions; the macOS main window reads it a few seconds after
+/// each read while it is open (slice 1).
 ///
 /// Reads, in this order: the session (locked / signed out / session ended), the live
 /// pause flag, the engine's last `engine-status` (real state, progress, last
 /// successful check, reason), the Finder install state (macOS only), the storage
 /// summary (cached for five minutes, refetched after an unlock, never when the vault
-/// is locked), and the state DB (queue, recent transfers, conflicts). File names are
-/// read only while the vault is unlocked, like `desktop_file_overview`.
+/// is locked; a refetch holds this call for `popover_data::STORAGE_WAIT` at most and
+/// a failed one is not tried again for `STORAGE_FAILURE_BACKOFF_SECS`, task 2179), and
+/// the state DB (queue, recent transfers, conflicts). File names are read only while
+/// the vault is unlocked, like `desktop_file_overview`.
 #[tauri::command]
 async fn popover_snapshot(
     state: State<'_, AppState>,

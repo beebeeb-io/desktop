@@ -167,25 +167,8 @@ export interface HomeStatus {
   action: 'resume' | 'add_storage' | null
 }
 
-type StatusInput = Pick<PopoverSnapshot, 'phase' | 'paused' | 'storage_full' | 'pending_changes' | 'reason'> & {
+type StatusInput = Pick<PopoverSnapshot, 'sync_phase' | 'pending_changes' | 'reason'> & {
   engine: Pick<PopoverSnapshot['engine'], 'state' | 'files_remaining' | 'last_tick_ok_at'>
-}
-
-const FINDER_PHASES: ReadonlySet<PopoverSnapshot['phase']> = new Set(['finder_failed', 'finder_user_disabled', 'finder_adding', 'finder_missing'])
-
-/**
- * The sync part of the snapshot when its phase is a Finder one. The backend's `popover_phase` ranks every Finder phase
- * above paused, storage full, offline and error (`surfaces/phase.rs`), so under a Finder phase those come from the
- * snapshot's own fields, in the same order. Follow-up to PR #134 (auto-review thread 2): before, Home said "Up to date"
- * from the engine alone and hid a pause and its Resume sync.
- */
-function syncPhase(input: StatusInput): PopoverSnapshot['phase'] {
-  if (!FINDER_PHASES.has(input.phase)) return input.phase
-  if (input.paused || input.engine.state === 'paused') return 'paused'
-  if (input.storage_full) return 'storage_full'
-  if (input.engine.state === 'offline') return 'offline'
-  if (input.engine.state === 'error') return 'error'
-  return 'syncing' // `syncState` tells syncing from up to date by the engine
 }
 
 const plural = (n: number, one: string, many: string) => (n === 1 ? one : many)
@@ -214,13 +197,14 @@ function syncState(input: StatusInput, nowSeconds: number): HomeStatus {
 }
 
 /**
- * The row's words per phase, from the popover's states (§6.3). Under a Finder phase it says the sync part, read from
- * the snapshot's fields (`syncPhase`), because Home's Finder row says the Finder part: both show. Signed out, session
- * ended and locked never reach here: the window shows its sign-in card or the locked card instead.
+ * The row's words per phase, from the popover's states (§6.3). It says the sync part of the state, `sync_phase`, which
+ * Rust's reducer computes with the Finder setup taken as ready (task 2179): Home's Finder row says the Finder part,
+ * and both show. Signed out, session ended and locked never reach here: the window shows its sign-in card or the
+ * locked card instead.
  */
 export function homeStatus(input: StatusInput, nowSeconds: number): HomeStatus {
   const n = input.pending_changes
-  switch (syncPhase(input)) {
+  switch (input.sync_phase) {
     case 'syncing':
       return syncState(input, nowSeconds)
     case 'paused':
@@ -292,29 +276,50 @@ export function connectMainNavigation(listen: Listen, pull: Pull, apply: (nav: M
   }
 }
 
-// ── Reading the snapshot (follow-up to PR #134, auto-review thread 1) ─────────
+// ── Reading the snapshot (follow-up to PR #134, auto-review thread 1; task 2179) ─
 
 type ReadResult = { ok: boolean }
 
+export interface SnapshotReaderOptions<R> {
+  /** The result a read gives that threw, rejected or never answered: a real failure, not a cast. */
+  failure: (cause: 'threw' | 'rejected' | 'timed out', error?: unknown) => R
+  /** A read still unanswered after this long is given up: its failure is applied and it no longer holds the ticks. */
+  watchdogMs: number
+}
+
 /**
- * Reads the account and sync state on a timer without ever throwing a read away because the timer fired. One read
- * is in flight at a time: a tick while one is pending starts nothing (`popover_snapshot` can take up to 8 s, the
- * storage fetch's timeout, and the tick is 5 s). `refresh` is for an outcome that changed the state (a sign-out, an
- * unlock): it reads at once, even with a read in flight, and every read started before it is dropped when it
- * finishes, whether before or after the refresh's own, so the outcome's read wins and the state from before it is
- * never shown again. Only a refresh runs two reads at once, so the newest result is always the one applied. `stop`
- * (the window unmounted) applies nothing more; `resume` undoes it (StrictMode remounts).
+ * Reads the account and sync state without ever throwing a read away because a timer fired.
+ *
+ * - `start(intervalMs)` reads now, then again `intervalMs` after each read finishes (a slow read delays the next one;
+ *   it never piles reads up).
+ * - Every outcome that changed the state (a sign-out, an unlock, a resume) calls `refresh`. It moves the epoch and
+ *   reads at once, even with a read in flight. A read only applies its result while its epoch is current, so a read
+ *   started before the outcome never shows the state from before it, whichever finishes first. `refresh` resolves once
+ *   its own result is applied, so a button can stay busy until the window shows what the action did.
+ * - `retry` ("Try again") joins the current epoch's read in flight instead of starting another: five clicks, one read.
+ * - Only the current epoch's read holds the ticks. One that never answers is given up after `watchdogMs`; one whose
+ *   `read()` throws synchronously fails like one that rejected.
+ * - `stop` (the window unmounted) applies nothing more and cancels the next tick; `resume` undoes it (StrictMode).
  */
 export class SnapshotReader<R extends ReadResult> {
-  private started = 0
-  private floor = 0
-  private pending = 0
+  private epoch = 0
+  private current: Promise<void> | null = null
   private stopped = true
+  private intervalMs: number | null = null
+  private timer: ReturnType<typeof setTimeout> | null = null
 
   constructor(
     private readonly read: () => Promise<R>,
     private readonly onResult: (result: R) => void,
+    private readonly options: SnapshotReaderOptions<R>,
   ) {}
+
+  /** Read now, then `intervalMs` after each read finishes. */
+  start(intervalMs: number): void {
+    this.intervalMs = intervalMs
+    this.resume()
+    this.tick()
+  }
 
   resume(): void {
     this.stopped = false
@@ -322,29 +327,63 @@ export class SnapshotReader<R extends ReadResult> {
 
   stop(): void {
     this.stopped = true
+    if (this.timer !== null) clearTimeout(this.timer)
+    this.timer = null
   }
 
-  /** A timer tick, or the first read: skipped while a read is in flight. */
+  /** The timer, or the first read: skipped while the current epoch's read is in flight. */
   tick(): void {
-    if (this.stopped || this.pending > 0) return
-    this.start()
+    if (this.stopped || this.current !== null) return
+    void this.begin()
   }
 
-  /** After an outcome: read now, and let nothing started before this win over it. */
-  refresh(): void {
-    if (this.stopped) return
-    this.floor = this.start()
+  /** After an outcome: read now; nothing started before wins over it. Resolves when its result is applied. */
+  refresh(): Promise<void> {
+    if (this.stopped) return Promise.resolve()
+    this.epoch += 1
+    return this.begin()
   }
 
-  private start(): number {
-    const sequence = ++this.started
-    this.pending += 1
-    const done = (result: R) => {
-      this.pending -= 1
-      if (this.stopped || sequence < this.floor) return
-      this.onResult(result)
+  /** "Try again": the current epoch's read in flight if there is one, else a new read. */
+  retry(): Promise<void> {
+    if (this.stopped) return Promise.resolve()
+    return this.current ?? this.begin()
+  }
+
+  private begin(): Promise<void> {
+    const epoch = this.epoch
+    let settled = false
+    let resolve: () => void = () => {}
+    const done = new Promise<void>((r) => { resolve = r })
+    const finish = (result: R) => {
+      if (settled) return
+      settled = true
+      clearTimeout(watchdog)
+      if (this.current === done) this.current = null
+      if (!this.stopped && epoch === this.epoch) this.onResult(result)
+      this.schedule()
+      resolve()
     }
-    void this.read().then(done, () => done({ ok: false } as R))
-    return sequence
+    this.current = done
+    const watchdog = setTimeout(() => finish(this.options.failure('timed out')), this.options.watchdogMs)
+    let pending: Promise<R>
+    try {
+      pending = this.read()
+    } catch (error) {
+      finish(this.options.failure('threw', error))
+      return done
+    }
+    pending.then(finish, (error: unknown) => finish(this.options.failure('rejected', error)))
+    return done
+  }
+
+  /** The next tick, `intervalMs` after the read that just finished. */
+  private schedule(): void {
+    if (this.stopped || this.intervalMs === null) return
+    if (this.timer !== null) clearTimeout(this.timer)
+    this.timer = setTimeout(() => {
+      this.timer = null
+      this.tick()
+    }, this.intervalMs)
   }
 }
