@@ -61,10 +61,6 @@ export default function Shared() {
       <div className="page-header">
         <div>
           <h1 className="page-title">Shared roots</h1>
-          <p className="page-copy">
-            Shared content is part of the Finder namespace, with permissions enforced by the daemon
-            before any hydrate or write operation.
-          </p>
         </div>
         <span className="status-pill">
           <span className={`dot ${roots.length > 0 ? 'ok' : ''}`} />

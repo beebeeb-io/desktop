@@ -11,7 +11,7 @@ export interface DesktopCapabilities {
   tray: 'available' | 'unavailable' | 'unknown'
   sharing: 'recipient_read_only' | 'web_only'
   install_format: 'app' | 'nsis' | 'msi' | 'appimage' | 'deb' | 'rpm' | 'unknown'
-  update_format: 'app_bundle' | 'nsis' | 'msi' | 'appimage' | 'package_manager' | 'manual'
+  update_format: 'app_bundle' | 'download' | 'nsis' | 'msi' | 'appimage' | 'package_manager' | 'manual'
   sync_mode_selection: boolean
   metered_sync_control: boolean
   sync_overlay_control: boolean
@@ -31,8 +31,12 @@ export function supportsRoute(caps: DesktopCapabilities | null, route: string): 
   return true
 }
 
+/**
+ * Whether this build can install an update in place. A Mac cannot, whatever its payload says (task 2176: the App Sandbox
+ * denies replacing the running bundle): it downloads the update instead (`macUpdateCopy.ts`).
+ */
 export function canInstallUpdate(caps: DesktopCapabilities | null): boolean {
-  return caps !== null && ['app_bundle', 'nsis', 'msi', 'appimage'].includes(caps.update_format)
+  return caps !== null && caps.host_os !== 'macos' && ['app_bundle', 'nsis', 'msi', 'appimage'].includes(caps.update_format)
 }
 
 export function CapabilityAlternative({ children }: { children?: ReactNode }) {

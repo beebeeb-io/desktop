@@ -44,6 +44,9 @@ pub enum InstallFormat {
 #[serde(rename_all = "snake_case")]
 pub enum UpdateFormat {
     AppBundle,
+    /// A sandboxed Mac: the App Sandbox denies replacing the running bundle, so an update is downloaded, never installed
+    /// in place (task 2176; two-surface spec §0 ruling 5).
+    Download,
     Nsis,
     Msi,
     Appimage,
@@ -90,7 +93,7 @@ pub fn snapshot(host: HostOs, install_format: InstallFormat, tray_created: bool)
     };
     let native_credentials = matches!(host, HostOs::Macos | HostOs::Windows);
     let update_format = match (host, install_format) {
-        (HostOs::Macos, InstallFormat::App) => UpdateFormat::AppBundle,
+        (HostOs::Macos, InstallFormat::App) => UpdateFormat::Download,
         (HostOs::Windows, InstallFormat::Nsis) => UpdateFormat::Nsis,
         (HostOs::Windows, InstallFormat::Msi) => UpdateFormat::Msi,
         (HostOs::Linux, InstallFormat::Appimage) => UpdateFormat::Appimage,
@@ -150,6 +153,19 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn a_mac_downloads_its_updates_and_nothing_else_does() {
+        // Task 2176: the App Sandbox denies replacing the running bundle, so a Mac's update is a download.
+        assert_eq!(snapshot(HostOs::Macos, InstallFormat::App, true).update_format, UpdateFormat::Download);
+        assert_eq!(snapshot(HostOs::Windows, InstallFormat::Nsis, true).update_format, UpdateFormat::Nsis);
+        assert_eq!(snapshot(HostOs::Windows, InstallFormat::Msi, true).update_format, UpdateFormat::Msi);
+        assert_eq!(snapshot(HostOs::Linux, InstallFormat::Appimage, true).update_format, UpdateFormat::Appimage);
+        assert_eq!(
+            serde_json::to_value(snapshot(HostOs::Macos, InstallFormat::App, true).update_format).unwrap(),
+            serde_json::json!("download")
+        );
     }
 
     #[test]

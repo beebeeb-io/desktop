@@ -446,7 +446,11 @@ export async function command<T>(name: string, args?: Record<string, unknown>): 
     return { ok: true, value }
   } catch (error) {
     const reason = reasonFrom(error)
-    return { ok: false, reason, unsupported: isUnsupported(reason) }
+    const unsupported = isUnsupported(reason)
+    // The name of a command this build does not have is for whoever reads the log (spec §10.2 #24). It is written here,
+    // once, where the host's answer is read: `commandUnavailableLabel` is called while a component renders.
+    if (unsupported) console.warn(name, 'unavailable')
+    return { ok: false, reason, unsupported }
   }
 }
 
@@ -507,8 +511,14 @@ export function formatBytes(bytes: number): string {
   return `${(bytes / 1_000_000_000_000).toFixed(1)} TB`
 }
 
-export function commandUnavailableLabel(commandName: string): string {
-  return `${commandName} is not wired in this build yet.`
+/**
+ * What a person is told when a command is missing from the build they run (spec `2026-10-24-macos-two-surface-app.md`
+ * §10.2 #24, every platform). The name of the command is for whoever reads the log, not for the screen, and `command()`
+ * logs it when it finds the command missing; this is read while components render, so it has no side effect. The name is
+ * kept as an argument so a call site says which command it speaks for.
+ */
+export function commandUnavailableLabel(_commandName: string): string {
+  return 'This isn’t available in this version of Beebeeb.'
 }
 
 // ── Account data layer (PKG-DATA, commit 39f18963) ──────────────────────────
@@ -928,6 +938,12 @@ export function fetchRegion(): Promise<UserRegionResponse | null> {
 
 export function accountProfile(): Promise<CommandResult<AccountProfile>> {
   return command<AccountProfile>('account_profile')
+}
+
+/** The profile as the server says it now, not as the session cached it at sign-in (`account_profile`). Settings › Security
+ *  reads this one: whether the authenticator app is on must not be a claim that is hours old. */
+export function accountProfileFresh(): Promise<CommandResult<AccountProfile>> {
+  return command<AccountProfile>('account_profile_fresh')
 }
 
 export function accountSubscription(): Promise<CommandResult<Subscription>> {

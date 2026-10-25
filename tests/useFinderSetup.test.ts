@@ -414,6 +414,9 @@ describe('lead ruling 7b: actions and the failed-action toast', () => {
       expect(traced).toEqual([
         ['open_system_settings', 'io.beebeeb.bridge 3'],
         ['show_in_finder', 'other'],
+        // A command the host does not have is also noted once by the command layer, under its own name, where it is found
+        // missing (desktopApi `command()`, review P3); the action's trace follows, as before.
+        ['finder_setup_copy_details', 'unavailable'],
         ['copy_details', 'unsupported'],
       ])
       expect(JSON.stringify(traced)).not.toContain('/Users')

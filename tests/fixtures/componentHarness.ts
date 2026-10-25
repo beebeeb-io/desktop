@@ -123,6 +123,7 @@ export function mount(
       },
     },
   }
+  const toastApi = { showToast: (toast: any) => toasts.push(toast), dismissToast() {}, clearToasts() {} }
   const controlledHooks: Record<string, unknown> = {
     React: { createElement, Fragment },
     useState(initial: any) {
@@ -152,7 +153,10 @@ export function mount(
       return states[index]
     },
     useSyncExternalStore: (_subscribe: unknown, getSnapshot: () => unknown) => getSnapshot(),
-    useToast: () => ({ showToast: (toast: any) => toasts.push(toast), dismissToast() {}, clearToasts() {} }),
+    // The real provider hands out the same `showToast` on every render (a `useCallback` with no dependencies), so an effect
+    // that lists it does not re-run for it. One object per mount, as there: a new one per call would make every such effect
+    // re-run on every render and hide the ones that really do.
+    useToast: () => toastApi,
   }
   const hookFunctions: Record<string, unknown> = {}
   for (const hook of opts.hookModules ?? []) {

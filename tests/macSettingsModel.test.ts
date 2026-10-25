@@ -24,6 +24,8 @@ import {
   planLine,
   REPAIR_BODY,
   REPAIR_TITLE,
+  RESET_FINDER_BODY,
+  RESET_FINDER_TITLE,
   repairNote,
   SETTINGS_TABS,
   settingsTabFromSearch,
@@ -34,11 +36,21 @@ import {
   STORAGE_RED_PERCENT,
   tabAfterKey,
   updateRow,
+  ACCOUNT_SETTINGS_URL,
+  APPEARANCE_OPTIONS,
+  appearanceHint,
+  downgradeRow,
+  RELEASE_CHANNELS,
+  SPEED_TEST_HINT,
+  speedTestSummary,
+  STORAGE_DETAILS_LARGEST,
+  STORAGE_DETAILS_SUBTITLE,
+  storageDetails,
 } from '../src/macSettingsModel'
 
 describe('tabs', () => {
   test('the window has exactly the four tabs of the spec, in order', () => {
-    expect(SETTINGS_TABS.map((t) => t.label)).toEqual(['General', 'Account', 'Sync', 'About'])
+    expect(SETTINGS_TABS.map((t) => t.label)).toEqual(['General', 'Account', 'Sync', 'Security', 'About'])
     expect(DEFAULT_SETTINGS_TAB).toBe('general')
   })
 
@@ -66,7 +78,7 @@ describe('tabs', () => {
   })
 
   test('the keys follow the order of the list they are given (the sidebar draws Account first)', () => {
-    const sidebar = ['account', 'general', 'sync', 'about'] as const
+    const sidebar = ['account', 'general', 'sync', 'security', 'about'] as const
     expect(tabAfterKey('account', 'ArrowDown', sidebar)).toBe('general')
     expect(tabAfterKey('account', 'ArrowUp', sidebar)).toBe('about')
     expect(tabAfterKey('sync', 'Home', sidebar)).toBe('account')
@@ -150,6 +162,14 @@ describe('Beebeeb in Finder (spec 2026-10-06)', () => {
     expect(REPAIR_BODY).toBe(
       'Beebeeb removes its Finder location and turns off Open Beebeeb at login, then adds itself back to Finder. Files waiting to upload are kept.',
     )
+  })
+
+  test('the Windows and Linux Finder page has its own confirmation: its login item is "Start at login", and it does not promise what a Mac does', () => {
+    expect(RESET_FINDER_TITLE).toBe('Reset Finder integration?')
+    expect(RESET_FINDER_BODY).toBe('Beebeeb will remove its Finder location and turn off Start at login. Files waiting to upload are kept.')
+    expect(RESET_FINDER_BODY).not.toContain('Open Beebeeb at login')
+    expect(RESET_FINDER_BODY).not.toContain('adds itself back')
+    expect(RESET_FINDER_BODY).not.toMatch(/socket|daemon|engine/i)
   })
 
   test('the Repair body is the one the design artefact draws, byte for byte (design before code)', () => {
@@ -309,9 +329,16 @@ describe('About', () => {
       hint: 'Version 0.8.6 is the latest.',
       action: 'check',
     })
+    // Task 2176 (lead decision, 2026-10-24): the App Sandbox cannot install an update in place, so a Mac is offered a
+    // download, with the one sentence that says what to do with it. It never offers to restart into an install.
     expect(updateRow({ kind: 'update_available', currentVersion: '0.8.6', channel: 'stable', version: '0.8.7' }, '0.8.6')).toEqual({
-      hint: 'Version 0.8.7 is available.',
-      action: 'install',
+      hint: 'Version 0.8.7 is available. Drag Beebeeb into Applications to replace this version.',
+      action: 'download',
+    })
+    // A channel older than this version has its own row below, so this one says only what this Mac runs.
+    expect(updateRow({ kind: 'downgrade_available', currentVersion: '0.9.1', currentChannel: 'alpha', channel: 'stable', version: '0.8.12', body: '', releaseNotesUrl: 'https://example.invalid/' }, '0.9.1')).toEqual({
+      hint: 'Version 0.9.1',
+      action: 'check',
     })
     const error = updateRow({ kind: 'error', reason: 'Could not reach the stable update manifest: connect' }, '0.8.6')
     expect(error.action).toBe('check')
@@ -322,6 +349,56 @@ describe('About', () => {
   test('Get help opens the support page the Help menu already uses', () => {
     expect(HELP_URL).toBe('https://beebeeb.io/support')
   })
+
+  test('the release channels are Stable, Beta, Alpha with the Windows shell\'s hints, word for word', () => {
+    expect(RELEASE_CHANNELS).toEqual([
+      { value: 'stable', label: 'Stable', hint: 'Regular releases after validation.' },
+      { value: 'beta', label: 'Beta', hint: 'Earlier builds for release testing.' },
+      { value: 'alpha', label: 'Alpha', hint: 'Earliest builds for rapid feedback.' },
+    ])
+  })
+
+  test('a channel older than the running version is a row that explains itself and never offers an install', () => {
+    const row = downgradeRow({
+      kind: 'downgrade_available', currentVersion: '0.9.1', currentChannel: 'alpha', channel: 'stable', version: '0.8.12',
+      body: 'Notes', releaseNotesUrl: 'https://github.com/beebeeb-io/desktop/releases/tag/desktop-v0.8.12',
+    })
+    expect(row).toEqual({
+      label: 'The Stable channel is at version 0.8.12',
+      hint: 'This Mac runs 0.9.1, from the Alpha channel. Read the release notes before you go back to an older version.',
+    })
+    expect(downgradeRow({ kind: 'idle' })).toBeNull()
+    expect(downgradeRow({ kind: 'up_to_date', currentVersion: '0.8.6', channel: 'stable' })).toBeNull()
+  })
+
+  test('the speed test says what it does in plain words, and its result is one mono line', () => {
+    expect(SPEED_TEST_HINT).toBe('Measures how fast this Mac reaches Beebeeb: 5 pings, then 3 uploads and 3 downloads of 10 MB. Takes 30 to 90 seconds.')
+    expect(SPEED_TEST_HINT).not.toMatch(/\bbb speedtest\b|parity|CLI/i)
+    expect(speedTestSummary({ latency: { min_ms: 18, avg_ms: 24, max_ms: 41 }, upload_bps: 4_400_000, download_bps: 11_750_000 })).toBe(
+      'Latency 24 ms (18 to 41) · Upload 35.2 Mbps · Download 94.0 Mbps',
+    )
+    expect(speedTestSummary({ latency: { min_ms: 1, avg_ms: 2, max_ms: 3 }, upload_bps: 1_250, download_bps: 625_000 })).toBe(
+      'Latency 2 ms (1 to 3) · Upload 0.01 Mbps · Download 5.00 Mbps',
+    )
+  })
+})
+
+describe('General and Account additions (task 1683 slice 5)', () => {
+  test('Appearance is System, Light, Dark; System says it follows macOS', () => {
+    expect(APPEARANCE_OPTIONS).toEqual([
+      { value: 'system', label: 'System' },
+      { value: 'light', label: 'Light' },
+      { value: 'dark', label: 'Dark' },
+    ])
+    expect(appearanceHint('system')).toBe('Follow macOS.')
+    expect(appearanceHint('light')).toBe('Always light.')
+    expect(appearanceHint('dark')).toBe('Always dark.')
+    expect(appearanceHint(undefined)).toBe('Follow macOS.')
+  })
+
+  test('the web row opens the account settings page on the web app', () => {
+    expect(ACCOUNT_SETTINGS_URL).toBe('https://app.beebeeb.io/settings/account')
+  })
 })
 
 describe('the short plan line (the Beebeeb window sidebar, task 1683 slice 1)', () => {
@@ -330,5 +407,58 @@ describe('the short plan line (the Beebeeb window sidebar, task 1683 slice 1)', 
     expect(planShortLine({ plan: 'basic' })).toBe('Basic plan')
     expect(planShortLine(null)).toBeNull()
     expect(planShortLine({ plan: '' })).toBeNull()
+  })
+})
+
+describe('Storage details (spec §10.2 #30: the Insights content, a Mac\'s words)', () => {
+  const breakdown = {
+    by_category: [
+      { category: 'other', bytes: 4_300_000_000, file_count: 90 },
+      { category: 'media', bytes: 60_000_000_000, file_count: 1200 },
+      { category: 'documents', bytes: 20_000_000_000, file_count: 1 },
+    ],
+    largest_files: [
+      { file_id: 'f1', path: 'Photos/2026/IMG_0001.heic', size_bytes: 3_200_000_000, category: 'media' },
+      { file_id: 'f2', path: 'Ledger/Q3 ledger.xlsx', size_bytes: 12_400_000, category: 'documents' },
+    ],
+    total_files: 1291,
+    total_bytes: 84_300_000_000,
+  }
+
+  test('the subtitle is spec #30\'s, and no longer claims anything about "this PC"', () => {
+    expect(STORAGE_DETAILS_SUBTITLE).toBe('Where your storage goes, by type and by your largest files.')
+    expect(STORAGE_DETAILS_SUBTITLE).not.toMatch(/\bPC\b|encrypted on/)
+    expect(STORAGE_DETAILS_LARGEST).toBe(10)
+  })
+
+  test('the three types are always listed, Media then Documents then Other, with the Mac\'s number format', () => {
+    const details = storageDetails(breakdown, 'nl-NL')
+    expect(details.total).toBe('1.291 files · 84,3 GB')
+    expect(details.types.map((t) => [t.key, t.label, t.size, t.files])).toEqual([
+      ['media', 'Media', '60 GB', '1.200 files'],
+      ['documents', 'Documents', '20 GB', '1 file'],
+      ['other', 'Other', '4,3 GB', '90 files'],
+    ])
+  })
+
+  test('a type the data leaves out is still listed, at nothing', () => {
+    const details = storageDetails({ ...breakdown, by_category: [{ category: 'media', bytes: 5, file_count: 1 }] }, 'en')
+    expect(details.types.map((t) => [t.key, t.size, t.files])).toEqual([['media', '5 B', '1 file'], ['documents', '0 B', '0 files'], ['other', '0 B', '0 files']])
+  })
+
+  test('the largest files are shown whole (a path wraps, it is never cut), biggest first, at most ten', () => {
+    const details = storageDetails(breakdown, 'nl-NL')
+    expect(details.largest).toEqual([
+      { id: 'f1', path: 'Photos/2026/IMG_0001.heic', hint: 'Media · 3,2 GB' },
+      { id: 'f2', path: 'Ledger/Q3 ledger.xlsx', hint: 'Documents · 12,4 MB' },
+    ])
+    const many = Array.from({ length: 14 }, (_, i) => ({ file_id: `f${i}`, path: `a/${i}`, size_bytes: 1000 - i, category: 'other' as const }))
+    expect(storageDetails({ ...breakdown, largest_files: many }, 'en').largest).toHaveLength(10)
+    expect(storageDetails({ ...breakdown, largest_files: [...many].reverse() }, 'en').largest[0].id).toBe('f0')
+  })
+
+  test('nothing stored is a state, not a table of zeros', () => {
+    expect(storageDetails({ by_category: [], largest_files: [], total_files: 0, total_bytes: 0 }, 'en').empty).toBe(true)
+    expect(storageDetails(breakdown, 'en').empty).toBe(false)
   })
 })

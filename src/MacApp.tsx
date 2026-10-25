@@ -5,8 +5,8 @@
  * One window (label `main`), one sidebar. Signed in, the sidebar holds Home (Review and Trash join with their panes
  * in slice 4) and, in its footer, the account and the gear. The gear, ⌘, and the menus swap the sidebar for the
  * Settings list in System Settings style (ruling 1): a back control that names where it returns to, the heading, the
- * account row (Account), General, Sync and, after a gap, About. Security joins in slice 5. The pane hosts the shipped
- * section bodies of `MacSettings.tsx` unchanged.
+ * account row (Account), General, Sync, Security and, after a gap, About. The pane hosts the section bodies of
+ * `MacSettings.tsx` and `MacSecurity.tsx`.
  *
  * Every opener reaches the window through one request (`main:navigate`, `mainWindowModel.navigate`). While a sheet is
  * open nothing navigates (§8.2) and Rust disables View › Home, View › Back and Settings…, so ⌘1, ⌘[ and ⌘, cannot
@@ -37,6 +37,7 @@ import type { PopoverSnapshot } from './popoverContract'
 import { heldSignOutWarning, subscribeSignOutWarning } from './accountSession'
 import { finderOpenFailedToast, useFinderSetup } from './finderSetup'
 import { finderActionButtonLabel } from './finderSetupCopy'
+import { focusById } from './focusById'
 import { KeptFolderNotes, useKeptFolders } from './keptFolderRows'
 import {
   accountInitial,
@@ -50,8 +51,10 @@ import {
 } from './macSettingsModel'
 import { Btn, Note, SettingsGroup, SettingsIcon } from './macSettingsParts'
 import { AboutTab, AccountTab, GeneralTab, showSignOutOutcome, SyncTab, useSettingsConfig } from './MacSettings'
+import { SecurityTab } from './MacSecurity'
 import {
   backLabel,
+  coerceSettingsView,
   connectMainNavigation,
   focusAfterNav,
   GEAR_ID,
@@ -82,11 +85,6 @@ function locationSearch(): string {
   } catch {
     return ''
   }
-}
-
-function focusById(id: string) {
-  if (typeof document === 'undefined') return
-  document.getElementById(id)?.focus()
 }
 
 /** The account's second line, in the sidebar footer and the Settings account row: "Vault locked" or the plan. */
@@ -303,8 +301,8 @@ export default function MacApp() {
   const [snapshot, setSnapshot] = useState<PopoverSnapshot | null>(null)
   const [snapshotFailed, setSnapshotFailed] = useState(false)
   const [plan, setPlan] = useState<Subscription | null | undefined>(undefined)
-  const [view, setView] = useState<MainView>(() => initialMainView(locationSearch()))
-  const [lastSettings, setLastSettings] = useState<SettingsTab | null>(() => (view.mode === 'settings' ? view.section : null))
+  const [rawView, setView] = useState<MainView>(() => initialMainView(locationSearch()))
+  const [lastSettings, setLastSettings] = useState<SettingsTab | null>(() => (rawView.mode === 'settings' ? rawView.section : null))
   const [focusId, setFocusId] = useState<string | null>(null)
   const [signingIn, setSigningIn] = useState(false)
   const openModals = useSyncExternalStore(subscribeOpenModals, openModalCount, openModalCount)
@@ -325,6 +323,8 @@ export default function MacApp() {
 
   const account = snapshot?.account ?? null
   const signedIn = account?.logged_in === true
+  // Signed out, only General and About exist (§7.8): a session that ends under another section moves the window to General.
+  const view = coerceSettingsView(rawView, signedIn)
   const unlocked = account?.vault_unlocked === true
   const sheetOpen = flowView.kind !== 'idle' || openModals > 0
 
@@ -641,10 +641,11 @@ export default function MacApp() {
   } else {
     pane = (
       <div className="ms-pane mw-pane" id="mw-pane">
-        {view.section === 'general' ? <GeneralTab settings={settings} /> : null}
+        {view.section === 'general' ? <GeneralTab settings={settings} signedIn={signedIn} /> : null}
         {view.section === 'account' ? <AccountTab flow={flow} flowView={flowView} flowOutcomes={flowOutcomes} /> : null}
         {view.section === 'sync' ? <SyncTab settings={settings} /> : null}
-        {view.section === 'about' ? <AboutTab /> : null}
+        {view.section === 'security' ? <SecurityTab unlocked={unlocked} /> : null}
+        {view.section === 'about' ? <AboutTab settings={settings} signedIn={signedIn} /> : null}
       </div>
     )
   }

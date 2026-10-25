@@ -18,6 +18,7 @@ import {
   parseMainNav,
   sectionTitle,
   settingsSections,
+  coerceSettingsView,
   type MainView,
   type NavContext,
 } from '../src/mainWindowModel'
@@ -27,13 +28,45 @@ const signedIn: NavContext = { signedIn: true, lastSettings: null, sheetOpen: fa
 const signedOut: NavContext = { signedIn: false, lastSettings: null, sheetOpen: false }
 
 describe('the two sidebar lists', () => {
-  test('signed in: Home in the window sidebar; the Settings list is Account, General, Sync, About (Security is slice 5)', () => {
+  test('signed in: Home in the window sidebar; the Settings list is Account, General, Sync, Security, About (slice 5 adds Security)', () => {
     expect(MAIN_SECTIONS.map((s) => s.label)).toEqual(['Home'])
-    expect(settingsSections(true)).toEqual(['account', 'general', 'sync', 'about'])
+    expect(settingsSections(true)).toEqual(['account', 'general', 'sync', 'security', 'about'])
   })
 
   test('signed out: Settings shows General and About only (§7.8)', () => {
     expect(settingsSections(false)).toEqual(['general', 'about'])
+  })
+})
+
+describe('a section that exists only with a session is never left up without one (§7.8, review P2-6 and its delta review)', () => {
+  const security = { mode: 'settings', section: 'security', returnTo: 'home' } as const
+
+  test('signed out, Security falls back to General: its sessions, devices and activity belong to an account that is gone', () => {
+    expect(coerceSettingsView(security, false)).toEqual({ mode: 'settings', section: 'general', returnTo: 'home' })
+  })
+
+  test('so does Sync: signed out only General and About exist (§7.8)', () => {
+    expect(coerceSettingsView({ ...security, section: 'sync' }, false)).toEqual({ mode: 'settings', section: 'general', returnTo: 'home' })
+  })
+
+  test('Account stays while the sign-out finishes: it is where "You’re signed out" and the held sentence are shown until the window remounts on the sign-in card', () => {
+    const account = { ...security, section: 'account' } as const
+    expect(coerceSettingsView(account, false)).toBe(account)
+  })
+
+  test('the two sections a signed-out window has stay as they are', () => {
+    for (const section of ['general', 'about'] as const) {
+      const view = { ...security, section }
+      expect(coerceSettingsView(view, false)).toBe(view)
+    }
+  })
+
+  test('signed in, and anywhere but Settings, the view is returned as it is (the same object, so nothing re-renders)', () => {
+    expect(coerceSettingsView(security, true)).toBe(security)
+    const sync = { ...security, section: 'sync' } as const
+    expect(coerceSettingsView(sync, true)).toBe(sync)
+    const home = { mode: 'main', section: 'home' } as const
+    expect(coerceSettingsView(home, false)).toBe(home)
   })
 })
 
@@ -87,9 +120,13 @@ describe('parseMainNav: what Rust sends on main:navigate', () => {
   })
 
   test('anything else is no request', () => {
-    for (const raw of [null, undefined, 'home', {}, { to: 'files' }, { to: 'settings', section: 'security' }, { to: 'settings', section: 7 }]) {
+    for (const raw of [null, undefined, 'home', {}, { to: 'files' }, { to: 'settings', section: 'status' }, { to: 'settings', section: 7 }]) {
       expect(parseMainNav(raw)).toBeNull()
     }
+  })
+
+  test('Security is a section a request can name (slice 5; it was the example of an unknown one in slice 1)', () => {
+    expect(parseMainNav({ to: 'settings', section: 'security' })).toEqual({ to: 'settings', section: 'security' })
   })
 })
 
@@ -122,7 +159,7 @@ describe('focus (§11)', () => {
 })
 
 describe('the keys of either sidebar list (§7.6, §11: ↑/↓ move and select, Home and End jump)', () => {
-  const list = ['account', 'general', 'sync', 'about'] as const
+  const list = ['account', 'general', 'sync', 'security', 'about'] as const
   test('down and up move and wrap, Home and End jump', () => {
     expect(listAfterKey(list, 'general', 'ArrowDown')).toBe('sync')
     expect(listAfterKey(list, 'about', 'ArrowDown')).toBe('account')
