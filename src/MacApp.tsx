@@ -314,8 +314,6 @@ export default function MacApp() {
   const signInFlow = useSyncExternalStore(subscribeSignInFlow, getSignInFlow, getSignInFlow)
   const account = snapshot?.account ?? null
   const signedIn = account?.logged_in === true
-  // Signed out, only General and About exist (§7.8): a session that ends under another section moves the window to General.
-  const view = coerceSettingsView(rawView, signedIn)
   const unlocked = account?.vault_unlocked === true
   // The flow is checked ONCE, against the first snapshot this window reads (`normalizeFlow`): a step of an account that
   // left is dropped, so the window shown again after a sign-out starts at sign-in. Never against a later snapshot, which
@@ -329,6 +327,9 @@ export default function MacApp() {
   const askingForSetup = account !== null && setupAsk !== 'done' && setupCheckWanted(account, flowNow)
   const screen = account === null ? 'home' : askingForSetup ? 'settling' : windowScreen(account, flowNow)
   const sheetOpen = flowView.kind !== 'idle' || openModals > 0
+  // Signed out, only General and About exist (§7.8): a session that ends under another section moves the window to General.
+  // Not under a sheet: nothing navigates under one (§8.2), and the Repair sheet lives in Sync. The move comes when it closes.
+  const view = sheetOpen ? rawView : coerceSettingsView(rawView, signedIn)
 
   // The listeners below are registered once; they read the window's current state through these.
   const viewRef = useRef(view)
