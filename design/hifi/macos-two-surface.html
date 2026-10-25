@@ -458,7 +458,7 @@ figure.shot>figcaption:first-child{margin-bottom:2px}
     <figure class="shot"><div class="desk"><div class="mb"><span>Finder</span><span class="mb-r"><span class="sitem on">b</span><span>Fri 09:41</span></span></div><div class="desk-in">
       <div class="pop" role="dialog" aria-label="Beebeeb">
         <div class="ph"><div class="acct"><div class="av">S</div><div class="acct-t"><div class="email">sam@example.eu</div><div class="use">Using 84,3 GB of 200 GB</div></div><button class="gear" aria-label="Beebeeb menu"><svg class="i s18"><use href="#i-gear"/></svg></button></div><div class="bar"><i style="width:42%"></i></div></div>
-        <div class="upd"><svg class="i s18"><use href="#i-sync"/></svg><span class="t">Version 0.8.14 is available.</span><button class="btn pri">Restart to update</button></div>
+        <div class="upd" style="display:grid;grid-template-columns:18px 1fr auto;column-gap:10px;row-gap:4px"><svg class="i s18"><use href="#i-sync"/></svg><span class="t">Version 0.8.14 is available.</span><button class="btn pri">Download update</button><span style="grid-column:2/4;color:var(--ink-3);font-size:12px">Drag Beebeeb into Applications to replace this version.</span></div>
         <div class="pb"><div class="slabel">Recent activity</div>
           <div class="row-a"><div class="tile"><svg class="i"><use href="#i-file"/></svg></div><div class="row-t"><div class="nm">Q3 ledger reconciliation.xlsx</div><div class="mt">Investigations · 2 min ago</div></div><svg class="i s14 dir"><use href="#i-up"/></svg></div>
           <div class="row-a"><div class="tile"><svg class="i"><use href="#i-file"/></svg></div><div class="row-t"><div class="nm">Source documents, batch 12.pdf</div><div class="mt">Ledger gap · 14 min ago</div></div><svg class="i s14 dir"><use href="#i-up"/></svg></div>
@@ -467,7 +467,7 @@ figure.shot>figcaption:first-child{margin-bottom:2px}
         <div class="ps"><span class="okd"><svg class="i s14" style="stroke-width:2.4"><use href="#i-check"/></svg></span>Up to date<span class="encl"><svg class="i s14"><use href="#i-lock"/></svg>Encrypted</span></div>
         <div class="pf"><button class="fb"><svg class="i s18"><use href="#i-folder"/></svg>Open in Finder</button><button class="fb"><svg class="i s18"><use href="#i-globe"/></svg>View online</button><button class="fb"><svg class="i s18"><use href="#i-db"/></svg>Add storage</button></div>
       </div></div></div>
-      <figcaption><b>Update available</b><span>Replaces the update toast. The same row is in Settings › About; “Check for Updates…” lives in the gear menu.</span></figcaption></figure>
+      <figcaption><b>Update available</b><span>Replaces the update toast. The same row is in Settings › About; “Check for Updates…” lives in the gear menu. Amended 25 Oct (task 2176): a Mac downloads the update, because the App Sandbox denies the in-app install, so the button is “Download update” with one line under it (was “Restart to update”).</span></figcaption></figure>
 
     <figure class="shot"><div class="desk"><div class="mb"><span>Finder</span><span class="mb-r"><span class="sitem on">b</span><span>Fri 09:41</span></span></div><div class="desk-in">
       <div class="pop" role="dialog" aria-label="Beebeeb">
