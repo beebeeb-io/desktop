@@ -26358,4 +26358,283 @@ mod tests {
         assert_eq!(content(Some(true)), SyncFolderContent::Queued, "a queued upload wins over in sync");
     }
 
+    // ── Task 2190: a concurrent edit (this device and the web), as main behaves today ──
+    //
+    // The file is edited here and on the web before this device syncs, the tick runs, then the
+    // upload attempt and a hydrate. The tick's detector (`process_metadata_row`, the `Local`
+    // branch) still takes `local` and `base` from the same `content_hash`, so it never reports a
+    // conflict (its rewrite is not task 1640's). Since task 1640 the sync folder keeps both
+    // versions anyway: the edit is queued on its base and parks as stale with its bytes, and no
+    // hydrate writes over it. Each test says whether both versions survive.
+
+    /// One chunk of `plaintext` as the server stores it for `file_id` (the mock serves it back).
+    fn task_2190_server_chunk(master_key: [u8; 32], file_id: &str, plaintext: &[u8]) -> Vec<u8> {
+        beebeeb_core::encrypt::encrypt_chunk_raw(
+            &beebeeb_core::kdf::derive_file_key(
+                &beebeeb_core::kdf::MasterKey::from_bytes(master_key),
+                file_id.as_bytes(),
+            ),
+            plaintext,
+        )
+        .unwrap()
+    }
+
+    /// The web saves `plaintext` as `file_id`'s next version, and the next snapshot lists it.
+    fn task_2190_web_saves(server: &VersionedServerMock, master_key: [u8; 32], file_id: &str, plaintext: &[u8]) {
+        let mut s = server.state.lock().unwrap();
+        let chunk = task_2190_server_chunk(master_key, file_id, plaintext);
+        let file = s.files.get_mut(file_id).unwrap();
+        file.versions.push(vec![chunk]);
+        let version = file.versions.len() as i64;
+        let mut node = snap_node(&master_key, file_id, "notes.txt", None, false, 1_700_000_500);
+        node["version_number"] = json!(version);
+        node["size_bytes"] = json!(plaintext.len());
+        s.snapshots
+            .push_back(("200 OK".into(), json!({ "seq_id": 1, "nodes": [node] })));
+    }
+
+    /// Every file under `root` whose bytes are exactly `bytes`.
+    fn task_2190_files_holding(root: &Path, bytes: &[u8]) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let mut dirs = vec![root.to_path_buf()];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if std::fs::read(&path).is_ok_and(|held| held == bytes) {
+                    found.push(path);
+                }
+            }
+        }
+        found
+    }
+
+    /// macOS (File Provider): the Mac's save is queued with base 1, the web saves version 2, the
+    /// tick runs, the upload is refused as stale and parks, and a fetch is served from the parked
+    /// copy. Both versions survive (the web's on the server, the Mac's in the queue and in
+    /// Finder), but no conflict is raised: the row is `Error` and the edit sits as a
+    /// `stale_base` review entry that has no action.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn task_2190_a_finder_edit_and_a_web_edit_park_as_stale_base_and_never_become_a_conflict() {
+        let master_key = [219u8; 32];
+        let file = "21900000-0000-4000-8000-000000000001";
+        let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_row(&bridge, &server, file);
+
+        // 1. The Mac saves on version 1. The save is staged and not sent.
+        let mac_save = fp_save(&bridge, dir.path(), file, "notes.txt", b"edited on this Mac", "1");
+        let mac_token = mac_save.token.clone().expect("a Finder save names its bytes");
+        let staged = bridge.db.list_operations_for_file(file).unwrap().remove(0).payload_path.unwrap();
+
+        // 2. The web saves version 2 before the Mac's upload starts.
+        task_2190_web_saves(&server, master_key, file, b"edited on the web");
+
+        // 3. The tick.
+        let tick = sync_tick_outcome(&bridge, &sync_root).await.unwrap();
+        assert!(tick.conflicts.is_empty(), "the tick reports no conflict");
+        let row = bridge.db.get_file(file).unwrap().unwrap();
+        assert_eq!(
+            row.status,
+            FileStatus::Uploading,
+            "a row with a queued save skips the detector (branch 3)"
+        );
+        assert_eq!(
+            bridge.db.get_file_contract_state(file).unwrap().unwrap().current_version,
+            2,
+            "the snapshot raised the row to the web's version"
+        );
+        assert_eq!(
+            held_content_version(&bridge, file),
+            mac_token,
+            "Finder is still told the Mac's bytes, so it does not fetch the web's"
+        );
+
+        // 4. The upload attempt: base 1 against version 2.
+        bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+        let parked = bridge.db.list_operations_for_file(file).unwrap().remove(0);
+        assert_eq!(parked.attempts, parked.max_attempts, "parked after one attempt");
+        assert_eq!(parked.last_error.as_deref(), Some("stale_base"));
+        assert_eq!(
+            bridge.db.get_file(file).unwrap().unwrap().status,
+            FileStatus::Error,
+            "the park settles the row to Error, not Conflict"
+        );
+        assert_eq!(held_content_version(&bridge, file), mac_token, "the park keeps the Mac's token");
+
+        // 5. Finder opens the file: the fetch is served from the parked copy.
+        server.state.lock().unwrap().serve_downloads = true;
+        let dest = dir.path().join("fetch").join("notes.txt");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        assert_eq!(
+            bridge.serve_hydrate(file, &dest, &[dir.path()], None).await.unwrap(),
+            HydrateSource::Queue
+        );
+        assert_eq!(std::fs::read(&dest).unwrap(), b"edited on this Mac");
+
+        // What the person can see: one `stale_base` review entry, no conflict anywhere.
+        let feed = bridge.version_conflict_feed().unwrap();
+        let kinds: Vec<&str> = feed.iter().map(|entry| entry.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["stale_base"]);
+        assert_eq!(feed[0].action, "review_upload");
+        assert!(bridge.db.list_by_status(FileStatus::Conflict).unwrap().is_empty());
+
+        // Both versions survive.
+        assert_eq!(
+            std::fs::read(&staged).unwrap(),
+            b"edited on this Mac",
+            "the Mac's bytes are kept in the parked op's staged copy"
+        );
+        let state = server.finish();
+        assert_eq!(
+            state.init_summary(),
+            vec![(json!(file), json!(1), 409)],
+            "one init, refused as stale"
+        );
+        assert_eq!(state.files[file].versions.len(), 2, "the server holds the web's version as current");
+        assert_eq!(state.latest_plaintext(file, master_key), b"edited on the web");
+    }
+
+    /// What [`task_2190_sync_folder_sequence`] saw, step by step.
+    #[derive(Debug)]
+    struct SyncFolderEdit {
+        /// After the edit: did the upload driver queue it, how many ops, and on which base.
+        dispatched: bool,
+        queued_after_edit: usize,
+        base_after_edit: Option<i64>,
+        /// The tick's conflicts, and the row after it.
+        tick_conflicts: usize,
+        row_after_tick: FileEntry,
+        /// Whether the next hydrate refused to write over the edit, and the local file's bytes after it.
+        hydrate_refused: bool,
+        local_after_hydrate: Vec<u8>,
+        /// Every copy of the edit under the test's root, and every queued op of the file, after it.
+        copies_of_the_edit: Vec<PathBuf>,
+        ops_after: usize,
+        /// The review feed's kinds and the `Conflict` rows, after it.
+        feed_kinds: Vec<String>,
+        conflict_rows: usize,
+        /// The server: every init, its versions and its current plaintext.
+        inits: Vec<(serde_json::Value, serde_json::Value, u16)>,
+        server_versions: usize,
+        server_current: Vec<u8>,
+    }
+
+    /// The sync folder (the engine as Windows and Linux run it, with no write id): a hydrated
+    /// file at version 1 is edited on disk, the web saves version 2, the tick runs, then the
+    /// upload attempt and the next hydrate.
+    async fn task_2190_sync_folder_sequence(master_key: [u8; 32], file: &str) -> SyncFolderEdit {
+        let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_row(&bridge, &server, file);
+        {
+            let mut s = server.state.lock().unwrap();
+            s.files.get_mut(file).unwrap().versions[0] = vec![task_2190_server_chunk(master_key, file, b"version one")];
+            s.serve_downloads = true;
+        }
+        let local = sync_root.join("notes.txt");
+        bridge.hydrate_file(file, &local, &[sync_root.as_path()]).await.unwrap();
+        assert_eq!(std::fs::read(&local).unwrap(), b"version one", "precondition: hydrated");
+        assert_eq!(bridge.db.get_file(file).unwrap().unwrap().status, FileStatus::Local, "precondition");
+
+        // 1. The person edits the file in the sync folder; the upload driver sees its close.
+        std::fs::write(&local, b"edited in the sync folder").unwrap();
+        let dispatched = crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "notify");
+        let queued = bridge.db.list_operations_for_file(file).unwrap();
+        let (queued_after_edit, base_after_edit) = (queued.len(), queued.first().and_then(|op| op.base_version));
+
+        // 2. The web saves version 2.
+        task_2190_web_saves(&server, master_key, file, b"edited on the web");
+
+        // 3. The tick.
+        let tick = sync_tick_outcome(&bridge, &sync_root).await.unwrap();
+        let row_after_tick = bridge.db.get_file(file).unwrap().unwrap();
+
+        // 4. The upload attempt.
+        bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+
+        // 5. The next hydrate, as a fetch after "Free up space" (or a pinned refresh) runs it.
+        let hydrate_refused = match bridge.hydrate_file(file, &local, &[sync_root.as_path()]).await {
+            Ok(()) => false,
+            Err(e) if e.is::<UnsentLocalChange>() => true,
+            Err(e) => panic!("the hydrate failed for another reason: {e:#}"),
+        };
+
+        let feed_kinds = bridge
+            .version_conflict_feed()
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.kind)
+            .collect();
+        let observed = (
+            std::fs::read(&local).unwrap(),
+            task_2190_files_holding(dir.path(), b"edited in the sync folder"),
+            bridge.db.list_operations_for_file(file).unwrap().len(),
+            bridge.db.list_by_status(FileStatus::Conflict).unwrap().len(),
+        );
+        drop(bridge);
+        let state = server.finish();
+        SyncFolderEdit {
+            dispatched,
+            queued_after_edit,
+            base_after_edit,
+            tick_conflicts: tick.conflicts.len(),
+            row_after_tick,
+            hydrate_refused,
+            local_after_hydrate: observed.0,
+            copies_of_the_edit: observed.1,
+            ops_after: observed.2,
+            feed_kinds,
+            conflict_rows: observed.3,
+            inits: state.init_summary(),
+            server_versions: state.files[file].versions.len(),
+            server_current: state.latest_plaintext(file, master_key),
+        }
+    }
+
+    /// Since task 1640, step by step: the upload driver queues the edit as a modify on version 1,
+    /// the tick still reports no conflict (the row is `Uploading`, which the detector skips), the
+    /// upload is refused as stale and parks with its bytes, and the next hydrate refuses to write
+    /// over the edit. Both versions survive: the web's on the server, the edit on disk and in the
+    /// parked op's copy, shown as one `stale_base` review entry. Before task 1640 the edit was
+    /// never queued and the hydrate wrote over it (red on main b89380d0).
+    #[tokio::test]
+    async fn task_2190_a_sync_folder_edit_is_queued_on_its_base_parks_as_stale_and_is_never_overwritten() {
+        let master_key = [220u8; 32];
+        let seen = task_2190_sync_folder_sequence(master_key, "21900000-0000-4000-8000-000000000002").await;
+        assert!(seen.dispatched, "the upload driver queued the edit");
+        assert_eq!((seen.queued_after_edit, seen.base_after_edit), (1, Some(1)), "one modify, on version 1");
+        assert_eq!(seen.tick_conflicts, 0, "the tick still reports no conflict");
+        assert_eq!(seen.row_after_tick.status, FileStatus::Uploading, "the queued edit owns the row");
+        assert_eq!(
+            seen.inits,
+            vec![(json!("21900000-0000-4000-8000-000000000002"), json!(1), 409)],
+            "sent on 1, refused as stale"
+        );
+        assert!(seen.hydrate_refused, "the hydrate refused to write over the edit");
+        assert_eq!(seen.local_after_hydrate, b"edited in the sync folder", "the edit stays on disk");
+        assert!(!seen.copies_of_the_edit.is_empty());
+        assert_eq!(seen.ops_after, 1, "the parked op keeps its copy");
+        assert_eq!(seen.feed_kinds, vec!["stale_base".to_string()], "shown as one review entry");
+        assert_eq!(seen.conflict_rows, 0, "no Conflict row: the detector is not task 1640's");
+        assert_eq!(seen.server_versions, 2);
+        assert_eq!(seen.server_current, b"edited on the web");
+    }
+
+    /// The outcome the task asks for (its verification line), for the same sequence: the tick
+    /// raises a conflict, or the edit is kept somewhere the person can get it back from, and the
+    /// web's version is on the server. Red on main b89380d0 (the edit survived nowhere); green
+    /// since task 1640.
+    #[tokio::test]
+    async fn task_2190_wanted_a_sync_folder_edit_and_a_web_edit_both_survive() {
+        let master_key = [221u8; 32];
+        let seen = task_2190_sync_folder_sequence(master_key, "21900000-0000-4000-8000-000000000003").await;
+        let flagged = seen.tick_conflicts > 0 || seen.conflict_rows > 0;
+        let edit_kept = !seen.copies_of_the_edit.is_empty() || seen.ops_after > 0;
+        assert!(
+            flagged || edit_kept,
+            "the sync-folder edit was lost with nothing shown: {seen:#?}"
+        );
+        assert_eq!(seen.server_current, b"edited on the web", "the web's version is on the server");
+    }
 }
