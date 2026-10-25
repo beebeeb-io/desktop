@@ -35,10 +35,13 @@ every new row as empty):
 | `v > 0`, hash set | candidate, one version | Every fetched byte on disk is version `v`'s; `fetched_hash` is the SHA-256 of all of version `v`'s plaintext. |
 | `v > 0`, hash NULL | candidate, mixed | The fetched bytes come from more than one version (or may have changed in part); `v` is the OLDEST. |
 
-What the content means for an edit (`sync_folder_content`, `engine_bridge.rs:5737`), first match wins:
+What the content means for an edit (`sync_folder_content`, `engine_bridge.rs:5742`), first match wins:
 
 1. an upload of the file is queued → **Queued**;
-2. the platform says in sync → **Agreed**;
+2. the platform says in sync → **Agreed**. This means "no local change since the engine or the
+   platform last marked it", not "one version": a placeholder created in sync and filled by range
+   fetches of two versions, never edited, reads in sync. Nothing unsent is lost by that (I3 is
+   about local changes), and an edit clears the state (premise 2);
 3. a baseline → bytes equal `local_hash` ? **Agreed** : **Changed { base: `local_base_version` }**;
 4. a one-version candidate → bytes equal `fetched_hash` ? **Agreed** : **Changed { base: v }**;
 5. a mixed candidate → **Changed { base: v }**, never Agreed;
@@ -66,21 +69,21 @@ from the recorded versions, so the record stays true. Forgetting it is what was 
 | # | Event | Change | Where |
 |---|---|---|---|
 | T1 | Row created (server tree, local create, migration) | default `-1` | `state_db.rs:2291` |
-| T2 | `CfCreatePlaceholders` really created the placeholder (neither the call nor the entry's own `Result` says ALREADY_EXISTS) | `-1` → `0`; only while still `-1` and no baseline | `windows_cf/mod.rs:1584`, `state_db.rs:3734` |
-| T3 | A fetch (range or whole) is about to transfer version `v` (hash `h`) | baseline folded in first (T6's merge); then `0` → `(v, h)`; `(v, h)` stays; another version, or the same version with another hash → `(min, NULL)`; `-1`/`-2` → `-2`. `local_hash` → NULL | `engine_bridge.rs:4375`, `state_db.rs:3697` |
-| T4 | A fetch's download named no version | content unknown: `-2`, `local_hash` NULL | `engine_bridge.rs:4267` (and the same in `hydrate_file_to_memory`), `state_db.rs:3720` |
-| T5 | A WHOLE-file fetch's transfer succeeded, and no other fetch of the file overlapped it (its `FetchTicket`: the only one in flight when it started, and none started or ended since) | baseline `(v, h)`, candidate `0`. Overlapped: nothing more (T3's merge stays) | `windows_cf/callbacks.rs:299`, `engine_bridge.rs:4425`, `engine_bridge.rs:4436` |
+| T2 | `CfCreatePlaceholders` really created the placeholder (neither the call nor the entry's own `Result` says ALREADY_EXISTS) | `-1` → `0`; only while still `-1` and no baseline | `windows_cf/mod.rs:1584`, `state_db.rs:3769` |
+| T3 | A fetch (range or whole) is about to transfer version `v` (hash `h`) | baseline folded in first (T6's merge); then `0` → `(v, h)`; `(v, h)` stays; another version, or the same version with another hash → `(min, NULL)`; `-1`/`-2` → `-2`. `local_hash` → NULL | `engine_bridge.rs:4375`, `state_db.rs:3732` |
+| T4 | A fetch's download named no version | content unknown: `-2`, `local_hash` NULL | `engine_bridge.rs:4267` (and the same in `hydrate_file_to_memory`), `state_db.rs:3755` |
+| T5 | A WHOLE-file fetch's transfer succeeded, and no other fetch of the file overlapped it (its `FetchTicket`: the only one in flight when it started, and none started or ended since) | baseline `(v, h)`, candidate `0`. Overlapped: nothing more (T3's merge stays) | `windows_cf/callbacks.rs:299`, `engine_bridge.rs:4425`, `engine_bridge.rs:4441` |
 | T5' | A fetch's transfer failed, was cut off, or hit a size mismatch | nothing more (T3 already recorded it) | `windows_cf/callbacks.rs:309`, `windows_cf/callbacks.rs:243` |
-| T6 | The row goes `cloud_only` from any status (a tick's decode of a partial placeholder, Explorer's or Storage Sense's dehydration through the reconcile, the engine's Free up space and selective-sync dehydrate, a cache eviction, an untrash) | **fold**: the baseline joins the candidate (`0` → `(base, local_hash)`; same version and hash stays; otherwise `(min, NULL)`; a baseline with no version → `-1`); `local_hash` → NULL. Never a wipe. | trigger `files_cloud_only_folds_agreed_into_candidate` `state_db.rs:2413`, the fold `state_db.rs:453` |
-| T7 | The size resolution: the decrypted size differs from the placeholder's, so it is resized without dehydrating | **poison**: fold, then `fetched_hash` NULL; the version is kept | `windows_cf/callbacks.rs:371`, `state_db.rs:3760` |
-| T8 | The startup repair: a row left `downloading` by a stop goes `cloud_only` | T6, then poison (same transaction) | `state_db.rs:3870` |
-| T9 | A remote move or rename (the row's path changes; the bytes do not) | candidate poisoned (`fetched_hash` NULL, version kept); baseline kept | `engine_bridge.rs:8079` |
+| T6 | The row goes `cloud_only` from any status (a tick's decode of a partial placeholder, Explorer's or Storage Sense's dehydration through the reconcile, the engine's Free up space and selective-sync dehydrate, a cache eviction, an untrash) | **fold**: the baseline joins the candidate (`0` → `(base, local_hash)`; same version and hash stays; otherwise `(min, NULL)`; a baseline with no version → `-1`); `local_hash` → NULL. Never a wipe. | trigger `files_cloud_only_folds_agreed_into_candidate` `state_db.rs:2416`, the fold `state_db.rs:453` |
+| T7 | The size resolution: the decrypted size differs from the placeholder's, so it is resized without dehydrating | **poison**: fold, then `fetched_hash` NULL; the version is kept | `windows_cf/callbacks.rs:371`, `state_db.rs:3795` |
+| T8 | The startup repair: a row left `downloading` by a stop goes `cloud_only` | T6, then poison (same transaction) | `state_db.rs:3905` |
+| T9 | A remote move or rename (the row's path changes; the bytes do not) | candidate poisoned (`fetched_hash` NULL, version kept); baseline kept | `engine_bridge.rs:8084` |
 | T10 | `hydrate_file` (Keep Theirs, Keep Both; on Windows nothing else) wrote the whole file by one atomic rename | baseline `(v, h)`, candidate `0`; no version known → T4 | `engine_bridge.rs:4266` |
-| T11 | Promotion: the platform says in sync with no modified data, the file is wholly on disk, its bytes hashed under one exclusive handle equal a one-version candidate, and the row is still `Local` with that candidate | baseline `(v, h)`, candidate `0` | `windows_cf/placeholders.rs:845`, `state_db.rs:3779` |
-| T12 | A landing that hashed the payload it sent | baseline (produced version, payload hash), candidate `0` | `state_db.rs:4601` |
-| T12' | A landing that could not hash its payload | baseline version moves, previous hash kept (reads as Changed, never Agreed) | `state_db.rs:4597` |
-| T13 | Sign-out | every row goes | `state_db.rs:5318`, `state_db.rs:5510` |
-| — | Revert (restore a version) | nothing: only the server changes; a later fetch records anew | `state_db.rs:4128` |
+| T11 | Promotion: the platform says in sync with no modified data, the file is wholly on disk, its bytes hashed under one exclusive handle equal a one-version candidate, and the row is still `Local` with that candidate | baseline `(v, h)`, candidate `0` | `windows_cf/placeholders.rs:845`, `state_db.rs:3814` |
+| T12 | A landing that hashed the payload it sent | baseline (produced version, payload hash), candidate `0` | `state_db.rs:4634` |
+| T12' | A landing that could not hash its payload | no baseline (`local_hash` NULL); for a sync-folder upload the candidate is mixed at the produced version: a change sent on that version, never Agreed, also after a revert to the old bytes (review-151d P3-6; round 1 kept the old hash, which paired the new version with the old bytes) | `state_db.rs:4630` |
+| T13 | Sign-out | every row goes | `state_db.rs:5357`, `state_db.rs:5549` |
+| — | Revert (restore a version) | nothing: only the server changes; a later fetch records anew | `state_db.rs:4163` |
 | — | A dehydration of any kind | nothing beyond T6 (see "Why a dehydration never needs a reset") | — |
 
 **No transition resets a candidate to `0` except T5, T10, T11, T12, whole writes that replace every byte.**
@@ -94,22 +97,33 @@ a whole fetch of the newer one: without a guard, T5 would name the newer version
 bytes, and an edit would be sent too high (I2). The guard is needed with or without the
 candidate: the round-2 whole-fetch baseline had the same exposure.
 
-- **One ticket per fetch** (`FetchTicket`, `engine_bridge.rs:5685`). It is
-  taken at the start of `hydrate_file_to_memory`, before anything is recorded (`engine_bridge.rs:4436`),
+- **One ticket per fetch** (`FetchTicket`, `engine_bridge.rs:5690`). It is
+  taken at the start of `hydrate_file_to_memory`, before anything is recorded (`engine_bridge.rs:4441`),
   and dropped once the callback's transfer has ended, succeeded or not (`windows_cf/callbacks.rs:317`).
   An early return or a cancelled fetch drops it too.
 - **Per file:** the number of fetches in flight, and a count of every start and end.
 - **Alone:** a ticket is alone when it was the file's only fetch in flight at its start, and the
   count has not moved since. T5 writes the baseline only for a ticket that is alone at the moment
   of the write. Otherwise T3's merge stays (lower or mixed).
-- **Process-wide, in memory** (`engine_bridge.rs:5678`): not per bridge, so a bridge
+- **Atomic** (review-151d P3-4): T5 checks "alone" and writes the baseline while holding the
+  tracker's lock, so no fetch can begin, download and record between the check and the write.
+  Lock order: the tracker, then the database; nothing takes the tracker while holding the database.
+  (At d8d1b009 the two were separate: a fetch fitting its whole download into T5's wait for the
+  database could have had its record replaced. I2 held there, since that fetch's version is not
+  older; I1 did not.)
+- **Process-wide, in memory** (`engine_bridge.rs:5683`): not per bridge, so a bridge
   made later in the same process (a new sign-in) sees what an earlier one still has in flight.
 - **Crash and restart:** the tracker starts empty with the process. A whole fetch writes a baseline
   only when it started with a known, empty in-flight set in THIS process, which the rule above
   is by construction. A fetch of an earlier process cannot transfer anything after a restart: only
   this process's callbacks write into its placeholders (`CfExecute` is the provider's own call),
-  and the platform cancels a dead provider's fetches. A fetch cut off by the crash left its T3
-  record (and T8 at the next start makes the row mixed), never a baseline.
+  and the platform cancels a dead provider's fetches. A fetch cut off by the crash during its
+  transfer left its T3 record, never a baseline: `hydrate_file_to_memory` has already set the row
+  `Local` before `transfer_range` (`engine_bridge.rs:4402`), so T8 does not see it, and T3's
+  record is true of a partial transfer of that version. T8 sees only a row stopped during the
+  in-memory download (no byte of that fetch written; it makes the record mixed, the safe
+  direction) and a `hydrate_file` stopped between its rename and its baseline write. (Corrected:
+  at d8d1b009 this said T8 makes a cut-off transfer's row mixed.)
 - **Not covered:** a transfer into a placeholder that is not one of this engine's fetches. There
   is none (premise 6).
 
@@ -132,7 +146,7 @@ candidate: the round-2 whole-fetch baseline had the same exposure.
 ## Files kept from a remote deletion (rounds 2 and 3)
 
 A file or folder the server no longer lists (a web trash, an emptied trash, a snapshot prune) is
-removed only when nothing unsent is lost (I3), `remove_pruned_entry` `engine_bridge.rs:8558`:
+removed only when nothing unsent is lost (I3), `remove_pruned_entry` `engine_bridge.rs:8563`:
 
 | Platform view | Bytes | Outcome | Entry (`kept_copies.reason`) |
 |---|---|---|---|
@@ -146,16 +160,26 @@ removed only when nothing unsent is lost (I3), `remove_pruned_entry` `engine_bri
 | Copy failed | — | kept in place, retried | `copy_failed` |
 | A folder that still holds something | — | kept, recorded in `removed_folders` | none |
 
-- A later remote op skips a file whose entry still waits (F4), `engine_bridge.rs:8797`.
-- The retry, every tick (`retry_kept_originals`, `engine_bridge.rs:8856`):
-  - it leaves a file restored on the web: its own row, live again (F2, `engine_bridge.rs:8885`). Another file moved to the place does not own the bytes there (still the deleted file's placeholder, which would keep the other file's from being created): they go as any other, a change copied first;
+- A later remote op skips a file whose entry still waits (F4), `engine_bridge.rs:8836`.
+- The retry, every tick (`retry_kept_originals`, `engine_bridge.rs:8898`):
+  - it leaves a file restored on the web: its own row, live again (F2, `engine_bridge.rs:8936`). Another file moved to the place does not own the bytes there (still the deleted file's placeholder, which would keep the other file's from being created): they go as any other, a change copied first;
   - an entry whose changes could not be copied never becomes "partly on disk" (which may be dismissed);
-  - it registers its own delete with the watcher, so no trash is queued;
+  - its removes register with the watcher right before they happen, so no trash is queued, and the
+    registration is dropped when a remove did not happen (review-151d P3-1, `engine_bridge.rs:8611`);
+  - once an original is removed, the Office owner file it left (`~$name`, or `~$` and the name
+    without its first two characters) goes too; nothing else in the folder is touched (review-151d
+    P2-2, `engine_bridge.rs:8625`): other names the sync folder ignores were never
+    synced, so they are the person's only copy;
   - it updates the entry where it is (F6), and an entry with nothing kept goes;
-  - it removes emptied kept folders (`engine_bridge.rs:8939`).
+  - it removes kept folders that are EMPTY now (`engine_bridge.rs:8995`); one that
+    still holds a file the sync folder ignores stays on disk (and stays the server's deletion);
+  - it drops a dismissed entry's tombstone once its file is gone or the server lists the place again.
 - The scan never creates a kept folder on the server again while it holds only waiting originals,
-  kept folders and ignored names (F3, `engine_bridge.rs:3588`,
-  `engine_bridge.rs:8994`); once it holds something new, it is wanted again.
+  originals whose entry was dismissed (a tombstone, review-151d P2-1: dismissing keeps the row,
+  hidden, so the dismissed file still counts as the server's deletion), kept folders and ignored
+  names (F3, `engine_bridge.rs:3588`, `engine_bridge.rs:9033`).
+  Once it holds something new, it is wanted again. It fails closed (review-151d P3-5): what cannot
+  be read, and a tree deeper than 32, count as held.
 
 ## Which tests and mutations pin each row
 
@@ -176,15 +200,15 @@ that turned the test red at its own assertion (evidence: the PR body and the gat
 | T11 | `regression_1640_a_candidate_is_promoted_only_when_the_bytes_are_its_own` | promotion without the hash compare |
 | T12 | `regression_1640_a_landing_replaces_the_candidate` | the landing keeps the candidate |
 | T12, disk changed after staging | `regression_1640_a_landing_whose_disk_changed_after_staging_is_not_agreed` | none: it pins what the round-1 payload hash means (the sent copy, never the disk) |
-| T12' | `regression_1640_a_landing_that_cannot_hash_the_sent_copy_keeps_the_previous_baseline` | (round 1) |
+| T12' | `regression_1640_a_landing_that_cannot_hash_the_sent_copy_is_never_agreed` | the previous hash kept |
 | sync_folder_content 4, 5 | `regression_1640_a_candidate_decides_like_a_baseline`, `regression_1640_an_edit_before_promotion_is_sent_on_the_candidates_version` | candidate always Agreed |
 | F2 | `regression_1640_a_retry_never_removes_a_file_the_server_lists_again` | no live-row check; another file's row keeps the bytes |
 | unreadable, no downgrade | `regression_1640_an_unreadable_or_uncopied_file_is_never_dismissable` | unreadable read as partly on disk; a copy-failed entry downgraded |
-| kept folder with ignored names | `regression_1640_a_kept_folder_left_with_ignored_names_is_removed` | no clean-up of ignored names |
+| owner file only, never-synced files kept | `regression_1640_a_kept_folder_keeps_the_files_it_never_synced` | every ignored name removed (d8d1b009's clean-up) |
 | F3 | `regression_1640_a_folder_deleted_elsewhere_is_not_created_again_for_what_it_keeps`, `..._with_something_new_is_created_again` | the folder created again; the retry's copy without the removed set |
 | F4 | `regression_1640_a_second_remote_op_copies_nothing_again` | the second op copies |
 | F5, F6 | `regression_1640_a_kept_file_says_why_and_is_resolved_where_it_is`, `regression_1640_a_file_partly_on_disk_is_listed_once_and_resolved_later` | one text for every reason; a new entry instead of an update |
-| F7 | `regression_1640_a_file_kept_partly_on_disk_can_be_dismissed` | not dismissable |
+| F7, the tombstone | `regression_1640_a_file_kept_partly_on_disk_can_be_dismissed` | not dismissable; a dismissal that deletes the row (the folder is created again) |
 
 ## Platform premises not verified here (the native rung)
 
@@ -210,10 +234,20 @@ run on a registered sync root on the Windows PC:
 8. Office's save sequence (temp file, rename over) leaves a plain file holding the new bytes.
 9. Under `CF_HYDRATION_POLICY_PARTIAL`, an app can write into a placeholder that is only partly on
    disk (a "dirty partial" placeholder) without the platform hydrating it first.
+10. The platform asks for `[0, FileSize)` only when no byte of the file is on disk, or its transfer
+    replaces every byte already there (T5's premise: "whole" means every byte is this fetch's).
 
-Rung: on a registered sync root, (a) Free up space on a really edited file keeps it, (b) a
-range-fetched Office file edited and saved is sent on the right version, (c) a web save between
-two range fetches, then an edit, parks.
+Rung, on a registered sync root on the Windows PC:
+
+- (a) Free up space on a really edited file keeps it (premises 1, 2, 3);
+- (b) a range-fetched Office file edited and saved is sent on the right version (1, 8, 9);
+- (c) a web save between two range fetches, then an edit, parks (1, 6);
+- (d) the overlap guard: a range fetch of the older version still transferring while a whole
+  fetch of the newer one completes, then an edit, parks (6, 10). Today only a unit test and its
+  mutation prove T5's guard;
+- (e) promotion and the stamp keep a writer out while they hash (4);
+- (f) a placeholder for a new remote file is "created", one over an existing file is not (5);
+- (g) a "(this PC)" copy never replaces an existing file (7).
 
 ## Residuals (known, not handled here)
 
@@ -236,6 +270,11 @@ two range fetches, then an edit, parks.
 - The round-3 design sent in chat had a wipe after the engine's dehydrate (a); it is not
   implemented (see "Not done").
 - A whole fetch used to record the baseline before its transfer; replaced by T3 + T5.
+- review-151d (on d8d1b009): 0 P1, 2 P2, 10 P3. Fixed after it: the kept-folder clean-up deleted
+  never-synced files (P2-2; now the owner file of a removed original only); a dismissal re-created
+  the folder on the server (P2-1; now a tombstone); stale delete suppressions (P3-1); the fail-open
+  folder check (P3-5); T12' kept the old hash (P3-6); the crash text (P3-2); premise 10 and the rung
+  list (P3-3); T5's non-atomic check (P3-4, now atomic); the tracker tolerates a poisoned lock (P3-8).
 - The author's own `/code-review` (high) on round 3 found that T5 still overwrote unconditionally:
   a range fetch of an older version overlapping a whole fetch could land after it. T5 now needs
   the fetch to have been alone (self-review #1). It also found the round-2 `DEFAULT 0` column, the

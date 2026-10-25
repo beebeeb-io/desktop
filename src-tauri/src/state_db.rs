@@ -2400,6 +2400,9 @@ impl StateDb {
         )?;
         // Task 1640 (review F5): why a file deleted elsewhere was kept (`KeptReason`).
         ensure_column(&conn, "kept_copies", "reason", "TEXT NOT NULL DEFAULT 'copy'")?;
+        // Task 1640 (review-151d P2-1): the person dismissed the entry of a file still kept where it
+        // is; the row stays as a tombstone, so its folder is still the server's deletion.
+        ensure_column(&conn, "kept_copies", "dismissed", "INTEGER NOT NULL DEFAULT 0")?;
         // Task 1640 (review F1, design T6): a file that goes cloud-only may still hold some of its
         // bytes (a placeholder partly on disk reads as cloud-only on every tick, and no dehydration is
         // known to remove them all). Its agreed content no longer describes every byte, so it joins
@@ -2881,7 +2884,9 @@ impl StateDb {
     /// Task 1640: every kept copy not dismissed, newest first.
     pub fn list_kept_copies(&self) -> Result<Vec<KeptCopy>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        let mut stmt = conn.prepare(&format!("SELECT {KEPT_COPY_COLUMNS} FROM kept_copies ORDER BY kept_at DESC, id DESC"))?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {KEPT_COPY_COLUMNS} FROM kept_copies WHERE dismissed = 0 ORDER BY kept_at DESC, id DESC"
+        ))?;
         let rows = stmt.query_map([], kept_copy_from_row)?;
         rows.collect()
     }
@@ -2892,7 +2897,7 @@ impl StateDb {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.query_row(
             &format!(
-                "SELECT {KEPT_COPY_COLUMNS} FROM kept_copies WHERE original_path = ?1 AND original_removed = 0
+                "SELECT {KEPT_COPY_COLUMNS} FROM kept_copies WHERE original_path = ?1 AND original_removed = 0 AND dismissed = 0
                  ORDER BY id DESC LIMIT 1"
             ),
             params![rel_path],
@@ -2962,7 +2967,7 @@ impl StateDb {
     pub fn is_kept_original_pending(&self, rel_path: &str) -> Result<bool> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM kept_copies WHERE original_path = ?1 AND original_removed = 0)",
+            "SELECT EXISTS(SELECT 1 FROM kept_copies WHERE original_path = ?1 AND original_removed = 0 AND dismissed = 0)",
             params![rel_path],
             |row| row.get(0),
         )
@@ -2974,12 +2979,42 @@ impl StateDb {
     pub fn dismiss_kept_copy(&self, id: i64) -> Result<bool> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let kept = conn
-            .query_row(&format!("SELECT {KEPT_COPY_COLUMNS} FROM kept_copies WHERE id = ?1"), params![id], kept_copy_from_row)
+            .query_row(
+                &format!("SELECT {KEPT_COPY_COLUMNS} FROM kept_copies WHERE id = ?1 AND dismissed = 0"),
+                params![id],
+                kept_copy_from_row,
+            )
             .optional()?;
-        if !kept.is_some_and(|kept| kept.dismissable()) {
+        let Some(kept) = kept.filter(KeptCopy::dismissable) else {
             return Ok(false);
-        }
-        Ok(conn.execute("DELETE FROM kept_copies WHERE id = ?1", params![id])? == 1)
+        };
+        // Review-151d P2-1: a file still kept where it is leaves a tombstone: its folder stays the
+        // server's deletion (never created again from this PC while it holds only that file).
+        let changed = if kept.original_removed {
+            conn.execute("DELETE FROM kept_copies WHERE id = ?1", params![id])?
+        } else {
+            conn.execute("UPDATE kept_copies SET dismissed = 1 WHERE id = ?1", params![id])?
+        };
+        Ok(changed == 1)
+    }
+
+    /// Task 1640 (review-151d P2-1): `rel_path` is a file kept from a deletion elsewhere whose
+    /// original was never removed: one that waits, or one whose entry the person dismissed.
+    pub fn is_kept_original(&self, rel_path: &str) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM kept_copies WHERE original_path = ?1 AND original_removed = 0)",
+            params![rel_path],
+            |row| row.get(0),
+        )
+    }
+
+    /// Task 1640 (review-151d P2-1): the dismissed entries' tombstones, as `(id, original_path)`.
+    pub fn list_dismissed_kept_originals(&self) -> Result<Vec<(i64, String)>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare("SELECT id, original_path FROM kept_copies WHERE dismissed = 1 ORDER BY id")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect()
     }
 
     pub fn record_local_activity(&self, input: LocalActivityEventInput) -> Result<()> {
@@ -4589,12 +4624,10 @@ impl StateDb {
         }
         contract.current_version = input.produced_version;
         contract.local_base_version = input.produced_version;
-        // Task 1640 (review P3-4): a landing that could not hash what it sent keeps the previous
-        // agreed content (its bytes then read as changed, never as agreed).
-        contract.local_hash = input
-            .completed_payload_hash
-            .map(str::to_string)
-            .or_else(|| contract.local_hash.take());
+        // Task 1640 (review-151d P3-6): a landing that could not hash what it sent records no agreed
+        // content: the previous hash would pair the new version with the old bytes (a revert to them
+        // would read as agreed). For a sync-folder upload the content is mixed at that version below.
+        contract.local_hash = input.completed_payload_hash.map(str::to_string);
         contract.current_object_version_id = Some(input.produced_object_version_id.to_string());
         contract.last_sync_at = input.now;
         set_file_contract_state_conn(&tx, &contract)?;
@@ -4603,6 +4636,12 @@ impl StateDb {
             tx.execute(
                 "UPDATE files SET fetched_min_version = 0, fetched_hash = NULL WHERE file_id = ?1",
                 params![server],
+            )?;
+        } else if input.write_id.is_none() {
+            // Review-151d P3-6: not hashed: never agreed; a change is sent on the version that landed.
+            tx.execute(
+                "UPDATE files SET fetched_min_version = ?2, fetched_hash = NULL WHERE file_id = ?1",
+                params![server, input.produced_version],
             )?;
         }
         // A landing: the row's version is the one the server answered, not a snapshot fill (§6.1).

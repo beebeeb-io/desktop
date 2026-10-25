@@ -153,6 +153,12 @@ fn take_engine_delete_suppressed(path: &Path) -> bool {
     }
 }
 
+/// Task 1640 (review-151d P3-1): the engine's own remove registered for `path` did not happen (it
+/// failed): drop its registration, so a later delete by the person is honoured.
+pub fn cancel_engine_delete_suppression(path: &Path) {
+    let _ = take_engine_delete_suppressed(path);
+}
+
 /// Drop suppression entries older than this. A registered engine delete whose
 /// NOTIFY never arrives (revert/remove failed, or the OS coalesced the event)
 /// must not linger and swallow a genuine LATER user delete of the same path.
