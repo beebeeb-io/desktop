@@ -316,17 +316,17 @@ describe('Settings in System Settings style (ruling 1, §7.8)', () => {
   for (const section of ['Security', 'Sync']) {
   test(`${section} is never shown without a session: when the account signs out under it, the window falls back to General (§7.8, review P2-6)`, async () => {
     let current: unknown = snapshot()
-    const { m } = openWindow({ snap: () => current })
-    const ticks: Array<() => void> = []
-    ;(globalThis as any).window.setInterval = (fn: () => void) => { ticks.push(fn); return 1 }
+    // The reader reads again SNAPSHOT_REFRESH_MS after its last read finished (task 2179 item 6); 5 ms here.
+    const { m } = openWindow({ snap: () => current, bindings: { SNAPSHOT_REFRESH_MS: 5 } })
     await settle(m)
     await click(m, 'Settings')
     await click(m, section)
     expect(shown(m)).toEqual([section.toLowerCase()])
     // The session ends while the pane is open: the next read says signed out.
     current = snapshot({ phase: 'signed_out', account: { email: null, logged_in: false, vault_unlocked: false } })
-    expect(ticks.length).toBeGreaterThan(0)
-    ticks.forEach((tickFn) => tickFn())
+    const reads = m.calls.filter((c) => c.name === 'popover_snapshot').length
+    for (let i = 0; i < 50 && m.calls.filter((c) => c.name === 'popover_snapshot').length === reads; i++) await new Promise((r) => setTimeout(r, 5))
+    expect(m.calls.filter((c) => c.name === 'popover_snapshot').length).toBeGreaterThan(reads)
     await settle(m)
     expect(shown(m)).toEqual(['general'])
     expect(title(m)).toBe('General')
