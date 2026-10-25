@@ -34,13 +34,18 @@ import {
   popoverSnapshot,
   type CommandResult,
   type Subscription,
+  type VersionConflictEntry,
 } from './desktopApi'
 import type { PopoverSnapshot } from './popoverContract'
 import { heldSignOutWarning, subscribeSignOutWarning } from './accountSession'
 import { LOAD_FAILED_TITLE, SET_UP_COPY, SIGNED_IN_WINDOW_TITLE, USE_RECOVERY_PHRASE } from './accountViewCopy'
+import { ConflictSheet } from './ConflictSheet'
+import { useFileOverview } from './fileOverview'
 import { finderOpenFailedToast, useFinderSetup } from './finderSetup'
 import { finderActionButtonLabel } from './finderSetupCopy'
 import { focusById } from './focusById'
+import { HomeActivity, HomeAttention, HomeCounts } from './HomeSections'
+import { activityRowsForHome, attentionForHome, HOME_ACTIVITY_ROWS, homeCounts } from './homeModel'
 import { KeptFolderNotes, useKeptFolders } from './keptFolderRows'
 import {
   accountInitial,
@@ -78,12 +83,14 @@ import {
   type MainNav,
   type MainView,
 } from './mainWindowModel'
-import { connectReviewFeed, refreshReviewFeed, reviewFeed, reviewFeedState, subscribeReviewFeed } from './reviewFeed'
+import { makeReviewActions } from './reviewActions'
+import { connectReviewFeed, refreshReviewFeed, reviewFeed, reviewFeedState, subscribeReviewFeed, type ReviewFeedState } from './reviewFeed'
 import { reviewBadge } from './reviewModel'
 import { ReviewPane } from './ReviewPane'
 import { getSignInFlow, setSignInFlow, subscribeSignInFlow } from './signInFlowStore'
 import { canLeaveSignInAgain, flowForNav, flowForPendingSetup, IDLE_FLOW, isNoVaultKey, normalizeFlow, setupCheckWanted, windowScreen } from './signInModel'
 import { connectSignOutFlowEvents, connectSignOutFlowMenu, SignOutFlow, signOutFlowApi, type FlowView } from './signOutFlow'
+import { systemLocale } from './storageFormat'
 import { TrashPane } from './TrashPane'
 import { setMainWindowTitle } from './windowTitle'
 import { openModalCount, subscribeOpenModals, useToast } from './windows/ui'
@@ -106,16 +113,32 @@ function accountLine(account: PopoverSnapshot['account'], plan: Subscription | n
   return planShortLine(plan)
 }
 
-// ── Home (§7.6, first cut: status, Finder row, storage, the kept rows) ────────
+// ── Home (§7.6: status, the Finder row and the counts line, what needs attention, storage, recent activity) ──
 
-function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefresh: () => void }) {
+function HomePane({
+  snapshot,
+  onRefresh,
+  feed,
+  onFeedChanged,
+  onOpenReview,
+}: {
+  snapshot: PopoverSnapshot
+  onRefresh: () => void
+  /** Review's feed (`reviewFeed.ts`): "Needs your attention" shows its top three. */
+  feed: ReviewFeedState
+  /** A conflict was decided here: read the feed again so the row leaves. */
+  onFeedChanged: () => void
+  onOpenReview: () => void
+}) {
   const { showToast } = useToast()
   const finder = useFinderSetup()
   const kept = useKeptFolders()
+  const overview = useFileOverview(snapshot.account.vault_unlocked)
   const [busy, setBusy] = useState<'open' | 'resume' | 'unlock' | null>(null)
   // Review P2-3 b: the Keychain holds a token and no vault key, so the unlock has nothing to read. The sentence is the
   // approved Set up this Mac one, and the card offers the recovery phrase, which is what helps.
   const [noKey, setNoKey] = useState(false)
+  const [deciding, setDeciding] = useState<VersionConflictEntry | null>(null)
 
   if (!snapshot.account.vault_unlocked) {
     const unlock = async () => {
@@ -164,7 +187,13 @@ function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefres
   const status = homeStatus(snapshot, Math.floor(Date.now() / 1000))
   const row = finderRow(finder.load.status === 'loaded' ? finder.load.view : null, finder.load.status === 'unavailable', finder.refusal)
   const storage = storageLine(snapshot.storage)
-  const attention = kept.kept !== null || kept.keptUnsent !== null
+  const keptRows = kept.kept !== null || kept.keptUnsent !== null
+  const now = new Date()
+  const counts = homeCounts(overview, systemLocale())
+  const attention = attentionForHome(feed)
+  const activity = activityRowsForHome(snapshot.activity, now)
+  // What a Review row's button does is one function for Review and Home (`reviewActions.ts`).
+  const act = makeReviewActions({ showToast, onDecide: setDeciding, openUrl, forceReauth })
 
   const openInFinder = async () => {
     setBusy('open')
@@ -246,14 +275,13 @@ function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefres
           </Note>
         ) : null}
         {finder.actionNote ? <Note kind="status">{finder.actionNote}</Note> : null}
+        <HomeCounts parts={counts} />
       </div>
 
       <div className="mw-columns">
-        {attention ? (
-          <SettingsGroup title="Needs your attention">
-            <KeptFolderNotes folders={kept} />
-          </SettingsGroup>
-        ) : null}
+        <HomeAttention entries={attention.entries} more={attention.more} now={now} onAction={act} onOpenReview={onOpenReview}>
+          {keptRows ? <KeptFolderNotes folders={kept} /> : null}
+        </HomeAttention>
         {storage ? (
           <SettingsGroup title="Storage">
             <div className="mw-storage">
@@ -279,6 +307,10 @@ function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefres
           </SettingsGroup>
         ) : null}
       </div>
+
+      <HomeActivity rows={activity} />
+
+      {deciding ? <ConflictSheet entry={deciding} onClose={() => setDeciding(null)} onResolved={onFeedChanged} /> : null}
     </div>
   )
 }
@@ -385,7 +417,7 @@ export default function MacApp() {
   const awaitingSettle = useRef(false)
   if (readerRef.current === null) {
     readerRef.current = new SnapshotReader(
-      () => popoverSnapshot(1),
+      () => popoverSnapshot(HOME_ACTIVITY_ROWS),
       (result) => {
         if (result.ok) {
           setSnapshot(result.value)
@@ -729,7 +761,15 @@ export default function MacApp() {
   let pane = null
   if (view.mode === 'main') {
     if (view.section === 'home') {
-      pane = <HomePane snapshot={snapshot} onRefresh={() => reader.refresh()} />
+      pane = (
+        <HomePane
+          snapshot={snapshot}
+          onRefresh={() => reader.refresh()}
+          feed={reviewFeedNow}
+          onFeedChanged={refreshReviewFeed}
+          onOpenReview={() => go({ to: 'review' })}
+        />
+      )
     } else if (!unlocked) {
       // §7.6: Review and Trash need the key and show Home's locked card.
       pane = <LockedPane onRefresh={() => reader.refresh()} />

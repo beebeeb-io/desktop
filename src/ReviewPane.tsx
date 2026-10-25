@@ -17,21 +17,13 @@
  * `tests/reviewPane.test.tsx` can execute them with the component harness.
  */
 import { useState } from 'react'
-import { BILLING_URL, forceReauth, openUrl, type VersionConflictEntry } from './desktopApi'
+import { forceReauth, openUrl, type VersionConflictEntry } from './desktopApi'
 import { ConflictSheet } from './ConflictSheet'
 import { Btn, Note } from './macSettingsParts'
 import type { ReviewFeedState } from './reviewFeed'
-import {
-  REVIEW_EMPTY,
-  REVIEW_INTRO,
-  REVIEW_SOME_UNREADABLE,
-  reviewActionName,
-  reviewKindLabel,
-  reviewMoreLine,
-  reviewRowAction,
-  reviewRowMeta,
-  type ReviewRowAction,
-} from './reviewModel'
+import { makeReviewActions } from './reviewActions'
+import { REVIEW_EMPTY, REVIEW_INTRO, REVIEW_SOME_UNREADABLE, reviewMoreLine } from './reviewModel'
+import { ReviewEntryRow } from './ReviewRow'
 import { VersionHistorySheet } from './VersionHistorySheet'
 import { useToast } from './windows/ui'
 
@@ -49,22 +41,8 @@ export function ReviewPane({
   const { showToast } = useToast()
   const [deciding, setDeciding] = useState<VersionConflictEntry | null>(null)
 
-  const signInAgain = async () => {
-    // `forceReauth` decides the flow per platform; on a Mac it opens sign-in in place and clears nothing (R8).
-    const result = await forceReauth()
-    if (!result.ok) {
-      showToast({ variant: 'error', title: 'Couldn’t open sign-in', message: result.reason })
-      return
-    }
-    // The expired session was cleared, but a step could not be confirmed: said neutrally (FB-24).
-    if (result.value.warning) showToast({ variant: 'info', message: result.value.warning.sentence })
-  }
-
-  const act = (entry: VersionConflictEntry, action: ReviewRowAction) => {
-    if (action.kind === 'open_conflict') setDeciding(entry)
-    else if (action.kind === 'upgrade' || action.kind === 'manage_plan') void openUrl(BILLING_URL)
-    else void signInAgain()
-  }
+  // What a row's button does is one function for Review and Home (`reviewActions.ts`).
+  const act = makeReviewActions({ showToast, onDecide: setDeciding, openUrl, forceReauth })
 
   const now = new Date()
   let body
@@ -93,24 +71,9 @@ export function ReviewPane({
           </div>
         ) : feed.entries.length > 0 ? (
           <div className="mw-card">
-            {feed.entries.map((entry) => {
-              const action = reviewRowAction(entry)
-              const meta = reviewRowMeta(entry, now)
-              return (
-                <div className="mw-row" data-row="review" key={entry.id}>
-                  <span className="mw-ktag">{reviewKindLabel(entry.kind)}</span>
-                  <div className="mw-row-text">
-                    <div className="mw-row-title">{entry.file_name}</div>
-                    {meta ? <div className="mw-row-hint">{meta}</div> : null}
-                  </div>
-                  {action ? (
-                    <Btn ariaLabel={reviewActionName(entry, action)} onClick={() => act(entry, action)}>
-                      {action.label}
-                    </Btn>
-                  ) : null}
-                </div>
-              )
-            })}
+            {feed.entries.map((entry) => (
+              <ReviewEntryRow key={entry.id} entry={entry} now={now} onAction={act} />
+            ))}
           </div>
         ) : null}
         {more ? (

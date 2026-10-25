@@ -76,6 +76,9 @@ const ICON_PATHS: Record<string, ReactNode> = {
   review: <path transform="scale(1.2)" d="M3 11.5h4l1.4 2h3.2l1.4-2h4M3 11.5l2-7h10l2 7v4a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z" />,
   trash: <path transform="scale(1.2)" d="M3.5 5.5h13M8 5.5V3.8h4v1.7M5.2 5.5l.8 11a1 1 0 0 0 1 .9h6a1 1 0 0 0 1-.9l.8-11" />,
   history: <path transform="scale(1.2)" d="M3.5 10a6.5 6.5 0 1 0 1.9-4.6M3.3 3.5v3.4h3.4M10 6.5V10l2.4 1.6" />,
+  // Home's activity rows: the direction a file moved (slice 4, the Home add-on).
+  arrowUp: <path d="M12 19V5M5 12l7-7 7 7" />,
+  arrowDown: <path d="M12 5v14M19 12l-7 7-7-7" />,
   file: (
     <g transform="scale(1.2)">
       <path d="M5 2.5h6.5L15.5 6.5v10a1 1 0 0 1-1 1h-9.5a1 1 0 0 1-1-1v-13a1 1 0 0 1 1-1z" />

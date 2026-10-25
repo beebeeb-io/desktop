@@ -1012,3 +1012,28 @@
 .mw-diff-line--remove {
   background: var(--diff-remove-bg);
 }
+
+/* ── Home's additions (task 1683 slice 4, the Home add-on; hi-fi section 3 "Home") ── */
+
+/* The counts line, a row at the bottom of the status card (hi-fi `.counts`). It wraps rather than truncates. */
+.mw-counts {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.mw-counts b {
+  color: var(--ink);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A failed transfer's glyph: ink on the error tint, never red text (§11); red is only for the icon. */
+.mw-tile--alert {
+  border-color: var(--line);
+  background: var(--err-bg);
+  color: var(--red);
+}

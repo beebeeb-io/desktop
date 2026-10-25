@@ -651,6 +651,11 @@ pub struct FileOverview {
     pub pinned_count: u64,
     /// Sum of effectively-pinned file sizes (negative sizes clamped to 0).
     pub pinned_bytes: i64,
+    /// How many FOLDERS the person chose to keep on this device (Home's "Kept on this Mac", task 1683 slice 4). The pure
+    /// computation does not know folders (the caller excludes them), so it reports 0 and `desktop_file_overview` fills it
+    /// from the state db; an answer from before this field reads as 0 (`#[serde(default)]`).
+    #[serde(default)]
+    pub pinned_folders: u64,
 }
 
 /// A minimal view of a mirrored file for the overview computation, paired with
@@ -774,6 +779,7 @@ pub fn compute_file_overview(
         total_bytes,
         pinned_count,
         pinned_bytes,
+        pinned_folders: 0,
     }
 }
 
@@ -1509,6 +1515,15 @@ mod tests {
     #[test]
     fn file_overview_empty_is_zeroed() {
         let o = compute_file_overview(&[], &[], 5);
+        // Home's counts line (task 1683 slice 4): the kept-folder count is the command's to fill from the state db; the pure
+        // computation reports none, and an older answer with no such key still reads (`#[serde(default)]`).
+        assert_eq!(o.pinned_folders, 0);
+        let json = serde_json::to_value(&o).unwrap();
+        assert_eq!(json["pinned_folders"], 0);
+        let mut old = json.clone();
+        old.as_object_mut().unwrap().remove("pinned_folders");
+        let read: FileOverview = serde_json::from_value(old).unwrap();
+        assert_eq!(read.pinned_folders, 0);
         assert_eq!(o.total_files, 0);
         assert_eq!(o.total_bytes, 0);
         assert_eq!(o.pinned_count, 0);

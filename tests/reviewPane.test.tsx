@@ -11,10 +11,12 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { createElement } from 'react'
 import * as desktopApi from '../src/desktopApi'
 import * as parts from '../src/macSettingsParts'
+import { makeReviewActions } from '../src/reviewActions'
 import * as reviewModel from '../src/reviewModel'
-import { mount, type Mounted } from './fixtures/componentHarness'
+import { loadComponent, mount, type Mounted } from './fixtures/componentHarness'
 import { button, buttons, buttonLabel, find, lines, press, settle, visibleLabel } from './fixtures/sheetHarness'
 
+const ReviewEntryRow = loadComponent('ReviewRow.tsx', 'ReviewEntryRow', { React: { createElement }, Btn: parts.Btn, ...reviewModel })
 const mounted: Mounted[] = []
 afterEach(() => { while (mounted.length) mounted.pop()!.close() })
 
@@ -48,6 +50,7 @@ function open(feed: Feed, extra: { historyOpen?: boolean; bindings?: Record<stri
       ...desktopApi,
       ...reviewModel,
       Btn: parts.Btn, Note: parts.Note, SettingsIcon: parts.SettingsIcon,
+      makeReviewActions, ReviewEntryRow,
       ConflictSheet: (props: any) => { sheets.push({ kind: 'conflict', props }); return createElement('div', { 'data-sheet': 'conflict', 'data-file': props.entry.file_id }) },
       VersionHistorySheet: (props: any) => { sheets.push({ kind: 'history', props }); return createElement('div', { 'data-sheet': 'history' }) },
       openUrl: async (url: string) => { urls.push(url); return { ok: true, value: undefined } },

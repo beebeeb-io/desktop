@@ -12664,7 +12664,11 @@ async fn desktop_file_overview(
                     occurred_at: event.occurred_at,
                 })
                 .collect();
-            Ok(account_dto::compute_file_overview(&inputs, &activity, limit))
+            let mut overview = account_dto::compute_file_overview(&inputs, &activity, limit);
+            // Home's "Kept on this Mac {n} folders": the folders the person chose, counted in the state db (the pure
+            // computation above excludes folders).
+            overview.pinned_folders = db.pinned_folder_count().map_err(|e| format!("count kept folders: {e}"))?;
+            Ok(overview)
         })
         .await
         .map_err(|e| format!("file overview task failed: {e}"))??;
@@ -16191,6 +16195,18 @@ mod main_window_tests {
         assert!(conflict.contains(".title(\"Conflict detected\")"), "{conflict}");
         let activate = super::finder_setup_command_tests::body_between(&production, "fn activate_notification(", "\n}\n");
         assert!(activate.contains("show_main_window(app, main_nav_for_notification(kind))"), "{activate}");
+    }
+
+    /// Home's counts line (task 1683 slice 4, spec §7.6: "Kept on this Mac {n} folders"): `desktop_file_overview` fills the
+    /// kept-folder count from the state db, in the same blocking task as the rest of the overview.
+    #[test]
+    fn the_file_overview_command_fills_the_kept_folder_count_from_the_state_db() {
+        let production = super::finder_setup_command_tests::production_source();
+        let command = super::finder_setup_command_tests::body_between(&production, "async fn desktop_file_overview(", "\n}\n");
+        let blocking = command.find("spawn_blocking(").expect("the blocking task");
+        let filled = command.find("overview.pinned_folders = db.pinned_folder_count()").expect("the kept-folder count is filled");
+        let returned = command.find("Ok(overview)").expect("and then returned");
+        assert!(blocking < filled && filled < returned, "{command}");
     }
 
     /// §8.2 (slice 4): the sheet rule reaches all three View items. A conflict sheet over Review or a password sheet over
