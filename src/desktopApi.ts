@@ -196,7 +196,7 @@ export const BILLING_URL = 'https://app.beebeeb.io/billing'
  */
 export const CREATE_ACCOUNT_URL = 'https://app.beebeeb.io/signup'
 
-export type ReviewEntryActionKind = 'open_conflict' | 'upgrade' | 'sign_in_again'
+export type ReviewEntryActionKind = 'open_conflict' | 'upgrade' | 'sign_in_again' | 'dismiss'
 
 export interface ReviewEntryAction {
   kind: ReviewEntryActionKind
@@ -219,6 +219,8 @@ export function reviewEntryAction(
   if (entry.action === 'open_conflict') return { kind: 'open_conflict', label: 'Review' }
   if (entry.kind === 'auth_failure') return { kind: 'sign_in_again', label: 'Sign in again' }
   if (entry.kind === 'quota_failure') return { kind: 'upgrade', label: 'Upgrade' }
+  // Task 1640: a kept copy needs no decision; the person can clear it from the list.
+  if (entry.kind === 'kept_copy') return { kind: 'dismiss', label: 'Dismiss' }
   return null
 }
 

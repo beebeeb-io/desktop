@@ -1345,34 +1345,16 @@ pub fn reconcile_placeholder_state(sync_root: &std::path::Path) {
 /// in-sync placeholder is a Windows no-op).
 const MAX_IN_SYNC_STAMPS_PER_PASS: usize = 512;
 
-/// Stamp every DB-`Local` file whose on-disk Cloud Files placeholder is NOT
-/// yet marked in-sync, so Explorer shows the green ✓ overlay for those files.
-///
-/// ## Why this is needed
-///
-/// `CfSetInSyncState(IN_SYNC)` currently fires only from `fetch_data_callback`
-/// when a single FETCH_DATA request covers the WHOLE file
-/// (`required_offset == 0 && required_length >= file_size`). Under
-/// `CF_HYDRATION_POLICY_PARTIAL` that condition rarely holds — Windows often
-/// issues partial-range requests — so files that ARE fully local (status=Local
-/// in the DB) may never receive the ✓ overlay. Additionally, the upload path
-/// (`upload_version` / modify) transitions the DB row to `Local` but does not
-/// call `CfSetInSyncState`, so freshly-uploaded files also miss the overlay.
-///
-/// This pass drives the built-in CF overlay from DB truth: if a row is `Local`
-/// the file IS fully synced, so we stamp it in-sync regardless of how it got
-/// there. `CfSetInSyncState` on an already-in-sync placeholder is a documented
-/// Windows no-op, making the pass idempotent and safe to run every tick.
-///
-/// ## Zero-knowledge
-///
-/// Never logs a path or filename — only aggregate counts. Paths may appear at
-/// `debug` level (matching the `mark_in_sync` sibling in `callbacks.rs`).
-///
-/// ## Bounded
-///
-/// At most [`MAX_IN_SYNC_STAMPS_PER_PASS`] files are stamped per call. Any
-/// remaining Local files are stamped on subsequent ticks.
+/// Task 1640 (review N13): retry the removal of every kept copy's original that was in use when
+/// the copy was made ([`crate::engine_bridge::retry_kept_originals`]).
+#[cfg(target_os = "windows")]
+pub fn retry_kept_originals(sync_root: &std::path::Path) {
+    let Some(bridge) = bridge() else {
+        return;
+    };
+    crate::engine_bridge::retry_kept_originals(bridge.db(), sync_root, &placeholders::placeholder_local_entry);
+}
+
 /// Task 1640 (review P2-5): a file's size and modification time.
 #[cfg(target_os = "windows")]
 fn file_fingerprint(path: &std::path::Path) -> Option<(u64, std::time::SystemTime)> {
@@ -1389,6 +1371,33 @@ fn in_sync_seen() -> &'static std::sync::Mutex<std::collections::HashMap<String,
     SEEN.get_or_init(Default::default)
 }
 
+/// Mark in sync, in Explorer's terms, the `Local` files whose bytes are the content this device
+/// agreed with the server on, so Explorer shows the synced overlay.
+///
+/// ## Why this is needed
+///
+/// `CfSetInSyncState(IN_SYNC)` fires from `fetch_data_callback` only when one FETCH_DATA request
+/// covers the WHOLE file, which under `CF_HYDRATION_POLICY_PARTIAL` rarely holds, and a landing
+/// marks only a create. So a file can be fully local and agreed yet out of sync.
+///
+/// ## Task 1640: only agreed bytes
+///
+/// Before task 1640 this pass marked EVERY `Local` row in sync on every tick, unsent edits
+/// included, which let "Free up space" discard them. Now a file is marked only when
+/// [`placeholders::stamp_if_agreed`] finds its bytes equal to the agreed content, under one
+/// exclusive handle across the hash and the mark. An edit (the platform cleared its in-sync
+/// state), a queued upload, or a file with no agreed content recorded stays out of sync.
+///
+/// ## Bounded
+///
+/// Candidates come from `list_stamp_candidates` (agreed content recorded, no upload queued),
+/// filtered before the cap. A file found in sync whose size and modification time have not
+/// changed is skipped without opening it; at most [`MAX_IN_SYNC_STAMPS_PER_PASS`] files that need
+/// work are handled per pass.
+///
+/// ## Zero-knowledge
+///
+/// Never logs a path or filename — only aggregate counts.
 #[cfg(target_os = "windows")]
 pub fn stamp_local_files_in_sync(sync_root: &std::path::Path) {
     // All CF symbols (CfOpenFileWithOplock, CfSetInSyncState, CfCloseHandle,

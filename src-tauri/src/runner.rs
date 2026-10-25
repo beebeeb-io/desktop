@@ -1607,7 +1607,9 @@ async fn run(
                         {
                             let stamp_root = sync_root.clone();
                             if let Err(e) = tokio::task::spawn_blocking(move || {
-                                crate::windows_cf::stamp_local_files_in_sync(&stamp_root)
+                                crate::windows_cf::stamp_local_files_in_sync(&stamp_root);
+                                // Task 1640 (review N13): kept copies whose original was in use.
+                                crate::windows_cf::retry_kept_originals(&stamp_root);
                             })
                             .await
                             {

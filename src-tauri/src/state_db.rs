@@ -32,7 +32,7 @@ use std::sync::Mutex;
 /// R10 (spec 2026-10-06 §5.6): every table holding one account's data. `has_account_data` counts
 /// them and `clear_account_data` empties them. `every_table_is_classified_for_the_account_binding`
 /// fails when a new table is not listed here or in `DEVICE_TABLES`.
-const ACCOUNT_TABLES: [&str; 11] = [
+const ACCOUNT_TABLES: [&str; 12] = [
     "files",
     "operation_queue",
     "local_activity",
@@ -45,6 +45,8 @@ const ACCOUNT_TABLES: [&str; 11] = [
     "upload_resume",
     // A File Provider create's provisional id and the server id it landed as (spec §5.4 row 15): the account's.
     "id_aliases",
+    // Task 1640: copies kept from files deleted elsewhere (file ids and names): the account's.
+    "kept_copies",
 ];
 /// Per-device tables: not counted as account data, emptied by a reset anyway.
 const DEVICE_TABLES: [&str; 1] = ["bandwidth_samples"];
@@ -492,6 +494,9 @@ pub struct PrunedRow {
     pub file_id: String,
     pub path: String,
     pub is_dir: bool,
+    /// Task 1640 (review N2): the file's agreed content when the row was read (a pruned row is
+    /// gone from the table by the time its entry is removed).
+    pub local_hash: Option<String>,
 }
 
 /// One row in the `files` table.
@@ -649,6 +654,29 @@ impl LocalActivityKind {
             _ => LocalActivityKind::MovedToTrash,
         }
     }
+}
+
+/// Task 1640 (review N9, N13): a kept copy to record, [`StateDb::record_kept_copy`].
+#[derive(Debug, Clone)]
+pub struct KeptCopyInput<'a> {
+    pub original_file_id: &'a str,
+    pub original_path: &'a str,
+    pub copy_path: &'a str,
+    pub copied_hash: &'a str,
+    pub original_removed: bool,
+    pub kept_at: i64,
+}
+
+/// Task 1640 (review N9, N13): one kept copy (paths relative to the sync root, '/'-joined).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeptCopy {
+    pub id: i64,
+    pub original_file_id: String,
+    pub original_path: String,
+    pub copy_path: String,
+    pub copied_hash: String,
+    pub original_removed: bool,
+    pub kept_at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2212,6 +2240,19 @@ impl StateDb {
                 payload_path TEXT NOT NULL,
                 stamped INTEGER NOT NULL DEFAULT 0
             );
+            -- Task 1640 (review N9, N13): a file deleted elsewhere while it held changes this
+            -- device had not sent, kept as a copy (paths relative to the sync root). The review
+            -- feed lists each until it is dismissed; an original that could not be removed when
+            -- the copy was made (`original_removed = 0`) is removed by a later tick.
+            CREATE TABLE IF NOT EXISTS kept_copies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                original_file_id TEXT NOT NULL,
+                original_path TEXT NOT NULL,
+                copy_path TEXT NOT NULL,
+                copied_hash TEXT NOT NULL,
+                original_removed INTEGER NOT NULL DEFAULT 0,
+                kept_at INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS staged_payloads (
                 path TEXT PRIMARY KEY,
                 source_path TEXT,
@@ -2390,13 +2431,14 @@ impl StateDb {
         // (task 0806). Deepest-first ordering keeps the returned rows in the
         // children-before-parent order the placeholder remover expects.
         let root: Option<PrunedRow> = {
-            let mut stmt = tx.prepare("SELECT file_id, path, item_kind FROM files WHERE file_id = ?1")?;
+            let mut stmt = tx.prepare("SELECT file_id, path, item_kind, local_hash FROM files WHERE file_id = ?1")?;
             let mut rows = stmt.query(params![file_id])?;
             if let Some(row) = rows.next()? {
                 Some(PrunedRow {
                     file_id: row.get(0)?,
                     path: row.get(1)?,
                     is_dir: ItemKind::from_str(&row.get::<_, String>(2)?) == ItemKind::Folder,
+                    local_hash: row.get(3)?,
                 })
             } else {
                 None
@@ -2435,7 +2477,7 @@ impl StateDb {
             if !root_path.is_empty() {
                 let descendants: Vec<PrunedRow> = {
                     let mut dstmt = tx.prepare(
-                        "SELECT file_id, path, item_kind FROM files
+                        "SELECT file_id, path, item_kind, local_hash FROM files
                          WHERE namespace = 'my_files'
                            AND substr(ltrim(path, '/'), 1, length(?1) + 1) = ?1 || '/'
                          ORDER BY length(path) DESC, path DESC",
@@ -2445,6 +2487,7 @@ impl StateDb {
                             file_id: r.get(0)?,
                             path: r.get(1)?,
                             is_dir: ItemKind::from_str(&r.get::<_, String>(2)?) == ItemKind::Folder,
+                            local_hash: r.get(3)?,
                         })
                     })?;
                     drows.collect::<Result<Vec<_>>>()?
@@ -2482,13 +2525,14 @@ impl StateDb {
         let tx = conn.transaction()?;
 
         let root: Option<PrunedRow> = {
-            let mut stmt = tx.prepare("SELECT file_id, path, item_kind FROM files WHERE file_id = ?1")?;
+            let mut stmt = tx.prepare("SELECT file_id, path, item_kind, local_hash FROM files WHERE file_id = ?1")?;
             let mut rows = stmt.query(params![file_id])?;
             if let Some(row) = rows.next()? {
                 Some(PrunedRow {
                     file_id: row.get(0)?,
                     path: row.get(1)?,
                     is_dir: ItemKind::from_str(&row.get::<_, String>(2)?) == ItemKind::Folder,
+                    local_hash: row.get(3)?,
                 })
             } else {
                 None
@@ -2528,7 +2572,7 @@ impl StateDb {
             if !root_path.is_empty() {
                 let descendants: Vec<PrunedRow> = {
                     let mut dstmt = tx.prepare(
-                        "SELECT file_id, path, item_kind FROM files
+                        "SELECT file_id, path, item_kind, local_hash FROM files
                          WHERE namespace = 'my_files'
                            AND substr(ltrim(path, '/'), 1, length(?1) + 1) = ?1 || '/'
                          ORDER BY length(path) DESC, path DESC",
@@ -2538,6 +2582,7 @@ impl StateDb {
                             file_id: r.get(0)?,
                             path: r.get(1)?,
                             is_dir: ItemKind::from_str(&r.get::<_, String>(2)?) == ItemKind::Folder,
+                            local_hash: r.get(3)?,
                         })
                     })?;
                     drows.collect::<Result<Vec<_>>>()?
@@ -2562,13 +2607,14 @@ impl StateDb {
 
         // Look up the row to delete (its path + kind drives the subtree prune).
         let root: Option<PrunedRow> = {
-            let mut stmt = tx.prepare("SELECT file_id, path, item_kind FROM files WHERE file_id = ?1")?;
+            let mut stmt = tx.prepare("SELECT file_id, path, item_kind, local_hash FROM files WHERE file_id = ?1")?;
             let mut rows = stmt.query(params![file_id])?;
             if let Some(row) = rows.next()? {
                 Some(PrunedRow {
                     file_id: row.get(0)?,
                     path: row.get(1)?,
                     is_dir: ItemKind::from_str(&row.get::<_, String>(2)?) == ItemKind::Folder,
+                    local_hash: row.get(3)?,
                 })
             } else {
                 None
@@ -2607,7 +2653,7 @@ impl StateDb {
             if !root_path.is_empty() {
                 let descendants: Vec<PrunedRow> = {
                     let mut dstmt = tx.prepare(
-                        "SELECT file_id, path, item_kind FROM files
+                        "SELECT file_id, path, item_kind, local_hash FROM files
                          WHERE substr(ltrim(path, '/'), 1, length(?1) + 1) = ?1 || '/'
                          ORDER BY length(path) DESC, path DESC",
                     )?;
@@ -2616,6 +2662,7 @@ impl StateDb {
                             file_id: r.get(0)?,
                             path: r.get(1)?,
                             is_dir: ItemKind::from_str(&r.get::<_, String>(2)?) == ItemKind::Folder,
+                            local_hash: r.get(3)?,
                         })
                     })?;
                     drows.collect::<Result<Vec<_>>>()?
@@ -2650,6 +2697,70 @@ impl StateDb {
     /// Append a local-only activity event and prune old rows. This table is the
     /// durable recent-activity surface for events whose canonical file row may
     /// legitimately disappear from `files` during sync convergence.
+    /// Task 1640 (review N9, N13): record a kept copy; its id.
+    pub fn record_kept_copy(&self, copy: &KeptCopyInput<'_>) -> Result<i64> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "INSERT INTO kept_copies (original_file_id, original_path, copy_path, copied_hash, original_removed, kept_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                copy.original_file_id,
+                copy.original_path,
+                copy.copy_path,
+                copy.copied_hash,
+                copy.original_removed,
+                copy.kept_at
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Task 1640: every kept copy not dismissed, newest first.
+    pub fn list_kept_copies(&self) -> Result<Vec<KeptCopy>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT id, original_file_id, original_path, copy_path, copied_hash, original_removed, kept_at
+             FROM kept_copies ORDER BY kept_at DESC, id DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(KeptCopy {
+                id: row.get(0)?,
+                original_file_id: row.get(1)?,
+                original_path: row.get(2)?,
+                copy_path: row.get(3)?,
+                copied_hash: row.get(4)?,
+                original_removed: row.get(5)?,
+                kept_at: row.get(6)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Task 1640 (review N13): the original of kept copy `id` is gone now.
+    pub fn mark_kept_original_removed(&self, id: i64) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute("UPDATE kept_copies SET original_removed = 1 WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Task 1640 (review N13): `rel_path` is an original whose kept copy is made but which is not
+    /// removed yet: the upload driver never sends it.
+    pub fn is_kept_original_pending(&self, rel_path: &str) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM kept_copies WHERE original_path = ?1 AND original_removed = 0)",
+            params![rel_path],
+            |row| row.get(0),
+        )
+    }
+
+    /// Task 1640 (review N9): the person dismissed kept copy `id` (its review entry). The copy
+    /// itself stays. `false`: no such entry, or its original still waits to be removed.
+    pub fn dismiss_kept_copy(&self, id: i64) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        Ok(conn.execute("DELETE FROM kept_copies WHERE id = ?1 AND original_removed = 1", params![id])? == 1)
+    }
+
     pub fn record_local_activity(&self, input: LocalActivityEventInput) -> Result<()> {
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction()?;
@@ -2846,12 +2957,13 @@ impl StateDb {
         // into the trash view); deleting them would erase trash-view rows.
         let direct_children: Vec<PrunedRow> = {
             let mut stmt =
-                tx.prepare("SELECT file_id, path, item_kind FROM files WHERE parent_id = ?1 AND status != 'trashing'")?;
+                tx.prepare("SELECT file_id, path, item_kind, local_hash FROM files WHERE parent_id = ?1 AND status != 'trashing'")?;
             let rows = stmt.query_map(params![folder_id], |r| {
                 Ok(PrunedRow {
                     file_id: r.get(0)?,
                     path: r.get(1)?,
                     is_dir: ItemKind::from_str(&r.get::<_, String>(2)?) == ItemKind::Folder,
+                    local_hash: r.get(3)?,
                 })
             })?;
             rows.collect::<Result<Vec<_>>>()?
@@ -2876,7 +2988,7 @@ impl StateDb {
                 if !child_path.is_empty() {
                     let descendants: Vec<PrunedRow> = {
                         let mut dstmt = tx.prepare(
-                            "SELECT file_id, path, item_kind FROM files
+                            "SELECT file_id, path, item_kind, local_hash FROM files
                              WHERE substr(ltrim(path, '/'), 1, length(?1) + 1) = ?1 || '/'
                              ORDER BY length(path) DESC, path DESC",
                         )?;
@@ -2885,6 +2997,7 @@ impl StateDb {
                                 file_id: r.get(0)?,
                                 path: r.get(1)?,
                                 is_dir: ItemKind::from_str(&r.get::<_, String>(2)?) == ItemKind::Folder,
+                                local_hash: r.get(3)?,
                             })
                         })?;
                         drows.collect::<Result<Vec<_>>>()?
@@ -3130,7 +3243,7 @@ impl StateDb {
         // `file_delete` (permanent) / `file_restore` ops instead.
         let candidates: Vec<PrunedRow> = {
             let mut stmt = tx.prepare(
-                "SELECT file_id, path, item_kind FROM files
+                "SELECT file_id, path, item_kind, local_hash FROM files
                  WHERE namespace = 'my_files'
                    AND status != 'uploading'
                    AND status != 'trashing'
@@ -3146,6 +3259,7 @@ impl StateDb {
                     file_id: row.get(0)?,
                     path: row.get(1)?,
                     is_dir: ItemKind::from_str(&row.get::<_, String>(2)?) == ItemKind::Folder,
+                    local_hash: row.get(3)?,
                 })
             })?;
             rows.collect::<Result<Vec<_>>>()?
@@ -3209,7 +3323,7 @@ impl StateDb {
                         // trash's content (recoverable), not dead rows; deleting
                         // them would erase the trash view's folder contents.
                         let mut dstmt = tx.prepare(
-                            "SELECT file_id, path, item_kind FROM files
+                            "SELECT file_id, path, item_kind, local_hash FROM files
                              WHERE namespace = 'my_files'
                                AND status != 'trashing'
                                AND substr(ltrim(path, '/'), 1, length(?1) + 1) = ?1 || '/'
@@ -3220,6 +3334,7 @@ impl StateDb {
                                 file_id: r.get(0)?,
                                 path: r.get(1)?,
                                 is_dir: ItemKind::from_str(&r.get::<_, String>(2)?) == ItemKind::Folder,
+                                local_hash: r.get(3)?,
                             })
                         })?;
                         drows.collect::<Result<Vec<_>>>()?

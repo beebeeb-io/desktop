@@ -10166,6 +10166,22 @@ fn list_version_conflict_center() -> Result<Vec<engine_bridge::VersionConflictEn
     engine_bridge::version_conflict_feed_from_db(&db).map_err(|e| e.to_string())
 }
 
+/// Task 1640 (review N9): dismiss one informational review entry (`kept:<id>`, a kept copy). The
+/// copy itself stays where it is.
+#[tauri::command]
+fn dismiss_review_entry(entry_id: String) -> Result<(), String> {
+    let Some(id) = entry_id.strip_prefix("kept:").and_then(|id| id.parse::<i64>().ok()) else {
+        return Err("This entry can’t be dismissed.".to_string());
+    };
+    let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
+    let db = state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?;
+    match db.dismiss_kept_copy(id) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err("This entry can be dismissed once its original is removed.".to_string()),
+        Err(e) => Err(format!("dismiss: {e}")),
+    }
+}
+
 fn file_versions_payload_for_frontend(body: serde_json::Value) -> Result<serde_json::Value, String> {
     let Some(versions) = body.get("versions") else {
         return Err("list_file_versions response missing versions array".to_string());
@@ -14749,6 +14765,7 @@ pub fn run() {
             free_up_space,
             export_diagnostics,
             list_version_conflict_center,
+            dismiss_review_entry,
             list_file_versions,
             restore_file_version,
             get_sync_root,

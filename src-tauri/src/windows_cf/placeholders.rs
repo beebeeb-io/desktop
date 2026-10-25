@@ -769,6 +769,57 @@ pub fn local_bytes_agreed(db: &crate::state_db::StateDb, file_id: &str, path: &s
     )
 }
 
+/// Task 1640 (review N2, N6): what the entry at `path` holds, as the platform reports it: in sync
+/// with no modified data, no data on disk, every byte on disk (also a plain file, which is what an
+/// atomic save leaves), or only some. Opened as the reparse point, so nothing is fetched. Anything
+/// that cannot be read reports "partly on disk", which keeps the entry.
+pub fn placeholder_local_entry(path: &std::path::Path) -> crate::engine_bridge::LocalEntry {
+    use crate::engine_bridge::LocalEntry;
+    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+    use windows::Win32::Foundation::{ERROR_NOT_A_CLOUD_FILE, HANDLE};
+    use windows::Win32::Storage::FileSystem::{
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+    let Ok(file) = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+        .open(path)
+    else {
+        return LocalEntry::PartlyLocal;
+    };
+    let mut buffer = vec![0u64; 1024];
+    // SAFETY: `file` is open for the whole call; the buffer is 8-byte aligned and its length is
+    // passed, so the call writes only inside it.
+    let read = unsafe {
+        CfGetPlaceholderInfo(
+            HANDLE(file.as_raw_handle()),
+            CF_PLACEHOLDER_INFO_STANDARD,
+            buffer.as_mut_ptr().cast(),
+            (buffer.len() * 8) as u32,
+            None,
+        )
+    };
+    match read {
+        Ok(()) => {}
+        Err(e) if e.code() == windows::core::HRESULT::from_win32(ERROR_NOT_A_CLOUD_FILE.0) => {
+            return LocalEntry::WhollyLocal;
+        }
+        Err(_) => return LocalEntry::PartlyLocal,
+    }
+    // SAFETY: a successful CF_PLACEHOLDER_INFO_STANDARD call wrote that struct at the start.
+    let info = unsafe { &*buffer.as_ptr().cast::<CF_PLACEHOLDER_STANDARD_INFO>() };
+    if info.InSyncState == CF_IN_SYNC_STATE_IN_SYNC && info.ModifiedDataSize == 0 {
+        LocalEntry::InSync
+    } else if info.OnDiskDataSize == 0 {
+        LocalEntry::NothingLocal
+    } else if fully_on_disk(path) {
+        LocalEntry::WhollyLocal
+    } else {
+        LocalEntry::PartlyLocal
+    }
+}
+
 /// Task 1640 (review P2-4): mark the placeholder at `path` in sync when its bytes are the agreed
 /// content, holding ONE exclusive handle across the hash and the mark (as
 /// [`complete_upload_placeholder`] does), so no write can land between them. `Ok(false)`: not

@@ -3334,6 +3334,12 @@ impl EngineBridge {
             );
             return None;
         };
+        // Task 1640 (review N13): an original whose kept copy is made but which is not removed
+        // yet (it was in use) is never sent: a later tick removes it.
+        if self.db.is_kept_original_pending(&rel).unwrap_or(false) {
+            tracing::debug!(rel_path = %rel, "classify_local_path: rejected an original whose copy is kept");
+            return None;
+        }
         match self.db.get_file_by_path(&rel) {
             Ok(Some(existing)) => return self.classify_tracked_edit(path, existing, file_name, rel),
             Ok(None) => { /* not tracked — filter 2, then new */ }
@@ -3435,10 +3441,20 @@ impl EngineBridge {
             // A file hydrated before this build has no agreed content: its change is kept on
             // disk (out of sync, so never stamped or freed) but not sent (task 2191).
             Ok(SyncFolderContent::Unknown) if os_in_sync == Some(false) => {
-                tracing::warn!(
-                    file_id = %existing.file_id,
-                    "sync folder: a change to a file synced before this version is kept on this PC, not sent"
-                );
+                // Once per file per change (review N11): the scan classifies it every pass.
+                static WARNED: std::sync::OnceLock<std::sync::Mutex<HashMap<String, (u64, std::time::SystemTime)>>> =
+                    std::sync::OnceLock::new();
+                let fingerprint = std::fs::metadata(path).ok().and_then(|m| Some((m.len(), m.modified().ok()?)));
+                let mut warned = WARNED.get_or_init(Default::default).lock().unwrap_or_else(|p| p.into_inner());
+                if let Some(fingerprint) = fingerprint
+                    && warned.get(&existing.file_id) != Some(&fingerprint)
+                {
+                    warned.insert(existing.file_id.clone(), fingerprint);
+                    tracing::warn!(
+                        file_id = %existing.file_id,
+                        "sync folder: a change to a file synced before this version is kept on this PC, not sent"
+                    );
+                }
                 return None;
             }
             Ok(_) => return None,
@@ -5453,9 +5469,6 @@ pub fn is_ignored_finder_name(name: &str) -> bool {
         || lower.ends_with(".crdownload")
 }
 
-/// How many recent kept-copy events (task 1640) the review feed lists.
-const KEPT_COPY_FEED_LIMIT: usize = 20;
-
 pub fn version_conflict_feed_from_db(db: &StateDb) -> anyhow::Result<Vec<VersionConflictEntry>> {
     let mut entries = Vec::new();
 
@@ -5480,21 +5493,26 @@ pub fn version_conflict_feed_from_db(db: &StateDb) -> anyhow::Result<Vec<Version
         entries.push(review_entry_for_operation(&op, db)?);
     }
 
-    // Task 1640: a file deleted elsewhere while it held changes this device had not sent; they
-    // were kept as a copy beside it. Informational: the copy is uploaded as a new file.
-    for event in db.list_recent_local_activity(KEPT_COPY_FEED_LIMIT)? {
-        if event.event_type != LocalActivityKind::KeptLocalCopy {
-            continue;
-        }
+    // Task 1640 (review N9): a file deleted elsewhere while it held changes this device had not
+    // sent; they were kept as a copy, which uploads as a new file. Informational: no decision is
+    // needed, so the person can dismiss it.
+    for kept in db.list_kept_copies()? {
+        let copy_name = display_name_for_path(&kept.copy_path);
+        let place = match kept.copy_path.rsplit_once('/') {
+            Some((folder, _)) => format!("in the folder {folder}"),
+            None => "at the top of your Beebeeb folder".to_string(),
+        };
         entries.push(VersionConflictEntry {
-            id: format!("kept:{}", event.id),
-            file_id: event.file_id.clone().unwrap_or_default(),
-            file_name: event.file_name.clone(),
+            id: format!("kept:{}", kept.id),
+            file_id: kept.original_file_id.clone(),
+            file_name: copy_name.clone(),
             kind: "kept_copy".to_string(),
             status: "kept as a copy".to_string(),
-            updated_at: Some(event.occurred_at),
-            detail: "This file was deleted elsewhere while it held changes not sent from this PC. Those changes are kept in this copy, in the same folder.".to_string(),
-            action: "none".to_string(),
+            updated_at: Some(kept.kept_at),
+            detail: format!(
+                "Deleted elsewhere while it held changes not sent from this PC. Those changes are kept as {copy_name}, {place}."
+            ),
+            action: "dismiss".to_string(),
             op_id: None,
             version_id: None,
             base_version: None,
@@ -8265,34 +8283,55 @@ fn apply_snapshot(
 /// A row whose path can't be safely resolved under the root (empty/traversal) is
 /// skipped. Per-row failures are logged (file_id only — zero-knowledge) and never
 /// abort the sweep. No-op on macOS/Linux.
+/// Task 1640: what a remotely deleted file's local entry holds, as the platform reports it.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LocalEntry {
+    /// A placeholder in sync with no modified data: the agreed bytes, or none.
+    InSync,
+    /// A placeholder with no data on disk: nothing local to keep.
+    NothingLocal,
+    /// Every byte is on disk: a hydrated placeholder out of sync, or a plain file (what an atomic
+    /// save leaves).
+    WhollyLocal,
+    /// Some bytes are on disk and it is out of sync: reading it would fetch the rest.
+    PartlyLocal,
+}
+
 /// Task 1640 (review P1-1): what removing one remotely deleted sync-folder entry did.
 #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PrunedEntry {
-    /// Removed: a file whose bytes are agreed (its placeholder is in sync), or an empty folder.
+    /// Removed: agreed bytes, no local bytes, or an empty folder.
     Removed,
     /// Nothing was there.
     Gone,
-    /// The file may have held a change that was never sent: its bytes were copied to this new
-    /// file beside it first, then the original was removed.
-    KeptCopy(PathBuf),
-    /// Left as it is: a folder that still holds something, or a file whose copy failed.
+    /// The file held bytes the server does not have: they were copied to `copy` (whose SHA-256
+    /// is `copied_hash`), where the copy can upload, then the original was removed, or not
+    /// (`original_removed`: it was in use; a later tick removes it).
+    KeptCopy { copy: PathBuf, copied_hash: String, original_removed: bool },
+    /// Left as it is: a folder that still holds something, a file partly on disk (reading it
+    /// would fetch the rest), or a copy that failed.
     KeptInPlace,
 }
 
-/// Task 1640 (review P1-1): remove the local entry of a file or folder the server no longer lists
-/// (a web trash, a snapshot prune) without losing a change that was never sent. Before, this
-/// deleted whatever the entry held: an edit that was not queued, a file hydrated before task
-/// 1640, a folder's new files not uploaded yet.
+/// Task 1640 (review P1-1, N2, N6): remove the local entry of a file or folder the server no
+/// longer lists (a web trash, a snapshot prune) without losing a change that was never sent.
 ///
-/// A file the platform reports in sync holds the content this device agreed with the server on
-/// (the engine marks only agreed bytes in sync), and is removed as before. Any other file (out of
-/// sync after an edit, a plain file an atomic save left, unreadable) is copied to
-/// `<name> (this PC)<ext>` beside it, never over an existing file, and only then removed; the
-/// upload driver sends the copy as a new file. A copy that fails leaves the original. A folder is
-/// removed only when it is empty: what it still holds stays.
+/// A file in sync, or with no bytes on disk, is removed. A file wholly on disk (out of sync after
+/// an edit, or a plain file an atomic save left) is removed when its bytes are `agreed` (the
+/// row's agreed content); other bytes are copied first, with [`copy_as_this_pc`], into
+/// `copy_dir` (a folder the copy can upload from), and only then is the original removed. A file
+/// partly on disk is left: reading it would fetch the rest from inside the tick, and the server's
+/// own bytes would come back as a copy. A folder is removed only when it is empty.
 #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
-pub(crate) fn remove_pruned_entry(path: &Path, is_dir: bool, in_sync: &dyn Fn(&Path) -> Option<bool>) -> PrunedEntry {
+pub(crate) fn remove_pruned_entry(
+    path: &Path,
+    is_dir: bool,
+    agreed: Option<&str>,
+    local: LocalEntry,
+    copy_dir: &Path,
+) -> PrunedEntry {
     if std::fs::symlink_metadata(path).is_err() {
         return PrunedEntry::Gone;
     }
@@ -8304,63 +8343,159 @@ pub(crate) fn remove_pruned_entry(path: &Path, is_dir: bool, in_sync: &dyn Fn(&P
     if is_dir {
         return removed(std::fs::remove_dir(path));
     }
-    if in_sync(path) == Some(true) {
-        return removed(std::fs::remove_file(path));
-    }
-    match copy_beside_as_this_pc(path) {
-        Ok(copy) => {
-            // Were the removal to fail, both stay: nothing is lost.
-            let _ = std::fs::remove_file(path);
-            PrunedEntry::KeptCopy(copy)
+    match local {
+        LocalEntry::InSync | LocalEntry::NothingLocal => removed(std::fs::remove_file(path)),
+        LocalEntry::PartlyLocal => PrunedEntry::KeptInPlace,
+        LocalEntry::WhollyLocal => {
+            let Ok(hash) = sha256_file_hex(path) else {
+                return PrunedEntry::KeptInPlace;
+            };
+            if agreed == Some(hash.as_str()) {
+                return removed(std::fs::remove_file(path));
+            }
+            match copy_as_this_pc(path, copy_dir) {
+                Ok((copy, copied_hash)) => {
+                    let original_removed = match std::fs::remove_file(path) {
+                        Ok(()) => true,
+                        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+                    };
+                    PrunedEntry::KeptCopy { copy, copied_hash, original_removed }
+                }
+                Err(_) => PrunedEntry::KeptInPlace,
+            }
         }
-        Err(_) => PrunedEntry::KeptInPlace,
     }
 }
 
-/// Task 1640: copy `path` to a new file beside it, `<stem> (this PC)<ext>`, then
-/// `<stem> (this PC 2)<ext>` and so on: created new, never over an existing file, and flushed.
-/// A copy that fails is removed again.
+/// Task 1640 (review P1-1, N5): copy `path` into `dir` as `<stem> (this PC)<ext>`, then
+/// `<stem> (this PC 2)<ext>` and so on, never over an existing file. The bytes are written and
+/// flushed under an ignored temporary name first and linked to the final name only then, so the
+/// upload driver never sees a partial copy. Returns the copy and the SHA-256 of what it holds.
 #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
-pub(crate) fn copy_beside_as_this_pc(path: &Path) -> std::io::Result<PathBuf> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "no parent folder"))?;
+pub(crate) fn copy_as_this_pc(path: &Path, dir: &Path) -> std::io::Result<(PathBuf, String)> {
+    use sha2::{Digest, Sha256};
+    use std::io::{Read, Write};
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
     let ext = path.extension().and_then(|s| s.to_str());
+    let temp = dir.join(format!(".{stem}.{}.tmp", uuid::Uuid::new_v4()));
+    let written = (|| -> std::io::Result<String> {
+        let mut source = std::fs::File::open(path)?;
+        let mut out = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp)?;
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0u8; 64 * 1024];
+        loop {
+            let read = source.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+            out.write_all(&buffer[..read])?;
+        }
+        out.sync_all()?;
+        Ok(format!("{:x}", hasher.finalize()))
+    })();
+    let hash = match written {
+        Ok(hash) => hash,
+        Err(e) => {
+            let _ = std::fs::remove_file(&temp);
+            return Err(e);
+        }
+    };
     for n in 1..=99 {
         let suffix = if n == 1 { " (this PC)".to_string() } else { format!(" (this PC {n})") };
         let name = match ext {
             Some(ext) => format!("{stem}{suffix}.{ext}"),
             None => format!("{stem}{suffix}"),
         };
-        let copy = parent.join(name);
-        let mut out = match std::fs::OpenOptions::new().write(true).create_new(true).open(&copy) {
-            Ok(out) => out,
+        let copy = dir.join(name);
+        match std::fs::hard_link(&temp, &copy) {
+            Ok(()) => {
+                let _ = std::fs::remove_file(&temp);
+                return Ok((copy, hash));
+            }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e),
-        };
-        let written = std::fs::File::open(path)
-            .and_then(|mut source| std::io::copy(&mut source, &mut out))
-            .and_then(|_| out.sync_all());
-        if let Err(e) = written {
-            drop(out);
-            let _ = std::fs::remove_file(&copy);
-            return Err(e);
+            Err(e) => {
+                let _ = std::fs::remove_file(&temp);
+                return Err(e);
+            }
         }
-        return Ok(copy);
     }
+    let _ = std::fs::remove_file(&temp);
     Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "no free name for the copy"))
 }
 
-/// Remove the on-disk entries of `rows` (a remote deletion), each through [`remove_pruned_entry`]:
-/// a kept copy is recorded as one activity event, which the review feed shows.
+/// Task 1640 (review N3): where a copy of `path` can upload from: its folder, or the nearest
+/// folder above it that is neither being removed now (`removed_dirs`) nor in the trash, else
+/// the sync root. Inside a folder trashed on the web the copy would name that folder as its
+/// parent, which the server refuses.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+fn kept_copy_dir(db: &StateDb, sync_root: &Path, path: &Path, removed_dirs: &HashSet<PathBuf>) -> PathBuf {
+    let mut dir = path.parent().unwrap_or(sync_root).to_path_buf();
+    while dir != sync_root && dir.starts_with(sync_root) {
+        let trashed = relative_db_path(sync_root, &dir)
+            .and_then(|rel| db.get_file_by_path(&rel).ok().flatten())
+            .is_some_and(|row| row.status == FileStatus::Trashing);
+        if !removed_dirs.contains(&dir) && !trashed {
+            return dir;
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent.to_path_buf(),
+            None => break,
+        }
+    }
+    sync_root.to_path_buf()
+}
+
+/// `path` relative to `sync_root`, '/'-joined.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+fn rel_under(sync_root: &Path, path: &Path) -> String {
+    path.strip_prefix(sync_root)
+        .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default()
+}
+
+/// Record a kept copy (review N9, N13): one review entry until it is dismissed, a tray activity
+/// row, and, while its original could not be removed, the retry's record.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+fn record_kept_copy(db: &StateDb, sync_root: &Path, file_id: &str, original: &Path, copy: &Path, copied_hash: &str, original_removed: bool) {
+    let now = now_secs();
+    let recorded = db
+        .record_kept_copy(&crate::state_db::KeptCopyInput {
+            original_file_id: file_id,
+            original_path: &rel_under(sync_root, original),
+            copy_path: &rel_under(sync_root, copy),
+            copied_hash,
+            original_removed,
+            kept_at: now,
+        })
+        .and_then(|_| {
+            db.record_local_activity(LocalActivityEventInput {
+                event_type: LocalActivityKind::KeptLocalCopy,
+                file_id: Some(file_id.to_string()),
+                file_name: copy.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string(),
+                rel_path: Some(rel_under(sync_root, copy)),
+                occurred_at: now,
+            })
+        });
+    if let Err(e) = recorded {
+        tracing::warn!(file_id = %file_id, error = %e, "remote-deletion reconcile: could not record the kept copy");
+    }
+}
+
+/// Remove the on-disk entries of `rows` (a remote deletion), each through [`remove_pruned_entry`],
+/// with `local` the platform's view of each file.
 #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
 fn remove_pruned_entries(
     db: &StateDb,
     sync_root: &Path,
     rows: &[crate::state_db::PrunedRow],
-    in_sync: &dyn Fn(&Path) -> Option<bool>,
+    local: &dyn Fn(&Path) -> LocalEntry,
 ) {
+    let removed_dirs: HashSet<PathBuf> = rows
+        .iter()
+        .filter(|row| row.is_dir)
+        .filter_map(|row| EngineBridge::placeholder_path_under(sync_root, &row.path))
+        .collect();
     for row in rows {
         let Some(path) = EngineBridge::placeholder_path_under(sync_root, &row.path) else {
             continue;
@@ -8368,41 +8503,64 @@ fn remove_pruned_entries(
         // Register BEFORE the remove so the NOTIFY_DELETE_COMPLETION the remove
         // fires is already suppressed when it lands in the watcher.
         crate::watcher::suppress_engine_delete(&path);
-        match remove_pruned_entry(&path, row.is_dir, in_sync) {
+        let state = if row.is_dir { LocalEntry::InSync } else { local(&path) };
+        let copy_dir = kept_copy_dir(db, sync_root, &path, &removed_dirs);
+        match remove_pruned_entry(&path, row.is_dir, row.local_hash.as_deref(), state, &copy_dir) {
             PrunedEntry::Removed | PrunedEntry::Gone => {}
-            PrunedEntry::KeptCopy(copy) => {
+            PrunedEntry::KeptCopy { copy, copied_hash, original_removed } => {
                 // Zero-knowledge: never log the path, only the file_id.
                 tracing::warn!(
                     file_id = %row.file_id,
-                    "remote-deletion reconcile: the file held changes that were not sent; they are kept as a copy beside it"
+                    original_removed,
+                    "remote-deletion reconcile: the file held changes that were not sent; they are kept as a copy"
                 );
-                let rel_path = copy
-                    .strip_prefix(sync_root)
-                    .ok()
-                    .map(|rel| rel.to_string_lossy().replace('\\', "/"));
-                let recorded = db.record_local_activity(LocalActivityEventInput {
-                    event_type: LocalActivityKind::KeptLocalCopy,
-                    file_id: Some(row.file_id.clone()),
-                    file_name: copy.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string(),
-                    rel_path,
-                    occurred_at: now_secs(),
-                });
-                if let Err(e) = recorded {
-                    tracing::warn!(file_id = %row.file_id, error = %e, "remote-deletion reconcile: could not record the kept copy");
-                }
+                record_kept_copy(db, sync_root, &row.file_id, &path, &copy, &copied_hash, original_removed);
             }
             PrunedEntry::KeptInPlace => tracing::warn!(
                 file_id = %row.file_id,
                 is_dir = row.is_dir,
-                "remote-deletion reconcile: kept the local entry (a folder that still holds files, or a copy that failed)"
+                "remote-deletion reconcile: kept the local entry (a folder that still holds files, a file partly on disk, or a copy that failed)"
             ),
+        }
+    }
+}
+
+/// Task 1640 (review N13): every kept copy whose original could not be removed (it was in use)
+/// is retried: the original is removed when it still holds the copied bytes; one the person
+/// changed since is a new change, kept as a new copy, and then removed. A copy is never made
+/// twice of the same bytes.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+pub(crate) fn retry_kept_originals(db: &StateDb, sync_root: &Path, local: &dyn Fn(&Path) -> LocalEntry) {
+    let Ok(kept) = db.list_kept_copies() else {
+        return;
+    };
+    for copy in kept.into_iter().filter(|copy| !copy.original_removed) {
+        let Some(original) = EngineBridge::placeholder_path_under(sync_root, &copy.original_path) else {
+            let _ = db.mark_kept_original_removed(copy.id);
+            continue;
+        };
+        if std::fs::symlink_metadata(&original).is_err() {
+            let _ = db.mark_kept_original_removed(copy.id);
+            continue;
+        }
+        let copy_dir = kept_copy_dir(db, sync_root, &original, &HashSet::new());
+        match remove_pruned_entry(&original, false, Some(&copy.copied_hash), local(&original), &copy_dir) {
+            PrunedEntry::Removed | PrunedEntry::Gone => {
+                let _ = db.mark_kept_original_removed(copy.id);
+            }
+            PrunedEntry::KeptCopy { copy: new_copy, copied_hash, original_removed } => {
+                // Changed since the first copy: a new change, with an entry of its own.
+                let _ = db.mark_kept_original_removed(copy.id);
+                record_kept_copy(db, sync_root, &copy.original_file_id, &original, &new_copy, &copied_hash, original_removed);
+            }
+            PrunedEntry::KeptInPlace => {}
         }
     }
 }
 
 #[cfg(target_os = "windows")]
 fn remove_pruned_placeholders(db: &StateDb, sync_root: &Path, rows: &[crate::state_db::PrunedRow]) {
-    remove_pruned_entries(db, sync_root, rows, &crate::windows_cf::placeholders::placeholder_in_sync);
+    remove_pruned_entries(db, sync_root, rows, &crate::windows_cf::placeholders::placeholder_local_entry);
 }
 
 /// No-op stand-in on non-Windows builds so the call sites stay platform-agnostic.
@@ -26639,10 +26797,8 @@ mod tests {
     // ── Task 1640, review P1-1: a remote deletion never deletes a change that was not sent ──
 
     /// A synced folder `docs` holding `notes.txt`, whose local bytes were edited and never sent
-    /// (no agreed content recorded, nothing queued).
-    fn regression_1640_edited_file_in_a_folder(dir: &Path) -> (StateDb, PathBuf) {
-        let db = StateDb::open(&dir.join("state.db")).unwrap();
-        let sync_root = dir.join("sync-root");
+    /// (no agreed content recorded, nothing queued), in `db` under `sync_root`.
+    fn regression_1640_edited_file_in_a_folder_in(db: &StateDb, sync_root: &Path) {
         std::fs::create_dir_all(sync_root.join("docs")).unwrap();
         let row = |file_id: &str, path: &str, item_kind: ItemKind| FileEntry {
             file_id: file_id.into(),
@@ -26665,32 +26821,45 @@ mod tests {
         })
         .unwrap();
         std::fs::write(sync_root.join("docs").join("notes.txt"), b"edited, never sent").unwrap();
+    }
+
+    fn regression_1640_edited_file_in_a_folder(dir: &Path) -> (StateDb, PathBuf) {
+        let db = StateDb::open(&dir.join("state.db")).unwrap();
+        let sync_root = dir.join("sync-root");
+        regression_1640_edited_file_in_a_folder_in(&db, &sync_root);
         (db, sync_root)
     }
 
+    /// The edit is kept as a copy where it can upload: the folder was removed with the trash, so
+    /// at the top of the sync folder. The emptied folder is gone; one review entry says where.
     fn regression_1640_assert_kept_as_a_copy(db: &StateDb, sync_root: &Path) {
-        let docs = sync_root.join("docs");
-        assert!(!docs.join("notes.txt").exists(), "the original is removed");
+        assert!(!sync_root.join("docs").exists(), "the original and its emptied folder are removed");
         assert_eq!(
-            std::fs::read(docs.join("notes (this PC).txt")).unwrap(),
+            std::fs::read(sync_root.join("notes (this PC).txt")).unwrap(),
             b"edited, never sent",
-            "the edit is kept as a copy beside it"
+            "the edit is kept as a copy where it can upload"
         );
-        assert!(docs.is_dir(), "the folder stays: it holds the copy");
-        let kept: Vec<String> = db
-            .list_recent_local_activity(10)
+        let kept = db.list_kept_copies().unwrap();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(
+            (kept[0].original_path.as_str(), kept[0].copy_path.as_str(), kept[0].original_removed),
+            ("docs/notes.txt", "notes (this PC).txt", true)
+        );
+        assert_eq!(kept[0].copied_hash, sha256_hex(b"edited, never sent"));
+        let feed: Vec<(String, String, String)> = version_conflict_feed_from_db(db)
             .unwrap()
             .into_iter()
-            .filter(|event| event.event_type == LocalActivityKind::KeptLocalCopy)
-            .map(|event| event.file_name)
+            .map(|entry| (entry.kind, entry.file_name, entry.action))
             .collect();
-        assert_eq!(kept, vec!["notes (this PC).txt".to_string()], "one activity event");
-        let feed: Vec<(String, String)> = version_conflict_feed_from_db(db)
-            .unwrap()
-            .into_iter()
-            .map(|entry| (entry.kind, entry.file_name))
-            .collect();
-        assert_eq!(feed, vec![("kept_copy".to_string(), "notes (this PC).txt".to_string())], "one review entry");
+        assert_eq!(
+            feed,
+            vec![("kept_copy".to_string(), "notes (this PC).txt".to_string(), "dismiss".to_string())],
+            "one review entry"
+        );
+        assert!(
+            std::fs::read_dir(sync_root).unwrap().all(|entry| !entry.unwrap().file_name().to_string_lossy().ends_with(".tmp")),
+            "no temporary copy is left"
+        );
     }
 
     #[test]
@@ -26700,7 +26869,7 @@ mod tests {
         // The web trashed the folder: the `file_trash` op's rows.
         let rows = db.mark_subtree_trashing("folder-docs").unwrap();
         assert_eq!(rows.len(), 2, "the folder and its file");
-        remove_pruned_entries(&db, &sync_root, &rows, &|_| Some(false));
+        remove_pruned_entries(&db, &sync_root, &rows, &|_| LocalEntry::WhollyLocal);
         regression_1640_assert_kept_as_a_copy(&db, &sync_root);
     }
 
@@ -26713,7 +26882,7 @@ mod tests {
         let seen: HashSet<String> = ["a-file-the-snapshot-still-lists".to_string()].into();
         let rows = db.prune_absent(&seen, 1_800_000_000).unwrap();
         assert_eq!(rows.len(), 2, "the folder and its file");
-        remove_pruned_entries(&db, &sync_root, &rows, &|_| Some(false));
+        remove_pruned_entries(&db, &sync_root, &rows, &|_| LocalEntry::WhollyLocal);
         regression_1640_assert_kept_as_a_copy(&db, &sync_root);
     }
 
@@ -26722,9 +26891,42 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
         let rows = db.mark_subtree_trashing("folder-docs").unwrap();
-        remove_pruned_entries(&db, &sync_root, &rows, &|_| Some(true));
+        remove_pruned_entries(&db, &sync_root, &rows, &|_| LocalEntry::InSync);
         assert!(!sync_root.join("docs").exists(), "agreed bytes and the then-empty folder are removed");
         assert!(version_conflict_feed_from_db(&db).unwrap().is_empty());
+    }
+
+    /// Review N2: an atomic save leaves a plain file (never in sync) holding the agreed bytes. It
+    /// is removed like a file in sync: no false "(this PC)" duplicate.
+    #[test]
+    fn regression_1640_an_agreed_plain_file_is_removed_without_a_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
+        db.record_local_baseline("file-notes", 2, &sha256_hex(b"edited, never sent")).unwrap();
+        let rows = db.mark_subtree_trashing("folder-docs").unwrap();
+        remove_pruned_entries(&db, &sync_root, &rows, &|_| LocalEntry::WhollyLocal);
+        assert!(!sync_root.join("docs").exists(), "removed, folder and all");
+        assert!(!sync_root.join("notes (this PC).txt").exists(), "no copy of the agreed bytes");
+        assert!(db.list_kept_copies().unwrap().is_empty());
+    }
+
+    /// Review N6: a file with no bytes on disk is removed without reading it (nothing to keep);
+    /// one with only some is left as it is (reading it would fetch the rest).
+    #[test]
+    fn regression_1640_a_file_with_no_or_only_some_local_bytes_is_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
+        let rows = db.mark_subtree_trashing("folder-docs").unwrap();
+        remove_pruned_entries(&db, &sync_root, &rows, &|_| LocalEntry::PartlyLocal);
+        assert_eq!(
+            std::fs::read(sync_root.join("docs").join("notes.txt")).unwrap(),
+            b"edited, never sent",
+            "partly on disk: kept in place"
+        );
+        assert!(!sync_root.join("notes (this PC).txt").exists(), "and not copied");
+        remove_pruned_entries(&db, &sync_root, &rows, &|_| LocalEntry::NothingLocal);
+        assert!(!sync_root.join("docs").exists(), "nothing on disk: removed");
+        assert!(db.list_kept_copies().unwrap().is_empty());
     }
 
     #[test]
@@ -26734,7 +26936,7 @@ mod tests {
         // A new file the upload driver has not sent yet: no row at all.
         std::fs::write(sync_root.join("docs").join("new.txt"), b"not uploaded yet").unwrap();
         let rows = db.mark_subtree_trashing("folder-docs").unwrap();
-        remove_pruned_entries(&db, &sync_root, &rows, &|_| Some(true));
+        remove_pruned_entries(&db, &sync_root, &rows, &|_| LocalEntry::InSync);
         assert!(!sync_root.join("docs").join("notes.txt").exists(), "the agreed file is removed");
         assert_eq!(
             std::fs::read(sync_root.join("docs").join("new.txt")).unwrap(),
@@ -26749,9 +26951,9 @@ mod tests {
         let original = dir.path().join("notes.txt");
         std::fs::write(&original, b"mine").unwrap();
         std::fs::write(dir.path().join("notes (this PC).txt"), b"an earlier copy").unwrap();
-        let copy = copy_beside_as_this_pc(&original).unwrap();
+        let (copy, hash) = copy_as_this_pc(&original, dir.path()).unwrap();
         assert_eq!(copy, dir.path().join("notes (this PC 2).txt"));
-        assert_eq!(std::fs::read(&copy).unwrap(), b"mine");
+        assert_eq!((std::fs::read(&copy).unwrap(), hash), (b"mine".to_vec(), sha256_hex(b"mine")));
         assert_eq!(
             std::fs::read(dir.path().join("notes (this PC).txt")).unwrap(),
             b"an earlier copy",
@@ -26759,9 +26961,74 @@ mod tests {
         );
         let bare = dir.path().join("Makefile");
         std::fs::write(&bare, b"all:").unwrap();
-        assert_eq!(copy_beside_as_this_pc(&bare).unwrap(), dir.path().join("Makefile (this PC)"));
+        assert_eq!(copy_as_this_pc(&bare, dir.path()).unwrap().0, dir.path().join("Makefile (this PC)"));
+        assert!(
+            std::fs::read_dir(dir.path()).unwrap().all(|entry| !entry.unwrap().file_name().to_string_lossy().ends_with(".tmp")),
+            "no temporary copy is left"
+        );
     }
 
+    /// Review N3: a copy kept from a folder trashed on the web goes where it can upload (the
+    /// trashed folder would be refused as its parent) and reaches the server; emptying the trash
+    /// later does not take the copy with it.
+    #[tokio::test]
+    async fn regression_1640_a_kept_copy_from_a_trashed_folder_uploads_where_it_can() {
+        let master_key = [180u8; 32];
+        let (_dir, sync_root, server, bridge) = rule3_setup(master_key);
+        regression_1640_edited_file_in_a_folder_in(&bridge.db, &sync_root);
+        let rows = bridge.db.mark_subtree_trashing("folder-docs").unwrap();
+        remove_pruned_entries(&bridge.db, &sync_root, &rows, &|_| LocalEntry::WhollyLocal);
+        let copy = sync_root.join("notes (this PC).txt");
+        assert!(crate::watcher::dispatch_local_create(&bridge, &sync_root, &copy, "scan"));
+        drain_upload_queue(&bridge, &sync_root).await;
+        let emptied = bridge.db.delete_file_subtree("folder-docs").unwrap();
+        assert!(
+            emptied.iter().all(|row| row.path.starts_with("docs")),
+            "emptying the trash takes only the trashed folder: {emptied:?}"
+        );
+        let state = server.finish();
+        let created: Vec<&serde_json::Value> = state.inits.iter().map(|(body, _)| body).collect();
+        assert_eq!(created.len(), 1, "one upload: the copy");
+        assert!(created[0]["file_id"].is_null(), "a new file");
+        assert!(created[0]["parent_id"].is_null(), "at the top, not under the trashed folder");
+        let server_id = state.files_with_content()[0].clone();
+        assert_eq!(state.latest_plaintext(&server_id, master_key), b"edited, never sent");
+    }
+
+    /// Review N13: a copy made while the original could not be removed (in use) is recorded; the
+    /// upload driver never sends that original; a later tick removes it, and never copies the same
+    /// bytes twice. The entry can be dismissed once the original is gone.
+    #[cfg(unix)]
+    #[test]
+    fn regression_1640_an_original_in_use_is_removed_later_and_never_copied_twice() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
+        let docs = sync_root.join("docs");
+        let rows = db.mark_subtree_trashing("folder-docs").unwrap();
+        // The original cannot be removed: its folder refuses changes.
+        std::fs::set_permissions(&docs, std::fs::Permissions::from_mode(0o555)).unwrap();
+        remove_pruned_entries(&db, &sync_root, &rows, &|_| LocalEntry::WhollyLocal);
+        let kept = db.list_kept_copies().unwrap();
+        assert_eq!((kept.len(), kept[0].original_removed), (1, false), "copied; the original stays for now");
+        assert!(db.is_kept_original_pending("docs/notes.txt").unwrap(), "the upload driver skips it");
+        assert!(!db.dismiss_kept_copy(kept[0].id).unwrap(), "not dismissed while its original waits");
+        let copies = |root: &Path| {
+            std::fs::read_dir(root)
+                .unwrap()
+                .filter(|entry| entry.as_ref().unwrap().file_name().to_string_lossy().contains("(this PC"))
+                .count()
+        };
+        retry_kept_originals(&db, &sync_root, &|_| LocalEntry::WhollyLocal);
+        assert_eq!(copies(&sync_root), 1, "still in use: retried later, not copied again");
+        std::fs::set_permissions(&docs, std::fs::Permissions::from_mode(0o755)).unwrap();
+        retry_kept_originals(&db, &sync_root, &|_| LocalEntry::WhollyLocal);
+        assert!(!docs.join("notes.txt").exists(), "a later tick removes the original");
+        assert_eq!(copies(&sync_root), 1, "and never copies the same bytes twice");
+        assert!(!db.is_kept_original_pending("docs/notes.txt").unwrap());
+        assert!(db.dismiss_kept_copy(kept[0].id).unwrap(), "now it can be dismissed");
+        assert!(version_conflict_feed_from_db(&db).unwrap().is_empty());
+    }
 
     // ── Task 1640, review P1-2: a baseline names the downloaded version, and only whole bytes ──
 

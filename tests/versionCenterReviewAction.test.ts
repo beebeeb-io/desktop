@@ -14,6 +14,13 @@ import { describe, expect, test } from 'bun:test'
 import { reviewEntryAction } from '../src/desktopApi'
 
 describe('reviewEntryAction', () => {
+  test('a kept copy (task 1640) gets a Dismiss button: it needs no decision', () => {
+    expect(reviewEntryAction({ kind: 'kept_copy', action: 'dismiss' })).toEqual({
+      kind: 'dismiss',
+      label: 'Dismiss',
+    })
+  })
+
   test('a real conflict still gets the Review button', () => {
     expect(reviewEntryAction({ kind: 'conflict', action: 'open_conflict' })).toEqual({
       kind: 'open_conflict',

@@ -65,6 +65,8 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
   const [notice, setNotice] = useState<string | null>(null)
   const [versionNotice, setVersionNotice] = useState<string | null>(null)
   const [restoring, setRestoring] = useState<string | null>(null)
+  // Task 1640: a dismissed entry reloads the feed.
+  const [reloads, setReloads] = useState(0)
 
   const selectedEntry = selected ?? entries[0] ?? null
 
@@ -94,13 +96,15 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
     return () => {
       cancelled = true
     }
-  }, [refreshSignal])
+  }, [refreshSignal, reloads])
 
   useEffect(() => {
     let cancelled = false
     const loadVersions = async () => {
-      if (!selectedEntry) {
+      // Task 1640: a kept copy's file was deleted elsewhere; it has no versions to show here.
+      if (!selectedEntry || selectedEntry.kind === 'kept_copy') {
         setVersions([])
+        setVersionNotice(null)
         return
       }
       setVersionNotice(null)
@@ -178,7 +182,22 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
     })
   }
 
+  const dismissEntry = async (entry: VersionConflictEntry) => {
+    const result = await command<void>('dismiss_review_entry', { entryId: entry.id })
+    if (!result.ok) {
+      showToast({
+        variant: 'error',
+        title: 'Couldn’t dismiss',
+        message: result.unsupported ? commandUnavailableLabel('dismiss_review_entry') : result.reason,
+      })
+      return
+    }
+    setReloads((value) => value + 1)
+  }
+
   const metrics = useMemo(() => reviewCounts(entries), [entries])
+  // Task 1640: a kept copy is informational; only entries that need a decision turn the dot red.
+  const needsAttention = conflicts > 0 || entries.some((entry) => entry.kind !== 'kept_copy')
 
   return (
     <section className="page">
@@ -188,7 +207,7 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
           <p className="page-copy">Files that need a decision from you, and changes Beebeeb couldn’t send yet.</p>
         </div>
         <span className="status-pill">
-          <span className={`dot ${conflicts > 0 || entries.length > 0 ? 'error' : 'ok'}`} />
+          <span className={`dot ${needsAttention ? 'error' : 'ok'}`} />
           {refreshing ? 'Refreshing' : `${entries.length} review item${entries.length === 1 ? '' : 's'}`}
         </span>
       </div>
@@ -241,6 +260,13 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
                   if (reviewAction.kind === 'open_conflict') {
                     return (
                       <button className="button" onClick={() => void openConflict(entry)}>
+                        {reviewAction.label}
+                      </button>
+                    )
+                  }
+                  if (reviewAction.kind === 'dismiss') {
+                    return (
+                      <button className="button" onClick={() => void dismissEntry(entry)}>
                         {reviewAction.label}
                       </button>
                     )

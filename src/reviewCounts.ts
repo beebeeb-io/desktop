@@ -21,6 +21,7 @@ const COULD_NOT_BE_SENT: ReadonlyArray<VersionConflictEntry['kind']> = [
 export function reviewCounts(entries: ReadonlyArray<Pick<VersionConflictEntry, 'kind'>>): { notSent: number; changedElsewhere: number } {
   return {
     notSent: entries.filter((entry) => COULD_NOT_BE_SENT.includes(entry.kind)).length,
-    changedElsewhere: entries.filter((entry) => entry.kind === 'stale_base').length,
+    // Task 1640: a kept copy (changes kept from a file deleted elsewhere) is counted here too.
+    changedElsewhere: entries.filter((entry) => entry.kind === 'stale_base' || entry.kind === 'kept_copy').length,
   }
 }
