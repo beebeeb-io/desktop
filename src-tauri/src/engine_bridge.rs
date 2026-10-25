@@ -28539,6 +28539,56 @@ mod tests {
         drop(server.finish());
     }
 
+    // ── Task 1640 follow-up: a new file is scanned again once its row exists ──
+
+    /// Every upload queued for `rel_path`, under any file id.
+    fn regression_1640_uploads_queued_for(bridge: &EngineBridge, rel_path: &str) -> usize {
+        bridge
+            .db
+            .list_due_operations(i64::MAX)
+            .unwrap()
+            .iter()
+            .filter(|op| op.target_path.as_deref() == Some(rel_path))
+            .count()
+    }
+
+    /// A new file the scan queued is a tracked file from then on. A scan while its upload is
+    /// queued queues nothing more (under any id); once it landed, an atomic save of it (no change
+    /// notification) is seen by the next scan and sent on the version that landed. Before, the
+    /// scan kept skipping the path (its `in_flight` set) until it left the disk, so that save
+    /// waited for a restart.
+    #[tokio::test]
+    async fn regression_1640_a_new_file_is_scanned_again_once_its_row_exists() {
+        let master_key = [190u8; 32];
+        let (_dir, sync_root, server, bridge) = rule3_setup(master_key);
+        let local = sync_root.join("fresh.txt");
+        std::fs::write(&local, b"made on this PC").unwrap();
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        assert_eq!(regression_1640_uploads_queued_for(&bridge, "fresh.txt"), 1, "precondition: queued as a new file");
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        assert_eq!(regression_1640_uploads_queued_for(&bridge, "fresh.txt"), 1, "no second upload while it is queued");
+        drain_upload_queue(&bridge, &sync_root).await;
+        let row = bridge.db.get_file_by_path("fresh.txt").unwrap().unwrap();
+        assert_eq!(row.status, FileStatus::Local, "precondition: landed");
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        assert_eq!(regression_1640_uploads_queued_for(&bridge, "fresh.txt"), 0, "landed, unchanged: nothing");
+        // An atomic save: the new bytes written elsewhere, then renamed over the file.
+        let saved = sync_root.join("fresh.txt.tmp");
+        std::fs::write(&saved, b"saved by an editor").unwrap();
+        std::fs::rename(&saved, &local).unwrap();
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        let ops = bridge.db.list_operations_for_file(&row.file_id).unwrap();
+        assert_eq!(
+            (regression_1640_uploads_queued_for(&bridge, "fresh.txt"), ops.len()),
+            (1, 1),
+            "the save is queued, as an edit of the file"
+        );
+        assert_eq!(ops[0].base_version, Some(1), "on the version that landed");
+        drain_upload_queue(&bridge, &sync_root).await;
+        let state = server.finish();
+        assert_eq!(state.latest_plaintext(&row.file_id, master_key), b"saved by an editor");
+    }
+
     // ── Task 2190: a concurrent edit (this device and the web), as main behaves today ──
     //
     // The file is edited here and on the web before this device syncs, the tick runs, then the
