@@ -536,3 +536,34 @@ flow owner is `main`. Until slice 3 the tray click still shows the compact flyou
 `surfaces::policy::compact_window_label`); until slice 2 sign-in is still the `onboarding` window, which the signed-out
 card in `main` opens. Tests: `tests/mainWindowModel.test.ts`, `tests/macApp.test.tsx`, `surfaces::{policy, registry,
 window_state, config_tests}`, `main_window_tests` in `lib.rs`; Chromium: `tests/render-mac-app.mjs`.
+
+---
+
+<a id="two-surface-slice-4"></a>
+
+## Two-surface slice 4: Review and Trash (task 1683)
+
+Added 2026-10-25. `CLAUDE.md` keeps the evergreen rules ("macOS window rules"); this is the slice's narrative.
+
+The window's sidebar gained Review (⌘2) and Trash (⌘3). Review replaces "Versions & conflicts", the per-conflict windows and
+the version-history modal on a Mac; Trash is the Windows shell's Trash in the window's rows. Both read the local state
+or the server through commands that already existed (`list_version_conflict_center`, `conflict_content_preview`,
+`resolve_conflict`, `list_file_versions`, `restore_file_version`, `desktop_search_files`, `desktop_trash_list`,
+`desktop_trash_restore`, `desktop_confirm_action`, `desktop_trash_delete_permanently`): the slice is UI and routing, no new
+engine behaviour. The one Rust change of substance is where a conflict goes: `surfaces::policy::conflict_target`
+answers `Review` on a Mac, `conflict_auto_opens_window` follows it, and `open_conflict_window_impl` opens the Beebeeb
+window on Review instead of building `conflict-<id>`.
+
+Decisions recorded here because they are not obvious from the code: (1) the detail line of a Review row is a plain
+sentence per kind, written in Rust (`REVIEW_DETAIL_*`, `engine_bridge.rs`); the failure's own text (an HTTP status, a
+URL with a port) stays in `VersionConflictEntry::last_error` and no surface renders it; (2) the feed lists only changes
+that FAILED (`state_db::list_review_operations` filters on `last_error`), and "stale_base" is what the failure says, not
+what every version upload carries: before, a healthy queued edit of an existing file was in Review as "changed
+elsewhere" (probed with a scratch test, task 1683 slice 4), which would have lit the sidebar badge on every save; (3) the
+feed lives in one module-level store so the badge and the pane cannot disagree, and it drops its rows when the last
+reader stops, so a locked vault or a switched account never shows the previous rows; (4) the version-history sheet opens
+on its search field, the conflict and delete sheets on their close button (§11); (5) the notification click route exists
+and is pinned, but nothing can trigger it yet: `tauri-plugin-notification` 2.3.3 raises desktop notifications through
+`notify-rust`, which gives the app no click; the trigger (a native `UNUserNotificationCenter` delegate, needing a device
+pass) is task 2181, recorded in the spec's A17 and §12 row 4; (6) the feed carries no folder, so a row has no folder
+line (the hi-fi draws one): the smallest read is a `folder` field on `VersionConflictEntry`.
