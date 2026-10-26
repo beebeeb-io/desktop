@@ -736,11 +736,13 @@ fn handle_fully_on_disk(file: &std::fs::File) -> bool {
 
 /// Desktop 0.8.15 (the hydration storm): open `path` to read its placeholder state, as the reparse
 /// point and with attribute access only (`FILE_READ_ATTRIBUTES`, no `FILE_READ_DATA`). 0.8.14
-/// opened these with read access; on a PC with 8,592 cloud-only files of unknown content its
-/// start-up guard was followed by a whole-file fetch of 5,294 of them, one per file in the
-/// guard's own order, ~42 GB in two hours, until the disk was full. A handle that cannot read
-/// data gives a scanner hooked on opens nothing to read, and `CfGetPlaceholderInfo` needs no more
-/// (the native probe `desktop_0815_probe_the_guard_reads_a_cloud_only_file_without_fetching_it`).
+/// opened these with read access, and on Windows that open of a cloud-only placeholder asks this
+/// provider for the WHOLE file: the native probe
+/// `desktop_0815_probe_the_guard_reads_a_cloud_only_file_without_fetching_it` counts one
+/// FETCH_DATA for all 8 MiB of its file, requested by the test's own process, after one such
+/// open, and none after these reads. On Guus's PC the 0.8.14 start-up guard's opens fetched
+/// 5,294 cloud-only files whole, one after another in the guard's own row order, ~42 GB in two
+/// hours, until C: was full. `CfGetPlaceholderInfo` needs no more than this handle.
 fn open_for_state(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows::Win32::Storage::FileSystem::{
