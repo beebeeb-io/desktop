@@ -1343,50 +1343,89 @@ pub fn reconcile_placeholder_state(sync_root: &std::path::Path) {
 /// in-sync placeholder is a Windows no-op).
 const MAX_IN_SYNC_STAMPS_PER_PASS: usize = 512;
 
-/// Task 1640 (review N13): retry the removal of every kept copy's original that was in use when
-/// the copy was made ([`crate::engine_bridge::retry_kept_originals`]).
 #[cfg(target_os = "windows")]
-/// Task 2191 (D2, D9): at engine start, before the first tick, every file of unknown content
-/// (synced before task 1640) whose placeholder holds bytes and reads in sync is marked NOT in
-/// sync, so neither this app, Explorer nor Storage Sense frees it. No network. Counts only.
-pub fn guard_unknown_placeholders(sync_root: &std::path::Path) {
+/// Task 2191 (D2, D9): at engine start, every file of unknown content (synced before task 1640)
+/// whose placeholder holds bytes and reads in sync is marked NOT in sync, so neither this app,
+/// Explorer nor Storage Sense frees it. No network. Counts only.
+///
+/// Desktop 0.8.15: this pass runs beside the engine (`runner::spawn_startup_guard`), as pass
+/// `generation` of [`crate::unknown_check::STARTUP_GUARD`]: it reports its progress there (and in
+/// an info line every [`crate::unknown_check::GUARD_PROGRESS_EVERY`] rows), stops between rows
+/// when the engine stops, and only a pass that walked every row lets freeing work run.
+pub fn guard_unknown_placeholders(sync_root: &std::path::Path, generation: u64) {
+    use crate::unknown_check::{GuardControl, STARTUP_GUARD, guard_progress_due};
     let Some(bridge) = bridge() else {
+        STARTUP_GUARD.abandon(generation);
+        tracing::warn!("guard: the engine stopped before the start-up pass began");
         return;
     };
     let rows = match bridge.db().list_guarded() {
         Ok(rows) => rows,
         Err(e) => {
-            tracing::warn!(error = %e, "guard: could not list the files of unknown content");
+            STARTUP_GUARD.abandon(generation);
+            tracing::warn!(error = %e, "guard: could not list the files of unknown content; freeing stays held");
             return;
         }
     };
+    let total = rows.len();
+    STARTUP_GUARD.set_total(generation, total as u64);
+    tracing::info!(guarded = total, "guard: start-up pass began");
+    let started = std::time::Instant::now();
+    // A lock or a sign-out waits at most 3 s for this lease (`revoke_callbacks`): stop between rows.
+    let stop = || bridge.is_revoked() || bridge.is_stopping();
+    let mut progress = |done: usize| {
+        STARTUP_GUARD.advance(generation, done as u64);
+        if guard_progress_due(done, total) {
+            tracing::info!(done, total, elapsed_secs = started.elapsed().as_secs(), "guard: progress");
+        }
+    };
     let mut mark = |path: &std::path::Path| placeholders::mark_not_in_sync_path(path);
-    match crate::unknown_check::guard_rows(bridge.db(), sync_root, &rows, &placeholders::platform_view, &mut mark) {
-        Ok(summary) => tracing::info!(
-            guarded = rows.len(),
-            marked = summary.marked,
-            emptied = summary.emptied,
-            mark_failed = summary.mark_failed,
-            "guard: files of unknown content kept from being freed"
-        ),
-        Err(e) => tracing::warn!(error = %e, "guard: the start-up pass stopped"),
+    let mut control = GuardControl { stop: &stop, progress: &mut progress };
+    match crate::unknown_check::guard_rows(bridge.db(), sync_root, &rows, &placeholders::platform_view, &mut mark, &mut control) {
+        Ok(summary) if !summary.stopped => {
+            STARTUP_GUARD.finish(generation);
+            tracing::info!(
+                guarded = total,
+                marked = summary.marked,
+                emptied = summary.emptied,
+                mark_failed = summary.mark_failed,
+                elapsed_secs = started.elapsed().as_secs(),
+                "guard: files of unknown content kept from being freed"
+            );
+        }
+        Ok(summary) => {
+            STARTUP_GUARD.abandon(generation);
+            tracing::info!(walked = summary.walked, guarded = total, "guard: the start-up pass stopped with the engine");
+        }
+        Err(e) => {
+            STARTUP_GUARD.abandon(generation);
+            tracing::warn!(error = %e, "guard: the start-up pass stopped; freeing stays held");
+        }
     }
 }
 
 /// Task 2191 (D2, D12): every tick, the marks still to be made (a failed one, a row that joined
-/// the guarded set, a placeholder left at another path). No network. Counts only.
+/// the guarded set, a placeholder left at another path). No network. Counts only. Desktop
+/// 0.8.15: skipped while the start-up pass walks the rows (it covers them; two walkers would
+/// open every placeholder twice), and stopped between rows when the engine stops.
 pub fn retry_pending_marks(sync_root: &std::path::Path) {
+    if crate::unknown_check::STARTUP_GUARD.is_running() {
+        return;
+    }
     let Some(bridge) = bridge() else {
         return;
     };
+    let stop = || bridge.is_revoked() || bridge.is_stopping();
     let mut mark = |path: &std::path::Path| placeholders::mark_not_in_sync_path(path);
-    match crate::unknown_check::retry_marks(bridge.db(), sync_root, &placeholders::platform_view, &mut mark) {
+    match crate::unknown_check::retry_marks(bridge.db(), sync_root, &placeholders::platform_view, &mut mark, &stop) {
         Ok(0) => {}
         Ok(marked) => tracing::info!(marked, "guard: pending marks made"),
         Err(e) => tracing::warn!(error = %e, "guard: the retry stopped"),
     }
 }
 
+/// Task 1640 (review N13): retry the removal of every kept copy's original that was in use when
+/// the copy was made ([`crate::engine_bridge::retry_kept_originals`]).
 pub fn retry_kept_originals(sync_root: &std::path::Path) {
     let Some(bridge) = bridge() else {
         return;

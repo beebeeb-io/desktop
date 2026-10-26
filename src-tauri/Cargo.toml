@@ -299,6 +299,15 @@ windows = { version = "0.58", features = [
 # `windows` crate's interfaces expect (type-identity errors).
 windows-core = "0.58"
 
+# 0.8.15: turn off WebView2's browser shortcuts (Ctrl+P / Ctrl+Shift+P print, F5 / Ctrl+R reload, Ctrl+F find, ...) in
+# every app window. Tauri 2.11 does not expose wry's `with_browser_accelerator_keys`, so `lib.rs`
+# (`webview2_browser_keys`) reaches the WebView2 controller through `Webview::with_webview` and sets them off itself.
+# Both crates are the versions wry 0.55 already links (Cargo.lock lists them before this line was added); no new crate
+# is downloaded. `windows-core` 0.61 is renamed because 0.58 above stays the `windows` crate's: it supplies the
+# `Interface::cast` the WebView2 0.61 interfaces need.
+webview2-com = "0.38"
+windows-core-webview2 = { package = "windows-core", version = "0.61" }
+
 [dev-dependencies]
 tempfile = "3"
 # Same 3.x Tauri itself merges platform configs with (already in Cargo.lock);

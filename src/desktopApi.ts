@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { accountSessionRevision, observeAccountSession, observeSignOutWarning, subscribeAccountSession } from './accountSession'
 import { parsePopoverSnapshot, type PopoverSnapshot } from './popoverContract'
+import { parseSyncActivitySummary, type SyncActivitySummary } from './windows/syncActivityModel'
 import type { AskCounts } from './signOutCopy'
 
 export type CommandResult<T> =
@@ -29,6 +30,12 @@ export interface SyncStatus {
    * PC, or an earlier engine stop was never confirmed. Parsed by `loadSyncStatus`; null otherwise.
    */
   engine_refusal?: EngineRefusal | null
+  /**
+   * Desktop 0.8.15 (engine lane, `fix/0815-guard-nonblocking`): the start-up guard's pass over the files of unknown
+   * content, `{running, done, total}`, live on every status read. Absent from builds without it; the sync activity
+   * model then falls back to the last pass `sync_activity_summary` heard of.
+   */
+  startup_guard?: { running: boolean; done: number; total: number } | null
 }
 
 /** The closed set of `sync_status.engine_refusal` codes (`account_binding::Refusal::code()` in Rust). */
@@ -502,6 +509,25 @@ export async function loadSyncStatus(): Promise<SyncStatus | null> {
     observeAccountSession(result.value.session_revision)
   }
   return result.ok ? { ...result.value, engine_refusal: parseEngineRefusal(result.value.engine_refusal) } : null
+}
+
+/**
+ * What sync is doing, in counts (0.8.15): the live pause flag, the engine's last state, what is moving, the queue held
+ * and given up, and the startup check while it runs. Settings › Sync and the Windows tray popover poll it next to
+ * `sync_status`; `syncActivityView` turns the two into words. Null when it cannot be read or is not the contract's shape.
+ */
+export async function loadSyncActivitySummary(): Promise<SyncActivitySummary | null> {
+  const result = await command<unknown>('sync_activity_summary')
+  return result.ok ? parseSyncActivitySummary(result.value) : null
+}
+
+/**
+ * Pause or resume syncing: the same backend the app menu and the tray menu use (`set_sync_paused` in Rust, through
+ * `tray_pause_sync` / `tray_resume_sync`). It persists `pause_sync` and emits `engine-status`, so every open surface
+ * follows.
+ */
+export function setSyncPaused(paused: boolean): Promise<CommandResult<void>> {
+  return command<void>(paused ? 'tray_pause_sync' : 'tray_resume_sync')
 }
 
 /** The current engine refusal, or `null` when there is none or the status cannot be read. */

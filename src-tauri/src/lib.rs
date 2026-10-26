@@ -92,7 +92,11 @@ mod sign_out;
 mod staged_payload;
 mod state_db;
 mod state_paths;
+// 0.8.15: the read Settings › Sync and the Windows tray poll to say what sync is doing (counts only).
+mod sync_activity;
 mod transfer_progress;
+// 0.8.15: WebView2's browser shortcuts (print, reload, find, ...) are off in every window; no-op off Windows.
+mod webview_browser_keys;
 mod write_token;
 // Task 1683 slice 1: pure macOS-popover surface logic, compiled and tested on every
 // platform. Slices 2-6 wire the rest of it; until then only `policy` has callers,
@@ -9552,14 +9556,17 @@ async fn sync_status(state: State<'_, AppState>) -> Result<serde_json::Value, St
                         .ok()
                         .map(|v| v.len() as u32)
                         .unwrap_or(0);
-                    (downloading + uploading, cloud_only, conflicts)
+                    // Desktop 0.8.15: queued changes held back (the `auth` pause) are not
+                    // syncing; the UI shows them as "N changes on hold".
+                    let on_hold = db.count_operations_on_hold().unwrap_or(0);
+                    (downloading + uploading, cloud_only, conflicts, on_hold)
                 })
-                .unwrap_or((0, 0, 0))
+                .unwrap_or((0, 0, 0, 0))
         } else {
-            (0, 0, 0)
+            (0, 0, 0, 0)
         }
     } else {
-        (0, 0, 0)
+        (0, 0, 0, 0)
     };
 
     Ok(serde_json::json!({
@@ -9575,6 +9582,11 @@ async fn sync_status(state: State<'_, AppState>) -> Result<serde_json::Value, St
         "syncing": counts.0,
         "cloud_only": counts.1,
         "conflicts": counts.2,
+        // Desktop 0.8.15: changes held back, never counted in `syncing`.
+        "changes_on_hold": counts.3,
+        // Desktop 0.8.15: the start-up guard's pass, `{running, done, total}` (Windows; at rest
+        // elsewhere). While it runs, uploads and downloads flow; only freeing work waits.
+        "startup_guard": crate::unknown_check::STARTUP_GUARD.progress(),
         // WS1 — storage byte totals for the tray status line.
         // These are `null` here because polling the billing API on every
         // 3-second status tick would hammer the server. The tray's
@@ -10888,6 +10900,28 @@ async fn tray_resume_sync(app: tauri::AppHandle) -> Result<(), String> {
     set_sync_paused(&app, false).await
 }
 
+/// What sync is doing, for Settings › Sync and the Windows tray popover (0.8.15, see [`sync_activity`]): the live pause
+/// flag, the engine's last state, what is moving, the queue in counts, and the startup check while it runs. Counts
+/// only; reading it changes nothing and needs no session, so it answers while the vault is locked too.
+#[tauri::command]
+async fn sync_activity_summary(
+    state: State<'_, AppState>,
+    runtime: State<'_, popover_data::PopoverRuntime>,
+) -> Result<sync_activity::SyncActivitySummary, String> {
+    let paused = state.active_account()?.sync_paused.load(Ordering::Relaxed);
+    let engine = runtime.status.lock().map(|view| view.clone()).unwrap_or_default();
+    let transfers_active = runtime.transfers.active().len();
+    let queue = tokio::task::spawn_blocking(|| -> Result<Option<state_db::QueueHold>, String> {
+        let Some(db) = DesktopConfig::load().and_then(|cfg| state_db_for_config(&cfg))? else {
+            return Ok(None);
+        };
+        db.queue_hold_summary().map(Some).map_err(|e| format!("read the sync queue: {e}"))
+    })
+    .await
+    .map_err(|e| format!("sync activity task failed: {e}"))??;
+    Ok(sync_activity::summary(paused, &engine, transfers_active, queue))
+}
+
 /// The menu's Pause / Resume item: flips the pause the file holds. Returns which way it went (`true` = pausing) with the
 /// result, so a failure can say which.
 async fn toggle_sync_paused_from_menu(app: &tauri::AppHandle) -> (bool, Result<(), String>) {
@@ -11672,6 +11706,13 @@ struct VaultEntryRow {
     /// Whether this file is currently hydrated on disk (`status == Local`).
     /// Always `false` for folders.
     on_disk: bool,
+    /// The row's path. Rows of the same kind at one path are one entry in the tree (0.8.15, [`one_entry_per_path`]).
+    path: String,
+    /// Whether the server knows the row (`current_version` or `remote_updated_at` set). A folder this PC created and
+    /// never sent has neither.
+    server_known: bool,
+    /// Whether the row's status is `local`, the status a folder this PC created and never sent keeps.
+    local_status: bool,
 }
 
 /// Mutable accumulator for one folder while we aggregate the subtree.
@@ -11769,6 +11810,71 @@ fn list_shared_roots() -> Result<Vec<DesktopSharedRoot>, String> {
     shared_roots_from_db(&db, sync_root.as_deref())
 }
 
+/// One state DB row as the tree builder reads it.
+fn vault_entry_row(entry: &state_db::TreeRow) -> VaultEntryRow {
+    VaultEntryRow {
+        id: entry.file_id.clone(),
+        parent_id: entry.parent_id.clone(),
+        is_folder: entry.item_kind == state_db::ItemKind::Folder,
+        name: folder_leaf_name(&entry.path).unwrap_or_else(|| folder_fallback_label(&entry.file_id)),
+        size_bytes: entry.size_bytes,
+        on_disk: entry.status == state_db::FileStatus::Local,
+        path: entry.path.clone(),
+        server_known: entry.current_version > 0 || entry.remote_updated_at > 0,
+        local_status: entry.status == state_db::FileStatus::Local,
+    }
+}
+
+/// One entry per path in the Selective sync tree (0.8.15). Display only.
+///
+/// On Guus's PC 2,828 folder paths had two rows: a folder this PC created on 4 Oct whose `create_folder` never landed
+/// (`local`, no server version, a locally minted id, its operation paused) and the server's folder at the same path,
+/// which arrived later with a snapshot. The tree listed both: the same folder twice, once with 0 B and 0 files.
+///
+/// Here a row the server does not know folds into the row that stays at its path: the server's (a row the server
+/// knows, then one whose status is not `local`, then the smallest id, so the choice is stable). The folded row is not
+/// shown, its children hang under the row that stays, and nothing is counted twice. Two rows the server knows are two
+/// server items, and both stay. Rows with an empty path are left alone.
+///
+/// The state DB and the queue are untouched: nothing is deleted, re-parented on disk or resumed. 0.8.16 repairs the data.
+fn one_entry_per_path(rows: &[VaultEntryRow]) -> Vec<VaultEntryRow> {
+    use std::cmp::Reverse;
+    use std::collections::HashMap;
+
+    let mut at_path: HashMap<(bool, &str), Vec<&VaultEntryRow>> = HashMap::new();
+    for row in rows {
+        let path = row.path.trim_matches('/');
+        if !path.is_empty() {
+            at_path.entry((row.is_folder, path)).or_default().push(row);
+        }
+    }
+    // Folded row id -> the id of the row that stays at its path. A row that stays never folds, so one lookup resolves.
+    let mut folded_into: HashMap<&str, &str> = HashMap::new();
+    for same_path in at_path.values().filter(|rows| rows.len() > 1) {
+        let Some(stays) = same_path
+            .iter()
+            .max_by_key(|row| (row.server_known, !row.local_status, Reverse(row.id.as_str())))
+        else {
+            continue;
+        };
+        for row in same_path {
+            if row.id != stays.id && !row.server_known {
+                folded_into.insert(row.id.as_str(), stays.id.as_str());
+            }
+        }
+    }
+    rows.iter()
+        .filter(|row| !folded_into.contains_key(row.id.as_str()))
+        .map(|row| {
+            let mut row = row.clone();
+            if let Some(stays) = row.parent_id.as_deref().and_then(|parent| folded_into.get(parent)) {
+                row.parent_id = Some((*stays).to_string());
+            }
+            row
+        })
+        .collect()
+}
+
 /// Build the nested SelectiveSync folder tree from a flat set of local
 /// rows (already nested via `parent_id`, from task 0784).
 ///
@@ -11788,7 +11894,15 @@ fn list_shared_roots() -> Result<Vec<DesktopSharedRoot>, String> {
 ///   4. `excluded` is set per-node from the `excluded` id set.
 ///
 /// Children are sorted by lowercased name then id for a stable UI order.
+///
+/// First, one entry per path: a folder this PC created and never sent folds into the server's at its path (0.8.15,
+/// [`one_entry_per_path`]).
 fn build_vault_tree(rows: &[VaultEntryRow], excluded: &std::collections::HashSet<String>) -> Vec<VaultItem> {
+    build_vault_tree_of_rows(&one_entry_per_path(rows), excluded)
+}
+
+/// [`build_vault_tree`] over the rows as they are, with no merge: what 0.8.14 showed.
+fn build_vault_tree_of_rows(rows: &[VaultEntryRow], excluded: &std::collections::HashSet<String>) -> Vec<VaultItem> {
     use std::collections::HashMap;
 
     // 1. Index folders.
@@ -12043,19 +12157,9 @@ async fn list_vault_folders(state: State<'_, AppState>) -> Result<Vec<VaultItem>
 
         // Primary path: build from the local, already-nested state DB.
         if let Ok(Some(db)) = DesktopConfig::load().and_then(|cfg| state_db_for_config(&cfg))
-            && let Ok(entries) = db.list_files()
+            && let Ok(entries) = db.list_tree_rows()
         {
-            let rows: Vec<VaultEntryRow> = entries
-                .iter()
-                .map(|e| VaultEntryRow {
-                    id: e.file_id.clone(),
-                    parent_id: e.parent_id.clone(),
-                    is_folder: e.item_kind == state_db::ItemKind::Folder,
-                    name: folder_leaf_name(&e.path).unwrap_or_else(|| folder_fallback_label(&e.file_id)),
-                    size_bytes: e.size_bytes,
-                    on_disk: e.status == state_db::FileStatus::Local,
-                })
-                .collect();
+            let rows: Vec<VaultEntryRow> = entries.iter().map(vault_entry_row).collect();
             let tree = build_vault_tree(&rows, &excluded);
             if !tree.is_empty() {
                 return Ok(tree);
@@ -14892,7 +14996,9 @@ pub fn run() {
         .manage(AppState::default())
         // Task 1683 slice 2: transfer board, last engine status, cached storage summary.
         .manage(popover_data::PopoverRuntime::default())
-        .plugin(tauri_plugin_opener::init());
+        .plugin(tauri_plugin_opener::init())
+        // 0.8.15: before any window exists, so its `on_webview_ready` sees every webview (Ctrl+Shift+P printed in 0.8.14).
+        .plugin(webview_browser_keys::plugin());
     // Windows and Linux keep the window-state plugin; a Mac keeps the Beebeeb window's frame itself (task 1683 slice 1,
     // review item 5; see `window_state_plugin`).
     #[cfg(not(target_os = "macos"))]
@@ -15046,6 +15152,7 @@ pub fn run() {
             tray_recent_activity,
             tray_pause_sync,
             tray_resume_sync,
+            sync_activity_summary,
             upload_files_to_sync_root,
             create_folder_in_sync_root,
             report_problem,
@@ -15870,12 +15977,44 @@ fn desktop_menu_spec_required(id: &str) -> &'static DesktopMenuSpec {
     desktop_menu_spec(id).unwrap_or_else(|| panic!("missing desktop menu spec: {id}"))
 }
 
+/// The desktop a native menu is built for. Accelerators differ only where that platform's web view takes a key first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MenuPlatform {
+    MacOs,
+    Windows,
+    Linux,
+}
+
+impl MenuPlatform {
+    fn current() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::MacOs
+        } else if cfg!(target_os = "windows") {
+            Self::Windows
+        } else {
+            Self::Linux
+        }
+    }
+}
+
+/// The accelerator `spec` gets on `platform`.
+///
+/// Pause / Resume keeps Cmd+Shift+P on macOS only. On Windows, WebView2 acts on Ctrl+Shift+P first and prints the page
+/// (0.8.14, Guus's PC); a Ctrl+Alt chord would be AltGr on European keyboards. So Windows and Linux get no shortcut for it:
+/// the menu item, the tray menu and Settings › Sync still pause and resume.
+fn menu_accelerator(spec: &DesktopMenuSpec, platform: MenuPlatform) -> Option<&'static str> {
+    match (spec.id, platform) {
+        (MENU_TOGGLE_SYNC_ID, MenuPlatform::Windows | MenuPlatform::Linux) => None,
+        _ => spec.accelerator,
+    }
+}
+
 fn build_desktop_menu_item<M: tauri::Manager<tauri::Wry>>(
     manager: &M,
     spec: &DesktopMenuSpec,
 ) -> tauri::Result<MenuItem<tauri::Wry>> {
     let mut builder = MenuItemBuilder::new(spec.label).id(spec.id);
-    if let Some(accelerator) = spec.accelerator {
+    if let Some(accelerator) = menu_accelerator(spec, MenuPlatform::current()) {
         builder = builder.accelerator(accelerator);
     }
     builder.build(manager)
@@ -17256,8 +17395,10 @@ mod tests {
         MENU_PREFERENCES_ID, MENU_QUIT_ID, MENU_SETTINGS_ID, MENU_SIGN_OUT_ID, MENU_TOGGLE_SYNC_ID,
         MENU_UPLOAD_FILES_ID, MENU_VIEW_ACTIVITY_ID, MENU_VIEW_FILES_ID, MENU_VIEW_SHARED_ID, MENU_VIEW_TRASH_ID,
         MENU_ZOOM_IN_ID, MENU_ZOOM_OUT_ID, MENU_ZOOM_RESET_ID, ManualUpdateCheckResult, MenuZoomAction,
-        UpdateAvailablePayload, VaultEntryRow, WINDOWS_MAIN_APP_VIEW_ROUTES, build_vault_tree, clear_cached_profile,
-        compact_menu_page_for_view, desktop_manifest_path_for_channel, desktop_menu_specs, disposable_cache_roots,
+        UpdateAvailablePayload, VaultEntryRow, VaultItem, WINDOWS_MAIN_APP_VIEW_ROUTES, build_vault_tree,
+        build_vault_tree_of_rows, clear_cached_profile, vault_entry_row,
+        MenuPlatform, compact_menu_page_for_view, desktop_manifest_path_for_channel, desktop_menu_spec_required,
+        desktop_menu_specs, disposable_cache_roots, menu_accelerator,
         file_versions_payload_for_frontend, folder_leaf_name, free_up_space_allowed_roots,
         installed_release_channel_from_config, is_disposable_cache_path, manual_update_available_result,
         manual_update_result_for_remote, manual_update_up_to_date_result, menu_view_nav_target, newly_excluded_ids,
@@ -17277,6 +17418,7 @@ mod tests {
     use crate::config::ReleaseChannel;
     use std::collections::HashSet;
 
+    /// A server-confirmed folder at its own path (`/<id>`), so no two helpers' rows share one.
     fn folder(id: &str, parent: Option<&str>, name: &str) -> VaultEntryRow {
         VaultEntryRow {
             id: id.to_string(),
@@ -17285,9 +17427,13 @@ mod tests {
             name: name.to_string(),
             size_bytes: 0,
             on_disk: false,
+            path: format!("/{id}"),
+            server_known: true,
+            local_status: false,
         }
     }
 
+    /// A server-confirmed file at its own path (`/<id>`).
     fn file(id: &str, parent: Option<&str>, size: i64, on_disk: bool) -> VaultEntryRow {
         VaultEntryRow {
             id: id.to_string(),
@@ -17296,7 +17442,19 @@ mod tests {
             name: String::new(),
             size_bytes: size,
             on_disk,
+            path: format!("/{id}"),
+            server_known: true,
+            local_status: on_disk,
         }
+    }
+
+    /// `row` at `path`, as a row the server knows (status not `local` unless the file is on disk) or as a row this PC
+    /// minted and never sent (status `local`).
+    fn at(mut row: VaultEntryRow, path: &str, server_known: bool) -> VaultEntryRow {
+        row.path = path.to_string();
+        row.server_known = server_known;
+        row.local_status = !server_known || row.on_disk;
+        row
     }
 
     #[test]
@@ -18809,6 +18967,182 @@ mod tests {
         assert!(!d.excluded);
     }
 
+    /// 0.8.15 (Guus's PC, 0.8.14): Selective sync listed one folder twice. One row the server never confirmed (a folder
+    /// this PC created on 4 Oct whose `create_folder` stayed paused) and the server's row at the same path. The tree shows
+    /// one `Archive`, the server's; the never-sent child with a server twin folds into it too; a never-sent child with no
+    /// twin stays, under the server's folder; the same file twice is counted once.
+    #[test]
+    fn selective_sync_shows_one_folder_per_path_preferring_the_server_row() {
+        let rows = vec![
+            at(folder("ghost-archive", None, "Archive"), "Archive", false),
+            at(folder("srv-archive", None, "Archive"), "Archive", true),
+            at(folder("ghost-other", Some("ghost-archive"), "other"), "Archive/other", false),
+            at(folder("srv-other", Some("srv-archive"), "other"), "Archive/other", true),
+            at(folder("ghost-only", Some("ghost-archive"), "new"), "Archive/new", false),
+            at(file("f1", Some("srv-other"), 100, true), "Archive/other/a.txt", true),
+            at(file("f2", Some("srv-archive"), 50, false), "Archive/b.txt", true),
+            at(file("f2-again", Some("srv-archive"), 50, true), "Archive/b.txt", false),
+        ];
+        let tree = build_vault_tree(&rows, &HashSet::new());
+
+        let roots: Vec<(&str, &str)> = tree.iter().map(|n| (n.id.as_str(), n.name.as_str())).collect();
+        assert_eq!(roots, vec![("srv-archive", "Archive")], "one Archive, the server's");
+        let archive = &tree[0];
+        assert_eq!(
+            (archive.size_bytes, archive.file_count, archive.on_disk_bytes),
+            (150, 2, 100),
+            "two files, 150 bytes, 100 of them on disk: nothing counted twice"
+        );
+        let children: Vec<(&str, &str)> = archive.children.iter().map(|c| (c.id.as_str(), c.name.as_str())).collect();
+        assert_eq!(children, vec![("ghost-only", "new"), ("srv-other", "other")]);
+        let other = &archive.children[1];
+        assert_eq!((other.size_bytes, other.file_count, other.on_disk_bytes), (100, 1, 100));
+        assert!(archive.children[0].children.is_empty() && other.children.is_empty());
+        assert_eq!(rows.len(), 8, "the rows themselves are untouched (display only)");
+    }
+
+    /// The merge is narrow: two rows the server confirmed at one path are two server items and both stay (with their
+    /// own online-only state); two never-confirmed rows at one path are one entry (the smallest id, for a stable choice);
+    /// a file and a folder at one path are never merged; a row with no path is left alone.
+    #[test]
+    fn per_path_merge_keeps_two_server_items_and_never_mixes_kinds() {
+        let rows = vec![
+            at(folder("srv-a", None, "Photos"), "Photos", true),
+            at(folder("srv-b", None, "Photos"), "Photos", true),
+            at(folder("ghost-2", None, "Docs"), "Docs", false),
+            at(folder("ghost-1", None, "Docs"), "Docs", false),
+            at(file("a-file-named-docs", Some("ghost-2"), 7, true), "/Docs/", true),
+            at(folder("no-path-1", None, "Folder 1"), "", false),
+            at(folder("no-path-2", None, "Folder 2"), "", true),
+        ];
+        let mut excluded = HashSet::new();
+        excluded.insert("srv-b".to_string());
+        let tree = build_vault_tree(&rows, &excluded);
+
+        let ids: Vec<&str> = tree.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, vec!["ghost-1", "no-path-1", "no-path-2", "srv-a", "srv-b"]);
+        assert_eq!(tree.iter().map(|n| n.excluded).collect::<Vec<_>>(), vec![false, false, false, false, true]);
+        assert_eq!((tree[0].file_count, tree[0].size_bytes), (1, 7), "the file under the folded row counts once");
+    }
+
+    /// What "the server knows the row" is read from: a server version, or a server timestamp (Guus's DB had 16 server
+    /// files with a timestamp and no version filled yet). A folder this PC created and never sent has neither.
+    #[test]
+    fn a_row_is_server_known_by_its_version_or_its_server_timestamp() {
+        let row = |current_version: i64, remote_updated_at: i64, status: crate::state_db::FileStatus| {
+            vault_entry_row(&crate::state_db::TreeRow {
+                file_id: "id".into(),
+                path: "Archive".into(),
+                status,
+                size_bytes: 0,
+                parent_id: None,
+                item_kind: crate::state_db::ItemKind::Folder,
+                current_version,
+                remote_updated_at,
+            })
+        };
+        use crate::state_db::FileStatus::{CloudOnly, Local};
+        assert!(!row(0, 0, Local).server_known && row(0, 0, Local).local_status);
+        assert!(row(3, 0, CloudOnly).server_known && !row(3, 0, CloudOnly).local_status);
+        assert!(row(0, 1_761_480_000, CloudOnly).server_known);
+        assert_eq!((row(0, 0, Local).name, row(0, 0, Local).path), ("Archive".to_string(), "Archive".to_string()));
+    }
+
+    /// The rows behind `tests/fixtures/selective-sync-tree.json`, the browser fixture `tests/render-sync-activity.mjs`
+    /// screenshots: Guus's shape with synthetic names. Every top folder the server knows also has a row this PC created
+    /// on 4 Oct and never sent (and so do two subfolders, under the never-sent parents); every file hangs under the
+    /// server's folders; an `error` row with no parent repeats a file's path. `Music` has no twin.
+    fn guus_shaped_rows() -> Vec<VaultEntryRow> {
+        vec![
+            at(folder("srv-documents", None, "Documents"), "Documents", true),
+            at(folder("srv-photos", None, "Photos"), "Photos", true),
+            at(folder("srv-archive", None, "Archive"), "Archive", true),
+            at(folder("srv-music", None, "Music"), "Music", true),
+            at(folder("srv-taxes", Some("srv-documents"), "Taxes"), "Documents/Taxes", true),
+            at(folder("srv-2026", Some("srv-photos"), "2026"), "Photos/2026", true),
+            at(folder("srv-other", Some("srv-archive"), "other"), "Archive/other", true),
+            at(folder("ghost-documents", None, "Documents"), "Documents", false),
+            at(folder("ghost-photos", None, "Photos"), "Photos", false),
+            at(folder("ghost-archive", None, "Archive"), "Archive", false),
+            at(folder("ghost-taxes", Some("ghost-documents"), "Taxes"), "Documents/Taxes", false),
+            at(folder("ghost-other", Some("ghost-archive"), "other"), "Archive/other", false),
+            at(file("f-report", Some("srv-documents"), 2_400_000, true), "Documents/report.pdf", true),
+            at(file("f-return", Some("srv-taxes"), 860_000, false), "Documents/Taxes/return.pdf", true),
+            at(file("f-beach", Some("srv-2026"), 4_100_000, false), "Photos/2026/beach.jpg", true),
+            at(file("f-hike", Some("srv-2026"), 3_700_000, true), "Photos/2026/hike.jpg", true),
+            at(file("f-disk", Some("srv-other"), 512_000_000, false), "Archive/other/disk.img", true),
+            at(file("f-song", Some("srv-music"), 9_800_000, false), "Music/song.flac", true),
+            at(file("err-report", None, 2_400_000, false), "Documents/report.pdf", false),
+        ]
+    }
+
+    /// The browser fixture is what `build_vault_tree` returns for [`guus_shaped_rows`] (`after`) and what 0.8.14 returned
+    /// (`before`, no merge), so the Selective sync screenshots show the real output of both. `BB_UPDATE_FIXTURES=1`
+    /// rewrites the file.
+    #[test]
+    fn the_selective_sync_browser_fixture_is_the_trees_real_output() {
+        let rows = guus_shaped_rows();
+        let excluded = HashSet::new();
+        let fixture = serde_json::json!({
+            "before": build_vault_tree_of_rows(&rows, &excluded),
+            "after": build_vault_tree(&rows, &excluded),
+        });
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fixtures/selective-sync-tree.json");
+        if std::env::var_os("BB_UPDATE_FIXTURES").is_some() {
+            std::fs::write(path, format!("{}\n", serde_json::to_string_pretty(&fixture).unwrap())).unwrap();
+        }
+        let on_disk: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(on_disk, fixture, "rerun with BB_UPDATE_FIXTURES=1 after a deliberate change");
+        let roots = |tree: &serde_json::Value| -> Vec<String> {
+            tree.as_array().unwrap().iter().map(|n| n["name"].as_str().unwrap().to_string()).collect()
+        };
+        assert_eq!(roots(&fixture["before"]), ["Archive", "Archive", "Documents", "Documents", "Music", "Photos", "Photos"]);
+        assert_eq!(roots(&fixture["after"]), ["Archive", "Documents", "Music", "Photos"]);
+    }
+
+    /// 0.8.15 evidence, not part of the suite: build the tree from a COPY of a real state DB (opening it migrates it),
+    /// named by `BB_SELECTIVE_SYNC_DB`. Prints counts only, never a name.
+    #[test]
+    #[ignore = "reads a real state DB copy named by BB_SELECTIVE_SYNC_DB"]
+    fn selective_sync_tree_from_a_real_state_db_copy() {
+        fn walk(nodes: &[VaultItem], total: &mut usize, sibling_dupes: &mut usize, files: &mut i64, depth: usize) {
+            let mut names: Vec<String> = nodes.iter().map(|n| n.name.to_lowercase()).collect();
+            names.sort();
+            *sibling_dupes += names.windows(2).filter(|pair| pair[0] == pair[1]).count();
+            for node in nodes {
+                *total += 1;
+                if depth == 0 {
+                    *files += node.file_count;
+                }
+                walk(&node.children, total, sibling_dupes, files, depth + 1);
+            }
+        }
+        let path = std::env::var("BB_SELECTIVE_SYNC_DB").expect("BB_SELECTIVE_SYNC_DB names a state.db copy");
+        let db = crate::state_db::StateDb::open(&path).unwrap();
+        let rows: Vec<VaultEntryRow> = db.list_tree_rows().unwrap().iter().map(vault_entry_row).collect();
+        let mut folder_paths: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for row in rows.iter().filter(|row| row.is_folder) {
+            *folder_paths.entry(row.path.trim_matches('/')).or_default() += 1;
+        }
+        let tree = build_vault_tree(&rows, &HashSet::new());
+        let (mut nodes, mut sibling_dupes, mut files) = (0, 0, 0);
+        walk(&tree, &mut nodes, &mut sibling_dupes, &mut files, 0);
+        println!(
+            "rows={} folder_rows={} folder_paths={} folder_paths_with_2+_rows={} tree_roots={} tree_folders={} \
+             sibling_name_duplicates={} files_counted_under_roots={}",
+            rows.len(),
+            rows.iter().filter(|row| row.is_folder).count(),
+            folder_paths.len(),
+            folder_paths.values().filter(|n| **n > 1).count(),
+            tree.len(),
+            nodes,
+            sibling_dupes,
+            files
+        );
+        assert_eq!(nodes, folder_paths.len(), "one tree entry per folder path");
+        assert_eq!(sibling_dupes, 0);
+    }
+
     #[test]
     fn build_tree_is_cycle_safe() {
         // A → B → A parent cycle (corrupt data). With edges A→B and B→A,
@@ -18930,6 +19264,89 @@ mod tests {
         assert_eq!(settings.action, DesktopMenuAction::OpenSettings);
         assert_eq!(preferences.accelerator, Some("CmdOrCtrl+Comma"));
         assert_eq!(settings.accelerator, Some("CmdOrCtrl+Comma"));
+    }
+
+    /// Keys a Chromium web view (WebView2 on Windows) acts on itself, with a meaning other than the menu item's.
+    /// Microsoft's list (ICoreWebView2Settings3: find, print, reload, DevTools, caret browsing, back/forward) plus
+    /// Ctrl+Shift+P, which printed the page on Guus's PC in 0.8.14 instead of pausing sync. The zoom keys are left out on
+    /// purpose: the View menu's Ctrl+= / Ctrl+- / Ctrl+0 mean what WebView2 means by them.
+    const WEB_VIEW_BROWSER_KEYS: &[&str] = &[
+        "Ctrl+P",
+        "Ctrl+Shift+P",
+        "Ctrl+F",
+        "F3",
+        "Ctrl+G",
+        "Ctrl+Shift+G",
+        "Ctrl+R",
+        "Ctrl+Shift+R",
+        "F5",
+        "Ctrl+Shift+C",
+        "Ctrl+Shift+I",
+        "Ctrl+Shift+J",
+        "F7",
+        "F12",
+        "Alt+Left",
+        "Alt+Right",
+    ];
+
+    /// Ctrl+Alt+<key> is AltGr+<key> on most European layouts (it types @, €, { ...), so a menu shortcut there eats a
+    /// character on Windows and Linux.
+    fn is_altgr_chord(accelerator: &str) -> bool {
+        let parts: Vec<&str> = accelerator.split('+').collect();
+        parts.contains(&"Alt") && (parts.contains(&"Ctrl") || parts.contains(&"CmdOrCtrl"))
+    }
+
+    /// 0.8.15: the switch that turns WebView2's browser shortcuts off is registered on the builder, before the `setup`
+    /// hook builds the windows, so its `on_webview_ready` sees every webview.
+    #[test]
+    fn the_browser_keys_plugin_is_registered_before_any_window_is_built() {
+        let source = include_str!("lib.rs").replace("\r\n", "\n");
+        let run = &source[source.find("\npub fn run() {").expect("run()")..];
+        let plugin = run.find(".plugin(webview_browser_keys::plugin())").expect("registered");
+        let setup = run.find(".setup(|app|").expect("run() has a setup hook");
+        assert!(plugin < setup, "the browser-keys plugin is registered in run(), before .setup builds the windows");
+    }
+
+    #[test]
+    fn no_windows_or_linux_menu_shortcut_is_a_web_view_browser_key_or_an_altgr_chord() {
+        let mut checked = 0;
+        for platform in [MenuPlatform::Windows, MenuPlatform::Linux] {
+            for spec in desktop_menu_specs() {
+                let Some(accelerator) = menu_accelerator(spec, platform) else {
+                    continue;
+                };
+                checked += 1;
+                let on_this_platform = accelerator.replace("CmdOrCtrl", "Ctrl");
+                assert!(
+                    !WEB_VIEW_BROWSER_KEYS.contains(&on_this_platform.as_str()),
+                    "{:?}: \"{}\" uses {on_this_platform}, which the web view acts on first",
+                    platform,
+                    spec.label
+                );
+                assert!(
+                    !is_altgr_chord(accelerator),
+                    "{:?}: \"{}\" uses {accelerator}, which is AltGr on European keyboards",
+                    platform,
+                    spec.label
+                );
+            }
+        }
+        // Every other item keeps its shortcut on both platforms: 16 of the 20 items have one there.
+        assert_eq!(checked, 32, "the check must have looked at the shortcuts it guards");
+    }
+
+    #[test]
+    fn pause_and_resume_keeps_its_shortcut_on_macos_only() {
+        let toggle = desktop_menu_spec_required(MENU_TOGGLE_SYNC_ID);
+        assert_eq!(menu_accelerator(toggle, MenuPlatform::MacOs), Some("CmdOrCtrl+Shift+P"));
+        assert_eq!(menu_accelerator(toggle, MenuPlatform::Windows), None);
+        assert_eq!(menu_accelerator(toggle, MenuPlatform::Linux), None);
+        // Nothing else changes per platform.
+        for spec in desktop_menu_specs().iter().filter(|spec| spec.id != MENU_TOGGLE_SYNC_ID) {
+            for platform in [MenuPlatform::MacOs, MenuPlatform::Windows, MenuPlatform::Linux] {
+                assert_eq!(menu_accelerator(spec, platform), spec.accelerator, "{}", spec.label);
+            }
+        }
     }
 
     #[test]

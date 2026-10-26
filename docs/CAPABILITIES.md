@@ -183,13 +183,16 @@ source. These **20 specification entries** are wired (Preferences and Settings
 are aliases). A menu item can still fail at runtime, especially without a root;
 its current failure path is tracing, so U2 must inspect both outcome and visible
 feedback. Accelerators are platform-native, separate from the search/history
-WebView shortcuts.
+WebView shortcuts. On Windows, WebView2's own browser shortcuts (print, reload,
+find, DevTools, caret browsing, back/forward) are turned off in every window
+since 0.8.15 (`webview_browser_keys.rs`); a menu shortcut must not use one of
+them (`no_windows_or_linux_menu_shortcut_is_a_web_view_browser_key_or_an_altgr_chord`).
 
 | Action | Backend / destination | Native check |
 | --- | --- | --- |
 | Preferences; Settings (Ctrl+,) | main window `settings` | Correct page selected |
 | Check for updates (Ctrl+Shift+U) | `menu:check-for-updates`, `consume_menu_update_check`, shared `check_for_updates_now` controller | Same checking/result/error state as Settings; error toast with retry, pending request survives cold window creation |
-| Pause/Resume syncing (Ctrl+Shift+P) | `toggle_sync_paused_from_menu` | Persisted pause and stopped/resumed work |
+| Pause/Resume syncing (Cmd+Shift+P on macOS only; no shortcut on Windows or Linux since 0.8.15, where WebView2 printed the page on Ctrl+Shift+P. Settings › Sync has a Pause / Resume button) | `toggle_sync_paused_from_menu`; Settings › Sync → `tray_pause_sync` / `tray_resume_sync` (same `set_sync_paused`) | Persisted pause and stopped/resumed work; Settings and the tray popover follow a menu toggle |
 | Sign out (Ctrl+Shift+L) | `clear_session_impl` | Lifecycle gate 1639 |
 | Quit (Ctrl+Q) | app.exit | Process exits |
 | Open Beebeeb folder (Ctrl+O) | `open_finder_location` | Registered root opens |
