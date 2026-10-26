@@ -440,6 +440,13 @@ const PENDING_LOCAL_RENAME_SQL: &str = "kind IN ('rename_file', 'move_file')
        AND CASE WHEN json_valid(metadata_json) THEN json_extract(metadata_json, '$.local_rename') END = 1
        AND claim_id IS NULL AND attempts < max_attempts AND paused_reason IS NULL";
 
+/// Task 2229: the row at a path. The Windows enumeration scan runs this for every file and
+/// folder on disk on every pass, so it must reach the row through `idx_files_path`: a full read
+/// of `files` per lookup burned a core on a 43k-file tree (0.8.13 to 0.8.15).
+const FILE_BY_PATH_SQL: &str = "SELECT file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at,
+            parent_id, item_kind
+     FROM files WHERE path = ?1";
+
 /// `get_file_by_path`'s other stored shape: `/leaf` ⇄ `leaf`.
 fn toggled_slash(path: &str) -> String {
     match path.strip_prefix('/') {
@@ -2408,6 +2415,8 @@ impl StateDb {
             "
             CREATE INDEX IF NOT EXISTS idx_files_namespace ON files(namespace);
             CREATE INDEX IF NOT EXISTS idx_files_shared_root ON files(shared_root_id);
+            -- Task 2229: `FILE_BY_PATH_SQL`, once per file and folder on every enumeration pass.
+            CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
             CREATE INDEX IF NOT EXISTS idx_operation_queue_paused ON operation_queue(paused_reason);
             CREATE INDEX IF NOT EXISTS idx_operation_queue_backup_source ON operation_queue(backup_source_key);
             -- Flow 7 (interrupted upload resume): the server upload session an
@@ -2839,11 +2848,7 @@ impl StateDb {
 
     fn get_file_by_exact_path(&self, path: &str) -> Result<Option<FileEntry>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        let mut stmt = conn.prepare(
-            "SELECT file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at,
-                    parent_id, item_kind
-             FROM files WHERE path = ?1",
-        )?;
+        let mut stmt = conn.prepare(FILE_BY_PATH_SQL)?;
         let mut rows = stmt.query(params![path])?;
         if let Some(row) = rows.next()? {
             Ok(Some(FileEntry {
@@ -7951,6 +7956,50 @@ mod tests {
             assert_eq!(rows, 0, "the Windows sign-out left rows in {table}");
         }
         assert!(!db.has_account_data().unwrap(), "no account data is left");
+    }
+
+    /// Task 2229: the enumeration scan looks every file and folder on disk up by path on every
+    /// pass, so the lookup steps no row of a full scan of `files`, whether the path is there or
+    /// not. That holds on a DB opened from a release before the index (0.8.15 and earlier),
+    /// because opening adds it.
+    #[test]
+    fn a_path_lookup_reads_through_an_index_not_the_whole_files_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        {
+            StateDb::open(&path).unwrap();
+            let mut conn = Connection::open(&path).unwrap();
+            let tx = conn.transaction().unwrap();
+            for i in 0..2000 {
+                tx.execute(
+                    "INSERT INTO files (file_id, path) VALUES (?1, ?2)",
+                    params![format!("f{i}"), format!("dir/{i}.txt")],
+                )
+                .unwrap();
+            }
+            tx.commit().unwrap();
+            // The schema 0.8.15 shipped: no index on `files.path`.
+            conn.execute("DROP INDEX IF EXISTS idx_files_path", []).unwrap();
+        }
+        let db = StateDb::open(&path).unwrap();
+        assert_eq!(
+            db.get_file_by_path("dir/1500.txt").unwrap().map(|e| e.file_id),
+            Some("f1500".to_string())
+        );
+
+        let conn = Connection::open(&path).unwrap();
+        let mut stmt = conn.prepare(FILE_BY_PATH_SQL).unwrap();
+        for probe in ["dir/1999.txt", "dir/missing.txt"] {
+            stmt.reset_status(rusqlite::StatementStatus::FullscanStep);
+            let mut rows = stmt.query(params![probe]).unwrap();
+            while rows.next().unwrap().is_some() {}
+            drop(rows);
+            let full_scan_steps = stmt.get_status(rusqlite::StatementStatus::FullscanStep);
+            assert_eq!(
+                full_scan_steps, 0,
+                "looking up {probe} stepped {full_scan_steps} rows of a full scan of files"
+            );
+        }
     }
 
     #[test]
