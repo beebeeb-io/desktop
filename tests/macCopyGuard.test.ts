@@ -206,7 +206,7 @@ describe('the guard itself', () => {
     // The window components a Mac can mount. One that `main.tsx` gains has to be named here, on purpose, or the scan
     // would quietly start reading it (and a slice that stops mounting one on a Mac removes it from this list).
     const components = macRoots(ROOT).filter((file) => /^[A-Z][A-Za-z]*\.tsx$/.test(file)).sort()
-    expect(components).toEqual(['AccountSessionBoundary.tsx', 'App.tsx', 'ConflictWindow.tsx', 'MacApp.tsx', 'Onboarding.tsx'])
+    expect(components).toEqual(['AccountSessionBoundary.tsx', 'App.tsx', 'ConflictWindow.tsx', 'MacApp.tsx', 'Onboarding.tsx', 'PopoverApp.tsx'])
   })
 
   test('the command names come from Rust\'s handler list (more than a hundred, none of them empty)', () => {
