@@ -860,6 +860,13 @@ pub fn promote_fetched_content(db: &crate::state_db::StateDb, file_id: &str, pat
     use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+    // Desktop 0.8.15: a read-access open of a placeholder that is not wholly on disk asks for the
+    // whole file (the probe in `callbacks.rs`), and this pass offers every in-sync file with no
+    // agreed content, a cloud-only one included. Such a file is never promoted, so it is not
+    // opened. Read from the path's attributes; the handle below checks again.
+    if !fully_on_disk(path) {
+        return Ok(false);
+    }
     // share_mode(0): while this handle is open no other handle can be opened to write.
     let Ok(mut file) = std::fs::OpenOptions::new()
         .read(true)
