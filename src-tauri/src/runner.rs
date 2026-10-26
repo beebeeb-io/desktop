@@ -1364,6 +1364,15 @@ async fn run(
     // All idempotent — safe to run on every (re)spawn.
     #[cfg(target_os = "windows")]
     crate::windows_cf::seed_placeholders(bridge.clone(), &sync_root);
+    // Task 2191 (D9): before the first tick, every file of unknown content that holds bytes and
+    // reads in sync is marked not in sync. No network; off the async workers, and awaited.
+    #[cfg(target_os = "windows")]
+    {
+        let guard_root = sync_root.clone();
+        if let Err(e) = tokio::task::spawn_blocking(move || crate::windows_cf::guard_unknown_placeholders(&guard_root)).await {
+            tracing::warn!(error = %e, "unknown-content guard panicked; continuing");
+        }
+    }
 
     // Task 0780 — the UPLOAD trigger. On Windows the desktop binary IS the
     // Cloud Files provider and there is no extension/IPC socket to fire
@@ -1476,6 +1485,16 @@ async fn run(
                         tracing::warn!(reason = "database", "daily alias sweep failed");
                     }
                     last_alias_sweep = std::time::Instant::now();
+                }
+
+                // Task 2191 (D2, review-157 F2): the "not in sync" marks still to be made are local
+                // work, so they run on every tick: paused, offline or not.
+                #[cfg(target_os = "windows")]
+                {
+                    let mark_root = sync_root.clone();
+                    if let Err(e) = tokio::task::spawn_blocking(move || crate::windows_cf::retry_pending_marks(&mark_root)).await {
+                        tracing::warn!(error = %e, "pending-mark retry panicked; continuing");
+                    }
                 }
 
                 // Skip all sync work while the user has paused sync.

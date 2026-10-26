@@ -1181,10 +1181,15 @@ async function sessionAction(name: 'clear_session' | 'lock_vault', args?: Record
  * 2026-10-10 §5.1) names the ask the person answered with "Sign out": Rust's gate goes on
  * only while the queue is what that ask showed, and keeps its waiting saves first.
  */
-export function clearSession(options: { forgetEmail?: boolean; keepUnsent?: { askId: string } } = {}): Promise<CommandResult<SessionActionOutcome>> {
+export function clearSession(
+  options: { forgetEmail?: boolean; keepUnsent?: { askId: string }; unknownFiles?: 'keep' | 'delete'; keptFolder?: string } = {},
+): Promise<CommandResult<SessionActionOutcome>> {
   const args: Record<string, unknown> = {}
   if (options.forgetEmail) args.forgetEmail = true
   if (options.keepUnsent) args.keepUnsent = options.keepUnsent
+  // Task 2191 (Windows): the person's answer for files from before the last update.
+  if (options.unknownFiles) args.unknownFiles = options.unknownFiles
+  if (options.keptFolder) args.keptFolder = options.keptFolder
   return sessionAction('clear_session', Object.keys(args).length ? args : undefined)
 }
 
@@ -1378,6 +1383,16 @@ export interface BandwidthSample {
  *  oldest-first; the caller downsamples to a fixed number of chart buckets. */
 export function getBandwidthHistory(hours?: number): Promise<CommandResult<BandwidthSample[]>> {
   return command<BandwidthSample[]>('get_bandwidth_history', { hours })
+}
+
+/** Task 2191 (Windows): files from before the last update that hold bytes on this PC, for the sign-out confirmation. */
+export interface UnknownFilesAtSignOut {
+  count: number
+  folder: string | null
+}
+
+export function signOutUnknownFiles(): Promise<CommandResult<UnknownFilesAtSignOut>> {
+  return command<UnknownFilesAtSignOut>('sign_out_unknown_files')
 }
 
 // 0.8.13 hand port of task 1640's count (main's reviewCounts.ts): a kept copy is changes kept

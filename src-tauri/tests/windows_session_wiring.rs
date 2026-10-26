@@ -113,8 +113,9 @@ fn cloud_files_unregister_precedes_shell_unregister_and_propagates_failure() {
         code.find("windows_cf::unregister_sync_root(&root)").unwrap()
             < code.find("windows_cf::unregister_shell_sync_root(&root)").unwrap()
     );
-    assert!(code.contains("Could not remove Explorer registration: {e}\"))?"));
-    assert!(code.contains("Could not unregister Cloud Files: {e}\"))?"));
+    // Task 2191: the failure is propagated with the folder the purge kept copies in.
+    assert!(code.contains("failed_after_purge(format!(\"Could not remove Explorer registration: {e}\")))?"));
+    assert!(code.contains("failed_after_purge(format!(\"Could not unregister Cloud Files: {e}\")))?"));
 }
 #[test]
 fn admission_guard_selftest_detects_a_bypassed_command() {

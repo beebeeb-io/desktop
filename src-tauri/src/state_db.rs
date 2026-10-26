@@ -32,7 +32,7 @@ use std::sync::Mutex;
 /// R10 (spec 2026-10-06 §5.6): every table holding one account's data. `has_account_data` counts
 /// them and `clear_account_data` empties them. `every_table_is_classified_for_the_account_binding`
 /// fails when a new table is not listed here or in `DEVICE_TABLES`.
-const ACCOUNT_TABLES: [&str; 13] = [
+const ACCOUNT_TABLES: [&str; 15] = [
     "files",
     "operation_queue",
     "local_activity",
@@ -49,7 +49,33 @@ const ACCOUNT_TABLES: [&str; 13] = [
     "kept_copies",
     // Task 1640 (review F3): folders deleted elsewhere that stay on disk for what they hold (names): the account's.
     "removed_folders",
+    // Task 2191: the check state of files of unknown content (file ids): the account's.
+    "unknown_checks",
+    // Task 2191 (D12): placeholders left at another path that hold unknown bytes (names): the account's.
+    "unknown_orphans",
 ];
+
+/// Task 2191: a file row of unknown content (synced before task 1640: no agreed content and no
+/// fetch candidate), whatever its status. The guarded set (spec D2).
+const GUARDED_SQL: &str = "item_kind = 'file' AND local_hash IS NULL AND fetched_min_version < 0";
+
+/// Task 2191: a guarded row, as the guard reads it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GuardedRow {
+    pub file_id: String,
+    pub path: String,
+    pub status: FileStatus,
+    pub fetched_min_version: i64,
+}
+
+fn guarded_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GuardedRow> {
+    Ok(GuardedRow {
+        file_id: row.get(0)?,
+        path: row.get(1)?,
+        status: FileStatus::from_str(&row.get::<_, String>(2)?),
+        fetched_min_version: row.get(3)?,
+    })
+}
 /// Per-device tables: not counted as account data, emptied by a reset anyway.
 const DEVICE_TABLES: [&str; 1] = ["bandwidth_samples"];
 const OWNER_USER_ID_KEY: &str = "owner_user_id";
@@ -2374,6 +2400,39 @@ impl StateDb {
                 path TEXT PRIMARY KEY,
                 removed_at INTEGER NOT NULL
             );
+            -- Task 2191: a file of unknown content (spec section 4). In S1 only `mark_pending` is
+            -- used: a not-in-sync mark that is still to be made (it failed, or the row joined the
+            -- guarded set during the session). The other columns are the check's (S2).
+            CREATE TABLE IF NOT EXISTS unknown_checks (
+                file_id TEXT PRIMARY KEY,
+                state TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                stops INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                copied_hash TEXT,
+                mark_pending INTEGER NOT NULL DEFAULT 0,
+                recorded_hash TEXT,
+                recorded_size INTEGER,
+                recorded_mtime INTEGER,
+                resume_candidate TEXT,
+                resume_chunk INTEGER,
+                resume_digest TEXT,
+                updated_at INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_unknown_checks_mark_pending ON unknown_checks(mark_pending) WHERE mark_pending = 1;
+            -- Task 2191 (D12): a placeholder at `path` whose identity names `file_id`, a file of
+            -- unknown content that lives at another path (a remote rename or move left it there).
+            CREATE TABLE IF NOT EXISTS unknown_orphans (
+                path TEXT PRIMARY KEY,
+                file_id TEXT NOT NULL,
+                state TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at INTEGER NOT NULL DEFAULT 0,
+                mark_pending INTEGER NOT NULL DEFAULT 0,
+                copied_hash TEXT,
+                updated_at INTEGER NOT NULL DEFAULT 0
+            );
             CREATE TABLE IF NOT EXISTS staged_payloads (
                 path TEXT PRIMARY KEY,
                 source_path TEXT,
@@ -2434,6 +2493,44 @@ impl StateDb {
                  UPDATE files SET {FOLD_AGREED_INTO_CANDIDATE} WHERE file_id = NEW.file_id;
              END;"
         ))?;
+        // Task 2191 (review-114 R2-P2-3): a row that joins the guarded set during the session (a
+        // pull inserting a row whose 0.8.12 placeholder already exists, or a row losing its
+        // agreed content) gets its "not in sync" mark at the next tick, not at the next start.
+        // The tick's retry reads its place once and clears the flag.
+        // Only the Windows guard reads these flags, so other builds carry no triggers (self-review).
+        if !cfg!(any(target_os = "windows", test)) {
+            conn.execute_batch(
+                "DROP TRIGGER IF EXISTS files_unknown_marks_after_insert;
+                 DROP TRIGGER IF EXISTS files_unknown_marks_after_insert_any_status;
+                 DROP TRIGGER IF EXISTS files_unknown_marks_after_update;",
+            )?;
+        } else {
+        conn.execute_batch(&format!(
+            "CREATE TRIGGER IF NOT EXISTS files_unknown_marks_after_insert_any_status
+             AFTER INSERT ON files
+             WHEN NEW.local_hash IS NULL AND NEW.fetched_min_version < 0
+             BEGIN
+                 INSERT INTO unknown_checks(file_id, mark_pending, updated_at)
+                 VALUES (NEW.file_id, 1, CAST(strftime('%s', 'now') AS INTEGER))
+                 ON CONFLICT(file_id) DO UPDATE SET mark_pending = 1;
+             END;
+             CREATE TRIGGER IF NOT EXISTS files_unknown_marks_after_update
+             AFTER UPDATE OF local_hash, fetched_min_version ON files
+             WHEN NEW.local_hash IS NULL AND NEW.fetched_min_version < 0
+              AND NOT (OLD.local_hash IS NULL AND OLD.fetched_min_version < 0)
+             BEGIN
+                 INSERT INTO unknown_checks(file_id, mark_pending, updated_at)
+                 VALUES (NEW.file_id, 1, CAST(strftime('%s', 'now') AS INTEGER))
+                 ON CONFLICT(file_id) DO UPDATE SET mark_pending = 1;
+             END;
+             CREATE TRIGGER IF NOT EXISTS files_unknown_checks_follow_delete
+             AFTER DELETE ON files
+             BEGIN
+                 DELETE FROM unknown_checks WHERE file_id = OLD.file_id;
+             END;
+             DROP TRIGGER IF EXISTS files_unknown_marks_after_insert;"
+        ))?;
+        }
         // Upgrade inventory: old one-shot Keep Mine rows may have no queue
         // owner. Preserve their plaintext reference before any resume purge.
         conn.execute(
@@ -2512,6 +2609,145 @@ impl StateDb {
         set_file_contract_state_conn(&tx, &contract)?;
         tx.commit()?;
         Ok(entry.path)
+    }
+
+    /// Task 2191: `file_id` is a file of unknown content, whatever its status (the guarded set).
+    pub fn is_unknown_content(&self, file_id: &str) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM files WHERE file_id = ?1 AND {GUARDED_SQL})"),
+            params![file_id],
+            |r| r.get(0),
+        )
+    }
+
+    /// Task 2191 (review-157 F7): `file_id` has agreed content recorded (`local_hash`).
+    pub fn has_agreed_content(&self, file_id: &str) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM files WHERE file_id = ?1 AND local_hash IS NOT NULL)",
+            params![file_id],
+            |r| r.get(0),
+        )
+    }
+
+    /// Task 2191: a file of unknown content that is `local` or `cloud_only` (the population the
+    /// check resolves; a conflict or an error is the person's to resolve).
+    pub fn is_unknown_population(&self, file_id: &str) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM files WHERE file_id = ?1 AND {GUARDED_SQL}
+                   AND status IN ('local', 'cloud_only'))"
+            ),
+            params![file_id],
+            |r| r.get(0),
+        )
+    }
+
+    /// Task 2191: every file of unknown content (the start-up guard walks them all).
+    pub fn list_guarded(&self) -> Result<Vec<GuardedRow>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT file_id, path, status, fetched_min_version FROM files WHERE {GUARDED_SQL} ORDER BY rowid"
+        ))?;
+        let rows = stmt.query_map([], guarded_row)?;
+        rows.collect()
+    }
+
+    /// Task 2191: a "not in sync" mark of `file_id` is still to be made (`true`) or done.
+    pub fn set_mark_pending(&self, file_id: &str, pending: bool) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        if pending {
+            conn.execute(
+                "INSERT INTO unknown_checks(file_id, mark_pending, updated_at)
+                 VALUES (?1, 1, CAST(strftime('%s', 'now') AS INTEGER))
+                 ON CONFLICT(file_id) DO UPDATE SET mark_pending = 1, updated_at = excluded.updated_at",
+                params![file_id],
+            )?;
+        } else {
+            // A cleared flag writes only a row that has one (no row per guarded file, self-review).
+            conn.execute(
+                "UPDATE unknown_checks SET mark_pending = 0 WHERE file_id = ?1 AND mark_pending = 1",
+                params![file_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Task 2191: [`Self::mark_no_fetched_content`] for many rows, in one transaction (the
+    /// start-up guard's empty placeholders). Returns how many were marked.
+    pub fn mark_no_fetched_content_many(&self, file_ids: &[String]) -> Result<usize> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+        let mut marked = 0;
+        for file_id in file_ids {
+            marked += tx.execute(
+                "UPDATE files SET fetched_min_version = 0, fetched_hash = NULL
+                 WHERE file_id = ?1 AND fetched_min_version = -1 AND local_hash IS NULL",
+                params![file_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(marked)
+    }
+
+    /// Task 2191: the guarded rows whose mark is still to be made, at most `limit`, oldest first.
+    /// A flag left on a row that is no longer guarded is cleared here.
+    pub fn list_mark_pending(&self, limit: usize) -> Result<Vec<GuardedRow>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            &format!(
+                "UPDATE unknown_checks SET mark_pending = 0
+                 WHERE mark_pending = 1 AND NOT EXISTS (
+                     SELECT 1 FROM files AS f WHERE f.file_id = unknown_checks.file_id AND {})",
+                GUARDED_SQL
+                    .replace("item_kind", "f.item_kind")
+                    .replace("local_hash", "f.local_hash")
+                    .replace("fetched_min_version", "f.fetched_min_version")
+            ),
+            [],
+        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT f.file_id, f.path, f.status, f.fetched_min_version
+             FROM unknown_checks AS u JOIN files AS f ON f.file_id = u.file_id
+             WHERE u.mark_pending = 1 AND {}
+             ORDER BY u.updated_at, u.file_id LIMIT ?1",
+            GUARDED_SQL
+                .replace("item_kind", "f.item_kind")
+                .replace("local_hash", "f.local_hash")
+                .replace("fetched_min_version", "f.fetched_min_version")
+        ))?;
+        let rows = stmt.query_map(params![limit as i64], guarded_row)?;
+        rows.collect()
+    }
+
+    /// Task 2191 (D12): record a placeholder at `path` whose identity is `file_id`, a file of
+    /// unknown content now at another path; `mark_pending` until its "not in sync" mark is made.
+    pub fn put_unknown_orphan(&self, path: &str, file_id: &str, mark_pending: bool) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "INSERT INTO unknown_orphans(path, file_id, mark_pending, updated_at)
+             VALUES (?1, ?2, ?3, CAST(strftime('%s', 'now') AS INTEGER))
+             ON CONFLICT(path) DO UPDATE SET file_id = ?2, mark_pending = ?3, updated_at = excluded.updated_at",
+            params![path, file_id, mark_pending],
+        )?;
+        Ok(())
+    }
+
+    /// Task 2191 (D12): every recorded orphan: (path, the identity's file id, mark still pending).
+    pub fn list_unknown_orphans(&self) -> Result<Vec<(String, String, bool)>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare("SELECT path, file_id, mark_pending FROM unknown_orphans ORDER BY path")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        rows.collect()
+    }
+
+    /// Task 2191 (D12): forget the orphan at `path` (its placeholder is gone, or holds nothing).
+    pub fn forget_unknown_orphan(&self, path: &str) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute("DELETE FROM unknown_orphans WHERE path = ?1", params![path])?;
+        Ok(())
     }
 
     /// Fetch a single row by `file_id`. `Ok(None)` if absent.
