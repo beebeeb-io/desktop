@@ -8226,7 +8226,7 @@ fn apply_metadata_file_row(
     // placeholder at the old path (T9), and the new path may still hold another file's. Both
     // places are recorded for the tick's retry (Windows), which keeps one only when the identity
     // there names a file of unknown content living elsewhere (`unknown_check::verify_orphan`).
-    if false && moved && cfg!(any(target_os = "windows", test)) && is_file {
+    if moved && cfg!(any(target_os = "windows", test)) && is_file {
         if let Some(previous) = existing.as_ref() {
             db.put_unknown_orphan(&previous.path, file_id, true)?;
         }
