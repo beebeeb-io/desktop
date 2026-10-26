@@ -11,6 +11,7 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { mount, textOf, type Mounted } from './fixtures/componentHarness'
 import { rustStr } from './fixtures/rustConstants'
+import { homeSyncMetrics } from '../src/windows/homeSyncMetrics'
 
 const mounted: Mounted[] = []
 afterEach(() => { while (mounted.length) mounted.pop()!.close() })
@@ -23,6 +24,10 @@ function openHome(syncStatus: unknown) {
     backend: {},
     props: { status: syncStatus, usage: null, storage: null },
     bindings: {
+      // 0.8.15: State comes from the sync activity model (tests/homeSyncMetrics.test.tsx); here the summary is not read yet.
+      useSyncActivitySummary: () => ({ summary: undefined, refresh: async () => undefined }),
+      homeSyncMetrics,
+      command: async () => ({ ok: false, reason: 'not scripted', unsupported: false }),
       usePlatformName: () => 'windows',
       thisDeviceNoun: () => 'this PC',
       formatBytes: (n: number) => `${n} B`,
