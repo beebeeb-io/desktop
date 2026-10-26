@@ -25,9 +25,12 @@ import {
   clearSession,
   formatBytes,
   openUrl,
+  signOutUnknownFiles,
   type AccountProfile,
   type Subscription,
+  type UnknownFilesAtSignOut,
 } from '../../desktopApi'
+import { UnknownFilesSignOutDialog } from '../UnknownFilesSignOutDialog'
 import { ACCOUNT_SETTINGS_URL } from '../../settingsConstants'
 import { T, Card, PageHeader, Chip, Skeleton, NavIcon, PrimaryBtn, useToast } from '../ui'
 
@@ -309,10 +312,22 @@ function DisconnectSection() {
   const { showToast } = useToast()
   const [phase, setPhase] = useState<DisconnectPhase>('idle')
   const [errorMsg, setErrorMsg] = useState<string>('')
+  // Task 2191: files from before the last update that hold bytes; the person chooses.
+  const [unknownAsk, setUnknownAsk] = useState<UnknownFilesAtSignOut | null>(null)
 
-  const handleConfirm = async () => {
+  const handleConfirm = async (unknownFiles?: 'keep' | 'delete') => {
+    setUnknownAsk(null)
+    // Task 2191 (Decision (lead, 2026-10-26)): files from before the last update are never
+    // copied or deleted silently. If any hold bytes on this PC, ask first.
+    if (!unknownFiles) {
+      const unknown = await signOutUnknownFiles()
+      if (unknown.ok && unknown.value.count > 0 && unknown.value.folder) {
+        setUnknownAsk(unknown.value)
+        return
+      }
+    }
     setPhase('busy')
-    const result = await clearSession()
+    const result = await clearSession(unknownFiles ? { unknownFiles } : {})
     if (!result.ok) {
       setErrorMsg(result.reason)
       setPhase('error')
@@ -337,6 +352,14 @@ function DisconnectSection() {
       background: T.paper,
       overflow: 'hidden',
     }}>
+      {unknownAsk?.folder ? (
+        <UnknownFilesSignOutDialog
+          count={unknownAsk.count}
+          folder={unknownAsk.folder}
+          onCancel={() => setUnknownAsk(null)}
+          onChoose={(choice) => void handleConfirm(choice)}
+        />
+      ) : null}
       {/* Header row */}
       <div style={{
         display: 'flex',

@@ -2497,10 +2497,18 @@ impl StateDb {
         // pull inserting a row whose 0.8.12 placeholder already exists, or a row losing its
         // agreed content) gets its "not in sync" mark at the next tick, not at the next start.
         // The tick's retry reads its place once and clears the flag.
+        // Only the Windows guard reads these flags, so other builds carry no triggers (self-review).
+        if !cfg!(any(target_os = "windows", test)) {
+            conn.execute_batch(
+                "DROP TRIGGER IF EXISTS files_unknown_marks_after_insert;
+                 DROP TRIGGER IF EXISTS files_unknown_marks_after_insert_any_status;
+                 DROP TRIGGER IF EXISTS files_unknown_marks_after_update;",
+            )?;
+        } else {
         conn.execute_batch(&format!(
-            "CREATE TRIGGER IF NOT EXISTS files_unknown_marks_after_insert
+            "CREATE TRIGGER IF NOT EXISTS files_unknown_marks_after_insert_any_status
              AFTER INSERT ON files
-             WHEN NEW.local_hash IS NULL AND NEW.fetched_min_version < 0 AND NEW.status IN ('local', 'cloud_only')
+             WHEN NEW.local_hash IS NULL AND NEW.fetched_min_version < 0
              BEGIN
                  INSERT INTO unknown_checks(file_id, mark_pending, updated_at)
                  VALUES (NEW.file_id, 1, CAST(strftime('%s', 'now') AS INTEGER))
@@ -2519,8 +2527,10 @@ impl StateDb {
              AFTER DELETE ON files
              BEGIN
                  DELETE FROM unknown_checks WHERE file_id = OLD.file_id;
-             END;"
+             END;
+             DROP TRIGGER IF EXISTS files_unknown_marks_after_insert;"
         ))?;
+        }
         // Upgrade inventory: old one-shot Keep Mine rows may have no queue
         // owner. Preserve their plaintext reference before any resume purge.
         conn.execute(
@@ -2638,13 +2648,38 @@ impl StateDb {
     /// Task 2191: a "not in sync" mark of `file_id` is still to be made (`true`) or done.
     pub fn set_mark_pending(&self, file_id: &str, pending: bool) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        conn.execute(
-            "INSERT INTO unknown_checks(file_id, mark_pending, updated_at)
-             VALUES (?1, ?2, CAST(strftime('%s', 'now') AS INTEGER))
-             ON CONFLICT(file_id) DO UPDATE SET mark_pending = ?2, updated_at = excluded.updated_at",
-            params![file_id, pending],
-        )?;
+        if pending {
+            conn.execute(
+                "INSERT INTO unknown_checks(file_id, mark_pending, updated_at)
+                 VALUES (?1, 1, CAST(strftime('%s', 'now') AS INTEGER))
+                 ON CONFLICT(file_id) DO UPDATE SET mark_pending = 1, updated_at = excluded.updated_at",
+                params![file_id],
+            )?;
+        } else {
+            // A cleared flag writes only a row that has one (no row per guarded file, self-review).
+            conn.execute(
+                "UPDATE unknown_checks SET mark_pending = 0 WHERE file_id = ?1 AND mark_pending = 1",
+                params![file_id],
+            )?;
+        }
         Ok(())
+    }
+
+    /// Task 2191: [`Self::mark_no_fetched_content`] for many rows, in one transaction (the
+    /// start-up guard's empty placeholders). Returns how many were marked.
+    pub fn mark_no_fetched_content_many(&self, file_ids: &[String]) -> Result<usize> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+        let mut marked = 0;
+        for file_id in file_ids {
+            marked += tx.execute(
+                "UPDATE files SET fetched_min_version = 0, fetched_hash = NULL
+                 WHERE file_id = ?1 AND fetched_min_version = -1 AND local_hash IS NULL",
+                params![file_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(marked)
     }
 
     /// Task 2191: the guarded rows whose mark is still to be made, at most `limit`, oldest first.
@@ -2654,7 +2689,12 @@ impl StateDb {
         conn.execute(
             &format!(
                 "UPDATE unknown_checks SET mark_pending = 0
-                 WHERE mark_pending = 1 AND file_id NOT IN (SELECT file_id FROM files WHERE {GUARDED_SQL})"
+                 WHERE mark_pending = 1 AND NOT EXISTS (
+                     SELECT 1 FROM files AS f WHERE f.file_id = unknown_checks.file_id AND {})",
+                GUARDED_SQL
+                    .replace("item_kind", "f.item_kind")
+                    .replace("local_hash", "f.local_hash")
+                    .replace("fetched_min_version", "f.fetched_min_version")
             ),
             [],
         )?;

@@ -91,14 +91,15 @@ pub(crate) fn guard_rows(
     mark: &mut dyn FnMut(&Path) -> anyhow::Result<()>,
 ) -> anyhow::Result<GuardSummary> {
     let mut summary = GuardSummary::default();
+    let mut empty = Vec::new();
     for row in rows {
         let Some(path) = crate::engine_bridge::EngineBridge::placeholder_path_under(sync_root, &row.path) else {
             db.set_mark_pending(&row.file_id, false)?;
             continue;
         };
         let decision = decide_guard(&view(&path), row.fetched_min_version, in_population(row));
-        if decision.mark_empty && db.mark_no_fetched_content(&row.file_id)? {
-            summary.emptied += 1;
+        if decision.mark_empty {
+            empty.push(row.file_id.clone());
         }
         if decision.mark_not_in_sync {
             if let Err(e) = mark(&path) {
@@ -111,6 +112,7 @@ pub(crate) fn guard_rows(
         }
         db.set_mark_pending(&row.file_id, false)?;
     }
+    summary.emptied = db.mark_no_fetched_content_many(&empty)?;
     Ok(summary)
 }
 
@@ -182,12 +184,49 @@ pub(crate) fn verify_orphan(
 }
 
 /// Spec D11: the folder unknown bytes are copied to at sign-out, beside the sync folder
-/// (`stamp` is the local date and time, `YYYY-MM-DD HHMM`).
-pub(crate) fn kept_files_dir(sync_root: &Path, stamp: &str) -> PathBuf {
-    sync_root
-        .parent()
-        .unwrap_or(sync_root)
-        .join(format!("Beebeeb kept files {stamp}"))
+/// (`stamp` is the local date and time, `YYYY-MM-DD HHMM`). A sync folder at a drive root has
+/// no "beside": the person's home folder is used, never a place inside the sync folder.
+pub(crate) fn kept_files_dir(sync_root: &Path, stamp: &str, home: Option<&Path>) -> Option<PathBuf> {
+    let name = format!("Beebeeb kept files {stamp}");
+    match sync_root.parent() {
+        Some(parent) => Some(parent.join(name)),
+        None => home.filter(|home| !home.starts_with(sync_root)).map(|home| home.join(name)),
+    }
+}
+
+/// What the database says is at a path at sign-out (self-review: never trusted without the
+/// placeholder's identity).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ExpectedAt {
+    /// The path of this file of unknown content.
+    Guarded(String),
+    /// A place recorded as possibly holding another file's unknown bytes, not verified yet.
+    OrphanCandidate,
+}
+
+/// Spec D11: the bytes at `rel_path` are kept (or deleted, as asked) as unknown at sign-out only
+/// when the platform agrees with the database: at a guarded file's path, a plain file or a
+/// placeholder of that same file; at an orphan candidate, a placeholder whose identity names a
+/// file of unknown content living elsewhere, or no file at all. Anything else is signed out by
+/// the ordinary rules, which refuse unsent changes.
+pub(crate) fn unknown_at_signout(
+    expected: &ExpectedAt,
+    rel_path: &str,
+    is_placeholder: bool,
+    identity: Option<&str>,
+    owner_of_identity: Option<(&str, bool)>,
+) -> bool {
+    match expected {
+        ExpectedAt::Guarded(file_id) => !is_placeholder || identity == Some(file_id.as_str()),
+        ExpectedAt::OrphanCandidate => {
+            is_placeholder
+                && identity.is_some()
+                && match owner_of_identity {
+                    None => true,
+                    Some((path, guarded)) => guarded && !same_place(path, rel_path),
+                }
+        }
+    }
 }
 
 /// Spec D11: copy `source` (of `size` bytes) to `dest`, wholly or only the `ranges` that are on
@@ -257,6 +296,11 @@ pub(crate) fn hash_source(source: &mut std::fs::File, size: u64, ranges: Option<
         }
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Where [`copy_out`] writes a copy of `dest` (a partial copy gets " (partial)" in its name).
+pub(crate) fn copy_dest(dest: &Path, partial: bool) -> PathBuf {
+    if partial { partial_name(dest) } else { dest.to_path_buf() }
 }
 
 /// `a/b.docx` -> `a/b (partial).docx`.
@@ -377,13 +421,26 @@ mod tests {
             item_kind: ItemKind::File,
         })
         .unwrap();
+        // ...and one inserted as a conflict (any status is guarded, self-review).
+        db.upsert_file(&FileEntry {
+            file_id: "late-conflict".into(),
+            path: "late (conflict).txt".into(),
+            status: FileStatus::Conflict,
+            size_bytes: 1,
+            modified_at: 0,
+            content_hash: None,
+            remote_updated_at: 0,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
         let mut marks = 0;
         let marked = retry_marks(&db, &root, &|_: &Path| placeholder(OnDisk::Wholly, true), &mut |_: &Path| {
             marks += 1;
             Ok(())
         })
         .unwrap();
-        assert_eq!((marked, marks), (1, 1), "marked at the first tick, not at the next start");
+        assert_eq!((marked, marks), (2, 2), "marked at the first tick, not at the next start");
     }
 
     #[test]
@@ -445,13 +502,41 @@ mod tests {
         assert!(retry < stamp, "every tick: the pending marks before the stamp pass");
     }
 
+    /// Self-review: at a drive root the copies go to the home folder, never into the sync folder.
+    #[test]
+    fn task_2191_a_sync_folder_at_a_drive_root_keeps_copies_in_the_home_folder() {
+        let root = Path::new("/");
+        let home = Path::new("/Users/someone");
+        assert_eq!(
+            kept_files_dir(Path::new("/Beebeeb"), "s", Some(home)),
+            Some(PathBuf::from("/Beebeeb kept files s"))
+        );
+        assert_eq!(kept_files_dir(root, "s", None), None, "no home: no place to keep, sign-out refuses Keep");
+        assert_eq!(kept_files_dir(root, "s", Some(home)), None, "a home inside the sync folder is no outside place");
+    }
+
+    /// Self-review: sign-out trusts the database only when the placeholder's identity agrees.
+    #[test]
+    fn task_2191_sign_out_treats_bytes_as_unknown_only_when_the_identity_agrees() {
+        let guarded = ExpectedAt::Guarded("u".into());
+        assert!(unknown_at_signout(&guarded, "a.txt", false, None, None), "a plain file at a guarded path");
+        assert!(unknown_at_signout(&guarded, "a.txt", true, Some("u"), None), "its own placeholder");
+        assert!(!unknown_at_signout(&guarded, "a.txt", true, Some("k"), Some(("a.txt", false))), "another file's: ordinary rules");
+        let candidate = ExpectedAt::OrphanCandidate;
+        assert!(unknown_at_signout(&candidate, "a.txt", true, Some("u"), Some(("b.txt", true))), "unknown, lives elsewhere");
+        assert!(unknown_at_signout(&candidate, "a.txt", true, Some("gone"), None), "no file at all");
+        assert!(!unknown_at_signout(&candidate, "a.txt", true, Some("k"), Some(("b.txt", false))), "a known file's: ordinary rules");
+        assert!(!unknown_at_signout(&candidate, "a.txt", true, Some("u"), Some(("a.txt", true))), "its own place");
+        assert!(!unknown_at_signout(&candidate, "a.txt", false, None, None), "a plain file: ordinary rules");
+    }
+
     #[test]
     fn task_2191_sign_out_copies_whole_and_partial_files_and_rehashes_what_it_copied() {
         let dir = tempfile::tempdir().unwrap();
         let source_path = dir.path().join("a.docx");
         std::fs::write(&source_path, b"0123456789abcdef").unwrap();
         let mut source = std::fs::File::open(&source_path).unwrap();
-        let kept = kept_files_dir(&dir.path().join("Beebeeb"), "2026-10-26 1200");
+        let kept = kept_files_dir(&dir.path().join("Beebeeb"), "2026-10-26 1200", None).unwrap();
         assert_eq!(kept, dir.path().join("Beebeeb kept files 2026-10-26 1200"));
         let (whole_hash, whole) = copy_out(&mut source, 16, None, &kept.join("docs/a.docx")).unwrap();
         assert_eq!(std::fs::read(&whole).unwrap(), b"0123456789abcdef");

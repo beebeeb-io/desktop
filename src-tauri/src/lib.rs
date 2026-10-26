@@ -3181,7 +3181,12 @@ async fn clear_session_impl(
             // Task 2191 (D11): files of unknown content are kept as copies or deleted, as the
             // person chose in the confirmation.
             let choice = match (unknown_files, root.as_deref()) {
-                (UnknownFilesArg::Keep, Some(root)) => windows_cf::signout::UnknownFiles::Keep { dir: kept_unknown_files_dir(root) },
+                (UnknownFilesArg::Keep, Some(root)) => windows_cf::signout::UnknownFiles::Keep {
+                    // A sync folder at a drive root with no home folder: nowhere outside it to keep
+                    // copies, so the sign-out stops rather than delete or copy into the folder.
+                    dir: kept_unknown_files_dir(root)
+                        .ok_or_else(|| "Sign-out paused: there is no folder outside the sync folder to keep copies in.".to_string())?,
+                },
                 (UnknownFilesArg::Keep, None) | (UnknownFilesArg::Delete, _) => windows_cf::signout::UnknownFiles::Delete,
             };
             let kept = windows_cf::signout::purge(&db, root.as_deref(), &choice).map_err(|e| format!("Sign-out paused: {e}"))?;
@@ -4116,10 +4121,60 @@ struct UnknownFilesAtSignOut {
     folder: Option<String>,
 }
 
-/// Task 2191: the folder a Windows sign-out keeps unknown bytes in, beside the sync folder.
+/// Task 2191: the folder a Windows sign-out keeps unknown bytes in: beside the sync folder, or in
+/// the home folder for a sync folder at a drive root. `None`: there is no place outside it.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-fn kept_unknown_files_dir(root: &std::path::Path) -> std::path::PathBuf {
-    unknown_check::kept_files_dir(root, &chrono::Local::now().format("%Y-%m-%d %H%M").to_string())
+fn kept_unknown_files_dir(root: &std::path::Path) -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(std::path::PathBuf::from);
+    unknown_check::kept_files_dir(root, &chrono::Local::now().format("%Y-%m-%d %H%M").to_string(), home.as_deref())
+}
+
+/// Task 2191 (D11): the files the Windows sign-out would keep or delete as unknown: by the same
+/// rule as the purge (`unknown_check::unknown_at_signout`), holding bytes on this PC.
+#[cfg(target_os = "windows")]
+fn count_unknown_files_at_sign_out() -> Result<UnknownFilesAtSignOut, String> {
+    use unknown_check::{ExpectedAt, OnDisk, PlatformView};
+    let root = DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root);
+    let (Some(db), Some(root)) = (state_db_from_app_local_state_dir()?, root) else {
+        return Ok(UnknownFilesAtSignOut { count: 0, folder: None });
+    };
+    let mut places: Vec<(String, ExpectedAt)> = db
+        .list_unknown_orphans()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|(path, _, _)| (path, ExpectedAt::OrphanCandidate))
+        .collect();
+    places.extend(db.list_guarded().map_err(|e| e.to_string())?.into_iter().map(|row| (row.path, ExpectedAt::Guarded(row.file_id))));
+    let mut count = 0;
+    for (rel, expected) in places {
+        let Some(path) = engine_bridge::EngineBridge::placeholder_path_under(&root, &rel) else {
+            continue;
+        };
+        let (placeholder, identity, holds_bytes) = match windows_cf::placeholders::platform_view(&path) {
+            PlatformView::Missing | PlatformView::Unreadable => continue,
+            PlatformView::PlainFile => (false, None, true),
+            PlatformView::Placeholder { on_disk, identity, .. } => (true, identity, on_disk != OnDisk::Nothing),
+        };
+        let owner = match identity.as_deref() {
+            Some(id) => db
+                .get_file(id)
+                .map_err(|e| e.to_string())?
+                .map(|row| (row.path, db.is_unknown_content(id).unwrap_or(false))),
+            None => None,
+        };
+        let unknown = unknown_check::unknown_at_signout(
+            &expected,
+            &rel,
+            placeholder,
+            identity.as_deref(),
+            owner.as_ref().map(|(path, guarded)| (path.as_str(), *guarded)),
+        );
+        if unknown && holds_bytes {
+            count += 1;
+        }
+    }
+    let folder = kept_unknown_files_dir(&root).filter(|_| count > 0).map(|dir| dir.to_string_lossy().into_owned());
+    Ok(UnknownFilesAtSignOut { count, folder })
 }
 
 /// Task 2191: how many files of unknown content hold bytes on this PC (Windows), for the
@@ -4128,25 +4183,10 @@ fn kept_unknown_files_dir(root: &std::path::Path) -> std::path::PathBuf {
 async fn sign_out_unknown_files() -> Result<UnknownFilesAtSignOut, String> {
     #[cfg(target_os = "windows")]
     {
-        let root = DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root);
-        let (Some(db), Some(root)) = (state_db_from_app_local_state_dir()?, root) else {
-            return Ok(UnknownFilesAtSignOut { count: 0, folder: None });
-        };
-        let mut paths: Vec<String> = db.list_guarded().map_err(|e| e.to_string())?.into_iter().map(|row| row.path).collect();
-        paths.extend(db.list_unknown_orphans().map_err(|e| e.to_string())?.into_iter().map(|(path, _, _)| path));
-        let count = paths
-            .iter()
-            .filter_map(|path| engine_bridge::EngineBridge::placeholder_path_under(&root, path))
-            .filter(|path| {
-                !matches!(
-                    windows_cf::placeholders::platform_view(path),
-                    unknown_check::PlatformView::Missing
-                        | unknown_check::PlatformView::Placeholder { on_disk: unknown_check::OnDisk::Nothing, .. }
-                )
-            })
-            .count();
-        let folder = (count > 0).then(|| kept_unknown_files_dir(&root).to_string_lossy().into_owned());
-        Ok(UnknownFilesAtSignOut { count, folder })
+        // Self-review: one platform read per file; off the async workers.
+        tokio::task::spawn_blocking(count_unknown_files_at_sign_out)
+            .await
+            .map_err(|e| e.to_string())?
     }
     #[cfg(not(target_os = "windows"))]
     {

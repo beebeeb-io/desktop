@@ -28608,6 +28608,7 @@ mod tests {
             conn.execute_batch(
                 "DROP TRIGGER IF EXISTS files_cloud_only_folds_agreed_into_candidate;
                  DROP TRIGGER IF EXISTS files_unknown_marks_after_insert;
+                 DROP TRIGGER IF EXISTS files_unknown_marks_after_insert_any_status;
                  DROP TRIGGER IF EXISTS files_unknown_marks_after_update;
                  ALTER TABLE files DROP COLUMN fetched_min_version;
                  ALTER TABLE files ADD COLUMN fetched_version INTEGER NOT NULL DEFAULT 0;

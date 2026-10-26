@@ -1,6 +1,6 @@
 import { useRegionLabel } from '../windows/useRegion'
 import { useEffect, useState, useSyncExternalStore } from 'react'
-import { Modal, useToast } from '../windows/ui'
+import { useToast } from '../windows/ui'
 import {
   accountSubscription,
   BILLING_URL,
@@ -11,12 +11,9 @@ import {
   loadSyncStatus,
   lockVault,
   openUrl,
-  signOutUnknownFiles,
   type Subscription,
   type SyncStatus,
-  type UnknownFilesAtSignOut,
 } from '../desktopApi'
-import { unknownFilesSignOutCopy } from '../signOutUnknownFilesCopy'
 import {
   SUPPORT_BUNDLE_DETAIL,
   SUPPORT_BUNDLE_SAVED_TITLE,
@@ -53,8 +50,6 @@ export default function Account() {
   // held outside the session boundary, because the sign-out remounts this page (accountSession.ts); the
   // next Lock, Unlock or sign-out clears it.
   const [actionNote, setActionNote] = useState<string | null>(null)
-  // Task 2191 (Windows): files from before the last update that hold bytes; the person chooses.
-  const [unknownAsk, setUnknownAsk] = useState<UnknownFilesAtSignOut | null>(null)
   const signOutNote = useSyncExternalStore(subscribeSignOutWarning, heldSignOutWarning, heldSignOutWarning)
 
   // Poll sync_status so the component reflects auto-unlock state that
@@ -152,21 +147,11 @@ export default function Account() {
     }
   }
 
-  const signOut = async (unknownFiles?: 'keep' | 'delete') => {
-    setUnknownAsk(null)
-    // Task 2191 (Decision (lead, 2026-10-26)): files from before the last update are never
-    // copied or deleted silently. If any hold bytes on this PC, ask first.
-    if (!unknownFiles) {
-      const unknown = await signOutUnknownFiles()
-      if (unknown.ok && unknown.value.count > 0 && unknown.value.folder) {
-        setUnknownAsk(unknown.value)
-        return
-      }
-    }
+  const signOut = async () => {
     setBusy('clear_session')
     setActionNote(null)
     clearSignOutWarning()
-    const result = await clearSession(unknownFiles ? { unknownFiles } : {})
+    const result = await clearSession()
     setBusy(null)
     if (!result.ok) {
       // Spec 2026-10-10 §4 row 2: a waiting change opens the flow in Settings › Account, never a toast here.
@@ -382,54 +367,6 @@ export default function Account() {
           </button>
         </div>
       </div>
-      {unknownAsk?.folder ? (
-        <UnknownFilesSignOutDialog
-          count={unknownAsk.count}
-          folder={unknownAsk.folder}
-          onCancel={() => setUnknownAsk(null)}
-          onChoose={(choice) => void signOut(choice)}
-        />
-      ) : null}
     </section>
-  )
-}
-
-/** Task 2191: keep copies (the default) or delete them, before signing out. */
-function UnknownFilesSignOutDialog({
-  count,
-  folder,
-  onCancel,
-  onChoose,
-}: {
-  count: number
-  folder: string
-  onCancel: () => void
-  onChoose: (choice: 'keep' | 'delete') => void
-}) {
-  const copy = unknownFilesSignOutCopy(count, folder)
-  return (
-    <Modal
-      open
-      onClose={onCancel}
-      title={copy.title}
-      maxWidth={520}
-      footer={
-        <div className="button-row">
-          <button className="button amber" onClick={() => onChoose('keep')}>
-            {copy.keepLabel}
-          </button>
-          <button className="button danger" onClick={() => onChoose('delete')}>
-            {copy.deleteLabel}
-          </button>
-          <button className="button" onClick={onCancel}>
-            {copy.cancelLabel}
-          </button>
-        </div>
-      }
-    >
-      <p>{copy.body}</p>
-      <p>{copy.keepNote}</p>
-      <p>{copy.deleteNote}</p>
-    </Modal>
   )
 }
