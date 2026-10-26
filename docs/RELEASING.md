@@ -295,6 +295,7 @@ update or downgrade is actually installed from that channel.
 6. Promote the same build to another channel by rerunning `.github/workflows/release.yml` with the same `version`, the new `channel`, and `publish_existing=true`.
 7. A `publish_existing=true` run skips release-note validation, skips the test gate, skips the build matrix, skips GitHub release creation, and only rewrites the selected channel manifest to point at the existing `desktop-v<version>` assets.
 8. The `publish-manifest` job reads the GitHub release body into the channel manifest `notes` field, so the authored notes are what the in-app updater shows on every promoted channel.
+9. The `publish-manifest` job fails closed: every bundle a manifest entry points at, and its `.sig`, must be an uploaded asset of `desktop-v<version>`, and the `.sig` must download with content (assets API, up to 3 attempts). darwin is all-or-nothing: with neither `Beebeeb.app.tar.gz` nor its `.sig` on the release the manifest omits `darwin-aarch64`, but a half-present macOS release (one without the other, or an empty or unfetchable `.sig`) fails the channel manifest instead of silently dropping Macs from the update. Tested offline by `scripts/test-release-channel-manifest.sh` (CI job "Release channel manifest (fake gh test)").
 
 ## Style Notes
 
