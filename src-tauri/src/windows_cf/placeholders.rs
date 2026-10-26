@@ -1176,9 +1176,20 @@ pub fn platform_view(path: &std::path::Path) -> crate::unknown_check::PlatformVi
 }
 
 /// Task 2191 (D2): mark `path` NOT in sync, so Explorer's "Free up space" and Storage Sense can't
-/// free it. Attribute-only open (`CF_OPEN_FILE_FLAG_NONE`, as `callbacks.rs` does), so share
-/// modes rarely block it; a failure is returned for the tick's retry.
+/// free it; a failure is returned for the tick's retry.
+///
+/// Desktop 0.8.15: through a handle with no data access (`WRITE_DAC` and attributes, as the
+/// reparse point) first. The guard marks files that hold bytes, a partly downloaded one
+/// included, and the 0.8.14 handle (`CfOpenFileWithOplock`, which opens for reading) asks for
+/// the whole file: the native probe in `callbacks.rs` counts one whole-file fetch after it on a
+/// cloud-only placeholder, and none after this mark, which leaves the file reading not in sync.
+/// Only when this handle can't be had (no `WRITE_DAC` on a file someone else owns) is the 0.8.14
+/// handle used.
 pub fn mark_not_in_sync_path(path: &std::path::Path) -> anyhow::Result<()> {
+    match mark_not_in_sync_without_data_access(path) {
+        Ok(()) => return Ok(()),
+        Err(e) => tracing::debug!(error = %e, "guard: no handle without data access; marking through an oplock handle"),
+    }
     let path_wide: Vec<u16> = path.to_string_lossy().encode_utf16().chain(std::iter::once(0)).collect();
     // SAFETY: `path_wide` is NUL-terminated and alive for the call; the handle is closed below.
     let handle = unsafe { CfOpenFileWithOplock(PCWSTR(path_wide.as_ptr()), CF_OPEN_FILE_FLAG_NONE) }?;
@@ -1187,6 +1198,23 @@ pub fn mark_not_in_sync_path(path: &std::path::Path) -> anyhow::Result<()> {
     // SAFETY: closed exactly once.
     unsafe { CfCloseHandle(handle) };
     result?;
+    Ok(())
+}
+
+/// Desktop 0.8.15: [`mark_not_in_sync_path`] through a handle that cannot read data.
+fn mark_not_in_sync_without_data_access(path: &std::path::Path) -> anyhow::Result<()> {
+    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, WRITE_DAC,
+    };
+    let file = std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES.0 | WRITE_DAC.0)
+        .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+        .open(path)?;
+    // SAFETY: `file` is open for the whole call.
+    unsafe { CfSetInSyncState(HANDLE(file.as_raw_handle()), CF_IN_SYNC_STATE_NOT_IN_SYNC, CF_SET_IN_SYNC_FLAG_NONE, None) }?;
     Ok(())
 }
 

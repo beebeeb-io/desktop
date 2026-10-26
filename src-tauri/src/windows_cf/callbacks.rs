@@ -1056,12 +1056,12 @@ mod tests {
 
     /// Desktop 0.8.15 (deliverable 2), the hydration storm. 0.8.14's guard opened every placeholder
     /// for reading (as the reparse point); on Guus's PC 5,294 cloud-only files were then fetched
-    /// whole, one after another, in the guard's row order, ~42 GB in 2 h, until C: was full. The
-    /// guard's reads now open for attributes only. On a temporary sync root connected with a
-    /// counting FETCH_DATA callback (which fails every fetch, so nothing is served), they read a
-    /// cloud-only placeholder's identity and state and ask for no bytes. The 0.8.14 open is made
-    /// too, and what followed it is printed, not asserted: who asks depends on the PC's
-    /// anti-malware, and that is what this probe is here to show (run with --nocapture).
+    /// whole, one after another, in the guard's row order, ~42 GB in 2 h, until C: was full. On a
+    /// temporary sync root connected with a counting FETCH_DATA callback (which fails every
+    /// fetch, so nothing is served), this measures what asks for a cloud-only file's bytes: the
+    /// guard's reads (now attribute-only), the stamp pass's promotion check, the 0.8.14
+    /// read-access open (for comparison, not asserted) and the guard's mark (now through a handle
+    /// with no data access). Run with --nocapture to see the counts and who asked.
     #[test]
     fn desktop_0815_probe_the_guard_reads_a_cloud_only_file_without_fetching_it() {
         use crate::unknown_check::{OnDisk, PlatformView};
@@ -1160,46 +1160,18 @@ mod tests {
         );
         settle();
         let after_0814_open = FETCHES.load(Ordering::SeqCst);
-        // The guard's mark (made only on files that hold bytes), for the record.
+        // The guard's mark. It is made only on files that hold bytes, a partly downloaded one
+        // included, so it must not ask for the rest: measured here on a cloud-only file.
         let marked = crate::windows_cf::placeholders::mark_not_in_sync_path(&cloud_only).is_ok();
         settle();
         let after_mark = FETCHES.load(Ordering::SeqCst);
-        // For the record: the same mark through a handle with no data access (WRITE_DAC and
-        // attributes), on a second cloud-only placeholder. Printed, not asserted.
-        assert!(
-            crate::windows_cf::placeholders::create_placeholder(&root, "probe-dac", "dac.bin", 8 << 20, 1_700_000_000, false)
-                .unwrap()
-        );
-        let dac = root.join("dac.bin");
-        settle();
-        let before_dac = FETCHES.load(Ordering::SeqCst);
-        let dac_mark = {
-            use std::os::windows::io::AsRawHandle;
-            use windows::Win32::Foundation::HANDLE;
-            use windows::Win32::Storage::FileSystem::{FILE_READ_ATTRIBUTES, WRITE_DAC};
-            match std::fs::OpenOptions::new()
-                .access_mode(FILE_READ_ATTRIBUTES.0 | WRITE_DAC.0)
-                .share_mode(7)
-                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
-                .open(&dac)
-            {
-                // SAFETY: the handle is open for the call.
-                Ok(file) => unsafe {
-                    CfSetInSyncState(HANDLE(file.as_raw_handle()), CF_IN_SYNC_STATE_NOT_IN_SYNC, CF_SET_IN_SYNC_FLAG_NONE, None)
-                }
-                .map_err(|e| format!("CfSetInSyncState: {e}")),
-                Err(e) => Err(format!("open: {e}")),
-            }
-        };
-        settle();
-        let after_dac = FETCHES.load(Ordering::SeqCst);
-        let dac_view = crate::windows_cf::placeholders::platform_view(&dac);
+        let marked_view = crate::windows_cf::placeholders::platform_view(&cloud_only);
+        // And on a file whose bytes are all on this PC, the case the guard meets most.
+        let local_marked = crate::windows_cf::placeholders::mark_not_in_sync_path(&local).is_ok();
+        let local_marked_view = crate::windows_cf::placeholders::platform_view(&local);
         println!(
             "desktop-0815 probe: fetches before={before} after_guard_reads={after_guard_reads} \
              after_promotion={after_promotion} after_0814_read_open={after_0814_open} after_mark={after_mark} (marked={marked})"
-        );
-        println!(
-            "desktop-0815 probe: no-data-access mark: result={dac_mark:?} fetches {before_dac}->{after_dac} view after={dac_view:?}"
         );
         for (pid, image, offset, length) in REQUESTERS.lock().unwrap_or_else(|p| p.into_inner()).iter() {
             println!(
@@ -1223,5 +1195,18 @@ mod tests {
         assert_eq!(after_guard_reads, before, "the guard's reads asked for no bytes");
         assert!(!promoted);
         assert_eq!(after_promotion, after_guard_reads, "the promotion check asked for no bytes");
+        assert!(marked);
+        assert_eq!(
+            marked_view,
+            PlatformView::Placeholder { on_disk: OnDisk::Nothing, in_sync: false, identity: Some("probe-cloud-only".into()) },
+            "marked not in sync"
+        );
+        assert_eq!(after_mark, after_0814_open, "the guard's mark asked for no bytes");
+        assert!(local_marked);
+        assert_eq!(
+            local_marked_view,
+            PlatformView::Placeholder { on_disk: OnDisk::Wholly, in_sync: false, identity: Some("probe-local".into()) },
+            "a local file marked not in sync"
+        );
     }
 }
