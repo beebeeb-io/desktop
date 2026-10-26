@@ -1164,9 +1164,42 @@ mod tests {
         let marked = crate::windows_cf::placeholders::mark_not_in_sync_path(&cloud_only).is_ok();
         settle();
         let after_mark = FETCHES.load(Ordering::SeqCst);
+        // For the record: the same mark through a handle with no data access (WRITE_DAC and
+        // attributes), on a second cloud-only placeholder. Printed, not asserted.
+        assert!(
+            crate::windows_cf::placeholders::create_placeholder(&root, "probe-dac", "dac.bin", 8 << 20, 1_700_000_000, false)
+                .unwrap()
+        );
+        let dac = root.join("dac.bin");
+        settle();
+        let before_dac = FETCHES.load(Ordering::SeqCst);
+        let dac_mark = {
+            use std::os::windows::io::AsRawHandle;
+            use windows::Win32::Foundation::HANDLE;
+            use windows::Win32::Storage::FileSystem::{FILE_READ_ATTRIBUTES, WRITE_DAC};
+            match std::fs::OpenOptions::new()
+                .access_mode(FILE_READ_ATTRIBUTES.0 | WRITE_DAC.0)
+                .share_mode(7)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+                .open(&dac)
+            {
+                // SAFETY: the handle is open for the call.
+                Ok(file) => unsafe {
+                    CfSetInSyncState(HANDLE(file.as_raw_handle()), CF_IN_SYNC_STATE_NOT_IN_SYNC, CF_SET_IN_SYNC_FLAG_NONE, None)
+                }
+                .map_err(|e| format!("CfSetInSyncState: {e}")),
+                Err(e) => Err(format!("open: {e}")),
+            }
+        };
+        settle();
+        let after_dac = FETCHES.load(Ordering::SeqCst);
+        let dac_view = crate::windows_cf::placeholders::platform_view(&dac);
         println!(
             "desktop-0815 probe: fetches before={before} after_guard_reads={after_guard_reads} \
              after_promotion={after_promotion} after_0814_read_open={after_0814_open} after_mark={after_mark} (marked={marked})"
+        );
+        println!(
+            "desktop-0815 probe: no-data-access mark: result={dac_mark:?} fetches {before_dac}->{after_dac} view after={dac_view:?}"
         );
         for (pid, image, offset, length) in REQUESTERS.lock().unwrap_or_else(|p| p.into_inner()).iter() {
             println!(
