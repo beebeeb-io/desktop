@@ -408,6 +408,20 @@ const DUE_ORDER_SQL: &str = "ORDER BY rowid ASC";
 #[cfg(not(target_os = "macos"))]
 const DUE_ORDER_SQL: &str = "ORDER BY created_at ASC, rowid ASC";
 
+/// Task 2204: a Windows rename (`metadata.local_rename`) not sent yet: unclaimed, and neither
+/// parked nor paused.
+const PENDING_LOCAL_RENAME_SQL: &str = "kind IN ('rename_file', 'move_file')
+       AND json_extract(metadata_json, '$.local_rename') = 1
+       AND claim_id IS NULL AND attempts < max_attempts AND paused_reason IS NULL";
+
+/// `get_file_by_path`'s other stored shape: `/leaf` ⇄ `leaf`.
+fn toggled_slash(path: &str) -> String {
+    match path.strip_prefix('/') {
+        Some(stripped) => stripped.to_string(),
+        None => format!("/{path}"),
+    }
+}
+
 /// `earlier` comes before `this` in [`DUE_ORDER_SQL`]'s order.
 #[cfg(target_os = "macos")]
 const EARLIER_IN_QUEUE_SQL: &str = "earlier.rowid < this.rowid";
@@ -5140,6 +5154,12 @@ impl StateDb {
             "UPDATE files SET path = ?2, parent_id = ?3 WHERE file_id = ?1 AND item_kind = 'file'",
             params![file_id, new_path, new_parent_id],
         )?;
+        // A queued hydrate writes where the file is now, never over a new file at the old name.
+        tx.execute(
+            "UPDATE operation_queue SET target_path = ?2
+             WHERE file_id = ?1 AND kind = 'hydrate_file' AND target_path IS NOT NULL",
+            params![file_id, new_path],
+        )?;
         tx.commit()?;
         Ok(FinderEnqueue::Queued)
     }
@@ -5157,19 +5177,79 @@ impl StateDb {
         )
     }
 
-    /// Task 2204 S0.4: how many rows that are not being trashed sit at `path`, in either stored
-    /// shape (`get_file_by_path`'s two lookups).
-    pub fn count_live_files_at_path(&self, path: &str) -> Result<i64> {
-        let alt = match path.strip_prefix('/') {
-            Some(stripped) => stripped.to_string(),
-            None => format!("/{path}"),
-        };
+    /// Task 2204 S0.4: `path` was vacated by a Windows rename that is still waiting to be sent
+    /// (unclaimed, not parked or paused). A file there waits too: a safe save may still fold
+    /// back onto the original ([`Self::fold_local_rename`]).
+    pub fn is_vacated_by_pending_rename(&self, path: &str) -> Result<bool> {
+        let alt = toggled_slash(path);
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.query_row(
-            "SELECT COUNT(*) FROM files WHERE path IN (?1, ?2) AND status != 'trashing'",
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM operation_queue WHERE {PENDING_LOCAL_RENAME_SQL}
+                   AND json_extract(metadata_json, '$.vacated_path') IN (?1, ?2))"
+            ),
             params![path, alt],
             |r| r.get(0),
         )
+    }
+
+    /// The path this file's pending Windows rename vacated, if one is still waiting to be sent.
+    pub fn pending_local_rename_vacated(&self, file_id: &str) -> Result<Option<String>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row(
+            &format!(
+                "SELECT json_extract(metadata_json, '$.vacated_path') FROM operation_queue
+                 WHERE {PENDING_LOCAL_RENAME_SQL} AND file_id = ?1 LIMIT 1"
+            ),
+            params![file_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map(Option::flatten)
+    }
+
+    /// Task 2204 S0.4: a safe save (Excel, a backup rename): the original was renamed away, a
+    /// new file took its name, and the renamed one is now deleted. In one transaction, and only
+    /// while the rename is still unsent and no other live row is at `vacated` (a manual swap,
+    /// review-128 F3), the rename is cancelled and the row goes back to `vacated`, so the new
+    /// bytes are an edit of the original. `false`: nothing changed; the delete is a delete.
+    pub fn fold_local_rename(&self, file_id: &str, vacated: &str) -> Result<bool> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let op: Option<(String, Option<String>)> = tx
+            .query_row(
+                &format!(
+                    "SELECT op_id, json_extract(metadata_json, '$.vacated_parent_id') FROM operation_queue
+                     WHERE {PENDING_LOCAL_RENAME_SQL} AND file_id = ?1
+                       AND json_extract(metadata_json, '$.vacated_path') = ?2 LIMIT 1"
+                ),
+                params![file_id, vacated],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((op_id, vacated_parent_id)) = op else {
+            return Ok(false);
+        };
+        let taken: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM files WHERE path IN (?1, ?2) AND file_id != ?3 AND status != 'trashing')",
+            params![vacated, toggled_slash(vacated), file_id],
+            |r| r.get(0),
+        )?;
+        if taken {
+            return Ok(false);
+        }
+        tx.execute("DELETE FROM operation_queue WHERE op_id = ?1", params![op_id])?;
+        tx.execute(
+            "UPDATE files SET path = ?2, parent_id = ?3 WHERE file_id = ?1",
+            params![file_id, vacated, vacated_parent_id],
+        )?;
+        tx.execute(
+            "UPDATE operation_queue SET target_path = ?2
+             WHERE file_id = ?1 AND kind = 'hydrate_file' AND target_path IS NOT NULL",
+            params![file_id, vacated],
+        )?;
+        tx.commit()?;
+        Ok(true)
     }
 
     pub fn enqueue_finder_change(
@@ -6681,15 +6761,15 @@ impl StateDb {
         .unwrap();
     }
 
-    /// Unguarded; the runner removes an op with [`Self::finish_claimed`] (spec §8.7
-    /// S2). Kept for tests that set up queue states.
-    #[cfg(test)]
     /// Tests outside this module: run one SQL statement (e.g. park an op by hand).
     #[cfg(test)]
     pub(crate) fn test_execute(&self, sql: &str) -> Result<usize> {
         self.0.lock().expect("state_db mutex poisoned").execute(sql, [])
     }
 
+    /// Unguarded; the runner removes an op with [`Self::finish_claimed`] (spec §8.7
+    /// S2). Kept for tests that set up queue states.
+    #[cfg(test)]
     pub fn remove_operation(&self, op_id: &str) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.execute("DELETE FROM operation_queue WHERE op_id = ?1", params![op_id])?;

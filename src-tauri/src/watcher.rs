@@ -747,7 +747,7 @@ pub(crate) fn dispatch_local_create(
 /// existing trash op so the server deletes it too. If there is no DB row, the
 /// delete was of an untracked local file (or an engine-internal file) — nothing
 /// to propagate.
-async fn handle_delete(bridge: &EngineBridge, sync_root: &std::path::Path, path: &std::path::Path) {
+pub(crate) async fn handle_delete(bridge: &EngineBridge, sync_root: &std::path::Path, path: &std::path::Path) {
     // Engine-internal deletes (state.db churn, lock file) must never propagate.
     if crate::engine_bridge::path_is_engine_internal(sync_root, path) {
         return;
@@ -755,6 +755,21 @@ async fn handle_delete(bridge: &EngineBridge, sync_root: &std::path::Path, path:
     let Some(rel) = crate::engine_bridge::relative_db_path(sync_root, path) else {
         return;
     };
+    // Task 2204 S0.4: a safe save renamed the original away, put the new bytes at its name and
+    // now deletes the renamed file. While that rename is unsent, it folds back: the row returns
+    // to the vacated path and the new bytes there are an edit of the original. A file that was
+    // only renamed then deleted (nothing at the vacated path), or a vacated path another tracked
+    // file holds (a manual swap), is a delete as before.
+    if let Ok(Some(entry)) = bridge.db().get_file_by_path(&rel)
+        && let Ok(Some(vacated)) = bridge.db().pending_local_rename_vacated(&entry.file_id)
+        && let Ok(vacated_on_disk) = crate::engine_bridge::local_file_path_under_sync_root(sync_root, &vacated)
+        && vacated_on_disk.is_file()
+        && bridge.db().fold_local_rename(&entry.file_id, &vacated).unwrap_or(false)
+    {
+        tracing::info!("upload driver: a safe save kept the file (rename folded back)");
+        handle_settled_path(bridge, sync_root, &vacated_on_disk);
+        return;
+    }
     match bridge.db().get_file_by_path(&rel) {
         Ok(Some(entry)) => match bridge.queue_finder_delete(&entry.file_id, None) {
             Ok(FinderWriteOutcome::Queued { op_id, .. }) => {

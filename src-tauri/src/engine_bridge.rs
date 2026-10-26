@@ -3015,8 +3015,12 @@ impl EngineBridge {
             return Ok(ignored_finder_item(&target.filename));
         };
         let (kind, mut payload) = self.metadata_update_payload(&file_id, &target, item_contract.as_ref())?;
+        let row = self.db.get_file(&file_id)?;
         payload["local_rename"] = serde_json::Value::Bool(true);
-        let op = self.finder_operation(
+        // S0.4: where the file was, so a safe save can fold back onto it.
+        payload["vacated_path"] = row.as_ref().map(|row| row.path.clone()).into();
+        payload["vacated_parent_id"] = row.and_then(|row| row.parent_id).into();
+        let mut op = self.finder_operation(
             kind.clone(),
             Some(file_id.clone()),
             target.parent_id.clone(),
@@ -3026,6 +3030,9 @@ impl EngineBridge {
             None,
             item_contract.and_then(|contract| contract.current_object_version_id),
         )?;
+        // S0.4: a safe save's rename, new file and delete arrive within this; until then the
+        // rename is not sent, and a file at the vacated path waits.
+        op.next_retry_at = now_secs() + RENAME_SETTLE_SECS;
         match self.db.enqueue_local_rename(&op, &file_id, new_path, target.parent_id.as_deref())? {
             crate::state_db::FinderEnqueue::AcceptsClosed => Err(anyhow::Error::new(AcceptsClosed)),
             crate::state_db::FinderEnqueue::Queued => Ok(FinderWriteOutcome::Queued {
@@ -3390,10 +3397,10 @@ impl EngineBridge {
             tracing::debug!(rel_path = %rel, "classify_local_path: rejected an original whose copy is kept");
             return None;
         }
-        // Task 2204 S0.4 (review-128 F13): two live rows at one path (a renamed row moved back for
-        // a tick by a stale echo, next to the new file at its old name): neither is classified.
-        if self.db.count_live_files_at_path(&rel).unwrap_or(0) > 1 {
-            tracing::debug!(rel_path = %rel, "classify_local_path: two rows at the path; skipped this pass");
+        // Task 2204 S0.4: a file at the path a Windows rename vacated waits until that rename is
+        // sent: it may be a safe save's new bytes, which fold back onto the original.
+        if self.db.is_vacated_by_pending_rename(&rel).unwrap_or(true) {
+            tracing::debug!(rel_path = %rel, "classify_local_path: the path a pending rename vacated; skipped this pass");
             return None;
         }
         match self.db.get_file_by_path(&rel) {
@@ -5893,6 +5900,10 @@ pub(crate) fn promote_fetched_content(
 }
 
 /// Lower-case hex SHA-256 of `bytes`: a sync-folder file's agreed content (task 1640).
+/// Task 2204 S0.4: a Windows rename is sent this long after it is queued, so a safe save
+/// (rename away, new file, delete) completes first and folds back onto the original.
+pub(crate) const RENAME_SETTLE_SECS: i64 = 10;
+
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     format!("{:x}", Sha256::digest(bytes))
@@ -8101,7 +8112,10 @@ fn apply_metadata_file_row(
     // Task 2204 S0.3: while a Windows rename of this file is queued (parked included), the row's
     // path and parent are where the file is on disk; the server's are still the old ones.
     let held = match existing.as_ref() {
-        Some(entry) if !entry.is_dir() && db.has_queued_local_rename(file_id)? => Some(entry.clone()),
+        // Only `handle_rename` (Windows) queues these ops, so other builds skip the query.
+        Some(entry) if cfg!(any(target_os = "windows", test)) && !entry.is_dir() && db.has_queued_local_rename(file_id)? => {
+            Some(entry.clone())
+        }
         _ => None,
     };
     let path = held.as_ref().map_or(path, |entry| entry.path.clone());
@@ -28830,35 +28844,106 @@ mod tests {
         assert_eq!(bridge.db.get_file(&id).unwrap().unwrap().path, "c.txt", "nothing queued: the pull applies");
     }
 
-    /// S0.4: a path two live rows share is not classified, so neither file gets the other's
-    /// bytes (review-128 F13: a split ops page moves the renamed row back for a tick).
+    /// S0.4: a safe save (Excel's: the original renamed to a hex name, the new bytes renamed onto
+    /// its name, the hex file deleted) is an edit of the original, never a trash plus a new file.
     #[tokio::test]
-    async fn task_2204_a_path_two_rows_share_is_not_classified() {
-        let master_key = [206u8; 32];
-        let (_dir, sync_root, _server, bridge) = rule3_setup(master_key);
-        let path = sync_root.join("dup.txt");
-        std::fs::write(&path, b"first").unwrap();
+    async fn task_2204_an_excel_save_is_an_edit_of_the_file() {
+        let master_key = [208u8; 32];
+        let (_dir, sync_root, server, bridge) = rule3_setup(master_key);
+        let (original, hex, temp) = (sync_root.join("a.xlsx"), sync_root.join("3F2A9B1C"), sync_root.join("~tmp1.tmp"));
+        std::fs::write(&original, b"version one").unwrap();
         crate::watcher::run_one_scan(&bridge, &sync_root);
         drain_upload_queue(&bridge, &sync_root).await;
-        std::fs::write(&path, b"edited").unwrap();
-        assert!(bridge.classify_local_path(&sync_root, &path).is_some(), "precondition: one row, an edit");
+        let id = bridge.db.get_file_by_path("a.xlsx").unwrap().unwrap().file_id;
+        std::fs::rename(&original, &hex).unwrap();
+        crate::watcher::handle_rename(&bridge, &sync_root, &original, &hex).await;
+        std::fs::write(&temp, b"version two, longer").unwrap();
+        std::fs::rename(&temp, &original).unwrap();
+        crate::watcher::handle_rename(&bridge, &sync_root, &temp, &original).await;
+        assert_eq!(regression_1640_uploads_queued_for(&bridge, "a.xlsx"), 0, "the new bytes wait while the rename is unsent");
+        std::fs::remove_file(&hex).unwrap();
+        crate::watcher::handle_delete(&bridge, &sync_root, &hex).await;
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        let row = bridge.db.get_file_by_path("a.xlsx").unwrap().expect("the original's row is back at its name");
+        assert_eq!(row.file_id, id);
+        let ops = bridge.db.list_operations_for_file(&id).unwrap();
+        assert_eq!(
+            ops.iter().map(|op| op.kind.clone()).collect::<Vec<_>>(),
+            vec![OperationKind::UploadVersion],
+            "one edit of the original: no rename, no trash"
+        );
+        drain_upload_queue(&bridge, &sync_root).await;
+        let state = server.finish();
+        assert!(state.trashes.is_empty(), "nothing trashed");
+        assert_eq!(state.files_with_content(), vec![id.clone()], "one file on the server");
+        assert_eq!(state.files[&id].versions.len(), 2, "the save is the file's next version");
+        assert_eq!(state.latest_plaintext(&id, master_key), b"version two, longer");
+    }
+
+    /// S0.4's limits: a rename then a delete still trashes the file (nothing is at the vacated
+    /// path), and a manual swap (another tracked file now holds the vacated path, review-128 F3)
+    /// is a delete of the old one, not a fold.
+    #[tokio::test]
+    async fn task_2204_a_delete_after_a_rename_or_a_swap_is_a_delete() {
+        let master_key = [209u8; 32];
+        let (_dir, sync_root, _server, bridge) = rule3_setup(master_key);
+        for name in ["gone.txt", "report.txt", "final.txt"] {
+            std::fs::write(sync_root.join(name), name.as_bytes()).unwrap();
+        }
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        drain_upload_queue(&bridge, &sync_root).await;
+        let trashes = |id: &str| {
+            bridge
+                .db
+                .list_operations_for_file(id)
+                .unwrap()
+                .iter()
+                .filter(|op| op.kind == OperationKind::TrashFile)
+                .count()
+        };
+        let id = |path: &str| bridge.db.get_file_by_path(path).unwrap().unwrap().file_id;
+        // Rename, then delete.
+        let gone = id("gone.txt");
+        let (g, g2) = (sync_root.join("gone.txt"), sync_root.join("gone2.txt"));
+        std::fs::rename(&g, &g2).unwrap();
+        crate::watcher::handle_rename(&bridge, &sync_root, &g, &g2).await;
+        std::fs::remove_file(&g2).unwrap();
+        crate::watcher::handle_delete(&bridge, &sync_root, &g2).await;
+        assert_eq!(trashes(&gone), 1, "a rename then a delete is a delete");
+        // A manual swap: report -> old, final -> report, delete old.
+        let (report, fin) = (id("report.txt"), id("final.txt"));
+        let (r, old, f) = (sync_root.join("report.txt"), sync_root.join("old.txt"), sync_root.join("final.txt"));
+        std::fs::rename(&r, &old).unwrap();
+        crate::watcher::handle_rename(&bridge, &sync_root, &r, &old).await;
+        std::fs::rename(&f, &r).unwrap();
+        crate::watcher::handle_rename(&bridge, &sync_root, &f, &r).await;
+        std::fs::remove_file(&old).unwrap();
+        crate::watcher::handle_delete(&bridge, &sync_root, &old).await;
+        assert_eq!(trashes(&report), 1, "the old report is deleted");
+        assert_eq!(id("report.txt"), fin, "the final file holds the name");
+    }
+
+    /// A hydrate queued before the rename writes where the file is now, never over a new file
+    /// at the old name.
+    #[tokio::test]
+    async fn task_2204_a_queued_hydrate_follows_the_rename() {
+        let master_key = [210u8; 32];
+        let (_dir, sync_root, _server, bridge) = rule3_setup(master_key);
+        let (a, b) = (sync_root.join("a.txt"), sync_root.join("b.txt"));
+        std::fs::write(&a, b"bytes").unwrap();
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        drain_upload_queue(&bridge, &sync_root).await;
+        let id = bridge.db.get_file_by_path("a.txt").unwrap().unwrap().file_id;
         bridge
             .db
-            .upsert_file(&FileEntry {
-                file_id: "second-row".into(),
-                path: "dup.txt".into(),
-                status: FileStatus::Local,
-                size_bytes: 6,
-                modified_at: 0,
-                content_hash: None,
-                remote_updated_at: 0,
-                parent_id: None,
-                item_kind: ItemKind::File,
-            })
+            .test_execute(&format!(
+                "INSERT INTO operation_queue (op_id, kind, file_id, target_path, metadata_json, attempts, max_attempts)
+                 VALUES ('hydrate-a', 'hydrate_file', '{id}', 'a.txt', '{{}}', 0, 25)"
+            ))
             .unwrap();
-        assert!(bridge.classify_local_path(&sync_root, &path).is_none(), "two rows at the path: not classified");
-        bridge.db.set_status("second-row", FileStatus::Trashing).unwrap();
-        assert!(bridge.classify_local_path(&sync_root, &path).is_some(), "a trashing row does not count");
+        std::fs::rename(&a, &b).unwrap();
+        crate::watcher::handle_rename(&bridge, &sync_root, &a, &b).await;
+        assert_eq!(bridge.db.get_operation("hydrate-a").unwrap().unwrap().target_path.as_deref(), Some("b.txt"));
     }
 
     /// S0 keeps today's behaviour for what it does not cover: a folder (its descendants would
