@@ -56,7 +56,7 @@ const called = (m: Mounted, name: string) => m.calls.filter((c) => c.name === na
 
 // ── General › From your account ─────────────────────────────────────────────
 
-describe('From your account', () => {
+describe('Account notifications', () => {
   const prefs = { new_device_login: true, share_received: true, file_updated: false, storage_warning: true, backup_complete: false }
   function openPrefs(backend: Record<string, (a: any) => unknown> = {}) {
     const m = mount('MacSettingsExtras.tsx', 'AccountPreferencesGroup', {
@@ -74,11 +74,11 @@ describe('From your account', () => {
     expect(m.calls.map((c) => c.name)).toEqual(['account_notification_preferences'])
     const text = visibleText(m)
     for (const words of [
-      'From your account',
+      'Account notifications',
       'New device sign-in', 'We cannot see your files, but we know when a new device signs in.',
-      'Share received', 'When someone grants you access to a file or folder.',
-      'File updated', 'When a file in your vault changes on another device.',
-      'Storage warning', 'When you are close to your storage limit.',
+      'Shared with you', 'When someone grants you access to a file or folder.',
+      'File updates', 'When a file in your vault changes on another device.',
+      'Storage warnings', 'When you are close to your storage limit.',
       'Backup complete', 'When a scheduled backup finishes.',
     ]) expect(text).toContain(words)
     expect(find(m, (el) => el.props.role === 'switch')).toHaveLength(5)
