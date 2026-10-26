@@ -6,6 +6,7 @@ import { command, loadSyncStatus, type SyncStatus } from '../src/desktopApi'
 import * as finderInstallCard from '../src/finderInstallCard'
 import { finderOpenFailedToast } from '../src/finderSetup'
 import { FINDER_OPEN_FAILED } from '../src/finderSetupCopy'
+import { syncActivityView } from '../src/windows/syncActivityModel'
 
 // Execute the production component declarations/handlers with controlled hooks.
 // This does not claim browser layout, React scheduling, or native Explorer proof.
@@ -98,6 +99,10 @@ function harness(file: string, name: string, overrides: Record<string, unknown> 
     getCurrentWindow: () => ({ onFocusChanged: async () => () => {}, hide: async () => {} }),
     BrandMark: 'brand', ActionIcon: 'icon', FileGlyph: 'glyph', ActionButton: 'action',
     TRAY_RECENT_LIMIT: 50, TRAY_VIEW_ALL_THRESHOLD: 8,
+    // The tray's status block (0.8.15): the real model, with the summary not read yet; tests/syncActivityModel.test.ts
+    // covers what it says.
+    syncActivityView, useSyncActivitySummary: () => ({ summary: undefined, refresh: async () => {} }),
+    SyncActivityIcon: 'activity-icon', SyncCheckProgress: 'check-progress',
     ...overrides,
   })
   function render() { cursor = 0; tree = View(props) }
