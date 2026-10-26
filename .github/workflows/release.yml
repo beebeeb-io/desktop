@@ -539,6 +539,9 @@ jobs:
       - build
       - release
     runs-on: ubuntu-latest
+    # Every GitHub request in the manifest step is bounded (timeout 120 s, 3 attempts); this
+    # bounds the job as a whole, so a stalled connection fails it instead of hanging for hours.
+    timeout-minutes: 15
     permissions:
       contents: read
 
@@ -561,6 +564,10 @@ jobs:
           CHANNEL: ${{ inputs.channel }}
         run: |
           set -euo pipefail
+          # Command substitutions keep errexit, so a failing command inside $(fetch_sig ...)
+          # fails the step even where no explicit `|| return 1` guards it (#164's empty-signature
+          # hole was exactly such a command).
+          shopt -s inherit_errexit
 
           DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           BASE_URL="https://github.com/$REPO/releases/download/$TAG"
@@ -572,13 +579,13 @@ jobs:
           # 0.8.15 alpha promotion failed twice. The retries ride out blips of seconds, not an
           # outage of that length; re-run the job once the API answers again.
           #
-          # gh_api_to <file> <endpoint> [gh api flags...]: up to 3 attempts; on success the file
-          # holds that attempt's response only.
+          # gh_api_to <file> <endpoint> [gh api flags...]: up to 3 attempts of at most 120 s each;
+          # on success the file holds that attempt's response only.
           gh_api_to() {
             local out="$1" endpoint="$2" attempt
             shift
             for attempt in 1 2 3; do
-              if gh api "$@" > "$out"; then
+              if timeout 120 gh api "$@" > "$out"; then
                 return 0
               fi
               echo "::warning::GitHub API request $endpoint failed (attempt $attempt of 3)" >&2
@@ -616,11 +623,12 @@ jobs:
           # Windows and Linux must fail closed if their bundles or signatures are absent.
           # macOS is still disabled in the release matrix (built + signed locally instead, see
           # the matrix comment above), so the CI-created release has no macOS assets until
-          # scripts/release-macos-local.sh uploads them. A release with neither the macOS
-          # bundle nor its signature omits the darwin entry instead of blocking Windows/Linux
-          # manifest publishing. A half-present macOS release (one of the two, or a signature
-          # that cannot be downloaded or is empty) fails the job: publishing without darwin
-          # would silently stop offering Macs the update.
+          # scripts/release-macos-local.sh uploads them. darwin is all-or-nothing: a release
+          # with no macOS asset at all (no dmg, no updater bundle, no signature, in any upload
+          # state) omits the darwin entry instead of blocking Windows/Linux manifest publishing.
+          # Any other macOS state (a dmg without the bundle, an upload still in progress, a
+          # signature that is missing, empty, unfetchable or not for this bundle) fails the job:
+          # publishing without darwin would silently stop offering Macs the update.
           #
           # Task 1608 (2026-09-29): macOS launched Apple Silicon (arm64) ONLY. The bundle name
           # below is Tauri's real, verified output (a real local `--target aarch64-apple-darwin`
@@ -640,23 +648,25 @@ jobs:
           # setup.exe installs, so the generic fallback intentionally points at
           # NSIS; MSI-installed clients still receive MSI through the typed key.
           MACOS_BUNDLE="Beebeeb.app.tar.gz"
+          MACOS_DMG="Beebeeb_${VER}_aarch64.dmg"
           LINUX_BUNDLE="Beebeeb_${VER}_amd64.AppImage"
           WINDOWS_NSIS_BUNDLE="Beebeeb_${VER}_x64-setup.exe"
           WINDOWS_MSI_BUNDLE="Beebeeb_${VER}_x64_en-US.msi"
 
-          # asset_id <name>: the id of the release's uploaded asset with exactly that name, or
-          # nothing. An asset still uploading (state "starter") counts as absent.
+          # asset_id <name>: the id of the release's fully uploaded, non-empty asset with exactly
+          # that name, or nothing.
           asset_id() {
             jq -r --arg name "$1" \
-              '.assets[] | select(.name == $name and .state == "uploaded") | .id' \
+              '.assets[] | select(.name == $name and .state == "uploaded" and .size > 0) | .id' \
               "$WORK_DIR/release.json"
           }
 
           # fetch_sig <bundle>: print the bundle's signature. Fails unless the bundle and its .sig
-          # are uploaded assets of $TAG and the .sig downloads with content. Every failure path
-          # returns non-zero explicitly: errexit is off inside the $(...) that calls this.
+          # are uploaded, non-empty assets of $TAG and the .sig is a Tauri (minisign) signature
+          # whose trusted comment names this bundle. Failure paths also return non-zero
+          # explicitly, on top of inherit_errexit.
           fetch_sig() {
-            local bundle="$1" sig_id
+            local bundle="$1" sig_id untrusted trusted
 
             if [ -z "$(asset_id "$bundle")" ]; then
               echo "::error::$bundle is not an uploaded asset of $TAG" >&2
@@ -673,16 +683,33 @@ jobs:
               echo "::error::$bundle.sig on $TAG is empty" >&2
               return 1
             fi
+            # Decoded, a signature reads "untrusted comment: ...", the signature line, then
+            # "trusted comment: timestamp:<n><TAB>file:<bundle>". An error page, the asset's
+            # JSON metadata or another bundle's signature must not reach the manifest. (Which
+            # key signed it is not checked here: a key-rotation release ships old-key signatures.)
+            if ! base64 -d "$WORK_DIR/$bundle.sig" > "$WORK_DIR/$bundle.sig.txt" 2>/dev/null; then
+              echo "::error::$bundle.sig on $TAG is not base64" >&2
+              return 1
+            fi
+            untrusted=$(sed -n 1p "$WORK_DIR/$bundle.sig.txt")
+            trusted=$(sed -n 3p "$WORK_DIR/$bundle.sig.txt")
+            if [[ "$untrusted" != "untrusted comment: "* || "$trusted" != "trusted comment: "* ||
+              $'\t'"${trusted#trusted comment: }"$'\t' != *$'\t'"file:$bundle"$'\t'* ]]; then
+              echo "::error::$bundle.sig on $TAG is not a Tauri signature of $bundle" >&2
+              return 1
+            fi
             cat "$WORK_DIR/$bundle.sig" || return 1
           }
 
-          # fetch_optional_sig <bundle>: like fetch_sig, but prints nothing when neither the bundle
-          # nor its .sig is on $TAG (the macOS case above).
+          # fetch_optional_sig <bundle>: like fetch_sig, but prints nothing when the release has
+          # no macOS asset at all, in any upload state (the darwin all-or-nothing rule above).
           fetch_optional_sig() {
             local bundle="$1"
 
-            if [ -z "$(asset_id "$bundle")" ] && [ -z "$(asset_id "$bundle.sig")" ]; then
-              echo "::notice::Neither $bundle nor its signature is on $TAG; omitting macOS manifest entries" >&2
+            if ! jq -e --arg a "$bundle" --arg b "$bundle.sig" --arg c "$MACOS_DMG" \
+              'any(.assets[]; .name == $a or .name == $b or .name == $c)' \
+              "$WORK_DIR/release.json" > /dev/null; then
+              echo "::notice::No macOS asset is on $TAG; omitting macOS manifest entries" >&2
               return 0
             fi
             fetch_sig "$bundle"

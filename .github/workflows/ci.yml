@@ -282,7 +282,9 @@ jobs:
     # against fixture releases with a fake gh on PATH (no network), and proves it fails closed:
     # a half-present macOS release, a missing or empty signature, or a download that keeps
     # failing writes no manifest. The truth line is a count
-    # ("release-channel-manifest: N passed, 0 failed"), guarded by a self-test that goes red.
+    # ("release-channel-manifest: N passed, 0 failed"), asserted on the run's own log by the
+    # same count guard its self-test proves can go red. A red run prints each failing
+    # scenario's step output and call log.
     name: Release channel manifest (fake gh test)
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -309,6 +311,9 @@ jobs:
         run: |
           set -o pipefail
           bash scripts/test-release-channel-manifest.sh 2>&1 | tee "$RUNNER_TEMP/release-manifest-test.log"
+
+      - name: Count guard on the run's own log
+        run: bash scripts/test-release-channel-manifest.sh --assert-log "$RUNNER_TEMP/release-manifest-test.log"
 
       - name: Upload manifest step test evidence
         if: always()

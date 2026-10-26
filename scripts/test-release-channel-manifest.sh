@@ -7,29 +7,30 @@
 # `curl` on PATH (scripts/fixtures/release-manifest-fake-gh.sh) against fixture releases, and
 # asserts:
 #   1. the manifest a complete release produces: platforms, URLs, signatures, notes, channel;
-#   2. a release without macOS assets omits darwin, and only then;
-#   3. fail closed: a half-present macOS release, a missing bundle or signature, a signature
-#      that cannot be downloaded or is empty, and an unreadable release all fail the step
-#      with no manifest written;
+#   2. a release with no macOS asset at all omits darwin, and only then;
+#   3. fail closed: a half-present or still-uploading macOS release, a missing or empty
+#      bundle or signature, a signature that cannot be downloaded, is not a Tauri signature or
+#      signs another file, and an unreadable release all fail the step, writing no manifest;
 #   4. retries: one failed request is retried and succeeds; three fail the step, with no
 #      sleep after the last attempt;
 #   5. signatures come through the assets API, never the public download URL (no curl).
 # Background: on 2026-10-26 the public .sig URL served a cached 504 for about 15 minutes, and
 # the step before that treated any failed macOS download as "no macOS release".
 #
-# The truth line is a COUNT ("release-channel-manifest: N passed, 0 failed") asserted
-# against EXPECTED_CHECKS. `--self-test` proves that assertion can go red. `--print-step`
-# prints the extracted step (CI shellchecks it).
+# The truth line is a COUNT ("release-channel-manifest: N passed, 0 failed"). CI asserts it
+# against EXPECTED_CHECKS with `--assert-log` on the run's own log, and `--self-test` proves
+# that same assertion can go red. `--print-step` prints the extracted step (CI shellchecks it).
 #
 # Usage:
-#   scripts/test-release-channel-manifest.sh               # run every scenario
-#   scripts/test-release-channel-manifest.sh --self-test   # red-proof of the count guard
-#   scripts/test-release-channel-manifest.sh --print-step  # the step's script, as tested
+#   scripts/test-release-channel-manifest.sh                    # run every scenario
+#   scripts/test-release-channel-manifest.sh --self-test        # red-proof of the count guard
+#   scripts/test-release-channel-manifest.sh --assert-log <log> # the count guard on a run's log
+#   scripts/test-release-channel-manifest.sh --print-step       # the step's script, as tested
 
 # shellcheck disable=SC2329  # predicates are invoked indirectly through `check`
 set -uo pipefail
 
-EXPECTED_CHECKS=82
+EXPECTED_CHECKS=100
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$HERE/.." && pwd)"
@@ -87,18 +88,22 @@ self_test() {
   echo "self-test OK: the count guard rejected 5 bad logs and accepted the good one"
 }
 
-# The step's `run: |` block, de-indented. Empty if the step was renamed or reshaped.
+# The step's `run: |` block, de-indented: from the step's own `- name:` line (exact, so a
+# comment that mentions it does not count) to the first non-blank line indented less than the
+# block. Empty if the step was renamed or reshaped.
 extract_step() {
-  awk -v name="- name: $STEP_NAME" '
-    index($0, name) { found = 1; next }
-    found && /^        run: \|$/ { body = 1; next }
-    body && /^      - name:/ { exit }
+  awk -v name="      - name: $STEP_NAME" '
+    !found && $0 == name { found = 1; next }
+    found && !body && /^      - name:/ { exit }
+    found && !body && /^        run: \|$/ { body = 1; next }
+    body && $0 != "" && $0 !~ /^          / { exit }
     body { sub(/^          /, ""); print }
   ' "$WORKFLOW"
 }
 
 case "${1:-}" in
   --self-test) self_test; exit $? ;;
+  --assert-log) assert_counts "${2:?usage: --assert-log <log file>}" 0; exit $? ;;
   --print-step) extract_step; exit $? ;;
 esac
 
@@ -113,6 +118,8 @@ cleanup_tmp() { if [[ "${BB_TEST_KEEP_TMP:-}" == 1 ]]; then echo "kept scenario 
 trap cleanup_tmp EXIT
 PASSED=0
 FAILED=0
+FAILED_FX=""
+FX=""
 
 # check <description> <command...>: the command must succeed.
 check() {
@@ -124,6 +131,7 @@ check() {
   else
     FAILED=$((FAILED + 1))
     printf '  FAIL %s\n' "$desc"
+    [[ " $FAILED_FX " == *" $FX "* ]] || FAILED_FX="$FAILED_FX $FX"
   fi
 }
 
@@ -155,29 +163,57 @@ new_scenario() { # name
   : >"$FX/calls.log"
 }
 
-# asset <name> <content> [state]: add an asset to the scenario's release. Content "-" is a
-# bundle placeholder.
+# sig_for <file>: a .sig shaped like Tauri's (base64 of a minisign signature whose trusted
+# comment names the signed file), as checked against real 0.8.14/0.8.15 signatures.
+sig_for() {
+  printf 'untrusted comment: signature from tauri secret key\nRUSfake%s\ntrusted comment: timestamp:1793037038\tfile:%s\nfakeglobal\n' \
+    "$1" "$1" | base64 -w0
+}
+SIG_MAC=$(sig_for "$MAC")
+SIG_LINUX=$(sig_for "$LINUX")
+SIG_NSIS=$(sig_for "$NSIS")
+SIG_MSI=$(sig_for "$MSI")
+
+# asset <name> <content> [state]: add an asset to the scenario's release; its size is the
+# content's. Bundles get placeholder content.
 asset() {
   local name="$1" content="$2" state="${3:-uploaded}"
   NEXT_ID=$((NEXT_ID + 1))
   printf '%s' "$content" >"$REL/assets/$NEXT_ID"
   ASSETS_JSON=$(jq -c --arg n "$name" --arg s "$state" --argjson id "$NEXT_ID" \
-    '. + [{id: $id, name: $n, state: $s, size: 1}]' <<<"$ASSETS_JSON")
+    --argjson size "$(wc -c <"$REL/assets/$NEXT_ID")" \
+    '. + [{id: $id, name: $n, state: $s, size: $size}]' <<<"$ASSETS_JSON")
 }
 
+# set_content <name> <content>: replace an asset's content (and size).
+set_content() {
+  local id
+  id=$(asset_id_of "$1")
+  printf '%s' "$2" >"$REL/assets/$id"
+  ASSETS_JSON=$(jq -c --arg n "$1" --argjson size "$(wc -c <"$REL/assets/$id")" \
+    'map(if .name == $n then .size = $size else . end)' <<<"$ASSETS_JSON")
+}
+
+set_state() { ASSETS_JSON=$(jq -c --arg n "$1" --arg s "$2" 'map(if .name == $n then .state = $s else . end)' <<<"$ASSETS_JSON"); }
+drop_asset() { ASSETS_JSON=$(jq -c --arg n "$1" 'map(select(.name != $n))' <<<"$ASSETS_JSON"); }
 asset_id_of() { jq -r --arg n "$1" '.[] | select(.name == $n) | .id' <<<"$ASSETS_JSON"; }
 
+windows_linux_assets() {
+  asset "$LINUX" BUNDLE
+  asset "$LINUX.sig" "$SIG_LINUX"
+  asset "$NSIS" BUNDLE
+  asset "$NSIS.sig" "$SIG_NSIS"
+  asset "$MSI" BUNDLE
+  asset "$MSI.sig" "$SIG_MSI"
+  asset "Beebeeb_${VER}_amd64.deb" BUNDLE
+  asset "Beebeeb_${VER}_amd64.deb.sig" "$(sig_for "Beebeeb_${VER}_amd64.deb")"
+}
+
 full_release() {
-  asset "$MAC" -
-  asset "$MAC.sig" "SIG-MAC"
-  asset "$LINUX" -
-  asset "$LINUX.sig" "SIG-LINUX"
-  asset "$NSIS" -
-  asset "$NSIS.sig" "SIG-NSIS"
-  asset "$MSI" -
-  asset "$MSI.sig" "SIG-MSI"
-  asset "Beebeeb_${VER}_amd64.deb" -
-  asset "Beebeeb_${VER}_amd64.deb.sig" "SIG-DEB"
+  asset "Beebeeb_${VER}_aarch64.dmg" BUNDLE
+  asset "$MAC" BUNDLE
+  asset "$MAC.sig" "$SIG_MAC"
+  windows_linux_assets
 }
 
 run_step() {
@@ -226,11 +262,11 @@ run_step
 check "exits 0" exited_ok
 check "version is $VER" mf_eq .version "$VER"
 check "all five platforms" platforms_are "$ALL5"
-check "darwin signature is the .sig's content" mf_eq '.platforms["darwin-aarch64"].signature' SIG-MAC
-check "linux signature" mf_eq '.platforms["linux-x86_64"].signature' SIG-LINUX
-check "windows (generic) signature is the NSIS one" mf_eq '.platforms["windows-x86_64"].signature' SIG-NSIS
-check "windows nsis signature" mf_eq '.platforms["windows-x86_64-nsis"].signature' SIG-NSIS
-check "windows msi signature" mf_eq '.platforms["windows-x86_64-msi"].signature' SIG-MSI
+check "darwin signature is the .sig's content" mf_eq '.platforms["darwin-aarch64"].signature' "$SIG_MAC"
+check "linux signature" mf_eq '.platforms["linux-x86_64"].signature' "$SIG_LINUX"
+check "windows (generic) signature is the NSIS one" mf_eq '.platforms["windows-x86_64"].signature' "$SIG_NSIS"
+check "windows nsis signature" mf_eq '.platforms["windows-x86_64-nsis"].signature' "$SIG_NSIS"
+check "windows msi signature" mf_eq '.platforms["windows-x86_64-msi"].signature' "$SIG_MSI"
 check "darwin url is the updater tarball" mf_eq '.platforms["darwin-aarch64"].url' "$BASE/$MAC"
 check "linux url is the AppImage" mf_eq '.platforms["linux-x86_64"].url' "$BASE/$LINUX"
 check "windows (generic) url is the NSIS installer" mf_eq '.platforms["windows-x86_64"].url' "$BASE/$NSIS"
@@ -259,22 +295,32 @@ check "all five platforms" platforms_are "$ALL5"
 
 echo "no macOS assets (the CI-created release)"
 new_scenario no-macos
-asset "$LINUX" -; asset "$LINUX.sig" SIG-LINUX; asset "$NSIS" -; asset "$NSIS.sig" SIG-NSIS
-asset "$MSI" -; asset "$MSI.sig" SIG-MSI
+windows_linux_assets
 run_step
 check "exits 0" exited_ok
 check "four platforms, no darwin" platforms_are "$NO_MAC"
-check "says why darwin is omitted" output_has "::notice::Neither $MAC nor its signature is on $TAG"
+check "says why darwin is omitted" output_has "::notice::No macOS asset is on $TAG"
 check "three signature downloads" calls_eq "^api repos/$REPO/releases/assets/" 3
 
-echo "macOS assets still uploading (state starter)"
+echo "macOS bundle and signature still uploading (state starter)"
 new_scenario macos-starter
 full_release
-ASSETS_JSON=$(jq -c --arg a "$MAC" --arg b "$MAC.sig" 'map(if .name == $a or .name == $b then .state = "starter" else . end)' <<<"$ASSETS_JSON")
+set_state "$MAC" starter
+set_state "$MAC.sig" starter
 run_step
-check "exits 0" exited_ok
-check "four platforms, no darwin" platforms_are "$NO_MAC"
+check "fails" exited_fail
+check "writes no manifest" no_manifest
+check "names the bundle that is not uploaded" output_has "::error::$MAC is not an uploaded asset of $TAG"
 check "the starter signature is not downloaded" eval '[[ "$(downloads_of "$MAC.sig")" == 0 ]]'
+
+echo "macOS dmg only (the updater bundle never uploaded)"
+new_scenario macos-dmg-only
+asset "Beebeeb_${VER}_aarch64.dmg" BUNDLE
+windows_linux_assets
+run_step
+check "fails" exited_fail
+check "writes no manifest" no_manifest
+check "names the missing bundle" output_has "::error::$MAC is not an uploaded asset of $TAG"
 
 echo "macOS signature cannot be downloaded (3 failures)"
 new_scenario macos-sig-504
@@ -287,19 +333,19 @@ check "three attempts at the darwin signature" calls_eq "^api repos/$REPO/releas
 check "backs off 10 s then 20 s, no sleep after the last attempt" sleeps_are "sleep 10,sleep 20,"
 check "reports the failed request" output_has "::error::GitHub API request repos/$REPO/releases/assets/$(asset_id_of "$MAC.sig") failed 3 times"
 
-echo "macOS signature is empty"
+echo "macOS signature is a 0-byte asset"
 new_scenario macos-sig-empty
 full_release
-: >"$REL/assets/$(asset_id_of "$MAC.sig")"
+set_content "$MAC.sig" ""
 run_step
 check "fails" exited_fail
 check "writes no manifest" no_manifest
-check "says the signature is empty" output_has "::error::$MAC.sig on $TAG is empty"
+check "names the signature as not usable" output_has "::error::$MAC.sig is not an uploaded asset of $TAG"
 
 echo "macOS signature is whitespace only"
 new_scenario macos-sig-blank
 full_release
-printf ' \n\t\n' >"$REL/assets/$(asset_id_of "$MAC.sig")"
+set_content "$MAC.sig" $' \n\t\n'
 run_step
 check "fails" exited_fail
 check "writes no manifest" no_manifest
@@ -307,8 +353,8 @@ check "says the signature is empty" output_has "::error::$MAC.sig on $TAG is emp
 
 echo "macOS bundle without its signature"
 new_scenario macos-bundle-only
-asset "$MAC" -; asset "$LINUX" -; asset "$LINUX.sig" SIG-LINUX; asset "$NSIS" -; asset "$NSIS.sig" SIG-NSIS
-asset "$MSI" -; asset "$MSI.sig" SIG-MSI
+asset "$MAC" BUNDLE
+windows_linux_assets
 run_step
 check "fails" exited_fail
 check "writes no manifest" no_manifest
@@ -317,8 +363,8 @@ check "downloads nothing" calls_eq "^api repos/$REPO/releases/assets/" 0
 
 echo "macOS signature without its bundle"
 new_scenario macos-sig-only
-asset "$MAC.sig" SIG-MAC; asset "$LINUX" -; asset "$LINUX.sig" SIG-LINUX; asset "$NSIS" -; asset "$NSIS.sig" SIG-NSIS
-asset "$MSI" -; asset "$MSI.sig" SIG-MSI
+asset "$MAC.sig" "$SIG_MAC"
+windows_linux_assets
 run_step
 check "fails" exited_fail
 check "writes no manifest" no_manifest
@@ -327,7 +373,7 @@ check "names the missing bundle" output_has "::error::$MAC is not an uploaded as
 echo "macOS bundle uploaded, its signature still uploading"
 new_scenario macos-sig-starter
 full_release
-ASSETS_JSON=$(jq -c --arg b "$MAC.sig" 'map(if .name == $b then .state = "starter" else . end)' <<<"$ASSETS_JSON")
+set_state "$MAC.sig" starter
 run_step
 check "fails" exited_fail
 check "writes no manifest" no_manifest
@@ -336,7 +382,7 @@ check "names the signature" output_has "::error::$MAC.sig is not an uploaded ass
 echo "AppImage missing, its signature present"
 new_scenario linux-bundle-missing
 full_release
-ASSETS_JSON=$(jq -c --arg a "$LINUX" 'map(select(.name != $a))' <<<"$ASSETS_JSON")
+drop_asset "$LINUX"
 run_step
 check "fails" exited_fail
 check "writes no manifest" no_manifest
@@ -346,13 +392,13 @@ check "fails at once, no retries" sleeps_are ""
 echo "NSIS signature missing"
 new_scenario nsis-sig-missing
 full_release
-ASSETS_JSON=$(jq -c --arg a "$NSIS.sig" 'map(select(.name != $a))' <<<"$ASSETS_JSON")
+drop_asset "$NSIS.sig"
 run_step
 check "fails" exited_fail
 check "writes no manifest" no_manifest
 check "names the missing signature" output_has "::error::$NSIS.sig is not an uploaded asset of $TAG"
 
-echo "MSI signature is empty"
+echo "MSI signature downloads empty (its metadata says otherwise)"
 new_scenario msi-sig-empty
 full_release
 : >"$REL/assets/$(asset_id_of "$MSI.sig")"
@@ -361,6 +407,50 @@ check "fails" exited_fail
 check "writes no manifest" no_manifest
 check "says the signature is empty" output_has "::error::$MSI.sig on $TAG is empty"
 
+echo "AppImage is a 0-byte asset"
+new_scenario linux-bundle-empty
+full_release
+set_content "$LINUX" ""
+run_step
+check "fails" exited_fail
+check "writes no manifest" no_manifest
+check "names the bundle" output_has "::error::$LINUX is not an uploaded asset of $TAG"
+
+echo "NSIS signature is not base64 (an error page)"
+new_scenario nsis-sig-html
+full_release
+set_content "$NSIS.sig" '<html><body>504 Gateway Time-out</body></html>'
+run_step
+check "fails" exited_fail
+check "writes no manifest" no_manifest
+check "says it is not base64" output_has "::error::$NSIS.sig on $TAG is not base64"
+
+echo "MSI signature is valid base64 but not a signature (JSON metadata)"
+new_scenario msi-sig-json
+full_release
+set_content "$MSI.sig" "$(printf '{"id":108,"name":"%s.sig"}' "$MSI" | base64 -w0)"
+run_step
+check "fails" exited_fail
+check "writes no manifest" no_manifest
+check "says it is not a Tauri signature of the MSI" output_has "::error::$MSI.sig on $TAG is not a Tauri signature of $MSI"
+
+echo "MSI signature signs the NSIS installer"
+new_scenario msi-sig-wrong-file
+full_release
+set_content "$MSI.sig" "$SIG_NSIS"
+run_step
+check "fails" exited_fail
+check "writes no manifest" no_manifest
+check "says it is not a Tauri signature of the MSI" output_has "::error::$MSI.sig on $TAG is not a Tauri signature of $MSI"
+
+echo "macOS signature signs a file whose name only starts like the bundle's"
+new_scenario macos-sig-prefix
+full_release
+set_content "$MAC.sig" "$(sig_for "$MAC.old")"
+run_step
+check "fails" exited_fail
+check "writes no manifest" no_manifest
+
 echo "MSI signature fails once, then downloads"
 new_scenario msi-sig-504-once
 full_release
@@ -368,7 +458,7 @@ FAIL_RULES="assets/$(asset_id_of "$MSI.sig"):1"
 run_step
 check "exits 0" exited_ok
 check "all five platforms" platforms_are "$ALL5"
-check "msi signature is the .sig's content" mf_eq '.platforms["windows-x86_64-msi"].signature' SIG-MSI
+check "msi signature is the .sig's content" mf_eq '.platforms["windows-x86_64-msi"].signature' "$SIG_MSI"
 check "one back-off of 10 s" sleeps_are "sleep 10,"
 check "warns about the failed attempt" output_has "::warning::GitHub API request repos/$REPO/releases/assets/$(asset_id_of "$MSI.sig") failed (attempt 1 of 3)"
 
@@ -399,6 +489,14 @@ check "fails" exited_fail
 check "writes no manifest" no_manifest
 check "downloads nothing" calls_eq "^api repos/$REPO/releases/assets/" 0
 check "backs off 10 s then 20 s, no sleep after the last attempt" sleeps_are "sleep 10,sleep 20,"
+
+for fx in $FAILED_FX; do
+  echo
+  echo "--- $(basename "$fx"): step output"
+  cat "$fx/out.log" 2>/dev/null
+  echo "--- $(basename "$fx"): calls"
+  cat "$fx/calls.log" 2>/dev/null
+done
 
 echo
 echo "release-channel-manifest: $PASSED passed, $FAILED failed"
