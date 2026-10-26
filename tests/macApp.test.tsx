@@ -23,6 +23,7 @@ import * as finderSetupCopy from '../src/finderSetupCopy'
 import * as model from '../src/macSettingsModel'
 import * as parts from '../src/macSettingsParts'
 import * as windowModel from '../src/mainWindowModel'
+import * as reviewModel from '../src/reviewModel'
 import * as signInModel from '../src/signInModel'
 import * as signInStore from '../src/signInFlowStore'
 import * as signOutCopy from '../src/signOutCopy'
@@ -80,6 +81,8 @@ const tabStub = (id: string) => (props: any) => createElement('div', { 'data-tab
 const settingsStub = () => ({ state: { status: 'loading' }, save: async () => {}, reload: async () => {} })
 
 interface WindowOpts {
+  /** What the Review feed holds (slice 4). Default: loaded and empty. */
+  feed?: { status: 'loading' | 'ready' | 'failed'; entries: unknown[]; count: number; rejected: number; reason: string | null }
   snap?: () => unknown
   backend?: Record<string, (args: any) => unknown>
   bindings?: Record<string, unknown>
@@ -101,6 +104,9 @@ function openWindow(opts: WindowOpts = {}) {
   }
   focused = []
   titles.length = 0
+  // Slice 4: the Review feed is a module-level store; the window reads it, starts it while there is a session and an
+  // unlocked vault, and asks it to read again after a resolved conflict. These record that.
+  const feedLog = { connected: 0, disconnected: 0, refreshed: 0, watched: 0, unwatched: 0, listens: [] as string[] }
   const m = mount('MacApp.tsx', 'MacApp', {
     backend: backend as any,
     expand: true,
@@ -120,6 +126,14 @@ function openWindow(opts: WindowOpts = {}) {
       setSignInFlow: signInStore.setSignInFlow,
       subscribeSignInFlow: signInStore.subscribeSignInFlow,
       setMainWindowTitle: async (title: string) => { titles.push(title) },
+      ReviewPane: tabStub('review'), TrashPane: tabStub('trash'), LockedPane: tabStub('locked'),
+      reviewBadge: reviewModel.reviewBadge,
+      // The rows are read only while Review shows them (`watchList`); the badge's count is read all the time.
+      reviewFeed: { watchList: () => { feedLog.watched += 1; return () => { feedLog.unwatched += 1 } } },
+      subscribeReviewFeed: () => () => {},
+      reviewFeedState: () => opts.feed ?? { status: 'ready', entries: [], count: 0, rejected: 0, reason: null },
+      connectReviewFeed: () => { feedLog.connected += 1; return () => { feedLog.disconnected += 1 } },
+      refreshReviewFeed: () => { feedLog.refreshed += 1 },
       useSettingsConfig: settingsStub,
       listen: bus.listen,
       connectNativeUpdateMenu: () => () => {},
@@ -140,7 +154,7 @@ function openWindow(opts: WindowOpts = {}) {
   mounted.push(m)
   /** Rust stores a request and pokes the window, as `show_main_window` does. */
   const request = async (nav: unknown) => { pendingNav = nav; bus.emit(windowModel.MAIN_NAVIGATE_EVENT); await settle(m) }
-  return { m, bus, request }
+  return { m, bus, request, feedLog }
 }
 
 const titles: string[] = []
@@ -223,6 +237,7 @@ describe('the window, signed in: Home and the sidebar (§7.6)', () => {
     const { m } = openWindow()
     await settle(m)
     expect(navOf(m).map((n) => n.props['aria-label'])).toEqual(['Beebeeb'])
+    expect(buttonsIn(navOf(m)[0]).map(label)).toEqual(['Home', 'Review', 'Trash', 'Settings'])
     expect(current(m)).toEqual(['Home'])
     expect(shown(m)).toEqual(['home'])
     expect(title(m)).toBe('Home')
@@ -1170,5 +1185,339 @@ describe('Home (§7.6, first cut: status, Finder row, storage, the kept rows)', 
     expect(find(m, (el) => el.props.role === 'alert')).toHaveLength(1)
     expect(m.toasts).toEqual([])
     expect(text).not.toContain('Open in Finder')
+  })
+})
+
+
+// ── Review and Trash (task 1683 slice 4; spec §7.6, §9.3, §8.2, §11) ─────────────────────────────────────────────
+
+const entryFixture = (id: string) => ({ id, file_id: `f-${id}`, file_name: `${id}.md`, kind: 'conflict', status: 'needs review', updated_at: 1000, detail: 'd', action: 'open_conflict' })
+const readyFeed = (n: number, count = n) => ({ status: 'ready' as const, entries: Array.from({ length: n }, (_, i) => entryFixture(`e${i}`)), count, rejected: 0, reason: null })
+const badgeOf = (m: Mounted) => find(m, (el) => el.props.className === 'mw-badge').map((el) => textOf(expand(el.props.children)).trim())
+const paneProps = (m: Mounted, tab: string) => find(m, (el) => el.props['data-tab'] === tab)[0]?.props['data-props']
+
+describe('the sidebar lists Home, Review and Trash (§7.6)', () => {
+  test('three rows in this order, each with its own id, the selected one current, one Tab stop', async () => {
+    const { m } = openWindow()
+    await settle(m)
+    const list = buttonsIn(navOf(m)[0]).filter((b) => b.props.id !== 'mw-gear')
+    expect(list.map(label)).toEqual(['Home', 'Review', 'Trash'])
+    expect(list.map((b) => b.props.id)).toEqual(['mw-section-home', 'mw-section-review', 'mw-section-trash'])
+    expect(list.map((b) => b.props.tabIndex)).toEqual([0, -1, -1])
+  })
+
+  test('Review carries the number of things waiting, only when there are some and the vault is unlocked', async () => {
+    const some = openWindow({ feed: readyFeed(2) })
+    await settle(some.m)
+    expect(badgeOf(some.m)).toEqual(['2'])
+    const review = find(some.m, (el) => el.type === 'button' && el.props.id === 'mw-section-review')[0]
+    expect(review.props['aria-label']).toBe('Review, 2 need attention')
+    const none = openWindow({ feed: readyFeed(0) })
+    await settle(none.m)
+    expect(badgeOf(none.m)).toEqual([])
+    const locked = openWindow({ feed: readyFeed(2), snap: () => snapshot({ account: { vault_unlocked: false } }) })
+    await settle(locked.m)
+    expect(badgeOf(locked.m)).toEqual([])
+  })
+
+  test('a single item says "1 needs attention", not "1 need"', async () => {
+    const { m } = openWindow({ feed: readyFeed(1) })
+    await settle(m)
+    expect(find(m, (el) => el.props.id === 'mw-section-review')[0].props['aria-label']).toBe('Review, 1 needs attention')
+  })
+
+  test('before the count has been read there is no number: no placeholder, no guess', async () => {
+    for (const status of ['loading', 'failed'] as const) {
+      const { m } = openWindow({ feed: { status, entries: [], count: 0, rejected: 0, reason: null } })
+      await settle(m)
+      expect(badgeOf(m)).toEqual([])
+    }
+  })
+
+  test('the number is the COUNT of what waits, not the rows the list carries (the list is capped), and a list that fails does not hide it (review of #142)', async () => {
+    const capped = openWindow({ feed: readyFeed(2, 7) })
+    await settle(capped.m)
+    expect(badgeOf(capped.m)).toEqual(['7'])
+    expect(find(capped.m, (el) => el.props.id === 'mw-section-review')[0].props['aria-label']).toBe('Review, 7 need attention')
+    const failedList = openWindow({ feed: { status: 'failed', entries: [], count: 3, rejected: 0, reason: 'state.db is locked' } })
+    await settle(failedList.m)
+    expect(badgeOf(failedList.m)).toEqual(['3'])
+  })
+})
+
+describe('⌘2 and ⌘3, the sidebar and the keys (§9.3, §11)', () => {
+  test('a request for Review shows Review: the pane, the title, the current row and the focus', async () => {
+    const { m, request } = openWindow({ feed: readyFeed(1) })
+    await settle(m)
+    await request({ to: 'review' })
+    expect(shown(m)).toEqual(['review'])
+    expect(title(m)).toBe('Review')
+    expect(current(m)).toEqual(['Review, 1 needs attention'])
+    expect(focused.at(-1)).toBe('mw-section-review')
+    await request({ to: 'trash' })
+    expect(shown(m)).toEqual(['trash'])
+    expect(title(m)).toBe('Trash')
+    expect(focused.at(-1)).toBe('mw-section-trash')
+  })
+
+  test('clicking a row shows its pane', async () => {
+    const { m } = openWindow()
+    await settle(m)
+    await click(m, 'Review')
+    expect(shown(m)).toEqual(['review'])
+    await click(m, 'Trash')
+    expect(shown(m)).toEqual(['trash'])
+    await click(m, 'Home')
+    expect(shown(m)).toEqual(['home'])
+  })
+
+  test('↓ and ↑ move through Home, Review, Trash and wrap; Home and End jump; nothing else is taken', async () => {
+    const { m } = openWindow()
+    await settle(m)
+    const selected = () => find(m, (el) => el.type === 'button' && el.props['aria-current'] === 'page')[0]
+    let prevented = 0
+    const key = async (k: string) => { selected().props.onKeyDown({ key: k, preventDefault: () => { prevented += 1 } }); m.render(); await settle(m) }
+    await key('ArrowDown')
+    expect(shown(m)).toEqual(['review'])
+    expect(focused.at(-1)).toBe('mw-section-review')
+    await key('ArrowDown')
+    expect(shown(m)).toEqual(['trash'])
+    await key('ArrowDown')
+    expect(shown(m)).toEqual(['home'])
+    await key('ArrowUp')
+    expect(shown(m)).toEqual(['trash'])
+    await key('Home')
+    expect(shown(m)).toEqual(['home'])
+    await key('End')
+    expect(shown(m)).toEqual(['trash'])
+    await key('ArrowLeft')
+    expect(prevented).toBe(6)
+  })
+
+  test('Settings entered from Review comes back to Review: the back control names it, and ⌘[ goes there', async () => {
+    const { m, request } = openWindow()
+    await settle(m)
+    await request({ to: 'review' })
+    await click(m, 'Settings')
+    expect(buttonsIn(navOf(m)[0]).map(label)[0]).toBe('Back to Review')
+    await request({ to: 'back' })
+    expect(shown(m)).toEqual(['review'])
+    expect(focused.at(-1)).toBe('mw-gear')
+  })
+
+  test('⌘2 from Settings leaves it for Review', async () => {
+    const { m, request } = openWindow()
+    await settle(m)
+    await request({ to: 'settings', section: 'sync' })
+    await request({ to: 'review' })
+    expect(navOf(m).map((n) => n.props['aria-label'])).toEqual(['Beebeeb'])
+    expect(shown(m)).toEqual(['review'])
+  })
+
+  test('§8.2: with a sheet open over Review (the conflict sheet), ⌘1, ⌘3 and ⌘, change nothing, and Rust is told', async () => {
+    let modals = 0
+    const { m, request } = openWindow({ bindings: { openModalCount: () => modals } })
+    await settle(m)
+    await request({ to: 'review' })
+    modals = 1
+    m.render()
+    await settle(m)
+    expect(menuStates(m).at(-1)).toEqual({ settingsShowing: false, sheetOpen: true })
+    for (const nav of [{ to: 'home' }, { to: 'trash' }, { to: 'settings', section: null }]) {
+      await request(nav)
+      expect(shown(m)).toEqual(['review'])
+    }
+  })
+})
+
+describe('Review and Trash need the key (§7.6: "Review and Trash show the same card")', () => {
+  test('locked, Review and Trash both show the locked card instead of their pane, and no toolbar action', async () => {
+    const { m, request } = openWindow({ snap: () => snapshot({ phase: 'locked', account: { vault_unlocked: false } }) })
+    await settle(m)
+    await request({ to: 'review' })
+    expect(shown(m)).toEqual(['locked'])
+    expect(title(m)).toBe('Review')
+    expect(find(m, (el) => el.type === 'button' && ['Version history…', 'Refresh'].includes(label(el)))).toHaveLength(0)
+    await request({ to: 'trash' })
+    expect(shown(m)).toEqual(['locked'])
+    expect(title(m)).toBe('Trash')
+  })
+
+  test('the card asks the window to read the account again after an unlock attempt', async () => {
+    const { m, request } = openWindow({ snap: () => snapshot({ account: { vault_unlocked: false } }) })
+    await settle(m)
+    await request({ to: 'review' })
+    const before = m.calls.filter((c) => c.name === 'popover_snapshot').length
+    paneProps(m, 'locked').onRefresh()
+    await settle(m)
+    expect(m.calls.filter((c) => c.name === 'popover_snapshot').length).toBeGreaterThan(before)
+  })
+})
+
+describe('the Review feed is read only while there is something to read (§7.6)', () => {
+  test('signed in with an unlocked vault: connected once, and disconnected when the window goes', async () => {
+    const { m, feedLog } = openWindow()
+    await settle(m)
+    expect(feedLog.connected).toBe(1)
+    m.unmount()
+    expect(feedLog.disconnected).toBe(1)
+  })
+
+  test('locked or signed out: never connected, so another account\'s or a locked vault\'s rows are never read', async () => {
+    const locked = openWindow({ snap: () => snapshot({ account: { vault_unlocked: false } }) })
+    await settle(locked.m)
+    expect(locked.feedLog.connected).toBe(0)
+    const out = openWindow({ snap: () => snapshot({ account: { logged_in: false, vault_unlocked: false } }) })
+    await settle(out.m)
+    expect(out.feedLog.connected).toBe(0)
+  })
+
+  test('the rows are read only while Review shows them: watched on Review and nowhere else, never while locked or signed out, and let go with the window (review of #142: the list is the costly read)', async () => {
+    const home = openWindow()
+    await settle(home.m)
+    expect(home.feedLog.watched).toBe(0)
+    await home.request({ to: 'trash' })
+    expect(home.feedLog.watched).toBe(0)
+    await home.request({ to: 'review' })
+    expect(home.feedLog.watched).toBe(1)
+    home.m.unmount()
+    expect(home.feedLog.unwatched).toBe(1)
+    const locked = openWindow({ snap: () => snapshot({ account: { vault_unlocked: false } }) })
+    await settle(locked.m)
+    await locked.request({ to: 'review' })
+    expect(locked.feedLog.watched).toBe(0)
+    const out = openWindow({ snap: () => snapshot({ account: { logged_in: false, vault_unlocked: false } }) })
+    await settle(out.m)
+    await out.request({ to: 'review' })
+    expect(out.feedLog.watched).toBe(0)
+  })
+
+  test('the feed is a new one when the session\'s revision moves, though the account is still signed in and unlocked (a sign-out and a sign-in as the same account between two reads; review of #142, round 2)', async () => {
+    const { m, feedLog, request } = openWindow()
+    await settle(m)
+    await request({ to: 'review' })
+    const connected = feedLog.connected
+    const watched = feedLog.watched
+    accountSession.observeAccountSession((accountSession.accountSessionRevision() ?? 0) + 1)
+    m.render()
+    await settle(m)
+    expect(feedLog.connected).toBe(connected + 1)
+    expect(feedLog.watched).toBe(watched + 1)
+    m.render()
+    await settle(m)
+    expect(feedLog.connected, 'and not again when nothing moved').toBe(connected + 1)
+  })
+
+  test('Review is given the feed, and a resolved conflict makes the window read it again', async () => {
+    const feed = readyFeed(2)
+    const { m, request, feedLog } = openWindow({ feed })
+    await settle(m)
+    await request({ to: 'review' })
+    const props = paneProps(m, 'review')
+    expect(props.feed).toBe(feed)
+    props.onChanged()
+    expect(feedLog.refreshed).toBe(1)
+  })
+})
+
+describe('the toolbar actions are the window\'s, not the panes\' (hi-fi section 3)', () => {
+  test('the encryption chip is Home\'s alone: Review and Trash draw their buttons in that place, as the hi-fi does', async () => {
+    const { m, request } = openWindow()
+    await settle(m)
+    const chips = () => find(m, (el) => el.props.className === 'mw-chip').length
+    expect(chips()).toBe(1)
+    await request({ to: 'review' })
+    expect(chips()).toBe(0)
+    await request({ to: 'trash' })
+    expect(chips()).toBe(0)
+  })
+
+  test('Review has "Version history…" at the right of the toolbar; pressing it opens the sheet over Review, and the sheet closing closes it', async () => {
+    const { m, request } = openWindow()
+    await settle(m)
+    await request({ to: 'review' })
+    expect(paneProps(m, 'review').historyOpen).toBe(false)
+    await click(m, 'Version history…')
+    expect(paneProps(m, 'review').historyOpen).toBe(true)
+    paneProps(m, 'review').onHistoryClose()
+    m.render()
+    await settle(m)
+    expect(paneProps(m, 'review').historyOpen).toBe(false)
+  })
+
+  test('the history sheet is Review\'s: when the sign-out flow forces the window to Settings, it is closed when Review comes back', async () => {
+    let pendingFlow = false
+    const { m, bus, request } = openWindow({
+      backend: {
+        consume_sign_out_flow_request: () => { const was = pendingFlow; pendingFlow = false; return was },
+        sign_out_count: () => ({ askId: 'a1', files: 0, copiedFiles: 0, others: 0, missingFiles: 0, earlierFolders: [], canSend: false, notSending: null }),
+      },
+      bindings: { connectSignOutFlowMenu },
+    })
+    await settle(m)
+    await request({ to: 'review' })
+    await click(m, 'Version history…')
+    expect(paneProps(m, 'review').historyOpen).toBe(true)
+    pendingFlow = true
+    bus.emit('menu:sign-out-flow')
+    await settle(m)
+    expect(shown(m)).toEqual(['account'])
+    await click(m, 'Back to Review')
+    await settle(m)
+    expect(shown(m)).toEqual(['review'])
+    expect(paneProps(m, 'review').historyOpen).toBe(false)
+  })
+
+  test('a vault that locks closes the history sheet: it is not waiting behind the locked card when the vault unlocks again (review of #142)', async () => {
+    let locked = false
+    const readers: any[] = []
+    class RecordedReader extends windowModel.SnapshotReader<any> {
+      constructor(...args: [() => Promise<any>, (result: any) => void]) {
+        super(...args)
+        readers.push(this)
+      }
+    }
+    const { m, request } = openWindow({
+      snap: () => snapshot({ account: { vault_unlocked: !locked } }),
+      bindings: { SnapshotReader: RecordedReader },
+    })
+    await settle(m)
+    await request({ to: 'review' })
+    await click(m, 'Version history…')
+    expect(paneProps(m, 'review').historyOpen).toBe(true)
+    locked = true
+    readers[0].refresh()
+    await settle(m)
+    expect(shown(m)).toEqual(['locked'])
+    locked = false
+    readers[0].refresh()
+    await settle(m)
+    expect(shown(m)).toEqual(['review'])
+    expect(paneProps(m, 'review').historyOpen).toBe(false)
+  })
+
+  test('Trash has Refresh; each press hands the pane a new signal so it loads again', async () => {
+    const { m, request } = openWindow()
+    await settle(m)
+    await request({ to: 'trash' })
+    const first = paneProps(m, 'trash').refreshSignal
+    await click(m, 'Refresh')
+    const second = paneProps(m, 'trash').refreshSignal
+    await click(m, 'Refresh')
+    const third = paneProps(m, 'trash').refreshSignal
+    expect(new Set([first, second, third]).size).toBe(3)
+  })
+
+  test('Home, Settings and the signed-out card have neither, and neither button is the amber primary', async () => {
+    const { m, request } = openWindow()
+    await settle(m)
+    const toolbarButtons = () => find(m, (el) => el.type === 'button' && ['Version history…', 'Refresh'].includes(label(el)))
+    expect(toolbarButtons()).toHaveLength(0)
+    await request({ to: 'settings', section: 'about' })
+    expect(toolbarButtons()).toHaveLength(0)
+    await request({ to: 'review' })
+    expect(toolbarButtons().map((b) => String(b.props.className))).toEqual(['ms-btn'])
+    await request({ to: 'trash' })
+    expect(toolbarButtons().map((b) => String(b.props.className))).toEqual(['ms-btn'])
   })
 })

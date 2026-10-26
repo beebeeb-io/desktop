@@ -10336,7 +10336,22 @@ mod diagnostics_export_tests {
 // ── IPC commands: conflict/version center ───────────────────────────────────
 
 #[tauri::command]
-fn list_version_conflict_center() -> Result<Vec<engine_bridge::VersionConflictEntry>, String> {
+async fn list_version_conflict_center() -> Result<Vec<engine_bridge::VersionConflictEntry>, String> {
+    on_the_blocking_pool("Could not read Review.", || {
+        let mut rows = read_review_entries()?;
+        rows.truncate(200);
+        Ok(rows)
+    }).await
+}
+
+// The existing producer stays in the engine lane. Its efficient SQL count/capped-read changes from #142 are a
+// merge dependency; this adapter keeps the UI compatible with today's DTO without changing engine files.
+#[tauri::command]
+async fn review_item_count() -> Result<usize, String> {
+    on_the_blocking_pool("Could not read Review.", || read_review_entries().map(|rows| rows.len())).await
+}
+
+fn read_review_entries() -> Result<Vec<engine_bridge::VersionConflictEntry>, String> {
     let cfg = DesktopConfig::load()?;
     let Some(_) = cfg.sync_root else {
         return Ok(Vec::new());
@@ -13274,6 +13289,14 @@ pub(crate) fn open_conflict_window_impl(
     file_name: &str,
     is_text: bool,
 ) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = (file_id, file_name, is_text);
+        show_main_window(app, MainNav::Review);
+        return Ok(());
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
     let label = format!("conflict-{file_id}");
 
     // If the user already has the window open for this file, just
@@ -13299,6 +13322,7 @@ pub(crate) fn open_conflict_window_impl(
         .build()
         .map_err(|e| e.to_string())?;
     Ok(())
+    }
 }
 
 /// Open a conflict-resolution window for a single file. The label is
@@ -14508,6 +14532,8 @@ const MAIN_NAVIGATE_EVENT: &str = "main:navigate";
 enum MainNav {
     /// Home, and out of Settings (⌘1).
     Home,
+    Review,
+    Trash,
     /// Settings on a section (`account`, `general`, `sync`, `about`); `None` opens the last section used in this
     /// window, else General (§7.8).
     Settings { section: Option<&'static str> },
@@ -14856,6 +14882,8 @@ fn apply_macos_main_menu_state(app: &tauri::AppHandle, state: MainMenuState) {
     let _ = items.settings.set_enabled(state.settings);
     let _ = items.check_updates.set_enabled(state.check_updates);
     let _ = items.view_home.set_enabled(state.home);
+    let _ = items.view_review.set_enabled(state.home);
+    let _ = items.view_trash.set_enabled(state.home);
     let _ = items.view_back.set_enabled(state.back);
 }
 
@@ -14962,6 +14990,7 @@ pub fn run() {
             free_up_space,
             export_diagnostics,
             list_version_conflict_center,
+            review_item_count,
             dismiss_review_entry,
             list_file_versions,
             restore_file_version,
@@ -15446,6 +15475,8 @@ const MENU_VIEW_SHARED_ID: &str = "menu_view_shared";
 const MENU_VIEW_TRASH_ID: &str = "menu_view_trash";
 // The Beebeeb window's View items on a Mac (task 1683 slice 1, two-surface F11 and F15).
 const MENU_VIEW_HOME_ID: &str = "menu_view_home";
+const MENU_VIEW_REVIEW_ID: &str = "menu_view_review";
+const MENU_VIEW_MAIN_TRASH_ID: &str = "menu_view_main_trash";
 const MENU_VIEW_BACK_ID: &str = "menu_view_back";
 const MENU_ZOOM_IN_ID: &str = "menu_zoom_in";
 const MENU_ZOOM_OUT_ID: &str = "menu_zoom_out";
@@ -15503,6 +15534,8 @@ impl DesktopMenuView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MainMenuNav {
     Home,
+    Review,
+    Trash,
     Back,
 }
 
@@ -15731,6 +15764,18 @@ const MACOS_MENU_SPECS: &[DesktopMenuSpec] = &[
         action: DesktopMenuAction::NavigateMain(MainMenuNav::Home),
     },
     DesktopMenuSpec {
+        id: MENU_VIEW_REVIEW_ID,
+        label: "Review",
+        accelerator: Some("CmdOrCtrl+Digit2"),
+        action: DesktopMenuAction::NavigateMain(MainMenuNav::Review),
+    },
+    DesktopMenuSpec {
+        id: MENU_VIEW_MAIN_TRASH_ID,
+        label: "Trash",
+        accelerator: Some("CmdOrCtrl+Digit3"),
+        action: DesktopMenuAction::NavigateMain(MainMenuNav::Trash),
+    },
+    DesktopMenuSpec {
         id: MENU_VIEW_BACK_ID,
         label: "Back",
         accelerator: Some("CmdOrCtrl+BracketLeft"),
@@ -15863,6 +15908,8 @@ const MACOS_MENU_LAYOUT: &[(&str, &[MacosMenuEntry])] = {
             "View",
             &[
                 Item(MENU_VIEW_HOME_ID),
+                Item(MENU_VIEW_REVIEW_ID),
+                Item(MENU_VIEW_MAIN_TRASH_ID),
                 Separator,
                 Item(MENU_VIEW_BACK_ID),
                 Separator,
@@ -15964,6 +16011,8 @@ struct MacosMenuItems {
     check_updates: MenuItem<tauri::Wry>,
     toggle_sync: MenuItem<tauri::Wry>,
     view_home: MenuItem<tauri::Wry>,
+    view_review: MenuItem<tauri::Wry>,
+    view_trash: MenuItem<tauri::Wry>,
     view_back: MenuItem<tauri::Wry>,
 }
 
@@ -15976,6 +16025,8 @@ impl MacosMenuItems {
             MENU_CHECK_UPDATES_ID => Some(&self.check_updates),
             MENU_TOGGLE_SYNC_ID => Some(&self.toggle_sync),
             MENU_VIEW_HOME_ID => Some(&self.view_home),
+            MENU_VIEW_REVIEW_ID => Some(&self.view_review),
+            MENU_VIEW_MAIN_TRASH_ID => Some(&self.view_trash),
             MENU_VIEW_BACK_ID => Some(&self.view_back),
             _ => None,
         }
@@ -16002,6 +16053,8 @@ fn setup_native_menu(app: &mut tauri::App) -> tauri::Result<()> {
         check_updates: build_desktop_menu_item(app, desktop_menu_spec_required(MENU_CHECK_UPDATES_ID))?,
         toggle_sync: build_desktop_menu_item(app, desktop_menu_spec_required(MENU_TOGGLE_SYNC_ID))?,
         view_home: build_desktop_menu_item(app, desktop_menu_spec_required(MENU_VIEW_HOME_ID))?,
+        view_review: build_desktop_menu_item(app, desktop_menu_spec_required(MENU_VIEW_REVIEW_ID))?,
+        view_trash: build_desktop_menu_item(app, desktop_menu_spec_required(MENU_VIEW_MAIN_TRASH_ID))?,
         view_back: build_desktop_menu_item(app, desktop_menu_spec_required(MENU_VIEW_BACK_ID))?,
     };
     let mut menus: Vec<Submenu<tauri::Wry>> = Vec::new();
@@ -16380,6 +16433,8 @@ mod main_window_tests {
         assert_eq!(main_nav_for_route(Some("settings")), MainNav::settings(None));
         assert_eq!(main_nav_for_route(None), MainNav::Home);
         assert_eq!(main_nav_for_route(Some("finder")), MainNav::Home);
+        assert_eq!(main_nav_for_route(Some("review")), MainNav::Review);
+        assert_eq!(main_nav_for_route(Some("trash")), MainNav::Trash);
     }
 
     fn mac(id: &str) -> &'static DesktopMenuSpec {
@@ -16391,7 +16446,7 @@ mod main_window_tests {
 
     #[test]
     fn the_macos_items_have_the_words_keys_and_targets_of_f1_to_f11() {
-        let rows: [(&str, &str, Option<&str>, DesktopMenuAction); 11] = [
+        let rows: [(&str, &str, Option<&str>, DesktopMenuAction); 13] = [
             (MENU_PREFERENCES_ID, "Settings…", Some("CmdOrCtrl+Comma"), DesktopMenuAction::OpenSettings),
             (MENU_CHECK_UPDATES_ID, "Check for Updates…", Some("CmdOrCtrl+Shift+U"), DesktopMenuAction::CheckForUpdates),
             (MENU_TOGGLE_SYNC_ID, "Pause Sync", Some("CmdOrCtrl+Shift+P"), DesktopMenuAction::ToggleSync),
@@ -16407,6 +16462,8 @@ mod main_window_tests {
                 Some("CmdOrCtrl+Digit1"),
                 DesktopMenuAction::NavigateMain(MainMenuNav::Home),
             ),
+            (MENU_VIEW_REVIEW_ID, "Review", Some("CmdOrCtrl+Digit2"), DesktopMenuAction::NavigateMain(MainMenuNav::Review)),
+            (MENU_VIEW_MAIN_TRASH_ID, "Trash", Some("CmdOrCtrl+Digit3"), DesktopMenuAction::NavigateMain(MainMenuNav::Trash)),
             (
                 MENU_VIEW_BACK_ID,
                 "Back",
@@ -16505,6 +16562,8 @@ mod main_window_tests {
             entries("View"),
             [
                 Item(MENU_VIEW_HOME_ID),
+                Item(MENU_VIEW_REVIEW_ID),
+                Item(MENU_VIEW_MAIN_TRASH_ID),
                 Separator,
                 Item(MENU_VIEW_BACK_ID),
                 Separator,
@@ -16683,6 +16742,8 @@ fn handle_desktop_menu_action(app: &tauri::AppHandle, spec: &'static DesktopMenu
             #[cfg(target_os = "macos")]
             match nav {
                 MainMenuNav::Home => show_main_window(app, MainNav::Home),
+                MainMenuNav::Review => show_main_window(app, MainNav::Review),
+                MainMenuNav::Trash => show_main_window(app, MainNav::Trash),
                 MainMenuNav::Back => back_in_main_window(app),
             }
             #[cfg(not(target_os = "macos"))]
@@ -17195,6 +17256,8 @@ fn show_compact_app_window_with_nav(app: &tauri::AppHandle, nav: Option<&str>) {
 fn main_nav_for_route(nav: Option<&str>) -> MainNav {
     match nav {
         Some("settings") => MainNav::settings(None),
+        Some("review") => MainNav::Review,
+        Some("trash") => MainNav::Trash,
         _ => MainNav::Home,
     }
 }

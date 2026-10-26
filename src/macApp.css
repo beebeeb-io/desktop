@@ -590,6 +590,34 @@
   border-top: 1px solid var(--line);
   font-size: 12.5px;
   color: var(--ink-3);
+}
+
+.mw-input:disabled {
+  opacity: 0.55;
+}
+
+/* The six or eight digits of a second factor are a machine's string: mono, spaced. */
+.mw-input--code {
+  height: 38px;
+  font-family: var(--font-mono);
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: 0.25em;
+}
+
+/* The device code of the browser sign-in: part of the encrypted hand-off, so mono on amber (spec §10.1). */
+.mw-code {
+  padding: 16px 10px;
+  border: 1px solid var(--amber);
+  border-radius: 10px;
+  background: var(--amber-bg);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 26px;
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-align: center;
   overflow-wrap: anywhere;
 }
 
@@ -836,4 +864,212 @@
 .mw-account-row:focus-visible {
   outline: 2px solid var(--ink);
   outline-offset: -2px;
+}
+
+/* ── Review and Trash (task 1683 slice 4; hi-fi section 3) ── */
+
+/* Review's number on its sidebar row: neutral, because amber is for encryption and the one primary action. */
+.mw-badge {
+  margin-left: auto;
+  flex: none;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--paper);
+  color: var(--ink-2);
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The section's own buttons, at the right of the 52 pt toolbar. */
+.mw-toolbar-actions {
+  margin-left: auto;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mw-toolbar-actions .ms-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mw-intro {
+  margin: 0;
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+
+.mw-empty {
+  padding: 22px 16px;
+  color: var(--ink-3);
+  text-align: center;
+}
+
+/* The mono kind tag of a Review row ("Conflict", "Upload", ...). */
+.mw-ktag {
+  flex: none;
+  padding: 3px 5px;
+  border: 1px solid var(--line-2);
+  border-radius: 4px;
+  color: var(--ink-2);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+/* Sheets over Review and Trash: the window's own `Modal`, with the shared `ms-sheet-*` copy and footer. */
+.mw-sheet-stack {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.mw-sheet-note {
+  min-width: 0;
+  color: var(--ink-3);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+/* A question the person has to answer (Keep the other asks before it overwrites this Mac's file): ink, not hint grey. */
+.mw-sheet-note[data-note='replace'] {
+  margin-top: 10px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.mw-sheet-empty,
+.mw-sheet-file {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.mw-sheet-empty {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.mw-search {
+  box-sizing: border-box;
+  width: 100%;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+
+.mw-search:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 1px;
+}
+
+.mw-pick-list {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.mw-pick {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 8px 12px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.mw-pick:last-child {
+  border-bottom: 0;
+}
+
+.mw-pick:hover {
+  background: var(--paper-2);
+}
+
+.mw-pick-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.mw-pick-path {
+  margin-top: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* The conflict sheet's two sides (hi-fi `.cmp`): This Mac and the other device, side by side. */
+.mw-compare {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+}
+
+.mw-compare-side {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper-2);
+  color: var(--ink-2);
+  font-size: 12px;
+}
+
+.mw-compare-side > b {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--ink);
+  font-size: 12.5px;
+}
+
+.mw-compare-body {
+  min-width: 0;
+}
+
+.mw-compare-note {
+  color: var(--ink-3);
+  overflow-wrap: anywhere;
+}
+
+.mw-diff-line {
+  padding: 1px 6px;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  /* A sheet scrolls as a whole (the window's `Modal`), and a line wraps rather than widening its column. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.mw-diff-line--add {
+  background: var(--diff-add-bg);
+}
+
+.mw-diff-line--remove {
+  background: var(--diff-remove-bg);
 }
