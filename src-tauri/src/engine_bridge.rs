@@ -2211,9 +2211,16 @@ impl EngineBridge {
         if !is_create {
             return Ok(None);
         }
-        let Some(target_path) = op.target_path.as_deref() else {
+        let Some(queued_path) = op.target_path.as_deref() else {
             return Ok(None);
         };
+        // Task 2204 S0.2 (review-128 F4): renamed since it was queued, the file is at its row's
+        // path; the landing writes the journal there too.
+        let renamed_path = match op.file_id.as_deref() {
+            Some(id) if self.db.has_queued_local_rename(id)? => self.db.get_file(id)?.map(|row| row.path),
+            _ => None,
+        };
+        let target_path = renamed_path.as_deref().unwrap_or(queued_path);
         let on_disk = local_file_path_under_sync_root(sync_root, target_path)?;
         if !on_disk.is_file() {
             return Ok(None);
@@ -2948,30 +2955,7 @@ impl EngineBridge {
             staged.retain();
             Ok(outcome)
         } else {
-            let name_encrypted = encrypted_metadata_for_name(
-                self.api.master_key(),
-                &file_id,
-                &target.filename,
-                target.content_type.as_deref(),
-            )?;
-            // Spec §7.2 (final review): a move is a change of parent, read against the row, so a
-            // move to the top level (no parent) is a move too, and a rename in a folder is a
-            // rename. With no row, a parent means a move, as before.
-            let moved = match self.db.get_file(&file_id)? {
-                Some(row) => row.parent_id != target.parent_id,
-                None => target.parent_id.is_some(),
-            };
-            let kind = if moved {
-                OperationKind::MoveFile
-            } else {
-                OperationKind::RenameFile
-            };
-            let mut payload = serde_json::json!({
-                "operation": "metadata_update",
-                "name_encrypted": name_encrypted,
-                "base_version_identifier": target.base_version_identifier,
-            });
-            apply_shared_context(&mut payload, item_contract.as_ref());
+            let (kind, payload) = self.metadata_update_payload(&file_id, &target, item_contract.as_ref())?;
             self.enqueue_finder_operation(
                 kind,
                 Some(file_id),
@@ -2985,6 +2969,72 @@ impl EngineBridge {
                     .and_then(|contract| contract.current_object_version_id.clone()),
                 None,
             )
+        }
+    }
+
+    /// A metadata-only modify's kind and payload: a move is a change of parent, read against
+    /// the row BEFORE the op changes it.
+    fn metadata_update_payload(
+        &self,
+        file_id: &str,
+        target: &FinderWriteTarget,
+        item_contract: Option<&crate::state_db::FileContractState>,
+    ) -> anyhow::Result<(OperationKind, serde_json::Value)> {
+        let name_encrypted = encrypted_metadata_for_name(
+            self.api.master_key(),
+            file_id,
+            &target.filename,
+            target.content_type.as_deref(),
+        )?;
+        // Spec §7.2 (final review): a move is a change of parent, read against the row, so a
+        // move to the top level (no parent) is a move too, and a rename in a folder is a
+        // rename. With no row, a parent means a move, as before.
+        let moved = match self.db.get_file(file_id)? {
+            Some(row) => row.parent_id != target.parent_id,
+            None => target.parent_id.is_some(),
+        };
+        let kind = if moved {
+            OperationKind::MoveFile
+        } else {
+            OperationKind::RenameFile
+        };
+        let mut payload = serde_json::json!({
+            "operation": "metadata_update",
+            "name_encrypted": name_encrypted,
+            "base_version_identifier": target.base_version_identifier,
+        });
+        apply_shared_context(&mut payload, item_contract);
+        Ok((kind, payload))
+    }
+
+    /// Task 2204 S0.1: a Windows rename or move of a tracked FILE, queued with its row moved to
+    /// `new_path` in the same transaction (`StateDb::enqueue_local_rename`). The op is marked
+    /// `local_rename`, which holds the row against stale landings and pulls until it is sent.
+    pub fn queue_local_rename(&self, target: FinderWriteTarget, new_path: &str) -> anyhow::Result<FinderWriteOutcome> {
+        let Some((file_id, item_contract)) = self.start_finder_modify(&target)? else {
+            return Ok(ignored_finder_item(&target.filename));
+        };
+        let (kind, mut payload) = self.metadata_update_payload(&file_id, &target, item_contract.as_ref())?;
+        payload["local_rename"] = serde_json::Value::Bool(true);
+        let op = self.finder_operation(
+            kind.clone(),
+            Some(file_id.clone()),
+            target.parent_id.clone(),
+            Some(target.filename.clone()),
+            payload,
+            None,
+            None,
+            item_contract.and_then(|contract| contract.current_object_version_id),
+        )?;
+        match self.db.enqueue_local_rename(&op, &file_id, new_path, target.parent_id.as_deref())? {
+            crate::state_db::FinderEnqueue::AcceptsClosed => Err(anyhow::Error::new(AcceptsClosed)),
+            crate::state_db::FinderEnqueue::Queued => Ok(FinderWriteOutcome::Queued {
+                op_id: op.op_id,
+                file_id: Some(file_id),
+                kind,
+                ignored: false,
+                message: "queued for encrypted sync".to_string(),
+            }),
         }
     }
 
@@ -3338,6 +3388,12 @@ impl EngineBridge {
         // yet (it was in use) is never sent: a later tick removes it.
         if self.db.is_kept_original_pending(&rel).unwrap_or(false) {
             tracing::debug!(rel_path = %rel, "classify_local_path: rejected an original whose copy is kept");
+            return None;
+        }
+        // Task 2204 S0.4 (review-128 F13): two live rows at one path (a renamed row moved back for
+        // a tick by a stale echo, next to the new file at its old name): neither is classified.
+        if self.db.count_live_files_at_path(&rel).unwrap_or(0) > 1 {
+            tracing::debug!(rel_path = %rel, "classify_local_path: two rows at the path; skipped this pass");
             return None;
         }
         match self.db.get_file_by_path(&rel) {
@@ -3955,6 +4011,44 @@ impl EngineBridge {
         base_object_version_id: Option<String>,
         folder: Option<crate::state_db::FinderFolderRow<'_>>,
     ) -> anyhow::Result<FinderWriteOutcome> {
+        let op = self.finder_operation(
+            kind.clone(),
+            file_id.clone(),
+            parent_id,
+            target_path,
+            metadata,
+            payload_path,
+            base_version,
+            base_object_version_id,
+        )?;
+        let op_id = op.op_id.clone();
+        // Spec 2026-10-10 §5.2 step 6: the sign-out's fence is read in the transaction that queues the op, and a
+        // folder's row is written in it too.
+        match self.db.enqueue_finder_change(&op, folder)? {
+            crate::state_db::FinderEnqueue::AcceptsClosed => Err(anyhow::Error::new(AcceptsClosed)),
+            crate::state_db::FinderEnqueue::Queued => Ok(FinderWriteOutcome::Queued {
+                op_id,
+                file_id,
+                kind,
+                ignored: false,
+                message: "queued for encrypted sync".to_string(),
+            }),
+        }
+    }
+
+    /// The op a Finder or sync-folder write queues (`enqueue_finder_operation`'s first half).
+    #[allow(clippy::too_many_arguments)]
+    fn finder_operation(
+        &self,
+        kind: OperationKind,
+        file_id: Option<String>,
+        parent_id: Option<String>,
+        target_path: Option<String>,
+        metadata: serde_json::Value,
+        payload_path: Option<String>,
+        base_version: Option<i64>,
+        base_object_version_id: Option<String>,
+    ) -> anyhow::Result<PendingOperation> {
         let op_id = uuid::Uuid::new_v4().to_string();
         let now = now_secs();
         // Task 0811: tag known-folder backup ops with their origin key (derived
@@ -3986,18 +4080,7 @@ impl EngineBridge {
             created_at: now,
             updated_at: now,
         };
-        // Spec 2026-10-10 §5.2 step 6: the sign-out's fence is read in the transaction that queues the op, and a
-        // folder's row is written in it too.
-        match self.db.enqueue_finder_change(&op, folder)? {
-            crate::state_db::FinderEnqueue::AcceptsClosed => Err(anyhow::Error::new(AcceptsClosed)),
-            crate::state_db::FinderEnqueue::Queued => Ok(FinderWriteOutcome::Queued {
-                op_id,
-                file_id,
-                kind,
-                ignored: false,
-                message: "queued for encrypted sync".to_string(),
-            }),
-        }
+        Ok(op)
     }
 
     fn enqueue_pin_tree_operation(&self, file_id: &str, pinned: bool, now: i64) -> anyhow::Result<()> {
@@ -8015,6 +8098,13 @@ fn apply_metadata_file_row(
             leaf.trim_start_matches('/')
         )
     };
+    // Task 2204 S0.3: while a Windows rename of this file is queued (parked included), the row's
+    // path and parent are where the file is on disk; the server's are still the old ones.
+    let held = match existing.as_ref() {
+        Some(entry) if !entry.is_dir() && db.has_queued_local_rename(file_id)? => Some(entry.clone()),
+        _ => None,
+    };
+    let path = held.as_ref().map_or(path, |entry| entry.path.clone());
     let status = existing
         .as_ref()
         .map(|entry| entry.status.clone())
@@ -8031,7 +8121,10 @@ fn apply_metadata_file_row(
     } else {
         ItemKind::File
     };
-    let server_parent_id = f["parent_id"].as_str().map(str::to_string);
+    let server_parent_id = match held.as_ref() {
+        Some(entry) => entry.parent_id.clone(),
+        None => f["parent_id"].as_str().map(str::to_string),
+    };
 
     let entry = FileEntry {
         file_id: file_id.to_string(),
@@ -28587,6 +28680,213 @@ mod tests {
         drain_upload_queue(&bridge, &sync_root).await;
         let state = server.finish();
         assert_eq!(state.latest_plaintext(&row.file_id, master_key), b"saved by an editor");
+    }
+
+    // ── Task 2204 S0: a Windows rename re-keys the file's row at once ──
+    //
+    // Review-154 P1-A, the case #154 widened: a rename left the row at the OLD path until the
+    // pull after the rename landed, and a create's landing wrote its queue-time path back. A new
+    // file written at the old name was then sent as a new version of the renamed file.
+
+    /// How the window between the rename and the new file is crossed.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Task2204Window {
+        /// The renamed file's create is still queued (review-154's scenario).
+        NewFile,
+        /// The renamed file landed long ago.
+        SyncedFile,
+        /// Nothing reaches the server until the new file is scanned too.
+        Offline,
+        /// The app restarts between the rename and the drain.
+        Restart,
+    }
+
+    /// Create `a.txt`, rename it to `b.txt`, write a new `a.txt`, sync: the server holds two
+    /// files with the right bytes, and each row is at its own file's path.
+    async fn task_2204_rename_then_a_new_file_at_the_old_name(window: Task2204Window) {
+        let master_key = [204u8; 32];
+        let (dir, sync_root, server, mut bridge) = rule3_setup(master_key);
+        let (a, b) = (sync_root.join("a.txt"), sync_root.join("b.txt"));
+        std::fs::write(&a, b"old bytes").unwrap();
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        assert_eq!(regression_1640_uploads_queued_for(&bridge, "a.txt"), 1, "precondition: queued as a new file");
+        if window == Task2204Window::SyncedFile {
+            drain_upload_queue(&bridge, &sync_root).await;
+            assert_eq!(bridge.db.get_file_by_path("a.txt").unwrap().unwrap().status, FileStatus::Local);
+        }
+        let renamed_id = bridge.db.get_file_by_path("a.txt").unwrap().unwrap().file_id;
+        std::fs::rename(&a, &b).unwrap();
+        crate::watcher::handle_rename(&bridge, &sync_root, &a, &b).await;
+        assert_eq!(
+            bridge.db.get_file_by_path("b.txt").unwrap().map(|row| row.file_id),
+            Some(renamed_id.clone()),
+            "the row moved with the file, before anything reached the server"
+        );
+        assert!(bridge.db.get_file_by_path("a.txt").unwrap().is_none(), "nothing is at the old name");
+        if window == Task2204Window::Restart {
+            drop(bridge);
+            bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+            assert!(bridge.db.get_file_by_path("b.txt").unwrap().is_some(), "the re-key is durable");
+        }
+        std::fs::write(&a, b"new bytes").unwrap();
+        if window == Task2204Window::Offline {
+            crate::watcher::run_one_scan(&bridge, &sync_root);
+        }
+        drain_upload_queue(&bridge, &sync_root).await;
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        drain_upload_queue(&bridge, &sync_root).await;
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        drain_upload_queue(&bridge, &sync_root).await;
+
+        let b_row = bridge.db.get_file_by_path("b.txt").unwrap().expect("the renamed file has a row");
+        let a_row = bridge.db.get_file_by_path("a.txt").unwrap().expect("the new file has a row");
+        assert_ne!(a_row.file_id, b_row.file_id, "two files, not one");
+        let state = server.finish();
+        assert_eq!(state.files_with_content().len(), 2, "the server holds two files");
+        assert_eq!(state.files[&b_row.file_id].versions.len(), 1, "the renamed file got no version from the new file");
+        assert_eq!(state.latest_plaintext(&b_row.file_id, master_key), b"old bytes");
+        assert_eq!(state.latest_plaintext(&a_row.file_id, master_key), b"new bytes");
+        assert!(
+            state.patches.iter().any(|(id, _)| *id == b_row.file_id),
+            "the rename was sent for the renamed file's server id"
+        );
+    }
+
+    #[tokio::test]
+    async fn task_2204_a_new_file_at_a_renamed_new_file_s_old_name_is_a_new_file() {
+        task_2204_rename_then_a_new_file_at_the_old_name(Task2204Window::NewFile).await;
+    }
+
+    #[tokio::test]
+    async fn task_2204_a_new_file_at_a_renamed_synced_file_s_old_name_is_a_new_file() {
+        task_2204_rename_then_a_new_file_at_the_old_name(Task2204Window::SyncedFile).await;
+    }
+
+    #[tokio::test]
+    async fn task_2204_offline_rename_and_new_file_give_two_files() {
+        task_2204_rename_then_a_new_file_at_the_old_name(Task2204Window::Offline).await;
+    }
+
+    #[tokio::test]
+    async fn task_2204_a_rename_survives_a_restart_mid_window() {
+        task_2204_rename_then_a_new_file_at_the_old_name(Task2204Window::Restart).await;
+    }
+
+    /// S0.3: while the rename is queued (or parked), a pull that still names the old path
+    /// leaves the row where the file is; once nothing is queued, the pull applies as before.
+    #[tokio::test]
+    async fn task_2204_the_pull_holds_a_renamed_row() {
+        let master_key = [205u8; 32];
+        let (_dir, sync_root, _server, bridge) = rule3_setup(master_key);
+        let (a, b) = (sync_root.join("a.txt"), sync_root.join("b.txt"));
+        std::fs::write(&a, b"bytes").unwrap();
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        drain_upload_queue(&bridge, &sync_root).await;
+        let id = bridge.db.get_file_by_path("a.txt").unwrap().unwrap().file_id;
+        std::fs::rename(&a, &b).unwrap();
+        crate::watcher::handle_rename(&bridge, &sync_root, &a, &b).await;
+        let mk = beebeeb_core::kdf::MasterKey::from_bytes(master_key);
+        let snapshot_row = |name: &str| {
+            serde_json::json!({
+                "id": id,
+                "name_encrypted": beebeeb_core::encrypt::encrypt_name(&mk, &id, name, None).unwrap(),
+                "size_bytes": 5,
+                "updated_at": now_secs(),
+                "is_folder": false,
+            })
+        };
+        let pull = |name: &str| {
+            apply_metadata_file_row(
+                &bridge.db,
+                &snapshot_row(name),
+                Namespace::MyFiles,
+                None,
+                None,
+                PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER,
+                now_secs(),
+                &master_key,
+                "",
+            )
+            .unwrap()
+        };
+        pull("a.txt");
+        assert_eq!(bridge.db.get_file(&id).unwrap().unwrap().path, "b.txt", "held while the rename is queued");
+        let rename = bridge.db.list_operations_for_file(&id).unwrap().into_iter().next().unwrap();
+        bridge
+            .db
+            .test_execute(&format!("UPDATE operation_queue SET attempts = max_attempts WHERE op_id = '{}'", rename.op_id))
+            .unwrap();
+        pull("a.txt");
+        assert_eq!(bridge.db.get_file(&id).unwrap().unwrap().path, "b.txt", "held while it is parked");
+        bridge.db.remove_operation(&rename.op_id).unwrap();
+        pull("c.txt");
+        assert_eq!(bridge.db.get_file(&id).unwrap().unwrap().path, "c.txt", "nothing queued: the pull applies");
+    }
+
+    /// S0.4: a path two live rows share is not classified, so neither file gets the other's
+    /// bytes (review-128 F13: a split ops page moves the renamed row back for a tick).
+    #[tokio::test]
+    async fn task_2204_a_path_two_rows_share_is_not_classified() {
+        let master_key = [206u8; 32];
+        let (_dir, sync_root, _server, bridge) = rule3_setup(master_key);
+        let path = sync_root.join("dup.txt");
+        std::fs::write(&path, b"first").unwrap();
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        drain_upload_queue(&bridge, &sync_root).await;
+        std::fs::write(&path, b"edited").unwrap();
+        assert!(bridge.classify_local_path(&sync_root, &path).is_some(), "precondition: one row, an edit");
+        bridge
+            .db
+            .upsert_file(&FileEntry {
+                file_id: "second-row".into(),
+                path: "dup.txt".into(),
+                status: FileStatus::Local,
+                size_bytes: 6,
+                modified_at: 0,
+                content_hash: None,
+                remote_updated_at: 0,
+                parent_id: None,
+                item_kind: ItemKind::File,
+            })
+            .unwrap();
+        assert!(bridge.classify_local_path(&sync_root, &path).is_none(), "two rows at the path: not classified");
+        bridge.db.set_status("second-row", FileStatus::Trashing).unwrap();
+        assert!(bridge.classify_local_path(&sync_root, &path).is_some(), "a trashing row does not count");
+    }
+
+    /// S0 keeps today's behaviour for what it does not cover: a folder (its descendants would
+    /// need re-keying too), a rename onto another tracked file, and a move into a folder with no
+    /// row (the full design, review-128).
+    #[tokio::test]
+    async fn task_2204_folders_replaces_and_unresolved_parents_are_not_rekeyed() {
+        let master_key = [207u8; 32];
+        let (_dir, sync_root, _server, bridge) = rule3_setup(master_key);
+        for name in ["a.txt", "t.txt", "m.txt"] {
+            std::fs::write(sync_root.join(name), name.as_bytes()).unwrap();
+        }
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        drain_upload_queue(&bridge, &sync_root).await;
+        let row = |path: &str| bridge.db.get_file_by_path(path).unwrap();
+        // A rename onto a tracked file.
+        let (a, t) = (sync_root.join("a.txt"), sync_root.join("t.txt"));
+        std::fs::remove_file(&t).unwrap();
+        std::fs::rename(&a, &t).unwrap();
+        crate::watcher::handle_rename(&bridge, &sync_root, &a, &t).await;
+        assert!(row("a.txt").is_some(), "a replace keeps today's behaviour (no re-key)");
+        // A move into a folder that has no row yet.
+        let (m, moved) = (sync_root.join("m.txt"), sync_root.join("newdir").join("m.txt"));
+        std::fs::create_dir_all(moved.parent().unwrap()).unwrap();
+        std::fs::rename(&m, &moved).unwrap();
+        crate::watcher::handle_rename(&bridge, &sync_root, &m, &moved).await;
+        assert!(row("m.txt").is_some(), "an unresolved parent keeps today's behaviour");
+        // A folder.
+        let (f, g) = (sync_root.join("f"), sync_root.join("g"));
+        std::fs::create_dir_all(&f).unwrap();
+        bridge.ensure_local_folder(&sync_root, &f).expect("a folder row");
+        assert!(row("f").unwrap().is_dir(), "precondition: a folder row");
+        std::fs::rename(&f, &g).unwrap();
+        crate::watcher::handle_rename(&bridge, &sync_root, &f, &g).await;
+        assert!(row("f").is_some(), "a folder keeps today's behaviour");
     }
 
     // ── Task 2190: a concurrent edit (this device and the web), as main behaves today ──
