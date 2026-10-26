@@ -77,12 +77,15 @@ then, the app keeps the file marked as not in sync.
   - In the code a macOS build shares with Windows, the only change that runs on macOS is two new,
     empty tables in the local database. Only Windows writes to them.
 - Real hardware smoke test: **not run before this release.** The Windows device checks run after
-  release, on a PC that synced files with 0.8.12:
+  release, at the maintainer's call ("nah for later. continue"), on a PC that synced files with
+  0.8.12:
   - Explorer's "Free up space" leaves an edited file from before 0.8.13 alone;
   - deleting such a file on the web keeps its bytes as a copy;
   - signing out with "Keep copies" puts the bytes in the named folder, and "Delete them" removes
     them.
-- <!-- lead: macOS sign-out device checks (RELEASE_BLOCKERS.md): state the waiver for 0.8.14 as the maintainers give it, or that the device run passed; the release checks refuse while this marker is here. -->
+- The macOS sign-out device checks that 0.8.12 shipped without were waived again for this release,
+  at the same call ("nah for later. continue"). The macOS code is identical to 0.8.13 apart from
+  the two empty tables above.
 - Not verified:
   - sending an edit in a file from before 0.8.13 (a later release, task 2191);
   - folder renames and moves into a folder that is not synced yet (task 2204's full design);
