@@ -2471,6 +2471,49 @@ impl StateDb {
         tx.commit()
     }
 
+    /// Task 2204 S0.3 (review-155): the pull's write of a server row, as
+    /// [`Self::upsert_file_with_contract`], with the Windows-rename hold decided in the same
+    /// transaction: while a `local_rename` op of the file is queued, the row keeps its current path
+    /// and parent whatever `entry` and `update` say. Returns the path written.
+    pub fn upsert_server_file_row(
+        &self,
+        entry: &FileEntry,
+        update: impl FnOnce(&mut FileContractState),
+    ) -> Result<String> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        // Only `handle_rename` (Windows) queues these ops, so other builds skip the query.
+        let held: Option<(String, Option<String>)> = if cfg!(any(target_os = "windows", test)) {
+            tx.query_row(
+                "SELECT path, parent_id FROM files
+                 WHERE file_id = ?1 AND item_kind = 'file'
+                   AND EXISTS(SELECT 1 FROM operation_queue
+                     WHERE file_id = ?1 AND kind IN ('rename_file', 'move_file')
+                       AND CASE WHEN json_valid(metadata_json)
+                           THEN json_extract(metadata_json, '$.local_rename') END = 1)",
+                params![entry.file_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+        } else {
+            None
+        };
+        let mut entry = entry.clone();
+        if let Some((path, _)) = &held {
+            entry.path = path.clone();
+        }
+        upsert_file_conn(&tx, &entry)?;
+        let mut contract =
+            get_file_contract_state_conn(&tx, &entry.file_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        update(&mut contract);
+        if let Some((_, parent_id)) = held {
+            contract.parent_id = parent_id;
+        }
+        set_file_contract_state_conn(&tx, &contract)?;
+        tx.commit()?;
+        Ok(entry.path)
+    }
+
     /// Fetch a single row by `file_id`. `Ok(None)` if absent.
     pub fn get_file(&self, file_id: &str) -> Result<Option<FileEntry>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
@@ -10756,6 +10799,38 @@ mod tests {
             Some(2),
             "(b) round 3's equal-base rule"
         );
+    }
+
+    /// Task 2204 S0.3 (review-155): the pull read the row (at `a.txt`) before a Windows rename
+    /// committed its re-key; its write, which still names `a.txt` and the old parent, keeps the
+    /// row where the rename put it.
+    #[test]
+    fn task_2204_a_pull_write_after_a_rename_keeps_the_new_path() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_own_row(&db, "f", FileStatus::Local, 10);
+        let stale = db.get_file("f").unwrap().unwrap();
+        db.0.lock()
+            .unwrap()
+            .execute_batch(
+                r#"INSERT INTO operation_queue (op_id, kind, file_id, target_path, metadata_json, attempts, max_attempts)
+                   VALUES ('rename', 'move_file', 'f', 'b.txt', '{"local_rename":true}', 0, 25);
+                   UPDATE files SET path = 'docs/b.txt', parent_id = 'docs' WHERE file_id = 'f';"#,
+            )
+            .unwrap();
+        let written = db
+            .upsert_server_file_row(&stale, |contract| contract.parent_id = None)
+            .unwrap();
+        assert_eq!(written, "docs/b.txt");
+        assert_eq!(db.get_file("f").unwrap().unwrap().path, "docs/b.txt", "the rename's path stands");
+        assert_eq!(
+            db.get_file_contract_state("f").unwrap().unwrap().parent_id.as_deref(),
+            Some("docs"),
+            "and its parent"
+        );
+        db.remove_operation("rename").unwrap();
+        db.upsert_server_file_row(&stale, |contract| contract.parent_id = None).unwrap();
+        assert_eq!(db.get_file("f").unwrap().unwrap().path, "f.txt", "nothing queued: the server's row is written");
     }
 
     /// Task 2204 S0.2 (review-128 F4): a sync-folder create renamed before it landed keeps the

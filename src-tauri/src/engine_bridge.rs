@@ -8140,7 +8140,7 @@ fn apply_metadata_file_row(
         None => f["parent_id"].as_str().map(str::to_string),
     };
 
-    let entry = FileEntry {
+    let mut entry = FileEntry {
         file_id: file_id.to_string(),
         path,
         status,
@@ -8159,7 +8159,9 @@ fn apply_metadata_file_row(
     };
     // Spec §7.2 (final review): the row and its contract in one transaction, so no listing
     // sees a new nested row without its parent.
-    db.upsert_file_with_contract(&entry, |contract| {
+    // Task 2204 S0.3 (review-155): the hold is decided again inside the write's own
+    // transaction, so a Windows rename committed after the reads above is never written over.
+    entry.path = db.upsert_server_file_row(&entry, |contract| {
         contract.namespace = namespace;
         contract.parent_id = server_parent_id;
         contract.shared_root_id = shared_root_id;
@@ -20641,12 +20643,20 @@ mod tests {
             ("fn apply_shared_metadata_file_row(", 1),
             ("fn apply_metadata_file_row(", 1),
         ] {
+            // Task 2204 S0.3: the pull's writer is `upsert_server_file_row`, the same one-transaction
+            // write with the Windows-rename hold decided inside it.
+            let body = body(production, writer);
             assert_eq!(
-                body(production, writer).matches("upsert_file_with_contract(").count(),
+                body.matches("upsert_file_with_contract(").count() + body.matches("upsert_server_file_row(").count(),
                 calls,
                 "{writer} writes each row and its contract in one call"
             );
         }
+        let held = body(state_db, "    pub fn upsert_server_file_row(");
+        assert!(
+            held.contains("upsert_file_conn(") && held.contains("set_file_contract_state_conn(") && held.contains("tx.commit()"),
+            "{held}"
+        );
         // Spec 2026-10-10 §5.2 step 6: a Finder folder create writes its row and its contract in the same
         // transaction as its op, behind the sign-out's fence, so a refused create leaves no row.
         assert!(
