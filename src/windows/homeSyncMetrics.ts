@@ -19,14 +19,14 @@ export interface HomeSyncMetric {
 
 /**
  * Every queued change not sent yet: waiting (due, backing off or being sent), held (paused, any reason) and given up.
- * "…" before the first read, "—" when the summary could not be read: an unknown queue is never shown as 0. Note the
- * queue also holds the downloads a pin queues, so during a pin this figure counts those too.
+ * "…" before the first read, "—" when the summary could not be read or carries no queue (`queue: null`, no state DB
+ * yet): an unknown queue is never shown as 0. Note the queue also holds the downloads a pin queues, so during a pin this
+ * figure counts those too.
  */
 export function notSentFigure(summary: SyncActivitySummary | null | undefined): string {
   if (summary === undefined) return '…'
-  if (summary === null) return '—'
-  const queue = summary.queue
-  if (queue === null) return formatCount(0)
+  const queue = summary?.queue ?? null
+  if (queue === null) return '—'
   const held = queue.held.reduce((sum, group) => sum + group.count, 0)
   return formatCount(queue.waiting + held + queue.gave_up)
 }
