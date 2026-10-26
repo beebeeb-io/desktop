@@ -8479,9 +8479,9 @@ mod tests {
             let conn = db.0.lock().unwrap();
             conn.execute(
                 "INSERT INTO files (file_id, path, status, item_kind, current_version, parent_id, size_bytes, remote_updated_at)
-                 VALUES ('ghost', 'Backups', 'local', 'folder', 0, NULL, 0, 0),
-                        ('server', 'Backups', 'cloud_only', 'folder', 3, NULL, 0, 0),
-                        ('f1', 'Backups/a.txt', 'local', 'file', 2, 'server', 12, 1761480000)",
+                 VALUES ('ghost', 'Archive', 'local', 'folder', 0, NULL, 0, 0),
+                        ('server', 'Archive', 'cloud_only', 'folder', 3, NULL, 0, 0),
+                        ('f1', 'Archive/a.txt', 'local', 'file', 2, 'server', 12, 1761480000)",
                 [],
             )
             .unwrap();

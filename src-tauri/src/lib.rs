@@ -11829,7 +11829,7 @@ fn vault_entry_row(entry: &state_db::TreeRow) -> VaultEntryRow {
 ///
 /// On Guus's PC 2,828 folder paths had two rows: a folder this PC created on 4 Oct whose `create_folder` never landed
 /// (`local`, no server version, a locally minted id, its operation paused) and the server's folder at the same path,
-/// which arrived later with a snapshot. The tree listed both: `Backups` twice, once with 0 B and 0 files.
+/// which arrived later with a snapshot. The tree listed both: the same folder twice, once with 0 B and 0 files.
 ///
 /// Here a row the server does not know folds into the row that stays at its path: the server's (a row the server
 /// knows, then one whose status is not `local`, then the smallest id, so the choice is stable). The folded row is not
@@ -18967,37 +18967,37 @@ mod tests {
         assert!(!d.excluded);
     }
 
-    /// 0.8.15 (Guus's PC, 0.8.14): Selective sync listed `Backups` twice. One row the server never confirmed (a folder
+    /// 0.8.15 (Guus's PC, 0.8.14): Selective sync listed one folder twice. One row the server never confirmed (a folder
     /// this PC created on 4 Oct whose `create_folder` stayed paused) and the server's row at the same path. The tree shows
-    /// one `Backups`, the server's; the never-sent child with a server twin folds into it too; a never-sent child with no
+    /// one `Archive`, the server's; the never-sent child with a server twin folds into it too; a never-sent child with no
     /// twin stays, under the server's folder; the same file twice is counted once.
     #[test]
     fn selective_sync_shows_one_folder_per_path_preferring_the_server_row() {
         let rows = vec![
-            at(folder("ghost-backups", None, "Backups"), "Backups", false),
-            at(folder("srv-backups", None, "Backups"), "Backups", true),
-            at(folder("ghost-unknown", Some("ghost-backups"), "unknown"), "Backups/unknown", false),
-            at(folder("srv-unknown", Some("srv-backups"), "unknown"), "Backups/unknown", true),
-            at(folder("ghost-only", Some("ghost-backups"), "new"), "Backups/new", false),
-            at(file("f1", Some("srv-unknown"), 100, true), "Backups/unknown/a.txt", true),
-            at(file("f2", Some("srv-backups"), 50, false), "Backups/b.txt", true),
-            at(file("f2-again", Some("srv-backups"), 50, true), "Backups/b.txt", false),
+            at(folder("ghost-archive", None, "Archive"), "Archive", false),
+            at(folder("srv-archive", None, "Archive"), "Archive", true),
+            at(folder("ghost-other", Some("ghost-archive"), "other"), "Archive/other", false),
+            at(folder("srv-other", Some("srv-archive"), "other"), "Archive/other", true),
+            at(folder("ghost-only", Some("ghost-archive"), "new"), "Archive/new", false),
+            at(file("f1", Some("srv-other"), 100, true), "Archive/other/a.txt", true),
+            at(file("f2", Some("srv-archive"), 50, false), "Archive/b.txt", true),
+            at(file("f2-again", Some("srv-archive"), 50, true), "Archive/b.txt", false),
         ];
         let tree = build_vault_tree(&rows, &HashSet::new());
 
         let roots: Vec<(&str, &str)> = tree.iter().map(|n| (n.id.as_str(), n.name.as_str())).collect();
-        assert_eq!(roots, vec![("srv-backups", "Backups")], "one Backups, the server's");
-        let backups = &tree[0];
+        assert_eq!(roots, vec![("srv-archive", "Archive")], "one Archive, the server's");
+        let archive = &tree[0];
         assert_eq!(
-            (backups.size_bytes, backups.file_count, backups.on_disk_bytes),
+            (archive.size_bytes, archive.file_count, archive.on_disk_bytes),
             (150, 2, 100),
             "two files, 150 bytes, 100 of them on disk: nothing counted twice"
         );
-        let children: Vec<(&str, &str)> = backups.children.iter().map(|c| (c.id.as_str(), c.name.as_str())).collect();
-        assert_eq!(children, vec![("ghost-only", "new"), ("srv-unknown", "unknown")]);
-        let unknown = &backups.children[1];
-        assert_eq!((unknown.size_bytes, unknown.file_count, unknown.on_disk_bytes), (100, 1, 100));
-        assert!(backups.children[0].children.is_empty() && unknown.children.is_empty());
+        let children: Vec<(&str, &str)> = archive.children.iter().map(|c| (c.id.as_str(), c.name.as_str())).collect();
+        assert_eq!(children, vec![("ghost-only", "new"), ("srv-other", "other")]);
+        let other = &archive.children[1];
+        assert_eq!((other.size_bytes, other.file_count, other.on_disk_bytes), (100, 1, 100));
+        assert!(archive.children[0].children.is_empty() && other.children.is_empty());
         assert_eq!(rows.len(), 8, "the rows themselves are untouched (display only)");
     }
 
@@ -19032,7 +19032,7 @@ mod tests {
         let row = |current_version: i64, remote_updated_at: i64, status: crate::state_db::FileStatus| {
             vault_entry_row(&crate::state_db::TreeRow {
                 file_id: "id".into(),
-                path: "Backups".into(),
+                path: "Archive".into(),
                 status,
                 size_bytes: 0,
                 parent_id: None,
@@ -19045,7 +19045,7 @@ mod tests {
         assert!(!row(0, 0, Local).server_known && row(0, 0, Local).local_status);
         assert!(row(3, 0, CloudOnly).server_known && !row(3, 0, CloudOnly).local_status);
         assert!(row(0, 1_761_480_000, CloudOnly).server_known);
-        assert_eq!((row(0, 0, Local).name, row(0, 0, Local).path), ("Backups".to_string(), "Backups".to_string()));
+        assert_eq!((row(0, 0, Local).name, row(0, 0, Local).path), ("Archive".to_string(), "Archive".to_string()));
     }
 
     /// The rows behind `tests/fixtures/selective-sync-tree.json`, the browser fixture `tests/render-sync-activity.mjs`
@@ -19056,21 +19056,21 @@ mod tests {
         vec![
             at(folder("srv-documents", None, "Documents"), "Documents", true),
             at(folder("srv-photos", None, "Photos"), "Photos", true),
-            at(folder("srv-backups", None, "Backups"), "Backups", true),
+            at(folder("srv-archive", None, "Archive"), "Archive", true),
             at(folder("srv-music", None, "Music"), "Music", true),
             at(folder("srv-taxes", Some("srv-documents"), "Taxes"), "Documents/Taxes", true),
             at(folder("srv-2026", Some("srv-photos"), "2026"), "Photos/2026", true),
-            at(folder("srv-unknown", Some("srv-backups"), "unknown"), "Backups/unknown", true),
+            at(folder("srv-other", Some("srv-archive"), "other"), "Archive/other", true),
             at(folder("ghost-documents", None, "Documents"), "Documents", false),
             at(folder("ghost-photos", None, "Photos"), "Photos", false),
-            at(folder("ghost-backups", None, "Backups"), "Backups", false),
+            at(folder("ghost-archive", None, "Archive"), "Archive", false),
             at(folder("ghost-taxes", Some("ghost-documents"), "Taxes"), "Documents/Taxes", false),
-            at(folder("ghost-unknown", Some("ghost-backups"), "unknown"), "Backups/unknown", false),
+            at(folder("ghost-other", Some("ghost-archive"), "other"), "Archive/other", false),
             at(file("f-report", Some("srv-documents"), 2_400_000, true), "Documents/report.pdf", true),
             at(file("f-return", Some("srv-taxes"), 860_000, false), "Documents/Taxes/return.pdf", true),
             at(file("f-beach", Some("srv-2026"), 4_100_000, false), "Photos/2026/beach.jpg", true),
             at(file("f-hike", Some("srv-2026"), 3_700_000, true), "Photos/2026/hike.jpg", true),
-            at(file("f-disk", Some("srv-unknown"), 512_000_000, false), "Backups/unknown/disk.img", true),
+            at(file("f-disk", Some("srv-other"), 512_000_000, false), "Archive/other/disk.img", true),
             at(file("f-song", Some("srv-music"), 9_800_000, false), "Music/song.flac", true),
             at(file("err-report", None, 2_400_000, false), "Documents/report.pdf", false),
         ]
@@ -19096,8 +19096,8 @@ mod tests {
         let roots = |tree: &serde_json::Value| -> Vec<String> {
             tree.as_array().unwrap().iter().map(|n| n["name"].as_str().unwrap().to_string()).collect()
         };
-        assert_eq!(roots(&fixture["before"]), ["Backups", "Backups", "Documents", "Documents", "Music", "Photos", "Photos"]);
-        assert_eq!(roots(&fixture["after"]), ["Backups", "Documents", "Music", "Photos"]);
+        assert_eq!(roots(&fixture["before"]), ["Archive", "Archive", "Documents", "Documents", "Music", "Photos", "Photos"]);
+        assert_eq!(roots(&fixture["after"]), ["Archive", "Documents", "Music", "Photos"]);
     }
 
     /// 0.8.15 evidence, not part of the suite: build the tree from a COPY of a real state DB (opening it migrates it),

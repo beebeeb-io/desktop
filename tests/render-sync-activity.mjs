@@ -273,7 +273,7 @@ try {
       await page.getByRole('button', { name: 'Selective sync', exact: true }).first().click()
       await page.getByText('Documents', { exact: true }).first().waitFor({ timeout: 5000 })
       const counts = {}
-      for (const folder of ['Documents', 'Photos', 'Backups', 'Music']) counts[folder] = await page.getByText(folder, { exact: true }).count()
+      for (const folder of ['Documents', 'Photos', 'Archive', 'Music']) counts[folder] = await page.getByText(folder, { exact: true }).count()
       await writeFile(path.join(output, `${name}-counts.json`), JSON.stringify(counts, null, 2))
       if (which === 'after') for (const [folder, n] of Object.entries(counts)) assert.equal(n, 1, `${folder} is listed ${n} times`)
       else assert.ok(Object.values(counts).some((n) => n > 1), 'the before tree lists a folder twice')
