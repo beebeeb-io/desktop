@@ -734,22 +734,34 @@ fn handle_fully_on_disk(file: &std::fs::File) -> bool {
         .is_ok_and(|metadata| metadata.file_attributes() & FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS.0 == 0)
 }
 
-/// Task 1640: the Cloud Files in-sync state of the placeholder at `path`, or `None` when it is
-/// not a placeholder (a plain file an atomic save left) or cannot be read. The platform clears
-/// it when the file's bytes change; this engine sets it only on content it agrees with the
-/// server on. Opened as the reparse point, so nothing is fetched.
-pub fn placeholder_in_sync(path: &std::path::Path) -> Option<bool> {
-    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
-    use windows::Win32::Foundation::HANDLE;
+/// Desktop 0.8.15 (the hydration storm): open `path` to read its placeholder state, as the reparse
+/// point and with attribute access only (`FILE_READ_ATTRIBUTES`, no `FILE_READ_DATA`). 0.8.14
+/// opened these with read access; on a PC with 8,592 cloud-only files of unknown content its
+/// start-up guard was followed by a whole-file fetch of 5,294 of them, one per file in the
+/// guard's own order, ~42 GB in two hours, until the disk was full. A handle that cannot read
+/// data gives a scanner hooked on opens nothing to read, and `CfGetPlaceholderInfo` needs no more
+/// (the native probe `desktop_0815_probe_the_guard_reads_a_cloud_only_file_without_fetching_it`).
+fn open_for_state(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
     use windows::Win32::Storage::FileSystem::{
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
     };
-    let file = std::fs::OpenOptions::new()
-        .read(true)
+    std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES.0)
         .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
         .open(path)
-        .ok()?;
+}
+
+/// Task 1640: the Cloud Files in-sync state of the placeholder at `path`, or `None` when it is
+/// not a placeholder (a plain file an atomic save left) or cannot be read. The platform clears
+/// it when the file's bytes change; this engine sets it only on content it agrees with the
+/// server on. Opened as the reparse point with attribute access only ([`open_for_state`]), so
+/// nothing is fetched.
+pub fn placeholder_in_sync(path: &std::path::Path) -> Option<bool> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    let file = open_for_state(path).ok()?;
     let handle = HANDLE(file.as_raw_handle());
     let mut buffer = vec![0u64; 1024];
     // SAFETY: `handle` is open for the whole call (`file` outlives it); the buffer is
@@ -798,17 +810,9 @@ pub fn placeholder_local_entry(path: &std::path::Path) -> crate::engine_bridge::
 /// edits in sync, so a file of unknown content is read by its size on disk alone.
 pub fn placeholder_local_entry_trusting(path: &std::path::Path, trust_in_sync: bool) -> crate::engine_bridge::LocalEntry {
     use crate::engine_bridge::LocalEntry;
-    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+    use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::{ERROR_NOT_A_CLOUD_FILE, HANDLE};
-    use windows::Win32::Storage::FileSystem::{
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    };
-    let Ok(file) = std::fs::OpenOptions::new()
-        .read(true)
-        .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
-        .open(path)
-    else {
+    let Ok(file) = open_for_state(path) else {
         return LocalEntry::Unreadable;
     };
     let mut buffer = vec![0u64; 1024];
@@ -1118,21 +1122,16 @@ fn unix_to_filetime(modified_at: i64) -> i64 {
 
 /// Task 2191 (D2, D12): the platform's view of `path` for the unknown-content guard: how much
 /// is on disk, whether it reads in sync (whatever its modified size), and the file id its
-/// identity names. Opened as the reparse point, so nothing is fetched.
+/// identity names. Opened as the reparse point with attribute access only ([`open_for_state`]),
+/// so nothing is fetched.
 pub fn platform_view(path: &std::path::Path) -> crate::unknown_check::PlatformView {
     use crate::unknown_check::{OnDisk, PlatformView};
-    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+    use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::{ERROR_NOT_A_CLOUD_FILE, HANDLE};
-    use windows::Win32::Storage::FileSystem::{FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE};
     if std::fs::symlink_metadata(path).is_err() {
         return PlatformView::Missing;
     }
-    let Ok(file) = std::fs::OpenOptions::new()
-        .read(true)
-        .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
-        .open(path)
-    else {
+    let Ok(file) = open_for_state(path) else {
         return PlatformView::Unreadable;
     };
     let mut buffer = vec![0u64; 1024];

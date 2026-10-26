@@ -9552,14 +9552,17 @@ async fn sync_status(state: State<'_, AppState>) -> Result<serde_json::Value, St
                         .ok()
                         .map(|v| v.len() as u32)
                         .unwrap_or(0);
-                    (downloading + uploading, cloud_only, conflicts)
+                    // Desktop 0.8.15: queued changes held back (the `auth` pause) are not
+                    // syncing; the UI shows them as "N changes on hold".
+                    let on_hold = db.count_operations_on_hold().unwrap_or(0);
+                    (downloading + uploading, cloud_only, conflicts, on_hold)
                 })
-                .unwrap_or((0, 0, 0))
+                .unwrap_or((0, 0, 0, 0))
         } else {
-            (0, 0, 0)
+            (0, 0, 0, 0)
         }
     } else {
-        (0, 0, 0)
+        (0, 0, 0, 0)
     };
 
     Ok(serde_json::json!({
@@ -9575,6 +9578,11 @@ async fn sync_status(state: State<'_, AppState>) -> Result<serde_json::Value, St
         "syncing": counts.0,
         "cloud_only": counts.1,
         "conflicts": counts.2,
+        // Desktop 0.8.15: changes held back, never counted in `syncing`.
+        "changes_on_hold": counts.3,
+        // Desktop 0.8.15: the start-up guard's pass, `{running, done, total}` (Windows; at rest
+        // elsewhere). While it runs, uploads and downloads flow; only freeing work waits.
+        "startup_guard": crate::unknown_check::STARTUP_GUARD.progress(),
         // WS1 — storage byte totals for the tray status line.
         // These are `null` here because polling the billing API on every
         // 3-second status tick would hammer the server. The tray's

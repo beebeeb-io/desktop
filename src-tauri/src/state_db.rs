@@ -587,6 +587,11 @@ pub struct PrunedRow {
     /// gone from the table by the time its entry is removed).
     pub local_hash: Option<String>,
     /// Task 1640 (review N1): the hash of the one version the range fetches served, when it was one.
+    /// Desktop 0.8.15: read only when that version is known (`fetched_min_version > 0`, as
+    /// `fetched_content` reads it). A file of unknown content (`-1`, `-2`) can still carry a hash
+    /// a fold left, which is no agreed content; with the start-up guard now running beside the
+    /// engine, a remote deletion may reach such a file before the guard has marked it, and the
+    /// platform's in-sync state is then not trusted for it.
     pub fetched_hash: Option<String>,
 }
 
@@ -2675,6 +2680,15 @@ impl StateDb {
         Ok(())
     }
 
+    /// Desktop 0.8.15: the files whose "not in sync" mark is pending now. The start-up pass reads
+    /// them once, so a row that needs nothing gets no write.
+    pub fn mark_pending_ids(&self) -> Result<HashSet<String>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare("SELECT file_id FROM unknown_checks WHERE mark_pending = 1")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        rows.collect()
+    }
+
     /// Task 2191: [`Self::mark_no_fetched_content`] for many rows, in one transaction (the
     /// start-up guard's empty placeholders). Returns how many were marked.
     pub fn mark_no_fetched_content_many(&self, file_ids: &[String]) -> Result<usize> {
@@ -2853,7 +2867,7 @@ impl StateDb {
         // (task 0806). Deepest-first ordering keeps the returned rows in the
         // children-before-parent order the placeholder remover expects.
         let root: Option<PrunedRow> = {
-            let mut stmt = tx.prepare("SELECT file_id, path, item_kind, local_hash, fetched_hash FROM files WHERE file_id = ?1")?;
+            let mut stmt = tx.prepare("SELECT file_id, path, item_kind, local_hash, CASE WHEN fetched_min_version > 0 THEN fetched_hash END FROM files WHERE file_id = ?1")?;
             let mut rows = stmt.query(params![file_id])?;
             if let Some(row) = rows.next()? {
                 Some(PrunedRow {
@@ -2900,7 +2914,7 @@ impl StateDb {
             if !root_path.is_empty() {
                 let descendants: Vec<PrunedRow> = {
                     let mut dstmt = tx.prepare(
-                        "SELECT file_id, path, item_kind, local_hash, fetched_hash FROM files
+                        "SELECT file_id, path, item_kind, local_hash, CASE WHEN fetched_min_version > 0 THEN fetched_hash END FROM files
                          WHERE namespace = 'my_files'
                            AND substr(ltrim(path, '/'), 1, length(?1) + 1) = ?1 || '/'
                          ORDER BY length(path) DESC, path DESC",
@@ -2949,7 +2963,7 @@ impl StateDb {
         let tx = conn.transaction()?;
 
         let root: Option<PrunedRow> = {
-            let mut stmt = tx.prepare("SELECT file_id, path, item_kind, local_hash, fetched_hash FROM files WHERE file_id = ?1")?;
+            let mut stmt = tx.prepare("SELECT file_id, path, item_kind, local_hash, CASE WHEN fetched_min_version > 0 THEN fetched_hash END FROM files WHERE file_id = ?1")?;
             let mut rows = stmt.query(params![file_id])?;
             if let Some(row) = rows.next()? {
                 Some(PrunedRow {
@@ -2997,7 +3011,7 @@ impl StateDb {
             if !root_path.is_empty() {
                 let descendants: Vec<PrunedRow> = {
                     let mut dstmt = tx.prepare(
-                        "SELECT file_id, path, item_kind, local_hash, fetched_hash FROM files
+                        "SELECT file_id, path, item_kind, local_hash, CASE WHEN fetched_min_version > 0 THEN fetched_hash END FROM files
                          WHERE namespace = 'my_files'
                            AND substr(ltrim(path, '/'), 1, length(?1) + 1) = ?1 || '/'
                          ORDER BY length(path) DESC, path DESC",
@@ -3033,7 +3047,7 @@ impl StateDb {
 
         // Look up the row to delete (its path + kind drives the subtree prune).
         let root: Option<PrunedRow> = {
-            let mut stmt = tx.prepare("SELECT file_id, path, item_kind, local_hash, fetched_hash FROM files WHERE file_id = ?1")?;
+            let mut stmt = tx.prepare("SELECT file_id, path, item_kind, local_hash, CASE WHEN fetched_min_version > 0 THEN fetched_hash END FROM files WHERE file_id = ?1")?;
             let mut rows = stmt.query(params![file_id])?;
             if let Some(row) = rows.next()? {
                 Some(PrunedRow {
@@ -3080,7 +3094,7 @@ impl StateDb {
             if !root_path.is_empty() {
                 let descendants: Vec<PrunedRow> = {
                     let mut dstmt = tx.prepare(
-                        "SELECT file_id, path, item_kind, local_hash, fetched_hash FROM files
+                        "SELECT file_id, path, item_kind, local_hash, CASE WHEN fetched_min_version > 0 THEN fetched_hash END FROM files
                          WHERE substr(ltrim(path, '/'), 1, length(?1) + 1) = ?1 || '/'
                          ORDER BY length(path) DESC, path DESC",
                     )?;
@@ -3420,6 +3434,16 @@ impl StateDb {
         rows.collect()
     }
 
+    /// Desktop 0.8.15 (deliverable 3): queued changes held back (`paused_reason` set: the `auth`
+    /// pause, a quota, a review). The UI shows them as "N changes on hold", never as syncing; they
+    /// are not transfer work ([`Self::transfer_backlog`] leaves them out).
+    pub fn count_operations_on_hold(&self) -> Result<u32> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let held: i64 =
+            conn.query_row("SELECT COUNT(*) FROM operation_queue WHERE paused_reason IS NOT NULL", [], |row| row.get(0))?;
+        Ok(u32::try_from(held.max(0)).unwrap_or(u32::MAX))
+    }
+
     /// What is waiting to transfer (see [`TransferBacklog`]). `now` is unix seconds: an upload whose
     /// retry time is still ahead of it is waiting out a backoff and does not count.
     pub fn transfer_backlog(&self, now: i64) -> Result<TransferBacklog> {
@@ -3506,7 +3530,7 @@ impl StateDb {
         // into the trash view); deleting them would erase trash-view rows.
         let direct_children: Vec<PrunedRow> = {
             let mut stmt =
-                tx.prepare("SELECT file_id, path, item_kind, local_hash, fetched_hash FROM files WHERE parent_id = ?1 AND status != 'trashing'")?;
+                tx.prepare("SELECT file_id, path, item_kind, local_hash, CASE WHEN fetched_min_version > 0 THEN fetched_hash END FROM files WHERE parent_id = ?1 AND status != 'trashing'")?;
             let rows = stmt.query_map(params![folder_id], |r| {
                 Ok(PrunedRow {
                     file_id: r.get(0)?,
@@ -3538,7 +3562,7 @@ impl StateDb {
                 if !child_path.is_empty() {
                     let descendants: Vec<PrunedRow> = {
                         let mut dstmt = tx.prepare(
-                            "SELECT file_id, path, item_kind, local_hash, fetched_hash FROM files
+                            "SELECT file_id, path, item_kind, local_hash, CASE WHEN fetched_min_version > 0 THEN fetched_hash END FROM files
                              WHERE substr(ltrim(path, '/'), 1, length(?1) + 1) = ?1 || '/'
                              ORDER BY length(path) DESC, path DESC",
                         )?;
@@ -3794,7 +3818,7 @@ impl StateDb {
         // `file_delete` (permanent) / `file_restore` ops instead.
         let candidates: Vec<PrunedRow> = {
             let mut stmt = tx.prepare(
-                "SELECT file_id, path, item_kind, local_hash, fetched_hash FROM files
+                "SELECT file_id, path, item_kind, local_hash, CASE WHEN fetched_min_version > 0 THEN fetched_hash END FROM files
                  WHERE namespace = 'my_files'
                    AND status != 'uploading'
                    AND status != 'trashing'
@@ -3875,7 +3899,7 @@ impl StateDb {
                         // trash's content (recoverable), not dead rows; deleting
                         // them would erase the trash view's folder contents.
                         let mut dstmt = tx.prepare(
-                            "SELECT file_id, path, item_kind, local_hash, fetched_hash FROM files
+                            "SELECT file_id, path, item_kind, local_hash, CASE WHEN fetched_min_version > 0 THEN fetched_hash END FROM files
                              WHERE namespace = 'my_files'
                                AND status != 'trashing'
                                AND substr(ltrim(path, '/'), 1, length(?1) + 1) = ?1 || '/'
@@ -7893,6 +7917,30 @@ mod tests {
             db.staged_payloads_for_signout().unwrap().is_empty(),
             "and the journal row goes with it"
         );
+    }
+
+    /// Desktop 0.8.15 (deliverable 3): changes held back (on Guus's PC, 2,832 folder creates and
+    /// 92 versions paused for `auth` since 4 Oct) are counted as on hold. They are never transfer
+    /// work, so they cannot keep the engine at "syncing"; they are not resumed here either.
+    #[test]
+    fn desktop_0815_changes_on_hold_are_counted_and_are_never_syncing() {
+        let db = super::StateDb::open(":memory:").unwrap();
+        db.0.lock()
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO operation_queue (op_id,kind,paused_reason,created_at,updated_at) VALUES
+                   ('a','create_folder','auth',1,1), ('b','upload_version','auth',1,1), ('c','upload_version',NULL,1,1);",
+            )
+            .unwrap();
+        assert_eq!(db.count_operations_on_hold().unwrap(), 2);
+        assert_eq!(db.transfer_backlog(i64::MAX).unwrap().upload_files, 1, "only the change not on hold is transfer work");
+        let still_paused: i64 = db
+            .0
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM operation_queue WHERE paused_reason = 'auth'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(still_paused, 2, "counting resumes nothing");
     }
 
     #[test]
