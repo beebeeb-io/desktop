@@ -148,6 +148,17 @@ describe('actions (§6.3, §6.4)', () => {
     })
   }
 
+  test.each(['beta', 'alpha', undefined])('a %s update opens the advertised version’s release', async (channel) => {
+    const snap = fixture('update-available')
+    snap.update.channel = channel
+    const { m } = openPopover({ snap: () => snap, backend: { 'plugin:opener|open_url': () => null } })
+    await m.flush()
+    await m.click('View release')
+    const opened = calls(m, 'plugin:opener|open_url')
+    expect(opened.length).toBe(1)
+    expect(opened[0].args).toEqual({ url: 'https://github.com/beebeeb-io/desktop/releases/tag/desktop-v0.8.14' })
+  })
+
   test('links go to the browser through the opener only, never window.open (it opens no window but the Beebeeb one)', () => {
     const source = readFileSync(new URL('../src/PopoverApp.tsx', import.meta.url), 'utf8')
     expect(source).not.toMatch(/window\.open\(|openUrl\(|WebviewWindow|new Window/)

@@ -97,6 +97,8 @@ export interface PopoverSnapshot {
   storage_full: boolean
   pending_changes: number
   conflicts: { count: number; files: { file_id: string; file_name: string }[] }
+  update?: { version: string; channel?: string | null } | null
+  sign_out_sending?: { changes_left: number } | null
   activity: ActivityRow[]
 }
 
@@ -159,6 +161,8 @@ export function parsePopoverSnapshot(raw: unknown): PopoverSnapshot | null {
     !conflicts.files.every((f) => isObj(f) && isStr(f.file_id) && isStr(f.file_name))
   ) return null
   if (!Array.isArray(activity) || !activity.every(isActivityRow)) return null
+  if (raw.update != null && !(isObj(raw.update) && isStr(raw.update.version) && raw.update.version.trim() !== '' && (raw.update.channel == null || isStr(raw.update.channel)))) return null
+  if (raw.sign_out_sending != null && !(isObj(raw.sign_out_sending) && isNum(raw.sign_out_sending.changes_left) && raw.sign_out_sending.changes_left >= 0)) return null
   return raw as unknown as PopoverSnapshot
 }
 

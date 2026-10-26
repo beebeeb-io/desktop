@@ -315,9 +315,12 @@ describe('Settings in System Settings style (ruling 1, §7.8)', () => {
   for (const section of ['Security', 'Sync']) {
   test(`${section} is never shown without a session: when the account signs out under it, the window falls back to General (§7.8, review P2-6)`, async () => {
     let current: unknown = snapshot()
-    const { m } = openWindow({ snap: () => current })
     const ticks: Array<() => void> = []
-    ;(globalThis as any).window.setInterval = (fn: () => void) => { ticks.push(fn); return 1 }
+    const { m } = openWindow({ snap: () => current, bindings: {
+      SnapshotReader: class extends windowModel.SnapshotReader<any> {
+        start(ms: number) { super.start(ms); ticks.push(() => this.tick()) }
+      },
+    } })
     await settle(m)
     await click(m, 'Settings')
     await click(m, section)
@@ -338,9 +341,13 @@ describe('Settings in System Settings style (ruling 1, §7.8)', () => {
   test('a session that ends under an open sheet leaves the section alone until the sheet is closed, then falls back to General', async () => {
     let current: unknown = snapshot()
     let modals = 0
-    const { m } = openWindow({ snap: () => current, bindings: { openModalCount: () => modals } })
     const ticks: Array<() => void> = []
-    ;(globalThis as any).window.setInterval = (fn: () => void) => { ticks.push(fn); return 1 }
+    const { m } = openWindow({ snap: () => current, bindings: {
+      openModalCount: () => modals,
+      SnapshotReader: class extends windowModel.SnapshotReader<any> {
+        start(ms: number) { super.start(ms); ticks.push(() => this.tick()) }
+      },
+    } })
     await settle(m)
     await click(m, 'Settings')
     await click(m, 'Sync')

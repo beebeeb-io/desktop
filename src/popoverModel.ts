@@ -19,12 +19,13 @@ import { P0_TITLE, P2_HINT, progressLine } from './signOutCopy'
 import { formatStorageSize, systemLocale } from './storageFormat'
 
 export { MACOS_DOWNLOAD_URL, UPDATE_DOWNLOAD_HINT, UPDATE_DOWNLOAD_LABEL } from './macUpdateCopy'
-import { UPDATE_DOWNLOAD_HINT, UPDATE_DOWNLOAD_LABEL, updateAvailableLine } from './macUpdateCopy'
+import { updateAvailableLine } from './macUpdateCopy'
+import { updateOffer } from './macUpdateOffer'
 
 /** The snapshot plus the two parts the popover reads beyond the reducer's phase (task 1683 slice 3, lead-approved). */
 export type PopoverInput = PopoverSnapshot & {
   /** An update the updater offered, kept by Rust so a popover built later still sees it. */
-  update?: { version: string } | null
+  update?: { version: string; channel?: string | null } | null
   /** Task 1887's send phase, while it runs: the changes still waiting. */
   sign_out_sending?: { changes_left: number } | null
 }
@@ -335,7 +336,8 @@ export function popoverView(input: PopoverInput, nowSeconds: number, options: Po
   let status: PopoverView['status'] = null
   if (body === null) {
     if (input.update) {
-      update = { line: updateAvailableLine(input.update.version), hint: UPDATE_DOWNLOAD_HINT, action: action(UPDATE_DOWNLOAD_LABEL, 'download_update') }
+      const offer = updateOffer(input.update.channel, input.update.version)
+      update = { line: updateAvailableLine(input.update.version), hint: offer.hint, action: action(offer.label, 'download_update') }
     }
     const count = input.conflicts.count
     if (count > 0) {

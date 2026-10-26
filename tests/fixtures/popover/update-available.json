@@ -109,7 +109,8 @@
     }
   ],
   "update": {
-    "version": "0.8.14"
+    "version": "0.8.14",
+    "channel": "stable"
   },
   "sign_out_sending": null
 }

@@ -19,8 +19,8 @@ import { FINDER_ACTION_FAILED } from './finderSetupCopy'
 import { SnapshotReader } from './mainWindowModel'
 import { parsePopoverSnapshot, POPOVER_SHOWN_EVENT, type PopoverPhase } from './popoverContract'
 import { PopoverIcon } from './popoverIcons'
+import { updateOffer } from './macUpdateOffer'
 import {
-  MACOS_DOWNLOAD_URL,
   popoverView,
   type PopoverAction,
   type PopoverBody,
@@ -74,14 +74,14 @@ export interface ActionFailure {
 const openLink = (url: string) => command<void>('plugin:opener|open_url', { url })
 
 /** Run one action. Each is one command; the answer is ok or the failure to show. */
-export function runPopoverAction(what: PopoverCommand): Promise<CommandResult<unknown>> {
+export function runPopoverAction(what: PopoverCommand, update: PopoverInput['update']): Promise<CommandResult<unknown>> {
   switch (what) {
     case 'open_review':
       return command<void>('popover_open_window', { to: 'review' })
     case 'open_beebeeb':
       return command<void>('popover_open_window', { to: 'front' })
     case 'download_update':
-      return openLink(MACOS_DOWNLOAD_URL)
+      return update ? openLink(updateOffer(update.channel, update.version).url) : Promise.resolve({ ok: false, reason: 'The update offer has expired.', unsupported: false })
     case 'add_storage':
       return openLink(BILLING_URL)
     case 'view_online':
@@ -403,7 +403,7 @@ export default function PopoverApp() {
       return
     }
     setBusy(what)
-    const result = await runPopoverAction(what)
+    const result = await runPopoverAction(what, snapshot.update)
     if (result.ok) {
       setFailureBoth(null)
       if (REFRESHES.has(what)) await reader.refresh()

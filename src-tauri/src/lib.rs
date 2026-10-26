@@ -83,6 +83,7 @@ mod macos_file_provider;
 #[cfg(target_os = "macos")]
 mod macos_workspace;
 mod popover_data;
+mod macos_popover;
 // Ruling R8 (spec 2026-10-06): the pure decision between a first sign-in, the same account signing in again and
 // an account switch. Windows keeps its refusal while a session exists and never asks.
 #[cfg_attr(target_os = "windows", allow(dead_code))]
@@ -9756,7 +9757,7 @@ async fn popover_snapshot(
         } = db_view.unwrap_or_default();
 
         let engine = runtime.status.lock().map(|view| view.clone()).unwrap_or_default();
-        Ok(popover_data::assemble(SnapshotInputs {
+        let mut snapshot = popover_data::assemble(SnapshotInputs {
             now,
             logged_in,
             vault_unlocked,
@@ -9775,7 +9776,20 @@ async fn popover_snapshot(
             recent,
             board,
             activity_limit: limit,
-        }))
+        });
+        snapshot.update = macos_popover::update_offer();
+        #[cfg(target_os = "macos")]
+        {
+            let sending = state.sign_out.phase.lock().map(|phase| phase.is_some()).unwrap_or(false);
+            if sending {
+                let waiting = tokio::task::spawn_blocking(read_waiting_changes).await
+                    .map_err(|e| e.to_string())??.counts();
+                snapshot.sign_out_sending = Some(macos_popover::Sending {
+                    changes_left: waiting.files.saturating_add(waiting.others),
+                });
+            }
+        }
+        Ok(snapshot)
     })
 }
 
@@ -13976,7 +13990,10 @@ async fn check_for_updates_now(app: tauri::AppHandle) -> Result<ManualUpdateChec
             }
 
             if let Some(payload) = payload {
+                macos_popover::note_update(&payload.channel, Some(&payload.version));
                 let _ = app.emit("update-available", payload);
+            } else {
+                macos_popover::note_update(channel.as_str(), None);
             }
 
             Ok(result)
@@ -13986,6 +14003,7 @@ async fn check_for_updates_now(app: tauri::AppHandle) -> Result<ManualUpdateChec
                 channel = %channel.as_str(),
                 "manual update check found no manifest release"
             );
+            macos_popover::note_update(channel.as_str(), None);
             Ok(manual_update_up_to_date_result(channel))
         }
         Err(error) => Err(format!(
@@ -14499,6 +14517,9 @@ enum MainNav {
     /// Linux's onboarding window does (`mode=reauth`), so the click always lands on it (review P3-1).
     #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
     Reauth,
+    /// The popover found no local vault key: continue in the same Set up this Mac card.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    Setup,
 }
 
 impl MainNav {
@@ -14531,6 +14552,7 @@ fn consume_main_navigation(window: tauri::WebviewWindow) -> Option<MainNav> {
 /// Opens (or shows and focuses) the Beebeeb window and asks it to show `nav`.
 #[cfg(target_os = "macos")]
 fn show_main_window(app: &tauri::AppHandle, nav: MainNav) {
+    macos_popover::hide(app);
     let label = surfaces::policy::main_window_label(surfaces::policy::Platform::current());
     store_main_nav(&MAIN_NAV_PENDING, nav);
     // §9.1: the Dock icon (and with it the app menu) comes first, so it is there when the window is.
@@ -14930,6 +14952,12 @@ pub fn run() {
             lock_vault,
             sync_status,
             popover_snapshot,
+            macos_popover::popover_hide,
+            macos_popover::popover_quit,
+            macos_popover::popover_open_window,
+            macos_popover::popover_retry_sync,
+            macos_popover::popover_unlock,
+            macos_popover::popover_gear_menu,
             desktop_storage_summary,
             free_up_space,
             export_diagnostics,
@@ -15373,6 +15401,7 @@ async fn check_for_update(app: &tauri::AppHandle) {
                 "update available — notifying frontend"
             );
             let version = update.version.to_string();
+            macos_popover::note_update(channel.as_str(), Some(&version));
             // Emit to the webview so the frontend can show a banner.
             // Frontend listens with: import { listen } from "@tauri-apps/api/event"
             //   await listen("update-available", handler)
@@ -15387,6 +15416,7 @@ async fn check_for_update(app: &tauri::AppHandle) {
             );
         }
         Ok(None) => {
+            macos_popover::note_update(channel.as_str(), None);
             tracing::debug!("no update available");
         }
         Err(e) => {
@@ -16853,8 +16883,8 @@ fn attach_tray_status_listener<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
 
 fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
     // Read current autostart state so the check mark is correct on launch.
-    let autostart_enabled = app.autolaunch().is_enabled().unwrap_or(false);
-    let tray_menu = build_tray_menu(app, autostart_enabled)?;
+    #[cfg(not(target_os = "macos"))]
+    let tray_menu = build_tray_menu(app, app.autolaunch().is_enabled().unwrap_or(false))?;
 
     // The tray ICON itself is built declaratively from `app.trayIcon` in
     // tauri.conf.json (iconPath, iconAsTemplate, tooltip,
@@ -16869,6 +16899,7 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
         .tray_by_id("tray")
         .expect("app.trayIcon in tauri.conf.json did not register a tray with id \"tray\"");
 
+    #[cfg(not(target_os = "macos"))]
     tray.set_menu(Some(tray_menu))?;
 
     tray.on_menu_event(|app, event| match event.id().as_ref() {
@@ -16922,7 +16953,7 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
         // without window chrome, so it reads as a system popover (1384).
         // On Linux: toggle the compact app window exactly as before.
         if let TrayIconEvent::Click {
-            button: MouseButton::Left,
+            button,
             button_state: MouseButtonState::Up,
             position,
             rect,
@@ -16930,6 +16961,10 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
         } = event
         {
             let app = tray.app_handle();
+            #[cfg(not(target_os = "macos"))]
+            if button != MouseButton::Left { return; }
+            #[cfg(target_os = "macos")]
+            let _ = button;
 
             #[cfg(target_os = "windows")]
             {
@@ -16957,21 +16992,8 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
 
             #[cfg(target_os = "macos")]
             {
-                let _ = position; // unused — macOS anchors from the icon's own rect
-                let already_visible = app
-                    .get_webview_window("settings")
-                    .map(|win| win.is_visible().unwrap_or(false))
-                    .unwrap_or(false);
-
-                if already_visible {
-                    if let Some(win) = app.get_webview_window("settings") {
-                        let _ = win.hide();
-                    }
-                } else {
-                    let anchor = macos_tray_flyout_anchor(app, &rect);
-                    *MACOS_TRAY_FLYOUT_ANCHOR.lock().unwrap() = Some(anchor);
-                    show_compact_app_window_impl(app);
-                }
+                let _ = (position, rect);
+                macos_popover::toggle(app);
             }
 
             #[cfg(not(any(target_os = "windows", target_os = "macos")))]

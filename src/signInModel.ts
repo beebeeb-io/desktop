@@ -125,9 +125,9 @@ export function flowForNav(
   ctx: { signedIn: boolean; sheetOpen: boolean },
   flow: SignInFlow,
 ): { flow: SignInFlow; held: boolean } {
-  if (nav.to !== 'reauth' || !ctx.signedIn || flow.step !== null) return { flow, held: false }
+  if ((nav.to !== 'reauth' && nav.to !== 'setup') || !ctx.signedIn || flow.step !== null) return { flow, held: false }
   if (ctx.sheetOpen) return { flow, held: true }
-  return { flow: { ...IDLE_FLOW, step: 'reauth' }, held: false }
+  return { flow: { ...IDLE_FLOW, step: nav.to === 'setup' ? 'unlock' : 'reauth' }, held: false }
 }
 
 /**

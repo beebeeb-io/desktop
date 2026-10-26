@@ -128,6 +128,14 @@ describe('§6.3 states, one fixture each', () => {
     expect(v.focus).toBe('download_update')
   })
 
+  test.each(['beta', 'alpha', undefined])('a %s update offers its release, never the stable disk image', (channel) => {
+    const input = fixture('update-available')
+    input.update.channel = channel
+    const v = state(input)
+    expect(v.update?.action.label).toBe('View release')
+    expect(v.update?.hint).toContain('release page')
+  })
+
   test('paused: the waiting changes and Resume sync; no status row', () => {
     const v = state(fixture('paused'))
     expect(message(v)).toEqual({

@@ -350,7 +350,7 @@ export default function MacApp() {
   // is shown on the card, not by leaving it for Settings.
   const showingCardRef = useRef(false)
   // A “Sign in again” request that arrived under a sheet, applied when the sheet closes (delta review P3-2).
-  const reauthHeld = useRef(false)
+  const reauthHeld = useRef<MainNav | null>(null)
   // A request can arrive before the first account read (a window Rust built for it pulls it on mount): it waits for
   // that read, because which sections exist depends on the session. Each waits as the step it is, in order.
   const loadedRef = useRef(false)
@@ -485,7 +485,7 @@ export default function MacApp() {
         // delta review P3-2; `reauthHeld`).
         whenLoaded(() => {
           const { flow: next, held } = flowForNav(nav, { signedIn: ctxRef.current.signedIn, sheetOpen: ctxRef.current.sheetOpen }, getSignInFlow())
-          if (held) reauthHeld.current = true
+          if (held) reauthHeld.current = nav
           else if (next !== getSignInFlow()) setSignInFlow(next)
         })
         go(nav)
@@ -497,8 +497,9 @@ export default function MacApp() {
   // A “Sign in again” request that waited for a sheet is applied when the sheet closes, once (delta review P3-2).
   useEffect(() => {
     if (sheetOpen || !reauthHeld.current) return
-    reauthHeld.current = false
-    const { flow: next } = flowForNav({ to: 'reauth' }, { signedIn: ctxRef.current.signedIn, sheetOpen: false }, getSignInFlow())
+    const nav = reauthHeld.current
+    reauthHeld.current = null
+    const { flow: next } = flowForNav(nav, { signedIn: ctxRef.current.signedIn, sheetOpen: false }, getSignInFlow())
     if (next !== getSignInFlow()) setSignInFlow(next)
   }, [sheetOpen])
 

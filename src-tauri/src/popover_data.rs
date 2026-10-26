@@ -397,6 +397,10 @@ pub struct PopoverSnapshotDto {
     pub pending_changes: u32,
     pub conflicts: ConflictsDto,
     pub activity: Vec<ActivityRow>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub update: Option<crate::macos_popover::UpdateOffer>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sign_out_sending: Option<crate::macos_popover::Sending>,
 }
 
 /// Everything the command gathered.
@@ -638,6 +642,8 @@ pub fn assemble(inputs: SnapshotInputs) -> PopoverSnapshotDto {
             files: conflict_files,
         },
         activity,
+        update: None,
+        sign_out_sending: None,
     }
 }
 
