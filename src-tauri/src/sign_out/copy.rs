@@ -167,11 +167,13 @@ pub fn w1(n: usize) -> Option<String> {
     }
 }
 
+/// Task 2191 (D11): the Windows sign-out's alert for the files of unknown content it kept.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn windows_kept_files_alert(path: &str, files: usize) -> Option<(&'static str, String)> {
+    w1(files).map(|line| (W0_TITLE, format!("{line}\n\n{path}")))
+}
+
 pub fn sign_out_alert(ours: Option<(&str, usize)>, macos: Option<&str>) -> Option<(&'static str, String)> {
-    #[cfg(target_os = "windows")]
-    if let Some((path, files)) = ours {
-        return w1(files).map(|line| (W0_TITLE, format!("{line}\n\n{path}")));
-    }
     let ours = ours.and_then(|(path, files)| k1(files).map(|line| format!("{line}\n\n{path}")));
     let macos = macos.map(crate::finder_removal::preserved_files_message);
     let body = match (ours, macos) {
@@ -193,6 +195,10 @@ mod tests {
         assert_eq!(w1(0), None);
         assert!(w1(1).unwrap().starts_with("Beebeeb copied 1 file from before the last update"));
         assert!(w1(3).unwrap().contains("3 files") && w1(3).unwrap().contains("aren’t encrypted"));
+        let (title, body) = windows_kept_files_alert("C:\\kept", 2).unwrap();
+        assert_eq!(title, W0_TITLE);
+        assert!(body.ends_with("\n\nC:\\kept"));
+        assert_eq!(windows_kept_files_alert("C:\\kept", 0), None);
     }
 
     /// U24.

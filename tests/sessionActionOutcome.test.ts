@@ -35,10 +35,10 @@ describe('the SessionActionOutcome contract', () => {
     // Task 1882 (rebase onto main): the command also takes the app handle, to raise the kept-folder alert; rustfmt
     // puts its arguments on their own lines, so compare without whitespace. Task 1887: and the calling window (a result
     // that needs showing waits for that window's acknowledgement) and `keep_unsent`, which `clearSession`'s
-    // `keepUnsent` fills.
+    // `keepUnsent` fills. Task 2191: and `unknown_files`, which `clearSession`'s `unknownFiles` fills (Windows).
     const squeezed = lib.replace(/\s+/g, '')
     expect(squeezed).toContain(
-      'asyncfnclear_session(app:tauri::AppHandle,window:tauri::WebviewWindow,state:State<\'_,AppState>,forget_email:Option<bool>,keep_unsent:Option<KeepUnsentArg>,)->Result<SessionActionOutcome,String>{',
+      'asyncfnclear_session(app:tauri::AppHandle,window:tauri::WebviewWindow,state:State<\'_,AppState>,forget_email:Option<bool>,keep_unsent:Option<KeepUnsentArg>,unknown_files:Option<UnknownFilesArg>,)->Result<SessionActionOutcome,String>{',
     )
     expect(lib).toContain('async fn lock_vault(state: State<\'_, AppState>) -> Result<SessionActionOutcome, String> {')
   })

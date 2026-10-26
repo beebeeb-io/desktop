@@ -4413,9 +4413,15 @@ fn surface_sign_out_folders(app: &tauri::AppHandle, result: &Result<SignedOut, S
         None if ours.is_some() => emit_kept_folder_changed(app),
         None => {}
     }
-    let Some((title, message)) =
-        sign_out::copy::sign_out_alert(ours.map(|kept| (kept.folder.as_str(), kept.files)), macos)
-    else {
+    // Task 2191 (D11): on Windows "ours" is the folder files of unknown content were kept in.
+    #[cfg(target_os = "windows")]
+    let alert = match ours {
+        Some(kept) => sign_out::copy::windows_kept_files_alert(&kept.folder, kept.files),
+        None => sign_out::copy::sign_out_alert(None, macos),
+    };
+    #[cfg(not(target_os = "windows"))]
+    let alert = sign_out::copy::sign_out_alert(ours.map(|kept| (kept.folder.as_str(), kept.files)), macos);
+    let Some((title, message)) = alert else {
         return;
     };
     app.dialog()
@@ -34295,7 +34301,7 @@ mod finder_removal_wiring_tests {
         let menu = &source[source.find("DesktopMenuAction::SignOut => {").expect("menu sign-out")..];
         let menu = squash(&menu[..menu.find("DesktopMenuAction::Quit").expect("next arm")]);
         assert!(menu.contains("spawn_menu_task(spec.id,asyncmove{"));
-        assert!(menu.contains("clear_session_impl(&state,false,None).await"));
+        assert!(menu.contains("clear_session_impl(&state,false,None,crate::UnknownFilesArg::Keep).await"));
         assert!(
             !menu.contains("remove_file_provider_domain"),
             "no removal in the menu handler itself"
