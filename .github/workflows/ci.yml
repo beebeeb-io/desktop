@@ -275,3 +275,49 @@ jobs:
         with:
           name: release-script-test
           path: ${{ runner.temp }}/release-script-test.log
+
+  release-manifest:
+    # release.yml's "Generate desktop channel manifest" step writes the alpha/beta/stable
+    # manifests every installed app updates from. The test runs that step's own run: block
+    # against fixture releases with a fake gh on PATH (no network), and proves it fails closed:
+    # a half-present macOS release, a missing or empty signature, or a download that keeps
+    # failing writes no manifest. The truth line is a count
+    # ("release-channel-manifest: N passed, 0 failed"), asserted on the run's own log by the
+    # same count guard its self-test proves can go red. A red run prints each failing
+    # scenario's step output and call log.
+    name: Release channel manifest (fake gh test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: shellcheck (warnings and above)
+        run: |
+          shellcheck --version
+          shellcheck -S warning -x \
+            scripts/test-release-channel-manifest.sh \
+            scripts/fixtures/release-manifest-fake-gh.sh
+          bash scripts/test-release-channel-manifest.sh --print-step > "$RUNNER_TEMP/manifest-step.sh"
+          test -s "$RUNNER_TEMP/manifest-step.sh"
+          shellcheck -s bash -S warning "$RUNNER_TEMP/manifest-step.sh"
+
+      - name: Count guard self-test
+        run: bash scripts/test-release-channel-manifest.sh --self-test
+
+      - name: Manifest step test (fake gh, real step)
+        run: |
+          set -o pipefail
+          bash scripts/test-release-channel-manifest.sh 2>&1 | tee "$RUNNER_TEMP/release-manifest-test.log"
+
+      - name: Count guard on the run's own log
+        run: bash scripts/test-release-channel-manifest.sh --assert-log "$RUNNER_TEMP/release-manifest-test.log"
+
+      - name: Upload manifest step test evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-manifest-test
+          path: ${{ runner.temp }}/release-manifest-test.log
