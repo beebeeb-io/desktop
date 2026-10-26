@@ -2848,7 +2848,7 @@ impl StateDb {
 
     fn get_file_by_exact_path(&self, path: &str) -> Result<Option<FileEntry>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        let mut stmt = conn.prepare(FILE_BY_PATH_SQL)?;
+        let mut stmt = conn.prepare_cached(FILE_BY_PATH_SQL)?;
         let mut rows = stmt.query(params![path])?;
         if let Some(row) = rows.next()? {
             Ok(Some(FileEntry {
@@ -7961,7 +7961,8 @@ mod tests {
     /// Task 2229: the enumeration scan looks every file and folder on disk up by path on every
     /// pass, so the lookup steps no row of a full scan of `files`, whether the path is there or
     /// not. That holds on a DB opened from a release before the index (0.8.15 and earlier),
-    /// because opening adds it.
+    /// because opening adds it. The counters read are those of the app's own cached statement,
+    /// so the lookup `get_file_by_path` runs is the one measured.
     #[test]
     fn a_path_lookup_reads_through_an_index_not_the_whole_files_table() {
         let dir = tempfile::tempdir().unwrap();
@@ -7982,19 +7983,19 @@ mod tests {
             conn.execute("DROP INDEX IF EXISTS idx_files_path", []).unwrap();
         }
         let db = StateDb::open(&path).unwrap();
-        assert_eq!(
-            db.get_file_by_path("dir/1500.txt").unwrap().map(|e| e.file_id),
-            Some("f1500".to_string())
-        );
-
-        let conn = Connection::open(&path).unwrap();
-        let mut stmt = conn.prepare(FILE_BY_PATH_SQL).unwrap();
-        for probe in ["dir/1999.txt", "dir/missing.txt"] {
-            stmt.reset_status(rusqlite::StatementStatus::FullscanStep);
-            let mut rows = stmt.query(params![probe]).unwrap();
-            while rows.next().unwrap().is_some() {}
-            drop(rows);
-            let full_scan_steps = stmt.get_status(rusqlite::StatementStatus::FullscanStep);
+        for (probe, found) in [("dir/1999.txt", Some("f1999")), ("dir/missing.txt", None)] {
+            assert_eq!(
+                db.get_file_by_path(probe).unwrap().map(|e| e.file_id),
+                found.map(str::to_string)
+            );
+            let conn = db.0.lock().unwrap();
+            let stmt = conn.prepare_cached(FILE_BY_PATH_SQL).unwrap();
+            assert!(
+                stmt.get_status(rusqlite::StatementStatus::Run) > 0,
+                "get_file_by_path did not run FILE_BY_PATH_SQL"
+            );
+            let full_scan_steps = stmt.reset_status(rusqlite::StatementStatus::FullscanStep);
+            stmt.reset_status(rusqlite::StatementStatus::Run);
             assert_eq!(
                 full_scan_steps, 0,
                 "looking up {probe} stepped {full_scan_steps} rows of a full scan of files"
