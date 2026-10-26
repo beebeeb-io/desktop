@@ -2925,6 +2925,22 @@ struct KeptUnsent {
     files: usize,
 }
 
+/// Task 2191 (review thread on #157): a sign-out failure after the Windows purge, carrying the
+/// folder it kept copies of unknown files in (or the macOS keep step's), so the alert can name it.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn sign_out_failure_after_purge(
+    message: String,
+    preserved_location: &Option<String>,
+    kept_unsent: &Option<KeptUnsent>,
+    windows_kept: &Option<KeptUnsent>,
+) -> SignOutFailure {
+    SignOutFailure {
+        message,
+        preserved_location: preserved_location.clone(),
+        kept_unsent: kept_unsent.clone().or_else(|| windows_kept.clone()),
+    }
+}
+
 /// What [`clear_session_impl`] did, and what of it could not be confirmed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SignedOut {
@@ -3210,13 +3226,17 @@ async fn clear_session_impl(
                 return Err("Cannot verify sync-folder ownership without its database. Restore the local state before signing out.".into());
             }
         }
+        // Task 2191 (review thread on #157): from here on the purge may have kept copies and
+        // deleted their originals, so every failure names their folder too.
+        let failed_after_purge =
+            |message: String| sign_out_failure_after_purge(message, &preserved_location, &kept_unsent, &windows_kept);
         if !already_signed_out {
             if let Some(root) = root {
                 // Cloud Files must release the root before WinRT removes its shell registration.
                 windows_cf::unregister_sync_root(&root)
-                    .map_err(|e| format!("Could not unregister Cloud Files: {e}"))?;
+                    .map_err(|e| failed_after_purge(format!("Could not unregister Cloud Files: {e}")))?;
                 windows_cf::unregister_shell_sync_root(&root)
-                    .map_err(|e| format!("Could not remove Explorer registration: {e}"))?;
+                    .map_err(|e| failed_after_purge(format!("Could not remove Explorer registration: {e}")))?;
             }
             let token = acct
                 .session
@@ -3233,7 +3253,7 @@ async fn clear_session_impl(
                 let client = reqwest::Client::builder()
                     .default_headers(api_client::provenance_headers())
                     .build()
-                    .map_err(|e| format!("Could not initialize logout request: {e}"))?;
+                    .map_err(|e| failed_after_purge(format!("Could not initialize logout request: {e}")))?;
                 let _ = tokio::time::timeout(
                     std::time::Duration::from_secs(3),
                     revoke_desktop_session(&client, &runner::api_base_url(), &token),
@@ -3242,6 +3262,10 @@ async fn clear_session_impl(
             }
         }
     }
+    // Task 2191 (review thread on #157): every later failure carries the folder the purge kept
+    // copies in, as the success does.
+    #[cfg(target_os = "windows")]
+    let kept_with = |message: String| sign_out_failure_after_purge(message, &preserved_location, &kept_unsent, &windows_kept);
 
     // Task 1538 findings 1+2: purge every queued operation (so a later
     // account's engine can never drain THIS account's still-queued uploads —
@@ -3369,7 +3393,7 @@ async fn clear_session_impl(
         drop(engine_slot);
     }
     #[cfg(target_os = "windows")]
-    clear_keychain_session(acct.id.as_str())?;
+    clear_keychain_session(acct.id.as_str()).map_err(&kept_with)?;
     set_auth_present(state, false);
     set_auth_email(state, None);
     lifecycle_log::event(lifecycle_log::LifecycleEvent::SignedOut);
@@ -36727,6 +36751,35 @@ mod sign_out_keep_tests {
 
     /// `clear_session` hands `keepUnsent: { askId }` on to the gate (spec §5.1, the contract). A unit test cannot build
     /// the command's `AppHandle`, so this checks the name the webview sends and the command's call.
+    /// Task 2191 (review thread on #157): a Windows sign-out that fails after its purge kept
+    /// copies names their folder: every failure from the purge on carries it.
+    #[test]
+    fn task_2191_a_failure_after_the_purge_names_the_kept_folder() {
+        let kept = Some(super::KeptUnsent { folder: "C:\\Beebeeb kept files".into(), files: 3 });
+        let failure = super::sign_out_failure_after_purge("Could not unregister Cloud Files: x".into(), &None, &None, &kept);
+        assert_eq!(failure.kept_unsent, kept);
+        let production = super::finder_setup_command_tests::production_source();
+        let body = crate::source_pin::squeeze(super::finder_setup_command_tests::body_between(
+            &production,
+            "async fn clear_session_impl(",
+            "\n}\n",
+        ));
+        let after = &body[body.find("windows_cf::signout::purge(").expect("the purge")..];
+        for step in ["Could not unregister Cloud Files", "Could not remove Explorer registration", "Could not initialize logout request"] {
+            assert!(
+                after.contains(&crate::source_pin::squeeze(&format!("failed_after_purge(format!(\"{step}"))),
+                "{step} carries the kept folder"
+            );
+        }
+        assert!(
+            after.contains(&crate::source_pin::squeeze(
+                "let kept_with = |message: String| sign_out_failure_after_purge(message, &preserved_location, &kept_unsent, &windows_kept);"
+            )),
+            "the later failures carry it too"
+        );
+        assert!(after.contains(&crate::source_pin::squeeze("clear_keychain_session(acct.id.as_str()).map_err(&kept_with)?;")));
+    }
+
     #[test]
     fn clear_session_hands_keep_unsent_on_to_the_gate() {
         let arg: KeepUnsentArg =
