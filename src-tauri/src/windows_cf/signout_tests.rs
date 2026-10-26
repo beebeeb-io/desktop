@@ -168,10 +168,11 @@ fn prepared_directory_cannot_be_replaced_during_cleanup() {
     let known = rows.iter().map(|r| (r.path.clone(), r)).collect();
     let (mut files, mut directories) = (Vec::new(), Vec::new());
     prepare(
+        &f.db,
         &f.root,
         &f.root,
         &known,
-        &std::collections::HashSet::new(),
+        &HashMap::new(),
         &UnknownFiles::Delete,
         &mut Vec::new(),
         &mut files,
@@ -197,10 +198,11 @@ fn child_arriving_after_prepare_blocks_nonrecursive_deletion() {
     let known = rows.iter().map(|r| (r.path.clone(), r)).collect();
     let (mut files, mut directories) = (Vec::new(), Vec::new());
     prepare(
+        &f.db,
         &f.root,
         &f.root,
         &known,
-        &std::collections::HashSet::new(),
+        &HashMap::new(),
         &UnknownFiles::Delete,
         &mut Vec::new(),
         &mut files,
