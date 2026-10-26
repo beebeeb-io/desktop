@@ -747,7 +747,7 @@ pub(crate) fn dispatch_local_create(
 /// existing trash op so the server deletes it too. If there is no DB row, the
 /// delete was of an untracked local file (or an engine-internal file) — nothing
 /// to propagate.
-async fn handle_delete(bridge: &EngineBridge, sync_root: &std::path::Path, path: &std::path::Path) {
+pub(crate) async fn handle_delete(bridge: &EngineBridge, sync_root: &std::path::Path, path: &std::path::Path) {
     // Engine-internal deletes (state.db churn, lock file) must never propagate.
     if crate::engine_bridge::path_is_engine_internal(sync_root, path) {
         return;
@@ -755,6 +755,30 @@ async fn handle_delete(bridge: &EngineBridge, sync_root: &std::path::Path, path:
     let Some(rel) = crate::engine_bridge::relative_db_path(sync_root, path) else {
         return;
     };
+    // Task 2204 S0.4: a safe save renamed the original away, put the new bytes at its name and
+    // now deletes the renamed file. While that rename is unsent, it folds back: the row returns
+    // to the vacated path and the new bytes there are an edit of the original. A file that was
+    // only renamed then deleted (nothing at the vacated path), or a vacated path another tracked
+    // file holds (a manual swap), is a delete as before.
+    if let Ok(Some(entry)) = bridge.db().get_file_by_path(&rel)
+        && let Ok(Some(vacated)) = bridge.db().pending_local_rename_vacated(&entry.file_id)
+        && let Ok(vacated_on_disk) = crate::engine_bridge::local_file_path_under_sync_root(sync_root, &vacated)
+        && vacated_on_disk.is_file()
+        // Review-155 P1-B: only onto a row that can take the new bytes as an edit (a synced file
+        // with a known base); a file synced before task 1640 (unknown content) or not on this PC
+        // keeps the delete, and its new bytes upload as a new file once the rename is sent.
+        && entry.status == crate::state_db::FileStatus::Local
+        && matches!(
+            crate::engine_bridge::sync_folder_content(bridge.db(), &entry.file_id, &vacated_on_disk, None),
+            Ok(crate::engine_bridge::SyncFolderContent::Agreed
+                | crate::engine_bridge::SyncFolderContent::Changed { base: Some(_) })
+        )
+        && bridge.db().fold_local_rename(&entry.file_id, &vacated).unwrap_or(false)
+    {
+        tracing::info!("upload driver: a safe save kept the file (rename folded back)");
+        handle_settled_path(bridge, sync_root, &vacated_on_disk);
+        return;
+    }
     match bridge.db().get_file_by_path(&rel) {
         Ok(Some(entry)) => match bridge.queue_finder_delete(&entry.file_id, None) {
             Ok(FinderWriteOutcome::Queued { op_id, .. }) => {
@@ -835,21 +859,29 @@ pub(crate) async fn handle_rename(
     // a path left stale by a folder rename, a database error) keeps the row's own
     // parent, so the op is a rename and sends no parent; read as the root, the
     // miss would move the file to the top level on every device.
-    let new_parent_id = if target.parent() == Some(sync_root) {
-        None
+    let resolved_parent = if target.parent() == Some(sync_root) {
+        Some(None)
     } else {
-        bridge
-            .resolve_parent_id_for(sync_root, target)
-            .or_else(|| existing.parent_id.clone())
+        bridge.resolve_parent_id_for(sync_root, target).map(Some)
     };
+    let new_parent_id = resolved_parent.clone().unwrap_or_else(|| existing.parent_id.clone());
+    // Task 2204 S0.1: a FILE whose new parent resolved, renamed onto a path no other row holds,
+    // has its row moved in the transaction that queues the op, so a new file at the old name is
+    // a new file. A folder (its descendants would move too), a replace, and an unresolved
+    // parent keep the old behaviour: the row is re-keyed by the pull after the op lands.
+    let rekey_to = crate::engine_bridge::relative_db_path(sync_root, target).filter(|target_rel| {
+        !existing.is_dir()
+            && resolved_parent.is_some()
+            && matches!(bridge.db().get_file_by_path(target_rel), Ok(None))
+    });
 
     let modify = crate::engine_bridge::FinderWriteTarget {
         file_id: Some(existing.file_id.clone()),
         parent_id: new_parent_id,
         filename: new_name,
         // A metadata-only move/rename: the server path is derived from
-        // parent_id + name, and the local row's path is re-keyed by the next
-        // sync_tick. No new-file path key to carry here.
+        // parent_id + name. The row is re-keyed by `queue_local_rename` (task 2204 S0.1), else
+        // by the pull after the op lands. No new-file path key to carry here.
         rel_path: None,
         kind: crate::engine_bridge::FinderWriteItemKind::File,
         // No new bytes — this is a metadata-only move/rename.
@@ -858,7 +890,11 @@ pub(crate) async fn handle_rename(
         base_version_identifier: None,
     };
 
-    match bridge.queue_finder_modify(modify) {
+    let queued = match rekey_to.as_deref() {
+        Some(target_rel) => bridge.queue_local_rename(modify, target_rel),
+        None => bridge.queue_finder_modify(modify),
+    };
+    match queued {
         Ok(FinderWriteOutcome::Queued { op_id, .. }) => {
             tracing::info!(op_id = %op_id, "upload driver: queued server rename/move for locally-renamed file");
         }
