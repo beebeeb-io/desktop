@@ -78,14 +78,37 @@ describe('the summary contract', () => {
 })
 
 describe('Guus’s on-hold state', () => {
-  test('is shown as on hold with both counts, never as synced or syncing', () => {
+  // Coordinator ruling (26 Oct): with the engine running, the state word is "Not in sync" (2,924 changes are not), not
+  // "On hold", which reads as if sync were paused while new changes do flow. The notice keeps the held sentence.
+  test('is "Not in sync" with both counts as the notice, never synced, syncing or on hold', () => {
     const view = syncActivityView(signedIn, guusOnHold(), { now })
-    expect(view.kind).toBe('on_hold')
-    expect(view.label).toBe('On hold')
+    expect(view.kind).toBe('not_in_sync')
+    expect(view.label).toBe('Not in sync')
     expect(view.headline).toBe(HELD_LINE)
     expect(view.details).toEqual([GAVE_UP_LINE])
     expect(view.tone).toBe('attention')
     expect(JSON.stringify(view)).not.toMatch(/synced|syncing/i)
+  })
+
+  test('the state word is "Paused" only for a user pause, "Syncing" while work moves, never "On hold"', () => {
+    const label = (s: SyncActivitySummary, status: SyncStatus = signedIn) => syncActivityView(status, s, { now }).label
+    expect(label(guusOnHold())).toBe('Not in sync')
+    expect(label(guusOnHold({ queue: { waiting: 0, gave_up: 43, held: [] } }))).toBe('Not in sync')
+    expect(label(guusOnHold({ paused: true }))).toBe('Paused')
+    const moving = syncActivityView(signedIn, guusOnHold({ transfers_active: 2 }), { now })
+    expect(moving.label).toBe('Syncing')
+    expect(moving.details).toEqual([HELD_LINE, GAVE_UP_LINE])
+    expect(label(guusOnHold({ engine_state: 'syncing', files_remaining: 4 }))).toBe('Syncing')
+    for (const s of [
+      guusOnHold(),
+      guusOnHold({ engine_state: 'running' }),
+      guusOnHold({ engine_state: 'offline' }),
+      guusOnHold({ engine_state: 'error' }),
+      guusOnHold({ queue: { ...guusOnHold().queue!, waiting: 3 } }),
+      guusOnHold({ startup_check: { done: 1, total: 2 } }),
+    ]) {
+      expect(label(s)).not.toMatch(/on hold|paused/i)
+    }
   })
 
   test('nothing offers to resume or retry the held changes (Mac lead ruling: they stay paused until an update)', () => {

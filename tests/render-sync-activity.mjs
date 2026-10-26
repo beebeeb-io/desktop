@@ -122,6 +122,9 @@ try {
     const { page, errors } = await settingsSync('settings-sync-on-hold', summaries['on-hold'])
     await expectText(page, HELD)
     await expectText(page, GAVE_UP)
+    // Coordinator ruling (26 Oct): the state word is "Not in sync" (chip and State figure), never "On hold".
+    assert.equal(await page.getByText('Not in sync', { exact: true }).count(), 2)
+    assert.equal(await page.getByText('On hold', { exact: true }).count(), 0)
     assert.equal(await page.getByText('Pause syncing from the app menu', { exact: false }).count(), 0)
     assert.equal(await page.getByText('Your files are synced', { exact: false }).count(), 0)
     const pause = page.getByRole('button', { name: 'Pause syncing', exact: true })
