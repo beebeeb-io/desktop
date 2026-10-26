@@ -17,7 +17,14 @@ impl Fixture {
         Self { db, root, temp }
     }
 
+    /// A row with known content (task 2191: not a file of unknown content), as before.
     fn track(&self, path: &str, kind: ItemKind, status: FileStatus) {
+        self.track_unknown(path, kind, status);
+        self.db.mark_no_fetched_content(path).unwrap();
+    }
+
+    /// Task 2191: a row of unknown content (synced before task 1640).
+    fn track_unknown(&self, path: &str, kind: ItemKind, status: FileStatus) {
         self.db
             .upsert_file(&FileEntry {
                 file_id: path.into(),
@@ -69,7 +76,7 @@ fn synced_plain_directories_sign_out_and_clear_rows() {
     f.folder("local");
     f.folder("local/nested");
     assert_eq!(f.db.list_files().unwrap().len(), 2);
-    let result = purge(&f.db, Some(&f.root));
+    let result = purge(&f.db, Some(&f.root), &UnknownFiles::Delete);
     assert!(result.is_ok(), "synced plain directories must sign out: {result:?}");
     assert_eq!(std::fs::read_dir(&f.root).unwrap().count(), 0);
     assert_eq!(f.db.list_files().unwrap().len(), 0);
@@ -81,7 +88,7 @@ fn plain_directory_unsynced_child_preserves_bytes_and_rows() {
     f.folder("local");
     let child = f.root.join("local/unsynced.txt");
     std::fs::write(&child, b"unsynced bytes").unwrap();
-    let error = purge(&f.db, Some(&f.root)).unwrap_err();
+    let error = purge(&f.db, Some(&f.root), &UnknownFiles::Delete).unwrap_err();
     assert!(
         error.to_string().contains("Unsynced files remain"),
         "must inspect children: {error:?}"
@@ -97,7 +104,7 @@ fn tracked_plain_file_still_requires_cloud_identity() {
     let child = f.root.join("local/tracked.txt");
     std::fs::write(&child, b"potentially unsynced bytes").unwrap();
     f.track("local/tracked.txt", ItemKind::File, FileStatus::Local);
-    assert!(purge(&f.db, Some(&f.root)).is_err());
+    assert!(purge(&f.db, Some(&f.root), &UnknownFiles::Delete).is_err());
     assert_eq!(std::fs::read(child).unwrap(), b"potentially unsynced bytes");
     assert_eq!(f.db.list_files().unwrap().len(), 2);
 }
@@ -107,7 +114,7 @@ fn unsynced_plain_directory_preserves_rows() {
     let f = Fixture::new();
     f.folder("local");
     f.track("local", ItemKind::Folder, FileStatus::Uploading);
-    let error = purge(&f.db, Some(&f.root)).unwrap_err();
+    let error = purge(&f.db, Some(&f.root), &UnknownFiles::Delete).unwrap_err();
     assert!(error.to_string().contains("Pending changes remain"));
     assert!(f.root.join("local").is_dir());
     assert_eq!(f.db.list_files().unwrap().len(), 1);
@@ -118,7 +125,7 @@ fn directory_at_file_row_is_not_accepted_as_synced_folder() {
     let f = Fixture::new();
     f.folder("local");
     f.track("local", ItemKind::File, FileStatus::Local);
-    let error = purge(&f.db, Some(&f.root)).unwrap_err();
+    let error = purge(&f.db, Some(&f.root), &UnknownFiles::Delete).unwrap_err();
     assert!(
         error.to_string().contains("Item type changed"),
         "must reject the DB/disk kind mismatch before traversal: {error:?}"
@@ -142,7 +149,7 @@ fn directory_junction_is_not_traversed_or_removed() {
         .unwrap();
     assert!(output.status.success(), "junction fixture failed: {output:?}");
     f.track("link", ItemKind::Folder, FileStatus::Local);
-    let error = purge(&f.db, Some(&f.root)).unwrap_err();
+    let error = purge(&f.db, Some(&f.root), &UnknownFiles::Delete).unwrap_err();
     assert!(
         !error.to_string().contains("Unsynced files remain"),
         "junction was traversed: {error:?}"
@@ -160,7 +167,17 @@ fn prepared_directory_cannot_be_replaced_during_cleanup() {
     let rows = f.db.list_files().unwrap();
     let known = rows.iter().map(|r| (r.path.clone(), r)).collect();
     let (mut files, mut directories) = (Vec::new(), Vec::new());
-    prepare(&f.root, &f.root, &known, &mut files, &mut directories).unwrap();
+    prepare(
+        &f.root,
+        &f.root,
+        &known,
+        &std::collections::HashSet::new(),
+        &UnknownFiles::Delete,
+        &mut Vec::new(),
+        &mut files,
+        &mut directories,
+    )
+    .unwrap();
     assert_eq!(files.len(), 0);
     assert_eq!(directories.len(), 1);
     assert!(
@@ -168,7 +185,7 @@ fn prepared_directory_cannot_be_replaced_during_cleanup() {
         "prepared directory must remain bound to the validated path"
     );
     drop(directories);
-    purge(&f.db, Some(&f.root)).unwrap();
+    purge(&f.db, Some(&f.root), &UnknownFiles::Delete).unwrap();
     assert_eq!(f.db.list_files().unwrap().len(), 0);
 }
 
@@ -179,7 +196,17 @@ fn child_arriving_after_prepare_blocks_nonrecursive_deletion() {
     let rows = f.db.list_files().unwrap();
     let known = rows.iter().map(|r| (r.path.clone(), r)).collect();
     let (mut files, mut directories) = (Vec::new(), Vec::new());
-    prepare(&f.root, &f.root, &known, &mut files, &mut directories).unwrap();
+    prepare(
+        &f.root,
+        &f.root,
+        &known,
+        &std::collections::HashSet::new(),
+        &UnknownFiles::Delete,
+        &mut Vec::new(),
+        &mut files,
+        &mut directories,
+    )
+    .unwrap();
     assert_eq!(directories.len(), 1);
     let child = f.root.join("local/late.txt");
     std::fs::write(&child, b"new unsynced bytes").unwrap();
@@ -190,7 +217,7 @@ fn child_arriving_after_prepare_blocks_nonrecursive_deletion() {
     drop(directories);
     assert_eq!(std::fs::read(&child).unwrap(), b"new unsynced bytes");
     assert_eq!(f.db.list_files().unwrap().len(), 1);
-    assert!(purge(&f.db, Some(&f.root)).is_err());
+    assert!(purge(&f.db, Some(&f.root), &UnknownFiles::Delete).is_err());
     assert_eq!(std::fs::read(child).unwrap(), b"new unsynced bytes");
 }
 
@@ -206,10 +233,10 @@ fn round5_signout_retries_busy_completed_upload_and_leaves_zero_staged_plaintext
         .share_mode(0)
         .open(&payload)
         .unwrap();
-    assert!(purge(&f.db, Some(&f.root)).is_err());
+    assert!(purge(&f.db, Some(&f.root), &UnknownFiles::Delete).is_err());
     assert_eq!(f.db.staged_payloads_for_signout().unwrap().len(), 1);
     drop(held);
-    purge(&f.db, Some(&f.root)).unwrap();
+    purge(&f.db, Some(&f.root), &UnknownFiles::Delete).unwrap();
     assert_eq!(f.db.staged_payloads_for_signout().unwrap().len(), 0);
     assert_eq!([payload].iter().filter(|p| p.exists()).count(), 0);
 }
@@ -238,7 +265,7 @@ fn round5_signout_preserves_abandoned_legacy_upload_only_copy() {
     })
     .unwrap();
     assert!(
-        purge(&f.db, Some(&f.root))
+        purge(&f.db, Some(&f.root), &UnknownFiles::Delete)
             .unwrap_err()
             .to_string()
             .contains("recoverable bytes")
@@ -248,7 +275,7 @@ fn round5_signout_preserves_abandoned_legacy_upload_only_copy() {
     // User recovers their only copy outside the provider; retry may finish.
     let recovered = f.temp.path().join("recovered");
     std::fs::rename(&payload, &recovered).unwrap();
-    purge(&f.db, Some(&f.root)).unwrap();
+    purge(&f.db, Some(&f.root), &UnknownFiles::Delete).unwrap();
     assert_eq!(std::fs::read(recovered).unwrap(), b"unsynced version");
     assert!(f.db.get_upload_resume("abandoned-keep-mine").unwrap().is_none());
 }
@@ -277,7 +304,7 @@ fn round6_uploaded_local_identity_matches_server_and_signs_out() {
     crate::windows_cf::placeholders::convert_to_unsynced_placeholder(&path, "temporary-local-id").unwrap();
     f.track("server-id", ItemKind::File, FileStatus::Local);
     crate::windows_cf::placeholders::convert_to_in_sync_placeholder(&path, "server-id").unwrap();
-    let result = purge(&f.db, Some(&f.root));
+    let result = purge(&f.db, Some(&f.root), &UnknownFiles::Delete);
     assert!(result.is_ok(), "completed local upload must sign out: {result:?}");
     assert_eq!(std::fs::read_dir(&f.root).unwrap().count(), 0);
     assert_eq!(f.db.list_files().unwrap().len(), 0);
@@ -293,7 +320,7 @@ fn round6_foreign_and_dirty_placeholders_keep_bytes() {
         let identity = if foreign { "foreign-id" } else { "server-id" };
         crate::windows_cf::placeholders::convert_to_unsynced_placeholder(&path, identity).unwrap();
         f.track("server-id", ItemKind::File, FileStatus::Local);
-        let error = purge(&f.db, Some(&f.root)).unwrap_err().to_string();
+        let error = purge(&f.db, Some(&f.root), &UnknownFiles::Delete).unwrap_err().to_string();
         assert!(error.contains(if foreign { "identity changed" } else { "Unsynced changes" }), "{error}");
         assert_eq!(std::fs::read(&path).unwrap(), b"must preserve bytes");
         assert_eq!(f.db.list_files().unwrap().len(), 1);
@@ -336,7 +363,7 @@ fn round6_upload_finalization_preserves_foreign_or_changed_bytes() {
         assert!(error.to_string().contains(if foreign { "belongs to another file" } else { "bytes changed" }), "{error:?}");
         assert_eq!(std::fs::read(&path).unwrap(), b"new local edit");
         f.track("server-id", ItemKind::File, FileStatus::Local);
-        assert!(purge(&f.db, Some(&f.root)).is_err());
+        assert!(purge(&f.db, Some(&f.root), &UnknownFiles::Delete).is_err());
     }
 }
 
@@ -351,6 +378,42 @@ fn round6_verified_upload_finalization_updates_identity() {
     crate::windows_cf::placeholders::convert_to_unsynced_placeholder(&path, "local-id").unwrap();
     crate::windows_cf::placeholders::complete_upload_placeholder(&path, "server-id", Some(("local-id", &payload))).unwrap();
     f.track("server-id", ItemKind::File, FileStatus::Local);
-    purge(&f.db, Some(&f.root)).unwrap();
+    purge(&f.db, Some(&f.root), &UnknownFiles::Delete).unwrap();
     assert_eq!(std::fs::read_dir(&f.root).unwrap().count(), 0);
+}
+
+/// Task 2191 (D11, Decision (lead, 2026-10-26)): a file of unknown content is copied out of the
+/// sync folder when the person chose "Keep copies", before the original goes.
+#[test]
+fn task_2191_sign_out_keeps_an_unknown_file_as_a_copy() {
+    let f = Fixture::new();
+    f.folder("docs");
+    std::fs::write(f.root.join("docs").join("a.txt"), b"an edit 0.8.12 never sent").unwrap();
+    f.track_unknown("docs/a.txt", ItemKind::File, FileStatus::Local);
+    let dir = f.temp.path().join("Beebeeb kept files 2026-10-26 1200");
+    let kept = purge(&f.db, Some(&f.root), &UnknownFiles::Keep { dir: dir.clone() }).unwrap();
+    assert_eq!(kept, KeptAtSignOut { files: 1, dir: Some(dir.clone()) });
+    assert_eq!(std::fs::read(dir.join("docs").join("a.txt")).unwrap(), b"an edit 0.8.12 never sent");
+    assert_eq!(std::fs::read_dir(&f.root).unwrap().count(), 0, "the sync folder is emptied");
+}
+
+/// Task 2191: "Delete them" deletes a file of unknown content with the rest, and keeps nothing.
+#[test]
+fn task_2191_sign_out_deletes_an_unknown_file_when_asked() {
+    let f = Fixture::new();
+    std::fs::write(f.root.join("a.txt"), b"an edit 0.8.12 never sent").unwrap();
+    f.track_unknown("a.txt", ItemKind::File, FileStatus::Local);
+    let kept = purge(&f.db, Some(&f.root), &UnknownFiles::Delete).unwrap();
+    assert_eq!(kept, KeptAtSignOut::default());
+    assert_eq!(std::fs::read_dir(&f.root).unwrap().count(), 0);
+}
+
+/// Task 2191: a file of KNOWN content that is not a clean placeholder still refuses sign-out.
+#[test]
+fn task_2191_a_known_file_that_is_not_clean_still_refuses_sign_out() {
+    let f = Fixture::new();
+    std::fs::write(f.root.join("a.txt"), b"plain bytes").unwrap();
+    f.track("a.txt", ItemKind::File, FileStatus::Local);
+    assert!(purge(&f.db, Some(&f.root), &UnknownFiles::Delete).is_err());
+    assert!(f.root.join("a.txt").exists(), "nothing deleted");
 }

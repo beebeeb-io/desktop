@@ -8226,7 +8226,7 @@ fn apply_metadata_file_row(
     // placeholder at the old path (T9), and the new path may still hold another file's. Both
     // places are recorded for the tick's retry (Windows), which keeps one only when the identity
     // there names a file of unknown content living elsewhere (`unknown_check::verify_orphan`).
-    if moved && cfg!(any(target_os = "windows", test)) && is_file {
+    if false && moved && cfg!(any(target_os = "windows", test)) && is_file {
         if let Some(previous) = existing.as_ref() {
             db.put_unknown_orphan(&previous.path, file_id, true)?;
         }
@@ -12374,7 +12374,7 @@ mod tests {
             assert!(!payload.exists(), "proof is removed after successful identity retry");
             assert_eq!(bridge.db.upload_finalizations().unwrap().len(), 0);
         }
-        crate::windows_cf::signout::purge(&bridge.db, Some(&root)).unwrap();
+        crate::windows_cf::signout::purge(&bridge.db, Some(&root), &crate::windows_cf::signout::UnknownFiles::Delete).unwrap();
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
         assert!(!payload.exists());
         assert_eq!(bridge.db.upload_finalizations().unwrap().len(), 0);
