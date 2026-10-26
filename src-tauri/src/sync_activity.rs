@@ -27,7 +27,9 @@ pub struct SyncActivitySummary {
     pub last_tick_ok_at: Option<i64>,
     /// The queue, or `None` when there is no state DB yet.
     pub queue: Option<QueueHold>,
-    /// The startup check of the files on this PC, while it runs.
+    /// The start-up guard's pass over the files on this PC, while it runs, as the last `engine-status` event reported
+    /// it. Once the engine lane's `STARTUP_GUARD` is on the same branch, `STARTUP_GUARD.progress()` is the live value
+    /// (the frontend already prefers `sync_status.startup_guard` when it is there).
     pub startup_check: Option<StartupCheck>,
 }
 
@@ -61,7 +63,7 @@ mod tests {
         engine.apply(&json!({
             "state": "running",
             "last_tick_ok_at": null,
-            crate::engine_status::STARTUP_CHECK_KEY: { "done": 12_400, "total": 37_169 },
+            crate::engine_status::STARTUP_CHECK_KEY: { "running": true, "done": 12_400, "total": 37_169 },
         }));
         summary(
             false,

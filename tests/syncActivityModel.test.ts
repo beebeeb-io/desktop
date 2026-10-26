@@ -157,6 +157,49 @@ describe('never calm over pending work', () => {
   })
 })
 
+describe('the start-up guard’s pass (engine lane: `startup_guard`, live on `sync_status`)', () => {
+  const live = (running: boolean, done: number, total: number) => ({ ...signedIn, startup_guard: { running, done, total } })
+
+  test('the live value on the status decides, over the last pass the summary heard of', () => {
+    expect(syncActivityView(live(true, 5, 10), summary(), { now }).headline).toBe('Checking files on this PC: 5 of 10.')
+    const atRest = syncActivityView(live(false, 0, 0), summary({ startup_check: { done: 12_400, total: 37_169 } }), { now })
+    expect(atRest.kind).toBe('up_to_date')
+    expect(atRest.progress).toBeNull()
+  })
+
+  test('without it on the status, the summary’s pass is shown', () => {
+    expect(syncActivityView(signedIn, summary({ startup_check: { done: 1, total: 4 } }), { now }).kind).toBe('checking')
+  })
+
+  test('a live value outside the shape is no check', () => {
+    for (const bad of [{ running: 'yes', done: 1, total: 2 }, { running: true, done: -1, total: 2 }, { running: true, done: 0, total: 0 }, 'running']) {
+      const status = { ...signedIn, startup_guard: bad } as unknown as SyncStatus
+      expect(syncActivityView(status, summary({ startup_check: { done: 1, total: 4 } }), { now }).kind).toBe('up_to_date')
+    }
+  })
+
+  test('uploads during the pass are the headline, with the pass and its progress under them', () => {
+    const view = syncActivityView(live(true, 2_000, 37_169), guusOnHold({ transfers_active: 3 }), { now })
+    expect(view.kind).toBe('syncing')
+    expect(view.headline).toBe('3 files syncing.')
+    expect(view.details).toEqual(['Checking files on this PC: 2,000 of 37,169.', HELD_LINE, GAVE_UP_LINE])
+    expect(view.progress).toEqual({ done: 2_000, total: 37_169 })
+  })
+
+  test('paused during the pass: the pause is the headline and the pass stays in view', () => {
+    const view = syncActivityView(live(true, 2_000, 37_169), summary({ paused: true }), { now })
+    expect(view.kind).toBe('paused')
+    expect(view.details).toEqual(['Checking files on this PC: 2,000 of 37,169.'])
+    expect(view.progress).toEqual({ done: 2_000, total: 37_169 })
+  })
+
+  test('conflicts that are not the headline are a detail line', () => {
+    const view = syncActivityView({ ...live(true, 1, 2), conflicts: 2 }, summary(), { now })
+    expect(view.kind).toBe('checking')
+    expect(view.details).toEqual(['2 conflicts to review.'])
+  })
+})
+
 describe('precedence', () => {
   test('signed out, session ended and a refused engine come before any count', () => {
     expect(syncActivityView({ ...signedIn, logged_in: false }, guusOnHold(), { now }).kind).toBe('signed_out')

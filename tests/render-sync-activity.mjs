@@ -41,11 +41,11 @@ const summaries = {
 const browser = await chromium.launch({ headless: true, ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : {}) })
 const results = []
 
-async function open({ surface, summary, viewport, colorScheme = 'light', failResume = false, tree = null }) {
+async function open({ surface, summary, viewport, colorScheme = 'light', failResume = false, tree = null, statusPatch = {} }) {
   const page = await browser.newPage({ viewport, colorScheme })
   const errors = []
   page.on('pageerror', (error) => errors.push(String(error)))
-  await page.addInitScript(({ caps, summary, surface, tree, failResume }) => {
+  await page.addInitScript(({ caps, summary, surface, tree, failResume, statusPatch }) => {
     window.calls = []
     window.fixtureSummary = summary
     const callbacks = new Map()
@@ -67,7 +67,7 @@ async function open({ surface, summary, viewport, colorScheme = 'light', failRes
           case 'plugin:event|unlisten': return null
           case 'desktop_capabilities': return caps
           case 'desktop_platform': return 'windows'
-          case 'sync_status': return { logged_in: true, engine: 'running', sync_root: 'C:\\Users\\Fixture\\Beebeeb', syncing: 0, cloud_only: 0, conflicts: 0, session_revision: 1 }
+          case 'sync_status': return { logged_in: true, engine: 'running', sync_root: 'C:\\Users\\Fixture\\Beebeeb', syncing: 0, cloud_only: 0, conflicts: 0, session_revision: 1, ...statusPatch }
           case 'sync_activity_summary': return s
           case 'tray_pause_sync':
           case 'tray_resume_sync': {
@@ -93,7 +93,7 @@ async function open({ surface, summary, viewport, colorScheme = 'light', failRes
       },
     }
     window.fixtureFailResume = failResume
-  }, { caps, summary, surface, tree, failResume })
+  }, { caps, summary, surface, tree, failResume, statusPatch })
   return { page, errors }
 }
 
@@ -191,6 +191,22 @@ try {
     ['paused', 'Sync is paused.'],
     ['up-to-date', 'Your files are synced.'],
   ]
+  // With the engine lane's non-blocking guard: uploads run during the pass, read live from `sync_status.startup_guard`.
+  {
+    const { page, errors } = await open({
+      surface: 'tray',
+      summary: { ...summaries['on-hold'], transfers_active: 3, startup_check: null },
+      viewport: { width: 400, height: 560 },
+      statusPatch: { startup_guard: { running: true, done: 2000, total: 37169 } },
+    })
+    await page.goto(`${base}/?window=tray`)
+    await expectText(page, '3 files syncing.')
+    await expectText(page, 'Checking files on this PC: 2,000 of 37,169.')
+    await page.getByRole('progressbar', { name: 'Startup check' }).waitFor()
+    results.push(['tray-uploading-during-check', await shot(page, 'tray-uploading-during-check')])
+    assert.deepEqual(errors, [])
+    await page.close()
+  }
   for (const [state, headline] of tray) {
     for (const colorScheme of state === 'on-hold' ? ['light', 'dark'] : ['light']) {
       const name = `tray-${state}${colorScheme === 'dark' ? '-dark' : ''}`
