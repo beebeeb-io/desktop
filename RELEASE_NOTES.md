@@ -62,12 +62,12 @@ had marked it in sync.
 - macOS: `git diff desktop-v0.8.12 release/0.8.13` over every macOS-only path is empty. Those
   paths are the File Provider extension and its tests and tools, `macos/`, and the Finder, IPC,
   Keychain and File Provider modules in `src-tauri/src`.
-- Real hardware smoke test: <!-- lead: device rung pending; fill in the result, then remove this marker (the release gate refuses it). To run before the release: on a Windows PC with a synced folder:
-  (1) edit a synced file, check that it arrives as a new version, and that "Free up space" keeps it
-  until then; (2) rename a synced file, write a new file at the old name within 8 s, wait for two
-  syncs, and check for two files on the server with the right contents and that a later edit of
-  the renamed file arrives; (3) save an .xlsx in Excel and check that it arrives as one new version
-  of the same file, with nothing trashed. -->
+- Real hardware smoke test: **not run before this release.** The Windows device checks (an edit
+  of a synced file arrives as a new version and "Free up space" keeps it until then; a rename then
+  a new file at the old name gives two files on the server; an Excel save stays one file with
+  nothing trashed) are run after release, at the maintainer's call: "3 will do later, just release
+  it now". The macOS sign-out device checks that 0.8.12 also shipped without were waived again for
+  this release (the macOS code is identical to 0.8.12).
 - Not verified:
   - files from before 0.8.13 that hold an edit hidden by 0.8.12 (task 2191);
   - folder renames and moves into a folder that is not synced yet (task 2204's full design);
