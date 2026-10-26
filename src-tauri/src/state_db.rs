@@ -2169,6 +2169,43 @@ pub struct QueueDiagnostics {
     pub last_error_class: Option<String>,
 }
 
+/// What the Windows tray and Settings › Sync say about the queue (0.8.15): counts and dates only, never a name, a path
+/// or an error text.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct QueueHold {
+    /// Not paused and not given up: due now, backing off, or being sent.
+    pub waiting: i64,
+    /// Not paused, but out of attempts: nothing retries them.
+    pub gave_up: i64,
+    /// Paused, one group per reason (`PAUSE_REASON_LABELS`, anything else as `other`), ordered by reason.
+    pub held: Vec<HeldGroup>,
+}
+
+/// The operations paused for one reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HeldGroup {
+    pub reason: String,
+    pub count: i64,
+    /// Unix seconds the oldest and newest of them were queued (0 = not recorded).
+    pub oldest_at: i64,
+    pub newest_at: i64,
+}
+
+/// One `files` row as the Selective sync tree reads it (0.8.15). A row the server never confirmed (a folder this PC
+/// created whose `create_folder` never landed) has `current_version` 0 and `remote_updated_at` 0; a server row has one
+/// of them set.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TreeRow {
+    pub file_id: String,
+    pub path: String,
+    pub status: FileStatus,
+    pub size_bytes: i64,
+    pub parent_id: Option<String>,
+    pub item_kind: ItemKind,
+    pub current_version: i64,
+    pub remote_updated_at: i64,
+}
+
 /// Owned handle to the local SQLite state database.
 ///
 /// One instance per running daemon process. The inner `Connection` is
@@ -6426,6 +6463,74 @@ impl StateDb {
         })
     }
 
+    /// [`QueueHold`] for the tray and Settings › Sync (0.8.15). Reads counts only, without the name-redaction pass of
+    /// [`Self::queue_diagnostics`], so a window can poll it. Changes nothing.
+    pub fn queue_hold_summary(&self) -> Result<QueueHold> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let (waiting, gave_up) = conn.query_row(
+            "SELECT COALESCE(SUM(attempts < max_attempts), 0), COALESCE(SUM(attempts >= max_attempts), 0)
+             FROM operation_queue
+             WHERE paused_reason IS NULL",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )?;
+        let mut stmt = conn.prepare(
+            "SELECT paused_reason, COUNT(*), MIN(created_at), MAX(created_at)
+             FROM operation_queue
+             WHERE paused_reason IS NOT NULL
+             GROUP BY paused_reason",
+        )?;
+        let groups = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?;
+        let mut held: BTreeMap<String, HeldGroup> = BTreeMap::new();
+        for group in groups {
+            let (reason, count, oldest_at, newest_at) = group?;
+            let reason = allowed_label(&reason, PAUSE_REASON_LABELS);
+            let entry = held.entry(reason.clone()).or_insert(HeldGroup {
+                reason,
+                count: 0,
+                oldest_at,
+                newest_at,
+            });
+            entry.count += count;
+            entry.oldest_at = entry.oldest_at.min(oldest_at);
+            entry.newest_at = entry.newest_at.max(newest_at);
+        }
+        Ok(QueueHold {
+            waiting,
+            gave_up,
+            held: held.into_values().collect(),
+        })
+    }
+
+    /// Every `files` row as [`TreeRow`], for the Selective sync tree (0.8.15). Changes nothing.
+    pub fn list_tree_rows(&self) -> Result<Vec<TreeRow>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT file_id, path, status, size_bytes, parent_id, item_kind, current_version, remote_updated_at
+             FROM files ORDER BY path ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(TreeRow {
+                file_id: row.get(0)?,
+                path: row.get(1)?,
+                status: FileStatus::from_str(&row.get::<_, String>(2)?),
+                size_bytes: row.get(3)?,
+                parent_id: row.get(4)?,
+                item_kind: ItemKind::from_str(&row.get::<_, String>(5)?),
+                current_version: row.get(6)?,
+                remote_updated_at: row.get(7)?,
+            })
+        })?;
+        rows.collect()
+    }
+
     /// Test hook: hold the database lock so a test can park every writer behind
     /// it and force two requests to overlap deterministically (task 1684).
     #[cfg(test)]
@@ -8260,6 +8365,92 @@ mod tests {
             "nothing left to resume"
         );
         assert_eq!(due(500).len(), 2, "and a second call moves nothing");
+    }
+
+    /// 0.8.15: the tray's and Settings › Sync's queue summary. Waiting (due or backing off) and given-up operations are
+    /// counted apart; paused ones are grouped by reason with the dates they were queued; a reason this build does not
+    /// know is `other`; nothing in it is a name, a path or an error text. It changes nothing.
+    #[test]
+    fn queue_hold_summary_counts_waiting_given_up_and_held_by_reason_without_names() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        for (id, created_at) in [("a1", 1_759_579_200), ("a2", 1_759_586_400)] {
+            let mut op = queued_op(id, OperationKind::CreateFolder, id);
+            op.created_at = created_at;
+            db.enqueue_operation(&op).unwrap();
+            db.record_operation_pause(id, OperationPauseReason::Auth, Some("HTTP 401 for secret-folder"), 5)
+                .unwrap();
+        }
+        let mut quota = queued_op("q1", OperationKind::UploadFile, "q1");
+        quota.created_at = 1_760_000_000;
+        db.enqueue_operation(&quota).unwrap();
+        db.record_operation_pause("q1", OperationPauseReason::Quota, None, 5).unwrap();
+        db.enqueue_operation(&queued_op("o1", OperationKind::UploadFile, "o1")).unwrap();
+        db.0.lock()
+            .unwrap()
+            .execute("UPDATE operation_queue SET paused_reason = 'secret-folder' WHERE op_id = 'o1'", [])
+            .unwrap();
+        db.enqueue_operation(&queued_op("w1", OperationKind::UploadFile, "w1")).unwrap();
+        let mut backing_off = queued_op("w2", OperationKind::UploadFile, "w2");
+        backing_off.attempts = 3;
+        backing_off.next_retry_at = 4_000_000_000;
+        db.enqueue_operation(&backing_off).unwrap();
+        let mut given_up = queued_op("g1", OperationKind::CreateFolder, "g1");
+        given_up.attempts = 25;
+        given_up.max_attempts = 25;
+        db.enqueue_operation(&given_up).unwrap();
+        let queued_before: i64 =
+            db.0.lock().unwrap().query_row("SELECT COUNT(*) FROM operation_queue", [], |row| row.get(0)).unwrap();
+
+        let summary = db.queue_hold_summary().unwrap();
+
+        assert_eq!((summary.waiting, summary.gave_up), (2, 1));
+        assert_eq!(
+            summary.held,
+            vec![
+                HeldGroup { reason: "auth".into(), count: 2, oldest_at: 1_759_579_200, newest_at: 1_759_586_400 },
+                HeldGroup { reason: "other".into(), count: 1, oldest_at: 1, newest_at: 1 },
+                HeldGroup { reason: "quota".into(), count: 1, oldest_at: 1_760_000_000, newest_at: 1_760_000_000 },
+            ]
+        );
+        let json = serde_json::to_string(&summary).unwrap();
+        assert!(!json.contains("secret"), "{json}");
+        let queued_after: i64 =
+            db.0.lock().unwrap().query_row("SELECT COUNT(*) FROM operation_queue", [], |row| row.get(0)).unwrap();
+        assert_eq!((queued_before, queued_after), (7, 7), "a read: nothing purged");
+        assert_eq!(db.queue_diagnostics(500).unwrap().paused, 4, "and nothing resumed");
+    }
+
+    /// 0.8.15: the Selective sync tree reads `current_version` and `remote_updated_at` (whether the server knows the
+    /// row); `list_files` does not carry the first.
+    #[test]
+    fn list_tree_rows_carries_the_server_version_of_every_row() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        {
+            let conn = db.0.lock().unwrap();
+            conn.execute(
+                "INSERT INTO files (file_id, path, status, item_kind, current_version, parent_id, size_bytes, remote_updated_at)
+                 VALUES ('ghost', 'Backups', 'local', 'folder', 0, NULL, 0, 0),
+                        ('server', 'Backups', 'cloud_only', 'folder', 3, NULL, 0, 0),
+                        ('f1', 'Backups/a.txt', 'local', 'file', 2, 'server', 12, 1761480000)",
+                [],
+            )
+            .unwrap();
+        }
+        let rows = db.list_tree_rows().unwrap();
+        let by_id = |id: &str| rows.iter().find(|row| row.file_id == id).unwrap().clone();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(
+            (by_id("ghost").current_version, by_id("ghost").remote_updated_at, by_id("ghost").status),
+            (0, 0, FileStatus::Local)
+        );
+        assert_eq!(by_id("f1").remote_updated_at, 1_761_480_000);
+        assert_eq!((by_id("server").current_version, by_id("server").item_kind), (3, ItemKind::Folder));
+        assert_eq!(
+            (by_id("f1").size_bytes, by_id("f1").parent_id.as_deref(), by_id("f1").item_kind),
+            (12, Some("server"), ItemKind::File)
+        );
     }
 
     /// Lead ruling, F9 review I-1: after a key replacement, the operations paused for `auth` are re-marked
