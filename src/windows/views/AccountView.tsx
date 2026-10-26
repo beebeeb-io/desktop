@@ -315,7 +315,7 @@ function DisconnectSection() {
   // Task 2191: files from before the last update that hold bytes; the person chooses.
   const [unknownAsk, setUnknownAsk] = useState<UnknownFilesAtSignOut | null>(null)
 
-  const handleConfirm = async (unknownFiles?: 'keep' | 'delete') => {
+  const handleConfirm = async (unknownFiles?: 'keep' | 'delete', keptFolder?: string) => {
     setUnknownAsk(null)
     // Task 2191 (Decision (lead, 2026-10-26)): files from before the last update are never
     // copied or deleted silently. If any hold bytes on this PC, ask first.
@@ -327,7 +327,7 @@ function DisconnectSection() {
       }
     }
     setPhase('busy')
-    const result = await clearSession(unknownFiles ? { unknownFiles } : {})
+    const result = await clearSession(unknownFiles ? { unknownFiles, ...(keptFolder ? { keptFolder } : {}) } : {})
     if (!result.ok) {
       setErrorMsg(result.reason)
       setPhase('error')
@@ -357,7 +357,7 @@ function DisconnectSection() {
           count={unknownAsk.count}
           folder={unknownAsk.folder}
           onCancel={() => setUnknownAsk(null)}
-          onChoose={(choice) => void handleConfirm(choice)}
+          onChoose={(choice) => void handleConfirm(choice, unknownAsk.folder ?? undefined)}
         />
       ) : null}
       {/* Header row */}

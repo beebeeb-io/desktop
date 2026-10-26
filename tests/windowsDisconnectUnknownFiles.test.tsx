@@ -35,7 +35,9 @@ describe('Windows Disconnect with files from before the last update (task 2191)'
     expect(signOuts(m)).toEqual([])
     await dialog(m)!.props.onChoose('keep')
     await m.flush()
-    expect(signOuts(m).map((call) => call.args)).toEqual([{ unknownFiles: 'keep' }])
+    expect(signOuts(m).map((call) => call.args)).toEqual([
+      { unknownFiles: 'keep', keptFolder: 'C:\\Users\\a\\Beebeeb kept files 2026-10-26 1200' },
+    ])
   })
 
   test('"Delete them" is passed on as such', async () => {
@@ -45,7 +47,7 @@ describe('Windows Disconnect with files from before the last update (task 2191)'
     await m.click('Disconnect')
     await dialog(m)!.props.onChoose('delete')
     await m.flush()
-    expect(signOuts(m).map((call) => call.args)).toEqual([{ unknownFiles: 'delete' }])
+    expect(signOuts(m).map((call) => call.args)).toEqual([{ unknownFiles: 'delete', keptFolder: 'D:\\kept' }])
   })
 
   test('with none, it signs out as before, without asking', async () => {

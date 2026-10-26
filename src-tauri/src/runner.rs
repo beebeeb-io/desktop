@@ -1504,6 +1504,16 @@ async fn run(
                     last_alias_sweep = std::time::Instant::now();
                 }
 
+                // Task 2191 (D2, review-157 F2): the "not in sync" marks still to be made are local
+                // work, so they run on every tick: paused, offline or not.
+                #[cfg(target_os = "windows")]
+                {
+                    let mark_root = sync_root.clone();
+                    if let Err(e) = tokio::task::spawn_blocking(move || crate::windows_cf::retry_pending_marks(&mark_root)).await {
+                        tracing::warn!(error = %e, "pending-mark retry panicked; continuing");
+                    }
+                }
+
                 // Skip all sync work while the user has paused sync.
                 // The loop keeps running so it can receive the cancel
                 // signal and so it wakes up promptly when resumed.
@@ -1616,8 +1626,6 @@ async fn run(
                         {
                             let stamp_root = sync_root.clone();
                             if let Err(e) = tokio::task::spawn_blocking(move || {
-                                // Task 2191 (D2): the marks still to be made, before anything is stamped.
-                                crate::windows_cf::retry_pending_marks(&stamp_root);
                                 crate::windows_cf::stamp_local_files_in_sync(&stamp_root);
                                 // Task 1640 (review N13): kept copies whose original was in use.
                                 crate::windows_cf::retry_kept_originals(&stamp_root);

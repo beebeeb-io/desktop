@@ -4265,7 +4265,10 @@ impl EngineBridge {
             // Task 2191 (G-engine): a file of unknown content (in the population, conflicts and
             // errors excepted: their resolution is the person's) is never written over while its
             // place holds bytes; they may be the person's only copy of a change.
-            let unknown_with_bytes = matches!(content, SyncFolderContent::Unknown)
+            // Review-157 F3: Windows only (elsewhere nothing marks a row empty, and a hydrate never
+            // writes in place).
+            let unknown_with_bytes = cfg!(any(target_os = "windows", test))
+                && matches!(content, SyncFolderContent::Unknown)
                 && self.db.is_unknown_population(file_id)?
                 && place_holds_bytes(dest_path);
             if unknown_with_bytes || matches!(content, SyncFolderContent::Changed { .. } | SyncFolderContent::Queued) {

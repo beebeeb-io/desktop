@@ -3000,6 +3000,7 @@ async fn clear_session_impl(
     forget_email: bool,
     keep_unsent: Option<&str>,
     unknown_files: UnknownFilesArg,
+    kept_folder: Option<std::path::PathBuf>,
 ) -> Result<SignedOut, SignOutFailure> {
     #[cfg(target_os = "windows")]
     let _transition = SESSION_TRANSITION.lock().await;
@@ -3159,7 +3160,7 @@ async fn clear_session_impl(
     #[cfg(target_os = "windows")]
     let mut windows_kept: Option<KeptUnsent> = None;
     #[cfg(not(target_os = "windows"))]
-    let _ = unknown_files;
+    let _ = (unknown_files, kept_folder);
 
     #[cfg(target_os = "windows")]
     {
@@ -3182,9 +3183,15 @@ async fn clear_session_impl(
             // person chose in the confirmation.
             let choice = match (unknown_files, root.as_deref()) {
                 (UnknownFilesArg::Keep, Some(root)) => windows_cf::signout::UnknownFiles::Keep {
-                    // A sync folder at a drive root with no home folder: nowhere outside it to keep
-                    // copies, so the sign-out stops rather than delete or copy into the folder.
-                    dir: kept_unknown_files_dir(root)
+                    // Review-157 F4: the folder the confirmation named, when it is one of ours and
+                    // outside the sync folder; else a fresh one. A sync folder at a drive root with
+                    // no home folder has nowhere outside it, so the sign-out stops.
+                    dir: kept_folder
+                        .filter(|dir| {
+                            !dir.starts_with(root)
+                                && dir.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.starts_with("Beebeeb kept files "))
+                        })
+                        .or_else(|| kept_unknown_files_dir(root))
                         .ok_or_else(|| "Sign-out paused: there is no folder outside the sync folder to keep copies in.".to_string())?,
                 },
                 (UnknownFilesArg::Keep, None) | (UnknownFilesArg::Delete, _) => windows_cf::signout::UnknownFiles::Delete,
@@ -4159,7 +4166,7 @@ fn count_unknown_files_at_sign_out() -> Result<UnknownFilesAtSignOut, String> {
             Some(id) => db
                 .get_file(id)
                 .map_err(|e| e.to_string())?
-                .map(|row| (row.path, db.is_unknown_content(id).unwrap_or(false))),
+                .map(|row| (row.path, db.has_agreed_content(id).unwrap_or(true))),
             None => None,
         };
         let unknown = unknown_check::unknown_at_signout(
@@ -4217,6 +4224,7 @@ async fn clear_session(
     forget_email: Option<bool>,
     keep_unsent: Option<KeepUnsentArg>,
     unknown_files: Option<UnknownFilesArg>,
+    kept_folder: Option<String>,
 ) -> Result<SessionActionOutcome, String> {
     #[cfg(target_os = "macos")]
     state.sign_out.late_results.begin(window.label());
@@ -4226,6 +4234,8 @@ async fn clear_session(
         keep_unsent.as_ref().map(|keep| keep.ask_id.as_str()),
         // Task 2191: without an answer (the menu, an older window) the copies are kept.
         unknown_files.unwrap_or(UnknownFilesArg::Keep),
+        // Review-157 F4: the folder the confirmation named, so the copies go where it said.
+        kept_folder.map(std::path::PathBuf::from),
     )
     .await;
     // Review I1: the alert comes first, also when the sign-out failed after the removal.
@@ -16546,7 +16556,7 @@ fn handle_desktop_menu_action(app: &tauri::AppHandle, spec: &'static DesktopMenu
             let app = app.clone();
             spawn_menu_task(spec.id, async move {
                 let state = app.state::<AppState>();
-                let result = clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep).await;
+                let result = clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep, None).await;
                 // Task 1882: the menu's sign-out names the folder of kept
                 // Finder files in the same alert as the `clear_session` command,
                 // also when it failed after the removal (review I1), and saves it for
@@ -20996,7 +21006,7 @@ mod signout_teardown_tests {
                     .unwrap();
             }
             drop(db);
-            super::with_upload_staging_for_test(upload_staging.clone(), clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep)).await
+            super::with_upload_staging_for_test(upload_staging.clone(), clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep, None)).await
         })
         .await;
 
@@ -21103,7 +21113,7 @@ mod signout_teardown_tests {
         });
         *acct.engine.lock().await = Some(EngineRunner::for_test_with_task(task));
 
-        let result = clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep).await;
+        let result = clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep, None).await;
 
         assert!(
             result.is_ok(),
@@ -21160,7 +21170,7 @@ mod signout_teardown_tests {
             "the premise: already signed out"
         );
         acct.engine_stop_unconfirmed.store(true, Ordering::SeqCst);
-        let result = clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep).await;
+        let result = clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep, None).await;
         #[cfg(not(target_os = "windows"))]
         assert_eq!(
             result,
@@ -21299,7 +21309,7 @@ mod signout_teardown_tests {
         });
         *acct.engine.lock().await = Some(EngineRunner::for_test_with_task(task));
 
-        let first = clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep)
+        let first = clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep, None)
             .await
             .expect_err("the first attempt must fail while the engine stop is unconfirmed");
         assert!(
@@ -21307,7 +21317,7 @@ mod signout_teardown_tests {
             "first attempt must be the unconfirmed-stop refusal, got: {first}"
         );
 
-        let second = clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep)
+        let second = clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep, None)
             .await
             .expect_err("the retry must also be refused, not silently proceed past the stop gate");
         assert!(
@@ -24066,7 +24076,7 @@ mod finder_lock_and_sign_out_tests {
             fx.reconciler(Some(Reconciler::RemovalFails));
             fx.install_keys();
             fx.install_finished_engine().await;
-            let done = clear_session_impl(&fx.state(), false, None, crate::UnknownFilesArg::Keep)
+            let done = clear_session_impl(&fx.state(), false, None, crate::UnknownFilesArg::Keep, None)
                 .await
                 .expect("the sign-out happened");
             assert_eq!(
@@ -24094,7 +24104,7 @@ mod finder_lock_and_sign_out_tests {
             fx.install_keys();
             fx.install_finished_engine().await;
             poison_session(&fx.acct);
-            let outcome = clear_session_impl(&fx.state(), false, None, crate::UnknownFilesArg::Keep)
+            let outcome = clear_session_impl(&fx.state(), false, None, crate::UnknownFilesArg::Keep, None)
                 .await
                 .expect("a sign-out that cleared the key");
             assert_eq!(outcome, SignedOut::confirmed(SignOutOutcome::Completed));
@@ -24127,7 +24137,7 @@ mod finder_lock_and_sign_out_tests {
                 serde_json::Value::Null,
                 "the premise: a refusal is shown"
             );
-            let outcome = clear_session_impl(&fx.state(), false, None, crate::UnknownFilesArg::Keep)
+            let outcome = clear_session_impl(&fx.state(), false, None, crate::UnknownFilesArg::Keep, None)
                 .await
                 .expect("the sign-out completes");
             assert_eq!(outcome, SignedOut::confirmed(SignOutOutcome::Completed));
@@ -24184,7 +24194,7 @@ mod finder_lock_and_sign_out_tests {
             fx.reconciler(Some(Reconciler::Answers));
             fx.install_keys();
             fx.install_finished_engine().await;
-            let outcome = tokio::time::timeout(Duration::from_secs(30), clear_session_impl(&fx.state(), false, None, crate::UnknownFilesArg::Keep))
+            let outcome = tokio::time::timeout(Duration::from_secs(30), clear_session_impl(&fx.state(), false, None, crate::UnknownFilesArg::Keep, None))
                 .await
                 .expect("the sign-out does not wait for the gate its own test holds")
                 .expect("the sign-out completes");
@@ -24294,7 +24304,7 @@ mod finder_lock_and_sign_out_tests {
         let mut fx = Fixture::new("finder-signout");
         runtime().block_on(async {
             fx.reconciler(Some(Reconciler::Answers));
-            let outcome = clear_session_impl(&fx.state(), false, None, crate::UnknownFilesArg::Keep)
+            let outcome = clear_session_impl(&fx.state(), false, None, crate::UnknownFilesArg::Keep, None)
                 .await
                 .expect("a removal the reconciler confirmed");
             assert_eq!(outcome, SignedOut::confirmed(SignOutOutcome::NotSignedIn));
@@ -24337,7 +24347,7 @@ mod finder_lock_and_sign_out_tests {
                 fx.install_keys();
                 fx.install_finished_engine().await;
                 fx.acct.engine_stop_unconfirmed.store(true, Ordering::SeqCst);
-                let result = clear_session_impl(&fx.state(), false, None, crate::UnknownFilesArg::Keep).await;
+                let result = clear_session_impl(&fx.state(), false, None, crate::UnknownFilesArg::Keep, None).await;
                 let failure = result.as_ref().expect_err("sign-out refuses after the removal");
                 assert_eq!(failure.message, UNCONFIRMED_ENGINE_STOP_ERROR, "{id}");
                 assert_eq!(
@@ -24373,7 +24383,7 @@ mod finder_lock_and_sign_out_tests {
             let mut fx = Fixture::new(id);
             runtime().block_on(async {
                 fx.reconciler(Some(mode));
-                let result = clear_session_impl(&fx.state(), false, None, crate::UnknownFilesArg::Keep).await;
+                let result = clear_session_impl(&fx.state(), false, None, crate::UnknownFilesArg::Keep, None).await;
                 let done = result.as_ref().expect("the sign-out happened");
                 assert_eq!(done.outcome, SignOutOutcome::NotSignedIn, "{id}");
                 assert_eq!(done.warning, warning, "{id}");
@@ -24399,7 +24409,7 @@ mod finder_lock_and_sign_out_tests {
                 fx.reconciler(mode);
                 let started = Instant::now();
                 let done = FINDER_WAIT_OVERRIDE
-                    .scope(SHORT_WAIT, clear_session_impl(&fx.state(), false, None, crate::UnknownFilesArg::Keep))
+                    .scope(SHORT_WAIT, clear_session_impl(&fx.state(), false, None, crate::UnknownFilesArg::Keep, None))
                     .await
                     .expect("the sign-out happened");
                 assert_eq!(
@@ -24448,7 +24458,7 @@ mod finder_lock_and_sign_out_tests {
                 fx.install_finished_engine().await;
                 // An earlier stop that was never confirmed: sign-out refuses AFTER the removal.
                 fx.acct.engine_stop_unconfirmed.store(true, Ordering::SeqCst);
-                let error = clear_session_impl(&fx.state(), false, None, crate::UnknownFilesArg::Keep)
+                let error = clear_session_impl(&fx.state(), false, None, crate::UnknownFilesArg::Keep, None)
                     .await
                     .expect_err("sign-out refuses");
                 assert_eq!(error.message, UNCONFIRMED_ENGINE_STOP_ERROR, "{id}");
@@ -24602,7 +24612,7 @@ mod finder_lock_and_sign_out_tests {
             let restore = restore_stored_session(&state, &fx.acct, &base_url);
             let sign_out_then_answer = async {
                 let probe = server.next_request().await;
-                let signed_out = clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep).await;
+                let signed_out = clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep, None).await;
                 server.release();
                 (probe, signed_out)
             };
@@ -24671,7 +24681,7 @@ mod finder_lock_and_sign_out_tests {
             );
             // "Sign out and switch" from here: the already-signed-out path, which must leave no key and no email.
             assert_eq!(
-                clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep).await,
+                clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep, None).await,
                 Ok(SignedOut::confirmed(SignOutOutcome::NotSignedIn))
             );
             assert_eq!(
@@ -24787,7 +24797,7 @@ mod finder_lock_and_sign_out_tests {
             let signing_out = scope.spawn(move || {
                 runtime().block_on(SIGN_OUT_HOLDS_THE_ENGINE_SLOT.scope(
                     sign_out_holds_the_slot,
-                    with_the_shared_state_dir(clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep)),
+                    with_the_shared_state_dir(clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep, None)),
                 ))
             });
             let deadline = Instant::now() + Duration::from_secs(60);
@@ -24953,7 +24963,7 @@ mod finder_lock_and_sign_out_tests {
             let decide = decide_sign_in_in_turn(&state, &fx.acct, &sources, &sam, "tok-new", &base_url, &turn);
             let sign_out_then_answer = async {
                 let proof = server.next_request().await;
-                let signed_out = clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep).await;
+                let signed_out = clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep, None).await;
                 server.release();
                 (proof, signed_out)
             };
@@ -25441,6 +25451,7 @@ mod finder_lock_and_sign_out_tests {
                     false,
                     None,
                     crate::UnknownFilesArg::Keep,
+                    None,
                 )))
             });
             let deadline = Instant::now() + Duration::from_secs(60);
@@ -25513,6 +25524,7 @@ mod finder_lock_and_sign_out_tests {
                     false,
                     None,
                     crate::UnknownFilesArg::Keep,
+                    None,
                 )))
             });
             let deadline = Instant::now() + Duration::from_secs(60);
@@ -25597,7 +25609,7 @@ mod finder_lock_and_sign_out_tests {
             let gate = SIGN_OUT_TEST_PURGE_GATE.lock().await; // the sign-out waits here, inside its purge
             let state = fx.state();
             let sam = t12_profile("u-1", "sam@beebeeb.io");
-            let sign_out = clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep);
+            let sign_out = clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep, None);
             let sign_in = async {
                 let deadline = Instant::now() + Duration::from_secs(30);
                 while !fx
@@ -25671,7 +25683,7 @@ mod finder_lock_and_sign_out_tests {
             fx.reconciler(Some(Reconciler::Answers));
             after_a_rejected_token(&fx);
             *fx.acct.engine.lock().await = Some(a_running_engine());
-            let signed_out = clear_session_impl(&fx.state(), false, None, crate::UnknownFilesArg::Keep).await;
+            let signed_out = clear_session_impl(&fx.state(), false, None, crate::UnknownFilesArg::Keep, None).await;
             assert_eq!(signed_out, Ok(SignedOut::confirmed(SignOutOutcome::NotSignedIn)));
             assert!(fx.acct.engine.lock().await.is_none(), "the engine it found is stopped");
             assert!(
@@ -32619,7 +32631,7 @@ mod reauth_tests {
                         assert_eq!(stored_token(&id), token_before, "{name}: and stores no token of B's");
 
                         // The confirmed switch: the full sign-out, which forgets A's email too (spec §5.6).
-                        clear_session_impl(&fx.state, true, None, crate::UnknownFilesArg::Keep)
+                        clear_session_impl(&fx.state, true, None, crate::UnknownFilesArg::Keep, None)
                             .await
                             .unwrap_or_else(|e| panic!("{name}: sign-out: {e}"));
                         assert!(!keychain_vault_key_present(&id), "{name}: A's vault key is gone");
@@ -32695,7 +32707,7 @@ mod reauth_tests {
                         )
                         .unwrap();
                         fx.install_session("tok-a", [1u8; 32], Some("a@beebeeb.io"));
-                        clear_session_impl(&fx.state, forget_email, None, crate::UnknownFilesArg::Keep)
+                        clear_session_impl(&fx.state, forget_email, None, crate::UnknownFilesArg::Keep, None)
                             .await
                             .unwrap_or_else(|e| panic!("{name}: sign-out: {e}"));
                         assert_eq!(
@@ -32739,7 +32751,7 @@ mod reauth_tests {
                     let before = fx.snapshot();
 
                     assert_eq!(
-                        clear_session_impl(&fx.state, true, None, crate::UnknownFilesArg::Keep).await,
+                        clear_session_impl(&fx.state, true, None, crate::UnknownFilesArg::Keep, None).await,
                         Err(SIGN_OUT_EMAIL_NOT_FORGOTTEN.into())
                     );
                     assert_eq!(fx.snapshot(), before, "nothing was torn down");
@@ -34341,7 +34353,7 @@ mod finder_removal_wiring_tests {
         let menu = &source[source.find("DesktopMenuAction::SignOut => {").expect("menu sign-out")..];
         let menu = squash(&menu[..menu.find("DesktopMenuAction::Quit").expect("next arm")]);
         assert!(menu.contains("spawn_menu_task(spec.id,asyncmove{"));
-        assert!(menu.contains("clear_session_impl(&state,false,None,crate::UnknownFilesArg::Keep).await"));
+        assert!(menu.contains("clear_session_impl(&state,false,None,crate::UnknownFilesArg::Keep,None).await"));
         assert!(
             !menu.contains("remove_file_provider_domain"),
             "no removal in the menu handler itself"
@@ -36127,7 +36139,7 @@ mod sign_out_keep_tests {
         keep: Option<&str>,
         seam: SignOutSeam,
     ) -> Result<SignedOut, SignOutFailure> {
-        SIGN_OUT_SEAM.scope(seam, clear_session_impl(state, false, keep, crate::UnknownFilesArg::Keep)).await
+        SIGN_OUT_SEAM.scope(seam, clear_session_impl(state, false, keep, crate::UnknownFilesArg::Keep, None)).await
     }
 
     fn no_seam() -> SignOutSeam {
@@ -36164,7 +36176,7 @@ mod sign_out_keep_tests {
             .unwrap();
             set_auth_present(&state, true);
             let failure = SIGN_OUT_SEAM
-                .scope(no_seam(), clear_session_impl(&state, true, None, crate::UnknownFilesArg::Keep))
+                .scope(no_seam(), clear_session_impl(&state, true, None, crate::UnknownFilesArg::Keep, None))
                 .await
                 .unwrap_err();
             assert!(failure.message.starts_with("unsent_changes: "), "{}", failure.message);
@@ -36735,7 +36747,8 @@ mod sign_out_keep_tests {
             "keep_unsent: Option<KeepUnsentArg>",
             "clear_session_impl(&state, forget_email.unwrap_or(false), keep_unsent.as_ref().map(|keep| keep.ask_id.as_str()),",
             // Task 2191: and the Windows answer for files of unknown content, kept when absent.
-            "unknown_files.unwrap_or(UnknownFilesArg::Keep))",
+            "unknown_files.unwrap_or(UnknownFilesArg::Keep),",
+            "kept_folder.map(std::path::PathBuf::from))",
         ] {
             assert!(
                 command.contains(&crate::source_pin::squeeze(expected)),
@@ -37788,7 +37801,7 @@ mod sign_out_keep_tests {
         let paused = menu.find(".title(\"Sign-out paused\")").unwrap();
         assert!(flow < paused, "the flow arm comes before the error dialog's arm");
         assert!(
-            menu.contains("clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep)"),
+            menu.contains("clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep, None)"),
             "the menu never keeps on its own"
         );
     }
@@ -38426,7 +38439,7 @@ mod sign_out_unchanged_elsewhere_tests {
             let state = AppState::default();
             synthesize_single_account(&state, AccountId("signout-1887-elsewhere".to_string()));
             set_auth_present(&state, false);
-            let result = clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep).await;
+            let result = clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep, None).await;
             #[cfg(target_os = "linux")]
             {
                 assert!(result.is_ok(), "Linux purges as before: {result:?}");

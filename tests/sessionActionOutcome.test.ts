@@ -38,7 +38,7 @@ describe('the SessionActionOutcome contract', () => {
     // `keepUnsent` fills. Task 2191: and `unknown_files`, which `clearSession`'s `unknownFiles` fills (Windows).
     const squeezed = lib.replace(/\s+/g, '')
     expect(squeezed).toContain(
-      'asyncfnclear_session(app:tauri::AppHandle,window:tauri::WebviewWindow,state:State<\'_,AppState>,forget_email:Option<bool>,keep_unsent:Option<KeepUnsentArg>,unknown_files:Option<UnknownFilesArg>,)->Result<SessionActionOutcome,String>{',
+      'asyncfnclear_session(app:tauri::AppHandle,window:tauri::WebviewWindow,state:State<\'_,AppState>,forget_email:Option<bool>,keep_unsent:Option<KeepUnsentArg>,unknown_files:Option<UnknownFilesArg>,kept_folder:Option<String>,)->Result<SessionActionOutcome,String>{',
     )
     expect(lib).toContain('async fn lock_vault(state: State<\'_, AppState>) -> Result<SessionActionOutcome, String> {')
   })

@@ -1219,13 +1219,14 @@ async function sessionAction(name: 'clear_session' | 'lock_vault', args?: Record
  * only while the queue is what that ask showed, and keeps its waiting saves first.
  */
 export function clearSession(
-  options: { forgetEmail?: boolean; keepUnsent?: { askId: string }; unknownFiles?: 'keep' | 'delete' } = {},
+  options: { forgetEmail?: boolean; keepUnsent?: { askId: string }; unknownFiles?: 'keep' | 'delete'; keptFolder?: string } = {},
 ): Promise<CommandResult<SessionActionOutcome>> {
   const args: Record<string, unknown> = {}
   if (options.forgetEmail) args.forgetEmail = true
   if (options.keepUnsent) args.keepUnsent = options.keepUnsent
   // Task 2191 (Windows): the person's answer for files from before the last update.
   if (options.unknownFiles) args.unknownFiles = options.unknownFiles
+  if (options.keptFolder) args.keptFolder = options.keptFolder
   return sessionAction('clear_session', Object.keys(args).length ? args : undefined)
 }
 

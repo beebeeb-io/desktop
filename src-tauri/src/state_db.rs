@@ -2621,6 +2621,16 @@ impl StateDb {
         )
     }
 
+    /// Task 2191 (review-157 F7): `file_id` has agreed content recorded (`local_hash`).
+    pub fn has_agreed_content(&self, file_id: &str) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM files WHERE file_id = ?1 AND local_hash IS NOT NULL)",
+            params![file_id],
+            |r| r.get(0),
+        )
+    }
+
     /// Task 2191: a file of unknown content that is `local` or `cloud_only` (the population the
     /// check resolves; a conflict or an error is the person's to resolve).
     pub fn is_unknown_population(&self, file_id: &str) -> Result<bool> {

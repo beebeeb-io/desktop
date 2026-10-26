@@ -97,7 +97,15 @@ pub(crate) fn guard_rows(
             db.set_mark_pending(&row.file_id, false)?;
             continue;
         };
-        let decision = decide_guard(&view(&path), row.fetched_min_version, in_population(row));
+        let seen = view(&path);
+        // Review-157 F1 (spec row 22): a file that can't be read now (held by another app) may
+        // hold bytes that read in sync; its mark stays pending and is retried every tick.
+        if seen == PlatformView::Unreadable {
+            db.set_mark_pending(&row.file_id, true)?;
+            summary.mark_failed += 1;
+            continue;
+        }
+        let decision = decide_guard(&seen, row.fetched_min_version, in_population(row));
         if decision.mark_empty {
             empty.push(row.file_id.clone());
         }
@@ -156,15 +164,23 @@ pub(crate) fn verify_orphan(
         db.forget_unknown_orphan(rel_path)?;
         return Ok(false);
     };
-    let PlatformView::Placeholder { on_disk, in_sync, identity: Some(identity) } = view(&path) else {
-        db.forget_unknown_orphan(rel_path)?;
-        return Ok(false);
+    let (on_disk, in_sync, identity) = match view(&path) {
+        PlatformView::Placeholder { on_disk, in_sync, identity: Some(identity) } => (on_disk, in_sync, identity),
+        // Review-157 F1: unreadable now (held by another app): kept, and read again next tick.
+        PlatformView::Unreadable => return Ok(false),
+        _ => {
+            db.forget_unknown_orphan(rel_path)?;
+            return Ok(false);
+        }
     };
     let owner = db.get_file(&identity)?;
+    // Review-157 F7: bytes at another path than the owner's are the owner's state's business only
+    // when the owner has agreed content; a row merely marked empty (its new placeholder) says
+    // nothing about what the old place still holds.
     let orphan = on_disk != OnDisk::Nothing
         && match owner {
             None => true,
-            Some(owner) => db.is_unknown_content(&identity)? && !same_place(&owner.path, rel_path),
+            Some(owner) => !db.has_agreed_content(&identity)? && !same_place(&owner.path, rel_path),
         };
     if !orphan {
         db.forget_unknown_orphan(rel_path)?;
@@ -207,7 +223,8 @@ pub(crate) enum ExpectedAt {
 /// Spec D11: the bytes at `rel_path` are kept (or deleted, as asked) as unknown at sign-out only
 /// when the platform agrees with the database: at a guarded file's path, a plain file or a
 /// placeholder of that same file; at an orphan candidate, a placeholder whose identity names a
-/// file of unknown content living elsewhere, or no file at all. Anything else is signed out by
+/// file living elsewhere without agreed content ([`verify_orphan`]'s rule), or no file at all.
+/// `owner_of_identity` is that file's (path, has agreed content). Anything else is signed out by
 /// the ordinary rules, which refuse unsent changes.
 pub(crate) fn unknown_at_signout(
     expected: &ExpectedAt,
@@ -223,7 +240,7 @@ pub(crate) fn unknown_at_signout(
                 && identity.is_some()
                 && match owner_of_identity {
                     None => true,
-                    Some((path, guarded)) => guarded && !same_place(path, rel_path),
+                    Some((path, agreed)) => !agreed && !same_place(path, rel_path),
                 }
         }
     }
@@ -467,6 +484,47 @@ mod tests {
         assert!(db.list_unknown_orphans().unwrap().iter().all(|(path, _, _)| path != "u2.txt"), "forgotten");
     }
 
+    /// Review-157 F1 (spec row 22): a file held by another app can't be read now; its mark stays
+    /// pending and is tried again at the next tick, and an unreadable orphan stays on record.
+    #[test]
+    fn task_2191_an_unreadable_file_keeps_its_mark_pending() {
+        let (dir, db) = db_with(&[("u", "u.pst", FileStatus::Local)]);
+        let root = dir.path().join("root");
+        let rows = db.list_guarded().unwrap();
+        let summary = guard_rows(&db, &root, &rows, &|_: &Path| PlatformView::Unreadable, &mut |_: &Path| -> anyhow::Result<()> { panic!("no mark") }).unwrap();
+        assert_eq!(summary.mark_failed, 1);
+        let mut marks = 0;
+        retry_marks(&db, &root, &|_: &Path| placeholder(OnDisk::Wholly, true), &mut |_: &Path| {
+            marks += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(marks, 1, "readable again: marked at the next tick");
+        db.put_unknown_orphan("old.pst", "u", true).unwrap();
+        retry_marks(&db, &root, &|_: &Path| PlatformView::Unreadable, &mut |_: &Path| Ok(())).unwrap();
+        assert_eq!(db.list_unknown_orphans().unwrap(), vec![("old.pst".into(), "u".into(), true)], "kept for the next tick");
+    }
+
+    /// Review-157 F7: a renamed file's new placeholder marked its row empty (fetched 0, no agreed
+    /// content); the old place, still holding the edit, stays an orphan.
+    #[test]
+    fn task_2191_an_orphan_stays_when_its_owner_was_only_marked_empty() {
+        let (dir, db) = db_with(&[("u", "new.docx", FileStatus::CloudOnly)]);
+        assert!(db.mark_no_fetched_content("u").unwrap(), "precondition: marked empty");
+        let root = dir.path().join("root");
+        db.set_mark_pending("u", false).unwrap();
+        db.put_unknown_orphan("old.docx", "u", true).unwrap();
+        let view = |_: &Path| PlatformView::Placeholder { on_disk: OnDisk::Wholly, in_sync: true, identity: Some("u".into()) };
+        let mut marks = 0;
+        retry_marks(&db, &root, &view, &mut |_: &Path| {
+            marks += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(marks, 1, "marked not in sync");
+        assert_eq!(db.list_unknown_orphans().unwrap(), vec![("old.docx".into(), "u".into(), false)]);
+    }
+
     #[test]
     fn task_2191_an_orphan_of_a_known_file_or_holding_nothing_is_forgotten() {
         let (dir, db) = db_with(&[("k", "k2.txt", FileStatus::Local)]);
@@ -495,11 +553,19 @@ mod tests {
         let at = |needle: &str| production.find(needle).unwrap_or_else(|| panic!("{needle} not found"));
         let seed = at("crate::windows_cf::seed_placeholders(bridge.clone(), &sync_root);");
         let guard = at("crate::windows_cf::guard_unknown_placeholders(&guard_root)).await");
-        let retry = at("crate::windows_cf::retry_pending_marks(&stamp_root);");
-        let stamp = at("crate::windows_cf::stamp_local_files_in_sync(&stamp_root);");
         let tick = at("let mut tick = tokio::time::interval(TICK_INTERVAL);");
+        let after = |from: usize, needle: &str| from + production[from..].find(needle).unwrap_or_else(|| panic!("{needle} not found"));
+        const PAUSED: &str = "if sync_paused.load(Ordering::Relaxed) {";
+        let retry = after(tick, "crate::windows_cf::retry_pending_marks(&mark_root)).await");
+        let paused = after(retry, PAUSED);
+        let stamp = after(paused, "crate::windows_cf::stamp_local_files_in_sync(&stamp_root);");
         assert!(seed < guard && guard < tick, "the guard runs after seeding and before the tick loop, awaited");
-        assert!(retry < stamp, "every tick: the pending marks before the stamp pass");
+        assert!(
+            !production[tick..retry].contains(PAUSED),
+            "every tick, paused included: the pending marks come before the loop's pause check (review-157 F2)"
+        );
+        assert!(paused < stamp);
+        assert_eq!(production.matches("retry_pending_marks(").count(), 1, "one call, on every tick");
     }
 
     /// Self-review: at a drive root the copies go to the home folder, never into the sync folder.
@@ -521,12 +587,12 @@ mod tests {
         let guarded = ExpectedAt::Guarded("u".into());
         assert!(unknown_at_signout(&guarded, "a.txt", false, None, None), "a plain file at a guarded path");
         assert!(unknown_at_signout(&guarded, "a.txt", true, Some("u"), None), "its own placeholder");
-        assert!(!unknown_at_signout(&guarded, "a.txt", true, Some("k"), Some(("a.txt", false))), "another file's: ordinary rules");
+        assert!(!unknown_at_signout(&guarded, "a.txt", true, Some("k"), Some(("a.txt", true))), "another file's: ordinary rules");
         let candidate = ExpectedAt::OrphanCandidate;
-        assert!(unknown_at_signout(&candidate, "a.txt", true, Some("u"), Some(("b.txt", true))), "unknown, lives elsewhere");
+        assert!(unknown_at_signout(&candidate, "a.txt", true, Some("u"), Some(("b.txt", false))), "no agreed content, lives elsewhere");
         assert!(unknown_at_signout(&candidate, "a.txt", true, Some("gone"), None), "no file at all");
-        assert!(!unknown_at_signout(&candidate, "a.txt", true, Some("k"), Some(("b.txt", false))), "a known file's: ordinary rules");
-        assert!(!unknown_at_signout(&candidate, "a.txt", true, Some("u"), Some(("a.txt", true))), "its own place");
+        assert!(!unknown_at_signout(&candidate, "a.txt", true, Some("k"), Some(("b.txt", true))), "a file with agreed content: ordinary rules");
+        assert!(!unknown_at_signout(&candidate, "a.txt", true, Some("u"), Some(("a.txt", false))), "its own place");
         assert!(!unknown_at_signout(&candidate, "a.txt", false, None, None), "a plain file: ordinary rules");
     }
 

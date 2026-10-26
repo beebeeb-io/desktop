@@ -231,7 +231,7 @@ fn prepare_unknown(
     // path goes through the ordinary rules, which refuse unsent changes.
     let (placeholder, identity) = super::placeholders::handle_identity(&file);
     let owner = match identity.as_deref() {
-        Some(id) => db.get_file(id)?.map(|row| (row.path, db.is_unknown_content(id).unwrap_or(false))),
+        Some(id) => db.get_file(id)?.map(|row| (row.path, db.has_agreed_content(id).unwrap_or(true))),
         None => None,
     };
     let rel_db = relative.replace('\\', "/");
