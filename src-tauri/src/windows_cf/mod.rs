@@ -1346,11 +1346,52 @@ const MAX_IN_SYNC_STAMPS_PER_PASS: usize = 512;
 /// Task 1640 (review N13): retry the removal of every kept copy's original that was in use when
 /// the copy was made ([`crate::engine_bridge::retry_kept_originals`]).
 #[cfg(target_os = "windows")]
+/// Task 2191 (D2, D9): at engine start, before the first tick, every file of unknown content
+/// (synced before task 1640) whose placeholder holds bytes and reads in sync is marked NOT in
+/// sync, so neither this app, Explorer nor Storage Sense frees it. No network. Counts only.
+pub fn guard_unknown_placeholders(sync_root: &std::path::Path) {
+    let Some(bridge) = bridge() else {
+        return;
+    };
+    let rows = match bridge.db().list_guarded() {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(error = %e, "guard: could not list the files of unknown content");
+            return;
+        }
+    };
+    let mut mark = |path: &std::path::Path| placeholders::mark_not_in_sync_path(path);
+    match crate::unknown_check::guard_rows(bridge.db(), sync_root, &rows, &placeholders::platform_view, &mut mark) {
+        Ok(summary) => tracing::info!(
+            guarded = rows.len(),
+            marked = summary.marked,
+            emptied = summary.emptied,
+            mark_failed = summary.mark_failed,
+            "guard: files of unknown content kept from being freed"
+        ),
+        Err(e) => tracing::warn!(error = %e, "guard: the start-up pass stopped"),
+    }
+}
+
+/// Task 2191 (D2, D12): every tick, the marks still to be made (a failed one, a row that joined
+/// the guarded set, a placeholder left at another path). No network. Counts only.
+pub fn retry_pending_marks(sync_root: &std::path::Path) {
+    let Some(bridge) = bridge() else {
+        return;
+    };
+    let mut mark = |path: &std::path::Path| placeholders::mark_not_in_sync_path(path);
+    match crate::unknown_check::retry_marks(bridge.db(), sync_root, &placeholders::platform_view, &mut mark) {
+        Ok(0) => {}
+        Ok(marked) => tracing::info!(marked, "guard: pending marks made"),
+        Err(e) => tracing::warn!(error = %e, "guard: the retry stopped"),
+    }
+}
+
 pub fn retry_kept_originals(sync_root: &std::path::Path) {
     let Some(bridge) = bridge() else {
         return;
     };
-    crate::engine_bridge::retry_kept_originals(bridge.db(), sync_root, &placeholders::placeholder_local_entry);
+    crate::engine_bridge::retry_kept_originals(bridge.db(), sync_root, &placeholders::placeholder_local_entry_trusting);
 }
 
 /// Task 1640 (review P2-5): a file's size and modification time.

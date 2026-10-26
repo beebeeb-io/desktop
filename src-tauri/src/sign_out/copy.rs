@@ -154,7 +154,24 @@ pub fn k1(n: usize) -> Option<String> {
 
 /// §9: one alert per sign-out. Ours first (K1, a blank line, our path), then a blank line and 1882's body verbatim.
 /// Only macOS's: 1882's body byte for byte. Neither: no alert.
+/// Task 2191 (D11): the Windows sign-out kept files of unknown content beside the sync folder.
+pub const W0_TITLE: &str = "Files kept on this PC";
+pub const W1_ONE: &str = "Beebeeb copied 1 file from before the last update to this folder on this PC, because it may hold changes the server doesn’t have. The copy isn’t encrypted:";
+pub const W1_MANY: &str = "Beebeeb copied {n} files from before the last update to this folder on this PC, because they may hold changes the server doesn’t have. The copies aren’t encrypted:";
+
+pub fn w1(n: usize) -> Option<String> {
+    match n {
+        0 => None,
+        1 => Some(W1_ONE.to_string()),
+        n => Some(fill(W1_MANY, "{n}", n)),
+    }
+}
+
 pub fn sign_out_alert(ours: Option<(&str, usize)>, macos: Option<&str>) -> Option<(&'static str, String)> {
+    #[cfg(target_os = "windows")]
+    if let Some((path, files)) = ours {
+        return w1(files).map(|line| (W0_TITLE, format!("{line}\n\n{path}")));
+    }
     let ours = ours.and_then(|(path, files)| k1(files).map(|line| format!("{line}\n\n{path}")));
     let macos = macos.map(crate::finder_removal::preserved_files_message);
     let body = match (ours, macos) {
@@ -169,6 +186,14 @@ pub fn sign_out_alert(ours: Option<(&str, usize)>, macos: Option<&str>) -> Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Task 2191: the Windows kept-files lines.
+    #[test]
+    fn task_2191_the_windows_kept_files_lines() {
+        assert_eq!(w1(0), None);
+        assert!(w1(1).unwrap().starts_with("Beebeeb copied 1 file from before the last update"));
+        assert!(w1(3).unwrap().contains("3 files") && w1(3).unwrap().contains("aren’t encrypted"));
+    }
 
     /// U24.
     #[test]

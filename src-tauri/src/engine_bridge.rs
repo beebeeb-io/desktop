@@ -3424,6 +3424,11 @@ impl EngineBridge {
         // placeholder write as a new upload.
         #[cfg(target_os = "windows")]
         if crate::windows_cf::placeholders::is_cloud_placeholder(path) {
+            // Task 2191 (D12): an untracked placeholder may be one a remote rename left behind,
+            // holding unknown bytes; the tick's retry checks its identity.
+            if let Err(e) = self.db.put_unknown_orphan(&rel, "", true) {
+                tracing::debug!(error = %e, "classify_local_path: could not record an untracked placeholder");
+            }
             tracing::debug!(
                 path = %path.display(),
                 "classify_local_path: rejected Cloud Files placeholder"
@@ -3834,7 +3839,7 @@ impl EngineBridge {
     /// fetch fallback. Returns `None` for an empty key or any `.`/`..`/empty
     /// segment, or if the join escapes the root.
     #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
-    fn placeholder_path_under(sync_root: &Path, rel_path: &str) -> Option<PathBuf> {
+    pub(crate) fn placeholder_path_under(sync_root: &Path, rel_path: &str) -> Option<PathBuf> {
         let rel = rel_path.trim_matches('/');
         if rel.is_empty() {
             return None;
@@ -4257,7 +4262,13 @@ impl EngineBridge {
         let legacy_version = self.legacy_download_version(file_id)?;
         if in_sync_folder && dest_path.exists() {
             let content = sync_folder_content(&self.db, file_id, dest_path, None)?;
-            if matches!(content, SyncFolderContent::Changed { .. } | SyncFolderContent::Queued) {
+            // Task 2191 (G-engine): a file of unknown content (in the population, conflicts and
+            // errors excepted: their resolution is the person's) is never written over while its
+            // place holds bytes; they may be the person's only copy of a change.
+            let unknown_with_bytes = matches!(content, SyncFolderContent::Unknown)
+                && self.db.is_unknown_population(file_id)?
+                && place_holds_bytes(dest_path);
+            if unknown_with_bytes || matches!(content, SyncFolderContent::Changed { .. } | SyncFolderContent::Queued) {
                 tracing::warn!(file_id = %file_id, "hydrate refused: the local file holds a change that is not sent");
                 return Err(anyhow::Error::new(UnsentLocalChange));
             }
@@ -5829,6 +5840,22 @@ pub(crate) enum SyncFolderContent {
 /// state of its placeholder (Windows; `None` elsewhere): the platform clears it when the bytes
 /// change, and this engine sets it only on agreed content, so `Some(true)` is agreed without
 /// reading the file. The file is read only when an agreed hash is recorded.
+/// Task 2191: whether `path` holds bytes on this PC (a placeholder partly or wholly on disk, or
+/// a plain file). Unreadable counts as holding bytes.
+fn place_holds_bytes(path: &Path) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        !matches!(
+            crate::windows_cf::placeholders::placeholder_local_entry_trusting(path, false),
+            LocalEntry::NothingLocal
+        )
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::fs::metadata(path).is_ok_and(|meta| meta.len() > 0)
+    }
+}
+
 pub(crate) fn sync_folder_content(
     db: &StateDb,
     file_id: &str,
@@ -5838,7 +5865,9 @@ pub(crate) fn sync_folder_content(
     if db.sync_folder_upload_queued(file_id)? {
         return Ok(SyncFolderContent::Queued);
     }
-    if os_in_sync == Some(true) {
+    // Task 2191 (G-engine): a file of unknown content (synced before task 1640) may hold an edit
+    // that 0.8.12 marked in sync, so the platform's in-sync state never makes it Agreed.
+    if os_in_sync == Some(true) && !db.is_unknown_content(file_id)? {
         return Ok(SyncFolderContent::Agreed);
     }
     let Some(contract) = db.get_file_contract_state(file_id)? else {
@@ -8135,6 +8164,7 @@ fn apply_metadata_file_row(
     } else {
         ItemKind::File
     };
+    let is_file = item_kind == ItemKind::File;
     let server_parent_id = match held.as_ref() {
         Some(entry) => entry.parent_id.clone(),
         None => f["parent_id"].as_str().map(str::to_string),
@@ -8191,6 +8221,16 @@ fn apply_metadata_file_row(
     // new place: it becomes mixed, its version kept.
     if moved {
         db.poison_fetched_content(file_id)?;
+    }
+    // Task 2191 (D12, review-114 F-P1-7, R2-P2-2): a remote rename or move leaves this file's
+    // placeholder at the old path (T9), and the new path may still hold another file's. Both
+    // places are recorded for the tick's retry (Windows), which keeps one only when the identity
+    // there names a file of unknown content living elsewhere (`unknown_check::verify_orphan`).
+    if moved && cfg!(any(target_os = "windows", test)) && is_file {
+        if let Some(previous) = existing.as_ref() {
+            db.put_unknown_orphan(&previous.path, file_id, true)?;
+        }
+        db.put_unknown_orphan(&entry.path, file_id, true)?;
     }
     Ok(Some(entry))
 }
@@ -8926,7 +8966,7 @@ fn remove_pruned_entries(
     db: &StateDb,
     sync_root: &Path,
     rows: &[crate::state_db::PrunedRow],
-    local: &dyn Fn(&Path) -> LocalEntry,
+    local: &dyn Fn(&Path, bool) -> LocalEntry,
 ) {
     let mut removed_dirs: HashSet<PathBuf> = rows
         .iter()
@@ -8947,9 +8987,11 @@ fn remove_pruned_entries(
         }
         // The remove itself registers with the watcher right before it happens (`engine_remove`),
         // so the NOTIFY_DELETE_COMPLETION it fires queues no trash.
-        let state = if row.is_dir { LocalEntry::InSync } else { local(&path) };
-        let copy_dir = kept_copy_dir(db, sync_root, &path, &removed_dirs);
         let agreed = row.local_hash.as_deref().or(row.fetched_hash.as_deref());
+        // Task 2191 (G-engine, review-114 F-P1-4): the platform's in-sync state is trusted only
+        // for a file with agreed content; one of unknown content is read by its size on disk.
+        let state = if row.is_dir { LocalEntry::InSync } else { local(&path, agreed.is_some()) };
+        let copy_dir = kept_copy_dir(db, sync_root, &path, &removed_dirs);
         match remove_pruned_entry(&path, row.is_dir, agreed, state, &copy_dir) {
             PrunedEntry::Removed if !row.is_dir => remove_office_owner_files(&path),
             PrunedEntry::Removed | PrunedEntry::Gone => {}
@@ -9004,7 +9046,7 @@ fn remove_pruned_entries(
 /// server lists again (restored on the web, or another file moved there) is left alone and no
 /// longer waits. Then every kept folder that is empty now is removed (review F3).
 #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
-pub(crate) fn retry_kept_originals(db: &StateDb, sync_root: &Path, local: &dyn Fn(&Path) -> LocalEntry) {
+pub(crate) fn retry_kept_originals(db: &StateDb, sync_root: &Path, local: &dyn Fn(&Path, bool) -> LocalEntry) {
     // Review-151d P2-1: a dismissed entry's tombstone goes once its file is gone, or once the place
     // is the server's again.
     for (id, rel) in db.list_dismissed_kept_originals().unwrap_or_default() {
@@ -9052,7 +9094,8 @@ pub(crate) fn retry_kept_originals(db: &StateDb, sync_root: &Path, local: &dyn F
         let copy_dir = kept_copy_dir(db, sync_root, &original, &removed_dirs);
         let agreed = Some(copy.copied_hash.as_str()).filter(|hash| !hash.is_empty());
         // Review F2: the engine's own remove queues no trash (`engine_remove` registers it).
-        match remove_pruned_entry(&original, false, agreed, local(&original), &copy_dir) {
+        // Task 2191 (review-114 F-P1-4): an entry with no agreed content never trusts in sync.
+        match remove_pruned_entry(&original, false, agreed, local(&original, agreed.is_some()), &copy_dir) {
             PrunedEntry::Removed | PrunedEntry::Gone => {
                 remove_office_owner_files(&original);
                 resolve(&copy);
@@ -9171,7 +9214,7 @@ fn held_only_for_kept(db: &StateDb, sync_root: &Path, dir: &Path, depth: usize) 
 
 #[cfg(target_os = "windows")]
 fn remove_pruned_placeholders(db: &StateDb, sync_root: &Path, rows: &[crate::state_db::PrunedRow]) {
-    remove_pruned_entries(db, sync_root, rows, &crate::windows_cf::placeholders::placeholder_local_entry);
+    remove_pruned_entries(db, sync_root, rows, &crate::windows_cf::placeholders::placeholder_local_entry_trusting);
 }
 
 /// No-op stand-in on non-Windows builds so the call sites stay platform-agnostic.
@@ -27382,8 +27425,11 @@ mod tests {
         .unwrap();
         let content = |os_in_sync| sync_folder_content(&db, "f", &path, os_in_sync).unwrap();
         assert_eq!(content(None), SyncFolderContent::Unknown, "no agreed content recorded");
-        assert_eq!(content(Some(true)), SyncFolderContent::Agreed, "the platform says in sync");
+        // Task 2191 (G-engine): with no agreed content recorded, the platform's "in sync" is not
+        // agreement (0.8.12 marked edits in sync). It was Agreed before 2191.
+        assert_eq!(content(Some(true)), SyncFolderContent::Unknown, "in sync, but the content is unknown");
         db.record_local_baseline("f", 3, &sha256_hex(b"agreed")).unwrap();
+        assert_eq!(content(Some(true)), SyncFolderContent::Agreed, "the platform says in sync");
         assert_eq!(content(None), SyncFolderContent::Agreed);
         std::fs::write(&path, b"edited").unwrap();
         assert_eq!(content(None), SyncFolderContent::Changed { base: Some(3) });
@@ -27488,7 +27534,7 @@ mod tests {
         // The web trashed the folder: the `file_trash` op's rows.
         let rows = db.mark_subtree_trashing("folder-docs").unwrap();
         assert_eq!(rows.len(), 2, "the folder and its file");
-        remove_pruned_entries(&db, &sync_root, &rows, &|_| LocalEntry::WhollyLocal);
+        remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::WhollyLocal);
         regression_1640_assert_kept_as_a_copy(&db, &sync_root);
     }
 
@@ -27501,7 +27547,7 @@ mod tests {
         let seen: HashSet<String> = ["a-file-the-snapshot-still-lists".to_string()].into();
         let rows = db.prune_absent(&seen, 1_800_000_000).unwrap();
         assert_eq!(rows.len(), 2, "the folder and its file");
-        remove_pruned_entries(&db, &sync_root, &rows, &|_| LocalEntry::WhollyLocal);
+        remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::WhollyLocal);
         regression_1640_assert_kept_as_a_copy(&db, &sync_root);
     }
 
@@ -27510,9 +27556,123 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
         let rows = db.mark_subtree_trashing("folder-docs").unwrap();
-        remove_pruned_entries(&db, &sync_root, &rows, &|_| LocalEntry::InSync);
+        remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::InSync);
         assert!(!sync_root.join("docs").exists(), "agreed bytes and the then-empty folder are removed");
         assert!(version_conflict_feed_from_db(&db).unwrap().is_empty());
+    }
+
+    // ── Task 2191 S1: files of unknown content (synced before task 1640) are never freed unread ──
+
+    /// G-engine (review-114 F-P1-4): a remote deletion of a file of unknown content never takes
+    /// the platform's "in sync" for agreement (0.8.12 marked edits in sync): it is read by size,
+    /// so a wholly local one is copied first. A file with agreed content is trusted as before.
+    #[test]
+    fn task_2191_a_remote_deletion_copies_an_unknown_file_the_platform_calls_in_sync() {
+        let by_trust = |_: &Path, trust: bool| if trust { LocalEntry::InSync } else { LocalEntry::WhollyLocal };
+        let dir = tempfile::tempdir().unwrap();
+        let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
+        let rows = db.mark_subtree_trashing("folder-docs").unwrap();
+        remove_pruned_entries(&db, &sync_root, &rows, &by_trust);
+        regression_1640_assert_kept_as_a_copy(&db, &sync_root);
+        let known = tempfile::tempdir().unwrap();
+        let (db, sync_root) = regression_1640_edited_file_in_a_folder(known.path());
+        db.record_local_baseline("file-notes", 2, &sha256_hex(b"the agreed bytes")).unwrap();
+        let rows = db.mark_subtree_trashing("folder-docs").unwrap();
+        remove_pruned_entries(&db, &sync_root, &rows, &by_trust);
+        assert!(!sync_root.join("docs").exists(), "known content in sync: removed as before");
+        assert!(!sync_root.join("notes (this PC).txt").exists());
+    }
+
+    /// Review-114 F-P1-4: the retry of a kept original recorded with no agreed content never
+    /// removes it as "in sync": once it can be read, it is copied first.
+    #[test]
+    fn task_2191_the_retry_never_removes_an_unknown_file_unread() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
+        let rows = db.mark_subtree_trashing("folder-docs").unwrap();
+        remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::Unreadable);
+        assert!(sync_root.join("docs").join("notes.txt").exists(), "precondition: kept where it is, in use");
+        retry_kept_originals(&db, &sync_root, &|_, trust| if trust { LocalEntry::InSync } else { LocalEntry::WhollyLocal });
+        assert_eq!(
+            std::fs::read(sync_root.join("notes (this PC).txt")).unwrap(),
+            b"edited, never sent",
+            "copied before the original went"
+        );
+    }
+
+    /// G-engine: in sync is never agreement for a file of unknown content; with agreed content
+    /// recorded, it is.
+    #[test]
+    fn task_2191_an_unknown_file_in_sync_is_never_agreed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
+        let path = sync_root.join("docs").join("notes.txt");
+        assert_eq!(sync_folder_content(&db, "file-notes", &path, Some(true)).unwrap(), SyncFolderContent::Unknown);
+        db.record_local_baseline("file-notes", 1, &sha256_hex(b"edited, never sent")).unwrap();
+        assert_eq!(sync_folder_content(&db, "file-notes", &path, Some(true)).unwrap(), SyncFolderContent::Agreed);
+    }
+
+    /// G-engine: a hydrate never writes over a file of unknown content that holds bytes; a
+    /// conflict is the person's to resolve and is not refused.
+    #[tokio::test]
+    async fn task_2191_a_hydrate_never_writes_over_an_unknown_file() {
+        let master_key = [191u8; 32];
+        let file = "21910000-0000-4000-8000-000000000001";
+        let (_dir, sync_root, server, bridge, local) = regression_1640_synced_file(master_key, file).await;
+        bridge
+            .db
+            .test_execute(&format!("UPDATE files SET local_hash = NULL, fetched_min_version = -1 WHERE file_id = '{file}'"))
+            .unwrap();
+        std::fs::write(&local, b"an edit 0.8.12 never sent").unwrap();
+        let refused = bridge.hydrate_file(file, &local, &[sync_root.as_path()]).await.unwrap_err();
+        assert!(refused.is::<UnsentLocalChange>(), "{refused:#}");
+        assert_eq!(std::fs::read(&local).unwrap(), b"an edit 0.8.12 never sent");
+        bridge.db.set_status(file, FileStatus::Conflict).unwrap();
+        bridge.hydrate_file(file, &local, &[sync_root.as_path()]).await.unwrap();
+        drop(server.finish());
+    }
+
+    /// D12 (review-114 F-P1-7, R2-P2-2): a remote rename of a file records both its old and its
+    /// new place for the guard's retry, which checks each one's identity.
+    #[test]
+    fn task_2191_a_web_rename_records_both_places_for_the_guard() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let master_key = [192u8; 32];
+        let file_id = "21910000-0000-4000-8000-000000000002";
+        let mk = beebeeb_core::kdf::MasterKey::from_bytes(master_key);
+        let row = |name: &str| {
+            serde_json::json!({
+                "id": file_id,
+                "name_encrypted": beebeeb_core::encrypt::encrypt_name(&mk, file_id, name, None).unwrap(),
+                "size_bytes": 5,
+                "updated_at": 100,
+                "is_folder": false,
+            })
+        };
+        let pull = |name: &str| {
+            apply_metadata_file_row(
+                &db,
+                &row(name),
+                Namespace::MyFiles,
+                None,
+                None,
+                PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER,
+                200,
+                &master_key,
+                "",
+            )
+            .unwrap()
+        };
+        pull("a.docx");
+        assert!(db.list_unknown_orphans().unwrap().is_empty(), "no move, nothing recorded");
+        pull("b.docx");
+        let mut recorded = db.list_unknown_orphans().unwrap();
+        recorded.sort();
+        assert_eq!(
+            recorded,
+            vec![("a.docx".into(), file_id.into(), true), ("b.docx".into(), file_id.into(), true)]
+        );
     }
 
     /// Review N2: an atomic save leaves a plain file (never in sync) holding the agreed bytes. It
@@ -27523,7 +27683,7 @@ mod tests {
         let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
         db.record_local_baseline("file-notes", 2, &sha256_hex(b"edited, never sent")).unwrap();
         let rows = db.mark_subtree_trashing("folder-docs").unwrap();
-        remove_pruned_entries(&db, &sync_root, &rows, &|_| LocalEntry::WhollyLocal);
+        remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::WhollyLocal);
         assert!(!sync_root.join("docs").exists(), "removed, folder and all");
         assert!(!sync_root.join("notes (this PC).txt").exists(), "no copy of the agreed bytes");
         assert!(db.list_kept_copies().unwrap().is_empty());
@@ -27536,7 +27696,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
         let rows = db.mark_subtree_trashing("folder-docs").unwrap();
-        remove_pruned_entries(&db, &sync_root, &rows, &|_| LocalEntry::PartlyLocal);
+        remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::PartlyLocal);
         assert_eq!(
             std::fs::read(sync_root.join("docs").join("notes.txt")).unwrap(),
             b"edited, never sent",
@@ -27551,9 +27711,9 @@ mod tests {
         );
         // Review F4: a second remote op leaves it to the retry (no second entry); the retry
         // removes it once nothing is on disk, and its entry goes (nothing was kept).
-        remove_pruned_entries(&db, &sync_root, &rows, &|_| LocalEntry::NothingLocal);
+        remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::NothingLocal);
         assert_eq!(db.list_kept_copies().unwrap().len(), 1, "no second entry");
-        retry_kept_originals(&db, &sync_root, &|_| LocalEntry::NothingLocal);
+        retry_kept_originals(&db, &sync_root, &|_, _| LocalEntry::NothingLocal);
         assert!(!sync_root.join("docs").exists(), "nothing on disk: removed, and the emptied folder too");
         assert!(db.list_kept_copies().unwrap().is_empty(), "nothing kept: no entry");
     }
@@ -27566,16 +27726,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
         let rows = db.mark_subtree_trashing("folder-docs").unwrap();
-        remove_pruned_entries(&db, &sync_root, &rows, &|_| LocalEntry::PartlyLocal);
-        remove_pruned_entries(&db, &sync_root, &rows, &|_| LocalEntry::PartlyLocal);
+        remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::PartlyLocal);
+        remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::PartlyLocal);
         for _ in 0..3 {
-            retry_kept_originals(&db, &sync_root, &|_| LocalEntry::PartlyLocal);
+            retry_kept_originals(&db, &sync_root, &|_, _| LocalEntry::PartlyLocal);
         }
         assert_eq!(db.list_kept_copies().unwrap().len(), 1, "one entry, no loop");
         let feed = version_conflict_feed_from_db(&db).unwrap();
         assert_eq!((feed.len(), feed[0].status.as_str(), feed[0].action.as_str()), (1, "kept in place", "dismiss"));
         // Now wholly on disk: resolved.
-        retry_kept_originals(&db, &sync_root, &|_| LocalEntry::WhollyLocal);
+        retry_kept_originals(&db, &sync_root, &|_, _| LocalEntry::WhollyLocal);
         assert!(!sync_root.join("docs").join("notes.txt").exists(), "the original is removed");
         assert_eq!(
             std::fs::read(sync_root.join("notes (this PC).txt")).unwrap(),
@@ -27601,7 +27761,7 @@ mod tests {
         // A new file the upload driver has not sent yet: no row at all.
         std::fs::write(sync_root.join("docs").join("new.txt"), b"not uploaded yet").unwrap();
         let rows = db.mark_subtree_trashing("folder-docs").unwrap();
-        remove_pruned_entries(&db, &sync_root, &rows, &|_| LocalEntry::InSync);
+        remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::InSync);
         assert!(!sync_root.join("docs").join("notes.txt").exists(), "the agreed file is removed");
         assert_eq!(
             std::fs::read(sync_root.join("docs").join("new.txt")).unwrap(),
@@ -27642,7 +27802,7 @@ mod tests {
         let (_dir, sync_root, server, bridge) = rule3_setup(master_key);
         regression_1640_edited_file_in_a_folder_in(&bridge.db, &sync_root);
         let rows = bridge.db.mark_subtree_trashing("folder-docs").unwrap();
-        remove_pruned_entries(&bridge.db, &sync_root, &rows, &|_| LocalEntry::WhollyLocal);
+        remove_pruned_entries(&bridge.db, &sync_root, &rows, &|_, _| LocalEntry::WhollyLocal);
         let copy = sync_root.join("notes (this PC).txt");
         assert!(crate::watcher::dispatch_local_create(&bridge, &sync_root, &copy, "scan"));
         drain_upload_queue(&bridge, &sync_root).await;
@@ -27673,7 +27833,7 @@ mod tests {
         let rows = db.mark_subtree_trashing("folder-docs").unwrap();
         // The original cannot be removed: its folder refuses changes.
         std::fs::set_permissions(&docs, std::fs::Permissions::from_mode(0o555)).unwrap();
-        remove_pruned_entries(&db, &sync_root, &rows, &|_| LocalEntry::WhollyLocal);
+        remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::WhollyLocal);
         let kept = db.list_kept_copies().unwrap();
         assert_eq!((kept.len(), kept[0].original_removed), (1, false), "copied; the original stays for now");
         assert!(db.is_kept_original_pending("docs/notes.txt").unwrap(), "the upload driver skips it");
@@ -27684,10 +27844,10 @@ mod tests {
                 .filter(|entry| entry.as_ref().unwrap().file_name().to_string_lossy().contains("(this PC"))
                 .count()
         };
-        retry_kept_originals(&db, &sync_root, &|_| LocalEntry::WhollyLocal);
+        retry_kept_originals(&db, &sync_root, &|_, _| LocalEntry::WhollyLocal);
         assert_eq!(copies(&sync_root), 1, "still in use: retried later, not copied again");
         std::fs::set_permissions(&docs, std::fs::Permissions::from_mode(0o755)).unwrap();
-        retry_kept_originals(&db, &sync_root, &|_| LocalEntry::WhollyLocal);
+        retry_kept_originals(&db, &sync_root, &|_, _| LocalEntry::WhollyLocal);
         assert!(!docs.join("notes.txt").exists(), "a later tick removes the original");
         assert_eq!(copies(&sync_root), 1, "and never copies the same bytes twice");
         assert!(!db.is_kept_original_pending("docs/notes.txt").unwrap());
@@ -28392,7 +28552,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
         let rows = db.mark_subtree_trashing("folder-docs").unwrap();
-        remove_pruned_entries(&db, &sync_root, &rows, &|_| LocalEntry::Unreadable);
+        remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::Unreadable);
         let kept = db.list_kept_copies().unwrap();
         assert_eq!((kept.len(), kept[0].reason, kept[0].dismissable()), (1, KeptReason::InUse, false));
         assert!(sync_root.join("docs").join("notes.txt").exists(), "kept");
@@ -28401,9 +28561,9 @@ mod tests {
         let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
         let rows = db.mark_subtree_trashing("folder-docs").unwrap();
         std::fs::set_permissions(&sync_root, std::fs::Permissions::from_mode(0o555)).unwrap();
-        remove_pruned_entries(&db, &sync_root, &rows, &|_| LocalEntry::WhollyLocal);
+        remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::WhollyLocal);
         std::fs::set_permissions(&sync_root, std::fs::Permissions::from_mode(0o755)).unwrap();
-        retry_kept_originals(&db, &sync_root, &|_| LocalEntry::PartlyLocal);
+        retry_kept_originals(&db, &sync_root, &|_, _| LocalEntry::PartlyLocal);
         let kept = db.list_kept_copies().unwrap();
         assert_eq!((kept.len(), kept[0].reason, kept[0].dismissable()), (1, KeptReason::CopyFailed, false));
     }
@@ -28421,9 +28581,9 @@ mod tests {
         std::fs::write(docs.join("notes.txt~"), b"the editor's backup").unwrap();
         std::fs::write(docs.join("big.zip.part"), b"a download not finished").unwrap();
         let rows = db.delete_file_subtree("folder-docs").unwrap();
-        remove_pruned_entries(&db, &sync_root, &rows, &|_| LocalEntry::PartlyLocal);
+        remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::PartlyLocal);
         assert!(docs.exists(), "precondition: kept for the file");
-        retry_kept_originals(&db, &sync_root, &|_| LocalEntry::NothingLocal);
+        retry_kept_originals(&db, &sync_root, &|_, _| LocalEntry::NothingLocal);
         assert!(!docs.join("notes.txt").exists(), "the original is removed");
         assert!(!docs.join("~$tes.txt").exists(), "and its owner file");
         assert_eq!(std::fs::read(docs.join("notes.txt~")).unwrap(), b"the editor's backup", "never synced: kept");
@@ -28431,7 +28591,7 @@ mod tests {
         assert_eq!(db.list_removed_folders().unwrap(), vec!["docs".to_string()], "still the server's deletion");
         std::fs::remove_file(docs.join("notes.txt~")).unwrap();
         std::fs::remove_file(docs.join("big.zip.part")).unwrap();
-        retry_kept_originals(&db, &sync_root, &|_| LocalEntry::NothingLocal);
+        retry_kept_originals(&db, &sync_root, &|_, _| LocalEntry::NothingLocal);
         assert!(!docs.exists(), "empty: removed");
         assert!(db.list_removed_folders().unwrap().is_empty());
     }
@@ -28447,6 +28607,8 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "DROP TRIGGER IF EXISTS files_cloud_only_folds_agreed_into_candidate;
+                 DROP TRIGGER IF EXISTS files_unknown_marks_after_insert;
+                 DROP TRIGGER IF EXISTS files_unknown_marks_after_update;
                  ALTER TABLE files DROP COLUMN fetched_min_version;
                  ALTER TABLE files ADD COLUMN fetched_version INTEGER NOT NULL DEFAULT 0;
                  INSERT INTO files (file_id, path, status) VALUES ('old', 'old.txt', 'local');",
@@ -28474,7 +28636,7 @@ mod tests {
             let docs = sync_root.join("docs");
             let rows = db.mark_subtree_trashing("folder-docs").unwrap();
             std::fs::set_permissions(&docs, std::fs::Permissions::from_mode(0o555)).unwrap();
-            remove_pruned_entries(&db, &sync_root, &rows, &|_| LocalEntry::WhollyLocal);
+            remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::WhollyLocal);
             std::fs::set_permissions(&docs, std::fs::Permissions::from_mode(0o755)).unwrap();
             assert!(db.is_kept_original_pending("docs/notes.txt").unwrap(), "{case}: precondition");
             if case == "restored on the web" {
@@ -28495,7 +28657,7 @@ mod tests {
                 })
                 .unwrap();
             }
-            retry_kept_originals(&db, &sync_root, &|_| LocalEntry::WhollyLocal);
+            retry_kept_originals(&db, &sync_root, &|_, _| LocalEntry::WhollyLocal);
             if case == "restored on the web" {
                 assert_eq!(
                     std::fs::read(docs.join("notes.txt")).unwrap(),
@@ -28524,12 +28686,12 @@ mod tests {
         regression_1640_edited_file_in_a_folder_in(&bridge.db, &sync_root);
         let docs = sync_root.join("docs");
         let rows = bridge.db.delete_file_subtree("folder-docs").unwrap();
-        remove_pruned_entries(&bridge.db, &sync_root, &rows, &|_| LocalEntry::PartlyLocal);
+        remove_pruned_entries(&bridge.db, &sync_root, &rows, &|_, _| LocalEntry::PartlyLocal);
         assert!(docs.join("notes.txt").exists(), "precondition: kept in place");
         assert_eq!(bridge.ensure_local_folder(&sync_root, &docs), None, "not created again");
         assert!(bridge.db.get_file_by_path("docs").unwrap().is_none(), "no folder row, no CreateFolder");
         // Now wholly on disk: copied where it can upload, the original and the folder removed.
-        retry_kept_originals(&bridge.db, &sync_root, &|_| LocalEntry::WhollyLocal);
+        retry_kept_originals(&bridge.db, &sync_root, &|_, _| LocalEntry::WhollyLocal);
         assert_eq!(std::fs::read(sync_root.join("notes (this PC).txt")).unwrap(), b"edited, never sent");
         assert!(!docs.exists(), "the emptied folder is removed");
         assert!(bridge.db.list_removed_folders().unwrap().is_empty());
@@ -28551,7 +28713,7 @@ mod tests {
         regression_1640_edited_file_in_a_folder_in(&bridge.db, &sync_root);
         let docs = sync_root.join("docs");
         let rows = bridge.db.delete_file_subtree("folder-docs").unwrap();
-        remove_pruned_entries(&bridge.db, &sync_root, &rows, &|_| LocalEntry::PartlyLocal);
+        remove_pruned_entries(&bridge.db, &sync_root, &rows, &|_, _| LocalEntry::PartlyLocal);
         std::fs::write(docs.join("new.txt"), b"made after the delete").unwrap();
         assert!(bridge.ensure_local_folder(&sync_root, &docs).is_some(), "created again");
         assert!(bridge.db.list_removed_folders().unwrap().is_empty());
@@ -28569,10 +28731,10 @@ mod tests {
         let docs = sync_root.join("docs");
         let trashed = db.mark_subtree_trashing("folder-docs").unwrap();
         std::fs::set_permissions(&docs, std::fs::Permissions::from_mode(0o555)).unwrap();
-        remove_pruned_entries(&db, &sync_root, &trashed, &|_| LocalEntry::WhollyLocal);
+        remove_pruned_entries(&db, &sync_root, &trashed, &|_, _| LocalEntry::WhollyLocal);
         let emptied = db.delete_file_subtree("folder-docs").unwrap();
         assert!(emptied.iter().any(|row| row.path == "docs/notes.txt"), "precondition: the file again");
-        remove_pruned_entries(&db, &sync_root, &emptied, &|_| LocalEntry::WhollyLocal);
+        remove_pruned_entries(&db, &sync_root, &emptied, &|_, _| LocalEntry::WhollyLocal);
         std::fs::set_permissions(&docs, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(sync_root.join("notes (this PC).txt").exists());
         assert!(!sync_root.join("notes (this PC 2).txt").exists(), "the same bytes are not copied twice");
@@ -28598,13 +28760,13 @@ mod tests {
         let docs = sync_root.join("docs");
         let rows = db.mark_subtree_trashing("folder-docs").unwrap();
         std::fs::set_permissions(&docs, std::fs::Permissions::from_mode(0o555)).unwrap();
-        remove_pruned_entries(&db, &sync_root, &rows, &|_| LocalEntry::InSync);
+        remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::InSync);
         let open = feed(&db);
         assert_eq!(open.len(), 1);
         assert_eq!((open[0].0.as_str(), open[0].2.as_str()), ("waiting to close", "none"));
         assert!(open[0].1.contains("open on this PC"), "{}", open[0].1);
         std::fs::set_permissions(&docs, std::fs::Permissions::from_mode(0o755)).unwrap();
-        retry_kept_originals(&db, &sync_root, &|_| LocalEntry::InSync);
+        retry_kept_originals(&db, &sync_root, &|_, _| LocalEntry::InSync);
         assert!(!docs.join("notes.txt").exists(), "removed once closed");
         assert!(feed(&db).is_empty(), "nothing was kept: the entry goes");
         // Changes that could not be copied (no room for the copy).
@@ -28612,7 +28774,7 @@ mod tests {
         let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
         let rows = db.mark_subtree_trashing("folder-docs").unwrap();
         std::fs::set_permissions(&sync_root, std::fs::Permissions::from_mode(0o555)).unwrap();
-        remove_pruned_entries(&db, &sync_root, &rows, &|_| LocalEntry::WhollyLocal);
+        remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::WhollyLocal);
         std::fs::set_permissions(&sync_root, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(
             std::fs::read(sync_root.join("docs").join("notes.txt")).unwrap(),
@@ -28622,7 +28784,7 @@ mod tests {
         let failed = feed(&db);
         assert_eq!((failed.len(), failed[0].0.as_str(), failed[0].2.as_str()), (1, "kept in place", "none"));
         assert!(failed[0].1.contains("could not be copied"), "{}", failed[0].1);
-        retry_kept_originals(&db, &sync_root, &|_| LocalEntry::WhollyLocal);
+        retry_kept_originals(&db, &sync_root, &|_, _| LocalEntry::WhollyLocal);
         let copied = feed(&db);
         assert_eq!((copied.len(), copied[0].0.as_str(), copied[0].2.as_str()), (1, "kept as a copy", "dismiss"));
     }
@@ -28636,7 +28798,7 @@ mod tests {
         regression_1640_edited_file_in_a_folder_in(db, &sync_root);
         let docs = sync_root.join("docs");
         let rows = db.delete_file_subtree("folder-docs").unwrap();
-        remove_pruned_entries(db, &sync_root, &rows, &|_| LocalEntry::PartlyLocal);
+        remove_pruned_entries(db, &sync_root, &rows, &|_, _| LocalEntry::PartlyLocal);
         let feed = version_conflict_feed_from_db(db).unwrap();
         assert_eq!((feed.len(), feed[0].action.as_str()), (1, "dismiss"));
         let id: i64 = feed[0].id.strip_prefix("kept:").unwrap().parse().unwrap();
@@ -28645,12 +28807,12 @@ mod tests {
         assert!(!db.is_kept_original_pending("docs/notes.txt").unwrap(), "and is no longer held back");
         assert!(version_conflict_feed_from_db(db).unwrap().is_empty());
         // Review-151d P2-1: the folder the server deleted is still not created again for it.
-        retry_kept_originals(db, &sync_root, &|_| LocalEntry::PartlyLocal);
+        retry_kept_originals(db, &sync_root, &|_, _| LocalEntry::PartlyLocal);
         assert_eq!(bridge.ensure_local_folder(&sync_root, &docs), None, "not created again");
         assert!(db.get_file_by_path("docs").unwrap().is_none(), "no folder row, no CreateFolder");
         // Once the person removes the file, the folder goes and nothing is left of the entry.
         std::fs::remove_file(docs.join("notes.txt")).unwrap();
-        retry_kept_originals(db, &sync_root, &|_| LocalEntry::PartlyLocal);
+        retry_kept_originals(db, &sync_root, &|_, _| LocalEntry::PartlyLocal);
         assert!(!docs.exists());
         assert!(!db.is_kept_original("docs/notes.txt").unwrap(), "the tombstone goes with the file");
         drop(server.finish());

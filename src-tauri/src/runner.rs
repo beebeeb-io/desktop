@@ -1381,6 +1381,15 @@ async fn run(
     // All idempotent — safe to run on every (re)spawn.
     #[cfg(target_os = "windows")]
     crate::windows_cf::seed_placeholders(bridge.clone(), &sync_root);
+    // Task 2191 (D9): before the first tick, every file of unknown content that holds bytes and
+    // reads in sync is marked not in sync. No network; off the async workers, and awaited.
+    #[cfg(target_os = "windows")]
+    {
+        let guard_root = sync_root.clone();
+        if let Err(e) = tokio::task::spawn_blocking(move || crate::windows_cf::guard_unknown_placeholders(&guard_root)).await {
+            tracing::warn!(error = %e, "unknown-content guard panicked; continuing");
+        }
+    }
 
     // Task 0780 — the UPLOAD trigger. On Windows the desktop binary IS the
     // Cloud Files provider and there is no extension/IPC socket to fire
@@ -1607,6 +1616,8 @@ async fn run(
                         {
                             let stamp_root = sync_root.clone();
                             if let Err(e) = tokio::task::spawn_blocking(move || {
+                                // Task 2191 (D2): the marks still to be made, before anything is stamped.
+                                crate::windows_cf::retry_pending_marks(&stamp_root);
                                 crate::windows_cf::stamp_local_files_in_sync(&stamp_root);
                                 // Task 1640 (review N13): kept copies whose original was in use.
                                 crate::windows_cf::retry_kept_originals(&stamp_root);

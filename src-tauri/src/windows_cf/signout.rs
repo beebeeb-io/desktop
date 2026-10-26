@@ -15,7 +15,42 @@ use std::path::Path;
 use windows::Win32::Foundation::{BOOLEAN, HANDLE};
 use windows::Win32::Storage::{CloudFilters::*, FileSystem::*};
 
-pub fn purge(db: &StateDb, root: Option<&Path>) -> anyhow::Result<()> {
+/// Task 2191 (spec D11; Decision (lead, 2026-10-26)): what sign-out does with files of unknown
+/// content (synced before task 1640) that hold bytes on this PC. The person chose it in the
+/// sign-out confirmation; nothing is decided from the platform's in-sync state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnknownFiles {
+    /// Copy each one to this folder beside the sync folder first, then delete the original.
+    Keep { dir: std::path::PathBuf },
+    /// Delete them with the rest.
+    Delete,
+}
+
+/// What the purge kept (`UnknownFiles::Keep`): how many files, and where.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct KeptAtSignOut {
+    pub files: usize,
+    pub dir: Option<std::path::PathBuf>,
+}
+
+/// Task 2191 (D11): the relative paths (as `prepare` keys them, `\`-joined) of the files of
+/// unknown content and of the placeholders recorded as left at another path.
+fn unknown_paths(db: &StateDb) -> anyhow::Result<std::collections::HashSet<String>> {
+    let key = |path: &str| path.trim_start_matches('/').replace('/', "\\");
+    let mut paths: std::collections::HashSet<String> = db.list_guarded()?.iter().map(|row| key(&row.path)).collect();
+    paths.extend(db.list_unknown_orphans()?.iter().map(|(path, _, _)| key(path)));
+    Ok(paths)
+}
+
+/// A file of unknown content opened for the purge, and what its copy holds.
+struct Kept {
+    file: std::fs::File,
+    size: u64,
+    ranges: Option<Vec<(u64, u64)>>,
+    hash: String,
+}
+
+pub fn purge(db: &StateDb, root: Option<&Path>, unknown: &UnknownFiles) -> anyhow::Result<KeptAtSignOut> {
     if let Some(root) = root {
         super::upload_finalization::retry(db, root);
     }
@@ -33,12 +68,15 @@ pub fn purge(db: &StateDb, root: Option<&Path>) -> anyhow::Result<()> {
         })
         .collect::<Result<Vec<_>, _>>()?;
     cache_paths.extend(crate::staged_payload::signout_paths(db)?);
+    let mut kept_files = 0usize;
     cleanup::purge(
         cache_paths,
         crate::is_disposable_cache_path,
         || {
             let mut handles = Vec::new();
             let mut directories = Vec::new();
+            let mut kept: Vec<Kept> = Vec::new();
+            let unknown_set = unknown_paths(db)?;
             if let Some(root) = root {
                 let known: HashMap<_, _> = rows
                     .iter()
@@ -48,11 +86,26 @@ pub fn purge(db: &StateDb, root: Option<&Path>) -> anyhow::Result<()> {
                     root.is_dir(),
                     "Sync folder is unavailable; restore it before signing out"
                 );
-                prepare(root, root, &known, &mut handles, &mut directories)?;
+                prepare(root, root, &known, &unknown_set, unknown, &mut kept, &mut handles, &mut directories)?;
             } else if !rows.is_empty() {
                 anyhow::bail!("Cannot locate the sync folder. Restore its location before signing out.");
             }
 
+            // Task 2191 (D11): every copy was made in `prepare`, before any deletion. An original
+            // goes only while it still holds what was copied, re-read through the same handle
+            // (only the ranges on this PC, for a partly downloaded one).
+            for entry in &mut kept {
+                let now = crate::unknown_check::hash_source(&mut entry.file, entry.size, entry.ranges.as_deref())?;
+                anyhow::ensure!(
+                    now == entry.hash,
+                    "A file changed while sign-out was copying it. Unlock and retry sign-out."
+                );
+            }
+            for entry in &kept {
+                mark_for_deletion(&entry.file)?;
+            }
+            kept_files = kept.len();
+            drop(kept);
             // Delete only files proven clean while their exclusive handle is held.
             // No dehydrate/remove fallback: dirty bytes never qualify for this list.
             for file in &handles {
@@ -79,19 +132,37 @@ pub fn purge(db: &StateDb, root: Option<&Path>) -> anyhow::Result<()> {
             for (path, _, _) in db.staged_payloads_for_signout()? { db.forget_staged_payload(&path)?; }
             Ok(db.finish_windows_signout()?)
         },
-    )
+    )?;
+    Ok(KeptAtSignOut {
+        files: kept_files,
+        dir: match unknown {
+            UnknownFiles::Keep { dir } if kept_files > 0 => Some(dir.clone()),
+            _ => None,
+        },
+    })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prepare(
     root: &Path,
     dir: &Path,
     known: &HashMap<String, &crate::state_db::FileEntry>,
+    unknown_set: &std::collections::HashSet<String>,
+    unknown: &UnknownFiles,
+    kept: &mut Vec<Kept>,
     handles: &mut Vec<std::fs::File>,
     directories: &mut Vec<std::fs::File>,
 ) -> anyhow::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let path = entry?.path();
         let relative = path.strip_prefix(root)?.to_string_lossy().replace('/', "\\");
+        // Task 2191 (D11): a file of unknown content, or a placeholder left at another path that
+        // holds unknown bytes, is never deleted unasked: decided from the database, never from
+        // the platform's in-sync state (which 0.8.12 set over edits).
+        if unknown_set.contains(&relative) && !path.is_dir() {
+            prepare_unknown(&path, &relative, unknown, kept, handles)?;
+            continue;
+        }
         let row = known.get(&relative).ok_or_else(|| anyhow::anyhow!(
             "Unsynced files remain in the sync folder. Sync them or move them outside Beebeeb, then unlock and retry sign-out."
         ))?;
@@ -113,10 +184,46 @@ fn prepare(
         }
         if metadata.is_dir() {
             directories.push(file);
-            prepare(root, &path, known, handles, directories)?;
+            prepare(root, &path, known, unknown_set, unknown, kept, handles, directories)?;
         } else {
             handles.push(file);
         }
+    }
+    Ok(())
+}
+
+/// Task 2191 (D11): open a file of unknown content exclusively, with read access. With
+/// `UnknownFiles::Keep`, copy what is on this PC (the ranges on disk, for a partly downloaded
+/// placeholder: the engine is stopped, so nothing can be fetched) before any deletion; with
+/// `Delete`, it goes with the rest. A placeholder with nothing on disk holds nothing to keep.
+fn prepare_unknown(
+    path: &Path,
+    relative: &str,
+    unknown: &UnknownFiles,
+    kept: &mut Vec<Kept>,
+    handles: &mut Vec<std::fs::File>,
+) -> anyhow::Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES.0 | FILE_READ_DATA.0 | DELETE.0)
+        .share_mode(0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0 | FILE_FLAG_BACKUP_SEMANTICS.0)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    let size = metadata.len();
+    let placeholder = metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0;
+    let ranges = if placeholder && !super::placeholders::fully_on_disk(path) {
+        Some(super::placeholders::on_disk_ranges(&file, size)?)
+    } else {
+        None
+    };
+    let holds_nothing = ranges.as_ref().is_some_and(|ranges| ranges.iter().all(|(_, length)| *length == 0));
+    match unknown {
+        UnknownFiles::Keep { dir } if !holds_nothing => {
+            let (hash, _) = crate::unknown_check::copy_out(&mut file, size, ranges.as_deref(), &dir.join(relative))
+                .map_err(|e| anyhow::anyhow!("Couldn’t keep a copy of a file before signing out ({e}). Free some space, then retry sign-out."))?;
+            kept.push(Kept { file, size, ranges, hash });
+        }
+        _ => handles.push(file),
     }
     Ok(())
 }
