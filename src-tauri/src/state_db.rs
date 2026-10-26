@@ -447,6 +447,10 @@ const FILE_BY_PATH_SQL: &str = "SELECT file_id, path, status, size_bytes, modifi
             parent_id, item_kind
      FROM files WHERE path = ?1";
 
+/// Task 2229: every column of the row at a path, for [`StateDb::file_row_stamp_by_path`]. The scan
+/// runs it for every file it skips, so it too goes through `idx_files_path`.
+const FILE_ROW_BY_PATH_SQL: &str = "SELECT * FROM files WHERE path = ?1";
+
 /// `get_file_by_path`'s other stored shape: `/leaf` ⇄ `leaf`.
 fn toggled_slash(path: &str) -> String {
     match path.strip_prefix('/') {
@@ -2844,6 +2848,32 @@ impl StateDb {
             return Ok(None);
         }
         self.get_file_by_exact_path(&alt)
+    }
+
+    /// Task 2229: a stamp of the row [`Self::get_file_by_path`] finds at `path`, over every column,
+    /// so any write to the row changes it; `None` without a row. Valid within this process only.
+    pub fn file_row_stamp_by_path(&self, path: &str) -> Result<Option<u64>> {
+        use rusqlite::types::ValueRef;
+        use std::hash::{Hash, Hasher};
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare_cached(FILE_ROW_BY_PATH_SQL)?;
+        for candidate in [path.to_string(), toggled_slash(path)] {
+            let mut rows = stmt.query(params![candidate])?;
+            if let Some(row) = rows.next()? {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                for column in 0..row.as_ref().column_count() {
+                    match row.get_ref(column)? {
+                        ValueRef::Null => 0u8.hash(&mut hasher),
+                        ValueRef::Integer(i) => (1u8, i).hash(&mut hasher),
+                        ValueRef::Real(f) => (2u8, f.to_bits()).hash(&mut hasher),
+                        ValueRef::Text(t) => (3u8, t).hash(&mut hasher),
+                        ValueRef::Blob(b) => (4u8, b).hash(&mut hasher),
+                    }
+                }
+                return Ok(Some(hasher.finish()));
+            }
+        }
+        Ok(None)
     }
 
     fn get_file_by_exact_path(&self, path: &str) -> Result<Option<FileEntry>> {
@@ -7988,18 +8018,58 @@ mod tests {
                 db.get_file_by_path(probe).unwrap().map(|e| e.file_id),
                 found.map(str::to_string)
             );
+            assert_eq!(db.file_row_stamp_by_path(probe).unwrap().is_some(), found.is_some());
             let conn = db.0.lock().unwrap();
-            let stmt = conn.prepare_cached(FILE_BY_PATH_SQL).unwrap();
-            assert!(
-                stmt.get_status(rusqlite::StatementStatus::Run) > 0,
-                "get_file_by_path did not run FILE_BY_PATH_SQL"
-            );
-            let full_scan_steps = stmt.reset_status(rusqlite::StatementStatus::FullscanStep);
-            stmt.reset_status(rusqlite::StatementStatus::Run);
-            assert_eq!(
-                full_scan_steps, 0,
-                "looking up {probe} stepped {full_scan_steps} rows of a full scan of files"
-            );
+            for sql in [FILE_BY_PATH_SQL, FILE_ROW_BY_PATH_SQL] {
+                let stmt = conn.prepare_cached(sql).unwrap();
+                assert!(
+                    stmt.get_status(rusqlite::StatementStatus::Run) > 0,
+                    "the app did not run {sql}"
+                );
+                let full_scan_steps = stmt.reset_status(rusqlite::StatementStatus::FullscanStep);
+                stmt.reset_status(rusqlite::StatementStatus::Run);
+                assert_eq!(
+                    full_scan_steps, 0,
+                    "looking up {probe} stepped {full_scan_steps} rows of a full scan of files: {sql}"
+                );
+            }
+        }
+    }
+
+    /// Task 2229: the scan skips a settled file while the stamp of its row is unchanged, so every
+    /// write to the row changes the stamp, and either stored slash shape finds it.
+    #[test]
+    fn a_row_stamp_changes_with_any_write_to_the_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        assert_eq!(
+            db.file_row_stamp_by_path("docs/a.txt").unwrap(),
+            None,
+            "no row, no stamp"
+        );
+        {
+            let conn = db.0.lock().unwrap();
+            conn.execute("INSERT INTO files (file_id, path) VALUES ('f1', '/docs/a.txt')", [])
+                .unwrap();
+        }
+        let first = db.file_row_stamp_by_path("docs/a.txt").unwrap();
+        assert!(first.is_some(), "the leading-slash shape is found too");
+        assert_eq!(db.file_row_stamp_by_path("/docs/a.txt").unwrap(), first);
+        assert_eq!(
+            db.file_row_stamp_by_path("docs/a.txt").unwrap(),
+            first,
+            "unchanged row, same stamp"
+        );
+        for write in [
+            "UPDATE files SET status = 'local' WHERE file_id = 'f1'",
+            "UPDATE files SET local_hash = 'h1' WHERE file_id = 'f1'",
+            "UPDATE files SET local_hash = NULL WHERE file_id = 'f1'",
+            "UPDATE files SET local_base_version = 2 WHERE file_id = 'f1'",
+            "UPDATE files SET held_write_id = 'w1' WHERE file_id = 'f1'",
+        ] {
+            let before = db.file_row_stamp_by_path("docs/a.txt").unwrap();
+            db.0.lock().unwrap().execute(write, []).unwrap();
+            assert_ne!(db.file_row_stamp_by_path("docs/a.txt").unwrap(), before, "{write}");
         }
     }
 

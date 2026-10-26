@@ -3331,6 +3331,15 @@ impl EngineBridge {
     /// risk a spurious one). Cross-platform so it type-checks everywhere; only
     /// the Windows triggers call it.
     pub fn classify_local_path(&self, sync_root: &Path, path: &Path) -> Option<FinderWriteTarget> {
+        match self.classify_local_path_verdict(sync_root, path) {
+            LocalPathVerdict::Write(target) => Some(target),
+            LocalPathVerdict::Settled | LocalPathVerdict::Skip => None,
+        }
+    }
+
+    /// Task 2229: [`Self::classify_local_path`], telling a tracked file that needs nothing while its row
+    /// and its bytes stay as they are ([`LocalPathVerdict::Settled`]) from one to ask about again.
+    pub(crate) fn classify_local_path_verdict(&self, sync_root: &Path, path: &Path) -> LocalPathVerdict {
         // The file may have been deleted/renamed during a debounce window — if
         // it is no longer a regular file there is nothing to upload.
         match std::fs::symlink_metadata(path) {
@@ -3343,7 +3352,7 @@ impl EngineBridge {
                     is_symlink = file_type.is_symlink(),
                     "classify_local_path: rejected non-regular file"
                 );
-                return None;
+                return LocalPathVerdict::Skip;
             }
             Err(e) => {
                 tracing::debug!(
@@ -3351,7 +3360,7 @@ impl EngineBridge {
                     error = %e,
                     "classify_local_path: stat failed; skipping"
                 );
-                return None;
+                return LocalPathVerdict::Skip;
             }
         }
 
@@ -3361,14 +3370,14 @@ impl EngineBridge {
                 path = %path.display(),
                 "classify_local_path: rejected engine-internal path"
             );
-            return None;
+            return LocalPathVerdict::Skip;
         }
         let Some(file_name) = path.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
             tracing::debug!(
                 path = %path.display(),
                 "classify_local_path: rejected path with non-utf8 filename"
             );
-            return None;
+            return LocalPathVerdict::Skip;
         };
         if is_ignored_finder_name(&file_name) {
             tracing::debug!(
@@ -3376,7 +3385,7 @@ impl EngineBridge {
                 filename = %file_name,
                 "classify_local_path: rejected ignored/temp filename"
             );
-            return None;
+            return LocalPathVerdict::Skip;
         }
 
         // Filter 3 (authoritative) — already a known server file? Then it is not a new
@@ -3389,19 +3398,19 @@ impl EngineBridge {
                 sync_root = %sync_root.display(),
                 "classify_local_path: rejected path outside sync root"
             );
-            return None;
+            return LocalPathVerdict::Skip;
         };
         // Task 1640 (review N13): an original whose kept copy is made but which is not removed
         // yet (it was in use) is never sent: a later tick removes it.
         if self.db.is_kept_original_pending(&rel).unwrap_or(false) {
             tracing::debug!(rel_path = %rel, "classify_local_path: rejected an original whose copy is kept");
-            return None;
+            return LocalPathVerdict::Skip;
         }
         // Task 2204 S0.4: a file at the path a Windows rename vacated waits until that rename is
         // sent: it may be a safe save's new bytes, which fold back onto the original.
         if self.db.is_vacated_by_pending_rename(&rel).unwrap_or(true) {
             tracing::debug!(rel_path = %rel, "classify_local_path: the path a pending rename vacated; skipped this pass");
-            return None;
+            return LocalPathVerdict::Skip;
         }
         match self.db.get_file_by_path(&rel) {
             Ok(Some(existing)) => return self.classify_tracked_edit(path, existing, file_name, rel),
@@ -3413,7 +3422,7 @@ impl EngineBridge {
                     error = %e,
                     "classify_local_path: state DB lookup failed; skipping to be safe"
                 );
-                return None;
+                return LocalPathVerdict::Skip;
             }
         }
 
@@ -3433,7 +3442,7 @@ impl EngineBridge {
                 path = %path.display(),
                 "classify_local_path: rejected Cloud Files placeholder"
             );
-            return None;
+            return LocalPathVerdict::Skip;
         }
 
         // parent_id resolution: a survivor at `<parent_dir>/<name>`. If the parent
@@ -3448,7 +3457,7 @@ impl EngineBridge {
             "classify_local_path: accepted new local file"
         );
 
-        Some(FinderWriteTarget {
+        LocalPathVerdict::Write(FinderWriteTarget {
             file_id: None,
             parent_id,
             filename: file_name.clone(),
@@ -3478,20 +3487,20 @@ impl EngineBridge {
         existing: FileEntry,
         file_name: String,
         rel: String,
-    ) -> Option<FinderWriteTarget> {
+    ) -> LocalPathVerdict {
         if existing.is_dir() || existing.status != FileStatus::Local {
             tracing::debug!(
                 path = %path.display(),
                 rel_path = %rel,
                 "classify_local_path: rejected already-tracked server file"
             );
-            return None;
+            return LocalPathVerdict::Settled;
         }
         // Windows: reading a placeholder that is not wholly on disk would fetch the rest of it.
         #[cfg(target_os = "windows")]
         let os_in_sync = {
             if !crate::windows_cf::placeholders::fully_on_disk(path) {
-                return None;
+                return LocalPathVerdict::Skip;
             }
             crate::windows_cf::placeholders::placeholder_in_sync(path)
         };
@@ -3504,7 +3513,7 @@ impl EngineBridge {
                     file_id = %existing.file_id,
                     "sync folder: an edit of a synced file has no known base version; it stays local, not sent"
                 );
-                return None;
+                return LocalPathVerdict::Skip;
             }
             // A file hydrated before this build has no agreed content: its change is kept on
             // disk (out of sync, so never stamped or freed) but not sent (task 2191).
@@ -3523,12 +3532,13 @@ impl EngineBridge {
                         "sync folder: a change to a file synced before this version is kept on this PC, not sent"
                     );
                 }
-                return None;
+                return LocalPathVerdict::Skip;
             }
-            Ok(_) => return None,
+            Ok(SyncFolderContent::Agreed) => return LocalPathVerdict::Settled,
+            Ok(_) => return LocalPathVerdict::Skip,
             Err(e) => {
                 tracing::warn!(file_id = %existing.file_id, error = %e, "sync folder: could not compare a synced file with its agreed content");
-                return None;
+                return LocalPathVerdict::Skip;
             }
         };
         let contract = self.db.get_file_contract_state(&existing.file_id).ok().flatten();
@@ -3537,7 +3547,7 @@ impl EngineBridge {
             base_version = base,
             "classify_local_path: accepted an edit of a synced file"
         );
-        Some(FinderWriteTarget {
+        LocalPathVerdict::Write(FinderWriteTarget {
             file_id: Some(existing.file_id),
             parent_id: contract.as_ref().and_then(|contract| contract.parent_id.clone()),
             content_type: contract
@@ -5835,6 +5845,18 @@ impl Drop for FetchTicket {
             }
         }
     }
+}
+
+/// Task 2229: what [`EngineBridge::classify_local_path_verdict`] makes of a local file.
+pub(crate) enum LocalPathVerdict {
+    /// An upload to queue: a new file, or a change of a synced one.
+    Write(FinderWriteTarget),
+    /// A tracked file that needs nothing while its row and its bytes stay as they are: a folder
+    /// row, a row not `Local`, or bytes that are the agreed content. The scan may skip it until
+    /// either changes.
+    Settled,
+    /// Nothing this pass; ask again next pass.
+    Skip,
 }
 
 /// Task 1640: what a tracked sync-folder file's bytes are (Windows: Linux runs no upload driver), against the content
@@ -25502,14 +25524,14 @@ mod tests {
             (
                 "watcher.rs",
                 "match bridge.queue_finder_create(target) {",
-                "pub(crate) fn dispatch_local_create(",
+                "pub(crate) fn dispatch_local_create_verdict(",
                 &[],
                 "the upload driver, which a Mac never starts (asserted below)",
             ),
             (
                 "watcher.rs",
                 "return match bridge.queue_finder_modify(target) {",
-                "pub(crate) fn dispatch_local_create(",
+                "pub(crate) fn dispatch_local_create_verdict(",
                 &[],
                 "the upload driver's edit of a synced file (task 1640), which a Mac never starts (asserted below)",
             ),
@@ -28939,6 +28961,170 @@ mod tests {
         drain_upload_queue(&bridge, &sync_root).await;
         let state = server.finish();
         assert_eq!(state.latest_plaintext(&row.file_id, master_key), b"saved by an editor");
+    }
+
+    // ── Task 2229: the scan skips a settled file until its bytes or its row change ──
+
+    /// (classified, skipped) of one pass of the scan with `memo`.
+    fn regression_2229_pass(
+        bridge: &EngineBridge,
+        sync_root: &Path,
+        memo: &mut crate::watcher::ScanMemo,
+    ) -> (usize, usize) {
+        crate::watcher::run_one_scan_with(bridge, sync_root, memo);
+        (memo.classified, memo.skipped)
+    }
+
+    /// A synced file whose bytes are the agreed content is classified once, then skipped while
+    /// its listing and its row stay the same. A write to its row, a save of new bytes, and the
+    /// periodic full pass each make the scan classify it again, and the save is still sent.
+    #[tokio::test]
+    async fn regression_2229_a_settled_file_is_classified_again_only_when_it_or_its_row_changes() {
+        let master_key = [191u8; 32];
+        let (_dir, sync_root, server, bridge) = rule3_setup(master_key);
+        let local = sync_root.join("kept.txt");
+        std::fs::write(&local, b"made on this PC").unwrap();
+        let mut memo = crate::watcher::ScanMemo::default();
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (1, 0),
+            "a new file"
+        );
+        assert_eq!(
+            regression_1640_uploads_queued_for(&bridge, "kept.txt"),
+            1,
+            "precondition: queued"
+        );
+        drain_upload_queue(&bridge, &sync_root).await;
+        let row = bridge.db.get_file_by_path("kept.txt").unwrap().unwrap();
+        assert_eq!(row.status, FileStatus::Local, "precondition: landed");
+
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (1, 0),
+            "its row changed: asked again"
+        );
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (0, 1),
+            "settled, unchanged: skipped"
+        );
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (0, 1),
+            "and again"
+        );
+
+        bridge.db.set_size_bytes(&row.file_id, 4242).unwrap();
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (1, 0),
+            "a write to its row: asked again"
+        );
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (0, 1),
+            "settled again"
+        );
+
+        memo.age_by(std::time::Duration::from_secs(11 * 60));
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (1, 0),
+            "the full pass asks about every file"
+        );
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (0, 1),
+            "then trusts it again"
+        );
+
+        // Only a settled verdict is remembered: an original whose kept copy is pending is passed
+        // over for now, so it is asked about on every pass, with its row and its bytes unchanged.
+        let kept = bridge
+            .db
+            .record_kept_copy(&crate::state_db::KeptCopyInput {
+                original_file_id: &row.file_id,
+                original_path: "kept.txt",
+                copy_path: "",
+                copied_hash: "",
+                original_removed: false,
+                reason: crate::state_db::KeptReason::InUse,
+                kept_at: 0,
+            })
+            .unwrap();
+        bridge.db.set_size_bytes(&row.file_id, 4243).unwrap();
+        for pass in 0..2 {
+            assert_eq!(
+                regression_2229_pass(&bridge, &sync_root, &mut memo),
+                (1, 0),
+                "passed over for now: asked again on pass {pass}"
+            );
+        }
+        bridge.db.delete_kept_copy(kept).unwrap();
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (1, 0),
+            "no longer held: settled"
+        );
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (0, 1),
+            "and skipped"
+        );
+
+        // An atomic save: the new bytes written elsewhere, then renamed over the file.
+        let saved = sync_root.join("kept.txt.part");
+        std::fs::write(&saved, b"saved by an editor").unwrap();
+        std::fs::rename(&saved, &local).unwrap();
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (1, 0),
+            "new bytes: asked again"
+        );
+        let ops = bridge.db.list_operations_for_file(&row.file_id).unwrap();
+        assert_eq!(ops.len(), 1, "the save is queued, as an edit of the file");
+        // Its row changed when the edit was queued; it is settled again until the row changes
+        // once more, when the edit lands.
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (1, 0),
+            "its row changed: asked again"
+        );
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (0, 1),
+            "settled while queued"
+        );
+        drain_upload_queue(&bridge, &sync_root).await;
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (1, 0),
+            "landed: asked again"
+        );
+        let state = server.finish();
+        assert_eq!(state.latest_plaintext(&row.file_id, master_key), b"saved by an editor");
+    }
+
+    /// Only a settled verdict is remembered: a file the scan passes over for now (here an
+    /// ignored temp name) is asked about on every pass.
+    #[tokio::test]
+    async fn regression_2229_a_file_passed_over_for_now_is_asked_about_every_pass() {
+        let (_dir, sync_root, _server, bridge) = rule3_setup([192u8; 32]);
+        std::fs::write(sync_root.join("~$draft.docx"), b"owner file").unwrap();
+        let mut memo = crate::watcher::ScanMemo::default();
+        for pass in 0..3 {
+            assert_eq!(
+                regression_2229_pass(&bridge, &sync_root, &mut memo),
+                (1, 0),
+                "pass {pass}"
+            );
+        }
+        assert_eq!(
+            regression_1640_uploads_queued_for(&bridge, "~$draft.docx"),
+            0,
+            "never queued"
+        );
     }
 
     // ── Task 2204 S0: a Windows rename re-keys the file's row at once ──
