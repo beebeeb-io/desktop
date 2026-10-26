@@ -30,6 +30,12 @@ export interface SyncStatus {
    * PC, or an earlier engine stop was never confirmed. Parsed by `loadSyncStatus`; null otherwise.
    */
   engine_refusal?: EngineRefusal | null
+  /**
+   * Desktop 0.8.15 (engine lane, `fix/0815-guard-nonblocking`): the start-up guard's pass over the files of unknown
+   * content, `{running, done, total}`, live on every status read. Absent from builds without it; the sync activity
+   * model then falls back to the last pass `sync_activity_summary` heard of.
+   */
+  startup_guard?: { running: boolean; done: number; total: number } | null
 }
 
 /** The closed set of `sync_status.engine_refusal` codes (`account_binding::Refusal::code()` in Rust). */

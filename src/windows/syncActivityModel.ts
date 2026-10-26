@@ -66,6 +66,21 @@ export function parseSyncActivitySummary(raw: unknown): SyncActivitySummary | nu
   return raw as unknown as SyncActivitySummary
 }
 
+/**
+ * The start-up guard's pass while it runs. `sync_status.startup_guard` is read live on every poll, so when the status
+ * carries it, it decides (a pass at rest is no check, whatever the summary last heard). Without it, the pass the last
+ * `engine-status` event reported (`summary.startup_check`). A value outside the shape is no check, never a guess.
+ */
+export function startupCheckFrom(status: SyncStatus | null, summary: SyncActivitySummary | null | undefined): StartupCheck | null {
+  const live: unknown = status?.startup_guard
+  if (live !== undefined && live !== null) {
+    if (!isObj(live) || live.running !== true || !isCount(live.done) || !isCount(live.total) || live.total === 0) return null
+    return { done: Math.min(live.done, live.total), total: live.total }
+  }
+  const last = summary?.startup_check ?? null
+  return last && last.total > 0 ? last : null
+}
+
 // ── Words ───────────────────────────────────────────────────────────────────
 
 export type SyncActivityKind =
@@ -214,6 +229,9 @@ export function syncActivityView(
   const movingCount = summary ? (summary.files_remaining ?? summary.transfers_active) : (status?.syncing ?? 0)
   const engineState = summary?.engine_state ?? ''
   const conflicts = status?.conflicts ?? 0
+  const conflictLine = conflicts > 0 ? `${plural(conflicts, 'conflict', 'conflicts')} to review.` : null
+  const check = startupCheckFrom(status, summary)
+  const checkLine = check ? `Checking files on ${device}: ${formatCount(check.done)} of ${formatCount(check.total)}.` : null
 
   const pick = (
     kind: SyncActivityKind,
@@ -228,7 +246,13 @@ export function syncActivityView(
     headline,
     tone,
     progress: extra.progress ?? null,
-    details: [...(extra.lead ?? []), ...(extra.waitingLine !== false && waiting > 0 ? [waitingSentence(waiting)] : []), ...heldLines, ...gaveUpLines],
+    details: [
+      ...(extra.lead ?? []),
+      ...(kind !== 'conflicts' && conflictLine ? [conflictLine] : []),
+      ...(extra.waitingLine !== false && waiting > 0 ? [waitingSentence(waiting)] : []),
+      ...heldLines,
+      ...gaveUpLines,
+    ],
   })
 
   if (status?.engine_refusal) {
@@ -237,19 +261,26 @@ export function syncActivityView(
   if (paused) {
     return pick('paused', 'Paused', 'Sync is paused.', 'neutral', {
       waitingLine: false,
-      lead: waiting > 0 ? [`${plural(waiting, 'change waits', 'changes wait')} until you resume.`] : [],
+      progress: check,
+      lead: [
+        ...(waiting > 0 ? [`${plural(waiting, 'change waits', 'changes wait')} until you resume.`] : []),
+        ...(checkLine ? [checkLine] : []),
+      ],
     })
   }
-  const check = summary?.startup_check ?? null
-  if (check && check.total > 0) {
-    return pick('checking', 'Checking', `Checking files on ${device}: ${formatCount(check.done)} of ${formatCount(check.total)}.`, 'busy', { progress: check })
+  const movingHeadline = movingCount > 0 ? `${plural(movingCount, 'file', 'files')} syncing.` : 'Syncing.'
+  if (check && checkLine) {
+    // Since 0.8.15 uploads and downloads run during the pass (the engine lane's non-blocking guard): what moves is the
+    // headline then, and the pass stays in view under it.
+    return moving
+      ? pick('syncing', 'Syncing', movingHeadline, 'busy', { progress: check, lead: [checkLine] })
+      : pick('checking', 'Checking', checkLine, 'busy', { progress: check })
   }
-  if (conflicts > 0) {
-    return pick('conflicts', 'Needs review', `${plural(conflicts, 'conflict', 'conflicts')} to review.`, 'attention')
+  if (conflicts > 0 && conflictLine) {
+    return pick('conflicts', 'Needs review', conflictLine, 'attention')
   }
   if (moving) {
-    const headline = movingCount > 0 ? `${plural(movingCount, 'file', 'files')} syncing.` : 'Syncing.'
-    return pick('syncing', 'Syncing', headline, 'busy')
+    return pick('syncing', 'Syncing', movingHeadline, 'busy')
   }
   if (engineState === 'offline') {
     return pick('offline', 'Offline', 'Offline. Beebeeb tries again when the connection is back.', 'attention')
