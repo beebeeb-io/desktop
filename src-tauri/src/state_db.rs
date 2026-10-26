@@ -408,6 +408,20 @@ const DUE_ORDER_SQL: &str = "ORDER BY rowid ASC";
 #[cfg(not(target_os = "macos"))]
 const DUE_ORDER_SQL: &str = "ORDER BY created_at ASC, rowid ASC";
 
+/// Task 2204: a Windows rename (`metadata.local_rename`) not sent yet: unclaimed, and neither
+/// parked nor paused.
+const PENDING_LOCAL_RENAME_SQL: &str = "kind IN ('rename_file', 'move_file')
+       AND CASE WHEN json_valid(metadata_json) THEN json_extract(metadata_json, '$.local_rename') END = 1
+       AND claim_id IS NULL AND attempts < max_attempts AND paused_reason IS NULL";
+
+/// `get_file_by_path`'s other stored shape: `/leaf` ⇄ `leaf`.
+fn toggled_slash(path: &str) -> String {
+    match path.strip_prefix('/') {
+        Some(stripped) => stripped.to_string(),
+        None => format!("/{path}"),
+    }
+}
+
 /// `earlier` comes before `this` in [`DUE_ORDER_SQL`]'s order.
 #[cfg(target_os = "macos")]
 const EARLIER_IN_QUEUE_SQL: &str = "earlier.rowid < this.rowid";
@@ -2455,6 +2469,49 @@ impl StateDb {
         update(&mut contract);
         set_file_contract_state_conn(&tx, &contract)?;
         tx.commit()
+    }
+
+    /// Task 2204 S0.3 (review-155): the pull's write of a server row, as
+    /// [`Self::upsert_file_with_contract`], with the Windows-rename hold decided in the same
+    /// transaction: while a `local_rename` op of the file is queued, the row keeps its current path
+    /// and parent whatever `entry` and `update` say. Returns the path written.
+    pub fn upsert_server_file_row(
+        &self,
+        entry: &FileEntry,
+        update: impl FnOnce(&mut FileContractState),
+    ) -> Result<String> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        // Only `handle_rename` (Windows) queues these ops, so other builds skip the query.
+        let held: Option<(String, Option<String>)> = if cfg!(any(target_os = "windows", test)) {
+            tx.query_row(
+                "SELECT path, parent_id FROM files
+                 WHERE file_id = ?1 AND item_kind = 'file'
+                   AND EXISTS(SELECT 1 FROM operation_queue
+                     WHERE file_id = ?1 AND kind IN ('rename_file', 'move_file')
+                       AND CASE WHEN json_valid(metadata_json)
+                           THEN json_extract(metadata_json, '$.local_rename') END = 1)",
+                params![entry.file_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+        } else {
+            None
+        };
+        let mut entry = entry.clone();
+        if let Some((path, _)) = &held {
+            entry.path = path.clone();
+        }
+        upsert_file_conn(&tx, &entry)?;
+        let mut contract =
+            get_file_contract_state_conn(&tx, &entry.file_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        update(&mut contract);
+        if let Some((_, parent_id)) = held {
+            contract.parent_id = parent_id;
+        }
+        set_file_contract_state_conn(&tx, &contract)?;
+        tx.commit()?;
+        Ok(entry.path)
     }
 
     /// Fetch a single row by `file_id`. `Ok(None)` if absent.
@@ -4582,9 +4639,23 @@ impl StateDb {
                 params![input.op_id],
                 |r| r.get(0),
             )?;
+        // Task 2204 S0.2: a Windows rename (`handle_rename`) re-keyed this file's row while the
+        // op was queued, so the row's path and parent are where the file is now and the op's are
+        // its queue-time ones. Read before the rekey loop moves the file's ops to the server id.
+        let renamed_since: bool = input.write_id.is_none()
+            && tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM operation_queue
+                   WHERE file_id IN (?1, ?2) AND op_id != ?3
+                     AND kind IN ('rename_file', 'move_file')
+                     AND CASE WHEN json_valid(metadata_json) THEN json_extract(metadata_json, '$.local_rename') END = 1)",
+                params![local, server, input.op_id],
+                |r| r.get(0),
+            )?;
         // The row and contract. The row's status, size and mtime are settled below, after
         // the chain step, because that step can park a later write (spec §9.1–§9.2).
-        let mut entry = get_file_conn(&tx, local)?.unwrap_or_else(|| FileEntry {
+        let existing_row = get_file_conn(&tx, local)?;
+        let keep_place = renamed_since && existing_row.is_some();
+        let mut entry = existing_row.unwrap_or_else(|| FileEntry {
             file_id: server.to_string(),
             path: input.target_path.unwrap_or(server).to_string(),
             status: FileStatus::Local,
@@ -4596,7 +4667,8 @@ impl StateDb {
             item_kind: ItemKind::File,
         });
         entry.file_id = server.to_string();
-        if let Some(target_path) = input.target_path.filter(|_| !later_save) {
+        let kept_path = keep_place.then(|| entry.path.clone());
+        if let Some(target_path) = input.target_path.filter(|_| !later_save && !keep_place) {
             // §7.2 (final review): a Finder landing, the id swap included, writes the full
             // relative path under its parent, never the op's name alone. Other landings write
             // their op's path as before.
@@ -4619,7 +4691,7 @@ impl StateDb {
             None if input.write_id.is_some() => contract.content_type.take(),
             landed_type => landed_type,
         };
-        if !later_save {
+        if !later_save && !keep_place {
             contract.parent_id = input.parent_id.map(str::to_string);
         }
         contract.current_version = input.produced_version;
@@ -4802,8 +4874,15 @@ impl StateDb {
         }
         // Windows: the journal takes over the op's local finalization in the same commit, so a
         // failure here rolls the whole landing back and the op is retried.
+        // Task 2204 S0.2 (review-128 F4): a renamed file is finalized where it is now.
         if let Some(finalization) = input.finalization {
-            insert_upload_finalization_conn(&tx, finalization)?;
+            match kept_path {
+                Some(path) => insert_upload_finalization_conn(
+                    &tx,
+                    &UploadFinalization { target_path: path, ..finalization.clone() },
+                )?,
+                None => insert_upload_finalization_conn(&tx, finalization)?,
+            }
         }
         tx.commit()?;
         Ok(Some(outcome))
@@ -5091,6 +5170,125 @@ impl StateDb {
     pub fn enqueue_operation(&self, op: &PendingOperation) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         insert_operation_conn(&conn, op)
+    }
+
+    /// Task 2204 S0.1: a Windows rename or move of a FILE, queued with its row moved to
+    /// `new_path` (and `new_parent_id`) in the same transaction, so no path-keyed decision sees
+    /// the old path for it again. `op` carries `metadata.local_rename`, which holds the row
+    /// against stale landings and pulls until it is sent.
+    pub fn enqueue_local_rename(
+        &self,
+        op: &PendingOperation,
+        file_id: &str,
+        new_path: &str,
+        new_parent_id: Option<&str>,
+    ) -> Result<FinderEnqueue> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if finder_accepts_closed_conn(&tx)? {
+            return Ok(FinderEnqueue::AcceptsClosed);
+        }
+        insert_operation_conn(&tx, op)?;
+        tx.execute(
+            "UPDATE files SET path = ?2, parent_id = ?3 WHERE file_id = ?1 AND item_kind = 'file'",
+            params![file_id, new_path, new_parent_id],
+        )?;
+        // A queued hydrate writes where the file is now, never over a new file at the old name.
+        tx.execute(
+            "UPDATE operation_queue SET target_path = ?2
+             WHERE file_id = ?1 AND kind = 'hydrate_file' AND target_path IS NOT NULL",
+            params![file_id, new_path],
+        )?;
+        tx.commit()?;
+        Ok(FinderEnqueue::Queued)
+    }
+
+    /// Task 2204 S0.3: an op `handle_rename` queued for this file is still queued (parked
+    /// included): the row's path and parent are the local truth, ahead of the server's.
+    pub fn has_queued_local_rename(&self, file_id: &str) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM operation_queue
+               WHERE file_id = ?1 AND kind IN ('rename_file', 'move_file')
+                 AND CASE WHEN json_valid(metadata_json) THEN json_extract(metadata_json, '$.local_rename') END = 1)",
+            params![file_id],
+            |r| r.get(0),
+        )
+    }
+
+    /// Task 2204 S0.4: `path` was vacated by a Windows rename that is still waiting to be sent
+    /// (unclaimed, not parked or paused). A file there waits too: a safe save may still fold
+    /// back onto the original ([`Self::fold_local_rename`]).
+    pub fn is_vacated_by_pending_rename(&self, path: &str) -> Result<bool> {
+        let alt = toggled_slash(path);
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM operation_queue WHERE {PENDING_LOCAL_RENAME_SQL}
+                   AND CASE WHEN json_valid(metadata_json) THEN json_extract(metadata_json, '$.vacated_path') END IN (?1, ?2))"
+            ),
+            params![path, alt],
+            |r| r.get(0),
+        )
+    }
+
+    /// The path this file's pending Windows rename vacated, if one is still waiting to be sent.
+    pub fn pending_local_rename_vacated(&self, file_id: &str) -> Result<Option<String>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row(
+            &format!(
+                "SELECT json_extract(metadata_json, '$.vacated_path') FROM operation_queue
+                 WHERE {PENDING_LOCAL_RENAME_SQL} AND attempts = 0 AND file_id = ?1 LIMIT 1"
+            ),
+            params![file_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map(Option::flatten)
+    }
+
+    /// Task 2204 S0.4: a safe save (Excel, a backup rename): the original was renamed away, a
+    /// new file took its name, and the renamed one is now deleted. In one transaction, and only
+    /// while the rename is still unsent and no other live row is at `vacated` (a manual swap,
+    /// review-128 F3), the rename is cancelled and the row goes back to `vacated`, so the new
+    /// bytes are an edit of the original. `false`: nothing changed; the delete is a delete.
+    pub fn fold_local_rename(&self, file_id: &str, vacated: &str) -> Result<bool> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let op: Option<(String, Option<String>)> = tx
+            .query_row(
+                &format!(
+                    "SELECT op_id, json_extract(metadata_json, '$.vacated_parent_id') FROM operation_queue
+                     WHERE {PENDING_LOCAL_RENAME_SQL} AND attempts = 0 AND file_id = ?1
+                       AND json_extract(metadata_json, '$.vacated_path') = ?2 LIMIT 1"
+                ),
+                params![file_id, vacated],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((op_id, vacated_parent_id)) = op else {
+            return Ok(false);
+        };
+        let taken: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM files WHERE path IN (?1, ?2) AND file_id != ?3 AND status != 'trashing')",
+            params![vacated, toggled_slash(vacated), file_id],
+            |r| r.get(0),
+        )?;
+        if taken {
+            return Ok(false);
+        }
+        tx.execute("DELETE FROM operation_queue WHERE op_id = ?1", params![op_id])?;
+        tx.execute(
+            "UPDATE files SET path = ?2, parent_id = ?3 WHERE file_id = ?1",
+            params![file_id, vacated, vacated_parent_id],
+        )?;
+        tx.execute(
+            "UPDATE operation_queue SET target_path = ?2
+             WHERE file_id = ?1 AND kind = 'hydrate_file' AND target_path IS NOT NULL",
+            params![file_id, vacated],
+        )?;
+        tx.commit()?;
+        Ok(true)
     }
 
     /// Spec 2026-10-10 §5.2 step 6: every change the Finder IPC queues (a rename, a move, a folder create with its
@@ -6091,6 +6289,36 @@ impl StateDb {
                 return Ok(ClaimOutcome::Wait);
             }
         }
+        // Task 2204 S0 (review-155 R1, P2): a Windows rename waits for the file's earlier
+        // sync-folder uploads that can still run, so their queue-time name lands first and the
+        // rename lands last; a trash of the file waits for its earlier Windows rename the same way.
+        if matches!(op.kind, OperationKind::RenameFile | OperationKind::MoveFile | OperationKind::TrashFile) {
+            let earlier: bool = tx.query_row(
+                &format!(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM operation_queue AS this
+                        JOIN operation_queue AS earlier
+                          ON earlier.file_id = this.file_id AND earlier.op_id != this.op_id
+                        WHERE this.op_id = ?1
+                          AND this.write_id IS NULL AND earlier.write_id IS NULL
+                          AND earlier.attempts < earlier.max_attempts AND earlier.paused_reason IS NULL
+                          AND ({EARLIER_IN_QUEUE_SQL})
+                          AND ((this.kind IN ('rename_file', 'move_file')
+                                AND CASE WHEN json_valid(this.metadata_json)
+                                    THEN json_extract(this.metadata_json, '$.local_rename') END = 1
+                                AND earlier.kind IN ('upload_version', 'upload_file'))
+                            OR (this.kind = 'trash_file'
+                                AND earlier.kind IN ('rename_file', 'move_file')
+                                AND CASE WHEN json_valid(earlier.metadata_json)
+                                    THEN json_extract(earlier.metadata_json, '$.local_rename') END = 1)))"
+                ),
+                params![op_id],
+                |row| row.get(0),
+            )?;
+            if earlier {
+                return Ok(ClaimOutcome::Wait);
+            }
+        }
         // Steps 3 and 4, with the hand-over (spec §8.4): a parked predecessor this spec
         // minted hands its role to this op, in this transaction. The loop runs again on
         // what the op inherited: a pending base, or the predecessor's own predecessor.
@@ -6604,6 +6832,12 @@ impl StateDb {
             params![op_id, write_id],
         )
         .unwrap();
+    }
+
+    /// Tests outside this module: run one SQL statement (e.g. park an op by hand).
+    #[cfg(test)]
+    pub(crate) fn test_execute(&self, sql: &str) -> Result<usize> {
+        self.0.lock().expect("state_db mutex poisoned").execute(sql, [])
     }
 
     /// Unguarded; the runner removes an op with [`Self::finish_claimed`] (spec §8.7
@@ -10564,6 +10798,112 @@ mod tests {
             db.get_operation("y").unwrap().unwrap().base_version,
             Some(2),
             "(b) round 3's equal-base rule"
+        );
+    }
+
+    /// Task 2204 S0.3 (review-155): the pull read the row (at `a.txt`) before a Windows rename
+    /// committed its re-key; its write, which still names `a.txt` and the old parent, keeps the
+    /// row where the rename put it.
+    #[test]
+    fn task_2204_a_pull_write_after_a_rename_keeps_the_new_path() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_own_row(&db, "f", FileStatus::Local, 10);
+        let stale = db.get_file("f").unwrap().unwrap();
+        db.0.lock()
+            .unwrap()
+            .execute_batch(
+                r#"INSERT INTO operation_queue (op_id, kind, file_id, target_path, metadata_json, attempts, max_attempts)
+                   VALUES ('rename', 'move_file', 'f', 'b.txt', '{"local_rename":true}', 0, 25);
+                   UPDATE files SET path = 'docs/b.txt', parent_id = 'docs' WHERE file_id = 'f';"#,
+            )
+            .unwrap();
+        let written = db
+            .upsert_server_file_row(&stale, |contract| contract.parent_id = None)
+            .unwrap();
+        assert_eq!(written, "docs/b.txt");
+        assert_eq!(db.get_file("f").unwrap().unwrap().path, "docs/b.txt", "the rename's path stands");
+        assert_eq!(
+            db.get_file_contract_state("f").unwrap().unwrap().parent_id.as_deref(),
+            Some("docs"),
+            "and its parent"
+        );
+        db.remove_operation("rename").unwrap();
+        db.upsert_server_file_row(&stale, |contract| contract.parent_id = None).unwrap();
+        assert_eq!(db.get_file("f").unwrap().unwrap().path, "f.txt", "nothing queued: the server's row is written");
+    }
+
+    /// Task 2204 S0.2 (review-128 F4): a sync-folder create renamed before it landed keeps the
+    /// row's path and parent, and its finalization journal row names the row's path, not the
+    /// op's queue-time one. Only an op `handle_rename` queued (`local_rename`) holds them.
+    #[test]
+    fn task_2204_a_landing_keeps_a_renamed_row_s_path_and_journal() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_own_row(&db, "provisional", FileStatus::Uploading, 10);
+        let mut row = db.get_file("provisional").unwrap().unwrap();
+        row.path = "docs/b.txt".into();
+        db.upsert_file(&row).unwrap();
+        let mut contract = db
+            .get_file_contract_state("provisional")
+            .unwrap()
+            .unwrap_or_else(|| default_contract("provisional"));
+        contract.parent_id = Some("docs-folder".into());
+        db.set_file_contract_state(&contract).unwrap();
+        db.0.lock()
+            .unwrap()
+            .execute_batch(
+                r#"INSERT INTO operation_queue (op_id, kind, file_id, target_path, metadata_json, payload_path,
+                                               claim_id, attempts, max_attempts)
+                   VALUES ('create', 'upload_version', 'provisional', 'a.txt', '{"operation":"create_file"}',
+                           '/staged/create', 'claim-c', 0, 25),
+                          ('rename', 'move_file', 'provisional', 'b.txt',
+                           '{"operation":"metadata_update","local_rename":true}', NULL, NULL, 0, 25);"#,
+            )
+            .unwrap();
+        let finalization = UploadFinalization {
+            op_id: "create".into(),
+            local_file_id: "provisional".into(),
+            server_file_id: "server".into(),
+            target_path: "a.txt".into(),
+            payload_path: "/staged/create".into(),
+            stamped: false,
+        };
+        let input = LandingInput {
+            op_id: "create",
+            claim_id: Some("claim-c"),
+            write_id: None,
+            local_file_id: "provisional",
+            server_file_id: "server",
+            target_path: Some("a.txt"),
+            parent_id: None,
+            landed_base: None,
+            produced_version: 1,
+            produced_object_version_id: "object-1",
+            size_bytes: 3,
+            content_type: None,
+            mime_type: None,
+            completed_payload: Some("/staged/create"),
+            completed_payload_hash: None,
+            finalization: Some(&finalization),
+            now: 20,
+        };
+        let rekey = |op: &PendingOperation, _: &str| -> anyhow::Result<Option<String>> { Ok(op.metadata_json.clone()) };
+        db.apply_landing(&input, &rekey).unwrap().expect("the claim holds");
+        let landed = db.get_file("server").unwrap().unwrap();
+        assert_eq!(landed.path, "docs/b.txt", "the row stays where the file is");
+        assert_eq!(
+            db.get_file_contract_state("server").unwrap().unwrap().parent_id.as_deref(),
+            Some("docs-folder"),
+            "and in its folder"
+        );
+        let journal = db.upload_finalizations().unwrap();
+        assert_eq!(journal.len(), 1);
+        assert_eq!(journal[0].target_path, "docs/b.txt", "the journal names the row's path");
+        assert_eq!(
+            db.get_operation("rename").unwrap().unwrap().file_id.as_deref(),
+            Some("server"),
+            "the rename now names the server id"
         );
     }
 
