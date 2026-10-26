@@ -25398,7 +25398,7 @@ mod tests {
             ),
             (
                 "watcher.rs",
-                "match bridge.queue_finder_modify(modify) {",
+                "None => bridge.queue_finder_modify(modify),",
                 "pub(crate) async fn handle_rename(",
                 &[],
                 "the upload driver, which a Mac never starts (asserted below)",
@@ -28728,11 +28728,17 @@ mod tests {
             bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
             assert!(bridge.db.get_file_by_path("b.txt").unwrap().is_some(), "the re-key is durable");
         }
-        std::fs::write(&a, b"new bytes").unwrap();
+        // Another length than the renamed file's, so the scan's size and modification-time
+        // fingerprint can never hide a misrouted edit.
+        std::fs::write(&a, b"the new file's bytes").unwrap();
         if window == Task2204Window::Offline {
             crate::watcher::run_one_scan(&bridge, &sync_root);
         }
         drain_upload_queue(&bridge, &sync_root).await;
+        assert!(
+            bridge.db.get_file_by_path("b.txt").unwrap().is_some_and(|row| row.status == FileStatus::Local),
+            "the renamed file landed, and its row stayed at its new path"
+        );
         crate::watcher::run_one_scan(&bridge, &sync_root);
         drain_upload_queue(&bridge, &sync_root).await;
         crate::watcher::run_one_scan(&bridge, &sync_root);
@@ -28744,8 +28750,9 @@ mod tests {
         let state = server.finish();
         assert_eq!(state.files_with_content().len(), 2, "the server holds two files");
         assert_eq!(state.files[&b_row.file_id].versions.len(), 1, "the renamed file got no version from the new file");
+        assert_eq!(state.files[&a_row.file_id].versions.len(), 1, "the new file is new, not a later version of another");
         assert_eq!(state.latest_plaintext(&b_row.file_id, master_key), b"old bytes");
-        assert_eq!(state.latest_plaintext(&a_row.file_id, master_key), b"new bytes");
+        assert_eq!(state.latest_plaintext(&a_row.file_id, master_key), b"the new file's bytes");
         assert!(
             state.patches.iter().any(|(id, _)| *id == b_row.file_id),
             "the rename was sent for the renamed file's server id"
