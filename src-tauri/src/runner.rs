@@ -1364,15 +1364,13 @@ async fn run(
     // All idempotent — safe to run on every (re)spawn.
     #[cfg(target_os = "windows")]
     crate::windows_cf::seed_placeholders(bridge.clone(), &sync_root);
-    // Task 2191 (D9): before the first tick, every file of unknown content that holds bytes and
-    // reads in sync is marked not in sync. No network; off the async workers, and awaited.
+    // Task 2191 (D9), revised in desktop 0.8.15: every file of unknown content that holds bytes
+    // and reads in sync is marked not in sync. The pass runs BESIDE the engine, not before it:
+    // 0.8.14 awaited it here, and on a PC with 37,169 such files nothing uploaded for over two
+    // hours. Uploads, downloads, deletes and renames start at once; the tick's freeing work waits
+    // for `STARTUP_GUARD` (spec U4). Nothing between here and the tick loop is awaited.
     #[cfg(target_os = "windows")]
-    {
-        let guard_root = sync_root.clone();
-        if let Err(e) = tokio::task::spawn_blocking(move || crate::windows_cf::guard_unknown_placeholders(&guard_root)).await {
-            tracing::warn!(error = %e, "unknown-content guard panicked; continuing");
-        }
-    }
+    spawn_startup_guard(sync_root.clone());
 
     // Task 0780 — the UPLOAD trigger. On Windows the desktop binary IS the
     // Cloud Files provider and there is no extension/IPC socket to fire
@@ -1605,8 +1603,10 @@ async fn run(
                         // in-sync placeholder is a Windows no-op. Bounded at
                         // MAX_IN_SYNC_STAMPS_PER_PASS files per tick.
                         // Task 1640 (review P2-5): the pass may hash a file; off the async workers.
+                        // Desktop 0.8.15: freeing work, so it waits until the start-up guard's pass
+                        // has walked every file of unknown content (spec U4).
                         #[cfg(target_os = "windows")]
-                        {
+                        if crate::unknown_check::STARTUP_GUARD.allows_freeing() {
                             let stamp_root = sync_root.clone();
                             if let Err(e) = tokio::task::spawn_blocking(move || {
                                 crate::windows_cf::stamp_local_files_in_sync(&stamp_root);
@@ -1802,8 +1802,40 @@ fn emit_status(app: &AppHandle, state: &str, sync_root: Option<&PathBuf>, error:
     );
 }
 
+/// Desktop 0.8.15: every `engine-status` payload carries the start-up guard's progress as
+/// `startup_guard`: `{running, done, total}`, counts only.
+pub(crate) fn with_startup_guard(mut payload: serde_json::Value) -> serde_json::Value {
+    if let Some(object) = payload.as_object_mut() {
+        object.insert(
+            "startup_guard".to_string(),
+            serde_json::json!(crate::unknown_check::STARTUP_GUARD.progress()),
+        );
+    }
+    payload
+}
+
+/// Task 2191 (D9), desktop 0.8.15: begin the start-up guard's pass for this engine and walk it in
+/// its own task, off the async workers. Nothing waits for it: freeing work asks
+/// `STARTUP_GUARD.allows_freeing()`. The pass stops between rows when the engine stops (a lock or
+/// a sign-out revokes the callback bridge it holds); one that stopped or panicked leaves freeing
+/// held until the next engine start's pass has walked every row.
+#[cfg(target_os = "windows")]
+fn spawn_startup_guard(sync_root: PathBuf) {
+    let generation = crate::unknown_check::STARTUP_GUARD.begin();
+    let guard_root = sync_root;
+    tokio::spawn(async move {
+        let pass = tokio::task::spawn_blocking(move || {
+            crate::windows_cf::guard_unknown_placeholders(&guard_root, generation)
+        });
+        if let Err(e) = pass.await {
+            crate::unknown_check::STARTUP_GUARD.abandon(generation);
+            tracing::warn!(error = %e, "unknown-content guard panicked; freeing stays held until the next start");
+        }
+    });
+}
+
 fn emit_payload<R: tauri::Runtime>(app: &tauri::AppHandle<R>, payload: serde_json::Value) {
-    if let Err(e) = app.emit(crate::engine_status::EVENT, payload) {
+    if let Err(e) = app.emit(crate::engine_status::EVENT, with_startup_guard(payload)) {
         tracing::warn!(error = %e, "failed to emit engine-status event");
     }
 }

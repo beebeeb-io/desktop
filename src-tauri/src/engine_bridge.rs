@@ -3853,6 +3853,21 @@ impl EngineBridge {
     }
 
     pub fn enforce_local_cache_limit(&self, max_local_cache_bytes: Option<i64>) -> anyhow::Result<CacheCleanupOutcome> {
+        self.enforce_local_cache_limit_after_guard(max_local_cache_bytes, &crate::unknown_check::STARTUP_GUARD)
+    }
+
+    /// Desktop 0.8.15: [`Self::enforce_local_cache_limit`], which evicts nothing until `guard`'s
+    /// start-up pass has walked every file of unknown content (the pass runs beside the engine).
+    pub(crate) fn enforce_local_cache_limit_after_guard(
+        &self,
+        max_local_cache_bytes: Option<i64>,
+        guard: &crate::unknown_check::StartupGuard,
+    ) -> anyhow::Result<CacheCleanupOutcome> {
+        if !guard.allows_freeing() {
+            return Ok(CacheCleanupOutcome {
+                evicted_file_ids: Vec::new(),
+            });
+        }
         let Some(max_local_cache_bytes) = max_local_cache_bytes else {
             return Ok(CacheCleanupOutcome {
                 evicted_file_ids: Vec::new(),
@@ -10912,6 +10927,38 @@ mod tests {
         assert_eq!(
             bridge.db.get_file("old").unwrap().unwrap().status,
             FileStatus::CloudOnly
+        );
+    }
+
+    /// Desktop 0.8.15 (deliverable 1): cache eviction is freeing work, so it waits for the
+    /// start-up guard's pass, which now runs beside the engine instead of before it; and every
+    /// caller goes through the process's one guard state.
+    #[test]
+    fn desktop_0815_cache_eviction_waits_for_the_start_up_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        seed_bridge_row(&bridge, "old", "/Old.txt", None, FileStatus::Local, 400);
+        seed_bridge_row(&bridge, "new", "/New.txt", None, FileStatus::Local, 300);
+        bridge.db.mark_cached("old", "/cache/old", 400, 20).unwrap();
+        bridge.db.mark_cached("new", "/cache/new", 300, 30).unwrap();
+        let guard = crate::unknown_check::StartupGuard::new();
+        let pass = guard.begin();
+        let held = bridge.enforce_local_cache_limit_after_guard(Some(500), &guard).unwrap();
+        assert!(held.evicted_file_ids.is_empty(), "nothing is evicted while the pass is owed");
+        assert_eq!(bridge.db.get_file("old").unwrap().unwrap().status, FileStatus::Local);
+        guard.finish(pass);
+        let evicted = bridge.enforce_local_cache_limit_after_guard(Some(500), &guard).unwrap();
+        assert_eq!(evicted.evicted_file_ids, vec!["old".to_string()], "evicted once the pass walked every row");
+        // The checkout may carry CRLF line endings (the Windows gate clones with core.autocrlf=true).
+        let source = include_str!("engine_bridge.rs").replace("\r\n", "\n");
+        let production = source.split("\n#[cfg(test)]\nmod tests {").next().unwrap();
+        let body = &production[production.find("pub fn enforce_local_cache_limit(").unwrap()..];
+        let body = &body[..body.find("\n    }\n").unwrap()];
+        assert!(
+            crate::source_pin::squeeze(body).contains(&crate::source_pin::squeeze(
+                "self.enforce_local_cache_limit_after_guard(max_local_cache_bytes, &crate::unknown_check::STARTUP_GUARD)"
+            )),
+            "{body}"
         );
     }
 
@@ -26572,6 +26619,28 @@ mod tests {
         remove_pruned_entries(&db, &sync_root, &rows, &by_trust);
         assert!(!sync_root.join("docs").exists(), "known content in sync: removed as before");
         assert!(!sync_root.join("notes (this PC).txt").exists());
+    }
+
+    /// Desktop 0.8.15: the start-up guard now runs beside the engine, so a remote deletion can
+    /// reach a file of unknown content before the guard has marked it not in sync. A guarded row
+    /// can still carry a fetched hash (a fold of a row with no agreed version leaves one at
+    /// `fetched_min_version` -1), and that hash is no agreed content: the platform's in-sync
+    /// state is not trusted for it, and the bytes are copied first, whether the guard got there
+    /// or not.
+    #[test]
+    fn desktop_0815_a_remote_deletion_never_trusts_a_guarded_row_s_fetched_hash() {
+        let by_trust = |_: &Path, trust: bool| if trust { LocalEntry::InSync } else { LocalEntry::WhollyLocal };
+        let dir = tempfile::tempdir().unwrap();
+        let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
+        db.test_execute(&format!(
+            "UPDATE files SET local_hash = NULL, fetched_min_version = -1, fetched_hash = '{}' WHERE file_id = 'file-notes'",
+            sha256_hex(b"some version the guard never saw")
+        ))
+        .unwrap();
+        assert!(db.is_unknown_content("file-notes").unwrap(), "precondition: guarded");
+        let rows = db.mark_subtree_trashing("folder-docs").unwrap();
+        remove_pruned_entries(&db, &sync_root, &rows, &by_trust);
+        regression_1640_assert_kept_as_a_copy(&db, &sync_root);
     }
 
     /// Review-114 F-P1-4: the retry of a kept original recorded with no agreed content never
