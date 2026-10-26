@@ -34224,11 +34224,13 @@ mod finder_removal_wiring_tests {
             "clear_session_holding_slot(&acct, &engine_slot, account::SessionTransition::SignOut).map_err(&kept_with)?;",
             "finish_sign_out_turn(&acct, &engine_slot, true).map_err(&kept_with)?;",
             "finish_sign_out_turn(&acct, &engine_slot, false).map_err(&kept_with)?;",
+            // Task 2191 (review thread on #157): the Windows keychain step too.
+            "clear_keychain_session(acct.id.as_str()).map_err(&kept_with)?;",
         ] {
             assert!(squash_ws(&sign_out).contains(&squash_ws(failure)), "{failure}");
         }
         // Task 1887: the keep step and its three test seams (test builds only) carry the folders too.
-        assert_eq!(squash_ws(&sign_out).matches(".map_err(&kept_with)?").count(), 10);
+        assert_eq!(squash_ws(&sign_out).matches(".map_err(&kept_with)?").count(), 11);
         assert_eq!(
             sign_out.matches("        preserved_location,\n").count(),
             2,
