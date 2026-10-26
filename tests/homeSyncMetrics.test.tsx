@@ -84,7 +84,12 @@ describe('homeSyncMetrics: the figures follow the model', () => {
 
   test('"Not sent" counts waiting, every held group and given up', () => {
     expect(notSentFigure({ ...calm, queue: { waiting: 3, gave_up: 2, held: [{ reason: 'quota', count: 4, oldest_at: 0, newest_at: 0 }, { reason: 'auth', count: 1_000, oldest_at: 0, newest_at: 0 }] } })).toBe('1,009')
-    expect(notSentFigure({ ...calm, queue: null })).toBe('0')
+  })
+
+  test('a summary without a queue (`queue: null`, no state DB yet) is no count: "—", never 0', () => {
+    const noQueue: SyncActivitySummary = { ...calm, queue: null }
+    expect(notSentFigure(noQueue)).toBe('—')
+    expect(figures(signedIn, noQueue)['Not sent']).toBe('—')
   })
 })
 
