@@ -75,8 +75,8 @@ interface SyncRow {
 
 const SYNC_ROWS: SyncRow[] = [
   {
-    label: 'Keep files encrypted end-to-end',
-    hint: 'This cannot be disabled. Every byte on disk is ciphertext.',
+    label: 'End-to-end encryption',
+    hint: 'Files are encrypted before upload. This cannot be disabled.',
     locked: true,
   },
   {
@@ -333,7 +333,7 @@ function SyncPanel({
           let control: ReactNode = null
 
           if (row.locked) {
-            control = windows ? <Chip>Always on</Chip> : <Toggle on={true} onChange={() => undefined} label={row.label} />
+            control = <Chip>Always on</Chip>
           } else if (row.label === 'Sync on metered connections') {
             control = <Toggle on={metered} onChange={(v) => onConfigChange({ metered: v })} label={row.label} />
           } else if (row.label === 'Files on Demand (online-only by default)') {
@@ -471,7 +471,7 @@ function NotificationPreferencesPanel() {
       <div style={{ padding: '13px 20px', borderBottom: `1px solid ${T.line}`, display: 'flex', alignItems: 'center', gap: 10 }}>
         <NavIcon name="cog" size={14} color={T.ink2} />
         <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ink }}>Notification preferences</div>
+          <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ink }}>Account notifications</div>
           <div style={{ fontSize: 11, color: T.ink3 }}>Choose which account events notify you.</div>
         </div>
       </div>
@@ -539,7 +539,7 @@ function DesktopNotificationPreferencesPanel({
       <div style={{ padding: '13px 20px', borderBottom: `1px solid ${T.line}`, display: 'flex', alignItems: 'center', gap: 10 }}>
         <NavIcon name="external" size={14} color={T.ink2} />
         <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ink }}>Desktop alerts</div>
+          <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ink }}>On this device</div>
           <div style={{ fontSize: 11, color: T.ink3 }}>Native notifications fired by this device.</div>
         </div>
       </div>
@@ -723,7 +723,7 @@ export function DataResidencyContent({ loading, loadError, view, onRetry, onSele
   return (
     <SettingsSectionShell>
       <PageHeader
-        title="Data residency"
+        title="Storage location"
         subtitle={subtitle}
       />
 
@@ -1663,8 +1663,8 @@ export function AdvancedPanel({
   return (
     <SettingsSectionShell>
       <PageHeader
-        title="Advanced"
-        subtitle="Device-level behavior for this desktop app."
+        title="Appearance & storage"
+        subtitle="Theme and downloaded files on this device."
       />
 
       <Card style={{ padding: 0, overflow: 'hidden', marginBottom: 16 }}>
@@ -1672,7 +1672,7 @@ export function AdvancedPanel({
           <div style={{ minWidth: 0 }}>
             <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, marginBottom: 3 }}>Theme</div>
             <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.5 }}>
-              Choose the appearance for this app window.
+              {themeOptions.find((option) => option.value === themePreference)?.hint}
             </div>
           </div>
           <div
@@ -1719,28 +1719,6 @@ export function AdvancedPanel({
             })}
           </div>
         </div>
-        {themeOptions.map((option, index) => {
-          const selected = option.value === themePreference
-          return (
-            <div
-              key={option.value}
-              style={{
-                display: 'grid',
-                gridTemplateColumns: '1fr auto',
-                gap: 12,
-                padding: '11px 18px',
-                alignItems: 'center',
-                borderBottom: index === themeOptions.length - 1 ? 'none' : `1px solid ${T.line}`,
-              }}
-            >
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: 12.5, fontWeight: 500, color: T.ink }}>{option.label}</div>
-                <div style={{ fontSize: 11, color: T.ink3, marginTop: 2, lineHeight: 1.45 }}>{option.hint}</div>
-              </div>
-              {selected && <Chip tone="green">Selected</Chip>}
-            </div>
-          )
-        })}
       </Card>
 
       {cacheControl ? <Card style={{ padding: 0, overflow: 'hidden', marginBottom: 16 }}>
