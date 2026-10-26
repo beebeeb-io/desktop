@@ -1,95 +1,134 @@
-# Beebeeb Desktop 0.8.14 — Windows files from before 0.8.13 are never discarded unread
+# Beebeeb Desktop 0.8.15 — Windows: sync no longer waits for the start-up check, and the check downloads nothing
 
-0.8.14 protects Windows files that were on this PC before 0.8.13. The app has no record of which
-server version those files' bytes are, and 0.8.12 may have marked an edit of one of them as in
-sync. In 0.8.13, Explorer's "Free up space" and Storage Sense could therefore still free such an
-edit, and signing out deleted it with the rest of the sync folder. In 0.8.14 nothing frees,
-removes or deletes those bytes without reading them first, and signing out asks what to do with
-them. The macOS app is unchanged from 0.8.13.
+In 0.8.14 every start of the Windows app began with a check of each file synced before 0.8.13, and sync
+waited until that check was done. No edit was sent and no new file was picked up in the meantime. On a PC
+with tens of thousands of such files the check ran for hours. It also opened files in a way that made
+Windows download every cloud-only file it looked at, which could fill the disk. 0.8.15 runs the check
+beside sync, reads each file's state without downloading it, and shows its progress. Settings › Sync gets
+Pause and Resume, and the tray and Settings now say plainly when changes are not in sync. On macOS the only
+change is that Selective sync no longer lists a folder twice.
 
-**Known limitation:** an edit in such a file is kept on this PC but still not sent. Sending it
-needs a check of the file against the server, which comes in a later release (task 2191). Until
-then, the app keeps the file marked as not in sync.
+**Known limitations** (unchanged from 0.8.14, and now shown in the app):
+- An edit in a file from before 0.8.13 is still kept on this PC and not sent. Explorer keeps showing it as
+  "sync pending" until the check against the server lands in a later release (task 2191).
+- On Windows, changes that were held when a sign-in expired stay held. Home, the tray and Settings count them
+  as not in sync. They are repaired in 0.8.16, which first matches them to what the server already has.
+- A new file saved into a folder that this PC created back then, but never managed to create on the server,
+  waits as well. The server answers "not found" for that folder until 0.8.16 repairs it. The app counts such
+  a file as waiting, then as stopped after repeated errors.
 
 ### What's New
 
-- **[Windows] Signing out asks about files from before the last update (PR #157).**
-  - When such files hold bytes on this PC, Disconnect says how many there are. It then offers
-    **Keep copies and sign out**, the default, or **Delete them and sign out**.
-  - Copies go into a new folder named `Beebeeb kept files <date> <time>` beside the sync
-    folder, or in the home folder when the sync folder is a drive root. The dialog says plainly
-    that the copies are not encrypted.
-  - After signing out, an alert names that folder. It does so even when the sign-out stops after
-    the copies were made.
+- **[Windows] Pause and Resume in Settings › Sync.**
+  - The button sits beside the live sync state and sets the same pause as the tray and the app menu.
+  - Covered by `tests/syncPauseControl.test.ts`.
+- **[Windows] Home, the tray and Settings › Sync say what sync is doing.**
+  - During the start-up check they show the check and its progress. Uploads made during the check are the
+    headline.
+  - Changes waiting to be sent, changes held back and changes that ran out of retries are counted, with
+    their dates.
+  - Pending work is never shown as "Up to date". Held changes read "Not in sync".
+  - Home's strip used to say "Up to date · Syncing 0" next to thousands of unsent changes. It now shows the
+    same state as Settings, next to a count of the changes not sent yet.
+  - Covered by `tests/syncActivityModel.test.ts`, `tests/homeSyncMetrics.test.tsx` and
+    `desktop_0815_changes_on_hold_are_counted_and_are_never_syncing`.
 
 ### Bug Fixes / Hardening
 
-- **[Windows] Explorer's "Free up space" and Storage Sense no longer free these files (PR #157).**
-  - **Before:** 0.8.12 could have marked an edit of such a file as in sync, so Windows treated
-    the edit as safe to free.
-  - **Now:** before the first sync of each session, every such file that holds bytes and reads as
-    in sync is marked not in sync. A mark that fails is retried on every sync pass, as is a file
-    that becomes one of these during the session.
-  - Verified by `task_2191_the_guard_decides_from_the_platform_view`,
-    `task_2191_conflict_and_error_rows_are_marked_and_a_failed_mark_is_retried_on_the_next_tick` and
-    `task_2191_a_row_that_joins_the_guarded_set_mid_session_is_marked_at_the_next_tick`.
-- **[Windows] The app never takes "in sync" as proof that such a file matches the server.**
-  - A download never writes over one that holds bytes.
-  - When the file is deleted elsewhere, its bytes are kept as a copy before the original is
-    removed, and the retry of that step never removes one unread.
-  - Verified by `task_2191_an_unknown_file_in_sync_is_never_agreed`,
-    `task_2191_a_hydrate_never_writes_over_an_unknown_file`,
-    `task_2191_a_remote_deletion_copies_an_unknown_file_the_platform_calls_in_sync` and
-    `task_2191_the_retry_never_removes_an_unknown_file_unread`.
-- **[Windows] A file renamed or moved on another device stays protected at its old place.** The
-  old place can still hold the edit. It is tracked by the file's identity, not by its name.
-  Verified by `task_2191_a_web_rename_records_both_places_for_the_guard` and
-  `task_2191_an_orphan_is_found_by_its_identity_even_under_another_file_s_row`.
-- **[Windows] Signing out copies before it deletes.**
-  - Every copy is made before anything is deleted. Each original is read again through the
-    handle that deletes it. It is deleted only if it still matches its copy; otherwise the
-    sign-out stops.
-  - A partly downloaded file is copied over the parts on this PC.
-  - A file with unsent changes that the app knows about still stops the sign-out, as before.
-  - Verified on native Windows by `task_2191_sign_out_keeps_an_unknown_file_as_a_copy`,
-    `task_2191_sign_out_deletes_an_unknown_file_when_asked` and
-    `task_2191_a_known_file_that_is_not_clean_still_refuses_sign_out`. Also covered by
-    `task_2191_sign_out_copies_whole_and_partial_files_and_rehashes_what_it_copied`,
-    `task_2191_a_sync_folder_at_a_drive_root_keeps_copies_in_the_home_folder`,
-    `task_2191_a_failure_after_the_purge_names_the_kept_folder` and
-    `tests/windowsDisconnectUnknownFiles.test.tsx`.
+- **[Windows] Edits and new files are sent while the start-up check runs.**
+  - **Before (0.8.14):** the app checked every file from before 0.8.13 first, then started sending changes.
+    On a PC with 37,169 such files the check ran for more than two hours without finishing, and no edit
+    was sent in that time.
+  - **Now:** the check runs beside sync and reports its progress.
+  - Verified by `desktop_0815_uploads_start_without_waiting_for_the_guard`,
+    `desktop_0815_the_guard_reports_progress_after_every_row` and
+    `desktop_0815_the_guard_stops_between_rows_and_keeps_what_it_found`.
+- **[Windows] The start-up check never downloads a file.**
+  - **Before (0.8.14):** the check opened files with read access, so Windows fetched each cloud-only file
+    in full to answer it. On one PC that added up to about 42 GB, and the disk filled.
+  - **Now:** the check reads a file's attributes only, and marks a file "not in sync" through a handle that
+    asks for no data. A file that is not wholly on this PC is never opened to check it.
+  - A native Windows probe counts the downloads: 0 after the check's reads, 0 after promotion, 0 after the
+    mark. 0.8.14's way of opening the same file triggers 1.
+  - Verified by `desktop_0815_probe_the_guard_reads_a_cloud_only_file_without_fetching_it`.
+- **[Windows] 0.8.14's protection still holds while the check runs beside sync.**
+  - Nothing that can free or remove a file's bytes runs until the check has been through every file:
+    cache eviction, the in-sync stamping, and the retry of kept originals.
+  - A remote deletion trusts a stored hash only when its version is known.
+  - Verified by `desktop_0815_freeing_waits_for_the_start_up_pass`,
+    `desktop_0815_cache_eviction_waits_for_the_start_up_pass`,
+    `desktop_0815_the_tick_stamps_nothing_until_the_start_up_pass_is_done`,
+    `desktop_0815_the_guard_never_clears_a_flag_set_while_it_ran` and
+    `desktop_0815_a_remote_deletion_never_trusts_a_guarded_row_s_fetched_hash`.
+- **[Windows] Ctrl+Shift+P no longer prints.**
+  - WebView2's browser shortcuts are off in every app window: print, reload, find and DevTools.
+  - Text editing keys are unchanged, and zooming still works through the View menu.
+  - The Pause/Resume keyboard shortcut is now macOS-only. On Windows, pause from the tray, the menu or
+    Settings.
+  - Verified by `the_browser_keys_plugin_is_registered_before_any_window_is_built`,
+    `no_windows_or_linux_menu_shortcut_is_a_web_view_browser_key_or_an_altgr_chord` and
+    `pause_and_resume_keeps_its_shortcut_on_macos_only`.
+- **Selective sync lists each folder once.**
+  - A folder this PC created but never managed to create on the server used to be listed next to the
+    server's folder at the same path, so the folder appeared twice, once empty.
+  - The list now shows the server's folder only.
+  - This is display only. Nothing is deleted, moved or resumed.
+  - Verified by `selective_sync_shows_one_folder_per_path_preferring_the_server_row` and
+    `per_path_merge_keeps_two_server_items_and_never_mixes_kinds`.
+- **[Windows] Diagnostics.** When Windows asks the app for a file's bytes, the debug log records which
+  program asked, by its file name only, never its path. Verified by
+  `desktop_0815_a_requester_is_named_by_its_image_file_name_only`.
 
 ### Verification
 
-- Test suite (macOS, the release branch):
-  - `cargo test --locked --lib` completed with `test result: ok. 1985 passed; 0 failed; 8 ignored`;
-  - the integration binaries: `keychain` 31, `windows_session_wiring` 8, `windows_signout_cleanup` 3, all 0 failed.
-- Test suite (native Windows, a clean clone of the release branch):
-  - `cargo check --locked --all-targets` exit 0;
-  - `cargo test --locked` lib `test result: ok. 1467 passed; 0 failed; 5 ignored`, and every other test binary 0 failed
-    (`keychain` 31, `windows_session_wiring` 8, `windows_signout_cleanup` 3).
-- Frontend: `bun test` 1172 pass / 0 fail across 71 files; `bunx tsc --noEmit` and `bunx eslint .`
-  both exit 0.
+- Test suite (Linux, release/0.8.15 at `9e5298f`):
+  - `cargo test --locked` lib reported `test result: ok. 1689 passed; 0 failed; 7 ignored`. The integration
+    binaries reported `keychain` 31, `windows_session_wiring` 8 and `windows_signout_cleanup` 3, all with 0 failed.
+  - Frontend: `bun test` 1213 pass / 0 fail across 74 files. `bunx tsc --noEmit` and `bunx eslint .` both
+    exit 0.
+- Test suite (native Windows, a clean clone at `9e5298f`):
+  - `cargo check --locked --all-targets` exit 0.
+  - `cargo test --locked` lib reported `test result: ok. 1491 passed; 0 failed; 6 ignored`. `keychain` 31,
+    `windows_session_wiring` 8 and `windows_signout_cleanup` 3, all with 0 failed.
+  - The download probe above, run on Windows with output captured.
+- Test suite (macOS, Apple Silicon, a fresh worktree at `9c98818`):
+  - `cargo test --locked` lib reported `test result: ok. 2008 passed; 0 failed; 9 ignored`. `keychain` 31,
+    `windows_session_wiring` 8 and `windows_signout_cleanup` 3, all with 0 failed.
+  - `bun test` 1203 pass / 0 fail.
+  - The only change after `9c98818` is the Windows Home fix: the Windows main window's frontend and its
+    tests, with no Rust.
 - macOS:
-  - `git diff desktop-v0.8.13 release/0.8.14` over every macOS-only path is empty. Those paths are
-    the File Provider extension and its tests and tools, `macos/`, and the Finder, IPC, Keychain
-    and File Provider modules in `src-tauri/src`.
-  - In the code a macOS build shares with Windows, the only change that runs on macOS is two new,
-    empty tables in the local database. Only Windows writes to them.
-- Real hardware smoke test: **not run before this release.** The Windows device checks run after
-  release, at the maintainer's call ("nah for later. continue"), on a PC that synced files with
-  0.8.12:
-  - Explorer's "Free up space" leaves an edited file from before 0.8.13 alone;
-  - deleting such a file on the web keeps its bytes as a copy;
-  - signing out with "Keep copies" puts the bytes in the named folder, and "Delete them" removes
-    them.
-- The macOS sign-out device checks that 0.8.12 shipped without were waived again for this release,
-  at the same call ("nah for later. continue"). The macOS code is identical to 0.8.13 apart from
-  the two empty tables above.
+  - No macOS-only path changed since 0.8.14.
+  - Of the shared code, three changes run on macOS:
+    - `sync_status` carries two new fields, which only the Windows views read;
+    - the Selective sync list shows one folder per path (see above);
+    - the menu keeps its Pause/Resume shortcut (Cmd+Shift+P).
+  - The start-up check never runs on macOS, so nothing there waits for it.
+- Real hardware smoke test, run on the maintainer's Windows 11 PC, the one where 0.8.14 stalled.
+  - **Build:** a local release build of `9c98818`, unsigned, run in place against the real sync folder and
+    state on 2026-10-26 from 17:30 CET. 0.8.14 had stalled on this PC: more than two hours without
+    finishing, about 42 GB downloaded, and a full disk.
+  - **Start-up check:** it went through 31,809 files in 7 seconds. In 45 minutes the debug log shows 0
+    fetch requests, 0 downloads and 0 errors.
+  - **Edits and new files:** the first scan reached an edited Word document and a new spreadsheet in the
+    sync folder 4.5 minutes after start. Both were sent within seconds: the edit as version 5, the new file
+    as version 1.
+  - **Disk:** free space on C: dropped 106 MB in 45 minutes. In the same time the debug log alone grew by
+    350 MB.
+  - **Settings › Sync:** it showed "5 changes waiting to sync", the 2,924 held changes and the 43 that
+    stopped. Pause and Resume switched the state both ways.
+  - **Home:** re-checked on the same PC with a build of `9e5298f`. The strip read "Starting · Not sent 2,972"
+    (2,924 held, 43 stopped, 5 waiting). The `9c98818` build had shown "Up to date · Syncing 0" for the same
+    queue, which is why the Home fix is in this release.
+  - **Not checked on the device:**
+    - Ctrl+Shift+P: synthetic keystrokes could not reach the window, and the maintainer did not try it by
+      hand. It is covered by the tests above.
+    - the tray popover.
+- The macOS sign-out device checks that 0.8.12 shipped without were waived again for this release, by the
+  maintainer (2026-10-26: "Waive for 0.8.15"). The blocker stays listed on main for later releases.
 - Not verified:
   - sending an edit in a file from before 0.8.13 (a later release, task 2191);
-  - folder renames and moves into a folder that is not synced yet (task 2204's full design);
-  - renames made while the app is not running.
+  - resuming changes held since a sign-in expired (0.8.16).
 
 ### Install / Update
 
