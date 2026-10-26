@@ -564,7 +564,34 @@ jobs:
 
           DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           BASE_URL="https://github.com/$REPO/releases/download/$TAG"
-          NOTES=$(gh release view "$TAG" --repo "$REPO" --json body --jq '.body // ""')
+          WORK_DIR=$(mktemp -d)
+
+          # The release and its signatures are read through the authenticated REST API, never the
+          # public releases/download URL: on 2026-10-26 github.com answered one .sig URL with a
+          # cached 504 for about 15 minutes while the assets API served the same file, and the
+          # 0.8.15 alpha promotion failed twice. The retries ride out blips of seconds, not an
+          # outage of that length; re-run the job once the API answers again.
+          #
+          # gh_api_to <file> <endpoint> [gh api flags...]: up to 3 attempts; on success the file
+          # holds that attempt's response only.
+          gh_api_to() {
+            local out="$1" endpoint="$2" attempt
+            shift
+            for attempt in 1 2 3; do
+              if gh api "$@" > "$out"; then
+                return 0
+              fi
+              echo "::warning::GitHub API request $endpoint failed (attempt $attempt of 3)" >&2
+              if [ "$attempt" -lt 3 ]; then
+                sleep $((attempt * 10))
+              fi
+            done
+            echo "::error::GitHub API request $endpoint failed 3 times" >&2
+            return 1
+          }
+
+          gh_api_to "$WORK_DIR/release.json" "repos/$REPO/releases/tags/$TAG"
+          NOTES=$(jq -r '.body // ""' "$WORK_DIR/release.json")
 
           if [[ ! "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::Desktop release version '$VER' must be plain semver like 0.2.1. Channel is selected separately by the workflow input."
@@ -586,12 +613,14 @@ jobs:
 
           # The Tauri updater verifies update bundles against the embedded pubkey
           # in tauri.conf.json using the .sig files produced at build time.
-          # Windows and Linux must fail closed if their signatures are absent.
+          # Windows and Linux must fail closed if their bundles or signatures are absent.
           # macOS is still disabled in the release matrix (built + signed locally instead, see
-          # the matrix comment above) so its updater bundle filename is a best-effort
-          # carry-forward until the macOS assets for this VER are actually uploaded to the
-          # release. Missing macOS signatures omit the darwin entry instead of blocking
-          # Windows/Linux manifest publishing.
+          # the matrix comment above), so the CI-created release has no macOS assets until
+          # scripts/release-macos-local.sh uploads them. A release with neither the macOS
+          # bundle nor its signature omits the darwin entry instead of blocking Windows/Linux
+          # manifest publishing. A half-present macOS release (one of the two, or a signature
+          # that cannot be downloaded or is empty) fails the job: publishing without darwin
+          # would silently stop offering Macs the update.
           #
           # Task 1608 (2026-09-29): macOS launched Apple Silicon (arm64) ONLY. The bundle name
           # below is Tauri's real, verified output (a real local `--target aarch64-apple-darwin`
@@ -615,44 +644,54 @@ jobs:
           WINDOWS_NSIS_BUNDLE="Beebeeb_${VER}_x64-setup.exe"
           WINDOWS_MSI_BUNDLE="Beebeeb_${VER}_x64_en-US.msi"
 
-          # Signatures come through the authenticated assets API (gh), not the public
-          # releases/download URL: on 2026-10-26 github.com answered one .sig URL with a cached
-          # 504 for over 20 minutes while the API served the same asset (0.8.15 alpha promotion).
-          # Whether the optional macOS signature exists is read from the release's asset list, so
-          # a failed download is never mistaken for an absent asset: a listed signature that
-          # cannot be fetched fails the job instead of silently dropping darwin from the manifest.
-          RELEASE_ASSETS=$(gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name')
-          SIG_DIR=$(mktemp -d)
-
-          fetch_sig() {
-            local name="$1" attempt
-
-            for attempt in 1 2 3; do
-              if gh release download "$TAG" --repo "$REPO" --pattern "$name" --dir "$SIG_DIR" --clobber >&2; then
-                cat "$SIG_DIR/$name"
-                return 0
-              fi
-              echo "::warning::Downloading $name from $TAG failed (attempt $attempt of 3)" >&2
-              sleep $((attempt * 10))
-            done
-            echo "::error::Could not download $name from $TAG" >&2
-            return 1
+          # asset_id <name>: the id of the release's uploaded asset with exactly that name, or
+          # nothing. An asset still uploading (state "starter") counts as absent.
+          asset_id() {
+            jq -r --arg name "$1" \
+              '.assets[] | select(.name == $name and .state == "uploaded") | .id' \
+              "$WORK_DIR/release.json"
           }
 
-          fetch_optional_sig() {
-            local name="$1"
+          # fetch_sig <bundle>: print the bundle's signature. Fails unless the bundle and its .sig
+          # are uploaded assets of $TAG and the .sig downloads with content. Every failure path
+          # returns non-zero explicitly: errexit is off inside the $(...) that calls this.
+          fetch_sig() {
+            local bundle="$1" sig_id
 
-            if ! grep -Fxq -- "$name" <<<"$RELEASE_ASSETS"; then
-              echo "::notice::Optional macOS signature $name is not on $TAG; omitting macOS manifest entries" >&2
+            if [ -z "$(asset_id "$bundle")" ]; then
+              echo "::error::$bundle is not an uploaded asset of $TAG" >&2
+              return 1
+            fi
+            sig_id=$(asset_id "$bundle.sig")
+            if [ -z "$sig_id" ]; then
+              echo "::error::$bundle.sig is not an uploaded asset of $TAG" >&2
+              return 1
+            fi
+            gh_api_to "$WORK_DIR/$bundle.sig" "repos/$REPO/releases/assets/$sig_id" \
+              -H 'Accept: application/octet-stream' || return 1
+            if ! grep -q '[^[:space:]]' "$WORK_DIR/$bundle.sig"; then
+              echo "::error::$bundle.sig on $TAG is empty" >&2
+              return 1
+            fi
+            cat "$WORK_DIR/$bundle.sig" || return 1
+          }
+
+          # fetch_optional_sig <bundle>: like fetch_sig, but prints nothing when neither the bundle
+          # nor its .sig is on $TAG (the macOS case above).
+          fetch_optional_sig() {
+            local bundle="$1"
+
+            if [ -z "$(asset_id "$bundle")" ] && [ -z "$(asset_id "$bundle.sig")" ]; then
+              echo "::notice::Neither $bundle nor its signature is on $TAG; omitting macOS manifest entries" >&2
               return 0
             fi
-            fetch_sig "$name"
+            fetch_sig "$bundle"
           }
 
-          SIG_MACOS=$(fetch_optional_sig "${MACOS_BUNDLE}.sig")
-          SIG_LINUX=$(fetch_sig "${LINUX_BUNDLE}.sig")
-          SIG_WINDOWS_NSIS=$(fetch_sig "${WINDOWS_NSIS_BUNDLE}.sig")
-          SIG_WINDOWS_MSI=$(fetch_sig "${WINDOWS_MSI_BUNDLE}.sig")
+          SIG_MACOS=$(fetch_optional_sig "$MACOS_BUNDLE")
+          SIG_LINUX=$(fetch_sig "$LINUX_BUNDLE")
+          SIG_WINDOWS_NSIS=$(fetch_sig "$WINDOWS_NSIS_BUNDLE")
+          SIG_WINDOWS_MSI=$(fetch_sig "$WINDOWS_MSI_BUNDLE")
 
           mkdir -p releases-repo/desktop
 
