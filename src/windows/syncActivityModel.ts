@@ -96,7 +96,7 @@ export type SyncActivityKind =
   | 'error'
   | 'starting'
   | 'waiting'
-  | 'on_hold'
+  | 'not_in_sync'
   | 'locked'
   | 'stopped'
   | 'reading'
@@ -189,8 +189,8 @@ export function waitingSentence(n: number): string {
 /**
  * The view for one `sync_status` and one `sync_activity_summary` (either may be missing). Precedence, highest first:
  * not signed in, session ended, engine refused, paused, startup check, conflicts, moving, offline, error, starting,
- * waiting, on hold, locked, not running, up to date. Whatever is pending and not the headline is a detail line, so a
- * surface never shows a calm state over a queue that is not empty.
+ * waiting, not in sync (held or given-up changes), locked, not running, up to date. Whatever is pending and not the
+ * headline is a detail line, so a surface never shows a calm state over a queue that is not empty.
  *
  * `summary` is `undefined` before the first read and `null` when it could not be read. Neither ever ends in "up to
  * date": without the queue there is no way to know that.
@@ -296,7 +296,9 @@ export function syncActivityView(
   }
   if (heldLines.length > 0 || gaveUpLines.length > 0) {
     const [headline, ...rest] = [...heldLines, ...gaveUpLines]
-    return { ...base, kind: 'on_hold', label: 'On hold', headline, details: rest, tone: 'attention' }
+    // "Not in sync", not "On hold": the engine runs and new changes flow; these changes are simply not synced. "Paused"
+    // is only ever a pause the person made (coordinator ruling, 26 Oct). The held sentence is the notice.
+    return { ...base, kind: 'not_in_sync', label: 'Not in sync', headline, details: rest, tone: 'attention' }
   }
   if (status?.engine === 'locked') {
     return pick('locked', 'Locked', 'Beebeeb is locked. Unlock it to sync.', 'neutral')
