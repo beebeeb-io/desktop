@@ -1135,6 +1135,7 @@ mod tests {
         let local = root.join("local.bin");
         std::fs::write(&local, b"bytes on this PC").unwrap();
         crate::windows_cf::placeholders::convert_to_in_sync_placeholder(&local, "probe-local").unwrap();
+        let db = crate::state_db::StateDb::open(temp.path().join("state.db")).unwrap();
         settle(); // anything that reacts to a new file has done so
         let before = FETCHES.load(Ordering::SeqCst);
         let view = crate::windows_cf::placeholders::platform_view(&cloud_only);
@@ -1143,6 +1144,11 @@ mod tests {
         let local_view = crate::windows_cf::placeholders::platform_view(&local);
         settle();
         let after_guard_reads = FETCHES.load(Ordering::SeqCst);
+        // The stamp pass (which now runs once the guard is done) offers every in-sync file with no
+        // agreed content to the range-fetch promotion: a cloud-only one must not be fetched.
+        let promoted = crate::windows_cf::placeholders::promote_fetched_content(&db, "probe-cloud-only", &cloud_only).unwrap();
+        settle();
+        let after_promotion = FETCHES.load(Ordering::SeqCst);
         // The 0.8.14 open, for comparison: read access, as the reparse point.
         drop(
             std::fs::OpenOptions::new()
@@ -1154,8 +1160,13 @@ mod tests {
         );
         settle();
         let after_0814_open = FETCHES.load(Ordering::SeqCst);
+        // The guard's mark (made only on files that hold bytes), for the record.
+        let marked = crate::windows_cf::placeholders::mark_not_in_sync_path(&cloud_only).is_ok();
+        settle();
+        let after_mark = FETCHES.load(Ordering::SeqCst);
         println!(
-            "desktop-0815 probe: fetches before={before} after_guard_reads={after_guard_reads} after_0814_read_open={after_0814_open}"
+            "desktop-0815 probe: fetches before={before} after_guard_reads={after_guard_reads} \
+             after_promotion={after_promotion} after_0814_read_open={after_0814_open} after_mark={after_mark} (marked={marked})"
         );
         for (pid, image, offset, length) in REQUESTERS.lock().unwrap_or_else(|p| p.into_inner()).iter() {
             println!(
@@ -1177,5 +1188,7 @@ mod tests {
             PlatformView::Placeholder { on_disk: OnDisk::Wholly, in_sync: true, identity: Some("probe-local".into()) }
         );
         assert_eq!(after_guard_reads, before, "the guard's reads asked for no bytes");
+        assert!(!promoted);
+        assert_eq!(after_promotion, after_guard_reads, "the promotion check asked for no bytes");
     }
 }

@@ -761,7 +761,7 @@ mod tests {
     /// stamp pass comes after it (a source pin: the runner calls them on Windows only).
     #[test]
     fn task_2191_the_guard_runs_before_the_first_tick_and_every_tick_before_the_stamp() {
-        let runner = include_str!("runner.rs");
+        let runner = include_str!("runner.rs").replace("\r\n", "\n");
         let production = runner.split("\nmod tests {").next().unwrap();
         let at = |needle: &str| production.find(needle).unwrap_or_else(|| panic!("{needle} not found"));
         let seed = at("crate::windows_cf::seed_placeholders(bridge.clone(), &sync_root);");
@@ -787,7 +787,7 @@ mod tests {
     /// and nothing between seeding and the tick loop is awaited.
     #[test]
     fn desktop_0815_uploads_start_without_waiting_for_the_guard() {
-        let runner = include_str!("runner.rs");
+        let runner = include_str!("runner.rs").replace("\r\n", "\n");
         let production = runner.split("\nmod tests {").next().unwrap();
         let at = |needle: &str| production.find(needle).unwrap_or_else(|| panic!("{needle} not found"));
         let seed = at("crate::windows_cf::seed_placeholders(bridge.clone(), &sync_root);");
@@ -819,7 +819,7 @@ mod tests {
     #[test]
     fn desktop_0815_the_tick_stamps_nothing_until_the_start_up_pass_is_done() {
         use crate::source_pin::squeeze;
-        let runner = include_str!("runner.rs");
+        let runner = include_str!("runner.rs").replace("\r\n", "\n");
         let production = runner.split("\nmod tests {").next().unwrap();
         let stamp = production.find("crate::windows_cf::stamp_local_files_in_sync(&stamp_root);").unwrap();
         let kept = production.find("crate::windows_cf::retry_kept_originals(&stamp_root);").unwrap();
@@ -840,13 +840,13 @@ mod tests {
     /// `sync_status` poll, and the changes held back as `changes_on_hold` on `sync_status`.
     #[test]
     fn desktop_0815_the_ui_reads_the_guard_s_progress_and_the_changes_on_hold() {
-        let runner = include_str!("runner.rs");
+        let runner = include_str!("runner.rs").replace("\r\n", "\n");
         let production = runner.split("\nmod tests {").next().unwrap();
         let emit = &production[production.find("fn emit_payload<").unwrap()..];
         let emit = &emit[..emit.find("\n}\n").unwrap()];
         assert!(emit.contains("app.emit(crate::engine_status::EVENT, with_startup_guard(payload))"), "{emit}");
         assert_eq!(production.matches("crate::engine_status::EVENT").count(), 1, "every engine-status event goes through emit_payload");
-        let lib = include_str!("lib.rs");
+        let lib = include_str!("lib.rs").replace("\r\n", "\n");
         let status = &lib[lib.find("async fn sync_status(").unwrap()..];
         let status = &status[..status.find("\n}\n").unwrap()];
         let literal = status.rfind("Ok(serde_json::json!({").unwrap();

@@ -10949,7 +10949,8 @@ mod tests {
         guard.finish(pass);
         let evicted = bridge.enforce_local_cache_limit_after_guard(Some(500), &guard).unwrap();
         assert_eq!(evicted.evicted_file_ids, vec!["old".to_string()], "evicted once the pass walked every row");
-        let source = include_str!("engine_bridge.rs");
+        // The checkout may carry CRLF line endings (the Windows gate clones with core.autocrlf=true).
+        let source = include_str!("engine_bridge.rs").replace("\r\n", "\n");
         let production = source.split("\n#[cfg(test)]\nmod tests {").next().unwrap();
         let body = &production[production.find("pub fn enforce_local_cache_limit(").unwrap()..];
         let body = &body[..body.find("\n    }\n").unwrap()];
