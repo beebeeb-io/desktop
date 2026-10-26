@@ -1,4 +1,4 @@
-// 0.8.15 browser evidence for Settings › Sync, the Windows tray popover and Selective sync, against the Vite dev
+// 0.8.15 browser evidence for Home, Settings › Sync, the Windows tray popover and Selective sync, against the Vite dev
 // server with a synthetic Tauri IPC (no app, no account, no network). Counts only; the folder names are synthetic.
 //
 //   bunx vite --port 5291 --strictPort &
@@ -116,7 +116,47 @@ function expectText(page, text) {
   return page.getByText(text, { exact: true }).first().waitFor({ timeout: 5000 })
 }
 
+async function home(summary, { colorScheme } = {}) {
+  const { page, errors } = await open({ surface: 'main-app', summary, viewport: { width: 1200, height: 860 }, colorScheme })
+  await page.goto(`${base}/?window=main-app&platform=windows`)
+  await page.getByText('Everything on this PC, at a glance.', { exact: false }).waitFor()
+  return { page, errors }
+}
+
+/** A Home strip figure, once the summary has been read: the value under its label, exactly. */
+async function expectHomeFigure(page, label, value) {
+  const figure = page.getByText(label, { exact: true }).first().locator('xpath=following-sibling::div[1]')
+  const deadline = Date.now() + 5000
+  let seen = null
+  while (Date.now() < deadline) {
+    seen = (await figure.textContent())?.trim() ?? null
+    if (seen === value) return
+    await page.waitForTimeout(100)
+  }
+  assert.fail(`Home ${label}: expected "${value}", saw "${seen}"`)
+}
+
 try {
+  // ── Home (the main window's first page) ────────────────────────────────────
+  // On Guus's PC Home said "Up to date · Syncing 0" over 2,924 held and 43 given-up changes. Now: the model's label, and
+  // the changes not sent (2,924 + 43).
+  for (const [state, figures, colorScheme] of [
+    ['on-hold', { State: 'Not in sync', 'Not sent': '2,967' }, 'light'],
+    ['on-hold', { State: 'Not in sync', 'Not sent': '2,967' }, 'dark'],
+    ['checking', { State: 'Checking', 'Not sent': '2,967' }, 'light'],
+    ['up-to-date', { State: 'Up to date', 'Not sent': '0' }, 'light'],
+  ]) {
+    const name = `home-${state}${colorScheme === 'dark' ? '-dark' : ''}`
+    const { page, errors } = await home(summaries[state], { colorScheme })
+    for (const [label, value] of Object.entries(figures)) await expectHomeFigure(page, label, value)
+    assert.equal(await page.getByText('Syncing', { exact: true }).count(), 0, 'Home has no "Syncing" figure')
+    if (state !== 'up-to-date') assert.equal(await page.getByText('Up to date', { exact: true }).count(), 0)
+    results.push([`${name} ${JSON.stringify(figures)}`, await shot(page, name)])
+    assert.deepEqual(errors, [])
+    await page.close()
+  }
+
+
   // ── Settings › Sync ────────────────────────────────────────────────────────
   {
     const { page, errors } = await settingsSync('settings-sync-on-hold', summaries['on-hold'])

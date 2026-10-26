@@ -39,6 +39,7 @@ import {
   setKnownFolderBackup,
   type KnownFolderStatus,
   type BillingUsage,
+  type DesktopConfig,
   type StorageSummary,
   type SyncStatus,
   type AccountProfile,
@@ -66,6 +67,8 @@ import ActivityView from './windows/views/ActivityView'
 import SettingsView from './windows/views/SettingsView'
 import { usePlatformName, thisDeviceNoun } from './platform'
 import { finderOpenFailedToast } from './finderSetup'
+import { useSyncActivitySummary } from './windows/syncActivityUi'
+import { homeSyncMetrics } from './windows/homeSyncMetrics'
 
 // ── Nav structure ───────────────────────────────────────────────────────────
 
@@ -264,19 +267,24 @@ function homeHumanizeType(type: string): string {
 // account body shows a calm signed-out prompt.
 function HomeView({ status, usage, storage }: { status: SyncStatus | null; usage: BillingUsage | null; storage: StorageSummary | null }) {
   const platform = usePlatformName()
-  const stateLabel =
-    status == null ? '…'
-    : !status.logged_in ? 'Signed out'
-    : status.engine === 'running' ? (status.syncing > 0 ? 'Syncing' : 'Up to date')
-    : 'Paused'
+  // What sync is doing (0.8.15): the model Settings › Sync and the tray render, so Home never says "Up to date" over
+  // held changes. Before this the strip read `status` alone and showed "Up to date · Syncing 0" next to 2,967 unsent
+  // changes. The saved pause setting is the model's fallback only while the summary cannot be read (as in Settings).
+  const { summary } = useSyncActivitySummary()
+  const [pausedFallback, setPausedFallback] = useState<boolean | undefined>(undefined)
+  useEffect(() => {
+    let cancelled = false
+    void command<DesktopConfig | null>('desktop_config').then((result) => {
+      if (!cancelled && result.ok && result.value != null) setPausedFallback(result.value.pause_sync)
+    })
+    return () => { cancelled = true }
+  }, [])
 
   const usedBytes = usage?.used_bytes ?? storage?.used_bytes ?? null
   const quotaBytes = usage?.quota_bytes ?? storage?.quota_bytes ?? null
 
   const metrics: Array<{ k: string; v: string }> = [
-    { k: 'State', v: stateLabel },
-    { k: 'Syncing', v: status ? String(status.syncing) : '…' },
-    { k: 'Conflicts', v: status ? String(status.conflicts) : '…' },
+    ...homeSyncMetrics(status, summary, { device: thisDeviceNoun(platform), pausedFallback }),
     { k: 'In vault', v: usedBytes != null ? formatBytes(usedBytes) : '…' },
   ]
 
