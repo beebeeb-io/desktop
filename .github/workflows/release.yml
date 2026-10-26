@@ -615,22 +615,44 @@ jobs:
           WINDOWS_NSIS_BUNDLE="Beebeeb_${VER}_x64-setup.exe"
           WINDOWS_MSI_BUNDLE="Beebeeb_${VER}_x64_en-US.msi"
 
+          # Signatures come through the authenticated assets API (gh), not the public
+          # releases/download URL: on 2026-10-26 github.com answered one .sig URL with a cached
+          # 504 for over 20 minutes while the API served the same asset (0.8.15 alpha promotion).
+          # Whether the optional macOS signature exists is read from the release's asset list, so
+          # a failed download is never mistaken for an absent asset: a listed signature that
+          # cannot be fetched fails the job instead of silently dropping darwin from the manifest.
+          RELEASE_ASSETS=$(gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name')
+          SIG_DIR=$(mktemp -d)
+
           fetch_sig() {
-            curl --proto '=https' --tlsv1.2 -fsSL "$1"
+            local name="$1" attempt
+
+            for attempt in 1 2 3; do
+              if gh release download "$TAG" --repo "$REPO" --pattern "$name" --dir "$SIG_DIR" --clobber >&2; then
+                cat "$SIG_DIR/$name"
+                return 0
+              fi
+              echo "::warning::Downloading $name from $TAG failed (attempt $attempt of 3)" >&2
+              sleep $((attempt * 10))
+            done
+            echo "::error::Could not download $name from $TAG" >&2
+            return 1
           }
 
           fetch_optional_sig() {
-            local url="$1"
+            local name="$1"
 
-            if ! curl --proto '=https' --tlsv1.2 -fsSL "$url"; then
-              echo "::notice::Optional macOS signature not found at $url; omitting macOS manifest entries" >&2
+            if ! grep -Fxq -- "$name" <<<"$RELEASE_ASSETS"; then
+              echo "::notice::Optional macOS signature $name is not on $TAG; omitting macOS manifest entries" >&2
+              return 0
             fi
+            fetch_sig "$name"
           }
 
-          SIG_MACOS=$(fetch_optional_sig "${BASE_URL}/${MACOS_BUNDLE}.sig")
-          SIG_LINUX=$(fetch_sig "${BASE_URL}/${LINUX_BUNDLE}.sig")
-          SIG_WINDOWS_NSIS=$(fetch_sig "${BASE_URL}/${WINDOWS_NSIS_BUNDLE}.sig")
-          SIG_WINDOWS_MSI=$(fetch_sig "${BASE_URL}/${WINDOWS_MSI_BUNDLE}.sig")
+          SIG_MACOS=$(fetch_optional_sig "${MACOS_BUNDLE}.sig")
+          SIG_LINUX=$(fetch_sig "${LINUX_BUNDLE}.sig")
+          SIG_WINDOWS_NSIS=$(fetch_sig "${WINDOWS_NSIS_BUNDLE}.sig")
+          SIG_WINDOWS_MSI=$(fetch_sig "${WINDOWS_MSI_BUNDLE}.sig")
 
           mkdir -p releases-repo/desktop
 
