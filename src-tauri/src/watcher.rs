@@ -764,6 +764,15 @@ pub(crate) async fn handle_delete(bridge: &EngineBridge, sync_root: &std::path::
         && let Ok(Some(vacated)) = bridge.db().pending_local_rename_vacated(&entry.file_id)
         && let Ok(vacated_on_disk) = crate::engine_bridge::local_file_path_under_sync_root(sync_root, &vacated)
         && vacated_on_disk.is_file()
+        // Review-155 P1-B: only onto a row that can take the new bytes as an edit (a synced file
+        // with a known base); a file synced before task 1640 (unknown content) or not on this PC
+        // keeps the delete, and its new bytes upload as a new file once the rename is sent.
+        && entry.status == crate::state_db::FileStatus::Local
+        && matches!(
+            crate::engine_bridge::sync_folder_content(bridge.db(), &entry.file_id, &vacated_on_disk, None),
+            Ok(crate::engine_bridge::SyncFolderContent::Agreed
+                | crate::engine_bridge::SyncFolderContent::Changed { base: Some(_) })
+        )
         && bridge.db().fold_local_rename(&entry.file_id, &vacated).unwrap_or(false)
     {
         tracing::info!("upload driver: a safe save kept the file (rename folded back)");

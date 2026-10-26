@@ -5899,11 +5899,11 @@ pub(crate) fn promote_fetched_content(
     Ok(db.promote_fetched_content(file_id, version, &candidate)?)
 }
 
-/// Lower-case hex SHA-256 of `bytes`: a sync-folder file's agreed content (task 1640).
 /// Task 2204 S0.4: a Windows rename is sent this long after it is queued, so a safe save
 /// (rename away, new file, delete) completes first and folds back onto the original.
 pub(crate) const RENAME_SETTLE_SECS: i64 = 10;
 
+/// Lower-case hex SHA-256 of `bytes`: a sync-folder file's agreed content (task 1640).
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     format!("{:x}", Sha256::digest(bytes))
@@ -28944,6 +28944,118 @@ mod tests {
         std::fs::rename(&a, &b).unwrap();
         crate::watcher::handle_rename(&bridge, &sync_root, &a, &b).await;
         assert_eq!(bridge.db.get_operation("hydrate-a").unwrap().unwrap().target_path.as_deref(), Some("b.txt"));
+    }
+
+    /// Review-155 P1-B: an Excel save of a file synced before task 1640 (no agreed content) is not
+    /// folded: the new bytes could not be sent as an edit of it, so the delete stays a delete and
+    /// the new bytes upload as a new file once the rename is sent. Nothing is left unsent.
+    #[tokio::test]
+    async fn task_2204_a_safe_save_of_a_file_of_unknown_content_keeps_the_delete() {
+        let master_key = [211u8; 32];
+        let (_dir, sync_root, server, bridge) = rule3_setup(master_key);
+        let (original, hex, temp) = (sync_root.join("a.xlsx"), sync_root.join("3F2A9B1C"), sync_root.join("~tmp2.tmp"));
+        std::fs::write(&original, b"version one").unwrap();
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        drain_upload_queue(&bridge, &sync_root).await;
+        let id = bridge.db.get_file_by_path("a.xlsx").unwrap().unwrap().file_id;
+        bridge
+            .db
+            .test_execute(&format!("UPDATE files SET local_hash = NULL, fetched_min_version = -1 WHERE file_id = '{id}'"))
+            .unwrap();
+        std::fs::rename(&original, &hex).unwrap();
+        crate::watcher::handle_rename(&bridge, &sync_root, &original, &hex).await;
+        std::fs::write(&temp, b"version two, longer").unwrap();
+        std::fs::rename(&temp, &original).unwrap();
+        crate::watcher::handle_rename(&bridge, &sync_root, &temp, &original).await;
+        std::fs::remove_file(&hex).unwrap();
+        crate::watcher::handle_delete(&bridge, &sync_root, &hex).await;
+        let ops = bridge.db.list_operations_for_file(&id).unwrap();
+        assert!(ops.iter().any(|op| op.kind == OperationKind::TrashFile), "not folded: the delete is queued");
+        drain_upload_queue(&bridge, &sync_root).await;
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        drain_upload_queue(&bridge, &sync_root).await;
+        let row = bridge.db.get_file_by_path("a.xlsx").unwrap().expect("the saved workbook has a row");
+        assert_ne!(row.file_id, id, "a new file");
+        let state = server.finish();
+        assert_eq!(state.latest_plaintext(&row.file_id, master_key), b"version two, longer", "the save reached the server");
+    }
+
+    /// Review-155 R1: an edit queued before a rename lands before it (its queue-time name first,
+    /// the rename last), even when the edit is backing off while the rename is due.
+    #[tokio::test]
+    async fn task_2204_an_edit_queued_before_a_rename_lands_first() {
+        let master_key = [212u8; 32];
+        let (_dir, sync_root, server, bridge) = rule3_setup(master_key);
+        let (a, b) = (sync_root.join("a.txt"), sync_root.join("b.txt"));
+        std::fs::write(&a, b"first").unwrap();
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        drain_upload_queue(&bridge, &sync_root).await;
+        let id = bridge.db.get_file_by_path("a.txt").unwrap().unwrap().file_id;
+        std::fs::write(&a, b"an edit of the file").unwrap();
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        server.state.lock().unwrap().fail_first_chunk_once.insert("session-2".into());
+        let t0 = now_secs();
+        bridge.process_due_operations(&sync_root, t0).await.unwrap();
+        assert_eq!(regression_1640_uploads_queued_for(&bridge, "a.txt"), 1, "precondition: the edit backs off (30 s)");
+        std::fs::rename(&a, &b).unwrap();
+        crate::watcher::handle_rename(&bridge, &sync_root, &a, &b).await;
+        bridge.process_due_operations(&sync_root, t0 + RENAME_SETTLE_SECS + 1).await.unwrap();
+        assert!(
+            bridge.db.list_operations_for_file(&id).unwrap().iter().any(|op| op.kind == OperationKind::RenameFile),
+            "the rename is due but waits for the edit"
+        );
+        std::fs::write(&a, b"a new file at the old name").unwrap();
+        drain_upload_queue(&bridge, &sync_root).await;
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        drain_upload_queue(&bridge, &sync_root).await;
+        let b_row = bridge.db.get_file_by_path("b.txt").unwrap().expect("the renamed file at its new path");
+        let a_row = bridge.db.get_file_by_path("a.txt").unwrap().expect("the new file");
+        assert_eq!(b_row.file_id, id);
+        let state = server.finish();
+        assert_eq!(state.latest_plaintext(&id, master_key), b"an edit of the file");
+        assert_eq!(state.files[&id].versions.len(), 2);
+        assert_eq!(state.latest_plaintext(&a_row.file_id, master_key), b"a new file at the old name");
+        assert_eq!(state.files[&a_row.file_id].versions.len(), 1);
+    }
+
+    /// Review-155 P2: a delete right after a rename is sent after the rename, never before it.
+    #[tokio::test]
+    async fn task_2204_a_trash_after_a_rename_waits_for_it() {
+        let master_key = [213u8; 32];
+        let (_dir, sync_root, server, bridge) = rule3_setup(master_key);
+        let (a, b) = (sync_root.join("a.txt"), sync_root.join("b.txt"));
+        std::fs::write(&a, b"bytes").unwrap();
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        drain_upload_queue(&bridge, &sync_root).await;
+        let id = bridge.db.get_file_by_path("a.txt").unwrap().unwrap().file_id;
+        std::fs::rename(&a, &b).unwrap();
+        crate::watcher::handle_rename(&bridge, &sync_root, &a, &b).await;
+        std::fs::remove_file(&b).unwrap();
+        crate::watcher::handle_delete(&bridge, &sync_root, &b).await;
+        bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+        assert!(server.state.lock().unwrap().trashes.is_empty(), "the trash waits while the rename settles");
+        drain_upload_queue(&bridge, &sync_root).await;
+        let state = server.finish();
+        assert_eq!(state.trashes, vec![id.clone()], "then it is sent");
+        let rename_at = state.requests.iter().position(|(m, p)| m == "PATCH" && p.ends_with(&id));
+        let trash_at = state.requests.iter().position(|(m, p)| m == "DELETE" && p.ends_with(&id));
+        assert!(rename_at.is_some() && rename_at < trash_at, "the rename first, then the trash");
+    }
+
+    /// Review-155 P2-1: one malformed op row never stops every classify (the `json_valid` guard).
+    #[tokio::test]
+    async fn task_2204_a_malformed_op_does_not_stop_classify() {
+        let (_dir, sync_root, _server, bridge) = rule3_setup([214u8; 32]);
+        bridge
+            .db
+            .test_execute(
+                "INSERT INTO operation_queue (op_id, kind, file_id, metadata_json, attempts, max_attempts)
+                 VALUES ('bad', 'rename_file', 'other', 'not json {', 0, 25)",
+            )
+            .unwrap();
+        let path = sync_root.join("new.txt");
+        std::fs::write(&path, b"a new file").unwrap();
+        assert!(bridge.classify_local_path(&sync_root, &path).is_some(), "a new file is still classified");
     }
 
     /// S0 keeps today's behaviour for what it does not cover: a folder (its descendants would

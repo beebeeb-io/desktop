@@ -411,7 +411,7 @@ const DUE_ORDER_SQL: &str = "ORDER BY created_at ASC, rowid ASC";
 /// Task 2204: a Windows rename (`metadata.local_rename`) not sent yet: unclaimed, and neither
 /// parked nor paused.
 const PENDING_LOCAL_RENAME_SQL: &str = "kind IN ('rename_file', 'move_file')
-       AND json_extract(metadata_json, '$.local_rename') = 1
+       AND CASE WHEN json_valid(metadata_json) THEN json_extract(metadata_json, '$.local_rename') END = 1
        AND claim_id IS NULL AND attempts < max_attempts AND paused_reason IS NULL";
 
 /// `get_file_by_path`'s other stored shape: `/leaf` ⇄ `leaf`.
@@ -4604,7 +4604,7 @@ impl StateDb {
                 "SELECT EXISTS(SELECT 1 FROM operation_queue
                    WHERE file_id IN (?1, ?2) AND op_id != ?3
                      AND kind IN ('rename_file', 'move_file')
-                     AND json_extract(metadata_json, '$.local_rename') = 1)",
+                     AND CASE WHEN json_valid(metadata_json) THEN json_extract(metadata_json, '$.local_rename') END = 1)",
                 params![local, server, input.op_id],
                 |r| r.get(0),
             )?;
@@ -5129,10 +5129,6 @@ impl StateDb {
         insert_operation_conn(&conn, op)
     }
 
-    /// Spec 2026-10-10 §5.2 step 6: every change the Finder IPC queues (a rename, a move, a folder create with its
-    /// row, a delete, and the watcher's and non-macOS writes) is queued in one `BEGIN IMMEDIATE` transaction that reads
-    /// the sign-out's fence first, as `accept_finder_write` does for a save. A closed fence writes nothing.
-    /// Engine-internal enqueues (`enqueue_operation`: pins, hydrates, restores) never read it.
     /// Task 2204 S0.1: a Windows rename or move of a FILE, queued with its row moved to
     /// `new_path` (and `new_parent_id`) in the same transaction, so no path-keyed decision sees
     /// the old path for it again. `op` carries `metadata.local_rename`, which holds the row
@@ -5171,7 +5167,7 @@ impl StateDb {
         conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM operation_queue
                WHERE file_id = ?1 AND kind IN ('rename_file', 'move_file')
-                 AND json_extract(metadata_json, '$.local_rename') = 1)",
+                 AND CASE WHEN json_valid(metadata_json) THEN json_extract(metadata_json, '$.local_rename') END = 1)",
             params![file_id],
             |r| r.get(0),
         )
@@ -5186,7 +5182,7 @@ impl StateDb {
         conn.query_row(
             &format!(
                 "SELECT EXISTS(SELECT 1 FROM operation_queue WHERE {PENDING_LOCAL_RENAME_SQL}
-                   AND json_extract(metadata_json, '$.vacated_path') IN (?1, ?2))"
+                   AND CASE WHEN json_valid(metadata_json) THEN json_extract(metadata_json, '$.vacated_path') END IN (?1, ?2))"
             ),
             params![path, alt],
             |r| r.get(0),
@@ -5199,7 +5195,7 @@ impl StateDb {
         conn.query_row(
             &format!(
                 "SELECT json_extract(metadata_json, '$.vacated_path') FROM operation_queue
-                 WHERE {PENDING_LOCAL_RENAME_SQL} AND file_id = ?1 LIMIT 1"
+                 WHERE {PENDING_LOCAL_RENAME_SQL} AND attempts = 0 AND file_id = ?1 LIMIT 1"
             ),
             params![file_id],
             |r| r.get::<_, Option<String>>(0),
@@ -5220,7 +5216,7 @@ impl StateDb {
             .query_row(
                 &format!(
                     "SELECT op_id, json_extract(metadata_json, '$.vacated_parent_id') FROM operation_queue
-                     WHERE {PENDING_LOCAL_RENAME_SQL} AND file_id = ?1
+                     WHERE {PENDING_LOCAL_RENAME_SQL} AND attempts = 0 AND file_id = ?1
                        AND json_extract(metadata_json, '$.vacated_path') = ?2 LIMIT 1"
                 ),
                 params![file_id, vacated],
@@ -5252,6 +5248,10 @@ impl StateDb {
         Ok(true)
     }
 
+    /// Spec 2026-10-10 §5.2 step 6: every change the Finder IPC queues (a rename, a move, a folder create with its
+    /// row, a delete, and the watcher's and non-macOS writes) is queued in one `BEGIN IMMEDIATE` transaction that reads
+    /// the sign-out's fence first, as `accept_finder_write` does for a save. A closed fence writes nothing.
+    /// Engine-internal enqueues (`enqueue_operation`: pins, hydrates, restores) never read it.
     pub fn enqueue_finder_change(
         &self,
         op: &PendingOperation,
@@ -6238,6 +6238,36 @@ impl StateDb {
                           AND ({EARLIER_IN_QUEUE_SQL})
                           AND (this.kind != 'restore_version' OR earlier.write_id IS NOT NULL)
                           AND (earlier.kind != 'restore_version' OR this.write_id IS NOT NULL))"
+                ),
+                params![op_id],
+                |row| row.get(0),
+            )?;
+            if earlier {
+                return Ok(ClaimOutcome::Wait);
+            }
+        }
+        // Task 2204 S0 (review-155 R1, P2): a Windows rename waits for the file's earlier
+        // sync-folder uploads that can still run, so their queue-time name lands first and the
+        // rename lands last; a trash of the file waits for its earlier Windows rename the same way.
+        if matches!(op.kind, OperationKind::RenameFile | OperationKind::MoveFile | OperationKind::TrashFile) {
+            let earlier: bool = tx.query_row(
+                &format!(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM operation_queue AS this
+                        JOIN operation_queue AS earlier
+                          ON earlier.file_id = this.file_id AND earlier.op_id != this.op_id
+                        WHERE this.op_id = ?1
+                          AND this.write_id IS NULL AND earlier.write_id IS NULL
+                          AND earlier.attempts < earlier.max_attempts AND earlier.paused_reason IS NULL
+                          AND ({EARLIER_IN_QUEUE_SQL})
+                          AND ((this.kind IN ('rename_file', 'move_file')
+                                AND CASE WHEN json_valid(this.metadata_json)
+                                    THEN json_extract(this.metadata_json, '$.local_rename') END = 1
+                                AND earlier.kind IN ('upload_version', 'upload_file'))
+                            OR (this.kind = 'trash_file'
+                                AND earlier.kind IN ('rename_file', 'move_file')
+                                AND CASE WHEN json_valid(earlier.metadata_json)
+                                    THEN json_extract(earlier.metadata_json, '$.local_rename') END = 1)))"
                 ),
                 params![op_id],
                 |row| row.get(0),
@@ -10728,10 +10758,6 @@ mod tests {
         );
     }
 
-    /// Windows: a create's finalization journal row is written in the
-    /// landing's own transaction. Either the landing commits with its journal row, or nothing
-    /// of it does and the op stays for the retry: here the journal write fails (a row already
-    /// holds its key, as a full disk would fail it), and the landing rolls back whole.
     /// Task 2204 S0.2 (review-128 F4): a sync-folder create renamed before it landed keeps the
     /// row's path and parent, and its finalization journal row names the row's path, not the
     /// op's queue-time one. Only an op `handle_rename` queued (`local_rename`) holds them.
@@ -10806,6 +10832,10 @@ mod tests {
         );
     }
 
+    /// Windows: a create's finalization journal row is written in the
+    /// landing's own transaction. Either the landing commits with its journal row, or nothing
+    /// of it does and the op stays for the retry: here the journal write fails (a row already
+    /// holds its key, as a full disk would fail it), and the landing rolls back whole.
     #[test]
     fn a_landing_journals_its_finalization_in_its_own_transaction() {
         let dir = tempdir().unwrap();
