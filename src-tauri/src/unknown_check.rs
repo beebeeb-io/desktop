@@ -1,6 +1,6 @@
-//! Task 2191 S1: the guard for files of unknown content, synced before task 1640 (spec
+//! Task 2191: the guard for files of unknown content, synced before task 1640 (spec
 //! `docs/superpowers/specs/2026-10-25-2191-windows-unknown-baseline-design.md`, D2, D9, D11,
-//! D12). Nothing here makes a network call: the guard's functions take the state database, the
+//! D12). The guard functions make no network calls: they take the state database, the
 //! sync root and the platform's view of a path, never an API client.
 //!
 //! - At every engine start, every guarded file whose placeholder holds bytes and reads in sync
@@ -13,7 +13,16 @@
 //!   chose (`windows_cf::signout`), never deleted unasked.
 //!
 //! The decisions are pure and cross-platform so the macOS suite reaches them; the Windows
-//! adapters live in `windows_cf`.
+//! adapters live in `windows_cf`. S2 recording, comparison and recovery live in the child modules;
+//! `job::Job` owns their Windows-only, account-scoped lifetime.
+
+pub(crate) mod budget;
+mod record;
+pub(crate) mod compare;
+mod resolve;
+pub(crate) mod job;
+mod cost;
+mod source;
 
 use crate::state_db::{FileStatus, GuardedRow, StateDb};
 use std::path::{Path, PathBuf};

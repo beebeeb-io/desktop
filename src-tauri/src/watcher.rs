@@ -337,6 +337,10 @@ async fn debounce_loop(
                         // never queue a redundant server trash. A genuine user delete
                         // has no entry and falls through to handle_delete as before.
                         if take_engine_delete_suppressed(&path) {
+                            if let Some(rel)=crate::engine_bridge::relative_db_path(&sync_root,&path)
+                                && let Ok(Some(row))=bridge.db().get_file_by_path(&rel) {
+                                let _=bridge.db().take_removing(&row.file_id);
+                            }
                             tracing::debug!("upload driver: dropping engine-originated delete (remote-deletion reconcile)");
                         } else {
                             handle_delete(&bridge, &sync_root, &path).await;
@@ -755,6 +759,13 @@ pub(crate) async fn handle_delete(bridge: &EngineBridge, sync_root: &std::path::
     let Some(rel) = crate::engine_bridge::relative_db_path(sync_root, path) else {
         return;
     };
+    // 2191 U7: durable protection when the delayed event outlives path suppression.
+    if let Ok(Some(row))=bridge.db().get_file_by_path(&rel) {
+        match bridge.db().take_removing(&row.file_id) {
+            Ok(false)=>{},
+            Ok(true)|Err(_)=>return,
+        }
+    }
     // Task 2204 S0.4: a safe save renamed the original away, put the new bytes at its name and
     // now deletes the renamed file. While that rename is unsent, it folds back: the row returns
     // to the vacated path and the new bytes there are an edit of the original. A file that was

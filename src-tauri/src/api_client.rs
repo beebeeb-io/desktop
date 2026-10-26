@@ -27,6 +27,7 @@ use urlencoding::encode;
 use zeroize::Zeroize;
 
 mod direct;
+mod unknown;
 pub(crate) use direct::{ChunkApiError, GrantReply, fetch_from_storage, now_ms};
 
 // ── Writer-provenance headers (task 1436, the desktop/web half of 1392) ────────

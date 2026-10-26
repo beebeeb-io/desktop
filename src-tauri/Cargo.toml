@@ -182,6 +182,7 @@ windows = { version = "0.58", features = [
     "Win32_Storage_FileSystem",
     "Win32_Foundation",
     "Win32_System_Com",
+    "Networking_Connectivity",
     "Win32_Security_Credentials",
     # CF_CALLBACK_INFO embeds a *CORRELATION_VECTOR, so the struct itself is
     # gated behind this feature in windows 0.58 — without it the type is

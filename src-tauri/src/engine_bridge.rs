@@ -3509,20 +3509,7 @@ impl EngineBridge {
             // A file hydrated before this build has no agreed content: its change is kept on
             // disk (out of sync, so never stamped or freed) but not sent (task 2191).
             Ok(SyncFolderContent::Unknown) if os_in_sync == Some(false) => {
-                // Once per file per change (review N11): the scan classifies it every pass.
-                static WARNED: std::sync::OnceLock<std::sync::Mutex<HashMap<String, (u64, std::time::SystemTime)>>> =
-                    std::sync::OnceLock::new();
-                let fingerprint = std::fs::metadata(path).ok().and_then(|m| Some((m.len(), m.modified().ok()?)));
-                let mut warned = WARNED.get_or_init(Default::default).lock().unwrap_or_else(|p| p.into_inner());
-                if let Some(fingerprint) = fingerprint
-                    && warned.get(&existing.file_id) != Some(&fingerprint)
-                {
-                    warned.insert(existing.file_id.clone(), fingerprint);
-                    tracing::warn!(
-                        file_id = %existing.file_id,
-                        "sync folder: a change to a file synced before this version is kept on this PC, not sent"
-                    );
-                }
+                // S2 emits one count-only summary per quantum; no per-file warning flood.
                 return None;
             }
             Ok(_) => return None,
@@ -4566,6 +4553,24 @@ impl EngineBridge {
     /// need the bytes on disk (`hydrate_file`) or in memory (`hydrate_file_to_memory`)
     /// handle that themselves so the disk-write decision stays at the call site,
     /// not buried inside the crypto loop.
+    pub(crate) fn unknown_foreground_busy(&self) -> bool {
+        !self.transfers.active().is_empty() || FETCHES_IN_FLIGHT.lock().unwrap_or_else(std::sync::PoisonError::into_inner).values().any(|v|v.in_flight>0)
+    }
+
+    /// S2 uses the same authenticated decryptor as whole/range fetches, with a single-attempt
+    /// bounded transport so the job owns every request and its first 429.
+    pub(crate) async fn unknown_chunk(&self,id:&str,index:u32,key:&beebeeb_core::kdf::FileKey,
+        pin:Option<&crate::download_pin::PinnedVersion>,max_wire:u64) -> anyhow::Result<(Zeroizing<Vec<u8>>,u64)> {
+        let start=std::time::Instant::now();
+        let bytes=self.api.unknown_chunk(id,index,pin,max_wire).await?;
+        let wire=bytes.len() as u64;
+        self.wire.download_bytes.fetch_add(wire,Ordering::Relaxed);
+        let speed=crate::unknown_check::budget::speed(crate::config::DesktopConfig::load().map(|c|c.download_kbps_limit).unwrap_or(0));
+        let target=Duration::from_secs_f64(wire as f64/(speed as f64*1024.0));
+        if let Some(wait)=target.checked_sub(start.elapsed()) {tokio::time::sleep(wait).await;}
+        Ok((Zeroizing::new(decrypt_downloaded_chunk(key,&bytes)?),wire))
+    }
+
     fn owned_file_key(&self, file_id: &str) -> beebeeb_core::kdf::FileKey {
         let mk_bytes: [u8; 32] = *self.api.master_key();
         let master_key = beebeeb_core::kdf::MasterKey::from_bytes(mk_bytes);
@@ -4573,6 +4578,10 @@ impl EngineBridge {
     }
 
     async fn file_key_for_download(&self, file_id: &str) -> anyhow::Result<beebeeb_core::kdf::FileKey> {
+        self.file_key_for_check(file_id,None).await
+    }
+
+    pub(crate) async fn file_key_for_check(&self,file_id:&str,scope:Option<&crate::unknown_check::job::Scope>) -> anyhow::Result<beebeeb_core::kdf::FileKey> {
         let Some(contract) = self.db.get_file_contract_state(file_id)? else {
             return Ok(self.owned_file_key(file_id));
         };
@@ -4587,7 +4596,7 @@ impl EngineBridge {
             .share_id
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("shared item is missing invite id"))?;
-        let body = self.api.list_shared_roots().await?;
+        let body = match scope {Some(s)=>s.json(&self.api.shares_incoming_url()).await?,None=>self.api.list_shared_roots().await?};
         let invite = body
             .get("invites")
             .and_then(|value| value.as_array())
@@ -4607,7 +4616,7 @@ impl EngineBridge {
                 .encrypted_folder_key
                 .as_deref()
                 .ok_or_else(|| anyhow::anyhow!("folder share {share_id} is missing encrypted_folder_key"))?;
-            let folder_keys = self.api.get_folder_keys(share_id).await?;
+            let folder_keys = match scope {Some(s)=>s.json(&self.api.folder_keys_url(share_id)).await?,None=>self.api.get_folder_keys(share_id).await?};
             unwrap_folder_share_file_key(
                 self.api.master_key(),
                 sender_public_key,
@@ -5653,6 +5662,16 @@ pub fn is_ignored_finder_name(name: &str) -> bool {
 
 pub fn version_conflict_feed_from_db(db: &StateDb) -> anyhow::Result<Vec<VersionConflictEntry>> {
     let mut entries = Vec::new();
+    let unchecked=db.unknown_unchecked_count()?;
+    if unchecked>0 {
+        entries.push(VersionConflictEntry {
+            id:"unknown-content-check".into(),file_id:String::new(),file_name:"Files kept on this PC".into(),
+            kind:"could_not_check".into(),status:"couldn't check".into(),updated_at:None,
+            detail:format!("{unchecked} files couldn't be checked against the server, so they're kept on this PC and not freed."),
+            action:"none".into(),op_id:None,version_id:None,base_version:None,last_error:None,
+        });
+    }
+
 
     for file in db.list_by_status(FileStatus::Conflict)? {
         entries.push(VersionConflictEntry {
@@ -5682,6 +5701,17 @@ pub fn version_conflict_feed_from_db(db: &StateDb) -> anyhow::Result<Vec<Version
         // Review F5: the text says why the file was kept.
         let original_name = display_name_for_path(&kept.original_path);
         let (file_name, status, detail) = match kept.reason {
+            KeptReason::PreFixChange => {
+                let copy_name=display_name_for_path(&kept.copy_path);
+                let place=kept.copy_path.rsplit_once('/').map(|(folder,_)|format!("in the folder {folder}"))
+                    .unwrap_or_else(||"at the top of your Beebeeb folder".into());
+                let detail=if kept.original_removed {
+                    format!("Changes made on this PC before this update weren't on the server. They are kept as {copy_name}, {place}, and the original now holds the server's version.")
+                } else {
+                    format!("Changes made on this PC before this update weren't on the server. They are kept as {copy_name}, {place}. The original stays on this PC until it can be replaced safely.")
+                };
+                (copy_name,"kept as a copy",detail)
+            }
             KeptReason::Copy => {
                 let copy_name = display_name_for_path(&kept.copy_path);
                 let place = match kept.copy_path.rsplit_once('/') {
@@ -8878,12 +8908,12 @@ pub(crate) fn move_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
 /// the sync root. Inside a folder trashed on the web the copy would name that folder as its
 /// parent, which the server refuses.
 #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
-fn kept_copy_dir(db: &StateDb, sync_root: &Path, path: &Path, removed_dirs: &HashSet<PathBuf>) -> PathBuf {
+pub(crate) fn kept_copy_dir(db: &StateDb, sync_root: &Path, path: &Path, removed_dirs: &HashSet<PathBuf>) -> PathBuf {
     let mut dir = path.parent().unwrap_or(sync_root).to_path_buf();
     while dir != sync_root && dir.starts_with(sync_root) {
         let trashed = relative_db_path(sync_root, &dir)
             .and_then(|rel| db.get_file_by_path(&rel).ok().flatten())
-            .is_some_and(|row| row.status == FileStatus::Trashing);
+            .is_some_and(|row| row.status == FileStatus::Trashing || db.get_file_contract_state(&row.file_id).ok().flatten().is_none_or(|c|!c.can_write()));
         if !removed_dirs.contains(&dir) && !trashed {
             return dir;
         }
@@ -9063,7 +9093,7 @@ pub(crate) fn retry_kept_originals(db: &StateDb, sync_root: &Path, local: &dyn F
         return;
     };
     let removed_dirs = removed_folder_paths(db, sync_root);
-    for copy in kept.into_iter().filter(|copy| !copy.original_removed) {
+    for copy in kept.into_iter().filter(|copy| !copy.original_removed && copy.reason != KeptReason::PreFixChange) {
         // Resolved with nothing left to wait for: a copy's entry stays (dismissable); a file kept
         // where it is had nothing kept, so its entry goes.
         let resolve = |copy: &crate::state_db::KeptCopy| {

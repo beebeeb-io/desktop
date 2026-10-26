@@ -280,3 +280,22 @@ Rung, on a registered sync root on the Windows PC:
   the fetch to have been alone (self-review #1). It also found the round-2 `DEFAULT 0` column, the
   per-entry create `Result`, the F2 "another file moved there" case keeping the deleted file's
   placeholder at the other file's place, and "unreadable" read as "partly on disk"; all fixed.
+
+## 2191 S2: resolving content unknown before the upgrade
+
+The merged workspace 2191 spec/plan and its approved throughput amendment own
+these transitions. The S1 guard remains active while any check is pending.
+
+| Transition | Condition | Result |
+| --- | --- | --- |
+| T14 — record | Wholly local eligible file; size/mtime stable across hashing | Durable local SHA-256/size/mtime; no baseline or network request |
+| T15 — match | Positive server version fully matches the record; row/path still eligible; chunk-mode exclusive rehash agrees | Baseline version/hash, with later hash-mode edits preserved; eligible for the next stamp pass |
+| T16 — divergence | All eligible candidates differ, none undecided | Keep a new `(this PC)` copy and its actual hash, then same-handle rehash/delete under durable `removing`; conditional cloud-only reset |
+| T17 — could not check | Eight counted failures | One shared informational review entry; guarded bytes remain; rearm only at engine start |
+
+Network outages, 429, pause and budget stops do not consume counted attempts.
+The request/byte ledger spans four-file quanta and restarts. Comparison uses the
+existing fetch decryptor in zeroizing memory. Partial files and orphans remain
+protected for S3; this change does not hydrate or free them.
+
+Implementation and validation boundaries: [2191 S2 evidence](../verification/2191-s2/README.md).

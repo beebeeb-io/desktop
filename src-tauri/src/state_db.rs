@@ -23,6 +23,9 @@ use crate::diagnostic_redaction::{
     DiagnosticErrorCode, KnownNames, PAUSE_REASON_LABELS, QUEUE_KIND_LABELS, allowed_label, classify_error_code,
     redact_for_export, redact_secrets_only,
 };
+mod unknown;
+pub use unknown::{UnknownCheck, UnknownRow};
+
 use rusqlite::{Connection, OptionalExtension, Result, params};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashSet};
@@ -501,7 +504,7 @@ const FOLD_AGREED_INTO_CANDIDATE: &str = "
         ELSE MIN(fetched_min_version, local_base_version) END,
     local_hash = NULL";
 
-const KEPT_COPY_COLUMNS: &str = "id, original_file_id, original_path, copy_path, copied_hash, original_removed, reason, kept_at";
+const KEPT_COPY_COLUMNS: &str = "id, original_file_id, original_path, copy_path, copied_hash, original_removed, reason, kept_at, content_known";
 
 fn kept_copy_from_row(row: &rusqlite::Row<'_>) -> Result<KeptCopy> {
     Ok(KeptCopy {
@@ -513,6 +516,7 @@ fn kept_copy_from_row(row: &rusqlite::Row<'_>) -> Result<KeptCopy> {
         original_removed: row.get(5)?,
         reason: KeptReason::from_str(&row.get::<_, String>(6)?),
         kept_at: row.get(7)?,
+        content_known: row.get(8)?,
     })
 }
 
@@ -750,6 +754,8 @@ impl LocalActivityKind {
 /// Task 1640 (review F5): why a file deleted elsewhere was kept on this PC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeptReason {
+    /// Task 2191: unknown pre-update content, kept as a new file.
+    PreFixChange,
     /// It held changes not sent: they are kept as a copy (`copy_path`).
     Copy,
     /// Only part of it was on this PC, out of sync: it stays where it is.
@@ -763,6 +769,7 @@ pub enum KeptReason {
 impl KeptReason {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::PreFixChange => "pre_fix_change",
             Self::Copy => "copy",
             Self::PartlyLocal => "partly_local",
             Self::InUse => "in_use",
@@ -772,6 +779,7 @@ impl KeptReason {
 
     fn from_str(value: &str) -> Self {
         match value {
+            "pre_fix_change" => Self::PreFixChange,
             "partly_local" => Self::PartlyLocal,
             "in_use" => Self::InUse,
             "copy_failed" => Self::CopyFailed,
@@ -803,6 +811,7 @@ pub struct KeptCopy {
     pub original_removed: bool,
     pub reason: KeptReason,
     pub kept_at: i64,
+    pub content_known: bool,
 }
 
 impl KeptCopy {
@@ -2473,6 +2482,8 @@ impl StateDb {
         )?;
         // Task 1640 (review F5): why a file deleted elsewhere was kept (`KeptReason`).
         ensure_column(&conn, "kept_copies", "reason", "TEXT NOT NULL DEFAULT 'copy'")?;
+        // S2 copies establish no server baseline, including old entries on upgrade.
+        ensure_column(&conn, "kept_copies", "content_known", "INTEGER NOT NULL DEFAULT 0")?;
         // Task 1640 (review-151d P2-1): the person dismissed the entry of a file still kept where it
         // is; the row stays as a tombstone, so its folder is still the server's deletion.
         ensure_column(&conn, "kept_copies", "dismissed", "INTEGER NOT NULL DEFAULT 0")?;
@@ -3141,7 +3152,11 @@ impl StateDb {
                 copy.kept_at
             ],
         )?;
-        Ok(conn.last_insert_rowid())
+        let id=conn.last_insert_rowid();
+        if copy.reason==KeptReason::PreFixChange {
+            conn.execute("UPDATE unknown_checks SET copied_hash=?2 WHERE file_id=?1",params![copy.original_file_id,copy.copied_hash])?;
+        }
+        Ok(id)
     }
 
     /// Task 1640 (review F6): kept copy `id` now says `copy` (the retry resolved it): one entry
@@ -3163,6 +3178,9 @@ impl StateDb {
                 copy.kept_at
             ],
         )?;
+        if copy.reason==KeptReason::PreFixChange {
+            conn.execute("UPDATE unknown_checks SET copied_hash=?2 WHERE file_id=?1",params![copy.original_file_id,copy.copied_hash])?;
+        }
         Ok(())
     }
 

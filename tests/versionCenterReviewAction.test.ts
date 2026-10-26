@@ -14,6 +14,10 @@ import { describe, expect, test } from 'bun:test'
 import { reviewEntryAction } from '../src/desktopApi'
 
 describe('reviewEntryAction', () => {
+  test('the shared unknown-content notice has no dismiss action', () => {
+    expect(reviewEntryAction({ kind: 'could_not_check', action: 'none' })).toBeNull()
+    expect(reviewEntryAction({ kind: 'could_not_check', action: 'dismiss' })).toBeNull()
+  })
   test('a kept copy (task 1640) gets a Dismiss button: it needs no decision', () => {
     expect(reviewEntryAction({ kind: 'kept_copy', action: 'dismiss' })).toEqual({
       kind: 'dismiss',

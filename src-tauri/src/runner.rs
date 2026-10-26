@@ -1446,6 +1446,11 @@ async fn run(
     // Spec 2026-10-10 §6.2: when the send phase's wake last ran the queue step.
     let mut last_phase_run: Option<std::time::Instant> = None;
 
+    #[cfg(target_os = "windows")]
+    let mut unknown_job=match crate::unknown_check::job::Job::start(bridge.clone(),sync_root.clone(),sync_paused.clone()) {
+        Ok(job)=>Some(job),Err(_)=>{tracing::warn!("unknown content check could not start");None}
+    };
+
     loop {
         match next_wake(&mut cancel, &mut tick, &send_phase).await {
             Wake::Cancel => break,
@@ -1636,6 +1641,9 @@ async fn run(
                             }
                         }
 
+                        #[cfg(target_os = "windows")]
+                        if let Some(job)=&unknown_job {job.wake();}
+
                         let syncing_after_tick = sync_in_flight_count(&db);
                         let unresolved_after_tick = unresolved_sync_issue_count(&db);
                         let should_notify_sync_complete = sync_complete_notifications.observe(
@@ -1737,6 +1745,9 @@ async fn run(
             }
         }
     }
+
+    #[cfg(target_os = "windows")]
+    if let Some(job)=&mut unknown_job {job.stop().await;}
 
     emit_payload(&app, tracker.stopped().to_json());
 

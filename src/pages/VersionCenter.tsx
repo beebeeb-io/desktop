@@ -45,6 +45,8 @@ function kindLabel(kind: VersionConflictEntry['kind']): string {
       return 'Delete'
     case 'restore':
       return 'Restore'
+    case 'could_not_check':
+      return 'Files kept on this PC'
     case 'kept_copy':
       return 'Kept copy'
     default:

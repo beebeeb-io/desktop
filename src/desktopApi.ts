@@ -177,6 +177,7 @@ export interface VersionConflictEntry {
     // Task 1640: a file deleted elsewhere while it held changes not sent from this PC; they
     // were kept as a copy beside it (informational, no action).
     | 'kept_copy'
+    | 'could_not_check'
   status: string
   updated_at?: number
   detail: string
