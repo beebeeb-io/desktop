@@ -46,39 +46,57 @@ export function currentPollWindow(): PollWindow | null {
 }
 
 /**
- * Whether `win` is on screen. A window that cannot answer counts as on screen: a surface that reads too often is
- * better than one that freezes.
+ * Whether `win` is on screen. A window that cannot answer, or answers anything but `false`, counts as on screen: a
+ * surface that reads too often is better than one that freezes.
  */
 export async function windowVisible(win: PollWindow | null): Promise<boolean> {
   if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return false
   if (!win) return true
   try {
-    return await win.isVisible()
+    return (await win.isVisible()) !== false
   } catch {
     return true
   }
 }
 
+/** How {@link pollWhileVisible} runs. */
+export interface PollOptions {
+  /** The window to ask; the current Tauri window by default, `null` to poll on every tick. */
+  win?: PollWindow | null
+  /** Read once when the poll starts (default). `false` for a surface that does its own first load. */
+  leading?: boolean
+}
+
 /**
- * Run `tick` now, then every `intervalMs` while `win` is on screen, and once each time it is shown again. Returns the
- * stop function for an effect's cleanup. The first read is unconditional: a surface needs one answer to render.
+ * Run `tick` now, then every `intervalMs` while the window is on screen. When it is shown or focused again after a
+ * tick was skipped, read at once, so a surface never appears stale; a focus change of a window that stayed on
+ * screen reads nothing extra. Returns the stop function for an effect's cleanup.
  */
 export function pollWhileVisible(
   tick: () => void | Promise<void>,
   intervalMs: number,
-  win: PollWindow | null = currentPollWindow(),
+  { win = currentPollWindow(), leading = true }: PollOptions = {},
 ): () => void {
   let stopped = false
+  let missed = false
   let unlisten: (() => void) | undefined
   const tickIfVisible = async () => {
-    if (stopped || !(await windowVisible(win)) || stopped) return
+    if (stopped) return
+    if (!(await windowVisible(win))) {
+      missed = true
+      return
+    }
+    if (stopped) return
+    missed = false
     await tick()
   }
-  void tick()
+  if (leading) void tick()
   const id = window.setInterval(tickIfVisible, intervalMs)
   void win
     ?.onShown(() => {
-      if (!stopped) void tick()
+      if (stopped || !missed) return
+      missed = false
+      void tick()
     })
     .then((fn) => {
       if (stopped) fn()

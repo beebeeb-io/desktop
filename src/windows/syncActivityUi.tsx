@@ -49,7 +49,7 @@ export function useSyncActivitySummary(): { summary: SyncActivitySummary | null 
     let pending: number | undefined
     let unlisten: (() => void) | undefined
     const win = currentPollWindow()
-    const stopPoll = pollWhileVisible(refresh, SYNC_ACTIVITY_POLL_MS, win)
+    const stopPoll = pollWhileVisible(refresh, SYNC_ACTIVITY_POLL_MS, { win })
     // Outside Tauri (a plain browser, a test) there is no event bus: the poll alone keeps the surface current.
     void Promise.resolve()
       .then(() => listen(ENGINE_STATUS_EVENT, () => {

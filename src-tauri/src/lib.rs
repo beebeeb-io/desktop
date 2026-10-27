@@ -9465,8 +9465,8 @@ mod reveal_and_open_file_tests {
     }
 }
 
-/// What [`sync_status`] counts in the state DB: files moving (downloading + uploading), cloud-only files,
-/// conflicts, and changes held back.
+/// What [`sync_status`] counts in the state DB: rows moving (downloading + uploading), cloud-only rows (files and
+/// folders, as before task 2243), conflicts, and changes held back.
 fn sync_status_counts(db: &state_db::StateDb) -> (u32, u32, u32, u32) {
     use state_db::FileStatus;
     // Downloading + Uploading both count toward "in-flight sync work" for the WebView's syncing pill: there is no
@@ -9502,14 +9502,24 @@ fn sync_status_counts(db: &state_db::StateDb) -> (u32, u32, u32, u32) {
 /// every window ([`sync_status_counts`]). If the DB doesn't exist yet (first
 /// launch, sync root not picked, or DB not initialised because no engine has
 /// run yet) we return zeros.
+///
+/// `session_only` (task 2243): only `logged_in` and `session_revision`, read from
+/// memory, with no config file and no state DB. `AccountSessionBoundary` polls
+/// this every second in every window, hidden ones included, to see a sign-out.
 #[tauri::command]
-async fn sync_status(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+async fn sync_status(state: State<'_, AppState>, session_only: Option<bool>) -> Result<serde_json::Value, String> {
     // session / engine / engine_state are per-account (decision 0800);
     // `auth_present` stays on `AppState`.
     let acct = state.active_account()?;
     let vault_unlocked = acct.session.lock().map(|g| g.is_some()).unwrap_or(false);
     let auth_present = state.auth_present.lock().map(|g| *g).unwrap_or(false);
     let logged_in = vault_unlocked || auth_present;
+    if session_only == Some(true) {
+        return Ok(serde_json::json!({
+            "logged_in": logged_in,
+            "session_revision": UI_SESSION_REVISION.load(std::sync::atomic::Ordering::SeqCst),
+        }));
+    }
     // Task 1546 finding 5: 3+ consecutive 401s from the engine's heartbeat /
     // sync-tick calls flip this — the trigger for the persistent "signed out
     // on this device" banner. Explicit and independent of `logged_in`: the
@@ -39242,8 +39252,8 @@ mod launch_wiring_tests {
     }
 }
 
-/// Task 2243: what the window and tray polls cost the disk. Every window polls `sync_status` each second
-/// (`AccountSessionBoundary`), each call on a fresh connection, so SQLite's page cache is empty every time.
+/// Task 2243: what the window and tray polls cost the disk. Each command opens a fresh connection, so SQLite's
+/// page cache is empty every time, and each count below includes `StateDb::open` itself: every poll pays it.
 #[cfg(test)]
 mod task_2243_poll_cost_tests {
     use super::*;
@@ -39275,6 +39285,27 @@ mod task_2243_poll_cost_tests {
         tx.commit().unwrap();
     }
 
+    /// `AccountSessionBoundary` polls `sync_status` every second in every window, hidden ones included, to see a
+    /// sign-out. It asks for the session only, and that answer returns before the config file, the state directory or
+    /// the state DB is touched: three windows each opening the DB every second were most of the reads left on Guus's PC
+    /// once the other polls stopped while their windows were hidden.
+    #[test]
+    fn task_2243_the_session_poll_reads_no_file() {
+        let source = include_str!("lib.rs").replace("\r\n", "\n");
+        let at = source.find("async fn sync_status(").expect("sync_status exists");
+        let body = crate::source_pin::squeeze(&source[at..at + source[at..].find("\n}\n").unwrap()]);
+        let early = body
+            .find("ifsession_only==Some(true){returnOk(serde_json::json!({")
+            .expect("the session-only answer returns at once");
+        let answer = &body[early..early + body[early..].find("}));}").expect("its end")];
+        assert!(answer.contains("\"logged_in\":logged_in"));
+        assert!(answer.contains("\"session_revision\":UI_SESSION_REVISION.load("));
+        for read in ["DesktopConfig::load(", "state_paths::", "StateDb::open("] {
+            let first = body.find(read).unwrap_or_else(|| panic!("the full answer reads {read}"));
+            assert!(early < first, "the session-only answer comes after {read}");
+        }
+    }
+
     /// The counts come from `idx_status` alone. Loading the rows to count them read the whole set from disk on every
     /// call: 1,062 page reads on Guus's 43k-row state.db, twice a second with two windows loaded.
     #[test]
@@ -39290,10 +39321,9 @@ mod task_2243_poll_cost_tests {
         ];
         seeded_state_db(&path, &rows);
         let db = state_db::StateDb::open(&path).unwrap();
-        let before = db.page_reads();
         assert_eq!(sync_status_counts(&db), (12, 3000, 2, 0));
-        let reads = db.page_reads() - before;
-        assert!(reads <= 40, "one sync_status read {reads} pages from disk");
+        let reads = db.page_reads();
+        assert!(reads <= 40, "one sync_status (the open and its counts) read {reads} pages from disk");
     }
 
     /// The tray's recent list is the overview's `recent`, read from the newest rows alone. The overview loads every row
@@ -39337,14 +39367,13 @@ mod task_2243_poll_cost_tests {
         );
 
         let db = state_db::StateDb::open(&path).unwrap();
-        let before = db.page_reads();
         let recent = recent_files(&db, 50).unwrap();
-        let reads = db.page_reads() - before;
+        let reads = db.page_reads();
         assert_eq!(
             serde_json::to_value(&recent).unwrap(),
             serde_json::to_value(&expected).unwrap()
         );
-        assert!(reads <= 60, "the tray's recent list read {reads} pages from disk");
+        assert!(reads <= 60, "the tray's recent list (the open and its reads) read {reads} pages from disk");
     }
 
     /// The tray's activity line asks for the queue's hold summary every 3 s. Its oldest and newest dates per reason
@@ -39384,9 +39413,8 @@ mod task_2243_poll_cost_tests {
             tx.commit().unwrap();
         }
         let db = state_db::StateDb::open(&path).unwrap();
-        let before = db.page_reads();
         let hold = db.queue_hold_summary().unwrap();
-        let reads = db.page_reads() - before;
+        let reads = db.page_reads();
         assert_eq!((hold.waiting, hold.gave_up), (500, 500));
         let groups: Vec<_> = hold
             .held
@@ -39400,6 +39428,6 @@ mod task_2243_poll_cost_tests {
                 ("quota", 1000, 1_700_000_001, 1_700_002_998)
             ]
         );
-        assert!(reads <= 40, "the hold summary read {reads} pages from disk");
+        assert!(reads <= 40, "the hold summary (the open and its reads) read {reads} pages from disk");
     }
 }

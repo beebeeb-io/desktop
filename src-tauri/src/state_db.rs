@@ -2451,10 +2451,12 @@ impl StateDb {
             CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
             -- Task 2243: the tray's recent list reads the newest rows through it, not every row.
             CREATE INDEX IF NOT EXISTS idx_files_modified_at ON files(modified_at);
-            CREATE INDEX IF NOT EXISTS idx_operation_queue_paused ON operation_queue(paused_reason);
-            -- Task 2243: `queue_hold_summary`, polled by the tray every few seconds, reads this alone.
+            -- Task 2243: `queue_hold_summary`, polled by the tray every few seconds, reads this alone. It starts
+            -- with `paused_reason`, so it also serves every lookup the old `idx_operation_queue_paused` did, and
+            -- that index is dropped: one index to keep up to date on each queue write, not two.
             CREATE INDEX IF NOT EXISTS idx_operation_queue_hold_summary
                 ON operation_queue(paused_reason, created_at, attempts, max_attempts);
+            DROP INDEX IF EXISTS idx_operation_queue_paused;
             CREATE INDEX IF NOT EXISTS idx_operation_queue_backup_source ON operation_queue(backup_source_key);
             -- Flow 7 (interrupted upload resume): the server upload session an
             -- UploadVersion/UploadFile op is writing to, persisted the moment
@@ -4429,11 +4431,8 @@ impl StateDb {
         Ok(updated)
     }
 
-    /// Return every row whose `status` matches. Used by the conflict
-    /// resolution UI (status = Conflict) and the daemon's
-    /// "what still needs uploading?" sweep (status = Uploading).
-    /// How many rows have `status`, counted in `idx_status` alone (task 2243). The windows poll it every second; loading
-    /// the rows to count them read the whole set from disk each time.
+    /// How many rows (files and folders) have `status`, counted in `idx_status` alone (task 2243). The windows poll it
+    /// every few seconds; loading the rows to count them read the whole set from disk each time.
     pub fn count_by_status(&self, status: FileStatus) -> Result<u32> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let count: i64 = conn
@@ -4442,6 +4441,9 @@ impl StateDb {
         Ok(u32::try_from(count.max(0)).unwrap_or(u32::MAX))
     }
 
+    /// Return every row whose `status` matches. Used by the conflict
+    /// resolution UI (status = Conflict) and the daemon's
+    /// "what still needs uploading?" sweep (status = Uploading).
     pub fn list_by_status(&self, status: FileStatus) -> Result<Vec<FileEntry>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let mut stmt = conn.prepare(
@@ -4509,8 +4511,9 @@ impl StateDb {
         rows.collect()
     }
 
-    /// The newest `limit` files (folders left out), newest first and ties by path, as [`StateDb::file_overview_rows`]
-    /// gives them: the tray's recent list (task 2243). Read through `idx_files_modified_at`, not by loading every row.
+    /// The newest `limit` files (folders left out), newest first and ties by path, in the row shape of
+    /// [`StateDb::file_overview_rows`]: the tray's recent list (task 2243). `compute_file_overview` sorts by the same
+    /// keys, so its newest `limit` files are among these. Read through `idx_files_modified_at`, not by loading every row.
     pub fn newest_file_rows(&self, limit: usize) -> Result<Vec<(FileEntry, bool)>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let mut stmt = conn.prepare_cached(&format!(
