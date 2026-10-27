@@ -27,7 +27,8 @@ fn unleased_credential_commands(source: &str) -> Vec<String> {
 #[test]
 fn every_credential_command_has_admission_before_credential_reads() {
     // 33: `account_profile_fresh` (PR #140 delta review) reads the server with the session's token, so it is admitted too.
-    assert_eq!(SOURCE.matches("session_command!(async").count(), 33);
+    // 34: `desktop_recent_files` (task 2243), the tray's recent list, is admitted like `desktop_file_overview`.
+    assert_eq!(SOURCE.matches("session_command!(async").count(), 34);
     assert!(
         unleased_credential_commands(&SOURCE).is_empty(),
         "unleased commands: {:?}",

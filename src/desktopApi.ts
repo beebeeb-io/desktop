@@ -503,12 +503,25 @@ export async function popoverSnapshot(activityLimit?: number): Promise<CommandRe
 
 export async function loadSyncStatus(): Promise<SyncStatus | null> {
   const result = await command<SyncStatus>('sync_status')
-  if (result.ok && result.value.session_revision !== undefined) {
-    // A sign-in clears a held sign-out sentence first, so the remount it causes does not show it again.
-    observeSignOutWarning(result.value.logged_in === true, result.value.session_revision)
-    observeAccountSession(result.value.session_revision)
-  }
+  if (result.ok) observeSession(result.value)
   return result.ok ? { ...result.value, engine_refusal: parseEngineRefusal(result.value.engine_refusal) } : null
+}
+
+/**
+ * Task 2243: only what `AccountSessionBoundary` needs to see a sign-out, `logged_in` and `session_revision`. Rust
+ * answers it from memory (`sync_status` with `sessionOnly`), with no config file and no state DB: the boundary polls
+ * it every second in every window, hidden ones included.
+ */
+export async function observeSessionStatus(): Promise<void> {
+  const result = await command<Pick<SyncStatus, 'logged_in' | 'session_revision'>>('sync_status', { sessionOnly: true })
+  if (result.ok) observeSession(result.value)
+}
+
+function observeSession(status: Pick<SyncStatus, 'logged_in' | 'session_revision'>): void {
+  if (status.session_revision === undefined) return
+  // A sign-in clears a held sign-out sentence first, so the remount it causes does not show it again.
+  observeSignOutWarning(status.logged_in === true, status.session_revision)
+  observeAccountSession(status.session_revision)
 }
 
 /**
@@ -1080,6 +1093,12 @@ export function desktopFileOverview(
   recentLimit?: number,
 ): Promise<CommandResult<FileOverview>> {
   return command<FileOverview>('desktop_file_overview', { recentLimit })
+}
+
+/** The tray's recent list: {@link desktopFileOverview}'s `recent` without its totals, read from the newest rows alone
+ *  (task 2243: the overview read every row, and the tray polls this every few seconds). */
+export function desktopRecentFiles(recentLimit?: number): Promise<CommandResult<RecentFile[]>> {
+  return command<RecentFile[]>('desktop_recent_files', { recentLimit })
 }
 
 /** Query the local desktop file-name search index. Results are local mirror

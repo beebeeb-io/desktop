@@ -13,6 +13,7 @@ import { loadSyncActivitySummary, setSyncPaused } from '../desktopApi'
 import { ENGINE_STATUS_EVENT } from '../popoverContract'
 import { formatCount, type StartupCheck, type SyncActivitySummary, type SyncActivityView } from './syncActivityModel'
 import { T } from './ui'
+import { currentPollWindow, pollWhileVisible, windowVisible } from './visiblePoll'
 
 /** How often a surface re-reads the summary while it is mounted, next to its `sync_status` poll. */
 export const SYNC_ACTIVITY_POLL_MS = 3000
@@ -28,6 +29,9 @@ export const RESUME_FAILED = { title: 'Couldn’t resume syncing', message: 'Bee
  * `engine-status` event (a tick, or a pause toggled from the app menu, the tray menu or another window).
  * `undefined` until the first read answers, `null` when it could not be read. `refresh` reads it now; only the
  * newest read's answer is kept.
+ *
+ * Task 2243: the poll and the event reads happen only while the window is on screen, and showing it reads at once.
+ * The tray flyout is hidden almost all the time, and each read opens the state DB.
  */
 export function useSyncActivitySummary(): { summary: SyncActivitySummary | null | undefined; refresh: () => Promise<void> } {
   const [summary, setSummary] = useState<SyncActivitySummary | null | undefined>(undefined)
@@ -44,15 +48,17 @@ export function useSyncActivitySummary(): { summary: SyncActivitySummary | null 
     mounted.current = true
     let pending: number | undefined
     let unlisten: (() => void) | undefined
-    void refresh()
-    const id = window.setInterval(() => void refresh(), SYNC_ACTIVITY_POLL_MS)
+    const win = currentPollWindow()
+    const stopPoll = pollWhileVisible(refresh, SYNC_ACTIVITY_POLL_MS, { win })
     // Outside Tauri (a plain browser, a test) there is no event bus: the poll alone keeps the surface current.
     void Promise.resolve()
       .then(() => listen(ENGINE_STATUS_EVENT, () => {
         if (pending !== undefined) return
         pending = window.setTimeout(() => {
           pending = undefined
-          void refresh()
+          void windowVisible(win).then((visible) => {
+            if (visible) void refresh()
+          })
         }, ENGINE_EVENT_COALESCE_MS)
       }))
       .then((fn) => {
@@ -62,7 +68,7 @@ export function useSyncActivitySummary(): { summary: SyncActivitySummary | null 
       .catch(() => undefined)
     return () => {
       mounted.current = false
-      window.clearInterval(id)
+      stopPoll()
       if (pending !== undefined) window.clearTimeout(pending)
       unlisten?.()
     }

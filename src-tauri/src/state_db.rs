@@ -440,6 +440,34 @@ const PENDING_LOCAL_RENAME_SQL: &str = "kind IN ('rename_file', 'move_file')
        AND CASE WHEN json_valid(metadata_json) THEN json_extract(metadata_json, '$.local_rename') END = 1
        AND claim_id IS NULL AND attempts < max_attempts AND paused_reason IS NULL";
 
+/// The columns [`file_overview_row`] reads.
+const FILE_OVERVIEW_COLUMNS: &str = "file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at,
+     parent_id, item_kind, pin_state, inherited_pin_state";
+
+/// A [`FILE_OVERVIEW_COLUMNS`] row and whether it is pinned.
+fn file_overview_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(FileEntry, bool)> {
+    let entry = FileEntry {
+        file_id: row.get(0)?,
+        path: row.get(1)?,
+        status: FileStatus::from_str(&row.get::<_, String>(2)?),
+        size_bytes: row.get(3)?,
+        modified_at: row.get(4)?,
+        content_hash: row.get(5)?,
+        remote_updated_at: row.get(6)?,
+        parent_id: row.get(7)?,
+        item_kind: ItemKind::from_str(&row.get::<_, String>(8)?),
+    };
+    let pin_state = PinState::from_str(&row.get::<_, String>(9)?);
+    let inherited_pin_state = PinState::from_str(&row.get::<_, String>(10)?);
+    // Mirror FileContractState::effective_pin_state: own pin wins unless
+    // it's `inherit`, in which case the inherited state decides.
+    let effective = match pin_state {
+        PinState::Inherit => inherited_pin_state,
+        explicit => explicit,
+    };
+    Ok((entry, effective == PinState::Pinned))
+}
+
 /// Task 2229: the row at a path. The Windows enumeration scan runs this for every file and
 /// folder on disk on every pass, so it must reach the row through `idx_files_path`: a full read
 /// of `files` per lookup burned a core on a 43k-file tree (0.8.13 to 0.8.15).
@@ -2421,7 +2449,14 @@ impl StateDb {
             CREATE INDEX IF NOT EXISTS idx_files_shared_root ON files(shared_root_id);
             -- Task 2229: `FILE_BY_PATH_SQL`, once per file and folder on every enumeration pass.
             CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
-            CREATE INDEX IF NOT EXISTS idx_operation_queue_paused ON operation_queue(paused_reason);
+            -- Task 2243: the tray's recent list reads the newest rows through it, not every row.
+            CREATE INDEX IF NOT EXISTS idx_files_modified_at ON files(modified_at);
+            -- Task 2243: `queue_hold_summary`, polled by the tray every few seconds, reads this alone. It starts
+            -- with `paused_reason`, so it also serves every lookup the old `idx_operation_queue_paused` did, and
+            -- that index is dropped: one index to keep up to date on each queue write, not two.
+            CREATE INDEX IF NOT EXISTS idx_operation_queue_hold_summary
+                ON operation_queue(paused_reason, created_at, attempts, max_attempts);
+            DROP INDEX IF EXISTS idx_operation_queue_paused;
             CREATE INDEX IF NOT EXISTS idx_operation_queue_backup_source ON operation_queue(backup_source_key);
             -- Flow 7 (interrupted upload resume): the server upload session an
             -- UploadVersion/UploadFile op is writing to, persisted the moment
@@ -3516,6 +3551,26 @@ impl StateDb {
         Ok(u32::try_from(held.max(0)).unwrap_or(u32::MAX))
     }
 
+    /// Pages this connection has read from the database file since it opened: SQLite's page-cache misses. Task 2243's
+    /// tests measure what one poll costs the disk with it.
+    #[cfg(test)]
+    pub(crate) fn page_reads(&self) -> i64 {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let (mut current, mut highwater) = (0, 0);
+        // SAFETY: `conn` is an open connection, held for the call; both out-pointers live on this frame.
+        let rc = unsafe {
+            rusqlite::ffi::sqlite3_db_status(
+                conn.handle(),
+                rusqlite::ffi::SQLITE_DBSTATUS_CACHE_MISS,
+                &mut current,
+                &mut highwater,
+                0,
+            )
+        };
+        assert_eq!(rc, rusqlite::ffi::SQLITE_OK, "sqlite3_db_status");
+        i64::from(current)
+    }
+
     /// What is waiting to transfer (see [`TransferBacklog`]). `now` is unix seconds: an upload whose
     /// retry time is still ahead of it is waiting out a backoff and does not count.
     pub fn transfer_backlog(&self, now: i64) -> Result<TransferBacklog> {
@@ -4376,6 +4431,16 @@ impl StateDb {
         Ok(updated)
     }
 
+    /// How many rows (files and folders) have `status`, counted in `idx_status` alone (task 2243). The windows poll it
+    /// every few seconds; loading the rows to count them read the whole set from disk each time.
+    pub fn count_by_status(&self, status: FileStatus) -> Result<u32> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let count: i64 = conn
+            .prepare_cached("SELECT COUNT(*) FROM files WHERE status = ?1")?
+            .query_row(params![status.as_str()], |row| row.get(0))?;
+        Ok(u32::try_from(count.max(0)).unwrap_or(u32::MAX))
+    }
+
     /// Return every row whose `status` matches. Used by the conflict
     /// resolution UI (status = Conflict) and the daemon's
     /// "what still needs uploading?" sweep (status = Uploading).
@@ -4441,34 +4506,21 @@ impl StateDb {
     /// pinned only when that resolves to [`PinState::Pinned`].
     pub fn file_overview_rows(&self) -> Result<Vec<(FileEntry, bool)>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        let mut stmt = conn.prepare(
-            "SELECT file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at,
-                    parent_id, item_kind, pin_state, inherited_pin_state
-             FROM files ORDER BY path ASC",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            let entry = FileEntry {
-                file_id: row.get(0)?,
-                path: row.get(1)?,
-                status: FileStatus::from_str(&row.get::<_, String>(2)?),
-                size_bytes: row.get(3)?,
-                modified_at: row.get(4)?,
-                content_hash: row.get(5)?,
-                remote_updated_at: row.get(6)?,
-                parent_id: row.get(7)?,
-                item_kind: ItemKind::from_str(&row.get::<_, String>(8)?),
-            };
-            let pin_state = PinState::from_str(&row.get::<_, String>(9)?);
-            let inherited_pin_state = PinState::from_str(&row.get::<_, String>(10)?);
-            // Mirror FileContractState::effective_pin_state: own pin wins unless
-            // it's `inherit`, in which case the inherited state decides.
-            let effective = match pin_state {
-                PinState::Inherit => inherited_pin_state,
-                explicit => explicit,
-            };
-            let pinned = effective == PinState::Pinned;
-            Ok((entry, pinned))
-        })?;
+        let mut stmt = conn.prepare(&format!("SELECT {FILE_OVERVIEW_COLUMNS} FROM files ORDER BY path ASC"))?;
+        let rows = stmt.query_map([], file_overview_row)?;
+        rows.collect()
+    }
+
+    /// The newest `limit` files (folders left out), newest first and ties by path, in the row shape of
+    /// [`StateDb::file_overview_rows`]: the tray's recent list (task 2243). `compute_file_overview` sorts by the same
+    /// keys, so its newest `limit` files are among these. Read through `idx_files_modified_at`, not by loading every row.
+    pub fn newest_file_rows(&self, limit: usize) -> Result<Vec<(FileEntry, bool)>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare_cached(&format!(
+            "SELECT {FILE_OVERVIEW_COLUMNS} FROM files WHERE item_kind != 'folder'
+             ORDER BY modified_at DESC, path ASC LIMIT ?1"
+        ))?;
+        let rows = stmt.query_map(params![i64::try_from(limit).unwrap_or(i64::MAX)], file_overview_row)?;
         rows.collect()
     }
 
