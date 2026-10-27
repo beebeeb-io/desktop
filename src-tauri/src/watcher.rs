@@ -41,8 +41,9 @@
 //! 2. **Periodic enumeration scan** ([`scan_loop`]) — the actual CREATE trigger.
 //!    Every [`SCAN_INTERVAL`] it recursively walks the sync root (reading the
 //!    disk directly always works — it does not depend on any filter callback),
-//!    runs the SAME [`EngineBridge::classify_local_path`] on every regular file,
-//!    and for each survivor (a genuinely-new plain file) converts it to an
+//!    runs the SAME [`EngineBridge::classify_local_path`] on every regular file
+//!    not found settled with the same listing and row before ([`ScanMemo`]; all of
+//!    them every [`FULL_RECHECK_INTERVAL`]), and for each survivor (a genuinely-new plain file) converts it to an
 //!    unsynced placeholder and queues the encrypted upload — the exact pipeline
 //!    the (non-firing) NOTIFY create callback would have used.
 //!
@@ -223,7 +224,9 @@ const MAX_SCAN_DEPTH: usize = 64;
 const MAX_NEW_UPLOADS_PER_SCAN: usize = 256;
 
 /// Task 2229: how long the scan trusts a settled verdict before it classifies every file again.
-/// The stamps miss bytes rewritten with the old size and modification time; this bounds that.
+/// The listing misses bytes rewritten with the old size and modification time on Windows, and a
+/// file still open for writing; this bounds both. The full pass compares the bytes by a fingerprint
+/// a restored time cannot fool ([`crate::engine_bridge::ContentFingerprint`], task 2232).
 const FULL_RECHECK_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
 /// Task 2229: a file as the directory listing shows it. On Windows the listing carries all of it
@@ -255,7 +258,7 @@ impl DiskStamp {
     }
 }
 
-/// Task 2229: the files a pass found settled ([`ScanDispatch::Settled`]), with the disk stamp
+/// Task 2229: the files a pass found settled or held ([`ScanDispatch::Settled`]), with the disk stamp
 /// and the row stamp seen before classifying them. A later pass skips a file whose two stamps
 /// are both unchanged. The scan used to classify every file on every pass (about five handle
 /// opens each), which kept a core busy on a 37k-file sync root. Cleared every
@@ -436,7 +439,8 @@ async fn debounce_loop(
 
 /// The CREATE trigger. Every [`SCAN_INTERVAL`] (debounced by awaiting each walk
 /// before scheduling the next), recursively walk `sync_root`, run the shared
-/// [`EngineBridge::classify_local_path`] on every regular file, and upload the
+/// [`EngineBridge::classify_local_path`] on every regular file not found settled
+/// with the same listing and row before ([`ScanMemo`]), and upload the
 /// survivors (genuinely-new plain files). This is what catches a file a foreign
 /// process drops into the sync root — the case the CF NOTIFY callbacks miss
 /// entirely (see module docs).
