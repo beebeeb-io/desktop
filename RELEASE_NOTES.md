@@ -1,61 +1,117 @@
-# Beebeeb Desktop 0.8.16 — Windows: the sync folder scan no longer reads the whole database for every file
+# Beebeeb Desktop 0.8.17 — Windows: the app stops re-checking files that have not changed
 
-Since 0.8.13 the Windows app has scanned the sync folder every few seconds to pick up edits and new files.
-For each file and folder it found, it looked up that path in its local database. That column had no index,
-so every lookup read the entire table. On a PC with 43,000 files and folders that came to about 1.4 GB of disk
-reads a second and more than one processor core, for as long as the app ran. 0.8.16 adds the index. Each lookup now
-goes straight to its row. This release changes nothing else; on macOS the index is created once at start-up.
+0.8.16 stopped the Windows app from reading its whole database for every file it scanned. It still checked every
+file in the sync folder on every pass, a few seconds apart, and its windows kept reading the database every few
+seconds, even while hidden. 0.8.17 fixes both. The scan now checks only files whose listing or record has
+changed, and the windows read only what they show, only while they are on screen. On the maintainer's PC
+processor use went from 86 % of one core to 25–30 %, and disk reads from about 28 MB to about 5 MB a second.
+This release changes nothing else.
 
 **Known limitations:**
-- The Windows app still uses a lot of processor time while the sync folder holds many files from before 0.8.13:
-  each scan still checks every one of them. A later release stops re-checking files that have not changed
-  (task 2229).
+- The Windows scan still walks the whole sync folder on every pass. It no longer re-checks unchanged files, but
+  listing 37,000 files every few seconds is most of the processor and disk use that is left (tasks 2240 to
+  2242).
 - An edit in a file from before 0.8.13 is still kept on this PC and not sent (task 2191).
 - 0.8.15's notes said 0.8.16 would resume changes held since a sign-in expired, and would repair folders this
-  PC created but never managed to create on the server. Neither is in this release. Both move to a later
+  PC created but never managed to create on the server. Neither is in 0.8.16 or 0.8.17. Both move to a later
   release, and the app keeps counting those changes as not in sync until then.
+
+### What's New
+
+- Nothing new to use. This release only makes the Windows app do less work.
 
 ### Bug Fixes / Hardening
 
-- **[Windows] The sync folder scan finds each file's record through an index.**
-  - **Before (0.8.13 to 0.8.15):** every lookup read the whole files table. On the maintainer's PC
-    (43,146 records) a lookup took 2.6 to 2.8 ms, and the app read about 1,484 MB a second from disk.
-  - **Now:** an index on the path. The same lookup takes 4 to 5 µs.
-  - The index is built once at start-up, in about 30 ms on that database.
-  - Verified by `a_path_lookup_reads_through_an_index_not_the_whole_files_table`. The test reads SQLite's own
-    counters on the statement the app ran. It counts 0 full-table steps for a path that exists and 0 for
-    one that does not. It fails when the index is missing, when the query cannot use it, and when the app
-    runs a different query.
+- **[Windows] The scan skips a file that has not changed (desktop #167, task 2229).**
+  - **Before:** every pass classified all 37,381 files on the maintainer's PC. That took about five file-handle
+    opens each, at 40 µs per open, for 10 to 13 seconds of one or two cores per pass.
+  - **Now:**
+    - A file that needs nothing is remembered with two stamps: its listing (size, modification time and, on
+      Windows, its attributes) and a hash of its database record.
+    - Later passes skip it while both stamps match, and classify it again when either changes.
+    - Files of unknown content are held the same way until their bytes or their record change, and edits
+      with no known base until their record holds one.
+    - Every 10 minutes every file is classified again. That covers bytes rewritten with the same size and
+      modification time.
+    - The walk reads each file's size and time from the directory listing instead of opening it.
+  - **Device:** on that PC, after the first pass, each pass classified 3 files and skipped 37,537.
+  - **Verified by:**
+    - `regression_2229_a_settled_file_is_classified_again_only_when_it_or_its_row_changes`
+    - `regression_2229_a_file_passed_over_for_now_is_asked_about_every_pass`
+    - `regression_2229_a_file_of_unknown_content_is_skipped_until_its_bytes_or_its_row_change`
+    - `regression_2229_an_edit_with_no_known_base_is_skipped_until_its_row_records_one`
+    - `regression_2229_an_equal_length_edit_that_restores_the_mtime_is_sent`
+    - `a_row_stamp_changes_with_any_write_to_the_row`
+
+    Each test was seen to fail when the behaviour it checks was removed.
+- **The sync folder's cached file hash is not reused for a rewrite that keeps the same size and restores the
+  modification time (task 2232).**
+  - The cache key now includes the file's change time and identity, so such a rewrite is hashed again and its
+    edit is sent.
+  - Verified by `task_2232_a_cached_hash_is_not_reused_for_an_equal_length_rewrite_that_restores_the_mtime`.
+- **[Windows] The windows read the database only for what they show, and only while they are on screen
+  (desktop #168, task 2243).**
+  - **Before:** each read opened the database afresh, and three of them loaded whole sets of records to show a
+    count or a short list:
+    - the status read loaded 5,969 records to count them;
+    - the tray's recent files read all 43,000 records every 5 seconds;
+    - the hold summary looked up every held change.
+
+    The tray, the main window and the first-run window stay loaded while hidden, so these reads ran almost all
+    the time. Every window also read the full status once a second to notice a sign-out.
+  - **Now:**
+    - The counts come from an index.
+    - The tray's recent list reads only the newest records.
+    - The hold summary reads one index.
+    - The once-a-second sign-out check reads no file at all.
+    - Every other poll in the Windows app pauses while its window is hidden, and reads at once when the window
+      is shown again.
+  - **Cold-start cost** on a copy of the maintainer's database (43,146 records, a fresh connection per read):
+    one round of these reads went from 7,172 page reads to 99, not counting the cost of opening it. The
+    sign-out check no longer opens it at all.
+  - **Verified by:**
+    - `task_2243_sync_status_counts_without_reading_the_rows`
+    - `task_2243_the_tray_recent_list_reads_only_the_newest_rows`
+    - `task_2243_the_hold_summary_reads_an_index_not_the_held_operations`
+    - `task_2243_the_session_poll_reads_no_file`
+    - 24 frontend tests: `tests/visiblePoll.test.ts` and the session poll in `tests/accountSession.test.ts`
+
+    Each was seen to fail first.
 
 ### Verification
 
-- Test suite (Linux, release/0.8.16 at `837cf67`):
-  - `cargo test` lib reported `test result: ok. 1690 passed; 0 failed; 7 ignored`, one more than 0.8.15: the
-    index test. The integration binaries reported `keychain` 31, `windows_session_wiring` 8 and
-    `windows_signout_cleanup` 3, all with 0 failed.
-- Test suite (native Windows, a clean clone at `837cf67`):
+- Test suite (Linux, release/0.8.17 at `aab7ab6`):
+  - `cargo test` lib reported `test result: ok. 1701 passed; 0 failed; 7 ignored`, 11 more than 0.8.16: the
+    tests named above. `keychain` 31, `windows_session_wiring` 8 and `windows_signout_cleanup` 3, all with 0
+    failed.
+  - `bun test` 1237 pass / 0 fail (0.8.16: 1213), `tsc --noEmit` 0 errors, `eslint` clean.
+- Test suite (native Windows, a clean clone at `aab7ab6`):
   - `cargo check --locked --all-targets` exit 0.
-  - `cargo test --locked` lib reported `test result: ok. 1492 passed; 0 failed; 6 ignored`. `keychain` 31,
+  - `cargo test --locked` lib reported `test result: ok. 1503 passed; 0 failed; 6 ignored`. `keychain` 31,
     `windows_session_wiring` 8 and `windows_signout_cleanup` 3, all with 0 failed.
-- Test suite (macOS, Apple Silicon, a fresh worktree at `837cf67`):
-  - `cargo test --locked` lib reported `test result: ok. 2009 passed; 0 failed; 9 ignored`. `keychain` 31,
+- Test suite (macOS, at `aab7ab6`):
+  - `cargo test --locked` lib reported `test result: ok. 2020 passed; 0 failed; 9 ignored`. `keychain` 31,
     `windows_session_wiring` 8 and `windows_signout_cleanup` 3, all with 0 failed.
-  - `bun test` 1213 pass / 0 fail. The frontend is unchanged since 0.8.15.
+  - `bun test` 1237 pass / 0 fail.
 - Real hardware smoke test on the maintainer's Windows 11 PC, the one with the 43,000-record database.
-  - **Build:** a local release build of `837cf67`, unsigned, run in place against the real sync folder and
-    state on 2026-10-26 from 20:58 CET.
-  - **Upgrade:** the index had already been added to this PC's database by hand at 20:05, so creating it at
-    start-up had to do nothing. After start-up the index was listed once, the path lookup's query plan used
-    it, and SQLite's `quick_check` returned ok. Creating the index on a database without it is covered by the
-    test above on all three platforms.
-  - **Disk reads:** 0.8.15 as shipped read 1,484 MB a second on this PC. 0.8.16 read 26.9 to 29.0 MB a
-    second in three 30-second samples.
-  - **Processor:** 70 to 94 % of one core in the same samples, 86 % over 90 seconds. The scan still checks
-    28,230 files on every pass. That is the first known limitation above.
+  - **Builds:** local release builds of main with these two changes, unsigned, run in place against the real
+    sync folder and state on 2026-10-27. Main carries other changes that this release does not, so the release
+    build itself is checked again on that PC once 0.8.17 is installed.
+  - **Scan (desktop #167):** processor 86 % of one core in 0.8.16, then 24 to 31 % in three 30-second samples.
+  - **Windows (desktop #168):** measured back to back with the main window shown, then closed to the tray.
+    - Disk reads: 25.3 to 26.1 MB a second without #168, 5.0 to 5.6 MB a second with it.
+    - Reads in a quiet second, the median: 3,300 to 3,356 without #168, 15 to 42 with it.
+    - Processor: 24.6 to 29.7 % of one core.
+    - What remains is the scan's walk (first known limitation above).
 - The macOS sign-out device checks that 0.8.12 shipped without were waived again for this release, by the
-  maintainer (2026-10-26: "waive for 0.8.16"). The blocker stays listed on main for later releases.
+  maintainer on 2026-10-27:
+  - to the Windows session: "Waive for 0.8.17";
+  - to the macOS session, after first typing "waive for 0.8.16": "Yes, waive for 0.8.17", then "17".
+
+  The blocker stays listed on main for later releases.
 - Not verified:
-  - sending an edit in a file from before 0.8.13 (task 2191).
+  - sending an edit in a file from before 0.8.13 (task 2191);
+  - the 0.8.17 build itself on the maintainer's PC (it runs after install).
 
 ### Install / Update
 
