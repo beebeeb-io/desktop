@@ -68,6 +68,7 @@ import SettingsView from './windows/views/SettingsView'
 import { usePlatformName, thisDeviceNoun } from './platform'
 import { finderOpenFailedToast } from './finderSetup'
 import { useSyncActivitySummary } from './windows/syncActivityUi'
+import { pollWhileVisible } from './windows/visiblePoll'
 import { homeSyncMetrics } from './windows/homeSyncMetrics'
 
 // ── Nav structure ───────────────────────────────────────────────────────────
@@ -1707,16 +1708,16 @@ export default function WindowsApp() {
     return () => window.removeEventListener(KF_ONBOARDING_REOPEN_EVENT, onReopen)
   }, [])
 
-  // Poll sync status (drives the auth gate + Home metrics).
+  // Poll sync status (drives the auth gate + Home metrics), while the window is on screen (task 2243: closing the
+  // window hides it, and each read opens the state DB).
   useEffect(() => {
     let cancelled = false
     const refresh = async () => {
       const next = await loadSyncStatus()
       if (!cancelled) setStatus(next)
     }
-    void refresh()
-    const id = window.setInterval(refresh, 5000)
-    return () => { cancelled = true; window.clearInterval(id) }
+    const stop = pollWhileVisible(refresh, 5000)
+    return () => { cancelled = true; stop() }
   }, [])
 
   const loggedIn = status?.logged_in ?? false

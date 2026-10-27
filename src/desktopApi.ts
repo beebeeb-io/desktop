@@ -1082,6 +1082,12 @@ export function desktopFileOverview(
   return command<FileOverview>('desktop_file_overview', { recentLimit })
 }
 
+/** The tray's recent list: {@link desktopFileOverview}'s `recent` without its totals, read from the newest rows alone
+ *  (task 2243: the overview read every row, and the tray polls this every few seconds). */
+export function desktopRecentFiles(recentLimit?: number): Promise<CommandResult<RecentFile[]>> {
+  return command<RecentFile[]>('desktop_recent_files', { recentLimit })
+}
+
 /** Query the local desktop file-name search index. Results are local mirror
  *  entries and are opened via the existing OS file-manager command. */
 export function desktopSearchFiles(

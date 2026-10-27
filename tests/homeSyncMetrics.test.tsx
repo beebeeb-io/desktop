@@ -14,6 +14,7 @@ import type { SyncStatus } from '../src/desktopApi'
 import { homeSyncMetrics, notSentFigure } from '../src/windows/homeSyncMetrics'
 import { parseSyncActivitySummary, type SyncActivitySummary } from '../src/windows/syncActivityModel'
 import { ENGINE_STATUS_EVENT } from '../src/popoverContract'
+import { pollWhileVisible, windowVisible } from '../src/windows/visiblePoll'
 import { mount, textOf, type Mounted } from './fixtures/componentHarness'
 
 const raw: unknown = JSON.parse(readFileSync(new URL('./fixtures/sync-activity-summary.on-hold.json', import.meta.url), 'utf8'))
@@ -107,6 +108,9 @@ const summaryHook = {
     ENGINE_STATUS_EVENT,
     SYNC_ACTIVITY_POLL_MS: 3000,
     ENGINE_EVENT_COALESCE_MS: 250,
+    currentPollWindow: () => null,
+    pollWhileVisible,
+    windowVisible,
   },
 }
 
