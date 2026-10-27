@@ -755,6 +755,57 @@ fn open_for_state(path: &std::path::Path) -> std::io::Result<std::fs::File> {
         .open(path)
 }
 
+/// Task 2232: what a file's modification time cannot show. Windows moves `ChangeTime` on every write
+/// and on every change of the file's times, and an ordinary tool cannot set it back; a file renamed
+/// over the path has another file index.
+pub struct ChangeStamp {
+    pub change_time: std::time::SystemTime,
+    pub volume_serial: u32,
+    pub file_index: u64,
+}
+
+/// [`ChangeStamp`] of the file at `path`, read through [`open_for_state`], so nothing is fetched.
+pub fn change_stamp(path: &std::path::Path) -> std::io::Result<ChangeStamp> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FileBasicInfo, GetFileInformationByHandle, GetFileInformationByHandleEx,
+    };
+    let file = open_for_state(path)?;
+    let handle = HANDLE(file.as_raw_handle());
+    let mut basic = FILE_BASIC_INFO::default();
+    let mut by_handle = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `handle` is open for both calls (`file` outlives them), and each writes only into the
+    // struct whose size it is given.
+    unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileBasicInfo,
+            (&mut basic as *mut FILE_BASIC_INFO).cast(),
+            std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+        )
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+        GetFileInformationByHandle(handle, &mut by_handle).map_err(|e| std::io::Error::other(e.to_string()))?;
+    }
+    Ok(ChangeStamp {
+        change_time: filetime_ticks_to_system_time(basic.ChangeTime),
+        volume_serial: by_handle.dwVolumeSerialNumber,
+        file_index: (u64::from(by_handle.nFileIndexHigh) << 32) | u64::from(by_handle.nFileIndexLow),
+    })
+}
+
+/// A `FILETIME` tick count (100 ns since 1601) as a `SystemTime`; one before 1970 as the Unix epoch.
+fn filetime_ticks_to_system_time(ticks: i64) -> std::time::SystemTime {
+    const UNIX_EPOCH_TICKS: i64 = 116_444_736_000_000_000;
+    ticks
+        .checked_sub(UNIX_EPOCH_TICKS)
+        .and_then(|since_epoch| u64::try_from(since_epoch).ok())
+        .and_then(|since_epoch| {
+            std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_nanos(since_epoch.saturating_mul(100)))
+        })
+        .unwrap_or(std::time::UNIX_EPOCH)
+}
+
 /// Task 1640: the Cloud Files in-sync state of the placeholder at `path`, or `None` when it is
 /// not a placeholder (a plain file an atomic save left) or cannot be read. The platform clears
 /// it when the file's bytes change; this engine sets it only on content it agrees with the

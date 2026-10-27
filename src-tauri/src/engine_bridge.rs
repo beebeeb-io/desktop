@@ -3306,6 +3306,15 @@ impl EngineBridge {
     /// risk a spurious one). Cross-platform so it type-checks everywhere; only
     /// the Windows triggers call it.
     pub fn classify_local_path(&self, sync_root: &Path, path: &Path) -> Option<FinderWriteTarget> {
+        match self.classify_local_path_verdict(sync_root, path) {
+            LocalPathVerdict::Write(target) => Some(target),
+            LocalPathVerdict::Settled | LocalPathVerdict::Skip => None,
+        }
+    }
+
+    /// Task 2229: [`Self::classify_local_path`], telling a tracked file that needs nothing while its row
+    /// and its bytes stay as they are ([`LocalPathVerdict::Settled`]) from one to ask about again.
+    pub(crate) fn classify_local_path_verdict(&self, sync_root: &Path, path: &Path) -> LocalPathVerdict {
         // The file may have been deleted/renamed during a debounce window — if
         // it is no longer a regular file there is nothing to upload.
         match std::fs::symlink_metadata(path) {
@@ -3318,7 +3327,7 @@ impl EngineBridge {
                     is_symlink = file_type.is_symlink(),
                     "classify_local_path: rejected non-regular file"
                 );
-                return None;
+                return LocalPathVerdict::Skip;
             }
             Err(e) => {
                 tracing::debug!(
@@ -3326,7 +3335,7 @@ impl EngineBridge {
                     error = %e,
                     "classify_local_path: stat failed; skipping"
                 );
-                return None;
+                return LocalPathVerdict::Skip;
             }
         }
 
@@ -3336,14 +3345,14 @@ impl EngineBridge {
                 path = %path.display(),
                 "classify_local_path: rejected engine-internal path"
             );
-            return None;
+            return LocalPathVerdict::Skip;
         }
         let Some(file_name) = path.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
             tracing::debug!(
                 path = %path.display(),
                 "classify_local_path: rejected path with non-utf8 filename"
             );
-            return None;
+            return LocalPathVerdict::Skip;
         };
         if is_ignored_finder_name(&file_name) {
             tracing::debug!(
@@ -3351,7 +3360,7 @@ impl EngineBridge {
                 filename = %file_name,
                 "classify_local_path: rejected ignored/temp filename"
             );
-            return None;
+            return LocalPathVerdict::Skip;
         }
 
         // Filter 3 (authoritative) — already a known server file? Then it is not a new
@@ -3364,19 +3373,19 @@ impl EngineBridge {
                 sync_root = %sync_root.display(),
                 "classify_local_path: rejected path outside sync root"
             );
-            return None;
+            return LocalPathVerdict::Skip;
         };
         // Task 1640 (review N13): an original whose kept copy is made but which is not removed
         // yet (it was in use) is never sent: a later tick removes it.
         if self.db.is_kept_original_pending(&rel).unwrap_or(false) {
             tracing::debug!(rel_path = %rel, "classify_local_path: rejected an original whose copy is kept");
-            return None;
+            return LocalPathVerdict::Skip;
         }
         // Task 2204 S0.4: a file at the path a Windows rename vacated waits until that rename is
         // sent: it may be a safe save's new bytes, which fold back onto the original.
         if self.db.is_vacated_by_pending_rename(&rel).unwrap_or(true) {
             tracing::debug!(rel_path = %rel, "classify_local_path: the path a pending rename vacated; skipped this pass");
-            return None;
+            return LocalPathVerdict::Skip;
         }
         match self.db.get_file_by_path(&rel) {
             Ok(Some(existing)) => return self.classify_tracked_edit(path, existing, file_name, rel),
@@ -3388,7 +3397,7 @@ impl EngineBridge {
                     error = %e,
                     "classify_local_path: state DB lookup failed; skipping to be safe"
                 );
-                return None;
+                return LocalPathVerdict::Skip;
             }
         }
 
@@ -3408,7 +3417,7 @@ impl EngineBridge {
                 path = %path.display(),
                 "classify_local_path: rejected Cloud Files placeholder"
             );
-            return None;
+            return LocalPathVerdict::Skip;
         }
 
         // parent_id resolution: a survivor at `<parent_dir>/<name>`. If the parent
@@ -3423,7 +3432,7 @@ impl EngineBridge {
             "classify_local_path: accepted new local file"
         );
 
-        Some(FinderWriteTarget {
+        LocalPathVerdict::Write(FinderWriteTarget {
             file_id: None,
             parent_id,
             filename: file_name.clone(),
@@ -3453,20 +3462,20 @@ impl EngineBridge {
         existing: FileEntry,
         file_name: String,
         rel: String,
-    ) -> Option<FinderWriteTarget> {
+    ) -> LocalPathVerdict {
         if existing.is_dir() || existing.status != FileStatus::Local {
             tracing::debug!(
                 path = %path.display(),
                 rel_path = %rel,
                 "classify_local_path: rejected already-tracked server file"
             );
-            return None;
+            return LocalPathVerdict::Settled;
         }
         // Windows: reading a placeholder that is not wholly on disk would fetch the rest of it.
         #[cfg(target_os = "windows")]
         let os_in_sync = {
             if !crate::windows_cf::placeholders::fully_on_disk(path) {
-                return None;
+                return LocalPathVerdict::Skip;
             }
             crate::windows_cf::placeholders::placeholder_in_sync(path)
         };
@@ -3479,12 +3488,13 @@ impl EngineBridge {
                     file_id = %existing.file_id,
                     "sync folder: an edit of a synced file has no known base version; it stays local, not sent"
                 );
-                return None;
+                // Task 2229: held until its row records a base; no change of its bytes sends it.
+                return LocalPathVerdict::Settled;
             }
             // A file hydrated before this build has no agreed content: its change is kept on
             // disk (out of sync, so never stamped or freed) but not sent (task 2191).
             Ok(SyncFolderContent::Unknown) if os_in_sync == Some(false) => {
-                // Once per file per change (review N11): the scan classifies it every pass.
+                // Once per file per change (review N11): the scan asks again after each change.
                 static WARNED: std::sync::OnceLock<std::sync::Mutex<HashMap<String, (u64, std::time::SystemTime)>>> =
                     std::sync::OnceLock::new();
                 let fingerprint = std::fs::metadata(path).ok().and_then(|m| Some((m.len(), m.modified().ok()?)));
@@ -3498,12 +3508,15 @@ impl EngineBridge {
                         "sync folder: a change to a file synced before this version is kept on this PC, not sent"
                     );
                 }
-                return None;
+                return LocalPathVerdict::Settled;
             }
-            Ok(_) => return None,
+            // Task 2229: unknown content is held until its row records the agreed content, whatever
+            // its bytes and its in-sync state; the scan remembers it like agreed bytes.
+            Ok(SyncFolderContent::Agreed | SyncFolderContent::Unknown) => return LocalPathVerdict::Settled,
+            Ok(SyncFolderContent::Queued) => return LocalPathVerdict::Skip,
             Err(e) => {
                 tracing::warn!(file_id = %existing.file_id, error = %e, "sync folder: could not compare a synced file with its agreed content");
-                return None;
+                return LocalPathVerdict::Skip;
             }
         };
         let contract = self.db.get_file_contract_state(&existing.file_id).ok().flatten();
@@ -3512,7 +3525,7 @@ impl EngineBridge {
             base_version = base,
             "classify_local_path: accepted an edit of a synced file"
         );
-        Some(FinderWriteTarget {
+        LocalPathVerdict::Write(FinderWriteTarget {
             file_id: Some(existing.file_id),
             parent_id: contract.as_ref().and_then(|contract| contract.parent_id.clone()),
             content_type: contract
@@ -5611,6 +5624,18 @@ impl Drop for FetchTicket {
     }
 }
 
+/// Task 2229: what [`EngineBridge::classify_local_path_verdict`] makes of a local file.
+pub(crate) enum LocalPathVerdict {
+    /// An upload to queue: a new file, or a change of a synced one.
+    Write(FinderWriteTarget),
+    /// A tracked file that needs nothing while its row and its bytes stay as they are: a folder
+    /// row, a row not `Local`, bytes that are the agreed content, or a change held until its row
+    /// records the agreed content or a base (task 2191). The scan may skip it until either changes.
+    Settled,
+    /// Nothing this pass; ask again next pass.
+    Skip,
+}
+
 /// Task 1640: what a tracked sync-folder file's bytes are (Windows: Linux runs no upload driver), against the content
 /// this device last agreed with the server on: `local_hash` at `local_base_version`, written by a
 /// hydrate into the sync folder and by a landing. The tick's detector is not this: it never sees
@@ -5730,43 +5755,104 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+/// Task 2232: what a cached content hash is reused against. Size and modification time alone let a
+/// write that keeps the size and sets the modification time back return the old hash, so an edit
+/// read as the agreed content was never sent. The change time moves on every write and on every
+/// time change, and an ordinary tool cannot set it back (Unix `ctime`; Windows `ChangeTime`). A
+/// file renamed over the path is another file (Unix device and inode; Windows volume and file index).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct ContentFingerprint {
+    len: u64,
+    modified: std::time::SystemTime,
+    changed: std::time::SystemTime,
+    identity: (u64, u64),
+}
+
+impl ContentFingerprint {
+    pub(crate) fn of(path: &Path) -> std::io::Result<Self> {
+        let meta = std::fs::metadata(path)?;
+        let modified = meta.modified()?;
+        #[cfg(unix)]
+        let (changed, identity) = {
+            use std::os::unix::fs::MetadataExt;
+            let changed = u64::try_from(meta.ctime())
+                .ok()
+                .and_then(|secs| {
+                    std::time::UNIX_EPOCH.checked_add(std::time::Duration::new(secs, meta.ctime_nsec() as u32))
+                })
+                .unwrap_or(std::time::UNIX_EPOCH);
+            (changed, (meta.dev(), meta.ino()))
+        };
+        #[cfg(target_os = "windows")]
+        let (changed, identity) = {
+            let stamp = crate::windows_cf::placeholders::change_stamp(path)?;
+            (stamp.change_time, (u64::from(stamp.volume_serial), stamp.file_index))
+        };
+        #[cfg(not(any(unix, target_os = "windows")))]
+        let (changed, identity) = (modified, (0, 0));
+        Ok(Self {
+            len: meta.len(),
+            modified,
+            changed,
+            identity,
+        })
+    }
+
+    /// The later of the modification and the change time: a hash taken within [`HASH_CACHE_SETTLED`] of it
+    /// may have missed a write in the same timer tick.
+    fn last_touched(&self) -> std::time::SystemTime {
+        self.modified.max(self.changed)
+    }
+}
+
 /// Task 1640 (review P2-5): [`sha256_file_hex`] of `file_id`'s file at `path`, read again only
-/// when its size or modification time changed since the last read: a scan, a close and a stamp
+/// when its [`ContentFingerprint`] changed since the last read: a scan, a close and a stamp
 /// pass otherwise re-hashed every out-of-sync file (a plain file an atomic save left stays one)
 /// every few seconds. A cached hash is trusted only when it was taken at least
-/// [`HASH_CACHE_SETTLED`] after the file's modification time: file times are coarse (a timer
-/// tick), so a later write inside the same tick would otherwise look unchanged. A hash whose file
-/// changed while it was read is not kept. Residual: a write that keeps the size and sets the
-/// modification time back is not seen until either changes (the stamp pass and the platform's
-/// in-sync state still keep its bytes).
+/// [`HASH_CACHE_SETTLED`] after the file's modification and change times: file times are coarse (a
+/// timer tick), so a later write inside the same tick would otherwise look unchanged. A hash whose
+/// file changed while it was read is not kept. The cache is one per process, keyed by the file id and
+/// the path together.
 pub(crate) fn cached_sha256_file_hex(file_id: &str, path: &Path) -> std::io::Result<String> {
-    type Fingerprint = (u64, std::time::SystemTime);
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<String, (Fingerprint, std::time::SystemTime, String)>>> =
-        std::sync::OnceLock::new();
-    let fingerprint = |path: &Path| -> std::io::Result<Fingerprint> {
-        let meta = std::fs::metadata(path)?;
-        Ok((meta.len(), meta.modified()?))
-    };
+    cached_sha256_file_hex_at(file_id, path, std::time::SystemTime::now())
+}
+
+/// [`cached_sha256_file_hex`], the hash taken at `now`: a test moves it past [`HASH_CACHE_SETTLED`], as a
+/// change time cannot be set back.
+fn cached_sha256_file_hex_at(file_id: &str, path: &Path, now: std::time::SystemTime) -> std::io::Result<String> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<(String, PathBuf), (ContentFingerprint, std::time::SystemTime, String)>>,
+    > = std::sync::OnceLock::new();
+    let fingerprint = ContentFingerprint::of;
     let before = fingerprint(path)?;
     let cache = CACHE.get_or_init(Default::default);
-    if let Some((seen, hashed_at, hash)) = cache.lock().unwrap_or_else(|p| p.into_inner()).get(file_id)
+    let key = (file_id.to_string(), path.to_path_buf());
+    if let Some((seen, hashed_at, hash)) = cache.lock().unwrap_or_else(|p| p.into_inner()).get(&key)
         && *seen == before
-        && *hashed_at >= before.1 + HASH_CACHE_SETTLED
+        && *hashed_at >= before.last_touched() + HASH_CACHE_SETTLED
     {
         return Ok(hash.clone());
     }
-    let hashed_at = std::time::SystemTime::now();
+    let hashed_at = now;
+    #[cfg(test)]
+    HASH_READS.with(|reads| reads.set(reads.get() + 1));
     let hash = sha256_file_hex(path)?;
     if fingerprint(path)? == before {
         cache
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .insert(file_id.to_string(), (before, hashed_at, hash.clone()));
+            .insert(key, (before, hashed_at, hash.clone()));
     }
     Ok(hash)
 }
 
-/// How long after a file's modification time a hash of it must have been taken to be reused.
+/// Files [`cached_sha256_file_hex`] read on this thread (tests count them).
+#[cfg(test)]
+thread_local! {
+    static HASH_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How long after a file's modification and change times a hash of it must have been taken to be reused.
 const HASH_CACHE_SETTLED: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// [`sha256_hex`] of the file at `path`, read in a stream.
@@ -25224,14 +25310,14 @@ mod tests {
             (
                 "watcher.rs",
                 "match bridge.queue_finder_create(target) {",
-                "pub(crate) fn dispatch_local_create(",
+                "pub(crate) fn dispatch_local_create_verdict(",
                 &[],
                 "the upload driver, which a Mac never starts (asserted below)",
             ),
             (
                 "watcher.rs",
                 "return match bridge.queue_finder_modify(target) {",
-                "pub(crate) fn dispatch_local_create(",
+                "pub(crate) fn dispatch_local_create_verdict(",
                 &[],
                 "the upload driver's edit of a synced file (task 1640), which a Mac never starts (asserted below)",
             ),
@@ -27006,39 +27092,46 @@ mod tests {
 
     // ── Task 1640, review P2-5 and P3-4 ──
 
-    /// The hash of a file whose size and modification time have not changed is not read again.
-    /// Shown by the documented residual: a write that keeps both returns the earlier hash; a
-    /// change of either reads the file again.
+    /// The hash of a file whose fingerprint has not changed is not read again; a change of it reads the file
+    /// again. The test counts the reads. Until task 2232 it showed the cache by its documented residual: a write
+    /// that kept the size and set the modification time back returned the earlier hash. That residual was the
+    /// bug (an edit read as agreed was never sent); such a write now moves the change time and is read again.
     #[test]
     fn regression_1640_an_unchanged_file_is_not_hashed_again() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("notes.txt");
+        let reads = || HASH_READS.with(std::cell::Cell::get);
         std::fs::write(&path, b"first bytes").unwrap();
         // A hash taken right after a write is not reused: a later write in the same timer tick
-        // would carry the same time.
-        assert_eq!(cached_sha256_file_hex("cache-file", &path).unwrap(), sha256_hex(b"first bytes"));
-        std::fs::write(&path, b"other bytes").unwrap();
+        // would carry the same times.
+        let start = reads();
+        for _ in 0..2 {
+            assert_eq!(
+                cached_sha256_file_hex("cache-file", &path).unwrap(),
+                sha256_hex(b"first bytes")
+            );
+        }
+        assert_eq!(reads() - start, 2, "a fresh write is read every time");
+        // A hash taken well after the file's times is reused while its fingerprint holds.
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        assert_eq!(
+            cached_sha256_file_hex_at("cache-file", &path, later).unwrap(),
+            sha256_hex(b"first bytes")
+        );
+        let settled = reads();
+        for _ in 0..3 {
+            assert_eq!(
+                cached_sha256_file_hex("cache-file", &path).unwrap(),
+                sha256_hex(b"first bytes")
+            );
+        }
+        assert_eq!(reads(), settled, "unchanged: the cached hash, not read again");
+        regression_2229_set_modified(&path, std::time::SystemTime::now() - std::time::Duration::from_secs(60));
         assert_eq!(
             cached_sha256_file_hex("cache-file", &path).unwrap(),
-            sha256_hex(b"other bytes"),
-            "a fresh write is read again"
+            sha256_hex(b"first bytes")
         );
-        // A settled file (its time well before the hash) is not read again.
-        let modified = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
-        std::fs::write(&path, b"first bytes").unwrap();
-        std::fs::File::options().write(true).open(&path).unwrap().set_modified(modified).unwrap();
-        let first = cached_sha256_file_hex("cache-file", &path).unwrap();
-        assert_eq!(first, sha256_hex(b"first bytes"));
-        std::fs::write(&path, b"other bytes").unwrap();
-        std::fs::File::options().write(true).open(&path).unwrap().set_modified(modified).unwrap();
-        assert_eq!(cached_sha256_file_hex("cache-file", &path).unwrap(), first, "same size and time: the cached hash");
-        let later = modified + std::time::Duration::from_secs(5);
-        std::fs::File::options().write(true).open(&path).unwrap().set_modified(later).unwrap();
-        assert_eq!(
-            cached_sha256_file_hex("cache-file", &path).unwrap(),
-            sha256_hex(b"other bytes"),
-            "a new modification time: read again"
-        );
+        assert_eq!(reads(), settled + 1, "a new modification time: read again");
     }
 
     /// Review-151d P3-6 (review P3-4 corrected): a landing that cannot hash the copy it sent records
@@ -27927,6 +28020,394 @@ mod tests {
         drain_upload_queue(&bridge, &sync_root).await;
         let state = server.finish();
         assert_eq!(state.latest_plaintext(&row.file_id, master_key), b"saved by an editor");
+    }
+
+    // ── Task 2229: the scan skips a settled file until its bytes or its row change ──
+
+    /// (classified, skipped) of one pass of the scan with `memo`.
+    fn regression_2229_pass(
+        bridge: &EngineBridge,
+        sync_root: &Path,
+        memo: &mut crate::watcher::ScanMemo,
+    ) -> (usize, usize) {
+        crate::watcher::run_one_scan_with(bridge, sync_root, memo);
+        (memo.classified, memo.skipped)
+    }
+
+    /// A synced file whose bytes are the agreed content is classified once, then skipped while
+    /// its listing and its row stay the same. A write to its row, a save of new bytes, and the
+    /// periodic full pass each make the scan classify it again, and the save is still sent.
+    #[tokio::test]
+    async fn regression_2229_a_settled_file_is_classified_again_only_when_it_or_its_row_changes() {
+        let master_key = [191u8; 32];
+        let (_dir, sync_root, server, bridge) = rule3_setup(master_key);
+        let local = sync_root.join("kept.txt");
+        std::fs::write(&local, b"made on this PC").unwrap();
+        let mut memo = crate::watcher::ScanMemo::default();
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (1, 0),
+            "a new file"
+        );
+        assert_eq!(
+            regression_1640_uploads_queued_for(&bridge, "kept.txt"),
+            1,
+            "precondition: queued"
+        );
+        drain_upload_queue(&bridge, &sync_root).await;
+        let row = bridge.db.get_file_by_path("kept.txt").unwrap().unwrap();
+        assert_eq!(row.status, FileStatus::Local, "precondition: landed");
+
+        // A queued file is not remembered, so the pass after its landing asks about it as for the first time.
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (1, 0),
+            "landed: asked"
+        );
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (0, 1),
+            "settled, unchanged: skipped"
+        );
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (0, 1),
+            "and again"
+        );
+
+        bridge.db.set_size_bytes(&row.file_id, 4242).unwrap();
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (1, 0),
+            "a write to its row: asked again"
+        );
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (0, 1),
+            "settled again"
+        );
+
+        memo.age_by(std::time::Duration::from_secs(11 * 60));
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (1, 0),
+            "the full pass asks about every file"
+        );
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (0, 1),
+            "then trusts it again"
+        );
+
+        // Only a settled verdict is remembered: an original whose kept copy is pending is passed
+        // over for now, so it is asked about on every pass, with its row and its bytes unchanged.
+        let kept = bridge
+            .db
+            .record_kept_copy(&crate::state_db::KeptCopyInput {
+                original_file_id: &row.file_id,
+                original_path: "kept.txt",
+                copy_path: "",
+                copied_hash: "",
+                original_removed: false,
+                reason: crate::state_db::KeptReason::InUse,
+                kept_at: 0,
+            })
+            .unwrap();
+        bridge.db.set_size_bytes(&row.file_id, 4243).unwrap();
+        for pass in 0..2 {
+            assert_eq!(
+                regression_2229_pass(&bridge, &sync_root, &mut memo),
+                (1, 0),
+                "passed over for now: asked again on pass {pass}"
+            );
+        }
+        bridge.db.delete_kept_copy(kept).unwrap();
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (1, 0),
+            "no longer held: settled"
+        );
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (0, 1),
+            "and skipped"
+        );
+
+        // An atomic save: the new bytes written elsewhere, then renamed over the file.
+        let saved = sync_root.join("kept.txt.part");
+        std::fs::write(&saved, b"saved by an editor").unwrap();
+        std::fs::rename(&saved, &local).unwrap();
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (1, 0),
+            "new bytes: asked again"
+        );
+        let ops = bridge.db.list_operations_for_file(&row.file_id).unwrap();
+        assert_eq!(ops.len(), 1, "the save is queued, as an edit of the file");
+        // Its row changed when the edit was queued; it is settled again until the row changes
+        // once more, when the edit lands.
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (1, 0),
+            "its row changed: asked again"
+        );
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (0, 1),
+            "settled while queued"
+        );
+        drain_upload_queue(&bridge, &sync_root).await;
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (1, 0),
+            "landed: asked again"
+        );
+        let state = server.finish();
+        assert_eq!(state.latest_plaintext(&row.file_id, master_key), b"saved by an editor");
+    }
+
+    /// Only a settled verdict is remembered: a file the scan passes over for now (here an
+    /// ignored temp name) is asked about on every pass.
+    #[tokio::test]
+    async fn regression_2229_a_file_passed_over_for_now_is_asked_about_every_pass() {
+        let (_dir, sync_root, _server, bridge) = rule3_setup([192u8; 32]);
+        std::fs::write(sync_root.join("~$draft.docx"), b"owner file").unwrap();
+        let mut memo = crate::watcher::ScanMemo::default();
+        for pass in 0..3 {
+            assert_eq!(
+                regression_2229_pass(&bridge, &sync_root, &mut memo),
+                (1, 0),
+                "pass {pass}"
+            );
+        }
+        assert_eq!(
+            regression_1640_uploads_queued_for(&bridge, "~$draft.docx"),
+            0,
+            "never queued"
+        );
+    }
+
+    /// A synced file of unknown content (synced before task 1640: task 2191's guarded rows) is held, not sent,
+    /// whatever its bytes are: only a write to its row can change that. The scan remembers it like a settled file,
+    /// so it no longer checks every such file on every pass (28,224 of them on the maintainer's PC, 0.8.15). When
+    /// the row learns the agreed content, the held edit is sent.
+    #[tokio::test]
+    async fn regression_2229_a_file_of_unknown_content_is_skipped_until_its_bytes_or_its_row_change() {
+        let master_key = [193u8; 32];
+        let (_dir, sync_root, server, bridge) = rule3_setup(master_key);
+        let local = sync_root.join("old.txt");
+        std::fs::write(&local, b"synced before 0.8.13").unwrap();
+        let mut memo = crate::watcher::ScanMemo::default();
+        regression_2229_pass(&bridge, &sync_root, &mut memo);
+        drain_upload_queue(&bridge, &sync_root).await;
+        let row = bridge.db.get_file_by_path("old.txt").unwrap().unwrap();
+        bridge
+            .db
+            .test_execute(&format!(
+                "UPDATE files SET local_hash = NULL, fetched_min_version = -1 WHERE file_id = '{}'",
+                row.file_id
+            ))
+            .unwrap();
+        assert!(
+            bridge.db.is_unknown_content(&row.file_id).unwrap(),
+            "precondition: content unknown"
+        );
+
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (1, 0),
+            "asked once"
+        );
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (0, 1),
+            "held, unchanged: skipped"
+        );
+
+        std::fs::write(&local, b"edited after 0.8.13, kept on this PC").unwrap();
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (1, 0),
+            "new bytes: asked again"
+        );
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (0, 1),
+            "still held: skipped"
+        );
+        assert!(
+            bridge.db.list_operations_for_file(&row.file_id).unwrap().is_empty(),
+            "an edit of unknown content is kept, not sent"
+        );
+
+        // The row learns the agreed content, as task 2191's check against the server will record it. The bytes
+        // on disk are not it, so they are an edit on that version.
+        bridge
+            .db
+            .test_execute(&format!(
+                "UPDATE files SET local_hash = '{}', local_base_version = 1, fetched_min_version = 0 WHERE file_id = '{}'",
+                sha256_hex(b"synced before 0.8.13"),
+                row.file_id
+            ))
+            .unwrap();
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (1, 0),
+            "its row changed: asked again"
+        );
+        let ops = bridge.db.list_operations_for_file(&row.file_id).unwrap();
+        assert_eq!(ops.len(), 1, "the held edit is queued");
+        assert_eq!(ops[0].base_version, Some(1), "on the agreed version");
+        drain_upload_queue(&bridge, &sync_root).await;
+        let state = server.finish();
+        assert_eq!(
+            state.latest_plaintext(&row.file_id, master_key),
+            b"edited after 0.8.13, kept on this PC"
+        );
+    }
+
+    /// An edit whose base version is not known is held, never sent without one, whatever its bytes are: the scan
+    /// remembers it until its bytes or its row change, and sends it once the row records a base.
+    #[tokio::test]
+    async fn regression_2229_an_edit_with_no_known_base_is_skipped_until_its_row_records_one() {
+        let master_key = [195u8; 32];
+        let (_dir, sync_root, server, bridge) = rule3_setup(master_key);
+        let local = sync_root.join("draft.txt");
+        std::fs::write(&local, b"first version").unwrap();
+        let mut memo = crate::watcher::ScanMemo::default();
+        regression_2229_pass(&bridge, &sync_root, &mut memo);
+        drain_upload_queue(&bridge, &sync_root).await;
+        let row = bridge.db.get_file_by_path("draft.txt").unwrap().unwrap();
+        std::fs::write(&local, b"an edit made while the base was lost").unwrap();
+        bridge
+            .db
+            .test_execute(&format!(
+                "UPDATE files SET local_base_version = 0, fetched_min_version = 0 WHERE file_id = '{}'",
+                row.file_id
+            ))
+            .unwrap();
+        assert_eq!(
+            sync_folder_content(&bridge.db, &row.file_id, &local, None).unwrap(),
+            SyncFolderContent::Changed { base: None },
+            "precondition: an edit with no known base"
+        );
+
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (1, 0),
+            "asked once"
+        );
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (0, 1),
+            "held, unchanged: skipped"
+        );
+        assert!(
+            bridge.db.list_operations_for_file(&row.file_id).unwrap().is_empty(),
+            "never sent without a base"
+        );
+
+        bridge
+            .db
+            .test_execute(&format!(
+                "UPDATE files SET local_base_version = 1 WHERE file_id = '{}'",
+                row.file_id
+            ))
+            .unwrap();
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (1, 0),
+            "its row changed: asked again"
+        );
+        let ops = bridge.db.list_operations_for_file(&row.file_id).unwrap();
+        assert_eq!(ops.len(), 1, "the held edit is queued");
+        assert_eq!(ops[0].base_version, Some(1), "on the recorded base");
+        drain_upload_queue(&bridge, &sync_root).await;
+        let state = server.finish();
+        assert_eq!(
+            state.latest_plaintext(&row.file_id, master_key),
+            b"an edit made while the base was lost"
+        );
+    }
+
+    /// Set the modification time of the file at `path`.
+    fn regression_2229_set_modified(path: &Path, modified: std::time::SystemTime) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+    }
+
+    /// Task 2232 (review of desktop #167, P1): an edit that keeps the file's length and sets its modification
+    /// time back is still sent. The full pass, the scan's safety net for what the directory listing cannot show,
+    /// must not take the old content hash from a cache that compared size and time alone. Every fake server names
+    /// its first file `server-file-1`; the cache key holds the path too, so a test running beside this one, in
+    /// its own directory, cannot replace this test's entry. The cache's own proof is the `task_2232_` test below.
+    #[tokio::test]
+    async fn regression_2229_an_equal_length_edit_that_restores_the_mtime_is_sent() {
+        let master_key = [194u8; 32];
+        let (_dir, sync_root, server, bridge) = rule3_setup(master_key);
+        let local = sync_root.join("ledger.txt");
+        std::fs::write(&local, b"balance: 100").unwrap();
+        let mut memo = crate::watcher::ScanMemo::default();
+        regression_2229_pass(&bridge, &sync_root, &mut memo);
+        drain_upload_queue(&bridge, &sync_root).await;
+        let row = bridge.db.get_file_by_path("ledger.txt").unwrap().unwrap();
+        // An hour old, so the hash the next pass takes is one the cache may hand back later.
+        let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        regression_2229_set_modified(&local, hour_ago);
+        assert_eq!(regression_2229_pass(&bridge, &sync_root, &mut memo), (1, 0), "asked");
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (0, 1),
+            "settled: its bytes are the agreed content"
+        );
+
+        std::fs::write(&local, b"balance: 999").unwrap();
+        regression_2229_set_modified(&local, hour_ago);
+        memo.age_by(std::time::Duration::from_secs(11 * 60));
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (1, 0),
+            "the full pass asks about it"
+        );
+        let ops = bridge.db.list_operations_for_file(&row.file_id).unwrap();
+        assert_eq!(ops.len(), 1, "the edit is queued");
+        drain_upload_queue(&bridge, &sync_root).await;
+        let state = server.finish();
+        assert_eq!(state.latest_plaintext(&row.file_id, master_key), b"balance: 999");
+    }
+
+    /// Task 2232: a content hash is not reused for a file rewritten to the same length with its modification
+    /// time set back. The hash is taken in real time, past [`HASH_CACHE_SETTLED`], as the app takes it. Two
+    /// writes inside one timer tick can share a change time (on Windows, 27 of 40 runs of this test did when it
+    /// dated the hash an hour ahead and rewrote at once), and the settle window is what keeps a rewrite after a
+    /// reusable hash out of the hash's tick.
+    #[test]
+    fn task_2232_a_cached_hash_is_not_reused_for_an_equal_length_rewrite_that_restores_the_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("same-length.bin");
+        let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::write(&path, b"AAAA").unwrap();
+        regression_2229_set_modified(&path, hour_ago);
+        std::thread::sleep(HASH_CACHE_SETTLED + std::time::Duration::from_millis(200));
+        assert_eq!(cached_sha256_file_hex("task-2232", &path).unwrap(), sha256_hex(b"AAAA"));
+        let reads = HASH_READS.with(std::cell::Cell::get);
+        assert_eq!(cached_sha256_file_hex("task-2232", &path).unwrap(), sha256_hex(b"AAAA"));
+        assert_eq!(
+            HASH_READS.with(std::cell::Cell::get),
+            reads,
+            "precondition: the cached hash is reused"
+        );
+        std::fs::write(&path, b"BBBB").unwrap();
+        regression_2229_set_modified(&path, hour_ago);
+        assert_eq!(
+            cached_sha256_file_hex("task-2232", &path).unwrap(),
+            sha256_hex(b"BBBB"),
+            "the hash of the bytes on disk, not the cached one"
+        );
     }
 
     // ── Task 2204 S0: a Windows rename re-keys the file's row at once ──
