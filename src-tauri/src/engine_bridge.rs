@@ -6037,7 +6037,8 @@ impl ContentFingerprint {
 /// every few seconds. A cached hash is trusted only when it was taken at least
 /// [`HASH_CACHE_SETTLED`] after the file's modification and change times: file times are coarse (a
 /// timer tick), so a later write inside the same tick would otherwise look unchanged. A hash whose
-/// file changed while it was read is not kept.
+/// file changed while it was read is not kept. The cache is one per process, keyed by the file id and
+/// the path together.
 pub(crate) fn cached_sha256_file_hex(file_id: &str, path: &Path) -> std::io::Result<String> {
     cached_sha256_file_hex_at(file_id, path, std::time::SystemTime::now())
 }
@@ -6046,12 +6047,13 @@ pub(crate) fn cached_sha256_file_hex(file_id: &str, path: &Path) -> std::io::Res
 /// change time cannot be set back.
 fn cached_sha256_file_hex_at(file_id: &str, path: &Path, now: std::time::SystemTime) -> std::io::Result<String> {
     static CACHE: std::sync::OnceLock<
-        std::sync::Mutex<HashMap<String, (ContentFingerprint, std::time::SystemTime, String)>>,
+        std::sync::Mutex<HashMap<(String, PathBuf), (ContentFingerprint, std::time::SystemTime, String)>>,
     > = std::sync::OnceLock::new();
     let fingerprint = ContentFingerprint::of;
     let before = fingerprint(path)?;
     let cache = CACHE.get_or_init(Default::default);
-    if let Some((seen, hashed_at, hash)) = cache.lock().unwrap_or_else(|p| p.into_inner()).get(file_id)
+    let key = (file_id.to_string(), path.to_path_buf());
+    if let Some((seen, hashed_at, hash)) = cache.lock().unwrap_or_else(|p| p.into_inner()).get(&key)
         && *seen == before
         && *hashed_at >= before.last_touched() + HASH_CACHE_SETTLED
     {
@@ -6065,7 +6067,7 @@ fn cached_sha256_file_hex_at(file_id: &str, path: &Path, now: std::time::SystemT
         cache
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .insert(file_id.to_string(), (before, hashed_at, hash.clone()));
+            .insert(key, (before, hashed_at, hash.clone()));
     }
     Ok(hash)
 }
@@ -29352,10 +29354,9 @@ mod tests {
 
     /// Task 2232 (review of desktop #167, P1): an edit that keeps the file's length and sets its modification
     /// time back is still sent. The full pass, the scan's safety net for what the directory listing cannot show,
-    /// must not take the old content hash from a cache that compared size and time alone. The cache is one per
-    /// process, keyed by file id, and every fake server names its first file `server-file-1`: a test running
-    /// beside this one can replace the entry, so a cache that compared size and time alone fails this test
-    /// reliably only with `--test-threads=1`. The cache's own proof is the `task_2232_` test below, with its own id.
+    /// must not take the old content hash from a cache that compared size and time alone. Every fake server names
+    /// its first file `server-file-1`; the cache key holds the path too, so a test running beside this one, in
+    /// its own directory, cannot replace this test's entry. The cache's own proof is the `task_2232_` test below.
     #[tokio::test]
     async fn regression_2229_an_equal_length_edit_that_restores_the_mtime_is_sent() {
         let master_key = [194u8; 32];
@@ -29392,7 +29393,10 @@ mod tests {
     }
 
     /// Task 2232: a content hash is not reused for a file rewritten to the same length with its modification
-    /// time set back.
+    /// time set back. The hash is taken in real time, past [`HASH_CACHE_SETTLED`], as the app takes it. Two
+    /// writes inside one timer tick can share a change time (on Windows, 27 of 40 runs of this test did when it
+    /// dated the hash an hour ahead and rewrote at once), and the settle window is what keeps a rewrite after a
+    /// reusable hash out of the hash's tick.
     #[test]
     fn task_2232_a_cached_hash_is_not_reused_for_an_equal_length_rewrite_that_restores_the_mtime() {
         let dir = tempfile::tempdir().unwrap();
@@ -29400,11 +29404,8 @@ mod tests {
         let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
         std::fs::write(&path, b"AAAA").unwrap();
         regression_2229_set_modified(&path, hour_ago);
-        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
-        assert_eq!(
-            cached_sha256_file_hex_at("task-2232", &path, later).unwrap(),
-            sha256_hex(b"AAAA")
-        );
+        std::thread::sleep(HASH_CACHE_SETTLED + std::time::Duration::from_millis(200));
+        assert_eq!(cached_sha256_file_hex("task-2232", &path).unwrap(), sha256_hex(b"AAAA"));
         let reads = HASH_READS.with(std::cell::Cell::get);
         assert_eq!(cached_sha256_file_hex("task-2232", &path).unwrap(), sha256_hex(b"AAAA"));
         assert_eq!(
