@@ -17,16 +17,19 @@
  *   • Header   — BrandMark + "Beebeeb" + settings gear (→ main app Settings).
  *   • Status   — what sync is doing, from `sync_status` + `sync_activity_summary` (0.8.15): moving, checking,
  *                paused, waiting, on hold, or up to date — never "synced" while the queue holds work.
- *   • Recent   — scrollable list of recently-changed files (desktopFileOverview).
+ *   • Recent   — scrollable list of recently-changed files (desktopRecentFiles).
  *   • Actions  — Open folder · View online · Recycle bin.
  *
  * Data sources:
  *   sync_status              → SyncStatus (logged_in / engine / syncing / conflicts)
  *   sync_activity_summary    → pause flag, engine state, transfers, queue counts, startup check (counts only)
- *   desktop_file_overview(50) → FileOverview.recent[] (path, size_bytes, status, modified_at)
+ *   desktop_recent_files(50) → RecentFile[] (path, size_bytes, status, modified_at)
  *   show_main_app_settings   → opens the main app and selects Settings
  *   open_finder_location     → opens the sync root in Explorer
  *   openUrl                  → app.beebeeb.io / app.beebeeb.io/trash
+ *
+ * Task 2243: the flyout stays loaded while hidden, so its polls read only while it is on screen
+ * (pollWhileVisible) and read at once when it is shown again.
  */
 
 import { useEffect, useState } from 'react'
@@ -34,7 +37,7 @@ import { emit } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
   command,
-  desktopFileOverview,
+  desktopRecentFiles,
   loadSyncStatus,
   openUrl,
   revealAndOpenFile,
@@ -44,6 +47,7 @@ import {
 import { T, useToast } from './windows/ui'
 import { syncActivityView } from './windows/syncActivityModel'
 import { SyncActivityIcon, SyncCheckProgress, useSyncActivitySummary } from './windows/syncActivityUi'
+import { pollWhileVisible } from './windows/visiblePoll'
 
 // ── File-type classification (ported from repos/web file-icon.tsx getFileType,
 //    pure, no @beebeeb/shared import) ─────────────────────────────────────────
@@ -308,30 +312,29 @@ export default function WindowsTray() {
     }
   }, [])
 
-  // Poll sync status (~3s).
+  // Poll sync status (~3s) while the flyout is on screen.
   useEffect(() => {
     let cancelled = false
     const refresh = async () => {
       const next = await loadSyncStatus()
       if (!cancelled) setStatus(next)
     }
-    void refresh()
-    const id = window.setInterval(refresh, 3000)
+    const stop = pollWhileVisible(refresh, 3000)
     return () => {
       cancelled = true
-      window.clearInterval(id)
+      stop()
     }
   }, [])
 
-  // Poll recent files (~5s). A failed overview (e.g. vault locked) → empty
-  // "Sign in" state, not an error banner.
+  // Poll recent files (~5s) while the flyout is on screen. Task 2243: only the newest rows are read, not the
+  // whole overview. A failed read (e.g. vault locked) → empty "Sign in" state, not an error banner.
   useEffect(() => {
     let cancelled = false
     const refresh = async () => {
-      const result = await desktopFileOverview(TRAY_RECENT_LIMIT)
+      const result = await desktopRecentFiles(TRAY_RECENT_LIMIT)
       if (cancelled) return
       if (result.ok) {
-        setRecent(result.value.recent ?? [])
+        setRecent(result.value)
         setSignedOut(false)
       } else {
         setRecent([])
@@ -339,11 +342,10 @@ export default function WindowsTray() {
       }
       setLoaded(true)
     }
-    void refresh()
-    const id = window.setInterval(refresh, 5000)
+    const stop = pollWhileVisible(refresh, 5000)
     return () => {
       cancelled = true
-      window.clearInterval(id)
+      stop()
     }
   }, [])
 

@@ -53,6 +53,7 @@ import {
   BROWSER_SIGN_IN_INTRO,
   browserWaitingInstruction,
 } from './browserLoginCopy'
+import { pollWhileVisible } from './windows/visiblePoll'
 
 // Progress event emitted by the Rust `start_browser_login` handoff.
 // `phase` keys the UI state machine; the other fields are populated on
@@ -1030,9 +1031,9 @@ function ReadyStep() {
       const next = await loadSyncStatus()
       if (!cancelled) setStatus(next)
     }
-    void refresh()
-    const id = window.setInterval(refresh, 2000)
-    return () => { cancelled = true; window.clearInterval(id) }
+    // Task 2243: the wizard window stays loaded, hidden, after sign-in; it reads only while it is on screen.
+    const stop = pollWhileVisible(refresh, 2000)
+    return () => { cancelled = true; stop() }
   }, [])
 
   const finish = async () => {
@@ -1102,9 +1103,9 @@ function WindowsFirstRunView() {
       if (cancelled || !status) return
       setLoggedIn(status.logged_in)
     }
-    void checkSession()
-    const id = window.setInterval(checkSession, 3000)
-    return () => { cancelled = true; window.clearInterval(id) }
+    // Task 2243: only while the window is on screen; showing it again reads at once.
+    const stop = pollWhileVisible(checkSession, 3000)
+    return () => { cancelled = true; stop() }
   }, [])
 
   // The only stale-view scenario is a lingering "All set." screen after a

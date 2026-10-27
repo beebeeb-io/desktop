@@ -58,6 +58,7 @@ import { setDesktopThemePreference } from '../theme'
 import { syncActivityView, type SyncActivityView } from '../syncActivityModel'
 import { SyncActivityIcon, SyncCheckProgress, SyncPauseButton, useSyncActivitySummary, useSyncPauseToggle } from '../syncActivityUi'
 import { desktopUpdateCheck } from '../manualUpdateCheck'
+import { pollWhileVisible } from '../visiblePoll'
 
 type ShellIntegrationState = FinderInstallState
 
@@ -1572,11 +1573,11 @@ function AppActivityPanel() {
       }
     }
 
-    void load()
-    const id = window.setInterval(() => { void load() }, ACTIVITY_POLL_INTERVAL_MS)
+    // Task 2243: each read opens the state DB; only while the window is on screen.
+    const stop = pollWhileVisible(load, ACTIVITY_POLL_INTERVAL_MS)
     return () => {
       cancelled = true
-      window.clearInterval(id)
+      stop()
     }
   }, [reloadKey])
 

@@ -1759,7 +1759,7 @@ async fn run(
             status: "stopped".to_string(),
             // Report the last known counts so the row's progress numbers don't
             // reset to null on the terminal beat; zero speed, no current file.
-            files_synced: db.list_by_status(FileStatus::Local).ok().map(|v| v.len() as i64),
+            files_synced: db.count_by_status(FileStatus::Local).ok().map(i64::from),
             current_file: None,
             speed_bps: Some(0),
             ..Default::default()
@@ -1912,7 +1912,7 @@ fn set_telemetry_state(telemetry: &Arc<Mutex<TelemetryState>>, state: &str) {
 /// shell. Counting reuses the `db` the loop already holds, so this adds one
 /// indexed count query per tick. No-op on non-Windows.
 fn file_status_count(db: &StateDb, status: FileStatus) -> u32 {
-    db.list_by_status(status).ok().map(|v| v.len() as u32).unwrap_or(0)
+    db.count_by_status(status).unwrap_or(0)
 }
 
 fn sync_in_flight_count(db: &StateDb) -> u32 {

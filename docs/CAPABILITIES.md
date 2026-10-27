@@ -10,7 +10,7 @@ core supplies shared crypto/protocol primitives.
 | --- | --- | --- | --- |
 | Trash | No page; native compact menu falls back to Finder | Trash | desktop_trash_list / desktop_trash_restore / desktop_trash_delete_permanently |
 | History | Global dialog, Versions & conflicts | Global dialog, Files action | list_file_versions / restore_file_version / list_version_conflict_center |
-| Activity | No timeline; native compact menu falls back to Status | Home summary, Activity; Windows tray recent list | account_activity / account_activity_feed / desktop_file_overview |
+| Activity | No timeline; native compact menu falls back to Status | Home summary, Activity; Windows tray recent list | account_activity / account_activity_feed / desktop_file_overview; the tray: desktop_recent_files |
 | Notifications | Local preferences | Activity inbox, Settings preferences | account_notifications (read-only inbox; no mark-read handler registered) |
 | Recipient shares | Mac File Provider namespace; Shared.tsx unmounted | Filesystem read access, no administration page | list_shared_roots; EngineBridge shared metadata/decryption |
 
@@ -166,7 +166,7 @@ are the obsolete CLI daemon/config/API, not the shipping shell. Its `--start-min
 | U52 | First run root chooser, Enable Explorer, Skip | `default_sync_root`, `pick_sync_root`, `install_windows_shell_integration`; local Skip | Wired; cancel picker preserves old root, Skip does not claim integration success |
 | U53 | First run Open control center | `show_main_app_window`, current WebView close | Wired; one main window; live engine status |
 | U54 | Tray gear/Settings | `show_main_app_settings`, flyout hide | Wired; Settings selected |
-| U55 | Tray recent-file row | `desktop_file_overview`, `reveal_and_open_file` | Wired; exact safe path opens in Explorer/default app |
+| U55 | Tray recent-file row | `desktop_recent_files` (the overview's recent list, from the newest rows only; task 2243), `reveal_and_open_file` | Wired; exact safe path opens in Explorer/default app |
 | U56 | Tray deleted-file row, Recycle bin footer | main-window event/storage nav to `trash`, `show_main_app_window` | Wired; Beebeeb trash, not OS recycle bin |
 | U57 | Tray View all in Beebeeb | main-window event/storage nav to `activity` | Wired; selected Activity page |
 | U58 | Tray Open folder, View online | `open_finder_location`; web app URL | Wired; flyout hides and correct destination opens |
@@ -232,7 +232,8 @@ behavior; do not count their existence as Windows reachability:
 **Correction of the earlier task note (2026-09-29):** there are no registered
 `account_mark_notification_read` or `account_mark_all_notifications_read`
 commands. Activity notifications are display-only. The tray reads
-`desktop_file_overview`; `tray_recent_activity` remains a registered but unused
+`desktop_recent_files` (task 2243; it read `desktop_file_overview` before);
+`tray_recent_activity` remains a registered but unused
 frontend command. The old `shared` compact
 route redirects to Finder; an unrecognized main-window query goes to Home,
 while Rust's unsupported native-menu route fallback is Files. These are not
@@ -310,6 +311,7 @@ placeholder default is unreachable for a validated NavId.
 | `desktop_trash_delete_permanently` | `WindowsApp.tsx`, `desktopApi.ts` | Wired (surface table above) |
 | `account_storage_breakdown` | `desktopApi.ts` | Wired (surface table above) |
 | `desktop_file_overview` | `desktopApi.ts` | Wired (surface table above) |
+| `desktop_recent_files` | `desktopApi.ts` | Wired (surface table above): the tray's recent list (task 2243) |
 | `desktop_search_files` | `DesktopQuickSearch.tsx`, `DesktopVersionHistory.tsx`, `desktopApi.ts` | Wired (surface table above) |
 | `app_activity_snapshot` | `desktopApi.ts` | Wired (surface table above) |
 | `get_selective_sync` | `desktopApi.ts` | Wired (surface table above) |

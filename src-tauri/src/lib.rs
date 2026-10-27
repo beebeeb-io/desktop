@@ -9296,6 +9296,25 @@ mod reveal_and_open_file_tests {
     }
 }
 
+/// What [`sync_status`] counts in the state DB: rows moving (downloading + uploading), cloud-only rows (files and
+/// folders, as before task 2243), conflicts, and changes held back.
+fn sync_status_counts(db: &state_db::StateDb) -> (u32, u32, u32, u32) {
+    use state_db::FileStatus;
+    // Downloading + Uploading both count toward "in-flight sync work" for the WebView's syncing pill: there is no
+    // user-meaningful difference between "we're pulling" and "we're pushing" at the indicator level.
+    let count = |status| db.count_by_status(status).unwrap_or(0);
+    let syncing = count(FileStatus::Downloading) + count(FileStatus::Uploading);
+    // Desktop 0.8.15: queued changes held back (the `auth` pause) are not syncing; the UI shows them as
+    // "N changes on hold".
+    let on_hold = db.count_operations_on_hold().unwrap_or(0);
+    (
+        syncing,
+        count(FileStatus::CloudOnly),
+        count(FileStatus::Conflict),
+        on_hold,
+    )
+}
+
 /// Lightweight status endpoint for the WebView's settings page.
 /// Reports whether the Rust side has a session, where the sync root
 /// is on disk, whether the engine task is currently running, and the
@@ -9307,22 +9326,31 @@ mod reveal_and_open_file_tests {
 /// the event stream is still ramping up.
 ///
 /// File counts are read from the app-local SQLite state DB via a fresh
-/// connection per call.
-/// SQLite is happy to share read access with the runner's connection
-/// (default journal mode supports many concurrent readers); a poll
-/// takes well under a millisecond on a typical vault. If the DB
-/// doesn't exist yet (first launch, sync root not picked, or DB not
-/// initialised because no engine has run yet) we return zeros.
+/// connection per call, so the page cache starts empty each time: every
+/// count must come from a count query through an index, never from loading
+/// rows. Task 2243: counting the cloud-only files by loading them cost about
+/// 1,100 page reads per call on a 43k-row DB, polled every few seconds by
+/// every window ([`sync_status_counts`]). If the DB doesn't exist yet (first
+/// launch, sync root not picked, or DB not initialised because no engine has
+/// run yet) we return zeros.
+///
+/// `session_only` (task 2243): only `logged_in` and `session_revision`, read from
+/// memory, with no config file and no state DB. `AccountSessionBoundary` polls
+/// this every second in every window, hidden ones included, to see a sign-out.
 #[tauri::command]
-async fn sync_status(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
-    use state_db::FileStatus;
-
+async fn sync_status(state: State<'_, AppState>, session_only: Option<bool>) -> Result<serde_json::Value, String> {
     // session / engine / engine_state are per-account (decision 0800);
     // `auth_present` stays on `AppState`.
     let acct = state.active_account()?;
     let vault_unlocked = acct.session.lock().map(|g| g.is_some()).unwrap_or(false);
     let auth_present = state.auth_present.lock().map(|g| *g).unwrap_or(false);
     let logged_in = vault_unlocked || auth_present;
+    if session_only == Some(true) {
+        return Ok(serde_json::json!({
+            "logged_in": logged_in,
+            "session_revision": UI_SESSION_REVISION.load(std::sync::atomic::Ordering::SeqCst),
+        }));
+    }
     // Task 1546 finding 5: 3+ consecutive 401s from the engine's heartbeat /
     // sync-tick calls flip this — the trigger for the persistent "signed out
     // on this device" banner. Explicit and independent of `logged_in`: the
@@ -9362,36 +9390,7 @@ async fn sync_status(state: State<'_, AppState>) -> Result<serde_json::Value, St
         if db_path.exists() {
             state_db::StateDb::open(&db_path)
                 .ok()
-                .map(|db| {
-                    // Downloading + Uploading both count toward "in-flight
-                    // sync work" for the WebView's syncing pill — there's no
-                    // user-meaningful difference between "we're pulling" and
-                    // "we're pushing" at the indicator level.
-                    let downloading = db
-                        .list_by_status(FileStatus::Downloading)
-                        .ok()
-                        .map(|v| v.len() as u32)
-                        .unwrap_or(0);
-                    let uploading = db
-                        .list_by_status(FileStatus::Uploading)
-                        .ok()
-                        .map(|v| v.len() as u32)
-                        .unwrap_or(0);
-                    let cloud_only = db
-                        .list_by_status(FileStatus::CloudOnly)
-                        .ok()
-                        .map(|v| v.len() as u32)
-                        .unwrap_or(0);
-                    let conflicts = db
-                        .list_by_status(FileStatus::Conflict)
-                        .ok()
-                        .map(|v| v.len() as u32)
-                        .unwrap_or(0);
-                    // Desktop 0.8.15: queued changes held back (the `auth` pause) are not
-                    // syncing; the UI shows them as "N changes on hold".
-                    let on_hold = db.count_operations_on_hold().unwrap_or(0);
-                    (downloading + uploading, cloud_only, conflicts, on_hold)
-                })
+                .map(|db| sync_status_counts(&db))
                 .unwrap_or((0, 0, 0, 0))
         } else {
             (0, 0, 0, 0)
@@ -12658,6 +12657,48 @@ async fn account_storage_breakdown(
     })
 }
 
+/// The overview's view of file rows. Folders carry no real size and no sync state worth surfacing; they are left out.
+fn file_overview_inputs(rows: Vec<(state_db::FileEntry, bool)>) -> Vec<account_dto::FileOverviewInput> {
+    rows.into_iter()
+        .filter(|(e, _)| !e.is_dir())
+        .map(|(e, pinned)| account_dto::FileOverviewInput {
+            path: e.path,
+            size_bytes: e.size_bytes,
+            status: e.status.as_str().to_string(),
+            pinned,
+            modified_at: e.modified_at,
+        })
+        .collect()
+}
+
+/// The newest `limit` local activity events, as the overview's recent list takes them.
+fn file_overview_activity(
+    db: &state_db::StateDb,
+    limit: usize,
+) -> Result<Vec<account_dto::FileOverviewActivityInput>, String> {
+    Ok(db
+        .list_recent_local_activity(limit)
+        .map_err(|e| format!("list local activity: {e}"))?
+        .into_iter()
+        .map(|event| account_dto::FileOverviewActivityInput {
+            event_type: event.event_type.as_str().to_string(),
+            file_name: event.file_name,
+            rel_path: event.rel_path,
+            occurred_at: event.occurred_at,
+        })
+        .collect())
+}
+
+/// The tray's recent list (task 2243): the overview's `recent`, without its totals.
+fn recent_files(db: &state_db::StateDb, limit: usize) -> Result<Vec<account_dto::RecentFile>, String> {
+    // The newest `limit` files and the newest `limit` events are all a list of `limit` can hold.
+    let rows = db.newest_file_rows(limit).map_err(|e| format!("list files: {e}"))?;
+    Ok(
+        account_dto::compute_file_overview(&file_overview_inputs(rows), &file_overview_activity(db, limit)?, limit)
+            .recent,
+    )
+}
+
 /// Per-PC **sync-state** overview for the in-app "Files" tab — the device
 /// lens that complements `account_storage_breakdown` (the by-TYPE / billing
 /// lens). Computed LOCALLY from the desktop SQLite mirror
@@ -12705,36 +12746,46 @@ async fn desktop_file_overview(
         let overview = tokio::task::spawn_blocking(move || -> Result<_, String> {
             let db = state_db::StateDb::open(&db_path).map_err(|e| format!("open state db: {e}"))?;
             let rows = db.file_overview_rows().map_err(|e| format!("list files: {e}"))?;
-            // Folders carry no real size and no sync state worth surfacing; exclude
-            // them from the overview.
-            let inputs: Vec<account_dto::FileOverviewInput> = rows
-                .into_iter()
-                .filter(|(e, _)| !e.is_dir())
-                .map(|(e, pinned)| account_dto::FileOverviewInput {
-                    path: e.path,
-                    size_bytes: e.size_bytes,
-                    status: e.status.as_str().to_string(),
-                    pinned,
-                    modified_at: e.modified_at,
-                })
-                .collect();
-            let activity: Vec<account_dto::FileOverviewActivityInput> = db
-                .list_recent_local_activity(limit)
-                .map_err(|e| format!("list local activity: {e}"))?
-                .into_iter()
-                .map(|event| account_dto::FileOverviewActivityInput {
-                    event_type: event.event_type.as_str().to_string(),
-                    file_name: event.file_name,
-                    rel_path: event.rel_path,
-                    occurred_at: event.occurred_at,
-                })
-                .collect();
-            Ok(account_dto::compute_file_overview(&inputs, &activity, limit))
+            Ok(account_dto::compute_file_overview(
+                &file_overview_inputs(rows),
+                &file_overview_activity(&db, limit)?,
+                limit,
+            ))
         })
         .await
         .map_err(|e| format!("file overview task failed: {e}"))??;
 
         Ok(overview)
+    })
+}
+
+/// The tray's recent list (task 2243), which it polls every few seconds while it is open. [`desktop_file_overview`]
+/// reads every row for its totals; this reads the newest rows alone.
+#[tauri::command]
+async fn desktop_recent_files(
+    state: State<'_, AppState>,
+    recent_limit: Option<usize>,
+) -> Result<Vec<account_dto::RecentFile>, String> {
+    session_command!(async {
+        {
+            let acct = state.active_account()?;
+            let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+            if guard.is_none() {
+                return Err("vault is locked".to_string());
+            }
+        }
+        let limit = recent_limit.unwrap_or(15);
+        tokio::task::spawn_blocking(move || -> Result<_, String> {
+            // As in the overview: no readable config, no sync root or no DB yet is an empty list, not an error (the tray
+            // shows an error as signed out).
+            let config = DesktopConfig::load().ok();
+            let Some(db) = config.as_ref().map(state_db_for_config).transpose()?.flatten() else {
+                return Ok(Vec::new());
+            };
+            recent_files(&db, limit)
+        })
+        .await
+        .map_err(|e| format!("recent files task failed: {e}"))?
     })
 }
 
@@ -14589,6 +14640,7 @@ pub fn run() {
             desktop_trash_delete_permanently,
             account_storage_breakdown,
             desktop_file_overview,
+            desktop_recent_files,
             desktop_search_files,
             app_activity_snapshot,
             // Task 0090 — selective sync
@@ -37466,5 +37518,185 @@ mod sign_out_unchanged_elsewhere_tests {
         state_paths::STATE_DIR_OVERRIDE
             .scope(state_dir, crate::config::CONFIG_DIR_OVERRIDE.scope(config_dir, body))
             .await;
+    }
+}
+
+/// Task 2243: what the window and tray polls cost the disk. Each command opens a fresh connection, so SQLite's
+/// page cache is empty every time, and each count below includes `StateDb::open` itself: every poll pays it.
+#[cfg(test)]
+mod task_2243_poll_cost_tests {
+    use super::*;
+    use rusqlite::{Connection, params};
+
+    /// A state.db at `path` with `rows` files of each status, written through another connection as the engine
+    /// writes them. The paths are long, as real ones are: reading the rows reads many pages.
+    fn seeded_state_db(path: &std::path::Path, rows: &[(&str, usize)]) {
+        state_db::StateDb::open(path).unwrap();
+        let mut conn = Connection::open(path).unwrap();
+        let tx = conn.transaction().unwrap();
+        for (status, count) in rows {
+            for i in 0..*count {
+                tx.execute(
+                    "INSERT INTO files (file_id, path, status, size_bytes, modified_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        format!("{status}-{i}"),
+                        format!(
+                            "Documents/Projects/Customer archive {i:05}/Correspondence and drafts/{status}-{i}.docx"
+                        ),
+                        status,
+                        1_000 + i as i64,
+                        1_700_000_000 + i as i64,
+                    ],
+                )
+                .unwrap();
+            }
+        }
+        tx.commit().unwrap();
+    }
+
+    /// `AccountSessionBoundary` polls `sync_status` every second in every window, hidden ones included, to see a
+    /// sign-out. It asks for the session only, and that answer returns before the config file, the state directory or
+    /// the state DB is touched: three windows each opening the DB every second were most of the reads left on Guus's PC
+    /// once the other polls stopped while their windows were hidden.
+    #[test]
+    fn task_2243_the_session_poll_reads_no_file() {
+        let source = include_str!("lib.rs").replace("\r\n", "\n");
+        let at = source.find("async fn sync_status(").expect("sync_status exists");
+        let body = crate::source_pin::squeeze(&source[at..at + source[at..].find("\n}\n").unwrap()]);
+        let early = body
+            .find("ifsession_only==Some(true){returnOk(serde_json::json!({")
+            .expect("the session-only answer returns at once");
+        let answer = &body[early..early + body[early..].find("}));}").expect("its end")];
+        assert!(answer.contains("\"logged_in\":logged_in"));
+        assert!(answer.contains("\"session_revision\":UI_SESSION_REVISION.load("));
+        for read in ["DesktopConfig::load(", "state_paths::", "StateDb::open("] {
+            let first = body.find(read).unwrap_or_else(|| panic!("the full answer reads {read}"));
+            assert!(early < first, "the session-only answer comes after {read}");
+        }
+    }
+
+    /// The counts come from `idx_status` alone. Loading the rows to count them read the whole set from disk on every
+    /// call: 1,062 page reads on Guus's 43k-row state.db, twice a second with two windows loaded.
+    #[test]
+    fn task_2243_sync_status_counts_without_reading_the_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let rows = [
+            ("cloud_only", 3000),
+            ("local", 3000),
+            ("downloading", 5),
+            ("uploading", 7),
+            ("conflict", 2),
+        ];
+        seeded_state_db(&path, &rows);
+        let db = state_db::StateDb::open(&path).unwrap();
+        assert_eq!(sync_status_counts(&db), (12, 3000, 2, 0));
+        let reads = db.page_reads();
+        assert!(reads <= 40, "one sync_status (the open and its counts) read {reads} pages from disk");
+    }
+
+    /// The tray's recent list is the overview's `recent`, read from the newest rows alone. The overview loads every row
+    /// for its totals: 5,461 page reads and 117 ms on Guus's state.db, every 5 s while the tray was loaded.
+    #[test]
+    fn task_2243_the_tray_recent_list_reads_only_the_newest_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        // Equal modification times across the two statuses, so ties are broken by path.
+        seeded_state_db(&path, &[("local", 3000), ("cloud_only", 3000)]);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "INSERT INTO files (file_id, path, status, item_kind, modified_at)
+                     VALUES ('folder-new', 'Documents/A newer folder', 'local', 'folder', 1800000000);
+                 UPDATE files SET pin_state = 'pinned' WHERE file_id IN ('local-2999', 'cloud_only-2990');
+                 UPDATE files SET pin_state = 'inherit', inherited_pin_state = 'pinned' WHERE file_id = 'local-2995';
+                 INSERT INTO local_activity (event_type, file_id, file_name, rel_path, occurred_at)
+                     VALUES ('moved_to_trash', 'gone-1', 'old plan.docx', 'Documents/old plan.docx', 1700002990),
+                            ('moved_to_trash', 'gone-2', 'older.docx', NULL, 1600000000);",
+            )
+            .unwrap();
+        }
+        let expected = {
+            let db = state_db::StateDb::open(&path).unwrap();
+            account_dto::compute_file_overview(
+                &file_overview_inputs(db.file_overview_rows().unwrap()),
+                &file_overview_activity(&db, 50).unwrap(),
+                50,
+            )
+            .recent
+        };
+        assert_eq!(expected.len(), 50);
+        assert!(
+            expected.iter().any(|f| f.activity_type.is_some()),
+            "precondition: a trash event is in the list"
+        );
+        assert!(
+            expected.iter().filter(|f| f.pinned).count() >= 2,
+            "precondition: pinned rows are in the list"
+        );
+
+        let db = state_db::StateDb::open(&path).unwrap();
+        let recent = recent_files(&db, 50).unwrap();
+        let reads = db.page_reads();
+        assert_eq!(
+            serde_json::to_value(&recent).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        assert!(reads <= 60, "the tray's recent list (the open and its reads) read {reads} pages from disk");
+    }
+
+    /// The tray's activity line asks for the queue's hold summary every 3 s. Its oldest and newest dates per reason
+    /// come from an index alone; looking each held operation up read the whole queue (627 pages on Guus's PC, with
+    /// 2,972 changes held since a sign-in expired).
+    #[test]
+    fn task_2243_the_hold_summary_reads_an_index_not_the_held_operations() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        state_db::StateDb::open(&path).unwrap();
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            let tx = conn.transaction().unwrap();
+            for i in 0..3000_i64 {
+                // Held ops carry their metadata, as real ones do: reading them reads many pages.
+                let (reason, attempts) = match i % 3 {
+                    0 => (Some("auth"), 0),
+                    1 => (Some("quota"), 0),
+                    _ => (None, if i % 2 == 0 { 5 } else { 1 }),
+                };
+                tx.execute(
+                    "INSERT INTO operation_queue (op_id, kind, file_id, target_path, metadata_json, attempts, max_attempts,
+                                                  paused_reason, created_at)
+                     VALUES (?1, 'upload_file', ?2, ?3, ?4, ?5, 5, ?6, ?7)",
+                    params![
+                        format!("op-{i}"),
+                        format!("file-{i}"),
+                        format!("Documents/Projects/Customer archive {i:05}/Correspondence and drafts/letter-{i}.docx"),
+                        format!("{{\"name_ct\":\"{}\",\"size\":{i}}}", "x".repeat(120)),
+                        attempts,
+                        reason,
+                        1_700_000_000 + i,
+                    ],
+                )
+                .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        let db = state_db::StateDb::open(&path).unwrap();
+        let hold = db.queue_hold_summary().unwrap();
+        let reads = db.page_reads();
+        assert_eq!((hold.waiting, hold.gave_up), (500, 500));
+        let groups: Vec<_> = hold
+            .held
+            .iter()
+            .map(|g| (g.reason.as_str(), g.count, g.oldest_at, g.newest_at))
+            .collect();
+        assert_eq!(
+            groups,
+            [
+                ("auth", 1000, 1_700_000_000, 1_700_002_997),
+                ("quota", 1000, 1_700_000_001, 1_700_002_998)
+            ]
+        );
+        assert!(reads <= 40, "the hold summary (the open and its reads) read {reads} pages from disk");
     }
 }

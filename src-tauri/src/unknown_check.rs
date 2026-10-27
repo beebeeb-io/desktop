@@ -852,7 +852,11 @@ mod tests {
         let literal = status.rfind("Ok(serde_json::json!({").unwrap();
         assert!(status[literal..].contains("\"startup_guard\": crate::unknown_check::STARTUP_GUARD.progress(),"), "{status}");
         assert!(status[literal..].contains("\"changes_on_hold\": counts.3,"), "{status}");
-        assert!(status[..literal].contains("db.count_operations_on_hold().unwrap_or(0)"), "{status}");
+        // Task 2243: the counts come from `sync_status_counts`, which counts through the indexes.
+        assert!(status[..literal].contains(".map(|db| sync_status_counts(&db))"), "{status}");
+        let counts = &lib[lib.find("fn sync_status_counts(").unwrap()..];
+        let counts = &counts[..counts.find("\n}\n").unwrap()];
+        assert!(counts.contains("db.count_operations_on_hold().unwrap_or(0)"), "{counts}");
         // No engine began a pass in this process: the shape the UI reads, at rest.
         let value = crate::runner::with_startup_guard(serde_json::json!({ "state": "running" }));
         assert_eq!(value["startup_guard"], serde_json::json!({ "running": false, "done": 0, "total": 0 }));

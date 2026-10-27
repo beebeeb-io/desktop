@@ -41,11 +41,11 @@ const summaries = {
 const browser = await chromium.launch({ headless: true, ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : {}) })
 const results = []
 
-async function open({ surface, summary, viewport, colorScheme = 'light', failResume = false, tree = null, statusPatch = {} }) {
+async function open({ surface, summary, viewport, colorScheme = 'light', failResume = false, tree = null, statusPatch = {}, recent = [] }) {
   const page = await browser.newPage({ viewport, colorScheme })
   const errors = []
   page.on('pageerror', (error) => errors.push(String(error)))
-  await page.addInitScript(({ caps, summary, surface, tree, failResume, statusPatch }) => {
+  await page.addInitScript(({ caps, summary, surface, tree, failResume, statusPatch, recent }) => {
     window.calls = []
     window.fixtureSummary = summary
     const callbacks = new Map()
@@ -80,6 +80,7 @@ async function open({ surface, summary, viewport, colorScheme = 'light', failRes
           case 'desktop_config': return { theme: 'system', pause_sync: s?.paused ?? false, local_cache_limit_bytes: 0, upload_kbps_limit: 0, download_kbps_limit: 0, metered: false, files_on_demand: true, sync_overlays: true }
           case 'desktop_storage_summary': return { used_bytes: 48_300_000_000, quota_bytes: 200_000_000_000, cache_bytes: 1_200_000_000, pinned_bytes: 2_100_000_000 }
           case 'desktop_file_overview': return { total_files: 0, total_bytes: 0, by_status: [], recent: [], pinned_count: 0, pinned_bytes: 0 }
+          case 'desktop_recent_files': return recent
           case 'list_vault_folders': return tree ?? []
           case 'get_selective_sync': return []
           case 'get_known_folder_onboarding_seen': return true
@@ -93,7 +94,7 @@ async function open({ surface, summary, viewport, colorScheme = 'light', failRes
       },
     }
     window.fixtureFailResume = failResume
-  }, { caps, summary, surface, tree, failResume, statusPatch })
+  }, { caps, summary, surface, tree, failResume, statusPatch, recent })
   return { page, errors }
 }
 
@@ -247,6 +248,26 @@ try {
     await expectText(page, 'Checking files on this PC: 2,000 of 37,169.')
     await page.getByRole('progressbar', { name: 'Startup check' }).waitFor()
     results.push(['tray-uploading-during-check', await shot(page, 'tray-uploading-during-check')])
+    assert.deepEqual(errors, [])
+    await page.close()
+  }
+  // Task 2243: the tray's recent list comes from `desktop_recent_files` (the newest rows only), never from the file
+  // overview, which loads every row for its totals.
+  {
+    const recent = [
+      { path: 'Documents/Plans/Quarter plan.docx', size_bytes: 24_576, status: 'local', pinned: false, modified_at: now - 60 },
+      { path: 'Photos/Holiday/Beach.jpg', size_bytes: 2_400_000, status: 'cloud_only', pinned: true, modified_at: now - 3600 },
+      { path: 'Documents/Old notes.txt', size_bytes: 0, status: 'moved_to_trash', pinned: false, modified_at: now - 7200, activity_type: 'moved_to_trash' },
+    ]
+    const { page, errors } = await open({ surface: 'tray', summary: summaries['up-to-date'], viewport: { width: 400, height: 560 }, recent })
+    await page.goto(`${base}/?window=tray`)
+    for (const name of ['Quarter plan.docx', 'Beach.jpg', 'Old notes.txt']) await expectText(page, name)
+    const calls = await page.evaluate(() => window.calls)
+    const reads = calls.filter((c) => c.name === 'desktop_recent_files')
+    assert.ok(reads.length >= 1, 'the tray reads desktop_recent_files')
+    assert.deepEqual(reads[0].args, { recentLimit: 50 })
+    assert.equal(calls.filter((c) => c.name === 'desktop_file_overview').length, 0, 'the tray never reads the file overview')
+    results.push([`tray-recent-list (desktop_recent_files x${reads.length}, desktop_file_overview x0)`, await shot(page, 'tray-recent-list')])
     assert.deepEqual(errors, [])
     await page.close()
   }
