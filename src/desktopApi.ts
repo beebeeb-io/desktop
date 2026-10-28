@@ -181,6 +181,8 @@ export interface VersionConflictEntry {
     // Previously fell through to the generic 'failed_upload' bucket with the
     // raw HTTP error text and no "sign in again" path — see `reviewEntryAction`.
     | 'auth_failure'
+    // Task 2190: a sync-folder edit held, not sent, because its base is unknown (needs a decision).
+    | 'held_edit'
     // Task 1640: a file deleted elsewhere while it held changes not sent from this PC; they
     // were kept as a copy beside it (informational, no action).
     | 'kept_copy'
@@ -440,6 +442,26 @@ export interface ConflictContentPreview {
 // flag could never be trusted (VersionCenter's open always guessed `false`).
 export function conflictContentPreview(fileId: string): Promise<CommandResult<ConflictContentPreview>> {
   return command<ConflictContentPreview>('conflict_content_preview', { fileId })
+}
+
+/** Task 2190 (plan §3.2): what the person chose for a parked conflict. */
+export type ParkedChoice = 'local' | 'remote' | 'both'
+
+/** Task 2190: what a decision on a parked conflict did (`engine_bridge::ParkedResolution`). */
+export type ParkedResolution =
+  | { outcome: 'rebased'; version: number }
+  | { outcome: 'kept_other'; kept_copy: string }
+  | { outcome: 'kept_both'; file_id: string; name: string }
+  | { outcome: 'moved' }
+
+/** Task 2190 (plan §3.4): both sides of a parked conflict, by its queued write. Read-only. */
+export function parkedConflictPreview(opId: string): Promise<CommandResult<ConflictContentPreview>> {
+  return command<ConflictContentPreview>('parked_conflict_preview', { opId })
+}
+
+/** Task 2190 (plan §3.2): decide a parked conflict, by its queued write. */
+export function resolveParkedConflict(opId: string, choice: ParkedChoice): Promise<CommandResult<ParkedResolution>> {
+  return command<ParkedResolution>('resolve_parked_conflict', { opId, choice })
 }
 
 /**
