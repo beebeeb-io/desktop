@@ -321,3 +321,34 @@ fn t15_end_to_end_deltas_equal_the_per_file_reference() {
     );
     assert_eq!(plan.counts.listing_hits, 3);
 }
+
+#[test]
+fn t16_populate_counts_created_and_already_existing() {
+    let r = Root::new();
+    r.track("one.bin", FileStatus::CloudOnly, PinState::Inherit);
+    r.track("two.bin", FileStatus::CloudOnly, PinState::Inherit);
+    let first = populate_placeholders(&r.db, &r.root);
+    assert_eq!((first.create_calls, first.created), (2, 2), "{first:?}");
+    r.track("three.bin", FileStatus::CloudOnly, PinState::Inherit);
+    let second = populate_placeholders(&r.db, &r.root);
+    assert_eq!(
+        (second.rows, second.create_calls, second.created, second.already_existed),
+        (3, 3, 1, 2),
+        "{second:?}"
+    );
+    assert_eq!(
+        (second.create_errors, second.skipped, second.ensure_dir_errors),
+        (0, 0, 0)
+    );
+}
+
+#[test]
+fn task_2240_refresh_and_seed_log_no_path() {
+    let source = include_str!("mod.rs").replace("\r\n", "\n");
+    for name in ["refresh_placeholders", "seed_placeholders"] {
+        assert!(
+            !fn_text(&source, name).contains("display()"),
+            "{name} must log counts only, never the sync root's path"
+        );
+    }
+}
