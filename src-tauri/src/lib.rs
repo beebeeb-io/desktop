@@ -80,6 +80,10 @@ mod macos_file_provider;
 // Task 1885: NSWorkspace for the URLs that are not Finder items (System Settings), with no child `open`.
 #[cfg(target_os = "macos")]
 mod macos_workspace;
+// Task 2267: a Windows start refused over unowned local data proves the data is the signed-in account's own before it
+// is adopted (Windows never resets; macOS and Linux reset instead, so they never need it).
+#[cfg(any(target_os = "windows", test))]
+mod own_data_proof;
 mod popover_data;
 // Ruling R8 (spec 2026-10-06): the pure decision between a first sign-in, the same account signing in again and
 // an account switch. Windows keeps its refusal while a session exists and never asks.
@@ -7484,7 +7488,77 @@ fn spawn_bound_engine(
     if let Some((folder, files)) = reset_kept {
         surface_reset_folder(&surface_app, &folder, files);
     }
+    // Task 2267: a Windows start refused over local data that no owner record matches asks, in the background, whether
+    // that data is this account's own, and sync starts once it is proven (`prove_own_data_in_background`).
+    #[cfg(target_os = "windows")]
+    if matches!(&started, Err(error) if error == account_binding::OTHER_ACCOUNT_ON_WINDOWS) {
+        prove_own_data_in_background(surface_app, paths.sync_root.clone());
+    }
     started
+}
+
+/// Task 2267: the background half of a Windows start refused with `OTHER_ACCOUNT_ON_WINDOWS`. It proves the local
+/// data is the signed-in account's own (`own_data_proof`: its My Files rows decrypt under this session's key), records
+/// the session as the owner, and starts sync through the usual start, which binds again and now keeps everything.
+/// Another account's data is never adopted and nothing is deleted. At most one proof runs at a time.
+#[cfg(target_os = "windows")]
+fn prove_own_data_in_background(app: tauri::AppHandle, sync_root: PathBuf) {
+    static RUNNING: AtomicBool = AtomicBool::new(false);
+    if RUNNING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        let proved = prove_own_data_of_active_session(&app, &sync_root).await;
+        RUNNING.store(false, Ordering::SeqCst);
+        match proved {
+            Ok(own_data_proof::Outcome::Adopted(tally)) => {
+                tracing::info!(?tally, "R10: this PC's local data is proven this account's own; starting sync");
+                let transition = SESSION_TRANSITION.lock().await;
+                let state = app.state::<AppState>();
+                if let Err(error) = start_engine_if_possible(app.clone(), &state, &transition).await {
+                    tracing::warn!(%error, "R10: the start after the proof was refused");
+                }
+            }
+            Ok(outcome) => tracing::warn!(?outcome, "R10: this PC's local data was not adopted"),
+            Err(error) => tracing::warn!(%error, "R10: the ownership proof could not run"),
+        }
+    });
+}
+
+/// The proof for the active session's keys and identity, read together as an engine start reads them. A session that
+/// changes before the owner is recorded records nothing (`session_unchanged_since`). Offline, the refusal becomes the
+/// one that says to connect and open Beebeeb again; the next start asks again.
+#[cfg(target_os = "windows")]
+async fn prove_own_data_of_active_session(
+    app: &tauri::AppHandle,
+    sync_root: &Path,
+) -> Result<own_data_proof::Outcome, String> {
+    let state = app.state::<AppState>();
+    let acct = state.active_account()?;
+    let turn = acct.session_generation();
+    let Ok(((token, key), identity)) = keys_for_engine_start(&acct) else {
+        return Ok(own_data_proof::Outcome::NotEligible);
+    };
+    let paths = LocalDataPaths::production(sync_root)?;
+    let Some(db) = state_db_from_state_dir(&paths.state_dir)? else {
+        return Ok(own_data_proof::Outcome::NotEligible);
+    };
+    let api = api_client::ApiClient::new(runner::api_base_url(), String::clone(&token), *key);
+    let outcome = own_data_proof::prove_and_adopt(
+        &db,
+        &identity,
+        &key,
+        |file_id| {
+            let api = &api;
+            async move { own_data_proof::fetched(api.get_file(&file_id).await) }
+        },
+        || acct.session_unchanged_since(turn),
+    )
+    .await?;
+    if matches!(outcome, own_data_proof::Outcome::Unavailable(_)) {
+        record_engine_refusal(&acct, turn, account_binding::IDENTITY_UNKNOWN);
+    }
+    Ok(outcome)
 }
 
 /// W12 and §9: the folder an R10 reset kept reaches the person as the app-start sweep's does. The reset recorded it
@@ -25745,6 +25819,41 @@ mod account_binding_tests {
             !bind.contains(".await"),
             "and never waits for it: the reconciler starts engines through here:\n{bind}"
         );
+    }
+
+    /// Task 2267: a Windows start refused with `OTHER_ACCOUNT_ON_WINDOWS` hands its data to the ownership proof, after
+    /// the start returned and whatever it returned, and the proof starts sync only once it adopted. The proof reads the
+    /// keys and identity as a start reads them and records nothing for a session that changed.
+    #[test]
+    fn a_windows_refusal_over_unowned_data_asks_for_the_proof_and_only_an_adoption_starts_sync() {
+        let production = production_source();
+        let squeeze = crate::source_pin::squeeze;
+        let gate = squeeze(&code_of(&production, "fn spawn_bound_engine("));
+        let hook = squeeze(
+            "#[cfg(target_os = \"windows\")] if matches!(&started, Err(error) if error == account_binding::OTHER_ACCOUNT_ON_WINDOWS) { prove_own_data_in_background(surface_app, paths.sync_root.clone()); }",
+        );
+        let surfaced = gate.find(&squeeze("surface_reset_folder(&surface_app, &folder, files);")).expect("surfaced");
+        let asked = gate.find(&hook).unwrap_or_else(|| panic!("the hook: {gate}"));
+        assert!(surfaced < asked && gate.ends_with("started"), "{gate}");
+
+        let background = code_of(&production, "fn prove_own_data_in_background(");
+        assert!(background.contains("RUNNING.swap(true, Ordering::SeqCst)"), "{background}");
+        let adopted = background.find("Outcome::Adopted(tally)").expect("the adopted arm");
+        let restart = background.find("start_engine_if_possible(").expect("a restart");
+        let other = background.find("Ok(outcome) =>").expect("every other outcome");
+        assert!(adopted < restart && restart < other, "only an adoption restarts: {background}");
+        assert_eq!(background.matches("start_engine_if_possible(").count(), 1, "{background}");
+
+        let proof = squeeze(&code_of(&production, "async fn prove_own_data_of_active_session("));
+        for step in [
+            "let turn = acct.session_generation();",
+            "keys_for_engine_start(&acct)",
+            "own_data_proof::prove_and_adopt(",
+            "|| acct.session_unchanged_since(turn)",
+            "record_engine_refusal(&acct, turn, account_binding::IDENTITY_UNKNOWN);",
+        ] {
+            assert!(proof.contains(&squeeze(step)), "{step}: {proof}");
+        }
     }
 
     // ---- the local data under test ----

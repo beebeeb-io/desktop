@@ -105,8 +105,9 @@ pub enum Bound {
 }
 
 pub const IDENTITY_UNKNOWN: &str = "Beebeeb couldn’t confirm which account this computer’s local files belong to, so sync didn’t start. Connect to the internet and open Beebeeb again.";
-pub const OTHER_ACCOUNT_ON_WINDOWS: &str =
-    "This PC still holds local files of another Beebeeb account, so sync didn’t start. Sign out, then sign in again.";
+/// Task 2267: shown only when this PC's local data could not be proven the signed-in account's own
+/// (`own_data_proof`). It never tells a person they have another account: the reported PCs had one.
+pub const OTHER_ACCOUNT_ON_WINDOWS: &str = "Beebeeb couldn’t confirm that the files on this PC belong to the account you’re signed in to, so sync didn’t start. Nothing was uploaded or deleted. Contact support@beebeeb.io.";
 
 /// The sentence for an engine start refused because an earlier engine stop was never confirmed: its task may still
 /// run with the keys, so every start refuses until Beebeeb restarts (spec §5.6).

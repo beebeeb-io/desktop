@@ -6085,6 +6085,45 @@ impl StateDb {
         Ok(account_rows(&conn)? > 0)
     }
 
+    /// Task 2267: the file ids a proof of ownership asks the server about (`own_data_proof`), at most `limit`:
+    /// My Files rows the server named (`remote_updated_at > 0`; a row this PC made and never uploaded cannot prove
+    /// anything), the ones a held write changes or files into first, then the most recently changed.
+    #[cfg(any(target_os = "windows", test))]
+    pub fn own_data_proof_sample(&self, limit: usize) -> Result<Vec<String>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT f.file_id FROM files f
+             WHERE f.namespace = 'my_files' AND f.remote_updated_at > 0
+             ORDER BY EXISTS(SELECT 1 FROM operation_queue q
+                             WHERE q.file_id = f.file_id OR q.parent_id = f.file_id) DESC,
+                      f.remote_updated_at DESC, f.file_id
+             LIMIT ?1",
+        )?;
+        let ids = stmt
+            .query_map(params![i64::try_from(limit).unwrap_or(i64::MAX)], |row| row.get(0))?
+            .collect::<Result<Vec<String>>>()?;
+        Ok(ids)
+    }
+
+    /// Task 2267: record `owner` only if the recorded owner is still `expected` and account data is still here (one
+    /// transaction), so a proof never replaces an owner recorded while it ran, nor names an owner of a database a
+    /// sign-out emptied meanwhile. Returns whether it recorded.
+    #[cfg(any(target_os = "windows", test))]
+    pub fn replace_owner_if(
+        &self,
+        expected: Option<&crate::account_binding::Identity>,
+        owner: &crate::account_binding::Identity,
+    ) -> Result<bool> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+        if read_owner(&tx)?.as_ref() != expected || account_rows(&tx)? == 0 {
+            return Ok(false);
+        }
+        write_owner(&tx, owner)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// R10, the upgrade path (fix round 1 of Task 10): record `candidate` as the owner of local data that has
     /// no owner, AT MOST ONCE per database, in one transaction. Once means the first startup after the upgrade:
     /// whatever this call finds, it shuts the window (`ADOPTION_CLOSED`), so a later startup, however it looks,
