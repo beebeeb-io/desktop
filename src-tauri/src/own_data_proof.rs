@@ -7,187 +7,185 @@
 //! and a session stored before the email was kept has none, so the window closed with no owner recorded. From then on
 //! every start saw unowned data and decided `Reset`, which Windows refuses (R10).
 //!
-//! This module settles such a refusal with evidence instead of a guess: it asks the server for a sample of the local
-//! My Files rows and adopts the data only when they decrypt under THIS session's master key. Another account's My
-//! Files rows never decrypt under this key (each name is sealed with a key derived from its owner's master key and the
-//! file id), so another account's data is never adopted (R10 holds), and nothing is deleted here in any case.
-//!
-//! Fix round 1 (the PR's self-review): a name is read in every format the engine reads (both key derivations, both
-//! envelopes); a name that proves nothing either way (a plaintext legacy name, none, a file received through a file
-//! request) is set aside instead of vetoing; a file this account cannot see blocks adoption unless it sat in a folder
-//! proven this account's own (a file deleted since); no answer, for any sampled file, means "ask again later"; and the
-//! sample reaches past the newest rows (held writes, the newest, then a random spread of the rest).
+//! This module settles such a refusal with evidence instead of a guess (fix round 2, the lead's review of the PR):
+//! - ONE listing of this account's own tree (`GET /api/v1/sync/snapshot`, the account's non-trashed files only).
+//! - EVERY local My Files row the server named must be in that tree with its name opening under THIS session's master
+//!   key, or be gone from a folder that is (no sampling). Another account's My Files rows are not in this account's
+//!   tree, and a name sealed under another key never opens (AES-GCM authenticates it), so another account's data is
+//!   never adopted (R10 holds).
+//! - Every queued change must act on this account's proven data. One that cannot be tied to it (a new item at the top
+//!   level, or in a folder that is not proven this account's own, such as a shared one) does not block the adoption:
+//!   it is held for the person's review (`found_while_paused`), recorded in the same transaction as the owner, and is
+//!   never sent on its own. The person uploads it or keeps it on this PC only (`found_while_paused.rs`).
+//! - Nothing is deleted here in any case.
 
 use crate::account_binding::{Identity, same_account};
-use crate::state_db::StateDb;
-use futures_util::stream::{self, StreamExt};
-use std::collections::HashMap;
+use crate::state_db::{ProofOp, ProofRow, StateDb};
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 
-/// How many local file rows a proof asks the server about.
-pub const SAMPLE_LIMIT: usize = 16;
-/// How many of them must prove to be this account's own (all of them when fewer were sampled).
+/// How many of the server-named rows must prove to be this account's own (all of them when fewer were checked).
 pub const REQUIRED_PROOFS: usize = 2;
-/// How many of them are asked about at once.
-pub const CONCURRENT_ASKS: usize = 4;
 
-/// What the server answered for one sampled file.
+/// What the server answered for this account's tree.
 #[derive(Debug, Clone)]
-pub enum Fetched {
-    /// The file's metadata, as `GET /api/v1/files/{id}` returned it.
-    Metadata(serde_json::Value),
-    /// Not this account's to read, or gone (403, 404, 410).
-    Missing,
+pub enum Listing {
+    /// The nodes of `GET /api/v1/sync/snapshot`: this account's own, non-trashed files and folders.
+    Nodes(Vec<serde_json::Value>),
     /// The server refused this session's token (401): nothing about ownership, and not a connection problem either.
     SignedOut,
     /// No answer that says anything about ownership: offline, a timeout, 429, a server error.
     Unavailable,
 }
 
-/// One sampled file, judged.
+/// One server-named row, judged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Probe {
-    /// Its name decrypts under this session's master key: this account's own file.
+    /// In this account's tree, and its name decrypts under this session's master key: this account's own.
     Own,
-    /// This account can read it, but its name does not decrypt under this account's key.
+    /// In this account's tree, but its name does not decrypt under this account's key.
     Unproven,
-    /// Proves nothing either way: a plaintext (legacy) name, no name, or a file received through a file request (its
-    /// name is sealed under the sender's content key). Set aside, never counted for or against.
+    /// Proves nothing either way: a plaintext (legacy) name, no name, or a name sealed under someone else's key by
+    /// design (a file received through a file request, or one a collaborator uploaded into this account's folder).
+    /// Set aside, never counted for or against.
     Neutral,
-    /// Missing, but it sat in a folder proven this account's own: deleted since. Set by the proof, never by `probe`.
+    /// Not in this account's tree, but its nearest ancestor that is, is this account's own: deleted since.
     Gone,
+    /// Not in this account's tree, and nothing of this account's explains it (another account's file looks exactly
+    /// like that).
     Missing,
-    SignedOut,
-    Unavailable,
 }
 
 /// The counts of one proof. Logged and reported; never a name or a path.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Tally {
-    pub sampled: usize,
+    /// Server-named My Files rows judged: all of them.
+    pub checked: usize,
     pub own: usize,
     pub neutral: usize,
-    /// Missing files whose folder proved this account's own: deleted since, not another account's.
+    /// Rows deleted since from a folder proven this account's own.
     pub gone: usize,
     pub unproven: usize,
     pub missing: usize,
+    /// Queued changes that act on proven data: they upload after the adoption.
+    pub proven_changes: usize,
+    /// Queued changes held for the person's review (`found_while_paused`).
+    pub held_for_review: usize,
+    /// 1 when the server refused this session's token for the listing.
     pub signed_out: usize,
+    /// 1 when the listing did not answer, twice.
     pub unavailable: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     Adopt,
-    Unavailable,
     NotProven,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
     /// Nothing a proof can settle: the data is owned by this session already, there is none, or the owner record
-    /// names another account by its user id (R10's strongest signal, never overridden).
+    /// names an account by its user id that this session cannot be compared with (R10's strongest signal).
     NotEligible,
-    /// Proven, and this session is now the recorded owner: the next start proceeds and keeps everything.
+    /// Proven, and this session is now the recorded owner: the next start proceeds and keeps everything. The changes
+    /// that could not be tied to this account's data are held for review.
     Adopted(Tally),
     NotProven(Tally),
-    /// Too few answers to decide; nothing recorded. A later start asks again.
+    /// No usable listing; nothing recorded. A later start asks again.
     Unavailable(Tally),
     /// The session or the owner record changed while the proof ran; nothing recorded.
     Changed(Tally),
 }
 
 /// Whether a refused start is one a proof may settle: this session is known, local data exists, and the data has no
-/// recorded owner or one that differs from this session only by email (an email-only record, or a session whose user
-/// id is not known yet).
+/// recorded owner, or one recorded by email only that differs from this session's.
 pub fn eligible(owner: Option<&Identity>, session: &Identity, has_local_data: bool) -> bool {
     if !session.is_known() || !has_local_data {
         return false;
     }
     match owner.filter(|owner| owner.is_known()) {
         None => true,
-        // Two user ids that differ are two accounts: R10's strongest signal, never questioned.
-        Some(owner) => {
-            let both_ids = owner.user_id.is_some() && session.user_id.is_some();
-            !both_ids && same_account(owner, session) == Some(false)
-        }
+        // An owner recorded WITH a user id is compared by that id only (review P3-2): another id is another account,
+        // R10's strongest signal, never questioned, and a session whose id is not known yet cannot be compared with it.
+        Some(owner) => owner.user_id.is_none() && same_account(owner, session) == Some(false),
     }
 }
 
-/// Judge one server answer for `file_id` against this session's master key.
-pub fn probe(master_key: &[u8; 32], file_id: &str, fetched: &Fetched) -> Probe {
-    let metadata = match fetched {
-        Fetched::Metadata(metadata) => metadata,
-        Fetched::Missing => return Probe::Missing,
-        Fetched::SignedOut => return Probe::SignedOut,
-        Fetched::Unavailable => return Probe::Unavailable,
-    };
-    // A file received through a file request has its name sealed under the sender's content key, and a plaintext
-    // (legacy) name or none is sealed under no key: neither says whose the file is.
-    if !metadata["file_request_id"].is_null() {
-        return Probe::Neutral;
-    }
-    let Some(sealed) = metadata["name_encrypted"]
-        .as_str()
-        .filter(|name| name.trim_start().starts_with('{'))
-    else {
-        return Probe::Neutral;
-    };
-    // The keys are derived from THIS session's master key and the id asked about, so metadata of another file, or a
-    // name sealed under another account's key, never opens (AES-GCM authenticates it). Every format the engine reads
-    // is read: the string id (as every client seals today) and the 16-byte binary id (the old CLI), each in both
-    // envelopes (`engine_bridge::decrypt_shared_name_with_key`).
+/// Whether `sealed` (a `name_encrypted` envelope) opens under a file key derived from `master_key` and `file_id`, in
+/// every format the engine reads: the string id (as every client seals today) and the 16-byte binary id (the old CLI),
+/// each in both envelopes (`engine_bridge::decrypt_shared_name_with_key`). The key is derived from this id, so a name
+/// sealed for another file, or under another account's key, never opens. Task 1888's key check reads names the same
+/// way.
+pub fn name_opens(master_key: &[u8; 32], file_id: &str, sealed: &str) -> bool {
     let master = beebeeb_core::kdf::MasterKey::from_bytes(*master_key);
     let by_string = beebeeb_core::kdf::derive_file_key(&master, file_id.as_bytes());
     let by_binary = uuid::Uuid::parse_str(file_id)
         .ok()
         .map(|id| beebeeb_core::kdf::derive_file_key(&master, id.as_bytes()));
-    let own = std::iter::once(by_string).chain(by_binary).any(|file_key| {
-        crate::engine_bridge::decrypt_shared_name_with_key(&file_key, sealed)
-            .is_some_and(|name| !name.trim().is_empty())
-    });
-    if own { Probe::Own } else { Probe::Unproven }
+    std::iter::once(by_string).chain(by_binary).any(|file_key| {
+        crate::engine_bridge::decrypt_shared_name_with_key(&file_key, sealed).is_some_and(|name| !name.trim().is_empty())
+    })
 }
 
-/// The decision over a whole sample (see the module docs and the PR's Decisions).
+/// Judge one node of this account's tree against this session's master key.
+pub fn probe(master_key: &[u8; 32], node: &serde_json::Value) -> Probe {
+    let set = |field: &str| node.get(field).is_some_and(|value| !value.is_null() && value.as_str() != Some(""));
+    // Sealed under someone else's key by design (review P2-3): a file received through a file request, or one a
+    // collaborator uploaded into this account's folder (the server names `uploaded_by` only when it is not the owner,
+    // and wraps a file key for the owner only on such uploads).
+    if set("file_request_id") || set("uploaded_by") || set("owner_wrapped_file_key") {
+        return Probe::Neutral;
+    }
+    let Some(file_id) = node.get("id").and_then(serde_json::Value::as_str) else {
+        return Probe::Unproven;
+    };
+    match node
+        .get("name_encrypted")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|sealed| sealed.starts_with('{'))
+    {
+        // A plaintext (legacy) name, or none: proves nothing either way.
+        None => Probe::Neutral,
+        Some(sealed) if name_opens(master_key, file_id, sealed) => Probe::Own,
+        Some(_) => Probe::Unproven,
+    }
+}
+
+/// The decision over the whole tree (see the module docs and the PR's Decisions).
 pub fn verdict(tally: &Tally) -> Verdict {
-    // Evidence against comes first: a file this account can read but cannot open, or one it cannot see that no folder
-    // of its own explains (another account's private file looks exactly like that). Either one: not adopted.
+    // Anything this account cannot explain blocks: a name that does not open under its key, or a row the server named
+    // that is not in its tree and not gone from one of its folders.
     if tally.unproven > 0 || tally.missing > 0 {
         return Verdict::NotProven;
     }
-    // A file that did not answer is not evidence for this account: ask again later.
-    if tally.unavailable > 0 || tally.signed_out > 0 {
-        return Verdict::Unavailable;
+    // Review P3-1: rows that prove nothing never outnumber the rows that prove ownership, and at least
+    // `REQUIRED_PROOFS` prove it (every row, when fewer were checked).
+    if tally.neutral > tally.own {
+        return Verdict::NotProven;
     }
-    // Enough of this account's own files: two, or the one when only one could answer.
-    if tally.own > 0 && tally.own >= REQUIRED_PROOFS.min(tally.own + tally.gone) {
+    if tally.own > 0 && tally.own >= REQUIRED_PROOFS.min(tally.checked) {
         Verdict::Adopt
     } else {
         Verdict::NotProven
     }
 }
 
-/// Whether an HTTP status says the file is not this account's to read, or gone.
-pub fn status_means_missing(status: u16) -> bool {
-    matches!(status, 403 | 404 | 410)
-}
-
-/// An HTTP failure as the proof reads it (`None`: no status at all, e.g. offline).
-pub fn fetched_from_status(status: Option<u16>) -> Fetched {
+/// An HTTP failure of the listing as the proof reads it (`None`: no status at all, e.g. offline).
+pub fn listing_from_status(status: Option<u16>) -> Listing {
     match status {
-        Some(status) if status_means_missing(status) => Fetched::Missing,
-        Some(401) => Fetched::SignedOut,
-        _ => Fetched::Unavailable,
+        Some(401) => Listing::SignedOut,
+        _ => Listing::Unavailable,
     }
 }
 
-/// A `get_file` result as the proof reads it: an HTTP status that says "not yours, or gone" is `Missing`, any other
-/// failure says nothing (`Unavailable`).
+/// A `sync_snapshot` result as the proof reads it.
 #[cfg(target_os = "windows")]
-pub fn fetched(result: anyhow::Result<serde_json::Value>) -> Fetched {
+pub fn listing(result: anyhow::Result<crate::api_client::SyncSnapshot>) -> Listing {
     match result {
-        Ok(metadata) => Fetched::Metadata(metadata),
-        Err(error) => fetched_from_status(
+        Ok(snapshot) => Listing::Nodes(snapshot.nodes),
+        Err(error) => listing_from_status(
             error
                 .downcast_ref::<reqwest::Error>()
                 .and_then(reqwest::Error::status)
@@ -196,21 +194,149 @@ pub fn fetched(result: anyhow::Result<serde_json::Value>) -> Fetched {
     }
 }
 
-/// Run the proof for `session` over `db` and, when it holds, record `session` as the owner. `fetch` asks the server for
-/// one file id, at most `CONCURRENT_ASKS` at once. `still_current` is checked before every question and right before
-/// the record is written, so a session that changed meanwhile (a Lock, a sign-out, another sign-in) stops the asking
-/// and records nothing. The owner is replaced only if it is still the one the proof began with. Nothing is ever
-/// deleted.
-pub async fn prove_and_adopt<F, Fut>(
+/// What the proof concluded about the rows and the queue (pure: no database, no network).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Judgement {
+    pub tally: Tally,
+    /// The queued changes that act on proven data.
+    pub proven: HashSet<String>,
+}
+
+/// Judge every server-named My Files row and every queued change against this account's tree.
+pub fn judge(master_key: &[u8; 32], rows: &[ProofRow], ops: &[ProofOp], nodes: &[serde_json::Value]) -> Judgement {
+    let tree: HashMap<&str, &serde_json::Value> = nodes
+        .iter()
+        .filter_map(|node| node.get("id").and_then(serde_json::Value::as_str).map(|id| (id, node)))
+        .collect();
+    let local: HashMap<&str, &ProofRow> = rows.iter().map(|row| (row.file_id.as_str(), row)).collect();
+    // Where two rows hold one path (a folder made here and its server twin, task 1888), the server's row wins.
+    let by_path: HashMap<&str, &ProofRow> = rows
+        .iter()
+        .filter(|row| !row.server_named)
+        .chain(rows.iter().filter(|row| row.server_named))
+        .map(|row| (row.path.trim_matches('/'), row))
+        .collect();
+    let judge = Judge {
+        master_key,
+        tree,
+        local,
+        by_path,
+        probes: std::cell::RefCell::new(HashMap::new()),
+    };
+
+    let mut tally = Tally::default();
+    for row in rows.iter().filter(|row| row.my_files && row.server_named) {
+        tally.checked += 1;
+        match judge.row(row) {
+            Probe::Own => tally.own += 1,
+            Probe::Neutral => tally.neutral += 1,
+            Probe::Gone => tally.gone += 1,
+            Probe::Unproven => tally.unproven += 1,
+            Probe::Missing => tally.missing += 1,
+        }
+    }
+    let proven: HashSet<String> = ops
+        .iter()
+        .filter(|op| {
+            let anchors: Vec<&str> = op.file_id.iter().chain(op.parent_id.iter()).map(String::as_str).collect();
+            !anchors.is_empty() && anchors.iter().all(|anchor| judge.anchor_is_proven(anchor))
+        })
+        .map(|op| op.op_id.clone())
+        .collect();
+    tally.proven_changes = proven.len();
+    Judgement { tally, proven }
+}
+
+/// The tree and the local rows, indexed, with each present node's probe computed once.
+struct Judge<'a> {
+    master_key: &'a [u8; 32],
+    tree: HashMap<&'a str, &'a serde_json::Value>,
+    local: HashMap<&'a str, &'a ProofRow>,
+    by_path: HashMap<&'a str, &'a ProofRow>,
+    probes: std::cell::RefCell<HashMap<&'a str, Probe>>,
+}
+
+impl<'a> Judge<'a> {
+    /// The probe of the node `id` of this account's tree, or `None` when the tree has no such node.
+    fn present(&self, id: &'a str) -> Option<Probe> {
+        let node = self.tree.get(id)?;
+        Some(*self.probes.borrow_mut().entry(id).or_insert_with(|| probe(self.master_key, node)))
+    }
+
+    /// The folder `row` is in: its parent link, or, for a row without one, the row at its path's folder.
+    fn parent_of(&self, row: &'a ProofRow) -> Option<&'a str> {
+        if let Some(parent) = row.parent_id.as_deref() {
+            return Some(parent);
+        }
+        let (folder, _) = row.path.trim_matches('/').rsplit_once('/')?;
+        self.by_path.get(folder).map(|parent| parent.file_id.as_str())
+    }
+
+    /// A server-named row: its node's probe, or, when this account's tree does not hold it, `Gone` if its nearest
+    /// ancestor the tree holds is this account's own (deleted since), else `Missing`. The walk follows the local
+    /// parents and ends as `Missing` at the top, at a parent with no row, or on a cycle.
+    fn row(&self, row: &'a ProofRow) -> Probe {
+        if let Some(probe) = self.present(&row.file_id) {
+            return probe;
+        }
+        let mut seen: HashSet<&str> = HashSet::from([row.file_id.as_str()]);
+        let mut current = row;
+        while let Some(id) = self.parent_of(current) {
+            if !seen.insert(id) {
+                break;
+            }
+            if let Some(probe) = self.present(id) {
+                return if probe == Probe::Own { Probe::Gone } else { Probe::Missing };
+            }
+            match self.local.get(id) {
+                Some(&parent) => current = parent,
+                None => break,
+            }
+        }
+        Probe::Missing
+    }
+
+    /// Whether a queued change's anchor (the item it acts on, or the folder it acts in) is this account's proven data:
+    /// the first server-named row up its local parents is in My Files and proven its own (or gone from its own
+    /// folder). An item made on this PC at the top level, or in a folder shared with this account, or in one whose
+    /// name proves nothing, is not.
+    fn anchor_is_proven(&self, anchor: &'a str) -> bool {
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut id = anchor;
+        loop {
+            if !seen.insert(id) {
+                return false;
+            }
+            let Some(&row) = self.local.get(id) else {
+                // No local row: a node of this account's tree this PC has not written yet.
+                return self.present(id) == Some(Probe::Own);
+            };
+            if row.server_named {
+                return row.my_files && matches!(self.row(row), Probe::Own | Probe::Gone);
+            }
+            match self.parent_of(row) {
+                Some(parent) => id = parent,
+                None => return false,
+            }
+        }
+    }
+}
+
+/// Run the proof for `session` over `db` and, when it holds, record `session` as the owner and hold for review what
+/// could not be tied to its data, in one transaction. `list` asks the server for this account's tree; a listing that
+/// does not answer is asked once more. `still_current` is checked before every question and right before the record
+/// is written, so a session that changed meanwhile (a Lock, a sign-out, another sign-in) stops the asking and records
+/// nothing. The owner is replaced only if it is still the one the proof began with. Nothing is ever deleted.
+pub async fn prove_and_adopt<L, Fut>(
     db: &StateDb,
     session: &Identity,
     master_key: &[u8; 32],
-    fetch: F,
+    list: L,
     still_current: impl Fn() -> bool,
 ) -> Result<Outcome, String>
 where
-    F: Fn(String) -> Fut,
-    Fut: Future<Output = Fetched>,
+    L: Fn() -> Fut,
+    Fut: Future<Output = Listing>,
 {
     let owner = db.owner().map_err(|e| format!("read the local data owner: {e}"))?;
     let has_local_data = db
@@ -219,107 +345,52 @@ where
     if !eligible(owner.as_ref(), session, has_local_data) {
         return Ok(Outcome::NotEligible);
     }
-    let sample = db
-        .own_data_proof_sample(SAMPLE_LIMIT)
-        .map_err(|e| format!("sample the local data: {e}"))?;
-    let mut tally = Tally {
-        sampled: sample.len(),
-        ..Tally::default()
+    let mut tally = Tally::default();
+    let mut nodes = None;
+    for _ in 0..2 {
+        if !still_current() {
+            return Ok(Outcome::Changed(tally));
+        }
+        match list().await {
+            Listing::Nodes(listed) => {
+                nodes = Some(listed);
+                break;
+            }
+            Listing::SignedOut => {
+                tally.signed_out = 1;
+                return Ok(Outcome::Unavailable(tally));
+            }
+            Listing::Unavailable => {}
+        }
+    }
+    let Some(nodes) = nodes else {
+        tally.unavailable = 1;
+        return Ok(Outcome::Unavailable(tally));
     };
-    let (fetch, still_current) = (&fetch, &still_current);
-    let answers: Vec<(String, Option<Probe>)> = stream::iter(sample)
-        .map(|file_id| async move {
-            let probe = ask(fetch, still_current, master_key, &file_id).await;
-            (file_id, probe)
-        })
-        .buffered(CONCURRENT_ASKS)
-        .collect()
-        .await;
-    let mut judged: HashMap<String, Probe> = HashMap::new();
-    for (file_id, probe) in &answers {
-        match probe {
-            Some(probe) => judged.insert(file_id.clone(), *probe),
-            None => return Ok(Outcome::Changed(tally)),
-        };
+    // Read after the listing: whatever was written while it ran is judged too, or held (it is not in `proven`).
+    let rows = db.own_data_proof_rows().map_err(|e| format!("read the local rows: {e}"))?;
+    let ops = db.own_data_proof_ops().map_err(|e| format!("read the queue: {e}"))?;
+    let Judgement { tally, proven } = judge(master_key, &rows, &ops, &nodes);
+    if verdict(&tally) != Verdict::Adopt {
+        return Ok(Outcome::NotProven(tally));
     }
-    for (file_id, probe) in answers {
-        let mut probe = probe.unwrap_or(Probe::Unavailable);
-        // A file this account cannot see is explained only when it sat in a folder proven this account's own: it was
-        // deleted since. Another account's private file sits in that account's folders, which this account cannot
-        // see either, or at the top level, which explains nothing.
-        if probe == Probe::Missing
-            && let Some(parent) = db
-                .get_file(&file_id)
-                .map_err(|e| format!("read a sampled row: {e}"))?
-                .and_then(|row| row.parent_id)
-                .filter(|parent| !parent.is_empty())
-        {
-            let folder = match judged.get(&parent) {
-                Some(folder) => *folder,
-                None => {
-                    let Some(folder) = ask(fetch, still_current, master_key, &parent).await else {
-                        return Ok(Outcome::Changed(tally));
-                    };
-                    judged.insert(parent, folder);
-                    folder
-                }
-            };
-            probe = match folder {
-                Probe::Own => Probe::Gone,
-                Probe::SignedOut | Probe::Unavailable => folder,
-                _ => Probe::Missing,
-            };
-        }
-        match probe {
-            Probe::Own => tally.own += 1,
-            Probe::Neutral => tally.neutral += 1,
-            Probe::Gone => tally.gone += 1,
-            Probe::Unproven => tally.unproven += 1,
-            Probe::Missing => tally.missing += 1,
-            Probe::SignedOut => tally.signed_out += 1,
-            Probe::Unavailable => tally.unavailable += 1,
-        }
+    if !still_current() {
+        return Ok(Outcome::Changed(tally));
     }
-    match verdict(&tally) {
-        Verdict::NotProven => Ok(Outcome::NotProven(tally)),
-        Verdict::Unavailable => Ok(Outcome::Unavailable(tally)),
-        Verdict::Adopt if !still_current() => Ok(Outcome::Changed(tally)),
-        Verdict::Adopt => {
-            let recorded = db
-                .replace_owner_if(owner.as_ref(), session)
-                .map_err(|e| format!("record the local data owner: {e}"))?;
-            Ok(if recorded {
-                Outcome::Adopted(tally)
-            } else {
-                Outcome::Changed(tally)
-            })
-        }
+    match db
+        .adopt_owner_holding(owner.as_ref(), session, &proven, now_secs())
+        .map_err(|e| format!("record the local data owner: {e}"))?
+    {
+        Some(held) => Ok(Outcome::Adopted(Tally { held_for_review: held, ..tally })),
+        None => Ok(Outcome::Changed(tally)),
     }
 }
 
-/// Ask about one file while the session is still the one the proof began with (`None` once it is not). A file that
-/// did not answer is asked once more.
-async fn ask<F, Fut>(
-    fetch: &F,
-    still_current: &impl Fn() -> bool,
-    master_key: &[u8; 32],
-    file_id: &str,
-) -> Option<Probe>
-where
-    F: Fn(String) -> Fut,
-    Fut: Future<Output = Fetched>,
-{
-    let mut judged = Probe::Unavailable;
-    for _ in 0..2 {
-        if !still_current() {
-            return None;
-        }
-        judged = probe(master_key, file_id, &fetch(file_id.to_string()).await);
-        if judged != Probe::Unavailable {
-            break;
-        }
-    }
-    Some(judged)
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -328,8 +399,9 @@ mod tests {
     use crate::account_binding::{
         Bound, IDENTITY_UNKNOWN, LocalData, OTHER_ACCOUNT_ON_WINDOWS, adopt_unbound, bind_before_engine_start,
     };
-    use crate::state_db::{FileEntry, FileStatus, ItemKind, OperationKind, PendingOperation};
-    use std::cell::RefCell;
+    use crate::state_db::{FileEntry, FileStatus, ItemKind, Namespace, OperationKind, PendingOperation};
+    use std::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
 
     const WINDOWS: bool = false; // `reset_allowed` on Windows
 
@@ -366,44 +438,84 @@ mod tests {
         _dir: tempfile::TempDir,
     }
 
-    /// A PC that synced `rows` My Files rows from the server and holds one change waiting to upload on the first
-    /// of them (a held write), the shape of the reported PCs.
-    fn pc_with(rows: &[&str]) -> Pc {
-        pc_with_held(rows, rows.first().copied())
+    /// How a row reached this PC, which decides the columns that say the server named it.
+    #[derive(Clone, Copy)]
+    enum Shape {
+        /// Written by the snapshot: the server's version, `remote_updated_at` 0 (the My Files ingest cannot read the
+        /// server's RFC 3339 `updated_at`). 39,626 of the 40,473 server rows on the maintainer's PC look like this.
+        Snapshot,
+        /// Written by a delta: stamped `now`, no version.
+        Delta,
+        /// Made on this PC and never uploaded.
+        Local,
     }
 
-    /// `rows` oldest first, with the held write on `held_on`.
-    fn pc_with_held(rows: &[&str], held_on: Option<&str>) -> Pc {
+    fn empty_pc() -> Pc {
         let dir = tempfile::tempdir().unwrap();
         let db = StateDb::open(dir.path().join("state.db")).unwrap();
-        let pc = Pc { db: Db(db), _dir: dir };
-        for (n, id) in rows.iter().enumerate() {
-            add_row(&pc, id, None, n);
+        Pc { db: Db(db), _dir: dir }
+    }
+
+    /// A PC that synced `rows` My Files rows from the server, at the top level, and holds one change waiting to upload
+    /// on the first of them (a held write), the shape of the reported PCs.
+    fn pc_with(rows: &[&str]) -> Pc {
+        let pc = empty_pc();
+        for id in rows {
+            add_row(&pc, id, None, Shape::Snapshot);
         }
-        if let Some(id) = held_on {
-            pc.db.0.enqueue_operation(&held_write("held-1", id)).unwrap();
+        if let Some(id) = rows.first() {
+            pc.db.0.enqueue_operation(&edit("held-1", id)).unwrap();
         }
         pc
     }
 
-    /// A My Files row the server named, `n` ordering it by when the server last changed it. Its parent is written
-    /// through the row's contract, as the pull writes every server row.
-    fn add_row(pc: &Pc, id: &str, parent: Option<&str>, n: usize) {
+    fn add_row(pc: &Pc, id: &str, parent: Option<&str>, shape: Shape) {
+        add_row_in(pc, id, parent, shape, Namespace::MyFiles, ItemKind::File);
+    }
+
+    fn add_folder(pc: &Pc, id: &str, parent: Option<&str>, shape: Shape) {
+        add_row_in(pc, id, parent, shape, Namespace::MyFiles, ItemKind::Folder);
+    }
+
+    /// A row written through its contract, as the pull and the watcher write every row.
+    fn add_row_in(pc: &Pc, id: &str, parent: Option<&str>, shape: Shape, namespace: Namespace, kind: ItemKind) {
+        add_row_at(pc, id, &format!("dir/{id}"), parent, shape, namespace, kind);
+    }
+
+    fn add_row_at(
+        pc: &Pc,
+        id: &str,
+        path: &str,
+        parent: Option<&str>,
+        shape: Shape,
+        namespace: Namespace,
+        kind: ItemKind,
+    ) {
+        let (version, remote_updated_at) = match shape {
+            Shape::Snapshot => (3, 0),
+            Shape::Delta => (0, 1_700_000_000),
+            Shape::Local => (0, 0),
+        };
         pc.db
             .0
             .upsert_file_with_contract(
                 &FileEntry {
                     file_id: id.to_string(),
-                    path: format!("folder/file-{id}.txt"),
+                    path: path.to_string(),
                     status: FileStatus::Local,
                     size_bytes: 10,
                     modified_at: 1_700_000_000,
                     content_hash: None,
-                    remote_updated_at: 1_700_000_000 + n as i64,
+                    remote_updated_at,
                     parent_id: parent.map(str::to_string),
-                    item_kind: ItemKind::File,
+                    item_kind: kind.clone(),
                 },
-                |contract| contract.parent_id = parent.map(str::to_string),
+                |contract| {
+                    contract.parent_id = parent.map(str::to_string);
+                    contract.namespace = namespace;
+                    contract.item_kind = kind;
+                    contract.current_version = version;
+                },
             )
             .unwrap();
     }
@@ -412,16 +524,16 @@ mod tests {
         (0..count).map(|n| format!("{prefix}-0000-4000-8000-{n:012}")).collect()
     }
 
-    fn held_write(op_id: &str, file_id: &str) -> PendingOperation {
+    fn op(op_id: &str, kind: OperationKind, file_id: Option<&str>, parent_id: Option<&str>) -> PendingOperation {
         PendingOperation {
             op_id: op_id.to_string(),
-            kind: OperationKind::UploadVersion,
-            file_id: Some(file_id.to_string()),
-            parent_id: None,
-            target_path: Some("folder/file-0.txt".to_string()),
+            kind,
+            file_id: file_id.map(str::to_string),
+            parent_id: parent_id.map(str::to_string),
+            target_path: Some("dir/x".to_string()),
             metadata_json: None,
             payload_path: None,
-            base_version: Some(1),
+            base_version: None,
             base_object_version_id: None,
             attempts: 0,
             max_attempts: 5,
@@ -433,58 +545,78 @@ mod tests {
         }
     }
 
-    /// The server's metadata for `file_id`, its name sealed under `owner_key` exactly as every client seals it.
-    fn sealed(owner_key: [u8; 32], file_id: &str) -> Fetched {
-        let mk = beebeeb_core::kdf::MasterKey::from_bytes(owner_key);
-        let name = beebeeb_core::encrypt::encrypt_name(&mk, file_id, "notes.txt", Some("text/plain")).unwrap();
-        Fetched::Metadata(serde_json::json!({ "id": file_id, "name_encrypted": name, "size_bytes": 10 }))
+    /// An edit of a file the server knows.
+    fn edit(op_id: &str, file_id: &str) -> PendingOperation {
+        PendingOperation {
+            base_version: Some(3),
+            ..op(op_id, OperationKind::UploadVersion, Some(file_id), None)
+        }
+    }
+
+    /// A new item this PC made (its row is `Shape::Local`) in `parent`.
+    fn create(op_id: &str, file_id: &str, parent: Option<&str>, folder: bool) -> PendingOperation {
+        let kind = if folder { OperationKind::CreateFolder } else { OperationKind::UploadVersion };
+        op(op_id, kind, Some(file_id), parent)
     }
 
     fn sealed_name(owner_key: [u8; 32], file_id: &str) -> String {
         let mk = beebeeb_core::kdf::MasterKey::from_bytes(owner_key);
-        beebeeb_core::encrypt::encrypt_name(&mk, file_id, "received.pdf", None).unwrap()
+        beebeeb_core::encrypt::encrypt_name(&mk, file_id, "notes.txt", Some("text/plain")).unwrap()
+    }
+
+    /// This account's tree's node for `file_id`, its name sealed under `owner_key` exactly as every client seals it.
+    fn node(owner_key: [u8; 32], file_id: &str, parent: Option<&str>) -> serde_json::Value {
+        serde_json::json!({
+            "id": file_id,
+            "parent_id": parent,
+            "name_encrypted": sealed_name(owner_key, file_id),
+            "file_request_id": null,
+            "uploaded_by": null,
+            "owner_wrapped_file_key": null,
+            "size_bytes": 10,
+            "is_folder": false,
+            "version_number": 3,
+        })
+    }
+
+    fn mine(file_id: &str) -> serde_json::Value {
+        node(MINE, file_id, None)
+    }
+
+    fn with(mut node: serde_json::Value, field: &str, value: serde_json::Value) -> serde_json::Value {
+        node[field] = value;
+        node
     }
 
     /// A name sealed under the LEGACY key derivation (the 16-byte binary UUID, as the old CLI sealed names).
-    fn sealed_binary(owner_key: [u8; 32], file_id: &str) -> Fetched {
+    fn sealed_binary_node(owner_key: [u8; 32], file_id: &str) -> serde_json::Value {
         let mk = beebeeb_core::kdf::MasterKey::from_bytes(owner_key);
         let uuid = uuid::Uuid::parse_str(file_id).unwrap();
         let key = beebeeb_core::kdf::derive_file_key(&mk, uuid.as_bytes());
         let plaintext = serde_json::json!({ "name": "old.txt", "mime_type": null }).to_string();
         let blob = beebeeb_core::encrypt::encrypt_metadata(&key, &plaintext).unwrap();
-        Fetched::Metadata(serde_json::json!({ "id": file_id, "name_encrypted": serde_json::to_string(&blob).unwrap() }))
+        with(mine(file_id), "name_encrypted", serde_json::json!(serde_json::to_string(&blob).unwrap()))
     }
 
-    /// A server that answers from a table, and counts what it was asked.
+    /// A server that answers the listing from a fixed tree, after any scripted failures, and counts the listings.
     struct Server {
-        answers: Vec<(String, Fetched)>,
-        asked: RefCell<Vec<String>>,
-        /// Ids that do not answer the first time they are asked.
-        flaky_once: RefCell<Vec<String>>,
+        nodes: Vec<serde_json::Value>,
+        first: RefCell<VecDeque<Listing>>,
+        listed: Cell<usize>,
     }
 
     impl Server {
-        fn new(answers: Vec<(&str, Fetched)>) -> Self {
-            Self {
-                answers: answers.into_iter().map(|(id, f)| (id.to_string(), f)).collect(),
-                asked: RefCell::new(Vec::new()),
-                flaky_once: RefCell::new(Vec::new()),
-            }
+        fn new(nodes: Vec<serde_json::Value>) -> Self {
+            Self { nodes, first: RefCell::new(VecDeque::new()), listed: Cell::new(0) }
         }
-        fn get(&self, id: String) -> std::future::Ready<Fetched> {
-            self.asked.borrow_mut().push(id.clone());
-            let mut flaky = self.flaky_once.borrow_mut();
-            if let Some(at) = flaky.iter().position(|f| *f == id) {
-                flaky.remove(at);
-                return std::future::ready(Fetched::Unavailable);
-            }
-            let answer = self
-                .answers
-                .iter()
-                .find(|(known, _)| *known == id)
-                .map(|(_, f)| f.clone())
-                .unwrap_or(Fetched::Missing);
-            std::future::ready(answer)
+        fn failing_first(self, answers: Vec<Listing>) -> Self {
+            *self.first.borrow_mut() = answers.into();
+            self
+        }
+        fn list(&self) -> std::future::Ready<Listing> {
+            self.listed.set(self.listed.get() + 1);
+            let scripted = self.first.borrow_mut().pop_front();
+            std::future::ready(scripted.unwrap_or_else(|| Listing::Nodes(self.nodes.clone())))
         }
     }
 
@@ -496,11 +628,31 @@ mod tests {
     }
 
     fn prove(pc: &Pc, session: &Identity, key: [u8; 32], server: &Server) -> Outcome {
-        block_on(prove_and_adopt(&pc.db.0, session, &key, |id| server.get(id), || true)).expect("the proof runs")
+        block_on(prove_and_adopt(&pc.db.0, session, &key, || server.list(), || true)).expect("the proof runs")
     }
 
-    fn held_writes(pc: &Pc) -> usize {
-        pc.db.0.list_due_operations(i64::MAX).unwrap().len()
+    fn due(pc: &Pc) -> Vec<String> {
+        pc.db
+            .0
+            .list_due_operations(i64::MAX)
+            .unwrap()
+            .into_iter()
+            .map(|op| op.op_id)
+            .collect()
+    }
+
+    /// The op ids held for the person's review, sorted; the hold summary counts the same.
+    fn held_for_review(pc: &Pc) -> Vec<String> {
+        let mut held: Vec<String> = pc.db.0.found_while_paused_ops().unwrap().into_iter().map(|op| op.op_id).collect();
+        held.sort();
+        let summary = pc.db.0.queue_hold_summary().unwrap();
+        let counted = summary
+            .held
+            .iter()
+            .find(|group| group.reason == "found_while_paused")
+            .map_or(0, |group| group.count);
+        assert_eq!(counted, held.len() as i64, "the hold summary shows them under their own reason");
+        held
     }
 
     const IDS: [&str; 3] = [
@@ -510,7 +662,7 @@ mod tests {
     ];
 
     fn own_server() -> Server {
-        Server::new(IDS.iter().map(|id| (*id, sealed(MINE, id))).collect())
+        Server::new(IDS.iter().map(|id| mine(id)).collect())
     }
 
     // ---- the stranding paths, reproduced against the real state.db ----
@@ -530,15 +682,17 @@ mod tests {
             "stranded before the proof"
         );
 
-        let outcome = prove(&pc, &session(), MINE, &own_server());
+        let server = own_server();
+        let outcome = prove(&pc, &session(), MINE, &server);
 
         assert!(
-            matches!(outcome, Outcome::Adopted(t) if t.own == 3 && t.sampled == 3),
+            matches!(outcome, Outcome::Adopted(t) if t.own == 3 && t.checked == 3 && t.proven_changes == 1),
             "{outcome:?}"
         );
+        assert_eq!(server.listed.get(), 1, "one listing, no question per file");
         assert_eq!(pc.db.0.owner().unwrap(), Some(session()));
         assert_eq!(bind_before_engine_start(&pc.db, &session(), WINDOWS), Ok(Bound::Kept));
-        assert_eq!(held_writes(&pc), 1, "the held write is kept, to upload");
+        assert_eq!(due(&pc), vec!["held-1".to_string()], "the held write is kept, to upload");
     }
 
     /// Path 2: the startup had a candidate but the window was already shut (an engine start or a sign-in opened the
@@ -548,22 +702,15 @@ mod tests {
     fn a_window_shut_before_the_candidate_arrived_no_longer_strands_the_owner() {
         let pc = pc_with(&IDS);
         pc.db.0.close_adoption_window().unwrap();
-        assert_eq!(
-            adopt_unbound(&pc.db, Some(&session())),
-            Ok(false),
-            "the window was already shut"
-        );
+        assert_eq!(adopt_unbound(&pc.db, Some(&session())), Ok(false), "the window was already shut");
         assert_eq!(
             bind_before_engine_start(&pc.db, &session(), WINDOWS),
             Err(OTHER_ACCOUNT_ON_WINDOWS.to_string())
         );
 
-        assert!(matches!(
-            prove(&pc, &session(), MINE, &own_server()),
-            Outcome::Adopted(_)
-        ));
+        assert!(matches!(prove(&pc, &session(), MINE, &own_server()), Outcome::Adopted(_)));
         assert_eq!(bind_before_engine_start(&pc.db, &session(), WINDOWS), Ok(Bound::Kept));
-        assert_eq!(held_writes(&pc), 1);
+        assert_eq!(due(&pc).len(), 1);
     }
 
     /// Path 3: signing out cannot break the loop. The Windows sign-out refuses while a change waits to upload, and
@@ -573,19 +720,12 @@ mod tests {
     fn the_sign_out_loop_is_broken_by_the_proof_not_by_deleting_the_held_write() {
         let pc = pc_with(&IDS);
         adopt_unbound(&pc.db, None).unwrap();
-        assert!(
-            pc.db.0.windows_signout_preflight().is_err(),
-            "sign-out refuses: a change waits to upload"
-        );
+        assert!(pc.db.0.windows_signout_preflight().is_err(), "sign-out refuses: a change waits to upload");
         assert!(pc.db.0.finish_windows_signout().is_err(), "and the purge refuses too");
-        assert_eq!(held_writes(&pc), 1);
 
-        assert!(matches!(
-            prove(&pc, &session(), MINE, &own_server()),
-            Outcome::Adopted(_)
-        ));
+        assert!(matches!(prove(&pc, &session(), MINE, &own_server()), Outcome::Adopted(_)));
         assert_eq!(bind_before_engine_start(&pc.db, &session(), WINDOWS), Ok(Bound::Kept));
-        assert_eq!(held_writes(&pc), 1, "nothing was deleted to get here");
+        assert_eq!(due(&pc).len(), 1, "nothing was deleted to get here");
     }
 
     /// Path 4: the owner was recorded by email only, and the account's email changed since. The emails differ, so the
@@ -593,94 +733,132 @@ mod tests {
     #[test]
     fn an_email_only_owner_whose_email_changed_is_proven_and_rerecorded() {
         let pc = pc_with(&IDS);
-        pc.db
-            .0
-            .set_owner(&Identity::new(None, Some("old-address@example.eu")))
-            .unwrap();
+        pc.db.0.set_owner(&Identity::new(None, Some("old-address@example.eu"))).unwrap();
         assert_eq!(
             bind_before_engine_start(&pc.db, &session(), WINDOWS),
             Err(OTHER_ACCOUNT_ON_WINDOWS.to_string())
         );
 
-        assert!(matches!(
-            prove(&pc, &session(), MINE, &own_server()),
-            Outcome::Adopted(_)
-        ));
+        assert!(matches!(prove(&pc, &session(), MINE, &own_server()), Outcome::Adopted(_)));
         assert_eq!(pc.db.0.owner().unwrap(), Some(session()));
         assert_eq!(bind_before_engine_start(&pc.db, &session(), WINDOWS), Ok(Bound::Kept));
     }
 
-    /// A session whose user id is not known yet (its profile was not fetched) against an owner recorded with an old
-    /// email: the same proof applies, and the email-only record it writes is completed by the next start.
+    /// A session whose user id is not known yet (its profile was not fetched) over unowned data: the same proof
+    /// applies, and the email-only record it writes is completed by the next start.
     #[test]
     fn a_session_without_its_user_id_yet_is_proven_by_its_email() {
         let pc = pc_with(&IDS);
         adopt_unbound(&pc.db, None).unwrap();
         let by_email = Identity::new(None, Some("david@example.eu"));
-        assert!(matches!(
-            prove(&pc, &by_email, MINE, &own_server()),
-            Outcome::Adopted(_)
-        ));
+        assert!(matches!(prove(&pc, &by_email, MINE, &own_server()), Outcome::Adopted(_)));
         assert_eq!(bind_before_engine_start(&pc.db, &session(), WINDOWS), Ok(Bound::Kept));
         assert_eq!(pc.db.0.owner().unwrap(), Some(session()), "the id completes the record");
     }
 
     // ---- R10 holds: another account's data is never adopted, and nothing is deleted ----
 
-    /// Another account's private files: this session cannot read them (404). Nothing is adopted, the start still
-    /// refuses, and every row and the held write are still there.
+    /// Another account's files are not in this account's tree. Nothing is adopted, the start still refuses, and every
+    /// row and the held write are still there, not held for review either.
     #[test]
-    fn another_accounts_private_data_is_never_adopted() {
+    fn another_accounts_data_is_never_adopted() {
         let pc = pc_with(&IDS);
         adopt_unbound(&pc.db, None).unwrap();
-        let server = Server::new(Vec::new()); // every id: Missing
 
-        let outcome = prove(&pc, &session(), MINE, &server);
+        let outcome = prove(&pc, &session(), MINE, &Server::new(Vec::new()));
 
-        assert!(
-            matches!(outcome, Outcome::NotProven(t) if t.missing == 3 && t.own == 0),
-            "{outcome:?}"
-        );
+        assert!(matches!(outcome, Outcome::NotProven(t) if t.missing == 3 && t.own == 0), "{outcome:?}");
         assert_eq!(pc.db.0.owner().unwrap(), None);
         assert_eq!(
             bind_before_engine_start(&pc.db, &session(), WINDOWS),
             Err(OTHER_ACCOUNT_ON_WINDOWS.to_string())
         );
-        assert_eq!(held_writes(&pc), 1);
+        assert_eq!(due(&pc).len(), 1, "the held write is untouched: not deleted, not held for review");
         assert_eq!(pc.db.0.list_files().unwrap().len(), 3);
     }
 
-    /// Another account's files that it shared with this one: this session can read them, but their names are sealed
-    /// under the other account's key. Not adopted.
+    /// A node of this account's tree whose name does not open under this account's key blocks the adoption.
     #[test]
-    fn another_accounts_shared_data_is_never_adopted() {
+    fn a_name_sealed_under_another_key_blocks_adoption() {
         let pc = pc_with(&IDS);
         adopt_unbound(&pc.db, None).unwrap();
-        let server = Server::new(IDS.iter().map(|id| (*id, sealed(THEIRS, id))).collect());
-
+        let server = Server::new(vec![mine(IDS[0]), mine(IDS[1]), node(THEIRS, IDS[2], None)]);
         let outcome = prove(&pc, &session(), MINE, &server);
-
-        assert!(
-            matches!(outcome, Outcome::NotProven(t) if t.unproven == 3),
-            "{outcome:?}"
-        );
+        assert!(matches!(outcome, Outcome::NotProven(t) if t.unproven == 1 && t.own == 2), "{outcome:?}");
         assert_eq!(pc.db.0.owner().unwrap(), None);
-        assert_eq!(held_writes(&pc), 1);
     }
 
-    /// A mix: some rows this account's own, one readable but sealed under another key. A database that holds anything
-    /// of another account is not adopted.
+    /// The lead's case: a database that is 95% this account's own and 5% another account's (rows at the top level
+    /// that are not in this account's tree) is refused EVERY time, because every row is checked, none sampled.
     #[test]
-    fn a_mixed_database_is_never_adopted() {
-        let pc = pc_with(&IDS);
+    fn a_five_percent_mixed_database_is_refused_every_time() {
+        let all = ids("0c000000", 100);
+        let theirs: HashSet<usize> = [3, 27, 51, 74, 99].into_iter().collect();
+        for _ in 0..25 {
+            let pc = empty_pc();
+            for id in &all {
+                add_row(&pc, id, None, Shape::Snapshot);
+            }
+            pc.db.0.enqueue_operation(&edit("held-1", &all[0])).unwrap();
+            adopt_unbound(&pc.db, None).unwrap();
+            let tree = all
+                .iter()
+                .enumerate()
+                .filter(|(n, _)| !theirs.contains(n))
+                .map(|(_, id)| mine(id))
+                .collect();
+
+            let outcome = prove(&pc, &session(), MINE, &Server::new(tree));
+
+            assert!(
+                matches!(outcome, Outcome::NotProven(t) if t.checked == 100 && t.own == 95 && t.missing == 5),
+                "{outcome:?}"
+            );
+            assert_eq!(pc.db.0.owner().unwrap(), None);
+            assert_eq!(due(&pc), vec!["held-1".to_string()], "nothing held, nothing deleted");
+        }
+    }
+
+    /// Every server-named row is judged, wherever it sits: one row of another account among 300 of this account's is
+    /// found, at any position.
+    #[test]
+    fn every_row_the_server_named_is_judged_not_a_sample() {
+        let all = ids("0c000001", 300);
+        for theirs in [0, 150, 299] {
+            let pc = empty_pc();
+            for id in &all {
+                add_row(&pc, id, None, Shape::Snapshot);
+            }
+            adopt_unbound(&pc.db, None).unwrap();
+            let tree = all.iter().enumerate().filter(|(n, _)| *n != theirs).map(|(_, id)| mine(id)).collect();
+            let outcome = prove(&pc, &session(), MINE, &Server::new(tree));
+            assert!(matches!(outcome, Outcome::NotProven(t) if t.checked == 300 && t.missing == 1), "{outcome:?}");
+        }
+    }
+
+    /// Round 1 sampled only rows with `remote_updated_at > 0`, which the snapshot never writes. A row written by the
+    /// snapshot, and one written by a delta, are both server-named and both judged.
+    #[test]
+    fn rows_written_by_the_snapshot_or_a_delta_are_both_judged() {
+        let pc = empty_pc();
+        add_row(&pc, IDS[0], None, Shape::Snapshot);
+        add_row(&pc, IDS[1], None, Shape::Delta);
+        add_row(&pc, IDS[2], None, Shape::Snapshot); // another account's: not in this tree
         adopt_unbound(&pc.db, None).unwrap();
-        let server = Server::new(vec![
-            (IDS[0], sealed(MINE, IDS[0])),
-            (IDS[1], sealed(MINE, IDS[1])),
-            (IDS[2], sealed(THEIRS, IDS[2])),
-        ]);
-        assert!(matches!(prove(&pc, &session(), MINE, &server), Outcome::NotProven(_)));
-        assert_eq!(pc.db.0.owner().unwrap(), None);
+        let outcome = prove(&pc, &session(), MINE, &Server::new(vec![mine(IDS[0]), mine(IDS[1])]));
+        assert!(
+            matches!(outcome, Outcome::NotProven(t) if t.checked == 3 && t.own == 2 && t.missing == 1),
+            "{outcome:?}"
+        );
+        let named: Vec<(String, bool)> = pc
+            .db
+            .0
+            .own_data_proof_rows()
+            .unwrap()
+            .into_iter()
+            .map(|row| (row.file_id, row.server_named))
+            .collect();
+        assert!(named.iter().all(|(_, named)| *named), "{named:?}");
     }
 
     /// An owner recorded WITH a user id that differs from this session's is another account by R10's strongest
@@ -693,23 +871,67 @@ mod tests {
         let server = own_server();
 
         assert_eq!(prove(&pc, &session(), MINE, &server), Outcome::NotEligible);
-        assert!(server.asked.borrow().is_empty(), "nothing asked");
+        assert_eq!(server.listed.get(), 0, "nothing asked");
         assert_eq!(pc.db.0.owner().unwrap(), Some(alice));
     }
 
-    /// Offline, or the server failing: nothing is decided and nothing recorded; a later start asks again.
+    // ---- the listing ----
+
+    /// Offline, or the server failing: the listing is asked twice, then nothing is decided and nothing recorded; a
+    /// later start asks again.
     #[test]
     fn no_answer_decides_nothing() {
         let pc = pc_with(&IDS);
         adopt_unbound(&pc.db, None).unwrap();
-        let server = Server::new(IDS.iter().map(|id| (*id, Fetched::Unavailable)).collect());
+        let server = own_server().failing_first(vec![Listing::Unavailable, Listing::Unavailable]);
 
-        assert!(matches!(prove(&pc, &session(), MINE, &server), Outcome::Unavailable(t) if t.unavailable == 3));
+        let outcome = prove(&pc, &session(), MINE, &server);
+
+        assert!(matches!(outcome, Outcome::Unavailable(t) if t.unavailable == 1 && t.signed_out == 0), "{outcome:?}");
+        assert_eq!(server.listed.get(), 2);
         assert_eq!(pc.db.0.owner().unwrap(), None);
-        assert_eq!(held_writes(&pc), 1);
+        assert_eq!(due(&pc).len(), 1);
     }
 
-    /// A session that changed while the proof ran (a sign-out, another sign-in) records nothing.
+    /// A listing that does not answer the first time is asked once more.
+    #[test]
+    fn a_listing_that_does_not_answer_is_asked_once_more() {
+        let pc = pc_with(&IDS);
+        adopt_unbound(&pc.db, None).unwrap();
+        let server = own_server().failing_first(vec![Listing::Unavailable]);
+        assert!(matches!(prove(&pc, &session(), MINE, &server), Outcome::Adopted(t) if t.own == 3));
+        assert_eq!(server.listed.get(), 2);
+    }
+
+    /// A token the server refuses (401) is not "offline": it is told apart, so the refusal does not tell the person to
+    /// connect to the internet, and it is not asked again.
+    #[test]
+    fn a_refused_token_is_told_apart_from_no_connection() {
+        assert!(matches!(listing_from_status(Some(401)), Listing::SignedOut));
+        for status in [None, Some(404), Some(429), Some(500), Some(503)] {
+            assert!(matches!(listing_from_status(status), Listing::Unavailable), "{status:?}");
+        }
+        let pc = pc_with(&IDS);
+        adopt_unbound(&pc.db, None).unwrap();
+        let server = own_server().failing_first(vec![Listing::SignedOut]);
+        let outcome = prove(&pc, &session(), MINE, &server);
+        assert!(matches!(outcome, Outcome::Unavailable(t) if t.signed_out == 1 && t.unavailable == 0), "{outcome:?}");
+        assert_eq!(server.listed.get(), 1);
+    }
+
+    /// A session that changed before the listing (a Lock, a sign-out) asks nothing: the key and token are not used.
+    #[test]
+    fn a_session_that_changed_before_the_listing_asks_nothing() {
+        let pc = pc_with(&IDS);
+        adopt_unbound(&pc.db, None).unwrap();
+        let server = own_server();
+        let outcome = block_on(prove_and_adopt(&pc.db.0, &session(), &MINE, || server.list(), || false)).unwrap();
+        assert!(matches!(outcome, Outcome::Changed(_)), "{outcome:?}");
+        assert_eq!(server.listed.get(), 0);
+        assert_eq!(pc.db.0.owner().unwrap(), None);
+    }
+
+    /// A session that changed after the listing records nothing, and holds nothing.
     #[test]
     fn a_session_that_changed_during_the_proof_records_nothing() {
         let pc = pc_with(&IDS);
@@ -719,34 +941,38 @@ mod tests {
             &pc.db.0,
             &session(),
             &MINE,
-            |id| server.get(id),
-            || false,
+            || server.list(),
+            || server.listed.get() == 0,
         ))
         .unwrap();
         assert!(matches!(outcome, Outcome::Changed(_)), "{outcome:?}");
         assert_eq!(pc.db.0.owner().unwrap(), None);
+        assert_eq!(due(&pc).len(), 1, "nothing held");
     }
 
-    /// An owner recorded by someone else while the proof ran is never replaced.
+    /// An owner recorded by someone else while the proof ran is never replaced, and nothing is held.
     #[test]
     fn an_owner_recorded_during_the_proof_is_never_replaced() {
         let pc = pc_with(&IDS);
         adopt_unbound(&pc.db, None).unwrap();
+        add_folder(&pc, "new-folder", None, Shape::Local);
+        pc.db.0.enqueue_operation(&create("op-new", "new-folder", None, true)).unwrap();
         let server = own_server();
         let racer = Identity::new(Some("user-racer"), None);
         let outcome = block_on(prove_and_adopt(
             &pc.db.0,
             &session(),
             &MINE,
-            |id| {
+            || {
                 pc.db.0.set_owner(&racer).unwrap();
-                server.get(id)
+                server.list()
             },
             || true,
         ))
         .unwrap();
         assert!(matches!(outcome, Outcome::Changed(_)), "{outcome:?}");
         assert_eq!(pc.db.0.owner().unwrap(), Some(racer));
+        assert_eq!(due(&pc).len(), 2, "nothing held when nothing was recorded");
     }
 
     /// A Windows sign-out that emptied the database while the proof ran (its purge also removes the owner record):
@@ -760,349 +986,356 @@ mod tests {
             &pc.db.0,
             &session(),
             &MINE,
-            |id| {
+            || {
                 if pc.db.0.has_account_data().unwrap() {
                     pc.db.0.remove_operation("held-1").unwrap();
                     pc.db.0.finish_windows_signout().unwrap();
                 }
-                server.get(id)
+                server.list()
             },
             || true,
         ))
         .unwrap();
-        assert!(matches!(outcome, Outcome::Changed(_)), "{outcome:?}");
+        assert!(matches!(outcome, Outcome::Changed(_) | Outcome::NotProven(_)), "{outcome:?}");
         assert_eq!(pc.db.0.owner().unwrap(), None);
         assert!(!pc.db.0.has_account_data().unwrap());
     }
 
-    /// Nothing to sample (no row the server knows): nothing can be proven, so nothing is adopted.
+    /// Nothing the server named on this PC: nothing can be proven, so nothing is adopted.
     #[test]
     fn data_without_any_server_row_is_never_adopted() {
-        let pc = pc_with(&[]);
-        pc.db
-            .0
-            .enqueue_operation(&held_write("held-new", "provisional-1"))
-            .unwrap();
+        let pc = empty_pc();
+        add_row(&pc, "new-file", None, Shape::Local);
+        pc.db.0.enqueue_operation(&create("op-new", "new-file", None, false)).unwrap();
         adopt_unbound(&pc.db, None).unwrap();
         let outcome = prove(&pc, &session(), MINE, &own_server());
-        assert!(
-            matches!(outcome, Outcome::NotProven(t) if t.sampled == 0),
-            "{outcome:?}"
-        );
+        assert!(matches!(outcome, Outcome::NotProven(t) if t.checked == 0), "{outcome:?}");
         assert_eq!(pc.db.0.owner().unwrap(), None);
-        assert_eq!(held_writes(&pc), 1);
+        assert_eq!(due(&pc).len(), 1);
     }
 
-    // ---- fix round 1 (the PR's self-review) ----
+    // ---- rows gone since ----
 
-    /// Finding 1: a name this account sealed under the legacy key derivation (the old CLI's binary UUID) is this
-    /// account's own, as the engine reads it; it is not a veto.
-    #[test]
-    fn a_name_sealed_under_the_legacy_key_derivation_proves_ownership() {
-        let id = IDS[0];
-        assert_eq!(probe(&MINE, id, &sealed_binary(MINE, id)), Probe::Own);
-        assert_eq!(
-            probe(&MINE, id, &sealed_binary(THEIRS, id)),
-            Probe::Unproven,
-            "another account's, legacy"
-        );
-
-        let pc = pc_with(&IDS);
-        adopt_unbound(&pc.db, None).unwrap();
-        let server = Server::new(vec![
-            (IDS[0], sealed_binary(MINE, IDS[0])),
-            (IDS[1], sealed(MINE, IDS[1])),
-            (IDS[2], sealed(MINE, IDS[2])),
-        ]);
-        assert!(
-            matches!(prove(&pc, &session(), MINE, &server), Outcome::Adopted(t) if t.own == 3),
-            "legacy rows adopt"
-        );
-    }
-
-    /// Finding 1: a name that proves nothing either way (a plaintext legacy name, no name, a file received through a
-    /// file request, sealed under the sender's key) is set aside: it neither proves nor vetoes.
-    #[test]
-    fn a_name_that_proves_nothing_is_set_aside_not_a_veto() {
-        let id = IDS[0];
-        let plaintext = Fetched::Metadata(serde_json::json!({ "id": id, "name_encrypted": "Photos" }));
-        let unnamed = Fetched::Metadata(serde_json::json!({ "id": id }));
-        let received = Fetched::Metadata(serde_json::json!({
-            "id": id,
-            "name_encrypted": sealed_name(THEIRS, id),
-            "file_request_id": "0f000000-0000-4000-8000-000000000001",
-        }));
-        for (fetched, why) in [
-            (&plaintext, "plaintext"),
-            (&unnamed, "no name"),
-            (&received, "a file request upload"),
-        ] {
-            assert_eq!(probe(&MINE, id, fetched), Probe::Neutral, "{why}");
-        }
-
-        let pc = pc_with(&IDS);
-        adopt_unbound(&pc.db, None).unwrap();
-        let server = Server::new(vec![
-            (IDS[0], plaintext),
-            (IDS[1], sealed(MINE, IDS[1])),
-            (IDS[2], received),
-        ]);
-        let outcome = prove(&pc, &session(), MINE, &server);
-        assert!(
-            matches!(outcome, Outcome::Adopted(t) if t.own == 1 && t.neutral == 2),
-            "{outcome:?}"
-        );
-    }
-
-    /// Finding 2: a file that did not answer is not evidence for this account. Two own files and six that timed out
-    /// (they may be another account's private files, which would have said "not found") is no adoption; a later start
-    /// asks again.
-    #[test]
-    fn files_that_did_not_answer_never_count_as_proof() {
-        let rows = ids("0d000000", 8);
-        let refs: Vec<&str> = rows.iter().map(String::as_str).collect();
-        let pc = pc_with(&refs);
-        adopt_unbound(&pc.db, None).unwrap();
-        let server = Server::new(
-            refs.iter()
-                .enumerate()
-                .map(|(n, id)| (*id, if n < 2 { sealed(MINE, id) } else { Fetched::Unavailable }))
-                .collect(),
-        );
-        let outcome = prove(&pc, &session(), MINE, &server);
-        assert!(
-            matches!(outcome, Outcome::Unavailable(t) if t.own == 2 && t.unavailable == 6),
-            "{outcome:?}"
-        );
-        assert_eq!(pc.db.0.owner().unwrap(), None);
-    }
-
-    /// Finding 3: another account's rows that the newest rows would hide are still reached: the sample spreads past
-    /// the held writes and the newest, and one row this account cannot see blocks adoption.
-    #[test]
-    fn another_accounts_older_rows_are_reached_and_block_adoption() {
-        let theirs = ids("0e000000", 20);
-        let mine = ids("0e000001", 10);
-        let pc = pc_with_held(&[], None);
-        for (n, id) in theirs.iter().chain(mine.iter()).enumerate() {
-            add_row(&pc, id, None, n); // another account's rows first (older), then this account's (newer)
-        }
-        pc.db.0.enqueue_operation(&held_write("held-1", &mine[0])).unwrap();
-        adopt_unbound(&pc.db, None).unwrap();
-        let server = Server::new(mine.iter().map(|id| (id.as_str(), sealed(MINE, id))).collect()); // theirs: 404
-
-        let outcome = prove(&pc, &session(), MINE, &server);
-
-        assert!(matches!(outcome, Outcome::NotProven(t) if t.missing > 0), "{outcome:?}");
-        assert_eq!(pc.db.0.owner().unwrap(), None);
-        assert_eq!(pc.db.0.list_files().unwrap().len(), 30, "nothing deleted");
-    }
-
-    /// Finding 3: a file this account cannot see, and that no proven folder of this account explains, blocks adoption
-    /// however many own files outnumber it (another account's private file looks exactly like that).
-    #[test]
-    fn a_file_this_account_cannot_see_blocks_adoption() {
-        let pc = pc_with(&IDS);
-        add_row(&pc, "0a000000-0000-4000-8000-000000000009", None, 9);
-        adopt_unbound(&pc.db, None).unwrap();
-        let outcome = prove(&pc, &session(), MINE, &own_server()); // the fourth row: 404
-        assert!(
-            matches!(outcome, Outcome::NotProven(t) if t.own == 3 && t.missing == 1),
-            "{outcome:?}"
-        );
-        assert_eq!(pc.db.0.owner().unwrap(), None);
-    }
-
-    /// A file deleted since from one of this account's own folders (404, its folder proven this account's) does not
-    /// block adoption: it is counted as gone.
+    /// A file deleted since from one of this account's own folders does not block adoption: it is gone.
     #[test]
     fn a_file_deleted_from_one_of_this_accounts_folders_does_not_block_adoption() {
         let folder = "0a000000-0000-4000-8000-0000000000f0";
         let pc = pc_with(&IDS);
-        add_row(&pc, folder, None, 5);
-        add_row(&pc, "0a000000-0000-4000-8000-0000000000f1", Some(folder), 6); // deleted since: 404
+        add_folder(&pc, folder, None, Shape::Snapshot);
+        add_row(&pc, "0a000000-0000-4000-8000-0000000000f1", Some(folder), Shape::Snapshot);
         adopt_unbound(&pc.db, None).unwrap();
-        let mut answers: Vec<(&str, Fetched)> = IDS.iter().map(|id| (*id, sealed(MINE, id))).collect();
-        answers.push((folder, sealed(MINE, folder)));
-        let outcome = prove(&pc, &session(), MINE, &Server::new(answers));
+        let mut tree: Vec<_> = IDS.iter().map(|id| mine(id)).collect();
+        tree.push(mine(folder));
+        let outcome = prove(&pc, &session(), MINE, &Server::new(tree));
+        assert!(matches!(outcome, Outcome::Adopted(t) if t.gone == 1 && t.missing == 0), "{outcome:?}");
+    }
+
+    /// The nearest ancestor that IS in the tree decides: a file under a folder deleted since, inside a folder of this
+    /// account's own, is gone.
+    #[test]
+    fn a_file_under_a_deleted_folder_inside_an_own_folder_is_gone() {
+        let (top, deleted, file) = ("folder-top", "folder-deleted", "file-deleted");
+        let pc = pc_with(&IDS);
+        add_folder(&pc, top, None, Shape::Snapshot);
+        add_folder(&pc, deleted, Some(top), Shape::Snapshot);
+        add_row(&pc, file, Some(deleted), Shape::Snapshot);
+        adopt_unbound(&pc.db, None).unwrap();
+        let mut tree: Vec<_> = IDS.iter().map(|id| mine(id)).collect();
+        tree.push(mine(top));
+        let outcome = prove(&pc, &session(), MINE, &Server::new(tree));
+        assert!(matches!(outcome, Outcome::Adopted(t) if t.gone == 2 && t.missing == 0), "{outcome:?}");
+    }
+
+    /// A file not in this account's tree whose folders are not in it either (up to the top) is not explained: it
+    /// blocks. So does one whose nearest ancestor in the tree proves nothing (a plaintext name).
+    #[test]
+    fn a_missing_file_that_no_own_folder_explains_blocks_adoption() {
+        let pc = pc_with(&IDS);
+        add_folder(&pc, "their-folder", None, Shape::Snapshot);
+        add_row(&pc, "their-file", Some("their-folder"), Shape::Snapshot);
+        add_folder(&pc, "plain-folder", None, Shape::Snapshot);
+        add_row(&pc, "file-in-plain", Some("plain-folder"), Shape::Snapshot);
+        adopt_unbound(&pc.db, None).unwrap();
+        let mut tree: Vec<_> = IDS.iter().map(|id| mine(id)).collect();
+        tree.push(with(mine("plain-folder"), "name_encrypted", serde_json::json!("Photos")));
+        let outcome = prove(&pc, &session(), MINE, &Server::new(tree));
         assert!(
-            matches!(outcome, Outcome::Adopted(t) if t.gone == 1 && t.missing == 0),
+            matches!(outcome, Outcome::NotProven(t) if t.missing == 3 && t.gone == 0 && t.neutral == 1),
             "{outcome:?}"
         );
     }
 
-    /// A file this account cannot see whose folder is not this account's either is not explained: it blocks.
+    /// Local parents that point at each other end the walk as missing; the proof terminates.
     #[test]
-    fn a_missing_file_in_a_folder_that_is_not_this_accounts_blocks_adoption() {
+    fn a_cycle_in_local_parents_ends_as_missing() {
         let pc = pc_with(&IDS);
-        add_row(
-            &pc,
-            "0a000000-0000-4000-8000-0000000000f1",
-            Some("0a000000-0000-4000-8000-0000000000e0"),
-            6,
-        );
+        add_folder(&pc, "loop-a", Some("loop-b"), Shape::Snapshot);
+        add_folder(&pc, "loop-b", Some("loop-a"), Shape::Snapshot);
         adopt_unbound(&pc.db, None).unwrap();
-        let outcome = prove(&pc, &session(), MINE, &own_server()); // the file and its folder: 404
-        assert!(
-            matches!(outcome, Outcome::NotProven(t) if t.missing == 1 && t.gone == 0),
-            "{outcome:?}"
-        );
+        let outcome = prove(&pc, &session(), MINE, &own_server());
+        assert!(matches!(outcome, Outcome::NotProven(t) if t.missing == 2), "{outcome:?}");
     }
 
-    /// Finding 5: a token the server refuses (401) is not "offline": it is told apart, so the refusal does not tell
-    /// the person to connect to the internet.
+    // ---- names that prove nothing ----
+
+    /// A name that proves nothing either way is set aside: a plaintext legacy name, no name, a file received through a
+    /// file request, and (review P2-3) a file a collaborator uploaded into this account's folder (`uploaded_by`, or a
+    /// file key wrapped for the owner).
     #[test]
-    fn a_refused_token_is_told_apart_from_no_connection() {
-        assert!(matches!(fetched_from_status(Some(401)), Fetched::SignedOut));
-        assert!(matches!(fetched_from_status(None), Fetched::Unavailable));
-        assert!(matches!(fetched_from_status(Some(429)), Fetched::Unavailable));
-        assert!(matches!(fetched_from_status(Some(404)), Fetched::Missing));
+    fn a_name_that_proves_nothing_is_set_aside_not_a_veto() {
+        let id = IDS[0];
+        let other = sealed_name(THEIRS, id);
+        let cases = [
+            (with(mine(id), "name_encrypted", serde_json::json!("Photos")), "plaintext"),
+            (with(mine(id), "name_encrypted", serde_json::Value::Null), "no name"),
+            (
+                with(with(mine(id), "name_encrypted", serde_json::json!(other)), "file_request_id", serde_json::json!("0f000000-0000-4000-8000-000000000001")),
+                "a file request upload",
+            ),
+            (
+                with(with(mine(id), "name_encrypted", serde_json::json!(other)), "uploaded_by", serde_json::json!("user-colleague")),
+                "uploaded by a collaborator",
+            ),
+            (
+                with(with(mine(id), "name_encrypted", serde_json::json!(other)), "owner_wrapped_file_key", serde_json::json!("wrapped")),
+                "a file key wrapped for the owner",
+            ),
+        ];
+        for (node, why) in &cases {
+            assert_eq!(probe(&MINE, node), Probe::Neutral, "{why}");
+        }
+
         let pc = pc_with(&IDS);
         adopt_unbound(&pc.db, None).unwrap();
-        let server = Server::new(IDS.iter().map(|id| (*id, Fetched::SignedOut)).collect());
+        let server = Server::new(vec![cases[0].0.clone(), mine(IDS[1]), mine(IDS[2])]);
         let outcome = prove(&pc, &session(), MINE, &server);
+        assert!(matches!(outcome, Outcome::Adopted(t) if t.own == 2 && t.neutral == 1), "{outcome:?}");
+    }
+
+    /// Review P3-1: more rows that prove nothing than rows that prove ownership is not enough.
+    #[test]
+    fn more_names_that_prove_nothing_than_own_names_is_not_adopted() {
+        let pc = pc_with(&IDS);
+        adopt_unbound(&pc.db, None).unwrap();
+        let plain = |id: &str| with(mine(id), "name_encrypted", serde_json::json!("Photos"));
+        let server = Server::new(vec![mine(IDS[0]), plain(IDS[1]), plain(IDS[2])]);
+        let outcome = prove(&pc, &session(), MINE, &server);
+        assert!(matches!(outcome, Outcome::NotProven(t) if t.own == 1 && t.neutral == 2), "{outcome:?}");
+        assert_eq!(pc.db.0.owner().unwrap(), None);
+    }
+
+    /// A name this account sealed under the legacy key derivation (the old CLI's binary UUID) is this account's own,
+    /// as the engine reads it.
+    #[test]
+    fn a_name_sealed_under_the_legacy_key_derivation_proves_ownership() {
+        let id = IDS[0];
+        assert_eq!(probe(&MINE, &sealed_binary_node(MINE, id)), Probe::Own);
+        assert_eq!(probe(&MINE, &sealed_binary_node(THEIRS, id)), Probe::Unproven, "another account's, legacy");
+
+        let pc = pc_with(&IDS);
+        adopt_unbound(&pc.db, None).unwrap();
+        let server = Server::new(vec![sealed_binary_node(MINE, IDS[0]), mine(IDS[1]), mine(IDS[2])]);
+        assert!(matches!(prove(&pc, &session(), MINE, &server), Outcome::Adopted(t) if t.own == 3));
+    }
+
+    // ---- the queue: proven changes upload, the rest wait for the person ----
+
+    /// The lead's case: all of this account's own data, plus a new folder at the top level (with a file in it) made
+    /// while sync was refused. The data is adopted; the new folder's two changes are held for review in the same
+    /// transaction as the owner record, and NOTHING of them is due; the edit of an own file uploads.
+    #[test]
+    fn an_all_own_database_with_a_new_top_level_folder_adopts_and_holds_the_folder() {
+        let pc = pc_with(&IDS);
+        add_folder(&pc, "new-folder", None, Shape::Local);
+        add_row(&pc, "new-file", Some("new-folder"), Shape::Local);
+        pc.db.0.enqueue_operation(&create("op-folder", "new-folder", None, true)).unwrap();
+        pc.db.0.enqueue_operation(&create("op-file", "new-file", Some("new-folder"), false)).unwrap();
+        adopt_unbound(&pc.db, None).unwrap();
+
+        let outcome = prove(&pc, &session(), MINE, &own_server());
+
         assert!(
-            matches!(outcome, Outcome::Unavailable(t) if t.signed_out == 3),
+            matches!(outcome, Outcome::Adopted(t) if t.own == 3 && t.proven_changes == 1 && t.held_for_review == 2),
             "{outcome:?}"
+        );
+        assert_eq!(pc.db.0.owner().unwrap(), Some(session()));
+        assert_eq!(due(&pc), vec!["held-1".to_string()], "nothing of the new folder is due");
+        assert_eq!(held_for_review(&pc), vec!["op-file".to_string(), "op-folder".to_string()]);
+        assert_eq!(pc.db.0.list_files().unwrap().len(), 5, "nothing deleted");
+    }
+
+    /// A new file in one of this account's own folders is tied to its data: it uploads.
+    #[test]
+    fn a_new_file_in_an_own_folder_uploads() {
+        let pc = pc_with(&IDS);
+        add_folder(&pc, "own-folder", None, Shape::Snapshot);
+        add_folder(&pc, "new-sub", Some("own-folder"), Shape::Local);
+        add_row(&pc, "new-file", Some("new-sub"), Shape::Local);
+        pc.db.0.enqueue_operation(&create("op-sub", "new-sub", Some("own-folder"), true)).unwrap();
+        pc.db.0.enqueue_operation(&create("op-file", "new-file", Some("new-sub"), false)).unwrap();
+        adopt_unbound(&pc.db, None).unwrap();
+        let mut tree: Vec<_> = IDS.iter().map(|id| mine(id)).collect();
+        tree.push(mine("own-folder"));
+
+        let outcome = prove(&pc, &session(), MINE, &Server::new(tree));
+
+        assert!(matches!(outcome, Outcome::Adopted(t) if t.proven_changes == 3 && t.held_for_review == 0), "{outcome:?}");
+        assert_eq!(due(&pc).len(), 3);
+    }
+
+    /// 128 of the 2,979 nested rows made on the maintainer's PC have no parent link, only their path. A new file whose
+    /// row has none is tied to its folder by its path: in one of this account's own folders it uploads, at the top
+    /// level it is held.
+    #[test]
+    fn a_new_item_whose_row_has_no_parent_link_is_judged_by_its_path() {
+        let pc = pc_with(&IDS);
+        add_row_at(&pc, "own-folder", "Projects", None, Shape::Snapshot, Namespace::MyFiles, ItemKind::Folder);
+        add_row_at(&pc, "new-file", "Projects/new.txt", None, Shape::Local, Namespace::MyFiles, ItemKind::File);
+        add_row_at(&pc, "new-top", "new-top.txt", None, Shape::Local, Namespace::MyFiles, ItemKind::File);
+        pc.db.0.enqueue_operation(&create("op-file", "new-file", Some("own-folder"), false)).unwrap();
+        pc.db.0.enqueue_operation(&create("op-top", "new-top", None, false)).unwrap();
+        adopt_unbound(&pc.db, None).unwrap();
+        let mut tree: Vec<_> = IDS.iter().map(|id| mine(id)).collect();
+        tree.push(mine("own-folder"));
+
+        let outcome = prove(&pc, &session(), MINE, &Server::new(tree));
+
+        assert!(matches!(outcome, Outcome::Adopted(t) if t.proven_changes == 2 && t.held_for_review == 1), "{outcome:?}");
+        assert_eq!(held_for_review(&pc), vec!["op-top".to_string()]);
+    }
+
+    /// A server row with no parent link that is gone from this account's tree is explained by the folder at its path.
+    #[test]
+    fn a_deleted_row_without_a_parent_link_is_explained_by_the_folder_at_its_path() {
+        let pc = pc_with(&IDS);
+        add_row_at(&pc, "own-folder", "Projects", None, Shape::Snapshot, Namespace::MyFiles, ItemKind::Folder);
+        add_row_at(&pc, "deleted", "Projects/old.txt", None, Shape::Snapshot, Namespace::MyFiles, ItemKind::File);
+        adopt_unbound(&pc.db, None).unwrap();
+        let mut tree: Vec<_> = IDS.iter().map(|id| mine(id)).collect();
+        tree.push(mine("own-folder"));
+        let outcome = prove(&pc, &session(), MINE, &Server::new(tree));
+        assert!(matches!(outcome, Outcome::Adopted(t) if t.gone == 1 && t.missing == 0), "{outcome:?}");
+    }
+
+    /// Changes in a folder shared with this account, and a new file in a folder whose name proves nothing, are not
+    /// tied to this account's own data: held for review, never sent on their own. They do not block the adoption.
+    #[test]
+    fn changes_in_a_shared_folder_or_an_unproven_folder_are_held() {
+        let pc = pc_with(&IDS);
+        add_row_in(&pc, "shared-folder", None, Shape::Delta, Namespace::SharedWithMe, ItemKind::Folder);
+        add_row_in(&pc, "shared-file", Some("shared-folder"), Shape::Delta, Namespace::SharedWithMe, ItemKind::File);
+        add_row(&pc, "new-in-shared", Some("shared-folder"), Shape::Local);
+        add_folder(&pc, "plain-folder", None, Shape::Snapshot);
+        add_row(&pc, "new-in-plain", Some("plain-folder"), Shape::Local);
+        pc.db.0.enqueue_operation(&edit("op-shared-edit", "shared-file")).unwrap();
+        pc.db.0.enqueue_operation(&create("op-shared-new", "new-in-shared", Some("shared-folder"), false)).unwrap();
+        pc.db.0.enqueue_operation(&create("op-plain-new", "new-in-plain", Some("plain-folder"), false)).unwrap();
+        adopt_unbound(&pc.db, None).unwrap();
+        let mut tree: Vec<_> = IDS.iter().map(|id| mine(id)).collect();
+        tree.push(with(mine("plain-folder"), "name_encrypted", serde_json::json!("Photos")));
+        tree.push(mine("own-extra")); // the tree may hold more than this PC
+
+        let outcome = prove(&pc, &session(), MINE, &Server::new(tree));
+
+        assert!(matches!(outcome, Outcome::Adopted(t) if t.held_for_review == 3 && t.proven_changes == 1), "{outcome:?}");
+        assert_eq!(due(&pc), vec!["held-1".to_string()]);
+        assert_eq!(
+            held_for_review(&pc),
+            vec!["op-plain-new".to_string(), "op-shared-edit".to_string(), "op-shared-new".to_string()]
         );
     }
 
-    /// Finding 4: a session that changes while the proof runs (a Lock, a sign-out) stops the asking, so the session's
-    /// key and token are not used for the rest of the sample.
+    /// A change queued after the proof read the queue was never judged: it is held for review, not sent.
     #[test]
-    fn a_session_that_changes_mid_proof_stops_asking() {
-        let rows = ids("0d000001", 16);
-        let refs: Vec<&str> = rows.iter().map(String::as_str).collect();
-        let pc = pc_with(&refs);
+    fn a_change_queued_after_the_proof_read_the_queue_is_held() {
+        let pc = pc_with(&IDS);
         adopt_unbound(&pc.db, None).unwrap();
-        let server = Server::new(refs.iter().map(|id| (*id, sealed(MINE, id))).collect());
+        let server = own_server();
+        let checks = Cell::new(0);
         let outcome = block_on(prove_and_adopt(
             &pc.db.0,
             &session(),
             &MINE,
-            |id| server.get(id),
-            || server.asked.borrow().is_empty(),
+            || server.list(),
+            || {
+                checks.set(checks.get() + 1);
+                if server.listed.get() == 1 && checks.get() == 2 {
+                    // Right before the record: the watcher queues an edit of an own file.
+                    pc.db.0.enqueue_operation(&edit("late", IDS[1])).unwrap();
+                }
+                true
+            },
         ))
         .unwrap();
-        assert!(matches!(outcome, Outcome::Changed(_)), "{outcome:?}");
-        assert!(
-            server.asked.borrow().len() <= CONCURRENT_ASKS,
-            "asked {}",
-            server.asked.borrow().len()
-        );
-        assert_eq!(pc.db.0.owner().unwrap(), None);
+        assert!(matches!(outcome, Outcome::Adopted(t) if t.held_for_review == 1), "{outcome:?}");
+        assert_eq!(due(&pc), vec!["held-1".to_string()]);
+        assert_eq!(held_for_review(&pc), vec!["late".to_string()]);
     }
 
-    /// One file that does not answer the first time is asked once more before the proof gives up on it.
+    /// A change paused because the server refused the old session (`auth`) that the proof cannot tie to this
+    /// account's data is held for review too, so the account's resume does not send it; a proven one stays `auth`.
     #[test]
-    fn a_file_that_does_not_answer_is_asked_once_more() {
+    fn an_unproven_change_paused_for_auth_is_held_and_a_proven_one_is_not() {
         let pc = pc_with(&IDS);
+        add_folder(&pc, "new-folder", None, Shape::Local);
+        pc.db.0.enqueue_operation(&create("op-folder", "new-folder", None, true)).unwrap();
+        pc.db.0.enqueue_operation(&edit("op-own-edit", IDS[1])).unwrap();
+        for op_id in ["op-folder", "op-own-edit"] {
+            pc.db.0.record_operation_pause(op_id, crate::state_db::OperationPauseReason::Auth, None, 5).unwrap();
+        }
         adopt_unbound(&pc.db, None).unwrap();
-        let server = own_server();
-        server.flaky_once.borrow_mut().push(IDS[1].to_string());
-        assert!(matches!(prove(&pc, &session(), MINE, &server), Outcome::Adopted(t) if t.own == 3));
+
+        assert!(matches!(prove(&pc, &session(), MINE, &own_server()), Outcome::Adopted(t) if t.held_for_review == 1));
+        assert_eq!(pc.db.0.resume_operations_paused_for_auth(0).unwrap(), 1, "only the proven one resumes");
+        assert_eq!(held_for_review(&pc), vec!["op-folder".to_string()]);
     }
 
-    // ---- the sample ----
-
-    /// The sample asks first about the files the held writes change, then the most recently changed rows, then a
-    /// random spread of the rest, at most `SAMPLE_LIMIT` and each row once; rows the server never named are not asked
-    /// about.
+    /// "Upload to my Beebeeb": every change held for review is due again; nothing else changes.
     #[test]
-    fn the_sample_takes_held_writes_then_the_newest_then_a_spread() {
-        let rows = ids("0b000000", 40);
-        let refs: Vec<&str> = rows.iter().map(String::as_str).collect();
-        let pc = pc_with(&refs); // the held write is on the OLDEST row (index 0)
-        pc.db
-            .0
-            .upsert_file(&FileEntry {
-                file_id: "never-on-the-server".to_string(),
-                path: "new.txt".to_string(),
-                status: FileStatus::Local,
-                size_bytes: 1,
-                modified_at: 1,
-                content_hash: None,
-                remote_updated_at: 0,
-                parent_id: None,
-                item_kind: ItemKind::File,
-            })
-            .unwrap();
+    fn upload_releases_only_the_changes_held_for_review() {
+        let pc = pc_with(&IDS);
+        add_folder(&pc, "new-folder", None, Shape::Local);
+        pc.db.0.enqueue_operation(&create("op-folder", "new-folder", None, true)).unwrap();
+        pc.db.0.enqueue_operation(&edit("op-auth", IDS[1])).unwrap();
+        adopt_unbound(&pc.db, None).unwrap();
+        assert!(matches!(prove(&pc, &session(), MINE, &own_server()), Outcome::Adopted(_)));
+        pc.db.0.record_operation_pause("op-auth", crate::state_db::OperationPauseReason::Auth, None, 5).unwrap();
 
-        let sample = pc.db.0.own_data_proof_sample(SAMPLE_LIMIT).unwrap();
+        assert_eq!(pc.db.0.release_found_while_paused(5).unwrap(), 1);
 
-        assert_eq!(sample.len(), SAMPLE_LIMIT);
-        assert_eq!(sample[0], rows[0], "the held write's file first");
-        assert_eq!(
-            &sample[1..5],
-            &[rows[39].clone(), rows[38].clone(), rows[37].clone(), rows[36].clone()],
-            "then the newest"
-        );
-        let distinct: std::collections::HashSet<&String> = sample.iter().collect();
-        assert_eq!(distinct.len(), sample.len(), "each row once");
-        assert!(!sample.iter().any(|id| id == "never-on-the-server"));
-        assert!(
-            sample.iter().any(|id| rows[1..24].contains(id)),
-            "the spread reaches rows older than the newest {SAMPLE_LIMIT}: {sample:?}"
-        );
+        let mut now_due = due(&pc);
+        now_due.sort();
+        assert_eq!(now_due, vec!["held-1".to_string(), "op-folder".to_string()], "op-auth stays paused for auth");
     }
 
     // ---- the pure parts ----
 
     #[test]
     fn the_verdict_table() {
-        let t = |own, gone, unproven, missing, signed_out, unavailable| Tally {
-            sampled: own + gone + unproven + missing + signed_out + unavailable,
+        let t = |own, neutral, gone, unproven, missing| Tally {
+            checked: own + neutral + gone + unproven + missing,
             own,
-            neutral: 0,
+            neutral,
             gone,
             unproven,
             missing,
-            signed_out,
-            unavailable,
+            ..Tally::default()
         };
         let rows = [
-            (t(0, 0, 0, 0, 0, 0), Verdict::NotProven, "nothing sampled"),
-            (t(1, 0, 0, 0, 0, 0), Verdict::Adopt, "one row, its own"),
-            (t(2, 0, 0, 0, 0, 0), Verdict::Adopt, "two own"),
-            (t(1, 1, 0, 0, 0, 0), Verdict::NotProven, "one own of two is not enough"),
-            (
-                t(3, 1, 0, 0, 0, 0),
-                Verdict::Adopt,
-                "a file gone from an own folder does not block",
-            ),
-            (t(0, 2, 0, 0, 0, 0), Verdict::NotProven, "only gone files prove nothing"),
-            (
-                t(7, 0, 0, 1, 0, 0),
-                Verdict::NotProven,
-                "a file this account cannot see blocks",
-            ),
-            (
-                t(7, 0, 1, 0, 0, 0),
-                Verdict::NotProven,
-                "a name sealed under another key blocks",
-            ),
-            (
-                t(2, 0, 0, 0, 0, 6),
-                Verdict::Unavailable,
-                "files that did not answer are not proof",
-            ),
-            (
-                t(7, 0, 0, 0, 0, 1),
-                Verdict::Unavailable,
-                "one unanswered file: ask again later",
-            ),
-            (
-                t(3, 0, 0, 0, 3, 0),
-                Verdict::Unavailable,
-                "a refused token: ask again later",
-            ),
-            (t(0, 0, 0, 0, 0, 3), Verdict::Unavailable, "no answers"),
-            (
-                t(5, 0, 0, 1, 0, 2),
-                Verdict::NotProven,
-                "evidence against beats no answer",
-            ),
-            (t(0, 0, 0, 3, 0, 0), Verdict::NotProven, "all not readable"),
+            (t(0, 0, 0, 0, 0), Verdict::NotProven, "nothing checked"),
+            (t(1, 0, 0, 0, 0), Verdict::Adopt, "one row, its own"),
+            (t(2, 0, 0, 0, 0), Verdict::Adopt, "two own"),
+            (t(1, 0, 1, 0, 0), Verdict::NotProven, "one own of two checked is not enough (P3-1)"),
+            (t(3, 0, 1, 0, 0), Verdict::Adopt, "a file gone from an own folder does not block"),
+            (t(0, 0, 2, 0, 0), Verdict::NotProven, "only gone files prove nothing"),
+            (t(7, 0, 0, 0, 1), Verdict::NotProven, "a file this account cannot see blocks"),
+            (t(7, 0, 0, 1, 0), Verdict::NotProven, "a name sealed under another key blocks"),
+            (t(2, 1, 0, 0, 0), Verdict::Adopt, "fewer neutral than own"),
+            (t(2, 2, 0, 0, 0), Verdict::Adopt, "as many neutral as own"),
+            (t(1, 2, 0, 0, 0), Verdict::NotProven, "more neutral than own (P3-1)"),
+            (t(0, 3, 0, 0, 0), Verdict::NotProven, "only neutral"),
+            (t(1, 1, 0, 0, 0), Verdict::NotProven, "one own of two checked (P3-1: min(2, checked))"),
+            (t(40_000, 0, 12, 0, 0), Verdict::Adopt, "a large own tree"),
         ];
         for (tally, expected, why) in rows {
             assert_eq!(verdict(&tally), expected, "{why}: {tally:?}");
@@ -1112,21 +1345,15 @@ mod tests {
     #[test]
     fn a_probe_is_own_only_when_the_name_decrypts_under_this_key_for_this_id() {
         let id = IDS[0];
-        assert_eq!(probe(&MINE, id, &sealed(MINE, id)), Probe::Own);
-        assert_eq!(probe(&MINE, id, &sealed(THEIRS, id)), Probe::Unproven, "another key");
+        assert_eq!(probe(&MINE, &mine(id)), Probe::Own);
+        assert_eq!(probe(&MINE, &node(THEIRS, id, None)), Probe::Unproven, "another key");
         assert_eq!(
-            probe(&MINE, id, &sealed(MINE, IDS[1])),
+            probe(&MINE, &with(mine(id), "name_encrypted", serde_json::json!(sealed_name(MINE, IDS[1])))),
             Probe::Unproven,
-            "another file's metadata"
+            "another file's name"
         );
-        let unnamed = Fetched::Metadata(serde_json::json!({ "id": id }));
-        assert_eq!(
-            probe(&MINE, id, &unnamed),
-            Probe::Neutral,
-            "no name proves nothing either way"
-        );
-        assert_eq!(probe(&MINE, id, &Fetched::Missing), Probe::Missing);
-        assert_eq!(probe(&MINE, id, &Fetched::Unavailable), Probe::Unavailable);
+        assert!(name_opens(&MINE, id, &sealed_name(MINE, id)));
+        assert!(!name_opens(&THEIRS, id, &sealed_name(MINE, id)));
     }
 
     #[test]
@@ -1140,26 +1367,13 @@ mod tests {
         assert!(!eligible(None, &me, false), "no data");
         assert!(!eligible(Some(&me), &me, true), "already this session's");
         assert!(!eligible(Some(&me_by_email), &me, true), "the same account by email");
-        assert!(
-            eligible(Some(&old_email), &me, true),
-            "an email-only owner that differs"
-        );
-        assert!(
-            eligible(Some(&alice_old_email), &me_by_email, true),
-            "a session without its id yet"
-        );
+        assert!(eligible(Some(&old_email), &me, true), "an email-only owner that differs");
+        assert!(eligible(Some(&old_email), &me_by_email, true), "an email-only owner, a session without its id yet");
+        // Review P3-2: an owner recorded WITH a user id is compared by user id only. A session whose id is not known
+        // yet cannot be compared: not eligible until it is.
+        assert!(!eligible(Some(&alice_old_email), &me_by_email, true), "an owner with an id, a session without one");
         assert!(!eligible(Some(&alice), &me, true), "another user id: never");
         assert!(!eligible(None, &Identity::default(), true), "an unknown session: never");
-    }
-
-    #[test]
-    fn missing_statuses() {
-        for status in [403, 404, 410] {
-            assert!(status_means_missing(status), "{status}");
-        }
-        for status in [200, 400, 401, 408, 429, 500, 502, 503] {
-            assert!(!status_means_missing(status), "{status}");
-        }
     }
 
     /// The copy a refused Windows start shows never tells a person they have another account.

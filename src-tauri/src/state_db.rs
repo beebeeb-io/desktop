@@ -2180,6 +2180,10 @@ pub enum OperationPauseReason {
     /// arm does not count as building it, so other platforms would report it never constructed.
     #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
     KeyReplaced,
+    /// Task 2267 (fix round 2): a change the ownership proof could not tie to this account's own data (a new item at
+    /// the top level, or in a folder that is not proven its own, such as a shared one), found when Beebeeb adopted the
+    /// data on this PC. It is never sent on its own: the person uploads it or keeps it on this PC only.
+    FoundWhilePaused,
 }
 
 impl OperationPauseReason {
@@ -2190,6 +2194,7 @@ impl OperationPauseReason {
             OperationPauseReason::Permission => "permission",
             OperationPauseReason::Locked => "locked",
             OperationPauseReason::KeyReplaced => "key_replaced",
+            OperationPauseReason::FoundWhilePaused => "found_while_paused",
         }
     }
 }
@@ -2233,6 +2238,30 @@ pub struct HeldGroup {
     /// Unix seconds the oldest and newest of them were queued (0 = not recorded).
     pub oldest_at: i64,
     pub newest_at: i64,
+}
+
+/// Task 2267 (fix round 2): one `files` row as the ownership proof judges it.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProofRow {
+    pub file_id: String,
+    pub parent_id: Option<String>,
+    /// Its path under the sync root ('/'-separated). 128 of the 2,979 nested rows made on the maintainer's PC have no
+    /// parent link, so a walk up falls back to the row at the path's folder.
+    pub path: String,
+    /// In the person's own files (`namespace = 'my_files'`), not a folder shared with them.
+    pub my_files: bool,
+    /// The server named it: `current_version > 0 OR remote_updated_at > 0`.
+    pub server_named: bool,
+}
+
+/// Task 2267 (fix round 2): one queued operation, by what it acts on.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProofOp {
+    pub op_id: String,
+    pub file_id: Option<String>,
+    pub parent_id: Option<String>,
 }
 
 /// One `files` row as the Selective sync tree reads it (0.8.15). A row the server never confirmed (a folder this PC
@@ -6085,70 +6114,110 @@ impl StateDb {
         Ok(account_rows(&conn)? > 0)
     }
 
-    /// Task 2267: the file ids a proof of ownership asks the server about (`own_data_proof`), at most `limit`:
-    /// My Files rows the server named (`remote_updated_at > 0`; a row this PC made and never uploaded cannot prove
-    /// anything), each at most once, up to `limit`: a quarter the files that held writes change or file into, a quarter
-    /// the most recently changed, the rest a random spread over all of them (so rows the newest would hide, such as
-    /// another account's older rows, are reached too). Three queries, each on the primary key or one scan.
+    /// Task 2267 (fix round 2): every `files` row as the ownership proof judges it, read once. A row the server named
+    /// has `current_version > 0` (a snapshot row carries the server's version) or `remote_updated_at > 0` (a delta or a
+    /// landing stamps the time); a row this PC made and never uploaded has both at 0. `remote_updated_at` alone is not
+    /// enough: the My Files ingest leaves it 0 for every snapshot row (the server sends `updated_at` as RFC 3339 text).
     #[cfg(any(target_os = "windows", test))]
-    pub fn own_data_proof_sample(&self, limit: usize) -> Result<Vec<String>> {
-        const NAMED: &str = "namespace = 'my_files' AND remote_updated_at > 0";
-        let part = (limit / 4).max(1);
-        let queries = [
-            (
-                format!(
-                    "SELECT file_id FROM files WHERE {NAMED} AND file_id IN (
-                         SELECT file_id FROM operation_queue WHERE file_id IS NOT NULL
-                         UNION SELECT parent_id FROM operation_queue WHERE parent_id IS NOT NULL)
-                     ORDER BY remote_updated_at DESC, file_id LIMIT ?1"
-                ),
-                part,
-            ),
-            (
-                format!("SELECT file_id FROM files WHERE {NAMED} ORDER BY remote_updated_at DESC, file_id LIMIT ?1"),
-                part,
-            ),
-            (format!("SELECT file_id FROM files WHERE {NAMED} ORDER BY random() LIMIT ?1"), limit),
-        ];
+    pub fn own_data_proof_rows(&self) -> Result<Vec<ProofRow>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        let mut sample: Vec<String> = Vec::with_capacity(limit);
-        for (sql, wanted) in queries {
-            let mut stmt = conn.prepare(&sql)?;
-            let asked = i64::try_from(wanted + sample.len()).unwrap_or(i64::MAX);
-            let found = stmt
-                .query_map(params![asked], |row| row.get::<_, String>(0))?
-                .collect::<Result<Vec<String>>>()?;
-            let mut added = 0;
-            for file_id in found {
-                if sample.len() >= limit || added >= wanted {
-                    break;
-                }
-                if !sample.contains(&file_id) {
-                    sample.push(file_id);
-                    added += 1;
-                }
-            }
-        }
-        Ok(sample)
+        let mut stmt = conn.prepare(
+            "SELECT file_id, parent_id, namespace = 'my_files', (current_version > 0 OR remote_updated_at > 0), path
+             FROM files",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(ProofRow {
+                file_id: row.get(0)?,
+                parent_id: row.get::<_, Option<String>>(1)?.filter(|parent| !parent.is_empty()),
+                my_files: row.get(2)?,
+                server_named: row.get(3)?,
+                path: row.get(4)?,
+            })
+        })?;
+        rows.collect()
     }
 
-    /// Task 2267: record `owner` only if the recorded owner is still `expected` and account data is still here (one
-    /// transaction), so a proof never replaces an owner recorded while it ran, nor names an owner of a database a
-    /// sign-out emptied meanwhile. Returns whether it recorded.
+    /// Task 2267 (fix round 2): every queued operation by what it acts on: its own row and its parent.
     #[cfg(any(target_os = "windows", test))]
-    pub fn replace_owner_if(
+    pub fn own_data_proof_ops(&self) -> Result<Vec<ProofOp>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare("SELECT op_id, file_id, parent_id FROM operation_queue")?;
+        let rows = stmt.query_map([], |row| {
+            Ok(ProofOp {
+                op_id: row.get(0)?,
+                file_id: row.get::<_, Option<String>>(1)?.filter(|id| !id.is_empty()),
+                parent_id: row.get::<_, Option<String>>(2)?.filter(|id| !id.is_empty()),
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Task 2267 (fix round 2): record `owner`, and hold for the person's review every queued operation the proof did
+    /// not prove (`found_while_paused`), in ONE transaction. Only if the recorded owner is still `expected` and account
+    /// data is still here, so a proof never replaces an owner recorded while it ran, nor names an owner of a database a
+    /// sign-out emptied meanwhile. An operation queued after the proof read the queue is not in `proven`, so it is held
+    /// too. Operations paused for another reason keep it, except `auth`: an unproven one must not resume with the
+    /// account's other changes. Returns how many were held, or `None` when nothing was recorded.
+    #[cfg(any(target_os = "windows", test))]
+    pub fn adopt_owner_holding(
         &self,
         expected: Option<&crate::account_binding::Identity>,
         owner: &crate::account_binding::Identity,
-    ) -> Result<bool> {
+        proven: &std::collections::HashSet<String>,
+        now: i64,
+    ) -> Result<Option<usize>> {
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         if read_owner(&tx)?.as_ref() != expected || account_rows(&tx)? == 0 {
-            return Ok(false);
+            return Ok(None);
         }
         write_owner(&tx, owner)?;
+        let candidates: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT op_id FROM operation_queue WHERE paused_reason IS NULL OR paused_reason = ?1",
+            )?;
+            let rows = stmt.query_map(params![OperationPauseReason::Auth.as_str()], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<String>>>()?
+        };
+        let mut held = 0;
+        for op_id in candidates.iter().filter(|op_id| !proven.contains(*op_id)) {
+            held += tx.execute(
+                "UPDATE operation_queue SET paused_reason = ?2, updated_at = ?3 WHERE op_id = ?1",
+                params![op_id, OperationPauseReason::FoundWhilePaused.as_str(), now],
+            )?;
+        }
         tx.commit()?;
-        Ok(true)
+        Ok(Some(held))
+    }
+
+    /// Task 2267 (fix round 2): the queued operations held for the person's review (`found_while_paused`), by what
+    /// they act on, oldest first.
+    #[cfg(any(target_os = "windows", test))]
+    pub fn found_while_paused_ops(&self) -> Result<Vec<ProofOp>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT op_id, file_id, parent_id FROM operation_queue WHERE paused_reason = ?1
+             ORDER BY created_at ASC, rowid ASC",
+        )?;
+        let rows = stmt.query_map(params![OperationPauseReason::FoundWhilePaused.as_str()], |row| {
+            Ok(ProofOp {
+                op_id: row.get(0)?,
+                file_id: row.get::<_, Option<String>>(1)?.filter(|id| !id.is_empty()),
+                parent_id: row.get::<_, Option<String>>(2)?.filter(|id| !id.is_empty()),
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Task 2267 (fix round 2), "Upload to my Beebeeb": every change held as `found_while_paused` is due again at
+    /// `now`, keeping its attempts. Returns how many.
+    pub fn release_found_while_paused(&self, now: i64) -> Result<usize> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "UPDATE operation_queue SET paused_reason = NULL, next_retry_at = ?1, updated_at = ?1
+             WHERE paused_reason = ?2",
+            params![now, OperationPauseReason::FoundWhilePaused.as_str()],
+        )
     }
 
     /// R10, the upgrade path (fix round 1 of Task 10): record `candidate` as the owner of local data that has

@@ -3008,6 +3008,7 @@ async fn clear_session_impl(
             windows_cf::revoke_callbacks()
                 .await
                 .map_err(|e| format!("Could not disconnect Cloud Files: {e}"))?;
+            stop_own_data_proofs();
             windows_cf::wait_for_credential_release().await?;
             // Native/credential shutdown is now confirmed. Cleanup may refuse dirty
             // files; allow an explicit unlock so the user can sync and retry.
@@ -4728,6 +4729,7 @@ async fn lock_vault(state: State<'_, AppState>) -> Result<SessionActionOutcome, 
         windows_cf::revoke_callbacks()
             .await
             .map_err(|e| format!("Could not disconnect Cloud Files: {e}"))?;
+        stop_own_data_proofs();
         windows_cf::wait_for_credential_release().await?;
     }
 
@@ -7537,7 +7539,7 @@ fn prove_own_data_in_background(
         *in_flight = Some(key);
     }
     let flight = Flight(key);
-    tauri::async_runtime::spawn(async move {
+    let proof = tauri::async_runtime::spawn(async move {
         let _flight = flight;
         match prove_own_data_of_session(&app, &sync_root, &acct, turn).await {
             Ok(own_data_proof::Outcome::Adopted(tally)) => {
@@ -7556,6 +7558,26 @@ fn prove_own_data_in_background(
             Err(error) => tracing::warn!(%error, "R10: the ownership proof could not run"),
         }
     });
+    let mut proofs = OWN_DATA_PROOFS.lock().unwrap_or_else(|p| p.into_inner());
+    proofs.retain(|running| !running.inner().is_finished());
+    proofs.push(proof);
+}
+
+/// Task 2267 (review P2-2): the ownership proofs that may still be running. Each holds the session's key and token
+/// (its client is registered with `windows_cf::track_credentials`), so a Lock and a sign-out stop them
+/// (`stop_own_data_proofs`) before they wait for every credential to be released.
+#[cfg(target_os = "windows")]
+static OWN_DATA_PROOFS: std::sync::Mutex<Vec<tauri::async_runtime::JoinHandle<()>>> = std::sync::Mutex::new(Vec::new());
+
+/// Stop every running ownership proof. Both callers hold the session-transition lock, which a proof takes only to
+/// start sync after an adoption, so a proof is never stopped half way through a start. A proof stopped after it
+/// recorded the owner has recorded this same account's own data; one stopped before records nothing.
+#[cfg(target_os = "windows")]
+fn stop_own_data_proofs() {
+    let proofs = std::mem::take(&mut *OWN_DATA_PROOFS.lock().unwrap_or_else(|p| p.into_inner()));
+    for proof in proofs {
+        proof.abort();
+    }
 }
 
 /// Whether `acct` is still the active account and its session is still the one read at `turn`.
@@ -7568,10 +7590,10 @@ fn session_still_active(app: &tauri::AppHandle, acct: &Arc<account::AccountRunti
             .is_ok_and(|active| Arc::ptr_eq(&active, acct))
 }
 
-/// How long the proof waits for one answer, so a Lock or a sign-out never waits long for the key and token it holds
-/// (the proof stops asking once the session changed, and drops both when it returns).
+/// How long the proof waits for the listing of this account's tree (one request; the client's own timeout bounds each
+/// attempt too). A Lock or a sign-out does not wait for it: they stop the proof first.
 #[cfg(target_os = "windows")]
-const ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 
 /// The proof for the session read at `turn`, with its keys and identity read together as an engine start reads them.
 /// A session that changes stops the asking and records nothing (`session_still_active`). With no answer at all the
@@ -7594,23 +7616,25 @@ async fn prove_own_data_of_session(
     let Some(db) = state_db_from_state_dir(&paths.state_dir)? else {
         return Ok(own_data_proof::Outcome::NotEligible);
     };
-    let api = api_client::ApiClient::new(runner::api_base_url(), String::clone(&token), *key);
+    let api = Arc::new(api_client::ApiClient::new(runner::api_base_url(), String::clone(&token), *key));
+    windows_cf::track_credentials(&api);
     let outcome = own_data_proof::prove_and_adopt(
         &db,
         &identity,
         &key,
-        |file_id| {
-            let api = &api;
+        || {
+            let api = Arc::clone(&api);
             async move {
-                match tokio::time::timeout(ASK_TIMEOUT, api.get_file(&file_id)).await {
-                    Ok(result) => own_data_proof::fetched(result),
-                    Err(_) => own_data_proof::Fetched::Unavailable,
+                match tokio::time::timeout(LIST_TIMEOUT, api.sync_snapshot()).await {
+                    Ok(result) => own_data_proof::listing(result),
+                    Err(_) => own_data_proof::Listing::Unavailable,
                 }
             }
         },
         || session_still_active(app, acct, turn),
     )
     .await?;
+    drop(api);
     if matches!(outcome, own_data_proof::Outcome::Unavailable(tally) if tally.signed_out == 0) {
         record_engine_refusal(acct, turn, account_binding::IDENTITY_UNKNOWN);
     }
@@ -25915,16 +25939,40 @@ mod account_binding_tests {
         for step in [
             "keys_for_engine_start(acct)",
             "own_data_proof::prove_and_adopt(",
-            "tokio::time::timeout(ASK_TIMEOUT, api.get_file(&file_id))",
+            // Fix round 2 (review P2-1): ONE listing of this account's tree, bounded.
+            "tokio::time::timeout(LIST_TIMEOUT, api.sync_snapshot())",
+            // Review P2-2: the proof's client is one a Lock or a sign-out waits for.
+            "windows_cf::track_credentials(&api);",
             "|| session_still_active(app, acct, turn)",
             "Outcome::Unavailable(tally) if tally.signed_out == 0",
             "record_engine_refusal(acct, turn, account_binding::IDENTITY_UNKNOWN);",
         ] {
             assert!(proof.contains(&squeeze(step)), "{step}: {proof}");
         }
+        assert_eq!(proof.matches("api.get_file(").count(), 0, "no question per file: {proof}");
         let still = squeeze(&code_of(&production, "fn session_still_active("));
         assert!(still.contains(&squeeze("acct.session_unchanged_since(turn)")), "{still}");
         assert!(still.contains(&squeeze("Arc::ptr_eq(&active, acct)")), "{still}");
+
+        // Review P2-2: a Lock and a sign-out stop every running proof before they wait for the credentials, so a proof
+        // never holds the key and the token past either.
+        assert!(
+            background.contains(&squeeze("OWN_DATA_PROOFS.lock()")) && background.contains("proofs.push(proof)"),
+            "the proof is kept to be stopped: {background}"
+        );
+        for (name, body) in [
+            ("lock_vault", code_of(&production, "async fn lock_vault(")),
+            ("clear_session_impl", code_of(&production, "async fn clear_session_impl(")),
+        ] {
+            let body = squeeze(&body);
+            let stop = body.find("stop_own_data_proofs();").unwrap_or_else(|| panic!("{name} stops the proofs: {body}"));
+            let wait = body
+                .find(&squeeze("windows_cf::wait_for_credential_release().await?;"))
+                .unwrap_or_else(|| panic!("{name} waits: {body}"));
+            assert!(stop < wait, "{name} stops the proofs before it waits: {body}");
+        }
+        let stops = squeeze(&code_of(&production, "fn stop_own_data_proofs("));
+        assert!(stops.contains(".abort()"), "{stops}");
     }
 
     // ---- the local data under test ----
