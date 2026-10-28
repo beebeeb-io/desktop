@@ -170,3 +170,26 @@ Full post-L8 macOS and remote frontend gates follow below. Native Windows remain
 
 
 Post-L8 remote frontend: **1,833 passed / 0 failed**, 106 files, 7,655 assertions; frozen install, TypeScript and ESLint all exit 0 (`l8-testrig-frontend.log`). Counted all 1,833 completed test rows. Graphify refreshed after source changes: **391 files / 8,558 nodes / 25,891 edges / 195 communities** (`graphify-l8-update.log`); outputs retained in `graphify-l8-refresh/`, tracked graph baseline restored. Full Mac gate source is the clean detached **90b7f773416bdce663892b41a31b7da86b9346a6**; subsequent commits record evidence only.
+
+
+## Final post-L8 gate (2026-10-28)
+
+Tested source **90b7f773416bdce663892b41a31b7da86b9346a6**, fresh detached lane-owned tree, workspace `with-lock.sh cargo-build`, owned target/cache and fresh scratch HOME, `BB_API_BASE=http://127.0.0.1:9` and `BB_REFUSE_NON_LOOPBACK_API=1`. Subsequent commits record evidence only.
+
+| Gate | Passed | Failed | Ignored |
+| --- | ---: | ---: | ---: |
+| macOS Rust library | 2,250 | 0 | 9 |
+| Keychain in-memory abstraction integration | 31 | 0 | 0 |
+| Portable Windows session integration | 8 | 0 | 0 |
+| Portable Windows sign-out integration | 3 | 0 | 0 |
+| Rust total | **2,292** | **0** | **9** |
+| Testrig Bun (106 files, 7,655 assertions) | **1,833** | **0** | 0 |
+| TypeScript / ESLint | exit 0 / exit 0 | 0 diagnostics | — |
+
+`cargo test --locked --no-fail-fast -- --test-threads=1` exits 0. All six suite totals match **2,301 completed rows**. All **44 lane tests** pass, including both L8 tests, all **11 rv173** tests and the **three mandatory review reproductions**. The nine existing ignores retain their previously recorded reasons; none was forced on. Receipts: `final-macos-rust.log`, `final-macos-wrapper.log`, `final-macos-rust-status.txt`, `final-macos-counts.json` and `l8-testrig-frontend.log`. The previous successful Mac gate is preserved in `pre-l8-macos/`.
+
+Core is coherently pinned to **c08defc70c35428926be6784d18ff091be6d004c** in `src-tauri/Cargo.toml` and `Cargo.lock`. Every owner-file adoption writer/reader uses L8; old derive_file_key owner wraps are rejected, with no fallback. L6's distinct legacy invite-folder seed remains supported only before observed custody. Per the binding L8 rollout ruling, old adoption envelopes were never enabled in production and are intentionally not adopted. Flag-off legacy invites and unrecorded-v1 content remain supported. No V2 write rollout or additional package was introduced.
+
+Read-only merge preview against desktop origin/main **64d39db9502a0c5cdf41e65e4fdf9b4fc34b02bc** passes (`l8-merge-preview.log`). `git diff --check` passes. Task 1943 desktop checklist remains complete with the new c08defc7 pin and the same core stream reader/finish contract.
+
+All **44 lane tests are portable; zero are cfg(windows)**. Native `windows_cf` provider/reconcile tests, t10–t16/t18 and the task_2240 guards require glegion's Windows re-gate at the new PR head. The 8+3 portable integration tests do not prove native Cloud Files behavior. Signed Finder/Explorer Task 13, live deployed-client/server interoperability, remaining 2240–2242 scanner/device integration and the separate owner-upload publication dependency remain unchanged. No installed app, real user config, real Keychain, production, release or merge was used.
