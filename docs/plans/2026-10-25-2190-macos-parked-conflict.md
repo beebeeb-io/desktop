@@ -104,14 +104,14 @@ Written before the code of `fix/2190-conflict-detector`, against desktop `main` 
 
 ### 7.2 The detector: decision table (`process_metadata_row`, the `Local` branch)
 
-Inputs: `B` = `local_base_version` (0 = unknown) with `local_hash`; `V` = the server version on the pulled row (`current_version`, `version`, `version_number`); `L` = the device's bytes.
+Inputs: `B` = the edit's base as `sync_folder_content` gives it (`local_hash` at `local_base_version`, or the fetched candidate before it is promoted; corrected on 28 Oct: the first draft read `local_base_version` alone, which is 0 until the candidate is promoted), else `local_base_version` (0 = unknown); `V` = the server version on the pulled row (`current_version`, `version`, `version_number`); `L` = the device's bytes.
 - On a sync-folder file, `L` is `sync_folder_content` (Windows, and every test build).
 - Elsewhere a `Local` row has no pending write, so `L` = agreed.
 
 | # | L | V against B | Action |
 |---|---|---|---|
 | 1 | agreed (or unknown) | any | Re-anchor, as today: `remote_updated_at`, `size_bytes` and `modified_at` from the server, then the metadata write. `local_base_version` is unchanged (E3). |
-| 2 | changed (an edit the scan has not queued yet) | `V > B > 0` | A concurrent edit. The metadata write still runs (the server's version is recorded), but `size_bytes`, `modified_at` and `remote_updated_at` keep describing the device's bytes, and `B` is kept. The scan then queues the edit on base `B`, the server refuses it as stale, and it parks: a reviewable conflict (§3). No `Conflict` status, and no `ConflictDetected`. |
+| 2 | changed (an edit the scan has not queued yet) | `V > B > 0` | ~~A concurrent edit. The metadata write still runs (the server's version is recorded), but `size_bytes`, `modified_at` and `remote_updated_at` keep describing the device's bytes, and `B` is kept.~~ **Corrected (lane, 28 Oct, first test run):** the metadata write (`apply_metadata_file_row`) itself writes the server's size and stamps, so a concurrent edit is written to the database exactly as row 1 is, and keeping them would be cosmetic: the pull resizes no placeholder (`resize_placeholder` runs only in the fetch callback). What the row keeps is the edit's base `B`, which the pull never touches. The scan then queues the edit on base `B`, the server refuses it as stale, and it parks: a reviewable conflict (§3). No `Conflict` status, and no `ConflictDetected`. `is_conflict` is true here, and only here, which the tick logs. |
 | 3 | changed | `V <= B`, or `B = 0` | Our own edit, not sent yet, or an unknown base: re-anchor as row 1 (the edit is queued on `B`, or held by task 2229). |
 | 4 | queued | — | Unreachable: such a row is `Uploading` (branch 3, unchanged). |
 
