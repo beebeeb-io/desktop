@@ -34,9 +34,15 @@ struct Batch {
 }
 
 fn missing(error: &anyhow::Error) -> bool {
-    error.to_string().contains("404")
-        || error.downcast_ref::<reqwest::Error>().and_then(reqwest::Error::status)
-            == Some(reqwest::StatusCode::NOT_FOUND)
+    crate::engine_bridge::error_http_status(error) == Some(404)
+        || error.to_string().starts_with("HTTP 404 ")
+}
+
+/// These statuses describe the pre-feature custody endpoint only. Authentication,
+/// transport and other server failures must never select the legacy reader.
+pub(crate) fn custody_absent(error: &anyhow::Error) -> bool {
+    matches!(crate::engine_bridge::error_http_status(error), Some(404 | 405 | 501))
+        || ["HTTP 404 ", "HTTP 405 ", "HTTP 501 "].iter().any(|prefix| error.to_string().starts_with(prefix))
 }
 
 fn foreign(row: &Value) -> bool {
@@ -128,7 +134,12 @@ impl Batch {
                         version: row["key_version"].as_i64().unwrap_or(1) as i32,
                     })
             }
-            Err(error) if missing(&error) => {
+            Err(error) if custody_absent(&error) => {
+                anyhow::ensure!(!scope.db.has_seen_folder_custody(id)?, "This folder's keys are unavailable");
+                if !missing(&error) {
+                    self.custody.insert(id.to_string(), None);
+                    return Ok(());
+                }
                 if self.invites.is_none() {
                     let body = scope.api.sent_folder_invites().await?;
                     scope.check()?;
@@ -172,6 +183,9 @@ impl Batch {
             }
             Err(error) => return Err(error),
         };
+        if custody.is_some() {
+            scope.remember_custody(id)?;
+        }
         self.custody.insert(id.to_string(), custody);
         Ok(())
     }
@@ -610,6 +624,12 @@ impl<'a> AccountScope<'a> {
             !self.stopping.load(Ordering::Acquire) && self.db.account_revision() == self.revision,
             "owner key request cancelled by account change"
         );
+        Ok(())
+    }
+
+    pub fn remember_custody(&self, folder_id: &str) -> anyhow::Result<()> {
+        self.check()?;
+        self.db.remember_folder_custody_at_revision(folder_id, self.revision)?;
         Ok(())
     }
 

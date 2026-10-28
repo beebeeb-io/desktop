@@ -2260,12 +2260,41 @@ impl EngineBridge {
             &root.file_id,
             encrypted_folder_key,
         )?;
-        let mut folder_keys_response = self.api.get_folder_keys(&root.invite_id).await?;
-        let custody = match self.api.get_shared_folder(&root.file_id).await {
-            Ok(_) => true,
-            Err(e) if e.to_string().starts_with("HTTP 404 ") => false,
-            Err(e) => return Err(e),
+        let scope = self.owner_key_scope();
+        scope.check()?;
+        let response = self.api.get_shared_folder(&root.file_id).await;
+        scope.check()?;
+        let custody = match response {
+            Ok(row) => {
+                anyhow::ensure!(row["folder_id"].as_str() == Some(&root.file_id)
+                    && row["key_version"].as_u64().is_some_and(|v| v > 0), "invalid folder custody record");
+                // The server returns the caller's copy: L6 for owners, the
+                // existing authenticated invite envelope for members. A member
+                // cannot open another account's owner/L6 envelope.
+                let custody_key = if row["role"] == "member" {
+                    let wrapped = row["wrapped_folder_key"].as_str()
+                        .ok_or_else(|| anyhow::anyhow!("missing member custody key"))?;
+                    unwrap_folder_share_key(self.api.master_key(), sender_public_key, &root.file_id, wrapped)?
+                } else {
+                    anyhow::ensure!(row["role"] == "owner", "invalid custody role");
+                    let wrap = crate::owner_keys::normalize_wrap(&row["owner_wrapped_folder_key"])?
+                        .ok_or_else(|| anyhow::anyhow!("missing owner custody key"))?;
+                    let key = beebeeb_sync::key_resolution::unwrap_folder_custody(
+                        &beebeeb_core::kdf::MasterKey::from_bytes(*self.api.master_key()), &root.file_id, &wrap)?;
+                    Zeroizing::new(*key.as_bytes())
+                };
+                anyhow::ensure!(*custody_key == *folder_key, "custody and invite keys differ");
+                scope.remember_custody(&root.file_id)?;
+                true
+            }
+            Err(error) if crate::owner_keys::custody_absent(&error) => {
+                anyhow::ensure!(!self.db.has_seen_folder_custody(&root.file_id)?, "This folder's keys are unavailable");
+                false
+            }
+            Err(error) => return Err(error),
         };
+        let mut folder_keys_response = self.api.get_folder_keys(&root.invite_id).await?;
+        scope.check()?;
         folder_keys_response["desktop_has_custody"] = serde_json::json!(custody);
         Ok((folder_key, folder_keys_response))
     }
@@ -6807,22 +6836,6 @@ fn payload_mtime_ns(path: &Path) -> i64 {
         .unwrap_or(0)
 }
 
-/// Fill `buffer` from `file` (short only at EOF). Chunk `k` must be exactly the
-/// bytes at `k * chunk_size`, so a resumed upload that seeks to the
-/// acknowledged watermark lines up with the chunks the server already holds.
-fn read_full_chunk(file: &mut std::fs::File, buffer: &mut [u8]) -> std::io::Result<usize> {
-    let mut filled = 0;
-    while filled < buffer.len() {
-        match file.read(&mut buffer[filled..]) {
-            Ok(0) => break,
-            Ok(n) => filled += n,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(filled)
-}
-
 /// The server no longer accepts writes to this upload session: 404 (session
 /// or file row gone — e.g. reaped by the stale-upload sweep), 410, or 400
 /// (session not writable / chunk plan no longer matches / a chunk the client
@@ -6996,11 +7009,6 @@ fn log_parked_attempts_used_up(op_id: &str, file_id: Option<&str>) {
 /// for `file_id`. The plaintext name is the op's display name; the MIME hint
 /// is the op's content type, else the one guessed from the name, as the
 /// Finder write path does.
-#[cfg(test)]
-fn metadata_rekeyed_to(master_key: &[u8; 32], op: &PendingOperation, file_id: &str) -> anyhow::Result<Option<String>> {
-    metadata_rekeyed_with_material(master_key, op, file_id, None)
-}
-
 fn metadata_rekeyed_with_material(master_key: &[u8; 32], op: &PendingOperation, file_id: &str, material: Option<(&beebeeb_core::kdf::FileKey, beebeeb_core::chunk_stream::ExpectedChunkFormat)>) -> anyhow::Result<Option<String>> {
     let Some(raw) = op.metadata_json.as_deref() else {
         return Ok(None);

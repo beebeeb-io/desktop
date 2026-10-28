@@ -2400,6 +2400,23 @@ impl StateDb {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         Ok(conn.execute("INSERT INTO sync_state (key,value) VALUES ('owned_key_retry_after',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE CAST(sync_state.value AS INTEGER)<=?2", params![now.saturating_add(30).to_string(),now])? > 0)
     }
+    /// L7c: account-scoped, durable format knowledge; contains no key material.
+    pub fn has_seen_folder_custody(&self, folder_id: &str) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        Ok(conn.query_row("SELECT 1 FROM sync_state WHERE key=?1",
+            [format!("shared_folder_custody_seen:{folder_id}")], |_| Ok(())).optional()?.is_some())
+    }
+
+    pub fn remember_folder_custody_at_revision(&self, folder_id: &str, revision: u64) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        if self.1.load(std::sync::atomic::Ordering::Acquire) != revision {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        conn.execute("INSERT INTO sync_state (key,value) VALUES (?1,'1') ON CONFLICT(key) DO NOTHING",
+            [format!("shared_folder_custody_seen:{folder_id}")])?;
+        Ok(())
+    }
+
     pub fn mark_shared_index_dirty(&self, folder_id: &str) -> Result<()> {
         let conn=self.0.lock().expect("state_db mutex poisoned");
         conn.execute("INSERT INTO sync_state (key,value) VALUES (?1,'1') ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT)", [format!("shared_folder_index_dirty:{folder_id}")])?;
@@ -6802,7 +6819,7 @@ impl StateDb {
         )?;
         tx.execute("DELETE FROM id_aliases", [])?;
         tx.execute("DELETE FROM owned_key_records", [])?;
-        tx.execute("DELETE FROM sync_state WHERE key LIKE 'shared_folder_index_dirty:%' OR key='owned_key_retry_after'", [])?;
+        tx.execute("DELETE FROM sync_state WHERE key LIKE 'shared_folder_index_dirty:%' OR key LIKE 'shared_folder_custody_seen:%' OR key='owned_key_retry_after'", [])?;
 
         tx.commit()?;
         self.1.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
