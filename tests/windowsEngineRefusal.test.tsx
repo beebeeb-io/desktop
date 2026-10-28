@@ -1,6 +1,7 @@
 /**
  * Must-render row 10, lead ruling FT-row10: Windows has no Status page, so an engine refusal
- * (`OTHER_ACCOUNT_ON_WINDOWS`: "This PC still holds local files of another Beebeeb account…") is
+ * (`OTHER_ACCOUNT_ON_WINDOWS`: "Beebeeb couldn’t confirm that the files on this PC belong to the account
+ * you’re signed in to…"; task 2267: it never tells a person they have another account) is
  * rendered on the existing sync-status card, the main window's live status strip on Home, sentence
  * only (no action: W2's way out stays a Windows decision, 1748 / spec C). Ruling P made the refusal a
  * sentence so that it is never silent.
