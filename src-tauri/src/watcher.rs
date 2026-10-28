@@ -654,6 +654,14 @@ pub(crate) fn run_one_scan_with(bridge: &EngineBridge, sync_root: &std::path::Pa
     if dispatched > 0 {
         tracing::debug!(dispatched, "enumeration scan queued new local files");
     }
+    // Task 2244: one line for the edits this pass held, never one per file; each is listed for review.
+    let held = bridge.take_newly_held();
+    if held > 0 {
+        tracing::warn!(
+            held,
+            "sync folder: changes to synced files are kept on this PC, not sent; each is listed for review"
+        );
+    }
     tracing::debug!(
         classified = memo.classified,
         skipped = memo.skipped,
