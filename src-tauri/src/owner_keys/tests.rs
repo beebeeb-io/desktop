@@ -120,7 +120,7 @@ fn run<T>(future: impl std::future::Future<Output = T>) -> T {
 fn record() -> OwnedKeyRecord {
     let master = beebeeb_core::kdf::MasterKey::from_bytes([7; 32]);
     let key = beebeeb_core::kdf::FileKey::from_bytes([0x9d; 32]);
-    let envelope = beebeeb_sync::key_resolution::wrap_key_to_owner(&master, "item", &key).unwrap();
+    let envelope = beebeeb_sync::key_resolution::wrap_owner_file_key(&master, "item", &key).unwrap();
     OwnedKeyRecord {
         file_id: "item".into(),
         name_encrypted: "opaque-name".into(),
@@ -314,3 +314,88 @@ fn sf2237d_t3_account_switch_cancels() {
 }
 
 mod ingestion;
+
+#[test]
+fn sf2237d_l8_old_owner_wrap_is_rejected_without_fallback() {
+    use beebeeb_core::{
+        chunk_stream::ExpectedChunkFormat,
+        kdf::{FileKey, MasterKey},
+    };
+    let master = MasterKey::from_bytes([7; 32]);
+    let id = "old-owner-format";
+    let key = FileKey::from_bytes([91; 32]);
+    // The removed format was an empty-AAD frame under derive_file_key(master,id).
+    // Build the historical wire bytes through core, never a compatibility reader.
+    let derived = beebeeb_core::kdf::derive_file_key(&master, id.as_bytes());
+    let old = beebeeb_core::encrypt::encrypt_chunk_raw(&derived, key.as_bytes()).unwrap();
+    let encrypted = beebeeb_core::encrypt::encrypt_name_for(
+        &key,
+        "legacy.txt",
+        None,
+        ExpectedChunkFormat::Unrecorded,
+    )
+    .unwrap();
+    for pending in [false, true] {
+        for foreign in [false, true] {
+            let record = OwnedKeyRecord {
+                file_id: id.into(),
+                name_encrypted: encrypted.clone(),
+                foreign_added: foreign,
+                owner_wrap: (!pending).then(|| old.clone()),
+                pending_owner_wrap: pending.then(|| old.clone()),
+                ..Default::default()
+            };
+            assert!(
+                record_key(&master, &record).is_err(),
+                "old owner envelopes must never open or select derived-key fallback"
+            );
+        }
+    }
+}
+
+#[test]
+fn sf2237d_l8_legacy_invite_seed_still_registers_l6_custody() {
+    use beebeeb_core::kdf::{FileKey, MasterKey};
+    let master = MasterKey::from_bytes([7; 32]);
+    let root = "10000000-0000-4000-8000-000000000001";
+    let folder = FileKey::from_bytes([55; 32]);
+    let derived = beebeeb_core::kdf::derive_file_key(&master, root.as_bytes());
+    let seed = STANDARD
+        .encode(beebeeb_core::encrypt::encrypt_chunk_raw(&derived, folder.as_bytes()).unwrap());
+    let mut custody = None;
+    let fixture = Fixture::wire(move |req| {
+        let (status, body) = if req.path == "/api/v1/shares/invites/sent" {
+            (
+                200,
+                json!({"invites":[{"file_id":root,"is_folder_share":true,"encrypted_owner_folder_key":seed}]}),
+            )
+        } else if req.path == format!("/api/v1/shared-folders/{root}/key") && req.method == "PUT" {
+            custody = Some(req.body["owner_wrapped_folder_key"].clone());
+            (200, json!({}))
+        } else if req.path == format!("/api/v1/shared-folders/{root}") {
+            if let Some(wrap) = &custody {
+                (
+                    200,
+                    json!({"folder_id":root,"role":"owner","key_version":1,"owner_wrapped_folder_key":wrap}),
+                )
+            } else {
+                (404, json!({}))
+            }
+        } else {
+            (404, json!({}))
+        };
+        Some((status, serde_json::to_vec(&body).unwrap()))
+    });
+    let temp = tempfile::tempdir().unwrap();
+    let bridge = crate::engine_bridge::EngineBridge::new(
+        Arc::new(StateDb::open(temp.path().join("db")).unwrap()),
+        Arc::new(fixture.api()),
+    );
+    assert_eq!(
+        run(bridge.shared_folder_custody_key(root))
+            .unwrap()
+            .as_bytes(),
+        folder.as_bytes()
+    );
+    assert!(bridge.db().has_seen_folder_custody(root).unwrap());
+}

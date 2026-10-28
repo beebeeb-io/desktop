@@ -45,6 +45,17 @@ pub(crate) fn custody_absent(error: &anyhow::Error) -> bool {
         || ["HTTP 404 ", "HTTP 405 ", "HTTP 501 "].iter().any(|prefix| error.to_string().starts_with(prefix))
 }
 
+/// L6's explicit legacy invite seeding path, ONLY for encrypted_owner_folder_key
+/// when custody has never been observed. Never used for file adoption envelopes.
+fn legacy_invite_folder_seed(master: &MasterKey, root: &str, seed: &[u8]) -> anyhow::Result<FileKey> {
+    anyhow::ensure!(seed.len() == 60, "invalid legacy invite seed");
+    let derived = beebeeb_core::kdf::derive_file_key(master, root.as_bytes());
+    let plaintext = zeroize::Zeroizing::new(beebeeb_core::encrypt::decrypt_chunk_raw(&derived, seed)?);
+    let bytes: [u8; 32] = plaintext.as_slice().try_into()
+        .map_err(|_| anyhow::anyhow!("invalid legacy invite key length"))?;
+    Ok(FileKey::from_bytes(bytes))
+}
+
 fn foreign(row: &Value) -> bool {
     !row["acted_via_share_id"].is_null() || !row["uploaded_by"].is_null()
 }
@@ -75,7 +86,7 @@ pub fn record_key(master: &MasterKey, record: &OwnedKeyRecord) -> anyhow::Result
         .into_iter()
         .flatten()
     {
-        if let Ok(key) = keys::unwrap_owner_key(master, &record.file_id, wrap)
+        if let Ok(key) = keys::unwrap_owner_file_key(master, &record.file_id, wrap)
             && let Ok(metadata) = authenticate(&key, &record.name_encrypted)
         {
             return Ok((key, metadata));
@@ -155,7 +166,7 @@ impl Batch {
                 if let Some(seed) = seed {
                     // Named legacy invite seeding path only. No child or custody
                     // record ever falls back to the old unbound format.
-                    if let Ok(key) = keys::unwrap_owner_key(&master, id, &seed) {
+                    if let Ok(key) = legacy_invite_folder_seed(&master, id, &seed) {
                         let wrap = STANDARD.encode(keys::wrap_folder_custody(&master, id, &key)?);
                         let registered = scope.api.register_shared_folder_key(id, &wrap, 1).await;
                         scope.check()?;
@@ -253,7 +264,7 @@ async fn verify_winner(
     let Some(frame) = normalize_wrap(&canonical["owner_wrapped_file_key"])? else {
         return Ok(false);
     };
-    let winner = keys::unwrap_owner_key(&MasterKey::from_bytes(*scope.api.master_key()), &record.file_id, &frame)?;
+    let winner = keys::unwrap_owner_file_key(&MasterKey::from_bytes(*scope.api.master_key()), &record.file_id, &frame)?;
     if winner.as_bytes() != key.as_bytes() {
         record.blocked_fingerprint = Some(record.fingerprint());
         scope.put(record)?;
@@ -451,7 +462,7 @@ impl crate::engine_bridge::EngineBridge {
                 && record.owner_wrap.is_none()
             {
                 if record.pending_owner_wrap.is_none() {
-                    record.pending_owner_wrap = Some(keys::wrap_key_to_owner(&master, id, key)?);
+                    record.pending_owner_wrap = Some(keys::wrap_owner_file_key(&master, id, key)?);
                 }
             }
             let tree_or_content_changed = self.db().get_file_contract_state(id)?.is_some_and(|previous| {

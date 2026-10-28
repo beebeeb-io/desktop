@@ -176,7 +176,7 @@ impl ContentServer {
                     .unwrap()
                     .into(),
                 owner_wrap: Some(
-                    beebeeb_sync::key_resolution::wrap_key_to_owner(&MasterKey::from_bytes([7; 32]), ID, &random_key())
+                    beebeeb_sync::key_resolution::wrap_owner_file_key(&MasterKey::from_bytes([7; 32]), ID, &random_key())
                         .unwrap(),
                 ),
                 foreign_added: true,
@@ -295,7 +295,7 @@ fn sf2237d_t5_whole_and_range_open() {
                     file_id: ID.into(),
                     name_encrypted: name.clone(),
                     owner_wrap: Some(
-                        beebeeb_sync::key_resolution::wrap_key_to_owner(&MasterKey::from_bytes([7; 32]), ID, &key)
+                        beebeeb_sync::key_resolution::wrap_owner_file_key(&MasterKey::from_bytes([7; 32]), ID, &key)
                             .unwrap(),
                     ),
                     foreign_added: true,

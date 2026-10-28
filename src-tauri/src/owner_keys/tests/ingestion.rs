@@ -5,7 +5,7 @@ use beebeeb_core::{
     kdf::{FileKey, MasterKey},
     search_index::{EncryptedShard, SearchIndex, ShardKeySource},
 };
-use beebeeb_sync::key_resolution::{wrap_child_key, wrap_folder_custody, wrap_key_to_owner};
+use beebeeb_sync::key_resolution::{wrap_child_key, wrap_folder_custody, wrap_owner_file_key};
 use std::collections::BTreeMap;
 const ROOT: &str = "10000000-0000-4000-8000-000000000001";
 const FOLDER: &str = "20000000-0000-4000-8000-000000000002";
@@ -310,7 +310,7 @@ fn sf2237d_t4_adoption_race_revoke_move_out() {
     let prepared = run(b.prepare_owned_rows(&[row])).unwrap();
     assert!(prepared[0].readable);
     world.lock().unwrap().rows.get_mut(GUEST).unwrap()["owner_wrapped_file_key"] =
-        json!(STANDARD.encode(wrap_key_to_owner(&master(), GUEST, &guest_key()).unwrap()));
+        json!(STANDARD.encode(wrap_owner_file_key(&master(), GUEST, &guest_key()).unwrap()));
     run(b.retry_owner_adoptions()).unwrap();
     drop(b);
     {

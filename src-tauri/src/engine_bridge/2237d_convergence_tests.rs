@@ -32,7 +32,7 @@ impl Convergence {
             file["acted_via_share_id"] = json!("guest-link");
             file["owner_wrapped_file_key"] = json!(
                 base64::engine::general_purpose::STANDARD.encode(
-                    beebeeb_sync::key_resolution::wrap_key_to_owner(&MasterKey::from_bytes([7; 32]), ID, &random_key())
+                    beebeeb_sync::key_resolution::wrap_owner_file_key(&MasterKey::from_bytes([7; 32]), ID, &random_key())
                         .unwrap()
                 )
             );
@@ -192,7 +192,7 @@ async fn sf2237d_t6_guest_and_member_add() {
     member["uploaded_by"] = json!("member-account");
     member["owner_wrapped_file_key"] = json!(
         base64::engine::general_purpose::STANDARD.encode(
-            beebeeb_sync::key_resolution::wrap_key_to_owner(&MasterKey::from_bytes([7; 32]), MEMBER, &random_key())
+            beebeeb_sync::key_resolution::wrap_owner_file_key(&MasterKey::from_bytes([7; 32]), MEMBER, &random_key())
                 .unwrap()
         )
     );
