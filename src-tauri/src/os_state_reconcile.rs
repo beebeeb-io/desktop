@@ -152,11 +152,11 @@ pub(crate) fn plan_reconcile(
             } else if in_window(i) {
                 // D4: measure lag the other way (a change the listing does not show yet).
                 counts.sentinel_checked += 1;
-                if let Some(direct) = read_direct(rel) {
-                    if (direct ^ listed) & OS_STATE_MASK != 0 {
-                        counts.sentinel_mismatches += 1;
-                        push(i, direct);
-                    }
+                if let Some(direct) = read_direct(rel)
+                    && (direct ^ listed) & OS_STATE_MASK != 0
+                {
+                    counts.sentinel_mismatches += 1;
+                    push(i, direct);
                 }
             }
         }
@@ -427,7 +427,7 @@ mod tests {
         let fs = Fs::fresh(&paths, 0);
         let plan = fs.run(paths.iter().map(|p| local(p)).collect(), 1_000);
         assert_eq!(plan.counts.sentinel_checked, 5);
-        assert_eq!(plan.next_cursor, (1_000 % 5 + SENTINEL_SAMPLE) % 5);
+        assert_eq!(plan.next_cursor, 4, "(1000 % 5 + SENTINEL_SAMPLE) % 5");
 
         let empty = Fs::default();
         let plan = empty.run(Vec::new(), 1_000);

@@ -1025,6 +1025,23 @@ pub fn read_os_placeholder_state(path: &std::path::Path) -> Option<u32> {
     Some(attrs)
 }
 
+/// Task 2240 slice 2: every entry of `dir` by its exact name, with the attribute word the folder listing
+/// carries (`FindFirstFile`/`FindNextFile` data: no file is opened). An entry whose name is not valid
+/// Unicode or whose metadata cannot be read is left out, so its row falls back to
+/// [`read_os_placeholder_state`]. An error listing `dir` itself is returned.
+pub fn list_dir_attributes(dir: &std::path::Path) -> std::io::Result<std::collections::HashMap<String, u32>> {
+    use std::os::windows::fs::MetadataExt;
+    let mut entries = std::collections::HashMap::new();
+    for entry in std::fs::read_dir(dir)? {
+        let Ok(entry) = entry else { continue };
+        let (Ok(name), Ok(meta)) = (entry.file_name().into_string(), entry.metadata()) else {
+            continue;
+        };
+        entries.insert(name, meta.file_attributes());
+    }
+    Ok(entries)
+}
+
 /// Resize the Cloud Files placeholder at `path` so its `FileSize` matches
 /// the AES-256-GCM-authenticated decrypted plaintext length, and re-stamp
 /// it in-sync. This is **Tier-1 of the hydration resolve-or-error path**
