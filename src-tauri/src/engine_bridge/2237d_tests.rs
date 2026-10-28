@@ -38,6 +38,7 @@ fn manifest(wire: &[Vec<u8>], size: usize) -> serde_json::Value {
     json!({"object_version_id":OBJECT,"version_number":1,"chunk_count":wire.len(),"chunk_size_bytes":4,"plaintext_size_bytes":size,"ciphertext_size_bytes":wire.iter().map(Vec::len).sum::<usize>(),"chunks":wire.iter().enumerate().map(|(i,f)|json!({"index":i,"size_bytes":f.len()})).collect::<Vec<_>>()})
 }
 struct ContentState {
+    rv_routes: std::collections::HashMap<String, (u16, Vec<u8>)>,
     nodes: Vec<serde_json::Value>,
     ops: Vec<serde_json::Value>,
     seq: i64,
@@ -59,6 +60,7 @@ impl ContentServer {
     fn start(key: &FileKey, pin: ExpectedChunkFormat) -> Self {
         let plain = b"guest bytes!";
         let state = Arc::new(Mutex::new(ContentState {
+            rv_routes: Default::default(),
             nodes: vec![],
             ops: vec![],
             seq: 0,
@@ -84,7 +86,7 @@ impl ContentServer {
                         stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
                         let req = read_http_request(&mut stream);
                         let mut w = world.lock().unwrap();
-                        let (status, body) = if req.path == "/api/v1/sync/snapshot" {
+                        let (status, body) = if let Some(reply) = w.rv_routes.get(&req.path).cloned() { reply } else if req.path == "/api/v1/sync/snapshot" {
                             (
                                 200,
                                 serde_json::to_vec(&json!({"seq_id":w.seq,"nodes":w.nodes})).unwrap(),
@@ -602,3 +604,5 @@ fn sf2237d_l7b_custody_never_uses_legacy_reader() {
 }
 
 include!("2237d_convergence_tests.rs");
+
+include!("rv_desktop173_tests.rs");
