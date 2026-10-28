@@ -133,3 +133,24 @@ All ten review tests are portable; none is cfg(windows). The new full macOS and 
 Review frontend gate: **1,833 passed / 0 failed**, 106 files, 7,655 assertions; frozen install, TypeScript and ESLint all exit 0 (`review-testrig-frontend.log`). Graphify refresh: 391 files, 8,551 nodes, 25,867 edges, 197 communities; outputs retained in `graphify-review-refresh/` and the tracked baseline restored. Fresh read-only merge preview against desktop main **64d39db9502a0c5cdf41e65e4fdf9b4fc34b02bc** exits 0 (`review-merge-preview.log`); `git diff --check` passes.
 
 Final source review found an additional L7c concurrency window: an in-flight pre-custody inventory could retain a legacy flag after another response records custody. The first review macOS run at 4471811 was deliberately stopped during compilation, before tests, and is not a gate result. Added `rv173_l7c_stale_inventory_cannot_reenable_legacy_reader`: **RED 0/1** (`review-stale-inventory-red.log`), then restored **42/0** aggregate (`review-lane-final.log`), including **11 rv173** tests. Every production folder child-key dispatch now checks durable custody before a legacy open, serialized with custody observation under the state DB lock. The synchronous callback only calls core; no DB lock crosses an await. Root-name, descendant-listing and content key readers all use that gate. This closes stale format flags without a protocol or security-model change.
+
+
+## Final post-review gate (2026-10-28)
+
+Tested source **68f3c780e8ce89451105b8c7fcdfaa2bae6a474a**, fresh detached lane-owned worktree, workspace `with-lock.sh cargo-build`, owned target/cache and fresh scratch HOME, `BB_API_BASE=http://127.0.0.1:9` plus `BB_REFUSE_NON_LOOPBACK_API=1`.
+
+| Gate | Passed | Failed | Ignored |
+| --- | ---: | ---: | ---: |
+| macOS Rust library | 2,248 | 0 | 9 |
+| Keychain in-memory abstraction integration | 31 | 0 | 0 |
+| Portable Windows session integration | 8 | 0 | 0 |
+| Portable Windows sign-out integration | 3 | 0 | 0 |
+| Rust total | **2,290** | **0** | **9** |
+| Testrig Bun (106 files, 7,655 assertions) | **1,833** | **0** | 0 |
+| TypeScript / ESLint | exit 0 / exit 0 | 0 diagnostics | — |
+
+`cargo test --locked --no-fail-fast -- --test-threads=1` exits 0. All six announced suite counts match **2,299 completed rows**; all **42 lane tests** pass, including **11 rv173** and the **three mandatory review regressions**. Existing nine ignores retain the previous reasons; none was forced on. Final logs: `final-macos-rust.log`, `final-macos-wrapper.log`, `final-macos-rust-status.txt`, `final-macos-counts.json`, `review-testrig-frontend-final.log`. The stopped compilation is archived separately in `aborted-review-macos-stale-inventory/`; the preceding successful pre-review gate remains in `pre-review-fixes-macos/`. No partial run is counted as a gate.
+
+Final Graphify refresh after the stale-inventory fix: **391 files / 8,555 nodes / 25,880 edges / 194 communities** (`graphify-review-final-update.log`); generated outputs retained in `graphify-review-final-refresh/`, tracked baseline restored. Final read-only main merge preview and diff checks pass (`review-merge-preview-final.log`). Server-main custody owner/member response verified at **fe0f130ac48599d3f12944b1c18e982b6752f914** without contacting production. Core pin remains **a245a549c12415af6311bf4488deca5def65e983** in `src-tauri/Cargo.toml` and `Cargo.lock`.
+
+All 42 lane tests, including all 11 review tests, are portable; **zero are cfg(windows)**. Native `windows_cf` provider/reconcile tests remain glegion's responsibility, including t10–t16/t18 and the task_2240 reconcile/log guards. Portable Windows integration results are not native Cloud Files proof. Signed Finder/Explorer Task 13, live deployed-client/server interoperability, remaining 2240–2242 device/scanner integration and the separate owner-upload publication dependency remain as previously recorded. No installed app, real user config, real Keychain, production, release or merge was used.
