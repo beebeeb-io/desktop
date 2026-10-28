@@ -846,6 +846,27 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
+    pub async fn get_shared_folder(&self, id: &str) -> anyhow::Result<serde_json::Value> {
+        self.get_typed(&format!("/api/v1/shared-folders/{}", encode(id))).await
+    }
+
+    pub async fn get_shared_folder_keys(&self, id: &str, cursor: Option<&str>) -> anyhow::Result<serde_json::Value> {
+        let mut path = format!("/api/v1/shared-folders/{}/keys?limit=500", encode(id));
+        if let Some(cursor) = cursor {
+            path.push_str(&format!("&cursor={}", encode(cursor)));
+        }
+        self.get_typed(&path).await
+    }
+
+    pub async fn adopt_owner_key(&self, id: &str, owner_wrap_b64: &str) -> anyhow::Result<bool> {
+        let url = self.url(&format!("/api/v1/files/{}/owner-key", encode(id)));
+        let response = self.send_with_retry(|| self.client.post(&url).json(&serde_json::json!({
+            "owner_wrapped_file_key": owner_wrap_b64
+        }))).await?;
+        let result: serde_json::Value = response.json().await?;
+        result["adopted"].as_bool().ok_or_else(|| anyhow::anyhow!("invalid adoption response"))
+    }
+
     /// `GET /api/v1/files/:id/chunks/:idx` — returns the raw encrypted
     /// chunk bytes. Decryption is the caller's job (`beebeeb_core`).
     pub async fn download_chunk(&self, file_id: &str, chunk_idx: u32) -> anyhow::Result<Vec<u8>> {

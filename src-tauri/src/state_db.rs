@@ -32,7 +32,8 @@ use std::sync::Mutex;
 /// R10 (spec 2026-10-06 §5.6): every table holding one account's data. `has_account_data` counts
 /// them and `clear_account_data` empties them. `every_table_is_classified_for_the_account_binding`
 /// fails when a new table is not listed here or in `DEVICE_TABLES`.
-const ACCOUNT_TABLES: [&str; 16] = [
+const ACCOUNT_TABLES: [&str; 17] = [
+    "owned_key_records",
     "files",
     "operation_queue",
     "local_activity",
@@ -2391,9 +2392,47 @@ pub struct TreeRow {
 /// `Connection` is `Send` but `!Sync` on its own). Lock contention is
 /// fine for our access pattern: the daemon does one tick every 5
 /// seconds and OS-extension callbacks are infrequent.
-pub struct StateDb(Mutex<Connection>);
+pub struct StateDb(Mutex<Connection>, std::sync::atomic::AtomicU64);
 
 impl StateDb {
+    /// Generation of this account-bound DB handle. The runner also stops its
+    /// old bridge before reset, so old requests cannot join a fresh engine.
+    pub fn account_revision(&self) -> u64 {
+        let _conn = self.0.lock().expect("state_db mutex poisoned");
+        self.1.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub fn get_owned_key_record(&self, id: &str) -> Result<Option<crate::owner_keys::OwnedKeyRecord>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let record: Option<String> = conn.query_row("SELECT record FROM owned_key_records WHERE file_id = ?1", [id], |r|r.get(0)).optional()?;
+        record.map(|s| serde_json::from_str(&s).map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))).transpose()
+    }
+
+    pub fn put_owned_key_record(&self, row: &crate::owner_keys::OwnedKeyRecord) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        Self::put_owned_key_record_conn(&conn, row)
+    }
+
+    pub fn put_owned_key_record_at_revision(&self, row: &crate::owner_keys::OwnedKeyRecord, revision: u64) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        if self.1.load(std::sync::atomic::Ordering::Acquire) != revision {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        Self::put_owned_key_record_conn(&conn, row)
+    }
+
+    fn put_owned_key_record_conn(conn: &Connection, row: &crate::owner_keys::OwnedKeyRecord) -> Result<()> {
+        let record = serde_json::to_string(row).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        conn.execute("INSERT INTO owned_key_records (file_id, record) VALUES (?1, ?2) ON CONFLICT(file_id) DO UPDATE SET record = excluded.record", params![row.file_id, record])?;
+        Ok(())
+    }
+
+    pub fn delete_owned_key_record(&self, id: &str) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute("DELETE FROM owned_key_records WHERE file_id = ?1", [id])?;
+        Ok(())
+    }
+
     /// Open or create the state database at `path`. Idempotent — the
     /// schema migration uses `CREATE TABLE IF NOT EXISTS` so re-opens
     /// are cheap.
@@ -2406,6 +2445,10 @@ impl StateDb {
         conn.execute_batch(
             "
             PRAGMA journal_mode = WAL;
+            CREATE TABLE IF NOT EXISTS owned_key_records (
+                file_id TEXT PRIMARY KEY,
+                record TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS files (
                 file_id TEXT PRIMARY KEY,
                 path TEXT NOT NULL,
@@ -2785,7 +2828,7 @@ impl StateDb {
             "INSERT OR IGNORE INTO staged_payloads(path, completed) SELECT payload_path, 0 FROM upload_resume",
             [],
         )?;
-        Ok(Self(Mutex::new(conn)))
+        Ok(Self(Mutex::new(conn), std::sync::atomic::AtomicU64::new(0)))
     }
 
     /// Insert or update a row keyed by `file_id`. ON CONFLICT replaces
@@ -6262,7 +6305,9 @@ impl StateDb {
             tx.execute(&format!("DELETE FROM {table}"), [])?;
         }
         tx.execute("DELETE FROM sync_state", [])?;
-        tx.commit()
+        tx.commit()?;
+        self.1.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Ok(())
     }
 
     /// R10: the account this local data belongs to, if one is recorded.
@@ -6276,7 +6321,9 @@ impl StateDb {
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction()?;
         write_owner(&tx, owner)?;
-        tx.commit()
+        tx.commit()?;
+        self.1.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Ok(())
     }
 
     /// Changes waiting to upload, plus the staged copies of them. Anything of either is a trace of an account:
@@ -6444,7 +6491,9 @@ impl StateDb {
             FINDER_DOMAIN_GONE_KEY
         };
         tx.execute("INSERT INTO sync_state (key, value) VALUES (?1, '1')", params![mark])?;
-        tx.commit()
+        tx.commit()?;
+        self.1.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Ok(())
     }
 
     /// Did the last clear leave the Finder domain known gone (a sign-out whose removal was confirmed)?
