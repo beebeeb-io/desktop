@@ -28,7 +28,9 @@ fn unleased_credential_commands(source: &str) -> Vec<String> {
 fn every_credential_command_has_admission_before_credential_reads() {
     // 33: `account_profile_fresh` (PR #140 delta review) reads the server with the session's token, so it is admitted too.
     // 34: `desktop_recent_files` (task 2243), the tray's recent list, is admitted like `desktop_file_overview`.
-    assert_eq!(SOURCE.matches("session_command!(async").count(), 34);
+    // 35, 36: task 2190's `parked_conflict_preview` and `resolve_parked_conflict` read the server with the
+    // session's token (the decision also writes the queue), so both are admitted.
+    assert_eq!(SOURCE.matches("session_command!(async").count(), 36);
     assert!(
         unleased_credential_commands(&SOURCE).is_empty(),
         "unleased commands: {:?}",

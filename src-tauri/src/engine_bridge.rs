@@ -3481,6 +3481,27 @@ impl EngineBridge {
     /// transfer or in conflict, agreed bytes, an upload already queued, no agreed content
     /// recorded, or an edit whose base is not known (never sent without one: it would replace
     /// the server's version unseen).
+    /// Task 2190 (the lead's condition on E3; glegion's constraints from #167's scan memo): the ONE
+    /// call each held branch of [`Self::classify_tracked_edit`] makes. Records that `file_id`'s edit
+    /// is held, not sent, with the file's content fingerprint, so the review feed shows it. Nothing
+    /// is written while neither the reason nor the fingerprint changed, and the `files` row is never
+    /// touched (the memo skips a settled file while that row is unchanged). A failure is logged: the
+    /// edit stays held either way.
+    fn hold_unsent_edit(&self, file_id: &str, path: &Path, reason: &str) {
+        let fingerprint = ContentFingerprint::of(path).map(|fp| format!("{fp:?}")).unwrap_or_default();
+        if let Err(e) = self.db.hold_unsent_edit(file_id, reason, &fingerprint, now_secs()) {
+            tracing::warn!(file_id = %file_id, error = %e, "sync folder: could not record a held edit");
+        }
+    }
+
+    /// Task 2190: the one call that ends a held edit's record, when the file reads as agreed, is
+    /// queued, or can be sent on a known base.
+    fn release_unsent_edit(&self, file_id: &str) {
+        if let Err(e) = self.db.release_unsent_edit(file_id) {
+            tracing::warn!(file_id = %file_id, error = %e, "sync folder: could not clear a held edit");
+        }
+    }
+
     fn classify_tracked_edit(
         &self,
         path: &Path,
@@ -3507,18 +3528,25 @@ impl EngineBridge {
         #[cfg(not(target_os = "windows"))]
         let os_in_sync = None;
         let base = match sync_folder_content(&self.db, &existing.file_id, path, os_in_sync) {
-            Ok(SyncFolderContent::Changed { base: Some(base) }) => base,
+            Ok(SyncFolderContent::Changed { base: Some(base) }) => {
+                self.release_unsent_edit(&existing.file_id);
+                base
+            }
             Ok(SyncFolderContent::Changed { base: None }) => {
                 tracing::warn!(
                     file_id = %existing.file_id,
                     "sync folder: an edit of a synced file has no known base version; it stays local, not sent"
                 );
+                self.hold_unsent_edit(&existing.file_id, path, HELD_BASE_UNKNOWN);
                 // Task 2229: held until its row records a base; no change of its bytes sends it.
                 return LocalPathVerdict::Settled;
             }
             // A file hydrated before this build has no agreed content: its change is kept on
             // disk (out of sync, so never stamped or freed) but not sent (task 2191).
-            Ok(SyncFolderContent::Unknown) if os_in_sync == Some(false) => {
+            // Task 2190: not reported in sync (Windows), or not a placeholder (an atomic save left a
+            // plain file; and every build without Cloud Files) may hold an edit.
+            Ok(SyncFolderContent::Unknown) if os_in_sync != Some(true) => {
+                self.hold_unsent_edit(&existing.file_id, path, HELD_CONTENT_UNKNOWN);
                 // Once per file per change (review N11): the scan asks again after each change.
                 static WARNED: std::sync::OnceLock<std::sync::Mutex<HashMap<String, (u64, std::time::SystemTime)>>> =
                     std::sync::OnceLock::new();
@@ -3537,8 +3565,14 @@ impl EngineBridge {
             }
             // Task 2229: unknown content is held until its row records the agreed content, whatever
             // its bytes and its in-sync state; the scan remembers it like agreed bytes.
-            Ok(SyncFolderContent::Agreed | SyncFolderContent::Unknown) => return LocalPathVerdict::Settled,
-            Ok(SyncFolderContent::Queued) => return LocalPathVerdict::Skip,
+            Ok(SyncFolderContent::Agreed | SyncFolderContent::Unknown) => {
+                self.release_unsent_edit(&existing.file_id);
+                return LocalPathVerdict::Settled;
+            }
+            Ok(SyncFolderContent::Queued) => {
+                self.release_unsent_edit(&existing.file_id);
+                return LocalPathVerdict::Skip;
+            }
             Err(e) => {
                 tracing::warn!(file_id = %existing.file_id, error = %e, "sync folder: could not compare a synced file with its agreed content");
                 return LocalPathVerdict::Skip;
@@ -5392,6 +5426,125 @@ impl EngineBridge {
         Ok(ConflictContentPreview { is_text, local, remote })
     }
 
+    /// Task 2190 (plan §3.4): both sides of a parked conflict. The Mac's side is the parked write's
+    /// staged copy, read with the same bounds as [`Self::local_content_preview`]; the other side is
+    /// the server's current version. Read-only.
+    pub async fn parked_conflict_preview(&self, op_id: &str) -> anyhow::Result<ConflictContentPreview> {
+        let op = self
+            .db
+            .get_operation(op_id)?
+            .ok_or_else(|| anyhow::anyhow!("no queued write {op_id}"))?;
+        let file_id = op.file_id.clone().ok_or_else(|| anyhow::anyhow!("the write names no file"))?;
+        let entry = self
+            .db
+            .get_file(&file_id)?
+            .ok_or_else(|| anyhow::anyhow!("no state.db row for {file_id}"))?;
+        let is_text = is_text_file(&entry.path);
+        let payload = PathBuf::from(op.payload_path.ok_or_else(|| anyhow::anyhow!("the write has no staged copy"))?);
+        let local = match (payload.parent(), payload.file_name().and_then(|name| name.to_str())) {
+            (Some(dir), Some(name)) => self.local_content_preview(dir, name, is_text),
+            _ => ConflictContentSide {
+                size_bytes: None,
+                text: None,
+                unavailable_reason: Some("Couldn't locate this Mac's copy.".to_string()),
+            },
+        };
+        let remote = self.remote_content_preview(&file_id, is_text).await;
+        Ok(ConflictContentPreview { is_text, local, remote })
+    }
+
+    /// Task 2190 (plan §3.2): the person's decision on a parked conflict. Every choice re-checks
+    /// [`StateDb::is_decidable_parked`] inside its own transaction, and returns `Moved`, with nothing
+    /// changed, when the op moved since the review was read.
+    /// - `Local`: the same op is rebased on the server's version and sent again.
+    /// - `Remote` (D1): `keep_copy` copies the Mac's bytes into the "Changes not sent" folder FIRST.
+    ///   If it fails, nothing changed. Then the op goes and the system reads the server's version.
+    ///   The staged copy is released only after that commit.
+    /// - `Both` (D4): the Mac's bytes are queued as a new file named [`keep_both_name`] beside the
+    ///   original, then the op goes as in `Remote`. If the op moved between the two steps, the new
+    ///   file stays (nothing is lost) and the result is `Moved`.
+    pub fn resolve_parked(
+        &self,
+        op_id: &str,
+        choice: ParkedChoice,
+        keep_copy: &mut dyn FnMut(&Path, &str) -> anyhow::Result<PathBuf>,
+        device: &str,
+        hhmm: &str,
+    ) -> anyhow::Result<ParkedResolution> {
+        if choice == ParkedChoice::Local {
+            return Ok(match self.db.rebase_parked(op_id, now_secs())? {
+                Some(version) => ParkedResolution::Rebased { version },
+                None => ParkedResolution::Moved,
+            });
+        }
+        if !self.db.is_decidable_parked(op_id)? {
+            return Ok(ParkedResolution::Moved);
+        }
+        let op = self
+            .db
+            .get_operation(op_id)?
+            .ok_or_else(|| anyhow::anyhow!("no queued write {op_id}"))?;
+        let file_id = op.file_id.clone().ok_or_else(|| anyhow::anyhow!("the write names no file"))?;
+        let row = self
+            .db
+            .get_file(&file_id)?
+            .ok_or_else(|| anyhow::anyhow!("no state.db row for {file_id}"))?;
+        let payload = op
+            .payload_path
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("the parked write has no staged copy"))?;
+        let kept = match choice {
+            ParkedChoice::Remote => {
+                let kept = keep_copy(Path::new(&payload), &row.path)?;
+                ParkedResolution::KeptOther {
+                    kept_copy: kept.to_string_lossy().into_owned(),
+                }
+            }
+            ParkedChoice::Both => {
+                let contract = self
+                    .db
+                    .get_file_contract_state(&file_id)?
+                    .ok_or_else(|| anyhow::anyhow!("no contract for {file_id}"))?;
+                let (parent_rel, leaf) = match row.path.rsplit_once('/') {
+                    Some((parent, leaf)) => (Some(parent), leaf),
+                    None => (None, row.path.as_str()),
+                };
+                let taken = self.db.child_names_lowercase(contract.parent_id.as_deref())?;
+                let name = keep_both_name(leaf, device, hhmm, &taken);
+                let target = FinderWriteTarget {
+                    file_id: None,
+                    parent_id: contract.parent_id.clone(),
+                    filename: name.clone(),
+                    rel_path: Some(match parent_rel {
+                        Some(parent) => format!("{parent}/{name}"),
+                        None => name.clone(),
+                    }),
+                    kind: FinderWriteItemKind::File,
+                    contents_path: Some(payload.clone()),
+                    content_type: contract.content_type.clone(),
+                    base_version_identifier: None,
+                };
+                let written = self.queue_file_provider_create_from(target, Some(&std::fs::File::open(&payload)?))?;
+                match written.outcome {
+                    FinderWriteOutcome::Queued { file_id: Some(new_id), .. } => {
+                        ParkedResolution::KeptBoth { file_id: new_id, name }
+                    }
+                    other => anyhow::bail!("the copy could not be queued as a new file: {other:?}"),
+                }
+            }
+            ParkedChoice::Local => unreachable!("handled above"),
+        };
+        match self.db.drop_parked(op_id)? {
+            Some(released) => {
+                if let Some(released) = released {
+                    crate::staged_payload::remove_or_log(&self.db, Path::new(&released));
+                }
+                Ok(kept)
+            }
+            None => Ok(ParkedResolution::Moved),
+        }
+    }
+
     /// Local half of [`Self::conflict_content_preview`] (task 1546 Codex
     /// round 2, finding 1): stats the file to learn its size WITHOUT reading
     /// it, and only reads bytes at all when a text preview applies AND the
@@ -5565,6 +5718,57 @@ pub struct ConflictContentSide {
     pub unavailable_reason: Option<String>,
 }
 
+/// Task 2190 (plan §3.2): what the person chose for a parked conflict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ParkedChoice {
+    /// "Keep this Mac's".
+    Local,
+    /// "Keep the other".
+    Remote,
+    /// "Keep both".
+    Both,
+}
+
+/// Task 2190: what a decision on a parked conflict did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum ParkedResolution {
+    /// The write is sent again, on the server's version `version`.
+    Rebased { version: i64 },
+    /// The Mac's bytes are kept at `kept_copy`, and the system reads the server's version.
+    KeptOther { kept_copy: String },
+    /// The Mac's bytes are queued as the new file `name`, beside the original.
+    KeptBoth { file_id: String, name: String },
+    /// The write moved since the review was read: nothing changed.
+    Moved,
+}
+
+/// Task 2190 (plan §3.3, D4): the name of the "Keep both" copy, `{stem} ({device}, HH.MM){ext}`.
+/// While that is taken, it becomes `{stem} ({device}, HH.MM) 2{ext}`, then ` 3`, and so on. It is
+/// never a name in `taken` (the parent's names, lowercased). The time uses a dot, not D4's colon:
+/// a `:` in a Mac file name shows as `/` in Finder, which is why 1887's kept folders use dots too. A
+/// leading dot (`.env`) is not an extension.
+pub(crate) fn keep_both_name(original: &str, device: &str, hhmm: &str, taken: &std::collections::HashSet<String>) -> String {
+    let (stem, ext) = match original.rfind('.') {
+        Some(dot) if dot > 0 => original.split_at(dot),
+        _ => (original, ""),
+    };
+    let base = format!("{stem} ({device}, {hhmm})");
+    let mut counter = 1u32;
+    loop {
+        let candidate = if counter == 1 {
+            format!("{base}{ext}")
+        } else {
+            format!("{base} {counter}{ext}")
+        };
+        if !taken.contains(&candidate.to_lowercase()) {
+            return candidate;
+        }
+        counter += 1;
+    }
+}
+
 /// Result of [`EngineBridge::conflict_content_preview`] — the real content
 /// (or an honest reason it's unavailable) for both sides of a conflict.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -5681,6 +5885,61 @@ pub fn is_ignored_finder_name(name: &str) -> bool {
 
 pub fn version_conflict_feed_from_db(db: &StateDb) -> anyhow::Result<Vec<VersionConflictEntry>> {
     let mut entries = Vec::new();
+
+    // Task 2190 (the lead's condition on E3): a sync-folder edit the scan holds is shown, so it
+    // never looks synced in the app. It is not sent, never marked in sync and never written over
+    // (task 1640), and both versions are kept.
+    // - `base_unknown`: a known edit whose base is not known: one row each, needing a decision.
+    // - `content_unknown`: a file hydrated before task 1640. The scan cannot tell an edited one from
+    //   an untouched one (task 2191 S1 marks them all not in sync), so they are ONE row that says
+    //   they are not checked yet, never "needs a decision" per file.
+    let mut not_checked: Vec<(String, String, i64)> = Vec::new();
+    for (file_id, path, reason, detected_at) in db.list_held_edits()? {
+        if reason == HELD_CONTENT_UNKNOWN {
+            not_checked.push((file_id, path, detected_at));
+            continue;
+        }
+        entries.push(VersionConflictEntry {
+            id: format!("held:{file_id}"),
+            file_id,
+            file_name: display_name_for_path(&path),
+            kind: "held_edit".to_string(),
+            status: "needs a decision".to_string(),
+            updated_at: Some(detected_at),
+            detail: "Changed on this PC, but Beebeeb doesn't know which version it was based on, so it \
+                     isn't sent. Both versions are kept: yours on this PC, the other in the file's history."
+                .to_string(),
+            action: "review_upload".to_string(),
+            op_id: None,
+            version_id: None,
+            base_version: None,
+            last_error: None,
+        });
+    }
+    if let Some((first_id, _, first_at)) = not_checked.first().cloned() {
+        let names: Vec<String> = not_checked.iter().take(5).map(|(_, path, _)| display_name_for_path(path)).collect();
+        let more = not_checked.len().saturating_sub(names.len());
+        let files = if not_checked.len() == 1 { "1 file".to_string() } else { format!("{} files", not_checked.len()) };
+        entries.push(VersionConflictEntry {
+            id: "held:content_unknown".to_string(),
+            file_id: first_id,
+            file_name: format!("{files} from before version 0.8.13"),
+            kind: "held_unknown".to_string(),
+            status: "not checked yet".to_string(),
+            updated_at: Some(first_at),
+            detail: format!(
+                "A change to one of them stays on this PC and isn't sent until a later update checks it. \
+                 Nothing is lost. {}{}",
+                names.join(", "),
+                if more > 0 { format!(" and {more} more") } else { String::new() }
+            ),
+            action: "review_upload".to_string(),
+            op_id: None,
+            version_id: None,
+            base_version: None,
+            last_error: None,
+        });
+    }
 
     for file in db.list_by_status(FileStatus::Conflict)? {
         entries.push(VersionConflictEntry {
@@ -5879,6 +6138,10 @@ pub(crate) enum SyncFolderContent {
     Unknown,
 }
 
+/// Task 2190: a held edit's reasons (`held_edits.reason`).
+const HELD_BASE_UNKNOWN: &str = "base_unknown";
+const HELD_CONTENT_UNKNOWN: &str = "content_unknown";
+
 /// [`SyncFolderContent`] of `file_id`'s bytes at `path`. `os_in_sync` is the Cloud Files in-sync
 /// state of its placeholder (Windows; `None` elsewhere): the platform clears it when the bytes
 /// change, and this engine sets it only on agreed content, so `Some(true)` is agreed without
@@ -5936,6 +6199,32 @@ pub(crate) fn sync_folder_content(
     Ok(SyncFolderContent::Changed {
         base: Some(base).filter(|version| *version > 0),
     })
+}
+
+/// Task 2190 (plan §7.2): the base of an edit of `entry`'s sync-folder file that is not queued
+/// yet: bytes other than its agreed content ([`sync_folder_content`]), with the version they are
+/// based on (`Some(None)`: not known). `None`: no such edit. A placeholder that is not wholly on
+/// disk holds none (Windows: reading it would fetch the rest), and a file that cannot be read or
+/// compared counts as none, so its row re-anchors as before.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+fn sync_folder_unqueued_edit(db: &StateDb, sync_root: &Path, entry: &FileEntry) -> Option<Option<i64>> {
+    let path = local_file_path_under_sync_root(sync_root, &entry.path).ok()?;
+    if !path.is_file() {
+        return None;
+    }
+    #[cfg(target_os = "windows")]
+    let os_in_sync = {
+        if !crate::windows_cf::placeholders::fully_on_disk(&path) {
+            return None;
+        }
+        crate::windows_cf::placeholders::placeholder_in_sync(&path)
+    };
+    #[cfg(not(target_os = "windows"))]
+    let os_in_sync = None;
+    match sync_folder_content(db, &entry.file_id, &path, os_in_sync) {
+        Ok(SyncFolderContent::Changed { base }) => Some(base),
+        _ => None,
+    }
 }
 
 /// Task 1640 (review N1, condition 2): make a file's candidate its agreed content. Only for a
@@ -7581,6 +7870,13 @@ fn review_entry_for_operation(op: &PendingOperation, db: &StateDb) -> anyhow::Re
         })
         .unwrap_or_else(|| file_id.clone());
     let (kind, status, detail, action) = classify_review_operation(op);
+    // Task 2190 (plan §3.4): a parked stale-base Finder write the person may decide opens the
+    // conflict; every other row keeps its action (D3).
+    let action = if kind == "stale_base" && db.is_decidable_parked(&op.op_id)? {
+        "open_conflict"
+    } else {
+        action
+    };
 
     Ok(VersionConflictEntry {
         id: format!("op:{}", op.op_id),
@@ -8316,9 +8612,8 @@ fn apply_metadata_file_row(
             .or_else(|| f["object_version_id"].as_str())
             .map(str::to_string)
             .or(contract.current_object_version_id.take());
-        if entry.status == FileStatus::Local && contract.local_base_version == 0 {
-            contract.local_base_version = contract.current_version;
-        }
+        // Task 2190 (plan §7.1 E3): a `Local` row's base is never invented from the server's
+        // version. 0 stays unknown; an edit on an unknown base is held, not sent (task 2229).
         contract.last_sync_at = now;
     })?;
     // Task 1640 (review F1): a move changes no byte, but the candidate is never promoted at the
@@ -8720,7 +9015,7 @@ fn apply_snapshot(
         };
 
         if let Some((rel_path, _kind)) =
-            process_metadata_row(bridge, f, &parent_rel_path, now_secs, RowSource::Snapshot, conflicts)?
+            process_metadata_row(bridge, sync_root, f, &parent_rel_path, now_secs, RowSource::Snapshot, conflicts)?
         {
             if !rel_path.is_empty() {
                 resolved_paths.insert(file_id.to_string(), rel_path);
@@ -9527,7 +9822,7 @@ fn apply_sync_op(
             let new_name = payload["new_name_encrypted"].as_str();
             let row = synthesize_op_row(bridge, id, op, new_name);
             let parent_rel = existing_parent_rel_path(bridge, id);
-            if process_metadata_row(bridge, &row, &parent_rel, now_secs, RowSource::Op, conflicts)?.is_some() {
+            if process_metadata_row(bridge, sync_root, &row, &parent_rel, now_secs, RowSource::Op, conflicts)?.is_some() {
                 applied.push(id.to_string());
             }
         }
@@ -9550,7 +9845,7 @@ fn apply_sync_op(
             } else {
                 existing_parent_rel_path(bridge, id)
             };
-            if process_metadata_row(bridge, &row, &parent_rel, now_secs, RowSource::Op, conflicts)?.is_some() {
+            if process_metadata_row(bridge, sync_root, &row, &parent_rel, now_secs, RowSource::Op, conflicts)?.is_some() {
                 applied.push(id.to_string());
             }
         }
@@ -9583,7 +9878,7 @@ fn apply_sync_op(
             } else {
                 parent_rel_path_by_id(bridge, payload["parent_id"].as_str())
             };
-            if process_metadata_row(bridge, &row, &parent_rel, now_secs, RowSource::Op, conflicts)?.is_some() {
+            if process_metadata_row(bridge, sync_root, &row, &parent_rel, now_secs, RowSource::Op, conflicts)?.is_some() {
                 applied.push(id.to_string());
             }
             #[cfg(target_os = "macos")]
@@ -9771,11 +10066,14 @@ enum RowSource {
 /// when the row is unusable (empty id / undecryptable name).
 fn process_metadata_row(
     bridge: &EngineBridge,
+    sync_root: &Path,
     f: &serde_json::Value,
     parent_rel_path: &str,
     now_secs: i64,
     source: RowSource,
-    conflicts: &mut Vec<ConflictDetected>,
+    // Task 2190 (plan §7.1 E1): the detector reports no `ConflictDetected`; a concurrent edit is
+    // the parked op. Kept so the tick's conflict plumbing stays as it is.
+    _conflicts: &mut Vec<ConflictDetected>,
 ) -> anyhow::Result<Option<(String, ItemKind)>> {
     let file_id = f["id"].as_str().unwrap_or_default();
     if file_id.is_empty() {
@@ -9870,23 +10168,45 @@ fn process_metadata_row(
                 return Ok(Some((entry.path, entry.item_kind)));
             }
 
-            // Synthesise version triplet (no server content hash on metadata;
-            // `size-mtime` is an opaque-but-stable surrogate — conservative,
-            // a same-size+mtime edit won't flag, but those collisions are rare).
+            // Task 2190 (follow-up 1, plan §7.2): the triplet from real sources. `base` is the
+            // content this device last agreed with the server on (task 1640: `local_hash` at
+            // `local_base_version`), `remote` the server's version on this row, and `local` the
+            // device's bytes where the engine reads them (a sync-folder file). Elsewhere a `Local`
+            // row has no pending write, so its bytes are the base. `content_hash` is not read: it
+            // has no writer, and on macOS it is part of the File Provider content version (E2).
+            // The edit's base is the one the scan will queue it on (`sync_folder_content`: the agreed
+            // content, or the fetched candidate before it is promoted), so the two never disagree.
+            let edit = if cfg!(any(target_os = "windows", test)) {
+                sync_folder_unqueued_edit(bridge.db(), sync_root, &entry)
+            } else {
+                None
+            };
+            let base_version = match edit {
+                Some(Some(base)) => base,
+                _ => bridge.db().get_file_contract_state(file_id)?.map_or(0, |c| c.local_base_version),
+            };
+            let remote_version = f["current_version"]
+                .as_i64()
+                .or_else(|| f["version"].as_i64())
+                .or_else(|| f["version_number"].as_i64());
+            let agreed = format!("v{base_version}");
             let local = VersionInfo {
-                hash: entry.content_hash.clone().unwrap_or_default(),
+                hash: if edit.is_some() { "changed".to_string() } else { agreed.clone() },
                 modified_at: entry.modified_at as u64,
             };
             let remote = VersionInfo {
-                hash: format!("{size}-{remote_updated}"),
+                hash: match remote_version {
+                    Some(version) if base_version > 0 && version > base_version => format!("v{version}"),
+                    _ => agreed.clone(),
+                },
                 modified_at: remote_updated as u64,
             };
             let base = VersionInfo {
-                hash: entry.content_hash.clone().unwrap_or_default(),
+                hash: agreed,
                 modified_at: entry.remote_updated_at as u64,
             };
-            // Local matches base → only remote changed. Quietly re-anchor and
-            // let a future hydrate replace bytes when the user opens it.
+            // Rows 1 and 3: the bytes are the base (or our own edit is not sent yet, or its base is
+            // unknown). Re-anchor and let a future hydrate replace bytes when the user opens it.
             if !is_conflict(&local, &remote, &base) {
                 let mut updated = entry.clone();
                 updated.remote_updated_at = remote_updated;
@@ -9896,32 +10216,19 @@ fn process_metadata_row(
                 return apply(bridge);
             }
 
-            // True conflict. Flip status, anchor `modified_at` to "now" so the
-            // auto-resolution clock starts from detection.
-            let mut updated = entry.clone();
-            updated.status = FileStatus::Conflict;
-            updated.modified_at = now_secs;
-            bridge.db().upsert_file(&updated)?;
-
-            let file_name = std::path::Path::new(&entry.path)
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or(&entry.path)
-                .to_string();
-            let is_text = is_text_file(&file_name);
+            // Row 2: an edit on disk that the scan has not queued yet, and a server version past its
+            // base. The metadata write records the server's version as row 1's does; the edit's base
+            // (the agreed content or the fetched candidate) is not touched, so the scan queues the
+            // edit on it, the server refuses it as stale, and it parks with its bytes: a reviewable
+            // conflict (plan §3, E1). No `Conflict` status: its windows and its 24 h Keep Both stay
+            // dormant.
             tracing::warn!(
                 file_id = %entry.file_id,
-                name = %file_name,
-                "conflict detected on tick — both sides moved past base"
+                base_version,
+                remote_version = remote_version.unwrap_or_default(),
+                "concurrent edit: a sync-folder change not sent yet, and a newer server version; its upload parks for review"
             );
-            conflicts.push(ConflictDetected {
-                file_id: entry.file_id.clone(),
-                file_name,
-                is_text,
-            });
-            // A conflicted folder is unusual, but still report its path/kind so
-            // enumeration of its (independent) children continues.
-            Ok(Some((entry.path, entry.item_kind)))
+            apply(bridge)
         }
         Some(entry) => {
             // (3) Pending download/upload/conflict/error — let the dedicated
@@ -14172,7 +14479,7 @@ mod tests {
             "is_uploading": true,
             "updated_at": 100
         });
-        let resolved = process_metadata_row(&bridge, &row, "", 200, RowSource::Snapshot, &mut conflicts).unwrap();
+        let resolved = process_metadata_row(&bridge, Path::new("/no-sync-root"), &row, "", 200, RowSource::Snapshot, &mut conflicts).unwrap();
         assert!(resolved.is_none());
         assert!(
             bridge.db.get_file("partial-upload-1").unwrap().is_none(),
@@ -29874,11 +30181,12 @@ mod tests {
     /// macOS (File Provider): the Mac's save is queued with base 1, the web saves version 2, the
     /// tick runs, the upload is refused as stale and parks, and a fetch is served from the parked
     /// copy. Both versions survive (the web's on the server, the Mac's in the queue and in
-    /// Finder), but no conflict is raised: the row is `Error` and the edit sits as a
-    /// `stale_base` review entry that has no action.
+    /// Finder). Since follow-up 2 the parked edit is the conflict: its review entry opens it
+    /// (`open_conflict`), where it had no action before (the pin's name until then:
+    /// `…_park_as_stale_base_and_never_become_a_conflict`). Still no `Conflict` status (plan E1).
     #[cfg(target_os = "macos")]
     #[tokio::test]
-    async fn task_2190_a_finder_edit_and_a_web_edit_park_as_stale_base_and_never_become_a_conflict() {
+    async fn task_2190_a_finder_edit_and_a_web_edit_park_as_stale_base_and_become_a_decidable_conflict() {
         let master_key = [219u8; 32];
         let file = "21900000-0000-4000-8000-000000000001";
         let (dir, sync_root, server, bridge) = rule3_setup(master_key);
@@ -29938,7 +30246,7 @@ mod tests {
         let feed = bridge.version_conflict_feed().unwrap();
         let kinds: Vec<&str> = feed.iter().map(|entry| entry.kind.as_str()).collect();
         assert_eq!(kinds, vec!["stale_base"]);
-        assert_eq!(feed[0].action, "review_upload");
+        assert_eq!(feed[0].action, "open_conflict", "the parked edit is a decidable conflict (follow-up 2)");
         assert!(bridge.db.list_by_status(FileStatus::Conflict).unwrap().is_empty());
 
         // Both versions survive.
@@ -29955,6 +30263,412 @@ mod tests {
         );
         assert_eq!(state.files[file].versions.len(), 2, "the server holds the web's version as current");
         assert_eq!(state.latest_plaintext(file, master_key), b"edited on the web");
+    }
+
+    /// A hydrated sync-folder file at version 1, then `edit` (when given) written on disk without
+    /// the upload driver seeing it, then the web's version 2 and the tick (follow-up 1, plan §7.2).
+    async fn task_2190_fu1_tick_after(
+        master_key: [u8; 32],
+        file: &str,
+        edit: Option<&[u8]>,
+    ) -> (tempfile::TempDir, PathBuf, VersionedServerMock, EngineBridge, FileEntry, SyncTickOutcome) {
+        let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_row(&bridge, &server, file);
+        {
+            let mut s = server.state.lock().unwrap();
+            s.files.get_mut(file).unwrap().versions[0] = vec![task_2190_server_chunk(master_key, file, b"version one")];
+            s.serve_downloads = true;
+        }
+        let local = sync_root.join("notes.txt");
+        bridge.hydrate_file(file, &local, &[sync_root.as_path()]).await.unwrap();
+        let before = bridge.db.get_file(file).unwrap().unwrap();
+        if let Some(edit) = edit {
+            std::fs::write(&local, edit).unwrap();
+        }
+        task_2190_web_saves(&server, master_key, file, b"edited on the web");
+        let tick = sync_tick_outcome(&bridge, &sync_root).await.unwrap();
+        (dir, sync_root, server, bridge, before, tick)
+    }
+
+    /// Row 2: an edit the scan has not queued yet, and a newer server version. The tick records
+    /// the server's version and leaves the edit's base alone; the scan then queues it on base 1,
+    /// it parks as stale, and both versions survive.
+    #[tokio::test]
+    async fn task_2190_fu1_a_concurrent_edit_the_scan_has_not_queued_keeps_its_base_and_parks() {
+        let master_key = [221u8; 32];
+        let file = "21900000-0000-4000-8000-000000000011";
+        let (_dir, sync_root, server, bridge, before, tick) =
+            task_2190_fu1_tick_after(master_key, file, Some(b"edited before the scan")).await;
+        assert!(tick.conflicts.is_empty(), "no ConflictDetected (E1)");
+        let row = bridge.db.get_file(file).unwrap().unwrap();
+        let contract = bridge.db.get_file_contract_state(file).unwrap().unwrap();
+        assert_eq!(row.status, FileStatus::Local, "no Conflict status (E1)");
+        assert_eq!(contract.current_version, 2, "the server's version is recorded");
+        let _ = before;
+
+        let local = sync_root.join("notes.txt");
+        assert!(crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "scan"));
+        assert_eq!(bridge.db.list_operations_for_file(file).unwrap()[0].base_version, Some(1));
+        bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+        let parked = bridge.db.list_operations_for_file(file).unwrap().remove(0);
+        assert_eq!(parked.last_error.as_deref(), Some("stale_base"), "refused as stale and parked");
+        assert_eq!(std::fs::read(&local).unwrap(), b"edited before the scan", "the edit is on disk");
+        drop(bridge);
+        let state = server.finish();
+        assert_eq!(state.latest_plaintext(file, master_key), b"edited on the web", "the web's version is current");
+    }
+
+    /// Row 1: the bytes are the agreed content, so the tick re-anchors the row to the server's
+    /// version as before, and the base stays the agreed one.
+    #[tokio::test]
+    async fn task_2190_fu1_agreed_bytes_re_anchor_to_the_server() {
+        let master_key = [222u8; 32];
+        let file = "21900000-0000-4000-8000-000000000012";
+        let (_dir, _sync_root, _server, bridge, _before, tick) = task_2190_fu1_tick_after(master_key, file, None).await;
+        assert!(tick.conflicts.is_empty());
+        let row = bridge.db.get_file(file).unwrap().unwrap();
+        let contract = bridge.db.get_file_contract_state(file).unwrap().unwrap();
+        assert_eq!(row.size_bytes, b"edited on the web".len() as i64, "re-anchored to the server's size");
+        assert_eq!(row.remote_updated_at, 1_700_000_500, "re-anchored to the server's stamp");
+        assert_eq!((contract.current_version, contract.local_base_version), (2, 1));
+    }
+
+    /// E3: a `Local` row whose base is unknown keeps it unknown when the pull sees it; the
+    /// server's version is never written over it as the base of the bytes on disk.
+    #[tokio::test]
+    async fn task_2190_fu1_a_local_row_with_an_unknown_base_keeps_it_unknown() {
+        let master_key = [223u8; 32];
+        let file = "21900000-0000-4000-8000-000000000013";
+        let (_dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_row(&bridge, &server, file);
+        bridge
+            .db
+            .test_execute(&format!("UPDATE files SET local_base_version = 0 WHERE file_id = '{file}'"))
+            .unwrap();
+        task_2190_web_saves(&server, master_key, file, b"edited on the web");
+        sync_tick_outcome(&bridge, &sync_root).await.unwrap();
+        let contract = bridge.db.get_file_contract_state(file).unwrap().unwrap();
+        assert_eq!(contract.current_version, 2);
+        assert_eq!(contract.local_base_version, 0, "the base stays unknown, never the server's version");
+    }
+
+    /// The macOS pin's steps 1–4: a Mac save on version 1, the web's version 2, the tick, and the
+    /// upload parked as stale. Returns the parked op, its staged copy and the Mac's token.
+    #[cfg(target_os = "macos")]
+    async fn task_2190_parked(
+        master_key: [u8; 32],
+        file: &str,
+    ) -> (tempfile::TempDir, PathBuf, VersionedServerMock, EngineBridge, String, String, String) {
+        let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_row(&bridge, &server, file);
+        let mac_save = fp_save(&bridge, dir.path(), file, "notes.txt", b"edited on this Mac", "1");
+        let token = mac_save.token.clone().expect("a Finder save names its bytes");
+        task_2190_web_saves(&server, master_key, file, b"edited on the web");
+        sync_tick_outcome(&bridge, &sync_root).await.unwrap();
+        bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+        let parked = bridge.db.list_operations_for_file(file).unwrap().remove(0);
+        assert_eq!(parked.last_error.as_deref(), Some("stale_base"), "precondition: parked as stale");
+        assert!(bridge.db.is_decidable_parked(&parked.op_id).unwrap(), "precondition: decidable");
+        let staged = parked.payload_path.clone().unwrap();
+        (dir, sync_root, server, bridge, parked.op_id, staged, token)
+    }
+
+    /// A `keep_copy` for the tests: the bytes go to `<root>/kept/<row path>`.
+    #[cfg(target_os = "macos")]
+    fn task_2190_keep_into(root: &Path) -> impl FnMut(&Path, &str) -> anyhow::Result<PathBuf> + '_ {
+        move |source, rel| {
+            let dest = root.join("kept").join(rel);
+            std::fs::create_dir_all(dest.parent().unwrap())?;
+            std::fs::copy(source, &dest)?;
+            Ok(dest)
+        }
+    }
+
+    /// "Keep this Mac's": the same op is rebased on version 2 and sent again; the server's new
+    /// current version is the Mac's bytes, and the web's stays in its history.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn task_2190_fu2_keep_this_macs_sends_the_write_on_the_servers_version() {
+        let master_key = [224u8; 32];
+        let file = "21900000-0000-4000-8000-000000000021";
+        let (dir, sync_root, server, bridge, op_id, _staged, _token) = task_2190_parked(master_key, file).await;
+        let mut keep = task_2190_keep_into(dir.path());
+        let done = bridge.resolve_parked(&op_id, ParkedChoice::Local, &mut keep, "Mac", "10.00").unwrap();
+        assert_eq!(done, ParkedResolution::Rebased { version: 2 });
+        let op = bridge.db.get_operation(&op_id).unwrap().unwrap();
+        assert_eq!((op.base_version, op.attempts, op.last_error.as_deref()), (Some(2), 0, None));
+        assert_eq!(bridge.db.get_file(file).unwrap().unwrap().status, FileStatus::Uploading);
+        bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+        assert!(bridge.db.list_operations_for_file(file).unwrap().is_empty(), "sent and landed");
+        drop(bridge);
+        let state = server.finish();
+        assert_eq!(state.init_summary(), vec![(json!(file), json!(1), 409), (json!(file), json!(2), 201)]);
+        assert_eq!(state.files[file].versions.len(), 3, "the web's version stays in the history");
+        assert_eq!(state.latest_plaintext(file, master_key), b"edited on this Mac");
+    }
+
+    /// "Keep the other" (D1): the Mac's bytes are copied first, then the op goes, the token is
+    /// cleared (the system reads version 2), and the staged copy is released after the commit.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn task_2190_fu2_keep_the_other_keeps_a_copy_first_then_reads_the_servers_version() {
+        let master_key = [225u8; 32];
+        let file = "21900000-0000-4000-8000-000000000022";
+        let (dir, _sync_root, server, bridge, op_id, staged, token) = task_2190_parked(master_key, file).await;
+        let mut keep = task_2190_keep_into(dir.path());
+        let done = bridge.resolve_parked(&op_id, ParkedChoice::Remote, &mut keep, "Mac", "10.00").unwrap();
+        let ParkedResolution::KeptOther { kept_copy } = done else { panic!("not kept: {done:?}") };
+        assert_eq!(std::fs::read(&kept_copy).unwrap(), b"edited on this Mac", "the Mac's edit is kept");
+        assert!(bridge.db.get_operation(&op_id).unwrap().is_none(), "the parked op is gone");
+        assert!(!Path::new(&staged).exists(), "the staged copy is released");
+        // Read before any presentation: the payload builder clears a held token whose write is gone
+        // (§5.3 housekeeping), so only this order shows that the decision left none behind itself.
+        assert!(
+            bridge.db.item_presentation(file).unwrap().unwrap().held.is_none(),
+            "the decision clears the held token's columns itself"
+        );
+        assert_ne!(held_content_version(&bridge, file), token, "Finder is shown the server's version");
+        assert_eq!(bridge.db.get_file(file).unwrap().unwrap().status, FileStatus::Local);
+        drop(bridge);
+        let state = server.finish();
+        assert_eq!(state.files[file].versions.len(), 2);
+        assert_eq!(state.latest_plaintext(file, master_key), b"edited on the web");
+    }
+
+    /// D1: when the copy cannot be made, "Keep the other" fails and changes nothing.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn task_2190_fu2_keep_the_other_changes_nothing_when_the_copy_fails() {
+        let master_key = [226u8; 32];
+        let file = "21900000-0000-4000-8000-000000000023";
+        let (_dir, _sync_root, _server, bridge, op_id, staged, token) = task_2190_parked(master_key, file).await;
+        let mut failing = |_: &Path, _: &str| -> anyhow::Result<PathBuf> { anyhow::bail!("the disk is full") };
+        assert!(bridge.resolve_parked(&op_id, ParkedChoice::Remote, &mut failing, "Mac", "10.00").is_err());
+        assert!(bridge.db.is_decidable_parked(&op_id).unwrap(), "still parked and decidable");
+        assert_eq!(std::fs::read(&staged).unwrap(), b"edited on this Mac", "the staged copy is kept");
+        assert_eq!(held_content_version(&bridge, file), token, "the token is kept");
+    }
+
+    /// "Keep both" (D4): the Mac's bytes are queued as a new file with a unique name beside the
+    /// original, and the original reads the server's version; both land on the server.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn task_2190_fu2_keep_both_queues_the_macs_bytes_as_a_new_file_with_a_unique_name() {
+        let master_key = [227u8; 32];
+        let file = "21900000-0000-4000-8000-000000000024";
+        let (dir, sync_root, server, bridge, op_id, _staged, token) = task_2190_parked(master_key, file).await;
+        let mut keep = task_2190_keep_into(dir.path());
+        let done = bridge.resolve_parked(&op_id, ParkedChoice::Both, &mut keep, "Mac", "10.00").unwrap();
+        let ParkedResolution::KeptBoth { file_id: new_id, name } = done else { panic!("not both: {done:?}") };
+        assert_eq!(name, "notes (Mac, 10.00).txt");
+        assert_eq!(bridge.db.get_file(&new_id).unwrap().unwrap().path, "notes (Mac, 10.00).txt");
+        assert!(bridge.db.get_operation(&op_id).unwrap().is_none(), "the parked op is gone");
+        assert!(
+            bridge.db.item_presentation(file).unwrap().unwrap().held.is_none(),
+            "the decision clears the held token's columns itself (read before any presentation)"
+        );
+        assert_ne!(held_content_version(&bridge, file), token, "the original reads the server's version");
+        assert!(!dir.path().join("kept").exists(), "keep both makes no kept copy");
+        bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+        drop(bridge);
+        let state = server.finish();
+        assert_eq!(state.latest_plaintext(file, master_key), b"edited on the web");
+        let others: Vec<Vec<u8>> = state
+            .files
+            .keys()
+            .filter(|id| id.as_str() != file)
+            .map(|id| state.latest_plaintext(id, master_key))
+            .collect();
+        assert_eq!(others, vec![b"edited on this Mac".to_vec()], "the Mac's bytes are one new server file");
+    }
+
+    /// D2: a newer save of the file queued behind the park makes every choice `Moved`, with
+    /// nothing changed; the feed then offers no decision for the older park.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn task_2190_fu2_a_newer_save_behind_the_park_makes_every_choice_moved() {
+        let master_key = [228u8; 32];
+        let file = "21900000-0000-4000-8000-000000000025";
+        let (dir, _sync_root, _server, bridge, op_id, staged, _token) = task_2190_parked(master_key, file).await;
+        fp_save(&bridge, dir.path(), file, "notes.txt", b"saved again on this Mac", "1");
+        let mut keep = task_2190_keep_into(dir.path());
+        for choice in [ParkedChoice::Local, ParkedChoice::Remote, ParkedChoice::Both] {
+            assert_eq!(
+                bridge.resolve_parked(&op_id, choice, &mut keep, "Mac", "10.00").unwrap(),
+                ParkedResolution::Moved,
+                "{choice:?}"
+            );
+        }
+        assert!(Path::new(&staged).exists(), "nothing released");
+        assert!(!dir.path().join("kept").exists(), "nothing copied");
+        assert_eq!(bridge.db.list_operations_for_file(file).unwrap().len(), 2, "both saves still queued");
+        let parked = bridge.version_conflict_feed().unwrap().into_iter().find(|entry| entry.op_id.as_deref() == Some(op_id.as_str()));
+        assert_ne!(parked.map(|entry| entry.action), Some("open_conflict".to_string()));
+    }
+
+    /// D4: the copy's name is unique among the parent's names, case-insensitively.
+    #[test]
+    fn task_2190_fu2_keep_both_name_is_unique() {
+        let taken = |names: &[&str]| names.iter().map(|name| name.to_lowercase()).collect::<std::collections::HashSet<_>>();
+        assert_eq!(keep_both_name("notes.txt", "Mac", "10.00", &taken(&[])), "notes (Mac, 10.00).txt");
+        assert_eq!(keep_both_name("notes.txt", "Mac", "10.00", &taken(&["notes (Mac, 10.00).txt"])), "notes (Mac, 10.00) 2.txt");
+        assert_eq!(
+            keep_both_name("notes.txt", "Mac", "10.00", &taken(&["NOTES (MAC, 10.00).TXT", "notes (Mac, 10.00) 2.txt"])),
+            "notes (Mac, 10.00) 3.txt",
+            "case-insensitive, and the counter keeps counting"
+        );
+        assert_eq!(keep_both_name("README", "Mac", "10.00", &taken(&[])), "README (Mac, 10.00)", "no extension");
+        assert_eq!(keep_both_name(".env", "Mac", "10.00", &taken(&[])), ".env (Mac, 10.00)", "a dotfile");
+        assert_eq!(keep_both_name("a (1).tar.gz", "Mac", "10.00", &taken(&[])), "a (1).tar (Mac, 10.00).gz", "the last dot");
+    }
+
+    /// The lead's condition on E3, for a sync folder: a hydrated file whose row is then put in
+    /// `state`, edited on this PC while the web saves version 2, then the save path, the scan, the
+    /// tick and a hydrate. Returns the feed's kinds for the file, the content, whether the hydrate
+    /// was refused, the bytes on disk, the queued uploads and the server's current bytes.
+    async fn task_2190_held(
+        master_key: [u8; 32],
+        file: &str,
+        state_sql: &str,
+    ) -> (Vec<String>, SyncFolderContent, bool, Vec<u8>, usize, Vec<u8>) {
+        let (_dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_row(&bridge, &server, file);
+        {
+            let mut s = server.state.lock().unwrap();
+            s.files.get_mut(file).unwrap().versions[0] = vec![task_2190_server_chunk(master_key, file, b"version one")];
+            s.serve_downloads = true;
+        }
+        let local = sync_root.join("notes.txt");
+        bridge.hydrate_file(file, &local, &[sync_root.as_path()]).await.unwrap();
+        bridge.db.test_execute(&state_sql.replace("{file}", file)).unwrap();
+        std::fs::write(&local, b"saved on this PC").unwrap();
+        task_2190_web_saves(&server, master_key, file, b"edited on the web");
+        crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "notify");
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        sync_tick_outcome(&bridge, &sync_root).await.unwrap();
+        let refused = matches!(
+            bridge.hydrate_file(file, &local, &[sync_root.as_path()]).await,
+            Err(e) if e.is::<UnsentLocalChange>()
+        );
+        let kinds = bridge
+            .version_conflict_feed()
+            .unwrap()
+            .into_iter()
+            .filter(|entry| entry.file_id == file)
+            .map(|entry| entry.kind)
+            .collect();
+        let content = sync_folder_content(&bridge.db, file, &local, None).unwrap();
+        let uploads = bridge
+            .db
+            .list_operations_for_file(file)
+            .unwrap()
+            .into_iter()
+            .filter(|op| matches!(op.kind, OperationKind::UploadVersion | OperationKind::UploadFile))
+            .count();
+        let on_disk = std::fs::read(&local).unwrap();
+        drop(bridge);
+        let server_now = server.finish().latest_plaintext(file, master_key);
+        (kinds, content, refused, on_disk, uploads, server_now)
+    }
+
+    /// A row with agreed content but no base (0), edited while the web changed: the edit is held,
+    /// shown in Review as needing a decision, never reads as agreed (so the stamp pass cannot mark
+    /// it in sync), and the hydrate refuses to write over it. Both versions are kept.
+    #[tokio::test]
+    async fn task_2190_held_a_base_0_edit_with_a_web_edit_is_visible_never_stamped_never_overwritten() {
+        let (kinds, content, refused, on_disk, uploads, server_now) = task_2190_held(
+            [231u8; 32],
+            "21900000-0000-4000-8000-000000000041",
+            "UPDATE files SET local_base_version = 0 WHERE file_id = '{file}'",
+        )
+        .await;
+        assert_eq!(kinds, vec!["held_edit".to_string()], "shown as needing a decision");
+        assert_eq!(content, SyncFolderContent::Changed { base: None }, "never reads as agreed");
+        assert!(refused, "the hydrate refuses to write over it");
+        assert_eq!((on_disk.as_slice(), uploads), (&b"saved on this PC"[..], 0), "kept on this PC, not sent");
+        assert_eq!(server_now, b"edited on the web", "the web's version is kept");
+    }
+
+    /// A file hydrated before task 1640 (unknown content), edited while the web changed: the edit
+    /// is held, shown in Review in the one "not checked yet" row (the scan cannot tell an edited
+    /// unknown file from an untouched one, so they are never "needs a decision" per file), never
+    /// reads as agreed, and the hydrate refuses to write over it. Both versions are kept.
+    #[tokio::test]
+    async fn task_2190_held_a_pre_1640_edit_with_a_web_edit_is_visible_never_stamped_never_overwritten() {
+        let (kinds, content, refused, on_disk, uploads, server_now) = task_2190_held(
+            [232u8; 32],
+            "21900000-0000-4000-8000-000000000042",
+            "UPDATE files SET local_hash = NULL, local_base_version = 0, fetched_min_version = -2, fetched_hash = NULL WHERE file_id = '{file}'",
+        )
+        .await;
+        assert_eq!(kinds, vec!["held_unknown".to_string()], "shown in the one not-checked-yet row");
+        assert_eq!(content, SyncFolderContent::Unknown, "never reads as agreed");
+        assert!(refused, "the hydrate refuses to write over it");
+        assert_eq!((on_disk.as_slice(), uploads), (&b"saved on this PC"[..], 0), "kept on this PC, not sent");
+        assert_eq!(server_now, b"edited on the web", "the web's version is kept");
+    }
+
+    /// macOS: a Finder save whose base is not known (an identifier with no server version), while
+    /// the web changed: it parks `base_unknown` with its bytes and is shown in Review; Finder keeps
+    /// the Mac's token, so nothing writes over it, and nothing is sent. Both versions are kept.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn task_2190_held_a_finder_edit_on_an_unknown_base_is_visible_and_keeps_both() {
+        let master_key = [233u8; 32];
+        let file = "21900000-0000-4000-8000-000000000043";
+        let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_row(&bridge, &server, file);
+        let save = fp_save(&bridge, dir.path(), file, "notes.txt", b"edited on this Mac", "no-version");
+        let token = save.token.clone().expect("a Finder save names its bytes");
+        task_2190_web_saves(&server, master_key, file, b"edited on the web");
+        sync_tick_outcome(&bridge, &sync_root).await.unwrap();
+        bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+        let parked = bridge.db.list_operations_for_file(file).unwrap().remove(0);
+        assert_eq!(parked.last_error.as_deref(), Some("base_unknown"));
+        assert_eq!(std::fs::read(parked.payload_path.as_ref().unwrap()).unwrap(), b"edited on this Mac");
+        assert_eq!(held_content_version(&bridge, file), token, "Finder keeps the Mac's bytes");
+        let feed = bridge.version_conflict_feed().unwrap();
+        assert!(
+            feed.iter().any(|entry| entry.op_id.as_deref() == Some(parked.op_id.as_str())),
+            "shown in Review: {feed:?}"
+        );
+        drop(bridge);
+        let state = server.finish();
+        assert!(state.init_summary().is_empty(), "nothing was sent");
+        assert_eq!(state.latest_plaintext(file, master_key), b"edited on the web");
+    }
+
+    /// The lead's check on glegion's constraint 1: a held edit keeps #167's scan memo working.
+    /// Holding it writes only `held_edits`, and no trigger writes `files`, so the row stamp the memo
+    /// keys on does not move, and the second pass skips the held file as settled instead of
+    /// classifying it again.
+    #[tokio::test]
+    async fn task_2190_held_a_held_edit_stays_settled_in_the_scan_memo() {
+        let master_key = [234u8; 32];
+        let file = "21900000-0000-4000-8000-000000000044";
+        let (_dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_row(&bridge, &server, file);
+        {
+            let mut s = server.state.lock().unwrap();
+            s.files.get_mut(file).unwrap().versions[0] = vec![task_2190_server_chunk(master_key, file, b"version one")];
+            s.serve_downloads = true;
+        }
+        let local = sync_root.join("notes.txt");
+        bridge.hydrate_file(file, &local, &[sync_root.as_path()]).await.unwrap();
+        bridge
+            .db
+            .test_execute(&format!("UPDATE files SET local_base_version = 0 WHERE file_id = '{file}'"))
+            .unwrap();
+        std::fs::write(&local, b"saved on this PC").unwrap();
+        let mut memo = crate::watcher::ScanMemo::default();
+        crate::watcher::run_one_scan_with(&bridge, &sync_root, &mut memo);
+        assert_eq!(memo.classified, 1, "the first pass classifies the edit");
+        assert_eq!(bridge.db.list_held_edits().unwrap().len(), 1, "and holds it");
+        let stamp = bridge.db.file_row_stamp_by_path("notes.txt").unwrap();
+        crate::watcher::run_one_scan_with(&bridge, &sync_root, &mut memo);
+        assert_eq!(bridge.db.file_row_stamp_by_path("notes.txt").unwrap(), stamp, "the row stamp did not move");
+        assert_eq!((memo.classified, memo.skipped), (0, 1), "the second pass skips the held file as settled");
+        assert_eq!(bridge.db.list_held_edits().unwrap().len(), 1, "still held");
     }
 
     /// What [`task_2190_sync_folder_sequence`] saw, step by step.

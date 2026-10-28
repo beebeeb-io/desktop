@@ -2111,7 +2111,32 @@ struct OwedWorkingSetSignal {
     ids: Vec<String>,
 }
 
+/// Task 2190: working-set signals a command could not deliver (a decision on a parked conflict met a
+/// busy bridge gate, or the signal failed). The next tick takes them into its debt
+/// ([`OwedWorkingSetSignal::take_command_debt`]), so they are re-sent with its signal, and stay owed
+/// while the gate is busy, by the same rule as the tick's own.
+static COMMAND_OWED_SIGNAL: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Task 2190: owe `ids` to the next tick's working-set signal.
+pub(crate) fn owe_working_set_signal(ids: &[String]) {
+    let mut owed = COMMAND_OWED_SIGNAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    for id in ids {
+        if !owed.contains(id) {
+            owed.push(id.clone());
+        }
+    }
+}
+
 impl OwedWorkingSetSignal {
+    /// Task 2190: the commands' undelivered signals join this debt (once: the queue is emptied).
+    fn take_command_debt(&mut self) {
+        let taken = std::mem::take(&mut *COMMAND_OWED_SIGNAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
+        if !taken.is_empty() {
+            let merged = self.merged_with(&taken);
+            self.record(true, merged);
+        }
+    }
+
     /// A debt that opens with `ids`: changes recorded before the tick loop started, which the first
     /// tick's signal must carry. Bounded like any other debt.
     fn owing(ids: Vec<String>) -> Self {
@@ -2156,6 +2181,7 @@ impl OwedWorkingSetSignal {
 /// kept the startup resets (and a signal a busy gate dropped) from the system until the network came back.
 /// Nothing owed, nothing sent.
 fn signal_owed_debt_after_a_failed_tick(owed_working_set_signal: &mut OwedWorkingSetSignal, db: &StateDb) {
+    owed_working_set_signal.take_command_debt();
     if owed_working_set_signal.is_owing() {
         signal_working_set_owing(owed_working_set_signal, db, "owed_debt", &[]);
     }
@@ -2164,6 +2190,7 @@ fn signal_owed_debt_after_a_failed_tick(owed_working_set_signal: &mut OwedWorkin
 /// One working-set signal with the debt carried: signals `owed + ids`, and owes them again when the gate
 /// was busy. Every call site in the tick loop goes through this one.
 fn signal_working_set_owing(owed: &mut OwedWorkingSetSignal, db: &StateDb, reason: &str, ids: &[String]) {
+    owed.take_command_debt();
     let merged = owed.merged_with(ids);
     let dropped = signal_file_provider_working_set(db, reason, &merged);
     owed.record(dropped, merged);
@@ -2313,7 +2340,7 @@ fn handle_new_conflict(app: &AppHandle, c: &ConflictDetected) {
     // `conflict_auto_opens_window` is true on every platform today (task 1683
     // slice 1 pins that for Windows and Linux); slice 6 makes macOS false.
     if crate::surfaces::policy::conflict_auto_opens_window(crate::surfaces::policy::Platform::current()) {
-        if let Err(e) = crate::open_conflict_window_impl(app, &c.file_id, &c.file_name, c.is_text) {
+        if let Err(e) = crate::open_conflict_window_impl(app, &c.file_id, &c.file_name, c.is_text, None) {
             tracing::warn!(error = %e, file_id = %c.file_id, "open_conflict_window failed");
         }
     }
@@ -2613,6 +2640,40 @@ mod tests {
     // Task 9 fix round 1 (item B): a working-set signal that meets a busy bridge gate is owed to the next
     // tick. The signal is the daemon's ONLY replica-refresh channel, so a dropped one would leave Finder
     // stale until some later tick happened to change a materialized parent.
+    /// Task 2190 (the lead's condition): a decision's working-set signal that was not delivered is
+    /// carried by the next tick's signal, through the same debt: taken once, kept while the gate is
+    /// busy, paid when delivered. Both tick-side signal sites take it first.
+    #[test]
+    fn task_2190_a_commands_undelivered_signal_is_carried_by_the_next_tick() {
+        owe_working_set_signal(&["parked".to_string()]);
+        owe_working_set_signal(&["parked".to_string(), "copy".to_string()]);
+        let mut owed = OwedWorkingSetSignal::default();
+        owed.take_command_debt();
+        assert_eq!(owed.merged_with(&[]), vec!["parked".to_string(), "copy".to_string()], "the next tick signals them");
+        owed.take_command_debt();
+        let merged = owed.merged_with(&["tick".to_string()]);
+        assert_eq!(merged, vec!["parked".to_string(), "copy".to_string(), "tick".to_string()], "taken once");
+        owed.record(true, merged);
+        assert!(owed.is_owing(), "a busy gate keeps them owed");
+        let merged = owed.merged_with(&[]);
+        owed.record(false, merged);
+        assert!(!owed.is_owing(), "delivered: paid");
+
+        let source = include_str!("runner.rs");
+        let body = |name: &str| {
+            let from = source.find(&format!("fn {name}(")).expect(name);
+            &source[from..from + source[from..].find("\n}\n").expect("the end of the fn")]
+        };
+        assert!(body("signal_working_set_owing").contains("owed.take_command_debt();"));
+        assert!(body("signal_owed_debt_after_a_failed_tick").contains("owed_working_set_signal.take_command_debt();"));
+        // The decision owes what its own signal did not deliver.
+        let lib = include_str!("lib.rs");
+        let decide = &lib[lib.find("async fn resolve_parked_conflict(").expect("the decision command")..];
+        assert!(decide.contains(
+            "if crate::finder_setup::macos_ports::signal_working_set().is_err() {\n                crate::runner::owe_working_set_signal(&ids);"
+        ));
+    }
+
     #[test]
     fn a_dropped_working_set_signal_is_owed_to_the_next_tick_and_a_delivered_one_clears_the_debt() {
         let mut owed = OwedWorkingSetSignal::default();

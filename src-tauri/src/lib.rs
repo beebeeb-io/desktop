@@ -13411,6 +13411,7 @@ pub(crate) fn open_conflict_window_impl(
     file_id: &str,
     file_name: &str,
     is_text: bool,
+    op_id: Option<&str>,
 ) -> Result<(), String> {
     let label = format!("conflict-{file_id}");
 
@@ -13424,8 +13425,10 @@ pub(crate) fn open_conflict_window_impl(
         return Ok(());
     }
 
+    // Task 2190: a parked conflict carries its queued write, which the window decides.
+    let op_param = op_id.map(|op| format!("&opId={}", urlencoding::encode(op))).unwrap_or_default();
     let url = format!(
-        "index.html?window=conflict&fileId={file_id}&fileName={enc_name}&isText={is_text}",
+        "index.html?window=conflict&fileId={file_id}&fileName={enc_name}&isText={is_text}{op_param}",
         enc_name = urlencoding::encode(file_name),
     );
 
@@ -13458,8 +13461,9 @@ async fn open_conflict_window(
     file_id: String,
     file_name: String,
     is_text: bool,
+    op_id: Option<String>,
 ) -> Result<(), String> {
-    open_conflict_window_impl(&app, &file_id, &file_name, is_text)
+    open_conflict_window_impl(&app, &file_id, &file_name, is_text, op_id.as_deref())
 }
 
 /// Show a native OS notification announcing a fresh conflict. Used
@@ -13668,6 +13672,119 @@ async fn resolve_conflict(
         );
 
         Ok(())
+    })
+}
+
+/// Task 2190 (plan §3.1): a bridge over the app-local state DB for a parked conflict. Unlike
+/// `resolve_conflict`, it needs no sync root: on a Mac a parked write's bytes are its staged copy.
+fn parked_conflict_bridge(state: &State<'_, AppState>) -> Result<engine_bridge::EngineBridge, String> {
+    let acct = state.active_account()?;
+    let (token, master_key) = {
+        let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+        match guard.as_ref() {
+            Some(s) => (s.token.clone(), s.master_key),
+            None => return Err("not signed in".into()),
+        }
+    };
+    let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
+    let db = std::sync::Arc::new(state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?);
+    let api = std::sync::Arc::new(api_client::ApiClient::new(runner::api_base_url(), token, master_key));
+    Ok(engine_bridge::EngineBridge::new(db, api))
+}
+
+/// Task 2190 (plan §3.2, D1): "Keep the other" keeps the Mac's bytes in the "Changes not sent"
+/// folder (spec 2026-10-10) FIRST, as the sign-out's keep step does: a new event folder, the copy
+/// under the file's path, and the folder recorded durably so Home and Review list it. Any failure
+/// removes what it made, and the decision changes nothing.
+#[cfg(target_os = "macos")]
+fn keep_parked_copy(op_id: &str, source: &std::path::Path, rel_path: &str) -> anyhow::Result<std::path::PathBuf> {
+    use sign_out::kept_names::{KeptRole, event_folder_name, kept_relative_path};
+    let root = sign_out_kept_root().map_err(|e| anyhow::anyhow!(e))?;
+    let mut writer = sign_out::kept_writer::KeptWriter::create(
+        &root,
+        &event_folder_name(chrono::Local::now()),
+        &sign_out::kept_writer::SystemClone,
+    )?;
+    let kept = match writer.keep(&kept_relative_path(Some(rel_path), op_id, KeptRole::Newest), source) {
+        Ok(kept) => kept,
+        Err(error) => {
+            writer.abandon();
+            return Err(error.into());
+        }
+    };
+    let event = writer.event().to_path_buf();
+    let folder = match writer.finish() {
+        Ok(folder) => folder,
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&event);
+            return Err(error.into());
+        }
+    };
+    let folder_text = folder.path.to_string_lossy().into_owned();
+    let config_path = DesktopConfig::path().map_err(|e| anyhow::anyhow!(e))?;
+    let previous = sign_out::kept_record::saved_kept_unsent_at(&config_path).ok().flatten();
+    if let Err(error) = sign_out::kept_record::save_kept_unsent_durably(&config_path, &folder_text, &config::RealConfigFs) {
+        let _ = sign_out::kept_record::take_back_kept_unsent_at(&config_path, &folder_text, previous.as_deref());
+        let _ = std::fs::remove_dir_all(&folder.path);
+        return Err(anyhow::anyhow!("record the kept folder: {error}"));
+    }
+    Ok(kept)
+}
+
+/// Task 2190 (plan §3.4): both sides of a parked conflict, for the conflict window. Read-only.
+#[tauri::command]
+async fn parked_conflict_preview(
+    state: State<'_, AppState>,
+    op_id: String,
+) -> Result<engine_bridge::ConflictContentPreview, String> {
+    session_command!(async {
+        let bridge = parked_conflict_bridge(&state)?;
+        bridge.parked_conflict_preview(&op_id).await.map_err(|e| e.to_string())
+    })
+}
+
+/// Task 2190 (plan §3.2): the person's decision on a parked conflict ("Keep this Mac's", "Keep the
+/// other", "Keep both"). A decision that changed something signals the File Provider, so Finder
+/// reads the item again; `Moved` changed nothing (the window asks the person to decide again).
+#[tauri::command]
+async fn resolve_parked_conflict(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    op_id: String,
+    choice: engine_bridge::ParkedChoice,
+) -> Result<engine_bridge::ParkedResolution, String> {
+    session_command!(async {
+        let bridge = parked_conflict_bridge(&state)?;
+        let file_id = bridge.db().get_operation(&op_id).ok().flatten().and_then(|op| op.file_id);
+        let device = hostname::get()
+            .map(|name| name.to_string_lossy().trim_end_matches(".local").to_string())
+            .unwrap_or_else(|_| "this Mac".to_string());
+        let hhmm = chrono::Local::now().format("%H.%M").to_string();
+        #[cfg(target_os = "macos")]
+        let mut keep_copy = |source: &std::path::Path, rel: &str| keep_parked_copy(&op_id, source, rel);
+        #[cfg(not(target_os = "macos"))]
+        let mut keep_copy = |_: &std::path::Path, _: &str| -> anyhow::Result<std::path::PathBuf> {
+            anyhow::bail!("this decision is not available on this platform yet")
+        };
+        let done = bridge
+            .resolve_parked(&op_id, choice, &mut keep_copy, &device, &hhmm)
+            .map_err(|e| e.to_string())?;
+        // The signal goes through the bridge gate. One it does not deliver (the gate is busy, or the
+        // signal fails) is owed to the next tick's signal, so Finder is never left stale.
+        #[cfg(target_os = "macos")]
+        if done != engine_bridge::ParkedResolution::Moved {
+            let mut ids: Vec<String> = file_id.into_iter().collect();
+            if let engine_bridge::ParkedResolution::KeptBoth { file_id: copy, .. } = &done {
+                ids.push(copy.clone());
+            }
+            if crate::finder_setup::macos_ports::signal_working_set().is_err() {
+                crate::runner::owe_working_set_signal(&ids);
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = file_id;
+        let _ = app.emit("conflict-resolved", serde_json::json!({ "op_id": op_id }));
+        Ok(done)
     })
 }
 
@@ -15185,6 +15302,8 @@ pub fn run() {
             resolve_conflict,
             // Task 1546 finding 2 — real (non-placeholder) conflict content preview
             conflict_content_preview,
+            parked_conflict_preview,
+            resolve_parked_conflict,
             // Task 11 — native conflict notification
             notify_conflict,
             // First-launch onboarding (login + folder picker + sync status)
