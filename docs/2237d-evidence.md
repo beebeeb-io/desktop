@@ -1,5 +1,7 @@
 # Lane d2-2237: desktop shared folders
 
+**Current outcome after workspace #225 correction:** Tasks 3–6 are complete in this PR. Final corrected macOS Rust gate: **2,279 passed / 0 failed / 9 existing ignored**, including all 31 lane tests. Testrig frontend: **1,833 / 0**, TypeScript and ESLint exit 0. The earlier Task 5 stop and previous gate below are retained historical receipts and superseded by the corrected-ruling sections and final receipt at the end. Native Task 13/Windows release proof remains outstanding.
+
 Owner: Codex, sequential run, no child agents.
 Worktree: `/Users/guuslangelaar/code/bb-worktrees/d2-2237-desktop`
 Branch: `feat/2237d-desktop-shared-folders`
@@ -89,3 +91,27 @@ Dependencies: desktop base contains #169 (2190) and #171 (2240 slice 2). Remaini
 Strengthened final lane fixtures: 31 passed / 0 failed (`lane-green.log`). Task 5 additionally exercises actual direct transport for owned and foreign keys with both unrecorded-v1 and V2 pins, including direct V2 truncation refusal and zero API fallback requests. Task 6 additionally checks a moved/renamed parent's descendants, two actors' interleaved sparse events in one catch-up batch, and both concurrent local/remote byte sequences surviving a held edit. New fixture files were rustfmt-formatted on the testrig. Per-task totals remain 6 + 8 + 7 + 8, plus two independent finish/L7b guards.
 
 Final remote related selections: direct_download 32 passed / 0 failed / 1 existing ignored; sync_tick 12 passed / 0 failed (`final-linux-related.log`). Frontend on testrig Bun image: 1,833 passed / 0 failed across 106 files; frozen install, TypeScript build and ESLint all exit 0 (`final-testrig-frontend.log`). No JS suite ran on the Mac in this resume.
+
+## Corrected final verification (2026-10-28, Codex)
+
+Tasks 3, 4, 5 and 6 completed sequentially. Source tested from fresh detached worktree at **638a42c3301e0cf2aa284e2af1cdb8351c66cd6a**; subsequent edits only record evidence. The earlier stopped conclusion is superseded by Guus's workspace #225 ruling, not silently erased.
+
+| Final gate | Passed | Failed | Ignored |
+| --- | ---: | ---: | ---: |
+| macOS Rust library | 2,237 | 0 | 9 |
+| Keychain abstraction integration (in-memory store) | 31 | 0 | 0 |
+| Portable Windows session wiring integration | 8 | 0 | 0 |
+| Portable Windows sign-out cleanup integration | 3 | 0 | 0 |
+| Rust total | **2,279** | **0** | **9** |
+| Testrig Bun, 106 files | **1,833** | **0** | 0 |
+| TypeScript / ESLint | exit 0 / exit 0 | 0 diagnostic lines | — |
+
+`cargo test --locked --no-fail-fast -- --test-threads=1` completed with exit 0 under workspace `with-lock.sh cargo-build`, a fresh scratch HOME, owned CARGO_TARGET_DIR/cache, BB_API_BASE=http://127.0.0.1:9 and BB_REFUSE_NON_LOOPBACK_API=1. All six announced suite totals match **2,288 completed rows**, including nine ignored reasons (`final-macos-counts.json`), and all **31 lane tests pass on macOS and Linux**. The nine existing ignores require local API/MinIO (5), a logged-in GUI (2), a real DB copy (1) or another surface slice (1); none was forced on. Previous final logs are archived in `pre-correction-macos/`; corrected logs are `final-macos-rust.log`, `final-macos-wrapper.log`, `final-macos-rust-status.txt`, `final-macos-counts.json` and `final-testrig-frontend.log`.
+
+Graphify was refreshed again after source changes: 390 files, 8,537 nodes, 25,817 edges, 191 communities (`graphify-resume-update.log`). Its generated artifacts are preserved externally in `graphify-resume-refresh/`; tracked baseline graph artifacts remain scoped out. Read-only merge preview against desktop origin/main 64d39db completed with exit 0 (`final-merge-preview.log`). `git diff --check` passes.
+
+No new test is Windows-only: all 31 lane tests are portable. `windows_cf` and its reconcile/provider tests are cfg(target_os = "windows"); its native t10–t16/t18 and task_2240 reconcile/log guards require glegion's Windows gate. The public whole-memory Windows callback is native-only; indexed ranges and DB cleanup have cfg(any(target_os = "windows", test)) portable coverage. Portable Windows integration tests are not Cloud Files proof.
+
+Task 1943 desktop: core pin a245a549 in src-tauri/Cargo.toml and Cargo.lock; content only through core chunk_stream; whole finish and explicit indexed ranges; published V1/V2 KATs; no V2 downgrade; truncation mutation red; new files Unrecorded, replacement pin preserved; name/thumbnail APIs stay purpose-specific. No desktop notes implementation. Partial V2 replacement sessions re-init safely rather than reuse a stream identity.
+
+Remaining release evidence: signed Finder/Explorer Task 13, native Windows, live deployed-client/server interoperability, and remaining 2240–2242 scanner/device integration. New owner-upload visibility to link guests is the plan's separate publication dependency; no new child-key publication writer is claimed by these incoming-sync/open tasks. Existing ordinary-create behavior is outside this bounded change. No production, installed app, real user config, real Keychain, release or merge was used.
