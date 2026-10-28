@@ -136,15 +136,15 @@ rand = "0.8"
 # Sync engine + crypto from the core repo, pinned to a git REV for
 # reproducible builds (task 0815). A relative `path` dep resolved wrong from a
 # /tmp worktree and silently linked a stale local checkout; the rev pin gives a
-# deterministic core (3235dc15 = core PR #33, task 2173's shared
-# `direct_transfer` rules; the writers still emit chunk format V1Legacy). The
+# deterministic core (c08defc7 = L8 purpose-bound owner-file envelopes and
+# explicit-key writers, including the L6/L7 bound envelopes). The
 # core sub-crates reference each other by
 # workspace-relative path, so no `[patch]` is needed when built as a git dep.
 # Local-dev override belongs in a gitignored `.cargo/config.toml` (mirrors
 # repos/cli) — never commit a path patch here.
-beebeeb-sync = { git = "https://github.com/beebeeb-io/core", rev = "3235dc15a5de705d388d7af79266013d83f9290a" }
-beebeeb-core = { git = "https://github.com/beebeeb-io/core", rev = "3235dc15a5de705d388d7af79266013d83f9290a" }
-beebeeb-types = { git = "https://github.com/beebeeb-io/core", rev = "3235dc15a5de705d388d7af79266013d83f9290a" }
+beebeeb-sync = { git = "https://github.com/beebeeb-io/core", rev = "c08defc70c35428926be6784d18ff091be6d004c" }
+beebeeb-core = { git = "https://github.com/beebeeb-io/core", rev = "c08defc70c35428926be6784d18ff091be6d004c" }
+beebeeb-types = { git = "https://github.com/beebeeb-io/core", rev = "c08defc70c35428926be6784d18ff091be6d004c" }
 
 # Unix-only liveness check; on Windows we currently fall back to a
 # conservative "always alive" — see lockfile.rs.

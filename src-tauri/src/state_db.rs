@@ -32,7 +32,8 @@ use std::sync::Mutex;
 /// R10 (spec 2026-10-06 §5.6): every table holding one account's data. `has_account_data` counts
 /// them and `clear_account_data` empties them. `every_table_is_classified_for_the_account_binding`
 /// fails when a new table is not listed here or in `DEVICE_TABLES`.
-const ACCOUNT_TABLES: [&str; 16] = [
+const ACCOUNT_TABLES: [&str; 17] = [
+    "owned_key_records",
     "files",
     "operation_queue",
     "local_activity",
@@ -2391,9 +2392,115 @@ pub struct TreeRow {
 /// `Connection` is `Send` but `!Sync` on its own). Lock contention is
 /// fine for our access pattern: the daemon does one tick every 5
 /// seconds and OS-extension callbacks are infrequent.
-pub struct StateDb(Mutex<Connection>);
+pub struct StateDb(Mutex<Connection>, std::sync::atomic::AtomicU64);
 
 impl StateDb {
+    /// One bounded maintenance pass per 30 seconds; account purge clears this clock.
+    pub fn claim_owned_key_maintenance(&self, now: i64) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        Ok(conn.execute("INSERT INTO sync_state (key,value) VALUES ('owned_key_retry_after',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE CAST(sync_state.value AS INTEGER)<=?2", params![now.saturating_add(30).to_string(),now])? > 0)
+    }
+    /// L7c: account-scoped, durable format knowledge; contains no key material.
+    pub fn has_seen_folder_custody(&self, folder_id: &str) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        Self::has_seen_folder_custody_conn(&conn, folder_id)
+    }
+
+    fn has_seen_folder_custody_conn(conn: &Connection, folder_id: &str) -> Result<bool> {
+        Ok(conn.query_row("SELECT 1 FROM sync_state WHERE key=?1",
+            [format!("shared_folder_custody_seen:{folder_id}")], |_| Ok(())).optional()?.is_some())
+    }
+
+    /// Serialize legacy key opening with custody observation. An old inventory
+    /// cannot authorize a read after another request durably remembers custody.
+    /// The synchronous callback only opens a key in core; it must not use the DB.
+    pub fn read_without_folder_custody<T>(&self, folder_id: &str, read: impl FnOnce() -> T) -> Result<Option<T>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        if Self::has_seen_folder_custody_conn(&conn, folder_id)? {
+            return Ok(None);
+        }
+        Ok(Some(read()))
+    }
+
+    pub fn remember_folder_custody_at_revision(&self, folder_id: &str, revision: u64) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        if self.1.load(std::sync::atomic::Ordering::Acquire) != revision {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        conn.execute("INSERT INTO sync_state (key,value) VALUES (?1,'1') ON CONFLICT(key) DO NOTHING",
+            [format!("shared_folder_custody_seen:{folder_id}")])?;
+        Ok(())
+    }
+
+    pub fn mark_shared_index_dirty(&self, folder_id: &str) -> Result<()> {
+        let conn=self.0.lock().expect("state_db mutex poisoned");
+        conn.execute("INSERT INTO sync_state (key,value) VALUES (?1,'1') ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT)", [format!("shared_folder_index_dirty:{folder_id}")])?;
+        Ok(())
+    }
+    pub fn dirty_shared_index_roots(&self) -> Result<Vec<String>> {
+        let conn=self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt=conn.prepare("SELECT substr(key,27) FROM sync_state WHERE key LIKE 'shared_folder_index_dirty:%'")?;
+        stmt.query_map([],|r|r.get(0))?.collect()
+    }
+    pub fn clear_shared_index_dirty(&self, folder_id: &str) -> Result<()> {
+        let conn=self.0.lock().expect("state_db mutex poisoned");
+        conn.execute("DELETE FROM sync_state WHERE key=?1", [format!("shared_folder_index_dirty:{folder_id}")])?;
+        Ok(())
+    }
+    pub fn shared_index_dirty_revision(&self,id:&str)->Result<Option<String>> {
+        let conn=self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row("SELECT value FROM sync_state WHERE key=?1",[format!("shared_folder_index_dirty:{id}")],|r|r.get(0)).optional()
+    }
+    pub fn clear_shared_index_dirty_at_revision(&self,id:&str,revision:Option<&str>)->Result<()> {
+        let conn=self.0.lock().expect("state_db mutex poisoned");
+        conn.execute("DELETE FROM sync_state WHERE key=?1 AND value=?2",params![format!("shared_folder_index_dirty:{id}"),revision])?;
+        Ok(())
+    }
+    pub fn list_owned_key_records(&self)->Result<Vec<crate::owner_keys::OwnedKeyRecord>> {
+        let conn=self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt=conn.prepare("SELECT record FROM owned_key_records")?;
+        let records=stmt.query_map([],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>>>()?;
+        records.into_iter().map(|s|serde_json::from_str(&s).map_err(|e|rusqlite::Error::FromSqlConversionFailure(0,rusqlite::types::Type::Text,Box::new(e)))).collect()
+    }
+
+    /// Generation of this account-bound DB handle. The runner also stops its
+    /// old bridge before reset, so old requests cannot join a fresh engine.
+    pub fn account_revision(&self) -> u64 {
+        let _conn = self.0.lock().expect("state_db mutex poisoned");
+        self.1.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub fn get_owned_key_record(&self, id: &str) -> Result<Option<crate::owner_keys::OwnedKeyRecord>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let record: Option<String> = conn.query_row("SELECT record FROM owned_key_records WHERE file_id = ?1", [id], |r|r.get(0)).optional()?;
+        record.map(|s| serde_json::from_str(&s).map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))).transpose()
+    }
+
+    pub fn put_owned_key_record(&self, row: &crate::owner_keys::OwnedKeyRecord) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        Self::put_owned_key_record_conn(&conn, row)
+    }
+
+    pub fn put_owned_key_record_at_revision(&self, row: &crate::owner_keys::OwnedKeyRecord, revision: u64) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        if self.1.load(std::sync::atomic::Ordering::Acquire) != revision {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        Self::put_owned_key_record_conn(&conn, row)
+    }
+
+    fn put_owned_key_record_conn(conn: &Connection, row: &crate::owner_keys::OwnedKeyRecord) -> Result<()> {
+        let record = serde_json::to_string(row).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        conn.execute("INSERT INTO owned_key_records (file_id, record) VALUES (?1, ?2) ON CONFLICT(file_id) DO UPDATE SET record = excluded.record", params![row.file_id, record])?;
+        Ok(())
+    }
+
+    pub fn delete_owned_key_record(&self, id: &str) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute("DELETE FROM owned_key_records WHERE file_id = ?1", [id])?;
+        Ok(())
+    }
+
     /// Open or create the state database at `path`. Idempotent — the
     /// schema migration uses `CREATE TABLE IF NOT EXISTS` so re-opens
     /// are cheap.
@@ -2406,6 +2513,10 @@ impl StateDb {
         conn.execute_batch(
             "
             PRAGMA journal_mode = WAL;
+            CREATE TABLE IF NOT EXISTS owned_key_records (
+                file_id TEXT PRIMARY KEY,
+                record TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS files (
                 file_id TEXT PRIMARY KEY,
                 path TEXT NOT NULL,
@@ -2785,7 +2896,7 @@ impl StateDb {
             "INSERT OR IGNORE INTO staged_payloads(path, completed) SELECT payload_path, 0 FROM upload_resume",
             [],
         )?;
-        Ok(Self(Mutex::new(conn)))
+        Ok(Self(Mutex::new(conn), std::sync::atomic::AtomicU64::new(0)))
     }
 
     /// Insert or update a row keyed by `file_id`. ON CONFLICT replaces
@@ -6262,7 +6373,9 @@ impl StateDb {
             tx.execute(&format!("DELETE FROM {table}"), [])?;
         }
         tx.execute("DELETE FROM sync_state", [])?;
-        tx.commit()
+        tx.commit()?;
+        self.1.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Ok(())
     }
 
     /// R10: the account this local data belongs to, if one is recorded.
@@ -6276,7 +6389,9 @@ impl StateDb {
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction()?;
         write_owner(&tx, owner)?;
-        tx.commit()
+        tx.commit()?;
+        self.1.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Ok(())
     }
 
     /// Changes waiting to upload, plus the staged copies of them. Anything of either is a trace of an account:
@@ -6444,7 +6559,9 @@ impl StateDb {
             FINDER_DOMAIN_GONE_KEY
         };
         tx.execute("INSERT INTO sync_state (key, value) VALUES (?1, '1')", params![mark])?;
-        tx.commit()
+        tx.commit()?;
+        self.1.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Ok(())
     }
 
     /// Did the last clear leave the Finder domain known gone (a sign-out whose removal was confirmed)?
@@ -6716,8 +6833,11 @@ impl StateDb {
             [],
         )?;
         tx.execute("DELETE FROM id_aliases", [])?;
+        tx.execute("DELETE FROM owned_key_records", [])?;
+        tx.execute("DELETE FROM sync_state WHERE key LIKE 'shared_folder_index_dirty:%' OR key LIKE 'shared_folder_custody_seen:%' OR key='owned_key_retry_after'", [])?;
 
         tx.commit()?;
+        self.1.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         Ok(LocalStatePurge {
             queued_ops_purged,
             payload_paths,
