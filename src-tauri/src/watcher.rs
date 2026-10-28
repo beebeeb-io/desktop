@@ -512,6 +512,11 @@ pub(crate) fn run_one_scan(bridge: &EngineBridge, sync_root: &std::path::Path) {
 
 /// [`run_one_scan`] remembering, in `memo`, the files earlier passes found settled (task 2229).
 pub(crate) fn run_one_scan_with(bridge: &EngineBridge, sync_root: &std::path::Path, memo: &mut ScanMemo) {
+    // Task 2240: the pass looks up every row by path. With SQLite's default page cache those lookups re-read the
+    // state DB from disk on every pass; sized to the DB, the second pass reads nothing.
+    if let Err(e) = bridge.db().fit_page_cache() {
+        tracing::debug!(error = %e, "enumeration scan: could not size the page cache; scanning with the current one");
+    }
     let now = Instant::now();
     if memo
         .since
@@ -1054,6 +1059,23 @@ mod tests {
     use std::collections::HashSet;
     use std::fs;
     use std::sync::Arc;
+
+    /// Task 2240 (T7, D1): every scan pass sizes the engine connection's page cache before it walks the tree, so the
+    /// row lookups of the pass hit memory instead of the file. A failure to size it is logged, and the pass goes on with
+    /// the cache it has.
+    #[test]
+    fn task_2240_every_scan_pass_fits_the_page_cache_first() {
+        use crate::finder_setup_command_tests::body_between;
+        use crate::source_pin::squeeze;
+        let source = include_str!("watcher.rs").replace("\r\n", "\n");
+        let body = squeeze(body_between(&source, "pub(crate) fn run_one_scan_with(", "\n}\n"));
+        let fit = body
+            .find("ifletErr(e)=bridge.db().fit_page_cache(){")
+            .expect("the pass fits the page cache");
+        let memo = body.find("memo.settled.clear()").expect("the memo reset");
+        let walk = body.find("walk_dir(").expect("the walk");
+        assert!(fit < memo && fit < walk, "the fit comes first:\n{body}");
+    }
 
     #[test]
     fn engine_delete_suppression_is_consumed_once() {

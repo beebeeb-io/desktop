@@ -479,6 +479,21 @@ const FILE_BY_PATH_SQL: &str = "SELECT file_id, path, status, size_bytes, modifi
 /// runs it for every file it skips, so it too goes through `idx_files_path`.
 const FILE_ROW_BY_PATH_SQL: &str = "SELECT * FROM files WHERE path = ?1";
 
+/// Task 2240 (D2): the scan's page cache never goes below SQLite's default, `cache_size = -2000` (2,000 KiB): the value
+/// every fresh connection reads, which `task_2240_ui_handles_keep_the_default_cache` checks …
+pub(crate) const PAGE_CACHE_FLOOR_KIB: i64 = 2_000;
+/// … nor above 128 MiB, which holds `files` and `idx_files_path` up to about 300k rows.
+pub(crate) const PAGE_CACHE_CEILING_KIB: i64 = 128 * 1024;
+
+/// Task 2240 (D2): the page cache, in KiB, for a DB of `db_bytes`: the whole DB plus an eighth, within
+/// [`PAGE_CACHE_FLOOR_KIB`, `PAGE_CACHE_CEILING_KIB`]. The scan's working set (`files` and `idx_files_path`) is part of
+/// the DB, so the DB's size always covers it. SQLite fills the cache only with pages the connection reads, so its memory
+/// follows what is read, up to this limit.
+pub(crate) fn page_cache_limit_kib(db_bytes: i64) -> i64 {
+    let kib = db_bytes.max(0) / 1024;
+    (kib + kib / 8).clamp(PAGE_CACHE_FLOOR_KIB, PAGE_CACHE_CEILING_KIB)
+}
+
 /// `get_file_by_path`'s other stored shape: `/leaf` ⇄ `leaf`.
 fn toggled_slash(path: &str) -> String {
     match path.strip_prefix('/') {
@@ -2909,6 +2924,27 @@ impl StateDb {
             }
         }
         Ok(None)
+    }
+
+    /// Task 2240: sizes this connection's page cache to the DB ([`page_cache_limit_kib`]) and returns the limit in KiB.
+    /// Only the Windows scan calls it, on the engine's long-lived connection, at the start of every pass (D1, D3): with
+    /// SQLite's default 2,000 KiB, every pass re-read `files` and its path index from disk (~18.5 MB on a 43k-row
+    /// vault). The cache is set only when the limit changed. UI commands open their own connections and keep the
+    /// default (I2). A commit by another connection still empties this cache; the next pass reads cold once (I4).
+    ///
+    /// The engine's connection is shared by the sync tick, the transfers and the Cloud Files callbacks too, so the pages
+    /// their queries read stay cached as well: this connection's cache can grow to the whole limit (the DB plus an
+    /// eighth, at most 128 MiB) and stays there. That is the memory bound D2 accepts.
+    pub fn fit_page_cache(&self) -> Result<i64> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let page_count: i64 = conn.query_row("PRAGMA page_count", [], |row| row.get(0))?;
+        let page_size: i64 = conn.query_row("PRAGMA page_size", [], |row| row.get(0))?;
+        let limit = page_cache_limit_kib(page_count.saturating_mul(page_size));
+        let current: i64 = conn.query_row("PRAGMA cache_size", [], |row| row.get(0))?;
+        if current != -limit {
+            conn.execute_batch(&format!("PRAGMA cache_size = -{limit}"))?;
+        }
+        Ok(limit)
     }
 
     fn get_file_by_exact_path(&self, path: &str) -> Result<Option<FileEntry>> {
@@ -8038,6 +8074,228 @@ mod tests {
             assert_eq!(rows, 0, "the Windows sign-out left rows in {table}");
         }
         assert!(!db.has_account_data().unwrap(), "no account data is left");
+    }
+
+    /// Task 2240: file rows in a fresh state.db, enough to fill several times SQLite's default page cache (about 300
+    /// bytes each). The scan's lookups find them as `dir/<i>.txt`.
+    const TASK_2240_ROWS: usize = 20_000;
+
+    fn task_2240_add_rows(path: &Path, from: usize, rows: usize, padding: usize) {
+        let mut conn = Connection::open(path).unwrap();
+        let tx = conn.transaction().unwrap();
+        let content_type = "x".repeat(padding);
+        for i in from..from + rows {
+            tx.execute(
+                "INSERT INTO files (file_id, path, content_type) VALUES (?1, ?2, ?3)",
+                params![format!("f{i}"), format!("dir/{i}.txt"), content_type],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+    }
+
+    fn task_2240_db() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        StateDb::open(&path).unwrap();
+        task_2240_add_rows(&path, 0, TASK_2240_ROWS, 200);
+        (dir, path)
+    }
+
+    /// One pass of the scan's lookups when every file is settled: the row stamp of every file, as
+    /// `run_one_scan_with` reads it. Returns the pages the pass read from the file.
+    fn task_2240_pass(db: &StateDb) -> i64 {
+        let before = db.page_reads();
+        for i in 0..TASK_2240_ROWS {
+            assert!(db.file_row_stamp_by_path(&format!("dir/{i}.txt")).unwrap().is_some());
+        }
+        db.page_reads() - before
+    }
+
+    fn task_2240_cache_size(db: &StateDb) -> i64 {
+        db.0.lock()
+            .unwrap()
+            .query_row("PRAGMA cache_size", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    /// Task 2240: runs `measure` in a fresh copy of this test binary that runs only the test `name`.
+    ///
+    /// The bundled SQLite is built with `SQLITE_ENABLE_MEMORY_MANAGEMENT` (libsqlite3-sys), so all the connections of
+    /// a process share one page-cache LRU: a connection that reads more than its own cache takes the oldest pages of
+    /// the others. A test that counts page reads in this binary would count the reads of every test running beside
+    /// it. The parent passes only when the child ran exactly one test, passed, and printed what it measured.
+    fn task_2240_in_own_process(name: &str, measure: impl FnOnce() -> String) {
+        const CHILD: &str = "BB_TASK_2240_PAGE_CACHE_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            println!("task 2240 child {name}: {}", measure());
+            return;
+        }
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                &format!("state_db::tests::{name}"),
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success(),
+            "the child run of {name} failed:\n{stdout}\n{stderr}"
+        );
+        assert!(
+            stdout.contains("test result: ok. 1 passed;"),
+            "the child ran no test:\n{stdout}"
+        );
+        let proof = format!("task 2240 child {name}: ");
+        let line = stdout.lines().find(|line| line.contains(&proof));
+        println!(
+            "{}",
+            line.unwrap_or_else(|| panic!("the child never measured:\n{stdout}"))
+        );
+    }
+
+    /// Task 2240 (D2, T1): the limit is the DB's size plus an eighth, within [2,000 KiB, 128 MiB].
+    #[test]
+    fn task_2240_the_page_cache_limit_follows_the_db_size() {
+        for (db_bytes, kib) in [
+            (0, 2_000),
+            (1 << 20, 2_000),
+            (30_707_712, 33_736),
+            (120 << 20, 131_072),
+            (2_i64 << 30, 131_072),
+        ] {
+            assert_eq!(page_cache_limit_kib(db_bytes), kib, "{db_bytes} bytes");
+        }
+    }
+
+    /// Task 2240 (T2): with SQLite's default cache, the scan's second pass reads its pages from the file again; with
+    /// the cache fitted it reads none. The default handle is measured first and closed: with one shared LRU, it would
+    /// otherwise borrow the fitted handle's pages.
+    #[test]
+    fn task_2240_a_fitted_cache_reads_nothing_on_the_second_pass() {
+        task_2240_in_own_process("task_2240_a_fitted_cache_reads_nothing_on_the_second_pass", || {
+            let (_dir, path) = task_2240_db();
+            let default = StateDb::open(&path).unwrap();
+            task_2240_pass(&default);
+            let unfitted = task_2240_pass(&default);
+            assert!(unfitted > 0, "precondition: the default cache cannot hold the pass");
+            drop(default);
+            let fitted = StateDb::open(&path).unwrap();
+            fitted.fit_page_cache().unwrap();
+            let cold = task_2240_pass(&fitted);
+            let warm = task_2240_pass(&fitted);
+            assert_eq!(warm, 0, "a fitted cache holds every page the pass reads");
+            format!("default cache: second pass read {unfitted} pages; fitted: {cold} then {warm}")
+        });
+    }
+
+    /// Task 2240 (T3, premise P1): every UI command opens the DB on its own connection. Opening it commits nothing, so
+    /// the scan's cache survives it. An `open` that writes would empty that cache on every poll.
+    #[test]
+    fn task_2240_a_ui_open_between_passes_keeps_the_cache() {
+        task_2240_in_own_process("task_2240_a_ui_open_between_passes_keeps_the_cache", || {
+            let (_dir, path) = task_2240_db();
+            let engine = StateDb::open(&path).unwrap();
+            engine.fit_page_cache().unwrap();
+            task_2240_pass(&engine);
+            drop(StateDb::open(&path).unwrap());
+            let warm = task_2240_pass(&engine);
+            assert_eq!(warm, 0, "opening the DB elsewhere leaves the scan's cache warm");
+            format!("pass after a UI open read {warm} pages")
+        });
+    }
+
+    /// Task 2240 (T4, I4): a commit by another connection empties the cache; the next pass reads cold once, and the
+    /// one after it reads nothing again.
+    #[test]
+    fn task_2240_a_commit_elsewhere_costs_one_cold_pass() {
+        task_2240_in_own_process("task_2240_a_commit_elsewhere_costs_one_cold_pass", || {
+            let (_dir, path) = task_2240_db();
+            let engine = StateDb::open(&path).unwrap();
+            engine.fit_page_cache().unwrap();
+            task_2240_pass(&engine);
+            Connection::open(&path)
+                .unwrap()
+                .execute(
+                    "UPDATE files SET last_opened_at = last_opened_at + 1 WHERE file_id = 'f0'",
+                    [],
+                )
+                .unwrap();
+            let cold = task_2240_pass(&engine);
+            assert!(cold > 0, "a commit elsewhere empties the cache");
+            let warm = task_2240_pass(&engine);
+            assert_eq!(warm, 0, "one pass warms it again");
+            format!("after a commit elsewhere: {cold} pages, then {warm}")
+        });
+    }
+
+    /// Task 2240 (I6): a UI command that reads more than its own 2,000 KiB on its connection takes the scan's oldest
+    /// pages (one shared LRU). The next pass re-reads at most what that command read, never more than a cold pass, and
+    /// the one after it reads nothing.
+    #[test]
+    fn task_2240_a_large_ui_read_costs_at_most_one_partial_pass() {
+        task_2240_in_own_process("task_2240_a_large_ui_read_costs_at_most_one_partial_pass", || {
+            let (_dir, path) = task_2240_db();
+            let engine = StateDb::open(&path).unwrap();
+            engine.fit_page_cache().unwrap();
+            let full = task_2240_pass(&engine);
+            let ui = StateDb::open(&path).unwrap();
+            let before = ui.page_reads();
+            let _: i64 =
+                ui.0.lock()
+                    .unwrap()
+                    .query_row("SELECT sum(length(content_type)) FROM files", [], |row| row.get(0))
+                    .unwrap();
+            let ui_read = ui.page_reads() - before;
+            drop(ui);
+            let partial = task_2240_pass(&engine);
+            assert!(partial > 0, "precondition: the UI read took some of the scan's pages");
+            assert!(
+                partial <= ui_read && partial <= full,
+                "{partial} pages, the UI read {ui_read}, a cold pass {full}"
+            );
+            let warm = task_2240_pass(&engine);
+            assert_eq!(warm, 0, "one pass warms it again");
+            format!("cold pass {full}; UI read {ui_read}; next pass {partial}, then {warm}")
+        });
+    }
+
+    /// Task 2240 (T5, I2): only the connection that is fitted gets the larger cache; a UI command's fresh one keeps
+    /// SQLite's default.
+    #[test]
+    fn task_2240_ui_handles_keep_the_default_cache() {
+        let (_dir, path) = task_2240_db();
+        let engine = StateDb::open(&path).unwrap();
+        let fitted = engine.fit_page_cache().unwrap();
+        assert!(
+            fitted > PAGE_CACHE_FLOOR_KIB,
+            "precondition: this DB fits above the floor"
+        );
+        assert_eq!(task_2240_cache_size(&engine), -fitted);
+        assert_eq!(
+            task_2240_cache_size(&StateDb::open(&path).unwrap()),
+            -PAGE_CACHE_FLOOR_KIB
+        );
+    }
+
+    /// Task 2240 (T6, D3): a DB that grows gets a larger cache at the next fit.
+    #[test]
+    fn task_2240_the_cache_is_refitted_when_the_db_grows() {
+        let (_dir, path) = task_2240_db();
+        let engine = StateDb::open(&path).unwrap();
+        let first = engine.fit_page_cache().unwrap();
+        task_2240_add_rows(&path, TASK_2240_ROWS, 10_000, 4_000);
+        let second = engine.fit_page_cache().unwrap();
+        assert!(
+            second > first,
+            "the limit grows with the DB: {first} KiB, then {second} KiB"
+        );
+        assert_eq!(task_2240_cache_size(&engine), -second);
     }
 
     /// Task 2229: the enumeration scan looks every file and folder on disk up by path on every
