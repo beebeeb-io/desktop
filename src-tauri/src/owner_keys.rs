@@ -381,8 +381,15 @@ impl crate::engine_bridge::EngineBridge {
                 text.is_some_and(|text| beebeeb_core::encrypt::decrypt_name_metadata(&master, id, text).is_ok());
             let sparse = text.is_none() && input["name"].is_null() && input["path"].is_null();
             if sparse || (!derived_readable && !known_foreign && text.is_some()) {
-                row = scope.api.get_file(id).await?;
+                let canonical = scope.api.get_file(id).await;
                 scope.check()?;
+                row = match canonical {
+                    Ok(row) => row,
+                    // The listing/event raced deletion. Omit this obsolete row;
+                    // the delta loop still applies later ops and acknowledges it.
+                    Err(error) if missing(&error) => continue,
+                    Err(error) => return Err(error),
+                };
                 anyhow::ensure!(row["id"].as_str() == Some(id), "canonical item id mismatch");
                 batch.rows.insert(id.to_string(), row.clone());
             }

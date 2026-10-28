@@ -4703,11 +4703,13 @@ impl EngineBridge {
                 let scope = self.owner_key_scope();
                 let custody = self.api.get_shared_folder(root).await.ok();
                 if let Err(error) = scope.check() { return error; }
-                custody.and_then(|row| crate::owner_keys::normalize_wrap(&row["owner_wrapped_folder_key"]).ok().flatten())
+                let key = custody.and_then(|row| crate::owner_keys::normalize_wrap(&row["owner_wrapped_folder_key"]).ok().flatten())
                     .and_then(|wrap| beebeeb_sync::key_resolution::unwrap_folder_custody(
-                        &beebeeb_core::kdf::MasterKey::from_bytes(*self.api.master_key()), root, &wrap).ok())
-                    .and_then(|key| beebeeb_core::encrypt::decrypt_file_metadata_with_key(&key, encrypted).ok())
-                    .map(|metadata| metadata.name)
+                        &beebeeb_core::kdf::MasterKey::from_bytes(*self.api.master_key()), root, &wrap).ok());
+                if let Some(key) = key {
+                    if let Err(error) = scope.remember_custody(root) { return error; }
+                    beebeeb_core::encrypt::decrypt_file_metadata_with_key(&key, encrypted).ok().map(|metadata| metadata.name)
+                } else { None }
             } else { None };
             return anyhow::anyhow!(crate::owner_keys::cannot_open_message(label.as_deref(), record.member_added));
         }
@@ -9005,8 +9007,10 @@ pub async fn sync_tick_outcome(
     // Apply the delta ops in order, advancing the cursor to the max seq_id.
     let mut max_seq = cursor;
     for original in &ops.ops {
-        let op=prepare_owned_sync_op(bridge,original).await?;
+        let prepared = prepare_owned_sync_op(bridge, original).await?;
         bridge.owner_key_scope().check()?;
+        max_seq = max_seq.max(original.seq_id);
+        let Some(op) = prepared else { continue; };
         match apply_sync_op(bridge, sync_root, &op, now_secs, &mut conflicts) {
             Ok(applied) => applied_item_ids.extend(applied),
             Err(e) => {
@@ -9014,7 +9018,6 @@ pub async fn sync_tick_outcome(
                 tracing::warn!(error = %e, op_type = %op.op_type, seq_id = op.seq_id, "sync_tick: op apply error; skipping op");
             }
         }
-        max_seq = max_seq.max(op.seq_id);
     }
     if max_seq > cursor {
         bridge.db().set_sync_cursor(max_seq)?;
@@ -9026,18 +9029,18 @@ pub async fn sync_tick_outcome(
 }
 
 /// Enrich actual sparse events before entering the synchronous reconciler.
-async fn prepare_owned_sync_op(bridge:&EngineBridge,op:&crate::api_client::SyncOp)->anyhow::Result<crate::api_client::SyncOp> {
-    if !matches!(op.op_type.as_str(),"file_create"|"folder_create"|"file_update"|"file_rename"|"folder_rename"|"file_move"|"folder_move") {return Ok(op.clone());}
-    let Some(id)=op.payload["id"].as_str() else{return Ok(op.clone())};
+async fn prepare_owned_sync_op(bridge:&EngineBridge,op:&crate::api_client::SyncOp)->anyhow::Result<Option<crate::api_client::SyncOp>> {
+    if !matches!(op.op_type.as_str(),"file_create"|"folder_create"|"file_update"|"file_rename"|"folder_rename"|"file_move"|"folder_move") {return Ok(Some(op.clone()));}
+    let Some(id)=op.payload["id"].as_str() else{return Ok(Some(op.clone()))};
     let known_foreign=bridge.db().get_owned_key_record(id)?.is_some_and(|r|r.foreign_added || r.owner_wrap.is_some());
     let mut row=synthesize_op_row(bridge,id,op,op.payload["new_name_encrypted"].as_str().or_else(||op.payload["name_encrypted"].as_str()));
     if known_foreign && op.payload["name_encrypted"].is_null() && op.payload["new_name_encrypted"].is_null() {row=serde_json::json!({"id":id});}
     let mut prepared=bridge.prepare_owned_rows(&[row]).await?;
-    let Some(prepared)=prepared.pop() else{return Ok(op.clone())};
+    let Some(prepared)=prepared.pop() else{return Ok(None)};
     let mut result=op.clone();result.payload=prepared.row;
     if matches!(op.op_type.as_str(),"file_move"|"folder_move") {result.payload["new_parent_id"]=result.payload["parent_id"].clone();}
     if matches!(op.op_type.as_str(),"file_rename"|"folder_rename") {result.payload["new_name_encrypted"]=result.payload["name_encrypted"].clone();}
-    Ok(result)
+    Ok(Some(result))
 }
 
 /// Drop duplicate ids from one tick's applied batch (an item can be applied

@@ -120,14 +120,19 @@ async fn rv173_deleted_before_sparse_update_does_not_pin_cursor() {
     let old_cursor = f.bridge.db.get_sync_cursor().unwrap().unwrap();
     f.event("file_update", json!({"id":ID,"version_number":2,"size_bytes":12}));
     f.event("file_delete", json!({"id":ID}));
+    f.event("folder_rename", json!({"id":A,"new_name_encrypted":named(&hydration_test_key([7;32], A), "later", ExpectedChunkFormat::Unrecorded)}));
     f.server.state.lock().unwrap().rv_routes.insert(format!("/api/v1/files/{ID}"), (404, b"{}".to_vec()));
     let first = sync_tick_outcome(&f.bridge, &f.root).await;
     let second = sync_tick_outcome(&f.bridge, &f.root).await;
     let cursor = f.bridge.db.get_sync_cursor().unwrap().unwrap();
     assert!(first.is_ok() && second.is_ok(),
         "terminal 404 on a superseded event must not block the later delete; attempts {first:?} / {second:?}, cursor {old_cursor}->{cursor}");
-    assert!(cursor > old_cursor);
+    assert_eq!(cursor, old_cursor + 3);
     assert!(f.bridge.db.get_file(ID).unwrap().is_none());
+    assert_eq!(f.bridge.db.get_file(A).unwrap().unwrap().path, "later");
+    let reopened = StateDb::open(f.dir.path().join("db")).unwrap();
+    assert_eq!(reopened.get_sync_cursor().unwrap(), Some(cursor));
+    assert!(reopened.get_file(ID).unwrap().is_none());
 }
 
 #[test]
@@ -170,5 +175,23 @@ fn rv173_l7c_owner_custody_is_remembered_only_after_l6_open() {
         server.state.lock().unwrap().rv_routes.insert(format!("/api/v1/shared-folders/{ROOT}"), (status,b"{}".to_vec()));
         let error = runtime().block_on(bridge.shared_folder_custody_key(ROOT)).err().unwrap();
         assert_eq!(error.to_string(), "This folder's keys are unavailable");
+    }
+}
+
+#[tokio::test]
+async fn rv173_canonical_auth_and_server_errors_still_retry() {
+    for status in [401,403,500] {
+        let f = Convergence::new().await;
+        let cursor = f.bridge.db.get_sync_cursor().unwrap();
+        f.event("file_update", json!({"id":ID,"version_number":2,"size_bytes":12}));
+        f.event("file_delete", json!({"id":ID}));
+        f.server.state.lock().unwrap().rv_routes.insert(format!("/api/v1/files/{ID}"), (status, b"{}".to_vec()));
+        assert!(sync_tick_outcome(&f.bridge, &f.root).await.is_err());
+        assert_eq!(f.bridge.db.get_sync_cursor().unwrap(), cursor, "retryable enrichment never acknowledges later events");
+        assert!(f.bridge.db.get_file(ID).unwrap().is_some());
+        f.server.state.lock().unwrap().rv_routes.insert(format!("/api/v1/files/{ID}"), (404, b"{}".to_vec()));
+        sync_tick_outcome(&f.bridge, &f.root).await.unwrap();
+        assert_eq!(f.bridge.db.get_sync_cursor().unwrap(), cursor.map(|n| n+2));
+        assert!(f.bridge.db.get_file(ID).unwrap().is_none());
     }
 }
