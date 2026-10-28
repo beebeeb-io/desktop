@@ -334,6 +334,13 @@ starts (Windows refuses instead); an owner that cannot be compared stops the sta
 sign-out purge stops. Keep every engine start behind `spawn_bound_engine`:
 `every_engine_start_is_bound_first` counts them.
 
+On Windows a refusal over data with no owner, or an owner recorded by an email only, asks the server in
+the background (`own_data_proof.rs`, task 2267): a sample of the My Files rows must decrypt under this
+session's key, and one file this account cannot see (unless it sat in a folder proven its own) or one
+name sealed under another key blocks. Proven, the session is recorded as the owner
+(`StateDb::replace_owner_if`) and sync starts through the same `spawn_bound_engine`. This is the only
+other place an owner is recorded; two different user ids are never questioned.
+
 ## Browser sign-in (`src-tauri/src/browser_login.rs`, task 1734)
 
 The first-run "Sign in with browser" handoff opens `<APP_URL>/cli-auth` and shows the device code in the app. The link carries NO code: the person TYPES the code on the page and confirms with their password, so a link someone else sends them has nothing to approve (security review 2026-10-04, finding 9). The WS init frame (`init_frame`) adds `client: "desktop"`, the release version, `os` and the hostname for the page to show as "reported by the device"; the screen copy lives in `src/browserLoginCopy.ts` (tested by `tests/browserLoginCopy.test.ts`). The decrypt path is unchanged.

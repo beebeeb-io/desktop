@@ -6087,22 +6087,49 @@ impl StateDb {
 
     /// Task 2267: the file ids a proof of ownership asks the server about (`own_data_proof`), at most `limit`:
     /// My Files rows the server named (`remote_updated_at > 0`; a row this PC made and never uploaded cannot prove
-    /// anything), the ones a held write changes or files into first, then the most recently changed.
+    /// anything), each at most once, up to `limit`: a quarter the files that held writes change or file into, a quarter
+    /// the most recently changed, the rest a random spread over all of them (so rows the newest would hide, such as
+    /// another account's older rows, are reached too). Three queries, each on the primary key or one scan.
     #[cfg(any(target_os = "windows", test))]
     pub fn own_data_proof_sample(&self, limit: usize) -> Result<Vec<String>> {
+        const NAMED: &str = "namespace = 'my_files' AND remote_updated_at > 0";
+        let part = (limit / 4).max(1);
+        let queries = [
+            (
+                format!(
+                    "SELECT file_id FROM files WHERE {NAMED} AND file_id IN (
+                         SELECT file_id FROM operation_queue WHERE file_id IS NOT NULL
+                         UNION SELECT parent_id FROM operation_queue WHERE parent_id IS NOT NULL)
+                     ORDER BY remote_updated_at DESC, file_id LIMIT ?1"
+                ),
+                part,
+            ),
+            (
+                format!("SELECT file_id FROM files WHERE {NAMED} ORDER BY remote_updated_at DESC, file_id LIMIT ?1"),
+                part,
+            ),
+            (format!("SELECT file_id FROM files WHERE {NAMED} ORDER BY random() LIMIT ?1"), limit),
+        ];
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        let mut stmt = conn.prepare(
-            "SELECT f.file_id FROM files f
-             WHERE f.namespace = 'my_files' AND f.remote_updated_at > 0
-             ORDER BY EXISTS(SELECT 1 FROM operation_queue q
-                             WHERE q.file_id = f.file_id OR q.parent_id = f.file_id) DESC,
-                      f.remote_updated_at DESC, f.file_id
-             LIMIT ?1",
-        )?;
-        let ids = stmt
-            .query_map(params![i64::try_from(limit).unwrap_or(i64::MAX)], |row| row.get(0))?
-            .collect::<Result<Vec<String>>>()?;
-        Ok(ids)
+        let mut sample: Vec<String> = Vec::with_capacity(limit);
+        for (sql, wanted) in queries {
+            let mut stmt = conn.prepare(&sql)?;
+            let asked = i64::try_from(wanted + sample.len()).unwrap_or(i64::MAX);
+            let found = stmt
+                .query_map(params![asked], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<String>>>()?;
+            let mut added = 0;
+            for file_id in found {
+                if sample.len() >= limit || added >= wanted {
+                    break;
+                }
+                if !sample.contains(&file_id) {
+                    sample.push(file_id);
+                    added += 1;
+                }
+            }
+        }
+        Ok(sample)
     }
 
     /// Task 2267: record `owner` only if the recorded owner is still `expected` and account data is still here (one
