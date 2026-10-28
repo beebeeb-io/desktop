@@ -12,7 +12,12 @@
 import type { SyncStatus } from '../desktopApi'
 
 export interface HeldGroup {
-  /** `auth`, `quota`, `permission`, `locked`, `key_replaced`, or `other`. */
+  /**
+   * `auth`, `quota`, `permission`, `locked`, `key_replaced`, `found_while_paused`, or `other`. `found_while_paused`
+   * (task 2267, Windows): local items Beebeeb could not prove were this account's own when it adopted the PC's data
+   * (new top-level items made while sync was refused, or changes inside shared-with-me folders). They wait for the
+   * person's decision in Settings › Sync (`foundWhilePaused.ts`): upload them, or keep them on this PC only.
+   */
   reason: string
   count: number
   /** Unix seconds the oldest and newest of them were queued (0 = not recorded). */
@@ -138,7 +143,8 @@ export function formatCount(n: number): string {
   return n.toLocaleString('en-US')
 }
 
-function plural(n: number, one: string, many: string): string {
+/** "1 change", "2,924 changes". */
+export function plural(n: number, one: string, many: string): string {
   return `${formatCount(n)} ${n === 1 ? one : many}`
 }
 
@@ -157,7 +163,10 @@ function datePhrase(group: HeldGroup, now: Date): string {
   return first === last ? ` from ${first}` : ` since ${first}`
 }
 
-/** One sentence per pause reason. Only `auth` promises a repair: the Mac lead's ruling for 0.8.15. */
+/**
+ * One sentence per pause reason. Only `auth` promises a repair: the Mac lead's ruling for 0.8.15. `found_while_paused`
+ * promises nothing either: those changes wait for the person's decision (task 2267).
+ */
 export function heldSentence(group: HeldGroup, now: Date = new Date()): string {
   const n = group.count
   const changes = plural(n, 'change', 'changes')
@@ -173,6 +182,8 @@ export function heldSentence(group: HeldGroup, now: Date = new Date()): string {
       return `${changes} ${are} on hold while Beebeeb is locked.`
     case 'key_replaced':
       return `${changes} ${are} on hold: ${n === 1 ? 'it was' : 'they were'} made with a key this account no longer uses.`
+    case 'found_while_paused':
+      return `${changes} found while sync was paused ${are} not uploaded yet.`
     default:
       return `${changes}${datePhrase(group, now)} ${are} on hold.`
   }
