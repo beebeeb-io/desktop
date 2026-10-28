@@ -6765,8 +6765,10 @@ impl StateDb {
             [],
         )?;
         tx.execute("DELETE FROM id_aliases", [])?;
+        tx.execute("DELETE FROM owned_key_records", [])?;
 
         tx.commit()?;
+        self.1.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         Ok(LocalStatePurge {
             queued_ops_purged,
             payload_paths,

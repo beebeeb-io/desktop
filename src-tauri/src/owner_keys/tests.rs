@@ -133,6 +133,13 @@ fn sf2237d_t3_migration_preserves_contracts() {
     })
     .unwrap();
     let before = db.get_file_contract_state("legacy").unwrap().unwrap();
+    // Emulate a pre-2237d database: the legacy file/contract survives migration.
+    drop(db);
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute("DROP TABLE IF EXISTS owned_key_records", [])
+        .unwrap();
+    let db = StateDb::open(&path).unwrap();
     db.put_owned_key_record(&record()).unwrap();
     drop(db);
     let db = StateDb::open(&path).unwrap();
@@ -182,6 +189,13 @@ fn sf2237d_t3_opaque_roundtrip_and_purge() {
     db.put_owned_key_record(&row).unwrap();
     db.delete_owned_key_record("item").unwrap();
     assert_eq!(db.get_owned_key_record("item").unwrap(), None);
+    db.put_owned_key_record(&row).unwrap();
+    let api = ApiClient::new("http://127.0.0.1:9".into(), "fixture".into(), [7; 32]);
+    let stop = AtomicBool::new(false);
+    let before_purge = AccountScope::new(&db, &api, &stop);
+    db.purge_all_local_state().unwrap();
+    assert_eq!(db.get_owned_key_record("item").unwrap(), None);
+    assert!(before_purge.put(&row).is_err());
 }
 
 #[test]
