@@ -335,11 +335,19 @@ sign-out purge stops. Keep every engine start behind `spawn_bound_engine`:
 `every_engine_start_is_bound_first` counts them.
 
 On Windows a refusal over data with no owner, or an owner recorded by an email only, asks the server in
-the background (`own_data_proof.rs`, task 2267): a sample of the My Files rows must decrypt under this
-session's key, and one file this account cannot see (unless it sat in a folder proven its own) or one
-name sealed under another key blocks. Proven, the session is recorded as the owner
-(`StateDb::replace_owner_if`) and sync starts through the same `spawn_bound_engine`. This is the only
-other place an owner is recorded; two different user ids are never questioned.
+the background (`own_data_proof.rs`, task 2267). It lists this account's whole tree once (the snapshot and
+the trash) and judges EVERY My Files row the server named, no sample: a row in the tree is its own when its
+name decrypts under this session's key; a row not in the tree is gone only when its nearest ancestor in
+the tree is its own. A name sealed under another key (when the API says nobody else sealed it), or a row
+this account cannot place, blocks; names that prove nothing never outnumber the own ones. Proven, the
+session is recorded as the owner (`StateDb::adopt_owner_holding`) and sync starts through the same
+`spawn_bound_engine`. In the same transaction every queued change the proof cannot tie to an own row is
+held as `found_while_paused` (later changes to those items too, `insert_operation_conn`): never sent and
+never deleted until the person decides in Settings › Sync. "Upload to my Beebeeb" releases them; "Keep on
+this PC only" (`found_while_paused.rs`) MOVES the items made on this PC out of the sync root into
+`Beebeeb - kept on this PC\YYYY-MM-DD` next to it (same volume, rename only, never over a name, journaled
+so a crash is settled at the next engine start) and forgets their rows. This is the only other place an
+owner is recorded; two different user ids are never questioned.
 
 ## Browser sign-in (`src-tauri/src/browser_login.rs`, task 1734)
 

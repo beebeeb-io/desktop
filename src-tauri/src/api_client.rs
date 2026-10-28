@@ -560,6 +560,19 @@ impl ApiClient {
         }
     }
 
+    /// This client with `timeout` for each request in place of the app's
+    /// [`crate::link_health::API_REQUEST_TIMEOUT_SECS`]: for a listing that may move a whole tree on a slow link and
+    /// that nobody waits on (task 2267's ownership proof, self-review F5).
+    #[cfg(any(target_os = "windows", test))]
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.client = Client::builder()
+            .timeout(timeout)
+            .default_headers(provenance_headers())
+            .build()
+            .expect("reqwest client");
+        self
+    }
+
     /// The shared record of whether the last requests reached the server.
     pub fn link(&self) -> std::sync::Arc<crate::link_health::LinkMonitor> {
         self.link.clone()

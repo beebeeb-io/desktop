@@ -140,6 +140,12 @@ pub fn probe(master_key: &[u8; 32], node: &serde_json::Value) -> Probe {
     let Some(file_id) = node.get("id").and_then(serde_json::Value::as_str) else {
         return Probe::Unproven;
     };
+    // Self-review F1: an API that does not say who sealed a name (its tree carried none of these before 2026-10-27)
+    // cannot tell a file received through a file request from anything else, so there a name that does not open
+    // proves nothing either way.
+    let says_who_sealed = ["file_request_id", "uploaded_by", "owner_wrapped_file_key"]
+        .iter()
+        .all(|field| node.get(*field).is_some());
     match node
         .get("name_encrypted")
         .and_then(serde_json::Value::as_str)
@@ -149,7 +155,8 @@ pub fn probe(master_key: &[u8; 32], node: &serde_json::Value) -> Probe {
         // A plaintext (legacy) name, or none: proves nothing either way.
         None => Probe::Neutral,
         Some(sealed) if name_opens(master_key, file_id, sealed) => Probe::Own,
-        Some(_) => Probe::Unproven,
+        Some(_) if says_who_sealed => Probe::Unproven,
+        Some(_) => Probe::Neutral,
     }
 }
 
@@ -180,12 +187,17 @@ pub fn listing_from_status(status: Option<u16>) -> Listing {
     }
 }
 
-/// A `sync_snapshot` result as the proof reads it.
-#[cfg(target_os = "windows")]
-pub fn listing(result: anyhow::Result<crate::api_client::SyncSnapshot>) -> Listing {
-    match result {
-        Ok(snapshot) => Listing::Nodes(snapshot.nodes),
-        Err(error) => listing_from_status(
+/// This account's tree as the proof reads it (self-review F2): the snapshot, which lists only what is not in the trash,
+/// and the trash listing, so a row the person trashed on the server while sync was refused is still found in the tree.
+/// Either one unread is a listing that did not answer.
+#[cfg(any(target_os = "windows", test))]
+pub fn listing_of(
+    snapshot: anyhow::Result<crate::api_client::SyncSnapshot>,
+    trashed: anyhow::Result<Vec<serde_json::Value>>,
+) -> Listing {
+    match (snapshot, trashed) {
+        (Ok(snapshot), Ok(trashed)) => Listing::Nodes(snapshot.nodes.into_iter().chain(trashed).collect()),
+        (Err(error), _) | (_, Err(error)) => listing_from_status(
             error
                 .downcast_ref::<reqwest::Error>()
                 .and_then(reqwest::Error::status)
@@ -1110,6 +1122,71 @@ mod tests {
         let server = Server::new(vec![cases[0].0.clone(), mine(IDS[1]), mine(IDS[2])]);
         let outcome = prove(&pc, &session(), MINE, &server);
         assert!(matches!(outcome, Outcome::Adopted(t) if t.own == 2 && t.neutral == 1), "{outcome:?}");
+    }
+
+    /// Self-review F1: a tree from an API that does not say who sealed a name (its nodes carry no `file_request_id`,
+    /// `uploaded_by` or `owner_wrapped_file_key` at all, as before 2026-10-27) cannot tell a file received through a
+    /// file request from anything else, so a name that does not open there proves nothing either way. An API that says
+    /// nobody else sealed it still makes it block.
+    #[test]
+    fn a_name_that_does_not_open_proves_nothing_when_the_api_does_not_say_who_sealed_it() {
+        let without = |mut node: serde_json::Value, fields: &[&str]| {
+            for field in fields {
+                node.as_object_mut().unwrap().remove(*field);
+            }
+            node
+        };
+        let attribution = ["file_request_id", "uploaded_by", "owner_wrapped_file_key"];
+        let received = |id: &str| with(mine(id), "name_encrypted", serde_json::json!(sealed_name(THEIRS, id)));
+        assert_eq!(probe(&MINE, &without(received(IDS[0]), &attribution)), Probe::Neutral, "the API does not say");
+        assert_eq!(
+            probe(&MINE, &without(received(IDS[0]), &["uploaded_by", "owner_wrapped_file_key"])),
+            Probe::Neutral,
+            "the API says only whether a file request sealed it"
+        );
+        assert_eq!(probe(&MINE, &received(IDS[0])), Probe::Unproven, "the API says nobody else sealed it");
+        assert_eq!(probe(&MINE, &without(mine(IDS[0]), &attribution)), Probe::Own, "an own name still proves it");
+
+        let pc = pc_with(&IDS);
+        adopt_unbound(&pc.db, None).unwrap();
+        let server = Server::new(vec![
+            without(received(IDS[0]), &attribution),
+            without(mine(IDS[1]), &attribution),
+            without(mine(IDS[2]), &attribution),
+        ]);
+        let outcome = prove(&pc, &session(), MINE, &server);
+        assert!(matches!(outcome, Outcome::Adopted(t) if t.own == 2 && t.neutral == 1), "{outcome:?}");
+    }
+
+    /// Self-review F2: a row the person put in the trash on the server while sync was refused is not in the snapshot,
+    /// which lists only what is not in the trash. The proof reads the trash too (`listing_of`), so a top-level folder
+    /// this account trashed (with a file in it that the trash listing does not name) is its own, and the data is
+    /// adopted. Read from the snapshot alone, the same PC is refused. Either listing unread: no verdict.
+    #[test]
+    fn a_folder_this_account_trashed_on_the_server_is_its_own() {
+        let trashed = "0b000000-0000-4000-8000-000000000009";
+        let inside = "0b000000-0000-4000-8000-00000000000a";
+        let snapshot = || crate::api_client::SyncSnapshot { seq_id: 7, nodes: vec![mine(IDS[0]), mine(IDS[1]), mine(IDS[2])] };
+        let pc = || {
+            let pc = pc_with(&IDS);
+            add_folder(&pc, trashed, None, Shape::Snapshot);
+            add_row(&pc, inside, Some(trashed), Shape::Snapshot);
+            adopt_unbound(&pc.db, None).unwrap();
+            pc
+        };
+
+        let outcome = prove(&pc(), &session(), MINE, &Server::new(snapshot().nodes));
+        assert!(matches!(outcome, Outcome::NotProven(t) if t.missing == 2), "precondition, the snapshot alone: {outcome:?}");
+
+        let in_trash = vec![with(mine(trashed), "is_trashed", serde_json::json!(true))];
+        let Listing::Nodes(nodes) = listing_of(Ok(snapshot()), Ok(in_trash)) else {
+            panic!("both listings read: the nodes of both");
+        };
+        let outcome = prove(&pc(), &session(), MINE, &Server::new(nodes));
+        assert!(matches!(outcome, Outcome::Adopted(t) if t.own == 4 && t.missing == 0), "{outcome:?}");
+
+        assert!(matches!(listing_of(Ok(snapshot()), Err(anyhow::anyhow!("offline"))), Listing::Unavailable));
+        assert!(matches!(listing_of(Err(anyhow::anyhow!("offline")), Ok(Vec::new())), Listing::Unavailable));
     }
 
     /// Review P3-1: more rows that prove nothing than rows that prove ownership is not enough.
