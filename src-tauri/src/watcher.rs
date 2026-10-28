@@ -1067,8 +1067,8 @@ mod tests {
     fn task_2240_every_scan_pass_fits_the_page_cache_first() {
         use crate::finder_setup_command_tests::body_between;
         use crate::source_pin::squeeze;
-        let source = include_str!("watcher.rs");
-        let body = squeeze(body_between(source, "pub(crate) fn run_one_scan_with(", "\n}\n"));
+        let source = include_str!("watcher.rs").replace("\r\n", "\n");
+        let body = squeeze(body_between(&source, "pub(crate) fn run_one_scan_with(", "\n}\n"));
         let fit = body
             .find("ifletErr(e)=bridge.db().fit_page_cache(){")
             .expect("the pass fits the page cache");
