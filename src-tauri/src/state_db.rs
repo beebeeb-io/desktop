@@ -479,15 +479,16 @@ const FILE_BY_PATH_SQL: &str = "SELECT file_id, path, status, size_bytes, modifi
 /// runs it for every file it skips, so it too goes through `idx_files_path`.
 const FILE_ROW_BY_PATH_SQL: &str = "SELECT * FROM files WHERE path = ?1";
 
-/// Task 2240 (D2): the scan's page cache never goes below SQLite's default (2,000 KiB) …
+/// Task 2240 (D2): the scan's page cache never goes below SQLite's default, `cache_size = -2000` (2,000 KiB): the value
+/// every fresh connection reads, which `task_2240_ui_handles_keep_the_default_cache` checks …
 pub(crate) const PAGE_CACHE_FLOOR_KIB: i64 = 2_000;
 /// … nor above 128 MiB, which holds `files` and `idx_files_path` up to about 300k rows.
 pub(crate) const PAGE_CACHE_CEILING_KIB: i64 = 128 * 1024;
 
 /// Task 2240 (D2): the page cache, in KiB, for a DB of `db_bytes`: the whole DB plus an eighth, within
 /// [`PAGE_CACHE_FLOOR_KIB`, `PAGE_CACHE_CEILING_KIB`]. The scan's working set (`files` and `idx_files_path`) is part of
-/// the DB, so the DB's size always covers it. SQLite fills the cache only with pages it reads, so a limit above what a
-/// pass touches costs no memory.
+/// the DB, so the DB's size always covers it. SQLite fills the cache only with pages the connection reads, so its memory
+/// follows what is read, up to this limit.
 pub(crate) fn page_cache_limit_kib(db_bytes: i64) -> i64 {
     let kib = db_bytes.max(0) / 1024;
     (kib + kib / 8).clamp(PAGE_CACHE_FLOOR_KIB, PAGE_CACHE_CEILING_KIB)
@@ -2930,6 +2931,10 @@ impl StateDb {
     /// SQLite's default 2,000 KiB, every pass re-read `files` and its path index from disk (~18.5 MB on a 43k-row
     /// vault). The cache is set only when the limit changed. UI commands open their own connections and keep the
     /// default (I2). A commit by another connection still empties this cache; the next pass reads cold once (I4).
+    ///
+    /// The engine's connection is shared by the sync tick, the transfers and the Cloud Files callbacks too, so the pages
+    /// their queries read stay cached as well: this connection's cache can grow to the whole limit (the DB plus an
+    /// eighth, at most 128 MiB) and stays there. That is the memory bound D2 accepts.
     pub fn fit_page_cache(&self) -> Result<i64> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let page_count: i64 = conn.query_row("PRAGMA page_count", [], |row| row.get(0))?;
@@ -8071,11 +8076,6 @@ mod tests {
         assert!(!db.has_account_data().unwrap(), "no account data is left");
     }
 
-    /// Task 2229: the enumeration scan looks every file and folder on disk up by path on every
-    /// pass, so the lookup steps no row of a full scan of `files`, whether the path is there or
-    /// not. That holds on a DB opened from a release before the index (0.8.15 and earlier),
-    /// because opening adds it. The counters read are those of the app's own cached statement,
-    /// so the lookup `get_file_by_path` runs is the one measured.
     /// Task 2240: file rows in a fresh state.db, enough to fill several times SQLite's default page cache (about 300
     /// bytes each). The scan's lookups find them as `dir/<i>.txt`.
     const TASK_2240_ROWS: usize = 20_000;
@@ -8298,6 +8298,11 @@ mod tests {
         assert_eq!(task_2240_cache_size(&engine), -second);
     }
 
+    /// Task 2229: the enumeration scan looks every file and folder on disk up by path on every
+    /// pass, so the lookup steps no row of a full scan of `files`, whether the path is there or
+    /// not. That holds on a DB opened from a release before the index (0.8.15 and earlier),
+    /// because opening adds it. The counters read are those of the app's own cached statement,
+    /// so the lookup `get_file_by_path` runs is the one measured.
     #[test]
     fn a_path_lookup_reads_through_an_index_not_the_whole_files_table() {
         let dir = tempfile::tempdir().unwrap();
