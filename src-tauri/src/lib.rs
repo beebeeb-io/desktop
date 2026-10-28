@@ -7665,9 +7665,13 @@ fn spawn_bound_engine(
     }
     // Task 2267: a Windows start refused over local data that no owner record matches asks, in the background, whether
     // that data is this account's own, and sync starts once it is proven (`prove_own_data_in_background`).
+    // The proof runs for the session this start read: the same account runtime, the turn read under the engine slot.
     #[cfg(target_os = "windows")]
-    if matches!(&started, Err(error) if error == account_binding::OTHER_ACCOUNT_ON_WINDOWS) {
-        prove_own_data_in_background(surface_app, paths.sync_root.clone());
+    if matches!(&started, Err(error) if error == account_binding::OTHER_ACCOUNT_ON_WINDOWS)
+        && let Ok(active) = state.active_account()
+        && std::ptr::eq(Arc::as_ptr(&active), acct)
+    {
+        prove_own_data_in_background(surface_app, paths.sync_root.clone(), active, acct.session_generation());
     }
     started
 }
@@ -7675,20 +7679,49 @@ fn spawn_bound_engine(
 /// Task 2267: the background half of a Windows start refused with `OTHER_ACCOUNT_ON_WINDOWS`. It proves the local
 /// data is the signed-in account's own (`own_data_proof`: its My Files rows decrypt under this session's key), records
 /// the session as the owner, and starts sync through the usual start, which binds again and now keeps everything.
-/// Another account's data is never adopted and nothing is deleted. At most one proof runs at a time.
+/// Another account's data is never adopted and nothing is deleted.
+///
+/// One proof per session (account runtime and turn) at a time: a start refused again while it runs asks nothing new,
+/// a proof for a session that has since changed does not hold the next session's back, and the slot is freed however
+/// the proof ends, a panic included. Sync starts only for the session that was proven, checked under the
+/// session-transition lock, so a Lock or a sign-out since leaves nothing to start.
 #[cfg(target_os = "windows")]
-fn prove_own_data_in_background(app: tauri::AppHandle, sync_root: PathBuf) {
-    static RUNNING: AtomicBool = AtomicBool::new(false);
-    if RUNNING.swap(true, Ordering::SeqCst) {
-        return;
+fn prove_own_data_in_background(
+    app: tauri::AppHandle,
+    sync_root: PathBuf,
+    acct: Arc<account::AccountRuntime>,
+    turn: account::SessionGeneration,
+) {
+    type Key = (usize, account::SessionGeneration);
+    static IN_FLIGHT: std::sync::Mutex<Option<Key>> = std::sync::Mutex::new(None);
+    struct Flight(Key);
+    impl Drop for Flight {
+        fn drop(&mut self) {
+            let mut in_flight = IN_FLIGHT.lock().unwrap_or_else(|p| p.into_inner());
+            if *in_flight == Some(self.0) {
+                *in_flight = None;
+            }
+        }
     }
+    let key = (Arc::as_ptr(&acct) as usize, turn);
+    {
+        let mut in_flight = IN_FLIGHT.lock().unwrap_or_else(|p| p.into_inner());
+        if *in_flight == Some(key) {
+            return;
+        }
+        *in_flight = Some(key);
+    }
+    let flight = Flight(key);
     tauri::async_runtime::spawn(async move {
-        let proved = prove_own_data_of_active_session(&app, &sync_root).await;
-        RUNNING.store(false, Ordering::SeqCst);
-        match proved {
+        let _flight = flight;
+        match prove_own_data_of_session(&app, &sync_root, &acct, turn).await {
             Ok(own_data_proof::Outcome::Adopted(tally)) => {
                 tracing::info!(?tally, "R10: this PC's local data is proven this account's own; starting sync");
                 let transition = SESSION_TRANSITION.lock().await;
+                if !session_still_active(&app, &acct, turn) {
+                    tracing::info!("R10: the session changed after the proof; nothing to start");
+                    return;
+                }
                 let state = app.state::<AppState>();
                 if let Err(error) = start_engine_if_possible(app.clone(), &state, &transition).await {
                     tracing::warn!(%error, "R10: the start after the proof was refused");
@@ -7700,18 +7733,36 @@ fn prove_own_data_in_background(app: tauri::AppHandle, sync_root: PathBuf) {
     });
 }
 
-/// The proof for the active session's keys and identity, read together as an engine start reads them. A session that
-/// changes before the owner is recorded records nothing (`session_unchanged_since`). Offline, the refusal becomes the
-/// one that says to connect and open Beebeeb again; the next start asks again.
+/// Whether `acct` is still the active account and its session is still the one read at `turn`.
 #[cfg(target_os = "windows")]
-async fn prove_own_data_of_active_session(
+fn session_still_active(app: &tauri::AppHandle, acct: &Arc<account::AccountRuntime>, turn: account::SessionGeneration) -> bool {
+    acct.session_unchanged_since(turn)
+        && app
+            .state::<AppState>()
+            .active_account()
+            .is_ok_and(|active| Arc::ptr_eq(&active, acct))
+}
+
+/// How long the proof waits for one answer, so a Lock or a sign-out never waits long for the key and token it holds
+/// (the proof stops asking once the session changed, and drops both when it returns).
+#[cfg(target_os = "windows")]
+const ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The proof for the session read at `turn`, with its keys and identity read together as an engine start reads them.
+/// A session that changes stops the asking and records nothing (`session_still_active`). With no answer at all the
+/// refusal becomes the one that says to connect and open Beebeeb again; a token the server refused is not "offline",
+/// so that sentence is not shown for it. The next start asks again.
+#[cfg(target_os = "windows")]
+async fn prove_own_data_of_session(
     app: &tauri::AppHandle,
     sync_root: &Path,
+    acct: &Arc<account::AccountRuntime>,
+    turn: account::SessionGeneration,
 ) -> Result<own_data_proof::Outcome, String> {
-    let state = app.state::<AppState>();
-    let acct = state.active_account()?;
-    let turn = acct.session_generation();
-    let Ok(((token, key), identity)) = keys_for_engine_start(&acct) else {
+    if !session_still_active(app, acct, turn) {
+        return Ok(own_data_proof::Outcome::Changed(own_data_proof::Tally::default()));
+    }
+    let Ok(((token, key), identity)) = keys_for_engine_start(acct) else {
         return Ok(own_data_proof::Outcome::NotEligible);
     };
     let paths = LocalDataPaths::production(sync_root)?;
@@ -7725,13 +7776,18 @@ async fn prove_own_data_of_active_session(
         &key,
         |file_id| {
             let api = &api;
-            async move { own_data_proof::fetched(api.get_file(&file_id).await) }
+            async move {
+                match tokio::time::timeout(ASK_TIMEOUT, api.get_file(&file_id)).await {
+                    Ok(result) => own_data_proof::fetched(result),
+                    Err(_) => own_data_proof::Fetched::Unavailable,
+                }
+            }
         },
-        || acct.session_unchanged_since(turn),
+        || session_still_active(app, acct, turn),
     )
     .await?;
-    if matches!(outcome, own_data_proof::Outcome::Unavailable(_)) {
-        record_engine_refusal(&acct, turn, account_binding::IDENTITY_UNKNOWN);
+    if matches!(outcome, own_data_proof::Outcome::Unavailable(tally) if tally.signed_out == 0) {
+        record_engine_refusal(acct, turn, account_binding::IDENTITY_UNKNOWN);
     }
     Ok(outcome)
 }
@@ -27315,38 +27371,53 @@ mod account_binding_tests {
     }
 
     /// Task 2267: a Windows start refused with `OTHER_ACCOUNT_ON_WINDOWS` hands its data to the ownership proof, after
-    /// the start returned and whatever it returned, and the proof starts sync only once it adopted. The proof reads the
-    /// keys and identity as a start reads them and records nothing for a session that changed.
+    /// the start returned and whatever it returned, for the session that start read (the same account runtime, the
+    /// turn read under the engine slot). The proof starts sync only once it adopted, and then only under the
+    /// session-transition lock for that same session (fix round 1, findings 6 and 8). One proof per session at a time,
+    /// its slot freed however it ends, a panic included (finding 7). Each question is bounded and the asking stops
+    /// when the session changes (finding 4); a refused token is not reported as "offline" (finding 5).
     #[test]
     fn a_windows_refusal_over_unowned_data_asks_for_the_proof_and_only_an_adoption_starts_sync() {
         let production = production_source();
         let squeeze = crate::source_pin::squeeze;
         let gate = squeeze(&code_of(&production, "fn spawn_bound_engine("));
         let hook = squeeze(
-            "#[cfg(target_os = \"windows\")] if matches!(&started, Err(error) if error == account_binding::OTHER_ACCOUNT_ON_WINDOWS) { prove_own_data_in_background(surface_app, paths.sync_root.clone()); }",
+            "#[cfg(target_os = \"windows\")] if matches!(&started, Err(error) if error == account_binding::OTHER_ACCOUNT_ON_WINDOWS) && let Ok(active) = state.active_account() && std::ptr::eq(Arc::as_ptr(&active), acct) { prove_own_data_in_background(surface_app, paths.sync_root.clone(), active, acct.session_generation()); }",
         );
         let surfaced = gate.find(&squeeze("surface_reset_folder(&surface_app, &folder, files);")).expect("surfaced");
         let asked = gate.find(&hook).unwrap_or_else(|| panic!("the hook: {gate}"));
         assert!(surfaced < asked && gate.ends_with("started"), "{gate}");
 
-        let background = code_of(&production, "fn prove_own_data_in_background(");
-        assert!(background.contains("RUNNING.swap(true, Ordering::SeqCst)"), "{background}");
+        let background = squeeze(&code_of(&production, "fn prove_own_data_in_background("));
+        for step in [
+            "impl Drop for Flight",
+            "if *in_flight == Some(key) { return; }",
+            "let _flight = flight;",
+        ] {
+            assert!(background.contains(&squeeze(step)), "{step}: {background}");
+        }
         let adopted = background.find("Outcome::Adopted(tally)").expect("the adopted arm");
+        let locked = background.find(&squeeze("let transition = SESSION_TRANSITION.lock().await;")).expect("the lock");
+        let current = background.find(&squeeze("if !session_still_active(&app, &acct, turn)")).expect("the check");
         let restart = background.find("start_engine_if_possible(").expect("a restart");
-        let other = background.find("Ok(outcome) =>").expect("every other outcome");
-        assert!(adopted < restart && restart < other, "only an adoption restarts: {background}");
+        let other = background.find("Ok(outcome)=>").expect("every other outcome");
+        assert!(adopted < locked && locked < current && current < restart && restart < other, "{background}");
         assert_eq!(background.matches("start_engine_if_possible(").count(), 1, "{background}");
 
-        let proof = squeeze(&code_of(&production, "async fn prove_own_data_of_active_session("));
+        let proof = squeeze(&code_of(&production, "async fn prove_own_data_of_session("));
         for step in [
-            "let turn = acct.session_generation();",
-            "keys_for_engine_start(&acct)",
+            "keys_for_engine_start(acct)",
             "own_data_proof::prove_and_adopt(",
-            "|| acct.session_unchanged_since(turn)",
-            "record_engine_refusal(&acct, turn, account_binding::IDENTITY_UNKNOWN);",
+            "tokio::time::timeout(ASK_TIMEOUT, api.get_file(&file_id))",
+            "|| session_still_active(app, acct, turn)",
+            "Outcome::Unavailable(tally) if tally.signed_out == 0",
+            "record_engine_refusal(acct, turn, account_binding::IDENTITY_UNKNOWN);",
         ] {
             assert!(proof.contains(&squeeze(step)), "{step}: {proof}");
         }
+        let still = squeeze(&code_of(&production, "fn session_still_active("));
+        assert!(still.contains(&squeeze("acct.session_unchanged_since(turn)")), "{still}");
+        assert!(still.contains(&squeeze("Arc::ptr_eq(&active, acct)")), "{still}");
     }
 
     // ---- the local data under test ----
