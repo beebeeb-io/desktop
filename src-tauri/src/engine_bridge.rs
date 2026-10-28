@@ -5449,7 +5449,7 @@ impl EngineBridge {
         let is_text = is_text_file(&entry.path);
 
         let local = self.local_content_preview(sync_root, &entry.path, is_text);
-        let remote = self.remote_content_preview(file_id, is_text).await;
+        let (remote, _) = self.remote_content_preview(file_id, is_text).await;
 
         Ok(ConflictContentPreview {
             is_text,
@@ -5482,9 +5482,15 @@ impl EngineBridge {
                 unavailable_reason: Some("Couldn't locate this Mac's copy.".to_string()),
             },
         };
-        let remote = self.remote_content_preview(&file_id, is_text).await;
-        // Review-169 #1: the version the person decides against.
-        let version = self.db.get_file_contract_state(&file_id)?.map(|contract| contract.current_version);
+        // Review-169 #1 and F1: the version the person decides against is the version of the bytes
+        // shown, from the metadata the download ran on (after a restart, the fresh one). Never the
+        // mirror read after the download: the pull can raise it to a version nobody has seen while
+        // the download runs. A file whose metadata names no version (legacy, or the fetch failed)
+        // gets the mirror as it was BEFORE the fetch, which is never newer than the bytes: at worst
+        // the decision is `Moved`, or the write is sent on an older base and the server refuses it.
+        let before = self.db.get_file_contract_state(&file_id)?.map(|contract| contract.current_version);
+        let (remote, shown) = self.remote_content_preview(&file_id, is_text).await;
+        let version = shown.or(before);
         Ok(ConflictContentPreview { is_text, local, remote, version })
     }
 
@@ -5684,24 +5690,30 @@ impl EngineBridge {
     /// metadata fetch `do_hydrate_with_meta` needs instead of letting
     /// `do_hydrate` re-fetch it, so the small-file path costs exactly the
     /// metadata GET + the chunk GETs it always cost.
-    async fn remote_content_preview(&self, file_id: &str, is_text: bool) -> ConflictContentSide {
+    ///
+    /// Also returns the server version the side shows: the `download_version.version_number` of the
+    /// metadata the attempt ran on (task 2190, review-169 F1), `None` when no metadata named one.
+    async fn remote_content_preview(&self, file_id: &str, is_text: bool) -> (ConflictContentSide, Option<i64>) {
         let unavailable = |reason: String| ConflictContentSide {
             size_bytes: None,
             text: None,
             unavailable_reason: Some(reason),
         };
         if let Err(e) = file_id.parse::<uuid::Uuid>() {
-            return unavailable(format!("invalid file_id (not a UUID): {e}"));
+            return (unavailable(format!("invalid file_id (not a UUID): {e}")), None);
         }
         let meta = match self.api.get_file(file_id).await {
             Ok(m) => m,
-            Err(e) => return unavailable(format!("Couldn't download the other device's version: {e}")),
+            Err(e) => return (unavailable(format!("Couldn't download the other device's version: {e}")), None),
         };
         // Tasks 1643 + 2173: a version that goes away mid-download restarts once from fresh metadata, as
         // `do_hydrate` does, and the size is checked again on the new version.
-        self.with_one_restart(file_id, meta, |meta| async move { self.preview_attempt(file_id, is_text, &meta).await })
-            .await
-            .unwrap_or_else(|e| unavailable(format!("Couldn't download the other device's version: {e}")))
+        self.with_one_restart(file_id, meta, |meta| async move {
+            let version = meta["download_version"]["version_number"].as_i64();
+            self.preview_attempt(file_id, is_text, &meta).await.map(|side| (side, version))
+        })
+        .await
+        .unwrap_or_else(|e| (unavailable(format!("Couldn't download the other device's version: {e}")), None))
     }
 
     /// One pass of [`Self::remote_content_preview`] on `meta`. `Err` only for what the restart handles (the version
@@ -5734,6 +5746,9 @@ impl EngineBridge {
             });
         }
 
+        // Between the metadata and the chunks: where another device's save and the pull's mirror of it
+        // can land while the preview downloads (review-169 F1's test).
+        self.seam("preview:before_download");
         match self.do_hydrate_with_meta(file_id, meta, None).await {
             Ok(mut bytes) => {
                 // Move the plaintext out instead of `bytes.to_vec()` — a
@@ -5802,25 +5817,32 @@ pub enum ParkedResolution {
 /// never a name in `taken` (the parent's names, lowercased). The time uses a dot, not D4's colon:
 /// a `:` in a Mac file name shows as `/` in Finder, which is why 1887's kept folders use dots too. A
 /// leading dot (`.env`) is not an extension.
+///
+/// Review-169 F3: the whole name fits the file-name limit, as a kept file's does
+/// ([`crate::sign_out::kept_names::with_suffix`], 255 bytes): the stem is cut at a character boundary,
+/// never the suffix, the counter or the extension. The device is cut first, to
+/// [`KEEP_BOTH_DEVICE_MAX_BYTES`], so the suffix always leaves the stem room.
 pub(crate) fn keep_both_name(original: &str, device: &str, hhmm: &str, taken: &std::collections::HashSet<String>) -> String {
-    let (stem, ext) = match original.rfind('.') {
-        Some(dot) if dot > 0 => original.split_at(dot),
-        _ => (original, ""),
-    };
-    let base = format!("{stem} ({device}, {hhmm})");
+    let device = crate::sign_out::kept_names::prefix_within(device, KEEP_BOTH_DEVICE_MAX_BYTES);
     let mut counter = 1u32;
     loop {
-        let candidate = if counter == 1 {
-            format!("{base}{ext}")
+        let suffix = if counter == 1 {
+            format!(" ({device}, {hhmm})")
         } else {
-            format!("{base} {counter}{ext}")
+            format!(" ({device}, {hhmm}) {counter}")
         };
+        let candidate = crate::sign_out::kept_names::with_suffix(original, &suffix);
         if !taken.contains(&candidate.to_lowercase()) {
             return candidate;
         }
         counter += 1;
     }
 }
+
+/// The longest device name a "Keep both" copy names, in UTF-8 bytes: a host name's label is at most 63
+/// characters, so a Mac's own one-label name is never cut, and the cap keeps the suffix far inside the
+/// 255-byte name limit (review-169 F3, plan §7.4).
+const KEEP_BOTH_DEVICE_MAX_BYTES: usize = 64;
 
 /// Result of [`EngineBridge::conflict_content_preview`] — the real content
 /// (or an honest reason it's unavailable) for both sides of a conflict.
@@ -26979,7 +27001,7 @@ mod tests {
                 k.grants.push_back(GrantScript::Replace);
             }
             let bridge = bridge_for(dir.path(), &pair);
-            let side = bridge.remote_content_preview(TEST_FILE_ID, true).await;
+            let (side, _) = bridge.remote_content_preview(TEST_FILE_ID, true).await;
             assert_eq!(side.unavailable_reason, None);
             assert_eq!(side.text.as_deref(), Some(String::from_utf8(b.plain.clone()).unwrap().as_str()));
         }
@@ -27288,12 +27310,15 @@ mod tests {
             let pin = query.split('&').find_map(|kv| kv.strip_prefix("object_version_id="));
             if method == "GET" && path == file {
                 let v = &s.versions[s.current];
+                // The server numbers its versions: the current one is the `current + 1`th (task 2190, F1).
+                let mut manifest = v.manifest();
+                manifest["version_number"] = json!(s.current + 1);
                 return http_json(
                     "200 OK",
                     json!({
                         "id": TEST_FILE_ID, "size_bytes": s.size_bytes_override.unwrap_or(v.plain.len()), "chunk_count": v.frames.len(),
                         "chunk_size_bytes": v.stride,
-                        "download_version": if s.legacy { serde_json::Value::Null } else { v.manifest() },
+                        "download_version": if s.legacy { serde_json::Value::Null } else { manifest },
                     }),
                 )
                 .into_bytes();
@@ -27530,10 +27555,44 @@ mod tests {
             let server = Server::start(versions, vec![(1, 1, true)]);
             server.state.lock().unwrap().null_manifest_on_commit = true;
             let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base.clone(), KEY);
-            let side = tokio::runtime::Runtime::new().unwrap().block_on(bridge.remote_content_preview(TEST_FILE_ID, true));
+            let (side, _) = tokio::runtime::Runtime::new().unwrap().block_on(bridge.remote_content_preview(TEST_FILE_ID, true));
             assert_eq!(side.text, None);
             assert!(side.unavailable_reason.as_deref().is_some_and(|r| r.contains("cannot be downloaded yet")), "{side:?}");
             no_unpinned_chunk_request(&server);
+        }
+
+        /// Task 2190 (review-169 F1): a conflict preview names the version of the bytes it returns, from the
+        /// metadata its download ran on. After a restart that is the fresh metadata's version, never the first's.
+        #[test]
+        fn a_conflict_preview_names_the_version_of_its_bytes_after_a_restart() {
+            let dir = tempfile::tempdir().unwrap();
+            let text = |name: &str| format!("remote version {name} ").repeat(200);
+            let versions = |b: bool| {
+                let mut list = vec![Version::new("aaaaaaaa-0000-4000-8000-00000000000a", text("A").into_bytes())];
+                if b {
+                    list.push(Version::new("bbbbbbbb-0000-4000-8000-00000000000b", text("B").into_bytes()));
+                }
+                list
+            };
+            // B commits after the first chunk and A is gone at once: the next pinned chunk is a 409, and the
+            // preview restarts on fresh metadata naming B.
+            let server = Server::start(versions(true), vec![(1, 1, true)]);
+            let bridge = test_bridge_with_api(&dir.path().join("restart.db"), server.base.clone(), KEY);
+            let (side, version) =
+                tokio::runtime::Runtime::new().unwrap().block_on(bridge.remote_content_preview(TEST_FILE_ID, true));
+            assert_eq!(side.text, Some(text("B")), "the new version's bytes, whole");
+            assert_eq!(version, Some(2), "and its version, from the fresh metadata");
+            assert_eq!(
+                server.seen().iter().filter(|r| r.as_str() == format!("GET /api/v1/files/{TEST_FILE_ID}")).count(),
+                2,
+                "precondition: it restarted"
+            );
+            // No restart: the first metadata's version.
+            let server = Server::start(versions(false), vec![]);
+            let bridge = test_bridge_with_api(&dir.path().join("plain.db"), server.base.clone(), KEY);
+            let (side, version) =
+                tokio::runtime::Runtime::new().unwrap().block_on(bridge.remote_content_preview(TEST_FILE_ID, true));
+            assert_eq!((side.text, version), (Some(text("A")), Some(1)));
         }
 
         #[test]
@@ -27568,7 +27627,7 @@ mod tests {
             let server = Server::start(vec![big], vec![]);
             server.state.lock().unwrap().size_bytes_override = Some(100);
             let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base.clone(), KEY);
-            let side = tokio::runtime::Runtime::new().unwrap().block_on(bridge.remote_content_preview(TEST_FILE_ID, true));
+            let (side, _) = tokio::runtime::Runtime::new().unwrap().block_on(bridge.remote_content_preview(TEST_FILE_ID, true));
             assert_eq!(side.size_bytes, Some(CONFLICT_PREVIEW_TEXT_MAX_BYTES as u64 + 1));
             assert!(side.unavailable_reason.as_deref().is_some_and(|r| r.starts_with("File is too large to preview")), "{side:?}");
             assert_eq!(server.seen().iter().filter(|r| r.contains("/chunks/")).count(), 0, "nothing downloaded");
@@ -30687,6 +30746,131 @@ mod tests {
         let feed = feed.expect("the feed still answers");
         let entry = feed.iter().find(|entry| entry.op_id.as_deref() == Some(op_id.as_str())).expect("the row stays");
         assert_eq!(entry.action, "review_upload", "a failed check offers no decision");
+    }
+
+    /// Review-169 F1: the window decides against the version of the bytes it showed, from the metadata
+    /// that produced them, never the mirror read after the download. Another device saves version 3
+    /// while the preview downloads version 2, and the pull raises the mirror to 3 (the seam, between
+    /// the metadata and the chunks): the preview still names 2, so every choice made on it is `Moved`.
+    /// A legacy file (no `download_version`) names the mirror as it was before the fetch, which is
+    /// never newer than the bytes.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn task_2190_fu2_the_preview_names_the_version_of_the_bytes_it_shows() {
+        for legacy in [false, true] {
+            let master_key = [241u8; 32];
+            let file = "21900000-0000-4000-8000-000000000057";
+            let (dir, _sync_root, server, bridge, op_id, staged, _token) = task_2190_parked(master_key, file).await;
+            {
+                let mut s = server.state.lock().unwrap();
+                s.serve_downloads = true;
+                s.legacy_downloads = legacy;
+            }
+            let (db, state, saved) = (std::sync::Arc::clone(&bridge.db), std::sync::Arc::clone(&server.state), file.to_string());
+            bridge.seams.arm("preview:before_download", move || {
+                let chunk = task_2190_server_chunk(master_key, &saved, b"saved on another device");
+                state.lock().unwrap().files.get_mut(&saved).unwrap().versions.push(vec![chunk]);
+                db.test_execute(&format!("UPDATE files SET current_version = 3 WHERE file_id = '{saved}'")).unwrap();
+            });
+            let preview = bridge.parked_conflict_preview(&op_id).await.unwrap();
+            assert_eq!(server.state.lock().unwrap().files[file].versions.len(), 3, "the seam ran: version 3 landed mid-download");
+            assert_eq!(preview.version, Some(2), "legacy {legacy}: the version of the bytes shown, or older");
+            if !legacy {
+                assert_eq!(preview.remote.text.as_deref(), Some("edited on the web"), "the pinned download is version 2");
+            }
+            let mut keep = task_2190_keep_into(dir.path());
+            for choice in [ParkedChoice::Local, ParkedChoice::Remote, ParkedChoice::Both] {
+                assert_eq!(
+                    bridge.resolve_parked(&op_id, choice, preview.version, &mut keep, "Mac", "10.00").unwrap(),
+                    ParkedResolution::Moved,
+                    "legacy {legacy}: {choice:?} on the version the preview returned"
+                );
+            }
+            assert!(Path::new(&staged).exists() && !dir.path().join("kept").exists(), "nothing changed");
+            let op = bridge.db.get_operation(&op_id).unwrap().unwrap();
+            assert_eq!((op.base_version, op.last_error.as_deref()), (Some(1), Some("stale_base")), "still parked on its base");
+        }
+    }
+
+    /// Review-169 F2: another device trashes the file, or the folder it is in, while the window is
+    /// open. The pull marks the row `trashing` (`mark_subtree_trashing`, the pull's `file_trash`) and
+    /// leaves its version and its parked write as they were: every choice is `Moved`, the upload stays
+    /// parked, and the feed offers no decision.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn task_2190_fu2_a_remote_trash_of_the_file_or_its_folder_makes_every_choice_moved() {
+        for trash_folder in [false, true] {
+            let master_key = [242u8; 32];
+            let file = "21900000-0000-4000-8000-000000000058";
+            let folder = "21900000-0000-4000-8000-000000000059";
+            let (dir, _sync_root, _server, bridge, op_id, staged, _token) = task_2190_parked(master_key, file).await;
+            let trashed = if trash_folder {
+                seed_folder_row(&bridge, folder, "Docs");
+                bridge
+                    .db
+                    .test_execute(&format!(
+                        "UPDATE files SET path = 'Docs/notes.txt', parent_id = '{folder}' WHERE file_id = '{file}'"
+                    ))
+                    .unwrap();
+                folder
+            } else {
+                file
+            };
+            let marked = bridge.db.mark_subtree_trashing(trashed).unwrap();
+            assert!(marked.iter().any(|row| row.file_id == file), "precondition: the file is marked trashing");
+            let mut keep = task_2190_keep_into(dir.path());
+            for choice in [ParkedChoice::Local, ParkedChoice::Remote, ParkedChoice::Both] {
+                assert_eq!(
+                    bridge.resolve_parked(&op_id, choice, Some(2), &mut keep, "Mac", "10.00").unwrap(),
+                    ParkedResolution::Moved,
+                    "{choice:?}, the folder trashed: {trash_folder}"
+                );
+            }
+            let op = bridge.db.get_operation(&op_id).unwrap().unwrap();
+            assert!(
+                op.attempts >= op.max_attempts && op.last_error.as_deref() == Some("stale_base"),
+                "the upload stays parked: {op:?}"
+            );
+            assert_eq!(bridge.db.get_file(file).unwrap().unwrap().status, FileStatus::Trashing);
+            assert!(Path::new(&staged).exists() && !dir.path().join("kept").exists(), "nothing changed");
+            let entry = bridge
+                .version_conflict_feed()
+                .unwrap()
+                .into_iter()
+                .find(|entry| entry.op_id.as_deref() == Some(op_id.as_str()));
+            assert_ne!(entry.map(|entry| entry.action), Some("open_conflict".to_string()), "no decision offered");
+        }
+    }
+
+    /// Review-169 F3: the "Keep both" name is at most 255 bytes (`kept_names::MAX_NAME_BYTES`, as kept
+    /// files are) whatever the original, the device or the counter: the stem is cut at a character
+    /// boundary, and the suffix and the extension never are.
+    #[test]
+    fn task_2190_fu2_keep_both_name_fits_the_name_limit() {
+        use crate::sign_out::kept_names::MAX_NAME_BYTES;
+        let none = std::collections::HashSet::new();
+        // The review's case: 240 ASCII bytes and `.txt` (244 bytes), on `MacBook Pro` at 10.00.
+        let ascii = format!("{}.txt", "a".repeat(240));
+        let name = keep_both_name(&ascii, "MacBook Pro", "10.00", &none);
+        assert_eq!(name, format!("{} (MacBook Pro, 10.00).txt", "a".repeat(230)));
+        assert_eq!(name.len(), MAX_NAME_BYTES);
+        // The counter at the limit: the stem gives way, the counter stays.
+        let taken = std::collections::HashSet::from([name.to_lowercase()]);
+        let second = keep_both_name(&ascii, "MacBook Pro", "10.00", &taken);
+        assert_eq!(second, format!("{} (MacBook Pro, 10.00) 2.txt", "a".repeat(228)));
+        // Multibyte: 80 three-byte characters (240 bytes) are cut at a character boundary.
+        let wide = format!("{}.txt", "日".repeat(80));
+        let name = keep_both_name(&wide, "MacBook Pro", "10.00", &none);
+        assert_eq!(name, format!("{} (MacBook Pro, 10.00).txt", "日".repeat(76)));
+        assert!(name.len() <= MAX_NAME_BYTES);
+        // A multibyte device name, and one far too long: the device is cut; the time and the extension stay.
+        let curly = keep_both_name(&wide, "Guus’s MacBook Pro", "10.00", &none);
+        assert!(curly.len() <= MAX_NAME_BYTES && curly.ends_with(" (Guus’s MacBook Pro, 10.00).txt"), "{curly}");
+        let long = keep_both_name("notes.txt", &"x".repeat(300), "10.00", &none);
+        assert!(
+            long.len() <= MAX_NAME_BYTES && long.starts_with("notes (x") && long.ends_with("x, 10.00).txt"),
+            "{long}"
+        );
     }
 
     /// D4: the copy's name is unique among the parent's names, case-insensitively.

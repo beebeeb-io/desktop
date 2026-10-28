@@ -500,7 +500,9 @@ const EARLIER_IN_QUEUE_SQL: &str =
 /// Provider content write (it has a write id) parked on a stale base, unclaimed, with no completion
 /// recorded; nothing queued behind it for the file (D2: no newer save, and no trash, move or rename,
 /// review-169 #2); and a file the pull has seen at a version past that base, so "Keep this Mac's" has a
-/// version to rebase on. The review feed and every decision use this one predicate, so the feed never
+/// version to rebase on, and that is not being trashed (review-169 F2: a trash from another device, of
+/// the file or of a folder it is in, marks the row `trashing` and queues nothing; a file deleted for
+/// good has no row). The review feed and every decision use this one predicate, so the feed never
 /// offers a choice the decision refuses.
 const DECIDABLE_PARKED_SQL: &str = "this.kind = 'upload_version' AND this.write_id IS NOT NULL
     AND this.last_error_class = 'stale_base' AND this.attempts >= this.max_attempts
@@ -510,7 +512,8 @@ const DECIDABLE_PARKED_SQL: &str = "this.kind = 'upload_version' AND this.write_
     AND NOT EXISTS (SELECT 1 FROM operation_queue AS later
                     WHERE later.file_id = this.file_id AND later.op_id != this.op_id AND later.rowid > this.rowid)
     AND EXISTS (SELECT 1 FROM files AS file
-                WHERE file.file_id = this.file_id AND file.current_version > this.base_version)";
+                WHERE file.file_id = this.file_id AND file.current_version > this.base_version
+                  AND file.status != 'trashing')";
 
 /// Task 2190: [`StateDb::list_held_edits`]'s read, kept in one place for its query-plan test.
 const LIST_HELD_EDITS_SQL: &str = "SELECT held.file_id, file.path, held.reason, held.detected_at

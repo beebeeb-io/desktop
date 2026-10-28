@@ -59,7 +59,7 @@ fn split_extension(name: &str) -> (&str, &str) {
 }
 
 /// The longest prefix of `text` that fits in `max` bytes, cut at a character boundary.
-fn prefix_within(text: &str, max: usize) -> &str {
+pub(crate) fn prefix_within(text: &str, max: usize) -> &str {
     if text.len() <= max {
         return text;
     }
