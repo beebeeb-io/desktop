@@ -409,7 +409,7 @@ mod tests {
     const THEIRS: [u8; 32] = [9u8; 32];
 
     fn session() -> Identity {
-        Identity::new(Some("user-david"), Some("david@example.eu"))
+        Identity::new(Some("user-owner"), Some("owner@example.eu"))
     }
 
     /// The real `state.db`, through the binding's own trait, as the engine start reads it.
@@ -750,7 +750,7 @@ mod tests {
     fn a_session_without_its_user_id_yet_is_proven_by_its_email() {
         let pc = pc_with(&IDS);
         adopt_unbound(&pc.db, None).unwrap();
-        let by_email = Identity::new(None, Some("david@example.eu"));
+        let by_email = Identity::new(None, Some("owner@example.eu"));
         assert!(matches!(prove(&pc, &by_email, MINE, &own_server()), Outcome::Adopted(_)));
         assert_eq!(bind_before_engine_start(&pc.db, &session(), WINDOWS), Ok(Bound::Kept));
         assert_eq!(pc.db.0.owner().unwrap(), Some(session()), "the id completes the record");
@@ -1359,7 +1359,7 @@ mod tests {
     #[test]
     fn eligibility() {
         let me = session();
-        let me_by_email = Identity::new(None, Some("david@example.eu"));
+        let me_by_email = Identity::new(None, Some("owner@example.eu"));
         let old_email = Identity::new(None, Some("old@example.eu"));
         let alice = Identity::new(Some("user-alice"), Some("alice@example.eu"));
         let alice_old_email = Identity::new(Some("user-alice"), Some("old@example.eu"));

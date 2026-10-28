@@ -88,6 +88,9 @@ mod macos_workspace;
 // is adopted (Windows never resets; macOS and Linux reset instead, so they never need it).
 #[cfg(any(target_os = "windows", test))]
 mod own_data_proof;
+// Task 2267 (fix round 2): what the person decides about the changes the proof held for review.
+#[cfg(any(target_os = "windows", test))]
+mod found_while_paused;
 mod popover_data;
 // Ruling R8 (spec 2026-10-06): the pure decision between a first sign-in, the same account signing in again and
 // an account switch. Windows keeps its refusal while a session exists and never asks.
@@ -7508,6 +7511,9 @@ fn start_engine_bound(
         StartPermit::FinderRemovalOwed => return Ok(EngineStart::FinderRemovalOwed),
     };
     resume_operations_paused_for_auth(acct, paths, resume_asked);
+    // Task 2267 (fix round 2): a "Keep on this PC only" a crash interrupted is settled before the engine exists.
+    #[cfg(target_os = "windows")]
+    settle_an_interrupted_keep(paths);
     **engine_slot = Some(spawn(paths.sync_root.clone(), token, key));
     *acct
         .engine_refusal
@@ -7814,6 +7820,205 @@ async fn prove_own_data_of_session(
         record_engine_refusal(acct, turn, account_binding::IDENTITY_UNKNOWN);
     }
     Ok(outcome)
+}
+
+/// Task 2267 (fix round 2): what Upload and Keep say when this PC's local data is not the signed-in account's own.
+#[cfg(any(target_os = "windows", test))]
+const FOUND_WHILE_PAUSED_NOT_YOURS: &str =
+    "Beebeeb couldn’t confirm these files belong to the account you’re signed in to, so nothing was changed.";
+
+/// Task 2267 (fix round 2): what Keep says when it stopped part way (the database could not be written). Every item it
+/// moved is forgotten in its own transaction, or settled at the next start (`settle_an_interrupted_keep`).
+#[cfg(target_os = "windows")]
+const FOUND_WHILE_PAUSED_KEEP_STOPPED: &str = "Beebeeb couldn’t finish moving these files. Anything already moved is in “Beebeeb - kept on this PC”; the rest stays where it is and isn’t uploaded.";
+
+/// Task 2267 (fix round 2): what Upload says when the held changes could not be released: nothing changed.
+#[cfg(target_os = "windows")]
+const FOUND_WHILE_PAUSED_UPLOAD_FAILED: &str =
+    "Beebeeb couldn’t start uploading these files, so they’re still waiting. Try again.";
+
+/// Task 2267 (fix round 2): what "Show in Explorer" says when the folder the last keep recorded is not there.
+#[cfg(any(target_os = "windows", test))]
+const KEPT_FOLDER_GONE: &str = "Beebeeb can’t find the folder it moved them to. It may have been moved or renamed.";
+
+/// Task 2267 (fix round 2): who is signed in, for a decision about the changes found while sync was paused: the
+/// session's own email and, when the cached profile is that account's, its user id ([`identity_of_session`]). No key is
+/// read. No session, or one that does not know who it is, decides nothing.
+#[cfg(any(target_os = "windows", test))]
+fn decision_identity(state: &AppState) -> Result<account_binding::Identity, String> {
+    let not_yours = || FOUND_WHILE_PAUSED_NOT_YOURS.to_string();
+    let acct = state.active_account().map_err(|_| not_yours())?;
+    let email = acct
+        .session
+        .lock()
+        .map_err(|_| not_yours())?
+        .as_ref()
+        .map(|session| session.email.clone())
+        .ok_or_else(not_yours)?;
+    let profile = acct.cached_profile.lock().ok().and_then(|guard| guard.clone());
+    Some(identity_of_session(email.as_deref(), profile.as_ref()))
+        .filter(|identity| identity.is_known())
+        .ok_or_else(not_yours)
+}
+
+/// Task 2267 (fix round 2): this PC's `state.db` under `state_dir`, only when its recorded owner is `identity`'s
+/// account. Another account's data, data nobody owns yet and no database decide nothing.
+#[cfg(any(target_os = "windows", test))]
+fn own_state_db(identity: &account_binding::Identity, state_dir: &Path) -> Result<state_db::StateDb, String> {
+    let db = state_db_from_state_dir(state_dir)?.ok_or_else(|| FOUND_WHILE_PAUSED_NOT_YOURS.to_string())?;
+    let owner = db.owner().map_err(|e| format!("read the local data owner: {e}"))?;
+    match owner {
+        Some(owner) if account_binding::same_account(&owner, identity) == Some(true) => Ok(db),
+        _ => Err(FOUND_WHILE_PAUSED_NOT_YOURS.to_string()),
+    }
+}
+
+/// Task 2267 (fix round 2): the signed-in account's own local data and the Beebeeb folder, for Upload and Keep.
+#[cfg(target_os = "windows")]
+fn own_local_data_for_decision(identity: &account_binding::Identity) -> Result<(state_db::StateDb, PathBuf), String> {
+    let sync_root = DesktopConfig::load()?
+        .sync_root
+        .ok_or_else(|| FOUND_WHILE_PAUSED_NOT_YOURS.to_string())?;
+    Ok((own_state_db(identity, &state_paths::beebeeb_state_dir()?)?, sync_root))
+}
+
+/// Task 2267 (fix round 2): the folder "Show in Explorer" opens: the dated folder the last keep recorded, only when it
+/// is a `YYYY-MM-DD` folder directly inside `Beebeeb - kept on this PC` next to the Beebeeb folder, and is there.
+#[cfg(any(target_os = "windows", test))]
+fn kept_folder_to_show(sync_root: &Path, recorded: rusqlite::Result<Option<String>>) -> Result<PathBuf, String> {
+    let folder = PathBuf::from(
+        recorded
+            .map_err(|e| format!("read the kept folder: {e}"))?
+            .ok_or(KEPT_FOLDER_GONE)?,
+    );
+    let kept = sync_root
+        .parent()
+        .map(|parent| parent.join(found_while_paused::KEPT_FOLDER_NAME));
+    let dated = folder.file_name().and_then(|name| name.to_str()).is_some_and(|name| {
+        name.len() == 10
+            && name
+                .bytes()
+                .enumerate()
+                .all(|(at, byte)| if at == 4 || at == 7 { byte == b'-' } else { byte.is_ascii_digit() })
+    });
+    if dated && kept.is_some_and(|kept| folder.parent() == Some(kept.as_path())) && folder.is_dir() {
+        Ok(folder)
+    } else {
+        Err(KEPT_FOLDER_GONE.to_string())
+    }
+}
+
+/// Task 2267 (fix round 2, lead ruling (a) 4): a "Keep on this PC only" that a crash interrupted is settled before the
+/// engine exists: finished when the item had moved, undone when it had not (`found_while_paused::recover`). The engine
+/// start calls it after the binding, so it acts on this account's own data only. A database that cannot be read or
+/// written leaves the journal for the next start; the engine starts either way, and the item's changes stay held.
+#[cfg(target_os = "windows")]
+fn settle_an_interrupted_keep(paths: &LocalDataPaths) {
+    let path = state_paths::state_db_path_from_state_dir(&paths.state_dir);
+    let settled = state_db::StateDb::open(&path)
+        .map_err(|e| format!("open state.db: {e}"))
+        .and_then(|db| found_while_paused::recover(&db, &paths.sync_root));
+    match settled {
+        Ok(found_while_paused::Recovery::Nothing) => {}
+        Ok(recovery) => tracing::info!(?recovery, "keep: a move a crash interrupted was settled before sync started"),
+        Err(error) => tracing::warn!(%error, "keep: a move a crash interrupted is settled at the next start"),
+    }
+}
+
+/// Task 2267 (fix round 2), Settings › Sync: how many changes "Upload to my Beebeeb" released.
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+struct FoundWhilePausedReleased {
+    released: usize,
+}
+
+/// Task 2267 (fix round 2), Settings › Sync, "Upload to my Beebeeb": every change held as found while sync was paused
+/// is due again, so the running engine uploads it. Only on the signed-in account's own data, and under the
+/// session-transition lock, so no sign-out or Lock runs in between.
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn found_while_paused_upload(state: State<'_, AppState>) -> Result<FoundWhilePausedReleased, String> {
+    let _transition = SESSION_TRANSITION.lock().await;
+    let identity = decision_identity(&state)?;
+    let released = tokio::task::spawn_blocking(move || -> Result<usize, String> {
+        let (db, _) = own_local_data_for_decision(&identity)?;
+        db.release_found_while_paused(now_unix_seconds()).map_err(|error| {
+            tracing::warn!(%error, "found while paused: the held changes could not be released");
+            FOUND_WHILE_PAUSED_UPLOAD_FAILED.to_string()
+        })
+    })
+    .await
+    .map_err(|e| format!("upload task failed: {e}"))??;
+    tracing::info!(released, "found while paused: released to upload");
+    Ok(FoundWhilePausedReleased { released })
+}
+
+/// Task 2267 (fix round 2), Settings › Sync, "Keep on this PC only" (lead ruling (a)): every item made on this PC that
+/// a held change acts on moves next to the Beebeeb folder and is forgotten (`found_while_paused::keep`). Only on the
+/// signed-in account's own data, and under the session-transition lock. Counts only in the log.
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn found_while_paused_keep(state: State<'_, AppState>) -> Result<found_while_paused::KeepResult, String> {
+    let _transition = SESSION_TRANSITION.lock().await;
+    let identity = decision_identity(&state)?;
+    let kept = tokio::task::spawn_blocking(move || -> Result<found_while_paused::KeepResult, String> {
+        let (db, sync_root) = own_local_data_for_decision(&identity)?;
+        found_while_paused::keep(&db, &sync_root, &found_while_paused::today(), &found_while_paused::rename_no_replace)
+            .map_err(|error| {
+                tracing::warn!(%error, "found while paused: the keep stopped");
+                FOUND_WHILE_PAUSED_KEEP_STOPPED.to_string()
+            })
+    })
+    .await
+    .map_err(|e| format!("keep task failed: {e}"))??;
+    tracing::info!(
+        moved_items = kept.moved_items,
+        moved_files = kept.moved_files,
+        not_moved = kept.not_moved,
+        stays_held = kept.stays_held,
+        "found while paused: kept on this PC"
+    );
+    Ok(kept)
+}
+
+/// Task 2267 (fix round 2), "Show in Explorer" after a keep: opens the folder the last keep recorded
+/// ([`kept_folder_to_show`]). The frontend never passes a path.
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn show_kept_folder() -> Result<(), String> {
+    tokio::task::spawn_blocking(|| -> Result<(), String> {
+        let cfg = DesktopConfig::load()?;
+        let sync_root = cfg.sync_root.clone().ok_or(KEPT_FOLDER_GONE)?;
+        let db = state_db_for_config(&cfg)?.ok_or(KEPT_FOLDER_GONE)?;
+        let folder = kept_folder_to_show(&sync_root, db.last_kept_dir())?;
+        std::process::Command::new("explorer")
+            .arg(&folder)
+            .spawn()
+            .map_err(|e| format!("open Explorer: {e}"))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("show task failed: {e}"))?
+}
+
+/// Task 2267: the changes found while sync was paused exist on Windows only (the ownership proof holds them). The
+/// commands are registered everywhere, because `generate_handler!` takes no `cfg`, and say so elsewhere.
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+async fn found_while_paused_upload() -> Result<(), String> {
+    Err("This works on Windows only.".into())
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+async fn found_while_paused_keep() -> Result<(), String> {
+    Err("This works on Windows only.".into())
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+async fn show_kept_folder() -> Result<(), String> {
+    Err("This works on Windows only.".into())
 }
 
 /// W12 and §9: the folder an R10 reset kept reaches the person as the app-start sweep's does. The reset recorded it
@@ -15563,6 +15768,9 @@ pub fn run() {
             tray_pause_sync,
             tray_resume_sync,
             sync_activity_summary,
+            found_while_paused_upload,
+            found_while_paused_keep,
+            show_kept_folder,
             upload_files_to_sync_root,
             create_folder_in_sync_root,
             report_problem,
@@ -27466,6 +27674,183 @@ mod account_binding_tests {
         }
         let stops = squeeze(&code_of(&production, "fn stop_own_data_proofs("));
         assert!(stops.contains(".abort()"), "{stops}");
+    }
+
+    /// Task 2267 (fix round 2): what Settings › Sync decides about the changes found while sync was paused. A keep a
+    /// crash interrupted is settled in the one engine start, after the binding (so it acts on this account's own data
+    /// only) and before the engine exists (lead ruling (a) 4). The three commands are registered; Upload and Keep run
+    /// under the session-transition lock and only on the signed-in account's own data; no command takes a path.
+    #[test]
+    fn the_found_while_paused_decision_is_wired_and_an_interrupted_keep_is_settled_before_the_engine() {
+        let production = production_source();
+        let squeeze = crate::source_pin::squeeze;
+        let bound = squeeze(&code_of(&production, "fn start_engine_bound("));
+        let at = |snippet: &str| {
+            bound
+                .find(&squeeze(snippet))
+                .unwrap_or_else(|| panic!("{snippet}:\n{bound}"))
+        };
+        let permitted = at("StartPermit::FinderRemovalOwed => return Ok(EngineStart::FinderRemovalOwed)");
+        let settled = at("#[cfg(target_os = \"windows\")] settle_an_interrupted_keep(paths);");
+        let spawned = at("spawn(paths.sync_root.clone()");
+        assert!(permitted < settled && settled < spawned, "{bound}");
+        let settle = squeeze(&code_of(&production, "fn settle_an_interrupted_keep("));
+        assert!(settle.contains(&squeeze("found_while_paused::recover(&db, &paths.sync_root)")), "{settle}");
+
+        let handler = body_between(&production, "tauri::generate_handler![", "])");
+        for command in ["found_while_paused_upload,", "found_while_paused_keep,", "show_kept_folder,"] {
+            assert!(handler.contains(command), "{command} is registered");
+        }
+        let windows = "#[cfg(target_os = \"windows\")]\n#[tauri::command]\n";
+        for (signature, steps) in [
+            (
+                "async fn found_while_paused_upload(state: State<'_, AppState>) -> Result<FoundWhilePausedReleased, String> {",
+                &[
+                    "let _transition = SESSION_TRANSITION.lock().await;",
+                    "let identity = decision_identity(&state)?;",
+                    "own_local_data_for_decision(&identity)?",
+                    "db.release_found_while_paused(now_unix_seconds())",
+                ][..],
+            ),
+            (
+                "async fn found_while_paused_keep(state: State<'_, AppState>) -> Result<found_while_paused::KeepResult, String> {",
+                &[
+                    "let _transition = SESSION_TRANSITION.lock().await;",
+                    "let identity = decision_identity(&state)?;",
+                    "own_local_data_for_decision(&identity)?",
+                    "found_while_paused::keep(&db, &sync_root, &found_while_paused::today(), &found_while_paused::rename_no_replace)",
+                ][..],
+            ),
+            (
+                "async fn show_kept_folder() -> Result<(), String> {",
+                &["kept_folder_to_show(&sync_root, db.last_kept_dir()", "std::process::Command::new(\"explorer\").arg(&folder)"][..],
+            ),
+        ] {
+            let body = squeeze(&code_of(&production, &format!("{windows}{signature}")));
+            for step in steps {
+                assert!(body.contains(&squeeze(step)), "{step}: {body}");
+            }
+        }
+        let own = squeeze(&code_of(&production, "fn own_state_db("));
+        assert!(
+            own.contains(&squeeze("account_binding::same_account(&owner, identity) == Some(true)")),
+            "{own}"
+        );
+    }
+
+    /// Task 2267 (fix round 2): Upload and Keep act on this PC's local data only when its recorded owner is the
+    /// account signed in now. Another account's data, data with no owner, no database and no session change nothing.
+    #[test]
+    fn a_decision_about_found_changes_acts_only_on_the_signed_in_accounts_own_data() {
+        let refused = Err(FOUND_WHILE_PAUSED_NOT_YOURS.to_string());
+        let mine = local_data_of(Some(alice()));
+        assert!(own_state_db(&alice(), mine.dir.path()).is_ok(), "the owner decides");
+        assert_eq!(own_state_db(&bob(), mine.dir.path()).map(|_| ()), refused, "another account does not");
+        let unowned = local_data_of(None);
+        assert_eq!(own_state_db(&alice(), unowned.dir.path()).map(|_| ()), refused, "data nobody owns yet");
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(own_state_db(&alice(), empty.path()).map(|_| ()), refused, "no database");
+        let by_email = Identity::new(None, Some("A@Beebeeb.io"));
+        assert!(own_state_db(&by_email, mine.dir.path()).is_ok(), "the same account by its email");
+
+        assert_eq!(decision_identity(&AuthorizeFixture::with_session(&alice()).state), Ok(alice()));
+        assert_eq!(decision_identity(&AuthorizeFixture::without_session().state).map(|_| ()), refused, "no session");
+    }
+
+    /// Task 2267 (fix round 2): "Show in Explorer" opens only the dated folder the last keep recorded, inside
+    /// `Beebeeb - kept on this PC` next to the Beebeeb folder, and only while it is there.
+    #[test]
+    fn show_in_explorer_opens_only_a_dated_folder_in_the_kept_folder_next_to_the_beebeeb_folder() {
+        let top = tempfile::tempdir().unwrap();
+        let root = top.path().join("Beebeeb");
+        let kept = top.path().join(crate::found_while_paused::KEPT_FOLDER_NAME);
+        let dated = kept.join("2026-10-28");
+        for dir in [&root, &dated, &kept.join("notes"), &top.path().join("elsewhere").join("2026-10-28")] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let recorded = |path: &Path| Some(path.to_string_lossy().into_owned());
+        assert_eq!(kept_folder_to_show(&root, Ok(recorded(&dated))), Ok(dated.clone()));
+        for other in [
+            None,
+            recorded(&kept),
+            recorded(&kept.join("..")),
+            recorded(&dated.join("..")),
+            recorded(&dated.join("..").join("2026-10-28")),
+            recorded(&kept.join("notes")),
+            recorded(&kept.join("2026-10-29")),
+            recorded(&root),
+            recorded(&top.path().join("elsewhere").join("2026-10-28")),
+            Some("2026-10-28".to_string()),
+        ] {
+            assert!(kept_folder_to_show(&root, Ok(other.clone())).is_err(), "{other:?}");
+        }
+        assert!(kept_folder_to_show(&root, Err(rusqlite::Error::InvalidQuery)).is_err());
+    }
+
+    /// Task 2267 (fix round 2, lead ruling (a) 4), behaviourally: a keep that a crash interrupted after its move is
+    /// finished by the next engine start before the engine is created. When the engine exists the journal is gone and
+    /// the kept item's row and queued change are forgotten; its bytes are in the kept folder.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_keep_a_crash_interrupted_is_finished_before_the_next_engine_is_created() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let local = local_data_of(None);
+            let top = tempfile::tempdir().unwrap();
+            let root = top.path().join("Beebeeb");
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join("A.txt"), b"local bytes").unwrap();
+            assert_eq!(
+                local
+                    .data
+                    .db
+                    .adopt_owner_holding(None, &alice(), &std::collections::HashSet::new(), 5)
+                    .unwrap(),
+                Some(1),
+                "precondition: the PC is this account's and its change is held"
+            );
+            let crash_after_moving = |from: &Path, to: &Path| -> std::io::Result<()> {
+                crate::found_while_paused::rename_no_replace(from, to).unwrap();
+                panic!("the process ends here");
+            };
+            let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::found_while_paused::keep(&local.data.db, &root, "2026-10-28", &crash_after_moving)
+            }));
+            assert!(
+                crashed.is_err() && local.data.db.keep_journal().unwrap().is_some(),
+                "precondition: a keep was interrupted after its move"
+            );
+
+            let fx = AuthorizeFixture::with_session(&alice());
+            let mut slot = fx.acct.engine.lock().await;
+            let paths = LocalDataPaths::for_test(local.dir.path(), &root);
+            let seen = std::cell::RefCell::new(None);
+            let result = start_engine_bound(&fx.state, &fx.acct, &mut slot, &paths, |_root, _token, _key| {
+                *seen.borrow_mut() = Some((
+                    local.data.db.keep_journal().unwrap(),
+                    local.data.db.get_file("file-a").unwrap().is_some(),
+                    local.data.db.list_due_operations(i64::MAX).unwrap().len()
+                        + local.data.db.found_while_paused_ops().unwrap().len(),
+                ));
+                crate::runner::EngineRunner::for_test_with_task(tokio::spawn(async {}))
+            });
+            assert_eq!(result, Ok(EngineStart::Started));
+            assert_eq!(
+                seen.into_inner(),
+                Some((None, false, 0)),
+                "when the engine is created the keep is finished: no journal, no row, no queued change"
+            );
+            let kept = top
+                .path()
+                .join(crate::found_while_paused::KEPT_FOLDER_NAME)
+                .join("2026-10-28")
+                .join("A.txt");
+            assert_eq!(std::fs::read(kept).unwrap(), b"local bytes", "nothing lost");
+            assert!(!root.join("A.txt").exists());
+        });
     }
 
     // ---- the local data under test ----
