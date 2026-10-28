@@ -432,7 +432,14 @@ impl crate::engine_bridge::EngineBridge {
                     record.pending_owner_wrap = Some(keys::wrap_key_to_owner(&master, id, key)?);
                 }
             }
-            let changed = old.as_ref().is_none_or(|old| old.fingerprint() != record.fingerprint());
+            let tree_or_content_changed = self.db().get_file_contract_state(id)?.is_some_and(|previous| {
+                previous.parent_id.as_deref() != row["parent_id"].as_str()
+                    || row["version_number"]
+                        .as_i64()
+                        .is_some_and(|version| version != previous.current_version)
+            });
+            let changed =
+                tree_or_content_changed || old.as_ref().is_none_or(|old| old.fingerprint() != record.fingerprint());
             if changed {
                 for root in old
                     .as_ref()

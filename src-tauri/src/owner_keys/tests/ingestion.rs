@@ -226,6 +226,7 @@ fn sf2237d_t4_sparse_create_and_update() {
     }
     tick(&b, temp.path());
     assert_eq!(b.db().get_file(GUEST).unwrap().unwrap().path, "shared/holiday.txt");
+    b.db().clear_shared_index_dirty(ROOT).unwrap();
     {
         let mut w = world.lock().unwrap();
         w.seq = 3;
@@ -238,6 +239,7 @@ fn sf2237d_t4_sparse_create_and_update() {
         b.db().get_file_contract_state(GUEST).unwrap().unwrap().current_version,
         2
     );
+    assert_eq!(b.db().dirty_shared_index_roots().unwrap(), vec![ROOT.to_string()]);
 }
 #[test]
 fn sf2237d_t4_nested_guest_folder_names() {
