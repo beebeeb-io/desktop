@@ -27,3 +27,11 @@ Evidence directory: `/Users/guuslangelaar/code/bb-gate-logs/fullspeed/d2-2237/`.
 - Native Finder/Explorer behavior remains Task 13 evidence; unit fixtures do not prove provider behavior.
 
 - Task 4 first green: 8 executed / 8 passed / 0 failed after behavioral red 8 executed / 0 passed / 8 failed (`t4-red.log`, `t4-green-attempt1.log`). Enrichment, L6/L7 custody resolution, adoption restart, safe blocked rows, CAS repair and app-only activity DTOs are covered. Normal-tick maintenance wiring and required enrichment mutation remain before Task 4 completion.
+
+- Task 4 maintenance green: 8 passed / 0 failed (`t4-green-wiring-counted.log`). Required enrichment mutation: 1 executed / 0 passed / 1 failed (`t4-mutation-red.log`), wrong guest path with enrichment bypassed. Restored green and regressions follow.
+
+## Task 5 premise blocker (2026-10-28)
+
+STOP under the lane's explicit wrong-premise rule. Task 5 assumes existing authenticated chunk-format pin readers and asks to preserve them while routing keys. At desktop base `f2d42d4`, `engine_bridge.rs::download_and_decrypt_chunk_range` calls `decrypt_downloaded_chunk` (current line 4991); that helper (current line 7029) only tries raw AES-GCM and legacy JSON frames. It accepts no item id, chunk index, authenticated `ExpectedChunkFormat`, frame count or finish contract. `direct_download.rs:422` calls the same helper; its Request at line 91 carries an object-version manifest, not an authenticated chunk-format pin. `download_pin.rs:21` describes only object identity/size. There is no `ChunkDecryptor` or `ExpectedChunkFormat` consumer in either desktop download driver. These facts were checked in source, not inferred from a failed compiler/test.
+
+The required v2-pinned bad-frame/no-fallback and authenticated finish tests cannot be met by swapping the key resolver into these existing interfaces. Correcting the premise requires a documented decoder/format-pin integration covering API, direct and range downloads (including v2 range AAD/frame-zero handling), beyond the plan's stated existing-reader contract and Task 5 file map. No alternative protocol or cryptography was invented. Task 5 has no red/green count and is unimplemented; Task 6 is blocked by Task 5. The new metadata/adoption work is not a working foreign-file open/edit feature and is not release-ready by itself.
