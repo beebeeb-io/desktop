@@ -167,3 +167,6 @@ The old-format rejection exercises both canonical and pending owner wraps, with 
 Ran `cargo update -p beebeeb-core -p beebeeb-sync -p beebeeb-types` on the testrig desktop image (`l8-cargo-update.log`). Cargo additionally reselected already-locked Windows dependency edges in nine unrelated packages. Those unrelated selections were excluded: the final lock changes only the three core source entries, with all other packages/edges unchanged, and the 44-test `--locked` gate accepts it. A premature locked invocation before installing the corrected lock failed dependency validation (`l8-instrument-lock-gate.log`); no tests ran and it is not a behavioral RED.
 
 Full post-L8 macOS and remote frontend gates follow below. Native Windows remains glegion's gate.
+
+
+Post-L8 remote frontend: **1,833 passed / 0 failed**, 106 files, 7,655 assertions; frozen install, TypeScript and ESLint all exit 0 (`l8-testrig-frontend.log`). Counted all 1,833 completed test rows. Graphify refreshed after source changes: **391 files / 8,558 nodes / 25,891 edges / 195 communities** (`graphify-l8-update.log`); outputs retained in `graphify-l8-refresh/`, tracked graph baseline restored. Full Mac gate source is the clean detached **90b7f773416bdce663892b41a31b7da86b9346a6**; subsequent commits record evidence only.
