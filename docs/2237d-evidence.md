@@ -8,7 +8,7 @@ Core pin: `a245a549c12415af6311bf4488deca5def65e983` in `src-tauri/Cargo.toml` (
 
 Contract: workspace origin/main plan `2026-10-28-shared-folders-p1d-desktop-cli.md`, tasks 3-6 only; approved shared-folder spec; plan D lead review and plan C L1-L7, L6a/L7a. Custody uses core L6 and child wraps use core L7 with ROOT + item + kind. No client crypto implementation.
 
-Verification planned before code: task filters `sf2237d_t3` (6), `sf2237d_t4` (8), `sf2237d_t5` (7), `sf2237d_t6` (8), behavioral red then identical green on testrig desktop image; relevant regressions; final macOS `cargo test --locked` under cargo-build lock with owned target/scratch HOME and loopback-only API; frontend Bun, tsc and eslint. Windows native gate belongs to the lead. No installed app, real user config, production, or merge.
+Verification planned before code: task filters `sf2237d_t3` (6), `sf2237d_t4` (8), ~~`sf2237d_t5` (7), `sf2237d_t6` (8)~~, behavioral red then identical green on testrig desktop image; relevant regressions; final macOS `cargo test --locked` under cargo-build lock with owned target/scratch HOME and loopback-only API; frontend Bun, tsc and eslint. Amendment — Codex, 2026-10-28: Task 5 verification is replaced in this run by the source-premise audit below, under the explicit stop rule; Task 6 is blocked by Task 5. Neither is implemented or counted as complete. Windows native gate belongs to the lead. No installed app, real user config, production, or merge.
 
 Evidence directory: `/Users/guuslangelaar/code/bb-gate-logs/fullspeed/d2-2237/`.
 
@@ -41,3 +41,25 @@ The required v2-pinned bad-frame/no-fallback and authenticated finish tests cann
 - Initial macOS final gate: build passed; 1,397 test rows passed before a nonblocking accepted socket panicked in the owned HTTP fixture, followed by a destructor panic/abort. This was a fixture failure, not a successful gate (`final-macos-rust-attempt1.log`). Fix: force accepted sockets into blocking mode and avoid a second panic while unwinding. Testrig recheck: 14 executed / 14 passed / 0 failed (`fixture-portability-green.log`). Frontend gate: 1,833 passed / 0 failed across 106 files; TypeScript and ESLint exit 0 with 0 diagnostic lines.
 
 - Repository Graphify refresh ran successfully: 388 files, 8,486 nodes, 25,575 edges, 192 communities (`graphify-update.log`). Its repository-wide 386,343-line rewrite exceeded this lane's explicit plan file map. The refreshed graph/report are preserved under the external evidence directory `graphify-refresh/`; tracked graph artifacts retain their base version. No unrelated graph rewrite is included in this scoped PR.
+
+## Final verification (2026-10-28, Codex)
+
+Tasks 3 and 4 are complete within their interfaces. Task 5 is stopped and Task 6 is blocked. Source tested at `185d87ed768f52eff4b651c0bf18ecb85361f7ef`; subsequent changes only record these receipts.
+
+| Gate | Passed | Failed | Ignored | Evidence |
+| --- | ---: | ---: | ---: | --- |
+| macOS Rust library | 2,220 | 0 | 9 | `final-macos-rust.log` |
+| macOS Rust integration: keychain abstraction | 31 | 0 | 0 | same log; in-memory secret store |
+| macOS Rust integration: portable Windows session wiring | 8 | 0 | 0 | same log |
+| macOS Rust integration: portable Windows sign-out cleanup | 3 | 0 | 0 | same log |
+| Rust total | 2,262 | 0 | 9 | `final-macos-counts.json`, process exit 0 |
+| Frontend Bun | 1,833 | 0 | 0 | `final-macos-bun.log`, 106 files |
+| TypeScript / ESLint | exit 0 / exit 0 | 0 diagnostic lines | — | `final-macos-tsc.log`, `final-macos-eslint.log` |
+
+The final Rust command was `cargo test --locked --no-fail-fast -- --test-threads=1`, under workspace `with-lock.sh cargo-build`, with an owned target/cache configuration, fresh scratch HOME, `BB_API_BASE=http://127.0.0.1:9` and `BB_REFUSE_NON_LOOPBACK_API=1`. Six announced binary/doc-test totals agree with 2,271 completed test rows, including ignored rows with reasons. All 14 new tests passed on both Linux testrig and macOS; none is Windows-only. The nine existing ignored tests require a real local API/MinIO (5), a logged-in GUI session (2), a real DB copy (1), or a separate existing two-surface implementation (1); their exact names/reasons are retained in the log and JSON receipt. They were not forced on.
+
+Native Windows tests inside `windows_cf`, including `windows_cf::reconcile_tests`, are gated by `cfg(target_os = "windows")` at `src-tauri/src/lib.rs:135` and were not run here. `tests/windows_session_wiring.rs` and `tests/windows_signout_cleanup.rs` are portable checks and passed on macOS; they do not prove Cloud Files behavior. `StateDb::finish_windows_signout` is available under `cfg(any(target_os = "windows", test))` for portable purge coverage. Lead glegion owns the native Windows gate.
+
+Source compatibility was checked against server main `7dd40237b5abb50fae1b686a37246e773584e2fc` (#349 / #351), not production. Latest desktop main `64d39db` still has no `ChunkDecryptor` / `ExpectedChunkFormat` consumer; a read-only `git merge-tree --write-tree origin/main HEAD` completed with exit 0 (`merge-preview.log`). The implementation retains the original allocated base. Core remains pinned coherently to `a245a549`; no chunk-format rollout. `git diff --check` passes. No Finder/Explorer device proof, deployed-client interoperability, live server check, or release clearance is claimed.
+
+Next required handoff: document/merge the authenticated API/direct/range chunk reader interface (including v2 format pins, finish validation and range AAD/frame-zero handling), amend Task 5's premise, then resume Tasks 5–6 and the Task 13 native rung.
