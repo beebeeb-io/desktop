@@ -105,10 +105,10 @@ describe('the keep result, line by line', () => {
 
   test('stays held only, singular and plural', () => {
     expect(keepResultLines(keep({ stays_held: 1 })).map((line) => line.text)).toEqual([
-      '1 change to an item already in Beebeeb stays on hold. Contact support@beebeeb.io.',
+      '1 change can’t be kept on this PC only. It isn’t uploaded and stays on hold until you choose “Upload to my Beebeeb”.',
     ])
     expect(keepResultLines(keep({ stays_held: 2 })).map((line) => line.text)).toEqual([
-      '2 changes to items already in Beebeeb stay on hold. Contact support@beebeeb.io.',
+      '2 changes can’t be kept on this PC only. They aren’t uploaded and stay on hold until you choose “Upload to my Beebeeb”.',
     ])
     expect(keepResultLines(keep({ stays_held: 2 }))[0].key).toBe('stays_held')
   })
@@ -119,7 +119,7 @@ describe('the keep result, line by line', () => {
     expect(lines.map((line) => line.text)).toEqual([
       `Moved 12 files to ${KEPT}. They stay on this PC and aren’t uploaded.`,
       '2 items couldn’t be moved and stay where they are. They aren’t uploaded.',
-      '5 changes to items already in Beebeeb stay on hold. Contact support@beebeeb.io.',
+      '5 changes can’t be kept on this PC only. They aren’t uploaded and stay on hold until you choose “Upload to my Beebeeb”.',
     ])
   })
 

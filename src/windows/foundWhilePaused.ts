@@ -41,7 +41,7 @@ export interface KeepResult {
   kept_path: string | null
   /** Items left in place and still held (on another drive, or the move failed). */
   not_moved: number
-  /** Held changes to items already in Beebeeb: they cannot be kept, and stay held. */
+  /** Held changes no move can keep off Beebeeb (the item is already there, or its upload had begun): they stay held. */
   stays_held: number
 }
 
@@ -105,8 +105,8 @@ export function keepResultLines(result: KeepResult): KeepResultLine[] {
     lines.push({
       key: 'stays_held',
       text: n === 1
-        ? '1 change to an item already in Beebeeb stays on hold. Contact support@beebeeb.io.'
-        : `${plural(n, 'change', 'changes')} to items already in Beebeeb stay on hold. Contact support@beebeeb.io.`,
+        ? `1 change can’t be kept on this PC only. It isn’t uploaded and stays on hold until you choose “${FOUND_WHILE_PAUSED_COPY.upload}”.`
+        : `${plural(n, 'change', 'changes')} can’t be kept on this PC only. They aren’t uploaded and stay on hold until you choose “${FOUND_WHILE_PAUSED_COPY.upload}”.`,
     })
   }
   return lines
