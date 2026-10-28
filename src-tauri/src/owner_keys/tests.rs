@@ -35,6 +35,8 @@ impl Fixture {
             while !signal.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        // macOS inherits the listener's nonblocking mode.
+                        stream.set_nonblocking(false).unwrap();
                         let request = read_request(&mut stream);
                         if let Some((status, bytes)) = answer(request) {
                             let header = format!(
@@ -63,7 +65,10 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
-        self.thread.take().unwrap().join().unwrap();
+        let result = self.thread.take().unwrap().join();
+        if !thread::panicking() {
+            result.expect("fixture server panicked");
+        }
     }
 }
 fn read_request(stream: &mut TcpStream) -> Request {
