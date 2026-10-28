@@ -4666,6 +4666,10 @@ impl EngineBridge {
         beebeeb_core::kdf::derive_file_key(&master_key, file_id.as_bytes())
     }
 
+    pub async fn encrypt_owned_name(&self, file_id: &str, name: &str, _pin: beebeeb_core::chunk_stream::ExpectedChunkFormat) -> anyhow::Result<String> {
+        encrypted_metadata_for_name(self.api.master_key(), file_id, name, None)
+    }
+
     async fn file_key_for_download(&self, file_id: &str) -> anyhow::Result<beebeeb_core::kdf::FileKey> {
         let Some(contract) = self.db.get_file_contract_state(file_id)? else {
             return Ok(self.owned_file_key(file_id));
@@ -10296,6 +10300,10 @@ fn process_metadata_row(
 
 #[cfg(test)]
 mod tests {
+    mod sf2237d {
+        use super::*;
+        include!("engine_bridge/2237d_tests.rs");
+    }
     use super::*;
     use base64::Engine;
     use serde_json::json;
