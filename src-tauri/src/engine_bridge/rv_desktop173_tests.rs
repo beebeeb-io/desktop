@@ -359,3 +359,23 @@ fn rv173_l7c_late_custody_write_cannot_cross_account_reset() {
         assert!(!bridge.db.has_seen_folder_custody(ROOT).unwrap());
     }
 }
+
+#[test]
+fn rv173_l7c_stale_inventory_cannot_reenable_legacy_reader() {
+    let (_server, _temp, bridge, mut root) = rv_folder_fixture(200);
+    let (folder, mut keys) = runtime().block_on(bridge.shared_folder_material(&root)).unwrap();
+    // An earlier request's 404/inventory may finish after this valid custody
+    // response. Its stale format flag cannot authorize an unbound read.
+    keys["desktop_has_custody"] = json!(false);
+    keys["keys"] = json!([{"file_id":ROOT,"encrypted_file_key":
+        base64::engine::general_purpose::STANDARD.encode(
+            beebeeb_core::encrypt::encrypt_chunk_raw(&FileKey::from_bytes(*folder), random_key().as_bytes()).unwrap())}]);
+    root.file_name_encrypted = Some(named(&random_key(), "replayed-root", ExpectedChunkFormat::Unrecorded));
+    LEGACY_CHILD_READS.with(|n| n.set(0));
+    assert!(bridge.decrypted_folder_root_name(&root, &folder, &keys).is_none());
+    assert_eq!(
+        LEGACY_CHILD_READS.with(|n| n.get()),
+        0,
+        "every dispatch rechecks durable custody, including stale in-flight inventories"
+    );
+}

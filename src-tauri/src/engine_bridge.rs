@@ -2299,6 +2299,23 @@ impl EngineBridge {
         Ok((folder_key, folder_keys_response))
     }
 
+    fn shared_folder_child_key(
+        &self,
+        folder: &[u8; 32],
+        root: &str,
+        id: &str,
+        kind: u8,
+        wrap: &str,
+        custody: bool,
+    ) -> anyhow::Result<beebeeb_core::kdf::FileKey> {
+        if custody {
+            return unwrap_folder_child_for_format(folder, root, id, kind, wrap, true);
+        }
+        self.db.read_without_folder_custody(root, || {
+            unwrap_folder_child_for_format(folder, root, id, kind, wrap, false)
+        })?.ok_or_else(|| anyhow::anyhow!("This folder's keys are unavailable"))?
+    }
+
     fn decrypted_folder_root_name(
         &self,
         root: &SharedRootMapping,
@@ -2307,7 +2324,7 @@ impl EngineBridge {
     ) -> Option<String> {
         let name_encrypted = root.file_name_encrypted.as_deref()?;
         let encrypted_file_key = encrypted_file_key_from_folder_keys_response(folder_keys_response, &root.file_id)?;
-        let file_key = unwrap_folder_child_for_format(folder_key, &root.file_id, &root.file_id, 2,
+        let file_key = self.shared_folder_child_key(folder_key, &root.file_id, &root.file_id, 2,
             encrypted_file_key, folder_keys_response["desktop_has_custody"].as_bool() == Some(true)).ok()?;
         decrypt_shared_name_with_key(&file_key, name_encrypted)
     }
@@ -2362,7 +2379,7 @@ impl EngineBridge {
                 };
                 let child_file_key = key_map
                     .get(&child_id)
-                    .and_then(|encrypted| unwrap_folder_child_for_format(folder_key, &root.file_id, &child_id,
+                    .and_then(|encrypted| self.shared_folder_child_key(folder_key, &root.file_id, &child_id,
                         if item_kind_from_metadata(&child) == ItemKind::Folder { 2 } else { 1 }, encrypted,
                         folder_keys_response["desktop_has_custody"].as_bool() == Some(true)).ok());
                 let Some(entry) = apply_shared_metadata_file_row(
@@ -4750,7 +4767,7 @@ impl EngineBridge {
             let (folder_key, folder_keys) = self.shared_folder_material(&mapping).await?;
             let wrap = encrypted_file_key_from_folder_keys_response(&folder_keys, file_id)
                 .ok_or_else(|| anyhow::anyhow!("folder share is missing the child key"))?;
-            unwrap_folder_child_for_format(&folder_key, &mapping.file_id, file_id, 1, wrap,
+            self.shared_folder_child_key(&folder_key, &mapping.file_id, file_id, 1, wrap,
                 folder_keys["desktop_has_custody"].as_bool() == Some(true))
         } else {
             let encrypted_file_key = mapping

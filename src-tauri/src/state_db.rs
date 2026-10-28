@@ -2403,8 +2403,23 @@ impl StateDb {
     /// L7c: account-scoped, durable format knowledge; contains no key material.
     pub fn has_seen_folder_custody(&self, folder_id: &str) -> Result<bool> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
+        Self::has_seen_folder_custody_conn(&conn, folder_id)
+    }
+
+    fn has_seen_folder_custody_conn(conn: &Connection, folder_id: &str) -> Result<bool> {
         Ok(conn.query_row("SELECT 1 FROM sync_state WHERE key=?1",
             [format!("shared_folder_custody_seen:{folder_id}")], |_| Ok(())).optional()?.is_some())
+    }
+
+    /// Serialize legacy key opening with custody observation. An old inventory
+    /// cannot authorize a read after another request durably remembers custody.
+    /// The synchronous callback only opens a key in core; it must not use the DB.
+    pub fn read_without_folder_custody<T>(&self, folder_id: &str, read: impl FnOnce() -> T) -> Result<Option<T>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        if Self::has_seen_folder_custody_conn(&conn, folder_id)? {
+            return Ok(None);
+        }
+        Ok(Some(read()))
     }
 
     pub fn remember_folder_custody_at_revision(&self, folder_id: &str, revision: u64) -> Result<()> {
