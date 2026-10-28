@@ -50,6 +50,8 @@
 
 pub mod callbacks;
 pub mod placeholders;
+#[cfg(test)]
+mod reconcile_tests;
 pub mod signout;
 pub mod status_ui;
 pub mod thumbnail_provider;
@@ -1181,12 +1183,9 @@ pub fn seed_placeholders(bridge: Arc<EngineBridge>, sync_root: &std::path::Path)
     // be reachable before we create any placeholder below.
     set_bridge(bridge.clone());
 
-    let created = populate_placeholders(&bridge, sync_root);
-    tracing::info!(
-        placeholders = created,
-        sync_root = %sync_root.display(),
-        "Cloud Files placeholders seeded"
-    );
+    let created = populate_placeholders(bridge.db(), sync_root).created;
+    // Zero-knowledge (task 2240 slice 2): a count, never the sync root's path.
+    tracing::info!(placeholders = created, "Cloud Files placeholders seeded");
 }
 
 /// Re-run placeholder population from the current DB so cloud-only rows
@@ -1214,17 +1213,21 @@ pub fn refresh_placeholders(sync_root: &std::path::Path) {
         tracing::debug!("refresh_placeholders called before bridge was set; skipping");
         return;
     };
-    let ensured = populate_placeholders(&bridge, sync_root);
-    if ensured > 0 {
-        // `ensured` counts the placeholders created by this refresh; ones that
-        // already existed (ERROR_ALREADY_EXISTS → Ok(false)) are not counted, so
-        // a steady-state tick logs nothing.
-        tracing::debug!(
-            placeholders = ensured,
-            sync_root = %sync_root.display(),
-            "Cloud Files placeholders refreshed"
-        );
-    }
+    // Task 2240 slice 2 (spec D6): what the refresh costs, measured every tick before anyone optimises it.
+    // Counts and milliseconds only, never a path.
+    let s = populate_placeholders(bridge.db(), sync_root);
+    tracing::debug!(
+        rows = s.rows,
+        skipped = s.skipped,
+        ensure_dir_errors = s.ensure_dir_errors,
+        create_calls = s.create_calls,
+        created = s.created,
+        already_existed = s.already_existed,
+        create_errors = s.create_errors,
+        db_ms = s.db_ms,
+        elapsed_ms = s.elapsed_ms,
+        "placeholder refresh"
+    );
 }
 
 /// Per-tick reconcile of on-disk Cloud Files placeholder state back into the
@@ -1250,78 +1253,72 @@ pub fn refresh_placeholders(sync_root: &std::path::Path) {
 /// written. Engine-owned statuses (`Uploading`/`Downloading`/`Conflict`/`Error`)
 /// are never overridden — `decode_os_state` returns `None` for them.
 ///
+/// ## Task 2240 slice 2: one listing per folder, and confirm before write
+///
+/// Each file row's attribute word comes from one listing of its parent folder, not one
+/// `GetFileAttributesW` per file (1.45–1.95 s of kernel time per tick on 37k files). A row whose
+/// listing word asks for a change is read again directly, and only that direct word decides what is
+/// written, so a listing that shows a change late (a handle still open) delays a detection but never
+/// writes a wrong pin or status. The decision lives in [`crate::os_state_reconcile`].
+///
 /// ## Zero-knowledge
 ///
-/// Never logs a path or filename — only the aggregate update count.
+/// Never logs a path or filename — only counts and milliseconds.
 #[cfg(target_os = "windows")]
 pub fn reconcile_placeholder_state(sync_root: &std::path::Path) {
-    use crate::state_db::{decode_os_state, FileStatus, PinState};
-
     let Some(bridge) = bridge() else {
         tracing::debug!("reconcile_placeholder_state called before bridge was set; skipping");
         return;
     };
+    reconcile_placeholder_state_with(bridge.db(), sync_root, &RECONCILE_CURSOR);
+}
+
+/// Where the next tick's sentinel window starts (spec D4). Only the sync tick touches it.
+#[cfg(target_os = "windows")]
+static RECONCILE_CURSOR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// [`reconcile_placeholder_state`] against `db` instead of the bridge's, so the native tests run it on
+/// a scratch root. Writes the deltas, logs one counts line, and returns what it decided.
+#[cfg(target_os = "windows")]
+pub(crate) fn reconcile_placeholder_state_with(
+    db: &crate::state_db::StateDb,
+    sync_root: &std::path::Path,
+    cursor: &std::sync::atomic::AtomicUsize,
+) -> crate::os_state_reconcile::ReconcilePlan {
+    use std::sync::atomic::Ordering;
+    let started = std::time::Instant::now();
 
     // `file_overview_rows` pairs each row with its EFFECTIVE-pinned flag, computed
     // with the same predicate the in-app "Files" tab uses — exactly the current
     // pin truth we must diff the OS-reported pin against.
-    let rows = match bridge.db().file_overview_rows() {
+    let rows = match db.file_overview_rows() {
         Ok(rows) => rows,
         Err(e) => {
             tracing::warn!(error = %e, "reconcile_placeholder_state: could not list files");
-            return;
+            return crate::os_state_reconcile::ReconcilePlan {
+                deltas: Vec::new(),
+                counts: Default::default(),
+                next_cursor: cursor.load(Ordering::Relaxed),
+            };
         }
     };
+    let db_ms = started.elapsed().as_millis() as u64;
 
-    let mut deltas: Vec<(String, Option<FileStatus>, Option<PinState>)> = Vec::new();
-    for (entry, pinned) in rows {
-        // Directory placeholders carry their own pin/hydration semantics handled
-        // by the engine's recursive pin path; reconcile only leaf files, the same
-        // surface `populate_placeholders` mints file placeholders for.
-        if entry.is_dir() {
-            continue;
-        }
-
-        // Map the server-relative '/'-joined key to the on-disk placeholder path
-        // the SAME way `populate_placeholders` does.
-        let rel = entry.path.trim_matches('/');
-        if rel.is_empty() {
-            continue;
-        }
-        let local_path = sync_root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
-
-        let Some(attrs) = placeholders::read_os_placeholder_state(&local_path) else {
-            // Placeholder gone / unreadable this tick — skip; a later tick retries.
-            continue;
-        };
-
-        let (desired_status, desired_pin) = decode_os_state(attrs, entry.status.clone());
-
-        // Status delta: only when decode produced a candidate that differs.
-        let status_delta = match desired_status {
-            Some(s) if s != entry.status => Some(s),
-            _ => None,
-        };
-
-        // Pin delta: decode reports the EXPLICIT per-file pin the OS carries
-        // (Pinned/Unpinned) or None. Compare its boolean meaning to the row's
-        // current effective-pinned flag so we don't churn on equivalent states.
-        let pin_delta = match desired_pin {
-            Some(PinState::Pinned) if !pinned => Some(PinState::Pinned),
-            Some(PinState::Unpinned) if pinned => Some(PinState::Unpinned),
-            _ => None,
-        };
-
-        if status_delta.is_some() || pin_delta.is_some() {
-            deltas.push((entry.file_id, status_delta, pin_delta));
-        }
-    }
+    // Relative '/'-joined keys map onto the sync root the SAME way `populate_placeholders` does.
+    let native = |rel: &str| sync_root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let plan = crate::os_state_reconcile::plan_reconcile(
+        rows,
+        cursor.load(Ordering::Relaxed),
+        |parent| placeholders::list_dir_attributes(&native(parent)),
+        |rel| placeholders::read_os_placeholder_state(&native(rel)),
+    );
+    cursor.store(plan.next_cursor, Ordering::Relaxed);
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    match bridge.db().reconcile_os_state(&deltas, now) {
+    match db.reconcile_os_state(&plan.deltas, now) {
         Ok(updated) => {
             if updated > 0 {
                 // Zero-knowledge: count only, never a path.
@@ -1332,6 +1329,35 @@ pub fn reconcile_placeholder_state(sync_root: &std::path::Path) {
             tracing::warn!(error = %e, "reconcile_os_state failed");
         }
     }
+
+    // Spec D5: one counts line per tick; a warn when the listing was seen lagging.
+    let c = plan.counts;
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    macro_rules! reconcile_line {
+        ($level:ident) => {
+            tracing::$level!(
+                rows = c.rows,
+                dirs_listed = c.dirs_listed,
+                listing_hits = c.listing_hits,
+                fallbacks = c.fallbacks,
+                list_errors = c.list_errors,
+                candidates = c.candidates,
+                confirmed = c.confirmed,
+                stale_candidates = c.stale_candidates,
+                sentinel_checked = c.sentinel_checked,
+                sentinel_mismatches = c.sentinel_mismatches,
+                db_ms,
+                elapsed_ms,
+                "reconcile"
+            )
+        };
+    }
+    if c.sentinel_mismatches > 0 || c.stale_candidates > 0 {
+        reconcile_line!(warn);
+    } else {
+        reconcile_line!(debug);
+    }
+    plan
 }
 
 /// Maximum number of `CfSetInSyncState` calls issued in a single
@@ -1580,23 +1606,42 @@ pub fn stamp_local_files_in_sync(sync_root: &std::path::Path) {
     }
 }
 
+/// What one [`populate_placeholders`] pass did (task 2240 slice 2, spec D6: measured, not changed). Counts and
+/// milliseconds only, never a path.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PopulateStats {
+    pub rows: usize,
+    pub skipped: usize,
+    pub ensure_dir_errors: usize,
+    pub create_calls: usize,
+    pub created: usize,
+    pub already_existed: usize,
+    pub create_errors: usize,
+    pub db_ms: u64,
+    pub elapsed_ms: u64,
+}
+
 /// Walk the engine bridge's DB file list and drop a cloud-only placeholder
-/// into Explorer for every file currently marked `CloudOnly`. Returns the
-/// number of placeholders created now (task 1640: an already-existing one
-/// is no error, but is not counted).
+/// into Explorer for every file currently marked `CloudOnly`. Returns what it
+/// did; `created` is the number of placeholders created now (task 1640: an
+/// already-existing one is no error, but is not counted as created).
 ///
 /// The placeholder is created under `sync_root joined with the file's
 /// parent directory` — we mint the parent path from the stored relative
 /// path and ensure it exists first, so nested cloud files land in the right
 /// Explorer subfolder.
-fn populate_placeholders(bridge: &EngineBridge, sync_root: &std::path::Path) -> usize {
-    let mut entries = match bridge.db().list_by_status(crate::state_db::FileStatus::CloudOnly) {
+fn populate_placeholders(db: &crate::state_db::StateDb, sync_root: &std::path::Path) -> PopulateStats {
+    let started = std::time::Instant::now();
+    let mut stats = PopulateStats::default();
+    let mut entries = match db.list_by_status(crate::state_db::FileStatus::CloudOnly) {
         Ok(entries) => entries,
         Err(e) => {
             tracing::warn!(error = %e, "could not list cloud-only files for placeholder seeding");
-            return 0;
+            return stats;
         }
     };
+    stats.db_ms = started.elapsed().as_millis() as u64;
+    stats.rows = entries.len();
 
     // PARENTS-BEFORE-CHILDREN. A nested file's placeholder must land INSIDE its
     // parent directory's placeholder, and a directory placeholder must exist
@@ -1614,13 +1659,13 @@ fn populate_placeholders(bridge: &EngineBridge, sync_root: &std::path::Path) -> 
     // directory placeholder was wanted. Depth-ordering avoids that race.
     entries.sort_by_key(|e| e.path.trim_matches('/').split('/').count());
 
-    let mut created = 0usize;
     for entry in entries {
         // Stored paths are server-relative, '/'-separated, possibly with a
         // leading slash. Map onto the local sync root with native
         // separators.
         let rel = entry.path.trim_matches('/');
         if rel.is_empty() {
+            stats.skipped += 1;
             continue;
         }
         let local_path = sync_root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
@@ -1630,6 +1675,7 @@ fn populate_placeholders(bridge: &EngineBridge, sync_root: &std::path::Path) -> 
                 // Zero-knowledge: log the file_id only, never the decrypted
                 // plaintext path/name.
                 tracing::warn!(file_id = %entry.file_id, "skipping placeholder for path with no file name");
+                stats.skipped += 1;
                 continue;
             }
         };
@@ -1644,9 +1690,11 @@ fn populate_placeholders(bridge: &EngineBridge, sync_root: &std::path::Path) -> 
             // relative path, so it can carry plaintext folder names — log the
             // file_id only, not the path.
             tracing::warn!(error = %e, file_id = %entry.file_id, "could not create placeholder parent dir");
+            stats.ensure_dir_errors += 1;
             continue;
         }
 
+        stats.create_calls += 1;
         match placeholders::create_placeholder(
             &parent_dir,
             &entry.file_id,
@@ -1656,18 +1704,19 @@ fn populate_placeholders(bridge: &EngineBridge, sync_root: &std::path::Path) -> 
             entry.is_dir(),
         ) {
             Ok(true) => {
-                created += 1;
+                stats.created += 1;
                 // Task 1640 (review F1): created where nothing was, so no fetched bytes are on
                 // disk: a first fetch starts the file's candidate. Only a row never fetched into
                 // is marked (a fetch on the new placeholder records first), so none is forgotten.
                 if !entry.is_dir() {
-                    if let Err(e) = bridge.db().mark_no_fetched_content(&entry.file_id) {
+                    if let Err(e) = db.mark_no_fetched_content(&entry.file_id) {
                         tracing::debug!(error = %e, file_id = %entry.file_id, "could not mark the new placeholder empty");
                     }
                 }
             }
-            Ok(false) => {}
+            Ok(false) => stats.already_existed += 1,
             Err(e) => {
+                stats.create_errors += 1;
                 // Zero-knowledge: log the file_id only — never the decrypted
                 // plaintext filename.
                 tracing::warn!(
@@ -1678,7 +1727,8 @@ fn populate_placeholders(bridge: &EngineBridge, sync_root: &std::path::Path) -> 
             }
         }
     }
-    created
+    stats.elapsed_ms = started.elapsed().as_millis() as u64;
+    stats
 }
 
 pub(crate) mod upload_finalization;
