@@ -384,6 +384,7 @@ impl crate::engine_bridge::EngineBridge {
                 Ok(None) => false,
                 Err(_) => true,
             };
+            record.member_added |= !row["uploaded_by"].is_null();
             record.origin_label_encrypted = row["origin_label_encrypted"]
                 .as_str()
                 .map(str::to_string)
@@ -553,6 +554,8 @@ pub struct OwnedKeyRecord {
     pub folder_wrap: Option<Vec<u8>>,
     pub folder_key_version: Option<i32>,
     pub foreign_added: bool,
+    #[serde(default)]
+    pub member_added: bool,
     pub origin_label_encrypted: Option<String>,
     pub blocked_fingerprint: Option<String>,
 }
@@ -654,3 +657,9 @@ impl<'a> AccountScope<'a> {
 
 #[cfg(test)]
 mod tests;
+
+/// Recoverable item copy. Only an authenticated, decrypted label may be passed here.
+pub fn cannot_open_message(label: Option<&str>, member_added: bool) -> String {
+    let source = label.filter(|s| !s.trim().is_empty()).unwrap_or(if member_added { "shared folder" } else { "link" });
+    format!("Can't open this file (added via {source})")
+}

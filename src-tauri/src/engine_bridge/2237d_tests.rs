@@ -114,3 +114,19 @@ fn sf2237d_1943_truncated_v2_never_publishes() {
     let temp=tempfile::tempdir().unwrap();let b=s.bridge(&temp.path().join("db"),false);let final_path=temp.path().join("result.txt");
     assert!(runtime().block_on(b.hydrate_file(ID,&final_path,&[temp.path()])).is_err());assert!(!final_path.exists());assert_eq!(b.db.get_file_contract_state(ID).unwrap().unwrap().cache_bytes,0);
 }
+#[test]
+fn sf2237d_l7b_custody_never_uses_legacy_reader() {
+    use base64::Engine as _;
+    LEGACY_CHILD_READS.with(|n| n.set(0));
+    let folder=FileKey::from_bytes([23;32]);
+    let wrap=beebeeb_sync::key_resolution::wrap_child_key(&folder,ROOT,ID,1,&random_key()).unwrap();
+    let encoded=base64::engine::general_purpose::STANDARD.encode(wrap);
+    let got=unwrap_folder_child_for_format(folder.as_bytes(),ROOT,ID,1,&encoded,true);
+    assert_eq!(LEGACY_CHILD_READS.with(|n| n.get()),0,"custody must never try the unbound reader");
+    assert_eq!(got.unwrap().as_bytes(),random_key().as_bytes());
+    let legacy=base64::engine::general_purpose::STANDARD.encode(beebeeb_core::encrypt::encrypt_chunk_raw(&folder,random_key().as_bytes()).unwrap());
+    assert!(unwrap_folder_child_for_format(folder.as_bytes(),ROOT,ID,1,&legacy,true).is_err());
+    assert_eq!(LEGACY_CHILD_READS.with(|n| n.get()),0);
+    assert_eq!(unwrap_folder_child_for_format(folder.as_bytes(),ROOT,ID,1,&legacy,false).unwrap().as_bytes(),random_key().as_bytes());
+    assert_eq!(LEGACY_CHILD_READS.with(|n| n.get()),1);
+}

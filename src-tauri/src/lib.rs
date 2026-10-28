@@ -12117,14 +12117,16 @@ fn subtree_file_ids(rows: &[(String, Option<String>, bool)], root_folder_ids: &[
 /// A bare plaintext name passes straight through. We deliberately swallow the
 /// error to `None` so the SelectiveSync row falls back to a stable id label.
 fn try_decrypt_name(file_meta: &serde_json::Value, id: &str, master_key: &[u8; 32]) -> Option<String> {
-    let name_enc_str = file_meta.get("name_encrypted").and_then(|v| v.as_str())?;
-
-    // MasterKey::from_bytes consumes the array (it zeroizes on drop),
-    // so copy from the borrow first.
-    let mk_bytes: [u8; 32] = *master_key;
-    let mk = beebeeb_core::kdf::MasterKey::from_bytes(mk_bytes);
-
-    beebeeb_core::encrypt::decrypt_name(&mk, id, name_enc_str).ok()
+    let name = file_meta["name_encrypted"].as_str()?;
+    let mk = beebeeb_core::kdf::MasterKey::from_bytes(*master_key);
+    let owner = owner_keys::normalize_wrap(&file_meta["owner_wrapped_file_key"]).ok()?;
+    let foreign = !file_meta["acted_via_share_id"].is_null() || !file_meta["uploaded_by"].is_null();
+    if owner.is_some() || foreign {
+        let resolved = beebeeb_sync::key_resolution::resolve_owned_key(&mk, id, owner.as_deref(), None, foreign).ok()?;
+        return beebeeb_core::encrypt::decrypt_file_metadata_with_key(&resolved.key, name).ok()
+            .map(|m| m.name).filter(|name| reject_unsafe_rel_path(name).is_ok() && !name.contains('/') && !name.contains('\\'));
+    }
+    beebeeb_core::encrypt::decrypt_name(&mk, id, name).ok()
 }
 
 /// Build the nested SelectiveSync folder tree.
@@ -12213,6 +12215,7 @@ async fn list_vault_folders(state: State<'_, AppState>) -> Result<Vec<VaultItem>
             // id-based label so the user can still tell folders apart.
             let display = try_decrypt_name(f, id, &master_key)
                 .or_else(|| {
+                    if !f["acted_via_share_id"].is_null() || !f["uploaded_by"].is_null() || !f["owner_wrapped_file_key"].is_null() { return None; }
                     let path = f.get("path").and_then(|v| v.as_str()).unwrap_or("");
                     if path.is_empty() {
                         None
@@ -12587,6 +12590,7 @@ async fn account_update_notification_preferences(
 }
 
 fn trash_name_fallback(file_meta: &serde_json::Value, id: &str) -> String {
+    if !file_meta["acted_via_share_id"].is_null() || !file_meta["uploaded_by"].is_null() || !file_meta["owner_wrapped_file_key"].is_null() { return owner_keys::blocked_name(id); }
     let from_plain = ["display_name", "decrypted_name", "filename", "file_name", "name"]
         .into_iter()
         .find_map(|key| {
@@ -12786,10 +12790,13 @@ async fn desktop_trash_list(state: State<'_, AppState>) -> Result<Vec<account_dt
     session_command!(async {
         let api = api_client_from_session(&state)?;
         let raw = api.list_trashed_files_all().await.map_err(|e| e.to_string())?;
-        Ok(raw
-            .iter()
-            .filter_map(|file_meta| trash_item_from_meta(file_meta, api.master_key()))
-            .collect())
+        let db = DesktopConfig::load().ok().and_then(|cfg| state_db_for_config(&cfg).ok().flatten());
+        Ok(raw.iter().filter_map(|file_meta| {
+            let mut item = trash_item_from_meta(file_meta, api.master_key())?;
+            if let Some(db) = db.as_ref()
+                && let Ok(Some(name)) = owner_keys::stored_name(db, &item.id, api.master_key()) { item.name = name; }
+            Some(item)
+        }).collect())
     })
 }
 

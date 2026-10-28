@@ -2180,7 +2180,8 @@ impl EngineBridge {
         mime_type: Option<&str>,
         file_key: &beebeeb_core::kdf::FileKey,
     ) -> anyhow::Result<()> {
-        let uploads = prepare_thumbnail_uploads_for_plaintext_media(payload_path, mime_type, file_key)?;
+        let pin = owned_key_and_pin(&self.db, self.api.master_key(), server_file_id)?.1;
+        let uploads = prepare_thumbnail_uploads_with_pin(payload_path, mime_type, file_key, pin)?;
         for upload in uploads {
             self.api
                 .upload_thumbnail(
@@ -2270,7 +2271,13 @@ impl EngineBridge {
             &root.file_id,
             encrypted_folder_key,
         )?;
-        let folder_keys_response = self.api.get_folder_keys(&root.invite_id).await?;
+        let mut folder_keys_response = self.api.get_folder_keys(&root.invite_id).await?;
+        let custody = match self.api.get_shared_folder(&root.file_id).await {
+            Ok(_) => true,
+            Err(e) if e.to_string().starts_with("HTTP 404 ") => false,
+            Err(e) => return Err(e),
+        };
+        folder_keys_response["desktop_has_custody"] = serde_json::json!(custody);
         Ok((folder_key, folder_keys_response))
     }
 
@@ -2282,7 +2289,8 @@ impl EngineBridge {
     ) -> Option<String> {
         let name_encrypted = root.file_name_encrypted.as_deref()?;
         let encrypted_file_key = encrypted_file_key_from_folder_keys_response(folder_keys_response, &root.file_id)?;
-        let file_key = unwrap_child_file_key(folder_key, encrypted_file_key).ok()?;
+        let file_key = unwrap_folder_child_for_format(folder_key, &root.file_id, &root.file_id, 2,
+            encrypted_file_key, folder_keys_response["desktop_has_custody"].as_bool() == Some(true)).ok()?;
         decrypt_shared_name_with_key(&file_key, name_encrypted)
     }
 
@@ -2336,7 +2344,9 @@ impl EngineBridge {
                 };
                 let child_file_key = key_map
                     .get(&child_id)
-                    .and_then(|encrypted| unwrap_child_file_key(folder_key, encrypted).ok());
+                    .and_then(|encrypted| unwrap_folder_child_for_format(folder_key, &root.file_id, &child_id,
+                        if item_kind_from_metadata(&child) == ItemKind::Folder { 2 } else { 1 }, encrypted,
+                        folder_keys_response["desktop_has_custody"].as_bool() == Some(true)).ok());
                 let Some(entry) = apply_shared_metadata_file_row(
                     &self.db,
                     &child,
@@ -4505,7 +4515,8 @@ impl EngineBridge {
                 Ok(())
             }
             Err(e) => {
-                set_failed();
+                let e = self.owned_open_failure(file_id, e);
+                set_failed(); // only writes over Downloading; the recoverable item already left it.
                 Err(e)
             }
         }
@@ -4606,7 +4617,8 @@ impl EngineBridge {
                 Ok(FetchedBytes { bytes: buf, version: fetched, ticket })
             }
             Err(e) => {
-                let _ = self.db.set_status(file_id, FileStatus::Error);
+                let e = self.owned_open_failure(file_id, e);
+                let _ = self.db.set_status_if(file_id, FileStatus::Downloading, FileStatus::Error);
                 Err(e)
             }
         }
@@ -4664,6 +4676,15 @@ impl EngineBridge {
         Ok(beebeeb_core::encrypt::encrypt_name_for(&key, name, None, pin)?)
     }
 
+    fn owned_open_failure(&self, file_id: &str, error: anyhow::Error) -> anyhow::Error {
+        if let Ok(Some(record)) = self.db.get_owned_key_record(file_id)
+            && record.foreign_added {
+            let _ = self.db.set_status_if(file_id, FileStatus::Downloading, FileStatus::CloudOnly);
+            return anyhow::anyhow!(crate::owner_keys::cannot_open_message(None, record.member_added));
+        }
+        error
+    }
+
     async fn file_key_for_download(&self, file_id: &str) -> anyhow::Result<beebeeb_core::kdf::FileKey> {
         let Some(contract) = self.db.get_file_contract_state(file_id)? else {
             return self.resolved_owned_key(file_id).await.map(|key| beebeeb_core::kdf::FileKey::from_bytes(*key.as_bytes()));
@@ -4695,19 +4716,11 @@ impl EngineBridge {
             .ok_or_else(|| anyhow::anyhow!("shared invite {share_id} is missing sender_public_key"))?;
 
         if mapping.is_folder {
-            let encrypted_folder_key = mapping
-                .encrypted_folder_key
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("folder share {share_id} is missing encrypted_folder_key"))?;
-            let folder_keys = self.api.get_folder_keys(share_id).await?;
-            unwrap_folder_share_file_key(
-                self.api.master_key(),
-                sender_public_key,
-                &mapping.file_id,
-                encrypted_folder_key,
-                file_id,
-                &folder_keys,
-            )
+            let (folder_key, folder_keys) = self.shared_folder_material(&mapping).await?;
+            let wrap = encrypted_file_key_from_folder_keys_response(&folder_keys, file_id)
+                .ok_or_else(|| anyhow::anyhow!("folder share is missing the child key"))?;
+            unwrap_folder_child_for_format(&folder_key, &mapping.file_id, file_id, 1, wrap,
+                folder_keys["desktop_has_custody"].as_bool() == Some(true))
         } else {
             let encrypted_file_key = mapping
                 .encrypted_file_key
@@ -5182,7 +5195,7 @@ impl EngineBridge {
                     _ => Ok(data),
                 }
             });
-        let data = read?;
+        let data = read.map_err(|e| self.owned_open_failure(file_id, e))?;
         // Only a whole-file covering range is evidence the file is fully
         // cached; a partial range leaves the row `Downloading` for the
         // caller (the CF callback) to resolve based on what CF itself
@@ -6502,6 +6515,11 @@ fn prepare_thumbnail_uploads_for_plaintext_media(
     mime_type: Option<&str>,
     file_key: &beebeeb_core::kdf::FileKey,
 ) -> anyhow::Result<Vec<PreparedThumbnailUpload>> {
+    prepare_thumbnail_uploads_with_pin(payload_path, mime_type, file_key, beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded)
+}
+
+fn prepare_thumbnail_uploads_with_pin(payload_path: &Path, mime_type: Option<&str>, file_key: &beebeeb_core::kdf::FileKey,
+    pin: beebeeb_core::chunk_stream::ExpectedChunkFormat) -> anyhow::Result<Vec<PreparedThumbnailUpload>> {
     if !beebeeb_core::media::is_media(mime_type) {
         return Ok(Vec::new());
     }
@@ -6530,7 +6548,7 @@ fn prepare_thumbnail_uploads_for_plaintext_media(
             };
         let plaintext = Zeroizing::new(output.data);
         let encrypted = Zeroizing::new(
-            beebeeb_core::encrypt::encrypt_chunk_raw(file_key, &plaintext)
+            beebeeb_core::encrypt::encrypt_thumbnail_for(file_key, &plaintext, pin)
                 .map_err(|e| anyhow::anyhow!("encrypt thumbnail {}: {e}", variant.label()))?,
         );
         if encrypted.len() > variant.encrypted_max_bytes() {
@@ -8336,10 +8354,23 @@ fn encrypted_file_key_from_folder_keys_response<'a>(
         .and_then(|entry| entry.get("encrypted_file_key").and_then(|value| value.as_str()))
 }
 
+#[cfg(test)]
+thread_local! { static LEGACY_CHILD_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
+fn unwrap_folder_child_for_format(folder: &[u8;32], root: &str, id: &str, kind: u8, wrap: &str, custody: bool) -> anyhow::Result<beebeeb_core::kdf::FileKey> {
+    if custody {
+        let frame = base64::engine::general_purpose::STANDARD.decode(wrap)?;
+        Ok(beebeeb_sync::key_resolution::unwrap_child_key(
+            &beebeeb_core::kdf::FileKey::from_bytes(*folder), root, id, kind, &frame)?)
+    } else { unwrap_child_file_key(folder, wrap) }
+}
+
 fn unwrap_child_file_key(
     folder_key: &[u8; 32],
     encrypted_file_key_b64: &str,
 ) -> anyhow::Result<beebeeb_core::kdf::FileKey> {
+    #[cfg(test)]
+    LEGACY_CHILD_READS.with(|n| n.set(n.get()+1));
     let file_key = unwrap_key_frame(folder_key, encrypted_file_key_b64, "encrypted_file_key")?;
     Ok(beebeeb_core::kdf::FileKey::from_bytes(*file_key))
 }
