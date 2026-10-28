@@ -8820,6 +8820,7 @@ pub async fn sync_tick_outcome(
         .unwrap_or(0);
     let mut conflicts: Vec<ConflictDetected> = Vec::new();
     let mut applied_item_ids: Vec<String> = Vec::new();
+    bridge.maintain_owned_keys(now_secs).await?;
 
     // ── /sync delta engine (task 0789) ────────────────────────────────────────
     //

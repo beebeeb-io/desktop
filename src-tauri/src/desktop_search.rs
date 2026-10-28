@@ -243,8 +243,24 @@ async fn sync_local_index_to_store(
 ) -> anyhow::Result<SearchIndexSyncSummary> {
     let local = build_local_index(db)?;
     let master_key = MasterKey::from_bytes(store.master_key_bytes());
-    let encrypted = local.index.encrypt_shards(&master_key)?;
     let remote_manifest = store.fetch_manifest().await?;
+    let partial = db.list_owned_key_records()?.iter().any(|r|r.blocked_fingerprint.is_some());
+    let mut remote_shards = Vec::new();
+    for coord in &remote_manifest {
+        if let Some(blob) = store.get_shard(coord.bucket,coord.page).await? {
+            let shard = EncryptedShard { bucket:coord.bucket,page:coord.page,blob };
+            if SearchIndex::from_encrypted_shards(&master_key,std::slice::from_ref(&shard),DEFAULT_NUM_SHARDS).is_ok() { remote_shards.push(shard); }
+            else if partial { anyhow::bail!("owner index rebuild deferred until listing is complete"); }
+        } else if partial { anyhow::bail!("owner index rebuild deferred until listing is complete"); }
+    }
+    let mut index = SearchIndex::from_encrypted_shards(&master_key,&remote_shards,DEFAULT_NUM_SHARDS)?;
+    // Preserve readable entries from concurrent devices, and replay only known
+    // local names/removals. Unavailable rows are not deletion instructions.
+    for entry in db.list_owned_key_records()? {
+        if !partial && db.get_file(&entry.file_id)?.is_none() { index.remove(&entry.file_id); }
+    }
+    for (id,entry) in &local.records { index.upsert(id,&entry.name); }
+    let encrypted = index.encrypt_shards(&master_key)?;
 
     let remote_versions: BTreeMap<(u32, u32), i64> = remote_manifest
         .iter()
@@ -295,7 +311,7 @@ async fn sync_local_index_to_store(
         indexed_file_count: local.index.file_count(),
         remote_manifest_count: remote_manifest.len(),
         put_count,
-        get_count: plan.to_get.len(),
+        get_count: remote_manifest.len(),
         delete_count,
         num_shards: DEFAULT_NUM_SHARDS,
     })
@@ -590,7 +606,7 @@ mod tests {
         assert_eq!(summary.remote_manifest_count, 1);
         assert_eq!(summary.put_count, encrypted.len());
         assert_eq!(summary.delete_count, 1);
-        assert_eq!(summary.get_count, 0);
+        assert_eq!(summary.get_count, 1);
 
         let restored = rt
             .block_on(super::load_remote_index_from_store(&store))

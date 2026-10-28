@@ -275,6 +275,71 @@ async fn adopt(
 }
 
 impl crate::engine_bridge::EngineBridge {
+    pub(crate) async fn maintain_owned_keys(&self, now: i64) -> anyhow::Result<()> {
+        let scope = self.owner_key_scope();
+        scope.check()?;
+        let dirty = self.db().dirty_shared_index_roots()?;
+        let pending = self
+            .db()
+            .list_owned_key_records()?
+            .iter()
+            .any(|r| r.pending_owner_wrap.is_some() && r.blocked_fingerprint.is_none());
+        if (pending || !dirty.is_empty()) && self.db().claim_owned_key_maintenance(now)? {
+            let _ = self.retry_owner_adoptions().await;
+            scope.check()?;
+            for root in dirty {
+                // Durable markers retain failed or partial work for the next pass.
+                let _ = self.repair_shared_folder_index(&root).await;
+                scope.check()?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn append_shared_activity(
+        &self,
+        feed: &mut crate::account_dto::ActivityFeed,
+    ) -> anyhow::Result<()> {
+        let scope = self.owner_key_scope();
+        let roots: std::collections::BTreeSet<_> = self
+            .db()
+            .list_owned_key_records()?
+            .into_iter()
+            .filter_map(|r| r.shared_root_id)
+            .collect();
+        for root in roots {
+            let Ok(rows) = self.shared_folder_activity(&root).await else {
+                scope.check()?;
+                continue;
+            };
+            for row in rows {
+                let id = format!("shared-folder:{}:{}", root, row["id"].as_str().unwrap_or_default());
+                if feed.events.iter().any(|e| e.id == id) {
+                    continue;
+                }
+                let label = row["label"].as_str().unwrap_or("shared folder");
+                let actor = row["actor"].as_str().unwrap_or("Someone");
+                feed.events.push(crate::account_dto::ActivityFeedEvent {
+                    id,
+                    event_type: "shared_folder.activity".into(),
+                    subject: Some(label.into()),
+                    details: Some(format!(
+                        "{actor}: {} ({})",
+                        row["kind"].as_str().unwrap_or("updated"),
+                        row["item_count"].as_u64().unwrap_or(1)
+                    )),
+                    origin: None,
+                    created_at: row["last_at"].as_str().unwrap_or_default().into(),
+                });
+                feed.total += 1;
+            }
+        }
+        scope.check()?;
+        feed.events
+            .sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| a.id.cmp(&b.id)));
+        Ok(())
+    }
+
     pub async fn prepare_owned_rows(&self, rows: &[Value]) -> anyhow::Result<Vec<PreparedOwnedRow>> {
         let scope = self.owner_key_scope();
         let master = MasterKey::from_bytes(*self.api().master_key());

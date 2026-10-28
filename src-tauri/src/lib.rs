@@ -12538,10 +12538,12 @@ async fn account_activity_feed(
     limit: Option<u32>,
 ) -> Result<account_dto::ActivityFeed, String> {
     session_command!(async {
-        api_client_from_session(&state)?
-            .activity_feed(page, limit)
-            .await
-            .map_err(|e| e.to_string())
+        let mut feed = api_client_from_session(&state)?.activity_feed(page, limit).await.map_err(|e| e.to_string())?;
+        if page.unwrap_or(1) == 1 {
+            let bridge = parked_conflict_bridge(&state)?;
+            bridge.append_shared_activity(&mut feed).await.map_err(|e| e.to_string())?;
+        }
+        Ok(feed)
     })
 }
 

@@ -2395,6 +2395,11 @@ pub struct TreeRow {
 pub struct StateDb(Mutex<Connection>, std::sync::atomic::AtomicU64);
 
 impl StateDb {
+    /// One bounded maintenance pass per 30 seconds; account purge clears this clock.
+    pub fn claim_owned_key_maintenance(&self, now: i64) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        Ok(conn.execute("INSERT INTO sync_state (key,value) VALUES ('owned_key_retry_after',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE CAST(sync_state.value AS INTEGER)<=?2", params![now.saturating_add(30).to_string(),now])? > 0)
+    }
     pub fn mark_shared_index_dirty(&self, folder_id: &str) -> Result<()> {
         let conn=self.0.lock().expect("state_db mutex poisoned");
         conn.execute("INSERT INTO sync_state (key,value) VALUES (?1,'1') ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT)", [format!("shared_folder_index_dirty:{folder_id}")])?;
@@ -6797,7 +6802,7 @@ impl StateDb {
         )?;
         tx.execute("DELETE FROM id_aliases", [])?;
         tx.execute("DELETE FROM owned_key_records", [])?;
-        tx.execute("DELETE FROM sync_state WHERE key LIKE 'shared_folder_index_dirty:%'", [])?;
+        tx.execute("DELETE FROM sync_state WHERE key LIKE 'shared_folder_index_dirty:%' OR key='owned_key_retry_after'", [])?;
 
         tx.commit()?;
         self.1.fetch_add(1, std::sync::atomic::Ordering::AcqRel);

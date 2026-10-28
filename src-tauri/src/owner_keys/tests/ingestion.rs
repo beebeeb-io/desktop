@@ -427,6 +427,22 @@ fn sf2237d_t4_activity_stays_local() {
     let activity = run(b.shared_folder_activity(ROOT)).unwrap();
     assert_eq!(activity[0]["label"], "Family");
     assert_eq!(activity[0]["actor"], "Lewis");
+    b.db()
+        .put_owned_key_record(&OwnedKeyRecord {
+            file_id: GUEST.into(),
+            shared_root_id: Some(ROOT.into()),
+            ..Default::default()
+        })
+        .unwrap();
+    let mut feed = crate::account_dto::ActivityFeed {
+        events: vec![],
+        total: 0,
+        page: Some(1),
+    };
+    run(b.append_shared_activity(&mut feed)).unwrap();
+    assert_eq!(feed.events.len(), 1);
+    assert_eq!(feed.events[0].subject.as_deref(), Some("Family"));
+    assert!(feed.events[0].details.as_ref().unwrap().contains("Lewis"));
     assert_eq!(
         world
             .lock()
