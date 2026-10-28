@@ -9976,11 +9976,24 @@ fn free_up_space_windows(db: &state_db::StateDb, sync_root: &std::path::Path) ->
                 continue;
             }
         }
-        // OS-level unpin BEFORE dehydrating. This file passed the DB pinned-skip
+        // Task 2240 (spec D2, the lead's ruling on self-review #1): confirm before evict. A pin made in Explorer
+        // reaches the DB only when the tick's folder listing shows it, and a listing can lag while another process
+        // holds the file open, so the DB's "unpinned" may be stale. The file's own attributes decide: pinned on disk
+        // (or unreadable) keeps it local, and its OS pin is never cleared below.
+        let direct = crate::windows_cf::placeholders::read_os_placeholder_state(&canonical);
+        let pinned_on_disk = |attrs: u32| {
+            crate::state_db::decode_os_state(attrs, crate::state_db::FileStatus::Local).1
+                == Some(crate::state_db::PinState::Pinned)
+        };
+        if direct.is_none_or(pinned_on_disk) {
+            tracing::info!(file_id = %file_id, "free_up_space: the file is pinned on disk (or unreadable); keeping it local");
+            continue;
+        }
+        // OS-level unpin BEFORE dehydrating. This file passed both pin checks
         // above, so it is MEANT to be reclaimed — but its placeholder may still
-        // carry an OS pin (CfSetPinState) from an earlier "available offline"
-        // toggle or an inherited recursive parent pin that the DB no longer
-        // reflects. `CfDehydratePlaceholder` fails with ERROR_CLOUD_FILE_PINNED on
+        // carry a pin it inherits from a pinned folder, which the DB does not
+        // reflect (an explicit pin on the file itself was refused just above).
+        // `CfDehydratePlaceholder` fails with ERROR_CLOUD_FILE_PINNED on
         // any OS-pinned placeholder, so we clear the OS pin first (non-recursive —
         // this is a single file). Best-effort: a failure here is logged (never the
         // path) and we still attempt the dehydrate, which simply no-ops/errors if

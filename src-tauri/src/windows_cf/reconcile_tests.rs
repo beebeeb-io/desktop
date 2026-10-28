@@ -1,8 +1,9 @@
 //! Task 2240 slice 2: the placeholder reconcile through folder listings, on real Windows.
 //!
-//! Spec: `docs/superpowers/specs/2026-10-28-2240-reconcile-from-listing-design.md` (workspace repo), T10–T16, and
-//! the source pins on the wiring. Registered roots are confined to a fresh temporary directory and revoked on drop,
-//! as in `signout_tests.rs`; no provider is connected (spec premise P5).
+//! Spec: `docs/superpowers/specs/2026-10-28-2240-reconcile-from-listing-design.md` (workspace repo), T10–T16, T18,
+//! and the source pins on the wiring. Registered roots are confined to a fresh temporary directory and revoked on
+//! drop, as in `signout_tests.rs`. A root is connected (with no callbacks) only where a test dehydrates: T12, T15 and
+//! T18 (spec premise P5's outcome).
 use super::*;
 use crate::os_state_reconcile::{Delta, OS_STATE_MASK};
 use crate::source_pin::squeeze;
@@ -145,6 +146,17 @@ impl Root {
     fn pinned_in_db(&self, rel: &str) -> bool {
         let rows = self.db.file_overview_rows().unwrap();
         rows.into_iter().find(|(e, _)| e.file_id == rel).unwrap().1
+    }
+
+    /// Records the bytes at `path` as `rel`'s agreed content (task 1640), so "Free up space" may reclaim it.
+    fn agree(&self, rel: &str, path: &std::path::Path) {
+        let mut contract = self.db.get_file_contract_state(rel).unwrap().unwrap();
+        contract.local_hash = Some(crate::engine_bridge::cached_sha256_file_hex(rel, path).unwrap());
+        self.db.set_file_contract_state(&contract).unwrap();
+    }
+
+    fn status_in_db(&self, rel: &str) -> FileStatus {
+        self.db.get_file(rel).unwrap().unwrap().status
     }
 }
 
@@ -351,4 +363,41 @@ fn task_2240_refresh_and_seed_log_no_path() {
             "{name} must log counts only, never the sync root's path"
         );
     }
+}
+
+/// The lead's ruling on self-review #1 (2026-10-28): D2's rule applied to eviction. A pin made in Explorer reaches the
+/// DB only when the listing shows it; while the listing lags, the DB still says unpinned. "Free up space" picks its
+/// files from the DB, so it reads the file's own attributes before dehydrating and keeps a file pinned on disk.
+#[test]
+fn t18_free_up_space_keeps_a_file_pinned_on_disk_the_db_thinks_unpinned() {
+    let r = Root::connected();
+    r.track("a/pinned.txt", FileStatus::Local, PinState::Unpinned);
+    let pinned = r.hydrated("a/pinned.txt", "a/pinned.txt");
+    r.agree("a/pinned.txt", &pinned);
+    placeholders::set_pin_state(&pinned, true, false).unwrap();
+    // The control: unpinned on disk too, so it is freed, which shows this root really dehydrates.
+    r.track("b/free.txt", FileStatus::Local, PinState::Unpinned);
+    let free = r.hydrated("b/free.txt", "b/free.txt");
+    r.agree("b/free.txt", &free);
+    placeholders::set_pin_state(&free, false, false).unwrap();
+    assert!(
+        !r.pinned_in_db("a/pinned.txt"),
+        "the DB's view is the stale one: unpinned"
+    );
+    assert_eq!(
+        direct_bits(&pinned) & (PINNED | RECALL),
+        PINNED,
+        "pinned and hydrated on disk"
+    );
+
+    crate::free_up_space_windows(&r.db, &r.root).unwrap();
+
+    assert_eq!(direct_bits(&free) & RECALL, RECALL, "the control is freed");
+    assert_eq!(r.status_in_db("b/free.txt"), FileStatus::CloudOnly);
+    assert_eq!(
+        direct_bits(&pinned) & (PINNED | RECALL),
+        PINNED,
+        "a file pinned on disk keeps its pin and its bytes"
+    );
+    assert_eq!(r.status_in_db("a/pinned.txt"), FileStatus::Local);
 }
