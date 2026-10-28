@@ -995,6 +995,10 @@ impl EngineBridge {
         }
     }
 
+    pub(crate) fn owner_key_scope(&self) -> crate::owner_keys::AccountScope<'_> {
+        crate::owner_keys::AccountScope::new(&self.db, &self.api, &self.stopping)
+    }
+
     /// Mark or clear `file_id`'s landed write as waiting for its new thumbnails (spec §5.6).
     fn set_thumbnails_pending(&self, file_id: &str, pending: bool) {
         let mut set = self
@@ -8607,7 +8611,7 @@ fn apply_metadata_file_row(
     let existing = db.get_file(file_id)?;
     let size = f["size_bytes"].as_i64().or_else(|| f["size"].as_i64()).unwrap_or(0);
     let remote_updated = f["updated_at"].as_i64().unwrap_or(0);
-    let leaf = resolve_relative_path(f, file_id, master_key);
+    let leaf = crate::owner_keys::stored_name(db,file_id,master_key)?.unwrap_or_else(||resolve_relative_path(f,file_id,master_key));
     // Compose the nested path. An empty leaf means the name didn't decrypt;
     // keep it empty so the placeholder seeder skips the row (and retries next
     // tick) rather than seeding a bare parent dir. A leaf that already carries
@@ -8944,7 +8948,8 @@ pub async fn sync_tick_outcome(
         // concurrent completion stamps during the fetch.
         let fetched_at = now_secs;
         match bridge.api().sync_snapshot().await {
-            Ok(snap) if snap.seq_id < cursor => {
+            Ok(mut snap) if snap.seq_id < cursor => {
+                snap.nodes=bridge.prepare_owned_rows(&snap.nodes).await?.into_iter().map(|p|p.row).collect();
                 tracing::warn!(
                     cursor,
                     server_seq = snap.seq_id,
@@ -8966,8 +8971,10 @@ pub async fn sync_tick_outcome(
 
     // Apply the delta ops in order, advancing the cursor to the max seq_id.
     let mut max_seq = cursor;
-    for op in &ops.ops {
-        match apply_sync_op(bridge, sync_root, op, now_secs, &mut conflicts) {
+    for original in &ops.ops {
+        let op=prepare_owned_sync_op(bridge,original).await?;
+        bridge.owner_key_scope().check()?;
+        match apply_sync_op(bridge, sync_root, &op, now_secs, &mut conflicts) {
             Ok(applied) => applied_item_ids.extend(applied),
             Err(e) => {
                 // A failed op applied nothing: it contributes no ids.
@@ -8983,6 +8990,21 @@ pub async fn sync_tick_outcome(
         conflicts,
         applied_item_ids: dedupe(applied_item_ids),
     })
+}
+
+/// Enrich actual sparse events before entering the synchronous reconciler.
+async fn prepare_owned_sync_op(bridge:&EngineBridge,op:&crate::api_client::SyncOp)->anyhow::Result<crate::api_client::SyncOp> {
+    if !matches!(op.op_type.as_str(),"file_create"|"folder_create"|"file_update"|"file_rename"|"folder_rename"|"file_move"|"folder_move") {return Ok(op.clone());}
+    let Some(id)=op.payload["id"].as_str() else{return Ok(op.clone())};
+    let known_foreign=bridge.db().get_owned_key_record(id)?.is_some_and(|r|r.foreign_added || r.owner_wrap.is_some());
+    let mut row=synthesize_op_row(bridge,id,op,op.payload["new_name_encrypted"].as_str().or_else(||op.payload["name_encrypted"].as_str()));
+    if known_foreign && op.payload["name_encrypted"].is_null() && op.payload["new_name_encrypted"].is_null() {row=serde_json::json!({"id":id});}
+    let mut prepared=bridge.prepare_owned_rows(&[row]).await?;
+    let Some(prepared)=prepared.pop() else{return Ok(op.clone())};
+    let mut result=op.clone();result.payload=prepared.row;
+    if matches!(op.op_type.as_str(),"file_move"|"folder_move") {result.payload["new_parent_id"]=result.payload["parent_id"].clone();}
+    if matches!(op.op_type.as_str(),"file_rename"|"folder_rename") {result.payload["new_name_encrypted"]=result.payload["name_encrypted"].clone();}
+    Ok(result)
 }
 
 /// Drop duplicate ids from one tick's applied batch (an item can be applied
@@ -9006,7 +9028,8 @@ async fn bootstrap_from_snapshot(
     // prune freshness cutoff that never prunes a row a concurrent local
     // completion stamps while this snapshot is in flight (see `prune_absent`).
     let fetched_at = now_secs;
-    let snapshot = bridge.api().sync_snapshot().await?;
+    let mut snapshot = bridge.api().sync_snapshot().await?;
+    snapshot.nodes=bridge.prepare_owned_rows(&snapshot.nodes).await?.into_iter().map(|p|p.row).collect();
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut applied = apply_snapshot(bridge, sync_root, &snapshot, now_secs, fetched_at, conflicts)?;
     // §6.3.3: an upload still waiting for its base after this successful snapshot counts

@@ -12,6 +12,8 @@ use std::{
 #[derive(Clone)]
 struct Request {
     path: String,
+    method: String,
+    bytes: Vec<u8>,
     body: Value,
 }
 struct Fixture {
@@ -21,6 +23,9 @@ struct Fixture {
 }
 impl Fixture {
     fn new(mut answer: impl FnMut(Request) -> Option<Value> + Send + 'static) -> Self {
+        Self::wire(move |request| answer(request).map(|body| (200, serde_json::to_vec(&body).unwrap())))
+    }
+    fn wire(mut answer: impl FnMut(Request) -> Option<(u16, Vec<u8>)> + Send + 'static) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -31,10 +36,9 @@ impl Fixture {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         let request = read_request(&mut stream);
-                        if let Some(body) = answer(request) {
-                            let bytes = serde_json::to_vec(&body).unwrap();
+                        if let Some((status, bytes)) = answer(request) {
                             let header = format!(
-                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                "HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                                 bytes.len()
                             );
                             stream.write_all(header.as_bytes()).unwrap();
@@ -93,7 +97,13 @@ fn read_request(stream: &mut TcpStream) -> Request {
         .unwrap()
         .to_string();
     let body = serde_json::from_slice(&bytes[end..]).unwrap_or(Value::Null);
-    Request { path, body }
+    let method = header.split_whitespace().next().unwrap().to_string();
+    Request {
+        path,
+        method,
+        bytes: bytes[end..].to_vec(),
+        body,
+    }
 }
 fn run<T>(future: impl std::future::Future<Output = T>) -> T {
     tokio::runtime::Builder::new_current_thread()
@@ -297,3 +307,5 @@ fn sf2237d_t3_account_switch_cancels() {
     assert!(scope.put(&record()).is_err());
     assert_eq!(db.get_owned_key_record("item").unwrap(), None);
 }
+
+mod ingestion;

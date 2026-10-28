@@ -2395,6 +2395,37 @@ pub struct TreeRow {
 pub struct StateDb(Mutex<Connection>, std::sync::atomic::AtomicU64);
 
 impl StateDb {
+    pub fn mark_shared_index_dirty(&self, folder_id: &str) -> Result<()> {
+        let conn=self.0.lock().expect("state_db mutex poisoned");
+        conn.execute("INSERT INTO sync_state (key,value) VALUES (?1,'1') ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT)", [format!("shared_folder_index_dirty:{folder_id}")])?;
+        Ok(())
+    }
+    pub fn dirty_shared_index_roots(&self) -> Result<Vec<String>> {
+        let conn=self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt=conn.prepare("SELECT substr(key,27) FROM sync_state WHERE key LIKE 'shared_folder_index_dirty:%'")?;
+        stmt.query_map([],|r|r.get(0))?.collect()
+    }
+    pub fn clear_shared_index_dirty(&self, folder_id: &str) -> Result<()> {
+        let conn=self.0.lock().expect("state_db mutex poisoned");
+        conn.execute("DELETE FROM sync_state WHERE key=?1", [format!("shared_folder_index_dirty:{folder_id}")])?;
+        Ok(())
+    }
+    pub fn shared_index_dirty_revision(&self,id:&str)->Result<Option<String>> {
+        let conn=self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row("SELECT value FROM sync_state WHERE key=?1",[format!("shared_folder_index_dirty:{id}")],|r|r.get(0)).optional()
+    }
+    pub fn clear_shared_index_dirty_at_revision(&self,id:&str,revision:Option<&str>)->Result<()> {
+        let conn=self.0.lock().expect("state_db mutex poisoned");
+        conn.execute("DELETE FROM sync_state WHERE key=?1 AND value=?2",params![format!("shared_folder_index_dirty:{id}"),revision])?;
+        Ok(())
+    }
+    pub fn list_owned_key_records(&self)->Result<Vec<crate::owner_keys::OwnedKeyRecord>> {
+        let conn=self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt=conn.prepare("SELECT record FROM owned_key_records")?;
+        let records=stmt.query_map([],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>>>()?;
+        records.into_iter().map(|s|serde_json::from_str(&s).map_err(|e|rusqlite::Error::FromSqlConversionFailure(0,rusqlite::types::Type::Text,Box::new(e)))).collect()
+    }
+
     /// Generation of this account-bound DB handle. The runner also stops its
     /// old bridge before reset, so old requests cannot join a fresh engine.
     pub fn account_revision(&self) -> u64 {
@@ -6766,6 +6797,7 @@ impl StateDb {
         )?;
         tx.execute("DELETE FROM id_aliases", [])?;
         tx.execute("DELETE FROM owned_key_records", [])?;
+        tx.execute("DELETE FROM sync_state WHERE key LIKE 'shared_folder_index_dirty:%'", [])?;
 
         tx.commit()?;
         self.1.fetch_add(1, std::sync::atomic::Ordering::AcqRel);

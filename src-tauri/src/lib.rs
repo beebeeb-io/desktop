@@ -33,6 +33,7 @@ mod download_pin;
 mod engine_bridge;
 mod engine_status;
 mod owner_keys;
+mod shared_folder_index;
 mod finder_removal;
 // Task 1885: how the bridge's answer to "open this in Finder" becomes a command's result, and the pins that keep
 // the macOS code from spawning `open` again. Only macOS calls it.

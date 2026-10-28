@@ -118,7 +118,7 @@ pub(crate) fn build_local_index(db: &StateDb) -> anyhow::Result<LocalSearchIndex
         .map(|contract| contract.file_id)
         .collect();
     for entry in db.list_files()? {
-        if entry.is_dir() {
+        if entry.is_dir() || db.get_owned_key_record(&entry.file_id)?.is_some_and(|record|record.blocked_fingerprint.is_some()) {
             continue;
         }
         let name = leaf_name(&entry.path);
