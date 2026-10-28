@@ -123,6 +123,10 @@ mod watcher;
 // decisions are cross-platform (tested everywhere); the runner calls it on Windows only.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 mod unknown_check;
+// Task 2240 slice 2: the placeholder reconcile decided from folder listings. Cross-platform so it is
+// tested everywhere; only the Windows tick calls it.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+mod os_state_reconcile;
 // Windows Cloud Files API — Phase 2 Task 6. Gated to Windows only;
 // the module's own files start with `#![cfg(target_os = "windows")]`
 // so this `mod` declaration plus the conditional are belt-and-braces.
