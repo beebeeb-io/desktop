@@ -990,6 +990,7 @@ pub(crate) mod test_support {
                         json!({
                             "id": k.file_id, "size_bytes": v.plain.len(), "chunk_count": v.chunk_count(),
                             "chunk_size_bytes": v.stride,
+                            "name_encrypted": beebeeb_core::encrypt::encrypt_name(&beebeeb_core::kdf::MasterKey::from_bytes(master_key), &k.file_id, "direct.bin", None).unwrap(),
                             "download_version": if k.legacy { Value::Null } else { v.manifest() },
                         }),
                     );

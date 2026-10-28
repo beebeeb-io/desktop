@@ -13,21 +13,10 @@
 //! Spec: `docs/superpowers/plans/2026-05-07-desktop-sync-client.md`
 //! Phase 1 Task 3.
 //!
-//! ## Divergence from the plan
-//!
-//! The plan's `hydrate_file` body referenced
-//! `beebeeb_core::crypto::derive_file_key` and a raw `nonce || ciphertext`
-//! chunk format. The real API surface is
-//! `beebeeb_core::kdf::derive_file_key(&MasterKey, &[u8]) -> FileKey` and
-//! `beebeeb_core::encrypt::decrypt_chunk(&FileKey, &EncryptedBlob)`, with
-//! chunks stored on the wire as JSON-serialised `EncryptedBlob`s (matches
-//! `repos/cli/src/commands/push.rs`'s `serde_json::to_vec(&blob)` upload
-//! path and `pull.rs`'s `serde_json::from_slice` decode path). The
-//! implementation below uses the real API.
-//!
-//! The per-chunk GET endpoint (`GET /api/v1/files/:id/chunks/:idx`) was
-//! added in `server` commit `d3cf0e2`. Before that landed, `hydrate_file`
-//! was a stub returning `anyhow::Err`.
+//! Content frames are opened only by core's pin-aware chunk_stream API. Transport
+//! normalization accepts the existing raw and JSON envelopes without decrypting them.
+//! ChunkDecryptor is the public facade over core StreamOpener; finish gates whole-file
+//! publication. Indexed range reads authenticate frame zero before calling open_chunk.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Read;
@@ -40,7 +29,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use zeroize::{Zeroize, Zeroizing};
 
 use base64::Engine;
-use beebeeb_types::{CipherSuite, EncryptedBlob};
+use beebeeb_types::EncryptedBlob;
 use serde::{Deserialize, Serialize};
 
 use crate::api_client::{ApiClient, DesktopUploadInitRequest};
@@ -4515,7 +4504,7 @@ impl EngineBridge {
                 Ok(())
             }
             Err(e) => {
-                let e = self.owned_open_failure(file_id, e);
+                let e = self.owned_open_failure(file_id, e).await;
                 set_failed(); // only writes over Downloading; the recoverable item already left it.
                 Err(e)
             }
@@ -4617,7 +4606,7 @@ impl EngineBridge {
                 Ok(FetchedBytes { bytes: buf, version: fetched, ticket })
             }
             Err(e) => {
-                let e = self.owned_open_failure(file_id, e);
+                let e = self.owned_open_failure(file_id, e).await;
                 let _ = self.db.set_status_if(file_id, FileStatus::Downloading, FileStatus::Error);
                 Err(e)
             }
@@ -4676,11 +4665,22 @@ impl EngineBridge {
         Ok(beebeeb_core::encrypt::encrypt_name_for(&key, name, None, pin)?)
     }
 
-    fn owned_open_failure(&self, file_id: &str, error: anyhow::Error) -> anyhow::Error {
+    async fn owned_open_failure(&self, file_id: &str, error: anyhow::Error) -> anyhow::Error {
         if let Ok(Some(record)) = self.db.get_owned_key_record(file_id)
             && record.foreign_added {
             let _ = self.db.set_status_if(file_id, FileStatus::Downloading, FileStatus::CloudOnly);
-            return anyhow::anyhow!(crate::owner_keys::cannot_open_message(None, record.member_added));
+            let label = if let (Some(root), Some(encrypted)) = (record.shared_root_id.as_deref(), record.origin_label_encrypted.as_deref()) {
+                // Display only, read-only custody lookup. Never re-seed custody during an open failure.
+                let scope = self.owner_key_scope();
+                let custody = self.api.get_shared_folder(root).await.ok();
+                if let Err(error) = scope.check() { return error; }
+                custody.and_then(|row| crate::owner_keys::normalize_wrap(&row["owner_wrapped_folder_key"]).ok().flatten())
+                    .and_then(|wrap| beebeeb_sync::key_resolution::unwrap_folder_custody(
+                        &beebeeb_core::kdf::MasterKey::from_bytes(*self.api.master_key()), root, &wrap).ok())
+                    .and_then(|key| beebeeb_core::encrypt::decrypt_file_metadata_with_key(&key, encrypted).ok())
+                    .map(|metadata| metadata.name)
+            } else { None };
+            return anyhow::anyhow!(crate::owner_keys::cannot_open_message(label.as_deref(), record.member_added));
         }
         error
     }
@@ -5099,6 +5099,7 @@ impl EngineBridge {
                 self.range_attempt(file_id, required_offset, required_length, &meta).await
             })
             .await;
+        let read = match read { Ok(value) => Ok(value), Err(e) => Err(self.owned_open_failure(file_id, e).await) };
         if read.is_err() {
             // Every failing exit (a second pass's own error too) ends with the row in Error, never left on
             // Downloading, and the placeholder never in sync.
@@ -5195,7 +5196,7 @@ impl EngineBridge {
                     _ => Ok(data),
                 }
             });
-        let data = read.map_err(|e| self.owned_open_failure(file_id, e))?;
+        let data = read?;
         // Only a whole-file covering range is evidence the file is fully
         // cached; a partial range leaves the row `Downloading` for the
         // caller (the CF callback) to resolve based on what CF itself
@@ -5224,15 +5225,8 @@ impl EngineBridge {
     /// integrations never regenerate a thumbnail and never decode the original
     /// media just to preview it — they decrypt this small blob.
     ///
-    /// ## Wire envelope (NOT the chunk envelope)
-    ///
-    /// Thumbnails are stored in the **raw** `nonce(12) || AES-256-GCM(ct+tag)`
-    /// envelope the web/mobile clients write (`thumbnail.ts encryptThumbnailBlob`):
-    /// a 12-byte random nonce followed by the AES-256-GCM ciphertext+tag, keyed
-    /// directly by the per-file key, with no AAD and no JSON. This differs from
-    /// file *chunks* (which are the `EncryptedBlob` JSON / `decrypt_chunk_raw`
-    /// frame), so this path decrypts the blob directly rather than going through
-    /// core’s purpose-specific thumbnail reader.
+    /// Core's purpose-specific thumbnail reader handles legacy raw-key blobs and
+    /// subkey thumbnails. File content always uses the separate stream reader.
     ///
     /// ## Zero-knowledge
     ///
@@ -6510,6 +6504,7 @@ fn upload_init_request_for_operation(
     }
 }
 
+#[cfg(test)]
 fn prepare_thumbnail_uploads_for_plaintext_media(
     payload_path: &Path,
     mime_type: Option<&str>,
@@ -7001,6 +6996,7 @@ fn log_parked_attempts_used_up(op_id: &str, file_id: Option<&str>) {
 /// for `file_id`. The plaintext name is the op's display name; the MIME hint
 /// is the op's content type, else the one guessed from the name, as the
 /// Finder write path does.
+#[cfg(test)]
 fn metadata_rekeyed_to(master_key: &[u8; 32], op: &PendingOperation, file_id: &str) -> anyhow::Result<Option<String>> {
     metadata_rekeyed_with_material(master_key, op, file_id, None)
 }
@@ -8375,6 +8371,7 @@ fn unwrap_child_file_key(
     Ok(beebeeb_core::kdf::FileKey::from_bytes(*file_key))
 }
 
+#[cfg(test)]
 fn unwrap_folder_share_file_key(
     recipient_master_key: &[u8; 32],
     sender_public_key_b64: &str,
@@ -8443,13 +8440,6 @@ fn safe_shared_leaf_name(name: &str) -> Option<String> {
         return None;
     }
     Some(leaf.to_string())
-}
-
-fn metadata_name_from_plaintext(plaintext: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(plaintext)
-        .ok()
-        .and_then(|value| value.get("name").and_then(|name| name.as_str()).map(str::to_string))
-        .unwrap_or_else(|| plaintext.to_string())
 }
 
 fn decrypt_shared_name_with_key(file_key: &beebeeb_core::kdf::FileKey, name_encrypted: &str) -> Option<String> {
@@ -10948,6 +10938,7 @@ mod tests {
                     "size_bytes": size_bytes,
                     "chunk_count": chunk_count,
                     "chunk_size_bytes": chunk_size_bytes,
+                    "name_encrypted": beebeeb_core::encrypt::encrypt_name_for(file_key,"range.bin",None,beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded).unwrap(),
                 }),
             ));
         }
@@ -10972,7 +10963,7 @@ mod tests {
 
     /// A multi-chunk file: request a range that spans exactly ONE interior
     /// chunk. `hydrate_file_range` must download+decrypt ONLY that chunk — the
-    /// mock server accepts exactly 2 requests (the metadata GET + the one
+    /// mock server accepts exactly 3 requests (the metadata GET + the one
     /// covering chunk GET) and would hang/fail on a third, so this test fails
     /// loudly if the whole file were downloaded instead.
     #[test]
@@ -10984,8 +10975,8 @@ mod tests {
         // 3 chunks of 10 bytes each (uniform, no remainder) — chunk 1 is the
         // interior chunk under test.
         let chunks: Vec<Vec<u8>> = vec![b"AAAAAAAAAA".to_vec(), b"BBBBBBBBBB".to_vec(), b"CCCCCCCCCC".to_vec()];
-        // 1 metadata GET + 1 chunk GET (only chunk index 1).
-        let server = HydrationMockServer::start(file_key, chunks, 2);
+        // Metadata, authenticated frame zero, and the requested interior frame.
+        let server = HydrationMockServer::start(file_key, chunks, 3);
 
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
         seed_bridge_row(&bridge, TEST_FILE_ID, "/range.bin", None, FileStatus::CloudOnly, 30);
@@ -11024,7 +11015,7 @@ mod tests {
         let mut last = vec![b'C'; MIB];
         last[123..127].copy_from_slice(b"LAST");
         let chunks: Vec<Vec<u8>> = vec![vec![b'A'; 4 * MIB], vec![b'B'; 4 * MIB], last];
-        let server = HydrationMockServer::start(file_key, chunks, 2);
+        let server = HydrationMockServer::start(file_key, chunks, 3);
 
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
         seed_bridge_row(
@@ -17271,6 +17262,7 @@ mod tests {
     #[derive(Default)]
     struct VersionedServerState {
         files: std::collections::BTreeMap<String, MockServerFile>,
+        authenticated_names: HashMap<String,String>,
         /// session id -> (file id, chunks received so far)
         sessions: HashMap<String, (String, Vec<Vec<u8>>)>,
         next_file: usize,
@@ -17517,12 +17509,15 @@ mod tests {
                     // nonce (12) + tag (16) per chunk.
                     let size: usize = chunks.iter().map(|chunk| chunk.len().saturating_sub(28)).sum();
                     let wire: usize = chunks.iter().map(Vec::len).sum();
+                    let name = s.authenticated_names.get(&file_id).cloned().or_else(||
+                        s.patches.iter().rev().find(|(id,_)|id==&file_id).and_then(|(_,body)|body["name_encrypted"].as_str().map(str::to_string)));
+
                     if s.legacy_downloads {
                         return (
                             None,
                             http_json(
                                 "200 OK",
-                                serde_json::json!({ "id": file_id, "chunk_count": chunks.len(), "size_bytes": size }),
+                                serde_json::json!({ "id": file_id, "name_encrypted": name, "chunk_count": chunks.len(), "size_bytes": size }),
                             )
                             .into_bytes(),
                         );
@@ -17534,6 +17529,7 @@ mod tests {
                             serde_json::json!({
                                 "id": file_id,
                                 "chunk_count": chunks.len(),
+                                "name_encrypted": name,
                                 "size_bytes": size,
                                 "download_version": {
                                     "object_version_id": mock_object_version_id(&file_id, version),
@@ -18095,6 +18091,7 @@ mod tests {
     /// A row the server holds at version 1 (seeded on the mock too).
     fn seed_uploaded_row(bridge: &EngineBridge, server: &VersionedServerMock, file_id: &str) {
         server.seed_file(file_id, 1);
+        server.state.lock().unwrap().authenticated_names.insert(file_id.into(), enc_name(bridge.api.master_key(), file_id, "notes.txt"));
         seed_uploaded_db_row(bridge, file_id);
     }
 
@@ -27139,7 +27136,7 @@ mod tests {
             let range = bridge.hydrate_file_range(TEST_FILE_ID, 1024, 10).await.unwrap().unwrap();
             assert_eq!(&*range.data, &pair.plain()[1024..2048]);
             assert_eq!(pair.discovery_requests(), 0, "a range read never asks for windows");
-            assert_eq!(pair.api_chunk_requests().len(), 1);
+            assert_eq!(pair.api_chunk_requests().len(), 2);
             assert_eq!(pair.storage_requests(), 0);
         }
 
@@ -27387,6 +27384,7 @@ mod tests {
                     json!({
                         "id": TEST_FILE_ID, "size_bytes": s.size_bytes_override.unwrap_or(v.plain.len()), "chunk_count": v.frames.len(),
                         "chunk_size_bytes": v.stride,
+                        "name_encrypted": enc_name(&KEY, TEST_FILE_ID, "version.bin"),
                         "download_version": if s.legacy { serde_json::Value::Null } else { manifest },
                     }),
                 )
@@ -27763,6 +27761,7 @@ mod tests {
         let mut node = snap_node(&master_key, file_id, "notes.txt", None, false, 1_700_000_500);
         node["version_number"] = json!(version);
         node["size_bytes"] = json!(plaintext.len());
+        s.authenticated_names.insert(file_id.into(), node["name_encrypted"].as_str().unwrap().into());
         s.snapshots
             .push_back(("200 OK".into(), json!({ "seq_id": 1, "nodes": [node] })));
     }
@@ -30291,6 +30290,7 @@ mod tests {
         let mut node = snap_node(&master_key, file_id, "notes.txt", None, false, 1_700_000_500);
         node["version_number"] = json!(version);
         node["size_bytes"] = json!(plaintext.len());
+        s.authenticated_names.insert(file_id.into(), node["name_encrypted"].as_str().unwrap().into());
         s.snapshots
             .push_back(("200 OK".into(), json!({ "seq_id": 1, "nodes": [node] })));
     }
