@@ -13428,6 +13428,7 @@ pub(crate) fn open_conflict_window_impl(
     file_id: &str,
     file_name: &str,
     is_text: bool,
+    op_id: Option<&str>,
 ) -> Result<(), String> {
     let label = format!("conflict-{file_id}");
 
@@ -13441,8 +13442,10 @@ pub(crate) fn open_conflict_window_impl(
         return Ok(());
     }
 
+    // Task 2190: a parked conflict carries its queued write, which the window decides.
+    let op_param = op_id.map(|op| format!("&opId={}", urlencoding::encode(op))).unwrap_or_default();
     let url = format!(
-        "index.html?window=conflict&fileId={file_id}&fileName={enc_name}&isText={is_text}",
+        "index.html?window=conflict&fileId={file_id}&fileName={enc_name}&isText={is_text}{op_param}",
         enc_name = urlencoding::encode(file_name),
     );
 
@@ -13475,8 +13478,9 @@ async fn open_conflict_window(
     file_id: String,
     file_name: String,
     is_text: bool,
+    op_id: Option<String>,
 ) -> Result<(), String> {
-    open_conflict_window_impl(&app, &file_id, &file_name, is_text)
+    open_conflict_window_impl(&app, &file_id, &file_name, is_text, op_id.as_deref())
 }
 
 /// Show a native OS notification announcing a fresh conflict. Used
@@ -13685,6 +13689,173 @@ async fn resolve_conflict(
         );
 
         Ok(())
+    })
+}
+
+/// Task 2190 (plan §3.1): a bridge over the app-local state DB for a parked conflict. Unlike
+/// `resolve_conflict`, it needs no sync root: on a Mac a parked write's bytes are its staged copy.
+fn parked_conflict_bridge(state: &State<'_, AppState>) -> Result<engine_bridge::EngineBridge, String> {
+    let acct = state.active_account()?;
+    let (token, master_key) = {
+        let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+        match guard.as_ref() {
+            Some(s) => (s.token.clone(), s.master_key),
+            None => return Err("not signed in".into()),
+        }
+    };
+    let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
+    let db = std::sync::Arc::new(state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?);
+    let api = std::sync::Arc::new(api_client::ApiClient::new(runner::api_base_url(), token, master_key));
+    Ok(engine_bridge::EngineBridge::new(db, api))
+}
+
+/// Task 2190 (plan §3.2, D1): "Keep the other" keeps the Mac's bytes in the "Changes not sent"
+/// folder (spec 2026-10-10) FIRST: a new event folder, the copy under the file's path, and the copy
+/// added to its OWN list durably (review-169 blocker: never the sign-out's one folder slot, never its
+/// unfinished list), so Settings › Sync lists every copy until the person dismisses it. Any failure
+/// removes what it made, and the decision changes nothing.
+#[cfg(target_os = "macos")]
+fn keep_parked_copy(op_id: &str, source: &std::path::Path, rel_path: &str) -> anyhow::Result<std::path::PathBuf> {
+    keep_parked_copy_at(
+        op_id,
+        source,
+        rel_path,
+        &sign_out_kept_root().map_err(|e| anyhow::anyhow!(e))?,
+        &DesktopConfig::path().map_err(|e| anyhow::anyhow!(e))?,
+        &sign_out::kept_writer::SystemClone,
+        &config::RealConfigFs,
+    )
+}
+
+/// [`keep_parked_copy`] with its folder, its config file and its file system steps given.
+#[cfg(target_os = "macos")]
+fn keep_parked_copy_at(
+    op_id: &str,
+    source: &std::path::Path,
+    rel_path: &str,
+    root: &std::path::Path,
+    config_path: &std::path::Path,
+    clone: &dyn sign_out::kept_writer::CloneFile,
+    config_fs: &dyn config::ConfigFs,
+) -> anyhow::Result<std::path::PathBuf> {
+    use sign_out::kept_names::{KeptRole, event_folder_name, kept_relative_path};
+    let mut writer = sign_out::kept_writer::KeptWriter::create(root, &event_folder_name(chrono::Local::now()), clone)?;
+    let kept = match writer.keep(&kept_relative_path(Some(rel_path), op_id, KeptRole::Newest), source) {
+        Ok(kept) => kept,
+        Err(error) => {
+            writer.abandon();
+            return Err(error.into());
+        }
+    };
+    let event = writer.event().to_path_buf();
+    let folder = match writer.finish() {
+        Ok(folder) => folder,
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&event);
+            return Err(error.into());
+        }
+    };
+    let kept_text = kept.to_string_lossy().into_owned();
+    if let Err(error) = sign_out::kept_record::save_conflict_copy_durably(config_path, &kept_text, config_fs) {
+        let _ = std::fs::remove_dir_all(&folder.path);
+        return Err(anyhow::anyhow!("record the kept copy: {error}"));
+    }
+    Ok(kept)
+}
+
+/// Task 2190 (review-169 blocker): "Show in Finder" reveals only a copy the list holds.
+fn conflict_copy_reveal_target<'a>(listed: &[String], path: &'a str) -> Result<&'a str, String> {
+    if listed.iter().any(|copy| copy == path) {
+        Ok(path)
+    } else {
+        Err(sign_out::copy::K3_TOAST.to_string())
+    }
+}
+
+/// Task 2190: every copy "Keep the other" kept, oldest first, for Settings › Sync.
+#[tauri::command]
+fn kept_conflict_copies() -> Result<Vec<String>, String> {
+    sign_out::kept_record::saved_conflict_copies_at(&DesktopConfig::path()?)
+}
+
+/// Task 2190: "Show in Finder" for one kept copy.
+#[tauri::command]
+fn show_kept_conflict_copy(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    let listed = sign_out::kept_record::saved_conflict_copies_at(&DesktopConfig::path()?)?;
+    let target = conflict_copy_reveal_target(&listed, &path)?;
+    tracing::info!("kept copy reveal requested");
+    app.opener()
+        .reveal_item_in_dir(target)
+        .map_err(|_| sign_out::copy::K3_TOAST.to_string())
+}
+
+/// Task 2190: "Dismiss" forgets one kept copy from the list, never deletes it.
+#[tauri::command]
+fn dismiss_kept_conflict_copy(app: tauri::AppHandle, path: String) -> Result<bool, String> {
+    let dismissed = sign_out::kept_record::dismiss_saved_conflict_copy_at(&DesktopConfig::path()?, &path)?;
+    emit_kept_folder_changed(&app);
+    Ok(dismissed)
+}
+
+/// Task 2190 (plan §3.4): both sides of a parked conflict, for the conflict window. Read-only.
+#[tauri::command]
+async fn parked_conflict_preview(
+    state: State<'_, AppState>,
+    op_id: String,
+) -> Result<engine_bridge::ConflictContentPreview, String> {
+    session_command!(async {
+        let bridge = parked_conflict_bridge(&state)?;
+        bridge.parked_conflict_preview(&op_id).await.map_err(|e| e.to_string())
+    })
+}
+
+/// Task 2190 (plan §3.2): the person's decision on a parked conflict ("Keep this Mac's", "Keep the
+/// other", "Keep both"). A decision that changed something signals the File Provider, so Finder
+/// reads the item again; `Moved` changed nothing (the window asks the person to decide again).
+#[tauri::command]
+async fn resolve_parked_conflict(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    op_id: String,
+    choice: engine_bridge::ParkedChoice,
+    shown_version: Option<i64>,
+) -> Result<engine_bridge::ParkedResolution, String> {
+    session_command!(async {
+        let bridge = parked_conflict_bridge(&state)?;
+        let file_id = bridge.db().get_operation(&op_id).ok().flatten().and_then(|op| op.file_id);
+        let device = hostname::get()
+            .map(|name| name.to_string_lossy().trim_end_matches(".local").to_string())
+            .unwrap_or_else(|_| "this Mac".to_string());
+        let hhmm = chrono::Local::now().format("%H.%M").to_string();
+        #[cfg(target_os = "macos")]
+        let mut keep_copy = |source: &std::path::Path, rel: &str| keep_parked_copy(&op_id, source, rel);
+        #[cfg(not(target_os = "macos"))]
+        let mut keep_copy = |_: &std::path::Path, _: &str| -> anyhow::Result<std::path::PathBuf> {
+            anyhow::bail!("this decision is not available on this platform yet")
+        };
+        let done = bridge
+            .resolve_parked(&op_id, choice, shown_version, &mut keep_copy, &device, &hhmm)
+            .map_err(|e| e.to_string())?;
+        // The signal goes through the bridge gate. One it does not deliver (the gate is busy, or the
+        // signal fails) is owed to the next tick's signal, so Finder is never left stale.
+        #[cfg(target_os = "macos")]
+        if done != engine_bridge::ParkedResolution::Moved {
+            let mut ids: Vec<String> = file_id.into_iter().collect();
+            if let engine_bridge::ParkedResolution::KeptBoth { file_id: copy, .. } = &done {
+                ids.push(copy.clone());
+            }
+            if crate::finder_setup::macos_ports::signal_working_set().is_err() {
+                crate::runner::owe_working_set_signal(&ids);
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = file_id;
+        // Review-169 #8: an open Sync tab reads its kept rows again (a new kept copy, a dropped write).
+        if done != engine_bridge::ParkedResolution::Moved {
+            emit_kept_folder_changed(&app);
+        }
+        let _ = app.emit("conflict-resolved", serde_json::json!({ "op_id": op_id }));
+        Ok(done)
     })
 }
 
@@ -15202,6 +15373,11 @@ pub fn run() {
             resolve_conflict,
             // Task 1546 finding 2 — real (non-placeholder) conflict content preview
             conflict_content_preview,
+            parked_conflict_preview,
+            resolve_parked_conflict,
+            kept_conflict_copies,
+            show_kept_conflict_copy,
+            dismiss_kept_conflict_copy,
             // Task 11 — native conflict notification
             notify_conflict,
             // First-launch onboarding (login + folder picker + sync status)
@@ -39446,5 +39622,61 @@ mod task_2243_poll_cost_tests {
             ]
         );
         assert!(reads <= 40, "the hold summary (the open and its reads) read {reads} pages from disk");
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod task_2190_kept_copies_tests {
+    use super::*;
+
+    /// Review-169 blocker: two "Keep the other" copies and a sign-out's kept folder are all listed
+    /// and revealable; the sign-out's one folder slot and its unfinished list still name only the
+    /// sign-out's folder, so its prompt never takes a decision's copy for an interrupted sign-out.
+    #[test]
+    fn task_2190_two_kept_copies_and_a_sign_out_folder_are_all_listed() {
+        use sign_out::kept_record::{
+            dismiss_saved_conflict_copy_at, save_kept_unsent_durably, saved_conflict_copies_at, saved_kept_unsent_at,
+            unfinished_at,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("Changes not sent");
+        let config_path = dir.path().join("desktop.toml");
+        let sign_out_folder = root.join("2026-10-28 at 09.00.00").to_string_lossy().into_owned();
+        save_kept_unsent_durably(&config_path, &sign_out_folder, &config::RealConfigFs).unwrap();
+        let (a, b) = (dir.path().join("a.staged"), dir.path().join("b.staged"));
+        std::fs::write(&a, b"edited on this Mac (a)").unwrap();
+        std::fs::write(&b, b"edited on this Mac (b)").unwrap();
+        let clone = sign_out::kept_writer::SystemClone;
+        let copy_a = keep_parked_copy_at("op-a", &a, "docs/a.txt", &root, &config_path, &clone, &config::RealConfigFs).unwrap();
+        let copy_b = keep_parked_copy_at("op-b", &b, "b.txt", &root, &config_path, &clone, &config::RealConfigFs).unwrap();
+        assert_eq!(std::fs::read(&copy_a).unwrap(), b"edited on this Mac (a)");
+        assert_eq!(std::fs::read(&copy_b).unwrap(), b"edited on this Mac (b)");
+        let listed = saved_conflict_copies_at(&config_path).unwrap();
+        assert_eq!(
+            listed,
+            vec![copy_a.to_string_lossy().into_owned(), copy_b.to_string_lossy().into_owned()],
+            "both copies listed, oldest first"
+        );
+        for copy in &listed {
+            assert!(conflict_copy_reveal_target(&listed, copy).is_ok(), "revealable: {copy}");
+        }
+        assert!(conflict_copy_reveal_target(&listed, &sign_out_folder).is_err(), "only a listed copy is revealed as one");
+        assert_eq!(saved_kept_unsent_at(&config_path).unwrap(), Some(sign_out_folder.clone()), "the sign-out's folder is still saved");
+        assert!(reveal_target(Some(&sign_out_folder), &sign_out_folder).is_ok(), "and still revealable");
+        assert_eq!(unfinished_at(&config_path).unwrap(), vec![sign_out_folder.clone()], "the sign-out prompt names only its own folder");
+        assert!(dismiss_saved_conflict_copy_at(&config_path, &listed[0]).unwrap());
+        assert_eq!(saved_conflict_copies_at(&config_path).unwrap(), vec![listed[1].clone()]);
+        assert!(std::path::Path::new(&listed[0]).exists(), "Dismiss never deletes the copy");
+    }
+
+    /// Review-169 #8: a decision that changed something tells an open Sync tab to read its rows again.
+    #[test]
+    fn task_2190_a_decision_tells_an_open_sync_tab() {
+        let source = include_str!("lib.rs").replace("\r\n", "\n");
+        let decide = &source[source.find("async fn resolve_parked_conflict(").expect("the decision command")..];
+        let decide = &decide[..decide.find("\n}\n").expect("its end")];
+        assert!(decide.contains(
+            "if done != engine_bridge::ParkedResolution::Moved {\n            emit_kept_folder_changed(&app);"
+        ));
     }
 }

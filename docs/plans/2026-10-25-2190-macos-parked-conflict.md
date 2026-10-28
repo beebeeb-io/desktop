@@ -88,3 +88,47 @@ Dependencies: code waits for conflict-2190's Windows fix (a parked modify must h
 | D3 | `base_unknown` parks. | Accepted: unchanged in this slice. |
 | D4 | The name of the "Keep both" copy. | The format is accepted, **and it must be unique**: if `{stem} ({device}, HH:MM).{ext}` exists, add a counter. Never overwrite (the #142 P2-B lesson). Test it. (§3.3.) |
 | D5 | Windows shares `resolve_parked`. | Yes, next, after the P0 fix lands. |
+
+## 7. Addendum (lane conflict-2190, 28 Oct 2026): the detector, and this PR's scope
+
+Written before the code of `fix/2190-conflict-detector`, against desktop `main` `f6614694`. The lead's brief for follow-ups 1 and 2 is the source; the four decisions below were sent to the lead before any code.
+
+### 7.1 Decisions
+
+- **E1. The parked op is the conflict, on every platform.**
+  - `FileStatus::Conflict` stays unset, so the 24 h auto Keep Both sweep and the per-file conflict windows stay dormant, as they are today.
+  - A row with a queued or parked write is `Uploading` or `Error`, never `Local`, so the tick's Local branch only sees rows with no pending write. The authoritative signal is the server's 409 on the write's base, which parks with both versions kept.
+- **E2. `content_hash` gets no production writer.** On macOS it is part of the File Provider content version (`item_content_version`). A writer would change every item's content version, so Finder would see every file as changed. The detector reads 1640's agreed content instead: `local_hash` at `local_base_version`.
+- **E3. The first-sight base is never invented.** `apply_metadata_file_row` no longer sets `local_base_version = current_version` for a `Local` row at 0. A base of 0 stays unknown, and an edit with an unknown base is held, not sent (task 2229).
+- **E4. Windows resolution (D5) is the next PR**, after 2191 S2 merges. "Keep the other" and "Keep both" on a sync-folder file must replace the edited disk file after the copy is made, which needs a hydrate that overrides 1640's unsent-edit refusal: the same code 2191 S2 changes. In this PR, Windows parked rows keep today's row.
+
+### 7.2 The detector: decision table (`process_metadata_row`, the `Local` branch)
+
+Inputs: `B` = the edit's base as `sync_folder_content` gives it (`local_hash` at `local_base_version`, or the fetched candidate before it is promoted; corrected on 28 Oct: the first draft read `local_base_version` alone, which is 0 until the candidate is promoted), else `local_base_version` (0 = unknown); `V` = the server version on the pulled row (`current_version`, `version`, `version_number`); `L` = the device's bytes.
+- On a sync-folder file, `L` is `sync_folder_content` (Windows, and every test build).
+- Elsewhere a `Local` row has no pending write, so `L` = agreed.
+
+| # | L | V against B | Action |
+|---|---|---|---|
+| 1 | agreed (or unknown) | any | Re-anchor, as today: `remote_updated_at`, `size_bytes` and `modified_at` from the server, then the metadata write. `local_base_version` is unchanged (E3). |
+| 2 | changed (an edit the scan has not queued yet) | `V > B > 0` | ~~A concurrent edit. The metadata write still runs (the server's version is recorded), but `size_bytes`, `modified_at` and `remote_updated_at` keep describing the device's bytes, and `B` is kept.~~ **Corrected (lane, 28 Oct, first test run):** the metadata write (`apply_metadata_file_row`) itself writes the server's size and stamps, so a concurrent edit is written to the database exactly as row 1 is, and keeping them would be cosmetic: the pull resizes no placeholder (`resize_placeholder` runs only in the fetch callback). What the row keeps is the edit's base `B`, which the pull never touches. The scan then queues the edit on base `B`, the server refuses it as stale, and it parks: a reviewable conflict (§3). No `Conflict` status, and no `ConflictDetected`. `is_conflict` is true here, and only here, which the tick logs. |
+| 3 | changed | `V <= B`, or `B = 0` | Our own edit, not sent yet, or an unknown base: re-anchor as row 1 (the edit is queued on `B`, or held by task 2229). |
+| 4 | queued | — | Unreachable: such a row is `Uploading` (branch 3, unchanged). |
+
+~~`is_conflict` is called with `local` = `"changed"` or the agreed hash, `base` = the agreed hash, and `remote` = `"v{V}"` when `V > B`, else the agreed hash. So it is true exactly in row 2.~~
+
+**Corrected after review-169 #7 (lane, 28 Oct):** the pull reads no file and calls no `is_conflict`. Rows 1–3 all take row 1's action, so telling them apart had one effect: a log line. Reading `L` cost a file hash on a cold cache during the pull. The branch was also gated `cfg!(any(target_os = "windows", test))`, so the macOS tests ran a read that macOS production never takes. What row 2 relies on is unchanged and still pinned (`task_2190_fu1_a_concurrent_edit_the_scan_has_not_queued_keeps_its_base_and_parks`, which also asserts 0 file reads in the pull): the pull never touches `B`, so the scan queues the edit on `B`, the server refuses it as stale, and the parked op is the conflict (E1). `conflict::is_conflict` stays for its own tests and a `Conflict` row's three-way rule.
+
+### 7.3 This PR (macOS)
+
+- §3's core: `resolve_parked` and its preview, the three choices, D1 (the kept copy), D2 (newest write only) and D4 (a unique name).
+- The feed gives `action: "open_conflict"` to a parked `stale_base` Finder write (`write_id` set) that the core would accept. It uses one predicate, so the feed never offers a choice the core refuses.
+- UI: main's review page and `ConflictWindow` route by `op_id`. #142's `ConflictSheet` is not on main, so the sheet change in §3.4 waits for it. The second-press copy in D1 applies to the window's "Keep theirs" on a parked row only.
+
+### 7.4 Re-review of review-169 (lane, 28 Oct): what a decision is made against
+
+- **The version shown (F1).** The window decides against the version of the bytes it showed: the `download_version.version_number` of the metadata the preview's download ran on (after a restart, the fresh metadata's), as `do_hydrate_versioned` reads it for 1640. It is never the mirror read after the download, which the pull can raise to a version nobody saw. Metadata that names no version (a legacy file, or a failed fetch) gets the mirror as it was before the fetch. That is never newer than the bytes, so at worst the choice is `Moved`, or the write goes on an older base and the server refuses it as stale.
+- **A trashing file is not decidable (F2).** The one predicate also requires the file's row not to be `trashing`. A trash from another device, of the file or of a folder it is in, marks the row `trashing` and queues nothing. A file deleted for good has no row.
+- **The "Keep both" name fits (F3).** At most 255 bytes, built as a kept file's name is (`kept_names::with_suffix`): the stem is cut at a character boundary, never the suffix, the counter or the extension. **New number (lane):** the device name is cut to 64 bytes first (`KEEP_BOTH_DEVICE_MAX_BYTES`), so the suffix always leaves the stem room. A host name's label is at most 63 characters, so a Mac's own one-label name (`MacBook-Pro`) is never cut; only a long multi-label name is.
+- ~~**Not covered:** a LOCAL trash of the parent folder while the window is open. `queue_finder_delete` marks only the folder row until the server's echo marks its children, and D2 sees no later op of the file itself. The echo closes it.~~ **Covered (the lead, 28 Oct):** the gap is closed in the same predicate.
+- **No folder above is being trashed or moved.** The predicate walks up `parent_id` (a recursive CTE, one primary-key lookup per level). Any folder above that is `trashing`, or that has a queued `trash_file`, `move_file` or `rename_file`, makes every choice `Moved`. A rename counts as a move, as D2 treats it for the file itself. A local trash marks only the folder's row and queues on the folder; a local move or rename queues on the folder. The walk follows `parent_id`, while the pull's mark of a remote trash follows path prefixes. **The walk's depth cap (lane):** 512 levels. macOS paths are at most 1024 bytes (`PATH_MAX`) and every level takes at least two (`a/`), so no real file nests deeper. A chain that reaches the cap (a cycle in the rows) is not decidable.

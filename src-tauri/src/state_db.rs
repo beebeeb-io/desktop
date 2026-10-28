@@ -32,7 +32,7 @@ use std::sync::Mutex;
 /// R10 (spec 2026-10-06 §5.6): every table holding one account's data. `has_account_data` counts
 /// them and `clear_account_data` empties them. `every_table_is_classified_for_the_account_binding`
 /// fails when a new table is not listed here or in `DEVICE_TABLES`.
-const ACCOUNT_TABLES: [&str; 15] = [
+const ACCOUNT_TABLES: [&str; 16] = [
     "files",
     "operation_queue",
     "local_activity",
@@ -53,6 +53,8 @@ const ACCOUNT_TABLES: [&str; 15] = [
     "unknown_checks",
     // Task 2191 (D12): placeholders left at another path that hold unknown bytes (names): the account's.
     "unknown_orphans",
+    // Task 2190: sync-folder edits held, not sent, because their base is unknown (file ids): the account's.
+    "held_edits",
 ];
 
 /// Task 2191: a file row of unknown content (synced before task 1640: no agreed content and no
@@ -508,6 +510,105 @@ const EARLIER_IN_QUEUE_SQL: &str = "earlier.rowid < this.rowid";
 #[cfg(not(target_os = "macos"))]
 const EARLIER_IN_QUEUE_SQL: &str =
     "earlier.created_at < this.created_at OR (earlier.created_at = this.created_at AND earlier.rowid < this.rowid)";
+
+/// Task 2190 (plan §3.1, D2): a parked op the person may decide, as the alias `this`: a File
+/// Provider content write (it has a write id) parked on a stale base, unclaimed, with no completion
+/// recorded; nothing queued behind it for the file (D2: no newer save, and no trash, move or rename,
+/// review-169 #2); and a file the pull has seen at a version past that base, so "Keep this Mac's" has a
+/// version to rebase on, and that is not being trashed (review-169 F2: a trash from another device, of
+/// the file or of a folder it is in, marks the row `trashing` and queues nothing; a file deleted for
+/// good has no row). No folder above it is being trashed or moved on this Mac either (the lead, after
+/// F2): a local trash marks only the folder's row, and a local trash, move or rename queues on the
+/// folder, never on the file. The walk up `parent_id` is a primary-key lookup per level, and stops at
+/// 512 levels (the walk's depth cap, plan §7.4): macOS paths are at most 1024 bytes (`PATH_MAX`) and every
+/// level takes at least two (`a/`), so no real file nests deeper. A chain that reaches the cap (a cycle in
+/// the rows) is not decidable. The review feed and every decision use this one predicate, so the feed
+/// never offers a choice the decision refuses.
+const DECIDABLE_PARKED_SQL: &str = "this.kind = 'upload_version' AND this.write_id IS NOT NULL
+    AND this.last_error_class = 'stale_base' AND this.attempts >= this.max_attempts
+    AND this.claim_id IS NULL AND this.base_version IS NOT NULL
+    AND NOT EXISTS (SELECT 1 FROM upload_resume AS resume
+                    WHERE resume.op_id = this.op_id AND resume.completed_version IS NOT NULL)
+    AND NOT EXISTS (SELECT 1 FROM operation_queue AS later
+                    WHERE later.file_id = this.file_id AND later.op_id != this.op_id AND later.rowid > this.rowid)
+    AND EXISTS (SELECT 1 FROM files AS file
+                WHERE file.file_id = this.file_id AND file.current_version > this.base_version
+                  AND file.status != 'trashing')
+    AND NOT EXISTS (
+        WITH RECURSIVE above(id, depth) AS (
+            SELECT parent_id, 1 FROM files WHERE file_id = this.file_id
+            UNION ALL
+            SELECT folder.parent_id, above.depth + 1 FROM files AS folder JOIN above ON folder.file_id = above.id
+             WHERE above.depth < 512)
+        SELECT 1 FROM above
+         WHERE above.depth >= 512
+            OR EXISTS (SELECT 1 FROM files AS folder WHERE folder.file_id = above.id AND folder.status = 'trashing')
+            OR EXISTS (SELECT 1 FROM operation_queue AS moving
+                       WHERE moving.file_id = above.id AND moving.kind IN ('trash_file', 'move_file', 'rename_file')))";
+
+/// Task 2190: [`StateDb::list_held_edits`]'s read, kept in one place for its query-plan test.
+const LIST_HELD_EDITS_SQL: &str = "SELECT held.file_id, file.path, held.reason, held.detected_at
+     FROM held_edits AS held INDEXED BY idx_held_edits_detected
+     JOIN files AS file ON file.file_id = held.file_id
+     ORDER BY held.detected_at, held.file_id";
+
+fn decidable_parked_conn(conn: &Connection, op_id: &str) -> Result<bool> {
+    conn.query_row(
+        &format!("SELECT EXISTS(SELECT 1 FROM operation_queue AS this WHERE this.op_id = ?1 AND {DECIDABLE_PARKED_SQL})"),
+        params![op_id],
+        |row| row.get(0),
+    )
+}
+
+/// Task 2190 (review-169 #1): decidable, and its file still at `shown`, the version the person was
+/// shown when they chose. A file past it is a version they have not seen: the decision is `Moved`.
+fn decidable_parked_at_conn(conn: &Connection, op_id: &str, shown: i64) -> Result<bool> {
+    conn.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM operation_queue AS this WHERE this.op_id = ?1 AND {DECIDABLE_PARKED_SQL}
+               AND EXISTS (SELECT 1 FROM files AS shown WHERE shown.file_id = this.file_id AND shown.current_version = ?2))"
+        ),
+        params![op_id, shown],
+        |row| row.get(0),
+    )
+}
+
+/// Task 2190 (plan §3.2, review-169 #4): the end of "Keep the other" and "Keep both", in the caller's
+/// transaction: the parked op goes, the file's held token is cleared (only this write's), the file
+/// presents `local` again, a change is recorded, and the staged copy is RELEASED in the journal
+/// (`completed = 1`, as `finish_claimed` does), so a crash before the unlink leaves no unfinished row:
+/// the engine-start sweep unlinks it (S6). Returns the copy for the caller to unlink after the commit.
+fn retire_parked_conn(tx: &rusqlite::Transaction<'_>, op_id: &str) -> Result<Option<String>> {
+    let (file_id, write_id, payload): (String, String, Option<String>) = tx.query_row(
+        "SELECT file_id, write_id, payload_path FROM operation_queue WHERE op_id = ?1",
+        params![op_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    tx.execute("DELETE FROM operation_queue WHERE op_id = ?1", params![op_id])?;
+    tx.execute("DELETE FROM upload_resume WHERE op_id = ?1", params![op_id])?;
+    tx.execute(
+        "UPDATE files SET held_write_id = NULL, held_base = NULL, held_version = NULL,
+                          held_object_version_id = NULL
+         WHERE file_id = ?1 AND held_write_id = ?2",
+        params![file_id, write_id],
+    )?;
+    tx.execute(
+        "UPDATE files SET status = 'local'
+         WHERE file_id = ?1 AND status IN ('error', 'uploading')
+           AND NOT EXISTS (SELECT 1 FROM operation_queue
+                           WHERE file_id = ?1 AND kind IN ('upload_version', 'upload_file'))",
+        params![file_id],
+    )?;
+    record_file_change_conn(tx, &file_id, FpChangeKind::Modified, None)?;
+    if let Some(path) = payload.as_deref() {
+        tx.execute(
+            "INSERT INTO staged_payloads(path, completed) VALUES (?1, 1)
+             ON CONFLICT(path) DO UPDATE SET completed = 1",
+            params![path],
+        )?;
+    }
+    Ok(payload)
+}
 
 fn pending_operation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PendingOperation> {
     Ok(PendingOperation {
@@ -1947,6 +2048,17 @@ pub struct FinderAccept<'a> {
     pub modified_at: i64,
     pub backup_source_key: Option<&'a str>,
     pub now: i64,
+    /// Task 2190 ("Keep both", review-169 #3): a create that takes a parked write's place. In the
+    /// same transaction, the parked op is checked (decidable, its file still at the version shown)
+    /// and retired ([`retire_parked_conn`]); if it is not decidable, nothing is written (`Moved`).
+    pub retire_parked: Option<RetireParked<'a>>,
+}
+
+/// Task 2190: the parked write a create retires, and the version the person was shown.
+#[derive(Debug, Clone, Copy)]
+pub struct RetireParked<'a> {
+    pub op_id: &'a str,
+    pub shown_version: i64,
 }
 
 #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
@@ -1977,6 +2089,12 @@ pub enum AcceptOutcome {
     /// A sign-out closed Finder accepts after its engine stop (spec 2026-10-10 §15 question 3). Nothing was
     /// written; the write is retried, and macOS keeps the change until it is.
     AcceptsClosed,
+    /// Task 2190: the parked write this create was to retire is no longer decidable. Nothing was
+    /// written. `released` is never set here.
+    ParkedMoved,
+    /// Task 2190: queued, and the parked write retired in the same transaction; `released` is its
+    /// staged copy, released in the journal, for the caller to unlink.
+    QueuedRetiring { token: String, released: Option<String> },
     /// A modify of an item in the trash: its row is `Trashing`, or the system names the trash
     /// container as its parent (spec §7.2). Nothing was written; the save is refused.
     InTrash,
@@ -2528,6 +2646,31 @@ impl StateDb {
             CREATE INDEX IF NOT EXISTS idx_unknown_checks_mark_pending ON unknown_checks(mark_pending) WHERE mark_pending = 1;
             -- Task 2191 (D12): a placeholder at `path` whose identity names `file_id`, a file of
             -- unknown content that lives at another path (a remote rename or move left it there).
+            -- Task 2190 (the lead's condition on E3): a sync-folder edit the scan holds and does not
+            -- send, because the version it is based on is not known (`base_unknown`) or the file's
+            -- content is unknown (`content_unknown`, hydrated before task 1640). The review feed
+            -- shows it, so a held edit never looks synced in the app. Kept OUT of the `files` row
+            -- (#167's scan memo keys on that row), and cleared by the triggers below when the row goes,
+            -- moves or leaves `local`. `fingerprint` is the file's content fingerprint when held.
+            CREATE TABLE IF NOT EXISTS held_edits (
+                file_id TEXT PRIMARY KEY,
+                reason TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                detected_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_held_edits_detected ON held_edits(detected_at, file_id);
+            CREATE TRIGGER IF NOT EXISTS files_held_edit_follows_delete
+            AFTER DELETE ON files
+            BEGIN
+                DELETE FROM held_edits WHERE file_id = OLD.file_id;
+            END;
+            CREATE TRIGGER IF NOT EXISTS files_held_edit_follows_change
+            AFTER UPDATE OF file_id, path, status ON files
+            WHEN NEW.file_id IS NOT OLD.file_id OR NEW.path IS NOT OLD.path
+              OR (OLD.status = 'local' AND NEW.status != 'local')
+            BEGIN
+                DELETE FROM held_edits WHERE file_id = OLD.file_id;
+            END;
             CREATE TABLE IF NOT EXISTS unknown_orphans (
                 path TEXT PRIMARY KEY,
                 file_id TEXT NOT NULL,
@@ -4670,6 +4813,116 @@ impl StateDb {
         tx.commit()
     }
 
+    /// Task 2190 (plan §3.3, D4): the leaf names of the rows in `parent_id`'s folder (the root when
+    /// `None`), lowercased: a Mac compares names case-insensitively. A create that has not landed
+    /// has its row already (the accept inserts it), so it counts.
+    pub fn child_names_lowercase(&self, parent_id: Option<&str>) -> Result<std::collections::HashSet<String>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare("SELECT path FROM files WHERE parent_id IS ?1")?;
+        let names = stmt
+            .query_map(params![parent_id], |row| row.get::<_, String>(0))?
+            .filter_map(|path| path.ok())
+            .map(|path| path.rsplit('/').next().unwrap_or_default().to_lowercase())
+            .collect();
+        Ok(names)
+    }
+
+    /// Task 2190 (the lead's condition on E3): the scan holds `file_id`'s edit and does not send it.
+    /// Idempotent: while the reason and the content `fingerprint` are unchanged, nothing is written
+    /// (`false`), so a scan pass that finds the same held edit again writes no page. The first
+    /// detection's time is kept.
+    pub fn hold_unsent_edit(&self, file_id: &str, reason: &str, fingerprint: &str, now: i64) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let written = conn.execute(
+            "INSERT INTO held_edits (file_id, reason, fingerprint, detected_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(file_id) DO UPDATE SET reason = excluded.reason, fingerprint = excluded.fingerprint
+             WHERE held_edits.reason IS NOT excluded.reason OR held_edits.fingerprint IS NOT excluded.fingerprint",
+            params![file_id, reason, fingerprint, now],
+        )?;
+        Ok(written == 1)
+    }
+
+    /// Task 2190: `file_id`'s edit is no longer held (its bytes are agreed, or it is queued, or it can
+    /// be sent on a base). `false`: there was none.
+    pub fn release_unsent_edit(&self, file_id: &str) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        Ok(conn.execute("DELETE FROM held_edits WHERE file_id = ?1", params![file_id])? == 1)
+    }
+
+    /// Task 2190: the held edits whose file still has a row, oldest first: `(file_id, path, reason,
+    /// detected_at)`. An index read (`idx_held_edits_detected`, then each row by its key).
+    pub fn list_held_edits(&self) -> Result<Vec<(String, String, String, i64)>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(LIST_HELD_EDITS_SQL)?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Task 2190 (review-169 #1): decidable, and its file still at `shown`.
+    pub fn is_decidable_parked_at(&self, op_id: &str, shown: i64) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        decidable_parked_at_conn(&conn, op_id, shown)
+    }
+
+    /// Task 2190 (plan §3.1): `op_id` is a parked op the person may decide ([`DECIDABLE_PARKED_SQL`]).
+    pub fn is_decidable_parked(&self, op_id: &str) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        decidable_parked_conn(&conn, op_id)
+    }
+
+    /// Task 2190 (plan §3.2, "Keep this Mac's"): in one transaction, the parked op is rebased on the
+    /// version the person was shown (`shown`, still the file's: review-169 #1) and made due now (attempts back to 0, its error
+    /// cleared), and the file presents `uploading` again. The runner then sends it through the
+    /// normal path and landing. Its stale session row goes (no completion is recorded, by the
+    /// predicate). `None`: the op is no longer decidable, and nothing changed.
+    pub fn rebase_parked(&self, op_id: &str, shown: i64, now: i64) -> Result<Option<i64>> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if !decidable_parked_at_conn(&tx, op_id, shown)? {
+            return Ok(None);
+        }
+        let (file_id, version, object_version_id): (String, i64, Option<String>) = tx.query_row(
+            "SELECT file.file_id, file.current_version, file.current_object_version_id
+             FROM operation_queue AS op JOIN files AS file ON file.file_id = op.file_id WHERE op.op_id = ?1",
+            params![op_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        tx.execute(
+            "UPDATE operation_queue
+             SET base_version = ?2, base_object_version_id = ?3, attempts = 0, last_error = NULL,
+                 last_error_class = NULL, next_retry_at = ?4, updated_at = ?4
+             WHERE op_id = ?1",
+            params![op_id, version, object_version_id, now],
+        )?;
+        tx.execute("DELETE FROM upload_resume WHERE op_id = ?1", params![op_id])?;
+        let flipped = tx.execute(
+            "UPDATE files SET status = 'uploading' WHERE file_id = ?1 AND status = 'error'",
+            params![file_id],
+        )?;
+        if flipped == 1 {
+            record_file_change_conn(&tx, &file_id, FpChangeKind::Modified, None)?;
+        }
+        tx.commit()?;
+        Ok(Some(version))
+    }
+
+    /// Task 2190 (plan §3.2, "Keep the other"): in one transaction, if the op is still decidable at
+    /// `shown`, [`retire_parked_conn`]: the op goes, the system reads the server's version, and the
+    /// staged copy is released in the journal. Returns that copy for the caller to unlink after the
+    /// commit; the caller has already kept the bytes (D1). `None`: not decidable, nothing changed.
+    pub fn drop_parked(&self, op_id: &str, shown: i64) -> Result<Option<Option<String>>> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if !decidable_parked_at_conn(&tx, op_id, shown)? {
+            return Ok(None);
+        }
+        let released = retire_parked_conn(&tx, op_id)?;
+        tx.commit()?;
+        Ok(Some(released))
+    }
+
     /// §6.3.2: a snapshot node's version, applied to the row in one transaction (S1.5).
     /// The fill (the row is at 0) and the raise (the node is newer) set `current_version`
     /// in any status but `Trashing` and `Conflict`; a node still uploading is skipped and
@@ -4867,6 +5120,13 @@ impl StateDb {
         if !journalled {
             return Ok(AcceptOutcome::CopyGone);
         }
+        // Task 2190 (review-169 #3): a create that takes a parked write's place is written only while
+        // that write is still decidable at the version shown, in this transaction.
+        if let Some(retire) = accept.retire_parked
+            && !decidable_parked_at_conn(&tx, retire.op_id, retire.shown_version)?
+        {
+            return Ok(AcceptOutcome::ParkedMoved);
+        }
         // The parent the op carries: the template's (§7.2).
         let parent_id = accept.parent_id.map(str::to_string);
         // A modify's record, for the upload's metadata step, of whether it moved the file.
@@ -4980,8 +5240,15 @@ impl StateDb {
         if parked {
             settle_status_after_park_conn(&tx, accept.file_id)?;
         }
+        let released = match accept.retire_parked {
+            Some(retire) => Some(retire_parked_conn(&tx, retire.op_id)?),
+            None => None,
+        };
         tx.commit()?;
         let token = WriteToken { base: b, write_id }.render();
+        if let Some(released) = released {
+            return Ok(AcceptOutcome::QueuedRetiring { token, released });
+        }
         Ok(if parked {
             AcceptOutcome::ParkedAtOnce {
                 token,
@@ -8536,6 +8803,84 @@ mod tests {
     }
 
     use super::*;
+
+    /// Task 2190: a `local` file row for the held-edit tests.
+    fn held_row(file_id: &str, path: &str) -> FileEntry {
+        FileEntry {
+            file_id: file_id.to_string(),
+            path: path.to_string(),
+            status: FileStatus::Local,
+            size_bytes: 1,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        }
+    }
+
+    /// Task 2190 (glegion's constraint 1): a held edit is written once; the same reason and
+    /// fingerprint again write nothing (a scan pass that finds it again writes no page); a new
+    /// fingerprint writes again, and the first detection's time is kept.
+    #[test]
+    fn task_2190_a_held_edit_is_written_once_per_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        db.upsert_file(&held_row("h1", "a.txt")).unwrap();
+        assert!(db.hold_unsent_edit("h1", "base_unknown", "fp1", 10).unwrap(), "the first detection writes");
+        assert!(!db.hold_unsent_edit("h1", "base_unknown", "fp1", 20).unwrap(), "unchanged: nothing written");
+        assert!(db.hold_unsent_edit("h1", "base_unknown", "fp2", 30).unwrap(), "a new fingerprint writes");
+        assert_eq!(
+            db.list_held_edits().unwrap(),
+            vec![("h1".to_string(), "a.txt".to_string(), "base_unknown".to_string(), 10)]
+        );
+        assert!(db.release_unsent_edit("h1").unwrap());
+        assert!(!db.release_unsent_edit("h1").unwrap(), "nothing left to release");
+    }
+
+    /// Task 2190 (glegion's constraint 2): the paths that skip the classify clear the record, so no
+    /// feed entry goes stale: the row's delete, its trash, a rename or move (its path), any status
+    /// away from `local`, and a re-key of its id. A write that changes none of them keeps it.
+    #[test]
+    fn task_2190_a_held_edit_goes_with_its_row_path_status_and_id() {
+        let held = |db: &StateDb| -> i64 {
+            db.0.lock().unwrap().query_row("SELECT COUNT(*) FROM held_edits", [], |row| row.get(0)).unwrap()
+        };
+        for (case, sql, left) in [
+            ("delete", "DELETE FROM files WHERE file_id = 'h1'", 0),
+            ("trash", "UPDATE files SET status = 'trashing' WHERE file_id = 'h1'", 0),
+            ("rename or move", "UPDATE files SET path = 'docs/b.txt' WHERE file_id = 'h1'", 0),
+            ("uploading", "UPDATE files SET status = 'uploading' WHERE file_id = 'h1'", 0),
+            ("re-key", "UPDATE files SET file_id = 'h2' WHERE file_id = 'h1'", 0),
+            ("size only", "UPDATE files SET size_bytes = 5 WHERE file_id = 'h1'", 1),
+            ("same path", "UPDATE files SET path = 'a.txt' WHERE file_id = 'h1'", 1),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let db = StateDb::open(dir.path().join("state.db")).unwrap();
+            db.upsert_file(&held_row("h1", "a.txt")).unwrap();
+            db.hold_unsent_edit("h1", "base_unknown", "fp", 1).unwrap();
+            db.test_execute(sql).unwrap();
+            assert_eq!(held(&db), left, "{case}");
+        }
+    }
+
+    /// Task 2190 (glegion's constraint 3): the feed's read of held edits is an index read: the
+    /// held rows by `idx_held_edits_detected`, each file by its key, and `files` never scanned.
+    #[test]
+    fn task_2190_the_feed_reads_held_edits_by_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let conn = db.0.lock().unwrap();
+        let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {LIST_HELD_EDITS_SQL}")).unwrap();
+        let plan: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(3))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(plan.iter().any(|step| step.contains("USING INDEX idx_held_edits_detected")), "{plan:?}");
+        assert!(plan.iter().any(|step| step.starts_with("SEARCH file")), "each file by its key: {plan:?}");
+        assert!(!plan.iter().any(|step| step.starts_with("SCAN file")), "files never scanned: {plan:?}");
+    }
     use tempfile::tempdir;
 
     #[test]
@@ -10560,6 +10905,7 @@ mod tests {
             db.track_staged_payload("/staged/x", None, false)?;
             db.accept_finder_write(
                 &FinderAccept {
+                    retire_parked: None,
                     op_id,
                     file_id,
                     kind,
@@ -10880,6 +11226,7 @@ mod tests {
         let accept = |op_id: &str, base: &str| {
             db.accept_finder_write(
                 &FinderAccept {
+                    retire_parked: None,
                     op_id,
                     file_id: "downgraded",
                     kind: FinderAcceptKind::Modify {
@@ -11339,6 +11686,7 @@ mod tests {
         let AcceptOutcome::Queued { token, .. } = db
             .accept_finder_write(
                 &FinderAccept {
+                    retire_parked: None,
                     op_id: "op-held",
                     file_id: "held",
                     kind: FinderAcceptKind::Modify {
@@ -11495,6 +11843,7 @@ mod tests {
         let accept = |op_id: &str, base: &str| {
             db.accept_finder_write(
                 &FinderAccept {
+                    retire_parked: None,
                     op_id,
                     file_id: "f",
                     kind: FinderAcceptKind::Modify {
@@ -13550,6 +13899,7 @@ mod tests {
         let accepted = db
             .accept_finder_write(
                 &FinderAccept {
+                    retire_parked: None,
                     op_id: "op-with-save",
                     file_id: "with-save",
                     kind: FinderAcceptKind::Modify {
@@ -13680,6 +14030,7 @@ mod tests {
         db.track_staged_payload(&payload_path, None, false).unwrap();
         db.accept_finder_write(
             &FinderAccept {
+                retire_parked: None,
                 op_id,
                 file_id,
                 kind: FinderAcceptKind::Modify { incoming_base: base },
@@ -14006,6 +14357,7 @@ mod tests {
         let accept = |payload_path: &str| {
             db.accept_finder_write(
                 &FinderAccept {
+                    retire_parked: None,
                     op_id: "op-swept",
                     file_id: "swept",
                     kind: FinderAcceptKind::Modify {
@@ -14041,6 +14393,7 @@ mod tests {
     fn accept_late_save(db: &StateDb, payload_path: &str) -> AcceptOutcome {
         db.accept_finder_write(
             &FinderAccept {
+                retire_parked: None,
                 op_id: "op-late",
                 file_id: "late",
                 kind: FinderAcceptKind::Modify {

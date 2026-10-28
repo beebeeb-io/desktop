@@ -181,6 +181,10 @@ export interface VersionConflictEntry {
     // Previously fell through to the generic 'failed_upload' bucket with the
     // raw HTTP error text and no "sign in again" path — see `reviewEntryAction`.
     | 'auth_failure'
+    // Task 2190: a sync-folder edit held, not sent, because its base is unknown (needs a decision).
+    | 'held_edit'
+    // Task 2190: the one row for files from before 0.8.13 that hold a change not checked yet.
+    | 'held_unknown'
     // Task 1640: a file deleted elsewhere while it held changes not sent from this PC; they
     // were kept as a copy beside it (informational, no action).
     | 'kept_copy'
@@ -432,6 +436,8 @@ export interface ConflictContentPreview {
   is_text: boolean
   local: ConflictContentSide
   remote: ConflictContentSide
+  /** Task 2190 (review-169 #1): a parked conflict's file version the person decides against. */
+  version?: number | null
 }
 
 // `is_text` is no longer a caller-supplied argument (task 1546 Codex round 2,
@@ -440,6 +446,31 @@ export interface ConflictContentPreview {
 // flag could never be trusted (VersionCenter's open always guessed `false`).
 export function conflictContentPreview(fileId: string): Promise<CommandResult<ConflictContentPreview>> {
   return command<ConflictContentPreview>('conflict_content_preview', { fileId })
+}
+
+/** Task 2190 (plan §3.2): what the person chose for a parked conflict. */
+export type ParkedChoice = 'local' | 'remote' | 'both'
+
+/** Task 2190: what a decision on a parked conflict did (`engine_bridge::ParkedResolution`). */
+export type ParkedResolution =
+  | { outcome: 'rebased'; version: number }
+  | { outcome: 'kept_other'; kept_copy: string }
+  | { outcome: 'kept_both'; file_id: string; name: string }
+  | { outcome: 'moved' }
+
+/** Task 2190 (plan §3.4): both sides of a parked conflict, by its queued write. Read-only. */
+export function parkedConflictPreview(opId: string): Promise<CommandResult<ConflictContentPreview>> {
+  return command<ConflictContentPreview>('parked_conflict_preview', { opId })
+}
+
+/** Task 2190 (plan §3.2): decide a parked conflict, by its queued write. */
+export function resolveParkedConflict(
+  opId: string,
+  choice: ParkedChoice,
+  shownVersion: number | null,
+): Promise<CommandResult<ParkedResolution>> {
+  // Review-169 #1: decided against the version the preview showed; a file past it is not decided.
+  return command<ParkedResolution>('resolve_parked_conflict', { opId, choice, shownVersion })
 }
 
 /**

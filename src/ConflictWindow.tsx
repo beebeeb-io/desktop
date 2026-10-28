@@ -33,7 +33,15 @@
 import { useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { useToast } from './windows/ui'
-import { conflictContentPreview, formatBytes, type ConflictContentPreview } from './desktopApi'
+import {
+  conflictContentPreview,
+  formatBytes,
+  parkedConflictPreview,
+  resolveParkedConflict,
+  type ConflictContentPreview,
+  type ParkedChoice,
+} from './desktopApi'
+import { PARKED_REPLACE_QUESTION, parkedResolutionNotice } from './parkedConflict'
 import { diffLines, DIFF_MAX_OPS, type DiffOp } from './diffLines'
 
 function DiffLine({
@@ -96,6 +104,8 @@ export default function ConflictWindow() {
   const params = new URLSearchParams(window.location.search)
   const fileId = params.get('fileId') ?? ''
   const fileName = params.get('fileName') ?? 'Unknown file'
+  // Task 2190: a parked conflict is decided by its queued write, never by the file.
+  const opId = params.get('opId') ?? ''
   // Best-effort layout hint for the FIRST paint only, while the real preview
   // is still loading. Task 1546 Codex round 2, finding 3: the daemon now
   // decides textness itself (from the file's own path) and returns the
@@ -109,17 +119,23 @@ export default function ConflictWindow() {
   const [preview, setPreview] = useState<ConflictContentPreview | null>(null)
   const [previewLoading, setPreviewLoading] = useState(true)
   const [previewError, setPreviewError] = useState<string | null>(null)
+  // Task 2190 (D1): "Keep Theirs" on a parked conflict asks once before it replaces.
+  const [confirmReplace, setConfirmReplace] = useState(false)
+  const [doneMessage, setDoneMessage] = useState<string | null>(null)
 
   const isText = preview?.is_text ?? initialIsText
+  // Task 2190 (review-169 #1): a parked conflict is decided against the version its preview showed,
+  // so its choices wait for the preview.
+  const decideLocked = busy || (opId !== '' && preview === null)
 
   useEffect(() => {
-    if (!fileId) {
+    if (!fileId && !opId) {
       setPreviewLoading(false)
       return
     }
     let cancelled = false
     setPreviewLoading(true)
-    void conflictContentPreview(fileId).then((result) => {
+    void (opId ? parkedConflictPreview(opId) : conflictContentPreview(fileId)).then((result) => {
       if (cancelled) return
       setPreviewLoading(false)
       if (result.ok) {
@@ -136,7 +152,32 @@ export default function ConflictWindow() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  async function resolveParked(choice: ParkedChoice) {
+    setBusy(true)
+    const result = await resolveParkedConflict(opId, choice, preview?.version ?? null)
+    const notice = result.ok ? parkedResolutionNotice(result.value) : { done: false, message: result.reason }
+    if (!notice.done) {
+      showToast({
+        id: 'conflict-resolution-error',
+        variant: 'error',
+        title: 'Could not resolve conflict',
+        message: notice.message,
+        durationMs: null,
+      })
+      setConfirmReplace(false)
+      setBusy(false)
+      return
+    }
+    setDoneMessage(notice.message)
+    setResolved(true)
+    setTimeout(() => window.close(), 1500)
+  }
+
   async function resolve(choice: 'local' | 'remote' | 'both') {
+    if (opId) {
+      await resolveParked(choice)
+      return
+    }
     if (!fileId) {
       showToast({
         id: 'conflict-resolution-error',
@@ -184,7 +225,7 @@ export default function ConflictWindow() {
         }}
       >
         <p style={{ color: 'var(--green)', fontWeight: 600 }}>
-          ✓ Conflict resolved
+          {doneMessage ?? '✓ Conflict resolved'}
         </p>
       </div>
     )
@@ -330,27 +371,32 @@ export default function ConflictWindow() {
         </div>
       )}
 
+      {confirmReplace && (
+        <p role="alert" style={{ marginTop: 16, marginBottom: 0 }}>
+          {PARKED_REPLACE_QUESTION}
+        </p>
+      )}
       <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
         <button
           className="button amber"
           onClick={() => resolve('local')}
-          disabled={busy}
+          disabled={decideLocked}
           style={{ flex: 1 }}
         >
           Keep Mine
         </button>
         <button
           className="button"
-          onClick={() => resolve('remote')}
-          disabled={busy}
+          onClick={() => (opId && !confirmReplace ? setConfirmReplace(true) : resolve('remote'))}
+          disabled={decideLocked}
           style={{ flex: 1 }}
         >
-          Keep Theirs
+          {confirmReplace ? 'Replace' : 'Keep Theirs'}
         </button>
         <button
           className="button"
           onClick={() => resolve('both')}
-          disabled={busy}
+          disabled={decideLocked}
           style={{ flex: 1 }}
         >
           Keep Both

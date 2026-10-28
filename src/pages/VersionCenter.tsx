@@ -47,6 +47,12 @@ function kindLabel(kind: VersionConflictEntry['kind']): string {
       return 'Restore'
     case 'kept_copy':
       return 'Kept copy'
+    case 'held_edit':
+    case 'held_unknown':
+      return 'Not sent'
+    // Review-169 #6 (found by its kind census): an expired session's row had fallen to "Conflict".
+    case 'auth_failure':
+      return 'Session'
     default:
       return 'Conflict'
   }
@@ -129,6 +135,8 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
       fileId: entry.file_id,
       fileName: entry.file_name,
       isText: false,
+      // Task 2190: a parked conflict is decided by its queued write.
+      opId: entry.kind === 'stale_base' ? (entry.op_id ?? null) : null,
     })
     if (!result.ok) {
       showToast({
