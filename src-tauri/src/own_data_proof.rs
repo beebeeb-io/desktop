@@ -112,20 +112,16 @@ pub fn eligible(owner: Option<&Identity>, session: &Identity, has_local_data: bo
     }
 }
 
-/// Whether `sealed` (a `name_encrypted` envelope) opens under a file key derived from `master_key` and `file_id`, in
-/// every format the engine reads: the string id (as every client seals today) and the 16-byte binary id (the old CLI),
-/// each in both envelopes (`engine_bridge::decrypt_shared_name_with_key`). The key is derived from this id, so a name
-/// sealed for another file, or under another account's key, never opens. Task 1888's key check reads names the same
-/// way.
+/// Whether `sealed` (a `name_encrypted` envelope) is this account's name for `file_id`. Core's file metadata reader
+/// (`decrypt_file_metadata`) opens it under the file key derived from `master_key` and `file_id`, in every format the
+/// engine reads: the string id (as every client seals today) and the 16-byte binary id (the old CLI); the name subkey
+/// (`beebeeb/name/v1`, task 1908) and the legacy raw file key; both envelopes. It refuses a plaintext name, which proves
+/// nothing. The key is derived from this id, so a name sealed for another file, or under another account's key, never
+/// opens. Task 1888's key check reads names the same way.
 pub fn name_opens(master_key: &[u8; 32], file_id: &str, sealed: &str) -> bool {
     let master = beebeeb_core::kdf::MasterKey::from_bytes(*master_key);
-    let by_string = beebeeb_core::kdf::derive_file_key(&master, file_id.as_bytes());
-    let by_binary = uuid::Uuid::parse_str(file_id)
-        .ok()
-        .map(|id| beebeeb_core::kdf::derive_file_key(&master, id.as_bytes()));
-    std::iter::once(by_string).chain(by_binary).any(|file_key| {
-        crate::engine_bridge::decrypt_shared_name_with_key(&file_key, sealed).is_some_and(|name| !name.trim().is_empty())
-    })
+    beebeeb_core::encrypt::decrypt_file_metadata(&master, file_id, sealed)
+        .is_ok_and(|metadata| !metadata.name.trim().is_empty())
 }
 
 /// Judge one node of this account's tree against this session's master key.
@@ -1136,6 +1132,32 @@ mod tests {
         adopt_unbound(&pc.db, None).unwrap();
         let server = Server::new(vec![sealed_binary_node(MINE, IDS[0]), mine(IDS[1]), mine(IDS[2])]);
         assert!(matches!(prove(&pc, &session(), MINE, &server), Outcome::Adopted(t) if t.own == 3));
+    }
+
+    /// Review P3-3 (main): a name sealed the way core seals names for v2 content, under the name subkey
+    /// (`beebeeb/name/v1`, task 1908), is this account's own; a plaintext name never proves anything.
+    #[test]
+    fn a_name_sealed_under_the_name_subkey_proves_ownership_and_a_plaintext_name_never_does() {
+        let id = IDS[0];
+        let mk = beebeeb_core::kdf::MasterKey::from_bytes(MINE);
+        let sealed = beebeeb_core::encrypt::encrypt_name_with_chunk_format(
+            &mk,
+            id,
+            "notes.txt",
+            Some("text/plain"),
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::V2,
+        )
+        .unwrap();
+        let raw_key = beebeeb_core::kdf::derive_file_key(&mk, id.as_bytes());
+        let blob: beebeeb_types::EncryptedBlob = serde_json::from_str(&sealed).unwrap();
+        assert!(
+            beebeeb_core::encrypt::decrypt_metadata(&raw_key, &blob).is_err(),
+            "precondition: sealed under the name subkey, not the raw file key"
+        );
+        assert!(name_opens(&MINE, id, &sealed), "this account's own");
+        assert!(!name_opens(&THEIRS, id, &sealed), "another account's key");
+        assert!(!name_opens(&MINE, IDS[1], &sealed), "another file's key");
+        assert!(!name_opens(&MINE, id, "notes.txt"), "a plaintext name");
     }
 
     // ---- the queue: proven changes upload, the rest wait for the person ----
