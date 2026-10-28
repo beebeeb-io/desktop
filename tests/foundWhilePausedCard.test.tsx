@@ -165,7 +165,7 @@ describe('Keep on this PC only', () => {
     await card.m.click(COPY.keep)
     await card.m.click(COPY.move)
     expect(card.text()).toContain('1 item couldn’t be moved and stays where it is. It isn’t uploaded.')
-    expect(card.text()).toContain('3 changes to items already in Beebeeb stay on hold. Contact support@beebeeb.io.')
+    expect(card.text()).toContain('3 changes can’t be kept on this PC only. They aren’t uploaded and stay on hold until you choose “Upload to my Beebeeb”.')
     expect(card.labels()).toEqual([COPY.upload, COPY.keep, COPY.dismiss])
   })
 
