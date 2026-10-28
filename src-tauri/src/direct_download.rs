@@ -2,7 +2,7 @@
 //!
 //! When the server offers `object-download-v1`, a whole-file hydrate fetches the file's encrypted
 //! chunks straight from object storage through short-lived presigned links, and decrypts them
-//! exactly as the API path does (`decrypt_downloaded_chunk`). The API only authorizes and signs.
+//! through the same core chunk_stream reader as the API path. The API only authorizes and signs.
 //!
 //! The rules (which links may be followed, when to renew, when to fall back) live in
 //! `beebeeb_core::direct_transfer` and are shared by every client. This module is the desktop's

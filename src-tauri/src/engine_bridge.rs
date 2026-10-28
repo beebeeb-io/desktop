@@ -10020,7 +10020,59 @@ fn apply_sync_op(
             tracing::debug!(op_type = other, "sync_tick: ignoring unknown op_type");
         }
     }
+    // A sparse folder rename/move has no descendant events. Reuse the same
+    // metadata write for their new parent paths, then signal those identities
+    // with the folder. This preserves content baselines and queued rename holds.
+    if matches!(op.op_type.as_str(), "folder_rename" | "folder_move" | "file_rename" | "file_move")
+        && applied.iter().any(|changed| changed == id)
+        && bridge.db().get_file(id)?.is_some_and(|row| row.is_dir())
+    {
+        rebase_folder_descendants(bridge, id, now_secs, &mut applied)?;
+    }
     Ok(applied)
+}
+
+fn rebase_folder_descendants(
+    bridge: &EngineBridge,
+    folder_id: &str,
+    now: i64,
+    applied: &mut Vec<String>,
+) -> anyhow::Result<()> {
+    let rows = bridge.db().list_files()?;
+    let mut parents = vec![folder_id.to_string()];
+    let mut visited = std::collections::HashSet::new();
+    while let Some(parent_id) = parents.pop() {
+        if !visited.insert(parent_id.clone()) {
+            continue;
+        }
+        let Some(parent) = bridge.db().get_file(&parent_id)? else { continue };
+        for child in rows.iter().filter(|row| row.parent_id.as_deref() == Some(&parent_id)) {
+            let Some(contract) = bridge.db().get_file_contract_state(&child.file_id)? else { continue };
+            let row = serde_json::json!({
+                "id": child.file_id,
+                "name": child.path.rsplit('/').next().unwrap_or_default(),
+                "parent_id": parent_id,
+                "is_folder": child.is_dir(),
+                "size_bytes": child.size_bytes,
+                "updated_at": child.remote_updated_at,
+                "version_number": contract.current_version,
+                "current_object_version_id": contract.current_object_version_id,
+                "content_type": contract.content_type,
+            });
+            if let Some(updated) = apply_metadata_file_row(
+                bridge.db(), &row, contract.namespace, contract.shared_root_id,
+                contract.share_id, contract.permission_bits, now, bridge.api().master_key(), &parent.path,
+            )? {
+                if updated.path != child.path {
+                    applied.push(child.file_id.clone());
+                }
+                if updated.is_dir() {
+                    parents.push(child.file_id.clone());
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Build a `/files`-shaped `serde_json::Value` from a sync op + the existing
