@@ -235,9 +235,10 @@ pub struct EngineBridge {
     /// [`FAILED_SNAPSHOTS_BEFORE_THE_QUEUE_RUNS`] on, a failed one no longer ends the tick.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     failed_snapshots: std::sync::atomic::AtomicU32,
-    /// Task 2244: edits newly held since the scan last logged its count ([`Self::take_newly_held`]). A
-    /// hold made between passes (a file's close) is counted in the next pass's line.
-    newly_held: std::sync::atomic::AtomicUsize,
+    /// Task 2244: edits newly held since the scan last logged its count ([`Self::take_newly_held`]), by
+    /// reason: content unknown, then base unknown. A hold made between passes (a file's close) is counted
+    /// in the next pass's line.
+    newly_held: [std::sync::atomic::AtomicUsize; 2],
     #[cfg(test)]
     pub(crate) seams: Seams,
 }
@@ -993,7 +994,7 @@ impl EngineBridge {
             stopping,
             thumbnails_pending: std::sync::Mutex::new(HashSet::new()),
             failed_snapshots: std::sync::atomic::AtomicU32::new(0),
-            newly_held: std::sync::atomic::AtomicUsize::new(0),
+            newly_held: Default::default(),
             #[cfg(test)]
             seams: Seams::default(),
         }
@@ -3526,16 +3527,21 @@ impl EngineBridge {
         match self.db.hold_unsent_edit(file_id, reason, &fingerprint, now_secs()) {
             Ok(true) => {
                 tracing::debug!(file_id = %file_id, reason, "sync folder: an edit of a synced file is kept on this PC, not sent");
-                self.newly_held.fetch_add(1, Ordering::Relaxed);
+                self.newly_held[usize::from(reason == HELD_BASE_UNKNOWN)].fetch_add(1, Ordering::Relaxed);
             }
             Ok(false) => {}
             Err(e) => tracing::warn!(file_id = %file_id, error = %e, "sync folder: could not record a held edit"),
         }
     }
 
-    /// Task 2244: the edits newly held since the last call, for the scan's one line a pass.
-    pub(crate) fn take_newly_held(&self) -> usize {
-        self.newly_held.swap(0, Ordering::Relaxed)
+    /// Task 2244: the edits newly held since the last call, for the scan's one line a pass:
+    /// (content unknown, base unknown).
+    pub(crate) fn take_newly_held(&self) -> (usize, usize) {
+        let [content_unknown, base_unknown] = &self.newly_held;
+        (
+            content_unknown.swap(0, Ordering::Relaxed),
+            base_unknown.swap(0, Ordering::Relaxed),
+        )
     }
 
     /// Task 2190: the one call that ends a held edit's record, when the file reads as agreed, is
@@ -29409,18 +29415,34 @@ mod tests {
     /// Every start of 0.8.17 on the maintainer's PC wrote one WARN line per held file of unknown content
     /// (28,224 in ~100 s), burying every other warning. Each held edit is listed for review (task 2190), so
     /// the log needs only the count: one line for a pass that holds new edits, the per-file line at DEBUG,
-    /// and nothing for a pass (or a start) whose held edits are the ones already listed.
+    /// and nothing for a pass (or a start) whose held edits are the ones already listed. The line counts each
+    /// reason apart (review on #172): an edit with no known base needs a look; a file synced before 1640 does not.
     #[tokio::test]
     async fn task_2244_a_pass_that_holds_edits_logs_one_count_not_a_line_per_file() {
         let master_key = [194u8; 32];
         let (_dir, sync_root, _server, bridge) = rule3_setup(master_key);
         let names = ["a.txt", "b.txt", "c.txt"];
-        for name in names {
+        for name in names.iter().chain(&["draft.txt"]) {
             std::fs::write(sync_root.join(name), name.as_bytes()).unwrap();
         }
         let mut memo = crate::watcher::ScanMemo::default();
         regression_2229_pass(&bridge, &sync_root, &mut memo);
         drain_upload_queue(&bridge, &sync_root).await;
+        let draft = sync_root.join("draft.txt");
+        let draft_row = bridge.db.get_file_by_path("draft.txt").unwrap().unwrap();
+        std::fs::write(&draft, b"an edit made while the base was lost").unwrap();
+        bridge
+            .db
+            .test_execute(&format!(
+                "UPDATE files SET local_base_version = 0, fetched_min_version = 0 WHERE file_id = '{}'",
+                draft_row.file_id
+            ))
+            .unwrap();
+        assert_eq!(
+            sync_folder_content(&bridge.db, &draft_row.file_id, &draft, None).unwrap(),
+            SyncFolderContent::Changed { base: None },
+            "precondition: an edit with no known base"
+        );
         for name in names {
             let row = bridge.db.get_file_by_path(name).unwrap().unwrap();
             bridge
@@ -29448,12 +29470,14 @@ mod tests {
         .await;
         assert_eq!(
             bridge.db.list_held_edits().unwrap().len(),
-            3,
-            "precondition: the pass held all three"
+            4,
+            "precondition: the pass held all four"
         );
         let first = warns(&logs);
         assert_eq!(first.len(), 1, "one line for the pass, not one per file: {first:#?}");
-        assert!(first[0].contains("held=3"), "the line carries the count: {}", first[0]);
+        for count in ["held=4", "content_unknown=3", "base_unknown=1"] {
+            assert!(first[0].contains(count), "the line carries {count}: {}", first[0]);
+        }
 
         // A start: a fresh memo asks about every file again, and their held edits are the ones listed.
         let mut restarted = crate::watcher::ScanMemo::default();
@@ -29461,7 +29485,7 @@ mod tests {
             regression_2229_pass(&bridge, &sync_root, &mut restarted);
         })
         .await;
-        assert_eq!(restarted.classified, 3, "precondition: the start asked about all three");
+        assert_eq!(restarted.classified, 4, "precondition: the start asked about all four");
         assert_eq!(warns(&logs), Vec::<String>::new(), "nothing new held: no line");
     }
 
