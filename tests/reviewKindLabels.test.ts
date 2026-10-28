@@ -12,7 +12,7 @@ const ROOT = join(import.meta.dir, '..')
 const ENGINE = readFileSync(join(ROOT, 'src-tauri', 'src', 'engine_bridge.rs'), 'utf8').replace(/\r\n/g, '\n')
 const PRODUCTION = ENGINE.slice(0, ENGINE.indexOf('\n#[cfg(test)]\nmod tests {'))
 const API = readFileSync(join(ROOT, 'src', 'desktopApi.ts'), 'utf8')
-const CENTER = readFileSync(join(ROOT, 'src', 'pages', 'VersionCenter.tsx'), 'utf8')
+const LABELS = readFileSync(join(ROOT, 'src', 'reviewKindLabel.ts'), 'utf8')
 
 function rustKinds(): string[] {
   const kinds = new Set<string>()
@@ -30,11 +30,13 @@ describe('review kinds', () => {
   })
 
   test('every Rust kind is a TypeScript kind and has its own label', () => {
-    const label = CENTER.slice(CENTER.indexOf('function kindLabel('), CENTER.indexOf('default:', CENTER.indexOf('function kindLabel(')))
+    const start = LABELS.indexOf('function reviewKindLabel(')
+    expect(start).toBeGreaterThanOrEqual(0)
+    const label = LABELS.slice(start, LABELS.indexOf('default:', start))
     for (const kind of rustKinds()) {
       expect(API.includes(`| '${kind}'`), `desktopApi kind ${kind}`).toBe(true)
       // `conflict` is the label's default ("Conflict"); every other kind names its own case.
-      if (kind !== 'conflict') expect(label.includes(`case '${kind}':`), `kindLabel ${kind}`).toBe(true)
+      if (kind !== 'conflict') expect(label.includes(`case '${kind}':`), `reviewKindLabel ${kind}`).toBe(true)
     }
   })
 })
