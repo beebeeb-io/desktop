@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { accountSessionRevision, observeAccountSession, observeSignOutWarning, subscribeAccountSession } from './accountSession'
 import { parsePopoverSnapshot, type PopoverSnapshot } from './popoverContract'
 import { parseSyncActivitySummary, type SyncActivitySummary } from './windows/syncActivityModel'
+import { parseKeepResult, type KeepResult } from './windows/foundWhilePaused'
 import type { AskCounts } from './signOutCopy'
 
 export type CommandResult<T> =
@@ -516,6 +517,38 @@ export async function loadSyncActivitySummary(): Promise<SyncActivitySummary | n
  */
 export function setSyncPaused(paused: boolean): Promise<CommandResult<void>> {
   return command<void>(paused ? 'tray_pause_sync' : 'tray_resume_sync')
+}
+
+// ── Changes found while sync was paused (task 2267, Windows) ────────────────
+//
+// Local items Beebeeb could not prove were the account's own are held with the pause reason `found_while_paused`
+// until the person decides in Settings › Sync (`windows/FoundWhilePausedCard.tsx`). No command takes a path.
+
+/** `found_while_paused_upload`: how many held operations were released to upload. */
+export interface FoundWhilePausedUploadResult {
+  released: number
+}
+
+/** "Upload to my Beebeeb": release every `found_while_paused` operation so it uploads. */
+export function foundWhilePausedUpload(): Promise<CommandResult<FoundWhilePausedUploadResult>> {
+  return command<FoundWhilePausedUploadResult>('found_while_paused_upload')
+}
+
+/**
+ * "Keep on this PC only": move each held local-only item out of the sync folder into
+ * `<parent of the sync folder>\Beebeeb - kept on this PC\YYYY-MM-DD\` and stop tracking it. An answer outside the
+ * contract's shape is a failure, never a made-up count.
+ */
+export async function foundWhilePausedKeep(): Promise<CommandResult<KeepResult>> {
+  const result = await command<unknown>('found_while_paused_keep')
+  if (!result.ok) return result
+  const kept = parseKeepResult(result.value)
+  return kept ? { ok: true, value: kept } : { ok: false, reason: 'The answer had an unexpected shape.', unsupported: false }
+}
+
+/** Open the last kept folder in Explorer. The backend knows which; the frontend never passes a path. */
+export function showKeptFolder(): Promise<CommandResult<void>> {
+  return command<void>('show_kept_folder')
 }
 
 /** The current engine refusal, or `null` when there is none or the status cannot be read. */

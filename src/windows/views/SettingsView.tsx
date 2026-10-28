@@ -57,6 +57,7 @@ import { FINDER_SETUP_TITLE, finderActionButtonLabel, finderStatusPill } from '.
 import { setDesktopThemePreference } from '../theme'
 import { syncActivityView, type SyncActivityView } from '../syncActivityModel'
 import { SyncActivityIcon, SyncCheckProgress, SyncPauseButton, useSyncActivitySummary, useSyncPauseToggle } from '../syncActivityUi'
+import { FoundWhilePausedCard } from '../FoundWhilePausedCard'
 import { desktopUpdateCheck } from '../manualUpdateCheck'
 import { pollWhileVisible } from '../visiblePoll'
 
@@ -328,6 +329,9 @@ function SyncPanel({
           ))}
         </div>
       </Card>
+
+      {/* Task 2267: changes found while sync was paused wait here for the person's decision (draws nothing otherwise). */}
+      <FoundWhilePausedCard summary={summary} refresh={refresh} />
 
       <Card style={{ padding: 0, overflow: 'hidden' }}>
         {rows.map((row, i) => {
