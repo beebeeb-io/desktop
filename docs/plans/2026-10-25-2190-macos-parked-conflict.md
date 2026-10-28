@@ -88,3 +88,37 @@ Dependencies: code waits for conflict-2190's Windows fix (a parked modify must h
 | D3 | `base_unknown` parks. | Accepted: unchanged in this slice. |
 | D4 | The name of the "Keep both" copy. | The format is accepted, **and it must be unique**: if `{stem} ({device}, HH:MM).{ext}` exists, add a counter. Never overwrite (the #142 P2-B lesson). Test it. (§3.3.) |
 | D5 | Windows shares `resolve_parked`. | Yes, next, after the P0 fix lands. |
+
+## 7. Addendum (lane conflict-2190, 28 Oct 2026): the detector, and this PR's scope
+
+Written before the code of `fix/2190-conflict-detector`, against desktop `main` `f6614694`. The lead's brief for follow-ups 1 and 2 is the source; the four decisions below were sent to the lead before any code.
+
+### 7.1 Decisions
+
+- **E1. The parked op is the conflict, on every platform.**
+  - `FileStatus::Conflict` stays unset, so the 24 h auto Keep Both sweep and the per-file conflict windows stay dormant, as they are today.
+  - A row with a queued or parked write is `Uploading` or `Error`, never `Local`, so the tick's Local branch only sees rows with no pending write. The authoritative signal is the server's 409 on the write's base, which parks with both versions kept.
+- **E2. `content_hash` gets no production writer.** On macOS it is part of the File Provider content version (`item_content_version`). A writer would change every item's content version, so Finder would see every file as changed. The detector reads 1640's agreed content instead: `local_hash` at `local_base_version`.
+- **E3. The first-sight base is never invented.** `apply_metadata_file_row` no longer sets `local_base_version = current_version` for a `Local` row at 0. A base of 0 stays unknown, and an edit with an unknown base is held, not sent (task 2229).
+- **E4. Windows resolution (D5) is the next PR**, after 2191 S2 merges. "Keep the other" and "Keep both" on a sync-folder file must replace the edited disk file after the copy is made, which needs a hydrate that overrides 1640's unsent-edit refusal: the same code 2191 S2 changes. In this PR, Windows parked rows keep today's row.
+
+### 7.2 The detector: decision table (`process_metadata_row`, the `Local` branch)
+
+Inputs: `B` = `local_base_version` (0 = unknown) with `local_hash`; `V` = the server version on the pulled row (`current_version`, `version`, `version_number`); `L` = the device's bytes.
+- On a sync-folder file, `L` is `sync_folder_content` (Windows, and every test build).
+- Elsewhere a `Local` row has no pending write, so `L` = agreed.
+
+| # | L | V against B | Action |
+|---|---|---|---|
+| 1 | agreed (or unknown) | any | Re-anchor, as today: `remote_updated_at`, `size_bytes` and `modified_at` from the server, then the metadata write. `local_base_version` is unchanged (E3). |
+| 2 | changed (an edit the scan has not queued yet) | `V > B > 0` | A concurrent edit. The metadata write still runs (the server's version is recorded), but `size_bytes`, `modified_at` and `remote_updated_at` keep describing the device's bytes, and `B` is kept. The scan then queues the edit on base `B`, the server refuses it as stale, and it parks: a reviewable conflict (§3). No `Conflict` status, and no `ConflictDetected`. |
+| 3 | changed | `V <= B`, or `B = 0` | Our own edit, not sent yet, or an unknown base: re-anchor as row 1 (the edit is queued on `B`, or held by task 2229). |
+| 4 | queued | — | Unreachable: such a row is `Uploading` (branch 3, unchanged). |
+
+`is_conflict` is called with `local` = `"changed"` or the agreed hash, `base` = the agreed hash, and `remote` = `"v{V}"` when `V > B`, else the agreed hash. So it is true exactly in row 2.
+
+### 7.3 This PR (macOS)
+
+- §3's core: `resolve_parked` and its preview, the three choices, D1 (the kept copy), D2 (newest write only) and D4 (a unique name).
+- The feed gives `action: "open_conflict"` to a parked `stale_base` Finder write (`write_id` set) that the core would accept. It uses one predicate, so the feed never offers a choice the core refuses.
+- UI: main's review page and `ConflictWindow` route by `op_id`. #142's `ConflictSheet` is not on main, so the sheet change in §3.4 waits for it. The second-press copy in D1 applies to the window's "Keep theirs" on a parked row only.
