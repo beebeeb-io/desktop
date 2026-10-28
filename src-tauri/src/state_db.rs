@@ -498,17 +498,17 @@ const EARLIER_IN_QUEUE_SQL: &str =
 
 /// Task 2190 (plan §3.1, D2): a parked op the person may decide, as the alias `this`: a File
 /// Provider content write (it has a write id) parked on a stale base, unclaimed, with no completion
-/// recorded; the file's newest write (no content op queued behind it); and a file the pull has seen
-/// at a version past that base, so "Keep this Mac's" has a version to rebase on. The review feed and
-/// every decision use this one predicate, so the feed never offers a choice the decision refuses.
+/// recorded; nothing queued behind it for the file (D2: no newer save, and no trash, move or rename,
+/// review-169 #2); and a file the pull has seen at a version past that base, so "Keep this Mac's" has a
+/// version to rebase on. The review feed and every decision use this one predicate, so the feed never
+/// offers a choice the decision refuses.
 const DECIDABLE_PARKED_SQL: &str = "this.kind = 'upload_version' AND this.write_id IS NOT NULL
     AND this.last_error_class = 'stale_base' AND this.attempts >= this.max_attempts
     AND this.claim_id IS NULL AND this.base_version IS NOT NULL
     AND NOT EXISTS (SELECT 1 FROM upload_resume AS resume
                     WHERE resume.op_id = this.op_id AND resume.completed_version IS NOT NULL)
     AND NOT EXISTS (SELECT 1 FROM operation_queue AS later
-                    WHERE later.file_id = this.file_id AND later.op_id != this.op_id
-                      AND later.kind IN ('upload_version', 'upload_file') AND later.rowid > this.rowid)
+                    WHERE later.file_id = this.file_id AND later.op_id != this.op_id AND later.rowid > this.rowid)
     AND EXISTS (SELECT 1 FROM files AS file
                 WHERE file.file_id = this.file_id AND file.current_version > this.base_version)";
 
@@ -524,6 +524,56 @@ fn decidable_parked_conn(conn: &Connection, op_id: &str) -> Result<bool> {
         params![op_id],
         |row| row.get(0),
     )
+}
+
+/// Task 2190 (review-169 #1): decidable, and its file still at `shown`, the version the person was
+/// shown when they chose. A file past it is a version they have not seen: the decision is `Moved`.
+fn decidable_parked_at_conn(conn: &Connection, op_id: &str, shown: i64) -> Result<bool> {
+    conn.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM operation_queue AS this WHERE this.op_id = ?1 AND {DECIDABLE_PARKED_SQL}
+               AND EXISTS (SELECT 1 FROM files AS shown WHERE shown.file_id = this.file_id AND shown.current_version = ?2))"
+        ),
+        params![op_id, shown],
+        |row| row.get(0),
+    )
+}
+
+/// Task 2190 (plan §3.2, review-169 #4): the end of "Keep the other" and "Keep both", in the caller's
+/// transaction: the parked op goes, the file's held token is cleared (only this write's), the file
+/// presents `local` again, a change is recorded, and the staged copy is RELEASED in the journal
+/// (`completed = 1`, as `finish_claimed` does), so a crash before the unlink leaves no unfinished row:
+/// the engine-start sweep unlinks it (S6). Returns the copy for the caller to unlink after the commit.
+fn retire_parked_conn(tx: &rusqlite::Transaction<'_>, op_id: &str) -> Result<Option<String>> {
+    let (file_id, write_id, payload): (String, String, Option<String>) = tx.query_row(
+        "SELECT file_id, write_id, payload_path FROM operation_queue WHERE op_id = ?1",
+        params![op_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    tx.execute("DELETE FROM operation_queue WHERE op_id = ?1", params![op_id])?;
+    tx.execute("DELETE FROM upload_resume WHERE op_id = ?1", params![op_id])?;
+    tx.execute(
+        "UPDATE files SET held_write_id = NULL, held_base = NULL, held_version = NULL,
+                          held_object_version_id = NULL
+         WHERE file_id = ?1 AND held_write_id = ?2",
+        params![file_id, write_id],
+    )?;
+    tx.execute(
+        "UPDATE files SET status = 'local'
+         WHERE file_id = ?1 AND status IN ('error', 'uploading')
+           AND NOT EXISTS (SELECT 1 FROM operation_queue
+                           WHERE file_id = ?1 AND kind IN ('upload_version', 'upload_file'))",
+        params![file_id],
+    )?;
+    record_file_change_conn(tx, &file_id, FpChangeKind::Modified, None)?;
+    if let Some(path) = payload.as_deref() {
+        tx.execute(
+            "INSERT INTO staged_payloads(path, completed) VALUES (?1, 1)
+             ON CONFLICT(path) DO UPDATE SET completed = 1",
+            params![path],
+        )?;
+    }
+    Ok(payload)
 }
 
 fn pending_operation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PendingOperation> {
@@ -1964,6 +2014,17 @@ pub struct FinderAccept<'a> {
     pub modified_at: i64,
     pub backup_source_key: Option<&'a str>,
     pub now: i64,
+    /// Task 2190 ("Keep both", review-169 #3): a create that takes a parked write's place. In the
+    /// same transaction, the parked op is checked (decidable, its file still at the version shown)
+    /// and retired ([`retire_parked_conn`]); if it is not decidable, nothing is written (`Moved`).
+    pub retire_parked: Option<RetireParked<'a>>,
+}
+
+/// Task 2190: the parked write a create retires, and the version the person was shown.
+#[derive(Debug, Clone, Copy)]
+pub struct RetireParked<'a> {
+    pub op_id: &'a str,
+    pub shown_version: i64,
 }
 
 #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
@@ -1994,6 +2055,12 @@ pub enum AcceptOutcome {
     /// A sign-out closed Finder accepts after its engine stop (spec 2026-10-10 §15 question 3). Nothing was
     /// written; the write is retried, and macOS keeps the change until it is.
     AcceptsClosed,
+    /// Task 2190: the parked write this create was to retire is no longer decidable. Nothing was
+    /// written. `released` is never set here.
+    ParkedMoved,
+    /// Task 2190: queued, and the parked write retired in the same transaction; `released` is its
+    /// staged copy, released in the journal, for the caller to unlink.
+    QueuedRetiring { token: String, released: Option<String> },
     /// A modify of an item in the trash: its row is `Trashing`, or the system names the trash
     /// container as its parent (spec §7.2). Nothing was written; the save is refused.
     InTrash,
@@ -4738,6 +4805,12 @@ impl StateDb {
         Ok(rows)
     }
 
+    /// Task 2190 (review-169 #1): decidable, and its file still at `shown`.
+    pub fn is_decidable_parked_at(&self, op_id: &str, shown: i64) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        decidable_parked_at_conn(&conn, op_id, shown)
+    }
+
     /// Task 2190 (plan §3.1): `op_id` is a parked op the person may decide ([`DECIDABLE_PARKED_SQL`]).
     pub fn is_decidable_parked(&self, op_id: &str) -> Result<bool> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
@@ -4745,14 +4818,14 @@ impl StateDb {
     }
 
     /// Task 2190 (plan §3.2, "Keep this Mac's"): in one transaction, the parked op is rebased on the
-    /// version the pull recorded for its file and made due now (attempts back to 0, its error
+    /// version the person was shown (`shown`, still the file's: review-169 #1) and made due now (attempts back to 0, its error
     /// cleared), and the file presents `uploading` again. The runner then sends it through the
     /// normal path and landing. Its stale session row goes (no completion is recorded, by the
     /// predicate). `None`: the op is no longer decidable, and nothing changed.
-    pub fn rebase_parked(&self, op_id: &str, now: i64) -> Result<Option<i64>> {
+    pub fn rebase_parked(&self, op_id: &str, shown: i64, now: i64) -> Result<Option<i64>> {
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        if !decidable_parked_conn(&tx, op_id)? {
+        if !decidable_parked_at_conn(&tx, op_id, shown)? {
             return Ok(None);
         }
         let (file_id, version, object_version_id): (String, i64, Option<String>) = tx.query_row(
@@ -4780,40 +4853,19 @@ impl StateDb {
         Ok(Some(version))
     }
 
-    /// Task 2190 (plan §3.2, "Keep the other" and the end of "Keep both"): in one transaction, the
-    /// parked op goes, the file's held token is cleared (only this write's, `held_write_id`), so the
-    /// system reads the server's version, the file presents `local` again, and a change is
-    /// recorded. Returns the staged copy for the caller to release AFTER the commit (S6); the caller
-    /// has already kept the bytes (D1, or the new file). `None`: no longer decidable, nothing changed.
-    pub fn drop_parked(&self, op_id: &str) -> Result<Option<Option<String>>> {
+    /// Task 2190 (plan §3.2, "Keep the other"): in one transaction, if the op is still decidable at
+    /// `shown`, [`retire_parked_conn`]: the op goes, the system reads the server's version, and the
+    /// staged copy is released in the journal. Returns that copy for the caller to unlink after the
+    /// commit; the caller has already kept the bytes (D1). `None`: not decidable, nothing changed.
+    pub fn drop_parked(&self, op_id: &str, shown: i64) -> Result<Option<Option<String>>> {
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        if !decidable_parked_conn(&tx, op_id)? {
+        if !decidable_parked_at_conn(&tx, op_id, shown)? {
             return Ok(None);
         }
-        let (file_id, write_id, payload): (String, String, Option<String>) = tx.query_row(
-            "SELECT file_id, write_id, payload_path FROM operation_queue WHERE op_id = ?1",
-            params![op_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )?;
-        tx.execute("DELETE FROM operation_queue WHERE op_id = ?1", params![op_id])?;
-        tx.execute("DELETE FROM upload_resume WHERE op_id = ?1", params![op_id])?;
-        tx.execute(
-            "UPDATE files SET held_write_id = NULL, held_base = NULL, held_version = NULL,
-                              held_object_version_id = NULL
-             WHERE file_id = ?1 AND held_write_id = ?2",
-            params![file_id, write_id],
-        )?;
-        tx.execute(
-            "UPDATE files SET status = 'local'
-             WHERE file_id = ?1 AND status IN ('error', 'uploading')
-               AND NOT EXISTS (SELECT 1 FROM operation_queue
-                               WHERE file_id = ?1 AND kind IN ('upload_version', 'upload_file'))",
-            params![file_id],
-        )?;
-        record_file_change_conn(&tx, &file_id, FpChangeKind::Modified, None)?;
+        let released = retire_parked_conn(&tx, op_id)?;
         tx.commit()?;
-        Ok(Some(payload))
+        Ok(Some(released))
     }
 
     /// §6.3.2: a snapshot node's version, applied to the row in one transaction (S1.5).
@@ -5013,6 +5065,13 @@ impl StateDb {
         if !journalled {
             return Ok(AcceptOutcome::CopyGone);
         }
+        // Task 2190 (review-169 #3): a create that takes a parked write's place is written only while
+        // that write is still decidable at the version shown, in this transaction.
+        if let Some(retire) = accept.retire_parked
+            && !decidable_parked_at_conn(&tx, retire.op_id, retire.shown_version)?
+        {
+            return Ok(AcceptOutcome::ParkedMoved);
+        }
         // The parent the op carries: the template's (§7.2).
         let parent_id = accept.parent_id.map(str::to_string);
         // A modify's record, for the upload's metadata step, of whether it moved the file.
@@ -5126,8 +5185,15 @@ impl StateDb {
         if parked {
             settle_status_after_park_conn(&tx, accept.file_id)?;
         }
+        let released = match accept.retire_parked {
+            Some(retire) => Some(retire_parked_conn(&tx, retire.op_id)?),
+            None => None,
+        };
         tx.commit()?;
         let token = WriteToken { base: b, write_id }.render();
+        if let Some(released) = released {
+            return Ok(AcceptOutcome::QueuedRetiring { token, released });
+        }
         Ok(if parked {
             AcceptOutcome::ParkedAtOnce {
                 token,
@@ -10562,6 +10628,7 @@ mod tests {
             db.track_staged_payload("/staged/x", None, false)?;
             db.accept_finder_write(
                 &FinderAccept {
+                    retire_parked: None,
                     op_id,
                     file_id,
                     kind,
@@ -10882,6 +10949,7 @@ mod tests {
         let accept = |op_id: &str, base: &str| {
             db.accept_finder_write(
                 &FinderAccept {
+                    retire_parked: None,
                     op_id,
                     file_id: "downgraded",
                     kind: FinderAcceptKind::Modify {
@@ -11341,6 +11409,7 @@ mod tests {
         let AcceptOutcome::Queued { token, .. } = db
             .accept_finder_write(
                 &FinderAccept {
+                    retire_parked: None,
                     op_id: "op-held",
                     file_id: "held",
                     kind: FinderAcceptKind::Modify {
@@ -11497,6 +11566,7 @@ mod tests {
         let accept = |op_id: &str, base: &str| {
             db.accept_finder_write(
                 &FinderAccept {
+                    retire_parked: None,
                     op_id,
                     file_id: "f",
                     kind: FinderAcceptKind::Modify {
@@ -13552,6 +13622,7 @@ mod tests {
         let accepted = db
             .accept_finder_write(
                 &FinderAccept {
+                    retire_parked: None,
                     op_id: "op-with-save",
                     file_id: "with-save",
                     kind: FinderAcceptKind::Modify {
@@ -13682,6 +13753,7 @@ mod tests {
         db.track_staged_payload(&payload_path, None, false).unwrap();
         db.accept_finder_write(
             &FinderAccept {
+                retire_parked: None,
                 op_id,
                 file_id,
                 kind: FinderAcceptKind::Modify { incoming_base: base },
@@ -14008,6 +14080,7 @@ mod tests {
         let accept = |payload_path: &str| {
             db.accept_finder_write(
                 &FinderAccept {
+                    retire_parked: None,
                     op_id: "op-swept",
                     file_id: "swept",
                     kind: FinderAcceptKind::Modify {
@@ -14043,6 +14116,7 @@ mod tests {
     fn accept_late_save(db: &StateDb, payload_path: &str) -> AcceptOutcome {
         db.accept_finder_write(
             &FinderAccept {
+                retire_parked: None,
                 op_id: "op-late",
                 file_id: "late",
                 kind: FinderAcceptKind::Modify {

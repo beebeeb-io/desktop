@@ -115,7 +115,9 @@ Inputs: `B` = the edit's base as `sync_folder_content` gives it (`local_hash` at
 | 3 | changed | `V <= B`, or `B = 0` | Our own edit, not sent yet, or an unknown base: re-anchor as row 1 (the edit is queued on `B`, or held by task 2229). |
 | 4 | queued | — | Unreachable: such a row is `Uploading` (branch 3, unchanged). |
 
-`is_conflict` is called with `local` = `"changed"` or the agreed hash, `base` = the agreed hash, and `remote` = `"v{V}"` when `V > B`, else the agreed hash. So it is true exactly in row 2.
+~~`is_conflict` is called with `local` = `"changed"` or the agreed hash, `base` = the agreed hash, and `remote` = `"v{V}"` when `V > B`, else the agreed hash. So it is true exactly in row 2.~~
+
+**Corrected after review-169 #7 (lane, 28 Oct):** the pull reads no file and calls no `is_conflict`. Rows 1–3 all take row 1's action, so telling them apart had one effect: a log line. Reading `L` cost a file hash on a cold cache during the pull. The branch was also gated `cfg!(any(target_os = "windows", test))`, so the macOS tests ran a read that macOS production never takes. What row 2 relies on is unchanged and still pinned (`task_2190_fu1_a_concurrent_edit_the_scan_has_not_queued_keeps_its_base_and_parks`, which also asserts 0 file reads in the pull): the pull never touches `B`, so the scan queues the edit on `B`, the server refuses it as stale, and the parked op is the conflict (E1). `conflict::is_conflict` stays for its own tests and a `Conflict` row's three-way rule.
 
 ### 7.3 This PR (macOS)
 

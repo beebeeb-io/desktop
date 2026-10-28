@@ -14,6 +14,9 @@ import type { ParkedResolution } from './desktopApi'
 export const PARKED_REPLACE_QUESTION =
   'Replace this Mac’s version? A copy of your changes stays in the Changes not sent folder.'
 
+/** Task 2190 (review-169 blocker): the Sync row for each copy "Keep Theirs" kept. */
+export const PARKED_COPY_ROW = 'A copy of this Mac’s changes, kept when you chose the other version.'
+
 /** The decision found the write moved since the review was read: nothing changed. */
 export const PARKED_MOVED = 'This file changed again. Close this and decide again.'
 

@@ -48,7 +48,11 @@ function kindLabel(kind: VersionConflictEntry['kind']): string {
     case 'kept_copy':
       return 'Kept copy'
     case 'held_edit':
+    case 'held_unknown':
       return 'Not sent'
+    // Review-169 #6 (found by its kind census): an expired session's row had fallen to "Conflict".
+    case 'auth_failure':
+      return 'Session'
     default:
       return 'Conflict'
   }

@@ -124,6 +124,9 @@ export default function ConflictWindow() {
   const [doneMessage, setDoneMessage] = useState<string | null>(null)
 
   const isText = preview?.is_text ?? initialIsText
+  // Task 2190 (review-169 #1): a parked conflict is decided against the version its preview showed,
+  // so its choices wait for the preview.
+  const decideLocked = busy || (opId !== '' && preview === null)
 
   useEffect(() => {
     if (!fileId && !opId) {
@@ -151,7 +154,7 @@ export default function ConflictWindow() {
 
   async function resolveParked(choice: ParkedChoice) {
     setBusy(true)
-    const result = await resolveParkedConflict(opId, choice)
+    const result = await resolveParkedConflict(opId, choice, preview?.version ?? null)
     const notice = result.ok ? parkedResolutionNotice(result.value) : { done: false, message: result.reason }
     if (!notice.done) {
       showToast({
@@ -377,7 +380,7 @@ export default function ConflictWindow() {
         <button
           className="button amber"
           onClick={() => resolve('local')}
-          disabled={busy}
+          disabled={decideLocked}
           style={{ flex: 1 }}
         >
           Keep Mine
@@ -385,7 +388,7 @@ export default function ConflictWindow() {
         <button
           className="button"
           onClick={() => (opId && !confirmReplace ? setConfirmReplace(true) : resolve('remote'))}
-          disabled={busy}
+          disabled={decideLocked}
           style={{ flex: 1 }}
         >
           {confirmReplace ? 'Replace' : 'Keep Theirs'}
@@ -393,7 +396,7 @@ export default function ConflictWindow() {
         <button
           className="button"
           onClick={() => resolve('both')}
-          disabled={busy}
+          disabled={decideLocked}
           style={{ flex: 1 }}
         >
           Keep Both

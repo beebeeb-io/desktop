@@ -9,6 +9,7 @@ import { join } from 'node:path'
 import { PARKED_MOVED, PARKED_REPLACE_QUESTION, parkedResolutionNotice } from '../src/parkedConflict'
 
 const WINDOW = readFileSync(join(import.meta.dir, '..', 'src', 'ConflictWindow.tsx'), 'utf8').replace(/\r\n/g, '\n')
+const ROWS = readFileSync(join(import.meta.dir, '..', 'src', 'keptFolderRows.tsx'), 'utf8').replace(/\r\n/g, '\n')
 const CENTER = readFileSync(join(import.meta.dir, '..', 'src', 'pages', 'VersionCenter.tsx'), 'utf8').replace(/\r\n/g, '\n')
 
 describe('parked conflict', () => {
@@ -24,7 +25,10 @@ describe('parked conflict', () => {
   test('the window decides a parked conflict by its op id, with the parked commands', () => {
     expect(WINDOW).toContain("params.get('opId')")
     expect(WINDOW).toContain('opId ? parkedConflictPreview(opId) : conflictContentPreview(fileId)')
-    expect(WINDOW).toContain('resolveParkedConflict(opId, choice)')
+    expect(WINDOW).toContain('resolveParkedConflict(opId, choice, preview?.version ?? null)')
+    // Review-169 #1: a parked conflict's choices wait for the preview, whose version they decide against.
+    expect(WINDOW).toContain("const decideLocked = busy || (opId !== '' && preview === null)")
+    expect(WINDOW.match(/disabled=\{decideLocked\}/g)?.length).toBe(3)
     expect(CENTER).toContain("opId: entry.kind === 'stale_base' ? (entry.op_id ?? null) : null")
   })
 
@@ -38,5 +42,13 @@ describe('parked conflict', () => {
     expect(PARKED_REPLACE_QUESTION).toBe(
       'Replace this Mac’s version? A copy of your changes stays in the Changes not sent folder.',
     )
+  })
+
+  test('review-169 blocker: every kept copy is its own row, with Show in Finder and Dismiss', () => {
+    expect(ROWS).toContain("command<string[]>('kept_conflict_copies')")
+    expect(ROWS).toContain('{folders.conflictCopies.map((copy) => (')
+    expect(ROWS).toContain("command<void>('show_kept_conflict_copy', { path })")
+    expect(ROWS).toContain("command<boolean>('dismiss_kept_conflict_copy', { path })")
+    expect(ROWS).toContain('{PARKED_COPY_ROW}')
   })
 })
