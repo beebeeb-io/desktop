@@ -30842,6 +30842,104 @@ mod tests {
         }
     }
 
+    /// Review-169, after F2 (lead): this Mac trashes or moves a folder the file is in while the window is
+    /// open. A local trash marks only the folder's row and queues its op on the folder (`queue_finder_delete`);
+    /// a move queues on the folder. The file's own row and queue stay as they were until the server's echo.
+    /// The ancestor walk sees both, at any depth: every choice is `Moved`, and nothing is sent again. The last
+    /// case is a folder above marked `trashing` with nothing queued on it: the walk follows `parent_id`, while
+    /// the pull's mark of a remote trash follows path prefixes, so a row the prefix misses is still caught.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn task_2190_fu2_a_trash_or_move_of_a_folder_above_makes_every_choice_moved() {
+        let (outer, parent) = ("21900000-0000-4000-8000-000000000061", "21900000-0000-4000-8000-000000000062");
+        for (case, folder) in [
+            ("trash the parent", parent),
+            ("trash a folder above", outer),
+            ("move the parent", parent),
+            ("a folder above marked trashing, nothing queued", outer),
+        ] {
+            let master_key = [243u8; 32];
+            let file = "21900000-0000-4000-8000-000000000060";
+            let (dir, _sync_root, _server, bridge, op_id, staged, _token) = task_2190_parked(master_key, file).await;
+            // Outer/Docs/notes.txt: the walk has to go past the parent.
+            seed_folder_row(&bridge, outer, "Outer");
+            seed_folder_row(&bridge, parent, "Outer/Docs");
+            for sql in [
+                format!("UPDATE files SET parent_id = '{outer}' WHERE file_id = '{parent}'"),
+                format!("UPDATE files SET path = 'Outer/Docs/notes.txt', parent_id = '{parent}' WHERE file_id = '{file}'"),
+            ] {
+                bridge.db.test_execute(&sql).unwrap();
+            }
+            assert!(bridge.db.is_decidable_parked(&op_id).unwrap(), "{case}: precondition, decidable in its folders");
+            if case.starts_with("trash") {
+                bridge.queue_finder_delete(folder, None).unwrap();
+                assert_eq!(bridge.db.get_file(folder).unwrap().unwrap().status, FileStatus::Trashing);
+            } else if case.starts_with("a folder above marked") {
+                bridge.db.test_execute(&format!("UPDATE files SET status = 'trashing' WHERE file_id = '{folder}'")).unwrap();
+                assert!(bridge.db.list_operations_for_file(folder).unwrap().is_empty(), "precondition: nothing queued on it");
+            } else {
+                bridge
+                    .queue_finder_modify(FinderWriteTarget {
+                        file_id: Some(folder.to_string()),
+                        parent_id: None,
+                        filename: "Docs".to_string(),
+                        rel_path: None,
+                        kind: FinderWriteItemKind::Folder,
+                        contents_path: None,
+                        content_type: None,
+                        base_version_identifier: None,
+                    })
+                    .unwrap();
+                let queued = bridge.db.list_operations_for_file(folder).unwrap();
+                assert_eq!(queued.iter().map(|op| op.kind.clone()).collect::<Vec<_>>(), vec![OperationKind::MoveFile]);
+            }
+            assert_eq!(bridge.db.list_operations_for_file(file).unwrap().len(), 1, "{case}: nothing queued on the file");
+            assert_ne!(bridge.db.get_file(file).unwrap().unwrap().status, FileStatus::Trashing, "{case}: its row not marked");
+            let mut keep = task_2190_keep_into(dir.path());
+            for choice in [ParkedChoice::Local, ParkedChoice::Remote, ParkedChoice::Both] {
+                assert_eq!(
+                    bridge.resolve_parked(&op_id, choice, Some(2), &mut keep, "Mac", "10.00").unwrap(),
+                    ParkedResolution::Moved,
+                    "{case}: {choice:?}"
+                );
+            }
+            let op = bridge.db.get_operation(&op_id).unwrap().unwrap();
+            assert!(
+                op.attempts >= op.max_attempts && op.last_error.as_deref() == Some("stale_base"),
+                "{case}: the upload stays parked: {op:?}"
+            );
+            assert!(Path::new(&staged).exists() && !dir.path().join("kept").exists(), "{case}: nothing changed");
+            let entry = bridge
+                .version_conflict_feed()
+                .unwrap()
+                .into_iter()
+                .find(|entry| entry.op_id.as_deref() == Some(op_id.as_str()));
+            assert_ne!(entry.map(|entry| entry.action), Some("open_conflict".to_string()), "{case}: no decision offered");
+        }
+    }
+
+    /// The walk's depth cap (plan §7.4): folders whose `parent_id`s form a cycle end the walk at the cap,
+    /// and the write is not decidable; nothing loops.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn task_2190_fu2_a_cycle_above_the_file_ends_the_walk_and_is_not_decidable() {
+        let (outer, parent) = ("21900000-0000-4000-8000-000000000064", "21900000-0000-4000-8000-000000000065");
+        let master_key = [244u8; 32];
+        let file = "21900000-0000-4000-8000-000000000063";
+        let (_dir, _sync_root, _server, bridge, op_id, _staged, _token) = task_2190_parked(master_key, file).await;
+        seed_folder_row(&bridge, outer, "Outer");
+        seed_folder_row(&bridge, parent, "Outer/Docs");
+        for sql in [
+            format!("UPDATE files SET parent_id = '{outer}' WHERE file_id = '{parent}'"),
+            format!("UPDATE files SET path = 'Outer/Docs/notes.txt', parent_id = '{parent}' WHERE file_id = '{file}'"),
+        ] {
+            bridge.db.test_execute(&sql).unwrap();
+        }
+        assert!(bridge.db.is_decidable_parked(&op_id).unwrap(), "precondition: decidable under a real chain");
+        bridge.db.test_execute(&format!("UPDATE files SET parent_id = '{parent}' WHERE file_id = '{outer}'")).unwrap();
+        assert!(!bridge.db.is_decidable_parked(&op_id).unwrap(), "a cycle reaches the cap: not decidable");
+    }
+
     /// Review-169 F3: the "Keep both" name is at most 255 bytes (`kept_names::MAX_NAME_BYTES`, as kept
     /// files are) whatever the original, the device or the counter: the stem is cut at a character
     /// boundary, and the suffix and the extension never are.

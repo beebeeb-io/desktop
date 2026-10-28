@@ -502,8 +502,13 @@ const EARLIER_IN_QUEUE_SQL: &str =
 /// review-169 #2); and a file the pull has seen at a version past that base, so "Keep this Mac's" has a
 /// version to rebase on, and that is not being trashed (review-169 F2: a trash from another device, of
 /// the file or of a folder it is in, marks the row `trashing` and queues nothing; a file deleted for
-/// good has no row). The review feed and every decision use this one predicate, so the feed never
-/// offers a choice the decision refuses.
+/// good has no row). No folder above it is being trashed or moved on this Mac either (the lead, after
+/// F2): a local trash marks only the folder's row, and a local trash, move or rename queues on the
+/// folder, never on the file. The walk up `parent_id` is a primary-key lookup per level, and stops at
+/// 512 levels (the walk's depth cap, plan §7.4): macOS paths are at most 1024 bytes (`PATH_MAX`) and every
+/// level takes at least two (`a/`), so no real file nests deeper. A chain that reaches the cap (a cycle in
+/// the rows) is not decidable. The review feed and every decision use this one predicate, so the feed
+/// never offers a choice the decision refuses.
 const DECIDABLE_PARKED_SQL: &str = "this.kind = 'upload_version' AND this.write_id IS NOT NULL
     AND this.last_error_class = 'stale_base' AND this.attempts >= this.max_attempts
     AND this.claim_id IS NULL AND this.base_version IS NOT NULL
@@ -513,7 +518,18 @@ const DECIDABLE_PARKED_SQL: &str = "this.kind = 'upload_version' AND this.write_
                     WHERE later.file_id = this.file_id AND later.op_id != this.op_id AND later.rowid > this.rowid)
     AND EXISTS (SELECT 1 FROM files AS file
                 WHERE file.file_id = this.file_id AND file.current_version > this.base_version
-                  AND file.status != 'trashing')";
+                  AND file.status != 'trashing')
+    AND NOT EXISTS (
+        WITH RECURSIVE above(id, depth) AS (
+            SELECT parent_id, 1 FROM files WHERE file_id = this.file_id
+            UNION ALL
+            SELECT folder.parent_id, above.depth + 1 FROM files AS folder JOIN above ON folder.file_id = above.id
+             WHERE above.depth < 512)
+        SELECT 1 FROM above
+         WHERE above.depth >= 512
+            OR EXISTS (SELECT 1 FROM files AS folder WHERE folder.file_id = above.id AND folder.status = 'trashing')
+            OR EXISTS (SELECT 1 FROM operation_queue AS moving
+                       WHERE moving.file_id = above.id AND moving.kind IN ('trash_file', 'move_file', 'rename_file')))";
 
 /// Task 2190: [`StateDb::list_held_edits`]'s read, kept in one place for its query-plan test.
 const LIST_HELD_EDITS_SQL: &str = "SELECT held.file_id, file.path, held.reason, held.detected_at
