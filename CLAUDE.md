@@ -341,8 +341,9 @@ name decrypts under this session's key; a row not in the tree is gone only when 
 the tree is its own. A name sealed under another key (when the API says nobody else sealed it), or a row
 this account cannot place, blocks; names that prove nothing never outnumber the own ones. Proven, the
 session is recorded as the owner (`StateDb::adopt_owner_holding`) and sync starts through the same
-`spawn_bound_engine`. In the same transaction every queued change the proof cannot tie to an own row is
-held as `found_while_paused` (later changes to those items too, `insert_operation_conn`): never sent and
+`spawn_bound_engine`. In the same transaction every queued change the proof cannot tie to an own row (a
+folder made here whose create never reached the server counts as the server folder at its path, task 1888)
+is held as `found_while_paused` (later changes to those items too, `insert_operation_conn`): never sent and
 never deleted until the person decides in Settings › Sync. "Upload to my Beebeeb" releases them; "Keep on
 this PC only" (`found_while_paused.rs`) MOVES the items made on this PC out of the sync root into
 `Beebeeb - kept on this PC\YYYY-MM-DD` next to it (same volume, rename only, never over a name, journaled

@@ -309,9 +309,9 @@ impl<'a> Judge<'a> {
     }
 
     /// Whether a queued change's anchor (the item it acts on, or the folder it acts in) is this account's proven data:
-    /// the first server-named row up its local parents is in My Files and proven its own (or gone from its own
-    /// folder). An item made on this PC at the top level, or in a folder shared with this account, or in one whose
-    /// name proves nothing, is not.
+    /// the first server-named row up its local parents (or at a local row's own path, its twin) is in My Files and
+    /// proven its own (or gone from its own folder). An item made on this PC at the top level, or in a folder shared
+    /// with this account, or in one whose name proves nothing, is not.
     fn anchor_is_proven(&self, anchor: &'a str) -> bool {
         let mut seen: HashSet<&str> = HashSet::new();
         let mut id = anchor;
@@ -325,6 +325,11 @@ impl<'a> Judge<'a> {
             };
             if row.server_named {
                 return row.my_files && matches!(self.row(row), Probe::Own | Probe::Gone);
+            }
+            // A folder made here whose create never reached the server shares its path with the server's folder
+            // (its twin, task 1888): it is that folder.
+            if let Some(&twin) = self.by_path.get(row.path.trim_matches('/')).filter(|twin| twin.server_named) {
+                return twin.my_files && matches!(self.row(twin), Probe::Own | Probe::Gone);
             }
             match self.parent_of(row) {
                 Some(parent) => id = parent,
@@ -1279,6 +1284,53 @@ mod tests {
 
         assert!(matches!(outcome, Outcome::Adopted(t) if t.proven_changes == 2 && t.held_for_review == 1), "{outcome:?}");
         assert_eq!(held_for_review(&pc), vec!["op-top".to_string()]);
+    }
+
+    /// The maintainer's PC (task 1888): 2,832 folders made here whose create never reached the server share their
+    /// path with the server's own folder (their twin), and the uploads in them name the folder made here as their
+    /// parent. A change there is tied to this account's data through the twin: it is not held. Without this rule all
+    /// 2,984 queued changes on that PC were held for review.
+    #[test]
+    fn a_change_in_a_folder_made_here_whose_server_twin_is_own_is_not_held() {
+        let pc = pc_with(&IDS);
+        add_row_at(&pc, "twin", "Backups", None, Shape::Snapshot, Namespace::MyFiles, ItemKind::Folder);
+        add_row_at(&pc, "ghost", "Backups", None, Shape::Local, Namespace::MyFiles, ItemKind::Folder);
+        add_row_at(&pc, "ghost-sub", "Backups/PC", Some("ghost"), Shape::Local, Namespace::MyFiles, ItemKind::Folder);
+        add_row_at(&pc, "new-file", "Backups/a.txt", Some("twin"), Shape::Local, Namespace::MyFiles, ItemKind::File);
+        pc.db.0.enqueue_operation(&create("op-ghost", "ghost", None, true)).unwrap();
+        pc.db.0.enqueue_operation(&create("op-ghost-sub", "ghost-sub", Some("ghost"), true)).unwrap();
+        pc.db.0.enqueue_operation(&create("op-new-file", "new-file", Some("ghost"), false)).unwrap();
+        adopt_unbound(&pc.db, None).unwrap();
+        let mut tree: Vec<_> = IDS.iter().map(|id| mine(id)).collect();
+        tree.push(mine("twin"));
+
+        let outcome = prove(&pc, &session(), MINE, &Server::new(tree));
+
+        assert!(
+            matches!(outcome, Outcome::Adopted(t) if t.own == 4 && t.proven_changes == 4 && t.held_for_review == 0),
+            "{outcome:?}"
+        );
+        assert!(held_for_review(&pc).is_empty());
+    }
+
+    /// The twin rule proves nothing by itself: a folder made here whose server twin's name proves nothing (or is not
+    /// in this account's tree) keeps its changes held.
+    #[test]
+    fn a_change_in_a_folder_made_here_whose_server_twin_proves_nothing_is_held() {
+        let pc = pc_with(&IDS);
+        add_row_at(&pc, "twin", "Backups", None, Shape::Snapshot, Namespace::MyFiles, ItemKind::Folder);
+        add_row_at(&pc, "ghost", "Backups", None, Shape::Local, Namespace::MyFiles, ItemKind::Folder);
+        add_row_at(&pc, "new-file", "Backups/a.txt", Some("ghost"), Shape::Local, Namespace::MyFiles, ItemKind::File);
+        pc.db.0.enqueue_operation(&create("op-ghost", "ghost", None, true)).unwrap();
+        pc.db.0.enqueue_operation(&create("op-new-file", "new-file", Some("ghost"), false)).unwrap();
+        adopt_unbound(&pc.db, None).unwrap();
+        let mut tree: Vec<_> = IDS.iter().map(|id| mine(id)).collect();
+        tree.push(with(mine("twin"), "name_encrypted", serde_json::json!("Backups")));
+
+        let outcome = prove(&pc, &session(), MINE, &Server::new(tree));
+
+        assert!(matches!(outcome, Outcome::Adopted(t) if t.neutral == 1 && t.held_for_review == 2), "{outcome:?}");
+        assert_eq!(held_for_review(&pc), vec!["op-ghost".to_string(), "op-new-file".to_string()]);
     }
 
     /// A server row with no parent link that is gone from this account's tree is explained by the folder at its path.
