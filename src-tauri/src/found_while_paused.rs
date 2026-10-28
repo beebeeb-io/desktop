@@ -866,6 +866,33 @@ mod tests {
         assert!(pc.on_disk("todo.txt").is_file());
     }
 
+    /// Self-review F3: a change queued after the hold to an item the person has not decided about yet is held too: the
+    /// item saved again, and a new file in a held new folder. A change to anything else is due, and a held change that is
+    /// queued again stays held.
+    #[test]
+    fn a_change_queued_after_the_hold_to_a_held_item_is_held_too() {
+        let pc = Pc::new();
+        pc.new_folder("new-folder", "Trip", None);
+        pc.new_file("new-top", "todo.txt", None, b"todo");
+        pc.queue("op-no-row", OperationKind::CreateFolder, None, None, None);
+        pc.hold_all();
+        assert_eq!(pc.held(), strings(&["op-new-folder", "op-new-top", "op-no-row"]), "precondition");
+
+        pc.queue("op-saved-again", OperationKind::UploadVersion, Some("new-top"), None, None);
+        pc.queue("op-new-inside", OperationKind::UploadVersion, Some("new-inside"), Some("new-folder"), None);
+        pc.queue("op-new-top", OperationKind::UploadVersion, Some("new-top"), None, None);
+        pc.queue("op-no-row", OperationKind::CreateFolder, None, None, None);
+        pc.queue("op-elsewhere", OperationKind::UploadVersion, Some("own-file"), Some("own-folder"), None);
+
+        assert_eq!(
+            pc.held(),
+            strings(&["op-new-folder", "op-new-inside", "op-new-top", "op-no-row", "op-saved-again"]),
+            "held: what acts on a held item, and a held change queued again"
+        );
+        let due: Vec<String> = pc.db.list_due_operations(i64::MAX).unwrap().into_iter().map(|op| op.op_id).collect();
+        assert_eq!(due, strings(&["op-elsewhere"]), "a change to anything else is due");
+    }
+
     /// The real scan of the Beebeeb folder, as the watcher runs it.
     fn scan(pc: &Pc) {
         let api = Arc::new(crate::api_client::ApiClient::new("https://api.invalid".into(), "token".into(), [17u8; 32]));

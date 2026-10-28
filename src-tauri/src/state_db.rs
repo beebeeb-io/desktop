@@ -1411,13 +1411,20 @@ fn finder_accepts_closed_conn(conn: &Connection) -> Result<bool> {
 
 /// [`StateDb::enqueue_operation`]'s insert on an open connection or transaction: a new op, or an op with the same id
 /// replaced.
+/// Queue `op`, or replace the op with its id. Task 2267 (self-review F3): an op acting on an item whose changes are held
+/// for the person's decision (`found_while_paused`: the item itself, or the folder it is in) is held with them, and a
+/// held op queued again stays held, so nothing of that item is sent before the person decides.
 fn insert_operation_conn(conn: &Connection, op: &PendingOperation) -> Result<()> {
     conn.execute(
         "INSERT INTO operation_queue (
                 op_id, kind, file_id, parent_id, target_path, metadata_json, payload_path,
                 base_version, base_object_version_id, attempts, max_attempts, next_retry_at,
                 last_error, last_error_class, paused_reason, backup_source_key, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL, NULL, ?14, ?15, ?16)
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL,
+                CASE WHEN EXISTS (SELECT 1 FROM operation_queue held
+                                  WHERE held.paused_reason = ?17 AND held.file_id IN (?3, ?4))
+                     THEN ?17 END,
+                ?14, ?15, ?16)
              ON CONFLICT(op_id) DO UPDATE SET
                 kind = excluded.kind,
                 file_id = excluded.file_id,
@@ -1432,7 +1439,7 @@ fn insert_operation_conn(conn: &Connection, op: &PendingOperation) -> Result<()>
                 next_retry_at = excluded.next_retry_at,
                 last_error = excluded.last_error,
                 last_error_class = excluded.last_error_class,
-                paused_reason = excluded.paused_reason,
+                paused_reason = CASE WHEN operation_queue.paused_reason = ?17 THEN ?17 ELSE excluded.paused_reason END,
                 backup_source_key = excluded.backup_source_key,
                 updated_at = excluded.updated_at",
         params![
@@ -1451,7 +1458,8 @@ fn insert_operation_conn(conn: &Connection, op: &PendingOperation) -> Result<()>
             op.last_error,
             op.backup_source_key,
             op.created_at,
-            op.updated_at
+            op.updated_at,
+            OperationPauseReason::FoundWhilePaused.as_str()
         ],
     )?;
     Ok(())
@@ -6728,6 +6736,7 @@ impl StateDb {
 
     /// Task 2267 (fix round 2), "Upload to my Beebeeb": every change held as `found_while_paused` is due again at
     /// `now`, keeping its attempts. Returns how many.
+    #[cfg(any(target_os = "windows", test))]
     pub fn release_found_while_paused(&self, now: i64) -> Result<usize> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.execute(

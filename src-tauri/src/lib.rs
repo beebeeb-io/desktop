@@ -7771,10 +7771,16 @@ fn session_still_active(app: &tauri::AppHandle, acct: &Arc<account::AccountRunti
             .is_ok_and(|active| Arc::ptr_eq(&active, acct))
 }
 
-/// How long the proof waits for the listing of this account's tree (one request; the client's own timeout bounds each
-/// attempt too). A Lock or a sign-out does not wait for it: they stop the proof first.
+/// How long the proof waits for the whole listing of this account's tree (the snapshot, then the trash, with the
+/// client's retries). A Lock or a sign-out does not wait for it: they stop the proof first.
 #[cfg(target_os = "windows")]
-const LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+const LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Self-review F5: how long one request of the proof's listing may take. The snapshot is the whole tree in one response,
+/// so the app's 30 s per request would refuse a large tree on a slow link every time, and say "connect to the internet"
+/// to someone who is online. Nobody waits on the proof (it runs in the background, and a Lock or a sign-out stops it).
+#[cfg(target_os = "windows")]
+const PROOF_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// The proof for the session read at `turn`, with its keys and identity read together as an engine start reads them.
 /// A session that changes stops the asking and records nothing (`session_still_active`). With no answer at all the
@@ -7797,7 +7803,10 @@ async fn prove_own_data_of_session(
     let Some(db) = state_db_from_state_dir(&paths.state_dir)? else {
         return Ok(own_data_proof::Outcome::NotEligible);
     };
-    let api = Arc::new(api_client::ApiClient::new(runner::api_base_url(), String::clone(&token), *key));
+    let api = Arc::new(
+        api_client::ApiClient::new(runner::api_base_url(), String::clone(&token), *key)
+            .with_request_timeout(PROOF_REQUEST_TIMEOUT),
+    );
     windows_cf::track_credentials(&api);
     let outcome = own_data_proof::prove_and_adopt(
         &db,
@@ -7806,10 +7815,16 @@ async fn prove_own_data_of_session(
         || {
             let api = Arc::clone(&api);
             async move {
-                match tokio::time::timeout(LIST_TIMEOUT, api.sync_snapshot()).await {
-                    Ok(result) => own_data_proof::listing(result),
-                    Err(_) => own_data_proof::Listing::Unavailable,
-                }
+                let listed = tokio::time::timeout(LIST_TIMEOUT, async {
+                    let snapshot = api.sync_snapshot().await;
+                    let trashed = match &snapshot {
+                        Ok(_) => api.list_trashed_files_all().await,
+                        Err(_) => Ok(Vec::new()),
+                    };
+                    own_data_proof::listing_of(snapshot, trashed)
+                })
+                .await;
+                listed.unwrap_or(own_data_proof::Listing::Unavailable)
             }
         },
         || session_still_active(app, acct, turn),
@@ -27640,8 +27655,13 @@ mod account_binding_tests {
         for step in [
             "keys_for_engine_start(acct)",
             "own_data_proof::prove_and_adopt(",
-            // Fix round 2 (review P2-1): ONE listing of this account's tree, bounded.
-            "tokio::time::timeout(LIST_TIMEOUT, api.sync_snapshot())",
+            // Fix round 2 (review P2-1): this account's tree, bounded; self-review F2: its trash too.
+            "tokio::time::timeout(LIST_TIMEOUT,",
+            "api.sync_snapshot().await",
+            "api.list_trashed_files_all().await",
+            "own_data_proof::listing_of(",
+            // Self-review F5: the proof's own client waits longer than the app's 30 s per request.
+            ".with_request_timeout(PROOF_REQUEST_TIMEOUT)",
             // Review P2-2: the proof's client is one a Lock or a sign-out waits for.
             "windows_cf::track_credentials(&api);",
             "|| session_still_active(app, acct, turn)",
@@ -27674,6 +27694,16 @@ mod account_binding_tests {
         }
         let stops = squeeze(&code_of(&production, "fn stop_own_data_proofs("));
         assert!(stops.contains(".abort()"), "{stops}");
+    }
+
+    /// Self-review F5: the proof's listing is not bounded by the app's 30 s per request. A large tree on a slow link has
+    /// minutes (a Lock or a sign-out stops the proof at once anyway), and the whole listing has room for more than one.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_proofs_listing_has_minutes_not_the_apps_thirty_seconds() {
+        assert!(PROOF_REQUEST_TIMEOUT >= std::time::Duration::from_secs(300), "{PROOF_REQUEST_TIMEOUT:?}");
+        assert!(PROOF_REQUEST_TIMEOUT.as_secs() > crate::link_health::API_REQUEST_TIMEOUT_SECS);
+        assert!(LIST_TIMEOUT >= PROOF_REQUEST_TIMEOUT * 2, "{LIST_TIMEOUT:?}");
     }
 
     /// Task 2267 (fix round 2): what Settings › Sync decides about the changes found while sync was paused. A keep a
