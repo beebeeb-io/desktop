@@ -92,6 +92,7 @@ pub(crate) struct Request<'a> {
     pub file_key: &'a beebeeb_core::kdf::FileKey,
     /// The metadata's chunk count; the grant manifest must agree.
     pub chunk_count: u32,
+    pub expected_format: beebeeb_core::chunk_stream::ExpectedChunkFormat,
     /// The user's download ceiling in KB/s (`0`: none), as on the API path.
     pub download_kbps_limit: u64,
     /// Sizes the plaintext buffer only.
@@ -228,6 +229,8 @@ pub(crate) async fn download(
     let mut tasks: FuturesUnordered<Task<'_>> = FuturesUnordered::new();
     let mut ready: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
     let mut plaintext: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(request.approx_size));
+    let mut reader = beebeeb_core::chunk_stream::ChunkDecryptor::for_push_with_file_key(
+        beebeeb_core::kdf::FileKey::from_bytes(*request.file_key.as_bytes()), request.file_id, request.expected_format);
     let mut geometry_checked = false;
     // Chunks that came through the pinned API route instead of storage.
     let mut api_chunks: u32 = 0;
@@ -285,6 +288,7 @@ pub(crate) async fn download(
                         } else {
                             FileTransport::Direct
                         };
+                        reader.finish().map_err(|_| DirectError::Corrupt)?;
                         return Ok(Outcome::Done { plaintext, transport });
                     }
                     dt::Poll::Stop(verdict) => {
@@ -419,7 +423,7 @@ pub(crate) async fn download(
         loop {
             let next = planner.consumed_count();
             let Some(frame) = ready.remove(&next) else { break };
-            match crate::engine_bridge::decrypt_downloaded_chunk(request.file_key, &frame) {
+            match crate::engine_bridge::content_frame(&frame).and_then(|frame| reader.push_frame(&frame).map(|opened| opened.data).map_err(Into::into)) {
                 Ok(mut chunk) => {
                     plaintext.extend_from_slice(&chunk);
                     chunk.zeroize();
@@ -1144,6 +1148,7 @@ mod tests {
             Request {
                 file_id: FILE_ID,
                 file_key: &key,
+                expected_format: beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
                 chunk_count,
                 download_kbps_limit: kbps,
                 approx_size: SIZE,
@@ -1336,6 +1341,7 @@ mod tests {
             Request {
                 file_id: FILE_ID,
                 file_key: &key,
+                expected_format: beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
                 chunk_count: 12,
                 download_kbps_limit: 0,
                 approx_size: SIZE,
@@ -1555,6 +1561,7 @@ mod tests {
             Request {
                 file_id: FILE_ID,
                 file_key: &key,
+                expected_format: beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
                 chunk_count: pin.chunk_count,
                 download_kbps_limit: 0,
                 approx_size: SIZE,

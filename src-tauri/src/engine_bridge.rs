@@ -1660,7 +1660,12 @@ impl EngineBridge {
                 && previous.chunk_count > 0
                 && previous.acked_chunks >= 0
                 && previous.acked_chunks <= previous.chunk_count;
-            if same_payload {
+            let v2 = owned_key_and_pin(&self.db, self.api.master_key(), &previous.server_file_id)?.1
+                == beebeeb_core::chunk_stream::ExpectedChunkFormat::V2;
+            if same_payload && v2 {
+                // A fresh core writer has a fresh stream identity. Never append it to an old v2 stream.
+                // Fresh init can refuse a live lease; preserve the old resume record until it succeeds.
+            } else if same_payload {
                 tracing::info!(
                     op_id = %op.op_id,
                     file_id = %previous.server_file_id,
@@ -1889,6 +1894,7 @@ impl EngineBridge {
             _ => None,
         };
         let master_key = self.api.master_key();
+        let landing_material = owned_key_and_pin(&self.db, master_key, server_file_id)?;
         let landed = self.db.apply_landing(
             &crate::state_db::LandingInput {
                 op_id: &op.op_id,
@@ -1910,7 +1916,8 @@ impl EngineBridge {
                 finalization: finalization.as_ref(),
                 now: now_secs(),
             },
-            &|queued, server_id| metadata_rekeyed_to(master_key, queued, server_id),
+            &|queued, server_id| metadata_rekeyed_with_material(master_key, queued, server_id,
+                (server_id == server_file_id).then_some((&landing_material.0, landing_material.1))),
         );
         // Nothing landed: the op is still queued, and the refusal is the queue's again.
         let landed = match landed {
@@ -1936,7 +1943,7 @@ impl EngineBridge {
         if let Some(path) = payload_path.as_deref() {
             // Task 1700: post-complete thumbnail work never fails the upload, but its
             // failure is surfaced on the outcome so a red run names the real error.
-            let file_key = file_key_for(self.api.master_key(), server_file_id);
+            let file_key = owned_key_and_pin(&self.db, self.api.master_key(), server_file_id)?.0;
             match self
                 .finish_completed_upload(op, server_file_id, Path::new(path), content_type, &file_key, sync_root)
                 .await
@@ -1983,8 +1990,8 @@ impl EngineBridge {
         let server_file_id = session.server_file_id.clone();
         if !session.metadata_applied {
             let effective_name_encrypted = if server_file_id != local_file_id {
-                encrypted_metadata_for_name(
-                    self.api.master_key(),
+                owned_metadata_for_name(
+                    &self.db, self.api.master_key(),
                     &server_file_id,
                     metadata_display_name(metadata, op)
                         .as_deref()
@@ -2004,20 +2011,20 @@ impl EngineBridge {
             self.db.set_upload_resume_metadata_applied(&op.op_id)?;
         }
 
-        let file_key = file_key_for(self.api.master_key(), &server_file_id);
+        let (file_key, pin) = owned_key_and_pin(&self.db, self.api.master_key(), &server_file_id)?;
 
-        let mut file = std::fs::File::open(payload_path)?;
+        let file = std::fs::File::open(payload_path)?;
         let chunk_size = session.chunk_size_bytes as usize;
         let chunk_count = session.chunk_count as u64;
         if chunk_size == 0 || chunk_count == 0 {
             return Err(anyhow::anyhow!("upload init returned invalid chunk plan"));
         }
         let first_chunk = session.acked_chunks.max(0) as u64;
-        if first_chunk > 0 {
-            use std::io::Seek;
-            file.seek(std::io::SeekFrom::Start(first_chunk * chunk_size as u64))?;
-        }
-        let mut buffer = vec![0u8; chunk_size];
+        anyhow::ensure!(first_chunk == 0 || pin != beebeeb_core::chunk_stream::ExpectedChunkFormat::V2,
+            "a v2 upload must restart in a fresh session");
+        let mut writer = beebeeb_core::chunk_stream::ChunkEncryptor::from_reader_with_file_key(
+            file_key, &server_file_id, session.payload_size as u64, chunk_size as u64, file)?
+            .with_recorded_pin(pin)?;
         // Task 1683 slice 2: per-file bytes for the popover. Keyed by the LOCAL file
         // id (the `files` row the activity list reads); a resumed session starts at
         // its acknowledged watermark, not at 0.
@@ -2036,22 +2043,13 @@ impl EngineBridge {
             .map(|c| c.upload_kbps_limit)
             .unwrap_or(0);
 
-        for chunk_index in first_chunk..chunk_count {
-            let read = read_full_chunk(&mut file, &mut buffer)?;
-            // A zero-length read is only legitimate for the single chunk of an
-            // empty file; anywhere else the staged payload is truncated.
-            if read == 0 && session.payload_size > 0 {
-                return Err(anyhow::anyhow!(
-                    "staged upload ended before expected chunk {} of {}",
-                    chunk_index + 1,
-                    chunk_count
-                ));
-            }
-            let encrypted = beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, &buffer[..read])
-                .map_err(|e| anyhow::anyhow!("encrypt upload chunk {chunk_index}: {e}"))?;
+        for chunk_index in 0..chunk_count {
+            let encrypted = writer.next_chunk()?.ok_or_else(|| anyhow::anyhow!("staged upload ended early"))?;
+            if chunk_index < first_chunk { continue; }
+            let read = encrypted.data.len().saturating_sub(28);
             let chunk_start = std::time::Instant::now();
             self.api
-                .upload_session_chunk(&session.upload_session_id, chunk_index as u32, &encrypted)
+                .upload_session_chunk(&session.upload_session_id, chunk_index as u32, &encrypted.data)
                 .await?;
             self.db.set_upload_resume_acked(&op.op_id, chunk_index as i64 + 1)?;
             progress.update(crate::transfer_progress::uploaded_bytes(
@@ -2077,6 +2075,7 @@ impl EngineBridge {
             }
         }
 
+        writer.finish()?;
         let completed = self.api.complete_upload_session(&session.upload_session_id).await;
         if completed.is_ok() {
             progress.finish();
@@ -2484,7 +2483,7 @@ impl EngineBridge {
                     file_id,
                     rel_path,
                 } = start;
-                let metadata = encrypted_metadata_for_name(self.api.master_key(), &file_id, &target.filename, None)?;
+                let metadata = owned_metadata_for_name(&self.db, self.api.master_key(), &file_id, &target.filename, None)?;
                 // Spec §7.2 (final review): an extension's create names its folder by parent
                 // only, so the row takes the full relative path under that parent, as every
                 // Finder writer does. A caller's own relative path (the watcher's) is kept.
@@ -2643,7 +2642,7 @@ impl EngineBridge {
             .content_type
             .as_deref()
             .or_else(|| beebeeb_core::media::guess_mime_type(&target.filename));
-        let name_encrypted = encrypted_metadata_for_name(self.api.master_key(), &file_id, &target.filename, mime)?;
+        let name_encrypted = owned_metadata_for_name(&self.db, self.api.master_key(), &file_id, &target.filename, mime)?;
         let row = FileEntry {
             file_id: file_id.clone(),
             // FULL relative key (e.g. `docs/a.txt`), so a nested file's
@@ -3007,8 +3006,8 @@ impl EngineBridge {
         target: &FinderWriteTarget,
         item_contract: Option<&crate::state_db::FileContractState>,
     ) -> anyhow::Result<(OperationKind, serde_json::Value)> {
-        let name_encrypted = encrypted_metadata_for_name(
-            self.api.master_key(),
+        let name_encrypted = owned_metadata_for_name(
+            &self.db, self.api.master_key(),
             file_id,
             &target.filename,
             target.content_type.as_deref(),
@@ -3123,7 +3122,7 @@ impl EngineBridge {
             .content_type
             .as_deref()
             .or_else(|| beebeeb_core::media::guess_mime_type(&target.filename));
-        let name_encrypted = encrypted_metadata_for_name(self.api.master_key(), file_id, &target.filename, mime)?;
+        let name_encrypted = owned_metadata_for_name(&self.db, self.api.master_key(), file_id, &target.filename, mime)?;
         let mut payload = serde_json::json!({
             "operation": "upload_version",
             "name_encrypted": name_encrypted,
@@ -4652,7 +4651,7 @@ impl EngineBridge {
     /// [`Zeroizing`] wrapper so the allocation is wiped on drop regardless of
     /// which exit path is taken (normal return, early `?`, or a panic unwind).
     ///
-    /// Intermediate per-chunk buffers from `decrypt_downloaded_chunk` are
+    /// Intermediate per-chunk buffers from core are
     /// explicitly zeroized after being copied into the accumulator, so at most
     /// one extra chunk's worth of plaintext is live in memory at any time.
     ///
@@ -4660,22 +4659,17 @@ impl EngineBridge {
     /// need the bytes on disk (`hydrate_file`) or in memory (`hydrate_file_to_memory`)
     /// handle that themselves so the disk-write decision stays at the call site,
     /// not buried inside the crypto loop.
-    fn owned_file_key(&self, file_id: &str) -> beebeeb_core::kdf::FileKey {
-        let mk_bytes: [u8; 32] = *self.api.master_key();
-        let master_key = beebeeb_core::kdf::MasterKey::from_bytes(mk_bytes);
-        beebeeb_core::kdf::derive_file_key(&master_key, file_id.as_bytes())
-    }
-
-    pub async fn encrypt_owned_name(&self, file_id: &str, name: &str, _pin: beebeeb_core::chunk_stream::ExpectedChunkFormat) -> anyhow::Result<String> {
-        encrypted_metadata_for_name(self.api.master_key(), file_id, name, None)
+    pub async fn encrypt_owned_name(&self, file_id: &str, name: &str, pin: beebeeb_core::chunk_stream::ExpectedChunkFormat) -> anyhow::Result<String> {
+        let key = self.resolved_owned_key(file_id).await?;
+        Ok(beebeeb_core::encrypt::encrypt_name_for(&key, name, None, pin)?)
     }
 
     async fn file_key_for_download(&self, file_id: &str) -> anyhow::Result<beebeeb_core::kdf::FileKey> {
         let Some(contract) = self.db.get_file_contract_state(file_id)? else {
-            return Ok(self.owned_file_key(file_id));
+            return self.resolved_owned_key(file_id).await.map(|key| beebeeb_core::kdf::FileKey::from_bytes(*key.as_bytes()));
         };
         if contract.namespace != Namespace::SharedWithMe {
-            return Ok(self.owned_file_key(file_id));
+            return self.resolved_owned_key(file_id).await.map(|key| beebeeb_core::kdf::FileKey::from_bytes(*key.as_bytes()));
         }
         if !contract.can_read() {
             anyhow::bail!("shared item is not readable");
@@ -4829,6 +4823,7 @@ impl EngineBridge {
         };
 
         let file_key = self.file_key_for_download(file_id).await?;
+        let expected_format = recorded_content_format(&file_key, meta)?;
 
         // Rate-limit ceiling for downloads, and the transport (task 2173).
         let config = crate::config::DesktopConfig::load().ok();
@@ -4857,6 +4852,7 @@ impl EngineBridge {
                 file_id,
                 file_key: &file_key,
                 chunk_count,
+                expected_format,
                 download_kbps_limit,
                 approx_size,
                 pin: pin.as_ref(),
@@ -4881,6 +4877,8 @@ impl EngineBridge {
                     approx_size,
                     progress,
                     pin.as_ref(),
+                    expected_format,
+                    chunk_count,
                 )
                 .await?,
                 crate::direct_download::FileTransport::Api,
@@ -4938,35 +4936,9 @@ impl EngineBridge {
     /// Task 1643: with a `pin`, every chunk request carries the pinned version's id and every chunk's
     /// wire size must be the manifest's; a 409 comes back as [`crate::download_pin::VersionGone`].
     /// Without one (a legacy file) the requests are today's unpinned ones.
-    #[allow(clippy::too_many_arguments)]
-    async fn download_and_decrypt_chunk_range(
-        &self,
-        file_id: &str,
-        file_key: &beebeeb_core::kdf::FileKey,
-        range: std::ops::Range<u32>,
-        download_kbps_limit: u64,
-        approx_size_hint: usize,
-        progress: Option<&HydrateProgressFn>,
-        pin: Option<&crate::download_pin::PinnedVersion>,
-    ) -> anyhow::Result<Zeroizing<Vec<u8>>> {
-        let mut acc: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(approx_size_hint));
-        // Task 1670 issue 3: tell the caller (the macOS IPC handler, which
-        // forwards it to Finder's progress bar) how far along we are. `total`
-        // is the size hint (server's plaintext size); the initial 0/total
-        // report lets the UI switch from indeterminate to determinate before
-        // the first chunk lands.
-        let total = approx_size_hint as u64;
-        // Task 1683 slice 2: the board first, so a caller that reads it from inside its
-        // own callback sees the same bytes it was just told about. A no-op for a file
-        // that is not registered (a partial range read).
-        self.transfers.report(file_id, 0, total);
-        if let Some(report) = progress {
-            report(0, total);
-        }
-
-        for i in range {
-            let chunk_start = std::time::Instant::now();
-            let chunk_bytes = match pin {
+    async fn download_content_frame(&self, file_id: &str, i: u32,
+        pin: Option<&crate::download_pin::PinnedVersion>) -> anyhow::Result<Vec<u8>> {
+        Ok(match pin {
                 // Task 1643: the pinned route (shared with the direct path's fallback): exactly the manifest's
                 // length, a transient failure tried again, a 409 = the version is gone, no URL in an error.
                 Some(pin) => {
@@ -4987,13 +4959,61 @@ impl EngineBridge {
                         })?
                 }
                 None => self.api.download_chunk(file_id, i).await?,
-            };
+        })
+
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn download_and_decrypt_chunk_range(
+        &self,
+        file_id: &str,
+        file_key: &beebeeb_core::kdf::FileKey,
+        range: std::ops::Range<u32>,
+        download_kbps_limit: u64,
+        approx_size_hint: usize,
+        progress: Option<&HydrateProgressFn>,
+        pin: Option<&crate::download_pin::PinnedVersion>,
+        expected: beebeeb_core::chunk_stream::ExpectedChunkFormat,
+        chunk_count: u32,
+    ) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+        let mut acc: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(approx_size_hint));
+        // Task 1670 issue 3: tell the caller (the macOS IPC handler, which
+        // forwards it to Finder's progress bar) how far along we are. `total`
+        // is the size hint (server's plaintext size); the initial 0/total
+        // report lets the UI switch from indeterminate to determinate before
+        // the first chunk lands.
+        let total = approx_size_hint as u64;
+        // Task 1683 slice 2: the board first, so a caller that reads it from inside its
+        // own callback sees the same bytes it was just told about. A no-op for a file
+        // that is not registered (a partial range read).
+        self.transfers.report(file_id, 0, total);
+        if let Some(report) = progress {
+            report(0, total);
+        }
+
+        // Public ChunkDecryptor delegates to core's StreamOpener; desktop owns no crypto.
+        let whole = range.start == 0 && range.end == chunk_count;
+        let mut reader = beebeeb_core::chunk_stream::ChunkDecryptor::for_push_with_file_key(
+            beebeeb_core::kdf::FileKey::from_bytes(*file_key.as_bytes()), file_id, expected);
+        let context = if whole { None } else {
+            let first = self.download_content_frame(file_id, 0, pin).await?;
+            let mut opened = reader.push_frame(&content_frame(&first)?)?;
+            opened.data.zeroize();
+            Some((reader.format().ok_or_else(|| anyhow::anyhow!("missing chunk format"))?, reader.version_id()))
+        };
+        for i in range {
+            let chunk_start = std::time::Instant::now();
+            let chunk_bytes = self.download_content_frame(file_id, i, pin).await?;
             let wire_len = chunk_bytes.len() as u64;
             // Decrypt into a temporary buffer, copy into the accumulator,
             // then zeroize the temporary. This limits live plaintext to
             // the accumulator + one chunk at any moment.
-            let mut decrypted = decrypt_downloaded_chunk(file_key, &chunk_bytes)
-                .map_err(|e| anyhow::anyhow!("decrypt chunk {i}: {e}"))?;
+            let frame = content_frame(&chunk_bytes)?;
+            let mut decrypted = if let Some((format, version)) = context {
+                beebeeb_core::chunk_stream::open_chunk(file_key, file_id,
+                    version.as_ref().map(|v| v.as_slice()).unwrap_or(&[]), i,
+                    i + 1 == chunk_count, format, &frame)?
+            } else { reader.push_frame(&frame)?.data };
             acc.extend_from_slice(&decrypted);
             decrypted.zeroize();
             self.transfers.report(file_id, acc.len() as u64, total);
@@ -5017,6 +5037,7 @@ impl EngineBridge {
             }
         }
 
+        if whole { reader.finish()?; }
         Ok(acc)
     }
 
@@ -5132,6 +5153,7 @@ impl EngineBridge {
         self.db.set_status(file_id, FileStatus::Downloading)?;
 
         let file_key = self.file_key_for_download(file_id).await?;
+        let expected_format = recorded_content_format(&file_key, meta)?;
         let download_kbps_limit = crate::config::DesktopConfig::load()
             .map(|c| c.download_kbps_limit)
             .unwrap_or(0);
@@ -5146,6 +5168,8 @@ impl EngineBridge {
                 plan.covering_span_hint,
                 None,
                 pin.as_ref(),
+                expected_format,
+                chunk_count as u32,
             )
             .await
             .and_then(|data| {
@@ -5195,7 +5219,7 @@ impl EngineBridge {
     /// directly by the per-file key, with no AAD and no JSON. This differs from
     /// file *chunks* (which are the `EncryptedBlob` JSON / `decrypt_chunk_raw`
     /// frame), so this path decrypts the blob directly rather than going through
-    /// [`decrypt_downloaded_chunk`].
+    /// core’s purpose-specific thumbnail reader.
     ///
     /// ## Zero-knowledge
     ///
@@ -5210,37 +5234,10 @@ impl EngineBridge {
     /// caller can fall back to the file-type icon — it is never reported as a
     /// success with empty bytes.
     pub async fn fetch_thumbnail_to_memory(&self, file_id: &str, variant: &str) -> anyhow::Result<Zeroizing<Vec<u8>>> {
-        use aes_gcm::aead::Aead;
-        use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
-
-        // Validate the id shape up front (same guard as do_hydrate).
-        let _file_uuid: uuid::Uuid = file_id
-            .parse()
-            .map_err(|e| anyhow::anyhow!("invalid file_id (not a UUID): {e}"))?;
-
-        // Pull the encrypted thumbnail blob. A 404 (no thumbnail) is an Err here
-        // and the COM caller maps it to the type-icon fallback.
+        let _: uuid::Uuid = file_id.parse()?;
         let blob = self.api.download_thumbnail(file_id, variant).await?;
-        if blob.len() < 12 + 16 {
-            // Must hold at least a 12-byte nonce + 16-byte GCM tag.
-            anyhow::bail!("thumbnail blob too short ({} bytes)", blob.len());
-        }
-
-        let file_key = self.file_key_for_download(file_id).await?;
-
-        // Split nonce || ciphertext+tag and AES-256-GCM decrypt with no AAD.
-        let (nonce_bytes, ciphertext) = blob.split_at(12);
-        let cipher = Aes256Gcm::new_from_slice(file_key.as_bytes())
-            .map_err(|e| anyhow::anyhow!("init thumbnail cipher: {e}"))?;
-        let nonce = Nonce::from_slice(nonce_bytes);
-        let plaintext = cipher
-            .decrypt(nonce, ciphertext)
-            // The error type carries no plaintext; a generic message avoids
-            // leaking anything about the ciphertext.
-            .map_err(|_| anyhow::anyhow!("thumbnail decrypt failed (bad key or corrupt blob)"))?;
-
-        // Hand the decoded image bytes back wrapped so they are wiped on drop.
-        Ok(Zeroizing::new(plaintext))
+        let key = self.file_key_for_download(file_id).await?;
+        Ok(Zeroizing::new(beebeeb_core::encrypt::decrypt_thumbnail(&key, &blob)?))
     }
 
     /// Apply a "Keep Mine" resolution: stage the current local bytes and upload
@@ -5270,7 +5267,7 @@ impl EngineBridge {
             .and_then(|contract| contract.content_type.clone())
             .or_else(|| beebeeb_core::media::guess_mime_type(&file_name).map(str::to_string));
         let name_encrypted =
-            encrypted_metadata_for_name(self.api.master_key(), file_id, &file_name, content_type.as_deref())?;
+            owned_metadata_for_name(&self.db, self.api.master_key(), file_id, &file_name, content_type.as_deref())?;
 
         let local_path = local_file_path_under_sync_root(sync_root, &entry.path)?;
         let staged =
@@ -6124,6 +6121,20 @@ pub fn version_conflict_feed_from_db(db: &StateDb) -> anyhow::Result<Vec<Version
     Ok(entries)
 }
 
+fn owned_key_and_pin(db: &StateDb, master: &[u8; 32], id: &str)
+    -> anyhow::Result<(beebeeb_core::kdf::FileKey, beebeeb_core::chunk_stream::ExpectedChunkFormat)> {
+    if let Some(record) = db.get_owned_key_record(id)? {
+        let (key, metadata) = crate::owner_keys::record_key(&beebeeb_core::kdf::MasterKey::from_bytes(*master), &record)?;
+        return Ok((key, metadata.chunk_format));
+    }
+    Ok((file_key_for(master, id), beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded))
+}
+
+fn owned_metadata_for_name(db: &StateDb, master: &[u8; 32], id: &str, name: &str, mime: Option<&str>) -> anyhow::Result<String> {
+    let (key, pin) = owned_key_and_pin(db, master, id)?;
+    Ok(beebeeb_core::encrypt::encrypt_name_for(&key, name, mime, pin)?)
+}
+
 fn encrypted_metadata_for_name(
     master_key_bytes: &[u8; 32],
     file_id: &str,
@@ -6973,6 +6984,10 @@ fn log_parked_attempts_used_up(op_id: &str, file_id: Option<&str>) {
 /// is the op's content type, else the one guessed from the name, as the
 /// Finder write path does.
 fn metadata_rekeyed_to(master_key: &[u8; 32], op: &PendingOperation, file_id: &str) -> anyhow::Result<Option<String>> {
+    metadata_rekeyed_with_material(master_key, op, file_id, None)
+}
+
+fn metadata_rekeyed_with_material(master_key: &[u8; 32], op: &PendingOperation, file_id: &str, material: Option<(&beebeeb_core::kdf::FileKey, beebeeb_core::chunk_stream::ExpectedChunkFormat)>) -> anyhow::Result<Option<String>> {
     let Some(raw) = op.metadata_json.as_deref() else {
         return Ok(None);
     };
@@ -6990,12 +7005,10 @@ fn metadata_rekeyed_to(master_key: &[u8; 32], op: &PendingOperation, file_id: &s
         .as_str()
         .map(str::to_string)
         .or_else(|| beebeeb_core::media::guess_mime_type(&name).map(str::to_string));
-    metadata["name_encrypted"] = serde_json::json!(encrypted_metadata_for_name(
-        master_key,
-        file_id,
-        &name,
-        mime.as_deref()
-    )?);
+    metadata["name_encrypted"] = serde_json::json!(match material {
+        Some((key, pin)) => beebeeb_core::encrypt::encrypt_name_for(key, &name, mime.as_deref(), pin)?,
+        None => encrypted_metadata_for_name(master_key, file_id, &name, mime.as_deref())?,
+    });
     Ok(Some(serde_json::to_string(&metadata)?))
 }
 
@@ -7030,17 +7043,20 @@ fn metadata_display_name(metadata: &serde_json::Value, op: &PendingOperation) ->
         .or_else(|| op.target_path.as_deref().map(display_name_for_path))
 }
 
-pub(crate) fn decrypt_downloaded_chunk(
-    file_key: &beebeeb_core::kdf::FileKey,
-    chunk_bytes: &[u8],
-) -> Result<Vec<u8>, beebeeb_core::CoreError> {
-    match beebeeb_core::encrypt::decrypt_chunk_raw(file_key, chunk_bytes) {
-        Ok(bytes) => Ok(bytes),
-        Err(raw_error) => {
-            let blob: EncryptedBlob = serde_json::from_slice(chunk_bytes).map_err(|_| raw_error)?;
-            beebeeb_core::encrypt::decrypt_chunk(file_key, &blob)
-        }
-    }
+/// Normalize the legacy JSON transport envelope, without decryption or format fallback.
+pub(crate) fn content_frame(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
+    if let Ok(blob) = serde_json::from_slice::<EncryptedBlob>(bytes) {
+        anyhow::ensure!(blob.nonce.len() == 12, "invalid chunk envelope");
+        let mut frame = blob.nonce;
+        frame.extend(blob.ciphertext);
+        Ok(frame)
+    } else { Ok(bytes.to_vec()) }
+}
+
+fn recorded_content_format(key: &beebeeb_core::kdf::FileKey, meta: &serde_json::Value)
+    -> anyhow::Result<beebeeb_core::chunk_stream::ExpectedChunkFormat> {
+    let name = meta["name_encrypted"].as_str().ok_or_else(|| anyhow::anyhow!("missing authenticated file metadata"))?;
+    Ok(beebeeb_core::encrypt::decrypt_file_metadata_with_key(key, name)?.chunk_format)
 }
 
 /// The result of [`EngineBridge::hydrate_file_range`]: the decrypted plaintext
@@ -8406,24 +8422,7 @@ fn metadata_name_from_plaintext(plaintext: &str) -> String {
 }
 
 fn decrypt_shared_name_with_key(file_key: &beebeeb_core::kdf::FileKey, name_encrypted: &str) -> Option<String> {
-    if let Ok(blob) = serde_json::from_str::<EncryptedBlob>(name_encrypted)
-        && let Ok(plaintext) = beebeeb_core::encrypt::decrypt_metadata(file_key, &blob)
-    {
-        return Some(metadata_name_from_plaintext(&plaintext));
-    }
-
-    if let Ok((nonce, ciphertext)) = beebeeb_core::metadata_wire::parse_encrypted_metadata(name_encrypted) {
-        let blob = EncryptedBlob {
-            cipher_suite: CipherSuite::V1Aes256Gcm,
-            nonce,
-            ciphertext,
-        };
-        if let Ok(plaintext) = beebeeb_core::encrypt::decrypt_metadata(file_key, &blob) {
-            return Some(metadata_name_from_plaintext(&plaintext));
-        }
-    }
-
-    None
+    beebeeb_core::encrypt::decrypt_file_metadata_with_key(file_key, name_encrypted).ok().map(|m| m.name)
 }
 
 fn shared_name_from_metadata(
@@ -10300,6 +10299,13 @@ fn process_metadata_row(
 
 #[cfg(test)]
 mod tests {
+    fn test_open_content_frame(key: &beebeeb_core::kdf::FileKey, bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
+        let mut reader = beebeeb_core::chunk_stream::ChunkDecryptor::for_push_with_file_key(
+            beebeeb_core::kdf::FileKey::from_bytes(*key.as_bytes()), "legacy", beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded);
+        let data = reader.push_frame(&content_frame(bytes)?)?.data;
+        reader.finish()?;
+        Ok(data)
+    }
     mod sf2237d {
         use super::*;
         include!("engine_bridge/2237d_tests.rs");
@@ -10535,11 +10541,11 @@ mod tests {
         let file_key = beebeeb_core::kdf::derive_file_key(&master_key, file_id.as_bytes());
 
         let raw = beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, b"raw bytes").unwrap();
-        assert_eq!(decrypt_downloaded_chunk(&file_key, &raw).unwrap(), b"raw bytes");
+        assert_eq!(test_open_content_frame(&file_key, &raw).unwrap(), b"raw bytes");
 
         let blob = beebeeb_core::encrypt::encrypt_chunk(&file_key, b"json bytes").unwrap();
         let json = serde_json::to_vec(&blob).unwrap();
-        assert_eq!(decrypt_downloaded_chunk(&file_key, &json).unwrap(), b"json bytes");
+        assert_eq!(test_open_content_frame(&file_key, &json).unwrap(), b"json bytes");
     }
 
     #[test]
@@ -10826,7 +10832,7 @@ mod tests {
     const TEST_FILE_ID: &str = "d6c090b4-69c8-437e-a61b-2023ea99ef89";
 
     /// Encrypt `plaintext` under `file_key` the same wire format
-    /// `decrypt_downloaded_chunk` accepts (`decrypt_chunk_raw`'s
+    /// `content_frame` accepts (`decrypt_chunk_raw`'s
     /// `nonce(12) || ciphertext || tag(16)`), returning the raw bytes a
     /// `download_chunk` response body would carry.
     fn encrypt_chunk_wire(file_key: &beebeeb_core::kdf::FileKey, plaintext: &[u8]) -> Vec<u8> {
@@ -11785,7 +11791,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(unwrapped.as_bytes(), &child_file_key);
-        assert_eq!(decrypt_downloaded_chunk(&unwrapped, &content_wire).unwrap(), plaintext);
+        assert_eq!(test_open_content_frame(&unwrapped, &content_wire).unwrap(), plaintext);
     }
 
     #[test]
@@ -27224,7 +27230,7 @@ mod tests {
                 let frames = plain.chunks(stride).map(|c| encrypt_chunk_wire(&key, c)).collect();
                 Version { id, plain, stride, frames, retained: true }
             }
-            /// The last chunk in the legacy JSON framing `decrypt_downloaded_chunk` still accepts, padded
+            /// The last chunk in the legacy JSON framing `content_frame` still accepts, padded
             /// to the manifest's exact wire size but holding `plain`: a chunk whose wire size is right and
             /// whose plaintext is not (only the plaintext totals can see it).
             fn with_json_last_chunk(mut self, plain: &[u8]) -> Self {
