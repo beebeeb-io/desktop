@@ -173,8 +173,8 @@ needed per release. The trust boundary has three parts, and each one is checked:
     create or delete a `release/*` branch. A bot, an app or a collaborator without the
     admin role cannot make a branch that is allowed to sign.
   - **"release branches (PR + checks)", with no bypass for anyone, admins included:**
-    - every change reaches a release branch through a pull request (merge method
-      "merge", review threads resolved);
+    - every update to an existing release branch goes through a pull request (merge
+      method "merge", review threads resolved);
     - the six CI jobs every release branch runs must pass: Frontend, Rust check
       (Windows), Rust check (macOS), Rust test (Linux), File Provider Swift (macOS), and
       the macOS release script check;
@@ -191,8 +191,18 @@ needed per release. The trust boundary has three parts, and each one is checked:
   - Until 2026-10-29 a single ruleset blocked every update, and merges needed the
     admin bypass. 0.8.19's #184 and #185 were merged that way, before the rule was
     changed.
+  - **What the rulesets do not cover: a branch's starting commit.**
+    - Creating a release branch is not a pull request. The required checks are not
+      enforced on creation, and CI does not run on pushes to `release/*`.
+    - So an admin who creates (or deletes and recreates) `release/x.y.z` at an
+      unreviewed commit gets a branch that `release.yml` can sign.
+    - `release.yml`'s own test gate still runs on that commit, but nothing reviews it.
+    - The rule: cut a release branch only from a published `desktop-v*` tag or a commit
+      on `main`, and keep the cut commit in the release record.
+    - A check inside `release.yml` that refuses any other branch point is a follow-up
+      (workspace task 2281).
   - Neither ruleset limits who holds an admin token. A tool or session acting with an
-    admin's token can still create or delete a release branch.
+    admin's token can still create, delete or recreate a release branch.
 
 The workflow has no reviewer gate on the environment: a release stays one dispatch.
 `signing-login-check.yml` proves the boundary without building or signing anything. It
