@@ -65,7 +65,7 @@ pub enum Unit {
     Release { op_id: String },
     /// D8 under a ghost kept for replay.
     Rearm { op_id: String },
-    /// D6: the parent found by path.
+    /// D6: the parent found by path, for the op and for its row (`file_id`, when the row exists).
     ResolveParent { op_id: String, file_id: Option<String>, parent: String },
     /// D5: empty `Backups/unknown` scaffolding.
     DropScaffold { op_ids: Vec<String>, file_ids: Vec<String>, dirs: Vec<String> },
@@ -182,6 +182,8 @@ pub fn plan(
     for row in rows.iter().filter(|r| r.is_folder && r.server_known) {
         server_folders.entry(row.parent_id.as_deref()).or_default().push(row);
     }
+    // D6, before D2: the parent of a create queued with none, by path. The rest of the plan reads the parents it sets.
+    let by_path = parents_by_path(rows, ops, &create_of, &landed_ops, &row_of, opts, &mut counts);
 
     let mut ghosts: Vec<&Row> =
         rows.iter().filter(|r| r.is_folder && !r.server_known && create_of.contains_key(r.file_id.as_str())).collect();
@@ -193,7 +195,13 @@ pub fn plan(
     for ghost in ghosts {
         let id = ghost.file_id.as_str();
         let create = create_of[id];
-        let parent_fate = ghost.parent_id.as_deref().and_then(|p| fate.get(p).copied());
+        if by_path.unresolved.contains(create.op_id.as_str()) {
+            // D6 held its create (and counted it): it stays, and its children wait with it.
+            fate.insert(id, Fate::Stays);
+            continue;
+        }
+        let row_parent = by_path.of_row(ghost);
+        let parent_fate = row_parent.and_then(|p| fate.get(p).copied());
         if matches!(parent_fate, Some(Fate::Stays)) {
             counts.waiting_under_held += 1;
             fate.insert(id, Fate::Stays);
@@ -206,7 +214,7 @@ pub fn plan(
         }
         let parent = match parent_fate {
             Some(Fate::Remapped(twin)) => Some(twin),
-            _ => ghost.parent_id.as_deref(),
+            _ => row_parent,
         };
         if parent.is_none() && ghost.path.trim_matches('/').contains('/') {
             // A nested folder the scan wrote without a parent: D6 finds its parent by path first, never the top level.
@@ -220,7 +228,7 @@ pub fn plan(
             .unwrap_or_default();
         let held = if ops.iter().any(|op| op.file_id.as_deref() == Some(id) && op.op_id != create.op_id) {
             Some(&mut counts.held_acts_on_ghost)
-        } else if create.parent_id.is_some() && create.parent_id != ghost.parent_id {
+        } else if by_path.of_op(create).is_some_and(|p| Some(p) != row_parent) {
             Some(&mut counts.held_parents_disagree)
         } else if twins.iter().any(|t| busy.contains(t.file_id.as_str())) {
             Some(&mut counts.held_twin_busy)
@@ -256,6 +264,18 @@ pub fn plan(
         }
     }
 
+    // D10, before D8: a held file twin is never re-armed.
+    let twins = file_twins(
+        rows,
+        ops,
+        &row_of,
+        &busy,
+        &by_path.unresolved,
+        |row| effective_parent(row, &by_path, &fate),
+        opts,
+        &mut counts,
+    );
+
     // D8: an op re-pointed off a remapped ghost (its unit carries it) or under a ghost kept for replay, whose last error
     // is a parent 404, given up or still retrying. A park, a pause the pass owns (`auth`, `needs_review`) and any other
     // error stay as they are. D8 amendment (lead ruling 2026-10-29): an op paused for the person gets its retry budget
@@ -263,7 +283,11 @@ pub fn plan(
     // so a superseded one is left as it is.
     let mut rearmed: HashSet<&str> = HashSet::new();
     for op in ops {
-        let Some(parent) = op.parent_id.as_deref() else { continue };
+        // Its parent once D6 applied: a create put under a ghost moves (and re-arms) with that ghost's remap.
+        let Some(parent) = by_path.of_op(op) else { continue };
+        if twins.held.contains(op.op_id.as_str()) {
+            continue;
+        }
         let remap = match fate.get(parent) {
             Some(Fate::Remapped(_)) => Some(remap_at[parent]),
             Some(Fate::Replay) => None,
@@ -315,11 +339,170 @@ pub fn plan(
         .count();
 
     let mut units: Vec<Unit> = landed.into_iter().map(|op_id| Unit::DropLanded { op_id: op_id.to_string() }).collect();
+    units.extend(by_path.units);
     units.extend(remaps);
+    units.extend(by_path.holds);
     units.extend(holds);
+    units.extend(twins.holds);
     units.extend(releases);
+    units.extend(twins.releases);
     units.extend(rearms);
     (units, counts)
+}
+
+/// `≡` as a lookup key: two names are `same_leaf` exactly when their keys are equal (spec §3).
+fn fold(name: &str, case_insensitive: bool) -> String {
+    if case_insensitive { name.to_lowercase() } else { name.to_string() }
+}
+
+/// What D6 decided: the units it makes and the parents the rest of the plan reads.
+#[derive(Default)]
+struct ByPath<'a> {
+    /// `ResolveParent`, applied before any remap, so a ghost's remap re-points what was just put under it.
+    units: Vec<Unit>,
+    holds: Vec<Unit>,
+    op_parent: HashMap<&'a str, &'a str>,
+    row_parent: HashMap<&'a str, &'a str>,
+    /// The creates it holds (or keeps held): no folder, or more than one, at their directory.
+    unresolved: HashSet<&'a str>,
+}
+
+impl<'a> ByPath<'a> {
+    /// The op's parent once D6 applied.
+    fn of_op(&self, op: &'a Op) -> Option<&'a str> {
+        self.op_parent.get(op.op_id.as_str()).copied().or(op.parent_id.as_deref())
+    }
+
+    /// The row's parent once D6 applied.
+    fn of_row(&self, row: &'a Row) -> Option<&'a str> {
+        self.row_parent.get(row.file_id.as_str()).copied().or(row.parent_id.as_deref())
+    }
+}
+
+/// D6: a create queued with no parent whose `target_path` is nested would land at the top level (anti-goal 1). Its
+/// parent is the folder row at `dirname(target_path)` under `≡`: the one server-known folder there, else, when none is,
+/// the one ghost (D2 or D3 then applies to it). Both the op and its row get it. Otherwise the create is held as D4,
+/// counted `parent_unresolved` (also while it stays held). Only creates: a move with no parent is a move to the top
+/// level, and the other kinds send no parent. A create held for the person (2267) gets its parent and keeps its pause;
+/// one that matches no single folder is left as it is, never re-labelled. A landed create is D1's.
+fn parents_by_path<'a>(
+    rows: &'a [Row],
+    ops: &'a [Op],
+    ghosts: &HashMap<&str, &Op>,
+    landed_ops: &HashSet<&str>,
+    row_of: &HashMap<&str, &Row>,
+    opts: &Options,
+    counts: &mut Counts,
+) -> ByPath<'a> {
+    let mut out = ByPath::default();
+    let mut folders_at: Option<HashMap<String, Vec<&Row>>> = None;
+    for op in ops {
+        let is_create = op.kind == "create_folder" || op.create_file;
+        if !is_create || op.parent_id.is_some() || landed_ops.contains(op.op_id.as_str()) {
+            continue;
+        }
+        let Some((dir, _)) = op.target_path.as_deref().and_then(|path| path.trim_matches('/').rsplit_once('/')) else {
+            continue;
+        };
+        let folders_at = folders_at.get_or_insert_with(|| {
+            let mut at: HashMap<String, Vec<&Row>> = HashMap::new();
+            for row in rows.iter().filter(|r| r.is_folder) {
+                at.entry(fold(row.path.trim_matches('/'), opts.case_insensitive)).or_default().push(row);
+            }
+            at
+        });
+        let at = folders_at.get(&fold(dir, opts.case_insensitive)).map(Vec::as_slice).unwrap_or_default();
+        let server: Vec<&Row> = at.iter().copied().filter(|r| r.server_known).collect();
+        let new: Vec<&Row> = at.iter().copied().filter(|r| ghosts.contains_key(r.file_id.as_str())).collect();
+        let parent = match (&server[..], &new[..]) {
+            ([one], _) | ([], [one]) => Some(*one),
+            _ => None,
+        };
+        if let Some(parent) = parent {
+            counts.parent_resolved += 1;
+            let file_id = op.file_id.as_deref().filter(|id| row_of.contains_key(id));
+            out.op_parent.insert(op.op_id.as_str(), parent.file_id.as_str());
+            if let Some(id) = file_id {
+                out.row_parent.insert(id, parent.file_id.as_str());
+            }
+            out.units.push(Unit::ResolveParent {
+                op_id: op.op_id.clone(),
+                file_id: file_id.map(str::to_string),
+                parent: parent.file_id.clone(),
+            });
+        } else if pass_decides(op) {
+            counts.parent_unresolved += 1;
+            out.unresolved.insert(op.op_id.as_str());
+            if op.paused_reason.as_deref() != Some(NEEDS_REVIEW) {
+                out.holds.push(Unit::Hold { op_id: op.op_id.clone() });
+            }
+        }
+    }
+    out
+}
+
+/// The effective parent of a row (spec §3): its parent once D6 applied, or that parent's twin when the plan remaps it.
+fn effective_parent<'a>(row: &'a Row, by_path: &ByPath<'a>, fate: &HashMap<&str, Fate<'a>>) -> Option<&'a str> {
+    let parent = by_path.of_row(row);
+    match parent.and_then(|p| fate.get(p)) {
+        Some(Fate::Remapped(twin)) => Some(twin),
+        _ => parent,
+    }
+}
+
+/// What D10 decided.
+struct FileTwins<'a> {
+    holds: Vec<Unit>,
+    releases: Vec<Unit>,
+    /// Every create it holds or keeps held: D8 re-arms none of them.
+    held: HashSet<&'a str>,
+}
+
+/// D10: a new file's create meets a server-known file that no op names, with the same effective parent and leaf (`≡`):
+/// held as D4 (`needs_review`), counted `file_twin` (also while it stays held). No download, no compare, no copy (P1).
+/// A held one whose twin is gone is due again (`Release`). A create the server already holds (its row is server-known)
+/// is D8's superseded case; one D6 holds stays D6's; one held for the person (2267) is left as it is.
+#[allow(clippy::too_many_arguments)]
+fn file_twins<'a>(
+    rows: &'a [Row],
+    ops: &'a [Op],
+    row_of: &HashMap<&str, &'a Row>,
+    busy: &HashSet<&str>,
+    unresolved: &HashSet<&str>,
+    parent_of: impl Fn(&'a Row) -> Option<&'a str>,
+    opts: &Options,
+    counts: &mut Counts,
+) -> FileTwins<'a> {
+    let mut out = FileTwins { holds: Vec::new(), releases: Vec::new(), held: HashSet::new() };
+    let ci = opts.case_insensitive;
+    let mut server_files: Option<HashMap<Option<&str>, Vec<&Row>>> = None;
+    for op in ops.iter().filter(|op| op.create_file && pass_decides(op) && !unresolved.contains(op.op_id.as_str())) {
+        let Some(row) = op.file_id.as_deref().and_then(|id| row_of.get(id)).copied() else { continue };
+        if row.server_known {
+            continue;
+        }
+        let server_files = server_files.get_or_insert_with(|| {
+            let mut by_parent: HashMap<Option<&str>, Vec<&Row>> = HashMap::new();
+            for row in rows.iter().filter(|r| !r.is_folder && r.server_known && !busy.contains(r.file_id.as_str())) {
+                by_parent.entry(row.parent_id.as_deref()).or_default().push(row);
+            }
+            by_parent
+        });
+        let same_name = |f: &&Row| f.file_id != row.file_id && same_leaf(leaf(&f.path), leaf(&row.path), ci);
+        let twin = server_files.get(&parent_of(row)).is_some_and(|files| files.iter().any(same_name));
+        let held = op.paused_reason.as_deref() == Some(NEEDS_REVIEW);
+        if twin {
+            counts.file_twin += 1;
+            out.held.insert(op.op_id.as_str());
+            if !held {
+                out.holds.push(Unit::Hold { op_id: op.op_id.clone() });
+            }
+        } else if held {
+            counts.released += 1;
+            out.releases.push(Unit::Release { op_id: op.op_id.clone() });
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -782,5 +965,239 @@ mod tests {
         assert!(is_parent_404(NOT_FOUND));
         assert!(!is_parent_404("HTTP status server error (500) for url (https://api.example/files/404a0000)"));
         assert!(!is_parent_404("connection reset"));
+    }
+
+    /// The op's sync-root-relative key, as every create queues it.
+    fn at(op: Op, path: &str) -> Op {
+        Op { target_path: Some(path.to_string()), ..op }
+    }
+
+    fn resolve(op_id: &str, file_id: &str, parent: &str) -> Unit {
+        Unit::ResolveParent { op_id: op_id.to_string(), file_id: Some(file_id.to_string()), parent: parent.to_string() }
+    }
+
+    /// D6: a create queued with no parent but a nested path gets the one server-known folder at its directory.
+    #[test]
+    fn a_root_level_upload_with_a_nested_path_gets_its_parent_by_path() {
+        let rows = [
+            folder("a", None, "A", true),
+            folder("b", Some("a"), "A/B", true),
+            folder("decoy", None, "B", true),
+            file("f", None, "A/B/f.txt", false, 0),
+        ];
+        let ops = [at(paused(upload("op-f", "f", None), "auth"), "A/B/f.txt")];
+        let (units, counts) = run(&rows, &ops);
+        assert_eq!(units, vec![resolve("op-f", "f", "b")]);
+        assert_eq!(counts, Counts { parent_resolved: 1, ..Counts::default() });
+    }
+
+    /// D6: two server-known folders at the directory (`≡`), or none at all: never a guess, the create is held.
+    #[test]
+    fn a_nested_path_that_names_no_single_folder_is_held() {
+        let rows = [
+            folder("a", None, "A", true),
+            folder("b1", Some("a"), "A/B", true),
+            folder("b2", Some("a"), "A/b", true),
+            file("f", None, "A/B/f.txt", false, 0),
+            file("g", None, "C/D/g.txt", false, 0),
+        ];
+        let ops = [at(upload("op-f", "f", None), "A/B/f.txt"), at(upload("op-g", "g", None), "C/D/g.txt")];
+        let (units, counts) = run(&rows, &ops);
+        assert_eq!(units, vec![hold("op-f"), hold("op-g")]);
+        assert_eq!(counts, Counts { parent_unresolved: 2, ..Counts::default() });
+        // Held already: no second Hold unit, still counted.
+        let held: Vec<Op> = ops.iter().cloned().map(|op| paused(op, NEEDS_REVIEW)).collect();
+        let (units, counts) = run(&rows, &held);
+        assert!(units.is_empty(), "{units:?}");
+        assert_eq!(counts, Counts { parent_unresolved: 2, ..Counts::default() });
+    }
+
+    /// D6 then D3: the only folder at the directory is new (a ghost with no twin): the change goes under it and waits.
+    #[test]
+    fn a_nested_path_that_only_a_new_folder_matches_goes_under_it() {
+        let rows = [
+            folder("a", None, "A", true),
+            folder("g", Some("a"), "A/B", false),
+            file("f", None, "A/B/f.txt", false, 0),
+        ];
+        let ops = [create_folder("op-g", "g", Some("a")), at(upload("op-f", "f", None), "A/B/f.txt")];
+        let (units, counts) = run(&rows, &ops);
+        assert_eq!(units, vec![resolve("op-f", "f", "g")]);
+        assert_eq!(counts, Counts { parent_resolved: 1, replay: 1, ..Counts::default() });
+    }
+
+    /// D6 then D2, in ONE plan: the parent found by path is a ghost, so the ghost's remap (after the resolve) re-points
+    /// the change to the twin. The twin is found by parent and leaf (§3); its path here does not match, so the ghost is
+    /// the only folder at the directory.
+    #[test]
+    fn a_parent_found_by_path_that_is_a_ghost_is_remapped_in_the_same_plan() {
+        let rows = [
+            folder("a", None, "A", true),
+            folder("g", Some("a"), "A/B", false),
+            folder("t", Some("a"), "Old/B", true),
+            file("f", None, "A/B/f.txt", false, 0),
+            file("s", Some("t"), "Old/B/f.txt", true, 2),
+        ];
+        let ops = [create_folder("op-g", "g", Some("a")), at(upload("op-f", "f", None), "A/B/f.txt")];
+        let (units, counts) = run(&rows, &ops);
+        assert_eq!(units, vec![resolve("op-f", "f", "g"), remap("g", "t", "op-g", &[]), hold("op-f")]);
+        assert_eq!(
+            counts,
+            Counts { parent_resolved: 1, remapped: 1, file_twin: 1, ..Counts::default() },
+            "the change meets the twin's file through the resolved parent and the remap"
+        );
+    }
+
+    /// D6 before D2: a nested ghost the scan wrote without a parent is matched under the folder at its directory, never
+    /// at the top level.
+    #[test]
+    fn a_nested_ghost_without_a_parent_id_gets_its_parent_by_path_and_is_remapped() {
+        let rows = [
+            folder("a", None, "A", true),
+            folder("t", Some("a"), "A/Photos", true),
+            folder("decoy", None, "Photos", true),
+            folder("g", None, "A/photos", false),
+        ];
+        let ops = [at(create_folder("op-g", "g", None), "A/photos")];
+        let (units, counts) = run(&rows, &ops);
+        assert_eq!(units, vec![resolve("op-g", "g", "a"), remap("g", "t", "op-g", &[])]);
+        assert_eq!(counts, Counts { parent_resolved: 1, remapped: 1, ..Counts::default() });
+    }
+
+    /// D6 is for creates: a move with no parent is a move to the top level, and a hydrate names no parent at all.
+    #[test]
+    fn only_a_create_gets_its_parent_by_path() {
+        let rows = [
+            folder("a", None, "A", true),
+            folder("b", Some("a"), "A/B", true),
+            file("m", Some("b"), "A/B/m.txt", true, 1),
+            file("h", Some("b"), "A/B/h.txt", true, 1),
+            folder("c", None, "A/B/C", false),
+        ];
+        let op = |op_id: &str, kind: &str, file_id: &str| Op {
+            op_id: op_id.to_string(),
+            kind: kind.to_string(),
+            file_id: Some(file_id.to_string()),
+            ..Op::default()
+        };
+        let ops = [
+            at(op("op-move", "move_file", "m"), "A/B/m.txt"),
+            at(op("op-hydrate", "hydrate_file", "h"), "A/B/h.txt"),
+            at(create_folder("op-c", "c", None), "A/B/C"),
+        ];
+        let (units, counts) = run(&rows, &ops);
+        assert_eq!(units, vec![resolve("op-c", "c", "b")], "the move and the hydrate are untouched");
+        assert_eq!(counts, Counts { parent_resolved: 1, replay: 1, ..Counts::default() });
+    }
+
+    /// D6 for a change held for the person (2267): its parent is set, its pause stays; unresolved, it is left as it is.
+    #[test]
+    fn a_change_held_for_the_person_gets_its_parent_by_path_and_keeps_its_pause() {
+        let rows = [
+            folder("a", None, "A", true),
+            folder("b", Some("a"), "A/B", true),
+            file("f", None, "A/B/f.txt", false, 0),
+            file("g", None, "C/D/g.txt", false, 0),
+        ];
+        let ops = [
+            paused(at(upload("op-f", "f", None), "A/B/f.txt"), "found_while_paused"),
+            paused(at(upload("op-g", "g", None), "C/D/g.txt"), "found_while_paused"),
+        ];
+        let (units, counts) = run(&rows, &ops);
+        assert_eq!(units, vec![resolve("op-f", "f", "b")]);
+        assert_eq!(counts, Counts { parent_resolved: 1, ..Counts::default() });
+    }
+
+    /// D6 re-evaluated: a change held because no single folder matched, once one does, goes under it and is due again.
+    #[test]
+    fn a_held_change_whose_parent_is_found_later_is_released_under_it() {
+        let rows =
+            [folder("a", None, "A", true), folder("b", Some("a"), "A/B", true), file("f", None, "A/B/f.txt", false, 0)];
+        let ops = [paused(at(upload("op-f", "f", None), "A/B/f.txt"), NEEDS_REVIEW)];
+        let (units, counts) = run(&rows, &ops);
+        assert_eq!(units, vec![resolve("op-f", "f", "b"), Unit::Release { op_id: "op-f".to_string() }]);
+        assert_eq!(counts, Counts { parent_resolved: 1, released: 1, ..Counts::default() });
+    }
+
+    /// D10: a new file meets a server file of the same name (`≡`) in the same folder: held, never compared or sent.
+    #[test]
+    fn a_new_file_that_meets_a_server_file_of_the_same_name_is_held() {
+        let rows = [
+            folder("p", None, "Docs", true),
+            file("s", Some("p"), "Docs/report.txt", true, 2),
+            file("n", Some("p"), "Docs/Report.txt", false, 0),
+        ];
+        let ops = [paused(upload("op-n", "n", Some("p")), "auth")];
+        let (units, counts) = run(&rows, &ops);
+        assert_eq!(units, vec![hold("op-n")]);
+        assert_eq!(counts, Counts { file_twin: 1, ..Counts::default() });
+
+        let (units, counts) = run(&[rows[0].clone(), rows[2].clone()], &ops);
+        assert!(units.is_empty(), "without the twin: {units:?}");
+        assert_eq!(counts, Counts::default());
+    }
+
+    /// D10 under a remapped ghost: the effective parent is the twin folder, so the new file meets the twin's file. It
+    /// is held, not re-armed, though it gave up on the ghost's 404.
+    #[test]
+    fn a_new_file_under_a_remapped_ghost_that_meets_a_server_file_is_held_not_rearmed() {
+        let rows = [
+            folder("t", None, "Photos", true),
+            folder("g", None, "Photos", false),
+            file("s", Some("t"), "Photos/1.jpg", true, 1),
+            file("n", Some("g"), "Photos/1.jpg", false, 0),
+        ];
+        let ops = [create_folder("op-g", "g", None), gave_up(upload("op-n", "n", Some("g")), NOT_FOUND)];
+        let (units, counts) = run(&rows, &ops);
+        assert_eq!(units, vec![remap("g", "t", "op-g", &[]), hold("op-n")]);
+        assert_eq!(counts, Counts { remapped: 1, file_twin: 1, ..Counts::default() });
+    }
+
+    /// D10: only a server FILE that no op names is a twin. A server file with a pending change is in flux (the person
+    /// may be replacing it); a folder of the same name is not a file.
+    #[test]
+    fn only_an_idle_server_file_is_a_file_twin() {
+        let rows = [
+            folder("p", None, "Docs", true),
+            file("s", Some("p"), "Docs/a.txt", true, 2),
+            file("n", Some("p"), "Docs/a.txt", false, 0),
+            folder("q", Some("p"), "Docs/b", true),
+            file("m", Some("p"), "Docs/b", false, 0),
+            file("idle", Some("p"), "Docs/c.txt", true, 1),
+            file("k", Some("p"), "Docs/C.txt", false, 0),
+        ];
+        let trash = Op {
+            op_id: "op-trash".to_string(),
+            kind: "trash_file".to_string(),
+            file_id: Some("s".to_string()),
+            ..Op::default()
+        };
+        let ops = [
+            trash,
+            upload("op-n", "n", Some("p")),
+            upload("op-m", "m", Some("p")),
+            upload("op-k", "k", Some("p")),
+        ];
+        let (units, counts) = run(&rows, &ops);
+        assert_eq!(units, vec![hold("op-k")], "only the idle file is a twin");
+        assert_eq!(counts, Counts { file_twin: 1, ..Counts::default() });
+    }
+
+    /// D10 re-evaluated: a held new file whose twin is gone is due again; one whose twin is still there stays held.
+    #[test]
+    fn a_held_file_whose_twin_is_gone_is_released() {
+        let rows = [
+            folder("p", None, "Docs", true),
+            file("s", Some("p"), "Docs/kept.txt", true, 2),
+            file("n", Some("p"), "Docs/kept.txt", false, 0),
+            file("m", Some("p"), "Docs/gone.txt", false, 0),
+        ];
+        let ops = [
+            paused(upload("op-n", "n", Some("p")), NEEDS_REVIEW),
+            paused(upload("op-m", "m", Some("p")), NEEDS_REVIEW),
+        ];
+        let (units, counts) = run(&rows, &ops);
+        assert_eq!(units, vec![Unit::Release { op_id: "op-m".to_string() }]);
+        assert_eq!(counts, Counts { file_twin: 1, released: 1, ..Counts::default() });
     }
 }
