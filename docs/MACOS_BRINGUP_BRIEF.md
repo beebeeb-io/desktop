@@ -136,9 +136,14 @@ to begin with.
   unelected extension is normal for this extension point on this macOS version, not the cause.
   **Before any macOS File Provider session:** run
   `pluginkit -mvvv -D -i io.beebeeb.app.FileProvider` and confirm exactly one result, at
-  `/Applications/Beebeeb.app/…`. A second result → `pluginkit -r <stale path>` (or delete the
-  stale `.app` outright) before touching "Install Finder location" again, or every timeout in that
-  session is this false lead, not a real code regression. No code fix exists for this class of
+  `/Applications/Beebeeb.app/…`. A second result is only a cleanup step: `pluginkit -r <stale
+  path>` (or delete the stale `.app` outright), then retry "Install Finder location". A duplicate
+  registration alone does **not** prove precedence — a duplicate can coexist while the
+  `/Applications` copy still has precedence and a signing, entitlement or provider regression
+  caused the timeout. Attribute a timeout to this stale-copy cause only when `pkd`'s discovery log
+  for the same attempt shows `another plugin has precedent` naming the stale UUID
+  (`log show --predicate 'process == "pkd"'` around the failure). Without that line, treat the
+  timeout as a real code/signing regression and investigate it. No code fix exists for this class of
   failure: the completion handler genuinely never fires, so the app has no NSError to
   distinguish "stale local dev build has precedence" from any other reason the extension didn't
   come up, and there's nothing in production for it to detect (`target/debug/` build artifacts on
