@@ -152,9 +152,14 @@ function installBackend({ caps, fx }) {
           if (f.browser !== 'done') return new Promise(() => {})
           await new Promise((resolve) => setTimeout(resolve, 300))
           window.__emit('browser-login', { attempt: a?.attemptId, phase: 'authorized' })
+          // C-S1 (task 1747 Part 1): the handoff's answer is the password path's LoginOutcome. Another account is an
+          // outcome, not an event and not an error: nothing was installed, and the switch step shows the count.
+          if (f.browserOutcome === 'mismatch') {
+            return { requires_2fa: false, reauthenticated: false, vault_unlocked: false, key_replaced: false, account_mismatch: { pending_changes: 3, unsent: { askId: 'a1', files: 2, copiedFiles: 2, others: 1, missingFiles: 0, earlierFolders: [] } } }
+          }
           signedIn(f, true)
           window.__emit('browser-login', { attempt: a?.attemptId, phase: 'done', email: 'sam@example.eu' })
-          return null
+          return { requires_2fa: false, reauthenticated: false, vault_unlocked: true, key_replaced: false, account_mismatch: null }
         }
         case 'desktop_capabilities': return caps
         case 'desktop_platform': return 'macos'
@@ -316,6 +321,9 @@ const SCENARIOS = [
   { name: 'reopened-pending-setup', fx: { snapshot: snapshot({ phase: 'locked', account: { vault_unlocked: false }, storage: null }), pending: { key_replaced: false } }, has: ['Set up this Mac', 'This Mac does not have your encryption keys yet. Restore them to continue.'], hasNot: ['Your vault is locked'], noSidebar: true, card: 440, title: 'Set up this Mac' },
   // P3-1: `open_reauth_window` asks for Sign in again whatever the session says.
   { name: 'sign-in-again-asked', fx: { nav: { to: 'reauth' } }, has: ['Sign in again', 'Beebeeb couldn’t send some changes with this sign-in. Sign in again to retry them.', 'Signed in before as sam@example.eu', 'Back to Home'], hasNot: ['Sync is paused'], noSidebar: true, card: 380, title: 'Sign in again' },
+  // C-S1 (task 1747 Part 1): a different account through the browser reaches the switch step through the handoff's returned
+  // outcome, with its count; no raw code is on the page.
+  { name: 'browser-account-switch', fx: { snapshot: snapshot({ phase: 'session_ended', account: { auth_expired: true } }), browser: 'done', browserOutcome: 'mismatch' }, act: async (p) => { await p.getByRole('button', { name: 'Sign in with browser' }).click(); await p.getByText('Switch accounts with changes not sent?').waitFor() }, has: ['Switch accounts with changes not sent?', 'Cancel', 'Sign out and switch'], hasNot: ['account_mismatch', 'Sign-in failed'], noSidebar: true, card: 460, focus: 'Cancel' },
   { name: 'signed-out-settings', fx: { snapshot: snapshot({ phase: 'signed_out', account: { email: null, logged_in: false, vault_unlocked: false }, storage: null }) }, open: '&tab=general', has: ['Sign in', 'Settings', 'General', 'About', 'Open Beebeeb at login', 'Appearance', 'Tell me about'], hasNot: ['From your account'], sidebar: ['Back to Sign in', 'General', 'About'], hifi: 'hifi-s4-fig6' },
   { name: 'signed-out-about', fx: { snapshot: snapshot({ phase: 'signed_out', account: { email: null, logged_in: false, vault_unlocked: false }, storage: null }) }, open: '&tab=about', has: ['Beebeeb for Mac', 'Release channel'], hasNot: ['Test connection speed'] },
 ]

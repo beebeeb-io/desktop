@@ -1,0 +1,15 @@
+{
+  "paused": false,
+  "engine_state": "running",
+  "files_remaining": null,
+  "transfers_active": 0,
+  "last_tick_ok_at": null,
+  "queue": {
+    "waiting": 0,
+    "gave_up": 43,
+    "held": [
+      { "reason": "auth", "count": 2924, "oldest_at": 1791115500, "newest_at": 1791122220 }
+    ]
+  },
+  "startup_check": { "done": 12400, "total": 37169 }
+}

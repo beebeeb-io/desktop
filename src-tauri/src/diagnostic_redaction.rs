@@ -128,7 +128,18 @@ pub const QUEUE_KIND_LABELS: &[&str] = &[
     "restore_file",
     "restore_version",
 ];
-pub const PAUSE_REASON_LABELS: &[&str] = &["auth", "quota", "permission", "locked", "key_replaced"];
+/// `needs_review` is a reconcile hold and `waiting_for_folder` the hold summary's computed group (tasks 1888, 2226;
+/// spec D4, D7, D13).
+pub const PAUSE_REASON_LABELS: &[&str] = &[
+    "auth",
+    "quota",
+    "permission",
+    "locked",
+    "key_replaced",
+    "found_while_paused",
+    "needs_review",
+    "waiting_for_folder",
+];
 
 /// `label` if it is one of `allowed`, otherwise `other`.
 pub fn allowed_label(label: &str, allowed: &[&str]) -> String {
@@ -1356,6 +1367,11 @@ mod tests {
         assert_eq!(allowed_label("Tax 2025", QUEUE_KIND_LABELS), "other");
         assert_eq!(allowed_label("auth", PAUSE_REASON_LABELS), "auth");
         assert_eq!(allowed_label("key_replaced", PAUSE_REASON_LABELS), "key_replaced");
+        // Task 2267 (fix round 2): changes found while sync was paused, held for the person's review.
+        assert_eq!(allowed_label("found_while_paused", PAUSE_REASON_LABELS), "found_while_paused");
+        // Tasks 1888, 2226 (spec D4, D7): a reconcile hold, and the hold summary's computed group.
+        assert_eq!(allowed_label("needs_review", PAUSE_REASON_LABELS), "needs_review");
+        assert_eq!(allowed_label("waiting_for_folder", PAUSE_REASON_LABELS), "waiting_for_folder");
         assert_eq!(allowed_label("/Users/guus", PAUSE_REASON_LABELS), "other");
     }
 }

@@ -258,7 +258,7 @@ export function GeneralTab({ settings, signedIn }: { settings: SettingsConfig; s
         <SettingRow
           name="appearance"
           tall
-          label="Appearance"
+          label="Theme"
           hint={appearanceHint(theme)}
           control={
             <ChoiceSelect
@@ -274,7 +274,7 @@ export function GeneralTab({ settings, signedIn }: { settings: SettingsConfig; s
       {settings.state.status === 'failed' ? (
         <ConfigLoadFailed onRetry={() => void settings.reload()} />
       ) : (
-        <SettingsGroup title="Tell me about">
+        <SettingsGroup title="On this device">
           {NOTIFICATION_ROWS.map((row) => (
             <ToggleRow
               key={row.key}
@@ -335,7 +335,7 @@ function DataResidencyGroup() {
 
   if (loading) {
     return (
-      <SettingsGroup title="Where your files are stored">
+      <SettingsGroup title="Storage location">
         <SettingRow name="region-loading" label="Loading…" />
       </SettingsGroup>
     )
@@ -343,7 +343,7 @@ function DataResidencyGroup() {
   const summary = residencySummary(view)
   if (loadError !== null || (summary === null && !view.preferenceUnavailable)) {
     return (
-      <SettingsGroup title="Where your files are stored">
+      <SettingsGroup title="Storage location">
         <Note
           kind="alert"
           surface="data-residency-load"
@@ -355,7 +355,7 @@ function DataResidencyGroup() {
   }
 
   return (
-    <SettingsGroup title="Where your files are stored">
+    <SettingsGroup title="Storage location">
       <SettingRow
         name="region-summary"
         label={view.preferenceUnavailable ? 'Your chosen location isn’t available right now.' : summary}

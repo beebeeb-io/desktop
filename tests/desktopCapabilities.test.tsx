@@ -23,7 +23,9 @@ test('real Windows settings omit four unsupported preference actions and the no-
   }
   expect(html).toContain('Always on')
   expect(html).toContain('Free up space')
-  expect(html).toContain('Pause syncing from the app menu')
+  // 0.8.15: Settings › Sync has its own Pause / Resume; the notice no longer sends people to the app menu.
+  expect(html).not.toContain('Pause syncing from the app menu')
+  expect(html).toMatch(/<button[^>]*>[\s\S]*?Pause syncing<\/button>/)
   expect(html).toMatch(/class="capability-notice"[^>]*>[\s\S]*?Files download when opened/)
 })
 

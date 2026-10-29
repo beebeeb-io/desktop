@@ -310,6 +310,14 @@ pub struct DesktopConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kept_unsent_unfinished: Vec<String>,
 
+    /// Task 2190 (D1, review-169 blocker): every copy "Keep the other" kept of a Mac's changes in the
+    /// Changes not sent folder, oldest first. Settings › Sync lists each one, with "Show in Finder",
+    /// until the person dismisses it. Its own list: never `kept_unsent_folder` (one slot, the
+    /// sign-out's) nor `kept_unsent_unfinished`, so a decision never hides a sign-out's folder and a
+    /// sign-out never mistakes a decision's copy for an unfinished one. Never logged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kept_conflict_copies: Vec<String>,
+
     // ── Spec 2026-10-06 (macOS Finder setup reconciler) §9 ────────────
     //
     // Truth about Finder comes from macOS on every check. These two keys are only memory: the
@@ -405,6 +413,7 @@ impl Default for DesktopConfig {
             kept_unsynced_folder: None,
             kept_unsent_folder: None,
             kept_unsent_unfinished: Vec::new(),
+            kept_conflict_copies: Vec::new(),
             finder_signed_out_by_choice: false,
             finder_last_failure: None,
         }

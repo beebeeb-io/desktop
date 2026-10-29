@@ -450,7 +450,7 @@ describe('General tab', () => {
     const m = open('GeneralTab', { autostart_enabled: () => true }, { props: { settings: ready() } })
     await m.flush()
     const text = visibleText(m)
-    for (const words of ['Open Beebeeb at login', 'Starts in the menu bar. No window opens.', 'Tell me about', 'Conflicts', 'When two versions of a file need a decision.', 'Sync finished', 'Local cache almost full']) {
+    for (const words of ['Open Beebeeb at login', 'Starts in the menu bar. No window opens.', 'On this device', 'Conflict alerts', 'When two versions of a file need a decision.', 'Sync complete', 'Local cache warnings']) {
       expect(text).toContain(words)
     }
     expect(switchOf(m, 'login').props['aria-checked']).toBe(true)
@@ -547,7 +547,7 @@ describe('General tab', () => {
     const m = open('GeneralTab', { autostart_enabled: () => true }, { props: { settings: ready({ theme: 'dark' }), signedIn: true } })
     await m.flush()
     const text = visibleText(m)
-    expect(text).toContain('Appearance')
+    expect(text).toContain('Theme')
     expect(text).toContain('Always dark.')
     expect(select(m, 'appearance').props.value).toBe('dark')
     expect(optionsOf(m, 'appearance')).toEqual([{ value: 'system', label: 'System' }, { value: 'light', label: 'Light' }, { value: 'dark', label: 'Dark' }])
@@ -583,14 +583,14 @@ describe('General tab', () => {
   test('"From your account" follows "Tell me about" for a signed-in account, and is not there signed out (those preferences live with the account)', async () => {
     const m = open('GeneralTab', { autostart_enabled: () => true }, { props: { settings: ready(), signedIn: true } })
     await m.flush()
-    const order = m.elements().filter((el) => el.props['data-prefs-group'] === 'true' || el.props['aria-label'] === 'Tell me about').map((el) => el.props['aria-label'] ?? 'prefs')
-    expect(order).toEqual(['Tell me about', 'prefs'])
+    const order = m.elements().filter((el) => el.props['data-prefs-group'] === 'true' || el.props['aria-label'] === 'On this device').map((el) => el.props['aria-label'] ?? 'prefs')
+    expect(order).toEqual(['On this device', 'prefs'])
 
     const out = open('GeneralTab', { autostart_enabled: () => true }, { props: { settings: ready(), signedIn: false } })
     await out.flush()
     expect(find(out, (el) => el.props['data-prefs-group'] === 'true')).toHaveLength(0)
-    expect(visibleText(out)).toContain('Appearance')
-    expect(visibleText(out)).toContain('Tell me about')
+    expect(visibleText(out)).toContain('Theme')
+    expect(visibleText(out)).toContain('On this device')
   })
 })
 

@@ -27,7 +27,10 @@ fn unleased_credential_commands(source: &str) -> Vec<String> {
 #[test]
 fn every_credential_command_has_admission_before_credential_reads() {
     // 33: `account_profile_fresh` (PR #140 delta review) reads the server with the session's token, so it is admitted too.
-    assert_eq!(SOURCE.matches("session_command!(async").count(), 33);
+    // 34: `desktop_recent_files` (task 2243), the tray's recent list, is admitted like `desktop_file_overview`.
+    // 35, 36: task 2190's `parked_conflict_preview` and `resolve_parked_conflict` read the server with the
+    // session's token (the decision also writes the queue), so both are admitted.
+    assert_eq!(SOURCE.matches("session_command!(async").count(), 36);
     assert!(
         unleased_credential_commands(&SOURCE).is_empty(),
         "unleased commands: {:?}",
@@ -114,8 +117,9 @@ fn cloud_files_unregister_precedes_shell_unregister_and_propagates_failure() {
         code.find("windows_cf::unregister_sync_root(&root)").unwrap()
             < code.find("windows_cf::unregister_shell_sync_root(&root)").unwrap()
     );
-    assert!(code.contains("Could not remove Explorer registration: {e}\"))?"));
-    assert!(code.contains("Could not unregister Cloud Files: {e}\"))?"));
+    // Task 2191: the failure is propagated with the folder the purge kept copies in.
+    assert!(code.contains("failed_after_purge(format!(\"Could not remove Explorer registration: {e}\")))?"));
+    assert!(code.contains("failed_after_purge(format!(\"Could not unregister Cloud Files: {e}\")))?"));
 }
 #[test]
 fn admission_guard_selftest_detects_a_bypassed_command() {

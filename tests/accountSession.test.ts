@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { clearSignOutWarning, heldSignOutWarning, holdSignOutWarning, observeSignOutWarning, subscribeSignOutWarning } from '../src/accountSession'
-import { fetchRegion, loadSyncStatus } from '../src/desktopApi'
+import { readFileSync } from 'node:fs'
+import { fetchRegion, loadSyncStatus, observeSessionStatus } from '../src/desktopApi'
 
 test('region cache refetches after account switch between status polls', async () => {
   const previous = globalThis.window
@@ -102,5 +103,50 @@ describe('the held sign-out sentence', () => {
       stop()
       expect(atRemount).toBeNull()
     } finally { globalThis.window = previous }
+  })
+})
+
+// Task 2243: AccountSessionBoundary polls every second in every window, hidden ones included. On Windows each full
+// `sync_status` opened the state DB cold (about 1,100 page reads), so the boundary asks only for the session.
+describe('the session poll', () => {
+  afterEach(() => clearSignOutWarning())
+
+  test('asks sync_status for the session only, and observes the revision and the sign-in', async () => {
+    const previous = globalThis.window
+    const sent: unknown[] = []
+    let status = { logged_in: false, session_revision: 50 }
+    let regionCalls = 0
+    globalThis.window = { __TAURI_INTERNALS__: { invoke: async (name: string, args: unknown) => {
+      if (name === 'sync_status') { sent.push(args); return status }
+      if (name === 'account_region') { regionCalls++; return { preferred_region: 'europe' } }
+      throw new Error(name)
+    } } } as unknown as Window & typeof globalThis
+    try {
+      holdSignOutWarning('You are signed out.')
+      await observeSessionStatus()
+      expect((await fetchRegion())?.preferred_region).toBe('europe')
+      status = { logged_in: true, session_revision: 52 }
+      await observeSessionStatus()
+      expect(heldSignOutWarning()).toBeNull()
+      await fetchRegion()
+      expect(regionCalls).toBe(2)
+      expect(sent).toEqual([{ sessionOnly: true }, { sessionOnly: true }])
+    } finally { globalThis.window = previous }
+  })
+
+  test('a failed read observes nothing', async () => {
+    const previous = globalThis.window
+    globalThis.window = { __TAURI_INTERNALS__: { invoke: async () => { throw new Error('vault locked') } } } as unknown as Window & typeof globalThis
+    try {
+      holdSignOutWarning('You are signed out.')
+      await observeSessionStatus()
+      expect(heldSignOutWarning()).toBe('You are signed out.')
+    } finally { globalThis.window = previous }
+  })
+
+  test('AccountSessionBoundary polls the session only, never the full status', () => {
+    const source = readFileSync(new URL('../src/AccountSessionBoundary.tsx', import.meta.url), 'utf8')
+    expect(source).toContain('await observeSessionStatus()')
+    expect(source).not.toContain('loadSyncStatus')
   })
 })
