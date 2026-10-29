@@ -7,7 +7,7 @@
  * prove (new top-level folders and files made while sync was refused, or changes inside shared-with-me folders) are not
  * uploaded on their own. The backend holds their queued operations with the pause reason `found_while_paused`, and the
  * person decides: `found_while_paused_upload` releases them, `found_while_paused_keep` moves the local-only ones out of
- * the sync folder into `<parent of the sync folder>\Beebeeb - kept on this PC\YYYY-MM-DD\` and stops tracking them.
+ * the sync folder into `<parent of the sync folder>\Beebeeb - not uploaded\YYYY-MM-DD\` and stops tracking them.
  *
  * Copy rules (as `syncActivityModel.ts`): counts only, never a file name; the one path shown is the folder the backend
  * reports it moved them to, which the person needs to find them.
@@ -21,8 +21,9 @@ import { plural, type SyncActivitySummary } from './syncActivityModel'
 /** The `HeldGroup.reason` the backend gives these changes. */
 export const FOUND_WHILE_PAUSED = 'found_while_paused'
 
-/** The folder the backend creates next to the sync folder (its dated subfolder is `kept_path`). */
-export const KEPT_FOLDER_NAME = 'Beebeeb - kept on this PC'
+/** The folder the backend creates next to the sync folder (its dated subfolder is `kept_path`). Lead ruling on self-review
+ * F9 (2026-10-29): "Beebeeb - not uploaded", true whether or not OneDrive or Dropbox syncs the folder it is made in. */
+export const KEPT_FOLDER_NAME = 'Beebeeb - not uploaded'
 
 export const FOUND_WHILE_PAUSED_COPY = {
   title: 'Files Beebeeb found while sync was paused. They haven’t been uploaded yet.',
