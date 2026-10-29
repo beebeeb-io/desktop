@@ -235,6 +235,10 @@ pub struct EngineBridge {
     /// [`FAILED_SNAPSHOTS_BEFORE_THE_QUEUE_RUNS`] on, a failed one no longer ends the tick.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     failed_snapshots: std::sync::atomic::AtomicU32,
+    /// Spec D11 (task 1888, review P2): the account's resume and pass requests, shared with the runner. A one-shot
+    /// bridge keeps a private one nobody moves. Off macOS, [`Self::process_due_operations`] sends nothing while a
+    /// release waits for a pass ([`Self::a_pass_is_owed`]).
+    resume: crate::runner::ResumeTicket,
     #[cfg(test)]
     pub(crate) seams: Seams,
 }
@@ -664,6 +668,54 @@ pub struct TransferLoopOutcome {
     pub account_refused: bool,
 }
 
+/// How many times one pass of `process_due_operations` may list its due work. Spec D7 (tasks 1888, 2226): on Windows
+/// and Linux a change in a folder made here is not due until that folder's create landed, so a pass that lands a
+/// folder create lists again for what the landing made due; a new tree up to this many levels deep goes up in one
+/// pass. macOS has no gate and lists once, as before.
+#[cfg(target_os = "macos")]
+const DUE_LISTINGS_PER_PASS: usize = 1;
+#[cfg(not(target_os = "macos"))]
+const DUE_LISTINGS_PER_PASS: usize = 16;
+
+/// The due work of one pass, in due order. It lists again only after a folder create of the pass landed (D7), at most
+/// `DUE_LISTINGS_PER_PASS` times in all, and an op listed earlier in the pass is not run again in it.
+struct DueOperations {
+    queue: VecDeque<PendingOperation>,
+    listed: HashSet<String>,
+    listings: usize,
+    folder_landed: bool,
+}
+
+impl DueOperations {
+    fn new(operations: Vec<PendingOperation>) -> Self {
+        Self {
+            listed: operations.iter().map(|op| op.op_id.clone()).collect(),
+            queue: operations.into(),
+            listings: 1,
+            folder_landed: false,
+        }
+    }
+
+    /// A folder create of this pass landed: the changes that waited for it may be due now.
+    fn folder_landed(&mut self) {
+        self.folder_landed = true;
+    }
+
+    fn next(&mut self, db: &StateDb, now: i64) -> anyhow::Result<Option<PendingOperation>> {
+        while self.queue.is_empty() && self.folder_landed && self.listings < DUE_LISTINGS_PER_PASS {
+            self.folder_landed = false;
+            self.listings += 1;
+            let listed = &mut self.listed;
+            self.queue = db
+                .list_due_operations(now)?
+                .into_iter()
+                .filter(|op| listed.insert(op.op_id.clone()))
+                .collect();
+        }
+        Ok(self.queue.pop_front())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationFailureClass {
     Retryable,
@@ -965,6 +1017,7 @@ impl EngineBridge {
             stopping,
             thumbnails_pending: std::sync::Mutex::new(HashSet::new()),
             failed_snapshots: std::sync::atomic::AtomicU32::new(0),
+            resume: crate::runner::ResumeTicket::default(),
             #[cfg(test)]
             seams: Seams::default(),
         }
@@ -1016,6 +1069,21 @@ impl EngineBridge {
         self
     }
 
+    /// Share the account's resume and pass requests (spec D11; review P2). [`crate::runner::run`] passes the same
+    /// ticket it serves in [`Self::reconcile_then_resume`].
+    pub fn with_resume(mut self, resume: crate::runner::ResumeTicket) -> Self {
+        self.resume = resume;
+        self
+    }
+
+    /// Review P2 (task 1888): a release asked for a pass that no committed pass has served yet. A released change may
+    /// be a ghost folder's create the pass has not seen; sent now, it would make a folder the server already has a
+    /// second time (anti-goal 1). The next successful tick runs the pass.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    fn a_pass_is_owed(&self) -> bool {
+        self.resume.pass_wanted.load(Ordering::SeqCst) > self.resume.pass_served.load(Ordering::SeqCst)
+    }
+
     pub fn transfers(&self) -> &Arc<crate::transfer_progress::TransferBoard> {
         &self.transfers
     }
@@ -1060,6 +1128,120 @@ impl EngineBridge {
         &self.api
     }
 
+    /// Spec D11, D12 and I6 (task 1888): Windows and Linux resume the operations paused for `auth` here, in the engine,
+    /// after a successful pull proved that the server accepts this session's token. It acts at the run's first
+    /// successful tick (`*reconciled` still false; the first-tick rule) and at any later one where a sign-in asked
+    /// (`asked > done`). Each time:
+    /// - the reconcile pass (D1-D10), then the removal of the scaffolding directories it dropped (D5);
+    /// - the key check (D12): every name that can be checked opens under this session's key, or every `auth` op is held
+    ///   as `key_replaced`;
+    /// - the resume (or that hold), then `done = asked`.
+    ///
+    /// A release that asked for a pass (`pass_wanted > pass_served`; review P2) gets the pass alone: no key check, no
+    /// resume. Any committed pass serves the release ask it read before it planned.
+    ///
+    /// `*reconciled` turns true only when all of it committed, so a step that fails is tried again at the next tick,
+    /// and nothing is resumed before a pass of this run (I6). Local only, counts only in the log (I7).
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    pub async fn reconcile_then_resume(
+        &self,
+        sync_root: &Path,
+        resume: &crate::runner::ResumeTicket,
+        reconciled: &mut bool,
+    ) -> anyhow::Result<()> {
+        let asked = resume.asked.load(Ordering::SeqCst);
+        // Review P2: a release's ask, read before the pass plans, so the pass that serves it has seen the release.
+        let wanted = resume.pass_wanted.load(Ordering::SeqCst);
+        let first_pass = !*reconciled;
+        let resume_owed = first_pass || asked > resume.done.load(Ordering::SeqCst);
+        if !resume_owed && wanted <= resume.pass_served.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let opts = crate::held_queue::Options {
+            device_segment: crate::runner::device_name()
+                .map(|name| crate::known_folder::sanitize_device_segment(&name)),
+            case_insensitive: cfg!(windows),
+        };
+        let now = now_secs();
+        let counts = self
+            .db
+            .reconcile_held_queue(&opts, now, &|rel| crate::state_db::tree_holds_a_file(&sync_root.join(rel)))?;
+        remove_scaffold_dirs(sync_root, &counts.scaffold_dirs);
+        tracing::info!(
+            landed = counts.landed,
+            remapped = counts.remapped,
+            replay = counts.replay,
+            held = counts.held_ambiguous
+                + counts.held_acts_on_ghost
+                + counts.held_parents_disagree
+                + counts.held_twin_busy,
+            released = counts.released,
+            rearmed = counts.rearmed + counts.rearmed_paused,
+            parent_resolved = counts.parent_resolved,
+            scaffold_dropped = counts.scaffold_dropped,
+            backup_unknown_kept = counts.backup_unknown_kept,
+            file_twin = counts.file_twin,
+            "reconcile pass committed"
+        );
+        // A pass that only a release asked for resumes nothing: a release is not a sign-in (spec D11).
+        let (resumed, held_key_replaced) = if !resume_owed {
+            (0, 0)
+        } else if self.auth_ops_open_under_this_key()? {
+            (self.db.resume_operations_paused_for_auth(now)?, 0)
+        } else {
+            (0, self.db.hold_operations_paused_for_auth_as_key_replaced(now)?)
+        };
+        if resume_owed {
+            resume.done.fetch_max(asked, Ordering::SeqCst);
+        }
+        resume.pass_served.fetch_max(wanted, Ordering::SeqCst);
+        *reconciled = true;
+        tracing::info!(
+            resumed,
+            held_key_replaced,
+            first_pass,
+            "after the reconcile pass: the operations paused for auth were resumed, or held under a replaced key"
+        );
+        Ok(())
+    }
+
+    /// Spec D12 (task 1888): whether the operations paused for `auth` were queued under this session's vault key. An op
+    /// is checked when its metadata carries a sealed name (an envelope, as the 2267 proof reads it) and no shared
+    /// context (`shared_root_id`, `share_id`), so its name is sealed by its own `file_id`: it must open under the
+    /// master key in memory ([`name_opens`]). Ops with no name, or with a shared context, are not checked and follow
+    /// the verdict; with none checked, nothing contradicts this key and the verdict is that they open. The key never
+    /// leaves memory, and nothing is logged.
+    fn auth_ops_open_under_this_key(&self) -> anyhow::Result<bool> {
+        let master_key = self.api.master_key();
+        for op in self.db.operations_paused_for_auth()? {
+            let Some(file_id) = op.file_id.as_deref() else {
+                continue;
+            };
+            let Some(metadata) = op
+                .metadata_json
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            else {
+                continue;
+            };
+            let shared = ["shared_root_id", "share_id"]
+                .iter()
+                .any(|field| metadata.get(*field).is_some_and(|value| !value.is_null() && value.as_str() != Some("")));
+            let sealed = metadata
+                .get("name_encrypted")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|sealed| sealed.starts_with('{'));
+            if let Some(sealed) = sealed
+                && !shared
+                && !name_opens(master_key, file_id, sealed)
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     pub fn queue_diagnostics(&self, now: i64) -> anyhow::Result<QueueDiagnostics> {
         Ok(self.db.queue_diagnostics(now)?)
     }
@@ -1079,9 +1261,9 @@ impl EngineBridge {
         if !self.is_stopping() {
             crate::windows_cf::upload_finalization::retry(&self.db, sync_root);
         }
-        let operations = self.db.list_due_operations(now)?;
+        let mut due = DueOperations::new(self.db.list_due_operations(now)?);
 
-        for op in operations {
+        while let Some(op) = due.next(&self.db, now)? {
             // Task 1538 Codex P1 (PR #49, lib.rs:1087 thread): stop draining
             // the queue the instant a caller asks this engine to stop,
             // rather than finishing every due operation first. `abort()`'s
@@ -1090,6 +1272,12 @@ impl EngineBridge {
             // sign-out needs this loop to actually stop promptly on its own,
             // not "eventually, once the batch happens to finish".
             if self.is_stopping() {
+                break;
+            }
+            // Review P2 (task 1888): a release that asked for a pass after this list was read stops the queue here, so
+            // a released ghost create is never sent before a pass has seen it; the next successful tick runs the pass.
+            #[cfg(not(target_os = "macos"))]
+            if self.a_pass_is_owed() {
                 break;
             }
             // The list is read once per pass, and an upload that lands moves
@@ -1173,6 +1361,9 @@ impl EngineBridge {
                     }
                     if let Some(file_id) = &op.file_id {
                         outcome.invalidated_item_ids.push(file_id.clone());
+                    }
+                    if op.kind == OperationKind::CreateFolder {
+                        due.folder_landed();
                     }
                     outcome.completed_op_ids.push(op.op_id);
                 }
@@ -7763,6 +7954,42 @@ fn metadata_name_from_plaintext(plaintext: &str) -> String {
         .unwrap_or_else(|| plaintext.to_string())
 }
 
+/// Spec D5 (task 1888): after the pass committed, the directories of the scaffolding it dropped (sync-root-relative)
+/// are removed deepest first, each with `std::fs::remove_dir`: never recursive, so one that holds anything errors and
+/// stays, as does one already gone. A path that is empty, absolute or climbs out of the sync root is skipped. The
+/// paths are never logged.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn remove_scaffold_dirs(sync_root: &Path, dirs: &[String]) {
+    let mut inside: Vec<&Path> = dirs
+        .iter()
+        .map(Path::new)
+        .filter(|rel| {
+            rel.components().next().is_some()
+                && rel.components().all(|part| matches!(part, std::path::Component::Normal(_)))
+        })
+        .collect();
+    inside.sort_by_key(|rel| std::cmp::Reverse(rel.components().count()));
+    for rel in inside {
+        let _ = std::fs::remove_dir(sync_root.join(rel));
+    }
+}
+
+/// Whether `sealed` (a `name_encrypted` envelope) opens under a file key derived from `master_key` and `file_id`, in
+/// every format the engine reads: the string id (as every client seals today) and the 16-byte binary id (the old CLI),
+/// each in both envelopes ([`decrypt_shared_name_with_key`]). The key is derived from this id, so a name sealed for
+/// another file, or under another account's key, never opens. Task 2267's proof (`own_data_proof::probe`) and task
+/// 1888's key check (spec D12) read names this way.
+pub fn name_opens(master_key: &[u8; 32], file_id: &str, sealed: &str) -> bool {
+    let master = beebeeb_core::kdf::MasterKey::from_bytes(*master_key);
+    let by_string = beebeeb_core::kdf::derive_file_key(&master, file_id.as_bytes());
+    let by_binary = uuid::Uuid::parse_str(file_id)
+        .ok()
+        .map(|id| beebeeb_core::kdf::derive_file_key(&master, id.as_bytes()));
+    std::iter::once(by_string)
+        .chain(by_binary)
+        .any(|file_key| decrypt_shared_name_with_key(&file_key, sealed).is_some_and(|name| !name.trim().is_empty()))
+}
+
 pub(crate) fn decrypt_shared_name_with_key(file_key: &beebeeb_core::kdf::FileKey, name_encrypted: &str) -> Option<String> {
     if let Ok(blob) = serde_json::from_str::<EncryptedBlob>(name_encrypted)
         && let Ok(plaintext) = beebeeb_core::encrypt::decrypt_metadata(file_key, &blob)
@@ -8132,6 +8359,12 @@ pub struct ConflictDetected {
 pub struct SyncTickOutcome {
     pub conflicts: Vec<ConflictDetected>,
     pub applied_item_ids: Vec<String>,
+    /// Spec D11 (task 1888, review P1): the pull came back from the server: a snapshot, or the `/sync/ops` delta. A
+    /// tick whose `GET /sync/ops` failed (offline, a 5xx, a 401) still returns `Ok`, so `Ok` alone proves neither that
+    /// the server accepts this session's token nor that the rows the reconcile pass plans against are current; the
+    /// pass and the resume wait for a tick where this is true.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    pub reached_server: bool,
 }
 
 /// Re-snapshots that must fail in a row before a failed one no longer ends the tick (spec §6.3.2).
@@ -8258,6 +8491,7 @@ pub async fn sync_tick_outcome(
             return Ok(SyncTickOutcome {
                 conflicts,
                 applied_item_ids: dedupe(applied_item_ids),
+                reached_server: true,
             });
         }
         Some(c) if needs_resnapshot => {
@@ -8275,6 +8509,7 @@ pub async fn sync_tick_outcome(
                     return Ok(SyncTickOutcome {
                         conflicts,
                         applied_item_ids: dedupe(applied_item_ids),
+                        reached_server: true,
                     });
                 }
                 Err(e) => after_failed_snapshot(bridge, c, e)?,
@@ -8291,9 +8526,11 @@ pub async fn sync_tick_outcome(
             // snapshot — just skip this tick and retry next time. The cursor is
             // unchanged, so no op is missed.
             tracing::warn!(error = %e, cursor, "sync_tick: /sync/ops failed; retrying next tick");
+            // The pull did not come back: `Ok`, but not a tick that reached the server (spec D11, review P1).
             return Ok(SyncTickOutcome {
                 conflicts,
                 applied_item_ids: dedupe(applied_item_ids),
+                reached_server: false,
             });
         }
     };
@@ -8334,6 +8571,7 @@ pub async fn sync_tick_outcome(
         return Ok(SyncTickOutcome {
             conflicts,
             applied_item_ids: dedupe(applied_item_ids),
+            reached_server: true,
         });
     }
 
@@ -8355,6 +8593,7 @@ pub async fn sync_tick_outcome(
     Ok(SyncTickOutcome {
         conflicts,
         applied_item_ids: dedupe(applied_item_ids),
+        reached_server: true,
     })
 }
 
@@ -10915,6 +11154,55 @@ mod tests {
         assert_eq!(row.status, FileStatus::Trashing);
 
         let _ = server.finish();
+    }
+
+    /// Spec D7 (tasks 1888, 2226): a folder made here inside another new folder waits for that folder's create, and a
+    /// pass reads its due work once. A pass that lands a folder create lists again, so a new tree two levels deep goes
+    /// up in one pass, not one tick (`TICK_INTERVAL`, 30 s) per level.
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn a_new_folder_and_the_folder_inside_it_are_created_in_one_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = SyncMockServer::start(vec![
+            ("200 OK".into(), serde_json::json!({ "id": "folder-new" })),
+            ("200 OK".into(), serde_json::json!({ "id": "folder-sub" })),
+        ]);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [9u8; 32]);
+        for (op_id, file_id, parent_id, created_at) in
+            [("op-new", "folder-new", None, 100), ("op-sub", "folder-sub", Some("folder-new"), 101)]
+        {
+            bridge
+                .db
+                .enqueue_operation(&PendingOperation {
+                    op_id: op_id.into(),
+                    kind: OperationKind::CreateFolder,
+                    file_id: Some(file_id.into()),
+                    parent_id: parent_id.map(str::to_string),
+                    target_path: None,
+                    metadata_json: Some(serde_json::json!({ "name_encrypted": "sealed" }).to_string()),
+                    payload_path: None,
+                    base_version: None,
+                    base_object_version_id: None,
+                    attempts: 0,
+                    max_attempts: 25,
+                    next_retry_at: 0,
+                    last_error: None,
+                    backup_source_key: None,
+                    created_at,
+                    updated_at: created_at,
+                })
+                .unwrap();
+        }
+        assert_eq!(bridge.db.list_due_operations(200).unwrap().len(), 1, "the inner folder waits for its folder");
+
+        let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
+        assert_eq!(outcome.completed_op_ids, vec!["op-new".to_string(), "op-sub".to_string()], "both in one pass");
+        assert!(outcome.retried_op_ids.is_empty());
+        let requests = server.finish();
+        assert_eq!(requests.len(), 2);
+        let inner: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+        assert_eq!(inner["folder_id"], "folder-sub");
+        assert_eq!(inner["parent_id"], "folder-new", "sent after its folder landed, under it");
     }
 
     #[test]
@@ -14981,6 +15269,59 @@ mod tests {
             Some(8),
             "cursor preserved across 429"
         );
+    }
+
+    /// Spec D11 (task 1888, review P1): a tick reaches the server only when its pull came back. A `/sync/ops` that
+    /// fails is swallowed (the tick is still `Ok`), so the outcome says so, and the reconcile pass and the resume wait.
+    #[tokio::test]
+    async fn a_tick_reaches_the_server_only_when_its_pull_came_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let mk = [3u8; 32];
+        let only = "eeee0000-0000-4000-8000-000000000001";
+        let db_path = dir.path().join("state.db");
+
+        // Cursor unset: the snapshot bootstrap came back.
+        let boot = serde_json::json!({ "seq_id": 4, "nodes": [ snap_node(&mk, only, "only.txt", None, false, 10) ] });
+        let server = SyncMockServer::start(vec![("200 OK".into(), boot)]);
+        let bridge = test_bridge_with_api(&db_path, server.base_url.clone(), mk);
+        let tick = sync_tick_outcome(&bridge, dir.path()).await.unwrap();
+        server.finish();
+        assert!(tick.reached_server, "a snapshot bootstrap reached the server");
+
+        // Cursor set, the session refused: `/sync/ops` answers 401 and the tick is still Ok.
+        let refused = serde_json::json!({ "error": "unauthorized" });
+        let server = SyncMockServer::start(vec![("401 Unauthorized".into(), refused)]);
+        let bridge = test_bridge_with_api(&db_path, server.base_url.clone(), mk);
+        let tick = sync_tick_outcome(&bridge, dir.path()).await.unwrap();
+        assert_eq!(server.finish().len(), 1);
+        assert!(!tick.reached_server, "a refused pull did not reach the server");
+
+        // A server error: the same.
+        let failed = serde_json::json!({ "error": "unavailable" });
+        let server = SyncMockServer::start(vec![("503 Service Unavailable".into(), failed)]);
+        let bridge = test_bridge_with_api(&db_path, server.base_url.clone(), mk);
+        assert!(!sync_tick_outcome(&bridge, dir.path()).await.unwrap().reached_server, "a 5xx pull");
+        server.finish();
+        let failed = serde_json::json!({ "error": "unavailable" });
+
+        // An empty delta came back (its freshness probe failing does not change that).
+        let empty = serde_json::json!({ "since": 4, "ops": [] });
+        let server = SyncMockServer::start(vec![("200 OK".into(), empty), ("503 Service Unavailable".into(), failed)]);
+        let bridge = test_bridge_with_api(&db_path, server.base_url.clone(), mk);
+        let tick = sync_tick_outcome(&bridge, dir.path()).await.unwrap();
+        server.finish();
+        assert!(tick.reached_server, "the delta came back, empty");
+
+        // A delta with ops came back.
+        let ops = serde_json::json!({ "since": 4, "ops": [ {
+            "seq_id": 5, "op_type": "file_trash", "file_id": only, "payload": { "id": only }, "created_at": 20,
+        } ] });
+        let server = SyncMockServer::start(vec![("200 OK".into(), ops)]);
+        let bridge = test_bridge_with_api(&db_path, server.base_url.clone(), mk);
+        let tick = sync_tick_outcome(&bridge, dir.path()).await.unwrap();
+        server.finish();
+        assert!(tick.reached_server, "the delta came back");
+        assert_eq!(bridge.db().get_sync_cursor().unwrap(), Some(5), "and was applied");
     }
 
     #[tokio::test]
@@ -29085,5 +29426,340 @@ mod tests {
             "the sync-folder edit was lost with nothing shown: {seen:#?}"
         );
         assert_eq!(seen.server_current, b"edited on the web", "the web's version is on the server");
+    }
+
+    /// Spec D11, D11b, D12 and I6 (task 1888): off macOS the engine resumes the operations paused for `auth` itself,
+    /// after its reconcile pass and the key check. Fixtures are made up: no real name, path or person.
+    mod reconcile_then_resume_tests {
+        use super::*;
+        use crate::runner::ResumeTicket;
+        use std::sync::atomic::Ordering::SeqCst;
+
+        const KEY: [u8; 32] = [7u8; 32];
+        const OTHER_KEY: [u8; 32] = [9u8; 32];
+
+        struct Pc {
+            dir: tempfile::TempDir,
+            root: PathBuf,
+            bridge: EngineBridge,
+            /// The ticket the bridge's queue reads, as the runner shares it.
+            resume: ResumeTicket,
+        }
+
+        impl Pc {
+            fn new() -> Self {
+                let dir = tempfile::tempdir().unwrap();
+                let root = dir.path().join("Beebeeb");
+                std::fs::create_dir_all(&root).unwrap();
+                let resume = ResumeTicket::default();
+                let bridge = test_bridge_with_api(&dir.path().join("state.db"), "https://api.example".into(), KEY)
+                    .with_resume(resume.clone());
+                Self { dir, root, bridge, resume }
+            }
+
+            /// A due change that needs no network (`PinTree`): it shows whether the queue sends.
+            fn due_pin(&self, op_id: &str) {
+                self.sql(&format!(
+                    "INSERT INTO operation_queue (op_id, kind, file_id, metadata_json, attempts, max_attempts, next_retry_at,
+                                                  created_at, updated_at)
+                     VALUES ('{op_id}', 'pin_tree', 'pin-{op_id}', '{{\"operation\":\"pin_tree\",\"pinned\":true}}', 0, 5, 0,
+                             100, 100)"
+                ));
+            }
+
+            fn sql(&self, sql: &str) {
+                self.bridge.db().test_execute(sql).unwrap();
+            }
+
+            /// A row: `version` > 0 is server-known (the snapshot's shape).
+            fn row(&self, id: &str, parent: Option<&str>, path: &str, folder: bool, version: i64) {
+                let parent = parent.map_or("NULL".to_string(), |p| format!("'{p}'"));
+                let (status, kind) = (if version > 0 { "synced" } else { "local" }, if folder { "folder" } else { "file" });
+                self.sql(&format!(
+                    "INSERT INTO files (file_id, path, status, item_kind, current_version, parent_id, size_bytes, remote_updated_at)
+                     VALUES ('{id}', '{path}', '{status}', '{kind}', {version}, {parent}, 0, 0)"
+                ));
+            }
+
+            /// An op paused for `auth` as a refused session pauses it (`record_pause_claimed`).
+            fn op(&self, op_id: &str, kind: &str, file_id: &str, parent: Option<&str>, metadata: serde_json::Value) {
+                let parent = parent.map_or("NULL".to_string(), |p| format!("'{p}'"));
+                let payload = self.dir.path().join(format!("staged-{op_id}"));
+                std::fs::write(&payload, op_id.as_bytes()).unwrap();
+                let metadata = metadata.to_string().replace('\'', "''");
+                self.sql(&format!(
+                    "INSERT INTO operation_queue (op_id, kind, file_id, parent_id, metadata_json, payload_path, attempts,
+                                                  max_attempts, next_retry_at, paused_reason, last_error_class, created_at, updated_at)
+                     VALUES ('{op_id}', '{kind}', '{file_id}', {parent}, '{metadata}', '{}', 0, 25, 0, 'auth', 'auth', 1, 1)",
+                    payload.to_string_lossy()
+                ));
+            }
+
+            /// A new file's create, its name sealed under `key` for `sealed_for`.
+            fn new_file(&self, op_id: &str, file_id: &str, parent: Option<&str>, path: &str, key: [u8; 32], sealed_for: &str) {
+                self.row(file_id, parent, path, false, 0);
+                let name = path.rsplit('/').next().unwrap();
+                self.op(
+                    op_id,
+                    "upload_version",
+                    file_id,
+                    parent,
+                    json!({
+                        "operation": "create_file",
+                        "name_encrypted": encrypted_metadata_for_name(&key, sealed_for, name, None).unwrap(),
+                        "content_type": null,
+                        "uploaded_by": "authenticated_desktop_user",
+                    }),
+                );
+            }
+
+            /// The server folder `t`, the ghost `g` made here at the same path (its create paused for `auth`), and a
+            /// new file `f` under the ghost whose create is paused for `auth` too.
+            fn ghost_with_twin(&self) {
+                self.row("t", None, "Photos", true, 3);
+                self.row("g", None, "Photos", true, 0);
+                self.op(
+                    "op-g",
+                    "create_folder",
+                    "g",
+                    None,
+                    json!({
+                        "operation": "create_folder",
+                        "name_encrypted": encrypted_metadata_for_name(&KEY, "g", "Photos", None).unwrap(),
+                    }),
+                );
+                self.new_file("op-f", "f", Some("g"), "Photos/a.jpg", KEY, "f");
+            }
+
+            fn pause(&self, op_id: &str, reason: &str) {
+                self.sql(&format!("UPDATE operation_queue SET paused_reason = '{reason}' WHERE op_id = '{op_id}'"));
+            }
+
+            fn query<T: rusqlite::types::FromSql>(&self, sql: &str) -> Option<T> {
+                use rusqlite::OptionalExtension as _;
+                self.bridge.db().hold_lock_for_test().query_row(sql, [], |row| row.get(0)).optional().unwrap()
+            }
+
+            /// The op's pause reason; `None` when it is due (or gone: see [`Self::has_op`]).
+            fn paused(&self, op_id: &str) -> Option<String> {
+                self.query::<Option<String>>(&format!("SELECT paused_reason FROM operation_queue WHERE op_id = '{op_id}'"))
+                    .flatten()
+            }
+
+            fn has_op(&self, op_id: &str) -> bool {
+                self.query::<String>(&format!("SELECT op_id FROM operation_queue WHERE op_id = '{op_id}'")).is_some()
+            }
+
+            fn has_row(&self, file_id: &str) -> bool {
+                self.query::<String>(&format!("SELECT file_id FROM files WHERE file_id = '{file_id}'")).is_some()
+            }
+
+            fn op_parent(&self, op_id: &str) -> Option<String> {
+                self.query::<Option<String>>(&format!("SELECT parent_id FROM operation_queue WHERE op_id = '{op_id}'"))
+                    .flatten()
+            }
+
+            async fn tick(&self, resume: &ResumeTicket, reconciled: &mut bool) {
+                self.bridge.reconcile_then_resume(&self.root, resume, reconciled).await.unwrap();
+            }
+        }
+
+        /// D11, I6: a later tick resumes only when a sign-in asked, and then after the pass: the ghost is folded into
+        /// its twin first, so its child resumes under the server folder. An ask is served once.
+        #[tokio::test]
+        async fn a_resume_runs_after_the_pass_and_only_when_asked() {
+            let pc = Pc::new();
+            pc.ghost_with_twin();
+            let resume = ResumeTicket::default();
+            // This run's first pass already ran: a later tick.
+            let mut reconciled = true;
+            pc.tick(&resume, &mut reconciled).await;
+            assert_eq!(pc.paused("op-f").as_deref(), Some("auth"), "asked == done: the auth op stays paused");
+            assert!(pc.has_op("op-g") && pc.has_row("g"), "and no pass ran");
+
+            resume.asked.store(1, SeqCst);
+            pc.tick(&resume, &mut reconciled).await;
+            assert!(!pc.has_op("op-g") && !pc.has_row("g"), "the pass ran first: the ghost was remapped");
+            assert_eq!(pc.op_parent("op-f").as_deref(), Some("t"), "its child now waits under the server folder");
+            assert_eq!(pc.paused("op-f"), None, "then the remaining auth op was resumed");
+            assert_eq!(resume.done.load(SeqCst), 1, "done == asked");
+
+            // The server refuses the session again; with no new ask, nothing is resumed.
+            pc.pause("op-f", "auth");
+            pc.tick(&resume, &mut reconciled).await;
+            assert_eq!(pc.paused("op-f").as_deref(), Some("auth"), "a second call with no new ask resumes nothing");
+            assert_eq!(resume.done.load(SeqCst), 1);
+        }
+
+        /// Review P2 (task 1888): "Upload to my Beebeeb" releases a held ghost folder's create and asks for a pass. Until
+        /// a committed pass has served that ask, the queue sends nothing (at a tick or a send-phase wake: both go
+        /// through `process_due_operations`). The pass then sees the released create and folds the ghost into its twin,
+        /// so it is never sent; and a release resumes no `auth` op, because it is not a sign-in.
+        #[tokio::test]
+        async fn a_released_change_is_not_sent_before_a_pass_has_seen_it() {
+            let pc = Pc::new();
+            pc.ghost_with_twin();
+            pc.pause("op-g", "found_while_paused");
+            pc.due_pin("op-pin");
+            // This run's first pass already ran; then the person pressed Upload on the held create.
+            let mut reconciled = true;
+            pc.resume.pass_wanted.fetch_add(1, SeqCst);
+            assert_eq!(pc.bridge.db().release_found_while_paused(&["op-g".to_string()], 200).unwrap(), 1);
+
+            let outcome = pc.bridge.process_due_operations(&pc.root, 200).await.unwrap();
+            assert!(outcome.completed_op_ids.is_empty(), "nothing is sent while a release waits for a pass");
+            assert!(pc.has_op("op-pin") && pc.has_op("op-g"));
+
+            pc.tick(&pc.resume, &mut reconciled).await;
+            assert!(!pc.has_op("op-g") && !pc.has_row("g"), "the pass saw the released create: the ghost was remapped");
+            assert_eq!(pc.op_parent("op-f").as_deref(), Some("t"));
+            assert_eq!(pc.paused("op-f").as_deref(), Some("auth"), "a release resumes no auth op");
+            assert_eq!(pc.resume.pass_served.load(SeqCst), 1, "the release ask is served");
+            assert_eq!(pc.resume.done.load(SeqCst), 0, "and no sign-in ask was");
+
+            let outcome = pc.bridge.process_due_operations(&pc.root, 200).await.unwrap();
+            assert_eq!(outcome.completed_op_ids, vec!["op-pin".to_string()], "after the pass the queue sends again");
+        }
+
+        /// I6: a pass that fails resumes nothing, serves no ask and records no pass for the run, so the next tick tries
+        /// again; once it completes, the resume follows it.
+        #[tokio::test]
+        async fn nothing_is_resumed_when_the_pass_fails() {
+            let pc = Pc::new();
+            pc.ghost_with_twin();
+            // A test-only trigger: deleting the ghost's row fails, so the pass's transaction rolls back.
+            pc.sql(
+                "CREATE TEMP TRIGGER stop_here BEFORE DELETE ON files WHEN OLD.file_id = 'g'
+                 BEGIN SELECT RAISE(ABORT, 'test'); END",
+            );
+            let resume = ResumeTicket::default();
+            resume.asked.store(1, SeqCst);
+            let mut reconciled = false;
+            assert!(pc.bridge.reconcile_then_resume(&pc.root, &resume, &mut reconciled).await.is_err());
+            assert_eq!(pc.paused("op-f").as_deref(), Some("auth"), "no resume without a committed pass");
+            assert!(pc.has_op("op-g"), "the failed transaction left the ghost as it was");
+            assert!(!reconciled, "no pass recorded for this run");
+            assert_eq!(resume.done.load(SeqCst), 0, "the ask stays open");
+
+            pc.sql("DROP TRIGGER stop_here");
+            pc.tick(&resume, &mut reconciled).await;
+            assert!(!pc.has_op("op-g"));
+            assert_eq!(pc.paused("op-f"), None, "the next tick passes, then resumes");
+            assert!(reconciled);
+            assert_eq!(resume.done.load(SeqCst), 1);
+        }
+
+        /// D11's first-tick rule: the first successful tick of an engine run proves the server accepts this session's
+        /// token, so it resumes without a sign-in (a Windows PC that launched offline asks nowhere else), after the
+        /// pass. Only once per run.
+        #[tokio::test]
+        async fn the_first_successful_tick_resumes_without_a_sign_in() {
+            let pc = Pc::new();
+            pc.ghost_with_twin();
+            let resume = ResumeTicket::default();
+            let mut reconciled = false;
+            pc.tick(&resume, &mut reconciled).await;
+            assert!(!pc.has_op("op-g") && !pc.has_row("g"), "the pass ran: the ghost was remapped");
+            assert_eq!(pc.op_parent("op-f").as_deref(), Some("t"));
+            assert_eq!(pc.paused("op-f"), None, "asked == done == 0, and the run's first pass resumed the auth op");
+            assert!(reconciled, "this run's first pass is recorded");
+            assert_eq!(resume.done.load(SeqCst), 0, "no ask was open");
+
+            pc.pause("op-f", "auth");
+            pc.tick(&resume, &mut reconciled).await;
+            assert_eq!(pc.paused("op-f").as_deref(), Some("auth"), "the second call does not resume again");
+        }
+
+        /// D12: every `auth` op whose name is sealed by its own id and carries no shared context is test-decrypted
+        /// under this session's key. One that does not open holds every `auth` op as `key_replaced`; ops paused for
+        /// another reason keep it. All opening: resumed. A shared-context op is not tested; it follows the verdict.
+        #[tokio::test]
+        async fn a_name_that_does_not_open_holds_every_auth_op_as_key_replaced() {
+            // One create sealed under another key.
+            let pc = Pc::new();
+            pc.new_file("op-mine", "f1", None, "a.txt", KEY, "f1");
+            pc.new_file("op-theirs", "f2", None, "b.txt", OTHER_KEY, "f2");
+            pc.op("op-trash", "trash_file", "f3", None, json!({}));
+            pc.new_file("op-quota", "f4", None, "c.txt", KEY, "f4");
+            pc.pause("op-quota", "quota");
+            let resume = ResumeTicket::default();
+            resume.asked.store(1, SeqCst);
+            let mut reconciled = true;
+            pc.tick(&resume, &mut reconciled).await;
+            for op in ["op-mine", "op-theirs", "op-trash"] {
+                assert_eq!(pc.paused(op).as_deref(), Some("key_replaced"), "{op}: every auth op is held");
+            }
+            assert_eq!(pc.paused("op-quota").as_deref(), Some("quota"), "another pause keeps its reason");
+            assert_eq!(resume.done.load(SeqCst), 1, "the ask is served by the hold");
+
+            // A name sealed under this key, but for another file: it does not open by its own id.
+            let pc = Pc::new();
+            pc.new_file("op-mine", "f1", None, "a.txt", KEY, "f1");
+            pc.new_file("op-moved", "f2", None, "b.txt", KEY, "f9");
+            let mut reconciled = false;
+            pc.tick(&ResumeTicket::default(), &mut reconciled).await;
+            assert_eq!(pc.paused("op-mine").as_deref(), Some("key_replaced"));
+            assert_eq!(pc.paused("op-moved").as_deref(), Some("key_replaced"), "keyed by its own id only");
+
+            // All sealed under this key; a shared-context op sealed elsewhere is not tested: resumed.
+            let pc = Pc::new();
+            pc.new_file("op-mine", "f1", None, "a.txt", KEY, "f1");
+            pc.new_file("op-too", "f2", None, "b.txt", KEY, "f2");
+            pc.op(
+                "op-shared",
+                "upload_version",
+                "f3",
+                None,
+                json!({
+                    "operation": "create_file",
+                    "name_encrypted": encrypted_metadata_for_name(&OTHER_KEY, "f3", "c.txt", None).unwrap(),
+                    "shared_root_id": "shared-root",
+                    "share_id": "invite-1",
+                }),
+            );
+            pc.op("op-trash", "trash_file", "f4", None, json!({}));
+            let resume = ResumeTicket::default();
+            resume.asked.store(1, SeqCst);
+            let mut reconciled = true;
+            pc.tick(&resume, &mut reconciled).await;
+            for op in ["op-mine", "op-too", "op-shared", "op-trash"] {
+                assert_eq!(pc.paused(op), None, "{op}: resumed");
+            }
+            assert_eq!(resume.done.load(SeqCst), 1);
+        }
+
+        /// Spec D5, anti-goal 3: the scaffolding directories a pass dropped are removed deepest first with
+        /// `remove_dir`, never recursively, and never one that holds something or lies outside the sync root.
+        #[test]
+        fn scaffold_directories_are_removed_bottom_up_and_never_when_they_hold_something() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join("Beebeeb");
+            std::fs::create_dir_all(root.join("Backups/unknown/A")).unwrap();
+            std::fs::create_dir_all(root.join("Backups/unknown/B")).unwrap();
+            std::fs::write(root.join("Backups/unknown/B/keep.txt"), b"x").unwrap();
+            std::fs::create_dir_all(dir.path().join("outside")).unwrap();
+            remove_scaffold_dirs(
+                &root,
+                &[
+                    "Backups/unknown".to_string(),
+                    "Backups/unknown/A".to_string(),
+                    "Backups/unknown/B".to_string(),
+                    "../outside".to_string(),
+                    "Missing/X".to_string(),
+                    String::new(),
+                ],
+            );
+            assert!(!root.join("Backups/unknown/A").exists(), "an empty one is removed");
+            assert!(root.join("Backups/unknown/B/keep.txt").exists(), "one that holds a file stays, file and all");
+            assert!(root.join("Backups/unknown").exists(), "its parent is not empty: it stays");
+            assert!(dir.path().join("outside").exists(), "never outside the sync root");
+            assert!(root.exists(), "never the sync root itself");
+
+            // Listed top-down, removed bottom-up: both go.
+            std::fs::create_dir_all(root.join("Backups/other/C")).unwrap();
+            remove_scaffold_dirs(&root, &["Backups/other".to_string(), "Backups/other/C".to_string()]);
+            assert!(!root.join("Backups/other").exists(), "the parent goes once its child is gone");
+            assert!(root.join("Backups").exists(), "what was not listed stays");
+        }
     }
 }

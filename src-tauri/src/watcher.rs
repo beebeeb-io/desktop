@@ -1284,4 +1284,42 @@ mod tests {
         assert_eq!(String::from_utf8(actual).unwrap(), *expected, "watcher identity must belong to its queued DB row");
     }
 
+    /// Tasks 1888 + 2226 (spec §4 "Windows Cloud Files identity", plan Task 1 Step 6b): a folder made on this PC gets a
+    /// row and a create, but no Cloud Files identity on disk. So when the reconcile pass re-points its row to the
+    /// server twin and deletes the ghost's id, nothing on disk still names that id.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_folder_made_on_this_pc_gets_no_cloud_files_identity() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::{Foundation::HANDLE, Storage::CloudFilters::*};
+        // FILE_FLAG_BACKUP_SEMANTICS: needed to open a directory.
+        const OPEN_A_DIRECTORY: u32 = 0x0200_0000;
+        const ERROR_NOT_A_CLOUD_FILE: u32 = 0x8007_0178;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        crate::windows_cf::register_sync_root(&root).unwrap();
+        let (_db, bridge) = test_bridge(&temp.path().join("state.db"));
+        let dir = root.join("new");
+        fs::create_dir(&dir).unwrap();
+        let id = bridge.ensure_local_folder(&root, &dir);
+        let handle = fs::OpenOptions::new().read(true).custom_flags(OPEN_A_DIRECTORY).open(&dir).unwrap();
+        let mut buffer = vec![0u64; 1024];
+        let info = unsafe {
+            CfGetPlaceholderInfo(
+                HANDLE(handle.as_raw_handle()),
+                CF_PLACEHOLDER_INFO_STANDARD,
+                buffer.as_mut_ptr().cast(),
+                (buffer.len() * 8) as u32,
+                None,
+            )
+        };
+        drop(handle);
+        crate::windows_cf::unregister_sync_root(&root).unwrap();
+        assert!(id.is_some(), "the folder gets a row and a create");
+        let error = info.expect_err("a folder made on this PC is no Cloud Files placeholder");
+        assert_eq!(error.code().0 as u32, ERROR_NOT_A_CLOUD_FILE, "{error}");
+    }
+
 }
