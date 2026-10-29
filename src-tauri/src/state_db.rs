@@ -1202,12 +1202,16 @@ fn apply_reconcile_unit_conn(conn: &Connection, unit: &crate::held_queue::Unit, 
             )?;
         }
         Unit::Rearm { op_id } => rearm_operation_conn(conn, op_id, now)?,
-        Unit::ResolveParent { .. } => {
-            // Task 3 (D6) applies this; the planner does not make it before then.
-            return Err(rusqlite::Error::SqliteFailure(
-                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
-                Some("reconcile: unit not applied yet".into()),
-            ));
+        Unit::ResolveParent { op_id, file_id, parent } => {
+            // D6: the op and its row both get the folder found by path, by primary key. It comes before any remap, so
+            // a ghost's remap re-points what was just put under it.
+            conn.execute(
+                "UPDATE operation_queue SET parent_id = ?2, updated_at = ?3 WHERE op_id = ?1",
+                params![op_id, parent, now],
+            )?;
+            if let Some(file_id) = file_id {
+                conn.execute("UPDATE files SET parent_id = ?2 WHERE file_id = ?1", params![file_id, parent])?;
+            }
         }
         Unit::DropScaffold { .. } => {
             // Task 2 (D5) applies this; the planner does not make it before then.
@@ -15908,5 +15912,85 @@ mod reconcile_tests {
         assert_eq!(pc.db.release_found_while_paused(&["op-f1".to_string()], NOW).unwrap(), 1);
         assert!(pc.due().is_empty(), "stopped after repeated errors: Upload only clears the pause");
         assert_eq!(pc.op("op-f1").3.as_deref(), Some(SERVER_ERROR));
+    }
+
+    impl Pc {
+        /// The op's sync-root-relative key, as every create queues it.
+        fn queued_at(&self, op_id: &str, path: &str) {
+            self.sql("UPDATE operation_queue SET target_path = ?2 WHERE op_id = ?1", params![op_id, path]);
+        }
+
+        /// A new file `f` at `A/B/f.txt` whose upload was queued with no parent (D6).
+        fn upload_without_a_parent(&self) {
+            self.file("f", None, "A/B/f.txt", 0);
+            self.upload("op-f", "f", None, 10);
+            self.queued_at("op-f", "A/B/f.txt");
+        }
+    }
+
+    /// D6: after the pass, the change and its row both name the folder found by path, and the change is due under it.
+    #[test]
+    fn reconcile_gives_a_root_level_upload_its_parent_by_path_in_both_columns() {
+        let pc = Pc::new();
+        pc.folder("a", None, "A", 3);
+        pc.folder("b", Some("a"), "A/B", 3);
+        pc.upload_without_a_parent();
+        let counts = pc.db.reconcile_held_queue(&opts(), NOW, &holds_a_file).unwrap();
+        assert_eq!(counts, Counts { parent_resolved: 1, ..Counts::default() });
+        assert_eq!(pc.op("op-f").0.as_deref(), Some("b"));
+        assert_eq!(pc.parent_of_row("f").as_deref(), Some("b"));
+        assert_eq!(pc.due(), vec!["op-f".to_string()]);
+    }
+
+    /// D6 then D2: the folder found by path is a ghost; its remap, in the same plan, points both columns at its twin.
+    /// The twin is found by parent and leaf (§3); its path here does not match, so the ghost is the only folder at the
+    /// directory. Split over two batches the result is the same.
+    #[test]
+    fn reconcile_points_both_columns_at_the_twin_when_the_parent_found_by_path_is_a_ghost() {
+        let setup = |pc: &Pc| {
+            pc.folder("a", None, "A", 3);
+            pc.folder("g", Some("a"), "A/B", 0);
+            pc.create_folder("op-g", "g", Some("a"));
+            pc.folder("t", Some("a"), "Old/B", 3);
+            pc.upload_without_a_parent();
+        };
+        let pc = Pc::new();
+        setup(&pc);
+        let mut batches = 0;
+        let counts = pc
+            .db
+            .reconcile_in_batches(&opts(), NOW, RECONCILE_UNITS_PER_TX, &holds_a_file, &mut |_, n| batches = n)
+            .unwrap();
+        assert_eq!(counts, Counts { parent_resolved: 1, remapped: 1, ..Counts::default() });
+        assert_eq!(batches, 1, "the resolve and the remap are in one plan");
+        assert_eq!(pc.op("op-f").0.as_deref(), Some("t"));
+        assert_eq!(pc.parent_of_row("f").as_deref(), Some("t"));
+        assert_eq!(pc.references("g"), 0);
+
+        let split = Pc::new();
+        setup(&split);
+        split.db.reconcile_in_batches(&opts(), NOW, 1, &holds_a_file, &mut |_, _| {}).unwrap();
+        assert_eq!(split.snapshot(), pc.snapshot());
+    }
+
+    /// D10: a new file that meets a server file of the same name is held (`needs_review`, not due); once the server
+    /// file is gone, the next pass releases it.
+    #[test]
+    fn reconcile_holds_a_new_file_that_meets_a_server_file_and_releases_it_once_the_twin_is_gone() {
+        let pc = Pc::new();
+        pc.folder("p", None, "Docs", 3);
+        pc.file("s", Some("p"), "Docs/report.txt", 2);
+        pc.file("n", Some("p"), "Docs/Report.txt", 0);
+        pc.upload("op-n", "n", Some("p"), 10);
+        let counts = pc.db.reconcile_held_queue(&opts(), NOW, &holds_a_file).unwrap();
+        assert_eq!(counts, Counts { file_twin: 1, ..Counts::default() });
+        assert_eq!(pc.op("op-n").4.as_deref(), Some(crate::held_queue::NEEDS_REVIEW));
+        assert!(pc.due().is_empty());
+
+        pc.sql("DELETE FROM files WHERE file_id = 's'", []);
+        let counts = pc.db.reconcile_held_queue(&opts(), NOW, &holds_a_file).unwrap();
+        assert_eq!(counts, Counts { released: 1, ..Counts::default() });
+        assert_eq!(pc.op("op-n").4, None);
+        assert_eq!(pc.due(), vec!["op-n".to_string()]);
     }
 }
