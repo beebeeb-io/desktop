@@ -9250,10 +9250,14 @@ fn write_owner(conn: &Connection, owner: &crate::account_binding::Identity) -> R
 }
 
 /// How many rows of an account live here: every `ACCOUNT_TABLES` row and every `sync_state` row except the
-/// owner record and the device keys (the Finder removal debt, the domain-gone mark, closed Finder accepts).
+/// owner record, the device keys (the Finder removal debt, the domain-gone mark, closed Finder accepts) and the
+/// custody memory (`shared_folder_custody_seen:%`, task 2279 N1). That memory is device-wide and survives every
+/// local-state wipe, so counting it would keep `has_account_data` true after a completed sign-out — permanently,
+/// because the set only grows — and the next engine start would want a reset or refuse on Windows.
 fn account_rows(conn: &Connection) -> Result<i64> {
     let mut rows: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM sync_state WHERE key NOT IN (?1, ?2, ?3, ?4, ?5)",
+        "SELECT COUNT(*) FROM sync_state
+         WHERE key NOT IN (?1, ?2, ?3, ?4, ?5) AND key NOT LIKE 'shared_folder_custody_seen:%'",
         params![
             OWNER_USER_ID_KEY,
             OWNER_EMAIL_KEY,
@@ -14846,6 +14850,40 @@ mod tests {
         wipe(&db);
         db.finish_windows_signout().unwrap();
         assert!(seen(&db), "the Windows sign-out keeps the custody memory");
+    }
+
+    /// N1 (round 3 of 2279): the kept custody row must not read as account data. F2 keeps
+    /// `shared_folder_custody_seen:%` through every wipe, and `account_rows` counted every `sync_state` key it did
+    /// not name, so `has_account_data` stayed true after a completed sign-out — forever, the set only grows. The next
+    /// engine start then wanted a reset on macOS/Linux and was refused as another account's data on Windows.
+    #[test]
+    fn sf2279_the_kept_custody_row_is_not_account_data_after_every_wipe() {
+        let root = "10000000-0000-4000-8000-000000000053";
+        let after_wipe = |name: &str, wipe: &dyn Fn(&StateDb)| {
+            let dir = tempfile::tempdir().unwrap();
+            let db = StateDb::open(dir.path().join("state.db")).unwrap();
+            db.remember_folder_custody_at_revision(root, db.account_revision())
+                .unwrap();
+            assert!(db.has_seen_folder_custody(root).unwrap(), "{name}: fixture");
+            wipe(&db);
+            assert!(
+                db.has_seen_folder_custody(root).unwrap(),
+                "{name}: the custody row survives the wipe (F2)"
+            );
+            assert!(
+                !db.has_account_data().unwrap(),
+                "{name}: the kept custody row is not account data"
+            );
+        };
+        after_wipe("purge_all_local_state", &|db| {
+            db.purge_all_local_state().unwrap();
+        });
+        after_wipe("clear_account_data", &|db| {
+            db.clear_account_data(false).unwrap();
+        });
+        after_wipe("finish_windows_signout", &|db| {
+            db.finish_windows_signout().unwrap();
+        });
     }
 
     /// L7d: the set stores canonical lowercase hyphenated UUIDs only. A write
