@@ -14,6 +14,8 @@ pub(crate) struct Counts {
     pub differs: usize,
     /// B changed on the server since the server read: left waiting, not downloaded.
     pub changed: usize,
+    /// B could not be read or did not open under its key: left waiting (review F5).
+    pub unreadable: usize,
 }
 
 /// One chunk of a file, decrypted. The buffer zeroizes itself when it is dropped.
@@ -28,7 +30,8 @@ fn waiting(pairs: &[Pair]) -> usize {
     pairs.iter().filter(|pair| pair.class == Class::Unknown).count()
 }
 
-/// Rows L11/L12 for every pair waiting, when `download_ok` is exactly how many there are (A4).
+/// Rows L11/L12 for every pair waiting, when `download_ok` is exactly how many there are (A4). A B that cannot be read,
+/// or does not open under the key derived for it, is left waiting and counted, and the compare goes on (review F5).
 pub(crate) async fn compare(api: &RepairApi, pairs: &mut [Pair], download_ok: usize) -> anyhow::Result<Counts> {
     if pairs.iter().any(|pair| pair.class == Class::Unknown && pair.server.is_none()) {
         anyhow::bail!("The server read has not run for every pair yet. Run server-read first; nothing was downloaded.");
@@ -45,7 +48,10 @@ pub(crate) async fn compare(api: &RepairApi, pairs: &mut [Pair], download_ok: us
         let Some(Some(ServerFile::Found(listed))) = pair.server.as_ref().map(|read| read.b.clone()) else {
             anyhow::bail!("pair {n}: the server read holds no B; run server-read again. Nothing was downloaded.");
         };
-        let now = api.file(&pair.b.file_id).await.map_err(|failure| failure.at(n))?;
+        let Ok(now) = api.file(&pair.b.file_id).await else {
+            counts.unreadable += 1;
+            continue;
+        };
         let ServerFile::Found(now) = now else {
             counts.changed += 1;
             continue;
@@ -54,14 +60,11 @@ pub(crate) async fn compare(api: &RepairApi, pairs: &mut [Pair], download_ok: us
             counts.changed += 1;
             continue;
         }
-        let key = api.file_key(&pair.b.file_id);
-        let mut hash = Sha256::new();
-        for index in 0..u32::try_from(now.chunk_count)? {
-            let sealed = api.chunk(&pair.b.file_id, index).await.map_err(|failure| failure.at(n))?;
-            let plain = decrypt_chunk(&key, &sealed).map_err(|_| anyhow::anyhow!("pair {n}: a chunk of B did not decrypt"))?;
-            hash.update(plain.as_slice());
-        }
-        let same = pair.a.local_hash.as_deref().map(str::to_ascii_lowercase) == Some(format!("{:x}", hash.finalize()));
+        let Some(digest) = b_digest(api, &pair.b.file_id, now.chunk_count).await else {
+            counts.unreadable += 1;
+            continue;
+        };
+        let same = pair.a.local_hash.as_deref().map(str::to_ascii_lowercase) == Some(digest);
         if same {
             pair.class = Class::Identical;
             counts.identical += 1;
@@ -71,4 +74,16 @@ pub(crate) async fn compare(api: &RepairApi, pairs: &mut [Pair], download_ok: us
         }
     }
     Ok(counts)
+}
+
+/// SHA-256 of B's plaintext, chunk by chunk; `None` when a chunk cannot be read or does not open.
+async fn b_digest(api: &RepairApi, file_id: &str, chunk_count: i64) -> Option<String> {
+    let key = api.file_key(file_id);
+    let mut hash = Sha256::new();
+    for index in 0..u32::try_from(chunk_count).ok()? {
+        let sealed = api.chunk(file_id, index).await.ok()?;
+        let plain = decrypt_chunk(&key, &sealed).ok()?;
+        hash.update(plain.as_slice());
+    }
+    Some(format!("{:x}", hash.finalize()))
 }

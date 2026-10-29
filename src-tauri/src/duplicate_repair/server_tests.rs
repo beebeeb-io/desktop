@@ -138,6 +138,7 @@ pub(super) fn pair(n: u32, a: &str, b: &str) -> Pair {
         server: None,
         action: super::model::Action::None,
         applied: None,
+        seal: String::new(),
     }
 }
 

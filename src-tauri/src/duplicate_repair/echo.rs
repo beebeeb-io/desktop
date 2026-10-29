@@ -21,10 +21,6 @@ pub(crate) enum EchoResult {
     CursorNeverReached,
 }
 
-/// The `sync_state` key the app keeps its op cursor under (`StateDb::SYNC_CURSOR_KEY`; the tests set the cursor
-/// through `StateDb` and read it here).
-const CURSOR_KEY: &str = "sync_ops_cursor";
-
 /// Check pair `n`'s echo, polling the cursor every `poll` for at most `wait` (spec: every 5 s for up to 3 minutes).
 pub(crate) fn check_echo(
     db_path: &Path,
@@ -69,7 +65,7 @@ pub(crate) fn check_echo(
 /// The app's op cursor, as `StateDb::get_sync_cursor` reads it.
 fn cursor(db: &Connection) -> anyhow::Result<Option<i64>> {
     let raw: Option<String> = db
-        .query_row("SELECT value FROM sync_state WHERE key = ?1", [CURSOR_KEY], |row| row.get(0))
+        .query_row("SELECT value FROM sync_state WHERE key = ?1", [crate::state_db::StateDb::SYNC_CURSOR_KEY], |row| row.get(0))
         .optional()
         .map_err(|_| anyhow::anyhow!("The app's op cursor could not be read."))?;
     Ok(raw.and_then(|raw| raw.parse().ok()))

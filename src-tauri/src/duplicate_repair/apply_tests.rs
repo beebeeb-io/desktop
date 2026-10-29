@@ -129,9 +129,11 @@ fn ops(list: &[(i64, &str, &str)]) -> Route {
     get(&format!("/api/v1/sync/ops?since={CURSOR}"), 200, serde_json::json!({ "ops": ops, "since": CURSOR }).to_string())
 }
 
-/// The trash and what the server answers after it: A live, B in the trash, B's op in the log.
+/// The op log empty after the app's cursor (review F3), the trash, and what the server answers after it: A live, B in
+/// the trash, and `log` (B's op, as the tests choose).
 fn trashed(b_size: i64, b_version: i64, log: Route) -> Vec<Route> {
     vec![
+        ops(&[]),
         (format!("DELETE /api/v1/files/{B}"), 200, b"{}".to_vec()),
         found(A, 10, false, 1),
         found(B, b_size, true, b_version),
@@ -171,7 +173,7 @@ async fn t1_an_identical_pair_forgets_b_then_trashes_it_once() {
     assert_eq!(run.pairs[0].action, Action::TrashB);
     let a_before = pc.columns(A);
     let mut routes = read(10, 1);
-    routes.extend(trashed(10, 1, ops(&[(9, "file_update", "other"), (12, "file_trash", B)])));
+    routes.extend(trashed(10, 1, ops(&[(12, "file_trash", B)])));
     let mock = RepairMockServer::start(routes);
 
     let outcome = pc.apply(&mock, &mut run, at_a()).await.unwrap();
@@ -184,6 +186,7 @@ async fn t1_an_identical_pair_forgets_b_then_trashes_it_once() {
     assert_eq!(writes, [&format!("DELETE /api/v1/files/{B}")], "one soft trash and nothing else: {requests:?}");
     let delete = requests.iter().position(|line| line.starts_with("DELETE ")).unwrap();
     assert!(requests[..delete].contains(&format!("GET /api/v1/files/{B}")), "B re-read first (A5): {requests:?}");
+    assert_eq!(requests[delete - 1], format!("GET /api/v1/sync/ops?since={CURSOR}"), "the op log read last (F3)");
     assert_eq!(
         requests[delete + 1..],
         [format!("GET /api/v1/files/{A}"), format!("GET /api/v1/files/{B}"), format!("GET /api/v1/sync/ops?since={CURSOR}")],
@@ -200,20 +203,26 @@ async fn t1_an_identical_pair_forgets_b_then_trashes_it_once() {
     assert_eq!(again.requests(), Vec::<String>::new());
 }
 
-/// The trash went through but the server does not confirm it, or B's op is not in the log: recorded, and the run
-/// stops for the lane to report.
+/// The trash went through but the server does not confirm it, B's op is not in the log, or the log after the app's
+/// cursor holds more than B's trash (review F3: the app would apply that too): recorded, and the run stops for the
+/// lane to report.
 #[tokio::test]
 async fn a_trash_the_server_does_not_confirm_is_unexpected() {
     for (b_after, log, expected) in [
-        (false, ops(&[(12, "file_trash", B)]), Outcome::Unexpected { a_live: true, b_trashed: false, seq: Some(12) }),
-        (true, ops(&[]), Outcome::Unexpected { a_live: true, b_trashed: true, seq: None }),
+        (false, ops(&[(12, "file_trash", B)]), Outcome::Unexpected { a_live: true, b_trashed: false, seq: Some(12), other_ops: 0 }),
+        (true, ops(&[]), Outcome::Unexpected { a_live: true, b_trashed: true, seq: None, other_ops: 0 }),
+        (
+            true,
+            ops(&[(11, "file_update", "other"), (12, "file_trash", B)]),
+            Outcome::Unexpected { a_live: true, b_trashed: true, seq: Some(12), other_ops: 1 },
+        ),
     ] {
         let pc = Pc::new();
         let mut run = identical(&pc).await;
         let mut routes = read(10, 1);
         routes.extend(trashed(10, 1, log));
         if !b_after {
-            routes[6] = found(B, 10, false, 1);
+            routes[7] = found(B, 10, false, 1);
         }
         let mock = RepairMockServer::start(routes);
         let outcome = pc.apply(&mock, &mut run, at_a()).await.unwrap();
@@ -223,12 +232,14 @@ async fn a_trash_the_server_does_not_confirm_is_unexpected() {
 }
 
 /// T12, I1: the trash fails after B's row was forgotten. The pair stops there, recorded; `apply-one` again re-checks
-/// it with B's row gone and sends the trash once more.
+/// it with B's row gone and sends the trash once more. The retry keeps the first try's backup, the one that still holds
+/// B's row (review F4).
 #[tokio::test]
 async fn t12_a_failed_trash_stops_at_forgotten_and_is_retried_by_a_second_run() {
     let pc = Pc::new();
     let mut run = identical(&pc).await;
     let mut routes = read(10, 1);
+    routes.push(ops(&[]));
     routes.push((format!("DELETE /api/v1/files/{B}"), 500, b"{}".to_vec()));
     let mock = RepairMockServer::start(routes);
 
@@ -246,7 +257,10 @@ async fn t12_a_failed_trash_stops_at_forgotten_and_is_retried_by_a_second_run() 
     let again = pc.apply(&mock, &mut run, at_a()).await.unwrap();
     assert_eq!(again, Outcome::Trashed { seq: 12, b_trashed_at: Some(TRASHED_AT.into()) });
     assert_eq!(mock.requests().iter().filter(|line| line.starts_with("DELETE ")).count(), 1);
-    assert_eq!(pc.backups().len(), 2, "each step backs up first");
+    let first = pc.backups();
+    assert_eq!(first.len(), 1, "the retry takes no second backup: {first:?}");
+    assert_eq!(run.pairs[0].applied.as_ref().map(|applied| applied.backup.clone()), Some(first[0].clone()));
+    assert_eq!(rows_in(&pc.out.join(&first[0])), 2, "the backup the run file names still holds B's row");
 }
 
 /// T4, A5: B changed on the server since the server read (its time or its size): skipped, nothing written.
@@ -358,7 +372,7 @@ async fn t10_a_b_in_the_trash_or_gone_is_forgotten_without_a_trash() {
         run.pairs[0].action = class.proposed();
         assert_eq!(run.pairs[0].action, Action::ForgetB);
         let a_before = pc.columns(A);
-        let mock = RepairMockServer::start(routes);
+        let mock = RepairMockServer::start(routes.into_iter().chain([ops(&[])]).collect());
 
         let outcome = pc.apply(&mock, &mut run, at_a()).await.unwrap();
 
@@ -409,6 +423,183 @@ async fn t11_a_run_file_marked_wrong_is_refused_before_any_write() {
     assert!(!error.contains("trash-everything") && !error.contains(PATH) && !error.contains(B), "{error}");
 }
 
+/// B as the server shows it once it is in the trash: `is_trashed`, `trashed_at` and `updated_at` set by the trash,
+/// everything else as the server read saw it (the server's soft trash, `files.rs` ~6274).
+fn b_in_trash() -> Route {
+    let mut b: serde_json::Value = serde_json::from_str(&file("p", 10, true, 1)).unwrap();
+    b["updated_at"] = serde_json::json!(TRASHED_AT);
+    get(&format!("/api/v1/files/{B}"), 200, b.to_string())
+}
+
+/// A first try that ends in `TrashFailed` (the DELETE answered 502): B's row forgotten, one backup.
+async fn failed_try(pc: &Pc, run: &mut RunFile) {
+    let mut routes = read(10, 1);
+    routes.push(ops(&[]));
+    routes.push((format!("DELETE /api/v1/files/{B}"), 502, b"{}".to_vec()));
+    let mock = RepairMockServer::start(routes);
+    assert_eq!(pc.apply(&mock, run, at_a()).await.unwrap(), Outcome::TrashFailed { status: Some(502) });
+    assert_eq!(pc.backups().len(), 1);
+}
+
+/// Review F2, F4: the DELETE went through although the tool saw a failure (a timeout after the server committed it).
+/// The retry finds B in the trash, sends no second trash, reads back and confirms the pair, and keeps the first backup.
+#[tokio::test]
+async fn a_retry_that_finds_b_in_the_trash_confirms_it_without_a_second_trash() {
+    let pc = Pc::new();
+    let mut run = identical(&pc).await;
+    failed_try(&pc, &mut run).await;
+    let first = pc.backups();
+
+    let mock = RepairMockServer::start(vec![found(A, 10, false, 1), b_in_trash(), ops(&[(12, "file_trash", B)])]);
+    let outcome = pc.apply(&mock, &mut run, at_a()).await.unwrap();
+
+    assert_eq!(outcome, Outcome::Trashed { seq: 12, b_trashed_at: Some(TRASHED_AT.into()) });
+    assert!(mock.requests().iter().all(|line| line.starts_with("GET ")), "no second trash: {:?}", mock.requests());
+    assert_eq!(pc.backups(), first, "no second backup");
+    assert_eq!(run.pairs[0].applied.as_ref().map(|applied| applied.backup.clone()), Some(first[0].clone()));
+
+    // A B in the trash that changed in anything but the trash's own fields is not B as listed: skipped.
+    let pc = Pc::new();
+    let mut run = identical(&pc).await;
+    failed_try(&pc, &mut run).await;
+    let mut moved: serde_json::Value = serde_json::from_str(&file("elsewhere", 10, true, 1)).unwrap();
+    moved["updated_at"] = serde_json::json!(TRASHED_AT);
+    let mock = RepairMockServer::start(vec![
+        found(A, 10, false, 1),
+        get(&format!("/api/v1/files/{B}"), 200, moved.to_string()),
+        ops(&[(12, "file_trash", B)]),
+    ]);
+    assert_eq!(pc.apply(&mock, &mut run, at_a()).await.unwrap(), Outcome::Skipped { reason: Reason::ChangedOnServer });
+    assert!(matches!(run.pairs[0].applied.as_ref().map(|applied| &applied.outcome), Some(Outcome::TrashFailed { .. })));
+}
+
+/// Review F2: on a first try, a B already in the trash is a change since the server read, never "done".
+#[tokio::test]
+async fn a_first_try_that_finds_b_in_the_trash_is_skipped() {
+    let pc = Pc::new();
+    let mut run = identical(&pc).await;
+    let mut routes = read(10, 1);
+    routes[1] = b_in_trash();
+    let mock = RepairMockServer::start(routes);
+    assert_eq!(pc.apply(&mock, &mut run, at_a()).await.unwrap(), Outcome::Skipped { reason: Reason::ChangedOnServer });
+    assert!(pc.db.get_file(B).unwrap().is_some());
+    assert_eq!(pc.backups(), Vec::<String>::new());
+}
+
+/// Review F3: ops after the app's cursor that the stopped app has not applied (here another device's update) would be
+/// applied when the app starts, after B's row is gone: the pair is skipped before any write.
+#[tokio::test]
+async fn ops_after_the_cursor_skip_the_pair_before_any_write() {
+    let pc = Pc::new();
+    let mut run = identical(&pc).await;
+    let mut routes = read(10, 1);
+    routes.push(ops(&[(9, "file_update", "other")]));
+    let mock = RepairMockServer::start(routes);
+
+    assert_eq!(pc.apply(&mock, &mut run, at_a()).await.unwrap(), Outcome::Skipped { reason: Reason::PendingOps });
+
+    assert!(mock.requests().contains(&format!("GET /api/v1/sync/ops?since={CURSOR}")), "{:?}", mock.requests());
+    assert!(mock.requests().iter().all(|line| line.starts_with("GET ")), "{:?}", mock.requests());
+    assert!(pc.db.get_file(B).unwrap().is_some(), "B's row kept");
+    assert_eq!(pc.backups(), Vec::<String>::new());
+    assert_eq!(run.pairs[0].applied, None);
+}
+
+/// Review F3: the app ran between a failed try and the retry (its cursor moved): the retry is skipped before any call,
+/// and the first try's record stays.
+#[tokio::test]
+async fn a_retry_after_the_app_ran_is_skipped_and_keeps_the_first_record() {
+    let pc = Pc::new();
+    let mut run = identical(&pc).await;
+    failed_try(&pc, &mut run).await;
+    let record = run.pairs[0].applied.clone();
+    pc.db.set_sync_cursor(CURSOR + 5).unwrap();
+
+    let mock = RepairMockServer::start(Vec::new());
+    let outcome = pc.apply(&mock, &mut run, at_a()).await.unwrap();
+
+    assert_eq!(outcome, Outcome::Skipped { reason: Reason::AppRanSinceTheTry });
+    assert_eq!(mock.requests(), Vec::<String>::new());
+    assert_eq!(run.pairs[0].applied, record);
+}
+
+/// Review F6: the trash went through, then reading A back failed (a 502). The pair is unconfirmed, not unexpected; a
+/// second `apply-one` reads back without a second trash and confirms it.
+#[tokio::test]
+async fn a_read_back_that_fails_is_unconfirmed_and_a_retry_confirms_it() {
+    let pc = Pc::new();
+    let mut run = identical(&pc).await;
+    let mut routes = read(10, 1);
+    routes.push(ops(&[]));
+    routes.push((format!("DELETE /api/v1/files/{B}"), 200, b"{}".to_vec()));
+    routes.push(get(&format!("/api/v1/files/{A}"), 502, "{}".into()));
+    let mock = RepairMockServer::start(routes);
+
+    let outcome = pc.apply(&mock, &mut run, at_a()).await.unwrap();
+
+    assert_eq!(outcome, Outcome::Unconfirmed { status: Some(502) });
+    assert_eq!(run.pairs[0].applied.as_ref().map(|applied| applied.outcome.clone()), Some(outcome));
+    let first = pc.backups();
+
+    let mock = RepairMockServer::start(vec![found(A, 10, false, 1), b_in_trash(), ops(&[(12, "file_trash", B)])]);
+    let again = pc.apply(&mock, &mut run, at_a()).await.unwrap();
+    assert_eq!(again, Outcome::Trashed { seq: 12, b_trashed_at: Some(TRASHED_AT.into()) });
+    assert!(mock.requests().iter().all(|line| line.starts_with("GET ")), "{:?}", mock.requests());
+    assert_eq!(pc.backups(), first);
+}
+
+/// Review F1: the class in the run file must follow from the server read done again now. A pair whose A is gone,
+/// marked in the file as compared and identical, is refused before any write, although its server facts are as listed.
+#[tokio::test]
+async fn a_class_the_server_read_does_not_give_is_refused() {
+    let pc = Pc::new();
+    let listing = list_pairs(&pc.db, Path::new("C:/root"), &|_: &Path| at_a()).unwrap();
+    let mut run = RunFile { pairs: listing.pairs, more_than_two: 0, retention_days: None };
+    let a_gone = vec![found(A, 10, true, 1)];
+    server_read(&api(&RepairMockServer::start(a_gone.clone())), &mut run.pairs).await.unwrap();
+    assert_eq!(run.pairs[0].class, Class::AGone, "precondition");
+    run.pairs[0].class = Class::Identical;
+    run.pairs[0].action = Action::TrashB;
+    let mock = RepairMockServer::start(a_gone);
+
+    let error = pc.apply(&mock, &mut run, at_a()).await.unwrap_err().to_string();
+
+    assert!(error.contains("pair 1") && !error.contains(A) && !error.contains(PATH), "{error}");
+    assert!(mock.requests().iter().all(|line| line.starts_with("GET ")), "{:?}", mock.requests());
+    assert!(pc.db.get_file(B).unwrap().is_some());
+    assert_eq!(pc.backups(), Vec::<String>::new());
+}
+
+/// Review F1: the run file is the tool's; the person marks only the action. A saved file loads back as it was, and
+/// with an action changed; a class, an id or a record changed by hand is refused at load, naming only the pair.
+#[tokio::test]
+async fn a_run_file_changed_outside_its_actions_is_refused_at_load() {
+    let pc = Pc::new();
+    let mut run = identical(&pc).await;
+    run.pairs[0].applied = Some(super::model::Applied { outcome: Outcome::Forgotten, cursor: CURSOR, backup: "b.db".into(), at: 1 });
+    let path = pc.out.join("run.json");
+    run.save(&path).unwrap();
+    let saved = std::fs::read_to_string(&path).unwrap();
+    let loaded = RunFile::load(&path).unwrap();
+    assert_eq!((loaded.pairs[0].class, loaded.pairs[0].action), (Class::Identical, Action::TrashB));
+    assert_eq!(loaded.pairs[0].applied, run.pairs[0].applied);
+
+    std::fs::write(&path, saved.replacen("\"trash-b\"", "\"none\"", 1)).unwrap();
+    assert_eq!(RunFile::load(&path).unwrap().pairs[0].action, Action::None, "an action may be marked by hand");
+
+    for (case, from, to) in [
+        ("class", "\"identical\"", "\"differs\""),
+        ("an id", &format!("\"{B}\"") as &str, "\"b2\""),
+        ("a record", "\"forgotten\"", "\"trash-failed\", \"status\": null"),
+    ] {
+        assert!(saved.contains(from), "{case}: {saved}");
+        std::fs::write(&path, saved.replacen(from, to, 1)).unwrap();
+        let error = RunFile::load(&path).unwrap_err().to_string();
+        assert!(error.contains("pair 1"), "{case}: {error}");
+        assert!(!error.contains(PATH) && !error.contains(B) && !error.contains(A), "{case}: {error}");
+    }
+}
+
 /// The code lines of a source file: comments say what the server is, the code must not call it.
 fn code(source: &str) -> String {
     source.lines().filter(|line| !line.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n")
@@ -435,7 +626,8 @@ fn sorted(mut names: Vec<String>) -> Vec<String> {
 /// `/permanent` fails this test.
 #[test]
 fn t14_the_tool_reaches_the_server_through_exactly_six_calls() {
-    let client = include_str!("../api_client.rs");
+    // A checkout with `core.autocrlf` (the Windows gate tree) has CRLF line ends; the searches below are written in LF.
+    let client = include_str!("../api_client.rs").replace("\r\n", "\n");
     assert_eq!(client.matches("#[cfg(feature = \"duplicate-repair\")]").count(), 1, "one block of the tool's calls");
     let start = client.find("#[cfg(feature = \"duplicate-repair\")]\nimpl ApiClient {").expect("the tool's calls");
     let block = code(&client[start..start + client[start..].find("\n}\n").unwrap()]);
@@ -470,7 +662,7 @@ fn t14_the_tool_reaches_the_server_through_exactly_six_calls() {
     let methods = &server[start..start + server[start..].find("\n}\n").unwrap()];
     assert_eq!(
         sorted(after(methods, "fn ")),
-        ["chunk", "file", "file_key", "live_invites", "live_links", "new", "trash", "trash_seq"],
+        ["chunk", "file", "file_key", "live_invites", "live_links", "new", "ops_after", "trash"],
     );
 
     // Every other file of the module, and the host, reaches the server only through `RepairApi`.

@@ -2,7 +2,9 @@
 //! every OS; `observe_tests` (Windows) reads real placeholders.
 use super::list::{Observed, list_pairs};
 use super::model::Class;
-use crate::state_db::{FileEntry, FileStatus, ItemKind, KeptCopyInput, KeptReason, OperationKind, PendingOperation, StateDb};
+use crate::state_db::{
+    FileEntry, FileStatus, ItemKind, KeptCopyInput, KeptReason, OperationKind, PendingOperation, StateDb, UploadFinalization,
+};
 use crate::unknown_check::{OnDisk, PlatformView};
 use std::path::Path;
 
@@ -195,4 +197,78 @@ fn an_unknown_content_mark_is_not_pending_work_on_either_row() {
     db.set_mark_pending("old", true).unwrap();
     db.set_mark_pending("new", true).unwrap();
     assert_eq!(listed(&db, placeholder(Some("new"), true)).pairs[0].class, Class::Unknown);
+}
+
+/// Review F7: pending work that names the pair's path rather than A or B (an op queued with no file id, a finalization,
+/// a kept copy from or at the path, an orphan placeholder at the path) leaves the pair busy. The path matches with
+/// either separator, a leading slash, and in any case (Windows paths are case-insensitive); work at another path does
+/// not count.
+#[test]
+fn work_at_the_path_that_names_neither_row_leaves_the_pair_busy() {
+    let queue_at = |db: &StateDb, target: &str| {
+        db.enqueue_operation(&PendingOperation {
+            op_id: "op-path".into(),
+            kind: OperationKind::UploadFile,
+            file_id: None,
+            parent_id: None,
+            target_path: Some(target.into()),
+            metadata_json: None,
+            payload_path: None,
+            base_version: None,
+            base_object_version_id: None,
+            attempts: 0,
+            max_attempts: 25,
+            next_retry_at: 0,
+            last_error: None,
+            backup_source_key: None,
+            created_at: 0,
+            updated_at: 0,
+        })
+        .unwrap()
+    };
+    let kept_at = |db: &StateDb, original: &str, copy: &str| {
+        db.record_kept_copy(&KeptCopyInput {
+            original_file_id: "other",
+            original_path: original,
+            copy_path: copy,
+            copied_hash: "h",
+            original_removed: false,
+            reason: KeptReason::Copy,
+            kept_at: 0,
+        })
+        .unwrap();
+    };
+    let cases: [(&str, &dyn Fn(&StateDb), Class); 9] = [
+        ("queued at the path", &|db| queue_at(db, "Docs/a.txt"), Class::ABusy),
+        ("queued, backslash", &|db| queue_at(db, "Docs\\a.txt"), Class::ABusy),
+        ("queued, leading slash and case", &|db| queue_at(db, "/docs/A.TXT"), Class::ABusy),
+        ("queued elsewhere", &|db| queue_at(db, "Docs/b.txt"), Class::Unknown),
+        (
+            "a finalization",
+            &|db| {
+                db.put_upload_finalization(&UploadFinalization {
+                    op_id: "op-f".into(),
+                    local_file_id: "local-x".into(),
+                    server_file_id: "server-x".into(),
+                    target_path: "Docs/a.txt".into(),
+                    payload_path: "payload".into(),
+                    stamped: false,
+                    review: None,
+                })
+                .unwrap()
+            },
+            Class::ABusy,
+        ),
+        ("a kept copy from the path", &|db| kept_at(db, "Docs/a.txt", "Docs/a (this PC).txt"), Class::ABusy),
+        ("a kept copy at the path", &|db| kept_at(db, "Docs/old.txt", "Docs/a.txt"), Class::ABusy),
+        ("an orphan at the path", &|db| db.put_unknown_orphan("Docs/a.txt", "other", true).unwrap(), Class::ABusy),
+        ("an orphan elsewhere", &|db| db.put_unknown_orphan("Docs/c.txt", "other", true).unwrap(), Class::Unknown),
+    ];
+    for (case, work, class) in cases {
+        let (_dir, db) = db();
+        row(&db, "old", "Docs/a.txt", None);
+        row(&db, "new", "Docs/a.txt", Some("h1"));
+        work(&db);
+        assert_eq!(listed(&db, placeholder(Some("new"), true)).pairs[0].class, class, "{case}");
+    }
 }

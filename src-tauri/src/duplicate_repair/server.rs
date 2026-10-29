@@ -6,15 +6,20 @@ use super::model::{Class, Pair, ServerFacts, ServerFile, ServerRead};
 use crate::api_client::ApiClient;
 use std::collections::HashMap;
 
-/// How many pages of the op log `trash_seq` reads at most (the server's page is 1,000 ops, `sync.rs` ~245).
-const OPS_PAGES: usize = 20;
-
 /// An invite in one of these states still shares the file (the server's own set, `invites.rs` ~198).
 const LIVE_INVITE: [&str; 3] = ["invited", "claimed", "approved"];
 
 /// The tool's only way to the server: exactly the calls spec I3 allows.
 pub(crate) struct RepairApi {
     api: ApiClient,
+}
+
+/// One op of the server's log: its seq, its type and the id its payload names (a file's or a folder's).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Op {
+    pub(super) seq: i64,
+    pub(super) kind: String,
+    pub(super) id: Option<String>,
 }
 
 /// A failed call: the HTTP status when the server answered, nothing else.
@@ -82,25 +87,16 @@ impl RepairApi {
         Ok(rows.iter().filter(|row| not_expired(row)).count())
     }
 
-    /// `GET /api/v1/sync/ops?since=`, page by page from `since`: the seq of the `file_trash` op of `file_id`, `None`
-    /// when the log holds none. Only seqs and ids are read; the log is dropped.
-    pub(super) async fn trash_seq(&self, since: i64, file_id: &str) -> Result<Option<i64>, Failure> {
-        let mut since = since;
-        for _ in 0..OPS_PAGES {
-            let page = self.api.repair_ops(since).await.map_err(|error| Failure::of(&error))?;
-            if let Some(op) = page
-                .ops
-                .iter()
-                .find(|op| op.op_type == "file_trash" && op.payload["id"].as_str() == Some(file_id))
-            {
-                return Ok(Some(op.seq_id));
-            }
-            match page.ops.iter().map(|op| op.seq_id).max() {
-                Some(last) if last > since => since = last,
-                _ => return Ok(None),
-            }
-        }
-        Ok(None)
+    /// `GET /api/v1/sync/ops?since=`: the first page of ops after `since` (the server's page holds 1,000, `sync.rs`
+    /// ~292). `apply-one` asks only whether there are none, or B's trash alone (review F3), which one page answers.
+    /// Seqs, types and ids are kept; the rest of the log is dropped.
+    pub(super) async fn ops_after(&self, since: i64) -> Result<Vec<Op>, Failure> {
+        let page = self.api.repair_ops(since).await.map_err(|error| Failure::of(&error))?;
+        Ok(page
+            .ops
+            .iter()
+            .map(|op| Op { seq: op.seq_id, kind: op.op_type.clone(), id: op.payload["id"].as_str().map(str::to_string) })
+            .collect())
     }
 
     /// `DELETE /api/v1/files/{id}`: the soft trash (spec S1). The tool has no other write.

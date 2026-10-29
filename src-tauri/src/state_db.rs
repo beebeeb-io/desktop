@@ -2653,6 +2653,32 @@ impl StateDb {
             |row| row.get::<_, bool>(0),
         )?)
     }
+
+    /// Task 2274 (review F7): whether pending work is keyed by `folded` itself (a [`StateDb::shared_paths`] path)
+    /// rather than by a file id: a queued operation's target, an upload finalization's target, a kept copy's original or
+    /// copy, or an unknown orphan. Matched with either separator, without a leading slash, and in any ASCII case
+    /// (Windows paths are case-insensitive), so it errs towards busy. `staged_payloads.path` is a payload file, not a
+    /// sync path, and is not consulted.
+    #[cfg(any(test, feature = "duplicate-repair"))]
+    pub(crate) fn pending_work_at_path(&self, folded: &str) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let at = |column: &str| format!("lower(ltrim(replace({column}, '\\', '/'), '/')) = lower(ltrim(?1, '/'))");
+        Ok(conn.query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM operation_queue WHERE {})
+                     OR EXISTS(SELECT 1 FROM upload_finalizations WHERE {})
+                     OR EXISTS(SELECT 1 FROM kept_copies WHERE {} OR {})
+                     OR EXISTS(SELECT 1 FROM unknown_orphans WHERE {})",
+                at("target_path"),
+                at("target_path"),
+                at("original_path"),
+                at("copy_path"),
+                at("path")
+            ),
+            params![folded],
+            |row| row.get::<_, bool>(0),
+        )?)
+    }
 }
 
 impl StateDb {
@@ -4196,7 +4222,7 @@ impl StateDb {
     // deletion-reconciliation bug (the snapshot path prunes server-deleted
     // rows; the ops path applies trash/delete ops).
 
-    const SYNC_CURSOR_KEY: &'static str = "sync_ops_cursor";
+    pub(crate) const SYNC_CURSOR_KEY: &'static str = "sync_ops_cursor";
     const NEEDS_RESNAPSHOT_KEY: &'static str = "sync_needs_resnapshot";
 
     /// Read the persisted `/sync/ops` cursor (highest applied `seq_id`).

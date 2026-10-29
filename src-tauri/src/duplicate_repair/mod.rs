@@ -133,9 +133,10 @@ fn windows_run(command: Command) -> anyhow::Result<i32> {
             .map_err(|_| anyhow::anyhow!("The app's stored session could not be read."))?
             .ok_or_else(|| anyhow::anyhow!("The app has no stored session on this PC; sign in to the app first."))?;
         let token = std::mem::take(&mut session.token);
-        let master_key = session.master_key;
+        // Review F8: the copy is wiped when it drops, like the session's own.
+        let master_key = zeroize::Zeroizing::new(session.master_key);
         zeroize::Zeroize::zeroize(&mut session.master_key);
-        Ok(server::RepairApi::new(crate::api_client::ApiClient::new(crate::runner::api_base_url(), token, master_key)))
+        Ok(server::RepairApi::new(crate::api_client::ApiClient::new(crate::runner::api_base_url(), token, *master_key)))
     };
     let lock = || claim_app_lock().map(|lock| Box::new(lock) as Box<dyn std::any::Any>);
     let env = host::Env {

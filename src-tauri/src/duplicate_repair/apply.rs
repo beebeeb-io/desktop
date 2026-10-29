@@ -4,7 +4,7 @@
 //! for B the app's `file_trash` changes nothing on disk (D2); with B's row present it acts on B's path, which is A's
 //! file (D1, 2283).
 use super::list::{self, Observed};
-use super::model::{Action, Applied, Class, Outcome, Pair, Reason, RunFile, ServerFile};
+use super::model::{Action, Applied, Class, Outcome, Pair, Reason, RunFile, ServerFacts, ServerFile};
 use super::server::{RepairApi, server_read};
 use crate::state_db::StateDb;
 use std::path::Path;
@@ -20,9 +20,19 @@ pub(crate) struct Local<'a> {
     pub observe: &'a dyn Fn(&Path) -> Observed,
 }
 
+/// What the server says about the pair now, against the server read.
+#[derive(Debug, PartialEq, Eq)]
+enum ServerNow {
+    AsListed,
+    /// A retry only: B is in the trash, and nothing else changed (the first try's trash went through, review F2).
+    BTrashed,
+    Changed,
+}
+
 /// Apply pair `n` as marked, and record what was done in the run file. A run file that fails [`RunFile::check`] is
-/// refused before anything is read or written (T11). A pair whose trash failed is tried again: B's row is gone then,
-/// so the re-check expects A's row alone (T12).
+/// refused before anything is read or written (T11). A pair whose trash failed, or whose trash was not read back, is
+/// tried again (T12, review F2, F6): B's row is gone then, so the re-check expects A's row alone; the first try's
+/// backup stands (F4), and the app must not have run since (F3).
 pub(crate) async fn apply_one(local: &Local<'_>, api: &RepairApi, run: &mut RunFile, n: u32) -> anyhow::Result<Outcome> {
     run.check()?;
     let index = usize::try_from(n)
@@ -31,13 +41,17 @@ pub(crate) async fn apply_one(local: &Local<'_>, api: &RepairApi, run: &mut RunF
         .filter(|index| *index < run.pairs.len())
         .ok_or_else(|| anyhow::anyhow!("pair {n} is not in the run file; nothing was changed."))?;
     let pair = run.pairs[index].clone();
-    let retry = match pair.applied.as_ref().map(|applied| &applied.outcome) {
-        None | Some(Outcome::Skipped { .. }) => false,
-        Some(Outcome::TrashFailed { .. }) => true,
-        Some(Outcome::Trashed { .. } | Outcome::Forgotten | Outcome::Unexpected { .. }) => {
-            return Ok(Outcome::Skipped { reason: Reason::AlreadyDone });
-        }
+    let first: Option<Applied> = match &pair.applied {
+        None => None,
+        Some(applied) => match applied.outcome {
+            Outcome::Skipped { .. } => None,
+            Outcome::TrashFailed { .. } | Outcome::Unconfirmed { .. } => Some(applied.clone()),
+            Outcome::Trashed { .. } | Outcome::Forgotten | Outcome::Unexpected { .. } => {
+                return Ok(Outcome::Skipped { reason: Reason::AlreadyDone });
+            }
+        },
     };
+    let retry = first.is_some();
     if pair.action == Action::None {
         return Ok(Outcome::Skipped { reason: Reason::NotMarked });
     }
@@ -45,14 +59,26 @@ pub(crate) async fn apply_one(local: &Local<'_>, api: &RepairApi, run: &mut RunF
         .db
         .get_sync_cursor()?
         .ok_or_else(|| anyhow::anyhow!("The app has not synced yet (no op cursor); nothing was changed."))?;
+    if first.as_ref().is_some_and(|first| first.cursor != cursor) {
+        return Ok(Outcome::Skipped { reason: Reason::AppRanSinceTheTry });
+    }
     if !unchanged_on_this_pc(local, &pair, retry)? {
         return Ok(Outcome::Skipped { reason: Reason::ChangedOnThisPc });
     }
-    if !unchanged_on_server(api, &pair).await? {
-        return Ok(Outcome::Skipped { reason: Reason::ChangedOnServer });
+    let server = server_now(api, &pair, retry).await?;
+    match server {
+        ServerNow::Changed => return Ok(Outcome::Skipped { reason: Reason::ChangedOnServer }),
+        // F3: an op after the cursor is one the stopped app would apply when it starts, with B's row gone.
+        ServerNow::AsListed if !api.ops_after(cursor).await.map_err(|failure| failure.at(n))?.is_empty() => {
+            return Ok(Outcome::Skipped { reason: Reason::PendingOps });
+        }
+        ServerNow::AsListed | ServerNow::BTrashed => {}
     }
 
-    let backup = back_up(local, n)?;
+    let backup = match &first {
+        Some(first) => first.backup.clone(),
+        None => back_up(local, n)?,
+    };
     let at = chrono::Utc::now().timestamp();
     let mut record = |outcome: Outcome| {
         run.pairs[index].applied = Some(Applied { outcome: outcome.clone(), cursor, backup: backup.clone(), at });
@@ -65,19 +91,39 @@ pub(crate) async fn apply_one(local: &Local<'_>, api: &RepairApi, run: &mut RunF
     if pair.action == Action::ForgetB {
         return Ok(record(Outcome::Forgotten));
     }
-    if let Err(failure) = api.trash(&pair.b.file_id).await {
-        return Ok(record(Outcome::TrashFailed { status: failure.0 }));
+    if server == ServerNow::AsListed {
+        if let Err(failure) = api.trash(&pair.b.file_id).await {
+            return Ok(record(Outcome::TrashFailed { status: failure.0 }));
+        }
     }
-    let a_live = matches!(api.file(&pair.a.file_id).await, Ok(ServerFile::Found(a)) if !a.trashed);
-    let (b_trashed, b_trashed_at) = match api.file(&pair.b.file_id).await {
-        Ok(ServerFile::Found(b)) if b.trashed => (true, b.trashed_at),
+    Ok(record(read_back(api, &pair, cursor).await))
+}
+
+/// After the trash: A live, B in the trash, and the ops after the app's cursor are B's `file_trash` alone, the echo the
+/// app applies when it starts (review F3). A read that fails leaves the pair unconfirmed, to be read back again (F6).
+async fn read_back(api: &RepairApi, pair: &Pair, cursor: i64) -> Outcome {
+    let a = api.file(&pair.a.file_id).await;
+    let b = api.file(&pair.b.file_id).await;
+    let ops = api.ops_after(cursor).await;
+    let (a, b, ops) = match (a, b, ops) {
+        (Ok(a), Ok(b), Ok(ops)) => (a, b, ops),
+        (a, b, ops) => {
+            let status = [a.err(), b.err(), ops.err()].into_iter().flatten().next().and_then(|failure| failure.0);
+            return Outcome::Unconfirmed { status };
+        }
+    };
+    let a_live = matches!(a, ServerFile::Found(a) if !a.trashed);
+    let (b_trashed, b_trashed_at) = match b {
+        ServerFile::Found(b) if b.trashed => (true, b.trashed_at),
         _ => (false, None),
     };
-    let seq = api.trash_seq(cursor, &pair.b.file_id).await.ok().flatten();
-    Ok(record(match seq {
-        Some(seq) if a_live && b_trashed => Outcome::Trashed { seq, b_trashed_at },
-        _ => Outcome::Unexpected { a_live, b_trashed, seq },
-    }))
+    let is_b_trash = |op: &&super::server::Op| op.kind == "file_trash" && op.id.as_deref() == Some(pair.b.file_id.as_str());
+    let seq = ops.iter().find(is_b_trash).map(|op| op.seq);
+    let other_ops = ops.iter().filter(|op| !is_b_trash(op)).count();
+    match seq {
+        Some(seq) if a_live && b_trashed && other_ops == 0 && ops.len() == 1 => Outcome::Trashed { seq, b_trashed_at },
+        _ => Outcome::Unexpected { a_live, b_trashed, seq, other_ops },
+    }
 }
 
 /// A5 on this PC: the path holds A and B's rows (A's alone when B's row was forgotten by an earlier try), every row
@@ -104,17 +150,48 @@ fn unchanged_on_this_pc(local: &Local<'_>, pair: &Pair, retry: bool) -> anyhow::
     if list::view_facts(&observed, identity.clone()) != pair.view {
         return Ok(false);
     }
-    Ok(list::local_class(local.db, &pair.a, &pair.b, &observed, identity.as_deref())? == Class::Unknown)
+    Ok(list::local_class(local.db, &pair.path, &pair.a, &pair.b, &observed, identity.as_deref())? == Class::Unknown)
 }
 
 /// A5 on the server: the server read, done again now, says exactly what it said for the list (A and B, their parents,
-/// sizes, times, versions and the counts of B's links and invites).
-async fn unchanged_on_server(api: &RepairApi, pair: &Pair) -> anyhow::Result<bool> {
+/// sizes, times, versions and the counts of B's links and invites), and the pair's class follows from it (review F1:
+/// a compared pair's class is the read's L10). On a retry, B in the trash with nothing else changed is the first
+/// try's trash (F2).
+async fn server_now(api: &RepairApi, pair: &Pair, retry: bool) -> anyhow::Result<ServerNow> {
     let mut now = pair.clone();
     now.class = Class::Unknown;
     now.server = None;
     server_read(api, std::slice::from_mut(&mut now)).await?;
-    Ok(now.server.is_some() && now.server == pair.server)
+    if now.server.is_some() && now.server == pair.server {
+        let read_gives = match pair.class {
+            Class::Identical | Class::Differs => Class::Unknown,
+            class => class,
+        };
+        if now.class != read_gives {
+            anyhow::bail!(
+                "pair {}: its class in the run file does not follow from the server read; nothing was changed.",
+                pair.n
+            );
+        }
+        return Ok(ServerNow::AsListed);
+    }
+    if retry && b_trashed_since(&now, pair) {
+        return Ok(ServerNow::BTrashed);
+    }
+    Ok(ServerNow::Changed)
+}
+
+/// A the same and B in the trash, B's facts as listed but for the three fields the trash sets.
+fn b_trashed_since(now: &Pair, listed: &Pair) -> bool {
+    let (Some(now), Some(listed)) = (&now.server, &listed.server) else { return false };
+    let (Some(ServerFile::Found(b_now)), Some(ServerFile::Found(b_listed))) = (&now.b, &listed.b) else { return false };
+    let untrashed = ServerFacts {
+        trashed: b_listed.trashed,
+        trashed_at: b_listed.trashed_at.clone(),
+        updated_at: b_listed.updated_at.clone(),
+        ..b_now.clone()
+    };
+    now.a == listed.a && b_now.trashed && untrashed == *b_listed
 }
 
 /// The state DB and its WAL, copied to the out dir before any write: `state-<pair>-<unix>.db` (and `…db-wal`). The app

@@ -1,6 +1,7 @@
 //! Task 2274: what the tool records about each pair. It is written to the run file in the out dir on this PC only (spec
 //! A3): names, paths and file ids never reach the screen.
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// The spec's decision table (section 7), one value per row. The first matching row wins.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,6 +84,11 @@ pub(crate) struct Pair {
     /// What `apply-one` did (spec L2: with B's id above, on this PC only, for a restore within retention).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub applied: Option<Applied>,
+    /// SHA-256 of everything the tool wrote for the pair, the action left out: set when the run file is saved, checked
+    /// when it is loaded, so a hand edit of anything but the action is refused (review F1). It catches a mistake, not
+    /// someone who rewrites the file and the seal together.
+    #[serde(default)]
+    pub seal: String,
 }
 
 /// The actions a pair can be marked with (spec section 7, "Proposed action").
@@ -95,6 +101,16 @@ pub(crate) enum Action {
     TrashB,
     /// Forget B's row on this PC only: B is gone or in the trash already (L5, L6).
     ForgetB,
+}
+
+impl Pair {
+    /// The pair's seal: SHA-256 of the pair as the tool wrote it, with the action and the seal left out.
+    fn sealed(&self) -> String {
+        let mut bare = self.clone();
+        bare.action = Action::None;
+        bare.seal = String::new();
+        format!("{:x}", Sha256::digest(serde_json::to_vec(&bare).expect("a pair serializes")))
+    }
 }
 
 impl Class {
@@ -136,13 +152,24 @@ pub(crate) struct Applied {
 pub(crate) enum Outcome {
     /// B's row forgotten and B in the server's trash, A live: `seq` is B's `file_trash` op, the echo the app applies.
     Trashed { seq: i64, b_trashed_at: Option<String> },
-    /// The trash went through, but the server does not show A live and B in the trash, or B's op was not found: the
-    /// run stops and the lane reports.
-    Unexpected { a_live: bool, b_trashed: bool, seq: Option<i64> },
+    /// The trash went through, but the server does not show A live and B in the trash, or the ops after the app's
+    /// cursor are not B's trash alone (`seq` is B's trash op when found, `other_ops` counts the rest): the run stops
+    /// and the lane reports.
+    Unexpected {
+        a_live: bool,
+        b_trashed: bool,
+        seq: Option<i64>,
+        #[serde(default)]
+        other_ops: usize,
+    },
     /// B's row forgotten, no call: B is gone or in the trash already.
     Forgotten,
-    /// B's row forgotten, the trash failed: B is still live. `apply-one` on the pair again retries the trash.
+    /// B's row forgotten, the trash failed (or its answer was lost). `apply-one` on the pair again re-checks it, and
+    /// sends the trash again only while B is still live (review F2).
     TrashFailed { status: Option<u16> },
+    /// B's row forgotten and the trash sent, but A, B or the op log could not be read back (`status`, when the server
+    /// answered): `apply-one` on the pair again reads them back, without a second trash.
+    Unconfirmed { status: Option<u16> },
     /// Nothing was changed.
     Skipped { reason: Reason },
 }
@@ -159,6 +186,11 @@ pub(crate) enum Reason {
     ChangedOnThisPc,
     /// What the server says about A or B differs from the server read (spec A5).
     ChangedOnServer,
+    /// The server holds ops after the app's cursor that the app has not applied: start the app, let it sync, stop it,
+    /// and run again (review F3).
+    PendingOps,
+    /// The app's cursor moved since the try that failed: stop and report (review F3).
+    AppRanSinceTheTry,
 }
 
 /// The run file in the out dir on this PC: every pair, what was marked and what was done.
@@ -174,23 +206,36 @@ pub(crate) struct RunFile {
 }
 
 impl RunFile {
-    /// Read the run file. A mistake in it is reported by line and column only, never with what it holds (I5).
+    /// Read the run file. A mistake in it is reported by line and column only, never with what it holds (I5). A pair
+    /// changed in more than its action does not load (review F1); the error names the pair only.
     pub(crate) fn load(path: &std::path::Path) -> anyhow::Result<Self> {
         let text = std::fs::read_to_string(path).map_err(|_| anyhow::anyhow!("The run file could not be read."))?;
-        serde_json::from_str(&text).map_err(|error| {
+        let run: Self = serde_json::from_str(&text).map_err(|error| {
             anyhow::anyhow!(
                 "The run file is not readable as written (line {}, column {}). An action is none, trash-b or forget-b; \
                  nothing was changed.",
                 error.line(),
                 error.column()
             )
-        })
+        })?;
+        if let Some(pair) = run.pairs.iter().find(|pair| pair.seal != pair.sealed()) {
+            anyhow::bail!(
+                "pair {}: the run file was changed in more than the action, the only field marked by hand; nothing was \
+                 changed. Undo that edit.",
+                pair.n
+            );
+        }
+        Ok(run)
     }
 
-    /// Write the run file: a new file next to it, then a rename, so a crash never leaves half a file.
+    /// Write the run file, each pair sealed: a new file next to it, then a rename, so a crash never leaves half a file.
     pub(crate) fn save(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        let mut sealed = self.clone();
+        for pair in &mut sealed.pairs {
+            pair.seal = pair.sealed();
+        }
         let next = path.with_extension("json.next");
-        std::fs::write(&next, serde_json::to_vec_pretty(self)?)?;
+        std::fs::write(&next, serde_json::to_vec_pretty(&sealed)?)?;
         std::fs::rename(&next, path)?;
         Ok(())
     }

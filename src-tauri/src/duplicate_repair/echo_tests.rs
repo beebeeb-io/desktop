@@ -200,7 +200,8 @@ fn a_pair_with_nothing_applied_is_refused() {
     for outcome in [
         None,
         Some(Outcome::TrashFailed { status: Some(500) }),
-        Some(Outcome::Unexpected { a_live: true, b_trashed: false, seq: Some(SEQ) }),
+        Some(Outcome::Unconfirmed { status: Some(502) }),
+        Some(Outcome::Unexpected { a_live: true, b_trashed: false, seq: Some(SEQ), other_ops: 0 }),
         Some(Outcome::Skipped { reason: Reason::ChangedOnServer }),
     ] {
         pc.outcome(outcome.clone());

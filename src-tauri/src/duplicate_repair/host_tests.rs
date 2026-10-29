@@ -125,6 +125,7 @@ fn found(id: &str, trashed: bool) -> Route {
 fn server() -> RepairMockServer {
     let key = beebeeb_core::kdf::derive_file_key(&beebeeb_core::kdf::MasterKey::from_bytes(MASTER), B.as_bytes());
     let chunk = beebeeb_core::encrypt::encrypt_chunk_raw(&key, CONTENT).unwrap();
+    let none = serde_json::json!({ "ops": [], "since": CURSOR });
     let ops = serde_json::json!({ "ops": [{ "seq_id": SEQ, "op_type": "file_trash", "payload": { "id": B } }], "since": CURSOR });
     RepairMockServer::start(vec![
         found(A, false),
@@ -137,6 +138,8 @@ fn server() -> RepairMockServer {
         get(&format!("/api/v1/shares/by-file/{B}"), 200, links(&[])),
         get("/api/v1/shares/invites/sent", 200, invites(&[(B, "revoked", None)])),
         (format!("GET /api/v1/files/{B}/chunks/0"), 200, chunk),
+        // The op log after the app's cursor: empty before the trash (review F3), B's trash after it.
+        get(&format!("/api/v1/sync/ops?since={CURSOR}"), 200, none.to_string()),
         (format!("DELETE /api/v1/files/{B}"), 200, b"{}".to_vec()),
         get(&format!("/api/v1/sync/ops?since={CURSOR}"), 200, ops.to_string()),
     ])

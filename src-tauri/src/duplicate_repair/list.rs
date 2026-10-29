@@ -62,7 +62,7 @@ pub(crate) fn list_pairs(db: &StateDb, root: &Path, observe: &dyn Fn(&Path) -> O
         } else {
             (first, second)
         };
-        let class = local_class(db, &a, &b, &observed, identity.as_deref())?;
+        let class = local_class(db, &path, &a, &b, &observed, identity.as_deref())?;
         listing.pairs.push(Pair {
             n: 0,
             path,
@@ -73,6 +73,7 @@ pub(crate) fn list_pairs(db: &StateDb, root: &Path, observe: &dyn Fn(&Path) -> O
             server: None,
             action: class.proposed(),
             applied: None,
+            seal: String::new(),
         });
     }
     listing.pairs.sort_by(|left, right| left.path.cmp(&right.path));
@@ -96,9 +97,11 @@ pub(super) fn observe_at(root: &Path, path: &str, observe: &dyn Fn(&Path) -> Obs
     (observed, identity)
 }
 
-/// Spec rows L1-L3b, in order; `Unknown` when none applies (the server read decides the rest).
+/// Spec rows L1-L3b, in order; `Unknown` when none applies (the server read decides the rest). Pending work keyed by
+/// the pair's path rather than by A or B (review F7) is work on the file at the path, A's file: L3.
 pub(super) fn local_class(
     db: &StateDb,
+    path: &str,
     a: &RowFacts,
     b: &RowFacts,
     observed: &Observed,
@@ -120,6 +123,9 @@ pub(super) fn local_class(
     // row deletes it (trigger `files_unknown_checks_follow_delete`).
     if db.names_pending_work(&b.file_id)? {
         return Ok(Class::BBusy);
+    }
+    if db.pending_work_at_path(path)? {
+        return Ok(Class::ABusy);
     }
     Ok(Class::Unknown)
 }

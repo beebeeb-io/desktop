@@ -78,7 +78,7 @@ async fn the_same_bytes_are_identical_and_one_byte_off_differs() {
     let mut pairs = vec![waiting(1, "b1", b"hello world", 11), waiting(2, "b2", b"hello world", 11)];
     let counts = compare(&api(&mock), &mut pairs, 2).await.unwrap();
     assert_eq!((pairs[0].class, pairs[1].class), (Class::Identical, Class::Differs));
-    assert_eq!(counts, Counts { identical: 1, differs: 1, changed: 0 });
+    assert_eq!(counts, Counts { identical: 1, differs: 1, changed: 0, unreadable: 0 });
     let requests = mock.requests();
     assert!(requests.iter().all(|line| line.starts_with("GET ")), "{requests:?}");
     assert_eq!(requests.iter().filter(|line| line.contains("/chunks/")).count(), 3);
@@ -95,21 +95,36 @@ async fn a_b_that_changed_since_the_server_read_is_not_downloaded() {
     let mut pairs = vec![waiting(1, "b1", b"same", 4)];
     let counts = compare(&api(&mock), &mut pairs, 1).await.unwrap();
     assert_eq!(pairs[0].class, Class::Unknown);
-    assert_eq!(counts, Counts { identical: 0, differs: 0, changed: 1 });
+    assert_eq!(counts, Counts { identical: 0, differs: 0, changed: 1, unreadable: 0 });
     assert!(!mock.requests().iter().any(|line| line.contains("/chunks/")), "{:?}", mock.requests());
 }
 
-/// A failed chunk stops the run; the error names the pair and the status, never an id (I5).
+/// Review F5: a B that cannot be read (its file or a chunk fails) or does not open under the key the tool derives (a
+/// file request's B, or one an old client keyed differently) is left waiting and counted; the compare goes on with the
+/// other pairs, and their results stand. Nothing on the screen or in an error names it (I5).
 #[tokio::test]
-async fn a_failed_chunk_stops_the_run_without_naming_an_id() {
-    let mut routes = stored("b-secret-id", 4, &[b"same"]);
+async fn a_b_that_cannot_be_read_or_opened_is_left_waiting_and_the_compare_goes_on() {
+    let mut routes = stored("b-secret-1", 4, &[b"same"]);
     routes[1].1 = 500;
+    let mut other_key = stored("b-secret-2", 4, &[b"same"]);
+    other_key[1].2 = beebeeb_core::encrypt::encrypt_chunk_raw(&key("not-b"), b"same").unwrap();
+    routes.extend(other_key);
+    routes.push(get("/api/v1/files/b-secret-3", 503, "{}".into()));
+    routes.extend(stored("b4", 4, &[b"same"]));
     let mock = RepairMockServer::start(routes);
-    let mut pairs = vec![waiting(1, "b-secret-id", b"same", 4)];
-    let error = format!("{:#}", compare(&api(&mock), &mut pairs, 1).await.unwrap_err());
-    assert!(error.contains("pair 1") && error.contains("500"), "{error}");
-    assert!(!error.contains("secret-id") && !error.contains("127.0.0.1"), "{error}");
-    assert_eq!(pairs[0].class, Class::Unknown);
+    let mut pairs = vec![
+        waiting(1, "b-secret-1", b"same", 4),
+        waiting(2, "b-secret-2", b"same", 4),
+        waiting(3, "b-secret-3", b"same", 4),
+        waiting(4, "b4", b"same", 4),
+    ];
+    let counts = compare(&api(&mock), &mut pairs, 4).await.unwrap();
+    assert_eq!(counts, Counts { identical: 1, differs: 0, changed: 0, unreadable: 3 });
+    let classes: Vec<Class> = pairs.iter().map(|pair| pair.class).collect();
+    assert_eq!(classes, [Class::Unknown, Class::Unknown, Class::Unknown, Class::Identical]);
+    // Left waiting, the three are compared again on the next run, alone.
+    let error = compare(&api(&mock), &mut pairs, 4).await.unwrap_err().to_string();
+    assert!(error.contains("3 pairs") && !error.contains("secret"), "{error}");
 }
 
 /// I6: a decrypted chunk only ever exists as a zeroized buffer (the binding below does not compile otherwise).

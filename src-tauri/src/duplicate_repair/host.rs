@@ -13,7 +13,7 @@ use super::apply::{Local, apply_one};
 use super::compare::compare;
 use super::echo::{EchoResult, check_echo};
 use super::list::{Observed, list_pairs};
-use super::model::{Class, Outcome, Pair, RunFile, kebab};
+use super::model::{Class, Outcome, Pair, Reason, RunFile, kebab};
 use super::server::{RepairApi, server_read};
 use crate::state_db::StateDb;
 use rusqlite::{Connection, OpenFlags};
@@ -90,10 +90,12 @@ pub(crate) async fn execute(command: Command, env: &Env<'_>) -> anyhow::Result<(
             Ok((
                 0,
                 format!(
-                    "Compared: {} identical, {} differ, {} changed on the server since the read (not downloaded).\n{}",
+                    "Compared: {} identical, {} differ, {} changed on the server since the read (not downloaded), {} could \
+                     not be read or opened (left waiting).\n{}",
                     counts.identical,
                     counts.differs,
                     counts.changed,
+                    counts.unreadable,
                     classes(&run.pairs)
                 ),
             ))
@@ -101,7 +103,6 @@ pub(crate) async fn execute(command: Command, env: &Env<'_>) -> anyhow::Result<(
         Command::ApplyOne { pair } => {
             let _lock = (env.lock)()?;
             let mut run = RunFile::load(&run_path)?;
-            run.check()?;
             if run.retention_days.is_none() {
                 anyhow::bail!(
                     "Read the trash retention in the admin panel and record it with `retention <days>` first; nothing \
@@ -160,7 +161,15 @@ fn applied(pair: u32, outcome: &Outcome) -> (i32, String) {
                 status.map_or("no answer".to_string(), |status| format!("HTTP {status}"))
             ),
         ),
-        Outcome::Unexpected { a_live, b_trashed, seq } => (
+        Outcome::Unconfirmed { status } => (
+            1,
+            format!(
+                "pair {pair}: B's row forgotten and the trash sent, but the server could not be read back ({}). Run \
+                 apply-one {pair} again with the app stopped: it reads back without a second trash.",
+                status.map_or("no answer".to_string(), |status| format!("HTTP {status}"))
+            ),
+        ),
+        Outcome::Unexpected { a_live, b_trashed, seq, .. } => (
             1,
             format!(
                 "pair {pair}: B's row forgotten and the trash sent, but the server does not confirm it (A live: {a_live}, \
@@ -168,7 +177,17 @@ fn applied(pair: u32, outcome: &Outcome) -> (i32, String) {
                 seq.is_some()
             ),
         ),
-        Outcome::Skipped { reason } => (1, format!("pair {pair}: skipped ({}); nothing was changed.", kebab(reason))),
+        Outcome::Skipped { reason } => {
+            let next = match reason {
+                Reason::PendingOps => {
+                    " The server holds changes the app has not applied yet: start the app, let it sync, stop it, then run \
+                     apply-one again."
+                }
+                Reason::AppRanSinceTheTry => " The app ran since the try that failed. Stop here.",
+                _ => "",
+            };
+            (1, format!("pair {pair}: skipped ({}); nothing was changed.{next}", kebab(reason)))
+        }
     }
 }
 
@@ -298,7 +317,11 @@ fn done(outcome: &Outcome, retention_days: Option<u32>) -> String {
             "B's row forgotten; the trash failed ({}); run apply-one again",
             status.map_or("no answer".to_string(), |status| format!("HTTP {status}"))
         ),
-        Outcome::Unexpected { a_live, b_trashed, seq } => format!(
+        Outcome::Unconfirmed { status } => format!(
+            "B's row forgotten, the trash sent, not read back yet ({}); run apply-one again",
+            status.map_or("no answer".to_string(), |status| format!("HTTP {status}"))
+        ),
+        Outcome::Unexpected { a_live, b_trashed, seq, .. } => format!(
             "trash sent, not confirmed (A live: {a_live}, B in the trash: {b_trashed}, trash op: {})",
             seq.map_or("not found".to_string(), |seq| seq.to_string())
         ),
