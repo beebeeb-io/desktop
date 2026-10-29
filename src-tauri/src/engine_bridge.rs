@@ -9302,9 +9302,11 @@ pub async fn sync_tick_outcome(
     // reset (cursor ahead) or an old server that does not advertise its head.
     if ops.ops.is_empty() {
         if ops.head_seq.is_some_and(|head| head >= cursor) {
+            // The delta came back (empty, at the head): this tick reached the server.
             return Ok(SyncTickOutcome {
                 conflicts,
                 applied_item_ids: dedupe(applied_item_ids),
+                reached_server: true,
             });
         }
         // `now_secs` (captured at tick start) is the prune freshness cutoff: it
