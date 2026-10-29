@@ -351,8 +351,27 @@ fn round6_unregister_removes_empty_owned_hkcu_key() {
     }
 }
 
+/// A finalization journal row: the upload `op` of the file at `target` became the server file `server_id`.
+fn journal_finalization(f: &Fixture, op: &str, local_id: &str, server_id: &str, target: &str, payload: &std::path::Path) {
+    f.db.put_upload_finalization(&crate::state_db::UploadFinalization {
+        op_id: op.into(),
+        local_file_id: local_id.into(),
+        server_file_id: server_id.into(),
+        target_path: target.into(),
+        payload_path: payload.to_string_lossy().into_owned(),
+        stamped: false,
+        review: None,
+    })
+    .unwrap();
+}
+
+/// Tasks 2270 / 2280 changed this test's meaning (0.8.19 refused both cases with an error on every tick):
+/// another file's placeholder is held for review and never stamped (spec F4); bytes that are neither the payload
+/// nor the agreed content get the server identity only, not in sync (F7c). Either way the bytes stay, and sign-out
+/// still refuses to delete them.
 #[test]
 fn round6_upload_finalization_preserves_foreign_or_changed_bytes() {
+    use crate::unknown_check::{OnDisk, PlatformView};
     for foreign in [false, true] {
         let registered = RegisteredRoot::new();
         let f = &registered.0;
@@ -361,11 +380,20 @@ fn round6_upload_finalization_preserves_foreign_or_changed_bytes() {
         std::fs::write(&path, b"new local edit").unwrap();
         std::fs::write(&payload, if foreign { b"new local edit".as_slice() } else { b"uploaded original".as_slice() }).unwrap();
         crate::windows_cf::placeholders::convert_to_unsynced_placeholder(&path, if foreign { "foreign-id" } else { "local-id" }).unwrap();
-        let error = crate::windows_cf::placeholders::complete_upload_placeholder(&path, "server-id", Some(("local-id", &payload))).unwrap_err();
-        assert!(error.to_string().contains(if foreign { "belongs to another file" } else { "bytes changed" }), "{error:?}");
-        assert_eq!(std::fs::read(&path).unwrap(), b"new local edit");
         f.track("server-id", ItemKind::File, FileStatus::Local);
-        assert!(purge(&f.db, Some(&f.root), &UnknownFiles::Delete).is_err());
+        journal_finalization(f, "op", "local-id", "server-id", "server-id", &payload);
+        crate::windows_cf::upload_finalization::retry(&f.db, &f.root);
+        let identity = if foreign { "foreign-id" } else { "server-id" };
+        assert_eq!(
+            crate::windows_cf::placeholders::platform_view(&path),
+            PlatformView::Placeholder { on_disk: OnDisk::Wholly, in_sync: false, identity: Some(identity.into()) },
+            "foreign={foreign}"
+        );
+        let reviews: Vec<_> = f.db.upload_finalizations().unwrap().into_iter().map(|row| row.review).collect();
+        assert_eq!(reviews, if foreign { vec![Some("other_file".to_string())] } else { vec![] }, "foreign={foreign}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"new local edit");
+        assert!(purge(&f.db, Some(&f.root), &UnknownFiles::Delete).is_err(), "foreign={foreign}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"new local edit", "foreign={foreign}");
     }
 }
 
@@ -378,9 +406,40 @@ fn round6_verified_upload_finalization_updates_identity() {
     std::fs::write(&path, b"uploaded bytes").unwrap();
     std::fs::write(&payload, b"uploaded bytes").unwrap();
     crate::windows_cf::placeholders::convert_to_unsynced_placeholder(&path, "local-id").unwrap();
-    crate::windows_cf::placeholders::complete_upload_placeholder(&path, "server-id", Some(("local-id", &payload))).unwrap();
     f.track("server-id", ItemKind::File, FileStatus::Local);
+    journal_finalization(f, "op", "local-id", "server-id", "server-id", &payload);
     purge(&f.db, Some(&f.root), &UnknownFiles::Delete).unwrap();
+    assert!(f.db.upload_finalizations().unwrap().is_empty());
+    assert_eq!(std::fs::read_dir(&f.root).unwrap().count(), 0);
+}
+
+/// Tasks 2270 / 2280 (spec X1, I5; review focus): a row held for review no longer blocks sign-out (the person cannot
+/// act on it), and sign-out forgets it. A row still pending (its file is open in another program) still blocks it,
+/// with today's message, until it finishes.
+#[test]
+fn signout_purges_review_rows_and_still_refuses_a_pending_one() {
+    let registered = RegisteredRoot::new();
+    let f = &registered.0;
+    // In review since an earlier tick of this start: its file moved before it was finalized (F1).
+    journal_finalization(f, "review-op", "review-local", "review-server", "moved-away", &f.temp.path().join("review-payload"));
+    f.db.mark_upload_finalization_review("review-op", "moved", 1).unwrap();
+    crate::windows_cf::upload_finalization::mark_review_retried(&f.root);
+    // Pending: the uploaded file is open in another program.
+    let path = f.root.join("server-id");
+    let payload = f.temp.path().join("uploaded");
+    std::fs::write(&path, b"uploaded bytes").unwrap();
+    std::fs::write(&payload, b"uploaded bytes").unwrap();
+    f.track("server-id", ItemKind::File, FileStatus::Local);
+    journal_finalization(f, "pending-op", "local-id", "server-id", "server-id", &payload);
+    let reader = std::fs::File::open(&path).unwrap();
+    let error = purge(&f.db, Some(&f.root), &UnknownFiles::Delete).unwrap_err();
+    assert!(error.to_string().contains("still needs its local identity repaired"), "{error:?}");
+    let ops: Vec<_> = f.db.upload_finalizations().unwrap().into_iter().map(|row| row.op_id).collect();
+    assert_eq!(ops, vec!["pending-op".to_string()], "the review row is forgotten, the pending one kept");
+    assert_eq!(std::fs::read(&path).unwrap(), b"uploaded bytes");
+    drop(reader);
+    purge(&f.db, Some(&f.root), &UnknownFiles::Delete).unwrap();
+    assert!(f.db.upload_finalizations().unwrap().is_empty());
     assert_eq!(std::fs::read_dir(&f.root).unwrap().count(), 0);
 }
 

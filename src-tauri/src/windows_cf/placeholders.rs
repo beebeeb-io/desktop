@@ -332,54 +332,6 @@ pub fn convert_to_in_sync_placeholder(path: &std::path::Path, file_id: &str) -> 
     stamp_identity(handle, existing.is_some(), file_id, true)
 }
 
-/// The uploader additionally proves ownership and that the resident bytes still
-/// equal the completed payload, while holding the same exclusive file handle.
-pub fn complete_upload_placeholder(
-    path: &std::path::Path,
-    file_id: &str,
-    uploaded: Option<(&str, &std::path::Path)>,
-) -> anyhow::Result<()> {
-    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
-    use windows::Win32::Foundation::{HANDLE, ERROR_NOT_A_CLOUD_FILE};
-    use windows::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
-    let mut file = std::fs::OpenOptions::new().read(true).write(true).share_mode(0)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0).open(path)?;
-    let handle = HANDLE(file.as_raw_handle());
-    let mut buffer = vec![0u64; 1024];
-    let info_result = unsafe { CfGetPlaceholderInfo(handle, CF_PLACEHOLDER_INFO_STANDARD,
-        buffer.as_mut_ptr().cast(), (buffer.len() * 8) as u32, None) };
-    let existing = match info_result {
-        Ok(()) => Some(unsafe { &*buffer.as_ptr().cast::<CF_PLACEHOLDER_STANDARD_INFO>() }),
-        Err(e) if e.code() == windows::core::HRESULT::from_win32(ERROR_NOT_A_CLOUD_FILE.0) => None,
-        Err(e) => return Err(e.into()),
-    };
-    if let Some((local_id, payload)) = uploaded {
-        if let Some(info) = existing {
-            let identity = unsafe { std::slice::from_raw_parts(info.FileIdentity.as_ptr(), info.FileIdentityLength as usize) };
-            anyhow::ensure!(identity == local_id.as_bytes() || identity == file_id.as_bytes(),
-                "Uploaded placeholder belongs to another file");
-        }
-        // Stream both handles; do not load a large upload into memory. An edit
-        // during upload must never be marked clean merely because upload ended.
-        use sha2::{Digest, Sha256};
-        let mut current_hash = Sha256::new();
-        std::io::copy(&mut file, &mut current_hash)?;
-        let mut payload_hash = Sha256::new();
-        std::io::copy(&mut std::fs::File::open(payload)?, &mut payload_hash)?;
-        anyhow::ensure!(current_hash.finalize() == payload_hash.finalize(), "Local bytes changed during upload");
-    }
-    unsafe {
-        if existing.is_some() {
-            CfUpdatePlaceholder(handle, None, Some(file_id.as_ptr().cast()), file_id.len() as u32,
-                None, CF_UPDATE_FLAG_MARK_IN_SYNC, None, None)?;
-        } else {
-            CfConvertToPlaceholder(handle, Some(file_id.as_ptr().cast()), file_id.len() as u32,
-                CF_CONVERT_FLAG_MARK_IN_SYNC, None, None)?;
-        }
-    }
-    Ok(())
-}
-
 /// Tasks 2270 / 2280 (spec §3): the handle finalization, the stamp pass and the promote pass open a user's file
 /// with. It has no write-data access, so a read-only file opens: `FILE_ATTRIBUTE_READONLY` refuses only opens that
 /// write data, append or delete (0.8.19 opened these files for writing and failed on every tick with access
