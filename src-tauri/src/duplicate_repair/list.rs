@@ -14,6 +14,23 @@ pub(crate) struct Observed {
     pub read_only: Option<bool>,
 }
 
+/// What Windows shows at `path`, without fetching anything: the placeholder state through
+/// [`crate::windows_cf::placeholders::platform_view`] (attribute access only), and size, last write and read-only from
+/// the reparse point's own metadata (an open with no data access).
+#[cfg(target_os = "windows")]
+pub(crate) fn observe(path: &Path) -> Observed {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_READONLY: u32 = 0x1;
+    let view = crate::windows_cf::placeholders::platform_view(path);
+    let metadata = std::fs::symlink_metadata(path).ok();
+    Observed {
+        view,
+        size: metadata.as_ref().map(MetadataExt::file_size),
+        modified: metadata.as_ref().map(MetadataExt::last_write_time),
+        read_only: metadata.as_ref().map(|metadata| metadata.file_attributes() & FILE_ATTRIBUTE_READONLY != 0),
+    }
+}
+
 /// The pairs, and the paths with more than two rows (spec L0: counted, never listed).
 #[derive(Debug)]
 pub(crate) struct Listing {
