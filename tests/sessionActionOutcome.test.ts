@@ -33,10 +33,12 @@ describe('the SessionActionOutcome contract', () => {
   test('both commands answer it', () => {
     const lib = rustSource('lib.rs')
     // Task 1882 (rebase onto main): the command also takes the app handle, to raise the kept-folder alert; rustfmt
-    // puts its arguments on their own lines, so compare without whitespace.
+    // puts its arguments on their own lines, so compare without whitespace. Task 1887: and the calling window (a result
+    // that needs showing waits for that window's acknowledgement) and `keep_unsent`, which `clearSession`'s
+    // `keepUnsent` fills. Task 2191: and `unknown_files`, which `clearSession`'s `unknownFiles` fills (Windows).
     const squeezed = lib.replace(/\s+/g, '')
     expect(squeezed).toContain(
-      'asyncfnclear_session(app:tauri::AppHandle,state:State<\'_,AppState>,forget_email:Option<bool>,)->Result<SessionActionOutcome,String>{',
+      'asyncfnclear_session(app:tauri::AppHandle,window:tauri::WebviewWindow,state:State<\'_,AppState>,forget_email:Option<bool>,keep_unsent:Option<KeepUnsentArg>,unknown_files:Option<UnknownFilesArg>,kept_folder:Option<String>,)->Result<SessionActionOutcome,String>{',
     )
     expect(lib).toContain('async fn lock_vault(state: State<\'_, AppState>) -> Result<SessionActionOutcome, String> {')
   })
@@ -178,9 +180,39 @@ describe('the answer of a command that ends the session itself stands when the r
     expect(result).toEqual({ ok: true, value: { warning } })
   })
 
+  // Task 1683 slice 2: the sign-in runs in the Beebeeb window, which `AccountSessionBoundary` polls every second, so a
+  // status read can observe the revision a sign-in moves before the sign-in's own answer arrives. The sign-in INSTALLS
+  // the session, so the revision moving is the sign-in having worked: its answer (a LoginOutcome with no account data
+  // of the new session in it) stands, as a sign-out's does. The Keychain and recovery-phrase unlocks do not move the
+  // revision (the session is already present), so they keep the guard.
+  test('a sign-in: Ok with its outcome, for each way in (password, second factor, browser)', async () => {
+    let start = 760
+    const outcome = { requires_2fa: false, reauthenticated: false, vault_unlocked: false, key_replaced: false, account_mismatch: null }
+    for (const name of ['desktop_login', 'desktop_login_2fa', 'start_browser_login']) {
+      const { native, seen } = await revisionMovesWhileRunning(name, outcome, start)
+      const result = await command<unknown>(name)
+      expect(seen.atAnswer).toBe(native.revision)
+      expect({ name, result }).toEqual({ name, result: { ok: true, value: outcome } })
+      start += 10
+    }
+  })
+
+  // PR #146 review, P3: the hint's answer is a flag of this Mac, not of an account. A sign-in or a lock that moves the revision
+  // while the read is out must not turn it into "Account changed" (which hides the hint) or lose a "Got it".
+  test('the one-time hint\'s two commands carry no account data: their answers stand', async () => {
+    let start = 780
+    for (const [name, answer] of [['get_menu_bar_hint_seen', false], ['mark_menu_bar_hint_seen', null]] as const) {
+      const { native, seen } = await revisionMovesWhileRunning(name, answer, start)
+      const result = await command<unknown>(name)
+      expect(seen.atAnswer).toBe(native.revision)
+      expect({ name, result }).toEqual({ name, result: { ok: true, value: answer } })
+      start += 10
+    }
+  })
+
   test('any other command still says "Account changed"', async () => {
     let start = 730
-    for (const name of ['account_email', 'unlock_vault', 'popover_snapshot', 'desktop_login']) {
+    for (const name of ['account_email', 'unlock_vault', 'popover_snapshot', 'desktop_unlock_with_recovery_phrase', 'open_onboarding_window']) {
       const { native, seen } = await revisionMovesWhileRunning(name, 'sam@example.eu', start)
       const result = await command<unknown>(name)
       expect(seen.atAnswer).toBe(native.revision)
@@ -225,6 +257,17 @@ describe('source contract: every caller reads the warning', () => {
         sites += 1
         continue
       }
+      if (file === 'signOutFlow.ts') {
+        // The Settings sign-out flow (task 1887): its API object only passes the call through, and the flow's own
+        // `signOut` is the one caller, a class method this function census cannot see; it reads the answer's warning.
+        const start = text.indexOf('private async signOut(')
+        expect(start, 'the flow signs out in signOut').toBeGreaterThan(-1)
+        const body = text.slice(start, text.indexOf('\n  }\n', start))
+        expect(body).toContain('this.api.clearSession(')
+        expect(body).toContain('result.value.warning')
+        sites += 1
+        continue
+      }
       // Every reference outside an import: a call, or the function handed to a runner (MacSettings).
       const code = text.replace(/^import[\s\S]*?from '[^']+'\n/gm, (imports) => ' '.repeat(imports.length))
       for (const match of code.matchAll(/\b(clearSession|lockVault)\b/g)) {
@@ -237,7 +280,9 @@ describe('source contract: every caller reads the warning', () => {
       }
     }
     expect(offenders).toEqual([])
-    // forceReauth, AccountSwitchStep, MacSettings (lock, sign-out), pages/Account (lock, sign-out), AccountView.
-    expect(sites).toBe(7)
+    // forceReauth, AccountSwitchStep (Linux's onboarding window), SwitchScreen (the same step in the Beebeeb window, task
+    // 1683 slice 2: it reads `.warning`, so the census still finds no caller that drops it), MacSettings (lock), the
+    // Settings sign-out flow, pages/Account (lock, sign-out), AccountView.
+    expect(sites).toBe(8)
   })
 })

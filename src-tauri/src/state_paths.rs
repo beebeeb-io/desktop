@@ -49,10 +49,23 @@ pub(crate) fn init_from_app(app: &tauri::AppHandle) -> Result<(), String> {
 }
 
 pub(crate) fn beebeeb_state_dir() -> Result<PathBuf, String> {
+    #[cfg(test)]
+    if let Ok(dir) = STATE_DIR_OVERRIDE.try_with(PathBuf::clone) {
+        return Ok(dir);
+    }
     BEEBEEB_STATE_DIR
         .get()
         .cloned()
         .ok_or_else(|| "Beebeeb state dir has not been initialized".to_string())
+}
+
+// Tests only: the state dir for one future (`STATE_DIR_OVERRIDE.scope(dir, future)`), instead of the process-wide
+// scratch dir that every sign-out test shares (`init_for_test`). For a test that queues rows: since task 1887 a
+// sign-out on a Mac reads the queue before it changes anything, so a row left in the shared dir would refuse another
+// test's sign-out. Code that runs on another task or thread inside the scope uses the shared dir, as before.
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static STATE_DIR_OVERRIDE: PathBuf;
 }
 
 /// Test-only: resolve the process-wide state dir to a throwaway directory, the way `init_from_app`

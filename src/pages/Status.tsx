@@ -156,7 +156,7 @@ export default function Status({ onNavigate }: { onNavigate?: (page: PageLink) =
   }, [statusLoggedIn, statusEngine])
 
   const health = useMemo(() => {
-    if (!status) return { label: 'Loading', className: '', detail: 'Waiting for daemon status.' }
+    if (!status) return { label: 'Loading', className: '', detail: 'Loading…' }
     if (!status.logged_in) {
       return { label: 'Signed out', className: 'warn', detail: 'Sign in to start the drive.' }
     }
@@ -205,7 +205,7 @@ export default function Status({ onNavigate }: { onNavigate?: (page: PageLink) =
         <div className="page-header">
           <div>
             <h1 className="page-title">Drive status</h1>
-            <p className="page-copy">Loading daemon status…</p>
+            <p className="page-copy">Loading…</p>
           </div>
         </div>
       </section>
@@ -217,10 +217,6 @@ export default function Status({ onNavigate }: { onNavigate?: (page: PageLink) =
       <div className="page-header">
         <div>
           <h1 className="page-title">Drive status</h1>
-          <p className="page-copy">
-            Beebeeb Desktop is the control center. Finder is the file surface; this page shows
-            whether the daemon can hydrate, upload, and keep versions safe.
-          </p>
         </div>
         <span className="status-pill">
           <span className={`dot ${health.className}`} />
@@ -232,17 +228,17 @@ export default function Status({ onNavigate }: { onNavigate?: (page: PageLink) =
         <div className="metric">
           <div className="metric-label">Transfer queue</div>
           <div className="metric-value">{status.syncing}</div>
-          <div className="metric-detail">Hydrates and uploads waiting now</div>
+          <div className="metric-detail">Downloads and uploads waiting now</div>
         </div>
         <div className="metric">
           <div className="metric-label">Online-only</div>
           <div className="metric-value">{status.cloud_only}</div>
-          <div className="metric-detail">Visible without local bytes</div>
+          <div className="metric-detail">Download when you open them</div>
         </div>
         <div className="metric">
           <div className="metric-label">Conflicts</div>
           <div className="metric-value">{status.conflicts}</div>
-          <div className="metric-detail">Version reviews needing action</div>
+          <div className="metric-detail">Files that need a decision from you</div>
         </div>
       </div>
 
@@ -274,9 +270,7 @@ export default function Status({ onNavigate }: { onNavigate?: (page: PageLink) =
           <div className="row">
             <div>
               <div className="row-title">Vault access</div>
-              <div className="row-detail">
-                {status.logged_in ? 'Session present' : 'No session token'} · engine {status.engine}
-              </div>
+              <div className="row-detail">{status.logged_in ? 'Signed in' : 'Not signed in'}</div>
             </div>
             <button className="button" onClick={() => onNavigate?.('account')}>
               Account

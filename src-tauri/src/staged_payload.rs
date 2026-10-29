@@ -767,6 +767,7 @@ mod tests {
         let accepted = db
             .accept_finder_write(
                 &FinderAccept {
+                    retire_parked: None,
                     op_id: "op-mid-accept",
                     file_id: "mid-accept",
                     kind: FinderAcceptKind::Modify {

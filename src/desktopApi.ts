@@ -1,6 +1,9 @@
 import { invoke } from '@tauri-apps/api/core'
 import { accountSessionRevision, observeAccountSession, observeSignOutWarning, subscribeAccountSession } from './accountSession'
 import { parsePopoverSnapshot, type PopoverSnapshot } from './popoverContract'
+import { parseSyncActivitySummary, type SyncActivitySummary } from './windows/syncActivityModel'
+import { parseKeepResult, parseReview, type FoundWhilePausedReview, type KeepResult } from './windows/foundWhilePaused'
+import type { AskCounts } from './signOutCopy'
 
 export type CommandResult<T> =
   | { ok: true; value: T }
@@ -28,6 +31,12 @@ export interface SyncStatus {
    * PC, or an earlier engine stop was never confirmed. Parsed by `loadSyncStatus`; null otherwise.
    */
   engine_refusal?: EngineRefusal | null
+  /**
+   * Desktop 0.8.15 (engine lane, `fix/0815-guard-nonblocking`): the start-up guard's pass over the files of unknown
+   * content, `{running, done, total}`, live on every status read. Absent from builds without it; the sync activity
+   * model then falls back to the last pass `sync_activity_summary` heard of.
+   */
+  startup_guard?: { running: boolean; done: number; total: number } | null
 }
 
 /** The closed set of `sync_status.engine_refusal` codes (`account_binding::Refusal::code()` in Rust). */
@@ -173,6 +182,13 @@ export interface VersionConflictEntry {
     // Previously fell through to the generic 'failed_upload' bucket with the
     // raw HTTP error text and no "sign in again" path — see `reviewEntryAction`.
     | 'auth_failure'
+    // Task 2190: a sync-folder edit held, not sent, because its base is unknown (needs a decision).
+    | 'held_edit'
+    // Task 2190: the one row for files from before 0.8.13 that hold a change not checked yet.
+    | 'held_unknown'
+    // Task 1640: a file deleted elsewhere while it held changes not sent from this PC; they
+    // were kept as a copy beside it (informational, no action).
+    | 'kept_copy'
   status: string
   updated_at?: number
   detail: string
@@ -186,8 +202,13 @@ export interface VersionConflictEntry {
 /** billing/upgrade destination shared by the Plan panel and any review-row
  * "Upgrade" action — same URL Windows' StorageWidget already opens. */
 export const BILLING_URL = 'https://app.beebeeb.io/billing'
+/**
+ * Where an account is created (spec C §5.1: the built-in address; the server's own link, `signup.web_url` of the
+ * pre-account onboarding document, replaces it when task 1747's account view lands). Signup is web-only.
+ */
+export const CREATE_ACCOUNT_URL = 'https://app.beebeeb.io/signup'
 
-export type ReviewEntryActionKind = 'open_conflict' | 'upgrade' | 'sign_in_again'
+export type ReviewEntryActionKind = 'open_conflict' | 'upgrade' | 'sign_in_again' | 'dismiss'
 
 export interface ReviewEntryAction {
   kind: ReviewEntryActionKind
@@ -210,6 +231,8 @@ export function reviewEntryAction(
   if (entry.action === 'open_conflict') return { kind: 'open_conflict', label: 'Review' }
   if (entry.kind === 'auth_failure') return { kind: 'sign_in_again', label: 'Sign in again' }
   if (entry.kind === 'quota_failure') return { kind: 'upgrade', label: 'Upgrade' }
+  // Task 1640: a kept copy needs no decision; the person can clear it from the list.
+  if (entry.kind === 'kept_copy' && entry.action === 'dismiss') return { kind: 'dismiss', label: 'Dismiss' }
   return null
 }
 
@@ -414,6 +437,8 @@ export interface ConflictContentPreview {
   is_text: boolean
   local: ConflictContentSide
   remote: ConflictContentSide
+  /** Task 2190 (review-169 #1): a parked conflict's file version the person decides against. */
+  version?: number | null
 }
 
 // `is_text` is no longer a caller-supplied argument (task 1546 Codex round 2,
@@ -424,6 +449,31 @@ export function conflictContentPreview(fileId: string): Promise<CommandResult<Co
   return command<ConflictContentPreview>('conflict_content_preview', { fileId })
 }
 
+/** Task 2190 (plan §3.2): what the person chose for a parked conflict. */
+export type ParkedChoice = 'local' | 'remote' | 'both'
+
+/** Task 2190: what a decision on a parked conflict did (`engine_bridge::ParkedResolution`). */
+export type ParkedResolution =
+  | { outcome: 'rebased'; version: number }
+  | { outcome: 'kept_other'; kept_copy: string }
+  | { outcome: 'kept_both'; file_id: string; name: string }
+  | { outcome: 'moved' }
+
+/** Task 2190 (plan §3.4): both sides of a parked conflict, by its queued write. Read-only. */
+export function parkedConflictPreview(opId: string): Promise<CommandResult<ConflictContentPreview>> {
+  return command<ConflictContentPreview>('parked_conflict_preview', { opId })
+}
+
+/** Task 2190 (plan §3.2): decide a parked conflict, by its queued write. */
+export function resolveParkedConflict(
+  opId: string,
+  choice: ParkedChoice,
+  shownVersion: number | null,
+): Promise<CommandResult<ParkedResolution>> {
+  // Review-169 #1: decided against the version the preview showed; a file past it is not decided.
+  return command<ParkedResolution>('resolve_parked_conflict', { opId, choice, shownVersion })
+}
+
 /**
  * Commands whose answer stands even when this WebView observed a new session revision while they ran.
  * `sync_status` is what observes it. `clear_session` (a sign-out, and the account switch's sign-out with
@@ -431,9 +481,25 @@ export function conflictContentPreview(fileId: string): Promise<CommandResult<Co
  * sign-out; for a Lock, when no Keychain session is left), and their answer is `{warning}`, with no account data
  * in it. On a Mac a status read sent during the sign-out waits behind the engine slot and is released already
  * carrying the new revision; when it is observed first, "Account changed" would report a sign-out that happened
- * as one that failed. Every other command keeps the guard.
+ * as one that failed. A sign-in is the same case from the other side (slice 2, below). Every other command keeps the
+ * guard.
  */
-const ANSWER_STANDS_WHEN_THE_ACCOUNT_CHANGES: ReadonlySet<string> = new Set(['sync_status', 'clear_session', 'lock_vault'])
+const ANSWER_STANDS_WHEN_THE_ACCOUNT_CHANGES: ReadonlySet<string> = new Set([
+  'sync_status',
+  'clear_session',
+  'lock_vault',
+  // Task 1683 slice 2: the three ways to sign in install the session, so the revision moving is the sign-in having
+  // worked. The Beebeeb window runs them under `AccountSessionBoundary`'s one-second status poll (the onboarding
+  // window did not), which can observe that revision before the sign-in's own answer arrives; "Account changed" would
+  // then report a sign-in that happened as one that failed. The answer is a LoginOutcome and carries no account data.
+  'desktop_login',
+  'desktop_login_2fa',
+  'start_browser_login',
+  // Home's one-time hint is a flag of this Mac, not of an account (PR #146 review, P3): a sign-in or a lock that moves the
+  // revision while it is read must neither hide the hint as a failed read nor lose a "Got it".
+  'get_menu_bar_hint_seen',
+  'mark_menu_bar_hint_seen',
+])
 
 export async function command<T>(name: string, args?: Record<string, unknown>): Promise<CommandResult<T>> {
   const revision = accountSessionRevision()
@@ -445,7 +511,11 @@ export async function command<T>(name: string, args?: Record<string, unknown>): 
     return { ok: true, value }
   } catch (error) {
     const reason = reasonFrom(error)
-    return { ok: false, reason, unsupported: isUnsupported(reason) }
+    const unsupported = isUnsupported(reason)
+    // The name of a command this build does not have is for whoever reads the log (spec §10.2 #24). It is written here,
+    // once, where the host's answer is read: `commandUnavailableLabel` is called while a component renders.
+    if (unsupported) console.warn(name, 'unavailable')
+    return { ok: false, reason, unsupported }
   }
 }
 
@@ -465,12 +535,87 @@ export async function popoverSnapshot(activityLimit?: number): Promise<CommandRe
 
 export async function loadSyncStatus(): Promise<SyncStatus | null> {
   const result = await command<SyncStatus>('sync_status')
-  if (result.ok && result.value.session_revision !== undefined) {
-    // A sign-in clears a held sign-out sentence first, so the remount it causes does not show it again.
-    observeSignOutWarning(result.value.logged_in === true, result.value.session_revision)
-    observeAccountSession(result.value.session_revision)
-  }
+  if (result.ok) observeSession(result.value)
   return result.ok ? { ...result.value, engine_refusal: parseEngineRefusal(result.value.engine_refusal) } : null
+}
+
+/**
+ * Task 2243: only what `AccountSessionBoundary` needs to see a sign-out, `logged_in` and `session_revision`. Rust
+ * answers it from memory (`sync_status` with `sessionOnly`), with no config file and no state DB: the boundary polls
+ * it every second in every window, hidden ones included.
+ */
+export async function observeSessionStatus(): Promise<void> {
+  const result = await command<Pick<SyncStatus, 'logged_in' | 'session_revision'>>('sync_status', { sessionOnly: true })
+  if (result.ok) observeSession(result.value)
+}
+
+function observeSession(status: Pick<SyncStatus, 'logged_in' | 'session_revision'>): void {
+  if (status.session_revision === undefined) return
+  // A sign-in clears a held sign-out sentence first, so the remount it causes does not show it again.
+  observeSignOutWarning(status.logged_in === true, status.session_revision)
+  observeAccountSession(status.session_revision)
+}
+
+/**
+ * What sync is doing, in counts (0.8.15): the live pause flag, the engine's last state, what is moving, the queue held
+ * and given up, and the startup check while it runs. Settings › Sync and the Windows tray popover poll it next to
+ * `sync_status`; `syncActivityView` turns the two into words. Null when it cannot be read or is not the contract's shape.
+ */
+export async function loadSyncActivitySummary(): Promise<SyncActivitySummary | null> {
+  const result = await command<unknown>('sync_activity_summary')
+  return result.ok ? parseSyncActivitySummary(result.value) : null
+}
+
+/**
+ * Pause or resume syncing: the same backend the app menu and the tray menu use (`set_sync_paused` in Rust, through
+ * `tray_pause_sync` / `tray_resume_sync`). It persists `pause_sync` and emits `engine-status`, so every open surface
+ * follows.
+ */
+export function setSyncPaused(paused: boolean): Promise<CommandResult<void>> {
+  return command<void>(paused ? 'tray_pause_sync' : 'tray_resume_sync')
+}
+
+// ── Changes found while sync was paused (task 2267, Windows) ────────────────
+//
+// Local items Beebeeb could not prove were the account's own are held with the pause reason `found_while_paused`
+// until the person decides in Settings › Sync (`windows/FoundWhilePausedCard.tsx`). No command takes a path.
+
+/** `found_while_paused_upload`: how many held operations were released to upload. */
+export interface FoundWhilePausedUploadResult {
+  released: number
+}
+
+/**
+ * What is held, by kind, with the ids "Upload to my Beebeeb" sends back (lead review round 3, P2-2). An answer outside
+ * the contract's shape is a failure, never a made-up count.
+ */
+export async function foundWhilePausedReview(): Promise<CommandResult<FoundWhilePausedReview>> {
+  const result = await command<unknown>('found_while_paused_review')
+  if (!result.ok) return result
+  const review = parseReview(result.value)
+  return review ? { ok: true, value: review } : { ok: false, reason: 'The answer had an unexpected shape.', unsupported: false }
+}
+
+/** "Upload to my Beebeeb": release the `found_while_paused` operations the card showed (`opIds`), so they upload. */
+export function foundWhilePausedUpload(opIds: string[]): Promise<CommandResult<FoundWhilePausedUploadResult>> {
+  return command<FoundWhilePausedUploadResult>('found_while_paused_upload', { opIds })
+}
+
+/**
+ * "Keep on this PC only", for the held changes the card showed (`opIds`): move each local-only item they act on out of
+ * the sync folder into `<parent of the sync folder>\Beebeeb - not uploaded\YYYY-MM-DD\` and stop tracking it. An answer outside the
+ * contract's shape is a failure, never a made-up count.
+ */
+export async function foundWhilePausedKeep(opIds: string[]): Promise<CommandResult<KeepResult>> {
+  const result = await command<unknown>('found_while_paused_keep', { opIds })
+  if (!result.ok) return result
+  const kept = parseKeepResult(result.value)
+  return kept ? { ok: true, value: kept } : { ok: false, reason: 'The answer had an unexpected shape.', unsupported: false }
+}
+
+/** Open the last kept folder in Explorer. The backend knows which; the frontend never passes a path. */
+export function showKeptFolder(): Promise<CommandResult<void>> {
+  return command<void>('show_kept_folder')
 }
 
 /** The current engine refusal, or `null` when there is none or the status cannot be read. */
@@ -506,8 +651,14 @@ export function formatBytes(bytes: number): string {
   return `${(bytes / 1_000_000_000_000).toFixed(1)} TB`
 }
 
-export function commandUnavailableLabel(commandName: string): string {
-  return `${commandName} is not wired in this build yet.`
+/**
+ * What a person is told when a command is missing from the build they run (spec `2026-10-24-macos-two-surface-app.md`
+ * §10.2 #24, every platform). The name of the command is for whoever reads the log, not for the screen, and `command()`
+ * logs it when it finds the command missing; this is read while components render, so it has no side effect. The name is
+ * kept as an argument so a call site says which command it speaks for.
+ */
+export function commandUnavailableLabel(_commandName: string): string {
+  return 'This isn’t available in this version of Beebeeb.'
 }
 
 // ── Account data layer (PKG-DATA, commit 39f18963) ──────────────────────────
@@ -852,47 +1003,60 @@ export interface ConfirmActionResult {
 }
 
 // ── Data residency / region — GET /api/v1/me/region ──────────────────────────
-// The Rust DTO maps server `available_regions` / `example_city` to IPC
-// `regions` / `city`. Provider metadata is ignored and never sent to the UI.
+// Task 2050 (Guus, 2026-10-19): storage location is a COUNTRY, never a city. The Rust DTO maps the
+// server's `available_regions` to IPC `regions`, and reads no city at all (the deprecated
+// `example_city` / `city` keys are dropped there), so nothing in this file can carry one.
+// Provider metadata is ignored and never sent to the UI.
 
 export interface RegionInfo {
   continent: string
   display_name: string
-  city: string
+  /** `example_country` of a server that speaks countries; null from an older one. */
+  country: string | null
   is_default: boolean
 }
 
 /**
- * One row of the storage-location list (task 1919): `GET /api/v1/me/region` -> `choices`, the same
- * list as the public `GET /api/v1/storage-regions`. The server owns every field: the "Europe"
- * default (`kind: 'region'`, no country, any datacenter), the live datacenters, and the datacenters
- * that are only coming soon (`selectable: false`). The client renders the list as it comes and
- * keeps no list, city or country table of its own. There is no provider field to read.
+ * One row of the storage-location list (task 1919, by country since task 2050): `GET /api/v1/me/region`
+ * -> `choices`, the same list as the public `GET /api/v1/storage-regions`. The server owns every field:
+ * the "Europe" default (`kind: 'region'`, no country, any data center), the countries we store in
+ * (`kind: 'country'`), and the countries that are only coming soon (`selectable: false`). The client
+ * renders the list as it comes and keeps no list, city or country table of its own. There is no city
+ * and no provider field to read. An older server sends one `kind: 'datacenter'` row per datacenter;
+ * the model folds those into countries (`foldChoices`).
  */
 export interface StorageChoice {
-  /** Sent back verbatim as `preferred_region`: `europe` or a datacenter id. */
+  /** Sent back verbatim as `preferred_region`: `europe` or a country id (`de`, `fi`). */
   id: string
-  kind: 'region' | 'datacenter' | (string & {})
+  kind: 'region' | 'country' | 'datacenter' | (string & {})
+  /** `Europe`, or the country's name. */
   name: string
-  city: string | null
   country: string | null
   country_code: string | null
   status: 'live' | 'coming_soon' | (string & {})
   selectable: boolean
   is_default: boolean
+  /**
+   * Client-side only (never on the wire): other stored values that mean this row. Set when an older
+   * server's datacenter rows are folded into a country, so a stored `fsn1` still selects Germany.
+   */
+  aliases?: string[]
 }
 
 export interface UserRegionResponse {
-  /** `europe`, a live datacenter id, or null (no choice, which places like `europe`). */
+  /** `europe`, a live country id, or null (no choice, which places like `europe`). */
   preferred_region: string | null
+  /** "Only store in <country>" (task 1952). False from a server that predates it. */
+  region_strict?: boolean
   /** The legacy one-entry-per-continent list. A server without `choices` sends only this. */
   regions: RegionInfo[]
-  /** The storage-location list (task 1919). Empty from a server that predates it. */
+  /** The storage-location list. Empty from a server that predates task 1919. */
   choices?: StorageChoice[]
 }
 
 export interface SetPreferredRegionResponse {
   preferred_region: string | null
+  region_strict?: boolean
 }
 
 // Coalesce concurrent readers, but never retain a previous account or failed
@@ -916,6 +1080,12 @@ export function accountProfile(): Promise<CommandResult<AccountProfile>> {
   return command<AccountProfile>('account_profile')
 }
 
+/** The profile as the server says it now, not as the session cached it at sign-in (`account_profile`). Settings › Security
+ *  reads this one: whether the authenticator app is on must not be a claim that is hours old. */
+export function accountProfileFresh(): Promise<CommandResult<AccountProfile>> {
+  return command<AccountProfile>('account_profile_fresh')
+}
+
 export function accountSubscription(): Promise<CommandResult<Subscription>> {
   return command<Subscription>('account_subscription')
 }
@@ -928,8 +1098,12 @@ export function accountRegion(): Promise<CommandResult<UserRegionResponse>> {
   return command<UserRegionResponse>('account_region')
 }
 
-export function setAccountRegion(preferredRegion: string | null): Promise<CommandResult<SetPreferredRegionResponse>> {
-  return command<SetPreferredRegionResponse>('account_set_region', { preferredRegion })
+/** `regionStrict` is "only store in <country>"; send it explicitly (the server replaces the whole choice). */
+export function setAccountRegion(
+  preferredRegion: string | null,
+  regionStrict?: boolean,
+): Promise<CommandResult<SetPreferredRegionResponse>> {
+  return command<SetPreferredRegionResponse>('account_set_region', { preferredRegion, regionStrict })
 }
 
 export function accountActivity(): Promise<CommandResult<AccountActivity>> {
@@ -994,6 +1168,12 @@ export function desktopFileOverview(
   recentLimit?: number,
 ): Promise<CommandResult<FileOverview>> {
   return command<FileOverview>('desktop_file_overview', { recentLimit })
+}
+
+/** The tray's recent list: {@link desktopFileOverview}'s `recent` without its totals, read from the newest rows alone
+ *  (task 2243: the overview read every row, and the tray polls this every few seconds). */
+export function desktopRecentFiles(recentLimit?: number): Promise<CommandResult<RecentFile[]>> {
+  return command<RecentFile[]>('desktop_recent_files', { recentLimit })
 }
 
 /** Query the local desktop file-name search index. Results are local mirror
@@ -1067,7 +1247,11 @@ export interface DesktopLoginResult {
    */
   key_replaced: boolean
   /** Another account signed in; nothing changed on this Mac. */
-  account_mismatch: { pending_changes: number } | null
+  /**
+   * On macOS also `unsent`, the switch's ask snapshot, or `unsent_error`, the coded E3 when its count failed (spec
+   * 2026-10-10 W11, §5.3 row 1).
+   */
+  account_mismatch: { pending_changes: number; unsent?: AskCounts; unsent_error?: string } | null
 }
 
 /**
@@ -1150,10 +1334,20 @@ async function sessionAction(name: 'clear_session' | 'lock_vault', args?: Record
  * stay on disk; the vault stays intact in the cloud. After this call the root
  * `sync_status` poll will return `logged_in: false` and the SignedOutGate will
  * take over. `forgetEmail` is the account switch (FB-I2): the previous account's
- * address is forgotten too, or the sign-out stops (`Err`).
+ * address is forgotten too, or the sign-out stops (`Err`). `keepUnsent` (macOS, spec
+ * 2026-10-10 §5.1) names the ask the person answered with "Sign out": Rust's gate goes on
+ * only while the queue is what that ask showed, and keeps its waiting saves first.
  */
-export function clearSession(options: { forgetEmail?: boolean } = {}): Promise<CommandResult<SessionActionOutcome>> {
-  return sessionAction('clear_session', options.forgetEmail ? { forgetEmail: true } : undefined)
+export function clearSession(
+  options: { forgetEmail?: boolean; keepUnsent?: { askId: string }; unknownFiles?: 'keep' | 'delete'; keptFolder?: string } = {},
+): Promise<CommandResult<SessionActionOutcome>> {
+  const args: Record<string, unknown> = {}
+  if (options.forgetEmail) args.forgetEmail = true
+  if (options.keepUnsent) args.keepUnsent = options.keepUnsent
+  // Task 2191 (Windows): the person's answer for files from before the last update.
+  if (options.unknownFiles) args.unknownFiles = options.unknownFiles
+  if (options.keptFolder) args.keptFolder = options.keptFolder
+  return sessionAction('clear_session', Object.keys(args).length ? args : undefined)
 }
 
 /** Lock the vault. `Ok` means it is locked; its `warning` says which step could not be confirmed. */
@@ -1285,6 +1479,18 @@ export function markKnownFolderOnboardingSeen(): Promise<CommandResult<void>> {
   return command<void>('mark_known_folder_onboarding_seen')
 }
 
+// ── Task 1683 slice 6 — the Beebeeb window's one-time hint on Home ───────────
+
+/** Whether the "Beebeeb lives in the menu bar" hint on Home has been dismissed on this Mac. */
+export function getMenuBarHintSeen(): Promise<CommandResult<boolean>> {
+  return command<boolean>('get_menu_bar_hint_seen')
+}
+
+/** "Got it": the hint is never shown again. */
+export function markMenuBarHintSeen(): Promise<CommandResult<void>> {
+  return command<void>('mark_menu_bar_hint_seen')
+}
+
 // ── Task 0812 — tray flyout: click file → reveal in Explorer + open ──────────
 
 /**
@@ -1346,4 +1552,14 @@ export interface BandwidthSample {
  *  oldest-first; the caller downsamples to a fixed number of chart buckets. */
 export function getBandwidthHistory(hours?: number): Promise<CommandResult<BandwidthSample[]>> {
   return command<BandwidthSample[]>('get_bandwidth_history', { hours })
+}
+
+/** Task 2191 (Windows): files from before the last update that hold bytes on this PC, for the sign-out confirmation. */
+export interface UnknownFilesAtSignOut {
+  count: number
+  folder: string | null
+}
+
+export function signOutUnknownFiles(): Promise<CommandResult<UnknownFilesAtSignOut>> {
+  return command<UnknownFilesAtSignOut>('sign_out_unknown_files')
 }

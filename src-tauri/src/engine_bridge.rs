@@ -13,21 +13,10 @@
 //! Spec: `docs/superpowers/plans/2026-05-07-desktop-sync-client.md`
 //! Phase 1 Task 3.
 //!
-//! ## Divergence from the plan
-//!
-//! The plan's `hydrate_file` body referenced
-//! `beebeeb_core::crypto::derive_file_key` and a raw `nonce || ciphertext`
-//! chunk format. The real API surface is
-//! `beebeeb_core::kdf::derive_file_key(&MasterKey, &[u8]) -> FileKey` and
-//! `beebeeb_core::encrypt::decrypt_chunk(&FileKey, &EncryptedBlob)`, with
-//! chunks stored on the wire as JSON-serialised `EncryptedBlob`s (matches
-//! `repos/cli/src/commands/push.rs`'s `serde_json::to_vec(&blob)` upload
-//! path and `pull.rs`'s `serde_json::from_slice` decode path). The
-//! implementation below uses the real API.
-//!
-//! The per-chunk GET endpoint (`GET /api/v1/files/:id/chunks/:idx`) was
-//! added in `server` commit `d3cf0e2`. Before that landed, `hydrate_file`
-//! was a stub returning `anyhow::Err`.
+//! Content frames are opened only by core's pin-aware chunk_stream API. Transport
+//! normalization accepts the existing raw and JSON envelopes without decrypting them.
+//! ChunkDecryptor is the public facade over core StreamOpener; finish gates whole-file
+//! publication. Indexed range reads authenticate frame zero before calling open_chunk.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Read;
@@ -40,13 +29,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use zeroize::{Zeroize, Zeroizing};
 
 use base64::Engine;
-use beebeeb_types::{CipherSuite, EncryptedBlob};
+use beebeeb_types::EncryptedBlob;
 use serde::{Deserialize, Serialize};
 
 use crate::api_client::{ApiClient, DesktopUploadInitRequest};
-use crate::conflict::{VersionInfo, is_conflict, is_text_file};
+use crate::conflict::is_text_file;
 use crate::state_db::{
-    ClaimOutcome, ClaimedOp, FileContractState, FileEntry, FileStatus, ItemKind, LocalActivityEventInput,
+    ClaimOutcome, ClaimedOp, FileContractState, FileEntry, FileStatus, ItemKind, KeptReason, LocalActivityEventInput,
     LocalActivityKind, Namespace, OperationKind, OperationPauseReason, PERMISSION_OWNER, PERMISSION_READ,
     PERMISSION_SHARE, PERMISSION_WRITE, ParkReason, PendingOperation, QueueDiagnostics, StateDb, TookOver,
     UploadResume,
@@ -235,6 +224,14 @@ pub struct EngineBridge {
     /// [`FAILED_SNAPSHOTS_BEFORE_THE_QUEUE_RUNS`] on, a failed one no longer ends the tick.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     failed_snapshots: std::sync::atomic::AtomicU32,
+    /// Task 2244: edits newly held since the scan last logged its count ([`Self::take_newly_held`]), by
+    /// reason: content unknown, then base unknown. A hold made between passes (a file's close) is counted
+    /// in the next pass's line.
+    newly_held: [std::sync::atomic::AtomicUsize; 2],
+    /// Spec D11 (task 1888, review P2): the account's resume and pass requests, shared with the runner. A one-shot
+    /// bridge keeps a private one nobody moves. Off macOS, [`Self::process_due_operations`] sends nothing while a
+    /// release waits for a pass ([`Self::a_pass_is_owed`]).
+    resume: crate::runner::ResumeTicket,
     #[cfg(test)]
     pub(crate) seams: Seams,
 }
@@ -247,6 +244,11 @@ pub(crate) struct Seams {
     hooks: std::sync::Mutex<HashMap<&'static str, SeamHook>>,
     /// Staging bases this bridge uses instead of the process's (`stage_under`, macOS tests).
     staging_bases: std::sync::Mutex<Option<FinderStagingBases>>,
+    /// The download transport this bridge uses (task 2173). Unset: `Auto`, so a test never reads
+    /// the developer's `BB_TRANSPORT` or `desktop.toml`.
+    transport: std::sync::Mutex<Option<crate::direct_download::Transport>>,
+    /// Every direct storage fetch fails with this status, without a request (task 2173).
+    storage_fail: std::sync::Mutex<Option<u16>>,
 }
 
 #[cfg(test)]
@@ -275,6 +277,16 @@ impl Seams {
 
     fn staging_bases(&self) -> Option<FinderStagingBases> {
         self.staging_bases.lock().unwrap().clone()
+    }
+
+    /// From now on this bridge downloads with `transport` (task 2173).
+    pub(crate) fn use_transport(&self, transport: crate::direct_download::Transport) {
+        *self.transport.lock().unwrap() = Some(transport);
+    }
+
+    /// From now on every direct storage fetch of this bridge fails with `status` (task 2173).
+    pub(crate) fn fail_storage(&self, status: u16) {
+        *self.storage_fail.lock().unwrap() = Some(status);
     }
 }
 
@@ -401,6 +413,20 @@ impl std::fmt::Display for QueuedCopyMissing {
 
 impl std::error::Error for QueuedCopyMissing {}
 
+/// Task 1640: a hydrate that would write over a sync-folder file holding a change that is not
+/// sent (its bytes differ from the content this device last agreed with the server on, or its
+/// upload is queued). Path-free on purpose.
+#[derive(Debug)]
+pub(crate) struct UnsentLocalChange;
+
+impl std::fmt::Display for UnsentLocalChange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("this file has a change that is not uploaded yet, so it is not replaced")
+    }
+}
+
+impl std::error::Error for UnsentLocalChange {}
+
 /// §5.6 safe default: no thumbnail is fetched while the item's held write is queued. The
 /// server holds only the previous version's, and the system would cache it under the token.
 #[derive(Debug)]
@@ -462,6 +488,16 @@ pub(crate) fn error_category(error: &(dyn std::error::Error + 'static)) -> &'sta
         }
         if current.downcast_ref::<reqwest::Error>().is_some() {
             return "network";
+        }
+        // Task 2173: a direct download's authorization answer, in the categories above.
+        if let Some(crate::direct_download::DirectError::Refused(status)) =
+            current.downcast_ref::<crate::direct_download::DirectError>()
+        {
+            return match status {
+                401 | 403 => "permission_denied",
+                404 => "not_found",
+                _ => "other",
+            };
         }
         cause = current.source();
     }
@@ -630,7 +666,7 @@ pub struct SharedRootRefreshOutcome {
     pub removed_cache_paths: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct TransferLoopOutcome {
     pub completed_op_ids: Vec<String>,
     pub retried_op_ids: Vec<String>,
@@ -643,6 +679,59 @@ pub struct TransferLoopOutcome {
     /// said only "medium thumbnail upload with blurhash query" with no
     /// trail. Each entry is `"<op_id>: <error>"`.
     pub post_complete_errors: Vec<String>,
+    /// Spec 2026-10-10 §6.4: an attempt failed at the link level (`offline`), the server refused the session
+    /// (`session`), or, by the §15 question 4 ruling, the account refused a Finder write it can cure (`account`).
+    pub link_failed: bool,
+    pub session_refused: bool,
+    pub account_refused: bool,
+}
+
+/// How many times one pass of `process_due_operations` may list its due work. Spec D7 (tasks 1888, 2226): on Windows
+/// and Linux a change in a folder made here is not due until that folder's create landed, so a pass that lands a
+/// folder create lists again for what the landing made due; a new tree up to this many levels deep goes up in one
+/// pass. macOS has no gate and lists once, as before.
+#[cfg(target_os = "macos")]
+const DUE_LISTINGS_PER_PASS: usize = 1;
+#[cfg(not(target_os = "macos"))]
+const DUE_LISTINGS_PER_PASS: usize = 16;
+
+/// The due work of one pass, in due order. It lists again only after a folder create of the pass landed (D7), at most
+/// `DUE_LISTINGS_PER_PASS` times in all, and an op listed earlier in the pass is not run again in it.
+struct DueOperations {
+    queue: VecDeque<PendingOperation>,
+    listed: HashSet<String>,
+    listings: usize,
+    folder_landed: bool,
+}
+
+impl DueOperations {
+    fn new(operations: Vec<PendingOperation>) -> Self {
+        Self {
+            listed: operations.iter().map(|op| op.op_id.clone()).collect(),
+            queue: operations.into(),
+            listings: 1,
+            folder_landed: false,
+        }
+    }
+
+    /// A folder create of this pass landed: the changes that waited for it may be due now.
+    fn folder_landed(&mut self) {
+        self.folder_landed = true;
+    }
+
+    fn next(&mut self, db: &StateDb, now: i64) -> anyhow::Result<Option<PendingOperation>> {
+        while self.queue.is_empty() && self.folder_landed && self.listings < DUE_LISTINGS_PER_PASS {
+            self.folder_landed = false;
+            self.listings += 1;
+            let listed = &mut self.listed;
+            self.queue = db
+                .list_due_operations(now)?
+                .into_iter()
+                .filter(|op| listed.insert(op.op_id.clone()))
+                .collect();
+        }
+        Ok(self.queue.pop_front())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -768,6 +857,19 @@ impl std::fmt::Display for StagedCopyGone {
 }
 
 impl std::error::Error for StagedCopyGone {}
+
+/// A sign-out closed Finder accepts after its engine stop (spec 2026-10-10 §15 question 3). Nothing was queued; the
+/// reply is `WriteRetryLater`, so macOS keeps the change and retries. Path-free: the text reaches the extension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AcceptsClosed;
+
+impl std::fmt::Display for AcceptsClosed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Beebeeb is signing out; this write was not queued")
+    }
+}
+
+impl std::error::Error for AcceptsClosed {}
 
 /// A content save of an item in the trash (spec §7.2): its row is `Trashing`, or the system names
 /// the trash container as its parent. Refused as a create in the trash is, so the item stays in
@@ -933,9 +1035,15 @@ impl EngineBridge {
             stopping,
             thumbnails_pending: std::sync::Mutex::new(HashSet::new()),
             failed_snapshots: std::sync::atomic::AtomicU32::new(0),
+            newly_held: Default::default(),
+            resume: crate::runner::ResumeTicket::default(),
             #[cfg(test)]
             seams: Seams::default(),
         }
+    }
+
+    pub(crate) fn owner_key_scope(&self) -> crate::owner_keys::AccountScope<'_> {
+        crate::owner_keys::AccountScope::new(&self.db, &self.api, &self.stopping)
     }
 
     /// Mark or clear `file_id`'s landed write as waiting for its new thumbnails (spec §5.6).
@@ -984,6 +1092,21 @@ impl EngineBridge {
         self
     }
 
+    /// Share the account's resume and pass requests (spec D11; review P2). [`crate::runner::run`] passes the same
+    /// ticket it serves in [`Self::reconcile_then_resume`].
+    pub fn with_resume(mut self, resume: crate::runner::ResumeTicket) -> Self {
+        self.resume = resume;
+        self
+    }
+
+    /// Review P2 (task 1888): a release asked for a pass that no committed pass has served yet. A released change may
+    /// be a ghost folder's create the pass has not seen; sent now, it would make a folder the server already has a
+    /// second time (anti-goal 1). The next successful tick runs the pass.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    fn a_pass_is_owed(&self) -> bool {
+        self.resume.pass_wanted.load(Ordering::SeqCst) > self.resume.pass_served.load(Ordering::SeqCst)
+    }
+
     pub fn transfers(&self) -> &Arc<crate::transfer_progress::TransferBoard> {
         &self.transfers
     }
@@ -1028,6 +1151,120 @@ impl EngineBridge {
         &self.api
     }
 
+    /// Spec D11, D12 and I6 (task 1888): Windows and Linux resume the operations paused for `auth` here, in the engine,
+    /// after a successful pull proved that the server accepts this session's token. It acts at the run's first
+    /// successful tick (`*reconciled` still false; the first-tick rule) and at any later one where a sign-in asked
+    /// (`asked > done`). Each time:
+    /// - the reconcile pass (D1-D10), then the removal of the scaffolding directories it dropped (D5);
+    /// - the key check (D12): every name that can be checked opens under this session's key, or every `auth` op is held
+    ///   as `key_replaced`;
+    /// - the resume (or that hold), then `done = asked`.
+    ///
+    /// A release that asked for a pass (`pass_wanted > pass_served`; review P2) gets the pass alone: no key check, no
+    /// resume. Any committed pass serves the release ask it read before it planned.
+    ///
+    /// `*reconciled` turns true only when all of it committed, so a step that fails is tried again at the next tick,
+    /// and nothing is resumed before a pass of this run (I6). Local only, counts only in the log (I7).
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    pub async fn reconcile_then_resume(
+        &self,
+        sync_root: &Path,
+        resume: &crate::runner::ResumeTicket,
+        reconciled: &mut bool,
+    ) -> anyhow::Result<()> {
+        let asked = resume.asked.load(Ordering::SeqCst);
+        // Review P2: a release's ask, read before the pass plans, so the pass that serves it has seen the release.
+        let wanted = resume.pass_wanted.load(Ordering::SeqCst);
+        let first_pass = !*reconciled;
+        let resume_owed = first_pass || asked > resume.done.load(Ordering::SeqCst);
+        if !resume_owed && wanted <= resume.pass_served.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let opts = crate::held_queue::Options {
+            device_segment: crate::runner::device_name()
+                .map(|name| crate::known_folder::sanitize_device_segment(&name)),
+            case_insensitive: cfg!(windows),
+        };
+        let now = now_secs();
+        let counts = self
+            .db
+            .reconcile_held_queue(&opts, now, &|rel| crate::state_db::tree_holds_a_file(&sync_root.join(rel)))?;
+        remove_scaffold_dirs(sync_root, &counts.scaffold_dirs);
+        tracing::info!(
+            landed = counts.landed,
+            remapped = counts.remapped,
+            replay = counts.replay,
+            held = counts.held_ambiguous
+                + counts.held_acts_on_ghost
+                + counts.held_parents_disagree
+                + counts.held_twin_busy,
+            released = counts.released,
+            rearmed = counts.rearmed + counts.rearmed_paused,
+            parent_resolved = counts.parent_resolved,
+            scaffold_dropped = counts.scaffold_dropped,
+            backup_unknown_kept = counts.backup_unknown_kept,
+            file_twin = counts.file_twin,
+            "reconcile pass committed"
+        );
+        // A pass that only a release asked for resumes nothing: a release is not a sign-in (spec D11).
+        let (resumed, held_key_replaced) = if !resume_owed {
+            (0, 0)
+        } else if self.auth_ops_open_under_this_key()? {
+            (self.db.resume_operations_paused_for_auth(now)?, 0)
+        } else {
+            (0, self.db.hold_operations_paused_for_auth_as_key_replaced(now)?)
+        };
+        if resume_owed {
+            resume.done.fetch_max(asked, Ordering::SeqCst);
+        }
+        resume.pass_served.fetch_max(wanted, Ordering::SeqCst);
+        *reconciled = true;
+        tracing::info!(
+            resumed,
+            held_key_replaced,
+            first_pass,
+            "after the reconcile pass: the operations paused for auth were resumed, or held under a replaced key"
+        );
+        Ok(())
+    }
+
+    /// Spec D12 (task 1888): whether the operations paused for `auth` were queued under this session's vault key. An op
+    /// is checked when its metadata carries a sealed name (an envelope, as the 2267 proof reads it) and no shared
+    /// context (`shared_root_id`, `share_id`), so its name is sealed by its own `file_id`: it must open under the
+    /// master key in memory ([`name_opens`]). Ops with no name, or with a shared context, are not checked and follow
+    /// the verdict; with none checked, nothing contradicts this key and the verdict is that they open. The key never
+    /// leaves memory, and nothing is logged.
+    fn auth_ops_open_under_this_key(&self) -> anyhow::Result<bool> {
+        let master_key = self.api.master_key();
+        for op in self.db.operations_paused_for_auth()? {
+            let Some(file_id) = op.file_id.as_deref() else {
+                continue;
+            };
+            let Some(metadata) = op
+                .metadata_json
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            else {
+                continue;
+            };
+            let shared = ["shared_root_id", "share_id"]
+                .iter()
+                .any(|field| metadata.get(*field).is_some_and(|value| !value.is_null() && value.as_str() != Some("")));
+            let sealed = metadata
+                .get("name_encrypted")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|sealed| sealed.starts_with('{'));
+            if let Some(sealed) = sealed
+                && !shared
+                && !name_opens(master_key, file_id, sealed)
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     pub fn queue_diagnostics(&self, now: i64) -> anyhow::Result<QueueDiagnostics> {
         Ok(self.db.queue_diagnostics(now)?)
     }
@@ -1039,14 +1276,17 @@ impl EngineBridge {
             paused_op_ids: Vec::new(),
             invalidated_item_ids: Vec::new(),
             post_complete_errors: Vec::new(),
+            link_failed: false,
+            session_refused: false,
+            account_refused: false,
         };
         #[cfg(target_os = "windows")]
         if !self.is_stopping() {
             crate::windows_cf::upload_finalization::retry(&self.db, sync_root);
         }
-        let operations = self.db.list_due_operations(now)?;
+        let mut due = DueOperations::new(self.db.list_due_operations(now)?);
 
-        for op in operations {
+        while let Some(op) = due.next(&self.db, now)? {
             // Task 1538 Codex P1 (PR #49, lib.rs:1087 thread): stop draining
             // the queue the instant a caller asks this engine to stop,
             // rather than finishing every due operation first. `abort()`'s
@@ -1055,6 +1295,12 @@ impl EngineBridge {
             // sign-out needs this loop to actually stop promptly on its own,
             // not "eventually, once the batch happens to finish".
             if self.is_stopping() {
+                break;
+            }
+            // Review P2 (task 1888): a release that asked for a pass after this list was read stops the queue here, so
+            // a released ghost create is never sent before a pass has seen it; the next successful tick runs the pass.
+            #[cfg(not(target_os = "macos"))]
+            if self.a_pass_is_owed() {
                 break;
             }
             // The list is read once per pass, and an upload that lands moves
@@ -1139,6 +1385,9 @@ impl EngineBridge {
                     if let Some(file_id) = &op.file_id {
                         outcome.invalidated_item_ids.push(file_id.clone());
                     }
+                    if op.kind == OperationKind::CreateFolder {
+                        due.folder_landed();
+                    }
                     outcome.completed_op_ids.push(op.op_id);
                 }
                 // The attempt already logged the step that found the op gone.
@@ -1157,12 +1406,13 @@ impl EngineBridge {
                     outcome.retried_op_ids.push(op.op_id);
                 }
                 // A stale base never becomes valid again: the server's version only grows
-                // (spec §8.4). Only a File Provider write parks at once; every other upload
-                // keeps today's retries.
+                // (spec §8.4). A File Provider write parks at once, and so does every other
+                // upload sent with a base (a sync-folder edit, task 1640), its bytes kept; an
+                // upload without a base keeps today's retries.
                 Err(error)
                     if !completed
                         && init_conflict_class(&error) == Some(crate::api_client::InitConflictClass::StaleBase)
-                        && claimed.write.is_some() =>
+                        && (claimed.write.is_some() || op.base_version.is_some()) =>
                 {
                     if !self
                         .db
@@ -1189,6 +1439,9 @@ impl EngineBridge {
                     } else {
                         classify_operation_error(&error.to_string())
                     };
+                    outcome.link_failed |= crate::link_health::classify_error(&error).is_some();
+                    outcome.session_refused |= class == OperationFailureClass::Auth;
+                    outcome.account_refused |= finder_write && is_curable_refusal(&error);
                     // m-11: a recorded completion is never paused (a busy database reads as
                     // `Locked`), because a paused op is not listed again.
                     let transient = finder_write && finder_write_failure_is_transient(class, &error);
@@ -1592,7 +1845,12 @@ impl EngineBridge {
                 && previous.chunk_count > 0
                 && previous.acked_chunks >= 0
                 && previous.acked_chunks <= previous.chunk_count;
-            if same_payload {
+            let v2 = owned_key_and_pin(&self.db, self.api.master_key(), &previous.server_file_id)?.1
+                == beebeeb_core::chunk_stream::ExpectedChunkFormat::V2;
+            if same_payload && v2 {
+                // A fresh core writer has a fresh stream identity. Never append it to an old v2 stream.
+                // Fresh init can refuse a live lease; preserve the old resume record until it succeeds.
+            } else if same_payload {
                 tracing::info!(
                     op_id = %op.op_id,
                     file_id = %previous.server_file_id,
@@ -1804,7 +2062,24 @@ impl EngineBridge {
         if marks_thumbnails {
             self.set_thumbnails_pending(server_file_id, true);
         }
+        // Task 1640: a sync-folder upload (no write id) records what it sent as the content this
+        // device now agrees with the server on. A Finder write's copy is not read again.
+        let completed_payload_hash = match (claim.and_then(|c| c.write.as_ref()), payload_path.as_deref()) {
+            (None, Some(path)) => match sha256_file_hex(Path::new(path)) {
+                Ok(hash) => Some(hash),
+                Err(e) => {
+                    tracing::warn!(
+                        op_id = %op.op_id,
+                        error = %e,
+                        "landing: could not hash the copy that was sent; the file keeps its previous agreed content"
+                    );
+                    None
+                }
+            },
+            _ => None,
+        };
         let master_key = self.api.master_key();
+        let landing_material = owned_key_and_pin(&self.db, master_key, server_file_id)?;
         let landed = self.db.apply_landing(
             &crate::state_db::LandingInput {
                 op_id: &op.op_id,
@@ -1822,10 +2097,12 @@ impl EngineBridge {
                 mime_type: mime_type.as_deref(),
                 // Always the op's payload path, whatever `release` is.
                 completed_payload: payload_path.as_deref(),
+                completed_payload_hash: completed_payload_hash.as_deref(),
                 finalization: finalization.as_ref(),
                 now: now_secs(),
             },
-            &|queued, server_id| metadata_rekeyed_to(master_key, queued, server_id),
+            &|queued, server_id| metadata_rekeyed_with_material(master_key, queued, server_id,
+                (server_id == server_file_id).then_some((&landing_material.0, landing_material.1))),
         );
         // Nothing landed: the op is still queued, and the refusal is the queue's again.
         let landed = match landed {
@@ -1851,7 +2128,7 @@ impl EngineBridge {
         if let Some(path) = payload_path.as_deref() {
             // Task 1700: post-complete thumbnail work never fails the upload, but its
             // failure is surfaced on the outcome so a red run names the real error.
-            let file_key = file_key_for(self.api.master_key(), server_file_id);
+            let file_key = owned_key_and_pin(&self.db, self.api.master_key(), server_file_id)?.0;
             match self
                 .finish_completed_upload(op, server_file_id, Path::new(path), content_type, &file_key, sync_root)
                 .await
@@ -1898,8 +2175,8 @@ impl EngineBridge {
         let server_file_id = session.server_file_id.clone();
         if !session.metadata_applied {
             let effective_name_encrypted = if server_file_id != local_file_id {
-                encrypted_metadata_for_name(
-                    self.api.master_key(),
+                owned_metadata_for_name(
+                    &self.db, self.api.master_key(),
                     &server_file_id,
                     metadata_display_name(metadata, op)
                         .as_deref()
@@ -1919,20 +2196,20 @@ impl EngineBridge {
             self.db.set_upload_resume_metadata_applied(&op.op_id)?;
         }
 
-        let file_key = file_key_for(self.api.master_key(), &server_file_id);
+        let (file_key, pin) = owned_key_and_pin(&self.db, self.api.master_key(), &server_file_id)?;
 
-        let mut file = std::fs::File::open(payload_path)?;
+        let file = std::fs::File::open(payload_path)?;
         let chunk_size = session.chunk_size_bytes as usize;
         let chunk_count = session.chunk_count as u64;
         if chunk_size == 0 || chunk_count == 0 {
             return Err(anyhow::anyhow!("upload init returned invalid chunk plan"));
         }
         let first_chunk = session.acked_chunks.max(0) as u64;
-        if first_chunk > 0 {
-            use std::io::Seek;
-            file.seek(std::io::SeekFrom::Start(first_chunk * chunk_size as u64))?;
-        }
-        let mut buffer = vec![0u8; chunk_size];
+        anyhow::ensure!(first_chunk == 0 || pin != beebeeb_core::chunk_stream::ExpectedChunkFormat::V2,
+            "a v2 upload must restart in a fresh session");
+        let mut writer = beebeeb_core::chunk_stream::ChunkEncryptor::from_reader_with_file_key(
+            file_key, &server_file_id, session.payload_size as u64, chunk_size as u64, file)?
+            .with_recorded_pin(pin)?;
         // Task 1683 slice 2: per-file bytes for the popover. Keyed by the LOCAL file
         // id (the `files` row the activity list reads); a resumed session starts at
         // its acknowledged watermark, not at 0.
@@ -1951,22 +2228,13 @@ impl EngineBridge {
             .map(|c| c.upload_kbps_limit)
             .unwrap_or(0);
 
-        for chunk_index in first_chunk..chunk_count {
-            let read = read_full_chunk(&mut file, &mut buffer)?;
-            // A zero-length read is only legitimate for the single chunk of an
-            // empty file; anywhere else the staged payload is truncated.
-            if read == 0 && session.payload_size > 0 {
-                return Err(anyhow::anyhow!(
-                    "staged upload ended before expected chunk {} of {}",
-                    chunk_index + 1,
-                    chunk_count
-                ));
-            }
-            let encrypted = beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, &buffer[..read])
-                .map_err(|e| anyhow::anyhow!("encrypt upload chunk {chunk_index}: {e}"))?;
+        for chunk_index in 0..chunk_count {
+            let encrypted = writer.next_chunk()?.ok_or_else(|| anyhow::anyhow!("staged upload ended early"))?;
+            if chunk_index < first_chunk { continue; }
+            let read = encrypted.data.len().saturating_sub(28);
             let chunk_start = std::time::Instant::now();
             self.api
-                .upload_session_chunk(&session.upload_session_id, chunk_index as u32, &encrypted)
+                .upload_session_chunk(&session.upload_session_id, chunk_index as u32, &encrypted.data)
                 .await?;
             self.db.set_upload_resume_acked(&op.op_id, chunk_index as i64 + 1)?;
             progress.update(crate::transfer_progress::uploaded_bytes(
@@ -1992,6 +2260,7 @@ impl EngineBridge {
             }
         }
 
+        writer.finish()?;
         let completed = self.api.complete_upload_session(&session.upload_session_id).await;
         if completed.is_ok() {
             progress.finish();
@@ -2096,7 +2365,8 @@ impl EngineBridge {
         mime_type: Option<&str>,
         file_key: &beebeeb_core::kdf::FileKey,
     ) -> anyhow::Result<()> {
-        let uploads = prepare_thumbnail_uploads_for_plaintext_media(payload_path, mime_type, file_key)?;
+        let pin = owned_key_and_pin(&self.db, self.api.master_key(), server_file_id)?.1;
+        let uploads = prepare_thumbnail_uploads_with_pin(payload_path, mime_type, file_key, pin)?;
         for upload in uploads {
             self.api
                 .upload_thumbnail(
@@ -2130,9 +2400,16 @@ impl EngineBridge {
         if !is_create {
             return Ok(None);
         }
-        let Some(target_path) = op.target_path.as_deref() else {
+        let Some(queued_path) = op.target_path.as_deref() else {
             return Ok(None);
         };
+        // Task 2204 S0.2 (review-128 F4): renamed since it was queued, the file is at its row's
+        // path; the landing writes the journal there too.
+        let renamed_path = match op.file_id.as_deref() {
+            Some(id) if self.db.has_queued_local_rename(id)? => self.db.get_file(id)?.map(|row| row.path),
+            _ => None,
+        };
+        let target_path = renamed_path.as_deref().unwrap_or(queued_path);
         let on_disk = local_file_path_under_sync_root(sync_root, target_path)?;
         if !on_disk.is_file() {
             return Ok(None);
@@ -2144,6 +2421,7 @@ impl EngineBridge {
             target_path: target_path.to_string(),
             payload_path: payload_path.to_string_lossy().into_owned(),
             stamped: false,
+            review: None,
         }))
     }
 
@@ -2179,8 +2457,60 @@ impl EngineBridge {
             &root.file_id,
             encrypted_folder_key,
         )?;
-        let folder_keys_response = self.api.get_folder_keys(&root.invite_id).await?;
+        let scope = self.owner_key_scope();
+        scope.check()?;
+        let response = self.api.get_shared_folder(&root.file_id).await;
+        scope.check()?;
+        let custody = match response {
+            Ok(row) => {
+                anyhow::ensure!(row["folder_id"].as_str() == Some(&root.file_id)
+                    && row["key_version"].as_u64().is_some_and(|v| v > 0), "invalid folder custody record");
+                // The server returns the caller's copy: L6 for owners, the
+                // existing authenticated invite envelope for members. A member
+                // cannot open another account's owner/L6 envelope.
+                let custody_key = if row["role"] == "member" {
+                    let wrapped = row["wrapped_folder_key"].as_str()
+                        .ok_or_else(|| anyhow::anyhow!("missing member custody key"))?;
+                    unwrap_folder_share_key(self.api.master_key(), sender_public_key, &root.file_id, wrapped)?
+                } else {
+                    anyhow::ensure!(row["role"] == "owner", "invalid custody role");
+                    let wrap = crate::owner_keys::normalize_wrap(&row["owner_wrapped_folder_key"])?
+                        .ok_or_else(|| anyhow::anyhow!("missing owner custody key"))?;
+                    let key = beebeeb_sync::key_resolution::unwrap_folder_custody(
+                        &beebeeb_core::kdf::MasterKey::from_bytes(*self.api.master_key()), &root.file_id, &wrap)?;
+                    Zeroizing::new(*key.as_bytes())
+                };
+                anyhow::ensure!(*custody_key == *folder_key, "custody and invite keys differ");
+                scope.remember_custody(&root.file_id)?;
+                true
+            }
+            Err(error) if crate::owner_keys::custody_absent(&error) => {
+                anyhow::ensure!(!self.db.has_seen_folder_custody(&root.file_id)?, "This folder's keys are unavailable");
+                false
+            }
+            Err(error) => return Err(error),
+        };
+        let mut folder_keys_response = self.api.get_folder_keys(&root.invite_id).await?;
+        scope.check()?;
+        folder_keys_response["desktop_has_custody"] = serde_json::json!(custody);
         Ok((folder_key, folder_keys_response))
+    }
+
+    fn shared_folder_child_key(
+        &self,
+        folder: &[u8; 32],
+        root: &str,
+        id: &str,
+        kind: u8,
+        wrap: &str,
+        custody: bool,
+    ) -> anyhow::Result<beebeeb_core::kdf::FileKey> {
+        if custody {
+            return unwrap_folder_child_for_format(folder, root, id, kind, wrap, true);
+        }
+        self.db.read_without_folder_custody(root, || {
+            unwrap_folder_child_for_format(folder, root, id, kind, wrap, false)
+        })?.ok_or_else(|| anyhow::anyhow!("This folder's keys are unavailable"))?
     }
 
     fn decrypted_folder_root_name(
@@ -2191,7 +2521,8 @@ impl EngineBridge {
     ) -> Option<String> {
         let name_encrypted = root.file_name_encrypted.as_deref()?;
         let encrypted_file_key = encrypted_file_key_from_folder_keys_response(folder_keys_response, &root.file_id)?;
-        let file_key = unwrap_child_file_key(folder_key, encrypted_file_key).ok()?;
+        let file_key = self.shared_folder_child_key(folder_key, &root.file_id, &root.file_id, 2,
+            encrypted_file_key, folder_keys_response["desktop_has_custody"].as_bool() == Some(true)).ok()?;
         decrypt_shared_name_with_key(&file_key, name_encrypted)
     }
 
@@ -2245,7 +2576,9 @@ impl EngineBridge {
                 };
                 let child_file_key = key_map
                     .get(&child_id)
-                    .and_then(|encrypted| unwrap_child_file_key(folder_key, encrypted).ok());
+                    .and_then(|encrypted| self.shared_folder_child_key(folder_key, &root.file_id, &child_id,
+                        if item_kind_from_metadata(&child) == ItemKind::Folder { 2 } else { 1 }, encrypted,
+                        folder_keys_response["desktop_has_custody"].as_bool() == Some(true)).ok());
                 let Some(entry) = apply_shared_metadata_file_row(
                     &self.db,
                     &child,
@@ -2392,7 +2725,7 @@ impl EngineBridge {
                     file_id,
                     rel_path,
                 } = start;
-                let metadata = encrypted_metadata_for_name(self.api.master_key(), &file_id, &target.filename, None)?;
+                let metadata = owned_metadata_for_name(&self.db, self.api.master_key(), &file_id, &target.filename, None)?;
                 // Spec §7.2 (final review): an extension's create names its folder by parent
                 // only, so the row takes the full relative path under that parent, as every
                 // Finder writer does. A caller's own relative path (the watcher's) is kept.
@@ -2410,24 +2743,18 @@ impl EngineBridge {
                 // present on disk, server CreateFolder op pending in the queue.
                 // Spec §7.2 (final review): the row and its parent in one transaction, so no
                 // listing sees the new folder without its parent.
-                self.db.upsert_file_with_contract(
-                    &FileEntry {
-                        file_id: file_id.clone(),
-                        path: row_path,
-                        status: FileStatus::Local,
-                        size_bytes: 0,
-                        modified_at: now_secs(),
-                        content_hash: None,
-                        remote_updated_at: 0,
-                        // Not persisted by upsert_file; the contract update owns these.
-                        parent_id: None,
-                        item_kind: ItemKind::Folder,
-                    },
-                    |contract| {
-                        contract.item_kind = ItemKind::Folder;
-                        contract.parent_id = target.parent_id.clone();
-                    },
-                )?;
+                let entry = FileEntry {
+                    file_id: file_id.clone(),
+                    path: row_path,
+                    status: FileStatus::Local,
+                    size_bytes: 0,
+                    modified_at: now_secs(),
+                    content_hash: None,
+                    remote_updated_at: 0,
+                    // Not persisted by upsert_file; the contract update owns these.
+                    parent_id: None,
+                    item_kind: ItemKind::Folder,
+                };
                 let mut payload = serde_json::json!({
                     "operation": "create_folder",
                     "name_encrypted": metadata,
@@ -2436,12 +2763,19 @@ impl EngineBridge {
                 self.enqueue_finder_operation(
                     OperationKind::CreateFolder,
                     Some(file_id),
-                    target.parent_id,
+                    target.parent_id.clone(),
                     Some(rel_path),
                     payload,
                     None,
                     None,
                     None,
+                    // The row, its contract (`Folder`, under its parent) and the op in one transaction, so a
+                    // nested child dispatched later still resolves this folder as its parent, and a refused
+                    // create leaves no row.
+                    Some(crate::state_db::FinderFolderRow {
+                        entry: &entry,
+                        parent_id: target.parent_id.as_deref(),
+                    }),
                 )
             }
             FinderWriteItemKind::File => {
@@ -2471,6 +2805,7 @@ impl EngineBridge {
                     Some(rel_path),
                     payload,
                     Some(staged_path),
+                    None,
                     None,
                     None,
                 )?;
@@ -2549,7 +2884,7 @@ impl EngineBridge {
             .content_type
             .as_deref()
             .or_else(|| beebeeb_core::media::guess_mime_type(&target.filename));
-        let name_encrypted = encrypted_metadata_for_name(self.api.master_key(), &file_id, &target.filename, mime)?;
+        let name_encrypted = owned_metadata_for_name(&self.db, self.api.master_key(), &file_id, &target.filename, mime)?;
         let row = FileEntry {
             file_id: file_id.clone(),
             // FULL relative key (e.g. `docs/a.txt`), so a nested file's
@@ -2597,8 +2932,25 @@ impl EngineBridge {
         if target.kind == FinderWriteItemKind::Folder {
             return self.queue_finder_create_from(target, contents).map(FpWrite::plain);
         }
+        self.queue_file_provider_create_retiring(target, contents, None)?
+            .map(|(write, _)| write)
+            .ok_or_else(|| anyhow::anyhow!("a create that retires no parked write is never refused as moved"))
+    }
+
+    /// Task 2190 ("Keep both", review-169 #3): [`Self::queue_file_provider_create_from`], taking the
+    /// place of the parked write `retire` names in the SAME transaction. `Ok(None)`: that write is no
+    /// longer decidable at the version shown, nothing was queued, and the copy staged for the create
+    /// is removed with its guard. With `retire`, the second value is the parked write's staged copy,
+    /// released in the journal, for the caller to unlink. A file only: a folder create goes through
+    /// [`Self::queue_file_provider_create_from`], and "Keep both" copies a file.
+    fn queue_file_provider_create_retiring(
+        &self,
+        target: FinderWriteTarget,
+        contents: Option<&std::fs::File>,
+        retire: Option<crate::state_db::RetireParked<'_>>,
+    ) -> anyhow::Result<Option<(FpWrite, Option<String>)>> {
         let Some(start) = self.start_finder_create(&target)? else {
-            return Ok(FpWrite::plain(ignored_finder_item(&target.filename)));
+            return Ok(Some((FpWrite::plain(ignored_finder_item(&target.filename)), None)));
         };
         let prepared = self.prepare_finder_create(&target, contents, start)?;
         let op_id = uuid::Uuid::new_v4().to_string();
@@ -2607,6 +2959,7 @@ impl EngineBridge {
         self.seam("accept:before_tx");
         let accepted = self.db.accept_finder_write(
             &crate::state_db::FinderAccept {
+                retire_parked: retire,
                 op_id: &op_id,
                 file_id: &prepared.file_id,
                 kind: crate::state_db::FinderAcceptKind::Create { row: &prepared.row },
@@ -2622,28 +2975,34 @@ impl EngineBridge {
             },
             &|entry, contract| legacy_item_identifiers(entry, contract).to_vec(),
         )?;
-        let token = match accepted {
-            crate::state_db::AcceptOutcome::Queued { token, .. } => token,
+        let (token, released) = match accepted {
+            crate::state_db::AcceptOutcome::Queued { token, .. } => (token, None),
+            crate::state_db::AcceptOutcome::QueuedRetiring { token, released } => (token, released),
             crate::state_db::AcceptOutcome::ParkedAtOnce { token, reason } => {
                 log_parked(&op_id, Some(&prepared.file_id), reason);
-                token
+                (token, None)
             }
+            crate::state_db::AcceptOutcome::ParkedMoved => return Ok(None),
             crate::state_db::AcceptOutcome::UnknownItem => anyhow::bail!("a create always inserts its row"),
             crate::state_db::AcceptOutcome::InTrash => anyhow::bail!("a create is never refused as in the trash"),
             crate::state_db::AcceptOutcome::CopyGone => return Err(anyhow::Error::new(StagedCopyGone)),
+            crate::state_db::AcceptOutcome::AcceptsClosed => return Err(anyhow::Error::new(AcceptsClosed)),
         };
         prepared.staged.retain();
-        Ok(FpWrite {
-            outcome: FinderWriteOutcome::Queued {
-                op_id,
-                file_id: Some(prepared.file_id),
-                kind: OperationKind::UploadVersion,
-                ignored: false,
-                message: "queued for encrypted sync".to_string(),
+        Ok(Some((
+            FpWrite {
+                outcome: FinderWriteOutcome::Queued {
+                    op_id,
+                    file_id: Some(prepared.file_id),
+                    kind: OperationKind::UploadVersion,
+                    ignored: false,
+                    message: "queued for encrypted sync".to_string(),
+                },
+                token: Some(token),
+                present_as: None,
             },
-            token: Some(token),
-            present_as: None,
-        })
+            released,
+        )))
     }
 
     /// A create with `.deletionConflicted` (spec §7.2, I-1): the system could not apply our
@@ -2845,45 +3204,26 @@ impl EngineBridge {
             // the row takes the staged copy's size and modification time. The
             // content version is untouched until the upload lands.
             self.db.record_local_write(&file_id, size_bytes, modified_at)?;
+            // A landing writes an op's target path to the row: a sync-folder edit (task 1640)
+            // names the file's full relative path, so a nested file stays in its folder.
+            let target_path = target.rel_path.unwrap_or(target.filename);
             let outcome = self.enqueue_finder_operation(
                 OperationKind::UploadVersion,
                 Some(file_id),
                 target.parent_id,
-                Some(target.filename),
+                Some(target_path),
                 payload,
                 Some(staged_path),
                 base_version,
                 item_contract
                     .as_ref()
                     .and_then(|contract| contract.current_object_version_id.clone()),
+                None,
             )?;
             staged.retain();
             Ok(outcome)
         } else {
-            let name_encrypted = encrypted_metadata_for_name(
-                self.api.master_key(),
-                &file_id,
-                &target.filename,
-                target.content_type.as_deref(),
-            )?;
-            // Spec §7.2 (final review): a move is a change of parent, read against the row, so a
-            // move to the top level (no parent) is a move too, and a rename in a folder is a
-            // rename. With no row, a parent means a move, as before.
-            let moved = match self.db.get_file(&file_id)? {
-                Some(row) => row.parent_id != target.parent_id,
-                None => target.parent_id.is_some(),
-            };
-            let kind = if moved {
-                OperationKind::MoveFile
-            } else {
-                OperationKind::RenameFile
-            };
-            let mut payload = serde_json::json!({
-                "operation": "metadata_update",
-                "name_encrypted": name_encrypted,
-                "base_version_identifier": target.base_version_identifier,
-            });
-            apply_shared_context(&mut payload, item_contract.as_ref());
+            let (kind, payload) = self.metadata_update_payload(&file_id, &target, item_contract.as_ref())?;
             self.enqueue_finder_operation(
                 kind,
                 Some(file_id),
@@ -2895,7 +3235,81 @@ impl EngineBridge {
                 item_contract
                     .as_ref()
                     .and_then(|contract| contract.current_object_version_id.clone()),
+                None,
             )
+        }
+    }
+
+    /// A metadata-only modify's kind and payload: a move is a change of parent, read against
+    /// the row BEFORE the op changes it.
+    fn metadata_update_payload(
+        &self,
+        file_id: &str,
+        target: &FinderWriteTarget,
+        item_contract: Option<&crate::state_db::FileContractState>,
+    ) -> anyhow::Result<(OperationKind, serde_json::Value)> {
+        let name_encrypted = owned_metadata_for_name(
+            &self.db, self.api.master_key(),
+            file_id,
+            &target.filename,
+            target.content_type.as_deref(),
+        )?;
+        // Spec §7.2 (final review): a move is a change of parent, read against the row, so a
+        // move to the top level (no parent) is a move too, and a rename in a folder is a
+        // rename. With no row, a parent means a move, as before.
+        let moved = match self.db.get_file(file_id)? {
+            Some(row) => row.parent_id != target.parent_id,
+            None => target.parent_id.is_some(),
+        };
+        let kind = if moved {
+            OperationKind::MoveFile
+        } else {
+            OperationKind::RenameFile
+        };
+        let mut payload = serde_json::json!({
+            "operation": "metadata_update",
+            "name_encrypted": name_encrypted,
+            "base_version_identifier": target.base_version_identifier,
+        });
+        apply_shared_context(&mut payload, item_contract);
+        Ok((kind, payload))
+    }
+
+    /// Task 2204 S0.1: a Windows rename or move of a tracked FILE, queued with its row moved to
+    /// `new_path` in the same transaction (`StateDb::enqueue_local_rename`). The op is marked
+    /// `local_rename`, which holds the row against stale landings and pulls until it is sent.
+    pub fn queue_local_rename(&self, target: FinderWriteTarget, new_path: &str) -> anyhow::Result<FinderWriteOutcome> {
+        let Some((file_id, item_contract)) = self.start_finder_modify(&target)? else {
+            return Ok(ignored_finder_item(&target.filename));
+        };
+        let (kind, mut payload) = self.metadata_update_payload(&file_id, &target, item_contract.as_ref())?;
+        let row = self.db.get_file(&file_id)?;
+        payload["local_rename"] = serde_json::Value::Bool(true);
+        // S0.4: where the file was, so a safe save can fold back onto it.
+        payload["vacated_path"] = row.as_ref().map(|row| row.path.clone()).into();
+        payload["vacated_parent_id"] = row.and_then(|row| row.parent_id).into();
+        let mut op = self.finder_operation(
+            kind.clone(),
+            Some(file_id.clone()),
+            target.parent_id.clone(),
+            Some(target.filename.clone()),
+            payload,
+            None,
+            None,
+            item_contract.and_then(|contract| contract.current_object_version_id),
+        )?;
+        // S0.4: a safe save's rename, new file and delete arrive within this; until then the
+        // rename is not sent, and a file at the vacated path waits.
+        op.next_retry_at = now_secs() + RENAME_SETTLE_SECS;
+        match self.db.enqueue_local_rename(&op, &file_id, new_path, target.parent_id.as_deref())? {
+            crate::state_db::FinderEnqueue::AcceptsClosed => Err(anyhow::Error::new(AcceptsClosed)),
+            crate::state_db::FinderEnqueue::Queued => Ok(FinderWriteOutcome::Queued {
+                op_id: op.op_id,
+                file_id: Some(file_id),
+                kind,
+                ignored: false,
+                message: "queued for encrypted sync".to_string(),
+            }),
         }
     }
 
@@ -2950,7 +3364,7 @@ impl EngineBridge {
             .content_type
             .as_deref()
             .or_else(|| beebeeb_core::media::guess_mime_type(&target.filename));
-        let name_encrypted = encrypted_metadata_for_name(self.api.master_key(), file_id, &target.filename, mime)?;
+        let name_encrypted = owned_metadata_for_name(&self.db, self.api.master_key(), file_id, &target.filename, mime)?;
         let mut payload = serde_json::json!({
             "operation": "upload_version",
             "name_encrypted": name_encrypted,
@@ -3014,6 +3428,7 @@ impl EngineBridge {
         self.seam("accept:before_tx");
         let accepted = self.db.accept_finder_write(
             &crate::state_db::FinderAccept {
+                retire_parked: None,
                 op_id: &op_id,
                 file_id: &file_id,
                 kind: crate::state_db::FinderAcceptKind::Modify {
@@ -3045,8 +3460,13 @@ impl EngineBridge {
                 }));
             }
             crate::state_db::AcceptOutcome::CopyGone => return Err(anyhow::Error::new(StagedCopyGone)),
+            crate::state_db::AcceptOutcome::AcceptsClosed => return Err(anyhow::Error::new(AcceptsClosed)),
             // §7.2: refused; the staged copy is dropped with `prepared`, and nothing was queued.
             crate::state_db::AcceptOutcome::InTrash => return Err(anyhow::Error::new(ItemInTrash)),
+            // A modify retires no parked write (task 2190's "Keep both" is a create).
+            crate::state_db::AcceptOutcome::ParkedMoved | crate::state_db::AcceptOutcome::QueuedRetiring { .. } => {
+                anyhow::bail!("a modify retires no parked write")
+            }
         };
         prepared.staged.retain();
         Ok(FpWrite {
@@ -3128,6 +3548,7 @@ impl EngineBridge {
             item_contract
                 .as_ref()
                 .and_then(|contract| contract.current_object_version_id.clone()),
+            None,
         )?;
         // Task 1698: park the row `Trashing` AFTER a successful enqueue, so
         // the change feed immediately presents the item under the trash
@@ -3183,6 +3604,15 @@ impl EngineBridge {
     /// risk a spurious one). Cross-platform so it type-checks everywhere; only
     /// the Windows triggers call it.
     pub fn classify_local_path(&self, sync_root: &Path, path: &Path) -> Option<FinderWriteTarget> {
+        match self.classify_local_path_verdict(sync_root, path) {
+            LocalPathVerdict::Write(target) => Some(target),
+            LocalPathVerdict::Settled | LocalPathVerdict::Skip => None,
+        }
+    }
+
+    /// Task 2229: [`Self::classify_local_path`], telling a tracked file that needs nothing while its row
+    /// and its bytes stay as they are ([`LocalPathVerdict::Settled`]) from one to ask about again.
+    pub(crate) fn classify_local_path_verdict(&self, sync_root: &Path, path: &Path) -> LocalPathVerdict {
         // The file may have been deleted/renamed during a debounce window — if
         // it is no longer a regular file there is nothing to upload.
         match std::fs::symlink_metadata(path) {
@@ -3195,7 +3625,7 @@ impl EngineBridge {
                     is_symlink = file_type.is_symlink(),
                     "classify_local_path: rejected non-regular file"
                 );
-                return None;
+                return LocalPathVerdict::Skip;
             }
             Err(e) => {
                 tracing::debug!(
@@ -3203,7 +3633,7 @@ impl EngineBridge {
                     error = %e,
                     "classify_local_path: stat failed; skipping"
                 );
-                return None;
+                return LocalPathVerdict::Skip;
             }
         }
 
@@ -3213,14 +3643,14 @@ impl EngineBridge {
                 path = %path.display(),
                 "classify_local_path: rejected engine-internal path"
             );
-            return None;
+            return LocalPathVerdict::Skip;
         }
         let Some(file_name) = path.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
             tracing::debug!(
                 path = %path.display(),
                 "classify_local_path: rejected path with non-utf8 filename"
             );
-            return None;
+            return LocalPathVerdict::Skip;
         };
         if is_ignored_finder_name(&file_name) {
             tracing::debug!(
@@ -3228,51 +3658,77 @@ impl EngineBridge {
                 filename = %file_name,
                 "classify_local_path: rejected ignored/temp filename"
             );
-            return None;
+            return LocalPathVerdict::Skip;
         }
 
-        // Filter 2 — Cloud Files placeholders are engine-owned (Windows only). A
-        // reparse point under the sync root is a placeholder we minted or
-        // converted; the hydration write that fills it does NOT turn it back into
-        // a plain file, so we must never treat a placeholder write as a new
-        // upload.
-        #[cfg(target_os = "windows")]
-        if crate::windows_cf::placeholders::is_cloud_placeholder(path) {
-            tracing::debug!(
-                path = %path.display(),
-                "classify_local_path: rejected Cloud Files placeholder"
-            );
-            return None;
-        }
-
-        // Filter 3 (authoritative) — already a known server file?
+        // Filter 3 (authoritative) — already a known server file? Then it is not a new
+        // upload. Task 1640: it may be an edit of that file; `classify_tracked_edit` decides
+        // from the content this device last agreed with the server on, before filter 2, which
+        // rejects every placeholder (a synced file is one).
         let Some(rel) = relative_db_path(sync_root, path) else {
             tracing::debug!(
                 path = %path.display(),
                 sync_root = %sync_root.display(),
                 "classify_local_path: rejected path outside sync root"
             );
-            return None;
+            return LocalPathVerdict::Skip;
         };
-        match self.db.get_file_by_path(&rel) {
-            Ok(Some(_existing)) => {
-                tracing::debug!(
-                    path = %path.display(),
-                    rel_path = %rel,
-                    "classify_local_path: rejected already-tracked server file"
+        // Task 1640 (review N13): an original whose kept copy is made but which is not removed
+        // yet (it was in use) is never sent: a later tick removes it.
+        if self.db.is_kept_original_pending(&rel).unwrap_or(false) {
+            tracing::debug!(rel_path = %rel, "classify_local_path: rejected an original whose copy is kept");
+            return LocalPathVerdict::Skip;
+        }
+        // Task 2204 S0.4: a file at the path a Windows rename vacated waits until that rename is
+        // sent: it may be a safe save's new bytes, which fold back onto the original.
+        if self.db.is_vacated_by_pending_rename(&rel).unwrap_or(true) {
+            tracing::debug!(rel_path = %rel, "classify_local_path: the path a pending rename vacated; skipped this pass");
+            return LocalPathVerdict::Skip;
+        }
+        match self.row_judging_bytes_at(&rel, path) {
+            Ok(RowAtPath::One(existing)) => return self.classify_tracked_edit(path, existing, file_name, rel),
+            Ok(RowAtPath::Ambiguous { file_ids, rows }) => {
+                // Lead ruling P2 (2271 contract §7): file ids and the row count, never the path.
+                tracing::warn!(
+                    ?file_ids,
+                    rows,
+                    "sync folder: several synced files share one path and its bytes are none of them; kept on this PC, not sent"
                 );
-                return None;
+                return LocalPathVerdict::Settled;
             }
-            Ok(None) => { /* genuinely new — fall through */ }
+            Ok(RowAtPath::NotWhollyOnDisk) => {
+                tracing::debug!(rel_path = %rel, "classify_local_path: several rows at a path not wholly on disk; asked again later");
+                return LocalPathVerdict::Skip;
+            }
+            Ok(RowAtPath::None) => { /* not tracked — filter 2, then new */ }
             Err(e) => {
                 tracing::warn!(
                     path = %path.display(),
                     rel_path = %rel,
                     error = %e,
-                    "classify_local_path: state DB lookup failed; skipping to be safe"
+                    "classify_local_path: could not tell which row the path's bytes belong to (a state DB lookup or a read of the bytes failed); skipping to be safe"
                 );
-                return None;
+                return LocalPathVerdict::Skip;
             }
+        }
+
+        // Filter 2 — Cloud Files placeholders are engine-owned (Windows only). An
+        // untracked reparse point under the sync root is a placeholder we minted or
+        // converted whose row is not written yet; the hydration write that fills it
+        // does NOT turn it back into a plain file, so we must never treat a
+        // placeholder write as a new upload.
+        #[cfg(target_os = "windows")]
+        if crate::windows_cf::placeholders::is_cloud_placeholder(path) {
+            // Task 2191 (D12): an untracked placeholder may be one a remote rename left behind,
+            // holding unknown bytes; the tick's retry checks its identity.
+            if let Err(e) = self.db.put_unknown_orphan(&rel, "", true) {
+                tracing::debug!(error = %e, "classify_local_path: could not record an untracked placeholder");
+            }
+            tracing::debug!(
+                path = %path.display(),
+                "classify_local_path: rejected Cloud Files placeholder"
+            );
+            return LocalPathVerdict::Skip;
         }
 
         // parent_id resolution: a survivor at `<parent_dir>/<name>`. If the parent
@@ -3287,7 +3743,7 @@ impl EngineBridge {
             "classify_local_path: accepted new local file"
         );
 
-        Some(FinderWriteTarget {
+        LocalPathVerdict::Write(FinderWriteTarget {
             file_id: None,
             parent_id,
             filename: file_name.clone(),
@@ -3301,6 +3757,205 @@ impl EngineBridge {
             content_type: beebeeb_core::media::guess_mime_type(&file_name).map(str::to_string),
             base_version_identifier: None,
         })
+    }
+
+    /// Task 2190 (the lead's condition on E3; glegion's constraints from #167's scan memo): the ONE
+    /// call each held branch of [`Self::classify_tracked_edit`] makes. Records that `file_id`'s edit
+    /// is held, not sent, with the file's content fingerprint, so the review feed shows it. Nothing
+    /// is written while neither the reason nor the fingerprint changed, and the `files` row is never
+    /// touched (the memo skips a settled file while that row is unchanged). A failure is logged: the
+    /// edit stays held either way.
+    /// Task 2244: a hold that writes is logged at DEBUG and counted; the scan logs the count once a
+    /// pass, not a line per file (28,224 on every start of 0.8.17 on the maintainer's PC).
+    fn hold_unsent_edit(&self, file_id: &str, path: &Path, reason: &str) {
+        let fingerprint = ContentFingerprint::of(path).map(|fp| format!("{fp:?}")).unwrap_or_default();
+        match self.db.hold_unsent_edit(file_id, reason, &fingerprint, now_secs()) {
+            Ok(true) => {
+                tracing::debug!(file_id = %file_id, reason, "sync folder: an edit of a synced file is kept on this PC, not sent");
+                self.newly_held[usize::from(reason == HELD_BASE_UNKNOWN)].fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(false) => {}
+            Err(e) => tracing::warn!(file_id = %file_id, error = %e, "sync folder: could not record a held edit"),
+        }
+    }
+
+    /// Task 2244: the edits newly held since the last call, for the scan's one line a pass:
+    /// (content unknown, base unknown).
+    pub(crate) fn take_newly_held(&self) -> (usize, usize) {
+        let [content_unknown, base_unknown] = &self.newly_held;
+        (
+            content_unknown.swap(0, Ordering::Relaxed),
+            base_unknown.swap(0, Ordering::Relaxed),
+        )
+    }
+
+    /// Task 2190: the one call that ends a held edit's record, when the file reads as agreed, is
+    /// queued, or can be sent on a known base.
+    fn release_unsent_edit(&self, file_id: &str) {
+        if let Err(e) = self.db.release_unsent_edit(file_id) {
+            tracing::warn!(file_id = %file_id, error = %e, "sync folder: could not clear a held edit");
+        }
+    }
+
+    /// Task 2271: the row the scan judges the bytes at `rel` by. Normally the one row there. When
+    /// several share the path (0.8.18's reconcile pass left the server's file of that name and the
+    /// copy this PC sent at one path), the row that records content this PC agreed on decides: the
+    /// only such row, or the one whose agreed content the bytes are. With no such row it is the
+    /// path's first, as before. With several and bytes that are none of them, no row is guessed.
+    /// Choosing among several reads the bytes once, and only when they are wholly on this PC.
+    fn row_judging_bytes_at(&self, rel: &str, path: &Path) -> anyhow::Result<RowAtPath> {
+        let mut rows = self.db.file_rows_at_path(rel)?;
+        if rows.len() < 2 {
+            return Ok(rows.pop().map_or(RowAtPath::None, RowAtPath::One));
+        }
+        let mut recorded = Vec::new();
+        for (at, row) in rows.iter().enumerate() {
+            if row.is_dir() {
+                continue;
+            }
+            let agreed = match self.db.get_file_contract_state(&row.file_id)?.and_then(|c| c.local_hash) {
+                Some(hash) => Some(Some(hash)),
+                None => self.db.fetched_content(&row.file_id)?.map(|(_, hash)| hash),
+            };
+            if let Some(agreed) = agreed {
+                recorded.push((at, agreed));
+            }
+        }
+        let at = match recorded[..] {
+            [] => 0,
+            [(at, _)] => at,
+            [(first, _), ..] => {
+                // Windows: reading a placeholder that is not wholly on disk would fetch the rest of
+                // it (as in `classify_tracked_edit`); the scan asks again once it is.
+                #[cfg(target_os = "windows")]
+                if !crate::windows_cf::placeholders::fully_on_disk(path) {
+                    return Ok(RowAtPath::NotWhollyOnDisk);
+                }
+                let bytes = cached_sha256_file_hex(&rows[first].file_id, path)?;
+                // A mixed fetch (no single version) is never agreed.
+                let matching: Vec<usize> = recorded
+                    .iter()
+                    .filter(|(_, agreed)| agreed.as_deref() == Some(bytes.as_str()))
+                    .map(|(at, _)| *at)
+                    .collect();
+                match matching[..] {
+                    [at] => at,
+                    _ => {
+                        let file_ids = recorded.iter().map(|(at, _)| rows[*at].file_id.clone()).collect();
+                        return Ok(RowAtPath::Ambiguous { file_ids, rows: rows.len() });
+                    }
+                }
+            }
+        };
+        Ok(RowAtPath::One(rows.swap_remove(at)))
+    }
+
+    /// Task 1640: a close or scan of a tracked sync-folder file is an edit when the file is a
+    /// synced (`Local`) file and its bytes differ from the content this device last agreed with
+    /// the server on. The edit is a content modify of that file, sent with the version its bytes
+    /// are based on, so the server refuses it as stale when the file changed elsewhere meanwhile
+    /// (it then parks with its bytes). Anything else is not an upload: a folder, a row in
+    /// transfer or in conflict, agreed bytes, an upload already queued, no agreed content
+    /// recorded, or an edit whose base is not known (never sent without one: it would replace
+    /// the server's version unseen).
+    fn classify_tracked_edit(
+        &self,
+        path: &Path,
+        existing: FileEntry,
+        file_name: String,
+        rel: String,
+    ) -> LocalPathVerdict {
+        if existing.is_dir() || existing.status != FileStatus::Local {
+            tracing::debug!(
+                path = %path.display(),
+                rel_path = %rel,
+                "classify_local_path: rejected already-tracked server file"
+            );
+            return LocalPathVerdict::Settled;
+        }
+        // Windows: reading a placeholder that is not wholly on disk would fetch the rest of it.
+        #[cfg(target_os = "windows")]
+        let os_in_sync = {
+            if !crate::windows_cf::placeholders::fully_on_disk(path) {
+                return LocalPathVerdict::Skip;
+            }
+            crate::windows_cf::placeholders::placeholder_in_sync(path)
+        };
+        #[cfg(not(target_os = "windows"))]
+        let os_in_sync = None;
+        let base = match sync_folder_content(&self.db, &existing.file_id, path, os_in_sync) {
+            Ok(SyncFolderContent::Changed { base: Some(base) }) => {
+                self.release_unsent_edit(&existing.file_id);
+                base
+            }
+            Ok(SyncFolderContent::Changed { base: None }) => {
+                self.hold_unsent_edit(&existing.file_id, path, HELD_BASE_UNKNOWN);
+                // Task 2229: held until its row records a base; no change of its bytes sends it.
+                return LocalPathVerdict::Settled;
+            }
+            // A file hydrated before this build has no agreed content: its change is kept on
+            // disk (out of sync, so never stamped or freed) but not sent (task 2191).
+            // Task 2190: not reported in sync (Windows), or not a placeholder (an atomic save left a
+            // plain file; and every build without Cloud Files) may hold an edit.
+            Ok(SyncFolderContent::Unknown) if os_in_sync != Some(true) => {
+                self.hold_unsent_edit(&existing.file_id, path, HELD_CONTENT_UNKNOWN);
+                return LocalPathVerdict::Settled;
+            }
+            // Task 2229: unknown content is held until its row records the agreed content, whatever
+            // its bytes and its in-sync state; the scan remembers it like agreed bytes.
+            Ok(SyncFolderContent::Agreed | SyncFolderContent::Unknown) => {
+                self.release_unsent_edit(&existing.file_id);
+                return LocalPathVerdict::Settled;
+            }
+            Ok(SyncFolderContent::Queued) => {
+                self.release_unsent_edit(&existing.file_id);
+                return LocalPathVerdict::Skip;
+            }
+            Err(e) => {
+                tracing::warn!(file_id = %existing.file_id, error = %e, "sync folder: could not compare a synced file with its agreed content");
+                return LocalPathVerdict::Skip;
+            }
+        };
+        let contract = self.db.get_file_contract_state(&existing.file_id).ok().flatten();
+        tracing::debug!(
+            file_id = %existing.file_id,
+            base_version = base,
+            "classify_local_path: accepted an edit of a synced file"
+        );
+        LocalPathVerdict::Write(FinderWriteTarget {
+            file_id: Some(existing.file_id),
+            parent_id: contract.as_ref().and_then(|contract| contract.parent_id.clone()),
+            content_type: contract
+                .and_then(|contract| contract.content_type)
+                .or_else(|| beebeeb_core::media::guess_mime_type(&file_name).map(str::to_string)),
+            filename: file_name,
+            rel_path: Some(rel),
+            kind: FinderWriteItemKind::File,
+            contents_path: Some(path.to_string_lossy().into_owned()),
+            base_version_identifier: Some(base.to_string()),
+        })
+    }
+
+    /// Task 1640 (review N1b): the row's version (`None` when unknown), the version a legacy
+    /// download records. Accepted for legacy files only: it can say less than the bytes are
+    /// (a later change then parks as stale), never more.
+    fn legacy_download_version(&self, file_id: &str) -> anyhow::Result<Option<i64>> {
+        Ok(self
+            .db
+            .get_file_contract_state(file_id)?
+            .map(|contract| contract.current_version)
+            .filter(|version| *version > 0))
+    }
+
+    /// Task 1640: whether `dest` is `file_id`'s own place in the sync folder, under one of
+    /// `allowed_roots`, rather than a staging copy (a Finder fetch, a Linux FUSE temp file).
+    fn dest_is_files_sync_folder_place(&self, file_id: &str, dest: &Path, allowed_roots: &[&Path]) -> anyhow::Result<bool> {
+        let Some(entry) = self.db.get_file(file_id)? else {
+            return Ok(false);
+        };
+        Ok(allowed_roots.iter().any(|root| {
+            local_file_path_under_sync_root(root, &entry.path).is_ok_and(|place| place.as_path() == dest)
+        }))
     }
 
     /// Resolve the server folder id of `path`'s immediate parent directory, for
@@ -3376,6 +4031,26 @@ impl EngineBridge {
             Ok(None) => { /* mint below */ }
             Err(e) => {
                 tracing::warn!(error = %e, "ensure_local_folder: DB lookup failed; skipping");
+                return None;
+            }
+        }
+
+        // Task 1640 (review F3): a folder deleted elsewhere that stays on disk only for what this PC
+        // keeps (an original still open, a file partly on disk) is never created again on the
+        // server; one the person put something new into is wanted again.
+        match self.db.outermost_removed_folder(&rel) {
+            Ok(Some(outermost)) => {
+                let held = Self::placeholder_path_under(sync_root, &outermost)
+                    .is_some_and(|dir| held_only_for_kept(&self.db, sync_root, &dir, 0));
+                if held {
+                    tracing::debug!("ensure_local_folder: a folder deleted elsewhere, kept for what it holds; not created again");
+                    return None;
+                }
+                let _ = self.db.forget_removed_folder(&outermost);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "ensure_local_folder: kept-folder lookup failed; skipping");
                 return None;
             }
         }
@@ -3548,8 +4223,8 @@ impl EngineBridge {
     /// there) so the pin path resolution uses the same containment guard as the
     /// fetch fallback. Returns `None` for an empty key or any `.`/`..`/empty
     /// segment, or if the join escapes the root.
-    #[cfg(target_os = "windows")]
-    fn placeholder_path_under(sync_root: &Path, rel_path: &str) -> Option<PathBuf> {
+    #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+    pub(crate) fn placeholder_path_under(sync_root: &Path, rel_path: &str) -> Option<PathBuf> {
         let rel = rel_path.trim_matches('/');
         if rel.is_empty() {
             return None;
@@ -3588,6 +4263,21 @@ impl EngineBridge {
     }
 
     pub fn enforce_local_cache_limit(&self, max_local_cache_bytes: Option<i64>) -> anyhow::Result<CacheCleanupOutcome> {
+        self.enforce_local_cache_limit_after_guard(max_local_cache_bytes, &crate::unknown_check::STARTUP_GUARD)
+    }
+
+    /// Desktop 0.8.15: [`Self::enforce_local_cache_limit`], which evicts nothing until `guard`'s
+    /// start-up pass has walked every file of unknown content (the pass runs beside the engine).
+    pub(crate) fn enforce_local_cache_limit_after_guard(
+        &self,
+        max_local_cache_bytes: Option<i64>,
+        guard: &crate::unknown_check::StartupGuard,
+    ) -> anyhow::Result<CacheCleanupOutcome> {
+        if !guard.allows_freeing() {
+            return Ok(CacheCleanupOutcome {
+                evicted_file_ids: Vec::new(),
+            });
+        }
         let Some(max_local_cache_bytes) = max_local_cache_bytes else {
             return Ok(CacheCleanupOutcome {
                 evicted_file_ids: Vec::new(),
@@ -3720,6 +4410,7 @@ impl EngineBridge {
         Ok(op)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn enqueue_finder_operation(
         &self,
         kind: OperationKind,
@@ -3730,7 +4421,46 @@ impl EngineBridge {
         payload_path: Option<String>,
         base_version: Option<i64>,
         base_object_version_id: Option<String>,
+        folder: Option<crate::state_db::FinderFolderRow<'_>>,
     ) -> anyhow::Result<FinderWriteOutcome> {
+        let op = self.finder_operation(
+            kind.clone(),
+            file_id.clone(),
+            parent_id,
+            target_path,
+            metadata,
+            payload_path,
+            base_version,
+            base_object_version_id,
+        )?;
+        let op_id = op.op_id.clone();
+        // Spec 2026-10-10 §5.2 step 6: the sign-out's fence is read in the transaction that queues the op, and a
+        // folder's row is written in it too.
+        match self.db.enqueue_finder_change(&op, folder)? {
+            crate::state_db::FinderEnqueue::AcceptsClosed => Err(anyhow::Error::new(AcceptsClosed)),
+            crate::state_db::FinderEnqueue::Queued => Ok(FinderWriteOutcome::Queued {
+                op_id,
+                file_id,
+                kind,
+                ignored: false,
+                message: "queued for encrypted sync".to_string(),
+            }),
+        }
+    }
+
+    /// The op a Finder or sync-folder write queues (`enqueue_finder_operation`'s first half).
+    #[allow(clippy::too_many_arguments)]
+    fn finder_operation(
+        &self,
+        kind: OperationKind,
+        file_id: Option<String>,
+        parent_id: Option<String>,
+        target_path: Option<String>,
+        metadata: serde_json::Value,
+        payload_path: Option<String>,
+        base_version: Option<i64>,
+        base_object_version_id: Option<String>,
+    ) -> anyhow::Result<PendingOperation> {
         let op_id = uuid::Uuid::new_v4().to_string();
         let now = now_secs();
         // Task 0811: tag known-folder backup ops with their origin key (derived
@@ -3762,14 +4492,7 @@ impl EngineBridge {
             created_at: now,
             updated_at: now,
         };
-        self.db.enqueue_operation(&op)?;
-        Ok(FinderWriteOutcome::Queued {
-            op_id,
-            file_id,
-            kind,
-            ignored: false,
-            message: "queued for encrypted sync".to_string(),
-        })
+        Ok(op)
     }
 
     fn enqueue_pin_tree_operation(&self, file_id: &str, pinned: bool, now: i64) -> anyhow::Result<()> {
@@ -3927,6 +4650,32 @@ impl EngineBridge {
             return Err(anyhow::anyhow!("hydrate destination is not within an allowed root"));
         }
         self.ensure_shared_hydrate_path_safe(file_id)?;
+        // Task 1640: a hydrate into the file's own place in the sync folder (on Windows, only
+        // conflict resolution reaches it) never writes over an unsent local change: bytes that differ from the content this
+        // device last agreed with the server on, or whose upload is queued, are the person's
+        // only copy. It refuses, and the file keeps its bytes. A Finder fetch (macOS) writes
+        // to the extension's own staging copy, never there.
+        let in_sync_folder = self.dest_is_files_sync_folder_place(file_id, dest_path, allowed_roots)?;
+        // Task 1640 (review N1b): the version a legacy download (no `download_version`) records,
+        // read BEFORE the download: at most the version the bytes are, so a later change can only
+        // be refused as stale, never accepted over a newer one.
+        let legacy_version = self.legacy_download_version(file_id)?;
+        if in_sync_folder && dest_path.exists() {
+            let content = sync_folder_content(&self.db, file_id, dest_path, None)?;
+            // Task 2191 (G-engine): a file of unknown content (in the population, conflicts and
+            // errors excepted: their resolution is the person's) is never written over while its
+            // place holds bytes; they may be the person's only copy of a change.
+            // Review-157 F3: Windows only (elsewhere nothing marks a row empty, and a hydrate never
+            // writes in place).
+            let unknown_with_bytes = cfg!(any(target_os = "windows", test))
+                && matches!(content, SyncFolderContent::Unknown)
+                && self.db.is_unknown_population(file_id)?
+                && place_holds_bytes(dest_path);
+            if unknown_with_bytes || matches!(content, SyncFolderContent::Changed { .. } | SyncFolderContent::Queued) {
+                tracing::warn!(file_id = %file_id, "hydrate refused: the local file holds a change that is not sent");
+                return Err(anyhow::Error::new(UnsentLocalChange));
+            }
+        }
         // Spec §7.4.2: a hydrate never changes the status of a row with a live upload of its
         // own (a Finder upload that has not parked): no `Downloading`, `Local` or `Error`.
         // That status is the upload's, and `Error` would make the item read-only. Nor
@@ -3961,14 +4710,14 @@ impl EngineBridge {
         let transfer = self
             .transfers
             .begin(file_id, crate::transfer_progress::Direction::Down, 0);
-        let hydrated = self.do_hydrate(file_id, progress).await;
+        let hydrated = self.do_hydrate_versioned(file_id, progress).await;
         // Past the only cancellation point (the download await): every path
         // below sets the final status itself.
         if let Some(guard) = downloading_guard.as_mut() {
             guard.disarm();
         }
         match hydrated {
-            Ok(mut buf) => {
+            Ok((mut buf, downloaded_version)) => {
                 // Write the decrypted bytes to disk (this is the intentional
                 // disk-writing path — sync root / conflict resolution / FUSE).
                 // Make the destination directory if needed.
@@ -4002,12 +4751,29 @@ impl EngineBridge {
                 // file" step needed here because the primitive itself never
                 // makes one externally visible.
                 let write_result = write_hydrated_plaintext(dest_path, allowed_roots, &buf);
+                let hydrated_hash = in_sync_folder.then(|| sha256_hex(&buf));
                 // Zeroize the in-memory copy now that it is on disk (or on
                 // error) so the allocation does not linger with plaintext.
                 buf.zeroize();
                 if let Err(e) = write_result {
                     set_failed();
                     return Err(anyhow::anyhow!("write {}: {e}", dest_path.display()));
+                }
+                // Task 1640: the bytes just written (one atomic rename: the whole file) are the
+                // content this device agrees with the server on, at the version the download
+                // metadata named, else (a legacy download, review N1b) the row's version read
+                // before the download. Recorded before the row leaves `Downloading`, so no
+                // classification sees the new bytes against the old baseline. With no version
+                // either, the content is not known (review F1), rather than left naming other bytes.
+                if let Some(hash) = hydrated_hash.as_deref() {
+                    let recorded = match downloaded_version.or(legacy_version) {
+                        Some(version) => self.db.record_local_baseline(file_id, version, hash),
+                        None => self.db.mark_content_unknown(file_id),
+                    };
+                    if let Err(e) = recorded {
+                        set_failed();
+                        return Err(e.into());
+                    }
                 }
 
                 // Task 1698: a Trashing row keeps its marker (viewing a file
@@ -4046,7 +4812,8 @@ impl EngineBridge {
                 Ok(())
             }
             Err(e) => {
-                set_failed();
+                let e = self.owned_open_failure(file_id, e).await;
+                set_failed(); // only writes over Downloading; the recoverable item already left it.
                 Err(e)
             }
         }
@@ -4110,10 +4877,33 @@ impl EngineBridge {
     /// separate cache file — `unpinned_local_files_for_dehydration` reconstructs
     /// the real on-disk path from `path` + sync root (see state_db comment).
     #[cfg(target_os = "windows")]
-    pub async fn hydrate_file_to_memory(&self, file_id: &str) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+    pub async fn hydrate_file_to_memory(&self, file_id: &str) -> anyhow::Result<FetchedBytes> {
+        // Self-review #1: counted from before anything is recorded until the caller's transfer ended.
+        let ticket = self.begin_fetch(file_id);
+        let legacy_version = self.legacy_download_version(file_id)?;
         self.db.set_status(file_id, FileStatus::Downloading)?;
-        match self.do_hydrate(file_id, None).await {
-            Ok(buf) => {
+        match self.do_hydrate_versioned(file_id, None).await {
+            Ok((buf, downloaded_version)) => {
+                // Task 1640 (review N1, F1): every fetch, of a range or of the whole file, is
+                // recorded BEFORE its bytes are transferred: the version it serves and the hash of
+                // all of that version's bytes join the file's candidate (`record_fetched_version`),
+                // so a transfer that fails or is cut off midway still counts. Only once the whole
+                // file is transferred does the caller make it the agreed content
+                // ([`Self::record_whole_fetch`]); a range never does: the placeholder's other
+                // ranges may hold other versions, or writes that were not sent. The stamp pass
+                // promotes a candidate once the whole file is on disk, in sync, with exactly those
+                // bytes. A download that names no version leaves the content not known. A failure
+                // to record fails the fetch, as every other failure here does.
+                let hash = sha256_hex(&buf);
+                let fetched = downloaded_version.or(legacy_version).map(|version| FetchedVersion { version, hash });
+                let recorded = match &fetched {
+                    Some(fetched) => self.db.record_fetched_version(file_id, fetched.version, &fetched.hash),
+                    None => self.db.mark_content_unknown(file_id),
+                };
+                if let Err(e) = recorded {
+                    let _ = self.db.set_status(file_id, FileStatus::Error);
+                    return Err(e.into());
+                }
                 self.db.set_status(file_id, FileStatus::Local)?;
                 // cache_path is empty: on Windows CF the hydrated bytes live
                 // INSIDE the placeholder (the CF runtime writes them there after
@@ -4121,12 +4911,48 @@ impl EngineBridge {
                 // file. Byte count is still recorded for smart-cache accounting.
                 self.db.mark_cached(file_id, "", buf.len() as i64, now_secs())?;
                 let _ = self.enforce_configured_cache_limit();
-                Ok(buf)
+                Ok(FetchedBytes { bytes: buf, version: fetched, ticket })
             }
             Err(e) => {
-                let _ = self.db.set_status(file_id, FileStatus::Error);
+                let e = self.owned_open_failure(file_id, e).await;
+                let _ = self.db.set_status_if(file_id, FileStatus::Downloading, FileStatus::Error);
                 Err(e)
             }
+        }
+    }
+
+    /// Task 1640 (review F1, design T5): a fetch transferred the whole file (`fetched`, from
+    /// [`Self::hydrate_file_to_memory`]): every byte on disk is that version's now, so they are the
+    /// content this device agrees with the server on, and nothing else fetched is left. Only when no
+    /// other fetch of the file overlapped this one (`ticket`, self-review #1): another fetch's bytes,
+    /// of another version, could land around this transfer. Then the candidate this fetch merged
+    /// stays (lower or mixed). `Ok(true)`: recorded.
+    #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+    pub fn record_whole_fetch(&self, file_id: &str, fetched: &FetchedVersion, ticket: &FetchTicket) -> anyhow::Result<bool> {
+        // Review-151d P3-4: the check and the write under the tracker's lock, so no fetch can begin
+        // (and record) between them. Lock order: the tracker, then the database; nothing takes the
+        // tracker while holding the database.
+        let fetches = FETCHES_IN_FLIGHT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !ticket.alone_in(&fetches) {
+            tracing::debug!(file_id = %file_id, "whole fetch overlapped by another fetch of the file; its candidate stays");
+            return Ok(false);
+        }
+        self.db.record_local_baseline(file_id, fetched.version, &fetched.hash)?;
+        drop(fetches);
+        Ok(true)
+    }
+
+    /// Task 1640 (self-review #1): a fetch of `file_id` starts ([`FetchTicket`]).
+    #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+    fn begin_fetch(&self, file_id: &str) -> FetchTicket {
+        let mut fetches = FETCHES_IN_FLIGHT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let activity = fetches.entry(file_id.to_string()).or_default();
+        activity.in_flight += 1;
+        activity.events += 1;
+        let alone_since = (activity.in_flight == 1).then_some(activity.events);
+        FetchTicket {
+            file_id: file_id.to_string(),
+            alone_since,
         }
     }
 
@@ -4134,7 +4960,7 @@ impl EngineBridge {
     /// [`Zeroizing`] wrapper so the allocation is wiped on drop regardless of
     /// which exit path is taken (normal return, early `?`, or a panic unwind).
     ///
-    /// Intermediate per-chunk buffers from `decrypt_downloaded_chunk` are
+    /// Intermediate per-chunk buffers from core are
     /// explicitly zeroized after being copied into the accumulator, so at most
     /// one extra chunk's worth of plaintext is live in memory at any time.
     ///
@@ -4142,18 +4968,39 @@ impl EngineBridge {
     /// need the bytes on disk (`hydrate_file`) or in memory (`hydrate_file_to_memory`)
     /// handle that themselves so the disk-write decision stays at the call site,
     /// not buried inside the crypto loop.
-    fn owned_file_key(&self, file_id: &str) -> beebeeb_core::kdf::FileKey {
-        let mk_bytes: [u8; 32] = *self.api.master_key();
-        let master_key = beebeeb_core::kdf::MasterKey::from_bytes(mk_bytes);
-        beebeeb_core::kdf::derive_file_key(&master_key, file_id.as_bytes())
+    pub async fn encrypt_owned_name(&self, file_id: &str, name: &str, pin: beebeeb_core::chunk_stream::ExpectedChunkFormat) -> anyhow::Result<String> {
+        let key = self.resolved_owned_key(file_id).await?;
+        Ok(beebeeb_core::encrypt::encrypt_name_for(&key, name, None, pin)?)
+    }
+
+    async fn owned_open_failure(&self, file_id: &str, error: anyhow::Error) -> anyhow::Error {
+        if let Ok(Some(record)) = self.db.get_owned_key_record(file_id)
+            && record.foreign_added {
+            let _ = self.db.set_status_if(file_id, FileStatus::Downloading, FileStatus::CloudOnly);
+            let label = if let (Some(root), Some(encrypted)) = (record.shared_root_id.as_deref(), record.origin_label_encrypted.as_deref()) {
+                // Display only, read-only custody lookup. Never re-seed custody during an open failure.
+                let scope = self.owner_key_scope();
+                let custody = self.api.get_shared_folder(root).await.ok();
+                if let Err(error) = scope.check() { return error; }
+                let key = custody.and_then(|row| crate::owner_keys::normalize_wrap(&row["owner_wrapped_folder_key"]).ok().flatten())
+                    .and_then(|wrap| beebeeb_sync::key_resolution::unwrap_folder_custody(
+                        &beebeeb_core::kdf::MasterKey::from_bytes(*self.api.master_key()), root, &wrap).ok());
+                if let Some(key) = key {
+                    if let Err(error) = scope.remember_custody(root) { return error; }
+                    beebeeb_core::encrypt::decrypt_file_metadata_with_key(&key, encrypted).ok().map(|metadata| metadata.name)
+                } else { None }
+            } else { None };
+            return anyhow::anyhow!(crate::owner_keys::cannot_open_message(label.as_deref(), record.member_added));
+        }
+        error
     }
 
     async fn file_key_for_download(&self, file_id: &str) -> anyhow::Result<beebeeb_core::kdf::FileKey> {
         let Some(contract) = self.db.get_file_contract_state(file_id)? else {
-            return Ok(self.owned_file_key(file_id));
+            return self.resolved_owned_key(file_id).await.map(|key| beebeeb_core::kdf::FileKey::from_bytes(*key.as_bytes()));
         };
         if contract.namespace != Namespace::SharedWithMe {
-            return Ok(self.owned_file_key(file_id));
+            return self.resolved_owned_key(file_id).await.map(|key| beebeeb_core::kdf::FileKey::from_bytes(*key.as_bytes()));
         }
         if !contract.can_read() {
             anyhow::bail!("shared item is not readable");
@@ -4179,19 +5026,11 @@ impl EngineBridge {
             .ok_or_else(|| anyhow::anyhow!("shared invite {share_id} is missing sender_public_key"))?;
 
         if mapping.is_folder {
-            let encrypted_folder_key = mapping
-                .encrypted_folder_key
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("folder share {share_id} is missing encrypted_folder_key"))?;
-            let folder_keys = self.api.get_folder_keys(share_id).await?;
-            unwrap_folder_share_file_key(
-                self.api.master_key(),
-                sender_public_key,
-                &mapping.file_id,
-                encrypted_folder_key,
-                file_id,
-                &folder_keys,
-            )
+            let (folder_key, folder_keys) = self.shared_folder_material(&mapping).await?;
+            let wrap = encrypted_file_key_from_folder_keys_response(&folder_keys, file_id)
+                .ok_or_else(|| anyhow::anyhow!("folder share is missing the child key"))?;
+            self.shared_folder_child_key(&folder_key, &mapping.file_id, file_id, 1, wrap,
+                folder_keys["desktop_has_custody"].as_bool() == Some(true))
         } else {
             let encrypted_file_key = mapping
                 .encrypted_file_key
@@ -4206,6 +5045,17 @@ impl EngineBridge {
         file_id: &str,
         progress: Option<&HydrateProgressFn>,
     ) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+        self.do_hydrate_versioned(file_id, progress).await.map(|(plaintext, _)| plaintext)
+    }
+
+    /// [`Self::do_hydrate`], also saying which server version the bytes are: the download
+    /// metadata's `download_version.version_number` (task 1640), `None` for a legacy file whose
+    /// metadata names no version.
+    async fn do_hydrate_versioned(
+        &self,
+        file_id: &str,
+        progress: Option<&HydrateProgressFn>,
+    ) -> anyhow::Result<(Zeroizing<Vec<u8>>, Option<i64>)> {
         let _file_uuid: uuid::Uuid = file_id
             .parse()
             .map_err(|e| anyhow::anyhow!("invalid file_id (not a UUID): {e}"))?;
@@ -4215,7 +5065,37 @@ impl EngineBridge {
         // `cloud_only` may have been re-uploaded with a new chunk
         // layout since we last saw it.
         let meta = self.api.get_file(file_id).await?;
-        self.do_hydrate_with_meta(file_id, &meta, progress).await
+        self.with_one_restart(file_id, meta, |meta| async move {
+            let version = meta["download_version"]["version_number"].as_i64();
+            self.do_hydrate_with_meta(file_id, &meta, progress)
+                .await
+                .map(|plaintext| (plaintext, version))
+        })
+        .await
+    }
+
+    /// Tasks 1643 + 2173: run one download `attempt` on `meta`, and when the version it was bound to went away
+    /// ([`crate::download_pin::VersionGone`]) run it ONCE more on fresh metadata; nothing of the first attempt is kept,
+    /// and versions are never mixed. The restart keeps the binding: when the first attempt was pinned and the fresh
+    /// metadata names no version (`download_version: null`), it is [`crate::download_pin::PinLost`], never an unpinned
+    /// download. The one copy of this rule (whole-file hydrate, range read, conflict preview).
+    async fn with_one_restart<T, F, Fut>(&self, file_id: &str, meta: serde_json::Value, attempt: F) -> anyhow::Result<T>
+    where
+        F: Fn(serde_json::Value) -> Fut,
+        Fut: std::future::Future<Output = anyhow::Result<T>>,
+    {
+        let first_was_pinned = crate::download_pin::PinnedVersion::from_metadata(&meta)?.is_some();
+        match attempt(meta).await {
+            Err(e) if e.downcast_ref::<crate::download_pin::VersionGone>().is_some() => {
+                tracing::debug!("download: the file changed while it was downloading; restarting once");
+                let fresh = self.api.get_file(file_id).await?;
+                if first_was_pinned && crate::download_pin::PinnedVersion::from_metadata(&fresh)?.is_none() {
+                    return Err(anyhow::Error::new(crate::download_pin::PinLost));
+                }
+                attempt(fresh).await
+            }
+            other => other,
+        }
     }
 
     /// Shared core of [`Self::do_hydrate`] and [`Self::remote_content_preview`]
@@ -4235,34 +5115,135 @@ impl EngineBridge {
         meta: &serde_json::Value,
         progress: Option<&HydrateProgressFn>,
     ) -> anyhow::Result<Zeroizing<Vec<u8>>> {
-        let chunk_count = meta
-            .get("chunk_count")
-            .and_then(|v| v.as_i64())
-            .ok_or_else(|| anyhow::anyhow!("server response missing chunk_count"))? as u32;
+        self.hydrate_whole_file(file_id, meta, progress)
+            .await
+            .map(|(plaintext, _)| plaintext)
+    }
+
+    /// [`Self::do_hydrate_with_meta`], also saying which transport carried the file. Task 2173:
+    /// straight from object storage when the server offers it and the handshake succeeds
+    /// ([`crate::direct_download`]); `UseApi` means nothing of that attempt was kept, and the file
+    /// goes through the API's per-chunk route below, as it always did.
+    ///
+    /// Task 1643: when the metadata names a `download_version`, both paths are bound to it: every
+    /// API chunk request carries `?object_version_id=`, the direct path must land on the same
+    /// version, each chunk's wire size and the final plaintext size are checked against its
+    /// manifest, and a version that goes away is [`crate::download_pin::VersionGone`] (the caller
+    /// starts again from fresh metadata). Without one (a legacy file), today's unpinned download.
+    async fn hydrate_whole_file(
+        &self,
+        file_id: &str,
+        meta: &serde_json::Value,
+        progress: Option<&HydrateProgressFn>,
+    ) -> anyhow::Result<(Zeroizing<Vec<u8>>, crate::direct_download::FileTransport)> {
+        let pin = crate::download_pin::PinnedVersion::from_metadata(meta)?;
+        let chunk_count = match &pin {
+            Some(pin) => pin.chunk_count,
+            None => meta
+                .get("chunk_count")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| anyhow::anyhow!("server response missing chunk_count"))? as u32,
+        };
 
         let file_key = self.file_key_for_download(file_id).await?;
+        let expected_format = recorded_content_format(&file_key, meta)?;
 
-        // Rate-limit ceiling for downloads.
-        let download_kbps_limit = crate::config::DesktopConfig::load()
-            .map(|c| c.download_kbps_limit)
-            .unwrap_or(0);
+        // Rate-limit ceiling for downloads, and the transport (task 2173).
+        let config = crate::config::DesktopConfig::load().ok();
+        let download_kbps_limit = config.as_ref().map(|c| c.download_kbps_limit).unwrap_or(0);
+        let transport = self.download_transport(config.as_ref().and_then(|c| c.transport.as_deref()));
 
         // Walk chunks. Pre-allocate roughly the file size if known,
         // but fall back to defaults — chunks are encrypted so the
         // ciphertext is always larger than plaintext anyway.
         // Use Zeroizing so that if we bail mid-loop (network error,
         // decrypt error) the partial plaintext is still wiped.
-        let approx_size = meta.get("size_bytes").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let approx_size = match &pin {
+            Some(pin) => usize::try_from(pin.plaintext_size_bytes).unwrap_or(0),
+            None => meta.get("size_bytes").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+        };
 
-        self.download_and_decrypt_chunk_range(
+        let report = HydrateReport {
+            bridge: self,
             file_id,
-            &file_key,
-            0..chunk_count,
-            download_kbps_limit,
-            approx_size,
+            total: approx_size as u64,
             progress,
+        };
+        let direct = crate::direct_download::download(
+            &self.api,
+            crate::direct_download::Request {
+                file_id,
+                file_key: &file_key,
+                chunk_count,
+                expected_format,
+                download_kbps_limit,
+                approx_size,
+                pin: pin.as_ref(),
+            },
+            transport,
+            self.storage_override(),
+            &report,
         )
         .await
+        .map_err(|e| match e {
+            crate::direct_download::DirectError::VersionChanged => anyhow::Error::new(crate::download_pin::VersionGone),
+            other => anyhow::Error::new(other),
+        })?;
+        let (plaintext, transport) = match direct {
+            crate::direct_download::Outcome::Done { plaintext, transport } => (plaintext, transport),
+            crate::direct_download::Outcome::UseApi => (
+                self.download_and_decrypt_chunk_range(
+                    file_id,
+                    &file_key,
+                    0..chunk_count,
+                    download_kbps_limit,
+                    approx_size,
+                    progress,
+                    pin.as_ref(),
+                    expected_format,
+                    chunk_count,
+                )
+                .await?,
+                crate::direct_download::FileTransport::Api,
+            ),
+        };
+        // Task 1643: the whole file is exactly the pinned version's plaintext, or nothing.
+        if let Some(pin) = &pin
+            && plaintext.len() as u64 != pin.plaintext_size_bytes
+        {
+            anyhow::bail!(
+                "the download is {} bytes, the pinned version's manifest says {}",
+                plaintext.len(),
+                pin.plaintext_size_bytes
+            );
+        }
+        tracing::debug!(transport = transport.as_str(), "download finished");
+        Ok((plaintext, transport))
+    }
+
+    /// The download transport: `BB_TRANSPORT`, else `desktop.toml`'s `transport`, else `auto`
+    /// (task 2173). A test bridge takes the one its test set, else `auto`.
+    fn download_transport(&self, configured: Option<&str>) -> crate::direct_download::Transport {
+        #[cfg(test)]
+        {
+            let _ = configured;
+            self.seams
+                .transport
+                .lock()
+                .unwrap()
+                .unwrap_or(crate::direct_download::Transport::Auto)
+        }
+        #[cfg(not(test))]
+        crate::direct_download::Transport::selected(configured)
+    }
+
+    /// A test's storage stand-in (task 2173); production always fetches.
+    fn storage_override(&self) -> Option<crate::direct_download::Storage<'static>> {
+        #[cfg(test)]
+        if let Some(status) = *self.seams.storage_fail.lock().unwrap() {
+            return Some(crate::direct_download::Storage::Fail(status));
+        }
+        None
     }
 
     /// Download + decrypt chunk indices `[range.start, range.end)` for
@@ -4274,6 +5255,38 @@ impl EngineBridge {
     /// `approx_size_hint` only sizes the initial allocation (`Vec::with_capacity`)
     /// — it never bounds or truncates the actual read, so a wrong hint costs at
     /// most a reallocation, never a silent short read.
+    ///
+    /// Task 1643: with a `pin`, every chunk request carries the pinned version's id and every chunk's
+    /// wire size must be the manifest's; a 409 comes back as [`crate::download_pin::VersionGone`].
+    /// Without one (a legacy file) the requests are today's unpinned ones.
+    async fn download_content_frame(&self, file_id: &str, i: u32,
+        pin: Option<&crate::download_pin::PinnedVersion>) -> anyhow::Result<Vec<u8>> {
+        Ok(match pin {
+                // Task 1643: the pinned route (shared with the direct path's fallback): exactly the manifest's
+                // length, a transient failure tried again, a 409 = the version is gone, no URL in an error.
+                Some(pin) => {
+                    let expected = pin
+                        .wire_size(i)
+                        .ok_or_else(|| anyhow::anyhow!("chunk {i} is outside the pinned version"))?;
+                    self.api
+                        .download_chunk_pinned(file_id, i, &pin.object_version_id, expected)
+                        .await
+                        .map_err(|e| match e {
+                            crate::api_client::ChunkApiError::Restart => {
+                                anyhow::Error::new(crate::download_pin::VersionGone)
+                            }
+                            crate::api_client::ChunkApiError::Terminal(status) => {
+                                anyhow::Error::new(crate::direct_download::DirectError::Refused(status))
+                            }
+                            crate::api_client::ChunkApiError::Failed(message) => anyhow::anyhow!(message),
+                        })?
+                }
+                None => self.api.download_chunk(file_id, i).await?,
+        })
+
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn download_and_decrypt_chunk_range(
         &self,
         file_id: &str,
@@ -4282,6 +5295,9 @@ impl EngineBridge {
         download_kbps_limit: u64,
         approx_size_hint: usize,
         progress: Option<&HydrateProgressFn>,
+        pin: Option<&crate::download_pin::PinnedVersion>,
+        expected: beebeeb_core::chunk_stream::ExpectedChunkFormat,
+        chunk_count: u32,
     ) -> anyhow::Result<Zeroizing<Vec<u8>>> {
         let mut acc: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(approx_size_hint));
         // Task 1670 issue 3: tell the caller (the macOS IPC handler, which
@@ -4298,15 +5314,29 @@ impl EngineBridge {
             report(0, total);
         }
 
+        // Public ChunkDecryptor delegates to core's StreamOpener; desktop owns no crypto.
+        let whole = range.start == 0 && range.end == chunk_count;
+        let mut reader = beebeeb_core::chunk_stream::ChunkDecryptor::for_push_with_file_key(
+            beebeeb_core::kdf::FileKey::from_bytes(*file_key.as_bytes()), file_id, expected);
+        let context = if whole { None } else {
+            let first = self.download_content_frame(file_id, 0, pin).await?;
+            let mut opened = reader.push_frame(&content_frame(&first)?)?;
+            opened.data.zeroize();
+            Some((reader.format().ok_or_else(|| anyhow::anyhow!("missing chunk format"))?, reader.version_id()))
+        };
         for i in range {
             let chunk_start = std::time::Instant::now();
-            let chunk_bytes = self.api.download_chunk(file_id, i).await?;
+            let chunk_bytes = self.download_content_frame(file_id, i, pin).await?;
             let wire_len = chunk_bytes.len() as u64;
             // Decrypt into a temporary buffer, copy into the accumulator,
             // then zeroize the temporary. This limits live plaintext to
             // the accumulator + one chunk at any moment.
-            let mut decrypted = decrypt_downloaded_chunk(file_key, &chunk_bytes)
-                .map_err(|e| anyhow::anyhow!("decrypt chunk {i}: {e}"))?;
+            let frame = content_frame(&chunk_bytes)?;
+            let mut decrypted = if let Some((format, version)) = context {
+                beebeeb_core::chunk_stream::open_chunk(file_key, file_id,
+                    version.as_ref().map(|v| v.as_slice()).unwrap_or(&[]), i,
+                    i + 1 == chunk_count, format, &frame)?
+            } else { reader.push_frame(&frame)?.data };
             acc.extend_from_slice(&decrypted);
             decrypted.zeroize();
             self.transfers.report(file_id, acc.len() as u64, total);
@@ -4330,6 +5360,7 @@ impl EngineBridge {
             }
         }
 
+        if whole { reader.finish()?; }
         Ok(acc)
     }
 
@@ -4370,12 +5401,48 @@ impl EngineBridge {
             .parse()
             .map_err(|e| anyhow::anyhow!("invalid file_id (not a UUID): {e}"))?;
 
+        // Task 1643: the range is planned on, and read from, one pinned version; a version that goes away
+        // mid-read starts the read again, once, from fresh metadata (`with_one_restart`).
         let meta = self.api.get_file(file_id).await?;
-        let chunk_count = meta.get("chunk_count").and_then(|v| v.as_i64()).unwrap_or(0) as u64;
-        let size_bytes = meta.get("size_bytes").and_then(|v| v.as_u64());
-        let chunk_size_bytes = meta.get("chunk_size_bytes").and_then(|v| v.as_u64());
+        let read = self
+            .with_one_restart(file_id, meta, |meta| async move {
+                self.range_attempt(file_id, required_offset, required_length, &meta).await
+            })
+            .await;
+        let read = match read { Ok(value) => Ok(value), Err(e) => Err(self.owned_open_failure(file_id, e).await) };
+        if read.is_err() {
+            // Every failing exit (a second pass's own error too) ends with the row in Error, never left on
+            // Downloading, and the placeholder never in sync.
+            let _ = self.db.set_status_if(file_id, FileStatus::Downloading, FileStatus::Error);
+        }
+        read
+    }
 
-        let (Some(size_bytes), Some(chunk_size_bytes), true) = (size_bytes, chunk_size_bytes, chunk_count > 0) else {
+    /// One pass of [`Self::hydrate_file_range`] on `meta`.
+    #[cfg(any(target_os = "windows", test))]
+    async fn range_attempt(
+        &self,
+        file_id: &str,
+        required_offset: u64,
+        required_length: u64,
+        meta: &serde_json::Value,
+    ) -> anyhow::Result<Option<HydratedRange>> {
+        let pin = crate::download_pin::PinnedVersion::from_metadata(meta)?;
+        let (chunk_count, size_bytes, chunk_size_bytes) = match &pin {
+            Some(pin) => (
+                u64::from(pin.chunk_count),
+                Some(pin.plaintext_size_bytes),
+                Some(pin.chunk_size_bytes),
+            ),
+            None => (
+                meta.get("chunk_count").and_then(|v| v.as_i64()).unwrap_or(0) as u64,
+                meta.get("size_bytes").and_then(|v| v.as_u64()),
+                meta.get("chunk_size_bytes").and_then(|v| v.as_u64()),
+            ),
+        };
+
+        let (Some(size_bytes), Some(chunk_size_bytes), true) = (size_bytes, chunk_size_bytes, chunk_count > 0)
+        else {
             // Missing metadata — caller falls back to the whole-file path.
             return Ok(None);
         };
@@ -4410,42 +5477,50 @@ impl EngineBridge {
         self.db.set_status(file_id, FileStatus::Downloading)?;
 
         let file_key = self.file_key_for_download(file_id).await?;
+        let expected_format = recorded_content_format(&file_key, meta)?;
         let download_kbps_limit = crate::config::DesktopConfig::load()
             .map(|c| c.download_kbps_limit)
             .unwrap_or(0);
 
-        match self
+        let chunks = plan.first_chunk..plan.last_chunk_exclusive;
+        let read = self
             .download_and_decrypt_chunk_range(
                 file_id,
                 &file_key,
-                plan.first_chunk..plan.last_chunk_exclusive,
+                chunks.clone(),
                 download_kbps_limit,
                 plan.covering_span_hint,
                 None,
+                pin.as_ref(),
+                expected_format,
+                chunk_count as u32,
             )
             .await
-        {
-            Ok(data) => {
-                // Only a whole-file covering range is evidence the file is fully
-                // cached; a partial range leaves the row `Downloading` for the
-                // caller (the CF callback) to resolve based on what CF itself
-                // reports (see `windows_cf::callbacks`).
-                if plan.covers_whole_file {
-                    self.db.set_status(file_id, FileStatus::Local)?;
-                    self.db.mark_cached(file_id, "", data.len() as i64, now_secs())?;
-                    let _ = self.enforce_configured_cache_limit();
+            .and_then(|data| {
+                // Task 1643: exactly the pinned version's plaintext for those chunks.
+                match pin.as_ref().map(|pin| pin.plaintext_size_of(chunks.clone())) {
+                    Some(want) if want != Some(data.len() as u64) => anyhow::bail!(
+                        "the range read is {} bytes, the pinned version's manifest says {want:?}",
+                        data.len()
+                    ),
+                    _ => Ok(data),
                 }
-                Ok(Some(HydratedRange {
-                    data,
-                    range_start_bytes: plan.range_start_bytes,
-                    covers_whole_file: plan.covers_whole_file,
-                }))
-            }
-            Err(e) => {
-                let _ = self.db.set_status(file_id, FileStatus::Error);
-                Err(e)
-            }
+            });
+        let data = read?;
+        // Only a whole-file covering range is evidence the file is fully
+        // cached; a partial range leaves the row `Downloading` for the
+        // caller (the CF callback) to resolve based on what CF itself
+        // reports (see `windows_cf::callbacks`).
+        if plan.covers_whole_file {
+            self.db.set_status(file_id, FileStatus::Local)?;
+            self.db.mark_cached(file_id, "", data.len() as i64, now_secs())?;
+            let _ = self.enforce_configured_cache_limit();
         }
+        Ok(Some(HydratedRange {
+            data,
+            range_start_bytes: plan.range_start_bytes,
+            covers_whole_file: plan.covers_whole_file,
+        }))
     }
 
     /// Fetch the encrypted server thumbnail for `file_id`, decrypt it **in
@@ -4460,15 +5535,8 @@ impl EngineBridge {
     /// integrations never regenerate a thumbnail and never decode the original
     /// media just to preview it — they decrypt this small blob.
     ///
-    /// ## Wire envelope (NOT the chunk envelope)
-    ///
-    /// Thumbnails are stored in the **raw** `nonce(12) || AES-256-GCM(ct+tag)`
-    /// envelope the web/mobile clients write (`thumbnail.ts encryptThumbnailBlob`):
-    /// a 12-byte random nonce followed by the AES-256-GCM ciphertext+tag, keyed
-    /// directly by the per-file key, with no AAD and no JSON. This differs from
-    /// file *chunks* (which are the `EncryptedBlob` JSON / `decrypt_chunk_raw`
-    /// frame), so this path decrypts the blob directly rather than going through
-    /// [`decrypt_downloaded_chunk`].
+    /// Core's purpose-specific thumbnail reader handles legacy raw-key blobs and
+    /// subkey thumbnails. File content always uses the separate stream reader.
     ///
     /// ## Zero-knowledge
     ///
@@ -4483,37 +5551,10 @@ impl EngineBridge {
     /// caller can fall back to the file-type icon — it is never reported as a
     /// success with empty bytes.
     pub async fn fetch_thumbnail_to_memory(&self, file_id: &str, variant: &str) -> anyhow::Result<Zeroizing<Vec<u8>>> {
-        use aes_gcm::aead::Aead;
-        use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
-
-        // Validate the id shape up front (same guard as do_hydrate).
-        let _file_uuid: uuid::Uuid = file_id
-            .parse()
-            .map_err(|e| anyhow::anyhow!("invalid file_id (not a UUID): {e}"))?;
-
-        // Pull the encrypted thumbnail blob. A 404 (no thumbnail) is an Err here
-        // and the COM caller maps it to the type-icon fallback.
+        let _: uuid::Uuid = file_id.parse()?;
         let blob = self.api.download_thumbnail(file_id, variant).await?;
-        if blob.len() < 12 + 16 {
-            // Must hold at least a 12-byte nonce + 16-byte GCM tag.
-            anyhow::bail!("thumbnail blob too short ({} bytes)", blob.len());
-        }
-
-        let file_key = self.file_key_for_download(file_id).await?;
-
-        // Split nonce || ciphertext+tag and AES-256-GCM decrypt with no AAD.
-        let (nonce_bytes, ciphertext) = blob.split_at(12);
-        let cipher = Aes256Gcm::new_from_slice(file_key.as_bytes())
-            .map_err(|e| anyhow::anyhow!("init thumbnail cipher: {e}"))?;
-        let nonce = Nonce::from_slice(nonce_bytes);
-        let plaintext = cipher
-            .decrypt(nonce, ciphertext)
-            // The error type carries no plaintext; a generic message avoids
-            // leaking anything about the ciphertext.
-            .map_err(|_| anyhow::anyhow!("thumbnail decrypt failed (bad key or corrupt blob)"))?;
-
-        // Hand the decoded image bytes back wrapped so they are wiped on drop.
-        Ok(Zeroizing::new(plaintext))
+        let key = self.file_key_for_download(file_id).await?;
+        Ok(Zeroizing::new(beebeeb_core::encrypt::decrypt_thumbnail(&key, &blob)?))
     }
 
     /// Apply a "Keep Mine" resolution: stage the current local bytes and upload
@@ -4543,7 +5584,7 @@ impl EngineBridge {
             .and_then(|contract| contract.content_type.clone())
             .or_else(|| beebeeb_core::media::guess_mime_type(&file_name).map(str::to_string));
         let name_encrypted =
-            encrypted_metadata_for_name(self.api.master_key(), file_id, &file_name, content_type.as_deref())?;
+            owned_metadata_for_name(&self.db, self.api.master_key(), file_id, &file_name, content_type.as_deref())?;
 
         let local_path = local_file_path_under_sync_root(sync_root, &entry.path)?;
         let staged =
@@ -4730,9 +5771,159 @@ impl EngineBridge {
         let is_text = is_text_file(&entry.path);
 
         let local = self.local_content_preview(sync_root, &entry.path, is_text);
-        let remote = self.remote_content_preview(file_id, is_text).await;
+        let (remote, _) = self.remote_content_preview(file_id, is_text).await;
 
-        Ok(ConflictContentPreview { is_text, local, remote })
+        Ok(ConflictContentPreview {
+            is_text,
+            local,
+            remote,
+            version: None,
+        })
+    }
+
+    /// Task 2190 (plan §3.4): both sides of a parked conflict. The Mac's side is the parked write's
+    /// staged copy, read with the same bounds as [`Self::local_content_preview`]; the other side is
+    /// the server's current version. Read-only.
+    pub async fn parked_conflict_preview(&self, op_id: &str) -> anyhow::Result<ConflictContentPreview> {
+        let op = self
+            .db
+            .get_operation(op_id)?
+            .ok_or_else(|| anyhow::anyhow!("no queued write {op_id}"))?;
+        let file_id = op.file_id.clone().ok_or_else(|| anyhow::anyhow!("the write names no file"))?;
+        let entry = self
+            .db
+            .get_file(&file_id)?
+            .ok_or_else(|| anyhow::anyhow!("no state.db row for {file_id}"))?;
+        let is_text = is_text_file(&entry.path);
+        let payload = PathBuf::from(op.payload_path.ok_or_else(|| anyhow::anyhow!("the write has no staged copy"))?);
+        let local = match (payload.parent(), payload.file_name().and_then(|name| name.to_str())) {
+            (Some(dir), Some(name)) => self.local_content_preview(dir, name, is_text),
+            _ => ConflictContentSide {
+                size_bytes: None,
+                text: None,
+                unavailable_reason: Some("Couldn't locate this Mac's copy.".to_string()),
+            },
+        };
+        // Review-169 #1 and F1: the version the person decides against is the version of the bytes
+        // shown, from the metadata the download ran on (after a restart, the fresh one). Never the
+        // mirror read after the download: the pull can raise it to a version nobody has seen while
+        // the download runs. A file whose metadata names no version (legacy, or the fetch failed)
+        // gets the mirror as it was BEFORE the fetch, which is never newer than the bytes: at worst
+        // the decision is `Moved`, or the write is sent on an older base and the server refuses it.
+        let before = self.db.get_file_contract_state(&file_id)?.map(|contract| contract.current_version);
+        let (remote, shown) = self.remote_content_preview(&file_id, is_text).await;
+        let version = shown.or(before);
+        Ok(ConflictContentPreview { is_text, local, remote, version })
+    }
+
+    /// Task 2190 (plan §3.2): the person's decision on a parked conflict, against `shown_version`,
+    /// the version the conflict window showed. Every choice re-checks the op inside the transaction
+    /// that acts on it (decidable, and its file still at that version), and returns `Moved`, with
+    /// nothing changed, when it moved since.
+    /// - `Local`: the same op is rebased on the server's version and sent again.
+    /// - `Remote` (D1): `keep_copy` copies the Mac's bytes into the "Changes not sent" folder FIRST.
+    ///   If it fails, nothing changed. Then the op goes and the system reads the server's version.
+    ///   The staged copy is released only after that commit.
+    /// - `Both` (D4): the Mac's bytes are queued as a new file named [`keep_both_name`] beside the
+    ///   original, and the op is retired, in ONE transaction (review-169 #3): if it moved, nothing
+    ///   is queued.
+    pub fn resolve_parked(
+        &self,
+        op_id: &str,
+        choice: ParkedChoice,
+        shown_version: Option<i64>,
+        keep_copy: &mut dyn FnMut(&Path, &str) -> anyhow::Result<PathBuf>,
+        device: &str,
+        hhmm: &str,
+    ) -> anyhow::Result<ParkedResolution> {
+        // Review-169 #1: the person decides against the version they were shown. Without it, or
+        // with the file past it, nothing changes.
+        let Some(shown) = shown_version else {
+            return Ok(ParkedResolution::Moved);
+        };
+        if choice == ParkedChoice::Local {
+            return Ok(match self.db.rebase_parked(op_id, shown, now_secs())? {
+                Some(version) => ParkedResolution::Rebased { version },
+                None => ParkedResolution::Moved,
+            });
+        }
+        if !self.db.is_decidable_parked_at(op_id, shown)? {
+            return Ok(ParkedResolution::Moved);
+        }
+        let op = self
+            .db
+            .get_operation(op_id)?
+            .ok_or_else(|| anyhow::anyhow!("no queued write {op_id}"))?;
+        let file_id = op.file_id.clone().ok_or_else(|| anyhow::anyhow!("the write names no file"))?;
+        let row = self
+            .db
+            .get_file(&file_id)?
+            .ok_or_else(|| anyhow::anyhow!("no state.db row for {file_id}"))?;
+        let payload = op
+            .payload_path
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("the parked write has no staged copy"))?;
+        let (done, released) = match choice {
+            ParkedChoice::Remote => {
+                // D1: the copy first; a failure changes nothing.
+                let kept = keep_copy(Path::new(&payload), &row.path)?;
+                match self.db.drop_parked(op_id, shown)? {
+                    Some(released) => (
+                        ParkedResolution::KeptOther {
+                            kept_copy: kept.to_string_lossy().into_owned(),
+                        },
+                        released,
+                    ),
+                    // The kept copy stays (nothing is lost) and stays listed.
+                    None => return Ok(ParkedResolution::Moved),
+                }
+            }
+            ParkedChoice::Both => {
+                let contract = self
+                    .db
+                    .get_file_contract_state(&file_id)?
+                    .ok_or_else(|| anyhow::anyhow!("no contract for {file_id}"))?;
+                let (parent_rel, leaf) = match row.path.rsplit_once('/') {
+                    Some((parent, leaf)) => (Some(parent), leaf),
+                    None => (None, row.path.as_str()),
+                };
+                let taken = self.db.child_names_lowercase(contract.parent_id.as_deref())?;
+                let name = keep_both_name(leaf, device, hhmm, &taken);
+                let target = FinderWriteTarget {
+                    file_id: None,
+                    parent_id: contract.parent_id.clone(),
+                    filename: name.clone(),
+                    rel_path: Some(match parent_rel {
+                        Some(parent) => format!("{parent}/{name}"),
+                        None => name.clone(),
+                    }),
+                    kind: FinderWriteItemKind::File,
+                    contents_path: Some(payload.clone()),
+                    content_type: contract.content_type.clone(),
+                    base_version_identifier: None,
+                };
+                // Review-169 #3: the copy is queued and the parked write retired in ONE transaction;
+                // a write that moved queues nothing.
+                let retire = crate::state_db::RetireParked { op_id, shown_version: shown };
+                let Some((written, released)) =
+                    self.queue_file_provider_create_retiring(target, Some(&std::fs::File::open(&payload)?), Some(retire))?
+                else {
+                    return Ok(ParkedResolution::Moved);
+                };
+                match written.outcome {
+                    FinderWriteOutcome::Queued { file_id: Some(new_id), .. } => {
+                        (ParkedResolution::KeptBoth { file_id: new_id, name }, released)
+                    }
+                    other => anyhow::bail!("the copy could not be queued as a new file: {other:?}"),
+                }
+            }
+            ParkedChoice::Local => unreachable!("handled above"),
+        };
+        // The staged copy was released in the decision's transaction; unlink it now (S6).
+        if let Some(released) = released {
+            crate::staged_payload::remove_or_log(&self.db, Path::new(&released));
+        }
+        Ok(done)
     }
 
     /// Local half of [`Self::conflict_content_preview`] (task 1546 Codex
@@ -4821,48 +6012,66 @@ impl EngineBridge {
     /// metadata fetch `do_hydrate_with_meta` needs instead of letting
     /// `do_hydrate` re-fetch it, so the small-file path costs exactly the
     /// metadata GET + the chunk GETs it always cost.
-    async fn remote_content_preview(&self, file_id: &str, is_text: bool) -> ConflictContentSide {
+    ///
+    /// Also returns the server version the side shows: the `download_version.version_number` of the
+    /// metadata the attempt ran on (task 2190, review-169 F1), `None` when no metadata named one.
+    async fn remote_content_preview(&self, file_id: &str, is_text: bool) -> (ConflictContentSide, Option<i64>) {
+        let unavailable = |reason: String| ConflictContentSide {
+            size_bytes: None,
+            text: None,
+            unavailable_reason: Some(reason),
+        };
         if let Err(e) = file_id.parse::<uuid::Uuid>() {
-            return ConflictContentSide {
-                size_bytes: None,
-                text: None,
-                unavailable_reason: Some(format!("invalid file_id (not a UUID): {e}")),
-            };
+            return (unavailable(format!("invalid file_id (not a UUID): {e}")), None);
         }
-
         let meta = match self.api.get_file(file_id).await {
             Ok(m) => m,
-            Err(e) => {
-                return ConflictContentSide {
-                    size_bytes: None,
-                    text: None,
-                    unavailable_reason: Some(format!("Couldn't download the other device's version: {e}")),
-                };
-            }
+            Err(e) => return (unavailable(format!("Couldn't download the other device's version: {e}")), None),
         };
-        let size_bytes = meta.get("size_bytes").and_then(|v| v.as_u64());
+        // Tasks 1643 + 2173: a version that goes away mid-download restarts once from fresh metadata, as
+        // `do_hydrate` does, and the size is checked again on the new version.
+        self.with_one_restart(file_id, meta, |meta| async move {
+            let version = meta["download_version"]["version_number"].as_i64();
+            self.preview_attempt(file_id, is_text, &meta).await.map(|side| (side, version))
+        })
+        .await
+        .unwrap_or_else(|e| (unavailable(format!("Couldn't download the other device's version: {e}")), None))
+    }
+
+    /// One pass of [`Self::remote_content_preview`] on `meta`. `Err` only for what the restart handles (the version
+    /// went away) or what ends it; every other failure is the side's own "unavailable" line.
+    async fn preview_attempt(&self, file_id: &str, is_text: bool, meta: &serde_json::Value) -> anyhow::Result<ConflictContentSide> {
+        // Task 1643: the size of the version that would be downloaded. While a replace runs, the top-level
+        // `size_bytes` can be another version's.
+        let size_bytes = match crate::download_pin::PinnedVersion::from_metadata(meta)? {
+            Some(pin) => Some(pin.plaintext_size_bytes),
+            None => meta.get("size_bytes").and_then(|v| v.as_u64()),
+        };
 
         if !is_text {
             // Binary preview only ever shows size — never download the bytes.
-            return ConflictContentSide {
+            return Ok(ConflictContentSide {
                 size_bytes,
                 text: None,
                 unavailable_reason: None,
-            };
+            });
         }
         let within_limit = matches!(size_bytes, Some(s) if s <= CONFLICT_PREVIEW_TEXT_MAX_BYTES as u64);
         if !within_limit {
-            return ConflictContentSide {
+            return Ok(ConflictContentSide {
                 size_bytes,
                 text: None,
                 unavailable_reason: Some(match size_bytes {
                     Some(s) => format!("File is too large to preview, {s} bytes"),
                     None => "Couldn't determine the other device's file size".to_string(),
                 }),
-            };
+            });
         }
 
-        match self.do_hydrate_with_meta(file_id, &meta, None).await {
+        // Between the metadata and the chunks: where another device's save and the pull's mirror of it
+        // can land while the preview downloads (review-169 F1's test).
+        self.seam("preview:before_download");
+        match self.do_hydrate_with_meta(file_id, meta, None).await {
             Ok(mut bytes) => {
                 // Move the plaintext out instead of `bytes.to_vec()` — a
                 // clone would briefly hold two live copies of the remote
@@ -4871,13 +6080,14 @@ impl EngineBridge {
                 // `bytes` is zeroized below for defense in depth.
                 let side = content_side_from_bytes(std::mem::take(&mut *bytes), is_text);
                 bytes.zeroize();
-                side
+                Ok(side)
             }
-            Err(e) => ConflictContentSide {
+            Err(e) if e.downcast_ref::<crate::download_pin::VersionGone>().is_some() => Err(e),
+            Err(e) => Ok(ConflictContentSide {
                 size_bytes,
                 text: None,
                 unavailable_reason: Some(format!("Couldn't download the other device's version: {e}")),
-            },
+            }),
         }
     }
 }
@@ -4898,6 +6108,64 @@ pub struct ConflictContentSide {
     pub unavailable_reason: Option<String>,
 }
 
+/// Task 2190 (plan §3.2): what the person chose for a parked conflict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ParkedChoice {
+    /// "Keep this Mac's".
+    Local,
+    /// "Keep the other".
+    Remote,
+    /// "Keep both".
+    Both,
+}
+
+/// Task 2190: what a decision on a parked conflict did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum ParkedResolution {
+    /// The write is sent again, on the server's version `version`.
+    Rebased { version: i64 },
+    /// The Mac's bytes are kept at `kept_copy`, and the system reads the server's version.
+    KeptOther { kept_copy: String },
+    /// The Mac's bytes are queued as the new file `name`, beside the original.
+    KeptBoth { file_id: String, name: String },
+    /// The write moved since the review was read: nothing changed.
+    Moved,
+}
+
+/// Task 2190 (plan §3.3, D4): the name of the "Keep both" copy, `{stem} ({device}, HH.MM){ext}`.
+/// While that is taken, it becomes `{stem} ({device}, HH.MM) 2{ext}`, then ` 3`, and so on. It is
+/// never a name in `taken` (the parent's names, lowercased). The time uses a dot, not D4's colon:
+/// a `:` in a Mac file name shows as `/` in Finder, which is why 1887's kept folders use dots too. A
+/// leading dot (`.env`) is not an extension.
+///
+/// Review-169 F3: the whole name fits the file-name limit, as a kept file's does
+/// ([`crate::sign_out::kept_names::with_suffix`], 255 bytes): the stem is cut at a character boundary,
+/// never the suffix, the counter or the extension. The device is cut first, to
+/// [`KEEP_BOTH_DEVICE_MAX_BYTES`], so the suffix always leaves the stem room.
+pub(crate) fn keep_both_name(original: &str, device: &str, hhmm: &str, taken: &std::collections::HashSet<String>) -> String {
+    let device = crate::sign_out::kept_names::prefix_within(device, KEEP_BOTH_DEVICE_MAX_BYTES);
+    let mut counter = 1u32;
+    loop {
+        let suffix = if counter == 1 {
+            format!(" ({device}, {hhmm})")
+        } else {
+            format!(" ({device}, {hhmm}) {counter}")
+        };
+        let candidate = crate::sign_out::kept_names::with_suffix(original, &suffix);
+        if !taken.contains(&candidate.to_lowercase()) {
+            return candidate;
+        }
+        counter += 1;
+    }
+}
+
+/// The longest device name a "Keep both" copy names, in UTF-8 bytes: a host name's label is at most 63
+/// characters, so a Mac's own one-label name is never cut, and the cap keeps the suffix far inside the
+/// 255-byte name limit (review-169 F3, plan §7.4).
+const KEEP_BOTH_DEVICE_MAX_BYTES: usize = 64;
+
 /// Result of [`EngineBridge::conflict_content_preview`] — the real content
 /// (or an honest reason it's unavailable) for both sides of a conflict.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -4905,6 +6173,9 @@ pub struct ConflictContentPreview {
     pub is_text: bool,
     pub local: ConflictContentSide,
     pub remote: ConflictContentSide,
+    /// Task 2190 (review-169 #1): for a parked conflict, the file's version the person decides
+    /// against; the decision is refused when the file is past it. `None` for a `Conflict` row.
+    pub version: Option<i64>,
 }
 
 /// Cap on how large a text file's content preview may be. Deliberately
@@ -5015,6 +6286,65 @@ pub fn is_ignored_finder_name(name: &str) -> bool {
 pub fn version_conflict_feed_from_db(db: &StateDb) -> anyhow::Result<Vec<VersionConflictEntry>> {
     let mut entries = Vec::new();
 
+    // Task 2190 (the lead's condition on E3): a sync-folder edit the scan holds is shown, so it
+    // never looks synced in the app. It is not sent, never marked in sync and never written over
+    // (task 1640), and both versions are kept.
+    // - `base_unknown`: a known edit whose base is not known: one row each, needing a decision.
+    // - `content_unknown`: a file hydrated before task 1640. The scan cannot tell an edited one from
+    //   an untouched one (task 2191 S1 marks them all not in sync), so they are ONE row that says
+    //   they are not checked yet, never "needs a decision" per file.
+    let mut not_checked: Vec<(String, String, i64)> = Vec::new();
+    let held = db.list_held_edits().unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "review feed: the held edits could not be read; they are left out");
+        Vec::new()
+    });
+    for (file_id, path, reason, detected_at) in held {
+        if reason == HELD_CONTENT_UNKNOWN {
+            not_checked.push((file_id, path, detected_at));
+            continue;
+        }
+        entries.push(VersionConflictEntry {
+            id: format!("held:{file_id}"),
+            file_id,
+            file_name: display_name_for_path(&path),
+            kind: "held_edit".to_string(),
+            status: "needs a decision".to_string(),
+            updated_at: Some(detected_at),
+            detail: "Changed on this PC, but Beebeeb doesn't know which version it was based on, so it \
+                     isn't sent. Both versions are kept: yours on this PC, the other in the file's history."
+                .to_string(),
+            action: "review_upload".to_string(),
+            op_id: None,
+            version_id: None,
+            base_version: None,
+            last_error: None,
+        });
+    }
+    if let Some((first_id, _, first_at)) = not_checked.first().cloned() {
+        let names: Vec<String> = not_checked.iter().take(5).map(|(_, path, _)| display_name_for_path(path)).collect();
+        let more = not_checked.len().saturating_sub(names.len());
+        let files = if not_checked.len() == 1 { "1 file".to_string() } else { format!("{} files", not_checked.len()) };
+        entries.push(VersionConflictEntry {
+            id: "held:content_unknown".to_string(),
+            file_id: first_id,
+            file_name: format!("{files} from before version 0.8.13"),
+            kind: "held_unknown".to_string(),
+            status: "not checked yet".to_string(),
+            updated_at: Some(first_at),
+            detail: format!(
+                "A change to one of them stays on this PC and isn't sent until a later update checks it. \
+                 Nothing is lost. {}{}",
+                names.join(", "),
+                if more > 0 { format!(" and {more} more") } else { String::new() }
+            ),
+            action: "review_upload".to_string(),
+            op_id: None,
+            version_id: None,
+            base_version: None,
+            last_error: None,
+        });
+    }
+
     for file in db.list_by_status(FileStatus::Conflict)? {
         entries.push(VersionConflictEntry {
             id: format!("conflict:{}", file.file_id),
@@ -5032,8 +6362,71 @@ pub fn version_conflict_feed_from_db(db: &StateDb) -> anyhow::Result<Vec<Version
         });
     }
 
+    // Review-169 #5: one entry that cannot be read is logged and left out; the rest of the feed shows.
     for op in db.list_review_operations()? {
-        entries.push(review_entry_for_operation(&op, db)?);
+        match review_entry_for_operation(&op, db) {
+            Ok(entry) => entries.push(entry),
+            Err(e) => tracing::warn!(op_id = %op.op_id, error = %e, "review feed: an entry could not be read; it is left out"),
+        }
+    }
+
+    // Task 1640 (review N9): a file deleted elsewhere while it held changes this device had not
+    // sent; they were kept as a copy, which uploads as a new file. Informational: no decision is
+    // needed, so the person can dismiss it.
+    for kept in db.list_kept_copies()? {
+        // Review F5: the text says why the file was kept.
+        let original_name = display_name_for_path(&kept.original_path);
+        let (file_name, status, detail) = match kept.reason {
+            KeptReason::Copy => {
+                let copy_name = display_name_for_path(&kept.copy_path);
+                let place = match kept.copy_path.rsplit_once('/') {
+                    Some((folder, _)) => format!("in the folder {folder}"),
+                    None => "at the top of your Beebeeb folder".to_string(),
+                };
+                let original = if kept.original_removed {
+                    ""
+                } else {
+                    " The original stays on this PC until it can be removed."
+                };
+                (
+                    copy_name.clone(),
+                    "kept as a copy",
+                    format!(
+                        "Deleted elsewhere while it held changes not sent from this PC. Those changes are kept as {copy_name}, {place}.{original}"
+                    ),
+                )
+            }
+            KeptReason::InUse => (
+                original_name,
+                "waiting to close",
+                "Deleted elsewhere while it was open on this PC. It is removed from this PC once it is closed.".to_string(),
+            ),
+            KeptReason::PartlyLocal => (
+                original_name,
+                "kept in place",
+                "Deleted elsewhere while only part of it was on this PC, so it could not be checked for changes. It stays where it is, as it is. Dismiss this once you have dealt with it.".to_string(),
+            ),
+            KeptReason::CopyFailed => (
+                original_name,
+                "kept in place",
+                "Deleted elsewhere while it held changes not sent from this PC, and they could not be copied. It stays where it is; the copy is tried again.".to_string(),
+            ),
+        };
+        entries.push(VersionConflictEntry {
+            id: format!("kept:{}", kept.id),
+            file_id: kept.original_file_id.clone(),
+            file_name,
+            kind: "kept_copy".to_string(),
+            status: status.to_string(),
+            updated_at: Some(kept.kept_at),
+            detail,
+            // Dismissable once nothing waits, or when no tick can resolve it (review F7).
+            action: if kept.dismissable() { "dismiss" } else { "none" }.to_string(),
+            op_id: None,
+            version_id: None,
+            base_version: None,
+            last_error: None,
+        });
     }
 
     entries.sort_by(|a, b| {
@@ -5045,6 +6438,20 @@ pub fn version_conflict_feed_from_db(db: &StateDb) -> anyhow::Result<Vec<Version
     Ok(entries)
 }
 
+fn owned_key_and_pin(db: &StateDb, master: &[u8; 32], id: &str)
+    -> anyhow::Result<(beebeeb_core::kdf::FileKey, beebeeb_core::chunk_stream::ExpectedChunkFormat)> {
+    if let Some(record) = db.get_owned_key_record(id)? {
+        let (key, metadata) = crate::owner_keys::record_key(&beebeeb_core::kdf::MasterKey::from_bytes(*master), &record)?;
+        return Ok((key, metadata.chunk_format));
+    }
+    Ok((file_key_for(master, id), beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded))
+}
+
+fn owned_metadata_for_name(db: &StateDb, master: &[u8; 32], id: &str, name: &str, mime: Option<&str>) -> anyhow::Result<String> {
+    let (key, pin) = owned_key_and_pin(db, master, id)?;
+    Ok(beebeeb_core::encrypt::encrypt_name_for(&key, name, mime, pin)?)
+}
+
 fn encrypted_metadata_for_name(
     master_key_bytes: &[u8; 32],
     file_id: &str,
@@ -5054,6 +6461,329 @@ fn encrypted_metadata_for_name(
     let master_key = beebeeb_core::kdf::MasterKey::from_bytes(*master_key_bytes);
     beebeeb_core::encrypt::encrypt_name(&master_key, file_id, filename, mime_type)
         .map_err(|e| anyhow::anyhow!("encrypt Finder metadata: {e}"))
+}
+
+/// Task 1640 (review F1): what a fetch served: the version, and the SHA-256 of all of that
+/// version's plaintext.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchedVersion {
+    pub version: i64,
+    pub hash: String,
+}
+
+/// Task 1640: one fetch's plaintext ([`EngineBridge::hydrate_file_to_memory`]), what it served
+/// (`None`: the download named no version), and its [`FetchTicket`], held until the transfer ended.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub struct FetchedBytes {
+    pub bytes: Zeroizing<Vec<u8>>,
+    pub version: Option<FetchedVersion>,
+    pub ticket: FetchTicket,
+}
+
+/// Task 1640 (self-review #1): a file's fetches in flight, and how often one started or ended.
+#[derive(Debug, Default)]
+struct FetchActivity {
+    in_flight: usize,
+    events: u64,
+}
+
+/// Task 1640 (self-review #1; design "The fetch tracker"): every file's fetches in flight, for the
+/// whole process, not one bridge: a bridge made later in the same process (a new sign-in) sees what
+/// an earlier one still has in flight. It is empty only when the process starts, and then no fetch
+/// of an earlier process can transfer anything any more: only this process's callbacks write into
+/// its placeholders.
+static FETCHES_IN_FLIGHT: std::sync::LazyLock<std::sync::Mutex<HashMap<String, FetchActivity>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Task 1640 (self-review #1): one fetch of a file, from before it records anything until its
+/// transfer ended (when it is dropped). It is "alone" when it was the file's only fetch in flight in
+/// this process when it started, and no other fetch of the file has started or ended since.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+pub struct FetchTicket {
+    file_id: String,
+    alone_since: Option<u64>,
+}
+
+impl FetchTicket {
+    /// Whether this fetch is alone, read from the tracker's locked map.
+    #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+    fn alone_in(&self, fetches: &HashMap<String, FetchActivity>) -> bool {
+        let Some(since) = self.alone_since else {
+            return false;
+        };
+        fetches.get(&self.file_id).is_some_and(|activity| activity.events == since)
+    }
+}
+
+impl Drop for FetchTicket {
+    fn drop(&mut self) {
+        {
+            let mut fetches = FETCHES_IN_FLIGHT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(activity) = fetches.get_mut(&self.file_id) {
+                activity.in_flight = activity.in_flight.saturating_sub(1);
+                activity.events += 1;
+                if activity.in_flight == 0 {
+                    fetches.remove(&self.file_id);
+                }
+            }
+        }
+    }
+}
+
+/// Task 2229: what [`EngineBridge::classify_local_path_verdict`] makes of a local file.
+pub(crate) enum LocalPathVerdict {
+    /// An upload to queue: a new file, or a change of a synced one.
+    Write(FinderWriteTarget),
+    /// A tracked file that needs nothing while its row and its bytes stay as they are: a folder
+    /// row, a row not `Local`, bytes that are the agreed content, or a change held until its row
+    /// records the agreed content or a base (task 2191). The scan may skip it until either changes.
+    Settled,
+    /// Nothing this pass; ask again next pass.
+    Skip,
+}
+
+/// Task 1640: what a tracked sync-folder file's bytes are (Windows: Linux runs no upload driver), against the content
+/// this device last agreed with the server on: `local_hash` at `local_base_version`, written by a
+/// hydrate into the sync folder and by a landing. The tick's detector is not this: it never sees
+/// the device's bytes (task 2190).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SyncFolderContent {
+    /// The bytes are the agreed content: they may be replaced, freed or marked in sync.
+    Agreed,
+    /// An upload of the file's content is queued (parked included): the bytes are not sent yet.
+    Queued,
+    /// The bytes differ from the agreed content and nothing is queued: a change that is not
+    /// sent. `base` is the version they are based on, `None` when it is not known.
+    Changed { base: Option<i64> },
+    /// No agreed content is recorded (a file hydrated before task 1640).
+    Unknown,
+}
+
+/// Task 2190: a held edit's reasons (`held_edits.reason`).
+const HELD_BASE_UNKNOWN: &str = "base_unknown";
+const HELD_CONTENT_UNKNOWN: &str = "content_unknown";
+
+/// [`SyncFolderContent`] of `file_id`'s bytes at `path`. `os_in_sync` is the Cloud Files in-sync
+/// state of its placeholder (Windows; `None` elsewhere): the platform clears it when the bytes
+/// change, and this engine sets it only on agreed content, so `Some(true)` is agreed without
+/// reading the file. The file is read only when an agreed hash is recorded.
+/// Task 2191: whether `path` holds bytes on this PC (a placeholder partly or wholly on disk, or
+/// a plain file). Unreadable counts as holding bytes.
+fn place_holds_bytes(path: &Path) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        !matches!(
+            crate::windows_cf::placeholders::placeholder_local_entry_trusting(path, false),
+            LocalEntry::NothingLocal
+        )
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::fs::metadata(path).is_ok_and(|meta| meta.len() > 0)
+    }
+}
+
+/// Task 2271: what [`EngineBridge::row_judging_bytes_at`] found at a path.
+enum RowAtPath {
+    None,
+    One(FileEntry),
+    /// Several rows record content this PC agreed on, and the bytes are none of them (or more than one): the ids of
+    /// those rows, and how many rows share the path.
+    Ambiguous { file_ids: Vec<String>, rows: usize },
+    /// Windows: several rows, and choosing would read bytes that are not wholly on this PC.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    NotWhollyOnDisk,
+}
+
+pub(crate) fn sync_folder_content(
+    db: &StateDb,
+    file_id: &str,
+    path: &Path,
+    os_in_sync: Option<bool>,
+) -> anyhow::Result<SyncFolderContent> {
+    if db.sync_folder_upload_queued(file_id)? {
+        return Ok(SyncFolderContent::Queued);
+    }
+    // Task 2191 (G-engine): a file of unknown content (synced before task 1640) may hold an edit
+    // that 0.8.12 marked in sync, so the platform's in-sync state never makes it Agreed.
+    if os_in_sync == Some(true) && !db.is_unknown_content(file_id)? {
+        return Ok(SyncFolderContent::Agreed);
+    }
+    let Some(contract) = db.get_file_contract_state(file_id)? else {
+        return Ok(SyncFolderContent::Unknown);
+    };
+    let (agreed, base) = match contract.local_hash {
+        Some(agreed) => (agreed, contract.local_base_version),
+        // Task 1640 (review N1): no agreed content yet, but range fetches served the bytes: the
+        // candidate decides like a baseline. Its bytes are exactly version `version`'s, so equal
+        // bytes are agreed, and any other is a change sent on `version` (never too high: a server
+        // that moved refuses it as stale).
+        None => match db.fetched_content(file_id)? {
+            Some((version, Some(hash))) => (hash, version),
+            // Mixed: the fetches served more than one version, so the bytes are none of them.
+            // Never agreed; a change is sent on the oldest version served.
+            Some((version, None)) => return Ok(SyncFolderContent::Changed { base: Some(version) }),
+            None => return Ok(SyncFolderContent::Unknown),
+        },
+    };
+    if cached_sha256_file_hex(file_id, path)? == agreed {
+        return Ok(SyncFolderContent::Agreed);
+    }
+    Ok(SyncFolderContent::Changed {
+        base: Some(base).filter(|version| *version > 0),
+    })
+}
+
+/// Task 1640 (review N1, condition 2): make a file's candidate its agreed content. Only for a
+/// file the platform reports in sync with no modified data (`local`), wholly on disk, whose bytes
+/// read under one exclusive handle (`hash_under_handle`) are the candidate's, with a candidate of
+/// ONE version (a mixed one is none), and only while the row is still `Local` with that same
+/// candidate (re-checked in the write). `Ok(true)`: promoted.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+pub(crate) fn promote_fetched_content(
+    db: &StateDb,
+    file_id: &str,
+    local: LocalEntry,
+    wholly_on_disk: bool,
+    hash_under_handle: &mut dyn FnMut() -> std::io::Result<String>,
+) -> anyhow::Result<bool> {
+    if local != LocalEntry::InSync || !wholly_on_disk {
+        return Ok(false);
+    }
+    let Some(row) = db.get_file(file_id)? else {
+        return Ok(false);
+    };
+    if row.status != FileStatus::Local
+        || db.get_file_contract_state(file_id)?.is_some_and(|contract| contract.local_hash.is_some())
+    {
+        return Ok(false);
+    }
+    let Some((version, Some(candidate))) = db.fetched_content(file_id)? else {
+        return Ok(false);
+    };
+    if hash_under_handle()? != candidate {
+        return Ok(false);
+    }
+    Ok(db.promote_fetched_content(file_id, version, &candidate)?)
+}
+
+/// Task 2204 S0.4: a Windows rename is sent this long after it is queued, so a safe save
+/// (rename away, new file, delete) completes first and folds back onto the original.
+pub(crate) const RENAME_SETTLE_SECS: i64 = 10;
+
+/// Lower-case hex SHA-256 of `bytes`: a sync-folder file's agreed content (task 1640).
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+/// Task 2232: what a cached content hash is reused against. Size and modification time alone let a
+/// write that keeps the size and sets the modification time back return the old hash, so an edit
+/// read as the agreed content was never sent. The change time moves on every write and on every
+/// time change, and an ordinary tool cannot set it back (Unix `ctime`; Windows `ChangeTime`). A
+/// file renamed over the path is another file (Unix device and inode; Windows volume and file index).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct ContentFingerprint {
+    len: u64,
+    modified: std::time::SystemTime,
+    changed: std::time::SystemTime,
+    identity: (u64, u64),
+}
+
+impl ContentFingerprint {
+    pub(crate) fn of(path: &Path) -> std::io::Result<Self> {
+        let meta = std::fs::metadata(path)?;
+        let modified = meta.modified()?;
+        #[cfg(unix)]
+        let (changed, identity) = {
+            use std::os::unix::fs::MetadataExt;
+            let changed = u64::try_from(meta.ctime())
+                .ok()
+                .and_then(|secs| {
+                    std::time::UNIX_EPOCH.checked_add(std::time::Duration::new(secs, meta.ctime_nsec() as u32))
+                })
+                .unwrap_or(std::time::UNIX_EPOCH);
+            (changed, (meta.dev(), meta.ino()))
+        };
+        #[cfg(target_os = "windows")]
+        let (changed, identity) = {
+            let stamp = crate::windows_cf::placeholders::change_stamp(path)?;
+            (stamp.change_time, (u64::from(stamp.volume_serial), stamp.file_index))
+        };
+        #[cfg(not(any(unix, target_os = "windows")))]
+        let (changed, identity) = (modified, (0, 0));
+        Ok(Self {
+            len: meta.len(),
+            modified,
+            changed,
+            identity,
+        })
+    }
+
+    /// The later of the modification and the change time: a hash taken within [`HASH_CACHE_SETTLED`] of it
+    /// may have missed a write in the same timer tick.
+    fn last_touched(&self) -> std::time::SystemTime {
+        self.modified.max(self.changed)
+    }
+}
+
+/// Task 1640 (review P2-5): [`sha256_file_hex`] of `file_id`'s file at `path`, read again only
+/// when its [`ContentFingerprint`] changed since the last read: a scan, a close and a stamp
+/// pass otherwise re-hashed every out-of-sync file (a plain file an atomic save left stays one)
+/// every few seconds. A cached hash is trusted only when it was taken at least
+/// [`HASH_CACHE_SETTLED`] after the file's modification and change times: file times are coarse (a
+/// timer tick), so a later write inside the same tick would otherwise look unchanged. A hash whose
+/// file changed while it was read is not kept. The cache is one per process, keyed by the file id and
+/// the path together.
+pub(crate) fn cached_sha256_file_hex(file_id: &str, path: &Path) -> std::io::Result<String> {
+    cached_sha256_file_hex_at(file_id, path, std::time::SystemTime::now())
+}
+
+/// [`cached_sha256_file_hex`], the hash taken at `now`: a test moves it past [`HASH_CACHE_SETTLED`], as a
+/// change time cannot be set back.
+fn cached_sha256_file_hex_at(file_id: &str, path: &Path, now: std::time::SystemTime) -> std::io::Result<String> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<(String, PathBuf), (ContentFingerprint, std::time::SystemTime, String)>>,
+    > = std::sync::OnceLock::new();
+    let fingerprint = ContentFingerprint::of;
+    let before = fingerprint(path)?;
+    let cache = CACHE.get_or_init(Default::default);
+    let key = (file_id.to_string(), path.to_path_buf());
+    if let Some((seen, hashed_at, hash)) = cache.lock().unwrap_or_else(|p| p.into_inner()).get(&key)
+        && *seen == before
+        && *hashed_at >= before.last_touched() + HASH_CACHE_SETTLED
+    {
+        return Ok(hash.clone());
+    }
+    let hashed_at = now;
+    #[cfg(test)]
+    HASH_READS.with(|reads| reads.set(reads.get() + 1));
+    let hash = sha256_file_hex(path)?;
+    if fingerprint(path)? == before {
+        cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(key, (before, hashed_at, hash.clone()));
+    }
+    Ok(hash)
+}
+
+/// Files [`cached_sha256_file_hex`] read on this thread (tests count them).
+#[cfg(test)]
+thread_local! {
+    static HASH_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How long after a file's modification and change times a hash of it must have been taken to be reused.
+const HASH_CACHE_SETTLED: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// [`sha256_hex`] of the file at `path`, read in a stream.
+pub(crate) fn sha256_file_hex(path: &Path) -> std::io::Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut std::fs::File::open(path)?, &mut hasher)?;
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 /// The `init` guard (spec §6.3.1), checked where the request is built: a File Provider
@@ -5096,11 +6826,17 @@ fn upload_init_request_for_operation(
     }
 }
 
+#[cfg(test)]
 fn prepare_thumbnail_uploads_for_plaintext_media(
     payload_path: &Path,
     mime_type: Option<&str>,
     file_key: &beebeeb_core::kdf::FileKey,
 ) -> anyhow::Result<Vec<PreparedThumbnailUpload>> {
+    prepare_thumbnail_uploads_with_pin(payload_path, mime_type, file_key, beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded)
+}
+
+fn prepare_thumbnail_uploads_with_pin(payload_path: &Path, mime_type: Option<&str>, file_key: &beebeeb_core::kdf::FileKey,
+    pin: beebeeb_core::chunk_stream::ExpectedChunkFormat) -> anyhow::Result<Vec<PreparedThumbnailUpload>> {
     if !beebeeb_core::media::is_media(mime_type) {
         return Ok(Vec::new());
     }
@@ -5129,7 +6865,7 @@ fn prepare_thumbnail_uploads_for_plaintext_media(
             };
         let plaintext = Zeroizing::new(output.data);
         let encrypted = Zeroizing::new(
-            beebeeb_core::encrypt::encrypt_chunk_raw(file_key, &plaintext)
+            beebeeb_core::encrypt::encrypt_thumbnail_for(file_key, &plaintext, pin)
                 .map_err(|e| anyhow::anyhow!("encrypt thumbnail {}: {e}", variant.label()))?,
         );
         if encrypted.len() > variant.encrypted_max_bytes() {
@@ -5393,22 +7129,6 @@ fn payload_mtime_ns(path: &Path) -> i64 {
         .unwrap_or(0)
 }
 
-/// Fill `buffer` from `file` (short only at EOF). Chunk `k` must be exactly the
-/// bytes at `k * chunk_size`, so a resumed upload that seeks to the
-/// acknowledged watermark lines up with the chunks the server already holds.
-fn read_full_chunk(file: &mut std::fs::File, buffer: &mut [u8]) -> std::io::Result<usize> {
-    let mut filled = 0;
-    while filled < buffer.len() {
-        match file.read(&mut buffer[filled..]) {
-            Ok(0) => break,
-            Ok(n) => filled += n,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(filled)
-}
-
 /// The server no longer accepts writes to this upload session: 404 (session
 /// or file row gone — e.g. reaped by the stale-upload sweep), 410, or 400
 /// (session not writable / chunk plan no longer matches / a chunk the client
@@ -5582,7 +7302,7 @@ fn log_parked_attempts_used_up(op_id: &str, file_id: Option<&str>) {
 /// for `file_id`. The plaintext name is the op's display name; the MIME hint
 /// is the op's content type, else the one guessed from the name, as the
 /// Finder write path does.
-fn metadata_rekeyed_to(master_key: &[u8; 32], op: &PendingOperation, file_id: &str) -> anyhow::Result<Option<String>> {
+fn metadata_rekeyed_with_material(master_key: &[u8; 32], op: &PendingOperation, file_id: &str, material: Option<(&beebeeb_core::kdf::FileKey, beebeeb_core::chunk_stream::ExpectedChunkFormat)>) -> anyhow::Result<Option<String>> {
     let Some(raw) = op.metadata_json.as_deref() else {
         return Ok(None);
     };
@@ -5600,12 +7320,10 @@ fn metadata_rekeyed_to(master_key: &[u8; 32], op: &PendingOperation, file_id: &s
         .as_str()
         .map(str::to_string)
         .or_else(|| beebeeb_core::media::guess_mime_type(&name).map(str::to_string));
-    metadata["name_encrypted"] = serde_json::json!(encrypted_metadata_for_name(
-        master_key,
-        file_id,
-        &name,
-        mime.as_deref()
-    )?);
+    metadata["name_encrypted"] = serde_json::json!(match material {
+        Some((key, pin)) => beebeeb_core::encrypt::encrypt_name_for(key, &name, mime.as_deref(), pin)?,
+        None => encrypted_metadata_for_name(master_key, file_id, &name, mime.as_deref())?,
+    });
     Ok(Some(serde_json::to_string(&metadata)?))
 }
 
@@ -5640,17 +7358,20 @@ fn metadata_display_name(metadata: &serde_json::Value, op: &PendingOperation) ->
         .or_else(|| op.target_path.as_deref().map(display_name_for_path))
 }
 
-fn decrypt_downloaded_chunk(
-    file_key: &beebeeb_core::kdf::FileKey,
-    chunk_bytes: &[u8],
-) -> Result<Vec<u8>, beebeeb_core::CoreError> {
-    match beebeeb_core::encrypt::decrypt_chunk_raw(file_key, chunk_bytes) {
-        Ok(bytes) => Ok(bytes),
-        Err(raw_error) => {
-            let blob: EncryptedBlob = serde_json::from_slice(chunk_bytes).map_err(|_| raw_error)?;
-            beebeeb_core::encrypt::decrypt_chunk(file_key, &blob)
-        }
-    }
+/// Normalize the legacy JSON transport envelope, without decryption or format fallback.
+pub(crate) fn content_frame(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
+    if let Ok(blob) = serde_json::from_slice::<EncryptedBlob>(bytes) {
+        anyhow::ensure!(blob.nonce.len() == 12, "invalid chunk envelope");
+        let mut frame = blob.nonce;
+        frame.extend(blob.ciphertext);
+        Ok(frame)
+    } else { Ok(bytes.to_vec()) }
+}
+
+fn recorded_content_format(key: &beebeeb_core::kdf::FileKey, meta: &serde_json::Value)
+    -> anyhow::Result<beebeeb_core::chunk_stream::ExpectedChunkFormat> {
+    let name = meta["name_encrypted"].as_str().ok_or_else(|| anyhow::anyhow!("missing authenticated file metadata"))?;
+    Ok(beebeeb_core::encrypt::decrypt_file_metadata_with_key(key, name)?.chunk_format)
 }
 
 /// The result of [`EngineBridge::hydrate_file_range`]: the decrypted plaintext
@@ -5757,6 +7478,35 @@ pub(crate) fn local_file_path_under_sync_root(sync_root: &Path, rel_path: &str) 
 /// Called synchronously from the download loop, so it must be cheap and must
 /// not block (the IPC handler just pushes onto a channel).
 pub(crate) type HydrateProgressFn = dyn Fn(u64, u64) + Send + Sync;
+
+/// Where a direct download (task 2173) reports: the same wire counter, transfer board and
+/// progress callback the API path's chunk loop feeds.
+struct HydrateReport<'a> {
+    bridge: &'a EngineBridge,
+    file_id: &'a str,
+    /// The server's plaintext size (the API path's `total`).
+    total: u64,
+    progress: Option<&'a HydrateProgressFn>,
+}
+
+impl crate::direct_download::Progress for HydrateReport<'_> {
+    fn received(&self, wire_bytes: u64) {
+        self.bridge.wire.download_bytes.fetch_add(wire_bytes, Ordering::Relaxed);
+    }
+
+    fn decrypted(&self, plaintext_bytes: u64) {
+        self.decrypted_bytes(plaintext_bytes);
+    }
+}
+
+impl HydrateReport<'_> {
+    fn decrypted_bytes(&self, done: u64) {
+        self.bridge.transfers.report(self.file_id, done, self.total);
+        if let Some(report) = self.progress {
+            report(done, self.total);
+        }
+    }
+}
 
 /// Restores a row's status if [`EngineBridge::hydrate_file_with_progress`] is
 /// dropped mid-download (the IPC client hung up and the future was cancelled).
@@ -6505,6 +8255,29 @@ fn record_moved_to_trash_activity(db: &StateDb, file_id: &str, rel_path: &str, o
     Ok(())
 }
 
+/// Task 2190 (review-169 #5): whether the review row may open the decision. A read that fails offers
+/// no decision (the row stays, with its old action), and is logged.
+fn decidable_or_logged(db: &StateDb, op_id: &str) -> bool {
+    decidable_check(db, op_id).unwrap_or_else(|e| {
+        tracing::warn!(op_id = %op_id, error = %e, "review feed: the decision check failed");
+        false
+    })
+}
+
+fn decidable_check(db: &StateDb, op_id: &str) -> anyhow::Result<bool> {
+    #[cfg(test)]
+    if FAIL_DECIDABLE_READ.with(|fail| fail.borrow().as_deref() == Some(op_id)) {
+        anyhow::bail!("the decision check failed (test)");
+    }
+    Ok(db.is_decidable_parked(op_id)?)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Task 2190: the op whose decision check fails, for the feed's per-item test.
+    static FAIL_DECIDABLE_READ: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
 fn review_entry_for_operation(op: &PendingOperation, db: &StateDb) -> anyhow::Result<VersionConflictEntry> {
     let file_id = op.file_id.clone().unwrap_or_else(|| op.op_id.clone());
     let file_name = op
@@ -6519,6 +8292,13 @@ fn review_entry_for_operation(op: &PendingOperation, db: &StateDb) -> anyhow::Re
         })
         .unwrap_or_else(|| file_id.clone());
     let (kind, status, detail, action) = classify_review_operation(op);
+    // Task 2190 (plan §3.4): a parked stale-base Finder write the person may decide opens the
+    // conflict; every other row keeps its action (D3).
+    let action = if kind == "stale_base" && decidable_or_logged(db, &op.op_id) {
+        "open_conflict"
+    } else {
+        action
+    };
 
     Ok(VersionConflictEntry {
         id: format!("op:{}", op.op_id),
@@ -6871,14 +8651,28 @@ fn encrypted_file_key_from_folder_keys_response<'a>(
         .and_then(|entry| entry.get("encrypted_file_key").and_then(|value| value.as_str()))
 }
 
+#[cfg(test)]
+thread_local! { static LEGACY_CHILD_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
+fn unwrap_folder_child_for_format(folder: &[u8;32], root: &str, id: &str, kind: u8, wrap: &str, custody: bool) -> anyhow::Result<beebeeb_core::kdf::FileKey> {
+    if custody {
+        let frame = base64::engine::general_purpose::STANDARD.decode(wrap)?;
+        Ok(beebeeb_sync::key_resolution::unwrap_child_key(
+            &beebeeb_core::kdf::FileKey::from_bytes(*folder), root, id, kind, &frame)?)
+    } else { unwrap_child_file_key(folder, wrap) }
+}
+
 fn unwrap_child_file_key(
     folder_key: &[u8; 32],
     encrypted_file_key_b64: &str,
 ) -> anyhow::Result<beebeeb_core::kdf::FileKey> {
+    #[cfg(test)]
+    LEGACY_CHILD_READS.with(|n| n.set(n.get()+1));
     let file_key = unwrap_key_frame(folder_key, encrypted_file_key_b64, "encrypted_file_key")?;
     Ok(beebeeb_core::kdf::FileKey::from_bytes(*file_key))
 }
 
+#[cfg(test)]
 fn unwrap_folder_share_file_key(
     recipient_master_key: &[u8; 32],
     sender_public_key_b64: &str,
@@ -6949,32 +8743,40 @@ fn safe_shared_leaf_name(name: &str) -> Option<String> {
     Some(leaf.to_string())
 }
 
-fn metadata_name_from_plaintext(plaintext: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(plaintext)
-        .ok()
-        .and_then(|value| value.get("name").and_then(|name| name.as_str()).map(str::to_string))
-        .unwrap_or_else(|| plaintext.to_string())
+/// Spec D5 (task 1888): after the pass committed, the directories of the scaffolding it dropped (sync-root-relative)
+/// are removed deepest first, each with `std::fs::remove_dir`: never recursive, so one that holds anything errors and
+/// stays, as does one already gone. A path that is empty, absolute or climbs out of the sync root is skipped. The
+/// paths are never logged.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn remove_scaffold_dirs(sync_root: &Path, dirs: &[String]) {
+    let mut inside: Vec<&Path> = dirs
+        .iter()
+        .map(Path::new)
+        .filter(|rel| {
+            rel.components().next().is_some()
+                && rel.components().all(|part| matches!(part, std::path::Component::Normal(_)))
+        })
+        .collect();
+    inside.sort_by_key(|rel| std::cmp::Reverse(rel.components().count()));
+    for rel in inside {
+        let _ = std::fs::remove_dir(sync_root.join(rel));
+    }
 }
 
-fn decrypt_shared_name_with_key(file_key: &beebeeb_core::kdf::FileKey, name_encrypted: &str) -> Option<String> {
-    if let Ok(blob) = serde_json::from_str::<EncryptedBlob>(name_encrypted)
-        && let Ok(plaintext) = beebeeb_core::encrypt::decrypt_metadata(file_key, &blob)
-    {
-        return Some(metadata_name_from_plaintext(&plaintext));
-    }
+/// Whether `sealed` (a `name_encrypted` envelope) is this account's name for `file_id`. Core's file metadata reader
+/// (`decrypt_file_metadata`) opens it under the file key derived from `master_key` and `file_id`, in every format the
+/// engine reads: the string id (as every client seals today) and the 16-byte binary id (the old CLI); the name subkey
+/// (`beebeeb/name/v1`, task 1908) and the legacy raw file key; both envelopes. It refuses a plaintext name, which proves
+/// nothing. The key is derived from this id, so a name sealed for another file, or under another account's key, never
+/// opens. Task 2267's proof (`own_data_proof::probe`) and task 1888's key check (spec D12) read names this way.
+pub fn name_opens(master_key: &[u8; 32], file_id: &str, sealed: &str) -> bool {
+    let master = beebeeb_core::kdf::MasterKey::from_bytes(*master_key);
+    beebeeb_core::encrypt::decrypt_file_metadata(&master, file_id, sealed)
+        .is_ok_and(|metadata| !metadata.name.trim().is_empty())
+}
 
-    if let Ok((nonce, ciphertext)) = beebeeb_core::metadata_wire::parse_encrypted_metadata(name_encrypted) {
-        let blob = EncryptedBlob {
-            cipher_suite: CipherSuite::V1Aes256Gcm,
-            nonce,
-            ciphertext,
-        };
-        if let Ok(plaintext) = beebeeb_core::encrypt::decrypt_metadata(file_key, &blob) {
-            return Some(metadata_name_from_plaintext(&plaintext));
-        }
-    }
-
-    None
+pub(crate) fn decrypt_shared_name_with_key(file_key: &beebeeb_core::kdf::FileKey, name_encrypted: &str) -> Option<String> {
+    beebeeb_core::encrypt::decrypt_file_metadata_with_key(file_key, name_encrypted).ok().map(|m| m.name)
 }
 
 fn shared_name_from_metadata(
@@ -7166,7 +8968,7 @@ fn apply_metadata_file_row(
     let existing = db.get_file(file_id)?;
     let size = f["size_bytes"].as_i64().or_else(|| f["size"].as_i64()).unwrap_or(0);
     let remote_updated = f["updated_at"].as_i64().unwrap_or(0);
-    let leaf = resolve_relative_path(f, file_id, master_key);
+    let leaf = crate::owner_keys::stored_name(db,file_id,master_key)?.unwrap_or_else(||resolve_relative_path(f,file_id,master_key));
     // Compose the nested path. An empty leaf means the name didn't decrypt;
     // keep it empty so the placeholder seeder skips the row (and retries next
     // tick) rather than seeding a bare parent dir. A leaf that already carries
@@ -7180,10 +8982,23 @@ fn apply_metadata_file_row(
             leaf.trim_start_matches('/')
         )
     };
+    // Task 2204 S0.3: while a Windows rename of this file is queued (parked included), the row's
+    // path and parent are where the file is on disk; the server's are still the old ones.
+    let held = match existing.as_ref() {
+        // Only `handle_rename` (Windows) queues these ops, so other builds skip the query.
+        Some(entry) if cfg!(any(target_os = "windows", test)) && !entry.is_dir() && db.has_queued_local_rename(file_id)? => {
+            Some(entry.clone())
+        }
+        _ => None,
+    };
+    let path = held.as_ref().map_or(path, |entry| entry.path.clone());
     let status = existing
         .as_ref()
         .map(|entry| entry.status.clone())
         .unwrap_or(FileStatus::CloudOnly);
+    // Task 1640 (review N1, condition 1): a remote move or rename gives the row another place;
+    // the fetch candidate described the entry at the old one.
+    let moved = existing.as_ref().is_some_and(|entry| entry.path != path);
 
     let item_kind = if f["is_folder"].as_bool().unwrap_or(false)
         || f["kind"].as_str() == Some("folder")
@@ -7193,9 +9008,13 @@ fn apply_metadata_file_row(
     } else {
         ItemKind::File
     };
-    let server_parent_id = f["parent_id"].as_str().map(str::to_string);
+    let is_file = item_kind == ItemKind::File;
+    let server_parent_id = match held.as_ref() {
+        Some(entry) => entry.parent_id.clone(),
+        None => f["parent_id"].as_str().map(str::to_string),
+    };
 
-    let entry = FileEntry {
+    let mut entry = FileEntry {
         file_id: file_id.to_string(),
         path,
         status,
@@ -7214,7 +9033,9 @@ fn apply_metadata_file_row(
     };
     // Spec §7.2 (final review): the row and its contract in one transaction, so no listing
     // sees a new nested row without its parent.
-    db.upsert_file_with_contract(&entry, |contract| {
+    // Task 2204 S0.3 (review-155): the hold is decided again inside the write's own
+    // transaction, so a Windows rename committed after the reads above is never written over.
+    entry.path = db.upsert_server_file_row(&entry, |contract| {
         contract.namespace = namespace;
         contract.parent_id = server_parent_id;
         contract.shared_root_id = shared_root_id;
@@ -7235,11 +9056,25 @@ fn apply_metadata_file_row(
             .or_else(|| f["object_version_id"].as_str())
             .map(str::to_string)
             .or(contract.current_object_version_id.take());
-        if entry.status == FileStatus::Local && contract.local_base_version == 0 {
-            contract.local_base_version = contract.current_version;
-        }
+        // Task 2190 (plan §7.1 E3): a `Local` row's base is never invented from the server's
+        // version. 0 stays unknown; an edit on an unknown base is held, not sent (task 2229).
         contract.last_sync_at = now;
     })?;
+    // Task 1640 (review F1): a move changes no byte, but the candidate is never promoted at the
+    // new place: it becomes mixed, its version kept.
+    if moved {
+        db.poison_fetched_content(file_id)?;
+    }
+    // Task 2191 (D12, review-114 F-P1-7, R2-P2-2): a remote rename or move leaves this file's
+    // placeholder at the old path (T9), and the new path may still hold another file's. Both
+    // places are recorded for the tick's retry (Windows), which keeps one only when the identity
+    // there names a file of unknown content living elsewhere (`unknown_check::verify_orphan`).
+    if moved && cfg!(any(target_os = "windows", test)) && is_file {
+        if let Some(previous) = existing.as_ref() {
+            db.put_unknown_orphan(&previous.path, file_id, true)?;
+        }
+        db.put_unknown_orphan(&entry.path, file_id, true)?;
+    }
     Ok(Some(entry))
 }
 
@@ -7267,17 +9102,11 @@ pub struct ConflictDetected {
 ///
 /// 2. **Known and locally `Local`, remote moved** — the row exists,
 ///    its status is `Local`, and the server's `updated_at` is past
-///    `remote_updated_at`. We use the
-///    [`crate::conflict::is_conflict`] predicate to decide whether
-///    that's a one-sided update we can quietly accept (no local edit
-///    since base) or a divergent edit that needs the user. The
-///    "hashes" we feed are synthetic right now: the server doesn't
-///    expose a content hash on file metadata yet, so we compose
-///    `<size>-<updated_at>` for remote and reuse the local
-///    `content_hash` for local. False negatives (different bytes,
-///    same size + mtime) are theoretically possible but rare; the
-///    engine bridge will catch them on the next chunk diff once that
-///    code lands.
+///    `remote_updated_at`. The row is re-anchored to the server's
+///    version (task 2190, plan §7.2). A `Local` row has no pending write;
+///    an edit not yet queued keeps its base (1640's agreed content), is
+///    queued on it and parks as stale when the server moved: the parked
+///    op is the conflict (E1). The pull reads no file.
 ///
 /// 3. **Known and not in `Local`** — pending download/upload, etc.
 ///    Leave alone; the upload/download path owns those transitions.
@@ -7291,6 +9120,12 @@ pub struct ConflictDetected {
 pub struct SyncTickOutcome {
     pub conflicts: Vec<ConflictDetected>,
     pub applied_item_ids: Vec<String>,
+    /// Spec D11 (task 1888, review P1): the pull came back from the server: a snapshot, or the `/sync/ops` delta. A
+    /// tick whose `GET /sync/ops` failed (offline, a 5xx, a 401) still returns `Ok`, so `Ok` alone proves neither that
+    /// the server accepts this session's token nor that the rows the reconcile pass plans against are current; the
+    /// pass and the resume wait for a tick where this is true.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    pub reached_server: bool,
 }
 
 /// Re-snapshots that must fail in a row before a failed one no longer ends the tick (spec §6.3.2).
@@ -7348,6 +9183,7 @@ pub async fn sync_tick_outcome(
         .unwrap_or(0);
     let mut conflicts: Vec<ConflictDetected> = Vec::new();
     let mut applied_item_ids: Vec<String> = Vec::new();
+    bridge.maintain_owned_keys(now_secs).await?;
 
     // ── /sync delta engine (task 0789) ────────────────────────────────────────
     //
@@ -7417,6 +9253,7 @@ pub async fn sync_tick_outcome(
             return Ok(SyncTickOutcome {
                 conflicts,
                 applied_item_ids: dedupe(applied_item_ids),
+                reached_server: true,
             });
         }
         Some(c) if needs_resnapshot => {
@@ -7434,6 +9271,7 @@ pub async fn sync_tick_outcome(
                     return Ok(SyncTickOutcome {
                         conflicts,
                         applied_item_ids: dedupe(applied_item_ids),
+                        reached_server: true,
                     });
                 }
                 Err(e) => after_failed_snapshot(bridge, c, e)?,
@@ -7450,9 +9288,11 @@ pub async fn sync_tick_outcome(
             // snapshot — just skip this tick and retry next time. The cursor is
             // unchanged, so no op is missed.
             tracing::warn!(error = %e, cursor, "sync_tick: /sync/ops failed; retrying next tick");
+            // The pull did not come back: `Ok`, but not a tick that reached the server (spec D11, review P1).
             return Ok(SyncTickOutcome {
                 conflicts,
                 applied_item_ids: dedupe(applied_item_ids),
+                reached_server: false,
             });
         }
     };
@@ -7472,7 +9312,8 @@ pub async fn sync_tick_outcome(
         // concurrent completion stamps during the fetch.
         let fetched_at = now_secs;
         match bridge.api().sync_snapshot().await {
-            Ok(snap) if snap.seq_id < cursor => {
+            Ok(mut snap) if snap.seq_id < cursor => {
+                snap.nodes=bridge.prepare_owned_rows(&snap.nodes).await?.into_iter().map(|p|p.row).collect();
                 tracing::warn!(
                     cursor,
                     server_seq = snap.seq_id,
@@ -7489,20 +9330,24 @@ pub async fn sync_tick_outcome(
         return Ok(SyncTickOutcome {
             conflicts,
             applied_item_ids: dedupe(applied_item_ids),
+            reached_server: true,
         });
     }
 
     // Apply the delta ops in order, advancing the cursor to the max seq_id.
     let mut max_seq = cursor;
-    for op in &ops.ops {
-        match apply_sync_op(bridge, sync_root, op, now_secs, &mut conflicts) {
+    for original in &ops.ops {
+        let prepared = prepare_owned_sync_op(bridge, original).await?;
+        bridge.owner_key_scope().check()?;
+        max_seq = max_seq.max(original.seq_id);
+        let Some(op) = prepared else { continue; };
+        match apply_sync_op(bridge, sync_root, &op, now_secs, &mut conflicts) {
             Ok(applied) => applied_item_ids.extend(applied),
             Err(e) => {
                 // A failed op applied nothing: it contributes no ids.
                 tracing::warn!(error = %e, op_type = %op.op_type, seq_id = op.seq_id, "sync_tick: op apply error; skipping op");
             }
         }
-        max_seq = max_seq.max(op.seq_id);
     }
     if max_seq > cursor {
         bridge.db().set_sync_cursor(max_seq)?;
@@ -7510,7 +9355,23 @@ pub async fn sync_tick_outcome(
     Ok(SyncTickOutcome {
         conflicts,
         applied_item_ids: dedupe(applied_item_ids),
+        reached_server: true,
     })
+}
+
+/// Enrich actual sparse events before entering the synchronous reconciler.
+async fn prepare_owned_sync_op(bridge:&EngineBridge,op:&crate::api_client::SyncOp)->anyhow::Result<Option<crate::api_client::SyncOp>> {
+    if !matches!(op.op_type.as_str(),"file_create"|"folder_create"|"file_update"|"file_rename"|"folder_rename"|"file_move"|"folder_move") {return Ok(Some(op.clone()));}
+    let Some(id)=op.payload["id"].as_str() else{return Ok(Some(op.clone()))};
+    let known_foreign=bridge.db().get_owned_key_record(id)?.is_some_and(|r|r.foreign_added || r.owner_wrap.is_some());
+    let mut row=synthesize_op_row(bridge,id,op,op.payload["new_name_encrypted"].as_str().or_else(||op.payload["name_encrypted"].as_str()));
+    if known_foreign && op.payload["name_encrypted"].is_null() && op.payload["new_name_encrypted"].is_null() {row=serde_json::json!({"id":id});}
+    let mut prepared=bridge.prepare_owned_rows(&[row]).await?;
+    let Some(prepared)=prepared.pop() else{return Ok(None)};
+    let mut result=op.clone();result.payload=prepared.row;
+    if matches!(op.op_type.as_str(),"file_move"|"folder_move") {result.payload["new_parent_id"]=result.payload["parent_id"].clone();}
+    if matches!(op.op_type.as_str(),"file_rename"|"folder_rename") {result.payload["new_name_encrypted"]=result.payload["name_encrypted"].clone();}
+    Ok(Some(result))
 }
 
 /// Drop duplicate ids from one tick's applied batch (an item can be applied
@@ -7534,7 +9395,8 @@ async fn bootstrap_from_snapshot(
     // prune freshness cutoff that never prunes a row a concurrent local
     // completion stamps while this snapshot is in flight (see `prune_absent`).
     let fetched_at = now_secs;
-    let snapshot = bridge.api().sync_snapshot().await?;
+    let mut snapshot = bridge.api().sync_snapshot().await?;
+    snapshot.nodes=bridge.prepare_owned_rows(&snapshot.nodes).await?.into_iter().map(|p|p.row).collect();
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut applied = apply_snapshot(bridge, sync_root, &snapshot, now_secs, fetched_at, conflicts)?;
     // §6.3.3: an upload still waiting for its base after this successful snapshot counts
@@ -7643,7 +9505,7 @@ fn apply_snapshot(
         // placeholder. `prune_absent` returns rows CHILDREN-BEFORE-PARENTS (orphan
         // descendants of a pruned folder precede the folder), which is exactly the
         // order placeholder removal needs (leaf files before their directory).
-        remove_pruned_placeholders(sync_root, &pruned);
+        remove_pruned_placeholders(bridge.db(), sync_root, &pruned);
         // A pruned row is a REMOTE deletion Finder must see (T3).
         applied.extend(pruned.iter().map(|row| row.file_id.clone()));
     }
@@ -7666,25 +9528,564 @@ fn apply_snapshot(
 /// A row whose path can't be safely resolved under the root (empty/traversal) is
 /// skipped. Per-row failures are logged (file_id only — zero-knowledge) and never
 /// abort the sweep. No-op on macOS/Linux.
-#[cfg(target_os = "windows")]
-fn remove_pruned_placeholders(sync_root: &Path, rows: &[crate::state_db::PrunedRow]) {
-    for row in rows {
-        let Some(path) = EngineBridge::placeholder_path_under(sync_root, &row.path) else {
-            continue;
-        };
-        // Register BEFORE the remove so the NOTIFY_DELETE_COMPLETION the remove
-        // fires is already suppressed when it lands in the watcher.
-        crate::watcher::suppress_engine_delete(&path);
-        if let Err(e) = crate::windows_cf::placeholders::delete_placeholder(&path, row.is_dir) {
-            // Zero-knowledge: never log the path — only the file_id + kind.
-            tracing::warn!(file_id = %row.file_id, is_dir = row.is_dir, error = %e, "remote-deletion reconcile: placeholder removal failed");
+/// Task 1640: what a remotely deleted file's local entry holds, as the platform reports it.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LocalEntry {
+    /// A placeholder in sync with no modified data: the agreed bytes, or none.
+    InSync,
+    /// A placeholder with no data on disk: nothing local to keep.
+    NothingLocal,
+    /// Every byte is on disk: a hydrated placeholder out of sync, or a plain file (what an atomic
+    /// save leaves).
+    WhollyLocal,
+    /// Some bytes are on disk and it is out of sync: reading it would fetch the rest.
+    PartlyLocal,
+    /// The platform's view could not be read (self-review #5: the file is open exclusively, or the
+    /// query failed): treated as in use, kept and retried, never as partly on disk.
+    Unreadable,
+}
+
+/// Task 1640 (review P1-1): what removing one remotely deleted sync-folder entry did.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PrunedEntry {
+    /// Removed: agreed bytes, no local bytes, or an empty folder.
+    Removed,
+    /// Nothing was there.
+    Gone,
+    /// The file held bytes the server does not have: they were copied to `copy` (whose SHA-256
+    /// is `copied_hash`), where the copy can upload, then the original was removed, or not
+    /// (`original_removed`: it was in use; a later tick removes it).
+    KeptCopy { copy: PathBuf, copied_hash: String, original_removed: bool },
+    /// A file left as it is, and why (review F5): partly on disk (reading it would fetch the
+    /// rest), in use (it could not be removed or read), or holding changes whose copy failed.
+    KeptInPlace(KeptReason),
+    /// A folder that still holds something (review F3).
+    FolderKept,
+}
+
+/// Task 1640 (review P1-1, N2, N6): remove the local entry of a file or folder the server no
+/// longer lists (a web trash, a snapshot prune) without losing a change that was never sent.
+///
+/// A file in sync, or with no bytes on disk, is removed. A file wholly on disk (out of sync after
+/// an edit, or a plain file an atomic save left) is removed when its bytes are `agreed` (the
+/// row's agreed content); other bytes are copied first, with [`copy_as_this_pc`], into
+/// `copy_dir` (a folder the copy can upload from), and only then is the original removed. A file
+/// partly on disk is left: reading it would fetch the rest from inside the tick, and the server's
+/// own bytes would come back as a copy. A folder is removed only when it is empty.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+pub(crate) fn remove_pruned_entry(
+    path: &Path,
+    is_dir: bool,
+    agreed: Option<&str>,
+    local: LocalEntry,
+    copy_dir: &Path,
+) -> PrunedEntry {
+    if std::fs::symlink_metadata(path).is_err() {
+        return PrunedEntry::Gone;
+    }
+    let removed = |result: std::io::Result<()>, kept: PrunedEntry| match result {
+        Ok(()) => PrunedEntry::Removed,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => PrunedEntry::Gone,
+        Err(_) => kept,
+    };
+    let in_use = || PrunedEntry::KeptInPlace(KeptReason::InUse);
+    if is_dir {
+        return removed(engine_remove(path, true), PrunedEntry::FolderKept);
+    }
+    match local {
+        LocalEntry::InSync | LocalEntry::NothingLocal => removed(engine_remove(path, false), in_use()),
+        LocalEntry::PartlyLocal => PrunedEntry::KeptInPlace(KeptReason::PartlyLocal),
+        LocalEntry::Unreadable => in_use(),
+        LocalEntry::WhollyLocal => {
+            let Ok(hash) = sha256_file_hex(path) else {
+                return in_use();
+            };
+            if agreed == Some(hash.as_str()) {
+                return removed(engine_remove(path, false), in_use());
+            }
+            match copy_as_this_pc(path, copy_dir) {
+                Ok((copy, copied_hash)) => {
+                    let original_removed = match engine_remove(path, false) {
+                        Ok(()) => true,
+                        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+                    };
+                    PrunedEntry::KeptCopy { copy, copied_hash, original_removed }
+                }
+                Err(_) => PrunedEntry::KeptInPlace(KeptReason::CopyFailed),
+            }
         }
     }
 }
 
+/// Task 1640 (review-151d P3-1): the engine's own remove of a sync-folder entry. It is registered
+/// with the watcher right before it happens, so its delete notification queues no trash, and the
+/// registration is dropped again when it did not happen (a later delete by the person counts).
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+fn engine_remove(path: &Path, is_dir: bool) -> std::io::Result<()> {
+    crate::watcher::suppress_engine_delete(path);
+    let removed = if is_dir { std::fs::remove_dir(path) } else { std::fs::remove_file(path) };
+    if removed.is_err() {
+        crate::watcher::cancel_engine_delete_suppression(path);
+    }
+    removed
+}
+
+/// Task 1640 (review-151d P2-2): once `original` is removed, the Office owner file it left (`~$`
+/// and its name, or `~$` and its name without the first two characters) goes too: it belongs to
+/// that file, and would keep its folder. No other file is touched: names the sync folder ignores
+/// are never synced, so they would be lost for good.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+fn remove_office_owner_files(original: &Path) {
+    let (Some(dir), Some(name)) = (original.parent(), original.file_name().and_then(|n| n.to_str())) else {
+        return;
+    };
+    let mut owners = vec![format!("~${name}")];
+    if let Some((cut, _)) = name.char_indices().nth(2) {
+        owners.push(format!("~${}", &name[cut..]));
+    }
+    for owner in owners {
+        let path = dir.join(owner);
+        if std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+/// Task 1640 (review P1-1, N5): copy `path` into `dir` as `<stem> (this PC)<ext>`, then
+/// `<stem> (this PC 2)<ext>` and so on, never over an existing file. The bytes are written and
+/// flushed under an ignored temporary name first and linked to the final name only then, so the
+/// upload driver never sees a partial copy. Returns the copy and the SHA-256 of what it holds.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+pub(crate) fn copy_as_this_pc(path: &Path, dir: &Path) -> std::io::Result<(PathBuf, String)> {
+    use sha2::{Digest, Sha256};
+    use std::io::{Read, Write};
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
+    let ext = path.extension().and_then(|s| s.to_str());
+    let temp = dir.join(format!(".{stem}.{}.tmp", uuid::Uuid::new_v4()));
+    let written = (|| -> std::io::Result<String> {
+        let mut source = std::fs::File::open(path)?;
+        let mut out = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp)?;
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0u8; 64 * 1024];
+        loop {
+            let read = source.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+            out.write_all(&buffer[..read])?;
+        }
+        out.sync_all()?;
+        Ok(format!("{:x}", hasher.finalize()))
+    })();
+    let hash = match written {
+        Ok(hash) => hash,
+        Err(e) => {
+            let _ = std::fs::remove_file(&temp);
+            return Err(e);
+        }
+    };
+    for n in 1..=99 {
+        let suffix = if n == 1 { " (this PC)".to_string() } else { format!(" (this PC {n})") };
+        let name = match ext {
+            Some(ext) => format!("{stem}{suffix}.{ext}"),
+            None => format!("{stem}{suffix}"),
+        };
+        let copy = dir.join(name);
+        match move_no_replace(&temp, &copy) {
+            Ok(()) => return Ok((copy, hash)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                let _ = std::fs::remove_file(&temp);
+                return Err(e);
+            }
+        }
+    }
+    let _ = std::fs::remove_file(&temp);
+    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "no free name for the copy"))
+}
+
+/// Task 1640 (review N5): move `from` to `to`, never over an existing file (`AlreadyExists`).
+/// Windows: `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING` (a hard link may be refused inside a
+/// Cloud Files sync root). Elsewhere: a hard link, then the old name is removed.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+pub(crate) fn move_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
+        let wide = |path: &Path| path.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<u16>>();
+        let (from_wide, to_wide) = (wide(from), wide(to));
+        // SAFETY: both wide strings are NUL-terminated and alive for the call.
+        unsafe {
+            MoveFileExW(
+                windows::core::PCWSTR(from_wide.as_ptr()),
+                windows::core::PCWSTR(to_wide.as_ptr()),
+                MOVEFILE_WRITE_THROUGH,
+            )
+        }
+        // An HRESULT from a Win32 error carries the code in its low 16 bits.
+        .map_err(|e| std::io::Error::from_raw_os_error(e.code().0 & 0xFFFF))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::fs::hard_link(from, to)?;
+        std::fs::remove_file(from)
+    }
+}
+
+/// Task 1640 (review N3): where a copy of `path` can upload from: its folder, or the nearest
+/// folder above it that is neither being removed now (`removed_dirs`) nor in the trash, else
+/// the sync root. Inside a folder trashed on the web the copy would name that folder as its
+/// parent, which the server refuses.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+fn kept_copy_dir(db: &StateDb, sync_root: &Path, path: &Path, removed_dirs: &HashSet<PathBuf>) -> PathBuf {
+    let mut dir = path.parent().unwrap_or(sync_root).to_path_buf();
+    while dir != sync_root && dir.starts_with(sync_root) {
+        let trashed = relative_db_path(sync_root, &dir)
+            .and_then(|rel| db.get_file_by_path(&rel).ok().flatten())
+            .is_some_and(|row| row.status == FileStatus::Trashing);
+        if !removed_dirs.contains(&dir) && !trashed {
+            return dir;
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent.to_path_buf(),
+            None => break,
+        }
+    }
+    sync_root.to_path_buf()
+}
+
+/// `path` relative to `sync_root`, '/'-joined.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+fn rel_under(sync_root: &Path, path: &Path) -> String {
+    path.strip_prefix(sync_root)
+        .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default()
+}
+
+/// Record a kept copy (review N9, N13): one review entry until it is dismissed, a tray activity
+/// row, and, while its original could not be removed, the retry's record. `copy: None` is a file
+/// kept where it is (`reason`, review F5); `copied_hash` is then its agreed content, if any, for
+/// the retry to compare with. `existing`: the entry to update where it is (review F6), not a new one.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+#[allow(clippy::too_many_arguments)]
+fn record_kept_copy(
+    db: &StateDb,
+    sync_root: &Path,
+    file_id: &str,
+    original: &Path,
+    copy: Option<&Path>,
+    copied_hash: &str,
+    original_removed: bool,
+    reason: KeptReason,
+    existing: Option<i64>,
+) {
+    let now = now_secs();
+    let original_path = rel_under(sync_root, original);
+    let copy_path = copy.map(|copy| rel_under(sync_root, copy)).unwrap_or_default();
+    let input = crate::state_db::KeptCopyInput {
+        original_file_id: file_id,
+        original_path: &original_path,
+        copy_path: &copy_path,
+        copied_hash,
+        original_removed,
+        reason,
+        kept_at: now,
+    };
+    let recorded = match existing {
+        Some(id) => db.update_kept_copy(id, &input),
+        None => db.record_kept_copy(&input).map(|_| ()),
+    }
+    .and_then(|()| match copy {
+        Some(copy) => db.record_local_activity(LocalActivityEventInput {
+            event_type: LocalActivityKind::KeptLocalCopy,
+            file_id: Some(file_id.to_string()),
+            file_name: copy.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string(),
+            rel_path: Some(copy_path.clone()),
+            occurred_at: now,
+        }),
+        None => Ok(()),
+    });
+    if let Err(e) = recorded {
+        tracing::warn!(file_id = %file_id, error = %e, "remote-deletion reconcile: could not record the kept copy");
+    }
+}
+
+/// Task 1640 (review F3): the folders deleted elsewhere that stay on disk for what they hold, as
+/// paths under `sync_root`.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+fn removed_folder_paths(db: &StateDb, sync_root: &Path) -> HashSet<PathBuf> {
+    db.list_removed_folders()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|rel| EngineBridge::placeholder_path_under(sync_root, rel))
+        .collect()
+}
+
+/// Remove the on-disk entries of `rows` (a remote deletion), each through [`remove_pruned_entry`],
+/// with `local` the platform's view of each file.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+fn remove_pruned_entries(
+    db: &StateDb,
+    sync_root: &Path,
+    rows: &[crate::state_db::PrunedRow],
+    local: &dyn Fn(&Path, bool) -> LocalEntry,
+) {
+    let mut removed_dirs: HashSet<PathBuf> = rows
+        .iter()
+        .filter(|row| row.is_dir)
+        .filter_map(|row| EngineBridge::placeholder_path_under(sync_root, &row.path))
+        .collect();
+    removed_dirs.extend(removed_folder_paths(db, sync_root));
+    for row in rows {
+        let Some(path) = EngineBridge::placeholder_path_under(sync_root, &row.path) else {
+            continue;
+        };
+        let rel = rel_under(sync_root, &path);
+        // Review F4: a file whose kept entry still waits (a copy made, the original in use; a
+        // file kept where it is) is the retry's. A second remote op (the trash emptied after a
+        // web trash, a folder trash after a file trash) copies nothing again. Unreadable: kept.
+        if !row.is_dir && db.pending_kept_original(&rel).map_or(true, |pending| pending.is_some()) {
+            continue;
+        }
+        // The remove itself registers with the watcher right before it happens (`engine_remove`),
+        // so the NOTIFY_DELETE_COMPLETION it fires queues no trash.
+        let agreed = row.local_hash.as_deref().or(row.fetched_hash.as_deref());
+        // Task 2191 (G-engine, review-114 F-P1-4): the platform's in-sync state is trusted only
+        // for a file with agreed content; one of unknown content is read by its size on disk.
+        let state = if row.is_dir { LocalEntry::InSync } else { local(&path, agreed.is_some()) };
+        let copy_dir = kept_copy_dir(db, sync_root, &path, &removed_dirs);
+        match remove_pruned_entry(&path, row.is_dir, agreed, state, &copy_dir) {
+            PrunedEntry::Removed if !row.is_dir => remove_office_owner_files(&path),
+            PrunedEntry::Removed | PrunedEntry::Gone => {}
+            PrunedEntry::KeptCopy { copy, copied_hash, original_removed } => {
+                if original_removed {
+                    remove_office_owner_files(&path);
+                }
+                // Zero-knowledge: never log the path, only the file_id.
+                tracing::warn!(
+                    file_id = %row.file_id,
+                    original_removed,
+                    "remote-deletion reconcile: the file held changes that were not sent; they are kept as a copy"
+                );
+                record_kept_copy(
+                    db,
+                    sync_root,
+                    &row.file_id,
+                    &path,
+                    Some(&copy),
+                    &copied_hash,
+                    original_removed,
+                    KeptReason::Copy,
+                    None,
+                );
+            }
+            PrunedEntry::KeptInPlace(reason) => {
+                tracing::warn!(
+                    file_id = %row.file_id,
+                    reason = reason.as_str(),
+                    "remote-deletion reconcile: kept the file where it is"
+                );
+                // Condition 5: ONE entry per file (a second remote op skips it, above); the retry
+                // resolves it once it can be removed, copied or is gone.
+                record_kept_copy(db, sync_root, &row.file_id, &path, None, agreed.unwrap_or_default(), false, reason, None);
+            }
+            PrunedEntry::FolderKept => {
+                tracing::warn!(file_id = %row.file_id, "remote-deletion reconcile: kept a folder that still holds something");
+                // Review F3: never created again from this PC while it only holds what is kept.
+                if let Err(e) = db.record_removed_folder(&rel, now_secs()) {
+                    tracing::warn!(file_id = %row.file_id, error = %e, "remote-deletion reconcile: could not record the kept folder");
+                }
+            }
+        }
+    }
+}
+
+/// Task 1640 (review N13, F2, F6): every file kept from a remote deletion whose original still
+/// waits (it was in use, partly on disk, or its copy failed) is retried: the original is removed
+/// when it still holds the copied bytes; one the person changed since is a new change, kept as a
+/// new copy, and then removed. A copy is never made twice of the same bytes. The entry is updated
+/// where it is, or goes when nothing is kept. An original whose place belongs to a file the
+/// server lists again (restored on the web, or another file moved there) is left alone and no
+/// longer waits. Then every kept folder that is empty now is removed (review F3).
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+pub(crate) fn retry_kept_originals(db: &StateDb, sync_root: &Path, local: &dyn Fn(&Path, bool) -> LocalEntry) {
+    // Review-151d P2-1: a dismissed entry's tombstone goes once its file is gone, or once the place
+    // is the server's again.
+    for (id, rel) in db.list_dismissed_kept_originals().unwrap_or_default() {
+        let gone = EngineBridge::placeholder_path_under(sync_root, &rel).is_none_or(|path| std::fs::symlink_metadata(path).is_err());
+        let listed = db.get_file_by_path(&rel).is_ok_and(|row| row.is_some_and(|row| row.status != FileStatus::Trashing));
+        if gone || listed {
+            let _ = db.delete_kept_copy(id);
+        }
+    }
+    let Ok(kept) = db.list_kept_copies() else {
+        return;
+    };
+    let removed_dirs = removed_folder_paths(db, sync_root);
+    for copy in kept.into_iter().filter(|copy| !copy.original_removed) {
+        // Resolved with nothing left to wait for: a copy's entry stays (dismissable); a file kept
+        // where it is had nothing kept, so its entry goes.
+        let resolve = |copy: &crate::state_db::KeptCopy| {
+            let _ = if copy.copy_path.is_empty() {
+                db.delete_kept_copy(copy.id)
+            } else {
+                db.mark_kept_original_removed(copy.id)
+            };
+        };
+        let Some(original) = EngineBridge::placeholder_path_under(sync_root, &copy.original_path) else {
+            resolve(&copy);
+            continue;
+        };
+        if std::fs::symlink_metadata(&original).is_err() {
+            resolve(&copy);
+            continue;
+        }
+        // Review F2: the file was restored on the web (its own row, live again): it is tracked by
+        // its row, never removed or trashed again. Any other row at the place (another file moved
+        // there) does not own these bytes: they are still the deleted file's placeholder, which would
+        // keep the other file's from being created, so they go as below (a change copied first); the
+        // remove is the engine's own, so nothing is trashed (self-review #4).
+        match db.get_file_by_path(&copy.original_path) {
+            Ok(Some(row)) if row.file_id == copy.original_file_id && row.status != FileStatus::Trashing => {
+                resolve(&copy);
+                continue;
+            }
+            Ok(_) => {}
+            Err(_) => continue,
+        }
+        let copy_dir = kept_copy_dir(db, sync_root, &original, &removed_dirs);
+        let agreed = Some(copy.copied_hash.as_str()).filter(|hash| !hash.is_empty());
+        // Review F2: the engine's own remove queues no trash (`engine_remove` registers it).
+        // Task 2191 (review-114 F-P1-4): an entry with no agreed content never trusts in sync.
+        match remove_pruned_entry(&original, false, agreed, local(&original, agreed.is_some()), &copy_dir) {
+            PrunedEntry::Removed | PrunedEntry::Gone => {
+                remove_office_owner_files(&original);
+                resolve(&copy);
+            }
+            PrunedEntry::KeptCopy { copy: new_copy, copied_hash, original_removed } => {
+                if original_removed {
+                    remove_office_owner_files(&original);
+                }
+                // Changed since (or wholly on disk now, with changes): a new change, in the same entry.
+                record_kept_copy(
+                    db,
+                    sync_root,
+                    &copy.original_file_id,
+                    &original,
+                    Some(&new_copy),
+                    &copied_hash,
+                    original_removed,
+                    KeptReason::Copy,
+                    Some(copy.id),
+                );
+            }
+            PrunedEntry::KeptInPlace(reason) => {
+                // Self-review #5: an entry whose changes could not be copied was read wholly once; it
+                // never becomes "partly on disk", which the person may dismiss.
+                let downgrade = copy.reason == KeptReason::CopyFailed && reason == KeptReason::PartlyLocal;
+                if copy.copy_path.is_empty() && reason != copy.reason && !downgrade {
+                    record_kept_copy(
+                        db,
+                        sync_root,
+                        &copy.original_file_id,
+                        &original,
+                        None,
+                        &copy.copied_hash,
+                        false,
+                        reason,
+                        Some(copy.id),
+                    );
+                }
+            }
+            PrunedEntry::FolderKept => {}
+        }
+    }
+    remove_empty_kept_folders(db, sync_root);
+}
+
+/// Task 1640 (review F3): remove every kept folder (deepest first) that holds nothing now, and
+/// forget every one that is gone or that the server lists again.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+fn remove_empty_kept_folders(db: &StateDb, sync_root: &Path) {
+    for rel in db.list_removed_folders().unwrap_or_default() {
+        let Some(path) = EngineBridge::placeholder_path_under(sync_root, &rel) else {
+            let _ = db.forget_removed_folder(&rel);
+            continue;
+        };
+        match db.get_file_by_path(&rel) {
+            // Listed again (restored on the web, or another folder moved there): it is not removed.
+            Ok(Some(row)) if row.status != FileStatus::Trashing => {
+                let _ = db.forget_removed_folder(&rel);
+                continue;
+            }
+            Ok(_) => {}
+            Err(_) => continue,
+        }
+        // Review-151d P2-2: only an empty folder goes. One that keeps a file the sync folder ignores
+        // (never synced, so the person's only copy) stays, and is not created again on the server.
+        if std::fs::read_dir(&path).is_ok_and(|mut entries| entries.next().is_some()) {
+            continue;
+        }
+        match engine_remove(&path, true) {
+            Ok(()) => {
+                let _ = db.forget_removed_folder(&rel);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let _ = db.forget_removed_folder(&rel);
+            }
+            Err(_) => {}
+        }
+    }
+}
+
+/// Task 1640 (review F3): whether `dir` holds only what this PC keeps from a deletion elsewhere:
+/// originals that still wait to be removed or whose entry was dismissed (review-151d P2-1),
+/// folders that themselves hold only that, and names the sync folder ignores (an Office owner
+/// file). Anything else is the person's, and the folder is wanted again. Fails closed (review-151d
+/// P3-5): what cannot be read, and a tree deeper than 32, count as held, so a folder the server
+/// removed is never created again on an error.
+fn held_only_for_kept(db: &StateDb, sync_root: &Path, dir: &Path, depth: usize) -> bool {
+    if depth >= 32 {
+        return true;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return true;
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return true;
+        };
+        let path = entry.path();
+        if entry.file_name().to_str().is_some_and(is_ignored_finder_name) {
+            continue;
+        }
+        let Some(rel) = relative_db_path(sync_root, &path) else {
+            return true;
+        };
+        let held = if entry.file_type().map_or(true, |kind| kind.is_dir()) {
+            db.is_removed_folder(&rel).unwrap_or(true) && held_only_for_kept(db, sync_root, &path, depth + 1)
+        } else {
+            db.is_kept_original(&rel).unwrap_or(true)
+        };
+        if !held {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(target_os = "windows")]
+fn remove_pruned_placeholders(db: &StateDb, sync_root: &Path, rows: &[crate::state_db::PrunedRow]) {
+    remove_pruned_entries(db, sync_root, rows, &crate::windows_cf::placeholders::placeholder_local_entry_trusting);
+}
+
 /// No-op stand-in on non-Windows builds so the call sites stay platform-agnostic.
 #[cfg(not(target_os = "windows"))]
-fn remove_pruned_placeholders(_sync_root: &Path, _rows: &[crate::state_db::PrunedRow]) {}
+fn remove_pruned_placeholders(_db: &StateDb, _sync_root: &Path, _rows: &[crate::state_db::PrunedRow]) {}
 
 /// Order snapshot nodes so every node appears AFTER its parent (parents-first),
 /// which lets `apply_snapshot` resolve a parent's path before its children.
@@ -7797,7 +10198,7 @@ fn apply_sync_op(
                 // immediate-parent protection cannot cover grandchildren and
                 // they drop out of the trash view.
                 let marked = bridge.db().mark_subtree_trashing(id)?;
-                remove_pruned_placeholders(sync_root, &marked);
+                remove_pruned_placeholders(bridge.db(), sync_root, &marked);
                 applied.extend(marked.iter().map(|row| row.file_id.clone()));
             }
             Some(_) => {
@@ -7806,7 +10207,7 @@ fn apply_sync_op(
                 // item is hidden locally — that part of 0802 stands), and
                 // report the ids so the working-set signal fires.
                 let marked = bridge.db().mark_subtree_trashing(id)?;
-                remove_pruned_placeholders(sync_root, &marked);
+                remove_pruned_placeholders(bridge.db(), sync_root, &marked);
                 applied.push(id.to_string());
                 applied.extend(marked.iter().map(|row| row.file_id.clone()));
             }
@@ -7820,7 +10221,7 @@ fn apply_sync_op(
                          {} orphaned child(ren) — pruned (task 0828)",
                         orphans.len()
                     );
-                    remove_pruned_placeholders(sync_root, &orphans);
+                    remove_pruned_placeholders(bridge.db(), sync_root, &orphans);
                     // The orphaned children left the mirror (T3); the folder
                     // itself never existed locally, so it contributes nothing.
                     applied.extend(orphans.iter().map(|row| row.file_id.clone()));
@@ -7833,14 +10234,14 @@ fn apply_sync_op(
                 // Trashing rows leave the trash view, live rows leave the tree
                 // (unchanged 0806 behavior for a live row).
                 let removed = bridge.db().delete_file_subtree(id)?;
-                remove_pruned_placeholders(sync_root, &removed);
+                remove_pruned_placeholders(bridge.db(), sync_root, &removed);
                 applied.push(id.to_string());
                 applied.extend(removed.iter().map(|row| row.file_id.clone()));
             }
             None => {
                 let orphans = bridge.db().delete_orphaned_children_of_absent_folder(id)?;
                 if !orphans.is_empty() {
-                    remove_pruned_placeholders(sync_root, &orphans);
+                    remove_pruned_placeholders(bridge.db(), sync_root, &orphans);
                     applied.extend(orphans.iter().map(|row| row.file_id.clone()));
                 }
             }
@@ -7872,7 +10273,7 @@ fn apply_sync_op(
                 // linger in the Trash view; direct children even become
                 // top-level trash entries after the parent leaves).
                 let flipped = bridge.db().untrash_subtree(id)?;
-                remove_pruned_placeholders(sync_root, &flipped);
+                remove_pruned_placeholders(bridge.db(), sync_root, &flipped);
                 applied.extend(flipped.iter().map(|r| r.file_id.clone()));
             }
             bridge.db().request_resnapshot()?;
@@ -7961,7 +10362,59 @@ fn apply_sync_op(
             tracing::debug!(op_type = other, "sync_tick: ignoring unknown op_type");
         }
     }
+    // A sparse folder rename/move has no descendant events. Reuse the same
+    // metadata write for their new parent paths, then signal those identities
+    // with the folder. This preserves content baselines and queued rename holds.
+    if matches!(op.op_type.as_str(), "folder_rename" | "folder_move" | "file_rename" | "file_move")
+        && applied.iter().any(|changed| changed == id)
+        && bridge.db().get_file(id)?.is_some_and(|row| row.is_dir())
+    {
+        rebase_folder_descendants(bridge, id, now_secs, &mut applied)?;
+    }
     Ok(applied)
+}
+
+fn rebase_folder_descendants(
+    bridge: &EngineBridge,
+    folder_id: &str,
+    now: i64,
+    applied: &mut Vec<String>,
+) -> anyhow::Result<()> {
+    let rows = bridge.db().list_files()?;
+    let mut parents = vec![folder_id.to_string()];
+    let mut visited = std::collections::HashSet::new();
+    while let Some(parent_id) = parents.pop() {
+        if !visited.insert(parent_id.clone()) {
+            continue;
+        }
+        let Some(parent) = bridge.db().get_file(&parent_id)? else { continue };
+        for child in rows.iter().filter(|row| row.parent_id.as_deref() == Some(&parent_id)) {
+            let Some(contract) = bridge.db().get_file_contract_state(&child.file_id)? else { continue };
+            let row = serde_json::json!({
+                "id": child.file_id,
+                "name": child.path.rsplit('/').next().unwrap_or_default(),
+                "parent_id": parent_id,
+                "is_folder": child.is_dir(),
+                "size_bytes": child.size_bytes,
+                "updated_at": child.remote_updated_at,
+                "version_number": contract.current_version,
+                "current_object_version_id": contract.current_object_version_id,
+                "content_type": contract.content_type,
+            });
+            if let Some(updated) = apply_metadata_file_row(
+                bridge.db(), &row, contract.namespace, contract.shared_root_id,
+                contract.share_id, contract.permission_bits, now, bridge.api().master_key(), &parent.path,
+            )? {
+                if updated.path != child.path {
+                    applied.push(child.file_id.clone());
+                }
+                if updated.is_dir() {
+                    parents.push(child.file_id.clone());
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Build a `/files`-shaped `serde_json::Value` from a sync op + the existing
@@ -8136,7 +10589,9 @@ fn process_metadata_row(
     parent_rel_path: &str,
     now_secs: i64,
     source: RowSource,
-    conflicts: &mut Vec<ConflictDetected>,
+    // Task 2190 (plan §7.1 E1): the detector reports no `ConflictDetected`; a concurrent edit is
+    // the parked op. Kept so the tick's conflict plumbing stays as it is.
+    _conflicts: &mut Vec<ConflictDetected>,
 ) -> anyhow::Result<Option<(String, ItemKind)>> {
     let file_id = f["id"].as_str().unwrap_or_default();
     if file_id.is_empty() {
@@ -8231,58 +10686,19 @@ fn process_metadata_row(
                 return Ok(Some((entry.path, entry.item_kind)));
             }
 
-            // Synthesise version triplet (no server content hash on metadata;
-            // `size-mtime` is an opaque-but-stable surrogate — conservative,
-            // a same-size+mtime edit won't flag, but those collisions are rare).
-            let local = VersionInfo {
-                hash: entry.content_hash.clone().unwrap_or_default(),
-                modified_at: entry.modified_at as u64,
-            };
-            let remote = VersionInfo {
-                hash: format!("{size}-{remote_updated}"),
-                modified_at: remote_updated as u64,
-            };
-            let base = VersionInfo {
-                hash: entry.content_hash.clone().unwrap_or_default(),
-                modified_at: entry.remote_updated_at as u64,
-            };
-            // Local matches base → only remote changed. Quietly re-anchor and
-            // let a future hydrate replace bytes when the user opens it.
-            if !is_conflict(&local, &remote, &base) {
-                let mut updated = entry.clone();
-                updated.remote_updated_at = remote_updated;
-                updated.size_bytes = size;
-                updated.modified_at = remote_updated;
-                bridge.db().upsert_file(&updated)?;
-                return apply(bridge);
-            }
-
-            // True conflict. Flip status, anchor `modified_at` to "now" so the
-            // auto-resolution clock starts from detection.
+            // Task 2190 (follow-up 1, plan §7.2 as corrected after review-169 #7): a `Local` row has no
+            // pending write (a queued or parked one makes the row `Uploading` or `Error`, branch 3), so
+            // the pull re-anchors it to the server's version. An edit on disk that the scan has not
+            // queued yet keeps its base (1640's agreed content, which this write never touches), is
+            // queued on it, refused as stale and parked: the parked op is the conflict (E1). The pull
+            // reads no file: `content_hash` is not read either (E2), and no hash is taken on a cold
+            // cache just to choose a log line.
             let mut updated = entry.clone();
-            updated.status = FileStatus::Conflict;
-            updated.modified_at = now_secs;
+            updated.remote_updated_at = remote_updated;
+            updated.size_bytes = size;
+            updated.modified_at = remote_updated;
             bridge.db().upsert_file(&updated)?;
-
-            let file_name = std::path::Path::new(&entry.path)
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or(&entry.path)
-                .to_string();
-            let is_text = is_text_file(&file_name);
-            tracing::warn!(
-                file_id = %entry.file_id,
-                name = %file_name,
-                "conflict detected on tick — both sides moved past base"
-            );
-            conflicts.push(ConflictDetected {
-                file_id: entry.file_id.clone(),
-                file_name,
-                is_text,
-            });
-            // A conflicted folder is unusual, but still report its path/kind so
-            // enumeration of its (independent) children continues.
-            Ok(Some((entry.path, entry.item_kind)))
+            apply(bridge)
         }
         Some(entry) => {
             // (3) Pending download/upload/conflict/error — let the dedicated
@@ -8298,6 +10714,17 @@ fn process_metadata_row(
 
 #[cfg(test)]
 mod tests {
+    fn test_open_content_frame(key: &beebeeb_core::kdf::FileKey, bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
+        let mut reader = beebeeb_core::chunk_stream::ChunkDecryptor::for_push_with_file_key(
+            beebeeb_core::kdf::FileKey::from_bytes(*key.as_bytes()), "legacy", beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded);
+        let data = reader.push_frame(&content_frame(bytes)?)?.data;
+        reader.finish()?;
+        Ok(data)
+    }
+    mod sf2237d {
+        use super::*;
+        include!("engine_bridge/2237d_tests.rs");
+    }
     use super::*;
     use base64::Engine;
     use serde_json::json;
@@ -8529,11 +10956,11 @@ mod tests {
         let file_key = beebeeb_core::kdf::derive_file_key(&master_key, file_id.as_bytes());
 
         let raw = beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, b"raw bytes").unwrap();
-        assert_eq!(decrypt_downloaded_chunk(&file_key, &raw).unwrap(), b"raw bytes");
+        assert_eq!(test_open_content_frame(&file_key, &raw).unwrap(), b"raw bytes");
 
         let blob = beebeeb_core::encrypt::encrypt_chunk(&file_key, b"json bytes").unwrap();
         let json = serde_json::to_vec(&blob).unwrap();
-        assert_eq!(decrypt_downloaded_chunk(&file_key, &json).unwrap(), b"json bytes");
+        assert_eq!(test_open_content_frame(&file_key, &json).unwrap(), b"json bytes");
     }
 
     #[test]
@@ -8676,7 +11103,6 @@ mod tests {
     /// the headers arrive as `None` instead of a panic (task 1670 issue 3: the
     /// cancelled-hydrate test hangs the daemon up while it is connecting, and on
     /// a busy CI runner that can land before the request line is sent).
-    #[cfg(unix)]
     fn read_http_request_or_hangup(stream: &mut std::net::TcpStream) -> Option<RecordedRequest> {
         let mut buffer = Vec::new();
         let mut temp = [0u8; 4096];
@@ -8821,7 +11247,7 @@ mod tests {
     const TEST_FILE_ID: &str = "d6c090b4-69c8-437e-a61b-2023ea99ef89";
 
     /// Encrypt `plaintext` under `file_key` the same wire format
-    /// `decrypt_downloaded_chunk` accepts (`decrypt_chunk_raw`'s
+    /// `content_frame` accepts (`decrypt_chunk_raw`'s
     /// `nonce(12) || ciphertext || tag(16)`), returning the raw bytes a
     /// `download_chunk` response body would carry.
     fn encrypt_chunk_wire(file_key: &beebeeb_core::kdf::FileKey, plaintext: &[u8]) -> Vec<u8> {
@@ -8906,6 +11332,7 @@ mod tests {
                     "size_bytes": size_bytes,
                     "chunk_count": chunk_count,
                     "chunk_size_bytes": chunk_size_bytes,
+                    "name_encrypted": beebeeb_core::encrypt::encrypt_name_for(file_key,"range.bin",None,beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded).unwrap(),
                 }),
             ));
         }
@@ -8930,7 +11357,7 @@ mod tests {
 
     /// A multi-chunk file: request a range that spans exactly ONE interior
     /// chunk. `hydrate_file_range` must download+decrypt ONLY that chunk — the
-    /// mock server accepts exactly 2 requests (the metadata GET + the one
+    /// mock server accepts exactly 3 requests (the metadata GET + the one
     /// covering chunk GET) and would hang/fail on a third, so this test fails
     /// loudly if the whole file were downloaded instead.
     #[test]
@@ -8942,8 +11369,8 @@ mod tests {
         // 3 chunks of 10 bytes each (uniform, no remainder) — chunk 1 is the
         // interior chunk under test.
         let chunks: Vec<Vec<u8>> = vec![b"AAAAAAAAAA".to_vec(), b"BBBBBBBBBB".to_vec(), b"CCCCCCCCCC".to_vec()];
-        // 1 metadata GET + 1 chunk GET (only chunk index 1).
-        let server = HydrationMockServer::start(file_key, chunks, 2);
+        // Metadata, authenticated frame zero, and the requested interior frame.
+        let server = HydrationMockServer::start(file_key, chunks, 3);
 
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
         seed_bridge_row(&bridge, TEST_FILE_ID, "/range.bin", None, FileStatus::CloudOnly, 30);
@@ -8982,7 +11409,7 @@ mod tests {
         let mut last = vec![b'C'; MIB];
         last[123..127].copy_from_slice(b"LAST");
         let chunks: Vec<Vec<u8>> = vec![vec![b'A'; 4 * MIB], vec![b'B'; 4 * MIB], last];
-        let server = HydrationMockServer::start(file_key, chunks, 2);
+        let server = HydrationMockServer::start(file_key, chunks, 3);
 
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
         seed_bridge_row(
@@ -9533,6 +11960,55 @@ mod tests {
         let _ = server.finish();
     }
 
+    /// Spec D7 (tasks 1888, 2226): a folder made here inside another new folder waits for that folder's create, and a
+    /// pass reads its due work once. A pass that lands a folder create lists again, so a new tree two levels deep goes
+    /// up in one pass, not one tick (`TICK_INTERVAL`, 30 s) per level.
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn a_new_folder_and_the_folder_inside_it_are_created_in_one_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = SyncMockServer::start(vec![
+            ("200 OK".into(), serde_json::json!({ "id": "folder-new" })),
+            ("200 OK".into(), serde_json::json!({ "id": "folder-sub" })),
+        ]);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [9u8; 32]);
+        for (op_id, file_id, parent_id, created_at) in
+            [("op-new", "folder-new", None, 100), ("op-sub", "folder-sub", Some("folder-new"), 101)]
+        {
+            bridge
+                .db
+                .enqueue_operation(&PendingOperation {
+                    op_id: op_id.into(),
+                    kind: OperationKind::CreateFolder,
+                    file_id: Some(file_id.into()),
+                    parent_id: parent_id.map(str::to_string),
+                    target_path: None,
+                    metadata_json: Some(serde_json::json!({ "name_encrypted": "sealed" }).to_string()),
+                    payload_path: None,
+                    base_version: None,
+                    base_object_version_id: None,
+                    attempts: 0,
+                    max_attempts: 25,
+                    next_retry_at: 0,
+                    last_error: None,
+                    backup_source_key: None,
+                    created_at,
+                    updated_at: created_at,
+                })
+                .unwrap();
+        }
+        assert_eq!(bridge.db.list_due_operations(200).unwrap().len(), 1, "the inner folder waits for its folder");
+
+        let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
+        assert_eq!(outcome.completed_op_ids, vec!["op-new".to_string(), "op-sub".to_string()], "both in one pass");
+        assert!(outcome.retried_op_ids.is_empty());
+        let requests = server.finish();
+        assert_eq!(requests.len(), 2);
+        let inner: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+        assert_eq!(inner["folder_id"], "folder-sub");
+        assert_eq!(inner["parent_id"], "folder-new", "sent after its folder landed, under it");
+    }
+
     #[test]
     fn test_recursive_pin_queues_hydration_for_cloud_only_descendants() {
         let dir = tempfile::tempdir().unwrap();
@@ -9629,6 +12105,38 @@ mod tests {
         assert_eq!(
             bridge.db.get_file("old").unwrap().unwrap().status,
             FileStatus::CloudOnly
+        );
+    }
+
+    /// Desktop 0.8.15 (deliverable 1): cache eviction is freeing work, so it waits for the
+    /// start-up guard's pass, which now runs beside the engine instead of before it; and every
+    /// caller goes through the process's one guard state.
+    #[test]
+    fn desktop_0815_cache_eviction_waits_for_the_start_up_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        seed_bridge_row(&bridge, "old", "/Old.txt", None, FileStatus::Local, 400);
+        seed_bridge_row(&bridge, "new", "/New.txt", None, FileStatus::Local, 300);
+        bridge.db.mark_cached("old", "/cache/old", 400, 20).unwrap();
+        bridge.db.mark_cached("new", "/cache/new", 300, 30).unwrap();
+        let guard = crate::unknown_check::StartupGuard::new();
+        let pass = guard.begin();
+        let held = bridge.enforce_local_cache_limit_after_guard(Some(500), &guard).unwrap();
+        assert!(held.evicted_file_ids.is_empty(), "nothing is evicted while the pass is owed");
+        assert_eq!(bridge.db.get_file("old").unwrap().unwrap().status, FileStatus::Local);
+        guard.finish(pass);
+        let evicted = bridge.enforce_local_cache_limit_after_guard(Some(500), &guard).unwrap();
+        assert_eq!(evicted.evicted_file_ids, vec!["old".to_string()], "evicted once the pass walked every row");
+        // The checkout may carry CRLF line endings (the Windows gate clones with core.autocrlf=true).
+        let source = include_str!("engine_bridge.rs").replace("\r\n", "\n");
+        let production = source.split("\n#[cfg(test)]\nmod tests {").next().unwrap();
+        let body = &production[production.find("pub fn enforce_local_cache_limit(").unwrap()..];
+        let body = &body[..body.find("\n    }\n").unwrap()];
+        assert!(
+            crate::source_pin::squeeze(body).contains(&crate::source_pin::squeeze(
+                "self.enforce_local_cache_limit_after_guard(max_local_cache_bytes, &crate::unknown_check::STARTUP_GUARD)"
+            )),
+            "{body}"
         );
     }
 
@@ -9748,7 +12256,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(unwrapped.as_bytes(), &child_file_key);
-        assert_eq!(decrypt_downloaded_chunk(&unwrapped, &content_wire).unwrap(), plaintext);
+        assert_eq!(test_open_content_frame(&unwrapped, &content_wire).unwrap(), plaintext);
     }
 
     #[test]
@@ -10413,6 +12921,208 @@ mod tests {
         );
     }
 
+    /// U45: every change the Finder IPC queues meets the sign-out's fence in the transaction that queues it. Once
+    /// accepts are closed, a rename, a move to the top level, a folder create and a delete are each refused with
+    /// `AcceptsClosed` (the extension hears `WriteRetryLater`): nothing is queued, and no row is written or changed.
+    /// Reopened, the same rename queues.
+    #[test]
+    fn every_finder_change_after_the_close_queues_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        seed_bridge_row(&bridge, "folder-a", "A", None, FileStatus::Local, 0);
+        seed_bridge_row(&bridge, "in-a", "A/x.txt", Some("folder-a"), FileStatus::Local, 0);
+        let target = |file_id: Option<&str>, parent_id: Option<&str>, filename: &str, kind: FinderWriteItemKind| {
+            FinderWriteTarget {
+                file_id: file_id.map(str::to_string),
+                parent_id: parent_id.map(str::to_string),
+                filename: filename.into(),
+                rel_path: None,
+                kind,
+                contents_path: None,
+                content_type: None,
+                base_version_identifier: None,
+            }
+        };
+        bridge.db.close_finder_accepts().unwrap();
+        let changes: [(&str, anyhow::Result<FinderWriteOutcome>); 4] = [
+            (
+                "a rename",
+                bridge.queue_finder_modify(target(
+                    Some("in-a"),
+                    Some("folder-a"),
+                    "renamed.txt",
+                    FinderWriteItemKind::File,
+                )),
+            ),
+            (
+                "a move to the top level",
+                bridge.queue_finder_modify(target(Some("in-a"), None, "x.txt", FinderWriteItemKind::File)),
+            ),
+            (
+                "a folder create",
+                bridge.queue_finder_create(target(
+                    None,
+                    Some("folder-a"),
+                    "New folder",
+                    FinderWriteItemKind::Folder,
+                )),
+            ),
+            ("a delete", bridge.queue_finder_delete("in-a", None)),
+        ];
+        for (what, result) in changes {
+            let error = result.expect_err(what);
+            assert!(error.is::<AcceptsClosed>(), "{what}: {error:#}");
+        }
+        // Every row, due or not: a paused, parked or backed-off op is still a queued change.
+        let queued: i64 = bridge
+            .db
+            .hold_lock_for_test()
+            .query_row("SELECT COUNT(*) FROM operation_queue", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(queued, 0, "nothing queued");
+        assert!(
+            bridge.db.get_file_by_path("A/New folder").unwrap().is_none(),
+            "the refused folder create left no row"
+        );
+        let row = bridge.db.get_file("in-a").unwrap().unwrap();
+        assert_eq!(
+            (row.path.as_str(), row.status),
+            ("A/x.txt", FileStatus::Local),
+            "the refused delete left the row as it was"
+        );
+        bridge.db.reopen_finder_accepts().unwrap();
+        bridge
+            .queue_finder_modify(target(
+                Some("in-a"),
+                Some("folder-a"),
+                "renamed.txt",
+                FinderWriteItemKind::File,
+            ))
+            .expect("reopened, the rename queues: the refusals above were the fence");
+        assert_eq!(bridge.db.list_due_operations(i64::MAX).unwrap().len(), 1);
+        // Reopened, the folder create writes its row in the fenced transaction, as a folder under its parent, so a
+        // nested child resolves it as its parent.
+        bridge
+            .queue_finder_create(target(
+                None,
+                Some("folder-a"),
+                "New folder",
+                FinderWriteItemKind::Folder,
+            ))
+            .expect("reopened, the folder create queues");
+        let folder = bridge
+            .db
+            .get_file_by_path("A/New folder")
+            .unwrap()
+            .expect("the folder create's row");
+        assert_eq!(
+            (folder.item_kind, folder.parent_id.as_deref()),
+            (ItemKind::Folder, Some("folder-a")),
+            "the folder create's row is a folder, under its parent"
+        );
+        assert_eq!(bridge.db.list_due_operations(i64::MAX).unwrap().len(), 2);
+    }
+
+    /// U45: a person's save meets the fence too. Once accepts are closed, a File Provider create of a new file and a
+    /// content save of an existing one are each refused with `AcceptsClosed`, and the IPC answers `WriteRetryLater`,
+    /// which the extension reports as a transient error, so macOS keeps the change and hands it over again (an `Error`
+    /// would reach it as the definitive `cannotSynchronize`). Nothing is queued, and the refused create leaves no row.
+    #[test]
+    fn a_file_provider_save_after_the_close_is_retried_later() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        seed_bridge_row(&bridge, "in-a", "x.txt", None, FileStatus::Local, 0);
+        let contents = dir.path().join("new.txt");
+        std::fs::write(&contents, b"new bytes").unwrap();
+        bridge.db.close_finder_accepts().unwrap();
+        let saves: [(&str, &'static str, anyhow::Result<FpWrite>); 2] = [
+            (
+                "a new file",
+                "create",
+                bridge.queue_file_provider_create(finder_file_target(None, "new.txt", &contents, None)),
+            ),
+            (
+                "a save",
+                "modify",
+                bridge.queue_file_provider_modify(finder_file_target(Some("in-a"), "x.txt", &contents, None)),
+            ),
+        ];
+        for (what, op, result) in saves {
+            let error = result.err().unwrap_or_else(|| panic!("{what} ({op}): queued"));
+            assert!(error.is::<AcceptsClosed>(), "{what} ({op}): {error:#}");
+            #[cfg(unix)]
+            {
+                let response = crate::ipc_socket::write_outcome_response(op, &bridge.db, Err(error));
+                assert!(
+                    matches!(response, crate::ipc_socket::IpcResponse::WriteRetryLater { .. }),
+                    "{what} ({op}): {response:?}"
+                );
+            }
+        }
+        // Every row, due or not.
+        let queued: i64 = bridge
+            .db
+            .hold_lock_for_test()
+            .query_row("SELECT COUNT(*) FROM operation_queue", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(queued, 0, "nothing queued");
+        let rows: Vec<String> = bridge
+            .db
+            .list_files()
+            .unwrap()
+            .into_iter()
+            .map(|row| row.file_id)
+            .collect();
+        assert_eq!(rows, ["in-a"], "the refused new file left no row");
+    }
+
+    /// Spec 2026-10-10 §5.2 step 6: every change the Finder IPC queues reads the sign-out's fence in the transaction
+    /// that queues it (`accept_finder_write`, `enqueue_finder_change`). Only the engine-internal kinds the spec exempts
+    /// queue through the unfenced `enqueue_operation`: a version restore, a pin and a hydrate. The IPC's code, whose
+    /// write arms call the bridge, never calls it.
+    #[test]
+    fn only_engine_internal_enqueues_skip_the_sign_out_fence() {
+        /// The function named on `line`, when it opens one.
+        fn fn_name(line: &str) -> Option<&str> {
+            let mut rest = line.trim_start();
+            for qualifier in ["pub(crate) ", "pub(super) ", "pub ", "const ", "async ", "unsafe "] {
+                rest = rest.strip_prefix(qualifier).unwrap_or(rest);
+            }
+            rest.strip_prefix("fn ")
+                .map(|rest| rest.split(['(', '<']).next().unwrap_or(rest))
+        }
+        /// For each unfenced enqueue in the production part of `source` (before its tests module), the function it
+        /// sits in. Comment lines do not count.
+        fn unfenced(source: &str) -> Vec<&str> {
+            let production = source.split("\nmod tests {").next().unwrap();
+            let mut function = "";
+            let mut found = Vec::new();
+            for line in production.lines() {
+                if let Some(name) = fn_name(line) {
+                    function = name;
+                }
+                if line.contains("enqueue_operation(") && !line.trim_start().starts_with("//") {
+                    found.push(function);
+                }
+            }
+            found
+        }
+        assert_eq!(
+            unfenced(include_str!("engine_bridge.rs")),
+            [
+                "queue_restore_version",
+                "enqueue_pin_tree_operation",
+                "enqueue_hydrate_operation"
+            ],
+            "only a version restore, a pin and a hydrate queue without the fence"
+        );
+        assert_eq!(
+            unfenced(include_str!("ipc_socket.rs")),
+            Vec::<&str>::new(),
+            "the IPC never queues without the fence"
+        );
+    }
+
     #[tokio::test]
     async fn test_process_due_operations_records_retry_for_upload_worker_handoff() {
         let dir = tempfile::tempdir().unwrap();
@@ -10638,7 +13348,7 @@ mod tests {
             assert!(!payload.exists(), "proof is removed after successful identity retry");
             assert_eq!(bridge.db.upload_finalizations().unwrap().len(), 0);
         }
-        crate::windows_cf::signout::purge(&bridge.db, Some(&root)).unwrap();
+        crate::windows_cf::signout::purge(&bridge.db, Some(&root), &crate::windows_cf::signout::UnknownFiles::Delete).unwrap();
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
         assert!(!payload.exists());
         assert_eq!(bridge.db.upload_finalizations().unwrap().len(), 0);
@@ -10837,7 +13547,8 @@ mod tests {
         let master_key = [14u8; 32];
         let file_key = hydration_test_key(master_key, TEST_FILE_ID);
         // 1 metadata GET + 1 chunk GET.
-        let server = HydrationMockServer::start(file_key, vec![Vec::new()], 2);
+        // + 1 discovery GET (task 2173): this server has no direct route (a JSON 404), so the API path serves it.
+        let server = HydrationMockServer::start(file_key, vec![Vec::new()], 3);
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
         seed_bridge_row(&bridge, TEST_FILE_ID, "/empty.txt", None, FileStatus::CloudOnly, 0);
 
@@ -10868,7 +13579,9 @@ mod tests {
         let master_key = [21u8; 32];
         let file_key = hydration_test_key(master_key, TEST_FILE_ID);
         let remote_chunks = vec![b"remote version text".to_vec()];
-        let server = HydrationMockServer::start(file_key, remote_chunks, 2);
+        // 1 metadata GET + 1 chunk GET
+        // + 1 discovery GET (task 2173): this server has no direct route (a JSON 404), so the API path serves it.
+        let server = HydrationMockServer::start(file_key, remote_chunks, 3);
 
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
         bridge
@@ -10918,7 +13631,9 @@ mod tests {
 
         let master_key = [22u8; 32];
         let file_key = hydration_test_key(master_key, TEST_FILE_ID);
-        let server = HydrationMockServer::start(file_key, vec![b"remote only".to_vec()], 2);
+        // 1 metadata GET + 1 chunk GET
+        // + 1 discovery GET (task 2173): this server has no direct route (a JSON 404), so the API path serves it.
+        let server = HydrationMockServer::start(file_key, vec![b"remote only".to_vec()], 3);
 
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
         bridge
@@ -11017,7 +13732,9 @@ mod tests {
 
         let master_key = [24u8; 32];
         let file_key = hydration_test_key(master_key, TEST_FILE_ID);
-        let server = HydrationMockServer::start(file_key, vec![b"remote version text".to_vec()], 2);
+        // 1 metadata GET + 1 chunk GET
+        // + 1 discovery GET (task 2173): this server has no direct route (a JSON 404), so the API path serves it.
+        let server = HydrationMockServer::start(file_key, vec![b"remote version text".to_vec()], 3);
 
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
         bridge
@@ -11635,7 +14352,8 @@ mod tests {
         let file_key = hydration_test_key(master_key, TEST_FILE_ID);
         let chunks: Vec<Vec<u8>> = vec![vec![b'a'; 10], vec![b'b'; 10], vec![b'c'; 10]];
         // 1 metadata GET + 3 chunk GETs.
-        let server = HydrationMockServer::start(file_key, chunks, 4);
+        // + 1 discovery GET (task 2173): this server has no direct route (a JSON 404), so the API path serves it.
+        let server = HydrationMockServer::start(file_key, chunks, 5);
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
         seed_bridge_row(
             &bridge,
@@ -11690,7 +14408,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let master_key = [9u8; 32];
         let file_key = hydration_test_key(master_key, TEST_FILE_ID);
-        let server = HydrationMockServer::start(file_key, vec![vec![b'x'; 12]], 2);
+        // 1 metadata GET + 1 chunk GET
+        // + 1 discovery GET (task 2173): this server has no direct route (a JSON 404), so the API path serves it.
+        let server = HydrationMockServer::start(file_key, vec![vec![b'x'; 12]], 3);
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
         seed_bridge_row(&bridge, TEST_FILE_ID, "one.bin", None, FileStatus::CloudOnly, 12);
         let dest = dir.path().join("one.bin");
@@ -13433,6 +16153,59 @@ mod tests {
         );
     }
 
+    /// Spec D11 (task 1888, review P1): a tick reaches the server only when its pull came back. A `/sync/ops` that
+    /// fails is swallowed (the tick is still `Ok`), so the outcome says so, and the reconcile pass and the resume wait.
+    #[tokio::test]
+    async fn a_tick_reaches_the_server_only_when_its_pull_came_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let mk = [3u8; 32];
+        let only = "eeee0000-0000-4000-8000-000000000001";
+        let db_path = dir.path().join("state.db");
+
+        // Cursor unset: the snapshot bootstrap came back.
+        let boot = serde_json::json!({ "seq_id": 4, "nodes": [ snap_node(&mk, only, "only.txt", None, false, 10) ] });
+        let server = SyncMockServer::start(vec![("200 OK".into(), boot)]);
+        let bridge = test_bridge_with_api(&db_path, server.base_url.clone(), mk);
+        let tick = sync_tick_outcome(&bridge, dir.path()).await.unwrap();
+        server.finish();
+        assert!(tick.reached_server, "a snapshot bootstrap reached the server");
+
+        // Cursor set, the session refused: `/sync/ops` answers 401 and the tick is still Ok.
+        let refused = serde_json::json!({ "error": "unauthorized" });
+        let server = SyncMockServer::start(vec![("401 Unauthorized".into(), refused)]);
+        let bridge = test_bridge_with_api(&db_path, server.base_url.clone(), mk);
+        let tick = sync_tick_outcome(&bridge, dir.path()).await.unwrap();
+        assert_eq!(server.finish().len(), 1);
+        assert!(!tick.reached_server, "a refused pull did not reach the server");
+
+        // A server error: the same.
+        let failed = serde_json::json!({ "error": "unavailable" });
+        let server = SyncMockServer::start(vec![("503 Service Unavailable".into(), failed)]);
+        let bridge = test_bridge_with_api(&db_path, server.base_url.clone(), mk);
+        assert!(!sync_tick_outcome(&bridge, dir.path()).await.unwrap().reached_server, "a 5xx pull");
+        server.finish();
+        let failed = serde_json::json!({ "error": "unavailable" });
+
+        // An empty delta came back (its freshness probe failing does not change that).
+        let empty = serde_json::json!({ "since": 4, "ops": [] });
+        let server = SyncMockServer::start(vec![("200 OK".into(), empty), ("503 Service Unavailable".into(), failed)]);
+        let bridge = test_bridge_with_api(&db_path, server.base_url.clone(), mk);
+        let tick = sync_tick_outcome(&bridge, dir.path()).await.unwrap();
+        server.finish();
+        assert!(tick.reached_server, "the delta came back, empty");
+
+        // A delta with ops came back.
+        let ops = serde_json::json!({ "since": 4, "ops": [ {
+            "seq_id": 5, "op_type": "file_trash", "file_id": only, "payload": { "id": only }, "created_at": 20,
+        } ] });
+        let server = SyncMockServer::start(vec![("200 OK".into(), ops)]);
+        let bridge = test_bridge_with_api(&db_path, server.base_url.clone(), mk);
+        let tick = sync_tick_outcome(&bridge, dir.path()).await.unwrap();
+        server.finish();
+        assert!(tick.reached_server, "the delta came back");
+        assert_eq!(bridge.db().get_sync_cursor().unwrap(), Some(5), "and was applied");
+    }
+
     #[tokio::test]
     async fn test_sync_tick_seq_id_zero_bootstrap_then_takes_ops_path_not_resnapshot() {
         // BLOCKER regression (issue 1): the server returns seq_id 0 for any vault
@@ -14347,8 +17120,9 @@ mod tests {
         assert!(!dest.exists(), "a cancelled hydrate must not write plaintext to disk");
         let served = server.stop_and_count();
         assert!(
-            served <= 2,
-            "the daemon must stop fetching after the hang-up: metadata + at most the in-flight chunk, got {served}"
+            served <= 3,
+            "the daemon must stop fetching after the hang-up: metadata + discovery (task 2173; this server has \
+             no direct route) + at most the in-flight chunk, got {served}"
         );
     }
 
@@ -14911,7 +17685,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let master_key = [7u8; 32];
         let file_key = hydration_test_key(master_key, TEST_FILE_ID);
-        let server = HydrationMockServer::start(file_key, vec![vec![b't'; 8]], 2);
+        // 1 metadata GET + 1 chunk GET
+        // + 1 discovery GET (task 2173): this server has no direct route (a JSON 404), so the API path serves it.
+        let server = HydrationMockServer::start(file_key, vec![vec![b't'; 8]], 3);
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
         seed_bridge_row(&bridge, TEST_FILE_ID, "trash-view.txt", None, FileStatus::Trashing, 8);
         let dest = dir.path().join("trash-view.txt");
@@ -15050,6 +17826,7 @@ mod tests {
     #[derive(Default)]
     struct VersionedServerState {
         files: std::collections::BTreeMap<String, MockServerFile>,
+        authenticated_names: HashMap<String,String>,
         /// session id -> (file id, chunks received so far)
         sessions: HashMap<String, (String, Vec<Vec<u8>>)>,
         next_file: usize,
@@ -15117,6 +17894,8 @@ mod tests {
         /// `GET /files/{id}` and `GET /files/{id}/chunks/{i}` answer with the file's latest
         /// version. Off: `GET /files/{id}` answers 404, as before.
         serve_downloads: bool,
+        /// The metadata names no `download_version` (a legacy file, an older server).
+        legacy_downloads: bool,
     }
 
     /// Upload mock that behaves like the server's version check: a replace
@@ -15219,6 +17998,12 @@ mod tests {
         }
     }
 
+    /// The UUID the mock names version `n` (1-based) of `file_id` by in a download manifest.
+    fn mock_object_version_id(file_id: &str, n: usize) -> String {
+        let tag = file_id.bytes().fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(u32::from(b)));
+        format!("{tag:08x}-0000-4000-8000-{n:012x}")
+    }
+
     fn versioned_server_response(
         request: &RecordedRequest,
         state: &Arc<Mutex<VersionedServerState>>,
@@ -15260,26 +18045,70 @@ mod tests {
                 ),
             };
         }
-        // `GET /files/{id}` and `GET /files/{id}/chunks/{i}`: the file's latest version, as the
-        // client uploaded it (binary chunk bodies).
+        // `GET /files/{id}[?object_version_id=]` and `GET /files/{id}/chunks/{i}[?object_version_id=]`:
+        // the file's latest version, or the pinned one, as the client uploaded it (binary chunk
+        // bodies). The metadata carries the server's `download_version` manifest (routes/files.rs,
+        // routes/version_download.rs), with the version's number.
         if s.serve_downloads
             && request.method == "GET"
             && let Some(rest) = request.path.strip_prefix("/api/v1/files/")
+            && !rest.contains("/versions")
         {
+            let (rest, query) = rest.split_once('?').unwrap_or((rest, ""));
+            let pinned = query.strip_prefix("object_version_id=").map(str::to_string);
             let (file_id, chunk) = match rest.split_once("/chunks/") {
                 Some((file_id, index)) => (file_id.to_string(), index.parse::<usize>().ok()),
                 None => (rest.to_string(), None),
             };
-            let latest = s.files.get(&file_id).and_then(|file| file.versions.last()).cloned();
+            let selected = s.files.get(&file_id).and_then(|file| match &pinned {
+                Some(pin) => (1..=file.versions.len())
+                    .find(|n| mock_object_version_id(&file_id, *n) == *pin)
+                    .map(|n| (n, file.versions[n - 1].clone())),
+                None => file.versions.last().map(|chunks| (file.versions.len(), chunks.clone())),
+            });
+            let latest = selected.as_ref().map(|(_, chunks)| chunks.clone());
             return match (latest, chunk) {
                 (Some(chunks), None) => {
+                    let version = selected.map_or(0, |(n, _)| n);
                     // nonce (12) + tag (16) per chunk.
                     let size: usize = chunks.iter().map(|chunk| chunk.len().saturating_sub(28)).sum();
+                    let wire: usize = chunks.iter().map(Vec::len).sum();
+                    let name = s.authenticated_names.get(&file_id).cloned().or_else(||
+                        s.patches.iter().rev().find(|(id,_)|id==&file_id).and_then(|(_,body)|body["name_encrypted"].as_str().map(str::to_string)));
+
+                    if s.legacy_downloads {
+                        return (
+                            None,
+                            http_json(
+                                "200 OK",
+                                serde_json::json!({ "id": file_id, "name_encrypted": name, "chunk_count": chunks.len(), "size_bytes": size }),
+                            )
+                            .into_bytes(),
+                        );
+                    }
                     (
                         None,
                         http_json(
                             "200 OK",
-                            serde_json::json!({ "id": file_id, "chunk_count": chunks.len(), "size_bytes": size }),
+                            serde_json::json!({
+                                "id": file_id,
+                                "chunk_count": chunks.len(),
+                                "name_encrypted": name,
+                                "size_bytes": size,
+                                "download_version": {
+                                    "object_version_id": mock_object_version_id(&file_id, version),
+                                    "version_number": version,
+                                    "chunk_count": chunks.len(),
+                                    "chunk_size_bytes": 1_048_576,
+                                    "plaintext_size_bytes": size,
+                                    "ciphertext_size_bytes": wire,
+                                    "chunks": chunks
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(index, chunk)| serde_json::json!({ "index": index, "size_bytes": chunk.len() }))
+                                        .collect::<Vec<_>>(),
+                                },
+                            }),
                         )
                         .into_bytes(),
                     )
@@ -15826,6 +18655,7 @@ mod tests {
     /// A row the server holds at version 1 (seeded on the mock too).
     fn seed_uploaded_row(bridge: &EngineBridge, server: &VersionedServerMock, file_id: &str) {
         server.seed_file(file_id, 1);
+        server.state.lock().unwrap().authenticated_names.insert(file_id.into(), enc_name(bridge.api.master_key(), file_id, "notes.txt"));
         seed_uploaded_db_row(bridge, file_id);
     }
 
@@ -18910,7 +21740,8 @@ mod tests {
     /// Spec §7.2 (final review): the writers that insert a row from the server or a create write
     /// its contract in the same call. The two-call shape (`upsert_file`, then
     /// `set_file_contract_state`) is gone from production code: `set_file_contract_state` exists
-    /// for tests only, and each writer calls `upsert_file_with_contract`.
+    /// for tests only, and each writer calls `upsert_file_with_contract`. A Finder folder create
+    /// writes its row and contract through `enqueue_finder_change`, with its op.
     #[test]
     fn ingestion_writers_use_the_single_transaction_api() {
         let source = include_str!("engine_bridge.rs");
@@ -18952,16 +21783,35 @@ mod tests {
         }
         for (writer, calls) in [
             ("pub async fn refresh_shared_roots(", 1),
-            ("pub fn queue_finder_create_from(", 2),
+            ("pub fn queue_finder_create_from(", 1),
             ("fn apply_shared_metadata_file_row(", 1),
             ("fn apply_metadata_file_row(", 1),
         ] {
+            // Task 2204 S0.3: the pull's writer is `upsert_server_file_row`, the same one-transaction
+            // write with the Windows-rename hold decided inside it.
+            let body = body(production, writer);
             assert_eq!(
-                body(production, writer).matches("upsert_file_with_contract(").count(),
+                body.matches("upsert_file_with_contract(").count() + body.matches("upsert_server_file_row(").count(),
                 calls,
                 "{writer} writes each row and its contract in one call"
             );
         }
+        let held = body(state_db, "    pub fn upsert_server_file_row(");
+        assert!(
+            held.contains("upsert_file_conn(") && held.contains("set_file_contract_state_conn(") && held.contains("tx.commit()"),
+            "{held}"
+        );
+        // Spec 2026-10-10 §5.2 step 6: a Finder folder create writes its row and its contract in the same
+        // transaction as its op, behind the sign-out's fence, so a refused create leaves no row.
+        assert!(
+            body(production, "pub fn queue_finder_create_from(").contains("Some(crate::state_db::FinderFolderRow {"),
+            "the folder branch hands its row to the fenced enqueue"
+        );
+        let fenced = body(state_db, "    pub fn enqueue_finder_change(");
+        assert!(
+            fenced.contains("upsert_file_conn(") && fenced.contains("set_file_contract_state_conn("),
+            "{fenced}"
+        );
     }
 
     /// The `parent_id` of each `PATCH /files/{file_id}` the server got, in order: `None` when the
@@ -21139,6 +23989,78 @@ mod tests {
         s.refuse_complete_with.remove(file_id);
     }
 
+    /// U17, the arithmetic: a change made due at the phase's start, failing every attempt, is tried at most twice in
+    /// 60 s and never parks there, for an other change (`UsesUp`) and for a Finder write's transient failure.
+    #[test]
+    fn a_phase_never_parks_what_it_made_due() {
+        for (max_attempts, start) in [(5_i64, 0_i64), (5, 2), (25, 0), (25, 22)] {
+            for count in [AttemptCount::UsesUp, AttemptCount::UpToTheBackoffCap] {
+                let mut attempts = start;
+                let mut at = 0_i64;
+                let mut tries = 0;
+                while at <= 60 {
+                    attempts = next_attempt_count(attempts, max_attempts, count);
+                    tries += 1;
+                    at += retry_delay_seconds(attempts);
+                }
+                assert!(tries <= 2, "{max_attempts}/{start}/{count:?}: {tries} tries");
+                assert!(
+                    attempts < max_attempts,
+                    "{max_attempts}/{start}/{count:?}: parked at {attempts}"
+                );
+            }
+        }
+    }
+
+    /// U46 (spec §15 question 4): one attempt that meets a refusal the account cures says so to the send phase.
+    #[tokio::test]
+    async fn a_refusal_the_account_cures_ends_the_send_phase() {
+        let refusals = [
+            quota_exceeded(),
+            object_budget_exceeded(),
+            billing_read_only(),
+            account_lapsed(),
+            plan_required(),
+            trial_cancelled_read_only(),
+        ];
+        for (index, refusal) in refusals.into_iter().enumerate() {
+            let key = [190u8 + index as u8; 32];
+            let file_id = format!("account-{index}");
+            let (dir, sync_root, server, bridge) = rule3_setup(key);
+            seed_uploaded_row(&bridge, &server, &file_id);
+            refuse(&server, Refused::Init, &file_id, refusal);
+            fp_save(&bridge, dir.path(), &file_id, "notes.txt", b"bytes", "1");
+            let outcome = bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+            assert!(
+                outcome.account_refused && !outcome.link_failed && !outcome.session_refused,
+                "{file_id}: {outcome:?}"
+            );
+            assert!(
+                bridge
+                    .db
+                    .list_operations_for_file(&file_id)
+                    .unwrap()
+                    .iter()
+                    .all(|op| op.attempts < op.max_attempts),
+                "still live"
+            );
+        }
+        let (dir, sync_root, server, bridge) = rule3_setup([199u8; 32]);
+        seed_uploaded_row(&bridge, &server, "plain-413");
+        refuse(
+            &server,
+            Refused::Init,
+            "plain-413",
+            ("413 Payload Too Large", json!({ "error": "payload_too_large" })),
+        );
+        fp_save(&bridge, dir.path(), "plain-413", "notes.txt", b"bytes", "1");
+        let outcome = bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+        assert!(
+            !outcome.account_refused,
+            "a plain 413 is counted, not an account refusal"
+        );
+    }
+
     /// Spec §8.4: a refusal the person cures (free space, subscribe, pay), in the server's real
     /// shape, 30 times: the File Provider write is never paused or parked and keeps presenting
     /// `uploading`; once the person has cured it, the save lands.
@@ -23257,9 +26179,20 @@ mod tests {
             1,
             "one fetch reached the server: {fetch:?}"
         );
+        // Task 2173: plus at most one discovery request (this server has no direct route).
         assert!(
-            fetch.iter().all(|(m, path)| m == "GET" && path.starts_with(&metadata)),
+            fetch
+                .iter()
+                .all(|(m, path)| m == "GET" && (path.starts_with(&metadata) || path == "/api/v1/transfer/capabilities")),
             "nothing but that fetch: {fetch:?}"
+        );
+        assert!(
+            fetch
+                .iter()
+                .filter(|(_, path)| path == "/api/v1/transfer/capabilities")
+                .count()
+                <= 1,
+            "discovery at most once: {fetch:?}"
         );
     }
 
@@ -23581,7 +26514,7 @@ mod tests {
         ];
         // (file, the call, the function it is in, lines between that function's start and the
         // call, why it queues no content on a Mac)
-        let allowed: [(&str, &str, &str, &[&str], &str); 7] = [
+        let allowed: [(&str, &str, &str, &[&str], &str); 8] = [
             (
                 "engine_bridge.rs",
                 "self.queue_finder_create_from(target, None)",
@@ -23620,13 +26553,20 @@ mod tests {
             (
                 "watcher.rs",
                 "match bridge.queue_finder_create(target) {",
-                "fn dispatch_local_create(",
+                "pub(crate) fn dispatch_local_create_verdict(",
                 &[],
                 "the upload driver, which a Mac never starts (asserted below)",
             ),
             (
                 "watcher.rs",
-                "match bridge.queue_finder_modify(modify) {",
+                "return match bridge.queue_finder_modify(target) {",
+                "pub(crate) fn dispatch_local_create_verdict(",
+                &[],
+                "the upload driver's edit of a synced file (task 1640), which a Mac never starts (asserted below)",
+            ),
+            (
+                "watcher.rs",
+                "None => bridge.queue_finder_modify(modify),",
                 "pub(crate) async fn handle_rename(",
                 &[],
                 "the upload driver, which a Mac never starts (asserted below)",
@@ -23686,7 +26626,7 @@ mod tests {
                 && !sources.iter().any(|(rel, _)| rel.starts_with("windows_cf/")),
             "the module filter sees what a Mac compiles"
         );
-        let mut matched = [0usize; 7];
+        let mut matched = [0usize; 8];
         for (rel, mac) in &sources {
             let lines: Vec<&str> = mac.lines().map(str::trim).collect();
             for (i, line) in lines.iter().enumerate() {
@@ -24477,16 +27417,17 @@ mod tests {
     /// Task 1919, against a REAL local API (ignored by default). The desktop's own code path end to end:
     /// `ApiClient::set_preferred_region` (the call `account_set_region` makes), then the desktop's own upload
     /// (`EngineBridge::process_due_operations` -> `POST /uploads/init`, which sends no region) and then the
-    /// file's `storage_location` as the API reports it. A choice must land the file in THAT datacenter's pool;
-    /// "europe" must take the default placement; a coming-soon datacenter must be refused and change nothing.
+    /// file's `storage_location` as the API reports it (task 2050: by COUNTRY). A choice must land the file in a
+    /// pool of THAT country; "europe" must take the default placement; a coming-soon country must be refused and
+    /// change nothing.
     ///
     /// ```text
     /// BB_REAL_API_BASE=http://127.0.0.1:39191 BB_REAL_API_TOKEN=<session token> \
     ///   cargo test --lib real_api_region_choice -- --ignored --nocapture --test-threads=1
     /// ```
     #[tokio::test]
-    #[ignore = "needs a running local API with fsn1/hel1/nbg1 pools: BB_REAL_API_BASE and BB_REAL_API_TOKEN"]
-    async fn real_api_region_choice_upload_lands_in_the_chosen_datacenter() {
+    #[ignore = "needs a running local API with de/fi pools: BB_REAL_API_BASE and BB_REAL_API_TOKEN"]
+    async fn real_api_region_choice_upload_lands_in_the_chosen_country() {
         let base = std::env::var("BB_REAL_API_BASE").expect("BB_REAL_API_BASE");
         let token = std::env::var("BB_REAL_API_TOKEN").expect("BB_REAL_API_TOKEN");
         assert!(
@@ -24503,19 +27444,15 @@ mod tests {
         let listed = api.account_region().await.expect("GET /me/region");
         let ids: Vec<&str> = listed.choices.iter().map(|c| c.id.as_str()).collect();
         println!("choices from the API: {ids:?}");
-        assert_eq!(ids, ["europe", "fsn1", "hel1", "nbg1", "ede"]);
-        let ede = listed.choices.iter().find(|c| c.id == "ede").unwrap();
-        assert!(!ede.selectable && ede.status == "coming_soon");
+        assert_eq!(ids, ["europe", "fi", "de", "nl"]);
+        let nl = listed.choices.iter().find(|c| c.id == "nl").unwrap();
+        assert!(!nl.selectable && nl.status == "coming_soon");
 
         let mut op_no = 0;
         let mut landed = Vec::new();
-        for (choice, expected_city) in [
-            ("hel1", "Helsinki"),
-            ("nbg1", "Nuremberg"),
-            ("europe", "Falkenstein"),
-            ("fsn1", "Falkenstein"),
-        ] {
-            let saved = api.set_preferred_region(Some(choice)).await.expect("PUT /me/region");
+        // "europe" lands in the default pool, which is a German one.
+        for (choice, expected_country) in [("fi", "Finland"), ("de", "Germany"), ("europe", "Germany")] {
+            let saved = api.set_preferred_region(Some(choice), Some(false)).await.expect("PUT /me/region");
             assert_eq!(saved.preferred_region.as_deref(), Some(choice));
             assert_eq!(
                 api.account_region().await.unwrap().preferred_region.as_deref(),
@@ -24574,17 +27511,4949 @@ mod tests {
                 .json()
                 .await
                 .unwrap();
-            let city = body["storage_location"]["city"].as_str().unwrap_or("<none>").to_string();
-            println!("UPLOAD choice={choice} file_id={file_id} storage_location.city={city}");
-            assert_eq!(city, expected_city, "choice {choice}: {body}");
-            landed.push((choice, file_id, city));
+            let country = body["storage_location"]["country"].as_str().unwrap_or("<none>").to_string();
+            println!("UPLOAD choice={choice} file_id={file_id} storage_location.country={country}");
+            assert_eq!(country, expected_country, "choice {choice}: {body}");
+            landed.push((choice, file_id, country));
         }
 
-        // A coming-soon datacenter is refused and the stored choice is left alone.
-        let refused = api.set_preferred_region(Some("ede")).await.expect_err("ede must be refused");
-        println!("PUT ede -> {refused}");
+        // A coming-soon country is refused and the stored choice is left alone.
+        let refused = api.set_preferred_region(Some("nl"), Some(false)).await.expect_err("nl must be refused");
+        println!("PUT nl -> {refused}");
         assert!(refused.to_string().contains("region_unavailable"), "{refused}");
-        assert_eq!(api.account_region().await.unwrap().preferred_region.as_deref(), Some("fsn1"));
+        assert_eq!(api.account_region().await.unwrap().preferred_region.as_deref(), Some("europe"));
         println!("LANDED {landed:?}");
+    }
+
+    /// Task 2173: the engine's whole-file hydrate over the direct transport, against a loopback API
+    /// and storage pair that speaks the contract (`direct_download::test_support`).
+    mod direct_download_engine {
+        use super::*;
+        use crate::direct_download::test_support::{GrantScript, Pair, SECRET, SIGNATURE, Version, capture_logs, content, file_key};
+        use crate::direct_download::{FileTransport, Transport};
+
+        const KEY: [u8; 32] = [31; 32];
+        const SIZE: usize = 10 * 1024 + 77;
+
+        fn bridge_for(dir: &Path, pair: &Pair) -> EngineBridge {
+            let bridge = test_bridge_with_api(&dir.join("state.db"), pair.api.base.clone(), KEY);
+            seed_bridge_row(&bridge, TEST_FILE_ID, "/direct.bin", None, FileStatus::CloudOnly, SIZE as i64);
+            bridge
+        }
+
+        #[tokio::test]
+        async fn a_direct_hydrate_writes_the_same_bytes_and_reports_like_the_api_path() {
+            let dir = tempfile::tempdir().unwrap();
+            let pair = Pair::start(KEY, TEST_FILE_ID, 1024, SIZE);
+            let bridge = bridge_for(dir.path(), &pair);
+            let reports: Arc<Mutex<Vec<(u64, u64)>>> = Arc::default();
+            let seen = reports.clone();
+            let progress = move |done: u64, total: u64| seen.lock().unwrap().push((done, total));
+            let dest = dir.path().join("direct.bin");
+            bridge
+                .hydrate_file_with_progress(TEST_FILE_ID, &dest, &[dir.path()], Some(&progress))
+                .await
+                .unwrap();
+            assert_eq!(std::fs::read(&dest).unwrap(), pair.plain(), "byte-identical on disk");
+            assert_eq!(pair.storage_requests(), 11);
+            assert!(pair.api_chunk_requests().is_empty(), "no chunk through the API");
+            let encrypted = pair.knobs().version.encrypted_size();
+            assert_eq!(bridge.wire.download_bytes.load(Ordering::Relaxed), encrypted, "wire bytes counted");
+            let reports = reports.lock().unwrap().clone();
+            let total = SIZE as u64;
+            assert_eq!(reports.first(), Some(&(0, total)), "the start, as on the API path");
+            assert_eq!(reports.last(), Some(&(total, total)));
+            assert_eq!(reports.len(), 12, "the start, then once per chunk");
+            assert_eq!(bridge.db.get_file(TEST_FILE_ID).unwrap().unwrap().status, FileStatus::Local);
+        }
+
+        #[tokio::test]
+        async fn a_version_replaced_mid_download_restarts_once_from_fresh_metadata() {
+            let dir = tempfile::tempdir().unwrap();
+            let pair = Pair::start(KEY, TEST_FILE_ID, 1024, SIZE);
+            let replacement = Version::new(
+                &file_key(KEY, TEST_FILE_ID),
+                "99999999-2222-4333-8444-555555555555",
+                1024,
+                content(SIZE + 5000, 9),
+            );
+            {
+                let mut k = pair.knobs();
+                k.replacement = Some(replacement.clone());
+                k.grants.push_back(GrantScript::Serve);
+                k.grants.push_back(GrantScript::Replace);
+            }
+            let bridge = bridge_for(dir.path(), &pair);
+            let plaintext = bridge.do_hydrate(TEST_FILE_ID, None).await.unwrap();
+            assert_eq!(&*plaintext, replacement.plain.as_slice(), "the new version, whole, never mixed");
+            let metadata = pair.api.count(|s| s.method == "GET" && s.path() == format!("/api/v1/files/{TEST_FILE_ID}"));
+            assert_eq!(metadata, 2, "fresh metadata once");
+            assert!(pair.api_chunk_requests().is_empty());
+        }
+
+        #[tokio::test]
+        async fn a_replace_with_more_chunks_before_the_first_window_restarts_and_never_publishes_a_truncated_file() {
+            // Review P2-2: get_file names A; B, with more chunks, completes before the first grant.
+            let dir = tempfile::tempdir().unwrap();
+            let pair = Pair::start(KEY, TEST_FILE_ID, 1024, SIZE);
+            let more = Version::new(
+                &file_key(KEY, TEST_FILE_ID),
+                "99999999-2222-4333-8444-555555555555",
+                1024,
+                content(SIZE + 5000, 9),
+            );
+            pair.knobs().replacement = Some(more.clone());
+            pair.knobs().grants.push_back(GrantScript::Replace);
+            let bridge = bridge_for(dir.path(), &pair);
+            let dest = dir.path().join("direct.bin");
+            bridge.hydrate_file(TEST_FILE_ID, &dest, &[dir.path()]).await.unwrap();
+            assert_eq!(std::fs::read(&dest).unwrap(), more.plain, "B, whole: never the old count's prefix");
+            let metadata = pair.api.count(|s| s.method == "GET" && s.path() == format!("/api/v1/files/{TEST_FILE_ID}"));
+            assert_eq!(metadata, 2, "fresh metadata once");
+            assert!(pair.api_chunk_requests().is_empty(), "the unpinned API loop never ran");
+        }
+
+        #[tokio::test]
+        async fn a_conflict_preview_restarts_once_when_the_version_goes_away() {
+            let dir = tempfile::tempdir().unwrap();
+            // 12 chunks: two grant windows, so the second one meets the replacement.
+            let pair = Pair::start_with(KEY, TEST_FILE_ID, 1024, b"remote version A ".repeat(700));
+            let b = Version::new(
+                &file_key(KEY, TEST_FILE_ID),
+                "99999999-2222-4333-8444-555555555555",
+                1024,
+                b"remote version B ".repeat(700),
+            );
+            {
+                let mut k = pair.knobs();
+                k.replacement = Some(b.clone());
+                k.grants.push_back(GrantScript::Serve);
+                k.grants.push_back(GrantScript::Replace);
+            }
+            let bridge = bridge_for(dir.path(), &pair);
+            let (side, _) = bridge.remote_content_preview(TEST_FILE_ID, true).await;
+            assert_eq!(side.unavailable_reason, None);
+            assert_eq!(side.text.as_deref(), Some(String::from_utf8(b.plain.clone()).unwrap().as_str()));
+        }
+
+        #[test]
+        fn a_refused_download_logs_by_category() {
+            use crate::direct_download::DirectError;
+            for (status, want) in [(401, "permission_denied"), (403, "permission_denied"), (404, "not_found"), (500, "other")] {
+                let e = anyhow::Error::new(DirectError::Refused(status));
+                assert_eq!(error_category(e.as_ref()), want, "{status}");
+            }
+        }
+
+        #[tokio::test]
+        async fn forcing_the_api_transport_keeps_the_old_requests() {
+            let dir = tempfile::tempdir().unwrap();
+            let pair = Pair::start(KEY, TEST_FILE_ID, 1024, SIZE);
+            let bridge = bridge_for(dir.path(), &pair);
+            bridge.seams.use_transport(Transport::Api);
+            let meta = bridge.api.get_file(TEST_FILE_ID).await.unwrap();
+            let (plaintext, transport) = bridge.hydrate_whole_file(TEST_FILE_ID, &meta, None).await.unwrap();
+            assert_eq!((plaintext.to_vec(), transport), (pair.plain(), FileTransport::Api));
+            assert_eq!(pair.discovery_requests(), 0);
+            assert!(pair.grant_requests().is_empty());
+            let chunks = pair.api_chunk_requests();
+            assert_eq!(chunks.len(), 11);
+            // Task 1643: the API path is bound to the metadata's version.
+            let pinned = format!("object_version_id={}", pair.knobs().version.id);
+            assert!(chunks.iter().all(|r| r.query() == pinned), "every chunk pinned");
+        }
+
+        #[tokio::test]
+        async fn a_legacy_file_takes_no_metadata_pin_on_either_path() {
+            // `download_version: null`: the client invents no pin. The API path is today's unpinned route; the direct
+            // path is bound by the planner's own pin, the version the first grant window names.
+            let dir = tempfile::tempdir().unwrap();
+            let pair = Pair::start(KEY, TEST_FILE_ID, 1024, SIZE);
+            pair.knobs().legacy = true;
+            let bridge = bridge_for(dir.path(), &pair);
+            bridge.seams.use_transport(Transport::Api);
+            let meta = bridge.api.get_file(TEST_FILE_ID).await.unwrap();
+            let (plaintext, transport) = bridge.hydrate_whole_file(TEST_FILE_ID, &meta, None).await.unwrap();
+            assert_eq!((plaintext.to_vec(), transport), (pair.plain(), FileTransport::Api));
+            assert!(pair.api_chunk_requests().iter().all(|r| r.query().is_empty()), "API path: no pin is invented");
+
+            let dir = tempfile::tempdir().unwrap();
+            let pair = Pair::start(KEY, TEST_FILE_ID, 1024, SIZE);
+            pair.knobs().legacy = true;
+            let bridge = bridge_for(dir.path(), &pair);
+            let meta = bridge.api.get_file(TEST_FILE_ID).await.unwrap();
+            let (plaintext, transport) = bridge.hydrate_whole_file(TEST_FILE_ID, &meta, None).await.unwrap();
+            assert_eq!((plaintext.to_vec(), transport), (pair.plain(), FileTransport::Direct));
+            let windows: Vec<serde_json::Value> =
+                pair.grant_requests().iter().map(|r| serde_json::from_slice(&r.body).unwrap()).collect();
+            assert_eq!(windows[0]["object_version_id"], serde_json::Value::Null, "the first window pins nothing itself");
+            let planner_pin = pair.knobs().version.id.clone();
+            assert!(windows[1..].iter().all(|w| w["object_version_id"] == planner_pin.as_str()), "later windows: the planner's pin");
+            assert!(pair.api_chunk_requests().is_empty());
+        }
+
+        #[tokio::test]
+        async fn a_range_read_stays_on_the_api() {
+            let dir = tempfile::tempdir().unwrap();
+            let pair = Pair::start(KEY, TEST_FILE_ID, 1024, SIZE);
+            let bridge = bridge_for(dir.path(), &pair);
+            let range = bridge.hydrate_file_range(TEST_FILE_ID, 1024, 10).await.unwrap().unwrap();
+            assert_eq!(&*range.data, &pair.plain()[1024..2048]);
+            assert_eq!(pair.discovery_requests(), 0, "a range read never asks for windows");
+            assert_eq!(pair.api_chunk_requests().len(), 2);
+            assert_eq!(pair.storage_requests(), 0);
+        }
+
+        fn real_env(name: &str) -> String {
+            std::env::var(name)
+                .unwrap_or_else(|_| panic!("{name} must be set (see the test's doc); this test never passes vacuously"))
+        }
+
+        /// The desktop engine against a REAL local server: the API path, the direct path and a
+        /// forced fallback (every storage fetch fails, so every chunk is renewed three times against
+        /// the real grant route and then fetched through the real pinned per-chunk route) all return
+        /// the same bytes. Ignored by default; it starts nothing and refuses any non-loopback URL.
+        ///
+        /// ```text
+        /// BB_REAL_SERVER_URL=http://127.0.0.1:3994   # beebeeb-api, its own Postgres, Redis, MinIO
+        /// BB_REAL_SESSION_TOKEN=<token>              # a session of a fresh test account
+        /// BB_REAL_FILE_ID=<id>                       # a file that account uploaded with a zero master key
+        /// BB_REAL_SHA256=<hex>                       # the sha256 of its plaintext
+        /// BB_REAL_EXPECT_TRANSPORT=direct|api        # what the auto run must use
+        /// BB_REAL_REPORT=<file>                      # optional: result lines are appended here
+        /// ```
+        #[tokio::test(flavor = "current_thread")]
+        #[ignore = "needs a running server and MinIO: set BB_REAL_SERVER_URL, BB_REAL_SESSION_TOKEN, BB_REAL_FILE_ID, BB_REAL_SHA256, BB_REAL_EXPECT_TRANSPORT"]
+        async fn real_server_api_direct_and_forced_fallback_return_identical_bytes() {
+            use sha2::Digest;
+            let url = real_env("BB_REAL_SERVER_URL");
+            assert!(
+                url.starts_with("http://127.0.0.1:") || url.starts_with("http://localhost:"),
+                "refusing to run against {url}: only a loopback http server"
+            );
+            let token = real_env("BB_REAL_SESSION_TOKEN");
+            let file_id = real_env("BB_REAL_FILE_ID");
+            let want = real_env("BB_REAL_SHA256");
+            let expect = real_env("BB_REAL_EXPECT_TRANSPORT");
+            assert!(expect == "direct" || expect == "api", "BB_REAL_EXPECT_TRANSPORT is direct or api");
+            let fallback = if expect == "direct" { "mixed" } else { "api" };
+            // (label, transport, every storage fetch fails, transport the run must report)
+            let cells = [
+                ("auto", Transport::Auto, false, expect.as_str()),
+                ("forced-api", Transport::Api, false, "api"),
+                ("forced-fallback", Transport::Auto, true, fallback),
+            ];
+            let (report, logs) = capture_logs(async {
+                let mut report = Vec::new();
+                for (label, transport, fail_storage, expected) in cells {
+                    let dir = tempfile::tempdir().unwrap();
+                    let db = Arc::new(StateDb::open(dir.path().join("state.db")).unwrap());
+                    // A fresh client per cell: each asks discovery itself. The 32 zero bytes are the
+                    // test account's master key (the server never sees it).
+                    let api = Arc::new(ApiClient::new(url.clone(), token.clone(), [0u8; 32]));
+                    let bridge = EngineBridge::new(db, api);
+                    bridge.seams.use_transport(transport);
+                    if fail_storage {
+                        bridge.seams.fail_storage(503);
+                    }
+                    let meta = bridge.api.get_file(&file_id).await.expect("file metadata");
+                    let started = std::time::Instant::now();
+                    let (plaintext, used) = bridge
+                        .hydrate_whole_file(&file_id, &meta, None)
+                        .await
+                        .unwrap_or_else(|e| panic!("{label}: {e:#}"));
+                    let got: String = sha2::Sha256::digest(&*plaintext).iter().map(|b| format!("{b:02x}")).collect();
+                    let line = format!(
+                        "{label}: transport={} sha256={got} bytes={} wire={} ms={}",
+                        used.as_str(),
+                        plaintext.len(),
+                        bridge.wire.download_bytes.load(Ordering::Relaxed),
+                        started.elapsed().as_millis()
+                    );
+                    println!("{line}");
+                    assert_eq!(got, want, "{label}: different bytes");
+                    assert_eq!(used.as_str(), expected, "{label}: another transport");
+                    report.push(line);
+                }
+                report
+            })
+            .await;
+            let leaks = logs.lines().filter(|l| l.contains(SIGNATURE) || l.contains(SECRET)).count();
+            let line = format!("log lines captured={} with {SIGNATURE}={leaks}", logs.lines().count());
+            println!("{line}");
+            assert_eq!(leaks, 0, "a signed link reached the log");
+            if let Ok(path) = std::env::var("BB_REAL_REPORT") {
+                let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
+                for l in report.iter().chain(std::iter::once(&line)) {
+                    writeln!(f, "{l}").unwrap();
+                }
+            }
+        }
+    }
+
+    /// Task 1643: every chunk of one download comes from ONE version. A loopback server that behaves
+    /// like the real one (contract "Version-bound downloads"): the metadata names the current version
+    /// with its manifest; an unpinned chunk request gets the CURRENT version's chunk; a pinned one gets
+    /// the pinned version's chunk while it is retained, else 409. Between two chunk requests the test
+    /// commits the next version (the "pause, commit an equal-size next version, resume" of the task).
+    /// Self-contained on purpose: the same module runs on main, where it shows the mixed bytes.
+    mod version_bound_downloads_1643 {
+        use super::*;
+        use sha2::Digest;
+
+        const KEY: [u8; 32] = [43; 32];
+        const STRIDE: usize = 1024;
+        const GONE: &str = "download version unavailable; restart download from fresh metadata";
+
+        struct Version {
+            id: &'static str,
+            plain: Vec<u8>,
+            stride: usize,
+            frames: Vec<Vec<u8>>,
+            retained: bool,
+        }
+
+        impl Version {
+            fn new(id: &'static str, plain: Vec<u8>) -> Self {
+                Self::with_stride(id, plain, STRIDE)
+            }
+            fn with_stride(id: &'static str, plain: Vec<u8>, stride: usize) -> Self {
+                let key = hydration_test_key(KEY, TEST_FILE_ID);
+                let frames = plain.chunks(stride).map(|c| encrypt_chunk_wire(&key, c)).collect();
+                Version { id, plain, stride, frames, retained: true }
+            }
+            /// The last chunk in the legacy JSON framing `content_frame` still accepts, padded
+            /// to the manifest's exact wire size but holding `plain`: a chunk whose wire size is right and
+            /// whose plaintext is not (only the plaintext totals can see it).
+            fn with_json_last_chunk(mut self, plain: &[u8]) -> Self {
+                let key = hydration_test_key(KEY, TEST_FILE_ID);
+                let last = self.frames.len() - 1;
+                let wire = self.frames[last].len();
+                let mut json = serde_json::to_vec(&beebeeb_core::encrypt::encrypt_chunk(&key, plain).unwrap()).unwrap();
+                assert!(json.len() <= wire, "the JSON frame ({} bytes) must fit the wire size {wire}", json.len());
+                json.resize(wire, b' ');
+                self.frames[last] = json;
+                self
+            }
+            fn manifest(&self) -> serde_json::Value {
+                let chunks: Vec<serde_json::Value> = self
+                    .frames
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| json!({"index": i, "size_bytes": f.len()}))
+                    .collect();
+                json!({
+                    "object_version_id": self.id, "version_number": 1, "chunk_count": self.frames.len(),
+                    "chunk_size_bytes": self.stride, "plaintext_size_bytes": self.plain.len(),
+                    "ciphertext_size_bytes": self.frames.iter().map(Vec::len).sum::<usize>(), "chunks": chunks,
+                })
+            }
+        }
+
+        /// Equal-size versions with different bytes: a mix is a third hash.
+        fn content(fill: u8, len: usize) -> Vec<u8> {
+            (0..len).map(|i| fill ^ (i as u8)).collect()
+        }
+
+        struct State {
+            versions: Vec<Version>,
+            current: usize,
+            /// (after this many chunk requests were answered, the version that becomes current,
+            /// whether the old one is pruned at that moment)
+            commits: Vec<(usize, usize, bool)>,
+            chunk_requests: usize,
+            /// A server bug for one test: pinned chunk requests are answered from the current version.
+            ignores_pin: bool,
+            legacy: bool,
+            /// A pruning commit also leaves the file with no servable version yet: the metadata after it says
+            /// `download_version: null` (review of #138, P2).
+            null_manifest_on_commit: bool,
+            /// What the next chunk requests get instead of their chunk, one each, in order.
+            faults: std::collections::VecDeque<Fault>,
+            /// The metadata's top-level `size_bytes`, when it must differ from the version's (a replace running).
+            size_bytes_override: Option<usize>,
+            seen: Vec<String>,
+        }
+
+        #[derive(Clone, Copy)]
+        enum Fault {
+            /// The server's real 429 (`rate_limit::too_many_requests`) with this Retry-After.
+            RateLimited(u64),
+            Status(u16),
+        }
+
+        struct Server {
+            base: String,
+            state: Arc<Mutex<State>>,
+        }
+
+        impl Server {
+            fn start(versions: Vec<Version>, commits: Vec<(usize, usize, bool)>) -> Self {
+                let state = Arc::new(Mutex::new(State {
+                    versions,
+                    current: 0,
+                    commits,
+                    chunk_requests: 0,
+                    ignores_pin: false,
+                    legacy: false,
+                    null_manifest_on_commit: false,
+                    faults: std::collections::VecDeque::new(),
+                    size_bytes_override: None,
+                    seen: Vec::new(),
+                }));
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                let base = format!("http://{}", listener.local_addr().unwrap());
+                let shared = state.clone();
+                thread::spawn(move || {
+                    for stream in listener.incoming() {
+                        let Ok(mut stream) = stream else { continue };
+                        let state = shared.clone();
+                        thread::spawn(move || {
+                            let Some(request) = read_http_request_or_hangup(&mut stream) else { return };
+                            let reply = answer(&mut state.lock().unwrap(), &request.method, &request.path);
+                            let _ = stream.write_all(&reply);
+                        });
+                    }
+                });
+                Server { base, state }
+            }
+
+            fn seen(&self) -> Vec<String> {
+                self.state.lock().unwrap().seen.clone()
+            }
+        }
+
+        fn bytes_reply(body: &[u8]) -> Vec<u8> {
+            let mut out = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .into_bytes();
+            out.extend_from_slice(body);
+            out
+        }
+
+        fn answer(s: &mut State, method: &str, target: &str) -> Vec<u8> {
+            s.seen.push(format!("{method} {target}"));
+            let file = format!("/api/v1/files/{TEST_FILE_ID}");
+            let (path, query) = target.split_once('?').unwrap_or((target, ""));
+            let pin = query.split('&').find_map(|kv| kv.strip_prefix("object_version_id="));
+            if method == "GET" && path == file {
+                let v = &s.versions[s.current];
+                // The server numbers its versions: the current one is the `current + 1`th (task 2190, F1).
+                let mut manifest = v.manifest();
+                manifest["version_number"] = json!(s.current + 1);
+                return http_json(
+                    "200 OK",
+                    json!({
+                        "id": TEST_FILE_ID, "size_bytes": s.size_bytes_override.unwrap_or(v.plain.len()), "chunk_count": v.frames.len(),
+                        "chunk_size_bytes": v.stride,
+                        "name_encrypted": enc_name(&KEY, TEST_FILE_ID, "version.bin"),
+                        "download_version": if s.legacy { serde_json::Value::Null } else { manifest },
+                    }),
+                )
+                .into_bytes();
+            }
+            if let Some(index) = path.strip_prefix(&format!("{file}/chunks/")).and_then(|i| i.parse::<usize>().ok()) {
+                match s.faults.pop_front() {
+                    Some(Fault::RateLimited(secs)) => {
+                        let body = json!({
+                            "error": "rate_limited",
+                            "message": format!("Too many requests. Try again in {secs} seconds."),
+                            "retry_after": secs,
+                        })
+                        .to_string();
+                        return format!(
+                            "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nRetry-After: {secs}\r\nX-RateLimit-Limit: 600\r\nX-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: {secs}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .into_bytes();
+                    }
+                    Some(Fault::Status(status)) => {
+                        return http_json(&format!("{status} Scripted"), json!({"error": "scripted"})).into_bytes();
+                    }
+                    None => {}
+                }
+                let served = match pin {
+                    Some(id) if !s.ignores_pin => s.versions.iter().position(|v| v.id == id && v.retained),
+                    _ => Some(s.current),
+                };
+                let reply = match served {
+                    Some(v) => bytes_reply(&s.versions[v].frames[index]),
+                    None => http_json("409 Conflict", json!({"error": GONE})).into_bytes(),
+                };
+                // The chunk is answered; now the next version may commit (the pause).
+                s.chunk_requests += 1;
+                let done = s.chunk_requests;
+                for &(after, next, prune) in &s.commits.clone() {
+                    if after == done {
+                        if prune {
+                            let old = s.current;
+                            s.versions[old].retained = false;
+                            if s.null_manifest_on_commit {
+                                s.legacy = true;
+                            }
+                        }
+                        s.current = next;
+                    }
+                }
+                return reply;
+            }
+            // Anything else (a newer client's discovery): this server has no such route.
+            http_json("404 Not Found", json!({"error": "not found"})).into_bytes()
+        }
+
+        fn sha(bytes: &[u8]) -> String {
+            sha2::Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+        }
+
+        /// The final bytes are exactly one version's, never a mix.
+        fn one_version<'a>(got: &[u8], versions: &[&'a Version]) -> &'a str {
+            versions
+                .iter()
+                .find(|v| v.plain == got)
+                .map(|v| v.id)
+                .unwrap_or_else(|| panic!("MIXED BYTES: sha256 {} is none of {:?}", sha(got), versions.iter().map(|v| (v.id, sha(&v.plain))).collect::<Vec<_>>()))
+        }
+
+        fn three_versions() -> (Vec<Version>, [Vec<u8>; 3]) {
+            let len = 3 * STRIDE + 77;
+            let a = Version::new("aaaaaaaa-0000-4000-8000-00000000000a", content(0xA1, len));
+            let b = Version::new("bbbbbbbb-0000-4000-8000-00000000000b", content(0xB1, len));
+            let c = Version::new("cccccccc-0000-4000-8000-00000000000c", content(0xC1, len));
+            let plains = [a.plain.clone(), b.plain.clone(), c.plain.clone()];
+            (vec![a, b, c], plains)
+        }
+
+        fn hydrate(server: &Server, dir: &Path) -> (anyhow::Result<()>, EngineBridge, PathBuf) {
+            let bridge = test_bridge_with_api(&dir.join("state.db"), server.base.clone(), KEY);
+            seed_bridge_row(&bridge, TEST_FILE_ID, "/pinned.bin", None, FileStatus::CloudOnly, 0);
+            let dest = dir.join("pinned.bin");
+            let result = tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(async { bridge.hydrate_file(TEST_FILE_ID, &dest, &[dir]).await });
+            (result, bridge, dest)
+        }
+
+        #[test]
+        fn a_replace_committed_between_chunk_requests_never_mixes_versions() {
+            let dir = tempfile::tempdir().unwrap();
+            let (versions, [a, b, _]) = three_versions();
+            // B commits after the first chunk is answered; A stays retained.
+            let server = Server::start(versions, vec![(1, 1, false)]);
+            let (result, bridge, dest) = hydrate(&server, dir.path());
+            result.unwrap();
+            let got = std::fs::read(&dest).unwrap();
+            let (va, vb) = (Version::new("aaaaaaaa-0000-4000-8000-00000000000a", a), Version::new("bbbbbbbb-0000-4000-8000-00000000000b", b));
+            assert_eq!(one_version(&got, &[&va, &vb]), va.id, "the version the metadata named");
+            let pinned: Vec<String> = server.seen().into_iter().filter(|r| r.contains("/chunks/")).collect();
+            assert!(pinned.iter().all(|r| r.ends_with(&format!("?object_version_id={}", va.id))), "every chunk pinned: {pinned:?}");
+            assert_eq!(bridge.db.get_file(TEST_FILE_ID).unwrap().unwrap().status, FileStatus::Local);
+        }
+
+        #[test]
+        fn a_pruned_version_restarts_from_fresh_metadata_and_hydrates_the_new_one() {
+            let dir = tempfile::tempdir().unwrap();
+            let (versions, [a, b, _]) = three_versions();
+            // B commits after the first chunk and A is gone at once: the next pinned request is a 409.
+            let server = Server::start(versions, vec![(1, 1, true)]);
+            let (result, _bridge, dest) = hydrate(&server, dir.path());
+            result.unwrap();
+            let got = std::fs::read(&dest).unwrap();
+            let (va, vb) = (Version::new("aaaaaaaa-0000-4000-8000-00000000000a", a), Version::new("bbbbbbbb-0000-4000-8000-00000000000b", b));
+            assert_eq!(one_version(&got, &[&va, &vb]), vb.id, "the new version, whole");
+            let metadata = server.seen().iter().filter(|r| r.as_str() == format!("GET /api/v1/files/{TEST_FILE_ID}")).count();
+            assert_eq!(metadata, 2, "fresh metadata once");
+        }
+
+        #[test]
+        fn two_replacements_in_a_row_fail_cleanly_and_write_nothing() {
+            let dir = tempfile::tempdir().unwrap();
+            let (versions, _) = three_versions();
+            // B commits (A pruned) after chunk request 1; C commits (B pruned) after request 3, the
+            // first chunk of the restarted download.
+            let server = Server::start(versions, vec![(1, 1, true), (3, 2, true)]);
+            let (result, bridge, dest) = hydrate(&server, dir.path());
+            assert!(result.is_err(), "a second replacement is an error, not a third attempt or a mix");
+            assert!(!dest.exists(), "nothing is written");
+            assert_eq!(
+                bridge.db.get_file(TEST_FILE_ID).unwrap().unwrap().status,
+                FileStatus::Error,
+                "never marked in sync"
+            );
+        }
+
+        #[test]
+        fn a_chunk_whose_size_is_not_the_manifests_is_refused_at_that_chunk() {
+            let dir = tempfile::tempdir().unwrap();
+            let len = 3 * STRIDE + 77;
+            let a = Version::new("aaaaaaaa-0000-4000-8000-00000000000a", content(0xA1, len));
+            // B has the same size in another stride; a server that ignored the pin would hand out B's
+            // chunks, and only their sizes give them away.
+            let b = Version::with_stride("bbbbbbbb-0000-4000-8000-00000000000b", content(0xB1, len), 1000);
+            let server = Server::start(vec![a, b], vec![(1, 1, false)]);
+            server.state.lock().unwrap().ignores_pin = true;
+            let (result, bridge, dest) = hydrate(&server, dir.path());
+            let err = format!("{:#}", result.expect_err("a chunk of another size is refused"));
+            assert!(err.contains("chunk 1 through the API is not the length its version's manifest states"), "refused at the chunk, by the chunk's size: {err}");
+            let chunks = server.seen().iter().filter(|r| r.contains("/chunks/")).count();
+            assert_eq!(chunks, 2, "nothing after the wrong chunk was fetched");
+            assert!(!dest.exists(), "nothing is written");
+            assert_eq!(bridge.db.get_file(TEST_FILE_ID).unwrap().unwrap().status, FileStatus::Error);
+        }
+
+        #[test]
+        fn a_chunk_that_decrypts_to_another_length_than_the_manifest_says_is_refused() {
+            let dir = tempfile::tempdir().unwrap();
+            let a = Version::new("aaaaaaaa-0000-4000-8000-00000000000a", content(0xA1, 3 * STRIDE + 200)).with_json_last_chunk(b"x");
+            let server = Server::start(vec![a], vec![]);
+            let (result, bridge, dest) = hydrate(&server, dir.path());
+            let err = format!("{:#}", result.expect_err("a plaintext of another size is refused"));
+            assert!(err.contains("the download is 3073 bytes, the pinned version's manifest says 3272"), "{err}");
+            assert!(!dest.exists(), "nothing is written");
+            assert_eq!(bridge.db.get_file(TEST_FILE_ID).unwrap().unwrap().status, FileStatus::Error);
+        }
+
+        #[test]
+        fn a_range_read_of_a_chunk_that_decrypts_to_another_length_is_refused() {
+            let dir = tempfile::tempdir().unwrap();
+            let a = Version::new("aaaaaaaa-0000-4000-8000-00000000000a", content(0xA1, 3 * STRIDE + 200)).with_json_last_chunk(b"x");
+            let server = Server::start(vec![a], vec![]);
+            let err = format!("{:#}", read_range(&server, dir.path(), 3 * STRIDE as u64, 200).expect_err("refused"));
+            assert!(err.contains("the range read is 1 bytes"), "{err}");
+        }
+
+        #[test]
+        fn a_file_without_a_download_version_is_downloaded_unpinned_as_before() {
+            let dir = tempfile::tempdir().unwrap();
+            let (versions, [a, ..]) = three_versions();
+            let server = Server::start(versions, vec![]);
+            server.state.lock().unwrap().legacy = true;
+            let (result, _bridge, dest) = hydrate(&server, dir.path());
+            result.unwrap();
+            assert_eq!(std::fs::read(&dest).unwrap(), a);
+            let chunks: Vec<String> = server.seen().into_iter().filter(|r| r.contains("/chunks/")).collect();
+            assert_eq!(chunks.len(), 4);
+            assert!(chunks.iter().all(|r| !r.contains('?')), "no pin is invented: {chunks:?}");
+        }
+
+        // ── review of #138 ──
+
+        fn no_unpinned_chunk_request(server: &Server) {
+            let unpinned: Vec<String> = server.seen().into_iter().filter(|r| r.contains("/chunks/") && !r.contains("?object_version_id=")).collect();
+            assert!(unpinned.is_empty(), "never a chunk without its pin: {unpinned:?}");
+        }
+
+        #[test]
+        fn a_restart_whose_fresh_metadata_names_no_version_is_an_error_never_an_unpinned_download() {
+            let dir = tempfile::tempdir().unwrap();
+            let (versions, _) = three_versions();
+            let server = Server::start(versions, vec![(1, 1, true)]);
+            server.state.lock().unwrap().null_manifest_on_commit = true;
+            let (result, bridge, dest) = hydrate(&server, dir.path());
+            let err = result.expect_err("an error, not an unpinned second attempt");
+            assert!(err.downcast_ref::<crate::download_pin::PinLost>().is_some(), "{err:#}");
+            assert!(!dest.exists(), "nothing is written");
+            assert_eq!(bridge.db.get_file(TEST_FILE_ID).unwrap().unwrap().status, FileStatus::Error);
+            no_unpinned_chunk_request(&server);
+        }
+
+        #[test]
+        fn a_range_read_whose_restart_finds_no_version_errs_and_leaves_the_row_in_error() {
+            let dir = tempfile::tempdir().unwrap();
+            let (versions, _) = three_versions();
+            let server = Server::start(versions, vec![(1, 1, true)]);
+            server.state.lock().unwrap().null_manifest_on_commit = true;
+            let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base.clone(), KEY);
+            seed_bridge_row(&bridge, TEST_FILE_ID, "/pinned.bin", None, FileStatus::CloudOnly, 0);
+            let read = tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(async { bridge.hydrate_file_range(TEST_FILE_ID, STRIDE as u64, 2 * STRIDE as u64).await });
+            let err = read.err().expect("an error");
+            assert!(err.downcast_ref::<crate::download_pin::PinLost>().is_some(), "{err:#}");
+            assert_eq!(
+                bridge.db.get_file(TEST_FILE_ID).unwrap().unwrap().status,
+                FileStatus::Error,
+                "never left on Downloading"
+            );
+            no_unpinned_chunk_request(&server);
+        }
+
+        #[test]
+        fn a_conflict_preview_whose_restart_finds_no_version_shows_no_text_and_fetches_nothing_unpinned() {
+            let dir = tempfile::tempdir().unwrap();
+            let (versions, _) = three_versions();
+            let server = Server::start(versions, vec![(1, 1, true)]);
+            server.state.lock().unwrap().null_manifest_on_commit = true;
+            let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base.clone(), KEY);
+            let (side, _) = tokio::runtime::Runtime::new().unwrap().block_on(bridge.remote_content_preview(TEST_FILE_ID, true));
+            assert_eq!(side.text, None);
+            assert!(side.unavailable_reason.as_deref().is_some_and(|r| r.contains("cannot be downloaded yet")), "{side:?}");
+            no_unpinned_chunk_request(&server);
+        }
+
+        /// Task 2190 (review-169 F1): a conflict preview names the version of the bytes it returns, from the
+        /// metadata its download ran on. After a restart that is the fresh metadata's version, never the first's.
+        #[test]
+        fn a_conflict_preview_names_the_version_of_its_bytes_after_a_restart() {
+            let dir = tempfile::tempdir().unwrap();
+            let text = |name: &str| format!("remote version {name} ").repeat(200);
+            let versions = |b: bool| {
+                let mut list = vec![Version::new("aaaaaaaa-0000-4000-8000-00000000000a", text("A").into_bytes())];
+                if b {
+                    list.push(Version::new("bbbbbbbb-0000-4000-8000-00000000000b", text("B").into_bytes()));
+                }
+                list
+            };
+            // B commits after the first chunk and A is gone at once: the next pinned chunk is a 409, and the
+            // preview restarts on fresh metadata naming B.
+            let server = Server::start(versions(true), vec![(1, 1, true)]);
+            let bridge = test_bridge_with_api(&dir.path().join("restart.db"), server.base.clone(), KEY);
+            let (side, version) =
+                tokio::runtime::Runtime::new().unwrap().block_on(bridge.remote_content_preview(TEST_FILE_ID, true));
+            assert_eq!(side.text, Some(text("B")), "the new version's bytes, whole");
+            assert_eq!(version, Some(2), "and its version, from the fresh metadata");
+            assert_eq!(
+                server.seen().iter().filter(|r| r.as_str() == format!("GET /api/v1/files/{TEST_FILE_ID}")).count(),
+                2,
+                "precondition: it restarted"
+            );
+            // No restart: the first metadata's version.
+            let server = Server::start(versions(false), vec![]);
+            let bridge = test_bridge_with_api(&dir.path().join("plain.db"), server.base.clone(), KEY);
+            let (side, version) =
+                tokio::runtime::Runtime::new().unwrap().block_on(bridge.remote_content_preview(TEST_FILE_ID, true));
+            assert_eq!((side.text, version), (Some(text("A")), Some(1)));
+        }
+
+        #[test]
+        fn the_pinned_api_path_rides_out_the_servers_own_429() {
+            let dir = tempfile::tempdir().unwrap();
+            let (versions, [a, ..]) = three_versions();
+            let server = Server::start(versions, vec![]);
+            server.state.lock().unwrap().faults.push_back(Fault::RateLimited(1));
+            let (result, _bridge, dest) = hydrate(&server, dir.path());
+            result.expect("the 429 is waited out, not a failed download");
+            assert_eq!(std::fs::read(&dest).unwrap(), a);
+            assert_eq!(server.seen().iter().filter(|r| r.contains("/chunks/")).count(), 5, "4 chunks and one retry");
+        }
+
+        #[test]
+        fn a_pinned_api_failure_names_no_url() {
+            let dir = tempfile::tempdir().unwrap();
+            let (versions, _) = three_versions();
+            let server = Server::start(versions, vec![]);
+            server.state.lock().unwrap().faults.push_back(Fault::Status(400));
+            let (result, _bridge, _dest) = hydrate(&server, dir.path());
+            let err = format!("{:#}", result.expect_err("a refused chunk"));
+            assert!(!err.contains("object_version_id") && !err.contains("http://"), "no URL in the error: {err}");
+            assert!(err.contains("chunk 0"), "{err}");
+        }
+
+        #[test]
+        fn a_conflict_preview_checks_the_size_of_the_version_it_would_download() {
+            let dir = tempfile::tempdir().unwrap();
+            // The pinned version is over the preview limit; the top-level size says it is tiny (a replace running).
+            let big = Version::new("aaaaaaaa-0000-4000-8000-00000000000a", content(0xA1, CONFLICT_PREVIEW_TEXT_MAX_BYTES + 1));
+            let server = Server::start(vec![big], vec![]);
+            server.state.lock().unwrap().size_bytes_override = Some(100);
+            let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base.clone(), KEY);
+            let (side, _) = tokio::runtime::Runtime::new().unwrap().block_on(bridge.remote_content_preview(TEST_FILE_ID, true));
+            assert_eq!(side.size_bytes, Some(CONFLICT_PREVIEW_TEXT_MAX_BYTES as u64 + 1));
+            assert!(side.unavailable_reason.as_deref().is_some_and(|r| r.starts_with("File is too large to preview")), "{side:?}");
+            assert_eq!(server.seen().iter().filter(|r| r.contains("/chunks/")).count(), 0, "nothing downloaded");
+        }
+
+        fn read_range(server: &Server, dir: &Path, offset: u64, length: u64) -> anyhow::Result<Vec<u8>> {
+            let bridge = test_bridge_with_api(&dir.join("state.db"), server.base.clone(), KEY);
+            seed_bridge_row(&bridge, TEST_FILE_ID, "/pinned.bin", None, FileStatus::CloudOnly, 0);
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(async { bridge.hydrate_file_range(TEST_FILE_ID, offset, length).await })
+                .map(|r| r.expect("a planned range").data.to_vec())
+        }
+
+        #[test]
+        fn a_range_read_across_a_replace_reads_one_version() {
+            let dir = tempfile::tempdir().unwrap();
+            let (versions, [a, b, _]) = three_versions();
+            // Chunks 1 and 2; B commits after chunk 1 is answered.
+            let server = Server::start(versions, vec![(1, 1, false)]);
+            let got = read_range(&server, dir.path(), STRIDE as u64, 2 * STRIDE as u64).unwrap();
+            let span = STRIDE..3 * STRIDE;
+            assert!(got == a[span.clone()] || got == b[span.clone()], "MIXED range: sha256 {}", sha(&got));
+            assert_eq!(got, a[span].to_vec(), "the version the metadata named");
+        }
+
+        #[test]
+        fn a_range_read_whose_version_is_pruned_restarts_and_reads_the_new_one() {
+            let dir = tempfile::tempdir().unwrap();
+            let (versions, [a, b, _]) = three_versions();
+            let server = Server::start(versions, vec![(1, 1, true)]);
+            let got = read_range(&server, dir.path(), STRIDE as u64, 2 * STRIDE as u64).unwrap();
+            let span = STRIDE..3 * STRIDE;
+            assert!(got == a[span.clone()] || got == b[span.clone()], "MIXED range: sha256 {}", sha(&got));
+            assert_eq!(got, b[span].to_vec(), "the new version, after one restart");
+        }
+    }
+
+    // ── Task 1640: an edit of a synced sync-folder file is sent on its base and never overwritten ──
+    //
+    // The engine as Windows (and Linux) runs it: no write id, the upload driver's
+    // `dispatch_local_create` is the trigger (a close, or the scan). Before the fix an edit of a
+    // tracked file was never queued, and the next hydrate wrote the server's bytes over it.
+
+    /// One chunk of `plaintext` as the server stores it for `file_id`.
+    fn regression_1640_chunk(master_key: [u8; 32], file_id: &str, plaintext: &[u8]) -> Vec<u8> {
+        beebeeb_core::encrypt::encrypt_chunk_raw(
+            &beebeeb_core::kdf::derive_file_key(
+                &beebeeb_core::kdf::MasterKey::from_bytes(master_key),
+                file_id.as_bytes(),
+            ),
+            plaintext,
+        )
+        .unwrap()
+    }
+
+    /// The web saves `plaintext` as `file_id`'s next version, and the next snapshot lists it.
+    fn regression_1640_web_saves(server: &VersionedServerMock, master_key: [u8; 32], file_id: &str, plaintext: &[u8]) {
+        let mut s = server.state.lock().unwrap();
+        let chunk = regression_1640_chunk(master_key, file_id, plaintext);
+        let file = s.files.get_mut(file_id).unwrap();
+        file.versions.push(vec![chunk]);
+        let version = file.versions.len() as i64;
+        let mut node = snap_node(&master_key, file_id, "notes.txt", None, false, 1_700_000_500);
+        node["version_number"] = json!(version);
+        node["size_bytes"] = json!(plaintext.len());
+        s.authenticated_names.insert(file_id.into(), node["name_encrypted"].as_str().unwrap().into());
+        s.snapshots
+            .push_back(("200 OK".into(), json!({ "seq_id": 1, "nodes": [node] })));
+    }
+
+    /// A synced file: the server holds `b"version one"` at version 1, and it was hydrated into
+    /// its place in the sync folder. Returns that place.
+    async fn regression_1640_synced_file(
+        master_key: [u8; 32],
+        file: &str,
+    ) -> (tempfile::TempDir, PathBuf, VersionedServerMock, EngineBridge, PathBuf) {
+        let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_row(&bridge, &server, file);
+        {
+            let mut s = server.state.lock().unwrap();
+            s.files.get_mut(file).unwrap().versions[0] = vec![regression_1640_chunk(master_key, file, b"version one")];
+            s.serve_downloads = true;
+        }
+        let local = sync_root.join("notes.txt");
+        bridge.hydrate_file(file, &local, &[sync_root.as_path()]).await.unwrap();
+        assert_eq!(std::fs::read(&local).unwrap(), b"version one", "precondition: hydrated");
+        (dir, sync_root, server, bridge, local)
+    }
+
+    #[tokio::test]
+    async fn regression_1640_a_hydrate_into_the_sync_folder_records_the_agreed_content() {
+        let file = "16400000-0000-4000-8000-000000000001";
+        let (_dir, _root, server, bridge, _local) = regression_1640_synced_file([164u8; 32], file).await;
+        let contract = bridge.db.get_file_contract_state(file).unwrap().unwrap();
+        assert_eq!(contract.local_base_version, 1);
+        assert_eq!(contract.local_hash.as_deref(), Some(sha256_hex(b"version one").as_str()));
+        drop(server.finish());
+    }
+
+    #[tokio::test]
+    async fn regression_1640_a_close_without_an_edit_queues_nothing() {
+        let file = "16400000-0000-4000-8000-000000000002";
+        let (_dir, sync_root, server, bridge, local) = regression_1640_synced_file([165u8; 32], file).await;
+        assert!(!crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "notify"));
+        assert!(bridge.db.list_operations_for_file(file).unwrap().is_empty());
+        assert_eq!(bridge.db.get_file(file).unwrap().unwrap().status, FileStatus::Local);
+        drop(server.finish());
+    }
+
+    #[tokio::test]
+    async fn regression_1640_an_edit_of_a_synced_file_is_queued_on_its_synced_base() {
+        let file = "16400000-0000-4000-8000-000000000003";
+        let (_dir, sync_root, server, bridge, local) = regression_1640_synced_file([166u8; 32], file).await;
+        std::fs::write(&local, b"edited in the sync folder").unwrap();
+        assert!(crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "notify"));
+        let ops = bridge.db.list_operations_for_file(file).unwrap();
+        assert_eq!(ops.len(), 1, "one upload queued");
+        assert_eq!(ops[0].kind, OperationKind::UploadVersion);
+        assert_eq!(ops[0].base_version, Some(1), "sent on the version the bytes are based on");
+        assert_eq!(ops[0].target_path.as_deref(), Some("notes.txt"), "the full relative path");
+        assert_eq!(std::fs::read(ops[0].payload_path.as_deref().unwrap()).unwrap(), b"edited in the sync folder");
+        assert_eq!(bridge.db.get_file(file).unwrap().unwrap().status, FileStatus::Uploading);
+        assert!(
+            !crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "scan"),
+            "a second close or scan queues nothing more while the upload is queued"
+        );
+        assert_eq!(bridge.db.list_operations_for_file(file).unwrap().len(), 1);
+        drop(server.finish());
+    }
+
+    /// Task 2271: two rows at one path, as the 0.8.18 reconcile pass left 89 on the maintainer's PC. The first is the
+    /// server's own file of that name (no content recorded on this PC), the second the copy this PC sent (its content
+    /// agreed at version 1). The scan judges the bytes by the row that records them: unchanged bytes queue nothing,
+    /// and an edit is queued on that row, never settled as "Up to date" because the other row has nothing to compare.
+    #[tokio::test]
+    async fn regression_2271_a_path_with_two_rows_is_judged_by_the_row_that_records_its_content() {
+        let master_key = [227u8; 32];
+        let server_twin = "22710000-0000-4000-8000-000000000001";
+        let file = "22710000-0000-4000-8000-000000000002";
+        let (_dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_db_row(&bridge, server_twin);
+        seed_uploaded_row(&bridge, &server, file);
+        {
+            let mut s = server.state.lock().unwrap();
+            s.files.get_mut(file).unwrap().versions[0] = vec![regression_1640_chunk(master_key, file, b"version one")];
+            s.serve_downloads = true;
+        }
+        let local = sync_root.join("notes.txt");
+        bridge.hydrate_file(file, &local, &[sync_root.as_path()]).await.unwrap();
+        assert_eq!(
+            bridge.db.get_file_by_path("notes.txt").unwrap().unwrap().file_id,
+            server_twin,
+            "precondition: the path's first row is the server's file, which records no content here"
+        );
+
+        assert!(!crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "scan"), "agreed bytes");
+        assert!(bridge.db.list_operations_for_file(file).unwrap().is_empty());
+
+        std::fs::write(&local, b"edited in the sync folder").unwrap();
+        assert!(crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "scan"), "the edit is queued");
+        let ops = bridge.db.list_operations_for_file(file).unwrap();
+        assert_eq!(ops.len(), 1, "one upload, on the row that records the content");
+        assert_eq!((ops[0].kind.clone(), ops[0].base_version), (OperationKind::UploadVersion, Some(1)));
+        assert!(bridge.db.list_operations_for_file(server_twin).unwrap().is_empty(), "nothing on the server's file");
+        drop(server.finish());
+    }
+
+    /// Task 2271: several rows at one path that each record content: the bytes pick the row they agree with, and bytes
+    /// that agree with none are never sent, neither as an edit of a guessed row nor as a new file.
+    #[tokio::test]
+    async fn regression_2271_several_rows_with_content_at_one_path_are_never_guessed() {
+        let (_dir, sync_root, server, bridge) = rule3_setup([228u8; 32]);
+        let (a, b) = ("22710000-0000-4000-8000-000000000003", "22710000-0000-4000-8000-000000000004");
+        for (id, bytes) in [(a, b"copy a".as_slice()), (b, b"copy b".as_slice())] {
+            seed_uploaded_db_row(&bridge, id);
+            let mut contract = bridge.db.get_file_contract_state(id).unwrap().unwrap();
+            contract.local_hash = Some(sha256_hex(bytes));
+            contract.local_base_version = 1;
+            bridge.db.set_file_contract_state(&contract).unwrap();
+        }
+        let queued = || -> i64 {
+            bridge.db.hold_lock_for_test().query_row("SELECT COUNT(*) FROM operation_queue", [], |row| row.get(0)).unwrap()
+        };
+        let local = sync_root.join("notes.txt");
+        std::fs::write(&local, b"copy b").unwrap();
+        assert!(!crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "scan"), "the bytes are b's");
+        assert_eq!(queued(), 0);
+        std::fs::write(&local, b"edited, agrees with neither").unwrap();
+        let mut dispatched = true;
+        let logs = capture_logs_async(async {
+            dispatched = crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "scan");
+        })
+        .await;
+        assert!(!dispatched, "no row is guessed");
+        assert_eq!(queued(), 0, "nothing sent: no edit of a guessed row, no new file");
+        // Lead ruling P2 (contract §7): file ids and the row count, never the path (log lines can leave the PC in the
+        // support bundle).
+        assert!(logs.contains(a) && logs.contains(b) && logs.contains("rows=2"), "{logs}");
+        assert!(!logs.contains("notes.txt"), "no path in the log: {logs}");
+        drop(server.finish());
+    }
+
+    /// Task 2271 review: several rows that record content at the path of a cloud-only placeholder. Choosing a row
+    /// would read the bytes, and reading a placeholder that is not wholly on disk fetches it (here nothing answers, so
+    /// the read blocks for about a minute). The scan asks again later instead, as it does for one row, and reads
+    /// nothing. The root is registered and connected with no callbacks, as `found_while_paused`'s tests do.
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn regression_2271_several_rows_at_a_cloud_only_placeholder_read_no_bytes() {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::Win32::Storage::CloudFilters::{
+            CF_CALLBACK_REGISTRATION, CF_CALLBACK_TYPE_NONE, CF_CONNECT_FLAG_NONE, CfConnectSyncRoot, CfDisconnectSyncRoot,
+        };
+        struct Root(PathBuf, windows::Win32::Storage::CloudFilters::CF_CONNECTION_KEY);
+        impl Drop for Root {
+            fn drop(&mut self) {
+                // SAFETY: the key of the connection made below, disconnected once.
+                let _ = unsafe { CfDisconnectSyncRoot(self.1) };
+                let _ = crate::windows_cf::unregister_sync_root(&self.0);
+            }
+        }
+        let (_dir, sync_root, server, bridge) = rule3_setup([229u8; 32]);
+        crate::windows_cf::register_sync_root(&sync_root).unwrap();
+        let table = Box::new([CF_CALLBACK_REGISTRATION { Type: CF_CALLBACK_TYPE_NONE, Callback: None }]);
+        let wide: Vec<u16> = sync_root.as_os_str().encode_wide().chain(Some(0)).collect();
+        // SAFETY: the path and the table outlive the connection (the table until the end of the test).
+        let key = unsafe { CfConnectSyncRoot(windows::core::PCWSTR(wide.as_ptr()), table.as_ptr(), None, CF_CONNECT_FLAG_NONE) }
+            .unwrap();
+        let _root = Root(sync_root.clone(), key);
+        let (a, b) = ("22710000-0000-4000-8000-000000000005", "22710000-0000-4000-8000-000000000006");
+        for id in [a, b] {
+            seed_uploaded_db_row(&bridge, id);
+            let mut contract = bridge.db.get_file_contract_state(id).unwrap().unwrap();
+            contract.local_hash = Some(sha256_hex(id.as_bytes()));
+            contract.local_base_version = 1;
+            bridge.db.set_file_contract_state(&contract).unwrap();
+        }
+        assert!(
+            crate::windows_cf::placeholders::create_placeholder(&sync_root, b, "notes.txt", 1 << 20, 1_700_000_000, false)
+                .unwrap()
+        );
+        let local = sync_root.join("notes.txt");
+        assert!(!crate::windows_cf::placeholders::fully_on_disk(&local), "precondition: cloud-only");
+
+        let reads = HASH_READS.with(std::cell::Cell::get);
+        let started = std::time::Instant::now();
+        let verdict = bridge.classify_local_path_verdict(&sync_root, &local);
+        let took = started.elapsed();
+
+        assert!(matches!(verdict, LocalPathVerdict::Skip), "asked again later");
+        assert_eq!(HASH_READS.with(std::cell::Cell::get), reads, "no bytes read");
+        assert!(took < std::time::Duration::from_secs(20), "nothing asked for the bytes: {took:?}");
+        assert!(!crate::windows_cf::placeholders::fully_on_disk(&local), "still cloud-only");
+        drop(server.finish());
+        // `_root` (declared after `table`) drops first: the root is disconnected before its callback table is freed.
+    }
+
+    #[tokio::test]
+    async fn regression_1640_an_edit_lands_as_the_next_version_and_becomes_the_agreed_content() {
+        let master_key = [167u8; 32];
+        let file = "16400000-0000-4000-8000-000000000004";
+        let (_dir, sync_root, server, bridge, local) = regression_1640_synced_file(master_key, file).await;
+        std::fs::write(&local, b"edited in the sync folder").unwrap();
+        assert!(crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "notify"));
+        drain_upload_queue(&bridge, &sync_root).await;
+        assert!(bridge.db.list_operations_for_file(file).unwrap().is_empty(), "landed");
+        let row = bridge.db.get_file(file).unwrap().unwrap();
+        assert_eq!((row.status, row.path.as_str()), (FileStatus::Local, "notes.txt"));
+        let contract = bridge.db.get_file_contract_state(file).unwrap().unwrap();
+        assert_eq!(contract.local_base_version, 2);
+        assert_eq!(
+            contract.local_hash.as_deref(),
+            Some(sha256_hex(b"edited in the sync folder").as_str()),
+            "what was sent is the agreed content now"
+        );
+        assert!(
+            !crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "notify"),
+            "the landed bytes are not an edit"
+        );
+        // The next edit goes on the version this one produced.
+        std::fs::write(&local, b"edited again").unwrap();
+        assert!(crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "notify"));
+        assert_eq!(bridge.db.list_operations_for_file(file).unwrap()[0].base_version, Some(2));
+        let state = server.finish();
+        assert_eq!(state.init_summary(), vec![(json!(file), json!(1), 201)]);
+        assert_eq!(state.latest_plaintext(file, master_key), b"edited in the sync folder");
+    }
+
+    /// The 2190 case, with the trigger: the web saves version 2 and the tick re-anchors the row
+    /// before the edit is seen. The edit is sent on 1 (not the row's 2), refused as stale, parks
+    /// with its bytes, and no hydrate writes the web's version over it. Both versions survive.
+    #[tokio::test]
+    async fn regression_1640_an_edit_made_while_the_web_saved_parks_with_its_bytes_and_is_never_overwritten() {
+        let master_key = [168u8; 32];
+        let file = "16400000-0000-4000-8000-000000000005";
+        let (_dir, sync_root, server, bridge, local) = regression_1640_synced_file(master_key, file).await;
+        regression_1640_web_saves(&server, master_key, file, b"edited on the web");
+        sync_tick_outcome(&bridge, &sync_root).await.unwrap();
+        assert_eq!(
+            bridge.db.get_file_contract_state(file).unwrap().unwrap().current_version,
+            2,
+            "precondition: the tick raised the row to the web's version"
+        );
+        std::fs::write(&local, b"edited in the sync folder").unwrap();
+        assert!(crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "notify"));
+        assert_eq!(
+            bridge.db.list_operations_for_file(file).unwrap()[0].base_version,
+            Some(1),
+            "the base is the version the bytes are based on, never the row's current one"
+        );
+        bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+        let parked = bridge.db.list_operations_for_file(file).unwrap().remove(0);
+        assert_eq!(parked.attempts, parked.max_attempts, "parked at once");
+        assert_eq!(parked.last_error.as_deref(), Some("stale_base"));
+        assert_eq!(
+            std::fs::read(parked.payload_path.as_deref().unwrap()).unwrap(),
+            b"edited in the sync folder",
+            "the parked op keeps the edit's bytes"
+        );
+        assert_eq!(bridge.db.get_file(file).unwrap().unwrap().status, FileStatus::Error);
+        let refused = bridge.hydrate_file(file, &local, &[sync_root.as_path()]).await.unwrap_err();
+        assert!(refused.is::<UnsentLocalChange>(), "{refused:#}");
+        assert_eq!(std::fs::read(&local).unwrap(), b"edited in the sync folder", "the edit stays on disk");
+        let kinds: Vec<String> = bridge
+            .version_conflict_feed()
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.kind)
+            .collect();
+        assert_eq!(kinds, vec!["stale_base".to_string()], "the person sees it");
+        let state = server.finish();
+        assert_eq!(state.init_summary(), vec![(json!(file), json!(1), 409)]);
+        assert_eq!(state.latest_plaintext(file, master_key), b"edited on the web");
+    }
+
+    #[tokio::test]
+    async fn regression_1640_a_hydrate_never_writes_over_an_edit_that_is_not_queued() {
+        let master_key = [169u8; 32];
+        let file = "16400000-0000-4000-8000-000000000006";
+        let (_dir, sync_root, server, bridge, local) = regression_1640_synced_file(master_key, file).await;
+        regression_1640_web_saves(&server, master_key, file, b"edited on the web");
+        std::fs::write(&local, b"edited in the sync folder").unwrap();
+        let refused = bridge.hydrate_file(file, &local, &[sync_root.as_path()]).await.unwrap_err();
+        assert!(refused.is::<UnsentLocalChange>(), "{refused:#}");
+        assert_eq!(std::fs::read(&local).unwrap(), b"edited in the sync folder");
+        assert_eq!(bridge.db.get_file(file).unwrap().unwrap().status, FileStatus::Local, "status untouched");
+        drop(server.finish());
+    }
+
+    #[tokio::test]
+    async fn regression_1640_a_hydrate_still_refreshes_agreed_bytes() {
+        let master_key = [170u8; 32];
+        let file = "16400000-0000-4000-8000-000000000007";
+        let (_dir, sync_root, server, bridge, local) = regression_1640_synced_file(master_key, file).await;
+        regression_1640_web_saves(&server, master_key, file, b"edited on the web");
+        sync_tick_outcome(&bridge, &sync_root).await.unwrap();
+        bridge.hydrate_file(file, &local, &[sync_root.as_path()]).await.unwrap();
+        assert_eq!(std::fs::read(&local).unwrap(), b"edited on the web");
+        let contract = bridge.db.get_file_contract_state(file).unwrap().unwrap();
+        assert_eq!(contract.local_base_version, 2);
+        assert_eq!(contract.local_hash.as_deref(), Some(sha256_hex(b"edited on the web").as_str()));
+        drop(server.finish());
+    }
+
+    /// A nested file keeps its folder: the landing writes the op's target path to the row, and a
+    /// sync-folder edit names the full relative path (a Finder modify names the file only).
+    #[tokio::test]
+    async fn regression_1640_an_edit_of_a_nested_file_lands_in_its_folder() {
+        let master_key = [171u8; 32];
+        let file = "16400000-0000-4000-8000-000000000008";
+        let (_dir, sync_root, server, bridge) = rule3_setup(master_key);
+        bridge
+            .db
+            .upsert_file(&FileEntry {
+                file_id: "16400000-0000-4000-8000-0000000000f1".into(),
+                path: "docs".into(),
+                status: FileStatus::Local,
+                size_bytes: 0,
+                modified_at: 1_700_000_000,
+                content_hash: None,
+                remote_updated_at: 1_700_000_000,
+                parent_id: None,
+                item_kind: ItemKind::Folder,
+            })
+            .unwrap();
+        seed_uploaded_row(&bridge, &server, file);
+        let mut row = bridge.db.get_file(file).unwrap().unwrap();
+        row.path = "docs/notes.txt".into();
+        bridge.db.upsert_file(&row).unwrap();
+        let mut contract = bridge.db.get_file_contract_state(file).unwrap().unwrap();
+        contract.parent_id = Some("16400000-0000-4000-8000-0000000000f1".into());
+        bridge.db.set_file_contract_state(&contract).unwrap();
+        {
+            let mut s = server.state.lock().unwrap();
+            s.files.get_mut(file).unwrap().versions[0] = vec![regression_1640_chunk(master_key, file, b"version one")];
+            s.serve_downloads = true;
+        }
+        let local = sync_root.join("docs").join("notes.txt");
+        std::fs::create_dir_all(local.parent().unwrap()).unwrap();
+        bridge.hydrate_file(file, &local, &[sync_root.as_path()]).await.unwrap();
+        std::fs::write(&local, b"edited in a folder").unwrap();
+        assert!(crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "notify"));
+        assert_eq!(
+            bridge.db.list_operations_for_file(file).unwrap()[0].target_path.as_deref(),
+            Some("docs/notes.txt")
+        );
+        drain_upload_queue(&bridge, &sync_root).await;
+        assert_eq!(bridge.db.get_file(file).unwrap().unwrap().path, "docs/notes.txt", "still in its folder");
+        let state = server.finish();
+        assert_eq!(state.latest_plaintext(file, master_key), b"edited in a folder");
+    }
+
+    #[test]
+    fn regression_1640_sync_folder_content_decides_from_the_agreed_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+        let path = dir.path().join("notes.txt");
+        std::fs::write(&path, b"agreed").unwrap();
+        db.upsert_file(&FileEntry {
+            file_id: "f".into(),
+            path: "notes.txt".into(),
+            status: FileStatus::Local,
+            size_bytes: 6,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+        let content = |os_in_sync| sync_folder_content(&db, "f", &path, os_in_sync).unwrap();
+        assert_eq!(content(None), SyncFolderContent::Unknown, "no agreed content recorded");
+        // Task 2191 (G-engine): with no agreed content recorded, the platform's "in sync" is not
+        // agreement (0.8.12 marked edits in sync). It was Agreed before 2191.
+        assert_eq!(content(Some(true)), SyncFolderContent::Unknown, "in sync, but the content is unknown");
+        db.record_local_baseline("f", 3, &sha256_hex(b"agreed")).unwrap();
+        assert_eq!(content(Some(true)), SyncFolderContent::Agreed, "the platform says in sync");
+        assert_eq!(content(None), SyncFolderContent::Agreed);
+        std::fs::write(&path, b"edited").unwrap();
+        assert_eq!(content(None), SyncFolderContent::Changed { base: Some(3) });
+        assert_eq!(content(Some(false)), SyncFolderContent::Changed { base: Some(3) });
+        db.record_local_baseline("f", 0, &sha256_hex(b"agreed")).unwrap();
+        assert_eq!(content(None), SyncFolderContent::Changed { base: None }, "no base known");
+        db.enqueue_operation(&PendingOperation {
+            op_id: "u".into(),
+            kind: OperationKind::UploadVersion,
+            file_id: Some("f".into()),
+            parent_id: None,
+            target_path: Some("notes.txt".into()),
+            metadata_json: None,
+            payload_path: Some(path.to_string_lossy().into_owned()),
+            base_version: Some(3),
+            base_object_version_id: None,
+            attempts: 0,
+            max_attempts: 25,
+            next_retry_at: 0,
+            last_error: None,
+            backup_source_key: None,
+            created_at: 0,
+            updated_at: 0,
+        })
+        .unwrap();
+        assert_eq!(content(Some(true)), SyncFolderContent::Queued, "a queued upload wins over in sync");
+    }
+
+
+    // ── Task 1640, review P1-1: a remote deletion never deletes a change that was not sent ──
+
+    /// A synced folder `docs` holding `notes.txt`, whose local bytes were edited and never sent
+    /// (no agreed content recorded, nothing queued), in `db` under `sync_root`.
+    fn regression_1640_edited_file_in_a_folder_in(db: &StateDb, sync_root: &Path) {
+        std::fs::create_dir_all(sync_root.join("docs")).unwrap();
+        let row = |file_id: &str, path: &str, item_kind: ItemKind| FileEntry {
+            file_id: file_id.into(),
+            path: path.into(),
+            status: FileStatus::Local,
+            size_bytes: 0,
+            modified_at: 1_700_000_000,
+            content_hash: None,
+            remote_updated_at: 1_700_000_000,
+            parent_id: None,
+            item_kind,
+        };
+        db.upsert_file_with_contract(&row("folder-docs", "docs", ItemKind::Folder), |contract| {
+            contract.item_kind = ItemKind::Folder;
+        })
+        .unwrap();
+        db.upsert_file_with_contract(&row("file-notes", "docs/notes.txt", ItemKind::File), |contract| {
+            contract.item_kind = ItemKind::File;
+            contract.parent_id = Some("folder-docs".into());
+        })
+        .unwrap();
+        std::fs::write(sync_root.join("docs").join("notes.txt"), b"edited, never sent").unwrap();
+    }
+
+    fn regression_1640_edited_file_in_a_folder(dir: &Path) -> (StateDb, PathBuf) {
+        let db = StateDb::open(&dir.join("state.db")).unwrap();
+        let sync_root = dir.join("sync-root");
+        regression_1640_edited_file_in_a_folder_in(&db, &sync_root);
+        (db, sync_root)
+    }
+
+    /// The edit is kept as a copy where it can upload: the folder was removed with the trash, so
+    /// at the top of the sync folder. The emptied folder is gone; one review entry says where.
+    fn regression_1640_assert_kept_as_a_copy(db: &StateDb, sync_root: &Path) {
+        assert!(!sync_root.join("docs").exists(), "the original and its emptied folder are removed");
+        assert_eq!(
+            std::fs::read(sync_root.join("notes (this PC).txt")).unwrap(),
+            b"edited, never sent",
+            "the edit is kept as a copy where it can upload"
+        );
+        let kept = db.list_kept_copies().unwrap();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(
+            (kept[0].original_path.as_str(), kept[0].copy_path.as_str(), kept[0].original_removed),
+            ("docs/notes.txt", "notes (this PC).txt", true)
+        );
+        assert_eq!(kept[0].copied_hash, sha256_hex(b"edited, never sent"));
+        let feed: Vec<(String, String, String)> = version_conflict_feed_from_db(db)
+            .unwrap()
+            .into_iter()
+            .map(|entry| (entry.kind, entry.file_name, entry.action))
+            .collect();
+        assert_eq!(
+            feed,
+            vec![("kept_copy".to_string(), "notes (this PC).txt".to_string(), "dismiss".to_string())],
+            "one review entry"
+        );
+        assert!(
+            std::fs::read_dir(sync_root).unwrap().all(|entry| !entry.unwrap().file_name().to_string_lossy().ends_with(".tmp")),
+            "no temporary copy is left"
+        );
+    }
+
+    #[test]
+    fn regression_1640_a_web_trash_keeps_an_unsent_edit_as_a_this_pc_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
+        // The web trashed the folder: the `file_trash` op's rows.
+        let rows = db.mark_subtree_trashing("folder-docs").unwrap();
+        assert_eq!(rows.len(), 2, "the folder and its file");
+        remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::WhollyLocal);
+        regression_1640_assert_kept_as_a_copy(&db, &sync_root);
+    }
+
+    #[test]
+    fn regression_1640_a_snapshot_prune_keeps_an_unsent_edit_as_a_this_pc_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
+        // A snapshot that no longer lists either (it lists another file: an empty snapshot is
+        // refused as degraded).
+        let seen: HashSet<String> = ["a-file-the-snapshot-still-lists".to_string()].into();
+        let rows = db.prune_absent(&seen, 1_800_000_000).unwrap();
+        assert_eq!(rows.len(), 2, "the folder and its file");
+        remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::WhollyLocal);
+        regression_1640_assert_kept_as_a_copy(&db, &sync_root);
+    }
+
+    #[test]
+    fn regression_1640_a_remote_deletion_still_removes_agreed_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
+        let rows = db.mark_subtree_trashing("folder-docs").unwrap();
+        remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::InSync);
+        assert!(!sync_root.join("docs").exists(), "agreed bytes and the then-empty folder are removed");
+        assert!(version_conflict_feed_from_db(&db).unwrap().is_empty());
+    }
+
+    // ── Task 2191 S1: files of unknown content (synced before task 1640) are never freed unread ──
+
+    /// G-engine (review-114 F-P1-4): a remote deletion of a file of unknown content never takes
+    /// the platform's "in sync" for agreement (0.8.12 marked edits in sync): it is read by size,
+    /// so a wholly local one is copied first. A file with agreed content is trusted as before.
+    #[test]
+    fn task_2191_a_remote_deletion_copies_an_unknown_file_the_platform_calls_in_sync() {
+        let by_trust = |_: &Path, trust: bool| if trust { LocalEntry::InSync } else { LocalEntry::WhollyLocal };
+        let dir = tempfile::tempdir().unwrap();
+        let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
+        let rows = db.mark_subtree_trashing("folder-docs").unwrap();
+        remove_pruned_entries(&db, &sync_root, &rows, &by_trust);
+        regression_1640_assert_kept_as_a_copy(&db, &sync_root);
+        let known = tempfile::tempdir().unwrap();
+        let (db, sync_root) = regression_1640_edited_file_in_a_folder(known.path());
+        db.record_local_baseline("file-notes", 2, &sha256_hex(b"the agreed bytes")).unwrap();
+        let rows = db.mark_subtree_trashing("folder-docs").unwrap();
+        remove_pruned_entries(&db, &sync_root, &rows, &by_trust);
+        assert!(!sync_root.join("docs").exists(), "known content in sync: removed as before");
+        assert!(!sync_root.join("notes (this PC).txt").exists());
+    }
+
+    /// Desktop 0.8.15: the start-up guard now runs beside the engine, so a remote deletion can
+    /// reach a file of unknown content before the guard has marked it not in sync. A guarded row
+    /// can still carry a fetched hash (a fold of a row with no agreed version leaves one at
+    /// `fetched_min_version` -1), and that hash is no agreed content: the platform's in-sync
+    /// state is not trusted for it, and the bytes are copied first, whether the guard got there
+    /// or not.
+    #[test]
+    fn desktop_0815_a_remote_deletion_never_trusts_a_guarded_row_s_fetched_hash() {
+        let by_trust = |_: &Path, trust: bool| if trust { LocalEntry::InSync } else { LocalEntry::WhollyLocal };
+        let dir = tempfile::tempdir().unwrap();
+        let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
+        db.test_execute(&format!(
+            "UPDATE files SET local_hash = NULL, fetched_min_version = -1, fetched_hash = '{}' WHERE file_id = 'file-notes'",
+            sha256_hex(b"some version the guard never saw")
+        ))
+        .unwrap();
+        assert!(db.is_unknown_content("file-notes").unwrap(), "precondition: guarded");
+        let rows = db.mark_subtree_trashing("folder-docs").unwrap();
+        remove_pruned_entries(&db, &sync_root, &rows, &by_trust);
+        regression_1640_assert_kept_as_a_copy(&db, &sync_root);
+    }
+
+    /// Review-114 F-P1-4: the retry of a kept original recorded with no agreed content never
+    /// removes it as "in sync": once it can be read, it is copied first.
+    #[test]
+    fn task_2191_the_retry_never_removes_an_unknown_file_unread() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
+        let rows = db.mark_subtree_trashing("folder-docs").unwrap();
+        remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::Unreadable);
+        assert!(sync_root.join("docs").join("notes.txt").exists(), "precondition: kept where it is, in use");
+        retry_kept_originals(&db, &sync_root, &|_, trust| if trust { LocalEntry::InSync } else { LocalEntry::WhollyLocal });
+        assert_eq!(
+            std::fs::read(sync_root.join("notes (this PC).txt")).unwrap(),
+            b"edited, never sent",
+            "copied before the original went"
+        );
+    }
+
+    /// G-engine: in sync is never agreement for a file of unknown content; with agreed content
+    /// recorded, it is.
+    #[test]
+    fn task_2191_an_unknown_file_in_sync_is_never_agreed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
+        let path = sync_root.join("docs").join("notes.txt");
+        assert_eq!(sync_folder_content(&db, "file-notes", &path, Some(true)).unwrap(), SyncFolderContent::Unknown);
+        db.record_local_baseline("file-notes", 1, &sha256_hex(b"edited, never sent")).unwrap();
+        assert_eq!(sync_folder_content(&db, "file-notes", &path, Some(true)).unwrap(), SyncFolderContent::Agreed);
+    }
+
+    /// G-engine: a hydrate never writes over a file of unknown content that holds bytes; a
+    /// conflict is the person's to resolve and is not refused.
+    #[tokio::test]
+    async fn task_2191_a_hydrate_never_writes_over_an_unknown_file() {
+        let master_key = [191u8; 32];
+        let file = "21910000-0000-4000-8000-000000000001";
+        let (_dir, sync_root, server, bridge, local) = regression_1640_synced_file(master_key, file).await;
+        bridge
+            .db
+            .test_execute(&format!("UPDATE files SET local_hash = NULL, fetched_min_version = -1 WHERE file_id = '{file}'"))
+            .unwrap();
+        std::fs::write(&local, b"an edit 0.8.12 never sent").unwrap();
+        let refused = bridge.hydrate_file(file, &local, &[sync_root.as_path()]).await.unwrap_err();
+        assert!(refused.is::<UnsentLocalChange>(), "{refused:#}");
+        assert_eq!(std::fs::read(&local).unwrap(), b"an edit 0.8.12 never sent");
+        bridge.db.set_status(file, FileStatus::Conflict).unwrap();
+        bridge.hydrate_file(file, &local, &[sync_root.as_path()]).await.unwrap();
+        drop(server.finish());
+    }
+
+    /// D12 (review-114 F-P1-7, R2-P2-2): a remote rename of a file records both its old and its
+    /// new place for the guard's retry, which checks each one's identity.
+    #[test]
+    fn task_2191_a_web_rename_records_both_places_for_the_guard() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let master_key = [192u8; 32];
+        let file_id = "21910000-0000-4000-8000-000000000002";
+        let mk = beebeeb_core::kdf::MasterKey::from_bytes(master_key);
+        let row = |name: &str| {
+            serde_json::json!({
+                "id": file_id,
+                "name_encrypted": beebeeb_core::encrypt::encrypt_name(&mk, file_id, name, None).unwrap(),
+                "size_bytes": 5,
+                "updated_at": 100,
+                "is_folder": false,
+            })
+        };
+        let pull = |name: &str| {
+            apply_metadata_file_row(
+                &db,
+                &row(name),
+                Namespace::MyFiles,
+                None,
+                None,
+                PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER,
+                200,
+                &master_key,
+                "",
+            )
+            .unwrap()
+        };
+        pull("a.docx");
+        assert!(db.list_unknown_orphans().unwrap().is_empty(), "no move, nothing recorded");
+        pull("b.docx");
+        let mut recorded = db.list_unknown_orphans().unwrap();
+        recorded.sort();
+        assert_eq!(
+            recorded,
+            vec![("a.docx".into(), file_id.into(), true), ("b.docx".into(), file_id.into(), true)]
+        );
+    }
+
+    /// Review N2: an atomic save leaves a plain file (never in sync) holding the agreed bytes. It
+    /// is removed like a file in sync: no false "(this PC)" duplicate.
+    #[test]
+    fn regression_1640_an_agreed_plain_file_is_removed_without_a_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
+        db.record_local_baseline("file-notes", 2, &sha256_hex(b"edited, never sent")).unwrap();
+        let rows = db.mark_subtree_trashing("folder-docs").unwrap();
+        remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::WhollyLocal);
+        assert!(!sync_root.join("docs").exists(), "removed, folder and all");
+        assert!(!sync_root.join("notes (this PC).txt").exists(), "no copy of the agreed bytes");
+        assert!(db.list_kept_copies().unwrap().is_empty());
+    }
+
+    /// Review N6: a file with no bytes on disk is removed without reading it (nothing to keep);
+    /// one with only some is left as it is (reading it would fetch the rest).
+    #[test]
+    fn regression_1640_a_file_with_no_or_only_some_local_bytes_is_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
+        let rows = db.mark_subtree_trashing("folder-docs").unwrap();
+        remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::PartlyLocal);
+        assert_eq!(
+            std::fs::read(sync_root.join("docs").join("notes.txt")).unwrap(),
+            b"edited, never sent",
+            "partly on disk: kept in place"
+        );
+        assert!(!sync_root.join("notes (this PC).txt").exists(), "and not copied");
+        let kept = db.list_kept_copies().unwrap();
+        assert_eq!(
+            (kept.len(), kept[0].copy_path.as_str(), kept[0].original_removed),
+            (1, "", false),
+            "one entry: kept in place"
+        );
+        // Review F4: a second remote op leaves it to the retry (no second entry); the retry
+        // removes it once nothing is on disk, and its entry goes (nothing was kept).
+        remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::NothingLocal);
+        assert_eq!(db.list_kept_copies().unwrap().len(), 1, "no second entry");
+        retry_kept_originals(&db, &sync_root, &|_, _| LocalEntry::NothingLocal);
+        assert!(!sync_root.join("docs").exists(), "nothing on disk: removed, and the emptied folder too");
+        assert!(db.list_kept_copies().unwrap().is_empty(), "nothing kept: no entry");
+    }
+
+    /// Condition 5: a file kept in place (partly on disk) is listed once, however often a remote
+    /// op or a tick looks at it, and is resolved once it is wholly on disk: its changed bytes are
+    /// kept as a copy where it can upload, and the original is removed.
+    #[test]
+    fn regression_1640_a_file_partly_on_disk_is_listed_once_and_resolved_later() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
+        let rows = db.mark_subtree_trashing("folder-docs").unwrap();
+        remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::PartlyLocal);
+        remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::PartlyLocal);
+        for _ in 0..3 {
+            retry_kept_originals(&db, &sync_root, &|_, _| LocalEntry::PartlyLocal);
+        }
+        assert_eq!(db.list_kept_copies().unwrap().len(), 1, "one entry, no loop");
+        let feed = version_conflict_feed_from_db(&db).unwrap();
+        assert_eq!((feed.len(), feed[0].status.as_str(), feed[0].action.as_str()), (1, "kept in place", "dismiss"));
+        // Now wholly on disk: resolved.
+        retry_kept_originals(&db, &sync_root, &|_, _| LocalEntry::WhollyLocal);
+        assert!(!sync_root.join("docs").join("notes.txt").exists(), "the original is removed");
+        assert_eq!(
+            std::fs::read(sync_root.join("notes (this PC).txt")).unwrap(),
+            b"edited, never sent",
+            "its bytes are kept as a copy where it can upload"
+        );
+        let kept = db.list_kept_copies().unwrap();
+        assert!(kept.iter().all(|copy| copy.original_removed), "nothing waits any more: {kept:?}");
+        assert_eq!(kept.iter().filter(|copy| !copy.copy_path.is_empty()).count(), 1);
+        // Review F6: one entry, updated where it is.
+        let feed: Vec<(String, String)> = version_conflict_feed_from_db(&db)
+            .unwrap()
+            .into_iter()
+            .map(|entry| (entry.status, entry.file_name))
+            .collect();
+        assert_eq!(feed, vec![("kept as a copy".to_string(), "notes (this PC).txt".to_string())]);
+    }
+
+    #[test]
+    fn regression_1640_a_remotely_deleted_folder_keeps_what_it_still_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
+        // A new file the upload driver has not sent yet: no row at all.
+        std::fs::write(sync_root.join("docs").join("new.txt"), b"not uploaded yet").unwrap();
+        let rows = db.mark_subtree_trashing("folder-docs").unwrap();
+        remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::InSync);
+        assert!(!sync_root.join("docs").join("notes.txt").exists(), "the agreed file is removed");
+        assert_eq!(
+            std::fs::read(sync_root.join("docs").join("new.txt")).unwrap(),
+            b"not uploaded yet",
+            "the folder stays with what it still holds"
+        );
+    }
+
+    #[test]
+    fn regression_1640_a_this_pc_copy_never_overwrites_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("notes.txt");
+        std::fs::write(&original, b"mine").unwrap();
+        std::fs::write(dir.path().join("notes (this PC).txt"), b"an earlier copy").unwrap();
+        let (copy, hash) = copy_as_this_pc(&original, dir.path()).unwrap();
+        assert_eq!(copy, dir.path().join("notes (this PC 2).txt"));
+        assert_eq!((std::fs::read(&copy).unwrap(), hash), (b"mine".to_vec(), sha256_hex(b"mine")));
+        assert_eq!(
+            std::fs::read(dir.path().join("notes (this PC).txt")).unwrap(),
+            b"an earlier copy",
+            "the earlier copy is untouched"
+        );
+        let bare = dir.path().join("Makefile");
+        std::fs::write(&bare, b"all:").unwrap();
+        assert_eq!(copy_as_this_pc(&bare, dir.path()).unwrap().0, dir.path().join("Makefile (this PC)"));
+        assert!(
+            std::fs::read_dir(dir.path()).unwrap().all(|entry| !entry.unwrap().file_name().to_string_lossy().ends_with(".tmp")),
+            "no temporary copy is left"
+        );
+    }
+
+    /// Review N3: a copy kept from a folder trashed on the web goes where it can upload (the
+    /// trashed folder would be refused as its parent) and reaches the server; emptying the trash
+    /// later does not take the copy with it.
+    #[tokio::test]
+    async fn regression_1640_a_kept_copy_from_a_trashed_folder_uploads_where_it_can() {
+        let master_key = [180u8; 32];
+        let (_dir, sync_root, server, bridge) = rule3_setup(master_key);
+        regression_1640_edited_file_in_a_folder_in(&bridge.db, &sync_root);
+        let rows = bridge.db.mark_subtree_trashing("folder-docs").unwrap();
+        remove_pruned_entries(&bridge.db, &sync_root, &rows, &|_, _| LocalEntry::WhollyLocal);
+        let copy = sync_root.join("notes (this PC).txt");
+        assert!(crate::watcher::dispatch_local_create(&bridge, &sync_root, &copy, "scan"));
+        drain_upload_queue(&bridge, &sync_root).await;
+        let emptied = bridge.db.delete_file_subtree("folder-docs").unwrap();
+        assert!(
+            emptied.iter().all(|row| row.path.starts_with("docs")),
+            "emptying the trash takes only the trashed folder: {emptied:?}"
+        );
+        let state = server.finish();
+        let created: Vec<&serde_json::Value> = state.inits.iter().map(|(body, _)| body).collect();
+        assert_eq!(created.len(), 1, "one upload: the copy");
+        assert!(created[0]["file_id"].is_null(), "a new file");
+        assert!(created[0]["parent_id"].is_null(), "at the top, not under the trashed folder");
+        let server_id = state.files_with_content()[0].clone();
+        assert_eq!(state.latest_plaintext(&server_id, master_key), b"edited, never sent");
+    }
+
+    /// Review N13: a copy made while the original could not be removed (in use) is recorded; the
+    /// upload driver never sends that original; a later tick removes it, and never copies the same
+    /// bytes twice. The entry can be dismissed once the original is gone.
+    #[cfg(unix)]
+    #[test]
+    fn regression_1640_an_original_in_use_is_removed_later_and_never_copied_twice() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
+        let docs = sync_root.join("docs");
+        let rows = db.mark_subtree_trashing("folder-docs").unwrap();
+        // The original cannot be removed: its folder refuses changes.
+        std::fs::set_permissions(&docs, std::fs::Permissions::from_mode(0o555)).unwrap();
+        remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::WhollyLocal);
+        let kept = db.list_kept_copies().unwrap();
+        assert_eq!((kept.len(), kept[0].original_removed), (1, false), "copied; the original stays for now");
+        assert!(db.is_kept_original_pending("docs/notes.txt").unwrap(), "the upload driver skips it");
+        assert!(!db.dismiss_kept_copy(kept[0].id).unwrap(), "not dismissed while its original waits");
+        let copies = |root: &Path| {
+            std::fs::read_dir(root)
+                .unwrap()
+                .filter(|entry| entry.as_ref().unwrap().file_name().to_string_lossy().contains("(this PC"))
+                .count()
+        };
+        retry_kept_originals(&db, &sync_root, &|_, _| LocalEntry::WhollyLocal);
+        assert_eq!(copies(&sync_root), 1, "still in use: retried later, not copied again");
+        std::fs::set_permissions(&docs, std::fs::Permissions::from_mode(0o755)).unwrap();
+        retry_kept_originals(&db, &sync_root, &|_, _| LocalEntry::WhollyLocal);
+        assert!(!docs.join("notes.txt").exists(), "a later tick removes the original");
+        assert_eq!(copies(&sync_root), 1, "and never copies the same bytes twice");
+        assert!(!db.is_kept_original_pending("docs/notes.txt").unwrap());
+        assert!(db.dismiss_kept_copy(kept[0].id).unwrap(), "now it can be dismissed");
+        assert!(version_conflict_feed_from_db(&db).unwrap().is_empty());
+    }
+
+    // ── Task 1640, review P1-2: a baseline names the downloaded version, and only whole bytes ──
+
+    /// The tick has not seen the web's version 2 yet (the row says 1): the hydrate downloads 2,
+    /// and its baseline says 2, from the download metadata. Before, it said the row's 1 (a later
+    /// edit then parked as stale for nothing).
+    #[tokio::test]
+    async fn regression_1640_a_hydrate_records_the_downloaded_version_not_the_rows() {
+        let master_key = [176u8; 32];
+        let file = "16400000-0000-4000-8000-000000000021";
+        let (_dir, sync_root, server, bridge, local) = regression_1640_synced_file(master_key, file).await;
+        regression_1640_web_saves(&server, master_key, file, b"edited on the web");
+        assert_eq!(
+            bridge.db.get_file_contract_state(file).unwrap().unwrap().current_version,
+            1,
+            "precondition: the row has not seen version 2"
+        );
+        std::fs::remove_file(&local).unwrap();
+        bridge.hydrate_file(file, &local, &[sync_root.as_path()]).await.unwrap();
+        let contract = bridge.db.get_file_contract_state(file).unwrap().unwrap();
+        assert_eq!(
+            (contract.local_base_version, contract.local_hash),
+            (2, Some(sha256_hex(b"edited on the web"))),
+            "the baseline is the version the download named"
+        );
+        drop(server.finish());
+    }
+
+    /// Review N1b: a download whose metadata names no version (a legacy file) records the row's
+    /// version, read before the download: at most what the bytes are (here the web has saved 2
+    /// and the row still says 1), so a later change parks as stale, never lands over a newer one.
+    #[tokio::test]
+    async fn regression_1640_a_legacy_download_records_the_rows_version() {
+        let master_key = [177u8; 32];
+        let file = "16400000-0000-4000-8000-000000000022";
+        let (_dir, sync_root, server, bridge, local) = regression_1640_synced_file(master_key, file).await;
+        assert!(bridge.db.get_file_contract_state(file).unwrap().unwrap().local_hash.is_some(), "precondition");
+        regression_1640_web_saves(&server, master_key, file, b"edited on the web");
+        server.state.lock().unwrap().legacy_downloads = true;
+        std::fs::remove_file(&local).unwrap();
+        bridge.hydrate_file(file, &local, &[sync_root.as_path()]).await.unwrap();
+        assert_eq!(std::fs::read(&local).unwrap(), b"edited on the web");
+        let contract = bridge.db.get_file_contract_state(file).unwrap().unwrap();
+        assert_eq!(
+            (contract.local_base_version, contract.local_hash),
+            (1, Some(sha256_hex(b"edited on the web"))),
+            "the row's version, never more"
+        );
+        drop(server.finish());
+    }
+
+    /// Windows: a fetch records a baseline only when it delivered the whole file; a partial range
+    /// leaves it alone (the placeholder's other ranges may hold writes that were not sent).
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn regression_1640_only_a_whole_file_fetch_records_a_baseline() {
+        let master_key = [178u8; 32];
+        let file = "16400000-0000-4000-8000-000000000023";
+        let (_dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_row(&bridge, &server, file);
+        {
+            let mut s = server.state.lock().unwrap();
+            s.files.get_mut(file).unwrap().versions[0] = vec![regression_1640_chunk(master_key, file, b"version one")];
+            s.serve_downloads = true;
+        }
+        let _ = &sync_root;
+        assert!(bridge.db.mark_no_fetched_content(file).unwrap(), "its placeholder created where nothing was");
+        let fetch = bridge.hydrate_file_to_memory(file).await.unwrap();
+        let fetched = fetch.version.clone().expect("the download names its version");
+        assert_eq!(fetched, FetchedVersion { version: 1, hash: sha256_hex(b"version one") });
+        assert_eq!(
+            bridge.db.get_file_contract_state(file).unwrap().unwrap().local_hash,
+            None,
+            "review F1: no baseline before the transfer (one cut off would leave it naming other bytes)"
+        );
+        assert_eq!(
+            bridge.db.fetched_content(file).unwrap(),
+            Some((1, Some(sha256_hex(b"version one")))),
+            "recorded as the candidate before the transfer"
+        );
+        // The whole file was transferred, and no other fetch overlapped it.
+        assert!(bridge.record_whole_fetch(file, &fetched, &fetch.ticket).unwrap());
+        drop(fetch);
+        let contract = bridge.db.get_file_contract_state(file).unwrap().unwrap();
+        assert_eq!((contract.local_base_version, contract.local_hash), (1, Some(sha256_hex(b"version one"))));
+        assert_eq!(bridge.db.fetched_content(file).unwrap(), None);
+        drop(server.finish());
+    }
+
+
+    // ── Task 1640, review P2-5 and P3-4 ──
+
+    /// The hash of a file whose fingerprint has not changed is not read again; a change of it reads the file
+    /// again. The test counts the reads. Until task 2232 it showed the cache by its documented residual: a write
+    /// that kept the size and set the modification time back returned the earlier hash. That residual was the
+    /// bug (an edit read as agreed was never sent); such a write now moves the change time and is read again.
+    #[test]
+    fn regression_1640_an_unchanged_file_is_not_hashed_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.txt");
+        let reads = || HASH_READS.with(std::cell::Cell::get);
+        std::fs::write(&path, b"first bytes").unwrap();
+        // A hash taken right after a write is not reused: a later write in the same timer tick
+        // would carry the same times.
+        let start = reads();
+        for _ in 0..2 {
+            assert_eq!(
+                cached_sha256_file_hex("cache-file", &path).unwrap(),
+                sha256_hex(b"first bytes")
+            );
+        }
+        assert_eq!(reads() - start, 2, "a fresh write is read every time");
+        // A hash taken well after the file's times is reused while its fingerprint holds.
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        assert_eq!(
+            cached_sha256_file_hex_at("cache-file", &path, later).unwrap(),
+            sha256_hex(b"first bytes")
+        );
+        let settled = reads();
+        for _ in 0..3 {
+            assert_eq!(
+                cached_sha256_file_hex("cache-file", &path).unwrap(),
+                sha256_hex(b"first bytes")
+            );
+        }
+        assert_eq!(reads(), settled, "unchanged: the cached hash, not read again");
+        regression_2229_set_modified(&path, std::time::SystemTime::now() - std::time::Duration::from_secs(60));
+        assert_eq!(
+            cached_sha256_file_hex("cache-file", &path).unwrap(),
+            sha256_hex(b"first bytes")
+        );
+        assert_eq!(reads(), settled + 1, "a new modification time: read again");
+    }
+
+    /// Review-151d P3-6 (review P3-4 corrected): a landing that cannot hash the copy it sent records
+    /// no agreed content: the file's content is mixed at the version that landed, so its bytes are a
+    /// change on that version and are never agreed, also when they return to the previous bytes.
+    #[tokio::test]
+    async fn regression_1640_a_landing_that_cannot_hash_the_sent_copy_is_never_agreed() {
+        let master_key = [179u8; 32];
+        let file = "16400000-0000-4000-8000-000000000031";
+        let (_dir, sync_root, server, bridge, local) = regression_1640_synced_file(master_key, file).await;
+        std::fs::write(&local, b"edited in the sync folder").unwrap();
+        assert!(crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "notify"));
+        let payload = bridge.db.list_operations_for_file(file).unwrap()[0].payload_path.clone().unwrap();
+        bridge.seams.arm("landing:after_complete", move || {
+            std::fs::remove_file(&payload).unwrap();
+        });
+        drain_upload_queue(&bridge, &sync_root).await;
+        assert!(bridge.db.list_operations_for_file(file).unwrap().is_empty(), "landed");
+        let contract = bridge.db.get_file_contract_state(file).unwrap().unwrap();
+        assert_eq!((contract.local_base_version, contract.local_hash), (2, None), "no agreed content");
+        assert_eq!(bridge.db.fetched_content(file).unwrap(), Some((2, None)), "mixed at the version that landed");
+        // Undone back to the previous bytes: still a change on version 2, never agreed (or freed).
+        std::fs::write(&local, b"version one").unwrap();
+        assert_eq!(
+            sync_folder_content(&bridge.db, file, &local, None).unwrap(),
+            SyncFolderContent::Changed { base: Some(2) }
+        );
+        let state = server.finish();
+        assert_eq!(state.latest_plaintext(file, master_key), b"edited in the sync folder");
+    }
+
+
+    // ── Task 1640, review N1: a file brought in by range fetches gets its agreed content ──
+
+    /// The candidate: the first fetch sets it; one of the same version keeps it; one of another
+    /// version makes it mixed, at the LOWER version and with no hash, and mixed it stays; a
+    /// baseline clears it.
+    #[test]
+    fn regression_1640_a_range_fetch_candidate_merges_by_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+        db.upsert_file(&FileEntry {
+            file_id: "f".into(),
+            path: "notes.txt".into(),
+            status: FileStatus::Local,
+            size_bytes: 1,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+        assert_eq!(db.fetched_content("f").unwrap(), None);
+        assert!(db.mark_no_fetched_content("f").unwrap(), "its placeholder created where nothing was");
+        db.record_fetched_version("f", 3, "h3").unwrap();
+        assert_eq!(db.fetched_content("f").unwrap(), Some((3, Some("h3".into()))));
+        db.record_fetched_version("f", 3, "h3").unwrap();
+        assert_eq!(db.fetched_content("f").unwrap(), Some((3, Some("h3".into()))), "same version: kept");
+        // Self-review #7: the same version with other bytes (a legacy download that under-claims).
+        regression_1640_new_placeholder(&db, "g", "g.txt");
+        db.record_fetched_version("g", 3, "h3").unwrap();
+        db.record_fetched_version("g", 3, "other bytes labelled 3").unwrap();
+        assert_eq!(db.fetched_content("g").unwrap(), Some((3, None)), "the same version, other bytes: mixed");
+        db.record_fetched_version("f", 2, "h2").unwrap();
+        assert_eq!(db.fetched_content("f").unwrap(), Some((2, None)), "another version: mixed, the lower one");
+        db.record_fetched_version("f", 2, "h2").unwrap();
+        assert_eq!(db.fetched_content("f").unwrap(), Some((2, None)), "mixed stays mixed");
+        db.record_local_baseline("f", 4, "h4").unwrap();
+        assert_eq!(db.fetched_content("f").unwrap(), None, "a write of the whole file replaces it");
+        db.record_fetched_version("f", 5, "h5").unwrap();
+        assert_eq!(
+            (db.get_file_contract_state("f").unwrap().unwrap().local_hash, db.fetched_content("f").unwrap()),
+            (None, Some((4, None))),
+            "a fetch on agreed bytes: they join the candidate, which is mixed at the lower version"
+        );
+    }
+
+    /// Review F1: a row whose bytes on disk are not known (every row from before the candidate,
+    /// every new one until its placeholder is created where nothing was) stays not known through
+    /// fetches: never agreed, never sent. Only a write of the whole file makes it known.
+    #[test]
+    fn regression_1640_a_file_of_unknown_content_stays_unknown_through_fetches() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+        let path = dir.path().join("notes.txt");
+        std::fs::write(&path, b"part of an old version, part of version two").unwrap();
+        db.upsert_file(&FileEntry {
+            file_id: "f".into(),
+            path: "notes.txt".into(),
+            status: FileStatus::Local,
+            size_bytes: 1,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+        db.record_fetched_version("f", 2, &sha256_hex(b"version two")).unwrap();
+        assert_eq!(db.fetched_content("f").unwrap(), None, "no candidate over bytes nobody can name");
+        assert_eq!(sync_folder_content(&db, "f", &path, None).unwrap(), SyncFolderContent::Unknown);
+        assert!(!db.mark_no_fetched_content("f").unwrap(), "fetched into: never marked empty after the fact");
+        db.record_local_baseline("f", 2, &sha256_hex(b"version two")).unwrap();
+        assert!(db.get_file_contract_state("f").unwrap().unwrap().local_hash.is_some(), "a whole write makes it known");
+    }
+
+    /// Review F1 (replaces condition 1's clear): a file that goes cloud-only (dehydrated, freed,
+    /// evicted, or a partial placeholder read on a tick) may still hold some of its bytes; its
+    /// agreed content joins the candidate (never forgotten, never raised). A remote move or rename
+    /// changes no byte: its candidate becomes mixed (never promoted at the new place), its agreed
+    /// content stays.
+    #[tokio::test]
+    async fn regression_1640_dehydrating_or_moving_a_file_keeps_what_it_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+        let local = |id: &str| FileEntry {
+            file_id: id.into(),
+            path: format!("{id}.txt"),
+            status: FileStatus::Local,
+            size_bytes: 1,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        };
+        for id in ["by-status", "by-free-up"] {
+            db.upsert_file(&local(id)).unwrap();
+            db.record_local_baseline(id, 2, "agreed").unwrap();
+        }
+        db.set_status("by-status", FileStatus::CloudOnly).unwrap();
+        db.mark_cloud_only_after_dehydrate(&["by-free-up".to_string()], 5).unwrap();
+        for id in ["by-status", "by-free-up"] {
+            let contract = db.get_file_contract_state(id).unwrap().unwrap();
+            assert_eq!(
+                (contract.local_hash, db.fetched_content(id).unwrap()),
+                (None, Some((2, Some("agreed".to_string())))),
+                "{id}: the agreed content is the candidate now"
+            );
+        }
+        // A remote rename: the metadata row names another path.
+        let master_key = [181u8; 32];
+        let (_dir2, sync_root, server, bridge) = rule3_setup(master_key);
+        let file = "16400000-0000-4000-8000-000000000041";
+        seed_uploaded_row(&bridge, &server, file);
+        assert!(bridge.db.mark_no_fetched_content(file).unwrap());
+        bridge.db.record_fetched_version(file, 1, "candidate").unwrap();
+        let mut node = snap_node(&master_key, file, "renamed.txt", None, false, 1_700_000_500);
+        node["version_number"] = json!(1);
+        server
+            .state
+            .lock()
+            .unwrap()
+            .snapshots
+            .push_back(("200 OK".into(), json!({ "seq_id": 1, "nodes": [node] })));
+        sync_tick_outcome(&bridge, &sync_root).await.unwrap();
+        assert_eq!(bridge.db.get_file(file).unwrap().unwrap().path, "renamed.txt", "precondition");
+        assert_eq!(bridge.db.fetched_content(file).unwrap(), Some((1, None)), "a move: mixed, its version kept");
+        drop(server.finish());
+        db.record_local_baseline("by-status", 3, "agreed three").unwrap();
+        db.poison_fetched_content("by-status").unwrap();
+        assert_eq!(
+            db.get_file_contract_state("by-status").unwrap().unwrap().local_hash.as_deref(),
+            Some("agreed three"),
+            "a move keeps the agreed content"
+        );
+    }
+
+    /// A candidate decides like a baseline: equal bytes are agreed; other bytes are a change on
+    /// the candidate's version; a mixed candidate is never agreed and sends on the oldest version.
+    #[test]
+    fn regression_1640_a_candidate_decides_like_a_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+        let path = dir.path().join("notes.txt");
+        std::fs::write(&path, b"version three").unwrap();
+        db.upsert_file(&FileEntry {
+            file_id: "f".into(),
+            path: "notes.txt".into(),
+            status: FileStatus::Local,
+            size_bytes: 13,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+        assert!(db.mark_no_fetched_content("f").unwrap());
+        db.record_fetched_version("f", 3, &sha256_hex(b"version three")).unwrap();
+        let content = || sync_folder_content(&db, "f", &path, None).unwrap();
+        assert_eq!(content(), SyncFolderContent::Agreed, "the candidate's bytes");
+        std::fs::write(&path, b"edited, never sent").unwrap();
+        assert_eq!(content(), SyncFolderContent::Changed { base: Some(3) }, "an edit, on the candidate's version");
+        db.record_fetched_version("f", 2, &sha256_hex(b"version two")).unwrap();
+        assert_eq!(content(), SyncFolderContent::Changed { base: Some(2) }, "mixed: never agreed, the oldest");
+    }
+
+    /// The edit an Office save makes before the stamp pass promoted anything is sent, on the
+    /// candidate's version.
+    #[tokio::test]
+    async fn regression_1640_an_edit_before_promotion_is_sent_on_the_candidates_version() {
+        let master_key = [182u8; 32];
+        let file = "16400000-0000-4000-8000-000000000042";
+        let (_dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_row(&bridge, &server, file);
+        let local = sync_root.join("notes.txt");
+        std::fs::write(&local, b"version one").unwrap();
+        assert!(bridge.db.mark_no_fetched_content(file).unwrap());
+        bridge.db.record_fetched_version(file, 1, &sha256_hex(b"version one")).unwrap();
+        assert!(!crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "scan"), "agreed: nothing");
+        std::fs::write(&local, b"saved by an editor").unwrap();
+        assert!(crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "notify"));
+        assert_eq!(bridge.db.list_operations_for_file(file).unwrap()[0].base_version, Some(1));
+        drain_upload_queue(&bridge, &sync_root).await;
+        let state = server.finish();
+        assert_eq!(state.init_summary(), vec![(json!(file), json!(1), 201)]);
+        assert_eq!(state.latest_plaintext(file, master_key), b"saved by an editor");
+    }
+
+    /// Condition 2: promotion needs the platform to say in sync with no modified data, the whole
+    /// file on disk, the bytes read under the handle equal to the candidate, a candidate of one
+    /// version, and the row still `Local` with that candidate.
+    #[test]
+    fn regression_1640_a_candidate_is_promoted_only_when_the_bytes_are_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+        db.upsert_file(&FileEntry {
+            file_id: "f".into(),
+            path: "notes.txt".into(),
+            status: FileStatus::Local,
+            size_bytes: 1,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+        let candidate = sha256_hex(b"version three");
+        assert!(db.mark_no_fetched_content("f").unwrap());
+        db.record_fetched_version("f", 3, &candidate).unwrap();
+        let promote = |local, wholly, bytes: &'static [u8]| {
+            promote_fetched_content(&db, "f", local, wholly, &mut || Ok(sha256_hex(bytes))).unwrap()
+        };
+        assert!(!promote(LocalEntry::InSync, true, b"other bytes"), "other bytes: no");
+        assert!(!promote(LocalEntry::PartlyLocal, true, b"version three"), "out of sync or modified: no");
+        assert!(!promote(LocalEntry::InSync, false, b"version three"), "not wholly on disk: no");
+        db.set_status("f", FileStatus::Uploading).unwrap();
+        assert!(!promote(LocalEntry::InSync, true, b"version three"), "the row moved on: no");
+        db.set_status("f", FileStatus::Local).unwrap();
+        assert!(promote(LocalEntry::InSync, true, b"version three"), "its own bytes: promoted");
+        let contract = db.get_file_contract_state("f").unwrap().unwrap();
+        assert_eq!((contract.local_base_version, contract.local_hash), (3, Some(candidate)));
+        assert_eq!(db.fetched_content("f").unwrap(), None);
+        // A mixed candidate is never promoted.
+        db.upsert_file(&FileEntry {
+            file_id: "m".into(),
+            path: "mixed.txt".into(),
+            status: FileStatus::Local,
+            size_bytes: 1,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+        assert!(db.mark_no_fetched_content("m").unwrap());
+        db.record_fetched_version("m", 3, "h3").unwrap();
+        db.record_fetched_version("m", 2, "h2").unwrap();
+        assert!(
+            !promote_fetched_content(&db, "m", LocalEntry::InSync, true, &mut || Ok("h2".into())).unwrap(),
+            "mixed: never"
+        );
+    }
+
+    /// Review N5: the kept copy's final move never replaces a file (Windows: MoveFileExW without
+    /// REPLACE_EXISTING).
+    #[test]
+    fn regression_1640_a_move_never_replaces_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (from, existing, free) = (dir.path().join("from"), dir.path().join("existing"), dir.path().join("free"));
+        std::fs::write(&from, b"new").unwrap();
+        std::fs::write(&existing, b"there first").unwrap();
+        let refused = move_no_replace(&from, &existing).unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::AlreadyExists, "{refused}");
+        assert_eq!(std::fs::read(&existing).unwrap(), b"there first", "the existing file is untouched");
+        assert_eq!(std::fs::read(&from).unwrap(), b"new", "and the source stays");
+        move_no_replace(&from, &free).unwrap();
+        assert_eq!(std::fs::read(&free).unwrap(), b"new");
+        assert!(!from.exists());
+    }
+
+    // ── Task 1640, review F1: the candidate only ever moves down or becomes mixed ──
+
+    /// A `Local` row for `file_id` at `path`, whose placeholder was created where nothing was.
+    fn regression_1640_new_placeholder(db: &StateDb, file_id: &str, path: &str) {
+        db.upsert_file(&FileEntry {
+            file_id: file_id.into(),
+            path: path.into(),
+            status: FileStatus::Local,
+            size_bytes: 1,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+        assert!(db.mark_no_fetched_content(file_id).unwrap());
+    }
+
+    /// One fetch as `hydrate_file_to_memory` records it: `Downloading`, the candidate before the
+    /// transfer, then `Local`.
+    fn regression_1640_fetch(db: &StateDb, file_id: &str, version: i64, plaintext: &[u8]) {
+        db.set_status(file_id, FileStatus::Downloading).unwrap();
+        db.record_fetched_version(file_id, version, &sha256_hex(plaintext)).unwrap();
+        db.set_status(file_id, FileStatus::Local).unwrap();
+    }
+
+    /// One tick's reconcile of a placeholder that is partly on disk (`RECALL_ON_DATA_ACCESS`):
+    /// the decode reads it as cloud-only.
+    fn regression_1640_tick_partly_on_disk(db: &StateDb, file_id: &str) {
+        let row = db.get_file(file_id).unwrap().unwrap();
+        let (status, _) = crate::state_db::decode_os_state(0x0040_0000, row.status);
+        assert_eq!(status, Some(FileStatus::CloudOnly), "precondition: the decode");
+        db.reconcile_os_state(&[(file_id.to_string(), status, None)], 1).unwrap();
+        assert_eq!(db.get_file(file_id).unwrap().unwrap().status, FileStatus::CloudOnly);
+    }
+
+    /// Review F1: ranges of version 1 are fetched; a tick reads the partial placeholder as
+    /// cloud-only; the web saves version 2; the rest is fetched at 2. The bytes are 1 and 2
+    /// spliced, so an edit is sent on 1 (a stale park when the server moved), never on 2. Before,
+    /// the tick wiped the candidate and the next fetch started a fresh one at 2.
+    #[test]
+    fn regression_1640_a_tick_between_range_fetches_never_raises_the_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+        let path = dir.path().join("notes.txt");
+        regression_1640_new_placeholder(&db, "f", "notes.txt");
+        regression_1640_fetch(&db, "f", 1, b"version one");
+        regression_1640_tick_partly_on_disk(&db, "f");
+        regression_1640_fetch(&db, "f", 2, b"version two");
+        regression_1640_tick_partly_on_disk(&db, "f");
+        db.set_status("f", FileStatus::Local).unwrap();
+        assert_eq!(db.fetched_content("f").unwrap(), Some((1, None)), "mixed, at the lower version");
+        std::fs::write(&path, b"ranges of one and two, then edited").unwrap();
+        assert_eq!(sync_folder_content(&db, "f", &path, None).unwrap(), SyncFolderContent::Changed { base: Some(1) });
+        // Same when the file had agreed content at 1 before it was partly freed.
+        regression_1640_new_placeholder(&db, "g", "other.txt");
+        db.record_local_baseline("g", 1, &sha256_hex(b"version one")).unwrap();
+        regression_1640_tick_partly_on_disk(&db, "g");
+        regression_1640_fetch(&db, "g", 2, b"version two");
+        db.set_status("g", FileStatus::Local).unwrap();
+        let other = dir.path().join("other.txt");
+        std::fs::write(&other, b"ranges of one and two, then edited").unwrap();
+        assert_eq!(sync_folder_content(&db, "g", &other, None).unwrap(), SyncFolderContent::Changed { base: Some(1) });
+        // A person's write into a partly hydrated file (a dirty partial placeholder), ticks around it:
+        // its bytes are not the candidate's, so they are a change on the candidate's version.
+        regression_1640_new_placeholder(&db, "w", "written.txt");
+        regression_1640_fetch(&db, "w", 3, b"version three");
+        regression_1640_tick_partly_on_disk(&db, "w");
+        let written = dir.path().join("written.txt");
+        std::fs::write(&written, b"part of version three, then written over").unwrap();
+        db.set_status("w", FileStatus::Local).unwrap();
+        regression_1640_tick_partly_on_disk(&db, "w");
+        assert_eq!(db.fetched_content("w").unwrap(), Some((3, Some(sha256_hex(b"version three")))), "the write kept it");
+        assert_eq!(
+            sync_folder_content(&db, "w", &written, None).unwrap(),
+            SyncFolderContent::Changed { base: Some(3) },
+            "a write: a change on the candidate's version, never agreed"
+        );
+    }
+
+    /// Review F1, the other two ways a candidate was reset while bytes stayed: the size resolution
+    /// (a resize that does not dehydrate) and the startup repair (a download cut off by a stop).
+    /// Both make the content mixed, version kept, so an edit is sent on the oldest version and the
+    /// file is never agreed (never freed, never marked in sync), even once its bytes are one version.
+    #[test]
+    fn regression_1640_a_resize_or_a_cut_off_download_makes_the_content_mixed_never_resets_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+        // Size resolution: ranges of 1 on disk; a fetch at 2 (recorded, then failed on the size).
+        regression_1640_new_placeholder(&db, "resized", "resized.txt");
+        regression_1640_fetch(&db, "resized", 1, b"version one");
+        db.set_status("resized", FileStatus::Downloading).unwrap();
+        db.record_fetched_version("resized", 2, &sha256_hex(b"version two, longer")).unwrap();
+        db.poison_local_content("resized").unwrap();
+        db.set_status("resized", FileStatus::CloudOnly).unwrap();
+        regression_1640_fetch(&db, "resized", 2, b"version two, longer");
+        let resized = dir.path().join("resized.txt");
+        std::fs::write(&resized, b"ranges of one and two, then edited").unwrap();
+        assert_eq!(
+            sync_folder_content(&db, "resized", &resized, None).unwrap(),
+            SyncFolderContent::Changed { base: Some(1) },
+            "a resize never resets the candidate"
+        );
+        // A one-version candidate made mixed is never agreed, even with that version's bytes.
+        regression_1640_new_placeholder(&db, "one", "one.txt");
+        regression_1640_fetch(&db, "one", 2, b"version two");
+        db.poison_local_content("one").unwrap();
+        regression_1640_fetch(&db, "one", 2, b"version two");
+        let one = dir.path().join("one.txt");
+        std::fs::write(&one, b"version two").unwrap();
+        assert_eq!(sync_folder_content(&db, "one", &one, None).unwrap(), SyncFolderContent::Changed { base: Some(2) });
+        // Startup repair: one row cut off mid-fetch with ranges of 1, one with agreed content at 1.
+        regression_1640_new_placeholder(&db, "cut", "cut.txt");
+        regression_1640_fetch(&db, "cut", 1, b"version one");
+        db.set_status("cut", FileStatus::Downloading).unwrap();
+        regression_1640_new_placeholder(&db, "agreed", "agreed.txt");
+        db.record_local_baseline("agreed", 1, &sha256_hex(b"version one")).unwrap();
+        db.set_status("agreed", FileStatus::Downloading).unwrap();
+        db.reconcile_stale_in_flight_on_startup().unwrap();
+        for id in ["cut", "agreed"] {
+            assert_eq!(db.get_file(id).unwrap().unwrap().status, FileStatus::CloudOnly, "{id}");
+            assert_eq!(db.get_file_contract_state(id).unwrap().unwrap().local_hash, None, "{id}");
+            assert_eq!(db.fetched_content(id).unwrap(), Some((1, None)), "{id}: mixed, version kept");
+        }
+    }
+
+    /// Review F1, end to end through the fetch path (Windows): ranges fetched at version 1, a
+    /// tick, the web saves 2, the rest fetched at 2, an edit. It is sent on 1, refused as stale
+    /// and parks with its bytes; the web's version 2 is not replaced.
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn regression_1640_range_fetches_across_a_tick_and_a_web_save_never_replace_the_web_version() {
+        let master_key = [183u8; 32];
+        let file = "16400000-0000-4000-8000-000000000051";
+        let (_dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_row(&bridge, &server, file);
+        {
+            let mut s = server.state.lock().unwrap();
+            s.files.get_mut(file).unwrap().versions[0] = vec![regression_1640_chunk(master_key, file, b"version one")];
+            s.serve_downloads = true;
+        }
+        assert!(bridge.db.mark_no_fetched_content(file).unwrap());
+        let fetch = bridge.hydrate_file_to_memory(file).await.unwrap();
+        assert_eq!(fetch.version.as_ref().unwrap().version, 1);
+        drop(fetch);
+        regression_1640_tick_partly_on_disk(&bridge.db, file);
+        regression_1640_web_saves(&server, master_key, file, b"version two");
+        let fetch = bridge.hydrate_file_to_memory(file).await.unwrap();
+        assert_eq!(fetch.version.as_ref().unwrap().version, 2);
+        drop(fetch);
+        assert_eq!(bridge.db.fetched_content(file).unwrap(), Some((1, None)));
+        let local = sync_root.join("notes.txt");
+        std::fs::write(&local, b"ranges of one and two, then edited").unwrap();
+        assert!(crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "notify"));
+        assert_eq!(bridge.db.list_operations_for_file(file).unwrap()[0].base_version, Some(1));
+        drain_upload_queue(&bridge, &sync_root).await;
+        assert_eq!(std::fs::read(&local).unwrap(), b"ranges of one and two, then edited", "the edit stays");
+        let state = server.finish();
+        assert_eq!(state.latest_plaintext(file, master_key), b"version two", "the web's version is not replaced");
+    }
+
+    /// Review F1: a landing sent the whole file, so nothing fetched is left on disk: its candidate
+    /// goes with the old agreed content.
+    #[tokio::test]
+    async fn regression_1640_a_landing_replaces_the_candidate() {
+        let master_key = [184u8; 32];
+        let file = "16400000-0000-4000-8000-000000000052";
+        let (_dir, sync_root, server, bridge, local) = regression_1640_synced_file(master_key, file).await;
+        // Partly freed and fetched again at 1: the agreed content is the candidate now.
+        bridge.db.record_fetched_version(file, 1, &sha256_hex(b"version one")).unwrap();
+        assert_eq!(bridge.db.fetched_content(file).unwrap(), Some((1, Some(sha256_hex(b"version one")))));
+        std::fs::write(&local, b"edited in the sync folder").unwrap();
+        assert!(crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "notify"));
+        drain_upload_queue(&bridge, &sync_root).await;
+        let contract = bridge.db.get_file_contract_state(file).unwrap().unwrap();
+        assert_eq!(
+            (contract.local_base_version, contract.local_hash),
+            (2, Some(sha256_hex(b"edited in the sync folder")))
+        );
+        assert_eq!(bridge.db.fetched_content(file).unwrap(), None, "the sent file replaced it");
+        drop(server.finish());
+    }
+
+    /// A landing records what it SENT. Bytes saved after the staging copy was taken are not the
+    /// agreed content: they read as a change on the version that landed.
+    #[tokio::test]
+    async fn regression_1640_a_landing_whose_disk_changed_after_staging_is_not_agreed() {
+        let master_key = [187u8; 32];
+        let file = "16400000-0000-4000-8000-000000000053";
+        let (_dir, sync_root, server, bridge, local) = regression_1640_synced_file(master_key, file).await;
+        std::fs::write(&local, b"first edit").unwrap();
+        assert!(crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "notify"));
+        // Saved again after the staging copy, before the upload ran; its event is not seen yet.
+        std::fs::write(&local, b"second edit, after staging").unwrap();
+        drain_upload_queue(&bridge, &sync_root).await;
+        let contract = bridge.db.get_file_contract_state(file).unwrap().unwrap();
+        assert_eq!(
+            (contract.local_base_version, contract.local_hash),
+            (2, Some(sha256_hex(b"first edit"))),
+            "what was sent is the agreed content"
+        );
+        assert_eq!(
+            sync_folder_content(&bridge.db, file, &local, None).unwrap(),
+            SyncFolderContent::Changed { base: Some(2) },
+            "the later bytes: a change on the version that landed, never agreed"
+        );
+        let state = server.finish();
+        assert_eq!(state.latest_plaintext(file, master_key), b"first edit");
+    }
+
+    /// Self-review #1: a whole fetch is the agreed content only when no other fetch of the file
+    /// overlapped it: one already in flight when it started, or one that started or ended before its
+    /// transfer ended, could put bytes of another version around it. Its candidate then stays.
+    #[tokio::test]
+    async fn regression_1640_a_whole_fetch_is_agreed_only_when_no_other_fetch_overlapped_it() {
+        let (_dir, _sync_root, server, bridge) = rule3_setup([188u8; 32]);
+        let one = FetchedVersion { version: 1, hash: sha256_hex(b"version one") };
+        let two = FetchedVersion { version: 2, hash: sha256_hex(b"version two") };
+        let fetch = |file: &str, fetched: &FetchedVersion| {
+            let ticket = bridge.begin_fetch(file);
+            bridge.db.record_fetched_version(file, fetched.version, &fetched.hash).unwrap();
+            ticket
+        };
+        // Alone: the whole file is version 2's.
+        regression_1640_new_placeholder(&bridge.db, "alone", "alone.txt");
+        let whole = fetch("alone", &two);
+        assert!(bridge.record_whole_fetch("alone", &two, &whole).unwrap());
+        drop(whole);
+        assert_eq!(bridge.db.get_file_contract_state("alone").unwrap().unwrap().local_hash, Some(two.hash.clone()));
+        // A range fetch of version 1 still in flight when the whole fetch started.
+        regression_1640_new_placeholder(&bridge.db, "earlier", "earlier.txt");
+        let range = fetch("earlier", &one);
+        let whole = fetch("earlier", &two);
+        assert!(!bridge.record_whole_fetch("earlier", &two, &whole).unwrap());
+        drop((range, whole));
+        // A fetch that started and ended during the whole fetch.
+        regression_1640_new_placeholder(&bridge.db, "during", "during.txt");
+        let whole = fetch("during", &two);
+        drop(fetch("during", &one));
+        assert!(!bridge.record_whole_fetch("during", &two, &whole).unwrap());
+        drop(whole);
+        // The range fetch's bytes landed after the whole fetch's: the file is never agreed, and an
+        // edit is sent on the older version.
+        let spliced = _sync_root.join("spliced.txt");
+        std::fs::write(&spliced, b"version two, with a range of version one").unwrap();
+        for id in ["earlier", "during"] {
+            assert_eq!(bridge.db.get_file_contract_state(id).unwrap().unwrap().local_hash, None, "{id}");
+            assert_eq!(bridge.db.fetched_content(id).unwrap(), Some((1, None)), "{id}: its candidate stays");
+            assert_eq!(
+                sync_folder_content(&bridge.db, id, &spliced, None).unwrap(),
+                SyncFolderContent::Changed { base: Some(1) },
+                "{id}: not agreed, the older version"
+            );
+        }
+        // A range fetch that starts after a whole fetch's agreed content: it joins it (lower or mixed).
+        drop(fetch("alone", &one));
+        assert_eq!(bridge.db.fetched_content("alone").unwrap(), Some((1, None)));
+        assert_eq!(
+            sync_folder_content(&bridge.db, "alone", &spliced, None).unwrap(),
+            SyncFolderContent::Changed { base: Some(1) }
+        );
+        // Later, alone again.
+        let whole = fetch("during", &two);
+        assert!(bridge.record_whole_fetch("during", &two, &whole).unwrap());
+        drop(server.finish());
+    }
+
+    /// Self-review #5: an entry whose platform view could not be read (open exclusively) is kept as
+    /// in use and retried, never "partly on disk" (which may be dismissed); and an entry whose changes
+    /// could not be copied never becomes "partly on disk" on a later read either.
+    #[cfg(unix)]
+    #[test]
+    fn regression_1640_an_unreadable_or_uncopied_file_is_never_dismissable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
+        let rows = db.mark_subtree_trashing("folder-docs").unwrap();
+        remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::Unreadable);
+        let kept = db.list_kept_copies().unwrap();
+        assert_eq!((kept.len(), kept[0].reason, kept[0].dismissable()), (1, KeptReason::InUse, false));
+        assert!(sync_root.join("docs").join("notes.txt").exists(), "kept");
+        // Changes that could not be copied, then read as partly on disk.
+        let dir = tempfile::tempdir().unwrap();
+        let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
+        let rows = db.mark_subtree_trashing("folder-docs").unwrap();
+        std::fs::set_permissions(&sync_root, std::fs::Permissions::from_mode(0o555)).unwrap();
+        remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::WhollyLocal);
+        std::fs::set_permissions(&sync_root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        retry_kept_originals(&db, &sync_root, &|_, _| LocalEntry::PartlyLocal);
+        let kept = db.list_kept_copies().unwrap();
+        assert_eq!((kept.len(), kept[0].reason, kept[0].dismissable()), (1, KeptReason::CopyFailed, false));
+    }
+
+    /// Review-151d P2-2 (self-review #8 corrected): once a kept original is removed, the Office owner
+    /// file it left goes too, and nothing else: a file the sync folder ignores (a backup `~` file, a
+    /// partial download) was never synced, so it stays, and so does its folder (not created again on
+    /// the server). Once the folder is empty, it goes.
+    #[test]
+    fn regression_1640_a_kept_folder_keeps_the_files_it_never_synced() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
+        let docs = sync_root.join("docs");
+        std::fs::write(docs.join("~$tes.txt"), b"owner of notes.txt").unwrap();
+        std::fs::write(docs.join("notes.txt~"), b"the editor's backup").unwrap();
+        std::fs::write(docs.join("big.zip.part"), b"a download not finished").unwrap();
+        let rows = db.delete_file_subtree("folder-docs").unwrap();
+        remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::PartlyLocal);
+        assert!(docs.exists(), "precondition: kept for the file");
+        retry_kept_originals(&db, &sync_root, &|_, _| LocalEntry::NothingLocal);
+        assert!(!docs.join("notes.txt").exists(), "the original is removed");
+        assert!(!docs.join("~$tes.txt").exists(), "and its owner file");
+        assert_eq!(std::fs::read(docs.join("notes.txt~")).unwrap(), b"the editor's backup", "never synced: kept");
+        assert_eq!(std::fs::read(docs.join("big.zip.part")).unwrap(), b"a download not finished", "never synced: kept");
+        assert_eq!(db.list_removed_folders().unwrap(), vec!["docs".to_string()], "still the server's deletion");
+        std::fs::remove_file(docs.join("notes.txt~")).unwrap();
+        std::fs::remove_file(docs.join("big.zip.part")).unwrap();
+        retry_kept_originals(&db, &sync_root, &|_, _| LocalEntry::NothingLocal);
+        assert!(!docs.exists(), "empty: removed");
+        assert!(db.list_removed_folders().unwrap().is_empty());
+    }
+
+    /// Self-review #2: the candidate's column has its own name, so a database from a round-2 build
+    /// (whose `fetched_version` had DEFAULT 0) reads every row as not known.
+    #[test]
+    fn regression_1640_a_round_two_database_reads_every_row_as_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        drop(StateDb::open(&path).unwrap());
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "DROP TRIGGER IF EXISTS files_cloud_only_folds_agreed_into_candidate;
+                 DROP TRIGGER IF EXISTS files_unknown_marks_after_insert;
+                 DROP TRIGGER IF EXISTS files_unknown_marks_after_insert_any_status;
+                 DROP TRIGGER IF EXISTS files_unknown_marks_after_update;
+                 ALTER TABLE files DROP COLUMN fetched_min_version;
+                 ALTER TABLE files ADD COLUMN fetched_version INTEGER NOT NULL DEFAULT 0;
+                 INSERT INTO files (file_id, path, status) VALUES ('old', 'old.txt', 'local');",
+            )
+            .unwrap();
+        }
+        let db = StateDb::open(&path).unwrap();
+        db.record_fetched_version("old", 2, "h2").unwrap();
+        assert_eq!(db.fetched_content("old").unwrap(), None, "not known: no candidate over its bytes");
+        assert!(!db.mark_no_fetched_content("old").unwrap());
+    }
+
+    // ── Task 1640, review F2–F7: files kept from a remote deletion ──
+
+    /// Review F2: an original that waits (in use) is never removed once the file is restored on the
+    /// web (its own row, live again). When ANOTHER file moved to the place, the bytes there are still
+    /// the deleted file's (already copied): they go, as the engine's own remove (self-review #4).
+    #[cfg(unix)]
+    #[test]
+    fn regression_1640_a_retry_never_removes_a_file_the_server_lists_again() {
+        use std::os::unix::fs::PermissionsExt;
+        for case in ["restored on the web", "another file moved there"] {
+            let dir = tempfile::tempdir().unwrap();
+            let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
+            let docs = sync_root.join("docs");
+            let rows = db.mark_subtree_trashing("folder-docs").unwrap();
+            std::fs::set_permissions(&docs, std::fs::Permissions::from_mode(0o555)).unwrap();
+            remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::WhollyLocal);
+            std::fs::set_permissions(&docs, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(db.is_kept_original_pending("docs/notes.txt").unwrap(), "{case}: precondition");
+            if case == "restored on the web" {
+                db.set_status("folder-docs", FileStatus::Local).unwrap();
+                db.set_status("file-notes", FileStatus::Local).unwrap();
+            } else {
+                db.delete_file_subtree("folder-docs").unwrap();
+                db.upsert_file(&FileEntry {
+                    file_id: "file-moved-here".into(),
+                    path: "docs/notes.txt".into(),
+                    status: FileStatus::Local,
+                    size_bytes: 1,
+                    modified_at: 1,
+                    content_hash: None,
+                    remote_updated_at: 1,
+                    parent_id: None,
+                    item_kind: ItemKind::File,
+                })
+                .unwrap();
+            }
+            retry_kept_originals(&db, &sync_root, &|_, _| LocalEntry::WhollyLocal);
+            if case == "restored on the web" {
+                assert_eq!(
+                    std::fs::read(docs.join("notes.txt")).unwrap(),
+                    b"edited, never sent",
+                    "{case}: the live file stays"
+                );
+            } else {
+                // Self-review #4: the bytes there are still the deleted file's (copied already); they go
+                // so the other file's placeholder can be created there. The remove is the engine's own.
+                assert!(!docs.join("notes.txt").exists(), "{case}: the deleted file's bytes go");
+                assert_eq!(db.get_file_by_path("docs/notes.txt").unwrap().unwrap().file_id, "file-moved-here", "{case}");
+            }
+            assert!(!db.is_kept_original_pending("docs/notes.txt").unwrap(), "{case}: nothing waits any more");
+            let kept = db.list_kept_copies().unwrap();
+            assert_eq!(kept.len(), 1, "{case}: the copy's entry stays");
+            assert!(kept[0].dismissable(), "{case}");
+        }
+    }
+
+    /// Review F3: a folder deleted on the web stays on disk for a file kept in it (partly on
+    /// disk), and the scan does not create it again on the server. Once the file is resolved its
+    /// copy goes where it can upload (not into that folder), and the emptied folder goes.
+    #[tokio::test]
+    async fn regression_1640_a_folder_deleted_elsewhere_is_not_created_again_for_what_it_keeps() {
+        let (_dir, sync_root, server, bridge) = rule3_setup([185u8; 32]);
+        regression_1640_edited_file_in_a_folder_in(&bridge.db, &sync_root);
+        let docs = sync_root.join("docs");
+        let rows = bridge.db.delete_file_subtree("folder-docs").unwrap();
+        remove_pruned_entries(&bridge.db, &sync_root, &rows, &|_, _| LocalEntry::PartlyLocal);
+        assert!(docs.join("notes.txt").exists(), "precondition: kept in place");
+        assert_eq!(bridge.ensure_local_folder(&sync_root, &docs), None, "not created again");
+        assert!(bridge.db.get_file_by_path("docs").unwrap().is_none(), "no folder row, no CreateFolder");
+        // Now wholly on disk: copied where it can upload, the original and the folder removed.
+        retry_kept_originals(&bridge.db, &sync_root, &|_, _| LocalEntry::WhollyLocal);
+        assert_eq!(std::fs::read(sync_root.join("notes (this PC).txt")).unwrap(), b"edited, never sent");
+        assert!(!docs.exists(), "the emptied folder is removed");
+        assert!(bridge.db.list_removed_folders().unwrap().is_empty());
+        // Review F6: one entry, updated where it is.
+        let feed: Vec<(String, String)> = version_conflict_feed_from_db(&bridge.db)
+            .unwrap()
+            .into_iter()
+            .map(|entry| (entry.status, entry.file_name))
+            .collect();
+        assert_eq!(feed, vec![("kept as a copy".to_string(), "notes (this PC).txt".to_string())]);
+        drop(server.finish());
+    }
+
+    /// Review F3: a folder deleted on the web that the person put something new into is wanted
+    /// again: the scan creates it.
+    #[tokio::test]
+    async fn regression_1640_a_folder_deleted_elsewhere_with_something_new_is_created_again() {
+        let (_dir, sync_root, server, bridge) = rule3_setup([186u8; 32]);
+        regression_1640_edited_file_in_a_folder_in(&bridge.db, &sync_root);
+        let docs = sync_root.join("docs");
+        let rows = bridge.db.delete_file_subtree("folder-docs").unwrap();
+        remove_pruned_entries(&bridge.db, &sync_root, &rows, &|_, _| LocalEntry::PartlyLocal);
+        std::fs::write(docs.join("new.txt"), b"made after the delete").unwrap();
+        assert!(bridge.ensure_local_folder(&sync_root, &docs).is_some(), "created again");
+        assert!(bridge.db.list_removed_folders().unwrap().is_empty());
+        drop(server.finish());
+    }
+
+    /// Review F4: a web trash copies an edit that Word holds open; then the trash is emptied. The
+    /// second remote op copies nothing again: one copy, one entry.
+    #[cfg(unix)]
+    #[test]
+    fn regression_1640_a_second_remote_op_copies_nothing_again() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
+        let docs = sync_root.join("docs");
+        let trashed = db.mark_subtree_trashing("folder-docs").unwrap();
+        std::fs::set_permissions(&docs, std::fs::Permissions::from_mode(0o555)).unwrap();
+        remove_pruned_entries(&db, &sync_root, &trashed, &|_, _| LocalEntry::WhollyLocal);
+        let emptied = db.delete_file_subtree("folder-docs").unwrap();
+        assert!(emptied.iter().any(|row| row.path == "docs/notes.txt"), "precondition: the file again");
+        remove_pruned_entries(&db, &sync_root, &emptied, &|_, _| LocalEntry::WhollyLocal);
+        std::fs::set_permissions(&docs, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(sync_root.join("notes (this PC).txt").exists());
+        assert!(!sync_root.join("notes (this PC 2).txt").exists(), "the same bytes are not copied twice");
+        assert_eq!(db.list_kept_copies().unwrap().len(), 1, "one entry");
+    }
+
+    /// Review F5, F6: an open file in sync (nothing to keep) says it waits to close, then goes
+    /// once removed; one whose changes could not be copied says so, and is resolved where it is.
+    #[cfg(unix)]
+    #[test]
+    fn regression_1640_a_kept_file_says_why_and_is_resolved_where_it_is() {
+        use std::os::unix::fs::PermissionsExt;
+        let feed = |db: &StateDb| -> Vec<(String, String, String)> {
+            version_conflict_feed_from_db(db)
+                .unwrap()
+                .into_iter()
+                .map(|entry| (entry.status, entry.detail, entry.action))
+                .collect()
+        };
+        // Open, in sync.
+        let dir = tempfile::tempdir().unwrap();
+        let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
+        let docs = sync_root.join("docs");
+        let rows = db.mark_subtree_trashing("folder-docs").unwrap();
+        std::fs::set_permissions(&docs, std::fs::Permissions::from_mode(0o555)).unwrap();
+        remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::InSync);
+        let open = feed(&db);
+        assert_eq!(open.len(), 1);
+        assert_eq!((open[0].0.as_str(), open[0].2.as_str()), ("waiting to close", "none"));
+        assert!(open[0].1.contains("open on this PC"), "{}", open[0].1);
+        std::fs::set_permissions(&docs, std::fs::Permissions::from_mode(0o755)).unwrap();
+        retry_kept_originals(&db, &sync_root, &|_, _| LocalEntry::InSync);
+        assert!(!docs.join("notes.txt").exists(), "removed once closed");
+        assert!(feed(&db).is_empty(), "nothing was kept: the entry goes");
+        // Changes that could not be copied (no room for the copy).
+        let dir = tempfile::tempdir().unwrap();
+        let (db, sync_root) = regression_1640_edited_file_in_a_folder(dir.path());
+        let rows = db.mark_subtree_trashing("folder-docs").unwrap();
+        std::fs::set_permissions(&sync_root, std::fs::Permissions::from_mode(0o555)).unwrap();
+        remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::WhollyLocal);
+        std::fs::set_permissions(&sync_root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            std::fs::read(sync_root.join("docs").join("notes.txt")).unwrap(),
+            b"edited, never sent",
+            "kept where it is"
+        );
+        let failed = feed(&db);
+        assert_eq!((failed.len(), failed[0].0.as_str(), failed[0].2.as_str()), (1, "kept in place", "none"));
+        assert!(failed[0].1.contains("could not be copied"), "{}", failed[0].1);
+        retry_kept_originals(&db, &sync_root, &|_, _| LocalEntry::WhollyLocal);
+        let copied = feed(&db);
+        assert_eq!((copied.len(), copied[0].0.as_str(), copied[0].2.as_str()), (1, "kept as a copy", "dismiss"));
+    }
+
+    /// Review F7: a file kept where it is because only part of it was on this PC can be dismissed
+    /// (no tick can resolve it when the rest is gone); the file stays, and is no longer held back.
+    #[tokio::test]
+    async fn regression_1640_a_file_kept_partly_on_disk_can_be_dismissed() {
+        let (_dir, sync_root, server, bridge) = rule3_setup([189u8; 32]);
+        let db = &bridge.db;
+        regression_1640_edited_file_in_a_folder_in(db, &sync_root);
+        let docs = sync_root.join("docs");
+        let rows = db.delete_file_subtree("folder-docs").unwrap();
+        remove_pruned_entries(db, &sync_root, &rows, &|_, _| LocalEntry::PartlyLocal);
+        let feed = version_conflict_feed_from_db(db).unwrap();
+        assert_eq!((feed.len(), feed[0].action.as_str()), (1, "dismiss"));
+        let id: i64 = feed[0].id.strip_prefix("kept:").unwrap().parse().unwrap();
+        assert!(db.dismiss_kept_copy(id).unwrap());
+        assert!(docs.join("notes.txt").exists(), "the file stays");
+        assert!(!db.is_kept_original_pending("docs/notes.txt").unwrap(), "and is no longer held back");
+        assert!(version_conflict_feed_from_db(db).unwrap().is_empty());
+        // Review-151d P2-1: the folder the server deleted is still not created again for it.
+        retry_kept_originals(db, &sync_root, &|_, _| LocalEntry::PartlyLocal);
+        assert_eq!(bridge.ensure_local_folder(&sync_root, &docs), None, "not created again");
+        assert!(db.get_file_by_path("docs").unwrap().is_none(), "no folder row, no CreateFolder");
+        // Once the person removes the file, the folder goes and nothing is left of the entry.
+        std::fs::remove_file(docs.join("notes.txt")).unwrap();
+        retry_kept_originals(db, &sync_root, &|_, _| LocalEntry::PartlyLocal);
+        assert!(!docs.exists());
+        assert!(!db.is_kept_original("docs/notes.txt").unwrap(), "the tombstone goes with the file");
+        drop(server.finish());
+    }
+
+    // ── Task 1640 follow-up: a new file is scanned again once its row exists ──
+
+    /// Every upload queued for `rel_path`, under any file id.
+    fn regression_1640_uploads_queued_for(bridge: &EngineBridge, rel_path: &str) -> usize {
+        bridge
+            .db
+            .list_due_operations(i64::MAX)
+            .unwrap()
+            .iter()
+            .filter(|op| op.target_path.as_deref() == Some(rel_path))
+            .count()
+    }
+
+    /// A new file the scan queued is a tracked file from then on. A scan while its upload is
+    /// queued queues nothing more (under any id); once it landed, an atomic save of it (no change
+    /// notification) is seen by the next scan and sent on the version that landed. Before, the
+    /// scan kept skipping the path (its `in_flight` set) until it left the disk, so that save
+    /// waited for a restart.
+    #[tokio::test]
+    async fn regression_1640_a_new_file_is_scanned_again_once_its_row_exists() {
+        let master_key = [190u8; 32];
+        let (_dir, sync_root, server, bridge) = rule3_setup(master_key);
+        let local = sync_root.join("fresh.txt");
+        std::fs::write(&local, b"made on this PC").unwrap();
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        assert_eq!(regression_1640_uploads_queued_for(&bridge, "fresh.txt"), 1, "precondition: queued as a new file");
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        assert_eq!(regression_1640_uploads_queued_for(&bridge, "fresh.txt"), 1, "no second upload while it is queued");
+        drain_upload_queue(&bridge, &sync_root).await;
+        let row = bridge.db.get_file_by_path("fresh.txt").unwrap().unwrap();
+        assert_eq!(row.status, FileStatus::Local, "precondition: landed");
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        assert_eq!(regression_1640_uploads_queued_for(&bridge, "fresh.txt"), 0, "landed, unchanged: nothing");
+        // An atomic save: the new bytes written elsewhere, then renamed over the file.
+        let saved = sync_root.join("fresh.txt.tmp");
+        std::fs::write(&saved, b"saved by an editor").unwrap();
+        std::fs::rename(&saved, &local).unwrap();
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        let ops = bridge.db.list_operations_for_file(&row.file_id).unwrap();
+        assert_eq!(
+            (regression_1640_uploads_queued_for(&bridge, "fresh.txt"), ops.len()),
+            (1, 1),
+            "the save is queued, as an edit of the file"
+        );
+        assert_eq!(ops[0].base_version, Some(1), "on the version that landed");
+        drain_upload_queue(&bridge, &sync_root).await;
+        let state = server.finish();
+        assert_eq!(state.latest_plaintext(&row.file_id, master_key), b"saved by an editor");
+    }
+
+    // ── Task 2244: a pass that holds edits logs one count, not a line per file ──
+
+    /// Every start of 0.8.17 on the maintainer's PC wrote one WARN line per held file of unknown content
+    /// (28,224 in ~100 s), burying every other warning. Each held edit is listed for review (task 2190), so
+    /// the log needs only the count: one line for a pass that holds new edits, the per-file line at DEBUG,
+    /// and nothing for a pass (or a start) whose held edits are the ones already listed. The line counts each
+    /// reason apart (review on #172): an edit with no known base needs a look; a file synced before 1640 does not.
+    #[tokio::test]
+    async fn task_2244_a_pass_that_holds_edits_logs_one_count_not_a_line_per_file() {
+        let master_key = [194u8; 32];
+        let (_dir, sync_root, _server, bridge) = rule3_setup(master_key);
+        let names = ["a.txt", "b.txt", "c.txt"];
+        for name in names.iter().chain(&["draft.txt"]) {
+            std::fs::write(sync_root.join(name), name.as_bytes()).unwrap();
+        }
+        let mut memo = crate::watcher::ScanMemo::default();
+        regression_2229_pass(&bridge, &sync_root, &mut memo);
+        drain_upload_queue(&bridge, &sync_root).await;
+        let draft = sync_root.join("draft.txt");
+        let draft_row = bridge.db.get_file_by_path("draft.txt").unwrap().unwrap();
+        std::fs::write(&draft, b"an edit made while the base was lost").unwrap();
+        bridge
+            .db
+            .test_execute(&format!(
+                "UPDATE files SET local_base_version = 0, fetched_min_version = 0 WHERE file_id = '{}'",
+                draft_row.file_id
+            ))
+            .unwrap();
+        assert_eq!(
+            sync_folder_content(&bridge.db, &draft_row.file_id, &draft, None).unwrap(),
+            SyncFolderContent::Changed { base: None },
+            "precondition: an edit with no known base"
+        );
+        for name in names {
+            let row = bridge.db.get_file_by_path(name).unwrap().unwrap();
+            bridge
+                .db
+                .test_execute(&format!(
+                    "UPDATE files SET local_hash = NULL, fetched_min_version = -1 WHERE file_id = '{}'",
+                    row.file_id
+                ))
+                .unwrap();
+            assert!(
+                bridge.db.is_unknown_content(&row.file_id).unwrap(),
+                "precondition: content unknown"
+            );
+        }
+        let warns = |logs: &str| {
+            logs.lines()
+                .filter(|l| l.contains(" WARN "))
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+
+        let logs = capture_logs_async(async {
+            regression_2229_pass(&bridge, &sync_root, &mut memo);
+        })
+        .await;
+        assert_eq!(
+            bridge.db.list_held_edits().unwrap().len(),
+            4,
+            "precondition: the pass held all four"
+        );
+        let first = warns(&logs);
+        assert_eq!(first.len(), 1, "one line for the pass, not one per file: {first:#?}");
+        for count in ["held=4", "content_unknown=3", "base_unknown=1"] {
+            assert!(first[0].contains(count), "the line carries {count}: {}", first[0]);
+        }
+
+        // A start: a fresh memo asks about every file again, and their held edits are the ones listed.
+        let mut restarted = crate::watcher::ScanMemo::default();
+        let logs = capture_logs_async(async {
+            regression_2229_pass(&bridge, &sync_root, &mut restarted);
+        })
+        .await;
+        assert_eq!(restarted.classified, 4, "precondition: the start asked about all four");
+        assert_eq!(warns(&logs), Vec::<String>::new(), "nothing new held: no line");
+    }
+
+    // ── Task 2229: the scan skips a settled file until its bytes or its row change ──
+
+    /// (classified, skipped) of one pass of the scan with `memo`.
+    fn regression_2229_pass(
+        bridge: &EngineBridge,
+        sync_root: &Path,
+        memo: &mut crate::watcher::ScanMemo,
+    ) -> (usize, usize) {
+        crate::watcher::run_one_scan_with(bridge, sync_root, memo);
+        (memo.classified, memo.skipped)
+    }
+
+    /// A synced file whose bytes are the agreed content is classified once, then skipped while
+    /// its listing and its row stay the same. A write to its row, a save of new bytes, and the
+    /// periodic full pass each make the scan classify it again, and the save is still sent.
+    #[tokio::test]
+    async fn regression_2229_a_settled_file_is_classified_again_only_when_it_or_its_row_changes() {
+        let master_key = [191u8; 32];
+        let (_dir, sync_root, server, bridge) = rule3_setup(master_key);
+        let local = sync_root.join("kept.txt");
+        std::fs::write(&local, b"made on this PC").unwrap();
+        let mut memo = crate::watcher::ScanMemo::default();
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (1, 0),
+            "a new file"
+        );
+        assert_eq!(
+            regression_1640_uploads_queued_for(&bridge, "kept.txt"),
+            1,
+            "precondition: queued"
+        );
+        drain_upload_queue(&bridge, &sync_root).await;
+        let row = bridge.db.get_file_by_path("kept.txt").unwrap().unwrap();
+        assert_eq!(row.status, FileStatus::Local, "precondition: landed");
+
+        // A queued file is not remembered, so the pass after its landing asks about it as for the first time.
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (1, 0),
+            "landed: asked"
+        );
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (0, 1),
+            "settled, unchanged: skipped"
+        );
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (0, 1),
+            "and again"
+        );
+
+        bridge.db.set_size_bytes(&row.file_id, 4242).unwrap();
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (1, 0),
+            "a write to its row: asked again"
+        );
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (0, 1),
+            "settled again"
+        );
+
+        memo.age_by(std::time::Duration::from_secs(11 * 60));
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (1, 0),
+            "the full pass asks about every file"
+        );
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (0, 1),
+            "then trusts it again"
+        );
+
+        // Only a settled verdict is remembered: an original whose kept copy is pending is passed
+        // over for now, so it is asked about on every pass, with its row and its bytes unchanged.
+        let kept = bridge
+            .db
+            .record_kept_copy(&crate::state_db::KeptCopyInput {
+                original_file_id: &row.file_id,
+                original_path: "kept.txt",
+                copy_path: "",
+                copied_hash: "",
+                original_removed: false,
+                reason: crate::state_db::KeptReason::InUse,
+                kept_at: 0,
+            })
+            .unwrap();
+        bridge.db.set_size_bytes(&row.file_id, 4243).unwrap();
+        for pass in 0..2 {
+            assert_eq!(
+                regression_2229_pass(&bridge, &sync_root, &mut memo),
+                (1, 0),
+                "passed over for now: asked again on pass {pass}"
+            );
+        }
+        bridge.db.delete_kept_copy(kept).unwrap();
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (1, 0),
+            "no longer held: settled"
+        );
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (0, 1),
+            "and skipped"
+        );
+
+        // An atomic save: the new bytes written elsewhere, then renamed over the file.
+        let saved = sync_root.join("kept.txt.part");
+        std::fs::write(&saved, b"saved by an editor").unwrap();
+        std::fs::rename(&saved, &local).unwrap();
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (1, 0),
+            "new bytes: asked again"
+        );
+        let ops = bridge.db.list_operations_for_file(&row.file_id).unwrap();
+        assert_eq!(ops.len(), 1, "the save is queued, as an edit of the file");
+        // Its row changed when the edit was queued; it is settled again until the row changes
+        // once more, when the edit lands.
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (1, 0),
+            "its row changed: asked again"
+        );
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (0, 1),
+            "settled while queued"
+        );
+        drain_upload_queue(&bridge, &sync_root).await;
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (1, 0),
+            "landed: asked again"
+        );
+        let state = server.finish();
+        assert_eq!(state.latest_plaintext(&row.file_id, master_key), b"saved by an editor");
+    }
+
+    /// Only a settled verdict is remembered: a file the scan passes over for now (here an
+    /// ignored temp name) is asked about on every pass.
+    #[tokio::test]
+    async fn regression_2229_a_file_passed_over_for_now_is_asked_about_every_pass() {
+        let (_dir, sync_root, _server, bridge) = rule3_setup([192u8; 32]);
+        std::fs::write(sync_root.join("~$draft.docx"), b"owner file").unwrap();
+        let mut memo = crate::watcher::ScanMemo::default();
+        for pass in 0..3 {
+            assert_eq!(
+                regression_2229_pass(&bridge, &sync_root, &mut memo),
+                (1, 0),
+                "pass {pass}"
+            );
+        }
+        assert_eq!(
+            regression_1640_uploads_queued_for(&bridge, "~$draft.docx"),
+            0,
+            "never queued"
+        );
+    }
+
+    /// A synced file of unknown content (synced before task 1640: task 2191's guarded rows) is held, not sent,
+    /// whatever its bytes are: only a write to its row can change that. The scan remembers it like a settled file,
+    /// so it no longer checks every such file on every pass (28,224 of them on the maintainer's PC, 0.8.15). When
+    /// the row learns the agreed content, the held edit is sent.
+    #[tokio::test]
+    async fn regression_2229_a_file_of_unknown_content_is_skipped_until_its_bytes_or_its_row_change() {
+        let master_key = [193u8; 32];
+        let (_dir, sync_root, server, bridge) = rule3_setup(master_key);
+        let local = sync_root.join("old.txt");
+        std::fs::write(&local, b"synced before 0.8.13").unwrap();
+        let mut memo = crate::watcher::ScanMemo::default();
+        regression_2229_pass(&bridge, &sync_root, &mut memo);
+        drain_upload_queue(&bridge, &sync_root).await;
+        let row = bridge.db.get_file_by_path("old.txt").unwrap().unwrap();
+        bridge
+            .db
+            .test_execute(&format!(
+                "UPDATE files SET local_hash = NULL, fetched_min_version = -1 WHERE file_id = '{}'",
+                row.file_id
+            ))
+            .unwrap();
+        assert!(
+            bridge.db.is_unknown_content(&row.file_id).unwrap(),
+            "precondition: content unknown"
+        );
+
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (1, 0),
+            "asked once"
+        );
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (0, 1),
+            "held, unchanged: skipped"
+        );
+
+        std::fs::write(&local, b"edited after 0.8.13, kept on this PC").unwrap();
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (1, 0),
+            "new bytes: asked again"
+        );
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (0, 1),
+            "still held: skipped"
+        );
+        assert!(
+            bridge.db.list_operations_for_file(&row.file_id).unwrap().is_empty(),
+            "an edit of unknown content is kept, not sent"
+        );
+
+        // The row learns the agreed content, as task 2191's check against the server will record it. The bytes
+        // on disk are not it, so they are an edit on that version.
+        bridge
+            .db
+            .test_execute(&format!(
+                "UPDATE files SET local_hash = '{}', local_base_version = 1, fetched_min_version = 0 WHERE file_id = '{}'",
+                sha256_hex(b"synced before 0.8.13"),
+                row.file_id
+            ))
+            .unwrap();
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (1, 0),
+            "its row changed: asked again"
+        );
+        let ops = bridge.db.list_operations_for_file(&row.file_id).unwrap();
+        assert_eq!(ops.len(), 1, "the held edit is queued");
+        assert_eq!(ops[0].base_version, Some(1), "on the agreed version");
+        drain_upload_queue(&bridge, &sync_root).await;
+        let state = server.finish();
+        assert_eq!(
+            state.latest_plaintext(&row.file_id, master_key),
+            b"edited after 0.8.13, kept on this PC"
+        );
+    }
+
+    /// An edit whose base version is not known is held, never sent without one, whatever its bytes are: the scan
+    /// remembers it until its bytes or its row change, and sends it once the row records a base.
+    #[tokio::test]
+    async fn regression_2229_an_edit_with_no_known_base_is_skipped_until_its_row_records_one() {
+        let master_key = [195u8; 32];
+        let (_dir, sync_root, server, bridge) = rule3_setup(master_key);
+        let local = sync_root.join("draft.txt");
+        std::fs::write(&local, b"first version").unwrap();
+        let mut memo = crate::watcher::ScanMemo::default();
+        regression_2229_pass(&bridge, &sync_root, &mut memo);
+        drain_upload_queue(&bridge, &sync_root).await;
+        let row = bridge.db.get_file_by_path("draft.txt").unwrap().unwrap();
+        std::fs::write(&local, b"an edit made while the base was lost").unwrap();
+        bridge
+            .db
+            .test_execute(&format!(
+                "UPDATE files SET local_base_version = 0, fetched_min_version = 0 WHERE file_id = '{}'",
+                row.file_id
+            ))
+            .unwrap();
+        assert_eq!(
+            sync_folder_content(&bridge.db, &row.file_id, &local, None).unwrap(),
+            SyncFolderContent::Changed { base: None },
+            "precondition: an edit with no known base"
+        );
+
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (1, 0),
+            "asked once"
+        );
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (0, 1),
+            "held, unchanged: skipped"
+        );
+        assert!(
+            bridge.db.list_operations_for_file(&row.file_id).unwrap().is_empty(),
+            "never sent without a base"
+        );
+
+        bridge
+            .db
+            .test_execute(&format!(
+                "UPDATE files SET local_base_version = 1 WHERE file_id = '{}'",
+                row.file_id
+            ))
+            .unwrap();
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (1, 0),
+            "its row changed: asked again"
+        );
+        let ops = bridge.db.list_operations_for_file(&row.file_id).unwrap();
+        assert_eq!(ops.len(), 1, "the held edit is queued");
+        assert_eq!(ops[0].base_version, Some(1), "on the recorded base");
+        drain_upload_queue(&bridge, &sync_root).await;
+        let state = server.finish();
+        assert_eq!(
+            state.latest_plaintext(&row.file_id, master_key),
+            b"an edit made while the base was lost"
+        );
+    }
+
+    /// Set the modification time of the file at `path`.
+    fn regression_2229_set_modified(path: &Path, modified: std::time::SystemTime) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+    }
+
+    /// Task 2232 (review of desktop #167, P1): an edit that keeps the file's length and sets its modification
+    /// time back is still sent. The full pass, the scan's safety net for what the directory listing cannot show,
+    /// must not take the old content hash from a cache that compared size and time alone. Every fake server names
+    /// its first file `server-file-1`; the cache key holds the path too, so a test running beside this one, in
+    /// its own directory, cannot replace this test's entry. The cache's own proof is the `task_2232_` test below.
+    #[tokio::test]
+    async fn regression_2229_an_equal_length_edit_that_restores_the_mtime_is_sent() {
+        let master_key = [194u8; 32];
+        let (_dir, sync_root, server, bridge) = rule3_setup(master_key);
+        let local = sync_root.join("ledger.txt");
+        std::fs::write(&local, b"balance: 100").unwrap();
+        let mut memo = crate::watcher::ScanMemo::default();
+        regression_2229_pass(&bridge, &sync_root, &mut memo);
+        drain_upload_queue(&bridge, &sync_root).await;
+        let row = bridge.db.get_file_by_path("ledger.txt").unwrap().unwrap();
+        // An hour old, so the hash the next pass takes is one the cache may hand back later.
+        let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        regression_2229_set_modified(&local, hour_ago);
+        assert_eq!(regression_2229_pass(&bridge, &sync_root, &mut memo), (1, 0), "asked");
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (0, 1),
+            "settled: its bytes are the agreed content"
+        );
+
+        std::fs::write(&local, b"balance: 999").unwrap();
+        regression_2229_set_modified(&local, hour_ago);
+        memo.age_by(std::time::Duration::from_secs(11 * 60));
+        assert_eq!(
+            regression_2229_pass(&bridge, &sync_root, &mut memo),
+            (1, 0),
+            "the full pass asks about it"
+        );
+        let ops = bridge.db.list_operations_for_file(&row.file_id).unwrap();
+        assert_eq!(ops.len(), 1, "the edit is queued");
+        drain_upload_queue(&bridge, &sync_root).await;
+        let state = server.finish();
+        assert_eq!(state.latest_plaintext(&row.file_id, master_key), b"balance: 999");
+    }
+
+    /// Task 2232: a content hash is not reused for a file rewritten to the same length with its modification
+    /// time set back. The hash is taken in real time, past [`HASH_CACHE_SETTLED`], as the app takes it. Two
+    /// writes inside one timer tick can share a change time (on Windows, 27 of 40 runs of this test did when it
+    /// dated the hash an hour ahead and rewrote at once), and the settle window is what keeps a rewrite after a
+    /// reusable hash out of the hash's tick.
+    #[test]
+    fn task_2232_a_cached_hash_is_not_reused_for_an_equal_length_rewrite_that_restores_the_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("same-length.bin");
+        let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::write(&path, b"AAAA").unwrap();
+        regression_2229_set_modified(&path, hour_ago);
+        std::thread::sleep(HASH_CACHE_SETTLED + std::time::Duration::from_millis(200));
+        assert_eq!(cached_sha256_file_hex("task-2232", &path).unwrap(), sha256_hex(b"AAAA"));
+        let reads = HASH_READS.with(std::cell::Cell::get);
+        assert_eq!(cached_sha256_file_hex("task-2232", &path).unwrap(), sha256_hex(b"AAAA"));
+        assert_eq!(
+            HASH_READS.with(std::cell::Cell::get),
+            reads,
+            "precondition: the cached hash is reused"
+        );
+        std::fs::write(&path, b"BBBB").unwrap();
+        regression_2229_set_modified(&path, hour_ago);
+        assert_eq!(
+            cached_sha256_file_hex("task-2232", &path).unwrap(),
+            sha256_hex(b"BBBB"),
+            "the hash of the bytes on disk, not the cached one"
+        );
+    }
+
+    // ── Task 2204 S0: a Windows rename re-keys the file's row at once ──
+    //
+    // Review-154 P1-A, the case #154 widened: a rename left the row at the OLD path until the
+    // pull after the rename landed, and a create's landing wrote its queue-time path back. A new
+    // file written at the old name was then sent as a new version of the renamed file.
+
+    /// How the window between the rename and the new file is crossed.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Task2204Window {
+        /// The renamed file's create is still queued (review-154's scenario).
+        NewFile,
+        /// The renamed file landed long ago.
+        SyncedFile,
+        /// Nothing reaches the server until the new file is scanned too.
+        Offline,
+        /// The app restarts between the rename and the drain.
+        Restart,
+    }
+
+    /// Create `a.txt`, rename it to `b.txt`, write a new `a.txt`, sync: the server holds two
+    /// files with the right bytes, and each row is at its own file's path.
+    async fn task_2204_rename_then_a_new_file_at_the_old_name(window: Task2204Window) {
+        let master_key = [204u8; 32];
+        let (dir, sync_root, server, mut bridge) = rule3_setup(master_key);
+        let (a, b) = (sync_root.join("a.txt"), sync_root.join("b.txt"));
+        std::fs::write(&a, b"old bytes").unwrap();
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        assert_eq!(regression_1640_uploads_queued_for(&bridge, "a.txt"), 1, "precondition: queued as a new file");
+        if window == Task2204Window::SyncedFile {
+            drain_upload_queue(&bridge, &sync_root).await;
+            assert_eq!(bridge.db.get_file_by_path("a.txt").unwrap().unwrap().status, FileStatus::Local);
+        }
+        let renamed_id = bridge.db.get_file_by_path("a.txt").unwrap().unwrap().file_id;
+        std::fs::rename(&a, &b).unwrap();
+        crate::watcher::handle_rename(&bridge, &sync_root, &a, &b).await;
+        assert_eq!(
+            bridge.db.get_file_by_path("b.txt").unwrap().map(|row| row.file_id),
+            Some(renamed_id.clone()),
+            "the row moved with the file, before anything reached the server"
+        );
+        assert!(bridge.db.get_file_by_path("a.txt").unwrap().is_none(), "nothing is at the old name");
+        if window == Task2204Window::Restart {
+            drop(bridge);
+            bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+            assert!(bridge.db.get_file_by_path("b.txt").unwrap().is_some(), "the re-key is durable");
+        }
+        // Another length than the renamed file's, so the scan's size and modification-time
+        // fingerprint can never hide a misrouted edit.
+        std::fs::write(&a, b"the new file's bytes").unwrap();
+        if window == Task2204Window::Offline {
+            crate::watcher::run_one_scan(&bridge, &sync_root);
+        }
+        drain_upload_queue(&bridge, &sync_root).await;
+        assert!(
+            bridge.db.get_file_by_path("b.txt").unwrap().is_some_and(|row| row.status == FileStatus::Local),
+            "the renamed file landed, and its row stayed at its new path"
+        );
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        drain_upload_queue(&bridge, &sync_root).await;
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        drain_upload_queue(&bridge, &sync_root).await;
+
+        let b_row = bridge.db.get_file_by_path("b.txt").unwrap().expect("the renamed file has a row");
+        let a_row = bridge.db.get_file_by_path("a.txt").unwrap().expect("the new file has a row");
+        assert_ne!(a_row.file_id, b_row.file_id, "two files, not one");
+        let state = server.finish();
+        assert_eq!(state.files_with_content().len(), 2, "the server holds two files");
+        assert_eq!(state.files[&b_row.file_id].versions.len(), 1, "the renamed file got no version from the new file");
+        assert_eq!(state.files[&a_row.file_id].versions.len(), 1, "the new file is new, not a later version of another");
+        assert_eq!(state.latest_plaintext(&b_row.file_id, master_key), b"old bytes");
+        assert_eq!(state.latest_plaintext(&a_row.file_id, master_key), b"the new file's bytes");
+        assert!(
+            state.patches.iter().any(|(id, _)| *id == b_row.file_id),
+            "the rename was sent for the renamed file's server id"
+        );
+    }
+
+    #[tokio::test]
+    async fn task_2204_a_new_file_at_a_renamed_new_file_s_old_name_is_a_new_file() {
+        task_2204_rename_then_a_new_file_at_the_old_name(Task2204Window::NewFile).await;
+    }
+
+    #[tokio::test]
+    async fn task_2204_a_new_file_at_a_renamed_synced_file_s_old_name_is_a_new_file() {
+        task_2204_rename_then_a_new_file_at_the_old_name(Task2204Window::SyncedFile).await;
+    }
+
+    #[tokio::test]
+    async fn task_2204_offline_rename_and_new_file_give_two_files() {
+        task_2204_rename_then_a_new_file_at_the_old_name(Task2204Window::Offline).await;
+    }
+
+    #[tokio::test]
+    async fn task_2204_a_rename_survives_a_restart_mid_window() {
+        task_2204_rename_then_a_new_file_at_the_old_name(Task2204Window::Restart).await;
+    }
+
+    /// S0.3: while the rename is queued (or parked), a pull that still names the old path
+    /// leaves the row where the file is; once nothing is queued, the pull applies as before.
+    #[tokio::test]
+    async fn task_2204_the_pull_holds_a_renamed_row() {
+        let master_key = [205u8; 32];
+        let (_dir, sync_root, _server, bridge) = rule3_setup(master_key);
+        let (a, b) = (sync_root.join("a.txt"), sync_root.join("b.txt"));
+        std::fs::write(&a, b"bytes").unwrap();
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        drain_upload_queue(&bridge, &sync_root).await;
+        let id = bridge.db.get_file_by_path("a.txt").unwrap().unwrap().file_id;
+        std::fs::rename(&a, &b).unwrap();
+        crate::watcher::handle_rename(&bridge, &sync_root, &a, &b).await;
+        let mk = beebeeb_core::kdf::MasterKey::from_bytes(master_key);
+        let snapshot_row = |name: &str| {
+            serde_json::json!({
+                "id": id,
+                "name_encrypted": beebeeb_core::encrypt::encrypt_name(&mk, &id, name, None).unwrap(),
+                "size_bytes": 5,
+                "updated_at": now_secs(),
+                "is_folder": false,
+            })
+        };
+        let pull = |name: &str| {
+            apply_metadata_file_row(
+                &bridge.db,
+                &snapshot_row(name),
+                Namespace::MyFiles,
+                None,
+                None,
+                PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER,
+                now_secs(),
+                &master_key,
+                "",
+            )
+            .unwrap()
+        };
+        pull("a.txt");
+        assert_eq!(bridge.db.get_file(&id).unwrap().unwrap().path, "b.txt", "held while the rename is queued");
+        let rename = bridge.db.list_operations_for_file(&id).unwrap().into_iter().next().unwrap();
+        bridge
+            .db
+            .test_execute(&format!("UPDATE operation_queue SET attempts = max_attempts WHERE op_id = '{}'", rename.op_id))
+            .unwrap();
+        pull("a.txt");
+        assert_eq!(bridge.db.get_file(&id).unwrap().unwrap().path, "b.txt", "held while it is parked");
+        bridge.db.remove_operation(&rename.op_id).unwrap();
+        pull("c.txt");
+        assert_eq!(bridge.db.get_file(&id).unwrap().unwrap().path, "c.txt", "nothing queued: the pull applies");
+    }
+
+    /// S0.4: a safe save (Excel's: the original renamed to a hex name, the new bytes renamed onto
+    /// its name, the hex file deleted) is an edit of the original, never a trash plus a new file.
+    #[tokio::test]
+    async fn task_2204_an_excel_save_is_an_edit_of_the_file() {
+        let master_key = [208u8; 32];
+        let (_dir, sync_root, server, bridge) = rule3_setup(master_key);
+        let (original, hex, temp) = (sync_root.join("a.xlsx"), sync_root.join("3F2A9B1C"), sync_root.join("~tmp1.tmp"));
+        std::fs::write(&original, b"version one").unwrap();
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        drain_upload_queue(&bridge, &sync_root).await;
+        let id = bridge.db.get_file_by_path("a.xlsx").unwrap().unwrap().file_id;
+        std::fs::rename(&original, &hex).unwrap();
+        crate::watcher::handle_rename(&bridge, &sync_root, &original, &hex).await;
+        std::fs::write(&temp, b"version two, longer").unwrap();
+        std::fs::rename(&temp, &original).unwrap();
+        crate::watcher::handle_rename(&bridge, &sync_root, &temp, &original).await;
+        assert_eq!(regression_1640_uploads_queued_for(&bridge, "a.xlsx"), 0, "the new bytes wait while the rename is unsent");
+        std::fs::remove_file(&hex).unwrap();
+        crate::watcher::handle_delete(&bridge, &sync_root, &hex).await;
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        let row = bridge.db.get_file_by_path("a.xlsx").unwrap().expect("the original's row is back at its name");
+        assert_eq!(row.file_id, id);
+        let ops = bridge.db.list_operations_for_file(&id).unwrap();
+        assert_eq!(
+            ops.iter().map(|op| op.kind.clone()).collect::<Vec<_>>(),
+            vec![OperationKind::UploadVersion],
+            "one edit of the original: no rename, no trash"
+        );
+        drain_upload_queue(&bridge, &sync_root).await;
+        let state = server.finish();
+        assert!(state.trashes.is_empty(), "nothing trashed");
+        assert_eq!(state.files_with_content(), vec![id.clone()], "one file on the server");
+        assert_eq!(state.files[&id].versions.len(), 2, "the save is the file's next version");
+        assert_eq!(state.latest_plaintext(&id, master_key), b"version two, longer");
+    }
+
+    /// S0.4's limits: a rename then a delete still trashes the file (nothing is at the vacated
+    /// path), and a manual swap (another tracked file now holds the vacated path, review-128 F3)
+    /// is a delete of the old one, not a fold.
+    #[tokio::test]
+    async fn task_2204_a_delete_after_a_rename_or_a_swap_is_a_delete() {
+        let master_key = [209u8; 32];
+        let (_dir, sync_root, _server, bridge) = rule3_setup(master_key);
+        for name in ["gone.txt", "report.txt", "final.txt"] {
+            std::fs::write(sync_root.join(name), name.as_bytes()).unwrap();
+        }
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        drain_upload_queue(&bridge, &sync_root).await;
+        let trashes = |id: &str| {
+            bridge
+                .db
+                .list_operations_for_file(id)
+                .unwrap()
+                .iter()
+                .filter(|op| op.kind == OperationKind::TrashFile)
+                .count()
+        };
+        let id = |path: &str| bridge.db.get_file_by_path(path).unwrap().unwrap().file_id;
+        // Rename, then delete.
+        let gone = id("gone.txt");
+        let (g, g2) = (sync_root.join("gone.txt"), sync_root.join("gone2.txt"));
+        std::fs::rename(&g, &g2).unwrap();
+        crate::watcher::handle_rename(&bridge, &sync_root, &g, &g2).await;
+        std::fs::remove_file(&g2).unwrap();
+        crate::watcher::handle_delete(&bridge, &sync_root, &g2).await;
+        assert_eq!(trashes(&gone), 1, "a rename then a delete is a delete");
+        // A manual swap: report -> old, final -> report, delete old.
+        let (report, fin) = (id("report.txt"), id("final.txt"));
+        let (r, old, f) = (sync_root.join("report.txt"), sync_root.join("old.txt"), sync_root.join("final.txt"));
+        std::fs::rename(&r, &old).unwrap();
+        crate::watcher::handle_rename(&bridge, &sync_root, &r, &old).await;
+        std::fs::rename(&f, &r).unwrap();
+        crate::watcher::handle_rename(&bridge, &sync_root, &f, &r).await;
+        std::fs::remove_file(&old).unwrap();
+        crate::watcher::handle_delete(&bridge, &sync_root, &old).await;
+        assert_eq!(trashes(&report), 1, "the old report is deleted");
+        assert_eq!(id("report.txt"), fin, "the final file holds the name");
+    }
+
+    /// A hydrate queued before the rename writes where the file is now, never over a new file
+    /// at the old name.
+    #[tokio::test]
+    async fn task_2204_a_queued_hydrate_follows_the_rename() {
+        let master_key = [210u8; 32];
+        let (_dir, sync_root, _server, bridge) = rule3_setup(master_key);
+        let (a, b) = (sync_root.join("a.txt"), sync_root.join("b.txt"));
+        std::fs::write(&a, b"bytes").unwrap();
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        drain_upload_queue(&bridge, &sync_root).await;
+        let id = bridge.db.get_file_by_path("a.txt").unwrap().unwrap().file_id;
+        bridge
+            .db
+            .test_execute(&format!(
+                "INSERT INTO operation_queue (op_id, kind, file_id, target_path, metadata_json, attempts, max_attempts)
+                 VALUES ('hydrate-a', 'hydrate_file', '{id}', 'a.txt', '{{}}', 0, 25)"
+            ))
+            .unwrap();
+        std::fs::rename(&a, &b).unwrap();
+        crate::watcher::handle_rename(&bridge, &sync_root, &a, &b).await;
+        assert_eq!(bridge.db.get_operation("hydrate-a").unwrap().unwrap().target_path.as_deref(), Some("b.txt"));
+    }
+
+    /// Review-155 P1-B: an Excel save of a file synced before task 1640 (no agreed content) is not
+    /// folded: the new bytes could not be sent as an edit of it, so the delete stays a delete and
+    /// the new bytes upload as a new file once the rename is sent. Nothing is left unsent.
+    #[tokio::test]
+    async fn task_2204_a_safe_save_of_a_file_of_unknown_content_keeps_the_delete() {
+        let master_key = [211u8; 32];
+        let (_dir, sync_root, server, bridge) = rule3_setup(master_key);
+        let (original, hex, temp) = (sync_root.join("a.xlsx"), sync_root.join("3F2A9B1C"), sync_root.join("~tmp2.tmp"));
+        std::fs::write(&original, b"version one").unwrap();
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        drain_upload_queue(&bridge, &sync_root).await;
+        let id = bridge.db.get_file_by_path("a.xlsx").unwrap().unwrap().file_id;
+        bridge
+            .db
+            .test_execute(&format!("UPDATE files SET local_hash = NULL, fetched_min_version = -1 WHERE file_id = '{id}'"))
+            .unwrap();
+        std::fs::rename(&original, &hex).unwrap();
+        crate::watcher::handle_rename(&bridge, &sync_root, &original, &hex).await;
+        std::fs::write(&temp, b"version two, longer").unwrap();
+        std::fs::rename(&temp, &original).unwrap();
+        crate::watcher::handle_rename(&bridge, &sync_root, &temp, &original).await;
+        std::fs::remove_file(&hex).unwrap();
+        crate::watcher::handle_delete(&bridge, &sync_root, &hex).await;
+        let ops = bridge.db.list_operations_for_file(&id).unwrap();
+        assert!(ops.iter().any(|op| op.kind == OperationKind::TrashFile), "not folded: the delete is queued");
+        drain_upload_queue(&bridge, &sync_root).await;
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        drain_upload_queue(&bridge, &sync_root).await;
+        let row = bridge.db.get_file_by_path("a.xlsx").unwrap().expect("the saved workbook has a row");
+        assert_ne!(row.file_id, id, "a new file");
+        let state = server.finish();
+        assert_eq!(state.latest_plaintext(&row.file_id, master_key), b"version two, longer", "the save reached the server");
+    }
+
+    /// Review-155 R1: an edit queued before a rename lands before it (its queue-time name first,
+    /// the rename last), even when the edit is backing off while the rename is due.
+    #[tokio::test]
+    async fn task_2204_an_edit_queued_before_a_rename_lands_first() {
+        let master_key = [212u8; 32];
+        let (_dir, sync_root, server, bridge) = rule3_setup(master_key);
+        let (a, b) = (sync_root.join("a.txt"), sync_root.join("b.txt"));
+        std::fs::write(&a, b"first").unwrap();
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        drain_upload_queue(&bridge, &sync_root).await;
+        let id = bridge.db.get_file_by_path("a.txt").unwrap().unwrap().file_id;
+        std::fs::write(&a, b"an edit of the file").unwrap();
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        server.state.lock().unwrap().fail_first_chunk_once.insert("session-2".into());
+        let t0 = now_secs();
+        bridge.process_due_operations(&sync_root, t0).await.unwrap();
+        assert_eq!(regression_1640_uploads_queued_for(&bridge, "a.txt"), 1, "precondition: the edit backs off (30 s)");
+        std::fs::rename(&a, &b).unwrap();
+        crate::watcher::handle_rename(&bridge, &sync_root, &a, &b).await;
+        bridge.process_due_operations(&sync_root, t0 + RENAME_SETTLE_SECS + 1).await.unwrap();
+        assert!(
+            bridge.db.list_operations_for_file(&id).unwrap().iter().any(|op| op.kind == OperationKind::RenameFile),
+            "the rename is due but waits for the edit"
+        );
+        std::fs::write(&a, b"a new file at the old name").unwrap();
+        drain_upload_queue(&bridge, &sync_root).await;
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        drain_upload_queue(&bridge, &sync_root).await;
+        let b_row = bridge.db.get_file_by_path("b.txt").unwrap().expect("the renamed file at its new path");
+        let a_row = bridge.db.get_file_by_path("a.txt").unwrap().expect("the new file");
+        assert_eq!(b_row.file_id, id);
+        let state = server.finish();
+        assert_eq!(state.latest_plaintext(&id, master_key), b"an edit of the file");
+        assert_eq!(state.files[&id].versions.len(), 2);
+        assert_eq!(state.latest_plaintext(&a_row.file_id, master_key), b"a new file at the old name");
+        assert_eq!(state.files[&a_row.file_id].versions.len(), 1);
+    }
+
+    /// Review-155 P2: a delete right after a rename is sent after the rename, never before it.
+    #[tokio::test]
+    async fn task_2204_a_trash_after_a_rename_waits_for_it() {
+        let master_key = [213u8; 32];
+        let (_dir, sync_root, server, bridge) = rule3_setup(master_key);
+        let (a, b) = (sync_root.join("a.txt"), sync_root.join("b.txt"));
+        std::fs::write(&a, b"bytes").unwrap();
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        drain_upload_queue(&bridge, &sync_root).await;
+        let id = bridge.db.get_file_by_path("a.txt").unwrap().unwrap().file_id;
+        std::fs::rename(&a, &b).unwrap();
+        crate::watcher::handle_rename(&bridge, &sync_root, &a, &b).await;
+        std::fs::remove_file(&b).unwrap();
+        crate::watcher::handle_delete(&bridge, &sync_root, &b).await;
+        bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+        assert!(server.state.lock().unwrap().trashes.is_empty(), "the trash waits while the rename settles");
+        drain_upload_queue(&bridge, &sync_root).await;
+        let state = server.finish();
+        assert_eq!(state.trashes, vec![id.clone()], "then it is sent");
+        let rename_at = state.requests.iter().position(|(m, p)| m == "PATCH" && p.ends_with(&id));
+        let trash_at = state.requests.iter().position(|(m, p)| m == "DELETE" && p.ends_with(&id));
+        assert!(rename_at.is_some() && rename_at < trash_at, "the rename first, then the trash");
+    }
+
+    /// Review-155 P2-1: one malformed op row never stops every classify (the `json_valid` guard).
+    #[tokio::test]
+    async fn task_2204_a_malformed_op_does_not_stop_classify() {
+        let (_dir, sync_root, _server, bridge) = rule3_setup([214u8; 32]);
+        bridge
+            .db
+            .test_execute(
+                "INSERT INTO operation_queue (op_id, kind, file_id, metadata_json, attempts, max_attempts)
+                 VALUES ('bad', 'rename_file', 'other', 'not json {', 0, 25)",
+            )
+            .unwrap();
+        let path = sync_root.join("new.txt");
+        std::fs::write(&path, b"a new file").unwrap();
+        assert!(bridge.classify_local_path(&sync_root, &path).is_some(), "a new file is still classified");
+    }
+
+    /// S0 keeps today's behaviour for what it does not cover: a folder (its descendants would
+    /// need re-keying too), a rename onto another tracked file, and a move into a folder with no
+    /// row (the full design, review-128).
+    #[tokio::test]
+    async fn task_2204_folders_replaces_and_unresolved_parents_are_not_rekeyed() {
+        let master_key = [207u8; 32];
+        let (_dir, sync_root, _server, bridge) = rule3_setup(master_key);
+        for name in ["a.txt", "t.txt", "m.txt"] {
+            std::fs::write(sync_root.join(name), name.as_bytes()).unwrap();
+        }
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        drain_upload_queue(&bridge, &sync_root).await;
+        let row = |path: &str| bridge.db.get_file_by_path(path).unwrap();
+        // A rename onto a tracked file.
+        let (a, t) = (sync_root.join("a.txt"), sync_root.join("t.txt"));
+        std::fs::remove_file(&t).unwrap();
+        std::fs::rename(&a, &t).unwrap();
+        crate::watcher::handle_rename(&bridge, &sync_root, &a, &t).await;
+        assert!(row("a.txt").is_some(), "a replace keeps today's behaviour (no re-key)");
+        // A move into a folder that has no row yet.
+        let (m, moved) = (sync_root.join("m.txt"), sync_root.join("newdir").join("m.txt"));
+        std::fs::create_dir_all(moved.parent().unwrap()).unwrap();
+        std::fs::rename(&m, &moved).unwrap();
+        crate::watcher::handle_rename(&bridge, &sync_root, &m, &moved).await;
+        assert!(row("m.txt").is_some(), "an unresolved parent keeps today's behaviour");
+        // A folder.
+        let (f, g) = (sync_root.join("f"), sync_root.join("g"));
+        std::fs::create_dir_all(&f).unwrap();
+        bridge.ensure_local_folder(&sync_root, &f).expect("a folder row");
+        assert!(row("f").unwrap().is_dir(), "precondition: a folder row");
+        std::fs::rename(&f, &g).unwrap();
+        crate::watcher::handle_rename(&bridge, &sync_root, &f, &g).await;
+        assert!(row("f").is_some(), "a folder keeps today's behaviour");
+    }
+
+    // ── Task 2190: a concurrent edit (this device and the web), as main behaves today ──
+    //
+    // The file is edited here and on the web before this device syncs, the tick runs, then the
+    // upload attempt and a hydrate. The tick's detector (`process_metadata_row`, the `Local`
+    // branch) still takes `local` and `base` from the same `content_hash`, so it never reports a
+    // conflict (its rewrite is not task 1640's). Since task 1640 the sync folder keeps both
+    // versions anyway: the edit is queued on its base and parks as stale with its bytes, and no
+    // hydrate writes over it. Each test says whether both versions survive.
+
+    /// One chunk of `plaintext` as the server stores it for `file_id` (the mock serves it back).
+    fn task_2190_server_chunk(master_key: [u8; 32], file_id: &str, plaintext: &[u8]) -> Vec<u8> {
+        beebeeb_core::encrypt::encrypt_chunk_raw(
+            &beebeeb_core::kdf::derive_file_key(
+                &beebeeb_core::kdf::MasterKey::from_bytes(master_key),
+                file_id.as_bytes(),
+            ),
+            plaintext,
+        )
+        .unwrap()
+    }
+
+    /// The web saves `plaintext` as `file_id`'s next version, and the next snapshot lists it.
+    fn task_2190_web_saves(server: &VersionedServerMock, master_key: [u8; 32], file_id: &str, plaintext: &[u8]) {
+        let mut s = server.state.lock().unwrap();
+        let chunk = task_2190_server_chunk(master_key, file_id, plaintext);
+        let file = s.files.get_mut(file_id).unwrap();
+        file.versions.push(vec![chunk]);
+        let version = file.versions.len() as i64;
+        let mut node = snap_node(&master_key, file_id, "notes.txt", None, false, 1_700_000_500);
+        node["version_number"] = json!(version);
+        node["size_bytes"] = json!(plaintext.len());
+        s.authenticated_names.insert(file_id.into(), node["name_encrypted"].as_str().unwrap().into());
+        s.snapshots
+            .push_back(("200 OK".into(), json!({ "seq_id": 1, "nodes": [node] })));
+    }
+
+    /// Every file under `root` whose bytes are exactly `bytes`.
+    fn task_2190_files_holding(root: &Path, bytes: &[u8]) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let mut dirs = vec![root.to_path_buf()];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if std::fs::read(&path).is_ok_and(|held| held == bytes) {
+                    found.push(path);
+                }
+            }
+        }
+        found
+    }
+
+    /// macOS (File Provider): the Mac's save is queued with base 1, the web saves version 2, the
+    /// tick runs, the upload is refused as stale and parks, and a fetch is served from the parked
+    /// copy. Both versions survive (the web's on the server, the Mac's in the queue and in
+    /// Finder). Since follow-up 2 the parked edit is the conflict: its review entry opens it
+    /// (`open_conflict`), where it had no action before (the pin's name until then:
+    /// `…_park_as_stale_base_and_never_become_a_conflict`). Still no `Conflict` status (plan E1).
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn task_2190_a_finder_edit_and_a_web_edit_park_as_stale_base_and_become_a_decidable_conflict() {
+        let master_key = [219u8; 32];
+        let file = "21900000-0000-4000-8000-000000000001";
+        let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_row(&bridge, &server, file);
+
+        // 1. The Mac saves on version 1. The save is staged and not sent.
+        let mac_save = fp_save(&bridge, dir.path(), file, "notes.txt", b"edited on this Mac", "1");
+        let mac_token = mac_save.token.clone().expect("a Finder save names its bytes");
+        let staged = bridge.db.list_operations_for_file(file).unwrap().remove(0).payload_path.unwrap();
+
+        // 2. The web saves version 2 before the Mac's upload starts.
+        task_2190_web_saves(&server, master_key, file, b"edited on the web");
+
+        // 3. The tick.
+        let tick = sync_tick_outcome(&bridge, &sync_root).await.unwrap();
+        assert!(tick.conflicts.is_empty(), "the tick reports no conflict");
+        let row = bridge.db.get_file(file).unwrap().unwrap();
+        assert_eq!(
+            row.status,
+            FileStatus::Uploading,
+            "a row with a queued save skips the detector (branch 3)"
+        );
+        assert_eq!(
+            bridge.db.get_file_contract_state(file).unwrap().unwrap().current_version,
+            2,
+            "the snapshot raised the row to the web's version"
+        );
+        assert_eq!(
+            held_content_version(&bridge, file),
+            mac_token,
+            "Finder is still told the Mac's bytes, so it does not fetch the web's"
+        );
+
+        // 4. The upload attempt: base 1 against version 2.
+        bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+        let parked = bridge.db.list_operations_for_file(file).unwrap().remove(0);
+        assert_eq!(parked.attempts, parked.max_attempts, "parked after one attempt");
+        assert_eq!(parked.last_error.as_deref(), Some("stale_base"));
+        assert_eq!(
+            bridge.db.get_file(file).unwrap().unwrap().status,
+            FileStatus::Error,
+            "the park settles the row to Error, not Conflict"
+        );
+        assert_eq!(held_content_version(&bridge, file), mac_token, "the park keeps the Mac's token");
+
+        // 5. Finder opens the file: the fetch is served from the parked copy.
+        server.state.lock().unwrap().serve_downloads = true;
+        let dest = dir.path().join("fetch").join("notes.txt");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        assert_eq!(
+            bridge.serve_hydrate(file, &dest, &[dir.path()], None).await.unwrap(),
+            HydrateSource::Queue
+        );
+        assert_eq!(std::fs::read(&dest).unwrap(), b"edited on this Mac");
+
+        // What the person can see: one `stale_base` review entry, no conflict anywhere.
+        let feed = bridge.version_conflict_feed().unwrap();
+        let kinds: Vec<&str> = feed.iter().map(|entry| entry.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["stale_base"]);
+        assert_eq!(feed[0].action, "open_conflict", "the parked edit is a decidable conflict (follow-up 2)");
+        assert!(bridge.db.list_by_status(FileStatus::Conflict).unwrap().is_empty());
+
+        // Both versions survive.
+        assert_eq!(
+            std::fs::read(&staged).unwrap(),
+            b"edited on this Mac",
+            "the Mac's bytes are kept in the parked op's staged copy"
+        );
+        let state = server.finish();
+        assert_eq!(
+            state.init_summary(),
+            vec![(json!(file), json!(1), 409)],
+            "one init, refused as stale"
+        );
+        assert_eq!(state.files[file].versions.len(), 2, "the server holds the web's version as current");
+        assert_eq!(state.latest_plaintext(file, master_key), b"edited on the web");
+    }
+
+    /// A hydrated sync-folder file at version 1, then `edit` (when given) written on disk without
+    /// the upload driver seeing it, then the web's version 2 and the tick (follow-up 1, plan §7.2).
+    async fn task_2190_fu1_tick_after(
+        master_key: [u8; 32],
+        file: &str,
+        edit: Option<&[u8]>,
+    ) -> (tempfile::TempDir, PathBuf, VersionedServerMock, EngineBridge, FileEntry, SyncTickOutcome, usize) {
+        let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_row(&bridge, &server, file);
+        {
+            let mut s = server.state.lock().unwrap();
+            s.files.get_mut(file).unwrap().versions[0] = vec![task_2190_server_chunk(master_key, file, b"version one")];
+            s.serve_downloads = true;
+        }
+        let local = sync_root.join("notes.txt");
+        bridge.hydrate_file(file, &local, &[sync_root.as_path()]).await.unwrap();
+        let before = bridge.db.get_file(file).unwrap().unwrap();
+        if let Some(edit) = edit {
+            std::fs::write(&local, edit).unwrap();
+        }
+        task_2190_web_saves(&server, master_key, file, b"edited on the web");
+        let reads = HASH_READS.with(std::cell::Cell::get);
+        let tick = sync_tick_outcome(&bridge, &sync_root).await.unwrap();
+        let reads_in_the_pull = HASH_READS.with(std::cell::Cell::get) - reads;
+        (dir, sync_root, server, bridge, before, tick, reads_in_the_pull)
+    }
+
+    /// Row 2: an edit the scan has not queued yet, and a newer server version. The tick records
+    /// the server's version and leaves the edit's base alone; the scan then queues it on base 1,
+    /// it parks as stale, and both versions survive.
+    #[tokio::test]
+    async fn task_2190_fu1_a_concurrent_edit_the_scan_has_not_queued_keeps_its_base_and_parks() {
+        let master_key = [221u8; 32];
+        let file = "21900000-0000-4000-8000-000000000011";
+        let (_dir, sync_root, server, bridge, before, tick, reads_in_the_pull) =
+            task_2190_fu1_tick_after(master_key, file, Some(b"edited before the scan")).await;
+        assert_eq!(reads_in_the_pull, 0, "the pull reads no file (review-169 #7)");
+        assert!(tick.conflicts.is_empty(), "no ConflictDetected (E1)");
+        let row = bridge.db.get_file(file).unwrap().unwrap();
+        let contract = bridge.db.get_file_contract_state(file).unwrap().unwrap();
+        assert_eq!(row.status, FileStatus::Local, "no Conflict status (E1)");
+        assert_eq!(contract.current_version, 2, "the server's version is recorded");
+        let _ = before;
+
+        let local = sync_root.join("notes.txt");
+        assert!(crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "scan"));
+        assert_eq!(bridge.db.list_operations_for_file(file).unwrap()[0].base_version, Some(1));
+        bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+        let parked = bridge.db.list_operations_for_file(file).unwrap().remove(0);
+        assert_eq!(parked.last_error.as_deref(), Some("stale_base"), "refused as stale and parked");
+        assert_eq!(std::fs::read(&local).unwrap(), b"edited before the scan", "the edit is on disk");
+        drop(bridge);
+        let state = server.finish();
+        assert_eq!(state.latest_plaintext(file, master_key), b"edited on the web", "the web's version is current");
+    }
+
+    /// Row 1: the bytes are the agreed content, so the tick re-anchors the row to the server's
+    /// version as before, and the base stays the agreed one.
+    #[tokio::test]
+    async fn task_2190_fu1_agreed_bytes_re_anchor_to_the_server() {
+        let master_key = [222u8; 32];
+        let file = "21900000-0000-4000-8000-000000000012";
+        let (_dir, _sync_root, _server, bridge, _before, tick, _) = task_2190_fu1_tick_after(master_key, file, None).await;
+        assert!(tick.conflicts.is_empty());
+        let row = bridge.db.get_file(file).unwrap().unwrap();
+        let contract = bridge.db.get_file_contract_state(file).unwrap().unwrap();
+        assert_eq!(row.size_bytes, b"edited on the web".len() as i64, "re-anchored to the server's size");
+        assert_eq!(row.remote_updated_at, 1_700_000_500, "re-anchored to the server's stamp");
+        assert_eq!((contract.current_version, contract.local_base_version), (2, 1));
+    }
+
+    /// E3: a `Local` row whose base is unknown keeps it unknown when the pull sees it; the
+    /// server's version is never written over it as the base of the bytes on disk.
+    #[tokio::test]
+    async fn task_2190_fu1_a_local_row_with_an_unknown_base_keeps_it_unknown() {
+        let master_key = [223u8; 32];
+        let file = "21900000-0000-4000-8000-000000000013";
+        let (_dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_row(&bridge, &server, file);
+        bridge
+            .db
+            .test_execute(&format!("UPDATE files SET local_base_version = 0 WHERE file_id = '{file}'"))
+            .unwrap();
+        task_2190_web_saves(&server, master_key, file, b"edited on the web");
+        sync_tick_outcome(&bridge, &sync_root).await.unwrap();
+        let contract = bridge.db.get_file_contract_state(file).unwrap().unwrap();
+        assert_eq!(contract.current_version, 2);
+        assert_eq!(contract.local_base_version, 0, "the base stays unknown, never the server's version");
+    }
+
+    /// The macOS pin's steps 1–4: a Mac save on version 1, the web's version 2, the tick, and the
+    /// upload parked as stale. Returns the parked op, its staged copy and the Mac's token.
+    #[cfg(target_os = "macos")]
+    async fn task_2190_parked(
+        master_key: [u8; 32],
+        file: &str,
+    ) -> (tempfile::TempDir, PathBuf, VersionedServerMock, EngineBridge, String, String, String) {
+        let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_row(&bridge, &server, file);
+        let mac_save = fp_save(&bridge, dir.path(), file, "notes.txt", b"edited on this Mac", "1");
+        let token = mac_save.token.clone().expect("a Finder save names its bytes");
+        task_2190_web_saves(&server, master_key, file, b"edited on the web");
+        sync_tick_outcome(&bridge, &sync_root).await.unwrap();
+        bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+        let parked = bridge.db.list_operations_for_file(file).unwrap().remove(0);
+        assert_eq!(parked.last_error.as_deref(), Some("stale_base"), "precondition: parked as stale");
+        assert!(bridge.db.is_decidable_parked(&parked.op_id).unwrap(), "precondition: decidable");
+        let staged = parked.payload_path.clone().unwrap();
+        (dir, sync_root, server, bridge, parked.op_id, staged, token)
+    }
+
+    /// A `keep_copy` for the tests: the bytes go to `<root>/kept/<row path>`.
+    #[cfg(target_os = "macos")]
+    fn task_2190_keep_into(root: &Path) -> impl FnMut(&Path, &str) -> anyhow::Result<PathBuf> + '_ {
+        move |source, rel| {
+            let dest = root.join("kept").join(rel);
+            std::fs::create_dir_all(dest.parent().unwrap())?;
+            std::fs::copy(source, &dest)?;
+            Ok(dest)
+        }
+    }
+
+    /// "Keep this Mac's": the same op is rebased on version 2 and sent again; the server's new
+    /// current version is the Mac's bytes, and the web's stays in its history.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn task_2190_fu2_keep_this_macs_sends_the_write_on_the_servers_version() {
+        let master_key = [224u8; 32];
+        let file = "21900000-0000-4000-8000-000000000021";
+        let (dir, sync_root, server, bridge, op_id, _staged, _token) = task_2190_parked(master_key, file).await;
+        let mut keep = task_2190_keep_into(dir.path());
+        let done = bridge.resolve_parked(&op_id, ParkedChoice::Local, Some(2), &mut keep, "Mac", "10.00").unwrap();
+        assert_eq!(done, ParkedResolution::Rebased { version: 2 });
+        let op = bridge.db.get_operation(&op_id).unwrap().unwrap();
+        assert_eq!((op.base_version, op.attempts, op.last_error.as_deref()), (Some(2), 0, None));
+        assert_eq!(bridge.db.get_file(file).unwrap().unwrap().status, FileStatus::Uploading);
+        bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+        assert!(bridge.db.list_operations_for_file(file).unwrap().is_empty(), "sent and landed");
+        drop(bridge);
+        let state = server.finish();
+        assert_eq!(state.init_summary(), vec![(json!(file), json!(1), 409), (json!(file), json!(2), 201)]);
+        assert_eq!(state.files[file].versions.len(), 3, "the web's version stays in the history");
+        assert_eq!(state.latest_plaintext(file, master_key), b"edited on this Mac");
+    }
+
+    /// "Keep the other" (D1): the Mac's bytes are copied first, then the op goes, the token is
+    /// cleared (the system reads version 2), and the staged copy is released after the commit.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn task_2190_fu2_keep_the_other_keeps_a_copy_first_then_reads_the_servers_version() {
+        let master_key = [225u8; 32];
+        let file = "21900000-0000-4000-8000-000000000022";
+        let (dir, _sync_root, server, bridge, op_id, staged, token) = task_2190_parked(master_key, file).await;
+        let mut keep = task_2190_keep_into(dir.path());
+        let done = bridge.resolve_parked(&op_id, ParkedChoice::Remote, Some(2), &mut keep, "Mac", "10.00").unwrap();
+        let ParkedResolution::KeptOther { kept_copy } = done else { panic!("not kept: {done:?}") };
+        assert_eq!(std::fs::read(&kept_copy).unwrap(), b"edited on this Mac", "the Mac's edit is kept");
+        assert!(bridge.db.get_operation(&op_id).unwrap().is_none(), "the parked op is gone");
+        assert!(!Path::new(&staged).exists(), "the staged copy is released");
+        // Read before any presentation: the payload builder clears a held token whose write is gone
+        // (§5.3 housekeeping), so only this order shows that the decision left none behind itself.
+        assert!(
+            bridge.db.item_presentation(file).unwrap().unwrap().held.is_none(),
+            "the decision clears the held token's columns itself"
+        );
+        assert_ne!(held_content_version(&bridge, file), token, "Finder is shown the server's version");
+        assert_eq!(bridge.db.get_file(file).unwrap().unwrap().status, FileStatus::Local);
+        drop(bridge);
+        let state = server.finish();
+        assert_eq!(state.files[file].versions.len(), 2);
+        assert_eq!(state.latest_plaintext(file, master_key), b"edited on the web");
+    }
+
+    /// D1: when the copy cannot be made, "Keep the other" fails and changes nothing.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn task_2190_fu2_keep_the_other_changes_nothing_when_the_copy_fails() {
+        let master_key = [226u8; 32];
+        let file = "21900000-0000-4000-8000-000000000023";
+        let (_dir, _sync_root, _server, bridge, op_id, staged, token) = task_2190_parked(master_key, file).await;
+        let mut failing = |_: &Path, _: &str| -> anyhow::Result<PathBuf> { anyhow::bail!("the disk is full") };
+        assert!(bridge.resolve_parked(&op_id, ParkedChoice::Remote, Some(2), &mut failing, "Mac", "10.00").is_err());
+        assert!(bridge.db.is_decidable_parked(&op_id).unwrap(), "still parked and decidable");
+        assert_eq!(std::fs::read(&staged).unwrap(), b"edited on this Mac", "the staged copy is kept");
+        assert_eq!(held_content_version(&bridge, file), token, "the token is kept");
+    }
+
+    /// "Keep both" (D4): the Mac's bytes are queued as a new file with a unique name beside the
+    /// original, and the original reads the server's version; both land on the server.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn task_2190_fu2_keep_both_queues_the_macs_bytes_as_a_new_file_with_a_unique_name() {
+        let master_key = [227u8; 32];
+        let file = "21900000-0000-4000-8000-000000000024";
+        let (dir, sync_root, server, bridge, op_id, _staged, token) = task_2190_parked(master_key, file).await;
+        let mut keep = task_2190_keep_into(dir.path());
+        let done = bridge.resolve_parked(&op_id, ParkedChoice::Both, Some(2), &mut keep, "Mac", "10.00").unwrap();
+        let ParkedResolution::KeptBoth { file_id: new_id, name } = done else { panic!("not both: {done:?}") };
+        assert_eq!(name, "notes (Mac, 10.00).txt");
+        assert_eq!(bridge.db.get_file(&new_id).unwrap().unwrap().path, "notes (Mac, 10.00).txt");
+        assert!(bridge.db.get_operation(&op_id).unwrap().is_none(), "the parked op is gone");
+        assert!(
+            bridge.db.item_presentation(file).unwrap().unwrap().held.is_none(),
+            "the decision clears the held token's columns itself (read before any presentation)"
+        );
+        assert_ne!(held_content_version(&bridge, file), token, "the original reads the server's version");
+        assert!(!dir.path().join("kept").exists(), "keep both makes no kept copy");
+        bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+        drop(bridge);
+        let state = server.finish();
+        assert_eq!(state.latest_plaintext(file, master_key), b"edited on the web");
+        let others: Vec<Vec<u8>> = state
+            .files
+            .keys()
+            .filter(|id| id.as_str() != file)
+            .map(|id| state.latest_plaintext(id, master_key))
+            .collect();
+        assert_eq!(others, vec![b"edited on this Mac".to_vec()], "the Mac's bytes are one new server file");
+    }
+
+    /// D2: a newer save of the file queued behind the park makes every choice `Moved`, with
+    /// nothing changed; the feed then offers no decision for the older park.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn task_2190_fu2_a_newer_save_behind_the_park_makes_every_choice_moved() {
+        let master_key = [228u8; 32];
+        let file = "21900000-0000-4000-8000-000000000025";
+        let (dir, _sync_root, _server, bridge, op_id, staged, _token) = task_2190_parked(master_key, file).await;
+        fp_save(&bridge, dir.path(), file, "notes.txt", b"saved again on this Mac", "1");
+        let mut keep = task_2190_keep_into(dir.path());
+        for choice in [ParkedChoice::Local, ParkedChoice::Remote, ParkedChoice::Both] {
+            assert_eq!(
+                bridge.resolve_parked(&op_id, choice, Some(2), &mut keep, "Mac", "10.00").unwrap(),
+                ParkedResolution::Moved,
+                "{choice:?}"
+            );
+        }
+        assert!(Path::new(&staged).exists(), "nothing released");
+        assert!(!dir.path().join("kept").exists(), "nothing copied");
+        assert_eq!(bridge.db.list_operations_for_file(file).unwrap().len(), 2, "both saves still queued");
+        let parked = bridge.version_conflict_feed().unwrap().into_iter().find(|entry| entry.op_id.as_deref() == Some(op_id.as_str()));
+        assert_ne!(parked.map(|entry| entry.action), Some("open_conflict".to_string()));
+    }
+
+    /// Review-169 #1: the person decides against the version the window showed. The file past it (a
+    /// newer server version the pull recorded since) makes every choice `Moved`, with nothing changed;
+    /// at the version shown, the choice acts and Keep Mine rebases on exactly it.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn task_2190_fu2_a_choice_on_a_version_the_file_moved_past_is_moved() {
+        let master_key = [235u8; 32];
+        let file = "21900000-0000-4000-8000-000000000051";
+        let (dir, _sync_root, _server, bridge, op_id, staged, _token) = task_2190_parked(master_key, file).await;
+        bridge
+            .db
+            .test_execute(&format!("UPDATE files SET current_version = 3 WHERE file_id = '{file}'"))
+            .unwrap();
+        let mut keep = task_2190_keep_into(dir.path());
+        for choice in [ParkedChoice::Local, ParkedChoice::Remote, ParkedChoice::Both] {
+            assert_eq!(
+                bridge.resolve_parked(&op_id, choice, Some(2), &mut keep, "Mac", "10.00").unwrap(),
+                ParkedResolution::Moved,
+                "{choice:?} on version 2 while the file is at 3"
+            );
+            assert_eq!(
+                bridge.resolve_parked(&op_id, choice, None, &mut keep, "Mac", "10.00").unwrap(),
+                ParkedResolution::Moved,
+                "{choice:?} with no version shown"
+            );
+        }
+        assert!(Path::new(&staged).exists() && !dir.path().join("kept").exists(), "nothing changed");
+        assert_eq!(
+            bridge.resolve_parked(&op_id, ParkedChoice::Local, Some(3), &mut keep, "Mac", "10.00").unwrap(),
+            ParkedResolution::Rebased { version: 3 },
+            "at the version shown, Keep Mine rebases on exactly it"
+        );
+    }
+
+    /// Review-169 #2 (D2): a trash, move or rename of the file queued behind the parked write makes
+    /// every choice `Moved` too, not only a newer save.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn task_2190_fu2_a_trash_or_rename_behind_the_park_makes_every_choice_moved() {
+        for kind in [OperationKind::TrashFile, OperationKind::RenameFile, OperationKind::MoveFile] {
+            let master_key = [236u8; 32];
+            let file = "21900000-0000-4000-8000-000000000052";
+            let (dir, _sync_root, _server, bridge, op_id, _staged, _token) = task_2190_parked(master_key, file).await;
+            bridge
+                .db
+                .enqueue_operation(&PendingOperation {
+                    op_id: format!("behind-{kind:?}"),
+                    kind: kind.clone(),
+                    file_id: Some(file.to_string()),
+                    parent_id: None,
+                    target_path: Some("notes renamed.txt".to_string()),
+                    metadata_json: None,
+                    payload_path: None,
+                    base_version: None,
+                    base_object_version_id: None,
+                    attempts: 0,
+                    max_attempts: 25,
+                    next_retry_at: 0,
+                    last_error: None,
+                    backup_source_key: None,
+                    created_at: now_secs(),
+                    updated_at: now_secs(),
+                })
+                .unwrap();
+            let mut keep = task_2190_keep_into(dir.path());
+            for choice in [ParkedChoice::Local, ParkedChoice::Remote, ParkedChoice::Both] {
+                assert_eq!(
+                    bridge.resolve_parked(&op_id, choice, Some(2), &mut keep, "Mac", "10.00").unwrap(),
+                    ParkedResolution::Moved,
+                    "{choice:?} with a {kind:?} behind"
+                );
+            }
+        }
+    }
+
+    /// Review-169 #3: "Keep both" on a write that moved queues nothing: no new row, no create, and the
+    /// copy staged for it removed. Decided again at the right version, it gives exactly one copy,
+    /// without " 2" (nothing was left behind by the first try).
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn task_2190_fu2_keep_both_on_a_moved_write_queues_nothing() {
+        let master_key = [237u8; 32];
+        let file = "21900000-0000-4000-8000-000000000053";
+        let (dir, _sync_root, _server, bridge, op_id, _staged, _token) = task_2190_parked(master_key, file).await;
+        let rows = |bridge: &EngineBridge| bridge.db.child_names_lowercase(None).unwrap().len();
+        let unfinished = |bridge: &EngineBridge| {
+            bridge.db.staged_payloads_for_signout().unwrap().into_iter().filter(|(_, _, completed)| !completed).count()
+        };
+        let (rows_before, unfinished_before) = (rows(&bridge), unfinished(&bridge));
+        let mut keep = task_2190_keep_into(dir.path());
+        assert_eq!(
+            bridge.resolve_parked(&op_id, ParkedChoice::Both, Some(1), &mut keep, "Mac", "10.00").unwrap(),
+            ParkedResolution::Moved
+        );
+        assert_eq!(rows(&bridge), rows_before, "no new row");
+        assert_eq!(unfinished(&bridge), unfinished_before, "no staged copy left for a create");
+        assert_eq!(bridge.db.list_operations_for_file(file).unwrap().len(), 1, "only the parked write");
+        let done = bridge.resolve_parked(&op_id, ParkedChoice::Both, Some(2), &mut keep, "Mac", "10.00").unwrap();
+        assert_eq!(
+            done.clone(),
+            match done {
+                ParkedResolution::KeptBoth { ref file_id, .. } => {
+                    ParkedResolution::KeptBoth { file_id: file_id.clone(), name: "notes (Mac, 10.00).txt".to_string() }
+                }
+                other => other,
+            },
+            "one copy, with the plain name"
+        );
+        assert_eq!(rows(&bridge), rows_before + 1, "exactly one new row");
+    }
+
+    /// Review-169 #3, the race: the parked write moves between the decision's first check and the
+    /// copy's accept (its seam). The accept's own check, in its transaction, refuses it: nothing is
+    /// queued and no staged copy is left.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn task_2190_fu2_keep_both_racing_a_move_queues_nothing() {
+        let master_key = [240u8; 32];
+        let file = "21900000-0000-4000-8000-000000000056";
+        let (dir, _sync_root, _server, bridge, op_id, _staged, _token) = task_2190_parked(master_key, file).await;
+        let rows = bridge.db.child_names_lowercase(None).unwrap().len();
+        let unfinished = |bridge: &EngineBridge| {
+            bridge.db.staged_payloads_for_signout().unwrap().into_iter().filter(|(_, _, completed)| !completed).count()
+        };
+        let unfinished_before = unfinished(&bridge);
+        let db = std::sync::Arc::clone(&bridge.db);
+        let moved = file.to_string();
+        bridge.seams.arm("accept:before_tx", move || {
+            db.test_execute(&format!("UPDATE files SET current_version = 3 WHERE file_id = '{moved}'")).unwrap();
+        });
+        let mut keep = task_2190_keep_into(dir.path());
+        assert_eq!(
+            bridge.resolve_parked(&op_id, ParkedChoice::Both, Some(2), &mut keep, "Mac", "10.00").unwrap(),
+            ParkedResolution::Moved,
+            "the accept refused the moved write"
+        );
+        assert_eq!(bridge.db.child_names_lowercase(None).unwrap().len(), rows, "no new row");
+        assert_eq!(unfinished(&bridge), unfinished_before, "no staged copy left");
+        assert_eq!(bridge.db.list_operations_for_file(file).unwrap().len(), 1, "only the parked write");
+    }
+
+    /// Review-169 #4: "Keep the other" releases the parked write's staged copy in the journal in its
+    /// own transaction: right after the drop (before any unlink) the journal row is released, so a
+    /// crash there leaves no unfinished row to block a sign-out; the engine-start sweep unlinks it.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn task_2190_fu2_dropping_a_parked_write_releases_its_copy_in_the_same_transaction() {
+        let master_key = [238u8; 32];
+        let file = "21900000-0000-4000-8000-000000000054";
+        let (_dir, _sync_root, _server, bridge, op_id, staged, _token) = task_2190_parked(master_key, file).await;
+        let journal = |bridge: &EngineBridge| {
+            bridge.db.staged_payloads_for_signout().unwrap().into_iter().find(|(path, _, _)| path == &staged).map(|(_, _, completed)| completed)
+        };
+        assert_eq!(journal(&bridge), Some(false), "precondition: the parked write's copy is unfinished");
+        assert_eq!(bridge.db.drop_parked(&op_id, 2).unwrap(), Some(Some(staged.clone())));
+        assert_eq!(journal(&bridge), Some(true), "released in the drop's transaction");
+        assert!(Path::new(&staged).exists(), "the unlink comes after the commit");
+    }
+
+    /// Review-169 #5: one review entry that cannot be read is left out; the rest of the feed shows.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn task_2190_fu2_one_unreadable_review_entry_leaves_the_rest_of_the_feed() {
+        let master_key = [239u8; 32];
+        let file = "21900000-0000-4000-8000-000000000055";
+        let (_dir, _sync_root, _server, bridge, op_id, _staged, _token) = task_2190_parked(master_key, file).await;
+        FAIL_DECIDABLE_READ.with(|fail| *fail.borrow_mut() = Some(op_id.clone()));
+        let feed = bridge.version_conflict_feed();
+        FAIL_DECIDABLE_READ.with(|fail| *fail.borrow_mut() = None);
+        let feed = feed.expect("the feed still answers");
+        let entry = feed.iter().find(|entry| entry.op_id.as_deref() == Some(op_id.as_str())).expect("the row stays");
+        assert_eq!(entry.action, "review_upload", "a failed check offers no decision");
+    }
+
+    /// Review-169 F1: the window decides against the version of the bytes it showed, from the metadata
+    /// that produced them, never the mirror read after the download. Another device saves version 3
+    /// while the preview downloads version 2, and the pull raises the mirror to 3 (the seam, between
+    /// the metadata and the chunks): the preview still names 2, so every choice made on it is `Moved`.
+    /// A legacy file (no `download_version`) names the mirror as it was before the fetch, which is
+    /// never newer than the bytes.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn task_2190_fu2_the_preview_names_the_version_of_the_bytes_it_shows() {
+        for legacy in [false, true] {
+            let master_key = [241u8; 32];
+            let file = "21900000-0000-4000-8000-000000000057";
+            let (dir, _sync_root, server, bridge, op_id, staged, _token) = task_2190_parked(master_key, file).await;
+            {
+                let mut s = server.state.lock().unwrap();
+                s.serve_downloads = true;
+                s.legacy_downloads = legacy;
+            }
+            let (db, state, saved) = (std::sync::Arc::clone(&bridge.db), std::sync::Arc::clone(&server.state), file.to_string());
+            bridge.seams.arm("preview:before_download", move || {
+                let chunk = task_2190_server_chunk(master_key, &saved, b"saved on another device");
+                state.lock().unwrap().files.get_mut(&saved).unwrap().versions.push(vec![chunk]);
+                db.test_execute(&format!("UPDATE files SET current_version = 3 WHERE file_id = '{saved}'")).unwrap();
+            });
+            let preview = bridge.parked_conflict_preview(&op_id).await.unwrap();
+            assert_eq!(server.state.lock().unwrap().files[file].versions.len(), 3, "the seam ran: version 3 landed mid-download");
+            assert_eq!(preview.version, Some(2), "legacy {legacy}: the version of the bytes shown, or older");
+            if !legacy {
+                assert_eq!(preview.remote.text.as_deref(), Some("edited on the web"), "the pinned download is version 2");
+            }
+            let mut keep = task_2190_keep_into(dir.path());
+            for choice in [ParkedChoice::Local, ParkedChoice::Remote, ParkedChoice::Both] {
+                assert_eq!(
+                    bridge.resolve_parked(&op_id, choice, preview.version, &mut keep, "Mac", "10.00").unwrap(),
+                    ParkedResolution::Moved,
+                    "legacy {legacy}: {choice:?} on the version the preview returned"
+                );
+            }
+            assert!(Path::new(&staged).exists() && !dir.path().join("kept").exists(), "nothing changed");
+            let op = bridge.db.get_operation(&op_id).unwrap().unwrap();
+            assert_eq!((op.base_version, op.last_error.as_deref()), (Some(1), Some("stale_base")), "still parked on its base");
+        }
+    }
+
+    /// Review-169 F2: another device trashes the file, or the folder it is in, while the window is
+    /// open. The pull marks the row `trashing` (`mark_subtree_trashing`, the pull's `file_trash`) and
+    /// leaves its version and its parked write as they were: every choice is `Moved`, the upload stays
+    /// parked, and the feed offers no decision.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn task_2190_fu2_a_remote_trash_of_the_file_or_its_folder_makes_every_choice_moved() {
+        for trash_folder in [false, true] {
+            let master_key = [242u8; 32];
+            let file = "21900000-0000-4000-8000-000000000058";
+            let folder = "21900000-0000-4000-8000-000000000059";
+            let (dir, _sync_root, _server, bridge, op_id, staged, _token) = task_2190_parked(master_key, file).await;
+            let trashed = if trash_folder {
+                seed_folder_row(&bridge, folder, "Docs");
+                bridge
+                    .db
+                    .test_execute(&format!(
+                        "UPDATE files SET path = 'Docs/notes.txt', parent_id = '{folder}' WHERE file_id = '{file}'"
+                    ))
+                    .unwrap();
+                folder
+            } else {
+                file
+            };
+            let marked = bridge.db.mark_subtree_trashing(trashed).unwrap();
+            assert!(marked.iter().any(|row| row.file_id == file), "precondition: the file is marked trashing");
+            let mut keep = task_2190_keep_into(dir.path());
+            for choice in [ParkedChoice::Local, ParkedChoice::Remote, ParkedChoice::Both] {
+                assert_eq!(
+                    bridge.resolve_parked(&op_id, choice, Some(2), &mut keep, "Mac", "10.00").unwrap(),
+                    ParkedResolution::Moved,
+                    "{choice:?}, the folder trashed: {trash_folder}"
+                );
+            }
+            let op = bridge.db.get_operation(&op_id).unwrap().unwrap();
+            assert!(
+                op.attempts >= op.max_attempts && op.last_error.as_deref() == Some("stale_base"),
+                "the upload stays parked: {op:?}"
+            );
+            assert_eq!(bridge.db.get_file(file).unwrap().unwrap().status, FileStatus::Trashing);
+            assert!(Path::new(&staged).exists() && !dir.path().join("kept").exists(), "nothing changed");
+            let entry = bridge
+                .version_conflict_feed()
+                .unwrap()
+                .into_iter()
+                .find(|entry| entry.op_id.as_deref() == Some(op_id.as_str()));
+            assert_ne!(entry.map(|entry| entry.action), Some("open_conflict".to_string()), "no decision offered");
+        }
+    }
+
+    /// Review-169, after F2 (lead): this Mac trashes or moves a folder the file is in while the window is
+    /// open. A local trash marks only the folder's row and queues its op on the folder (`queue_finder_delete`);
+    /// a move queues on the folder. The file's own row and queue stay as they were until the server's echo.
+    /// The ancestor walk sees both, at any depth: every choice is `Moved`, and nothing is sent again. The last
+    /// case is a folder above marked `trashing` with nothing queued on it: the walk follows `parent_id`, while
+    /// the pull's mark of a remote trash follows path prefixes, so a row the prefix misses is still caught.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn task_2190_fu2_a_trash_or_move_of_a_folder_above_makes_every_choice_moved() {
+        let (outer, parent) = ("21900000-0000-4000-8000-000000000061", "21900000-0000-4000-8000-000000000062");
+        for (case, folder) in [
+            ("trash the parent", parent),
+            ("trash a folder above", outer),
+            ("move the parent", parent),
+            ("a folder above marked trashing, nothing queued", outer),
+        ] {
+            let master_key = [243u8; 32];
+            let file = "21900000-0000-4000-8000-000000000060";
+            let (dir, _sync_root, _server, bridge, op_id, staged, _token) = task_2190_parked(master_key, file).await;
+            // Outer/Docs/notes.txt: the walk has to go past the parent.
+            seed_folder_row(&bridge, outer, "Outer");
+            seed_folder_row(&bridge, parent, "Outer/Docs");
+            for sql in [
+                format!("UPDATE files SET parent_id = '{outer}' WHERE file_id = '{parent}'"),
+                format!("UPDATE files SET path = 'Outer/Docs/notes.txt', parent_id = '{parent}' WHERE file_id = '{file}'"),
+            ] {
+                bridge.db.test_execute(&sql).unwrap();
+            }
+            assert!(bridge.db.is_decidable_parked(&op_id).unwrap(), "{case}: precondition, decidable in its folders");
+            if case.starts_with("trash") {
+                bridge.queue_finder_delete(folder, None).unwrap();
+                assert_eq!(bridge.db.get_file(folder).unwrap().unwrap().status, FileStatus::Trashing);
+            } else if case.starts_with("a folder above marked") {
+                bridge.db.test_execute(&format!("UPDATE files SET status = 'trashing' WHERE file_id = '{folder}'")).unwrap();
+                assert!(bridge.db.list_operations_for_file(folder).unwrap().is_empty(), "precondition: nothing queued on it");
+            } else {
+                bridge
+                    .queue_finder_modify(FinderWriteTarget {
+                        file_id: Some(folder.to_string()),
+                        parent_id: None,
+                        filename: "Docs".to_string(),
+                        rel_path: None,
+                        kind: FinderWriteItemKind::Folder,
+                        contents_path: None,
+                        content_type: None,
+                        base_version_identifier: None,
+                    })
+                    .unwrap();
+                let queued = bridge.db.list_operations_for_file(folder).unwrap();
+                assert_eq!(queued.iter().map(|op| op.kind.clone()).collect::<Vec<_>>(), vec![OperationKind::MoveFile]);
+            }
+            assert_eq!(bridge.db.list_operations_for_file(file).unwrap().len(), 1, "{case}: nothing queued on the file");
+            assert_ne!(bridge.db.get_file(file).unwrap().unwrap().status, FileStatus::Trashing, "{case}: its row not marked");
+            let mut keep = task_2190_keep_into(dir.path());
+            for choice in [ParkedChoice::Local, ParkedChoice::Remote, ParkedChoice::Both] {
+                assert_eq!(
+                    bridge.resolve_parked(&op_id, choice, Some(2), &mut keep, "Mac", "10.00").unwrap(),
+                    ParkedResolution::Moved,
+                    "{case}: {choice:?}"
+                );
+            }
+            let op = bridge.db.get_operation(&op_id).unwrap().unwrap();
+            assert!(
+                op.attempts >= op.max_attempts && op.last_error.as_deref() == Some("stale_base"),
+                "{case}: the upload stays parked: {op:?}"
+            );
+            assert!(Path::new(&staged).exists() && !dir.path().join("kept").exists(), "{case}: nothing changed");
+            let entry = bridge
+                .version_conflict_feed()
+                .unwrap()
+                .into_iter()
+                .find(|entry| entry.op_id.as_deref() == Some(op_id.as_str()));
+            assert_ne!(entry.map(|entry| entry.action), Some("open_conflict".to_string()), "{case}: no decision offered");
+        }
+    }
+
+    /// The walk's depth cap (plan §7.4): folders whose `parent_id`s form a cycle end the walk at the cap,
+    /// and the write is not decidable; nothing loops.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn task_2190_fu2_a_cycle_above_the_file_ends_the_walk_and_is_not_decidable() {
+        let (outer, parent) = ("21900000-0000-4000-8000-000000000064", "21900000-0000-4000-8000-000000000065");
+        let master_key = [244u8; 32];
+        let file = "21900000-0000-4000-8000-000000000063";
+        let (_dir, _sync_root, _server, bridge, op_id, _staged, _token) = task_2190_parked(master_key, file).await;
+        seed_folder_row(&bridge, outer, "Outer");
+        seed_folder_row(&bridge, parent, "Outer/Docs");
+        for sql in [
+            format!("UPDATE files SET parent_id = '{outer}' WHERE file_id = '{parent}'"),
+            format!("UPDATE files SET path = 'Outer/Docs/notes.txt', parent_id = '{parent}' WHERE file_id = '{file}'"),
+        ] {
+            bridge.db.test_execute(&sql).unwrap();
+        }
+        assert!(bridge.db.is_decidable_parked(&op_id).unwrap(), "precondition: decidable under a real chain");
+        bridge.db.test_execute(&format!("UPDATE files SET parent_id = '{parent}' WHERE file_id = '{outer}'")).unwrap();
+        assert!(!bridge.db.is_decidable_parked(&op_id).unwrap(), "a cycle reaches the cap: not decidable");
+    }
+
+    /// Review-169 F3: the "Keep both" name is at most 255 bytes (`kept_names::MAX_NAME_BYTES`, as kept
+    /// files are) whatever the original, the device or the counter: the stem is cut at a character
+    /// boundary, and the suffix and the extension never are.
+    #[test]
+    fn task_2190_fu2_keep_both_name_fits_the_name_limit() {
+        use crate::sign_out::kept_names::MAX_NAME_BYTES;
+        let none = std::collections::HashSet::new();
+        // The review's case: 240 ASCII bytes and `.txt` (244 bytes), on `MacBook Pro` at 10.00.
+        let ascii = format!("{}.txt", "a".repeat(240));
+        let name = keep_both_name(&ascii, "MacBook Pro", "10.00", &none);
+        assert_eq!(name, format!("{} (MacBook Pro, 10.00).txt", "a".repeat(230)));
+        assert_eq!(name.len(), MAX_NAME_BYTES);
+        // The counter at the limit: the stem gives way, the counter stays.
+        let taken = std::collections::HashSet::from([name.to_lowercase()]);
+        let second = keep_both_name(&ascii, "MacBook Pro", "10.00", &taken);
+        assert_eq!(second, format!("{} (MacBook Pro, 10.00) 2.txt", "a".repeat(228)));
+        // Multibyte: 80 three-byte characters (240 bytes) are cut at a character boundary.
+        let wide = format!("{}.txt", "日".repeat(80));
+        let name = keep_both_name(&wide, "MacBook Pro", "10.00", &none);
+        assert_eq!(name, format!("{} (MacBook Pro, 10.00).txt", "日".repeat(76)));
+        assert!(name.len() <= MAX_NAME_BYTES);
+        // A multibyte device name, and one far too long: the device is cut; the time and the extension stay.
+        let curly = keep_both_name(&wide, "Guus’s MacBook Pro", "10.00", &none);
+        assert!(curly.len() <= MAX_NAME_BYTES && curly.ends_with(" (Guus’s MacBook Pro, 10.00).txt"), "{curly}");
+        let long = keep_both_name("notes.txt", &"x".repeat(300), "10.00", &none);
+        assert!(
+            long.len() <= MAX_NAME_BYTES && long.starts_with("notes (x") && long.ends_with("x, 10.00).txt"),
+            "{long}"
+        );
+    }
+
+    /// D4: the copy's name is unique among the parent's names, case-insensitively.
+    #[test]
+    fn task_2190_fu2_keep_both_name_is_unique() {
+        let taken = |names: &[&str]| names.iter().map(|name| name.to_lowercase()).collect::<std::collections::HashSet<_>>();
+        assert_eq!(keep_both_name("notes.txt", "Mac", "10.00", &taken(&[])), "notes (Mac, 10.00).txt");
+        assert_eq!(keep_both_name("notes.txt", "Mac", "10.00", &taken(&["notes (Mac, 10.00).txt"])), "notes (Mac, 10.00) 2.txt");
+        assert_eq!(
+            keep_both_name("notes.txt", "Mac", "10.00", &taken(&["NOTES (MAC, 10.00).TXT", "notes (Mac, 10.00) 2.txt"])),
+            "notes (Mac, 10.00) 3.txt",
+            "case-insensitive, and the counter keeps counting"
+        );
+        assert_eq!(keep_both_name("README", "Mac", "10.00", &taken(&[])), "README (Mac, 10.00)", "no extension");
+        assert_eq!(keep_both_name(".env", "Mac", "10.00", &taken(&[])), ".env (Mac, 10.00)", "a dotfile");
+        assert_eq!(keep_both_name("a (1).tar.gz", "Mac", "10.00", &taken(&[])), "a (1).tar (Mac, 10.00).gz", "the last dot");
+    }
+
+    /// The lead's condition on E3, for a sync folder: a hydrated file whose row is then put in
+    /// `state`, edited on this PC while the web saves version 2, then the save path, the scan, the
+    /// tick and a hydrate. Returns the feed's kinds for the file, the content, whether the hydrate
+    /// was refused, the bytes on disk, the queued uploads and the server's current bytes.
+    async fn task_2190_held(
+        master_key: [u8; 32],
+        file: &str,
+        state_sql: &str,
+    ) -> (Vec<String>, SyncFolderContent, bool, Vec<u8>, usize, Vec<u8>) {
+        let (_dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_row(&bridge, &server, file);
+        {
+            let mut s = server.state.lock().unwrap();
+            s.files.get_mut(file).unwrap().versions[0] = vec![task_2190_server_chunk(master_key, file, b"version one")];
+            s.serve_downloads = true;
+        }
+        let local = sync_root.join("notes.txt");
+        bridge.hydrate_file(file, &local, &[sync_root.as_path()]).await.unwrap();
+        bridge.db.test_execute(&state_sql.replace("{file}", file)).unwrap();
+        std::fs::write(&local, b"saved on this PC").unwrap();
+        task_2190_web_saves(&server, master_key, file, b"edited on the web");
+        crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "notify");
+        crate::watcher::run_one_scan(&bridge, &sync_root);
+        sync_tick_outcome(&bridge, &sync_root).await.unwrap();
+        let refused = matches!(
+            bridge.hydrate_file(file, &local, &[sync_root.as_path()]).await,
+            Err(e) if e.is::<UnsentLocalChange>()
+        );
+        let kinds = bridge
+            .version_conflict_feed()
+            .unwrap()
+            .into_iter()
+            .filter(|entry| entry.file_id == file)
+            .map(|entry| entry.kind)
+            .collect();
+        let content = sync_folder_content(&bridge.db, file, &local, None).unwrap();
+        let uploads = bridge
+            .db
+            .list_operations_for_file(file)
+            .unwrap()
+            .into_iter()
+            .filter(|op| matches!(op.kind, OperationKind::UploadVersion | OperationKind::UploadFile))
+            .count();
+        let on_disk = std::fs::read(&local).unwrap();
+        drop(bridge);
+        let server_now = server.finish().latest_plaintext(file, master_key);
+        (kinds, content, refused, on_disk, uploads, server_now)
+    }
+
+    /// A row with agreed content but no base (0), edited while the web changed: the edit is held,
+    /// shown in Review as needing a decision, never reads as agreed (so the stamp pass cannot mark
+    /// it in sync), and the hydrate refuses to write over it. Both versions are kept.
+    #[tokio::test]
+    async fn task_2190_held_a_base_0_edit_with_a_web_edit_is_visible_never_stamped_never_overwritten() {
+        let (kinds, content, refused, on_disk, uploads, server_now) = task_2190_held(
+            [231u8; 32],
+            "21900000-0000-4000-8000-000000000041",
+            "UPDATE files SET local_base_version = 0 WHERE file_id = '{file}'",
+        )
+        .await;
+        assert_eq!(kinds, vec!["held_edit".to_string()], "shown as needing a decision");
+        assert_eq!(content, SyncFolderContent::Changed { base: None }, "never reads as agreed");
+        assert!(refused, "the hydrate refuses to write over it");
+        assert_eq!((on_disk.as_slice(), uploads), (&b"saved on this PC"[..], 0), "kept on this PC, not sent");
+        assert_eq!(server_now, b"edited on the web", "the web's version is kept");
+    }
+
+    /// A file hydrated before task 1640 (unknown content), edited while the web changed: the edit
+    /// is held, shown in Review in the one "not checked yet" row (the scan cannot tell an edited
+    /// unknown file from an untouched one, so they are never "needs a decision" per file), never
+    /// reads as agreed, and the hydrate refuses to write over it. Both versions are kept.
+    #[tokio::test]
+    async fn task_2190_held_a_pre_1640_edit_with_a_web_edit_is_visible_never_stamped_never_overwritten() {
+        let (kinds, content, refused, on_disk, uploads, server_now) = task_2190_held(
+            [232u8; 32],
+            "21900000-0000-4000-8000-000000000042",
+            "UPDATE files SET local_hash = NULL, local_base_version = 0, fetched_min_version = -2, fetched_hash = NULL WHERE file_id = '{file}'",
+        )
+        .await;
+        assert_eq!(kinds, vec!["held_unknown".to_string()], "shown in the one not-checked-yet row");
+        assert_eq!(content, SyncFolderContent::Unknown, "never reads as agreed");
+        assert!(refused, "the hydrate refuses to write over it");
+        assert_eq!((on_disk.as_slice(), uploads), (&b"saved on this PC"[..], 0), "kept on this PC, not sent");
+        assert_eq!(server_now, b"edited on the web", "the web's version is kept");
+    }
+
+    /// macOS: a Finder save whose base is not known (an identifier with no server version), while
+    /// the web changed: it parks `base_unknown` with its bytes and is shown in Review; Finder keeps
+    /// the Mac's token, so nothing writes over it, and nothing is sent. Both versions are kept.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn task_2190_held_a_finder_edit_on_an_unknown_base_is_visible_and_keeps_both() {
+        let master_key = [233u8; 32];
+        let file = "21900000-0000-4000-8000-000000000043";
+        let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_row(&bridge, &server, file);
+        let save = fp_save(&bridge, dir.path(), file, "notes.txt", b"edited on this Mac", "no-version");
+        let token = save.token.clone().expect("a Finder save names its bytes");
+        task_2190_web_saves(&server, master_key, file, b"edited on the web");
+        sync_tick_outcome(&bridge, &sync_root).await.unwrap();
+        bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+        let parked = bridge.db.list_operations_for_file(file).unwrap().remove(0);
+        assert_eq!(parked.last_error.as_deref(), Some("base_unknown"));
+        assert_eq!(std::fs::read(parked.payload_path.as_ref().unwrap()).unwrap(), b"edited on this Mac");
+        assert_eq!(held_content_version(&bridge, file), token, "Finder keeps the Mac's bytes");
+        let feed = bridge.version_conflict_feed().unwrap();
+        assert!(
+            feed.iter().any(|entry| entry.op_id.as_deref() == Some(parked.op_id.as_str())),
+            "shown in Review: {feed:?}"
+        );
+        drop(bridge);
+        let state = server.finish();
+        assert!(state.init_summary().is_empty(), "nothing was sent");
+        assert_eq!(state.latest_plaintext(file, master_key), b"edited on the web");
+    }
+
+    /// The lead's check on glegion's constraint 1: a held edit keeps #167's scan memo working.
+    /// Holding it writes only `held_edits`, and no trigger writes `files`, so the row stamp the memo
+    /// keys on does not move, and the second pass skips the held file as settled instead of
+    /// classifying it again.
+    #[tokio::test]
+    async fn task_2190_held_a_held_edit_stays_settled_in_the_scan_memo() {
+        let master_key = [234u8; 32];
+        let file = "21900000-0000-4000-8000-000000000044";
+        let (_dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_row(&bridge, &server, file);
+        {
+            let mut s = server.state.lock().unwrap();
+            s.files.get_mut(file).unwrap().versions[0] = vec![task_2190_server_chunk(master_key, file, b"version one")];
+            s.serve_downloads = true;
+        }
+        let local = sync_root.join("notes.txt");
+        bridge.hydrate_file(file, &local, &[sync_root.as_path()]).await.unwrap();
+        bridge
+            .db
+            .test_execute(&format!("UPDATE files SET local_base_version = 0 WHERE file_id = '{file}'"))
+            .unwrap();
+        std::fs::write(&local, b"saved on this PC").unwrap();
+        let mut memo = crate::watcher::ScanMemo::default();
+        crate::watcher::run_one_scan_with(&bridge, &sync_root, &mut memo);
+        assert_eq!(memo.classified, 1, "the first pass classifies the edit");
+        assert_eq!(bridge.db.list_held_edits().unwrap().len(), 1, "and holds it");
+        let stamp = bridge.db.file_row_stamp_by_path("notes.txt").unwrap();
+        crate::watcher::run_one_scan_with(&bridge, &sync_root, &mut memo);
+        assert_eq!(bridge.db.file_row_stamp_by_path("notes.txt").unwrap(), stamp, "the row stamp did not move");
+        assert_eq!((memo.classified, memo.skipped), (0, 1), "the second pass skips the held file as settled");
+        assert_eq!(bridge.db.list_held_edits().unwrap().len(), 1, "still held");
+    }
+
+    /// What [`task_2190_sync_folder_sequence`] saw, step by step.
+    #[derive(Debug)]
+    struct SyncFolderEdit {
+        /// After the edit: did the upload driver queue it, how many ops, and on which base.
+        dispatched: bool,
+        queued_after_edit: usize,
+        base_after_edit: Option<i64>,
+        /// The tick's conflicts, and the row after it.
+        tick_conflicts: usize,
+        row_after_tick: FileEntry,
+        /// Whether the next hydrate refused to write over the edit, and the local file's bytes after it.
+        hydrate_refused: bool,
+        local_after_hydrate: Vec<u8>,
+        /// Every copy of the edit under the test's root, and every queued op of the file, after it.
+        copies_of_the_edit: Vec<PathBuf>,
+        ops_after: usize,
+        /// The review feed's kinds and the `Conflict` rows, after it.
+        feed_kinds: Vec<String>,
+        conflict_rows: usize,
+        /// The server: every init, its versions and its current plaintext.
+        inits: Vec<(serde_json::Value, serde_json::Value, u16)>,
+        server_versions: usize,
+        server_current: Vec<u8>,
+    }
+
+    /// The sync folder (the engine as Windows and Linux run it, with no write id): a hydrated
+    /// file at version 1 is edited on disk, the web saves version 2, the tick runs, then the
+    /// upload attempt and the next hydrate.
+    async fn task_2190_sync_folder_sequence(master_key: [u8; 32], file: &str) -> SyncFolderEdit {
+        let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_row(&bridge, &server, file);
+        {
+            let mut s = server.state.lock().unwrap();
+            s.files.get_mut(file).unwrap().versions[0] = vec![task_2190_server_chunk(master_key, file, b"version one")];
+            s.serve_downloads = true;
+        }
+        let local = sync_root.join("notes.txt");
+        bridge.hydrate_file(file, &local, &[sync_root.as_path()]).await.unwrap();
+        assert_eq!(std::fs::read(&local).unwrap(), b"version one", "precondition: hydrated");
+        assert_eq!(bridge.db.get_file(file).unwrap().unwrap().status, FileStatus::Local, "precondition");
+
+        // 1. The person edits the file in the sync folder; the upload driver sees its close.
+        std::fs::write(&local, b"edited in the sync folder").unwrap();
+        let dispatched = crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "notify");
+        let queued = bridge.db.list_operations_for_file(file).unwrap();
+        let (queued_after_edit, base_after_edit) = (queued.len(), queued.first().and_then(|op| op.base_version));
+
+        // 2. The web saves version 2.
+        task_2190_web_saves(&server, master_key, file, b"edited on the web");
+
+        // 3. The tick.
+        let tick = sync_tick_outcome(&bridge, &sync_root).await.unwrap();
+        let row_after_tick = bridge.db.get_file(file).unwrap().unwrap();
+
+        // 4. The upload attempt.
+        bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+
+        // 5. The next hydrate, as a fetch after "Free up space" (or a pinned refresh) runs it.
+        let hydrate_refused = match bridge.hydrate_file(file, &local, &[sync_root.as_path()]).await {
+            Ok(()) => false,
+            Err(e) if e.is::<UnsentLocalChange>() => true,
+            Err(e) => panic!("the hydrate failed for another reason: {e:#}"),
+        };
+
+        let feed_kinds = bridge
+            .version_conflict_feed()
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.kind)
+            .collect();
+        let observed = (
+            std::fs::read(&local).unwrap(),
+            task_2190_files_holding(dir.path(), b"edited in the sync folder"),
+            bridge.db.list_operations_for_file(file).unwrap().len(),
+            bridge.db.list_by_status(FileStatus::Conflict).unwrap().len(),
+        );
+        drop(bridge);
+        let state = server.finish();
+        SyncFolderEdit {
+            dispatched,
+            queued_after_edit,
+            base_after_edit,
+            tick_conflicts: tick.conflicts.len(),
+            row_after_tick,
+            hydrate_refused,
+            local_after_hydrate: observed.0,
+            copies_of_the_edit: observed.1,
+            ops_after: observed.2,
+            feed_kinds,
+            conflict_rows: observed.3,
+            inits: state.init_summary(),
+            server_versions: state.files[file].versions.len(),
+            server_current: state.latest_plaintext(file, master_key),
+        }
+    }
+
+    /// Since task 1640, step by step: the upload driver queues the edit as a modify on version 1,
+    /// the tick still reports no conflict (the row is `Uploading`, which the detector skips), the
+    /// upload is refused as stale and parks with its bytes, and the next hydrate refuses to write
+    /// over the edit. Both versions survive: the web's on the server, the edit on disk and in the
+    /// parked op's copy, shown as one `stale_base` review entry. Before task 1640 the edit was
+    /// never queued and the hydrate wrote over it (red on main b89380d0).
+    #[tokio::test]
+    async fn task_2190_a_sync_folder_edit_is_queued_on_its_base_parks_as_stale_and_is_never_overwritten() {
+        let master_key = [220u8; 32];
+        let seen = task_2190_sync_folder_sequence(master_key, "21900000-0000-4000-8000-000000000002").await;
+        assert!(seen.dispatched, "the upload driver queued the edit");
+        assert_eq!((seen.queued_after_edit, seen.base_after_edit), (1, Some(1)), "one modify, on version 1");
+        assert_eq!(seen.tick_conflicts, 0, "the tick still reports no conflict");
+        assert_eq!(seen.row_after_tick.status, FileStatus::Uploading, "the queued edit owns the row");
+        assert_eq!(
+            seen.inits,
+            vec![(json!("21900000-0000-4000-8000-000000000002"), json!(1), 409)],
+            "sent on 1, refused as stale"
+        );
+        assert!(seen.hydrate_refused, "the hydrate refused to write over the edit");
+        assert_eq!(seen.local_after_hydrate, b"edited in the sync folder", "the edit stays on disk");
+        assert!(!seen.copies_of_the_edit.is_empty());
+        assert_eq!(seen.ops_after, 1, "the parked op keeps its copy");
+        assert_eq!(seen.feed_kinds, vec!["stale_base".to_string()], "shown as one review entry");
+        assert_eq!(seen.conflict_rows, 0, "no Conflict row: the detector is not task 1640's");
+        assert_eq!(seen.server_versions, 2);
+        assert_eq!(seen.server_current, b"edited on the web");
+    }
+
+    /// The outcome the task asks for (its verification line), for the same sequence: the tick
+    /// raises a conflict, or the edit is kept somewhere the person can get it back from, and the
+    /// web's version is on the server. Red on main b89380d0 (the edit survived nowhere); green
+    /// since task 1640.
+    #[tokio::test]
+    async fn task_2190_wanted_a_sync_folder_edit_and_a_web_edit_both_survive() {
+        let master_key = [221u8; 32];
+        let seen = task_2190_sync_folder_sequence(master_key, "21900000-0000-4000-8000-000000000003").await;
+        let flagged = seen.tick_conflicts > 0 || seen.conflict_rows > 0;
+        let edit_kept = !seen.copies_of_the_edit.is_empty() || seen.ops_after > 0;
+        assert!(
+            flagged || edit_kept,
+            "the sync-folder edit was lost with nothing shown: {seen:#?}"
+        );
+        assert_eq!(seen.server_current, b"edited on the web", "the web's version is on the server");
+    }
+
+    /// Spec D11, D11b, D12 and I6 (task 1888): off macOS the engine resumes the operations paused for `auth` itself,
+    /// after its reconcile pass and the key check. Fixtures are made up: no real name, path or person.
+    mod reconcile_then_resume_tests {
+        use super::*;
+        use crate::runner::ResumeTicket;
+        use std::sync::atomic::Ordering::SeqCst;
+
+        const KEY: [u8; 32] = [7u8; 32];
+        const OTHER_KEY: [u8; 32] = [9u8; 32];
+
+        struct Pc {
+            dir: tempfile::TempDir,
+            root: PathBuf,
+            bridge: EngineBridge,
+            /// The ticket the bridge's queue reads, as the runner shares it.
+            #[cfg_attr(target_os = "macos", allow(dead_code))]
+            resume: ResumeTicket,
+        }
+
+        impl Pc {
+            fn new() -> Self {
+                let dir = tempfile::tempdir().unwrap();
+                let root = dir.path().join("Beebeeb");
+                std::fs::create_dir_all(&root).unwrap();
+                let resume = ResumeTicket::default();
+                let bridge = test_bridge_with_api(&dir.path().join("state.db"), "https://api.example".into(), KEY)
+                    .with_resume(resume.clone());
+                Self { dir, root, bridge, resume }
+            }
+
+            /// A due change that needs no network (`PinTree`): it shows whether the queue sends.
+            #[cfg(not(target_os = "macos"))]
+            fn due_pin(&self, op_id: &str) {
+                self.sql(&format!(
+                    "INSERT INTO operation_queue (op_id, kind, file_id, metadata_json, attempts, max_attempts, next_retry_at,
+                                                  created_at, updated_at)
+                     VALUES ('{op_id}', 'pin_tree', 'pin-{op_id}', '{{\"operation\":\"pin_tree\",\"pinned\":true}}', 0, 5, 0,
+                             100, 100)"
+                ));
+            }
+
+            fn sql(&self, sql: &str) {
+                self.bridge.db().test_execute(sql).unwrap();
+            }
+
+            /// A row: `version` > 0 is server-known (the snapshot's shape).
+            fn row(&self, id: &str, parent: Option<&str>, path: &str, folder: bool, version: i64) {
+                let parent = parent.map_or("NULL".to_string(), |p| format!("'{p}'"));
+                let (status, kind) = (if version > 0 { "synced" } else { "local" }, if folder { "folder" } else { "file" });
+                self.sql(&format!(
+                    "INSERT INTO files (file_id, path, status, item_kind, current_version, parent_id, size_bytes, remote_updated_at)
+                     VALUES ('{id}', '{path}', '{status}', '{kind}', {version}, {parent}, 0, 0)"
+                ));
+            }
+
+            /// An op paused for `auth` as a refused session pauses it (`record_pause_claimed`).
+            fn op(&self, op_id: &str, kind: &str, file_id: &str, parent: Option<&str>, metadata: serde_json::Value) {
+                let parent = parent.map_or("NULL".to_string(), |p| format!("'{p}'"));
+                let payload = self.dir.path().join(format!("staged-{op_id}"));
+                std::fs::write(&payload, op_id.as_bytes()).unwrap();
+                let metadata = metadata.to_string().replace('\'', "''");
+                self.sql(&format!(
+                    "INSERT INTO operation_queue (op_id, kind, file_id, parent_id, metadata_json, payload_path, attempts,
+                                                  max_attempts, next_retry_at, paused_reason, last_error_class, created_at, updated_at)
+                     VALUES ('{op_id}', '{kind}', '{file_id}', {parent}, '{metadata}', '{}', 0, 25, 0, 'auth', 'auth', 1, 1)",
+                    payload.to_string_lossy()
+                ));
+            }
+
+            /// A new file's create, its name sealed under `key` for `sealed_for`.
+            fn new_file(&self, op_id: &str, file_id: &str, parent: Option<&str>, path: &str, key: [u8; 32], sealed_for: &str) {
+                self.row(file_id, parent, path, false, 0);
+                let name = path.rsplit('/').next().unwrap();
+                self.op(
+                    op_id,
+                    "upload_version",
+                    file_id,
+                    parent,
+                    json!({
+                        "operation": "create_file",
+                        "name_encrypted": encrypted_metadata_for_name(&key, sealed_for, name, None).unwrap(),
+                        "content_type": null,
+                        "uploaded_by": "authenticated_desktop_user",
+                    }),
+                );
+            }
+
+            /// The server folder `t`, the ghost `g` made here at the same path (its create paused for `auth`), and a
+            /// new file `f` under the ghost whose create is paused for `auth` too.
+            fn ghost_with_twin(&self) {
+                self.row("t", None, "Photos", true, 3);
+                self.row("g", None, "Photos", true, 0);
+                self.op(
+                    "op-g",
+                    "create_folder",
+                    "g",
+                    None,
+                    json!({
+                        "operation": "create_folder",
+                        "name_encrypted": encrypted_metadata_for_name(&KEY, "g", "Photos", None).unwrap(),
+                    }),
+                );
+                self.new_file("op-f", "f", Some("g"), "Photos/a.jpg", KEY, "f");
+            }
+
+            fn pause(&self, op_id: &str, reason: &str) {
+                self.sql(&format!("UPDATE operation_queue SET paused_reason = '{reason}' WHERE op_id = '{op_id}'"));
+            }
+
+            fn query<T: rusqlite::types::FromSql>(&self, sql: &str) -> Option<T> {
+                use rusqlite::OptionalExtension as _;
+                self.bridge.db().hold_lock_for_test().query_row(sql, [], |row| row.get(0)).optional().unwrap()
+            }
+
+            /// The op's pause reason; `None` when it is due (or gone: see [`Self::has_op`]).
+            fn paused(&self, op_id: &str) -> Option<String> {
+                self.query::<Option<String>>(&format!("SELECT paused_reason FROM operation_queue WHERE op_id = '{op_id}'"))
+                    .flatten()
+            }
+
+            fn has_op(&self, op_id: &str) -> bool {
+                self.query::<String>(&format!("SELECT op_id FROM operation_queue WHERE op_id = '{op_id}'")).is_some()
+            }
+
+            fn has_row(&self, file_id: &str) -> bool {
+                self.query::<String>(&format!("SELECT file_id FROM files WHERE file_id = '{file_id}'")).is_some()
+            }
+
+            fn op_parent(&self, op_id: &str) -> Option<String> {
+                self.query::<Option<String>>(&format!("SELECT parent_id FROM operation_queue WHERE op_id = '{op_id}'"))
+                    .flatten()
+            }
+
+            async fn tick(&self, resume: &ResumeTicket, reconciled: &mut bool) {
+                self.bridge.reconcile_then_resume(&self.root, resume, reconciled).await.unwrap();
+            }
+        }
+
+        /// D11, I6: a later tick resumes only when a sign-in asked, and then after the pass: the ghost is folded into
+        /// its twin first, so its child resumes under the server folder. An ask is served once.
+        #[tokio::test]
+        async fn a_resume_runs_after_the_pass_and_only_when_asked() {
+            let pc = Pc::new();
+            pc.ghost_with_twin();
+            let resume = ResumeTicket::default();
+            // This run's first pass already ran: a later tick.
+            let mut reconciled = true;
+            pc.tick(&resume, &mut reconciled).await;
+            assert_eq!(pc.paused("op-f").as_deref(), Some("auth"), "asked == done: the auth op stays paused");
+            assert!(pc.has_op("op-g") && pc.has_row("g"), "and no pass ran");
+
+            resume.asked.store(1, SeqCst);
+            pc.tick(&resume, &mut reconciled).await;
+            assert!(!pc.has_op("op-g") && !pc.has_row("g"), "the pass ran first: the ghost was remapped");
+            assert_eq!(pc.op_parent("op-f").as_deref(), Some("t"), "its child now waits under the server folder");
+            assert_eq!(pc.paused("op-f"), None, "then the remaining auth op was resumed");
+            assert_eq!(resume.done.load(SeqCst), 1, "done == asked");
+
+            // The server refuses the session again; with no new ask, nothing is resumed.
+            pc.pause("op-f", "auth");
+            pc.tick(&resume, &mut reconciled).await;
+            assert_eq!(pc.paused("op-f").as_deref(), Some("auth"), "a second call with no new ask resumes nothing");
+            assert_eq!(resume.done.load(SeqCst), 1);
+        }
+
+        /// Review P2 (task 1888): "Upload to my Beebeeb" releases a held ghost folder's create and asks for a pass. Until
+        /// a committed pass has served that ask, the queue sends nothing (at a tick or a send-phase wake: both go
+        /// through `process_due_operations`). The pass then sees the released create and folds the ghost into its twin,
+        /// so it is never sent; and a release resumes no `auth` op, because it is not a sign-in.
+        /// Not on macOS: the queue's pass-owed gate is off there (engine_bridge.rs `process_due_operations`), and macOS
+        /// has no "Upload to my Beebeeb" release.
+        #[cfg(not(target_os = "macos"))]
+        #[tokio::test]
+        async fn a_released_change_is_not_sent_before_a_pass_has_seen_it() {
+            let pc = Pc::new();
+            pc.ghost_with_twin();
+            pc.pause("op-g", "found_while_paused");
+            pc.due_pin("op-pin");
+            // This run's first pass already ran; then the person pressed Upload on the held create.
+            let mut reconciled = true;
+            pc.resume.pass_wanted.fetch_add(1, SeqCst);
+            assert_eq!(pc.bridge.db().release_found_while_paused(&["op-g".to_string()], 200).unwrap(), 1);
+
+            let outcome = pc.bridge.process_due_operations(&pc.root, 200).await.unwrap();
+            assert!(outcome.completed_op_ids.is_empty(), "nothing is sent while a release waits for a pass");
+            assert!(pc.has_op("op-pin") && pc.has_op("op-g"));
+
+            pc.tick(&pc.resume, &mut reconciled).await;
+            assert!(!pc.has_op("op-g") && !pc.has_row("g"), "the pass saw the released create: the ghost was remapped");
+            assert_eq!(pc.op_parent("op-f").as_deref(), Some("t"));
+            assert_eq!(pc.paused("op-f").as_deref(), Some("auth"), "a release resumes no auth op");
+            assert_eq!(pc.resume.pass_served.load(SeqCst), 1, "the release ask is served");
+            assert_eq!(pc.resume.done.load(SeqCst), 0, "and no sign-in ask was");
+
+            let outcome = pc.bridge.process_due_operations(&pc.root, 200).await.unwrap();
+            assert_eq!(outcome.completed_op_ids, vec!["op-pin".to_string()], "after the pass the queue sends again");
+        }
+
+        /// I6: a pass that fails resumes nothing, serves no ask and records no pass for the run, so the next tick tries
+        /// again; once it completes, the resume follows it.
+        #[tokio::test]
+        async fn nothing_is_resumed_when_the_pass_fails() {
+            let pc = Pc::new();
+            pc.ghost_with_twin();
+            // A test-only trigger: deleting the ghost's row fails, so the pass's transaction rolls back.
+            pc.sql(
+                "CREATE TEMP TRIGGER stop_here BEFORE DELETE ON files WHEN OLD.file_id = 'g'
+                 BEGIN SELECT RAISE(ABORT, 'test'); END",
+            );
+            let resume = ResumeTicket::default();
+            resume.asked.store(1, SeqCst);
+            let mut reconciled = false;
+            assert!(pc.bridge.reconcile_then_resume(&pc.root, &resume, &mut reconciled).await.is_err());
+            assert_eq!(pc.paused("op-f").as_deref(), Some("auth"), "no resume without a committed pass");
+            assert!(pc.has_op("op-g"), "the failed transaction left the ghost as it was");
+            assert!(!reconciled, "no pass recorded for this run");
+            assert_eq!(resume.done.load(SeqCst), 0, "the ask stays open");
+
+            pc.sql("DROP TRIGGER stop_here");
+            pc.tick(&resume, &mut reconciled).await;
+            assert!(!pc.has_op("op-g"));
+            assert_eq!(pc.paused("op-f"), None, "the next tick passes, then resumes");
+            assert!(reconciled);
+            assert_eq!(resume.done.load(SeqCst), 1);
+        }
+
+        /// D11's first-tick rule: the first successful tick of an engine run proves the server accepts this session's
+        /// token, so it resumes without a sign-in (a Windows PC that launched offline asks nowhere else), after the
+        /// pass. Only once per run.
+        #[tokio::test]
+        async fn the_first_successful_tick_resumes_without_a_sign_in() {
+            let pc = Pc::new();
+            pc.ghost_with_twin();
+            let resume = ResumeTicket::default();
+            let mut reconciled = false;
+            pc.tick(&resume, &mut reconciled).await;
+            assert!(!pc.has_op("op-g") && !pc.has_row("g"), "the pass ran: the ghost was remapped");
+            assert_eq!(pc.op_parent("op-f").as_deref(), Some("t"));
+            assert_eq!(pc.paused("op-f"), None, "asked == done == 0, and the run's first pass resumed the auth op");
+            assert!(reconciled, "this run's first pass is recorded");
+            assert_eq!(resume.done.load(SeqCst), 0, "no ask was open");
+
+            pc.pause("op-f", "auth");
+            pc.tick(&resume, &mut reconciled).await;
+            assert_eq!(pc.paused("op-f").as_deref(), Some("auth"), "the second call does not resume again");
+        }
+
+        /// D12: every `auth` op whose name is sealed by its own id and carries no shared context is test-decrypted
+        /// under this session's key. One that does not open holds every `auth` op as `key_replaced`; ops paused for
+        /// another reason keep it. All opening: resumed. A shared-context op is not tested; it follows the verdict.
+        #[tokio::test]
+        async fn a_name_that_does_not_open_holds_every_auth_op_as_key_replaced() {
+            // One create sealed under another key.
+            let pc = Pc::new();
+            pc.new_file("op-mine", "f1", None, "a.txt", KEY, "f1");
+            pc.new_file("op-theirs", "f2", None, "b.txt", OTHER_KEY, "f2");
+            pc.op("op-trash", "trash_file", "f3", None, json!({}));
+            pc.new_file("op-quota", "f4", None, "c.txt", KEY, "f4");
+            pc.pause("op-quota", "quota");
+            let resume = ResumeTicket::default();
+            resume.asked.store(1, SeqCst);
+            let mut reconciled = true;
+            pc.tick(&resume, &mut reconciled).await;
+            for op in ["op-mine", "op-theirs", "op-trash"] {
+                assert_eq!(pc.paused(op).as_deref(), Some("key_replaced"), "{op}: every auth op is held");
+            }
+            assert_eq!(pc.paused("op-quota").as_deref(), Some("quota"), "another pause keeps its reason");
+            assert_eq!(resume.done.load(SeqCst), 1, "the ask is served by the hold");
+
+            // A name sealed under this key, but for another file: it does not open by its own id.
+            let pc = Pc::new();
+            pc.new_file("op-mine", "f1", None, "a.txt", KEY, "f1");
+            pc.new_file("op-moved", "f2", None, "b.txt", KEY, "f9");
+            let mut reconciled = false;
+            pc.tick(&ResumeTicket::default(), &mut reconciled).await;
+            assert_eq!(pc.paused("op-mine").as_deref(), Some("key_replaced"));
+            assert_eq!(pc.paused("op-moved").as_deref(), Some("key_replaced"), "keyed by its own id only");
+
+            // All sealed under this key; a shared-context op sealed elsewhere is not tested: resumed.
+            let pc = Pc::new();
+            pc.new_file("op-mine", "f1", None, "a.txt", KEY, "f1");
+            pc.new_file("op-too", "f2", None, "b.txt", KEY, "f2");
+            pc.op(
+                "op-shared",
+                "upload_version",
+                "f3",
+                None,
+                json!({
+                    "operation": "create_file",
+                    "name_encrypted": encrypted_metadata_for_name(&OTHER_KEY, "f3", "c.txt", None).unwrap(),
+                    "shared_root_id": "shared-root",
+                    "share_id": "invite-1",
+                }),
+            );
+            pc.op("op-trash", "trash_file", "f4", None, json!({}));
+            let resume = ResumeTicket::default();
+            resume.asked.store(1, SeqCst);
+            let mut reconciled = true;
+            pc.tick(&resume, &mut reconciled).await;
+            for op in ["op-mine", "op-too", "op-shared", "op-trash"] {
+                assert_eq!(pc.paused(op), None, "{op}: resumed");
+            }
+            assert_eq!(resume.done.load(SeqCst), 1);
+        }
+
+        /// Spec D5, anti-goal 3: the scaffolding directories a pass dropped are removed deepest first with
+        /// `remove_dir`, never recursively, and never one that holds something or lies outside the sync root.
+        #[test]
+        fn scaffold_directories_are_removed_bottom_up_and_never_when_they_hold_something() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join("Beebeeb");
+            std::fs::create_dir_all(root.join("Backups/unknown/A")).unwrap();
+            std::fs::create_dir_all(root.join("Backups/unknown/B")).unwrap();
+            std::fs::write(root.join("Backups/unknown/B/keep.txt"), b"x").unwrap();
+            std::fs::create_dir_all(dir.path().join("outside")).unwrap();
+            remove_scaffold_dirs(
+                &root,
+                &[
+                    "Backups/unknown".to_string(),
+                    "Backups/unknown/A".to_string(),
+                    "Backups/unknown/B".to_string(),
+                    "../outside".to_string(),
+                    "Missing/X".to_string(),
+                    String::new(),
+                ],
+            );
+            assert!(!root.join("Backups/unknown/A").exists(), "an empty one is removed");
+            assert!(root.join("Backups/unknown/B/keep.txt").exists(), "one that holds a file stays, file and all");
+            assert!(root.join("Backups/unknown").exists(), "its parent is not empty: it stays");
+            assert!(dir.path().join("outside").exists(), "never outside the sync root");
+            assert!(root.exists(), "never the sync root itself");
+
+            // Listed top-down, removed bottom-up: both go.
+            std::fs::create_dir_all(root.join("Backups/other/C")).unwrap();
+            remove_scaffold_dirs(&root, &["Backups/other".to_string(), "Backups/other/C".to_string()]);
+            assert!(!root.join("Backups/other").exists(), "the parent goes once its child is gone");
+            assert!(root.join("Backups").exists(), "what was not listed stays");
+        }
     }
 }

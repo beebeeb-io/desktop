@@ -1,74 +1,27 @@
-//! Window-state v2 for the macOS Settings window (spec section 6 rule 8).
+//! Where the Beebeeb window opens (two-surface spec `docs/specs/2026-10-24-macos-two-surface-app.md` §7.2, task 1683
+//! slice 1): the answer to "randomly in the screen".
 //!
-//! Why this exists: every 0.8.x install already has a `settings` entry in
-//! `.window-state.json` that was saved from POPOVER mode (`decorated: false`, a
-//! position under the menu bar, a 680 x 540 pt size). Narrowing the plugin's
-//! flags would still restore that stale entry into the new 560 pt Settings
-//! window and recreate P2 ("window appears at a random place") for exactly the
-//! users who complained. So the macOS build gets a new file name, tracks one
-//! label, and validates whatever it restores with [`validate_restore`].
+//! - First open: centred on the display that holds the menu-bar icon.
+//! - After that: where it was left, at the size it was left; never its visibility, never full screen or zoomed.
+//! - Off-screen guard: if less than half of that frame is on a connected display, centre it again as on first open.
 //!
-//! What this file does NOT decide: whether a valid saved position beats the
-//! top-right anchor from [`super::anchor::place_settings`]. Ruling 6 says
-//! Settings opens top right under the menu bar on the icon's display; rule 8
-//! (written before that ruling) said "else centre". Slice 6 picks; this file
-//! only says which saved entries are safe to use. It also never centres.
+//! **Logical points, per display.** On a Mac, tao and tray-icon report every position as points × the scale of the
+//! window or display it belongs to, so one "physical" number means different places on a 2× built-in and a 1×
+//! external (review item 5 on PR #134). Everything here is in logical points (macOS global coordinates, top-left
+//! origin): a display is its physical frame divided by its own scale, which is exact, and the window is placed with
+//! logical sizes and positions, which AppKit takes as points on whichever display they fall on. For the same reason
+//! the window-state plugin is not used on a Mac: it stores physical numbers without their scale, which cannot be
+//! placed back on a mixed-DPI desk. `lib.rs` keeps the frame itself ([`MAIN_FRAME_FILENAME`], logical points),
+//! written when the window closes and when the app quits, and plans the whole placement before it applies any of it
+//! (review item 4). Windows and Linux keep the plugin, its default file and its denylist, unchanged.
 
-use serde::Deserialize;
-use std::collections::HashMap;
-use tauri_plugin_window_state::StateFlags;
+use serde::{Deserialize, Serialize};
 
-use super::anchor::SETTINGS_WIDTH;
+/// The Beebeeb window's frame on a Mac, in logical points, in the app's config directory. A new name: nothing a
+/// 0.8.x build wrote is ever read back.
+pub const MAIN_FRAME_FILENAME: &str = "main-window-frame.json";
 
-/// New file name, so the v1 `.window-state.json` written by every 0.8.x popover
-/// is never read by the macOS build. (Windows and Linux keep the default file.)
-pub const FILENAME_V2: &str = "window-state-v2.json";
-
-/// The only label the macOS build tracks. The plugin's flags are global per
-/// builder, not per label; the filter is what selects labels.
-pub const TRACKED_LABEL: &str = "settings";
-
-/// `with_filter` callback: `true` saves and restores the window, `false` skips it.
-pub fn tracks_label(label: &str) -> bool {
-    label == TRACKED_LABEL
-}
-
-/// Size and position only. Never DECORATIONS (the old file's poison), VISIBLE
-/// (the plugin force-shows a window with no entry), MAXIMIZED or FULLSCREEN.
-pub fn state_flags() -> StateFlags {
-    StateFlags::SIZE | StateFlags::POSITION
-}
-
-/// One entry of the plugin's state file. Field names and units are the
-/// plugin's: physical pixels, global desktop coordinates. Keys the plugin
-/// writes that we do not need (`prev_x`, `prev_y`) are ignored.
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
-pub struct SavedWindowState {
-    pub width: u32,
-    pub height: u32,
-    pub x: i32,
-    pub y: i32,
-    #[serde(default)]
-    pub maximized: bool,
-    #[serde(default = "yes")]
-    pub visible: bool,
-    #[serde(default = "yes")]
-    pub decorated: bool,
-    #[serde(default)]
-    pub fullscreen: bool,
-}
-
-fn yes() -> bool {
-    true
-}
-
-/// Pull the `settings` entry out of a state file's JSON (`{"<label>": {..}}`).
-pub fn settings_entry_from_file(json: &str) -> Option<SavedWindowState> {
-    let mut map: HashMap<String, SavedWindowState> = serde_json::from_str(json).ok()?;
-    map.remove(TRACKED_LABEL)
-}
-
-/// A physical-pixel rectangle.
+/// A physical-pixel rectangle as tauri reports a monitor (`Monitor::position` + `size`, `Monitor::work_area`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PRect {
     pub x: i32,
@@ -77,483 +30,350 @@ pub struct PRect {
     pub h: u32,
 }
 
-impl PRect {
-    fn right(&self) -> i64 {
-        self.x as i64 + self.w as i64
+/// A rectangle in logical points.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct LRect {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+impl LRect {
+    fn right(&self) -> f64 {
+        self.x + self.w
     }
-    fn bottom(&self) -> i64 {
-        self.y as i64 + self.h as i64
+    fn bottom(&self) -> f64 {
+        self.y + self.h
     }
-    fn contains_rect(&self, inner: &PRect) -> bool {
-        (inner.x as i64) >= (self.x as i64)
-            && (inner.y as i64) >= (self.y as i64)
-            && inner.right() <= self.right()
-            && inner.bottom() <= self.bottom()
+    fn area(&self) -> f64 {
+        self.w.max(0.0) * self.h.max(0.0)
+    }
+    fn contains(&self, x: f64, y: f64) -> bool {
+        x >= self.x && x < self.right() && y >= self.y && y < self.bottom()
+    }
+    fn overlap(&self, other: &LRect) -> f64 {
+        let w = self.right().min(other.right()) - self.x.max(other.x);
+        let h = self.bottom().min(other.bottom()) - self.y.max(other.y);
+        if w <= 0.0 || h <= 0.0 { 0.0 } else { w * h }
+    }
+    fn is_usable(&self) -> bool {
+        [self.x, self.y, self.w, self.h].iter().all(|v| v.is_finite()) && self.w > 0.0 && self.h > 0.0
     }
 }
 
-/// Height of the macOS title bar in points. The plugin's stored size omits it.
-pub const TITLE_BAR_POINTS: f64 = 28.0;
+fn valid_scale(scale: f64) -> f64 {
+    if scale.is_finite() && scale > 0.0 { scale } else { 1.0 }
+}
 
-fn scale_of(d: &PhysicalDisplay) -> f64 {
-    if d.scale_factor.is_finite() && d.scale_factor > 0.0 {
-        d.scale_factor
-    } else {
-        1.0
+fn logical(rect: PRect, scale: f64) -> LRect {
+    let s = valid_scale(scale);
+    LRect {
+        x: rect.x as f64 / s,
+        y: rect.y as f64 / s,
+        w: rect.w as f64 / s,
+        h: rect.h as f64 / s,
     }
 }
 
-/// `inner` (what the plugin stored) grown by the title bar at `scale`.
-fn outer_rect(inner: &PRect, scale: f64) -> PRect {
-    PRect {
-        h: inner.h.saturating_add((TITLE_BAR_POINTS * scale).round() as u32),
-        ..*inner
-    }
-}
-
-/// A display as tauri reports it: `Monitor::work_area()` (physical, excludes the
-/// menu bar, notch band and Dock) and its scale factor.
+/// A display in logical points, built from what tauri reports (each value is that display's points × its scale), with
+/// the scale it was built with.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PhysicalDisplay {
-    pub work_area: PRect,
-    pub scale_factor: f64,
+pub struct Display {
+    pub frame: LRect,
+    pub work_area: LRect,
+    pub scale: f64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IgnoreReason {
-    /// No entry in the file.
-    NoEntry,
-    /// `decorated: false`. Settings is always decorated, so this entry was
-    /// saved from popover mode: the exact poison this module exists to drop.
-    PopoverEra,
-    Maximized,
-    Fullscreen,
-    /// Zero width or height: the plugin's own "default" placeholder entry.
-    Degenerate,
-    /// The saved width is not the new window's width (the old one was 680 pt).
-    WrongWidth,
-    /// Not fully inside any connected display's work area (display unplugged,
-    /// resolution changed, or a position under the menu bar).
-    OffScreen,
+impl Display {
+    pub fn from_physical(frame: PRect, work_area: PRect, scale: f64) -> Display {
+        Display {
+            frame: logical(frame, scale),
+            work_area: logical(work_area, scale),
+            scale: valid_scale(scale),
+        }
+    }
+
+    /// The menu bar's height: the band between the display's top and its work area (0 with an auto-hiding menu bar).
+    fn menu_bar_height(&self) -> f64 {
+        (self.work_area.y - self.frame.y).max(0.0)
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum RestoreDecision {
-    /// Safe to use. `display` indexes the `displays` slice.
-    Restore {
-        rect: PRect,
-        display: usize,
-    },
-    Ignore(IgnoreReason),
-}
-
-/// Decide whether a saved entry may be applied to the Settings window.
-pub fn validate_restore(saved: Option<&SavedWindowState>, displays: &[PhysicalDisplay]) -> RestoreDecision {
-    use IgnoreReason::*;
-    let Some(s) = saved else {
-        return RestoreDecision::Ignore(NoEntry);
-    };
-    if !s.decorated {
-        return RestoreDecision::Ignore(PopoverEra);
-    }
-    if s.maximized {
-        return RestoreDecision::Ignore(Maximized);
-    }
-    if s.fullscreen {
-        return RestoreDecision::Ignore(Fullscreen);
-    }
-    if s.width == 0 || s.height == 0 {
-        return RestoreDecision::Ignore(Degenerate);
-    }
-    let rect = PRect {
-        x: s.x,
-        y: s.y,
-        w: s.width,
-        h: s.height,
-    };
-    // The plugin stores the OUTER position but the INNER size, so `rect` has no
-    // title bar. Settings is decorated: its real extent is `rect` plus the title
-    // bar on the bottom edge (the top edge is the stored outer y). Test the
-    // outer extent, with the title bar converted at each candidate display's own
-    // scale.
-    let Some(display) = displays
+/// The display holding the menu-bar icon, from tray-icon's rect (points × the icon's own scale). A display holds the
+/// icon when, read at that display's scale, the icon's centre is inside it. One holder is the answer. On a mixed-DPI
+/// desk two can hold the same numbers (2800 px is 1400 pt on a 2× built-in and 2800 pt on a 1× external to its right);
+/// then the one whose menu bar is as tall as the icon wins (review round 2, P2-4: the height only breaks a tie).
+/// `None` when no display holds it, or the tie stays (the caller then uses the primary display).
+pub fn icon_display(icon: PRect, displays: &[Display]) -> Option<usize> {
+    let read = |display: &Display| logical(icon, display.scale);
+    let holders: Vec<usize> = displays
         .iter()
-        .position(|d| d.work_area.contains_rect(&outer_rect(&rect, scale_of(d))))
-    else {
-        return RestoreDecision::Ignore(OffScreen);
-    };
-    let scale = scale_of(&displays[display]);
-    // One logical pixel of slack for rounding on fractional scales.
-    if (rect.w as f64 / scale - SETTINGS_WIDTH).abs() > 1.0 {
-        return RestoreDecision::Ignore(WrongWidth);
+        .enumerate()
+        .filter(|(_, display)| {
+            let at = read(display);
+            display.frame.contains(at.x + at.w / 2.0, at.y + at.h / 2.0)
+        })
+        .map(|(index, _)| index)
+        .collect();
+    if holders.len() <= 1 {
+        return holders.first().copied();
     }
-    RestoreDecision::Restore { rect, display }
+    let fitting: Vec<usize> = holders
+        .into_iter()
+        .filter(|&index| {
+            let display = &displays[index];
+            let bar = display.menu_bar_height();
+            bar > 0.0 && (read(display).h - bar).abs() <= 6.0
+        })
+        .collect();
+    if fitting.len() == 1 { Some(fitting[0]) } else { None }
+}
+
+/// The frame that centres `size` in the display's work area. A window larger than the work area keeps its top-left
+/// corner inside it, so its title bar is always reachable.
+pub fn centred(size: (f64, f64), display: &Display) -> LRect {
+    let area = display.work_area;
+    LRect {
+        x: (area.x + (area.w - size.0) / 2.0).max(area.x),
+        y: (area.y + (area.h - size.1) / 2.0).max(area.y),
+        w: size.0,
+        h: size.1,
+    }
+}
+
+/// Spec §7.2's guard: at least half of `frame` lies on the work areas of connected displays.
+pub fn mostly_on_screen(frame: LRect, displays: &[Display]) -> bool {
+    let total = frame.area();
+    if total <= 0.0 {
+        return false;
+    }
+    let on: f64 = displays.iter().map(|d| frame.overlap(&d.work_area)).sum();
+    on * 2.0 >= total
+}
+
+/// The frame to keep when the window closes or the app quits: its outer position and its size, each divided by the
+/// window's own scale. A full-screen or zoomed window keeps nothing, so the last ordinary frame stays (review item
+/// 8: a full-screen or zoomed frame is never restored as an ordinary, screen-sized window).
+pub fn frame_to_keep(
+    position: (i32, i32),
+    size: (u32, u32),
+    scale: f64,
+    fullscreen: bool,
+    zoomed: bool,
+) -> Option<LRect> {
+    if fullscreen || zoomed {
+        return None;
+    }
+    let frame = logical(
+        PRect {
+            x: position.0,
+            y: position.1,
+            w: size.0,
+            h: size.1,
+        },
+        scale,
+    );
+    frame.is_usable().then_some(frame)
+}
+
+/// The kept frame, read back from [`MAIN_FRAME_FILENAME`]; anything that is not a usable frame is no frame.
+pub fn parse_kept_frame(json: &str) -> Option<LRect> {
+    serde_json::from_str::<LRect>(json).ok().filter(LRect::is_usable)
+}
+
+/// The whole placement, decided before any of it is applied: the kept frame when at least half of it is on screen;
+/// else centred on the icon's display, else on `primary`, at the kept size (review round 2: an off-screen recovery
+/// keeps the size it was left at) or, with no kept frame, at `default_size` (the window's own config).
+pub fn plan_main_window(
+    kept: Option<LRect>,
+    displays: &[Display],
+    icon: Option<usize>,
+    primary: usize,
+    default_size: (f64, f64),
+) -> Option<LRect> {
+    let kept = kept.filter(LRect::is_usable);
+    if let Some(frame) = kept.filter(|frame| mostly_on_screen(*frame, displays)) {
+        return Some(frame);
+    }
+    let display = icon
+        .and_then(|i| displays.get(i))
+        .or_else(|| displays.get(primary))
+        .or_else(|| displays.first())?;
+    Some(centred(kept.map_or(default_size, |frame| (frame.w, frame.h)), display))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A real 0.8.x `.window-state.json` shape (the plugin writes every key),
-    /// with the `settings` entry a popover left behind: undecorated, 680 x 540
-    /// pt at 2x, just under the menu bar near the status item.
-    const OLD_POPOVER_FILE: &str = r#"{
-      "settings": {"width":1360,"height":1080,"x":1704,"y":34,"prev_x":1704,"prev_y":34,
-                   "maximized":false,"visible":true,"decorated":false,"fullscreen":false},
-      "onboarding": {"width":1720,"height":1280,"x":640,"y":260,"prev_x":640,"prev_y":260,
-                   "maximized":false,"visible":true,"decorated":true,"fullscreen":false}
-    }"#;
+    const SIZE: (f64, f64) = (920.0, 620.0);
 
-    // 14" MacBook Pro built-in (2x, work area below the 74 px notch band and
-    // above a 90 px Dock) plus a 1x external to its right.
-    fn displays() -> [PhysicalDisplay; 2] {
+    // Review item 5's desk: a 14" built-in at 2× (1512 × 982 pt; a 37 pt menu bar with the notch, a 70 pt Dock) and a
+    // 1× external to its right (1920 × 1080 pt, a 25 pt menu bar). As tauri reports them: points × each one's scale.
+    const BUILT_IN: f64 = 2.0;
+    const EXTERNAL: f64 = 1.0;
+    fn desk() -> [Display; 2] {
         [
-            PhysicalDisplay {
-                work_area: PRect {
-                    x: 0,
-                    y: 74,
-                    w: 3024,
-                    h: 1800,
-                },
-                scale_factor: 2.0,
-            },
-            PhysicalDisplay {
-                work_area: PRect {
-                    x: 3024,
-                    y: 24,
-                    w: 1920,
-                    h: 1025,
-                },
-                scale_factor: 1.0,
-            },
+            Display::from_physical(
+                PRect { x: 0, y: 0, w: 3024, h: 1964 },
+                PRect { x: 0, y: 74, w: 3024, h: 1750 },
+                BUILT_IN,
+            ),
+            Display::from_physical(
+                PRect { x: 1512, y: 0, w: 1920, h: 1080 },
+                PRect { x: 1512, y: 25, w: 1920, h: 1055 },
+                EXTERNAL,
+            ),
         ]
     }
 
-    fn valid() -> SavedWindowState {
-        SavedWindowState {
-            width: 1120, // 560 pt at 2x
-            height: 800,
-            x: 1800,
-            y: 80,
-            maximized: false,
-            visible: true,
-            decorated: true,
-            fullscreen: false,
-        }
-    }
-
-    #[test]
-    fn filter_tracks_settings_and_nothing_else() {
-        assert!(tracks_label("settings"));
-        for other in [
-            "popover",
-            "onboarding",
-            "review",
-            "tray",
-            "windows-onboarding",
-            "main-app",
-            "conflict-abc",
-            "",
-            "Settings",
-            "settings2",
-        ] {
-            assert!(!tracks_label(other), "{other:?} must not be tracked");
-        }
-    }
-
-    #[test]
-    fn flags_are_size_and_position_only() {
-        let f = state_flags();
-        assert!(f.contains(StateFlags::SIZE) && f.contains(StateFlags::POSITION));
-        for poison in [
-            StateFlags::DECORATIONS,
-            StateFlags::VISIBLE,
-            StateFlags::MAXIMIZED,
-            StateFlags::FULLSCREEN,
-        ] {
-            assert!(!f.intersects(poison), "{poison:?} must not be restored");
-        }
-    }
-
-    #[test]
-    fn v2_file_name_never_reads_the_v1_file() {
-        assert_ne!(FILENAME_V2, tauri_plugin_window_state::DEFAULT_FILENAME);
-        assert_eq!(FILENAME_V2, "window-state-v2.json");
-    }
-
-    /// Type-checked, never instantiated. Do NOT call it with `tauri::Wry`: that
-    /// links the real webview runtime into the test executable, and on Windows
-    /// the lib test binary then fails to start (STATUS_ENTRYPOINT_NOT_FOUND,
-    /// 0xc0000139, a comctl32 v6 import with no manifest) - found by CI on PR #82.
-    #[allow(dead_code)]
-    fn plugin_for_macos<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
-        tauri_plugin_window_state::Builder::default()
-            .with_filename(FILENAME_V2)
-            .with_filter(tracks_label)
-            .with_state_flags(state_flags())
-            .skip_initial_state(TRACKED_LABEL)
-            .build::<R>()
-    }
-
-    #[test]
-    fn the_plugin_builder_accepts_this_configuration() {
-        // The generic fn above is the compile-time proof that tauri-plugin-window-state
-        // 2.4 has every knob rule 8 depends on (`with_filename`, `with_filter`,
-        // `with_state_flags`, `skip_initial_state`). This runs the builder half,
-        // which needs no runtime, so nothing webview-shaped is linked.
-        let _builder = tauri_plugin_window_state::Builder::default()
-            .with_filename(FILENAME_V2)
-            .with_filter(tracks_label)
-            .with_state_flags(state_flags())
-            .skip_initial_state(TRACKED_LABEL);
-    }
-
-    #[test]
-    fn the_old_popover_entry_is_ignored() {
-        let entry = settings_entry_from_file(OLD_POPOVER_FILE).expect("fixture has a settings entry");
-        assert!(!entry.decorated, "fixture must be the popover-era entry");
-        assert_eq!(
-            validate_restore(Some(&entry), &displays()),
-            RestoreDecision::Ignore(IgnoreReason::PopoverEra)
-        );
-    }
-
-    #[test]
-    fn the_old_popover_entry_is_ignored_even_if_it_were_decorated() {
-        // Defence in depth: flip the decorated flag and the entry is STILL not
-        // used, because its y (34 px) lies under the menu bar, outside the work
-        // area (top 74 px).
-        let mut entry = settings_entry_from_file(OLD_POPOVER_FILE).unwrap();
-        entry.decorated = true;
-        assert_eq!(
-            validate_restore(Some(&entry), &displays()),
-            RestoreDecision::Ignore(IgnoreReason::OffScreen)
-        );
-    }
-
-    #[test]
-    fn the_old_680_pt_width_is_ignored_even_at_a_valid_position() {
-        // A regular-mode 0.8.x entry: decorated, on screen, but 680 pt wide
-        // (1360 px at 2x) where the new window is 560 pt.
-        let entry = SavedWindowState {
-            width: 1360,
-            height: 1080,
-            x: 800,
-            y: 300,
-            ..valid()
-        };
-        assert_eq!(
-            validate_restore(Some(&entry), &displays()),
-            RestoreDecision::Ignore(IgnoreReason::WrongWidth)
-        );
-    }
-
-    #[test]
-    fn a_good_entry_is_restored_with_its_display() {
-        assert_eq!(
-            validate_restore(Some(&valid()), &displays()),
-            RestoreDecision::Restore {
-                rect: PRect {
-                    x: 1800,
-                    y: 80,
-                    w: 1120,
-                    h: 800
-                },
-                display: 0
-            }
-        );
-    }
-
-    #[test]
-    fn width_is_judged_against_the_display_it_lands_on() {
-        // 560 pt on the 1x external is 560 px; the same 1120 px there is 1120 pt.
-        let on_external = SavedWindowState {
-            width: 560,
-            x: 3100,
-            y: 100,
-            height: 400,
-            ..valid()
-        };
-        assert!(matches!(
-            validate_restore(Some(&on_external), &displays()),
-            RestoreDecision::Restore { display: 1, .. }
-        ));
-        let too_wide_there = SavedWindowState {
-            width: 1120,
-            ..on_external
-        };
-        assert_eq!(
-            validate_restore(Some(&too_wide_there), &displays()),
-            RestoreDecision::Ignore(IgnoreReason::WrongWidth)
-        );
-    }
-
-    #[test]
-    fn entries_outside_every_work_area_are_ignored() {
-        // Off the right edge, under the menu bar (y < work area top), below the
-        // Dock, and on a display that has been unplugged.
-        for (x, y) in [(2500, 80), (1800, 20), (1800, 1300), (9000, 100)] {
-            let s = SavedWindowState { x, y, ..valid() };
-            assert_eq!(
-                validate_restore(Some(&s), &displays()),
-                RestoreDecision::Ignore(IgnoreReason::OffScreen),
-                "({x}, {y})"
-            );
-        }
-    }
-
-    #[test]
-    fn the_title_bar_counts_towards_fitting_inside_the_work_area() {
-        // The plugin stores the window's OUTER position and its INNER size.
-        // Settings is decorated, so the real window also covers a title bar
-        // (28 pt, 56 px at 2x) that the stored size leaves out. Display 0's work
-        // area ends at y = 74 + 1800 = 1874.
-        let just_fits = SavedWindowState {
-            y: 1874 - 800 - 56,
-            ..valid()
-        };
-        let under_the_dock = SavedWindowState {
-            y: 1874 - 800,
-            ..valid()
-        };
-        let d = displays();
-        assert!(
-            matches!(
-                validate_restore(Some(&just_fits), &d),
-                RestoreDecision::Restore { display: 0, .. }
-            ),
-            "outer bottom is exactly the work area bottom"
-        );
-        assert_eq!(
-            validate_restore(Some(&under_the_dock), &d),
-            RestoreDecision::Ignore(IgnoreReason::OffScreen),
-            "the inner rect fits but the title bar puts the outer bottom under the Dock"
-        );
-        // The boundary at 2x is 56 px, not 28: one px short of it is out.
-        let d2 = displays();
-        assert_eq!(
-            validate_restore(
-                Some(&SavedWindowState {
-                    y: 1874 - 800 - 55,
-                    ..valid()
-                }),
-                &d2
-            ),
-            RestoreDecision::Ignore(IgnoreReason::OffScreen),
-            "the title bar is 28 pt, so 56 px on a 2x display"
-        );
-        // On the 1x external the title bar is 28 px: work area ends at 24 + 1025.
-        let external = |y| SavedWindowState {
-            width: 560,
-            height: 400,
-            x: 3100,
-            y,
-            ..valid()
-        };
-        assert!(matches!(
-            validate_restore(Some(&external(1049 - 400 - 28)), &d),
-            RestoreDecision::Restore { display: 1, .. }
-        ));
-        assert_eq!(
-            validate_restore(Some(&external(1049 - 400 - 27)), &d),
-            RestoreDecision::Ignore(IgnoreReason::OffScreen)
-        );
-    }
-
-    #[test]
-    fn a_window_spanning_two_displays_is_not_fully_inside_either() {
-        let s = SavedWindowState {
-            x: 2500,
-            width: 1120,
-            ..valid()
-        };
-        assert_eq!(
-            validate_restore(Some(&s), &displays()),
-            RestoreDecision::Ignore(IgnoreReason::OffScreen)
-        );
-    }
-
-    #[test]
-    fn every_other_reason_is_reported_on_its_own() {
-        let d = displays();
-        assert_eq!(
-            validate_restore(None, &d),
-            RestoreDecision::Ignore(IgnoreReason::NoEntry)
-        );
-        assert_eq!(
-            validate_restore(
-                Some(&SavedWindowState {
-                    maximized: true,
-                    ..valid()
-                }),
-                &d
-            ),
-            RestoreDecision::Ignore(IgnoreReason::Maximized)
-        );
-        assert_eq!(
-            validate_restore(
-                Some(&SavedWindowState {
-                    fullscreen: true,
-                    ..valid()
-                }),
-                &d
-            ),
-            RestoreDecision::Ignore(IgnoreReason::Fullscreen)
-        );
-        // The plugin inserts an all-zero placeholder for a tracked window with
-        // no disk entry (`visible` and `decorated` default to true).
-        let placeholder = SavedWindowState {
-            width: 0,
-            height: 0,
-            x: 0,
+    /// The status item as tray-icon reports it: its frame in points × its own display's scale.
+    fn icon_at(points_x: f64, bar_height: f64, scale: f64) -> PRect {
+        PRect {
+            x: (points_x * scale) as i32,
             y: 0,
-            ..valid()
-        };
-        assert_eq!(
-            validate_restore(Some(&placeholder), &d),
-            RestoreDecision::Ignore(IgnoreReason::Degenerate)
-        );
+            w: (24.0 * scale) as u32,
+            h: (bar_height * scale) as u32,
+        }
     }
 
     #[test]
-    fn no_displays_restores_nothing() {
-        assert_eq!(
-            validate_restore(Some(&valid()), &[]),
-            RestoreDecision::Ignore(IgnoreReason::OffScreen)
-        );
+    fn a_display_is_its_physical_frame_over_its_own_scale() {
+        let d = desk();
+        assert_eq!(d[0].frame, LRect { x: 0.0, y: 0.0, w: 1512.0, h: 982.0 });
+        assert_eq!((d[0].scale, d[1].scale), (BUILT_IN, EXTERNAL));
+        assert_eq!(d[0].work_area, LRect { x: 0.0, y: 37.0, w: 1512.0, h: 875.0 });
+        assert_eq!(d[1].frame, LRect { x: 1512.0, y: 0.0, w: 1920.0, h: 1080.0 });
     }
 
     #[test]
-    fn a_bad_scale_factor_is_treated_as_one_not_a_division_by_zero() {
-        let d = [PhysicalDisplay {
-            work_area: PRect {
-                x: 0,
-                y: 24,
-                w: 1920,
-                h: 1025,
-            },
-            scale_factor: 0.0,
-        }];
-        let s = SavedWindowState {
-            width: 560,
-            x: 100,
-            y: 100,
-            height: 400,
-            ..valid()
-        };
-        assert!(matches!(
-            validate_restore(Some(&s), &d),
-            RestoreDecision::Restore { .. }
-        ));
+    fn the_icon_names_its_display_on_a_mixed_dpi_desk_on_either_display() {
+        let d = desk();
+        // On the built-in at x = 1400 pt: physical 2800, which at 1× would also fall on the external (1512..3432 pt).
+        // Only the built-in's 37 pt menu bar is as tall as the icon (74 px / 2).
+        assert_eq!(icon_display(icon_at(1400.0, 37.0, BUILT_IN), &d), Some(0));
+        // On the external at x = 2900 pt: physical 2900, which at 2× would also fall on the built-in (1450 pt). Only
+        // the external's 25 pt menu bar is as tall as the icon.
+        assert_eq!(icon_display(icon_at(2900.0, 25.0, EXTERNAL), &d), Some(1));
+        assert_eq!(icon_display(icon_at(3300.0, 25.0, EXTERNAL), &d), Some(1));
     }
 
     #[test]
-    fn a_missing_settings_entry_or_garbage_yields_none() {
-        assert_eq!(
-            settings_entry_from_file(r#"{"onboarding":{"width":1,"height":1,"x":0,"y":0}}"#),
-            None
-        );
-        assert_eq!(settings_entry_from_file("not json"), None);
-        assert_eq!(settings_entry_from_file("{}"), None);
+    fn one_display_holding_the_icon_names_it_whatever_the_icon_height() {
+        // Review round 2, P2-4: the height only breaks a tie. A single display that holds the icon is its display,
+        // also when its menu bar is not the 37 pt the notch draws (a 39 pt bar, a bigger text size).
+        let d = desk();
+        assert_eq!(icon_display(icon_at(1400.0, 39.0, BUILT_IN), &d[..1]), Some(0));
+        // On the external alone, with a 30 pt bar.
+        assert_eq!(icon_display(icon_at(1600.0, 30.0, EXTERNAL), &d[1..]), Some(0));
+        // Two 2× displays side by side: only one contains the icon at their (equal) scale, whatever its height.
+        let twins = [
+            Display::from_physical(PRect { x: 0, y: 0, w: 3024, h: 1964 }, PRect { x: 0, y: 74, w: 3024, h: 1750 }, 2.0),
+            Display::from_physical(PRect { x: 3024, y: 0, w: 3024, h: 1964 }, PRect { x: 3024, y: 50, w: 3024, h: 1774 }, 2.0),
+        ];
+        assert_eq!(icon_display(icon_at(1400.0, 40.0, 2.0), &twins), Some(0));
+        assert_eq!(icon_display(icon_at(2900.0, 40.0, 2.0), &twins), Some(1));
+    }
+
+    #[test]
+    fn off_screen_recovery_keeps_the_kept_size() {
+        // Review round 2, P3: centred again, at the size it was left, not the default.
+        let d = desk();
+        let gone = LRect { x: 4000.0, y: 100.0, w: 1000.0, h: 700.0 };
+        assert_eq!(plan_main_window(Some(gone), &d, Some(1), 0, SIZE), Some(centred((1000.0, 700.0), &d[1])));
+    }
+
+    #[test]
+    fn an_icon_no_display_claims_or_two_displays_claim_is_unknown() {
+        let d = desk();
+        assert_eq!(icon_display(icon_at(9000.0, 25.0, EXTERNAL), &d), None);
+        // Auto-hiding menu bars: no height to tell the displays apart, and both fit, so the caller's primary decides.
+        let hidden = [
+            Display { work_area: d[0].frame, ..d[0] },
+            Display { work_area: d[1].frame, ..d[1] },
+        ];
+        assert_eq!(icon_display(icon_at(1400.0, 37.0, BUILT_IN), &hidden), None);
+    }
+
+    #[test]
+    fn first_open_centres_on_the_icon_display_in_points_whichever_display_holds_it() {
+        let d = desk();
+        // Built-in work area 1512 × 875 from y 37: (1512 - 920) / 2 = 296, 37 + (875 - 620) / 2 = 164.5.
+        assert_eq!(plan_main_window(None, &d, Some(0), 0, SIZE), Some(LRect { x: 296.0, y: 164.5, w: 920.0, h: 620.0 }));
+        // External work area 1920 × 1055 from (1512, 25): 1512 + 500, 25 + 217.5.
+        assert_eq!(plan_main_window(None, &d, Some(1), 0, SIZE), Some(LRect { x: 2012.0, y: 242.5, w: 920.0, h: 620.0 }));
+        // No icon display: the primary.
+        assert_eq!(plan_main_window(None, &d, None, 1, SIZE), plan_main_window(None, &d, Some(1), 0, SIZE));
+    }
+
+    #[test]
+    fn a_kept_frame_on_the_external_comes_back_exactly_as_it_was_left() {
+        let d = desk();
+        // Left on the 1× external at (2200, 300) pt, 1000 × 700: what `frame_to_keep` writes from tao's numbers.
+        let kept = frame_to_keep((2200, 300), (1000, 700), EXTERNAL, false, false).unwrap();
+        assert_eq!(kept, LRect { x: 2200.0, y: 300.0, w: 1000.0, h: 700.0 });
+        assert_eq!(plan_main_window(Some(kept), &d, Some(0), 0, SIZE), Some(kept));
+        // Left on the 2× built-in at (100, 80) pt, 920 × 620: tao reports (200, 160) and 1840 × 1240.
+        let kept = frame_to_keep((200, 160), (1840, 1240), BUILT_IN, false, false).unwrap();
+        assert_eq!(kept, LRect { x: 100.0, y: 80.0, w: 920.0, h: 620.0 });
+        assert_eq!(plan_main_window(Some(kept), &d, Some(1), 0, SIZE), Some(kept));
+    }
+
+    #[test]
+    fn exactly_half_on_screen_is_kept_and_less_than_half_is_centred_again() {
+        let d = desk();
+        // The desk's right edge is 3432 pt.
+        let at = |x| LRect { x, y: 200.0, w: 920.0, h: 620.0 };
+        assert!(mostly_on_screen(at(3432.0 - 460.0), &d), "460 of 920 points on screen: half");
+        assert!(!mostly_on_screen(at(3432.0 - 459.0), &d), "459 of 920: less than half");
+        assert_eq!(plan_main_window(Some(at(3432.0 - 459.0)), &d, Some(0), 1, SIZE), plan_main_window(None, &d, Some(0), 1, SIZE));
+    }
+
+    #[test]
+    fn a_frame_on_a_display_that_was_unplugged_is_centred_on_the_icon_display() {
+        let d = desk();
+        let gone = LRect { x: 4000.0, y: 100.0, w: 920.0, h: 620.0 };
+        assert_eq!(plan_main_window(Some(gone), &d, Some(1), 0, SIZE), plan_main_window(None, &d, Some(1), 0, SIZE));
+        // Unplugged with only the built-in left.
+        assert_eq!(plan_main_window(Some(gone), &d[..1], Some(0), 0, SIZE), plan_main_window(None, &d[..1], Some(0), 0, SIZE));
+    }
+
+    #[test]
+    fn a_full_screen_or_zoomed_window_keeps_no_frame() {
+        assert_eq!(frame_to_keep((0, 0), (3024, 1964), BUILT_IN, true, false), None);
+        assert_eq!(frame_to_keep((0, 74), (3024, 1750), BUILT_IN, false, true), None);
+        assert!(frame_to_keep((200, 160), (1840, 1240), BUILT_IN, false, false).is_some());
+    }
+
+    #[test]
+    fn under_the_menu_bar_counts_as_off_the_work_area() {
+        let d = desk();
+        // 620 tall, only its bottom 200 pt below the built-in's 37 pt menu bar band: less than half on screen.
+        assert!(!mostly_on_screen(LRect { x: 100.0, y: 37.0 + 200.0 - 620.0, w: 920.0, h: 620.0 }, &d));
+    }
+
+    #[test]
+    fn a_window_larger_than_the_work_area_keeps_its_title_bar_on_screen() {
+        let d = desk();
+        assert_eq!(centred((4000.0, 3000.0), &d[1]), LRect { x: 1512.0, y: 25.0, w: 4000.0, h: 3000.0 });
+    }
+
+    #[test]
+    fn the_file_round_trips_and_anything_else_is_no_frame() {
+        let frame = LRect { x: 2200.0, y: 300.5, w: 1000.0, h: 700.0 };
+        let json = serde_json::to_string(&frame).unwrap();
+        assert_eq!(parse_kept_frame(&json), Some(frame));
+        for bad in ["", "not json", "{}", r#"{"x":1,"y":2,"w":0,"h":5}"#, r#"{"x":1,"y":2,"w":-3,"h":5}"#] {
+            assert_eq!(parse_kept_frame(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn no_displays_place_nothing_and_a_bad_scale_counts_as_one() {
+        assert_eq!(plan_main_window(None, &[], None, 0, SIZE), None);
+        let d = Display::from_physical(PRect { x: 0, y: 0, w: 1920, h: 1080 }, PRect { x: 0, y: 25, w: 1920, h: 1055 }, 0.0);
+        assert_eq!(d.frame.w, 1920.0);
+        assert_eq!(frame_to_keep((10, 10), (920, 620), f64::NAN, false, false), Some(LRect { x: 10.0, y: 10.0, w: 920.0, h: 620.0 }));
     }
 }

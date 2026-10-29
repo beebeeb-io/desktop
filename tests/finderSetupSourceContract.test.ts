@@ -10,11 +10,16 @@
  * excluded), so only `'install_' + 'finder_location'` slips through; nothing in src builds a
  * command name that way, and a review would flag the first.
  */
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, setDefaultTimeout, test } from 'bun:test'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import ts from 'typescript'
 import { censusOfSource, familyLiterals, KEPT_FOLDER_READERS, type Site, type Violation, type ViolationKind } from './fixtures/finderResultCensus'
+
+// Every test here reads, scans or copies the real source tree, which takes seconds when the machine is loaded (a gate at
+// load 60 timed three of them out at bun's default 5 s; the same tests take under 4 s together at load 14). Their results do
+// not depend on the time, so a slow run must not be a red one (PR #147, lead's gate).
+setDefaultTimeout(30_000)
 
 const SRC = new URL('../src/', import.meta.url).pathname
 const FORBIDDEN_ON_MACOS = ['install_finder_location', 'continue_without_finder_location', 'finder_location_state', 'finder_domain_user_enabled']
@@ -75,7 +80,11 @@ describe('no macOS code path calls the install-era Finder commands (R5)', () => 
       ['macSettingsModel.ts', null],
       ['finderSetup.ts', null],
       ['finderSetupCopy.ts', null],
-      ['Onboarding.tsx', 'MacFinderStep'],
+      // Task 1683 slice 2: the Beebeeb window's sign-in screens replaced Onboarding's macOS step (`MacFinderStep`).
+      ['macSignIn.tsx', null],
+      ['signInModel.ts', null],
+      ['browserSignIn.ts', null],
+      ['MacApp.tsx', null],
       ['windows/views/SettingsView.tsx', 'MacFinderIntegrationPanel'],
       ['pages/Status.tsx', 'macFinderSetupState'],
     ]
@@ -100,9 +109,13 @@ describe('no macOS code path calls the install-era Finder commands (R5)', () => 
     }
   })
 
-  test('Onboarding routes macOS to MacFinderStep; the old step is not reachable there', () => {
-    expect(functionText('Onboarding.tsx', 'OnboardingView')).toMatch(/platform === 'macos' \? \(\s*<MacFinderStep/)
+  // Task 1683 slice 2: Onboarding used to route a Mac to its own Finder step. A Mac now never loads that window
+  // (`HostOnboarding` renders nothing for it, and Rust never builds it: `surfaces::policy::onboarding_surface`), so the
+  // install-era step is not reachable there by construction rather than by a branch.
+  test('the old step is not reachable on a Mac: HostOnboarding renders nothing for macOS', () => {
+    expect(functionText('main.tsx', 'HostOnboarding')).toMatch(/host_os === 'macos'\) return null/)
     expect(functionText('Onboarding.tsx', 'FinderInstallStep')).not.toContain('finder_domain_user_enabled')
+    expect(readFileSync(join(SRC, 'Onboarding.tsx'), 'utf8')).not.toMatch(/MacFinderStep|platform === 'macos'/)
   })
 
   test('the main-window Settings panel dispatches macOS to MacFinderIntegrationPanel', () => {
@@ -148,10 +161,11 @@ describe('the mixed pages take the reconciler from useFinderSetup and never run 
  * null root disables "Open folder" and sends no command, so the tray cannot reach it on a Mac.)
  */
 describe('a failed Open in Finder on a Mac is mapped once (task 17b)', () => {
-  test('both macOS call sites take the toast from finderOpenFailedToast and never write the sentence themselves', () => {
+  test('every macOS call site takes the toast from finderOpenFailedToast and never writes the sentence itself', () => {
     for (const [file, fn] of [
       ['pages/SyncFolder.tsx', 'SyncFolder'],
       ['WindowsApp.tsx', 'SyncFolderCard'],
+      ['MacApp.tsx', 'HomePane'],
     ] as const) {
       const body = functionText(file, fn)
       expect(body).toContain('finderOpenFailedToast()')
@@ -205,10 +219,12 @@ describe('the sweep: every call site of a Finder command, and what it does with 
   test('call sites: the pinned count of invocations per file and command', () => {
     expect(column((group) => group.length)).toEqual({
       'DesktopQuickSearch.tsx | open_in_finder': 1,
+      // Task 1683 slice 1: Home in the Beebeeb window. Its Open in Finder takes the toast from finderOpenFailedToast and
+      // never reads the reason; its notice's action discards finder.run's result (both checked below).
+      'MacApp.tsx | finder.run': 1,
+      'MacApp.tsx | open_finder_location': 1,
       'MacSettings.tsx | finder.run': 1,
       'MacSettings.tsx | reset_macos_integration': 1,
-      'Onboarding.tsx | finder.run': 1,
-      'Onboarding.tsx | wrapper:loadFinderSetup': 1,
       'WindowsApp.tsx | open_finder_location': 1,
       [TRAY]: 1,
       'finderSetup.ts | finder_setup_*': 4,
@@ -216,6 +232,10 @@ describe('the sweep: every call site of a Finder command, and what it does with 
       'finderSetup.ts | wrapper:copyFinderSetupDetails': 1,
       'finderSetup.ts | wrapper:loadFinderSetup': 1,
       'finderSetup.ts | wrapper:runFinderSetupAction': 1,
+      // Task 1683 slice 2: the sign-in screens of the Beebeeb window replaced the macOS onboarding step (whose
+      // `Onboarding.tsx | finder.run` and `wrapper:loadFinderSetup` sites went with it). The disk-image notice and the
+      // Finder status screen each hand a notice's action to finder.run and discard what it returns (checked below).
+      'macSignIn.tsx | finder.run': 2,
       'pages/Shared.tsx | open_in_finder': 1,
       'pages/SyncFolder.tsx | finder.run': 1,
       'pages/SyncFolder.tsx | open_finder_location': 1,
@@ -231,6 +251,7 @@ describe('the sweep: every call site of a Finder command, and what it does with 
     )
     expect(literals).toEqual({
       'DesktopQuickSearch.tsx': { open_in_finder: 2 },
+      'MacApp.tsx': { open_finder_location: 1 },
       'MacSettings.tsx': { reset_macos_integration: 1 },
       'WindowsApp.tsx': { open_finder_location: 2 },
       'WindowsTray.tsx': { open_finder_location: 1 },
@@ -333,7 +354,7 @@ describe('the sweep: every call site of a Finder command, and what it does with 
 
   test('nothing reads the result of finder.run: it is discarded or handed to an event handler that discards it', () => {
     const runs = sites.filter((site) => site.family === 'finder.run')
-    expect(runs).toHaveLength(4)
+    expect(runs).toHaveLength(6)
     for (const run of runs) expect(['returned', 'discarded']).toContain(run.consumption)
   })
 

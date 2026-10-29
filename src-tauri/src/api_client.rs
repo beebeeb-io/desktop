@@ -26,6 +26,9 @@ use std::time::Duration;
 use urlencoding::encode;
 use zeroize::Zeroize;
 
+mod direct;
+pub(crate) use direct::{ChunkApiError, GrantReply, fetch_from_storage, now_ms};
+
 // ── Writer-provenance headers (task 1436, the desktop/web half of 1392) ────────
 //
 // The server records `X-Beebeeb-Client` / `X-Beebeeb-Client-Version` on every
@@ -496,6 +499,42 @@ pub struct HeartbeatBody {
 /// upload watcher, the heartbeat producer) is dropped with it, and this Drop
 /// impl is what actually erases the key from memory rather than leaving it
 /// to linger in a freed allocation.
+/// The server refused a custody write because the folder still has legacy key
+/// rows and the owner must upgrade it first (task 2258, decision L11). Kept as
+/// its own type so no caller can mistake it for a transport error or retry it
+/// as a legacy write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct UpgradeRequired;
+
+impl std::fmt::Display for UpgradeRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the owner must upgrade this folder before its keys can be shared here")
+    }
+}
+
+impl std::error::Error for UpgradeRequired {}
+
+/// Whether `error` is the typed L11 refusal (`409 upgrade_required`).
+pub(crate) fn upgrade_required(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<UpgradeRequired>().is_some()
+}
+
+/// Whether a custody write was refused because this deployment has no custody:
+/// a mount without the route answers 405, and the shared-folders feature gate
+/// answers `501 {"error":"shared_folders_v1"}` (server
+/// `feature_gate::require_shared_folders_enabled`). That is a state, not a
+/// failed write to retry. The 501 counts only when it names that gate: any
+/// other 501 is a server failure the caller must see (task 2276 P3-D).
+pub(crate) fn custody_unavailable(error: &anyhow::Error) -> bool {
+    let text = error.to_string();
+    let missing_route =
+        matches!(crate::engine_bridge::error_http_status(error), Some(405)) || text.starts_with("HTTP 405 ");
+    let feature_gate = (matches!(crate::engine_bridge::error_http_status(error), Some(501))
+        || text.starts_with("HTTP 501 "))
+        && text.contains("shared_folders_v1");
+    missing_route || feature_gate
+}
+
 pub struct ApiClient {
     // Dropped AFTER Drop has zeroized credentials, unlike Weak<ApiClient>'s
     // strong count (which reaches zero before its destructor runs).
@@ -508,6 +547,15 @@ pub struct ApiClient {
     /// Outcome of the most recent request, read by the runner after each tick
     /// (see `link_health`). Not secret.
     link: std::sync::Arc<crate::link_health::LinkMonitor>,
+    /// Task 2173: what the server's direct-transfer discovery said, asked lazily and trusted for
+    /// at most 10 minutes (`beebeeb_core::direct_transfer::DiscoveryCache`). It lives and dies
+    /// with this client, i.e. with the signed-in session: nothing of it outlives a sign-out or
+    /// an account switch.
+    direct_discovery: tokio::sync::Mutex<beebeeb_core::direct_transfer::DiscoveryCache>,
+    /// Task 2173: the client for presigned storage links, built on first use. Never `client`:
+    /// no default headers (so no `X-Beebeeb-*`), no cookies, no `Authorization`, redirects
+    /// refused, https only (loopback http when the API itself is on loopback http).
+    storage_client: std::sync::OnceLock<Option<Client>>,
 }
 
 impl Drop for ApiClient {
@@ -525,6 +573,16 @@ impl Drop for ApiClient {
 // `Session::ZeroizeOnDrop` gives, verified the same way in `lib.rs`'s
 // `session_zeroizes_master_key_on_drop` test.
 impl zeroize::ZeroizeOnDrop for ApiClient {}
+
+/// The `PUT /api/v1/me/region` body (task 2050): the chosen id, and `region_strict` only when the
+/// caller states it.
+fn set_region_body(preferred_region: Option<&str>, region_strict: Option<bool>) -> serde_json::Value {
+    let mut body = serde_json::json!({ "preferred_region": preferred_region });
+    if let Some(strict) = region_strict {
+        body["region_strict"] = serde_json::json!(strict);
+    }
+    body
+}
 
 impl ApiClient {
     #[cfg(any(target_os = "windows", test))]
@@ -550,7 +608,22 @@ impl ApiClient {
                 .build()
                 .expect("reqwest client"),
             link: std::sync::Arc::new(crate::link_health::LinkMonitor::new()),
+            direct_discovery: tokio::sync::Mutex::new(beebeeb_core::direct_transfer::DiscoveryCache::new()),
+            storage_client: std::sync::OnceLock::new(),
         }
+    }
+
+    /// This client with `timeout` for each request in place of the app's
+    /// [`crate::link_health::API_REQUEST_TIMEOUT_SECS`]: for a listing that may move a whole tree on a slow link and
+    /// that nobody waits on (task 2267's ownership proof, self-review F5).
+    #[cfg(any(target_os = "windows", test))]
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.client = Client::builder()
+            .timeout(timeout)
+            .default_headers(provenance_headers())
+            .build()
+            .expect("reqwest client");
+        self
     }
 
     /// The shared record of whether the last requests reached the server.
@@ -823,6 +896,83 @@ impl ApiClient {
             .await?
             .error_for_status()?;
         Ok(resp.json().await?)
+    }
+
+    pub async fn sent_folder_invites(&self) -> anyhow::Result<serde_json::Value> {
+        self.get_typed("/api/v1/shares/invites/sent").await
+    }
+
+    /// `PUT /api/v1/shared-folders/{id}/key` — the folder's custody record.
+    ///
+    /// `format` declares the key format of the write (task 2258, L10):
+    /// `Some("l7")` for a custody folder, `None` for a no-custody (legacy)
+    /// write, where the field must be absent rather than null.
+    pub async fn register_shared_folder_key(
+        &self,
+        id: &str,
+        wrapped: &str,
+        version: i32,
+        format: Option<&str>,
+    ) -> anyhow::Result<serde_json::Value> {
+        let url = self.url(&format!("/api/v1/shared-folders/{}/key", encode(id)));
+        let mut body = serde_json::json!({"owner_wrapped_folder_key":wrapped,"key_version":version});
+        if let Some(format) = format {
+            body["format"] = serde_json::Value::String(format.to_string());
+        }
+        let response = self.send_with_retry(|| self.client.put(&url).json(&body)).await?;
+        Ok(response.json().await?)
+    }
+
+    pub async fn shared_folder_activity(&self, id: &str) -> anyhow::Result<serde_json::Value> {
+        self.get_typed(&format!("/api/v1/shared-folders/{}/activity", encode(id))).await
+    }
+
+    pub async fn shared_index_manifest(&self, id: &str) -> anyhow::Result<serde_json::Value> {
+        self.get_typed(&format!("/api/v1/shared-folders/{}/search-index/shards", encode(id))).await
+    }
+
+    pub async fn shared_index_get(&self, id: &str, bucket: u32, page: u32) -> anyhow::Result<Option<Vec<u8>>> {
+        let url=self.url(&format!("/api/v1/shared-folders/{}/search-index/shards/{bucket}/{page}",encode(id)));
+        let response=self.client.get(url).header("Authorization",format!("Bearer {}",self.token)).send().await?;
+        if response.status()==reqwest::StatusCode::NOT_FOUND{return Ok(None);}
+        Ok(Self::check_status(response).await?.bytes().await?.to_vec().into())
+    }
+
+    pub async fn shared_index_write(&self, id: &str, bucket: u32, page: u32, version: i64, blob: Option<&[u8]>) -> anyhow::Result<()> {
+        let url=self.url(&format!("/api/v1/shared-folders/{}/search-index/shards/{bucket}/{page}?if_version={version}",encode(id)));
+        self.send_with_retry(|| match blob {
+            Some(blob)=>self.client.put(&url).header("Content-Type","application/octet-stream").body(blob.to_vec()),
+            None=>self.client.delete(&url),
+        }).await?;
+        Ok(())
+    }
+
+    /// Paginated listing for a bounded shared-index rebuild; ordinary sync
+    /// retains its snapshot/delta transport.
+    pub async fn list_owned_folder_page(&self, parent: &str, cursor: Option<&str>) -> anyhow::Result<serde_json::Value> {
+        let url=self.list_files_url(ListFilesScope {parent_id:Some(parent),cursor,..Default::default()});
+        Ok(self.send_with_retry(||self.client.get(&url)).await?.json().await?)
+    }
+
+    pub async fn get_shared_folder(&self, id: &str) -> anyhow::Result<serde_json::Value> {
+        self.get_typed(&format!("/api/v1/shared-folders/{}", encode(id))).await
+    }
+
+    pub async fn get_shared_folder_keys(&self, id: &str, cursor: Option<&str>) -> anyhow::Result<serde_json::Value> {
+        let mut path = format!("/api/v1/shared-folders/{}/keys?limit=500", encode(id));
+        if let Some(cursor) = cursor {
+            path.push_str(&format!("&cursor={}", encode(cursor)));
+        }
+        self.get_typed(&path).await
+    }
+
+    pub async fn adopt_owner_key(&self, id: &str, owner_wrap_b64: &str) -> anyhow::Result<bool> {
+        let url = self.url(&format!("/api/v1/files/{}/owner-key", encode(id)));
+        let response = self.send_with_retry(|| self.client.post(&url).json(&serde_json::json!({
+            "owner_wrapped_file_key": owner_wrap_b64
+        }))).await?;
+        let result: serde_json::Value = response.json().await?;
+        result["adopted"].as_bool().ok_or_else(|| anyhow::anyhow!("invalid adoption response"))
     }
 
     /// `GET /api/v1/files/:id/chunks/:idx` — returns the raw encrypted
@@ -1241,6 +1391,15 @@ impl ApiClient {
             return Ok(resp);
         }
         let body = resp.text().await.unwrap_or_default();
+        // L11: a custody write over a folder that still has legacy key rows is
+        // refused until the owner upgrades it. It is its own state — never a
+        // generic error and never a reason to retry as a legacy write.
+        if status == reqwest::StatusCode::CONFLICT
+            && serde_json::from_str::<serde_json::Value>(&body)
+                .is_ok_and(|value| value["error"] == "upgrade_required")
+        {
+            return Err(anyhow::Error::new(UpgradeRequired));
+        }
         let snippet: String = body.chars().take(300).collect();
         anyhow::bail!("HTTP {status}: {snippet}")
     }
@@ -1261,24 +1420,27 @@ impl ApiClient {
     }
 
     /// `GET /api/v1/me/region` — the user's preferred region + available list.
-    /// Mirrors the webapp `getUserRegion()` contract so the desktop resolves
-    /// the effective region's CITY the same way (never the provider).
+    /// Mirrors the webapp `getUserRegion()` contract: the list is by COUNTRY
+    /// (task 2050), never a city and never the provider.
     pub async fn account_region(&self) -> anyhow::Result<crate::account_dto::UserRegionResponse> {
         self.get_typed("/api/v1/me/region").await
     }
 
-    /// `PUT /api/v1/me/region` — set or clear the user's preferred region.
+    /// `PUT /api/v1/me/region` — set or clear the user's preferred region (`europe` or a country
+    /// id). `region_strict` is "only store in <country>"; the server replaces the whole choice, so
+    /// an omitted value means false there. `None` leaves it out of the body.
     pub async fn set_preferred_region(
         &self,
         preferred_region: Option<&str>,
+        region_strict: Option<bool>,
     ) -> anyhow::Result<crate::account_dto::SetPreferredRegionResponse> {
+        let body = set_region_body(preferred_region, region_strict);
         #[cfg(test)]
-        if let Some(response) = region_set_fixture::try_handle(&self.base_url, &self.token, preferred_region)? {
+        if let Some(response) = region_set_fixture::try_handle(&self.base_url, &self.token, &body)? {
             return Ok(response);
         }
 
         let url = self.url("/api/v1/me/region");
-        let body = serde_json::json!({ "preferred_region": preferred_region });
         let resp = self.send_with_retry(|| self.client.put(&url).json(&body)).await?;
         Ok(resp.json().await?)
     }
@@ -1566,7 +1728,7 @@ mod region_set_fixture {
     pub(super) fn try_handle(
         base_url: &str,
         token: &str,
-        preferred_region: Option<&str>,
+        body: &Value,
     ) -> anyhow::Result<Option<SetPreferredRegionResponse>> {
         let Some(id) = base_url.strip_prefix("fixture://") else {
             return Ok(None);
@@ -1578,7 +1740,6 @@ mod region_set_fixture {
             .cloned()
             .with_context(|| format!("region fixture {id} missing"))?;
         let mut fixture = fixture.lock().unwrap();
-        let body = serde_json::json!({ "preferred_region": preferred_region });
         fixture.requests.push(RegionRequest {
             method: "PUT".to_string(),
             path: "/api/v1/me/region".to_string(),
@@ -1794,20 +1955,40 @@ mod tests {
     fn set_preferred_region_puts_region_and_parses_response() {
         let server = RegionMockServer::start(vec![(
             "200 OK".to_string(),
-            serde_json::json!({ "preferred_region": "us" }),
+            serde_json::json!({ "preferred_region": "de", "region_strict": true }),
         )]);
         let client = ApiClient::new(server.base_url.clone(), "tok".into(), [0u8; 32]);
 
-        let result = run_async(client.set_preferred_region(Some("us"))).unwrap();
+        let result = run_async(client.set_preferred_region(Some("de"), Some(true))).unwrap();
 
-        assert_eq!(result.preferred_region.as_deref(), Some("us"));
+        assert_eq!(result.preferred_region.as_deref(), Some("de"));
+        assert!(result.region_strict);
         let requests = server.finish();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].method, "PUT");
         assert_eq!(requests[0].path, "/api/v1/me/region");
         assert_eq!(requests[0].authorization.as_deref(), Some("Bearer tok"));
         let body: serde_json::Value = serde_json::from_slice(requests[0].body.as_bytes()).unwrap();
-        assert_eq!(body, serde_json::json!({ "preferred_region": "us" }));
+        assert_eq!(
+            body,
+            serde_json::json!({ "preferred_region": "de", "region_strict": true })
+        );
+    }
+
+    #[test]
+    fn set_preferred_region_leaves_strict_out_when_the_caller_does_not_state_it() {
+        let server = RegionMockServer::start(vec![(
+            "200 OK".to_string(),
+            serde_json::json!({ "preferred_region": "europe", "region_strict": false }),
+        )]);
+        let client = ApiClient::new(server.base_url.clone(), "tok".into(), [0u8; 32]);
+
+        let result = run_async(client.set_preferred_region(Some("europe"), None)).unwrap();
+
+        assert!(!result.region_strict);
+        let requests = server.finish();
+        let body: serde_json::Value = serde_json::from_slice(requests[0].body.as_bytes()).unwrap();
+        assert_eq!(body, serde_json::json!({ "preferred_region": "europe" }));
     }
 
     #[test]
@@ -1821,7 +2002,7 @@ mod tests {
         )]);
         let client = ApiClient::new(server.base_url.clone(), "tok".into(), [0u8; 32]);
 
-        let err = run_async(client.set_preferred_region(Some("mars")))
+        let err = run_async(client.set_preferred_region(Some("mars"), None))
             .unwrap_err()
             .to_string();
 

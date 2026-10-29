@@ -97,19 +97,19 @@ describe('forceReauth', () => {
 // M7: a command this build does not have is named correctly. "Sign in again" can stop at the platform
 // read, the reauth window (macOS), the clear or the onboarding window (Windows/Linux); the callers show
 // the reason as is, so forceReauth names the command that is missing.
-describe('forceReauth names the command a build is missing (M7)', () => {
+describe('forceReauth says plainly that a command is missing (M7; spec §10.2 #24: the command name goes to the log, not the screen)', () => {
   const missing = { ok: false as const, reason: 'Command not found', unsupported: true }
   test('desktop_platform', async () => {
     const result = await forceReauth(fakeApi({ platform: async () => missing }))
-    expect(result).toEqual({ ok: false, reason: 'desktop_platform is not wired in this build yet.', unsupported: true })
+    expect(result).toEqual({ ok: false, reason: 'This isn’t available in this version of Beebeeb.', unsupported: true })
   })
   test('open_reauth_window on macOS', async () => {
     const result = await forceReauth(fakeApi({ platform: async () => ({ ok: true, value: 'macos' }), openReauthWindow: async () => missing }))
-    expect(result).toEqual({ ok: false, reason: 'open_reauth_window is not wired in this build yet.', unsupported: true })
+    expect(result).toEqual({ ok: false, reason: 'This isn’t available in this version of Beebeeb.', unsupported: true })
   })
   test('clear_session and open_onboarding_window elsewhere', async () => {
-    expect(await forceReauth(fakeApi({ clearSession: async () => missing }))).toEqual({ ok: false, reason: 'clear_session is not wired in this build yet.', unsupported: true })
-    expect(await forceReauth(fakeApi({ openOnboardingWindow: async () => missing }))).toEqual({ ok: false, reason: 'open_onboarding_window is not wired in this build yet.', unsupported: true })
+    expect(await forceReauth(fakeApi({ clearSession: async () => missing }))).toEqual({ ok: false, reason: 'This isn’t available in this version of Beebeeb.', unsupported: true })
+    expect(await forceReauth(fakeApi({ openOnboardingWindow: async () => missing }))).toEqual({ ok: false, reason: 'This isn’t available in this version of Beebeeb.', unsupported: true })
   })
   test('a failure that is not a missing command keeps its own reason', async () => {
     expect(await forceReauth(fakeApi({ openOnboardingWindow: async () => ({ ok: false, reason: 'window failed', unsupported: false }) }))).toEqual({ ok: false, reason: 'window failed', unsupported: false })

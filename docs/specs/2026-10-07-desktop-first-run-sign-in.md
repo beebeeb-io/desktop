@@ -3,6 +3,7 @@
 **Status:** design approved by Guus on 2026-10-07 in three parts, with rulings C1–C7; this written spec awaits his review.
 **Amended:** 2026-10-07 for the lead's rulings on the six open points and the browser sign-in outcome (§17, C-S1). — lead, 2026-10-07
 **Amended:** 2026-10-07 for the lead's rulings on the independent spec review (§17.2). — lead, 2026-10-07
+**Amended:** 2026-10-24 for Guus's ruling of at most two macOS surfaces ([two-surface spec](2026-10-24-macos-two-surface-app.md)): the account window is the one Beebeeb window, the popover replaces the compact window, and "spec B" below means that spec. Rules C-W3 (Ready), C-W4 (Ready), C-W7 (Keychain), C-W8, C-W9 (Ready), §7.5 (where) and §7.6 (Ready) are struck and replaced in place; every state, copy string and Rust rule is unchanged. — two-surface design, 2026-10-24
 **Date:** 7 Oct 2026
 **Repo:** desktop. macOS and Windows; Linux shares the Rust account state and the sign-in window (§7.8).
 **Tasks:** 1747 (macOS) and 1748 (Windows), re-scoped by Guus on 2026-10-06: "Signup only web, signin web or direct". Server dependency: 1844.
@@ -232,7 +233,7 @@ C3's launch policy applies to macOS only in spec C. Windows and Linux keep today
   - It is read from `NSAppleEventManager`'s current event during launch, through a small Objective-C function beside `src-tauri/macos/FileProviderBridge.m`.
   - **Present:** a login launch.
   - **Absent, unreadable, or launched by an unknown mechanism:** a manual launch, and the window shows. This fails safe: the only cost is a window at login for a signed-out person who has autostart on.
-  - **An updater relaunch** carries no such event, because tauri's `restart` spawns the binary directly (tauri 2.11.5 `src/process.rs:74-129`). It counts as manual.
+  - **An updater relaunch** carries no such event, because tauri's `restart` spawns the binary directly (tauri 2.11.5 `src/process.rs:74-129`). ~~It counts as manual.~~ It is recognised by the flag the updater leaves just before `restart`, not by this event, and on a Mac it shows what the person had open and nothing else. — slice 6, 2026-10-25, lead's brief to the slice 6 lane (macos-beebeeb-teamlead): "a relaunch after an update shows what the user had open, nothing else"; the struck text said an updater relaunch counts as manual / opens nothing. The updater leaves `relaunch.json`; see the [two-surface spec](2026-10-24-macos-two-surface-app.md) §7.3.
   - One pure function maps the parameter to `LaunchKind`.
   - Whether the parameter arrives under the registration the shipped build uses is a device rung (§16).
 - **C-W2** On macOS, opening the app while it is already running (from Finder, the Dock or Spotlight) is a manual launch. The app handles `RunEvent::Reopen`, which it does not today (`.run(tauri::generate_context!())`, `lib.rs:9059`).
@@ -241,22 +242,28 @@ C3's launch policy applies to macOS only in spec C. Windows and Linux keep today
 
 - **C-W3 Icon click.**
   - In any state other than Ready, Checking included, a click opens the account window on that state's screen: sign-in (C-R1), sign-in again (C-R2, spec A's `open_reauth_window`), update (C-R3), unlock (C-R4, C-W7), choose a plan (C-R5), or busy (Checking). The exception is C-R4 with the key in the Keychain, which opens the Settings window (C-W7).
-  - In Ready, a click opens the compact window on spec A's Finder location view (`src/pages/SyncFolder.tsx`, compact page `finder`) until spec B. It toggles as today (`lib.rs:9904-9912`).
+  - ~~In Ready, a click opens the compact window on spec A's Finder location view (`src/pages/SyncFolder.tsx`, compact page `finder`) until spec B. It toggles as today (`lib.rs:9904-9912`).~~
+  - In Ready, a click toggles the menu-bar popover ([two-surface spec](2026-10-24-macos-two-surface-app.md) §6.2). — two-surface design, 2026-10-24
 - **C-W4 Manual launch.**
   - The decision waits until the state has settled, that is, until it is out of Checking. The 5 s settle starts when spec A's restore probe completes or times out (`probe_startup_session`, itself capped at 5 s, `lib.rs:561`).
   - If the state is still Checking at the end of the settle, the account window opens in the busy state.
   - A settled state other than Ready opens the account window on that state's screen, except C-R4 with the key in the Keychain, which opens the Settings window (C-W7).
-  - In Ready, today's launch behaviour stays: `startup_surface` opens onboarding when no `sync_root` is set, else the compact window, which now lands on the Finder location view.
+  - ~~In Ready, today's launch behaviour stays: `startup_surface` opens onboarding when no `sync_root` is set, else the compact window, which now lands on the Finder location view.~~
+  - In Ready, a manual launch opens the Beebeeb window on Home; ~~an updater relaunch opens nothing~~ an updater relaunch opens what the person had open, and nothing else ([two-surface spec](2026-10-24-macos-two-surface-app.md) §7.3). — two-surface design, 2026-10-24; the updater-relaunch clause amended— slice 6, 2026-10-25, lead's brief to the slice 6 lane (macos-beebeeb-teamlead): "a relaunch after an update shows what the user had open, nothing else"; the struck text said an updater relaunch counts as manual / opens nothing. The updater leaves `relaunch.json`; see the [two-surface spec](2026-10-24-macos-two-surface-app.md) §7.3.
 - **C-W5 Login launch.** It never opens a window.
 - **C-W6 Nothing else** opens the account window by itself. A window that is already open re-renders when the state changes.
 - **C-W7 The C-R4 screen is today's unlock flow; there is no new unlock UI.**
-  - **The key is in the Keychain:** the Keychain unlock, which is the Settings Account tab's Vault "Unlock" button (`unlock_vault`, spec A `src/MacSettings.tsx`). The click or launch opens the Settings window (`show_macos_settings_window`, `lib.rs:8682`).
+  - ~~**The key is in the Keychain:** the Keychain unlock, which is the Settings Account tab's Vault "Unlock" button (`unlock_vault`, spec A `src/MacSettings.tsx`). The click or launch opens the Settings window (`show_macos_settings_window`, `lib.rs:8682`).~~
+  - **The key is in the Keychain:** the popover's "Unlock vault" unlocks in place (`unlock_vault`); the Beebeeb window's Settings › Account keeps its Vault "Unlock" row. No Settings window opens ([two-surface spec](2026-10-24-macos-two-surface-app.md) §6.3). — two-surface design, 2026-10-24
   - **No key on this device:** the account window's recovery-phrase step (`UnlockStep`, `src/Onboarding.tsx:350`, calling `desktop_unlock_with_recovery_phrase`).
-- **C-W8 The account window** is the existing `onboarding` window (`lib.rs:874-910`, and spec A's `open_reauth_window`), centred at 860×640 (popover ruling 6).
+- ~~**C-W8 The account window** is the existing `onboarding` window (`lib.rs:874-910`, and spec A's `open_reauth_window`), centred at 860×640 (popover ruling 6).~~
+- **C-W8 The account window** is the Beebeeb window (label `main`) in its signed-out state, not a separate window ([two-surface spec](2026-10-24-macos-two-surface-app.md) §7.4). The title still follows the screen; the size and position follow §7.2 there. — two-surface design, 2026-10-24
   - On macOS its title becomes "Sign in to Beebeeb"; today it is "Welcome to Beebeeb" (`lib.rs:896`). The title bar follows the heading of the screen it shows.
-  - The label stays, and so does spec A's `?window=onboarding&mode=reauth`.
+  - ~~The label stays, and so does spec A's `?window=onboarding&mode=reauth`.~~
+  - The label is `main`; "Sign in again" (R8) is that window's sign-in-again screen, still with no purge. — two-surface design, 2026-10-24
 - **C-W9 `startup_surface`** (`policy.rs:49-55`) gains the launch kind and the `AccountView` as inputs.
-  - Only the macOS row changes. It still reads `no_sync_root` in Ready, because C-W4 keeps today's behaviour there.
+  - ~~Only the macOS row changes. It still reads `no_sync_root` in Ready, because C-W4 keeps today's behaviour there.~~
+  - Only the macOS row changes. In Ready it no longer reads `no_sync_root`: a manual launch opens the Beebeeb window on Home (C-W4 as amended). — two-surface design, 2026-10-24
   - The Windows and Linux rows, and their pin tests, stay as they are.
 
 ### 6.3 The menu
@@ -311,7 +318,8 @@ The click starts the 15-minute re-check (C-D4) whether or not the browser opened
 
 ### 7.5 Ready notices (C-R6)
 
-- **Where.** One line in Settings: the Account tab on macOS (`src/MacSettings.tsx:242`), the Account view on Windows (`src/windows/views/AccountView.tsx`). Spec B later moves it to the popover.
+- ~~**Where.** One line in Settings: the Account tab on macOS (`src/MacSettings.tsx:242`), the Account view on Windows (`src/windows/views/AccountView.tsx`). Spec B later moves it to the popover.~~
+- **Where.** In the menu-bar popover's header and in the Beebeeb window's Settings › Account on macOS ([two-surface spec](2026-10-24-macos-two-surface-app.md) §6.3, §7.8); the Account view on Windows, unchanged. — two-surface design, 2026-10-24
 - **The plan button.** While a notice shows, its link replaces the Account tab's "Upgrade" / "Manage plan" button (`src/MacSettings.tsx:352`). With no notice the button stays, and it opens the resolved web-billing link.
 - **Server copy wins.** If the server sends `copy` for the state, it is shown verbatim, so legal dates always come from the server. Otherwise the line comes from this table.
 
@@ -358,7 +366,7 @@ Each row was checked against the server's golden fixture (server `contracts/onbo
 
 ### 7.6 After sign-in (macOS)
 
-The removed steps (§11) are not replaced by other steps. While spec A's reconciler is `Adding`, the window shows spec A's "Adding Beebeeb to Finder…" (spec A `src/finderSetupCopy.ts`) and closes by itself on `Ready`. On `Failed` or `UserDisabled` it shows spec A's one sentence and one action (spec A §6.2) instead. Without this, a failed first add would go unseen until spec B.
+The removed steps (§11) are not replaced by other steps. While spec A's reconciler is `Adding`, the window shows spec A's "Adding Beebeeb to Finder…" (spec A `src/finderSetupCopy.ts`) and ~~closes by itself on `Ready`~~ moves on to Home on `Ready` and stays open ([two-surface spec](2026-10-24-macos-two-surface-app.md) §7.5; — two-surface design, 2026-10-24). On `Failed` or `UserDisabled` it shows spec A's one sentence and one action (spec A §6.2) instead. Without this, a failed first add would go unseen until spec B.
 
 ### 7.7 Windows (1748)
 
@@ -649,7 +657,7 @@ Each entry records a finding, with the ruling beneath it. Where a later ruling r
   - **Accepted as written:** the macOS startup row reads `no_sync_root` in Ready (C-W9), and Linux gets the colour crossed `.ico` (§7.8).
 - **Minor findings:** all 19 applied (M-1 to M-19).
   - M-5: spec A is cited by symbol.
-  - M-11: the updater relaunch counts as manual (C-W1).
+  - M-11: ~~the updater relaunch counts as manual (C-W1)~~ (superseded by the two-surface spec §7.3, slice 6: the updater's flag, not the login event, decides).
   - M-14: the Windows machine is not named.
 
 ### 17.3 The scoped re-review (lead rulings, 2026-10-07)

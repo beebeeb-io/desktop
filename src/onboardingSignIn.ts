@@ -28,6 +28,7 @@
  */
 import { SIGN_IN_OUTCOME_UNREADABLE } from './accountSwitchCopy'
 import { desktopLogin, desktopLogin2fa, commandUnavailableLabel, type DesktopLoginResult } from './desktopApi'
+import type { AskCounts } from './signOutCopy'
 
 export interface SignInApi {
   desktopLogin: typeof desktopLogin
@@ -38,13 +39,21 @@ export const defaultSignInApi: SignInApi = { desktopLogin, desktopLogin2fa }
 
 /** What a completed sign-in became (R8). */
 export type SignInSettled =
-  | { kind: 'fresh' }
+  /**
+   * A sign-in with no account on this Mac before. `vaultUnlocked` (spec C C-S1): the keys arrived with it, so no
+   * recovery phrase is asked. Rust's password path always says `false`; the browser path's keys are always here.
+   */
+  | { kind: 'fresh'; vaultUnlocked: boolean }
   /**
    * The account on this Mac signed in again in place. `keyReplaced` (FB-I1): the kept vault key was no
    * longer the account's, so it was removed and the recovery phrase follows; that step says why.
    */
   | { kind: 'reauthenticated'; vaultUnlocked: boolean; keyReplaced: boolean }
-  | { kind: 'account_mismatch'; pendingChanges: number }
+  /**
+   * Another account. On macOS `unsent` is the switch's ask snapshot (spec 2026-10-10 W11), and `unsentError` the coded
+   * E3 when its count failed (§5.3 row 1); Linux sends neither, so both are null there.
+   */
+  | { kind: 'account_mismatch'; pendingChanges: number; unsent: AskCounts | null; unsentError: string | null }
 
 /** `settledFrom`'s answer: a `SignInSettled`, or `unreadable` for a shape it cannot classify. */
 export type SignInOutcome = SignInSettled | { kind: 'unreadable' }
@@ -54,6 +63,16 @@ export type PasswordStepResult =
   | { ok: false; message: string }
 
 export type TotpStepResult = { ok: true; settled: SignInSettled } | { ok: false; message: string }
+
+/** The switch's snapshot (spec 2026-10-10 W11), or null when absent or not whole (Linux sends none). */
+export function unsentFrom(raw: unknown): AskCounts | null {
+  if (raw === null || typeof raw !== 'object') return null
+  const u = raw as Record<string, unknown>
+  const whole = (n: unknown) => typeof n === 'number' && Number.isSafeInteger(n) && n >= 0
+  if (typeof u.askId !== 'string' || ![u.files, u.copiedFiles, u.others, u.missingFiles].every(whole)) return null
+  if (!Array.isArray(u.earlierFolders) || !u.earlierFolders.every((p) => typeof p === 'string')) return null
+  return { askId: u.askId, files: u.files as number, copiedFiles: u.copiedFiles as number, others: u.others as number, missingFiles: u.missingFiles as number, earlierFolders: u.earlierFolders as string[] }
+}
 
 /**
  * Classify what `desktop_login` / `desktop_login_2fa` returned (R8). Strict by design: this is the
@@ -84,14 +103,21 @@ export function settledFrom(value: DesktopLoginResult | null | undefined): SignI
     if (reauthenticated === true || key_replaced) return unreadable
     const pending = typeof account_mismatch === 'object' ? (account_mismatch as Record<string, unknown>).pending_changes : undefined
     if (typeof pending !== 'number' || !Number.isSafeInteger(pending) || pending < 0) return unreadable
-    return { kind: 'account_mismatch', pendingChanges: pending }
+    const raw = account_mismatch as Record<string, unknown>
+    return {
+      kind: 'account_mismatch',
+      pendingChanges: pending,
+      unsent: unsentFrom(raw.unsent),
+      // The coded E3 when the switch's count failed; the step shows it as a line.
+      unsentError: typeof raw.unsent_error === 'string' ? raw.unsent_error : null,
+    }
   }
   if (reauthenticated === true) {
     if (key_replaced && vault_unlocked === true) return unreadable
     return { kind: 'reauthenticated', vaultUnlocked: vault_unlocked === true, keyReplaced: key_replaced === true }
   }
   if (key_replaced) return unreadable
-  return { kind: 'fresh' }
+  return { kind: 'fresh', vaultUnlocked: vault_unlocked === true }
 }
 
 /**

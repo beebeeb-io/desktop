@@ -110,6 +110,7 @@ fn every_reachable_registry_state_shows_a_finder_failure_exactly_once() {
     // Drive the real registry through every sequence of up to 4 opens and
     // feed its visibility into both reducers.
     let mut checked = 0usize;
+    let mut both_visible = 0usize;
     let mut stack: Vec<Vec<SurfaceKind>> = vec![vec![]];
     while let Some(seq) = stack.pop() {
         let mut r = SurfaceRegistry::new();
@@ -117,6 +118,7 @@ fn every_reachable_registry_state_shows_a_finder_failure_exactly_once() {
             r.open(k);
         }
         let vis = r.visible();
+        both_visible += usize::from(vis.popover && vis.settings);
         for origin in [Some(Origin::Popover), Some(Origin::Settings)] {
             let shown = finder_failure_surfaces(origin, vis);
             let expected = usize::from(vis.popover || vis.settings);
@@ -131,6 +133,9 @@ fn every_reachable_registry_state_shows_a_finder_failure_exactly_once() {
             }
         }
     }
-    // 1 + 4 + 16 + 64 + 256.
-    assert_eq!(checked, 341);
+    // Two kinds since two-surface slice 1 (popover, main): 1 + 2 + 4 + 8 + 16. The popover can now show over the
+    // Beebeeb window, so this walk reaches popover + settings visible at once, the case the failure reducer must
+    // still show once.
+    assert_eq!(checked, 31);
+    assert!(both_visible > 0, "the walk must reach the popover over the window");
 }

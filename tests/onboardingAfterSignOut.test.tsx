@@ -1,7 +1,11 @@
 /**
  * After a sign-out, "Sign in" reaches the sign-in step, whatever step the onboarding window was left on.
  *
- * The onboarding window is reused, not rebuilt: closing it only hides it (the macOS close policy is Hide for every
+ * Task 1683 slice 2: the onboarding window is Linux's now (a Mac signs in in the Beebeeb window, where the same rule is
+ * `normalizeFlow`, tests/signInModel.test.ts and tests/macApp.test.tsx), so this runs against a Linux capability
+ * snapshot and the Linux routing: a configured sync folder takes a signed-in window to the last step.
+ *
+ * The onboarding window is reused, not rebuilt: closing it only hides it (Linux's close policy is Hide for every
  * label), and `open_onboarding_window`, which every "Sign in" calls (Status, the Finder row, the menu), shows and
  * focuses the existing WebView. Its React state survives both, and the onboarding window is not under
  * AccountSessionBoundary (a sign-in in it moves the session revision, so a remount would throw the flow away). So a
@@ -19,7 +23,10 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test
 import { readFileSync } from 'node:fs'
 import { allElements, installMiniDom, MiniNode, type MiniDomInstall, type MiniElement } from './fixtures/miniDom'
 
-const capabilities = JSON.parse(readFileSync(new URL('./fixtures/desktop-capabilities.json', import.meta.url), 'utf8')).macos
+// Linux's snapshot says `native_credentials: false` today (it fails closed), and `supportsRoute('onboarding')` is that flag,
+// so on a real Linux machine the capability gate shows its alternative instead of this window. These tests are about the
+// window's own revisit logic, so they ask for the snapshot of a Linux machine whose credentials the gate lets through.
+const capabilities = { ...JSON.parse(readFileSync(new URL('./fixtures/desktop-capabilities.json', import.meta.url), 'utf8'))['linux-deb'], native_credentials: true }
 const LAST_SIGNED_IN = 'sam@example.eu'
 
 // The listeners the app puts on `window`, so a test can deliver what the WebView delivers on a reopen.
@@ -49,12 +56,11 @@ afterAll(() => dom.restore())
 interface Native {
   loggedIn: boolean
   revision: number
-  /** How many times `finder_setup_state` was read: the first read says Adding, every later one Ready. */
-  finderReads: number
   calls: string[]
 }
 
-const finderView = (setup: 'adding' | 'ready') => ({ setup, reason: null, launch_location: 'applications', attempt: 1, max_attempts: 0, last_failure: null })
+/** The sync folder a signed-in Linux window has, which routes it to the last step. */
+const SYNC_ROOT = '/home/sam/Beebeeb'
 
 function installBackend(native: Native) {
   let callbackId = 0
@@ -62,20 +68,18 @@ function installBackend(native: Native) {
     desktop_capabilities: () => capabilities,
     'plugin:event|listen': () => callbackId,
     'plugin:event|unlisten': () => null,
-    desktop_platform: () => 'macos',
     sync_status: () => ({
       logged_in: native.loggedIn,
       session_revision: native.revision,
       vault_unlocked: native.loggedIn,
       engine: native.loggedIn ? 'running' : 'stopped',
-      sync_root: null,
+      sync_root: native.loggedIn ? SYNC_ROOT : null,
       syncing: 0,
       cloud_only: 0,
       conflicts: 0,
       auth_expired: false,
       engine_refusal: null,
     }),
-    finder_setup_state: () => finderView(native.finderReads++ === 0 ? 'adding' : 'ready'),
     list_remote_tree: () => [],
     last_signed_in_email: () => LAST_SIGNED_IN,
   }
@@ -135,7 +139,7 @@ const emailField = (container: MiniElement) =>
     .filter((el) => el.tagName === 'LABEL' && el.textContent.startsWith('Email'))
     .flatMap((label) => allElements(label).filter((el) => el.tagName === 'INPUT'))[0]
 
-const STEP_4 = 'Start online-only'
+const LAST_STEP = 'Control center is ready'
 const SIGN_IN = 'Welcome back'
 
 /** What a WebView receives when its hidden window is shown and focused again (`open_onboarding_window`). */
@@ -147,19 +151,21 @@ async function reopen() {
   })
 }
 
-/** The window opened after a sign-in routes itself through the Finder step to step 4, as on the device. */
-async function onStep4(native: Native) {
+/** A signed-in window with a sync folder routes itself to the last step, as it does on Linux. */
+async function onLastStep(native: Native) {
   installBackend(native)
   const container = await mountOnboarding()
-  await waitFor('step 4, "Choose offline folders"', () => headings(container).includes(STEP_4))
-  expect(native.calls).toContain('finder_setup_state')
+  await waitFor('the last step, "Control center is ready"', () => headings(container).includes(LAST_STEP))
+  // Linux's window never asks the Finder reconciler (a Mac does not mount it at all).
+  expect(native.calls).not.toContain('finder_setup_state')
+  expect(native.calls).not.toContain('desktop_platform')
   return container
 }
 
 describe('the onboarding window after a sign-out', () => {
-  test('left on step 4, signed out, reopened: the sign-in form, prefilled with the last signed-in address', async () => {
-    const native: Native = { loggedIn: true, revision: 10, finderReads: 0, calls: [] }
-    const container = await onStep4(native)
+  test('left on the last step, signed out, reopened: the sign-in form, prefilled with the last signed-in address', async () => {
+    const native: Native = { loggedIn: true, revision: 10, calls: [] }
+    const container = await onLastStep(native)
 
     // Settings › Account › Sign out: `clear_session_impl` ends the session and moves the revision twice.
     native.loggedIn = false
@@ -176,8 +182,8 @@ describe('the onboarding window after a sign-out', () => {
   })
 
   test('closed and reopened a second time, still signed out: still the sign-in form', async () => {
-    const native: Native = { loggedIn: true, revision: 20, finderReads: 0, calls: [] }
-    const container = await onStep4(native)
+    const native: Native = { loggedIn: true, revision: 20, calls: [] }
+    const container = await onLastStep(native)
     native.loggedIn = false
     native.revision += 2
     await reopen()
@@ -188,13 +194,13 @@ describe('the onboarding window after a sign-out', () => {
   })
 
   test('still signed in: a reopen leaves the flow where it was', async () => {
-    const native: Native = { loggedIn: true, revision: 30, finderReads: 0, calls: [] }
-    const container = await onStep4(native)
+    const native: Native = { loggedIn: true, revision: 30, calls: [] }
+    const container = await onLastStep(native)
     const reads = native.calls.filter((name) => name === 'sync_status').length
     await reopen()
     await waitFor('the reopen to settle', () => false, 300).catch(() => undefined)
     expect(native.calls.filter((name) => name === 'sync_status').length).toBeGreaterThan(reads)
-    expect(headings(container)).toEqual([STEP_4])
+    expect(headings(container)).toEqual([LAST_STEP])
   })
 })
 
@@ -203,32 +209,25 @@ describe('the onboarding window after a sign-out', () => {
  * whose props can be read): what it clears, what it must leave alone, and what it is not evidence of.
  */
 describe('what the reset after a sign-out clears and keeps', () => {
-  const STEP_NAMES = ['SignInStep', 'UnlockStep', 'MacFinderStep', 'FinderInstallStep', 'PinningStep', 'ReadyStep', 'AccountSwitchStep']
+  const STEP_NAMES = ['SignInStep', 'UnlockStep', 'FinderInstallStep', 'PinningStep', 'ReadyStep', 'AccountSwitchStep']
 
   async function openView(status: { current: unknown }) {
     const { mount } = await import('./fixtures/componentHarness')
     const desktopApi = await import('../src/desktopApi')
-    const { loadFinderSetup } = await import('../src/finderSetup')
     const byName: Record<string, (props: any) => null> = {}
     for (const name of STEP_NAMES) byName[name] = () => null
     const m = mount('Onboarding.tsx', 'OnboardingView', {
       backend: {
         sync_status: () => { if (status.current instanceof Error) throw status.current; return status.current },
-        desktop_platform: () => 'macos',
-        finder_setup_state: () => finderView('ready'),
       },
       props: { mode: 'setup' },
       bindings: {
         ...desktopApi,
-        loadFinderSetup,
         ...byName,
         getCurrentWindow: () => ({ close: async () => {} }),
-        useCapabilities: () => ({ host_os: 'macos' }),
         STEPS: [],
         Wordmark: () => null,
         useRegionLabel: () => 'Stored in the EU',
-        FINDER_RAIL_TITLE: '',
-        FINDER_RAIL_DETAIL: '',
       },
     })
     // The harness's `window` ignores listeners; record them, so a test can deliver a reopen.
@@ -251,7 +250,7 @@ describe('what the reset after a sign-out clears and keeps', () => {
     return { m, find, shown, reopen, listeners, close: () => m.close() }
   }
 
-  const status = (loggedIn: boolean) => ({ logged_in: loggedIn, vault_unlocked: loggedIn, session_revision: 1, engine: 'idle', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0 })
+  const status = (loggedIn: boolean) => ({ logged_in: loggedIn, vault_unlocked: loggedIn, session_revision: 1, engine: 'idle', sync_root: loggedIn ? SYNC_ROOT : null, syncing: 0, cloud_only: 0, conflicts: 0 })
 
   test('it listens for the reopen on window, and stops when the window unmounts', async () => {
     const v = await openView({ current: status(false) })
@@ -266,7 +265,7 @@ describe('what the reset after a sign-out clears and keeps', () => {
     const backend = { current: status(false) as unknown }
     const v = await openView(backend)
     try {
-      v.find('SignInStep')!.props.onDone({ kind: 'account_mismatch', pendingChanges: 2 }, 'b@beebeeb.io')
+      v.find('SignInStep')!.props.onDone({ kind: 'account_mismatch', pendingChanges: 2, unsent: null, unsentError: null }, 'b@beebeeb.io')
       await v.m.flush()
       // The warning is up; a reopen while it is up leaves it.
       await v.reopen()
@@ -287,7 +286,7 @@ describe('what the reset after a sign-out clears and keeps', () => {
     const v = await openView(backend)
     try {
       // A switch carried an address, then the same account signed in with a replaced key: the recovery step says why.
-      v.find('SignInStep')!.props.onDone({ kind: 'account_mismatch', pendingChanges: 1 }, 'b@beebeeb.io')
+      v.find('SignInStep')!.props.onDone({ kind: 'account_mismatch', pendingChanges: 1, unsent: null, unsentError: null }, 'b@beebeeb.io')
       await v.m.flush()
       v.find('AccountSwitchStep')!.props.onSwitched()
       await v.m.flush()
@@ -300,7 +299,7 @@ describe('what the reset after a sign-out clears and keeps', () => {
       await v.reopen()
       expect(v.shown()).toEqual(['SignInStep'])
       expect(v.find('SignInStep')!.props.initialEmail).toBeUndefined()
-      v.find('SignInStep')!.props.onDone({ kind: 'fresh' }, 'c@beebeeb.io')
+      v.find('SignInStep')!.props.onDone({ kind: 'fresh', vaultUnlocked: false }, 'c@beebeeb.io')
       await v.m.flush()
       expect(v.find('UnlockStep')!.props.keyReplaced).toBe(false)
     } finally { v.close() }

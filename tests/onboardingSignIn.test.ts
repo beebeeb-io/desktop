@@ -47,7 +47,7 @@ describe('onboardingSignIn.submitPassword', () => {
       desktopLogin: async () => ({ ok: true, value: outcome() }),
     })
     const result = await submitPassword('user@beebeeb.io', 'correct horse', api)
-    expect(result).toEqual({ ok: true, requiresTotp: false, settled: { kind: 'fresh' } })
+    expect(result).toEqual({ ok: true, requiresTotp: false, settled: { kind: 'fresh', vaultUnlocked: false } })
   })
 
   test('a wrong password surfaces the server message and never reaches requiresTotp', async () => {
@@ -74,12 +74,12 @@ describe('onboardingSignIn.submitTotpCode', () => {
     }
 
     const passwordResult = await submitPassword('user@beebeeb.io', 'correct horse', api)
-    expect(passwordResult).toEqual({ ok: true, requiresTotp: true, settled: { kind: 'fresh' } })
+    expect(passwordResult).toEqual({ ok: true, requiresTotp: true, settled: { kind: 'fresh', vaultUnlocked: false } })
     // Session must NOT be considered installed yet — the caller's UI is
     // expected to show a code prompt now, not proceed to the vault step.
 
     const totpResult = await submitTotpCode('123456', api)
-    expect(totpResult).toEqual({ ok: true, settled: { kind: 'fresh' } })
+    expect(totpResult).toEqual({ ok: true, settled: { kind: 'fresh', vaultUnlocked: false } })
 
     // Both legs of the handoff actually ran, in order — proves the code
     // prompt's `desktop_login_2fa` call really happens before sign-in is
@@ -96,7 +96,7 @@ describe('onboardingSignIn.submitTotpCode', () => {
       },
     })
     const result = await submitTotpCode('12345678', api)
-    expect(result).toEqual({ ok: true, settled: { kind: 'fresh' } })
+    expect(result).toEqual({ ok: true, settled: { kind: 'fresh', vaultUnlocked: false } })
     expect(received).toBe('12345678')
   })
 
@@ -115,16 +115,26 @@ describe('onboardingSignIn.submitTotpCode', () => {
     const result = await submitTotpCode('123456', api)
     expect(result.ok).toBe(false)
     if (result.ok) throw new Error('unreachable')
-    expect(result.message).toContain('desktop_login_2fa')
+    // Spec §10.2 #24: the person is told plainly; the command's name goes to the log.
+    expect(result.message).toBe('This isn’t available in this version of Beebeeb.')
+    expect(result.message).not.toContain('desktop_login_2fa')
   })
 })
 
 describe('settledFrom (R8)', () => {
   test('maps the outcomes', () => {
-    expect(settledFrom(outcome())).toEqual({ kind: 'fresh' })
+    expect(settledFrom(outcome())).toEqual({ kind: 'fresh', vaultUnlocked: false })
     expect(settledFrom(outcome({ reauthenticated: true, vault_unlocked: true }))).toEqual({ kind: 'reauthenticated', vaultUnlocked: true, keyReplaced: false })
     expect(settledFrom(outcome({ reauthenticated: true, vault_unlocked: false }))).toEqual({ kind: 'reauthenticated', vaultUnlocked: false, keyReplaced: false })
-    expect(settledFrom(outcome({ account_mismatch: { pending_changes: 3 } }))).toEqual({ kind: 'account_mismatch', pendingChanges: 3 })
+    expect(settledFrom(outcome({ account_mismatch: { pending_changes: 3 } }))).toEqual({ kind: 'account_mismatch', pendingChanges: 3, unsent: null, unsentError: null })
+  })
+
+  // Spec C C-S1 (the TypeScript lane's change): a FRESH result carries whether the keys arrived with it, so the window
+  // can send a sign-in that delivered them to the Finder screen instead of the recovery phrase. Rust's password path
+  // always says false today; the field is read, not assumed.
+  test('a fresh sign-in says whether its keys are here (C-S1)', () => {
+    expect(settledFrom(outcome({ vault_unlocked: true }))).toEqual({ kind: 'fresh', vaultUnlocked: true })
+    expect(settledFrom(outcome({ vault_unlocked: false }))).toEqual({ kind: 'fresh', vaultUnlocked: false })
   })
 
   // FB-I1: a same-account re-sign-in whose kept vault key the server no longer accepts. The key was
@@ -160,7 +170,7 @@ describe('settledFrom (R8)', () => {
     expect(settled.filter((s) => s.kind === 'unreadable')).toEqual([])
     expect(settled).toContainEqual({ kind: 'reauthenticated', vaultUnlocked: false, keyReplaced: true })
     expect(settled).toContainEqual({ kind: 'reauthenticated', vaultUnlocked: true, keyReplaced: false })
-    expect(settled).toContainEqual({ kind: 'account_mismatch', pendingChanges: 3 })
+    expect(settled).toContainEqual({ kind: 'account_mismatch', pendingChanges: 3, unsent: null, unsentError: null })
   })
 
   // M9: Lane R always sends all five fields (lib.rs pins it), so a bundle cannot skew against it any
@@ -211,14 +221,14 @@ describe('onboardingSignIn carries what the sign-in became (R8)', () => {
     const same = await submitPassword('user@beebeeb.io', 'pw', fakeApi({ desktopLogin: async () => ({ ok: true, value: reauthenticated }) }))
     expect(same).toEqual({ ok: true, requiresTotp: false, settled: { kind: 'reauthenticated', vaultUnlocked: true, keyReplaced: false } })
     const other = await submitPassword('user@beebeeb.io', 'pw', fakeApi({ desktopLogin: async () => ({ ok: true, value: mismatch }) }))
-    expect(other).toEqual({ ok: true, requiresTotp: false, settled: { kind: 'account_mismatch', pendingChanges: 3 } })
+    expect(other).toEqual({ ok: true, requiresTotp: false, settled: { kind: 'account_mismatch', pendingChanges: 3, unsent: null, unsentError: null } })
   })
 
   test('the 2FA step reports them too (that is where a 2FA account learns it)', async () => {
     const same = await submitTotpCode('123456', fakeApi({ desktopLogin2fa: async () => ({ ok: true, value: reauthenticated }) }))
     expect(same).toEqual({ ok: true, settled: { kind: 'reauthenticated', vaultUnlocked: true, keyReplaced: false } })
     const other = await submitTotpCode('123456', fakeApi({ desktopLogin2fa: async () => ({ ok: true, value: mismatch }) }))
-    expect(other).toEqual({ ok: true, settled: { kind: 'account_mismatch', pendingChanges: 3 } })
+    expect(other).toEqual({ ok: true, settled: { kind: 'account_mismatch', pendingChanges: 3, unsent: null, unsentError: null } })
   })
 
   test('an unreadable result is an error in both steps, not a completed sign-in', async () => {

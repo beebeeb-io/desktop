@@ -95,6 +95,12 @@ export function mount(
     props?: any
     expand?: boolean
     hookModules?: HookModule[]
+    /**
+     * Re-render at the end of a `flush` only when a state setter changed a value (`Object.is`), as React does. Without it a
+     * `flush` always re-renders, which hides a handler that forgot to set state: the test sees the new world anyway
+     * (PR #147 review, P3-a). Off by default: the tests written before it lean on the always-render behaviour.
+     */
+    honestRender?: boolean
   },
 ): Mounted {
   const states: any[] = []
@@ -123,12 +129,21 @@ export function mount(
       },
     },
   }
+  let dirty = false
+  const toastApi = { showToast: (toast: any) => toasts.push(toast), dismissToast() {}, clearToasts() {} }
   const controlledHooks: Record<string, unknown> = {
     React: { createElement, Fragment },
     useState(initial: any) {
       const index = cursor++
       if (!(index in states)) states[index] = typeof initial === 'function' ? initial() : initial
-      return [states[index], (next: any) => { states[index] = typeof next === 'function' ? next(states[index]) : next }]
+      return [
+        states[index],
+        (next: any) => {
+          const value = typeof next === 'function' ? next(states[index]) : next
+          if (!Object.is(value, states[index])) dirty = true
+          states[index] = value
+        },
+      ]
     },
     useEffect(fn: any, next: any[]) {
       const index = cursor++
@@ -152,7 +167,10 @@ export function mount(
       return states[index]
     },
     useSyncExternalStore: (_subscribe: unknown, getSnapshot: () => unknown) => getSnapshot(),
-    useToast: () => ({ showToast: (toast: any) => toasts.push(toast), dismissToast() {}, clearToasts() {} }),
+    // The real provider hands out the same `showToast` on every render (a `useCallback` with no dependencies), so an effect
+    // that lists it does not re-run for it. One object per mount, as there: a new one per call would make every such effect
+    // re-run on every render and hide the ones that really do.
+    useToast: () => toastApi,
   }
   const hookFunctions: Record<string, unknown> = {}
   for (const hook of opts.hookModules ?? []) {
@@ -169,7 +187,8 @@ export function mount(
       }
       await Promise.resolve()
     }
-    render()
+    if (!opts.honestRender || dirty) render()
+    dirty = false
   }
   const unmount = () => {
     for (const cleanup of cleanups.values()) cleanup()

@@ -29,7 +29,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           persist-credentials: false
 
@@ -54,7 +54,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           persist-credentials: false
 
@@ -97,7 +97,7 @@ jobs:
 
       - name: Upload Rust test evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rust-test-linux
           path: |
@@ -118,7 +118,7 @@ jobs:
             os: macos-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           persist-credentials: false
 
@@ -131,9 +131,12 @@ jobs:
           workspaces: src-tauri
 
       - name: Test count guard self-test
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' || runner.os == 'macOS'
         shell: bash
-        run: python scripts/assert-cargo-test-counts.py --self-test
+        run: |
+          # Windows: `python`, as before (python3 can be the Store stub there); macOS: python3.
+          if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
+          "$py" scripts/assert-cargo-test-counts.py --self-test
 
       - name: Cargo check
         working-directory: src-tauri
@@ -145,26 +148,32 @@ jobs:
           echo "$check_exit" > "$RUNNER_TEMP/cargo-check.exit"
           exit "$check_exit"
 
-      - name: Run Windows Rust tests
-        if: runner.os == 'Windows'
+      # Task 2272 / 2271: macOS runs the tests too, not only `cargo check`. The 0.8.18 release found a macOS-only test
+      # failure on the maintainer's Mac that this job would have caught.
+      - name: Run Rust tests
+        if: runner.os == 'Windows' || runner.os == 'macOS'
         working-directory: src-tauri
         shell: bash
         env:
-          # Windows config/cache use Known Folders in the disposable runner's
-          # profile; keep temporary test files in their own directory.
+          # Config/cache live in the disposable runner's profile (Windows Known Folders, macOS
+          # ~/Library); keep temporary test files in their own directory. TEMP/TMP are Windows',
+          # TMPDIR is macOS'.
           TEMP: ${{ runner.temp }}/beebeeb-tmp
           TMP: ${{ runner.temp }}/beebeeb-tmp
+          TMPDIR: ${{ runner.temp }}/beebeeb-tmp
         run: |
           mkdir -p "$TEMP"
           cargo_exit=0
           CARGO_TERM_COLOR=never cargo test --locked > "$RUNNER_TEMP/cargo-test.log" 2>&1 || cargo_exit=$?
           cat "$RUNNER_TEMP/cargo-test.log"
           echo "$cargo_exit" > "$RUNNER_TEMP/cargo-test.exit"
-          python ../scripts/assert-cargo-test-counts.py "$RUNNER_TEMP/cargo-test.log" --cargo-exit-code "$cargo_exit"
+          # Windows: `python`, as before (python3 can be the Store stub there); macOS: python3.
+          if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
+          "$py" ../scripts/assert-cargo-test-counts.py "$RUNNER_TEMP/cargo-test.log" --cargo-exit-code "$cargo_exit"
 
       - name: Upload Rust evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rust-${{ matrix.name }}
           path: |
@@ -184,7 +193,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           persist-credentials: false
 
@@ -227,7 +236,7 @@ jobs:
 
       - name: Upload File Provider Swift evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: fileprovider-swift
           path: |
@@ -248,7 +257,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           persist-credentials: false
 
@@ -271,7 +280,101 @@ jobs:
 
       - name: Upload release script test evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-script-test
           path: ${{ runner.temp }}/release-script-test.log
+
+  release-manifest:
+    # release.yml's "Generate desktop channel manifest" step writes the alpha/beta/stable
+    # manifests every installed app updates from. The test runs that step's own run: block
+    # against fixture releases with a fake gh on PATH (no network), and proves it fails closed:
+    # a half-present macOS release, a missing or empty signature, or a download that keeps
+    # failing writes no manifest. The truth line is a count
+    # ("release-channel-manifest: N passed, 0 failed"), asserted on the run's own log by the
+    # same count guard its self-test proves can go red. A red run prints each failing
+    # scenario's step output and call log.
+    name: Release channel manifest (fake gh test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+
+      - name: shellcheck (warnings and above)
+        run: |
+          shellcheck --version
+          shellcheck -S warning -x \
+            scripts/test-release-channel-manifest.sh \
+            scripts/fixtures/release-manifest-fake-gh.sh
+          bash scripts/test-release-channel-manifest.sh --print-step > "$RUNNER_TEMP/manifest-step.sh"
+          test -s "$RUNNER_TEMP/manifest-step.sh"
+          shellcheck -s bash -S warning "$RUNNER_TEMP/manifest-step.sh"
+
+      - name: Count guard self-test
+        run: bash scripts/test-release-channel-manifest.sh --self-test
+
+      - name: Manifest step test (fake gh, real step)
+        run: |
+          set -o pipefail
+          bash scripts/test-release-channel-manifest.sh 2>&1 | tee "$RUNNER_TEMP/release-manifest-test.log"
+
+      - name: Count guard on the run's own log
+        run: bash scripts/test-release-channel-manifest.sh --assert-log "$RUNNER_TEMP/release-manifest-test.log"
+
+      - name: Upload manifest step test evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-manifest-test
+          path: ${{ runner.temp }}/release-manifest-test.log
+
+  release-branch-point:
+    # release.yml's `verify-branch-point` job refuses a release/* branch whose starting commit
+    # was never reviewed (task 2281): the branch must start at a commit on main or at the commit
+    # of a published desktop-v* tag that is itself a pull request merge into main or a release/*
+    # branch, and every first-parent commit since then must be a pull request merged
+    # into that branch. This job tests the script offline against a real local git repository with
+    # a fake `gh`: a tag on a PR merge into a release branch, a tag on a PR merge into main, a
+    # main start, an unreviewed start, a direct (non-PR) commit, a tag on a direct commit, a PR
+    # merged into another branch, a tag on a PR merge into a feature branch, a non-release ref, a
+    # tag with no release, a draft release, a failing release lookup and a failing pulls lookup.
+    # The truth line is a count
+    # ("release-branch-point: N passed, 0 failed"), asserted on the run's own log by the same
+    # count guard its self-test proves can go red.
+    name: Release branch point (fake gh test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+
+      - name: shellcheck (warnings and above)
+        run: |
+          shellcheck --version
+          shellcheck -S warning -x \
+            scripts/verify-release-branch-point.sh \
+            scripts/test-release-branch-point.sh \
+            scripts/fixtures/release-branch-point-fake-gh.sh
+
+      - name: Count guard self-test
+        run: bash scripts/test-release-branch-point.sh --self-test
+
+      - name: Branch point test (fake gh, real git)
+        run: |
+          set -o pipefail
+          bash scripts/test-release-branch-point.sh 2>&1 | tee "$RUNNER_TEMP/release-branch-point-test.log"
+
+      - name: Count guard on the run's own log
+        run: bash scripts/test-release-branch-point.sh --assert-log "$RUNNER_TEMP/release-branch-point-test.log"
+
+      - name: Upload branch point test evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-branch-point-test
+          path: ${{ runner.temp }}/release-branch-point-test.log

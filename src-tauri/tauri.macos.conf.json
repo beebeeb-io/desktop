@@ -1,6 +1,25 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Beebeeb",
+        "url": "index.html?window=main&platform=macos",
+        "width": 920,
+        "height": 620,
+        "minWidth": 760,
+        "minHeight": 520,
+        "resizable": true,
+        "fullscreen": false,
+        "visible": false,
+        "center": false,
+        "decorations": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "create": false
+      }
+    ],
     "trayIcon": {
       "iconPath": "icons/tray-template@2x.png",
       "iconAsTemplate": true

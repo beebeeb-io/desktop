@@ -28,8 +28,12 @@ mod conflict;
 mod desktop_capabilities;
 mod desktop_search;
 mod diagnostic_redaction;
+mod direct_download;
+mod download_pin;
 mod engine_bridge;
 mod engine_status;
+mod owner_keys;
+mod shared_folder_index;
 mod finder_removal;
 // Task 1885: how the bridge's answer to "open this in Finder" becomes a command's result, and the pins that keep
 // the macOS code from spawning `open` again. Only macOS calls it.
@@ -80,16 +84,31 @@ mod macos_file_provider;
 // Task 1885: NSWorkspace for the URLs that are not Finder items (System Settings), with no child `open`.
 #[cfg(target_os = "macos")]
 mod macos_workspace;
+// Task 2267: a Windows start refused over unowned local data proves the data is the signed-in account's own before it
+// is adopted (Windows never resets; macOS and Linux reset instead, so they never need it).
+#[cfg(any(target_os = "windows", test))]
+mod own_data_proof;
+// Task 2267 (fix round 2): what the person decides about the changes the proof held for review.
+#[cfg(any(target_os = "windows", test))]
+mod found_while_paused;
+// Tasks 1888 + 2226: the reconcile pass over the queue (ghost folder creates folded into their server twins), planned in
+// memory. Windows and Linux run it; macOS keeps its own resume.
+mod held_queue;
 mod popover_data;
 // Ruling R8 (spec 2026-10-06): the pure decision between a first sign-in, the same account signing in again and
 // an account switch. Windows keeps its refusal while a session exists and never asks.
 #[cfg_attr(target_os = "windows", allow(dead_code))]
 mod reauth;
 mod runner;
+mod sign_out;
 mod staged_payload;
 mod state_db;
 mod state_paths;
+// 0.8.15: the read Settings › Sync and the Windows tray poll to say what sync is doing (counts only).
+mod sync_activity;
 mod transfer_progress;
+// 0.8.15: WebView2's browser shortcuts (print, reload, find, ...) are off in every window; no-op off Windows.
+mod webview_browser_keys;
 mod write_token;
 // Task 1683 slice 1: pure macOS-popover surface logic, compiled and tested on every
 // platform. Slices 2-6 wire the rest of it; until then only `policy` has callers,
@@ -112,6 +131,18 @@ mod extension_log_pin;
 // all (it calls the in-process `EngineBridge` directly). Compiled everywhere (cheap, cross-platform via
 // `notify`) but the runner only spawns it on Windows (see `runner::run`).
 mod watcher;
+// Task 2191: the guard for Windows files of unknown content (synced before task 1640). Its
+// decisions are cross-platform (tested everywhere); the runner calls it on Windows only.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+mod unknown_check;
+// Task 2240 slice 2: the placeholder reconcile decided from folder listings. Cross-platform so it is
+// tested everywhere; only the Windows tick calls it.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+mod os_state_reconcile;
+// Tasks 2270 / 2280: what to do with an upload finalization journal row. Decided on every platform (tested
+// everywhere); applied on Windows only (`windows_cf::upload_finalization`).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+mod upload_finalization_plan;
 // Windows Cloud Files API — Phase 2 Task 6. Gated to Windows only;
 // the module's own files start with `#![cfg(target_os = "windows")]`
 // so this `mod` declaration plus the conditional are belt-and-braces.
@@ -272,6 +303,11 @@ pub struct AppState {
     /// The macOS Finder reconciler (spec 2026-10-06). Set once in `setup()` on macOS; empty on
     /// Windows/Linux and in tests that install none.
     pub finder_setup: std::sync::OnceLock<finder_setup::driver::FinderSetupHandle>,
+    /// The sign-out flow's state (spec 2026-10-10 §5.1): the newest ask snapshot, which the gate compares with.
+    pub(crate) sign_out: sign_out::SignOutState,
+    /// The set-up step a password sign-in without a key left open, for the life of the process (review P2-3 on the Mac
+    /// sign-in PR): see [`PendingSetup`].
+    pending_setup: Mutex<Option<HeldSetup>>,
 }
 
 impl AppState {
@@ -315,8 +351,101 @@ impl Default for AppState {
             pending_2fa: Mutex::new(None),
             menu_zoom_scale: Mutex::new(1.0),
             finder_setup: std::sync::OnceLock::new(),
+            sign_out: sign_out::SignOutState::default(),
+            pending_setup: Mutex::new(None),
         }
     }
+}
+
+/// The step a password sign-in on a Mac with no vault key leaves open: “Set up this Mac”, the recovery phrase. The Beebeeb
+/// window keeps its sign-in flow in a module store, and ⌘W destroys the window and the store with it, while the session
+/// stays and the key was never delivered; a window opened again then showed Home, whose locked card had nothing to unlock
+/// from (review P2-3). The window tells Rust when it enters the step (`set_pending_setup`) and asks once when it opens
+/// signed in and locked (`pending_setup`). Held for the life of the process: a relaunch is the Keychain signal of task
+/// 1747's Part 2.
+///
+/// It is forgotten the moment keys arrive on this Mac ([`keys_arrived`]: every unlock and every sign-in that puts a session
+/// in memory), and it is answered only while it is still true (an account signed in, its vault locked), so a sign-out or
+/// any other way the account leaves makes it inert without touching the sign-out code; the next sign-in sets it again or
+/// brings keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+struct PendingSetup {
+    /// The kept key was replaced (spec §5.6), so the card says why the phrase is asked.
+    key_replaced: bool,
+}
+
+/// A pending step and the account it was set for. The slot outlives a sign-out (the sign-out code is untouched), so a step
+/// of account A would otherwise be answered for account B who signed in after A and is signed in and locked; it is
+/// answered only for the account it was set for (review P3-4 of the delta review).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HeldSetup {
+    step: PendingSetup,
+    account: account_binding::Identity,
+}
+
+fn remember_pending_setup(slot: &Mutex<Option<HeldSetup>>, key_replaced: bool, account: account_binding::Identity) {
+    *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(HeldSetup {
+        step: PendingSetup { key_replaced },
+        account,
+    });
+}
+
+fn forget_pending_setup(slot: &Mutex<Option<HeldSetup>>) {
+    *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+}
+
+/// The pending step, if it is still true: an account is signed in, its vault is locked, and it is the account the step was
+/// set for (`account_binding::same_account`: an identity that cannot be compared resumes nothing). Reading it does not use
+/// it up.
+fn resume_pending_setup(
+    slot: &Mutex<Option<HeldSetup>>,
+    signed_in: bool,
+    vault_unlocked: bool,
+    current: &account_binding::Identity,
+) -> Option<PendingSetup> {
+    if !signed_in || vault_unlocked {
+        return None;
+    }
+    let held = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()?;
+    (account_binding::same_account(&held.account, current) == Some(true)).then_some(held.step)
+}
+
+/// Who this Mac's credentials name, for a pending step: the cached profile's user id and email, else the session's or the
+/// Keychain's email (`credentials_identity`). Windows has no Beebeeb window to resume, so it names nobody there.
+fn pending_setup_identity(acct: &AccountRuntime) -> account_binding::Identity {
+    #[cfg(not(target_os = "windows"))]
+    {
+        credentials_identity(acct)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = acct;
+        account_binding::Identity::default()
+    }
+}
+
+/// The window enters “Set up this Mac”: Rust keeps the step for the process, for the account whose credentials this Mac holds
+/// (see [`PendingSetup`]).
+#[tauri::command]
+fn set_pending_setup(state: State<'_, AppState>, key_replaced: bool) -> Result<(), String> {
+    let acct = state.active_account()?;
+    remember_pending_setup(&state.pending_setup, key_replaced, pending_setup_identity(&acct));
+    Ok(())
+}
+
+/// A window that opens signed in and locked asks whether “Set up this Mac” is still owed. `logged_in` is `sync_status`'s own
+/// reading: a session in memory, or a token in the credential store.
+#[tauri::command]
+fn pending_setup(state: State<'_, AppState>) -> Result<Option<PendingSetup>, String> {
+    let acct = state.active_account()?;
+    let vault_unlocked = acct.session.lock().map(|guard| guard.is_some()).unwrap_or(false);
+    let auth_present = state.auth_present.lock().map(|guard| *guard).unwrap_or(false);
+    Ok(resume_pending_setup(
+        &state.pending_setup,
+        vault_unlocked || auth_present,
+        vault_unlocked,
+        &pending_setup_identity(&acct),
+    ))
 }
 
 fn keychain_error(context: &str, error: impl fmt::Display) -> String {
@@ -1013,6 +1142,10 @@ async fn restore_session_on_startup(app: &tauri::AppHandle) {
 
 /// The startup restore proper (see [`restore_session_on_startup`], which shuts the adoption window after it).
 async fn restore_session_inner(app: &tauri::AppHandle) {
+    // Spec 2026-10-10 §15 question 3: a sign-out quit between its keep step and its purge left Finder accepts closed on
+    // disk. Reopen them before this restore can start an engine.
+    #[cfg(target_os = "macos")]
+    reopen_finder_accepts_at_startup();
     #[cfg(target_os = "windows")]
     let _transition = SESSION_TRANSITION.lock().await;
     #[cfg(target_os = "windows")]
@@ -1118,8 +1251,8 @@ async fn restore_stored_session(state: &AppState, acct: &AccountRuntime, base_ur
     // must never be logged out by startup. Still inside the spawned startup
     // task: setup() is never blocked by this.
     let probe = probe_startup_session(base_url, &session.token).await;
-    // Lead ruling, F9 review I-2: on a Mac, a token the server confirmed resumes the queue below.
-    #[cfg(target_os = "macos")]
+    // Lead ruling, F9 review I-2, on every OS since spec D11 (task 1888): a token the server confirmed resumes the
+    // queue below.
     let token_confirmed = matches!(probe, StartupSessionCheck::Authorized { .. });
     let probed = match probe {
         StartupSessionCheck::Unauthorized => {
@@ -1173,11 +1306,10 @@ async fn restore_stored_session(state: &AppState, acct: &AccountRuntime, base_ur
                 *cached = Some(profile);
             }
         }
-        // Lead ruling, F9 review I-2: the server confirmed the stored token and the Keychain unlocked the vault, so on a
-        // Mac sync resumes as after a sign-in: the edits paused for `auth` are due before the engine's first tick (the
-        // relaunch "Quit and reopen Beebeeb" asks for). Those held as `key_replaced` stay held. Windows and Linux keep
-        // today's flow (spec R8).
-        #[cfg(target_os = "macos")]
+        // Lead ruling, F9 review I-2: the server confirmed the stored token and the Keychain unlocked the vault, so
+        // sync resumes as after a sign-in (the relaunch "Quit and reopen Beebeeb" asks for). A Mac makes the edits
+        // paused for `auth` due before the engine's first tick; Windows and Linux after the engine's reconcile pass and
+        // key check (spec D11, task 1888). Those held as `key_replaced` stay held.
         if token_confirmed {
             ask_to_resume_auth_paused(&write, acct);
         }
@@ -1313,29 +1445,56 @@ async fn start_engine_if_possible(
 
 // ── IPC commands: first-launch onboarding ────────────────────────────────────
 
-/// Open the first-launch onboarding window.
+/// Open the sign-in surface (`surfaces::policy::onboarding_surface`).
 ///
-/// The window is wide enough for the two-column onboarding shell and centred. It mounts
-/// `Onboarding.tsx` (via `?window=onboarding`) which walks the user
-/// through three steps: sign-in, sync-folder selection, and a first-sync
-/// progress view. Called from `setup` if no sync_root is configured and
-/// no session is loaded (i.e., fresh install or post-uninstall run).
-///
-/// Re-calling when the window already exists is a no-op (focus only).
+/// A Mac signs in in the Beebeeb window (task 1683 slice 2, two-surface spec §7.4): the signed-out window shows the
+/// sign-in screens itself, so this only shows `main` on Home, and the `onboarding` window is never built there.
+/// Windows keeps its wider two-column wizard (`WindowsFirstRun.tsx`, label `windows-onboarding`) and Linux the compact
+/// `Onboarding.tsx` (label `onboarding`). Re-calling when the window already exists is a no-op (focus only).
 pub(crate) fn open_onboarding_window_impl(app: &tauri::AppHandle) -> Result<(), String> {
-    // Windows uses a wider two-column layout (WindowsFirstRun.tsx) selected by
-    // the `platform=windows` query param, matching the `windows-onboarding`
-    // entry in tauri.conf.json.
-    // macOS/Linux keep the original compact single-column Onboarding.tsx (no param).
-    #[cfg(target_os = "windows")]
-    let (label, url, width, height) = (
-        "windows-onboarding",
-        "index.html?window=onboarding&platform=windows",
-        860.0_f64,
-        640.0_f64,
-    );
-    #[cfg(not(target_os = "windows"))]
-    let (label, url, width, height) = ("onboarding", "index.html?window=onboarding", 860.0_f64, 640.0_f64);
+    match surfaces::policy::onboarding_surface(surfaces::policy::Platform::current()) {
+        surfaces::policy::OnboardingSurface::BeebeebWindow => show_sign_in_in_beebeeb_window(app),
+        #[cfg(not(target_os = "macos"))]
+        surfaces::policy::OnboardingSurface::Window(label) => open_onboarding_window_labelled(app, label),
+        #[cfg(target_os = "macos")]
+        surfaces::policy::OnboardingSurface::Window(_) => Err("A Mac signs in in the Beebeeb window.".to_string()),
+    }
+}
+
+/// A Mac's sign-in: the Beebeeb window on Home, which shows sign-in by itself when there is no account, or "Sign in
+/// again" for an ended one. Nothing is cleared first; the window decides what to show from the account it reads.
+#[cfg(target_os = "macos")]
+fn show_sign_in_in_beebeeb_window(app: &tauri::AppHandle) -> Result<(), String> {
+    show_main_window(app, MainNav::Home);
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn show_sign_in_in_beebeeb_window(_app: &tauri::AppHandle) -> Result<(), String> {
+    Err("Only the macOS app signs in in the Beebeeb window.".to_string())
+}
+
+/// R8: “Sign in again” on a Mac. Unlike the sign-in above, which lets the window decide from the account it reads, this
+/// asks the window for the card: a click on “Sign in again” always lands on it, even when the session was marked ended and
+/// has since recovered (review P3-1). Nothing is cleared first.
+#[cfg(target_os = "macos")]
+fn show_reauth_in_beebeeb_window(app: &tauri::AppHandle) -> Result<(), String> {
+    show_main_window(app, MainNav::Reauth);
+    Ok(())
+}
+
+/// The first-run window of Windows and Linux. It is not compiled on a Mac, which never builds it.
+///
+/// The window is wide enough for the two-column shell and centred. It mounts `Onboarding.tsx` (`?window=onboarding`)
+/// on Linux or the Windows wizard (`platform=windows`) selected by the label, matching the `windows-onboarding` entry
+/// in tauri.conf.json.
+#[cfg(not(target_os = "macos"))]
+fn open_onboarding_window_labelled(app: &tauri::AppHandle, label: &'static str) -> Result<(), String> {
+    let (url, width, height) = if label == "windows-onboarding" {
+        ("index.html?window=onboarding&platform=windows", 860.0_f64, 640.0_f64)
+    } else {
+        ("index.html?window=onboarding", 860.0_f64, 640.0_f64)
+    };
 
     if let Some(existing) = app.get_webview_window(label) {
         let _ = existing.show();
@@ -1360,15 +1519,16 @@ pub(crate) fn open_onboarding_window_impl(app: &tauri::AppHandle) -> Result<(), 
     Ok(())
 }
 
-/// IPC wrapper so the frontend can also open the onboarding window
+/// IPC wrapper so the frontend can also open the sign-in surface
 /// (e.g., from Account page → "Switch account").
 #[tauri::command]
 async fn open_onboarding_window(app: tauri::AppHandle) -> Result<(), String> {
     open_onboarding_window_impl(&app)
 }
 
-/// R8: "Sign in again" on macOS opens sign-in in place. Nothing is cleared first, and the onboarding window starts at
-/// the sign-in step whatever `sync_status` says (`mode=reauth`).
+/// R8: "Sign in again" opens sign-in in place. Nothing is cleared first. On a Mac that is the Beebeeb window, which
+/// shows "Sign in again" for an ended account (two-surface spec §7.4); on Linux the onboarding window starts at the
+/// sign-in step whatever `sync_status` says (`mode=reauth`); Windows keeps its own flow.
 #[tauri::command]
 async fn open_reauth_window(app: tauri::AppHandle) -> Result<(), String> {
     #[cfg(target_os = "windows")]
@@ -1376,7 +1536,11 @@ async fn open_reauth_window(app: tauri::AppHandle) -> Result<(), String> {
         let _ = app;
         Err("Only available on macOS and Linux.".to_string())
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        show_reauth_in_beebeeb_window(&app)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         const URL: &str = "index.html?window=onboarding&mode=reauth";
         if let Some(existing) = app.get_webview_window("onboarding") {
@@ -1399,6 +1563,13 @@ async fn open_reauth_window(app: tauri::AppHandle) -> Result<(), String> {
         let _ = window.set_focus();
         Ok(())
     }
+}
+
+/// The sign-in card's "Quit Beebeeb" (spec C §7.1): the same exit as the menu's Quit and ⌘Q. It carries an exit code,
+/// so `keep_running_on_exit_request` does not turn it down.
+#[tauri::command]
+fn quit_beebeeb(app: tauri::AppHandle) {
+    app.exit(0)
 }
 
 /// Result of an OPAQUE sign-in attempt handed back to the frontend.
@@ -1427,9 +1598,15 @@ struct LoginOutcome {
 }
 
 /// What the frontend needs to warn before an account switch: how many changes on this Mac have not uploaded yet.
+/// On a Mac (spec 2026-10-10 W11) also the ask snapshot the switch step renders (`unsent`), or, when the count could
+/// not be read, the coded E3 the step shows as a line (`unsent_error`); each is left out when it is `None`.
 #[derive(serde::Serialize)]
 struct AccountMismatchDto {
     pending_changes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unsent: Option<sign_out::snapshot::AskCounts>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unsent_error: Option<String>,
 }
 
 impl LoginOutcome {
@@ -1461,9 +1638,17 @@ impl LoginOutcome {
     }
 
     #[cfg_attr(target_os = "windows", allow(dead_code))]
-    fn account_mismatch(pending_changes: u64) -> Self {
+    fn account_mismatch(
+        pending_changes: u64,
+        unsent: Option<sign_out::snapshot::AskCounts>,
+        unsent_error: Option<String>,
+    ) -> Self {
         Self {
-            account_mismatch: Some(AccountMismatchDto { pending_changes }),
+            account_mismatch: Some(AccountMismatchDto {
+                pending_changes,
+                unsent,
+                unsent_error,
+            }),
             ..Self::signed_in()
         }
     }
@@ -1687,11 +1872,15 @@ async fn desktop_login(
                 } => {
                     return Ok(LoginOutcome::reauthenticated(vault_unlocked, key_replaced));
                 }
-                SignInSettlement::AccountMismatch { pending_changes } => {
+                SignInSettlement::AccountMismatch {
+                    pending_changes,
+                    unsent,
+                    unsent_error,
+                } => {
                     // Nothing on this Mac changed. The session just minted for the other account is revoked;
                     // after the switch the person signs in again.
                     let _ = revoke_desktop_session(&client, &base_url, &session_token).await;
-                    return Ok(LoginOutcome::account_mismatch(pending_changes));
+                    return Ok(LoginOutcome::account_mismatch(pending_changes, unsent, unsent_error));
                 }
                 SignInSettlement::Unconfirmed => {
                     // The server could not say whose key this Mac holds: nothing changed, the new session is
@@ -1885,13 +2074,17 @@ async fn desktop_login_2fa(
                     }
                     return Ok(LoginOutcome::reauthenticated(vault_unlocked, key_replaced));
                 }
-                SignInSettlement::AccountMismatch { pending_changes } => {
+                SignInSettlement::AccountMismatch {
+                    pending_changes,
+                    unsent,
+                    unsent_error,
+                } => {
                     // Nothing on this Mac changed. The session just minted for the other account is revoked.
                     let _ = revoke_desktop_session(&client, &base_url, &session_token).await;
                     if let Ok(mut guard) = state.pending_2fa.lock() {
                         *guard = None;
                     }
-                    return Ok(LoginOutcome::account_mismatch(pending_changes));
+                    return Ok(LoginOutcome::account_mismatch(pending_changes, unsent, unsent_error));
                 }
                 SignInSettlement::Unconfirmed => {
                     let _ = revoke_desktop_session(&client, &base_url, &session_token).await;
@@ -2045,9 +2238,7 @@ fn install_recovered_session(
         });
         drop(guard);
         set_auth_present(state, true);
-        // Ruling F9: the vault is unlocked now (after a replaced key too), so on a Mac sync resumes. Windows and Linux
-        // keep today's flow (spec R8).
-        #[cfg(target_os = "macos")]
+        // Ruling F9: the vault is unlocked now (after a replaced key too), so sync resumes; on every OS since spec D11.
         ask_to_resume_auth_paused(&write, acct);
         drop(write);
     }
@@ -2651,8 +2842,7 @@ fn install_new_session(
     drop(guard);
     set_auth_present(state, true);
     set_auth_email(state, email);
-    // Ruling F9: on a Mac, sync resumes. Windows and Linux keep today's flow (spec R8).
-    #[cfg(target_os = "macos")]
+    // Ruling F9: sync resumes; on every OS since spec D11 (task 1888).
     ask_to_resume_auth_paused(&write, acct);
     drop(write);
     Ok(NewSession::Installed)
@@ -2748,15 +2938,40 @@ struct SessionActionOutcome {
     warning: Option<ActionWarning>,
 }
 
+/// Spec 2026-10-10 §5.2 step 10: the folder the keep step made and its file count. Never logged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct KeptUnsent {
+    folder: String,
+    files: usize,
+}
+
+/// Task 2191 (review thread on #157): a sign-out failure after the Windows purge, carrying the
+/// folder it kept copies of unknown files in (or the macOS keep step's), so the alert can name it.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn sign_out_failure_after_purge(
+    message: String,
+    preserved_location: &Option<String>,
+    kept_unsent: &Option<KeptUnsent>,
+    windows_kept: &Option<KeptUnsent>,
+) -> SignOutFailure {
+    SignOutFailure {
+        message,
+        preserved_location: preserved_location.clone(),
+        kept_unsent: kept_unsent.clone().or_else(|| windows_kept.clone()),
+    }
+}
+
 /// What [`clear_session_impl`] did, and what of it could not be confirmed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SignedOut {
     outcome: SignOutOutcome,
     warning: Option<ActionWarning>,
     /// Task 1882: the folder where macOS kept the Finder files that had not reached the server when the
-    /// sign-out removed the Finder location. Shown to the person in the app's alert
-    /// (`show_preserved_files_alert`), never logged.
+    /// sign-out removed the Finder location. Shown to the person in the sign-out's alert
+    /// (`surface_sign_out_folders`), never logged.
     preserved_location: Option<String>,
+    /// Task 1887: the folder the sign-out's keep step copied the waiting Finder saves into (macOS). Never logged.
+    kept_unsent: Option<KeptUnsent>,
 }
 
 #[cfg(test)]
@@ -2767,6 +2982,7 @@ impl SignedOut {
             outcome,
             warning: None,
             preserved_location: None,
+            kept_unsent: None,
         }
     }
 }
@@ -2779,6 +2995,8 @@ struct SignOutFailure {
     message: String,
     /// The folder macOS kept, when the failure came after the removal. Never logged.
     preserved_location: Option<String>,
+    /// Task 1887: the folder the keep step made, when the failure came after the keep step. Never logged.
+    kept_unsent: Option<KeptUnsent>,
 }
 
 impl From<String> for SignOutFailure {
@@ -2786,6 +3004,7 @@ impl From<String> for SignOutFailure {
         Self {
             message,
             preserved_location: None,
+            kept_unsent: None,
         }
     }
 }
@@ -2802,14 +3021,6 @@ impl std::fmt::Display for SignOutFailure {
     }
 }
 
-/// The folder a sign-out kept, whether it succeeded or failed after the removal (review I1).
-fn sign_out_kept_folder(result: &Result<SignedOut, SignOutFailure>) -> Option<&str> {
-    match result {
-        Ok(done) => done.preserved_location.as_deref(),
-        Err(failure) => failure.preserved_location.as_deref(),
-    }
-}
-
 /// The unconfirmed-stop refusal (Bug A / task 1538 Codex P1). Shared by the
 /// fresh-abort path and the Bug-A2 retry gate so a retry cannot be
 /// distinguished from a first refusal by its message.
@@ -2820,11 +3031,22 @@ const UNCONFIRMED_ENGINE_STOP_ERROR: &str = "Could not stop the sync engine. Ple
 ///
 /// Shared by the WebView IPC command and the native menu "Sign out" item so
 /// both routes have the exact same security side-effects.
-async fn clear_session_impl(state: &AppState, forget_email: bool) -> Result<SignedOut, SignOutFailure> {
+async fn clear_session_impl(
+    state: &AppState,
+    forget_email: bool,
+    keep_unsent: Option<&str>,
+    unknown_files: UnknownFilesArg,
+    kept_folder: Option<std::path::PathBuf>,
+) -> Result<SignedOut, SignOutFailure> {
     #[cfg(target_os = "windows")]
     let _transition = SESSION_TRANSITION.lock().await;
     #[cfg(target_os = "windows")]
     let mut _auth_reopen = None;
+    // Spec 2026-10-10 W5: the gate runs first, before anything changes. A refusal changes nothing.
+    #[cfg(target_os = "macos")]
+    let accepted = gate_sign_out(state, keep_unsent)?;
+    #[cfg(not(target_os = "macos"))]
+    let _ = keep_unsent;
     let acct = state.active_account()?;
     // An account switch (spec §5.6) leaves no account email behind, or it stops: the prefill is forgotten before
     // anything is torn down, and it is never saved again below.
@@ -2854,6 +3076,7 @@ async fn clear_session_impl(state: &AppState, forget_email: bool) -> Result<Sign
     let kept_with = |message: String| SignOutFailure {
         message,
         preserved_location: preserved_location.clone(),
+        kept_unsent: None,
     };
     // What the result says when the sign-out happens: a removal the reconciler did not confirm (FB-24).
     #[cfg(target_os = "macos")]
@@ -2933,6 +3156,7 @@ async fn clear_session_impl(state: &AppState, forget_email: bool) -> Result<Sign
             windows_cf::revoke_callbacks()
                 .await
                 .map_err(|e| format!("Could not disconnect Cloud Files: {e}"))?;
+            stop_own_data_proofs();
             windows_cf::wait_for_credential_release().await?;
             // Native/credential shutdown is now confirmed. Cleanup may refuse dirty
             // files; allow an explicit unlock so the user can sync and retry.
@@ -2943,6 +3167,37 @@ async fn clear_session_impl(state: &AppState, forget_email: bool) -> Result<Sign
         }
         Some(engine_slot)
     };
+    // Spec 2026-10-10 §5.2 step 7 (W6): after the confirmed stop of either arm above, before the purge. Nothing between
+    // here and the purge deletes a file, writes the queue, clears a session or starts an engine (U10).
+    #[cfg(test)]
+    sign_out_seam("before_keep").map_err(&kept_with)?;
+    #[cfg(target_os = "macos")]
+    let kept = keep_for_sign_out(accepted.as_ref()).map_err(&kept_with)?;
+    // Spec 2026-10-10 §15 question 3: the keep step left Finder accepts closed for the purge, which clears them with
+    // the rows. Any return before the purge has done so reopens them.
+    #[cfg(target_os = "macos")]
+    let mut reopen_accepts = AcceptsReopenOnAbort { armed: true };
+    #[cfg(not(target_os = "macos"))]
+    let kept: Option<sign_out::kept_set::KeptSet> = None;
+    let kept_unsent = kept.as_ref().and_then(|kept| {
+        kept.folder.as_ref().map(|folder| KeptUnsent {
+            folder: folder.to_string_lossy().into_owned(),
+            files: kept.files,
+        })
+    });
+    // §5.2 step 10: from here on every failure carries our folder too.
+    let kept_with = |message: String| SignOutFailure {
+        message,
+        preserved_location: preserved_location.clone(),
+        kept_unsent: kept_unsent.clone(),
+    };
+    #[cfg(test)]
+    sign_out_seam("after_keep").map_err(&kept_with)?;
+    // Task 2191 (D11): the folder a Windows sign-out kept unknown bytes in, for the alert.
+    #[cfg(target_os = "windows")]
+    let mut windows_kept: Option<KeptUnsent> = None;
+    #[cfg(not(target_os = "windows"))]
+    let _ = (unknown_files, kept_folder);
 
     #[cfg(target_os = "windows")]
     {
@@ -2961,7 +3216,28 @@ async fn clear_session_impl(state: &AppState, forget_email: bool) -> Result<Sign
         };
         let db = state_db_from_app_local_state_dir()?;
         if let Some(db) = db {
-            windows_cf::signout::purge(&db, root.as_deref()).map_err(|e| format!("Sign-out paused: {e}"))?;
+            // Task 2191 (D11): files of unknown content are kept as copies or deleted, as the
+            // person chose in the confirmation.
+            let choice = match (unknown_files, root.as_deref()) {
+                (UnknownFilesArg::Keep, Some(root)) => windows_cf::signout::UnknownFiles::Keep {
+                    // Review-157 F4: the folder the confirmation named, when it is one of ours and
+                    // outside the sync folder; else a fresh one. A sync folder at a drive root with
+                    // no home folder has nowhere outside it, so the sign-out stops.
+                    dir: kept_folder
+                        .filter(|dir| {
+                            !dir.starts_with(root)
+                                && dir.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.starts_with("Beebeeb kept files "))
+                        })
+                        .or_else(|| kept_unknown_files_dir(root))
+                        .ok_or_else(|| "Sign-out paused: there is no folder outside the sync folder to keep copies in.".to_string())?,
+                },
+                (UnknownFilesArg::Keep, None) | (UnknownFilesArg::Delete, _) => windows_cf::signout::UnknownFiles::Delete,
+            };
+            let kept = windows_cf::signout::purge(&db, root.as_deref(), &choice).map_err(|e| format!("Sign-out paused: {e}"))?;
+            windows_kept = kept.dir.map(|dir| KeptUnsent {
+                folder: dir.to_string_lossy().into_owned(),
+                files: kept.files,
+            });
         } else if let Some(root) = root.as_ref() {
             if std::fs::read_dir(root)
                 .map_err(|e| format!("Cannot inspect sync folder: {e}"))?
@@ -2971,13 +3247,17 @@ async fn clear_session_impl(state: &AppState, forget_email: bool) -> Result<Sign
                 return Err("Cannot verify sync-folder ownership without its database. Restore the local state before signing out.".into());
             }
         }
+        // Task 2191 (review thread on #157): from here on the purge may have kept copies and
+        // deleted their originals, so every failure names their folder too.
+        let failed_after_purge =
+            |message: String| sign_out_failure_after_purge(message, &preserved_location, &kept_unsent, &windows_kept);
         if !already_signed_out {
             if let Some(root) = root {
                 // Cloud Files must release the root before WinRT removes its shell registration.
                 windows_cf::unregister_sync_root(&root)
-                    .map_err(|e| format!("Could not unregister Cloud Files: {e}"))?;
+                    .map_err(|e| failed_after_purge(format!("Could not unregister Cloud Files: {e}")))?;
                 windows_cf::unregister_shell_sync_root(&root)
-                    .map_err(|e| format!("Could not remove Explorer registration: {e}"))?;
+                    .map_err(|e| failed_after_purge(format!("Could not remove Explorer registration: {e}")))?;
             }
             let token = acct
                 .session
@@ -2994,7 +3274,7 @@ async fn clear_session_impl(state: &AppState, forget_email: bool) -> Result<Sign
                 let client = reqwest::Client::builder()
                     .default_headers(api_client::provenance_headers())
                     .build()
-                    .map_err(|e| format!("Could not initialize logout request: {e}"))?;
+                    .map_err(|e| failed_after_purge(format!("Could not initialize logout request: {e}")))?;
                 let _ = tokio::time::timeout(
                     std::time::Duration::from_secs(3),
                     revoke_desktop_session(&client, &runner::api_base_url(), &token),
@@ -3003,6 +3283,10 @@ async fn clear_session_impl(state: &AppState, forget_email: bool) -> Result<Sign
             }
         }
     }
+    // Task 2191 (review thread on #157): every later failure carries the folder the purge kept
+    // copies in, as the success does.
+    #[cfg(target_os = "windows")]
+    let kept_with = |message: String| sign_out_failure_after_purge(message, &preserved_location, &kept_unsent, &windows_kept);
 
     // Task 1538 findings 1+2: purge every queued operation (so a later
     // account's engine can never drain THIS account's still-queued uploads —
@@ -3042,8 +3326,18 @@ async fn clear_session_impl(state: &AppState, forget_email: bool) -> Result<Sign
         } else {
             Some(SIGN_OUT_TEST_PURGE_GATE.lock().await)
         };
-        purge_local_data_for_sign_out(state_paths::beebeeb_state_dir(), cfg_sync_root.as_deref(), owe_removal)
-            .map_err(&kept_with)?;
+        purge_local_data_for_sign_out(
+            state_paths::beebeeb_state_dir(),
+            cfg_sync_root.as_deref(),
+            owe_removal,
+            kept.as_ref(),
+        )
+        .map_err(&kept_with)?;
+        // The purge cleared the rows, and the closed accepts with them.
+        #[cfg(target_os = "macos")]
+        reopen_accepts.disarm();
+        #[cfg(test)]
+        sign_out_seam("after_purge").map_err(&kept_with)?;
     }
 
     // (macOS: the Finder removal is the reconciler's, at the start of this function: spec 2026-10-06
@@ -3101,10 +3395,15 @@ async fn clear_session_impl(state: &AppState, forget_email: bool) -> Result<Sign
         }
         set_auth_present(state, false);
         set_auth_email(state, None);
+        state.sign_out.snapshots.clear();
         return Ok(SignedOut {
             outcome: SignOutOutcome::NotSignedIn,
             warning: removal_warning,
             preserved_location,
+            #[cfg(target_os = "windows")]
+            kept_unsent: kept_unsent.clone().or_else(|| windows_kept.clone()),
+            #[cfg(not(target_os = "windows"))]
+            kept_unsent: kept_unsent.clone(),
         });
     }
     // macOS/Linux: the Keychain clear and its check in the sign-out's last turn, which moves the generation on after them.
@@ -3115,16 +3414,21 @@ async fn clear_session_impl(state: &AppState, forget_email: bool) -> Result<Sign
         drop(engine_slot);
     }
     #[cfg(target_os = "windows")]
-    clear_keychain_session(acct.id.as_str())?;
+    clear_keychain_session(acct.id.as_str()).map_err(&kept_with)?;
     set_auth_present(state, false);
     set_auth_email(state, None);
     lifecycle_log::event(lifecycle_log::LifecycleEvent::SignedOut);
     // Everything this sign-out can clear is cleared, so it happened; a removal from Finder it could not confirm is a
     // warning on that success, not an error (FB-24; lead rulings T8-⚠lock 1 and T7-⚠2 5).
+    state.sign_out.snapshots.clear();
     Ok(SignedOut {
         outcome: SignOutOutcome::Completed,
         warning: removal_warning,
         preserved_location,
+        #[cfg(target_os = "windows")]
+        kept_unsent: kept_unsent.clone().or_else(|| windows_kept.clone()),
+        #[cfg(not(target_os = "windows"))]
+        kept_unsent: kept_unsent.clone(),
     })
 }
 
@@ -3156,12 +3460,12 @@ async fn take_slot_and_stop_engine_for_sign_out(
 /// Refuses (Bug A / A2) unless the engine task is CONFIRMED terminated, or no
 /// engine is running and no earlier attempt left an unconfirmed one behind.
 ///
-/// Then upload staging: every handed-over copy is removed. Safe exactly here:
-/// the IPC listener runs inside the engine's task, so once the stop is
-/// confirmed no request can still be served, and a request that arrives
-/// later reaches no daemon, fails transiently, and the extension stages a
-/// fresh copy for the system's retry. The caller holds the engine slot, so no
-/// new engine can start in between.
+/// Then upload staging: every handed-over copy is removed. A request that arrives later reaches no daemon and fails
+/// transiently. One Finder write or change may still be running: a save, a rename, a move or a folder create in
+/// `spawn_blocking`, or a delete's synchronous enqueue, which an abort cannot stop once it started. The keep step
+/// closes accepts before it reads the queue, each of them reads that in the transaction that queues it, and a
+/// sign-out that stops reopens them (spec 2026-10-10 §5.2 step 6, §15 question 3). The caller holds the engine slot,
+/// so no new engine can start in between: no engine start reopens accepts between the keep step and the purge.
 async fn stop_engine_for_sign_out(
     acct: &crate::account::AccountRuntime,
     engine_slot: &mut Option<runner::EngineRunner>,
@@ -3256,14 +3560,19 @@ async fn with_the_shared_state_dir<T>(body: impl std::future::Future<Output = T>
 /// owed before any engine starts. Any failure stops the sign-out: a purge that cannot run (state dir unresolved,
 /// database unopenable), one that fails (a file that cannot be removed), a failed clear. A state.db that does not
 /// exist yet is a fresh install: nothing to purge.
+///
+/// `kept` (macOS, spec 2026-10-10 §5.2 step 8): what the keep step kept. The purge refuses before it deletes anything
+/// unless every waiting change is in it, and that refusal (`unsent_copy_failed: …`) is returned as it is, so the caller
+/// can match its code. Once the rows are cleared, the unfinished sign-out marker is cleared too (W13).
 #[cfg(not(target_os = "windows"))]
 fn purge_local_data_for_sign_out(
     state_dir: Result<PathBuf, String>,
     sync_root: Option<&Path>,
     owe_finder_removal: bool,
+    kept: Option<&sign_out::kept_set::KeptSet>,
 ) -> Result<(), String> {
     match state_dir.and_then(|dir| state_db_from_state_dir(&dir)) {
-        Ok(Some(db)) => match purge_local_state_files(&db, sync_root) {
+        Ok(Some(db)) => match purge_local_state_files(&db, sync_root, kept) {
             Ok(summary) => {
                 tracing::info!(
                     queued_ops_purged = summary.queued_ops_purged,
@@ -3272,12 +3581,24 @@ fn purge_local_data_for_sign_out(
                     windows_placeholders_dehydrated = summary.windows_placeholders_dehydrated,
                     "purged operation queue and decrypted cache on sign-out"
                 );
+                // Spec 2026-10-10 W13: the rows are cleared, so no write can look missing any more. Best effort
+                // (§7.3). The warning names the step that failed, `path`, `read` or `write`, and never an error's
+                // text: a read error quotes a line of the file, and the list's lines are kept folders' paths (W10).
+                #[cfg(target_os = "macos")]
+                if let Err(step) = DesktopConfig::path()
+                    .map_err(|_| "path".to_string())
+                    .and_then(|path| sign_out::kept_record::clear_unfinished_at(&path))
+                {
+                    tracing::warn!(step = %step, "could not clear the unfinished sign-out marker");
+                }
                 if let Err(error) = db.clear_account_data(owe_finder_removal) {
                     tracing::error!(error = %error, "sign-out stopped: the account rows could not be cleared");
                     return Err(format!("{SIGN_OUT_PURGE_FAILED} ({error})"));
                 }
                 Ok(())
             }
+            // The guard's refusal is E2 with its code, so the caller can match it (spec §11).
+            Err(error) if error.starts_with(&format!("{}: ", sign_out::copy::UNSENT_COPY_FAILED_CODE)) => Err(error),
             Err(error) => {
                 tracing::error!(error = %error, "sign-out stopped: the local data could not be purged");
                 Err(format!("{SIGN_OUT_PURGE_FAILED} ({error})"))
@@ -3292,10 +3613,638 @@ fn purge_local_data_for_sign_out(
     }
 }
 
+/// Spec 2026-10-10 §5.1 step 1 without the send conditions (the send phase adds them): one read; the earlier folders
+/// only when the ask shows a missing write. A failed read of the queue is E3, never a 0. A failed read of the
+/// unfinished list leaves the earlier folders out and the ask still counts; its warning names the step that failed,
+/// never the error: a read error quotes a line of the file, and the list's lines are kept folders' paths (W10).
+#[cfg(target_os = "macos")]
+fn count_ask(owner: &str) -> Result<sign_out::snapshot::AskSnapshot, String> {
+    let e3 = || {
+        sign_out::copy::coded(
+            sign_out::copy::UNSENT_COUNT_FAILED_CODE,
+            sign_out::copy::E3_UNSENT_COUNT_FAILED,
+        )
+    };
+    let waiting = read_waiting_changes().map_err(|_| e3())?;
+    let earlier = if waiting.counts().missing_files > 0 {
+        DesktopConfig::path()
+            .map_err(|_| "path")
+            .and_then(|path| sign_out::kept_record::unfinished_at(&path).map_err(|_| "read"))
+            .unwrap_or_else(|step| {
+                tracing::warn!(
+                    step = %step,
+                    "the ask names no earlier folder: the unfinished sign-out list could not be read"
+                );
+                Vec::new()
+            })
+    } else {
+        Vec::new()
+    };
+    Ok(sign_out::snapshot::AskSnapshot::of(&waiting, owner, earlier))
+}
+
+/// The queue as the sign-out counts it, from the app's state dir. No `state.db` yet: nothing waits.
+#[cfg(target_os = "macos")]
+fn read_waiting_changes() -> Result<sign_out::waiting::WaitingChanges, String> {
+    match state_db_from_state_dir(&state_paths::beebeeb_state_dir()?)? {
+        Some(db) => sign_out::waiting::WaitingChanges::read(&db),
+        None => Ok(sign_out::waiting::WaitingChanges::default()),
+    }
+}
+
+/// §5.1, the contract: `sign_out_count`'s answer. Built on a Mac only; elsewhere the command's twin answers an error.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SignOutCount {
+    #[serde(flatten)]
+    counts: sign_out::snapshot::AskCounts,
+    can_send: bool,
+    not_sending: Option<sign_out::waiting::NotSending>,
+}
+
+/// §6.1 conditions 1-4 for the active account, and the running engine's phase link.
+#[cfg(target_os = "macos")]
+async fn send_conditions(state: &AppState) -> (sign_out::waiting::SendConditions, Option<Arc<runner::SendPhaseLink>>) {
+    let Ok(acct) = state.active_account() else {
+        return (
+            sign_out::waiting::SendConditions {
+                engine_running: false,
+                vault_unlocked: false,
+                session_expired: true,
+                link_failed: false,
+                sync_paused: false,
+            },
+            None,
+        );
+    };
+    // Running, not merely present: a runner whose task ended at startup leaves its handle in the slot, and that must
+    // not advertise a send nobody would run (the count then goes straight to the engine-stopped ask).
+    let link = acct
+        .engine
+        .lock()
+        .await
+        .as_ref()
+        .filter(|engine| engine.is_running())
+        .map(|engine| engine.send_phase());
+    let conditions = sign_out::waiting::SendConditions {
+        engine_running: link.is_some(),
+        vault_unlocked: acct.session.lock().map(|session| session.is_some()).unwrap_or(false),
+        session_expired: acct.auth_health.is_expired(),
+        link_failed: link.as_ref().is_some_and(|link| link.link_failed()),
+        sync_paused: acct.sync_paused.load(Ordering::Relaxed),
+    };
+    (conditions, link)
+}
+
+/// §5.1 step 1: one read, a snapshot owned by the calling window, and one `info` line with counts only (review I8).
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn sign_out_count(window: tauri::WebviewWindow, state: State<'_, AppState>) -> Result<SignOutCount, String> {
+    let snapshot = count_ask(window.label())?;
+    let (conditions, _) = send_conditions(&state).await;
+    let not_sending = sign_out::waiting::readiness(conditions, snapshot.is_empty(), snapshot.any_live);
+    let can_send = !snapshot.is_empty() && not_sending.is_none();
+    tracing::info!(
+        files = snapshot.counts.files,
+        copied_files = snapshot.counts.copied_files,
+        others = snapshot.counts.others,
+        missing_files = snapshot.counts.missing_files,
+        can_send,
+        not_sending = not_sending.map(|reason| format!("{reason:?}")).unwrap_or_default(),
+        earlier_folder = !snapshot.counts.earlier_folders.is_empty(),
+        "sign-out flow counted"
+    );
+    let counts = snapshot.counts.clone();
+    state.sign_out.snapshots.record(snapshot);
+    Ok(SignOutCount {
+        counts,
+        can_send,
+        not_sending,
+    })
+}
+
+/// Windows and Linux keep today's sign-out (spec 2026-10-10 W5): the flow's commands are registered everywhere,
+/// because `generate_handler!` takes no `cfg`, and say so off a Mac.
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+async fn sign_out_count(window: tauri::WebviewWindow, state: State<'_, AppState>) -> Result<SignOutCount, String> {
+    let _ = (window, state);
+    Err("This works on a Mac only.".into())
+}
+
+/// W11: on macOS the switch step renders a snapshot, owned by the sign-in window, `onboarding`. Its one caller,
+/// `settle_sign_in`, is not built on Windows.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
+fn switch_snapshot(state: &AppState) -> Result<Option<sign_out::snapshot::AskCounts>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let snapshot = count_ask("onboarding")?;
+        // §6.4 (review I8): the switch's snapshot logs the same line as `sign_out_count`; it never sends (W11).
+        tracing::info!(
+            files = snapshot.counts.files,
+            copied_files = snapshot.counts.copied_files,
+            others = snapshot.counts.others,
+            missing_files = snapshot.counts.missing_files,
+            can_send = false,
+            not_sending = "",
+            earlier_folder = !snapshot.counts.earlier_folders.is_empty(),
+            "sign-out flow counted"
+        );
+        let counts = snapshot.counts.clone();
+        state.sign_out.snapshots.record(snapshot);
+        Ok(Some(counts))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = state;
+        Ok(None)
+    }
+}
+
+/// What the driver needs of a started phase.
+#[cfg(target_os = "macos")]
+struct PhaseRun {
+    owner: String,
+    link: Option<Arc<runner::SendPhaseLink>>,
+    stop: Arc<AtomicBool>,
+    closed: Arc<AtomicBool>,
+    started: std::time::Instant,
+    changes_at_start: usize,
+}
+
+/// §6.2: a stale ask refuses; a running phase starts nothing; otherwise make live changes due, arm, and register.
+#[cfg(target_os = "macos")]
+fn start_send_phase(
+    sign_out: &sign_out::SignOutState,
+    ask_id: &str,
+    owner: &str,
+    link: Option<Arc<runner::SendPhaseLink>>,
+) -> Result<Option<PhaseRun>, String> {
+    if sign_out.snapshots.newest_ask_id().as_deref() != Some(ask_id) {
+        return Err(sign_out::copy::coded(
+            sign_out::copy::UNSENT_CHANGES_CODE,
+            sign_out::copy::E1_UNSENT_CHANGES,
+        ));
+    }
+    let mut phase = sign_out.phase.lock().unwrap_or_else(|p| p.into_inner());
+    if phase.is_some() {
+        return Ok(None);
+    }
+    let changes_at_start = read_waiting_changes().map(|waiting| waiting.changes()).unwrap_or(0);
+    if let Ok(Some(db)) = state_paths::beebeeb_state_dir().and_then(|dir| state_db_from_state_dir(&dir)) {
+        let _ = db.make_due_for_send_phase(now_unix_seconds());
+    }
+    if let Some(link) = &link {
+        link.arm();
+    }
+    let (stop, closed) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+    *phase = Some(sign_out::send_phase::RunningPhase {
+        ask_id: ask_id.to_string(),
+        owner: owner.to_string(),
+        stop: stop.clone(),
+        closed: closed.clone(),
+    });
+    Ok(Some(PhaseRun {
+        owner: owner.to_string(),
+        link,
+        stop,
+        closed,
+        started: std::time::Instant::now(),
+        changes_at_start,
+    }))
+}
+
+/// The phase is over, for any reason: disarm, so the runner is back on its tick within a second.
+#[cfg(target_os = "macos")]
+fn end_send_phase(sign_out: &sign_out::SignOutState, link: Option<&runner::SendPhaseLink>) {
+    if let Some(link) = link {
+        link.disarm();
+    }
+    *sign_out.phase.lock().unwrap_or_else(|p| p.into_inner()) = None;
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn sign_out_send_start(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    ask_id: String,
+) -> Result<(), String> {
+    let (_, link) = send_conditions(&state).await;
+    if let Some(run) = start_send_phase(&state.sign_out, &ask_id, window.label(), link)? {
+        tauri::async_runtime::spawn(drive_send_phase(app, run));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+async fn sign_out_send_start(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    ask_id: String,
+) -> Result<(), String> {
+    let _ = (app, window, state, ask_id);
+    Err("This works on a Mac only.".into())
+}
+
+/// "Stop waiting" (and Esc): the phase ends `stopped`. Nothing happens when no phase runs.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn sign_out_send_stop(state: State<'_, AppState>) -> Result<(), String> {
+    if let Some(phase) = state.sign_out.phase.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
+        phase.stop.store(true, Ordering::SeqCst);
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn sign_out_send_stop(state: State<'_, AppState>) -> Result<(), String> {
+    let _ = state;
+    Err("This works on a Mac only.".into())
+}
+
+/// One observation of the world for the phase (§6.4): the queue as read, the account's conditions, and what the
+/// phase's attempts met on its link. The driver's own step, split out so a test can run it with no window.
+#[cfg(target_os = "macos")]
+fn observe_phase(
+    run: &PhaseRun,
+    waiting: &sign_out::waiting::WaitingChanges,
+    conditions: sign_out::waiting::SendConditions,
+) -> sign_out::send_phase::PhaseObservation {
+    sign_out::send_phase::PhaseObservation {
+        elapsed: run.started.elapsed(),
+        changes_left: waiting.changes(),
+        any_live: waiting.any_live(),
+        engine_running: run.link.is_some() && conditions.engine_running,
+        session_expired: conditions.session_expired,
+        link_failed: conditions.link_failed,
+        attempt: run.link.as_ref().map(|link| link.signals()).unwrap_or_default(),
+        stop_requested: run.stop.load(Ordering::SeqCst),
+        window_closed: run.closed.load(Ordering::SeqCst),
+    }
+}
+
+/// The driver: once a second, wake the runner's queue step, read the world, and end or report progress.
+#[cfg(target_os = "macos")]
+async fn drive_send_phase(app: tauri::AppHandle, run: PhaseRun) {
+    let state = app.state::<AppState>();
+    let mut phase = sign_out::send_phase::SendPhase::default();
+    let mut changes_left = run.changes_at_start;
+    let end = loop {
+        if let Some(link) = &run.link {
+            link.wake();
+        }
+        // `std::time::Duration`: `lib.rs` imports none at the crate level.
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let Ok(waiting) = read_waiting_changes() else {
+            break sign_out::send_phase::PhaseEnd::Stopped;
+        };
+        changes_left = waiting.changes();
+        let (conditions, _) = send_conditions(&state).await;
+        let observation = observe_phase(&run, &waiting, conditions);
+        match phase.observe(&observation) {
+            sign_out::send_phase::PhaseStep::Continue => {}
+            sign_out::send_phase::PhaseStep::Progress(left) => {
+                let _ = app.emit_to(
+                    run.owner.as_str(),
+                    "sign-out-send-progress",
+                    serde_json::json!({ "changesLeft": left }),
+                );
+            }
+            sign_out::send_phase::PhaseStep::End(end) => break end,
+        }
+    };
+    end_send_phase(&state.sign_out, run.link.as_deref());
+    use sign_out::send_phase::PhaseEnd;
+    let ask = match end {
+        PhaseEnd::AllSent | PhaseEnd::Closed => None,
+        _ => count_ask(&run.owner).ok().map(|snapshot| {
+            let counts = snapshot.counts.clone();
+            state.sign_out.snapshots.record(snapshot);
+            counts
+        }),
+    };
+    tracing::info!(
+        reason = end.as_str(),
+        changes_at_start = run.changes_at_start,
+        changes_left,
+        elapsed_ms = run.started.elapsed().as_millis() as u64,
+        "sign-out send phase ended"
+    );
+    let _ = app.emit_to(
+        run.owner.as_str(),
+        "sign-out-send-ended",
+        serde_json::json!({ "reason": end, "ask": ask }),
+    );
+}
+
+/// W5, the gate: one read compared with the snapshot `keep_unsent` names.
+#[cfg(target_os = "macos")]
+fn gate_sign_out(
+    state: &AppState,
+    keep_unsent: Option<&str>,
+) -> Result<Option<sign_out::snapshot::AskSnapshot>, SignOutFailure> {
+    let waiting = read_waiting_changes().map_err(|_| {
+        SignOutFailure::from(sign_out::copy::coded(
+            sign_out::copy::UNSENT_COUNT_FAILED_CODE,
+            sign_out::copy::E3_UNSENT_COUNT_FAILED,
+        ))
+    })?;
+    state.sign_out.snapshots.gate(&waiting, keep_unsent).map_err(|_| {
+        SignOutFailure::from(sign_out::copy::coded(
+            sign_out::copy::UNSENT_CHANGES_CODE,
+            sign_out::copy::E1_UNSENT_CHANGES,
+        ))
+    })
+}
+
+/// Where the kept folder goes: the container's `Documents/Changes not sent` (§7.1). A test build writes under its
+/// per-process sandbox, never the person's folders.
+#[cfg(target_os = "macos")]
+fn sign_out_kept_root() -> Result<PathBuf, String> {
+    #[cfg(test)]
+    {
+        crate::test_sandbox::dir("kept")
+            .map(|dir| dir.join("Changes not sent"))
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(test))]
+    {
+        sign_out::kept_names::kept_root_for_this_app().ok_or_else(|| "no folder for kept changes".to_string())
+    }
+}
+
+/// Who runs the keep step. A failed copy's log line names it: an R10 reset is not a sign-out (W12).
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+enum KeepCaller {
+    /// §5.2 step 7: a sign-out by choice.
+    SignOut,
+    /// W12: spec A's R10 reset before an engine starts.
+    Reset,
+}
+
+/// The keep step on `db` (§5.2 step 7, W12): the kept root, the config, the clone and the durable save are the app's.
+/// A failed copy is logged by its category, never a path (W10), in the caller's own line.
+#[cfg(target_os = "macos")]
+fn keep_in(
+    db: &state_db::StateDb,
+    acknowledge: sign_out::keep::Acknowledge<'_>,
+    caller: KeepCaller,
+) -> Result<sign_out::kept_set::KeptSet, String> {
+    let failed = || {
+        sign_out::copy::coded(
+            sign_out::copy::UNSENT_COPY_FAILED_CODE,
+            sign_out::copy::E2_UNSENT_COPY_FAILED,
+        )
+    };
+    let root = sign_out_kept_root().map_err(|_| failed())?;
+    let config = DesktopConfig::path().map_err(|_| failed())?;
+    sign_out::keep::keep_unsent(sign_out::keep::KeepInputs {
+        db,
+        acknowledge,
+        root: &root,
+        event_name: sign_out::kept_names::event_folder_name(chrono::Local::now()),
+        config_path: &config,
+        clone: &sign_out::kept_writer::SystemClone,
+        config_fs: &config::RealConfigFs,
+    })
+    .map_err(|failure| {
+        if let sign_out::keep::KeepFailure::Copy(reason) = &failure {
+            match caller {
+                KeepCaller::SignOut => tracing::error!(
+                    reason,
+                    "sign-out stopped: the waiting changes could not be kept; nothing was purged"
+                ),
+                KeepCaller::Reset => tracing::error!(
+                    reason,
+                    "R10: local data reset stopped: the waiting changes could not be kept; nothing was purged"
+                ),
+            }
+        }
+        failure.message()
+    })
+}
+
+/// §5.2 step 7: the keep step on the app's state dir. `None`: no `state.db` yet, nothing to keep. A state dir that does
+/// not resolve, or a `state.db` that does not open, means the queue cannot be read: E3 with its code, as a failed read
+/// inside the keep step is. Its log names the step, never the error, whose text names the database's path (W10).
+#[cfg(target_os = "macos")]
+fn keep_for_sign_out(
+    accepted: Option<&sign_out::snapshot::AskSnapshot>,
+) -> Result<Option<sign_out::kept_set::KeptSet>, String> {
+    use sign_out::keep::Acknowledge;
+    let opened = state_paths::beebeeb_state_dir()
+        .map_err(|_| "state_dir")
+        .and_then(|dir| state_db_from_state_dir(&dir).map_err(|_| "state_db"));
+    let db = match opened {
+        Ok(Some(db)) => db,
+        Ok(None) => return Ok(None),
+        Err(step) => {
+            tracing::error!(
+                step = %step,
+                "sign-out stopped: the waiting changes could not be read; nothing was purged"
+            );
+            return Err(sign_out::copy::coded(
+                sign_out::copy::UNSENT_COUNT_FAILED_CODE,
+                sign_out::copy::E3_UNSENT_COUNT_FAILED,
+            ));
+        }
+    };
+    let acknowledge = match accepted {
+        Some(snapshot) => Acknowledge::Asked {
+            others: &snapshot.others,
+            missing: &snapshot.missing,
+        },
+        None => Acknowledge::Nothing,
+    };
+    keep_in(&db, acknowledge, KeepCaller::SignOut).map(Some)
+}
+
+/// Spec 2026-10-10 §15 question 3: reopen Finder accepts in the app's state database. Best effort: an engine start
+/// reopens them too (`engine_start_repair`). No `state.db` yet: nothing was closed. One that does not open is logged
+/// by its step, never by the error, whose text names the database's path (W10).
+#[cfg(target_os = "macos")]
+fn reopen_finder_accepts_in(state_dir: &Path) {
+    let db = match state_db_from_state_dir(state_dir) {
+        Ok(Some(db)) => db,
+        Ok(None) => return,
+        Err(_) => {
+            accepts_not_reopened("state_db");
+            return;
+        }
+    };
+    if let Err(error) = db.reopen_finder_accepts() {
+        tracing::warn!(%error, "could not reopen Finder accepts; the next engine start reopens them");
+    }
+}
+
+/// A sign-out quit between its keep step and its purge left accepts closed on disk: the launch reopens them first.
+#[cfg(target_os = "macos")]
+fn reopen_finder_accepts_at_startup() {
+    match state_paths::beebeeb_state_dir() {
+        Ok(state_dir) => reopen_finder_accepts_in(&state_dir),
+        Err(_) => accepts_not_reopened("state_dir"),
+    }
+}
+
+/// A reopen that could not reach the state database: the step only (W10).
+#[cfg(target_os = "macos")]
+fn accepts_not_reopened(step: &'static str) {
+    tracing::warn!(
+        step = %step,
+        "could not reopen Finder accepts; the next engine start reopens them"
+    );
+}
+
+/// From a completed keep step until the purge has cleared the rows (and the key with them), any return reopens Finder
+/// accepts at once: a refused or failed purge, a test seam, a panic.
+#[cfg(target_os = "macos")]
+struct AcceptsReopenOnAbort {
+    armed: bool,
+}
+
+#[cfg(target_os = "macos")]
+impl AcceptsReopenOnAbort {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for AcceptsReopenOnAbort {
+    fn drop(&mut self) {
+        if self.armed
+            && let Ok(state_dir) = state_paths::beebeeb_state_dir()
+        {
+            reopen_finder_accepts_in(&state_dir);
+        }
+    }
+}
+
+/// Test builds only: a hook between the steps of `clear_session_impl`, per test task (`SIGN_OUT_SEAM.scope`). An
+/// `Err` stops the sign-out at that point with that message.
+#[cfg(test)]
+type SignOutSeam = Arc<dyn Fn(&'static str) -> Result<(), String> + Send + Sync>;
+
+#[cfg(test)]
+tokio::task_local! {
+    static SIGN_OUT_SEAM: SignOutSeam;
+}
+
+#[cfg(test)]
+fn sign_out_seam(point: &'static str) -> Result<(), String> {
+    SIGN_OUT_SEAM.try_with(|seam| seam(point)).unwrap_or(Ok(()))
+}
+
 /// R10: on macOS and Linux a sign-out whose local-data purge fails stops instead of completing, as
 /// Windows already does. The engine is already stopped, so trying again is safe.
 #[cfg(not(target_os = "windows"))]
 const SIGN_OUT_PURGE_FAILED: &str = "Sign-out paused: Beebeeb couldn’t clear this computer’s local data. Try again; if it keeps happening, restart Beebeeb.";
+
+/// `clear_session`'s `keepUnsent: { askId }` (spec 2026-10-10 §5.1, the contract). Accepted and ignored off macOS (W5).
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KeepUnsentArg {
+    ask_id: String,
+}
+
+/// Task 2191 (Decision (lead, 2026-10-26)): what the person chose in the Windows sign-out
+/// confirmation for files of unknown content that hold bytes on this PC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum UnknownFilesArg {
+    /// Keep a copy of each in a folder beside the sync folder (the default).
+    Keep,
+    /// Delete them with the rest.
+    Delete,
+}
+
+/// Task 2191: what the Windows sign-out confirmation shows: how many files of unknown content
+/// hold bytes on this PC, and the folder "Keep copies" would use.
+#[derive(Debug, Clone, serde::Serialize)]
+struct UnknownFilesAtSignOut {
+    count: usize,
+    folder: Option<String>,
+}
+
+/// Task 2191: the folder a Windows sign-out keeps unknown bytes in: beside the sync folder, or in
+/// the home folder for a sync folder at a drive root. `None`: there is no place outside it.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn kept_unknown_files_dir(root: &std::path::Path) -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(std::path::PathBuf::from);
+    unknown_check::kept_files_dir(root, &chrono::Local::now().format("%Y-%m-%d %H%M").to_string(), home.as_deref())
+}
+
+/// Task 2191 (D11): the files the Windows sign-out would keep or delete as unknown: by the same
+/// rule as the purge (`unknown_check::unknown_at_signout`), holding bytes on this PC.
+#[cfg(target_os = "windows")]
+fn count_unknown_files_at_sign_out() -> Result<UnknownFilesAtSignOut, String> {
+    use unknown_check::{ExpectedAt, OnDisk, PlatformView};
+    let root = DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root);
+    let (Some(db), Some(root)) = (state_db_from_app_local_state_dir()?, root) else {
+        return Ok(UnknownFilesAtSignOut { count: 0, folder: None });
+    };
+    let mut places: Vec<(String, ExpectedAt)> = db
+        .list_unknown_orphans()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|(path, _, _)| (path, ExpectedAt::OrphanCandidate))
+        .collect();
+    places.extend(db.list_guarded().map_err(|e| e.to_string())?.into_iter().map(|row| (row.path, ExpectedAt::Guarded(row.file_id))));
+    let mut count = 0;
+    for (rel, expected) in places {
+        let Some(path) = engine_bridge::EngineBridge::placeholder_path_under(&root, &rel) else {
+            continue;
+        };
+        let (placeholder, identity, holds_bytes) = match windows_cf::placeholders::platform_view(&path) {
+            PlatformView::Missing | PlatformView::Unreadable => continue,
+            PlatformView::PlainFile => (false, None, true),
+            PlatformView::Placeholder { on_disk, identity, .. } => (true, identity, on_disk != OnDisk::Nothing),
+        };
+        let owner = match identity.as_deref() {
+            Some(id) => db
+                .get_file(id)
+                .map_err(|e| e.to_string())?
+                .map(|row| (row.path, db.has_agreed_content(id).unwrap_or(true))),
+            None => None,
+        };
+        let unknown = unknown_check::unknown_at_signout(
+            &expected,
+            &rel,
+            placeholder,
+            identity.as_deref(),
+            owner.as_ref().map(|(path, guarded)| (path.as_str(), *guarded)),
+        );
+        if unknown && holds_bytes {
+            count += 1;
+        }
+    }
+    let folder = kept_unknown_files_dir(&root).filter(|_| count > 0).map(|dir| dir.to_string_lossy().into_owned());
+    Ok(UnknownFilesAtSignOut { count, folder })
+}
+
+/// Task 2191: how many files of unknown content hold bytes on this PC (Windows), for the
+/// sign-out confirmation. Elsewhere: none.
+#[tauri::command]
+async fn sign_out_unknown_files() -> Result<UnknownFilesAtSignOut, String> {
+    #[cfg(target_os = "windows")]
+    {
+        // Self-review: one platform read per file; off the async workers.
+        tokio::task::spawn_blocking(count_unknown_files_at_sign_out)
+            .await
+            .map_err(|e| e.to_string())?
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(UnknownFilesAtSignOut { count: 0, folder: None })
+    }
+}
 
 /// Sign out through the shared native-menu/WebView teardown. Windows returns
 /// an error while work, plaintext cleanup or root unregistration is incomplete;
@@ -3308,27 +4257,201 @@ const SIGN_OUT_PURGE_FAILED: &str = "Sign-out paused: Beebeeb couldn’t clear t
 /// server, the app's alert names the folder. Every frontend sign-out (Settings,
 /// the compact Account page, "Sign in again", the account switch) ends here; the menu's sign-out
 /// raises the same alert in its own handler.
+///
+/// Spec 2026-10-10 §5.1 "A late result" (macOS): Tauri passes the calling window. A result that needs showing stays
+/// pending until that window acknowledges it (`sign_out_result_ack`); if the window closes, is destroyed or reloads
+/// first, Rust shows it in the menu's dialog, and so it does when the call returns after such a close.
 #[tauri::command]
 async fn clear_session(
     app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
     state: State<'_, AppState>,
     forget_email: Option<bool>,
+    keep_unsent: Option<KeepUnsentArg>,
+    unknown_files: Option<UnknownFilesArg>,
+    kept_folder: Option<String>,
 ) -> Result<SessionActionOutcome, String> {
-    let result = clear_session_impl(&state, forget_email.unwrap_or(false)).await;
+    #[cfg(target_os = "macos")]
+    state.sign_out.late_results.begin(window.label());
+    let result = clear_session_impl(
+        &state,
+        forget_email.unwrap_or(false),
+        keep_unsent.as_ref().map(|keep| keep.ask_id.as_str()),
+        // Task 2191: without an answer (the menu, an older window) the copies are kept.
+        unknown_files.unwrap_or(UnknownFilesArg::Keep),
+        // Review-157 F4: the folder the confirmation named, so the copies go where it said.
+        kept_folder.map(std::path::PathBuf::from),
+    )
+    .await;
     // Review I1: the alert comes first, also when the sign-out failed after the removal.
     // Review I2: and the folder is saved for the Settings › Sync row.
-    surface_kept_folder(&app, sign_out_kept_folder(&result));
+    surface_sign_out_folders(&app, &result);
+    #[cfg(target_os = "macos")]
+    if let Some(shown) = state
+        .sign_out
+        .late_results
+        .complete(window.label(), late_result_of(&result))
+    {
+        show_late_result(&app, shown);
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = &window;
     result
         .map(|done| SessionActionOutcome { warning: done.warning })
         .map_err(|failure| failure.message)
 }
 
+/// Spec 2026-10-10 §5.1 "A late result": what needs showing. Not `unsent_changes` (nothing changed, and a hidden window
+/// cannot show the ask), and not a completed sign-out without a warning. Read on macOS and in tests only.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn late_result_of(result: &Result<SignedOut, SignOutFailure>) -> Option<sign_out::flow_window::Shown> {
+    use sign_out::flow_window::Shown;
+    match result {
+        Err(failure)
+            if failure
+                .message
+                .starts_with(&format!("{}: ", sign_out::copy::UNSENT_CHANGES_CODE)) =>
+        {
+            None
+        }
+        Err(failure) => Some(Shown::Failure(failure.message.clone())),
+        Ok(SignedOut {
+            warning: Some(warning), ..
+        }) => Some(Shown::Warning(warning.sentence().to_string())),
+        Ok(_) => None,
+    }
+}
+
+/// The menu's own dialogs (its sign-out's "Sign-out paused" and "Signed out"), in the callback form, which does not
+/// wait for the person, so a window-event handler can raise one. With no parent window macOS draws it in its own
+/// UserNotificationCenter process, so it shows while Settings is hidden.
+#[cfg(target_os = "macos")]
+fn show_late_result(app: &tauri::AppHandle, shown: sign_out::flow_window::Shown) {
+    use sign_out::flow_window::Shown;
+    let (title, message, kind) = match shown {
+        Shown::Failure(message) => (
+            "Sign-out paused",
+            message,
+            tauri_plugin_dialog::MessageDialogKind::Error,
+        ),
+        Shown::Warning(sentence) => ("Signed out", sentence, tauri_plugin_dialog::MessageDialogKind::Info),
+    };
+    app.dialog().message(message).title(title).kind(kind).show(|_| {});
+}
+
+/// What a close of `label` did (U34): the four steps of §5.1's hook, on the flow state alone. Read on macOS and in
+/// tests only.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+struct FlowClosed {
+    // The hook acts on `show` alone; these two say what the close ended, for the tests (U34).
+    #[cfg_attr(not(test), allow(dead_code))]
+    phase_closed: bool,
+    #[cfg_attr(not(test), allow(dead_code))]
+    snapshot_dropped: bool,
+    show: Option<sign_out::flow_window::Shown>,
+}
+
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn flow_window_closed(sign_out: &sign_out::SignOutState, label: &str) -> FlowClosed {
+    let phase_closed = match sign_out.phase.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
+        Some(phase) if phase.owner == label => {
+            phase.closed.store(true, Ordering::SeqCst);
+            true
+        }
+        _ => false,
+    };
+    FlowClosed {
+        phase_closed,
+        snapshot_dropped: sign_out.snapshots.drop_owned_by(label),
+        show: sign_out.late_results.window_closed(label),
+    }
+}
+
+/// Spec 2026-10-10 §5.1 "A close ends the flow": every `CloseRequested` and `Destroyed`, and every page load `Started`,
+/// of any window.
+#[cfg(target_os = "macos")]
+fn sign_out_flow_window_closed(app: &tauri::AppHandle, label: &str) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    let closed = flow_window_closed(&state.sign_out, label);
+    let _ = app.emit_to(label, "sign-out-flow-closed", ());
+    if let Some(shown) = closed.show {
+        show_late_result(app, shown);
+    }
+}
+
+/// The webview displayed its `clear_session`'s outcome (spec 2026-10-10 F12): remove that window's pending result.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn sign_out_result_ack(window: tauri::WebviewWindow, state: State<'_, AppState>) -> Result<(), String> {
+    state.sign_out.late_results.acknowledge(window.label());
+    Ok(())
+}
+
+/// Windows and Linux keep today's sign-out (spec 2026-10-10 W5): nothing is ever pending there.
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn sign_out_result_ack(window: tauri::WebviewWindow, state: State<'_, AppState>) -> Result<(), String> {
+    let _ = (window, state);
+    Ok(())
+}
+
+/// §5.1 "A flow request survives a window that has not loaded yet": one pending request. Read on macOS and in tests
+/// only.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn take_sign_out_flow_request(sign_out: &sign_out::SignOutState) -> bool {
+    sign_out.flow_request.swap(false, Ordering::SeqCst)
+}
+
+/// Entry points 2 and 5: store the request, open the Beebeeb window on Settings › Account (task 1683 slice 1,
+/// two-surface spec §8.1), and tell it (it also consumes on mount).
+#[cfg(target_os = "macos")]
+fn open_sign_out_flow(app: &tauri::AppHandle) {
+    app.state::<AppState>()
+        .sign_out
+        .flow_request
+        .store(true, Ordering::SeqCst);
+    show_main_window(app, MainNav::settings(Some("account")));
+    let _ = app.emit_to("main", "menu:sign-out-flow", ());
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn request_sign_out_flow(app: tauri::AppHandle) -> Result<(), String> {
+    open_sign_out_flow(&app);
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn consume_sign_out_flow_request(state: State<'_, AppState>) -> bool {
+    take_sign_out_flow_request(&state.sign_out)
+}
+
+/// Windows and Linux keep today's sign-out (spec 2026-10-10 W5): there is no flow to open there.
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn request_sign_out_flow(app: tauri::AppHandle) -> Result<(), String> {
+    let _ = app;
+    Err("This works on a Mac only.".into())
+}
+
+/// Windows and Linux: no request is ever pending.
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn consume_sign_out_flow_request(state: State<'_, AppState>) -> bool {
+    let _ = state;
+    false
+}
+
 /// Task 1882 (spec `docs/specs/2026-10-09-macos-removal-keeps-unsynced-files.md` §5): the app's
-/// own alert after a removal that kept files — the sentence, a blank line, then the folder. A sign-out, the
-/// app-start sweep and a reconciler removal nobody waits for (an owed removal, the account binding's Repair, or one
-/// that finished after the reconciler's time limit) raise it through `surface_kept_folder`, which first saves the
-/// folder for the Settings › Sync row. `install_finder_location`'s rollback calls it too, but only Windows and Linux
-/// have that path, and nothing is kept there. Logs never carry the folder. Nothing kept → no alert.
+/// own alert after a removal that kept files — the sentence, a blank line, then the folder. The app-start sweep and a
+/// reconciler removal nobody waits for (an owed removal, the account binding's Repair, or one that finished after the
+/// reconciler's time limit) raise it through `surface_kept_folder`, which first saves the folder for the Settings ›
+/// Sync row. A sign-out puts the same body in its own alert, after its kept folder's (`surface_sign_out_folders`, task
+/// 1887). `install_finder_location`'s rollback calls it too, but only Windows and Linux have that path, and nothing is
+/// kept there. Logs never carry the folder. Nothing kept → no alert.
 ///
 /// Device K-F1 (round 2): with no parent window, `tauri-plugin-dialog` 2.7 hands this to `rfd`
 /// 0.16, which calls `CFUserNotificationDisplayAlert` on a background thread. macOS draws that
@@ -3349,9 +4472,9 @@ fn show_preserved_files_alert(app: &tauri::AppHandle, preserved_location: Option
 }
 
 /// Review I2 (lead ruling, round 2): hands a kept folder to the person on the paths that have no
-/// config of their own (sign-out, the app-start sweep, a reconciler removal): saved for the Settings › Sync row
+/// config of their own (the app-start sweep, a reconciler removal): saved for the Settings › Sync row
 /// first, with the windows told (rebase re-review I2: [`save_kept_folder_for_row`]), then the alert. Nothing kept →
-/// nothing.
+/// nothing. A sign-out surfaces its folders through [`surface_sign_out_folders`].
 fn surface_kept_folder(app: &tauri::AppHandle, preserved_location: Option<&str>) {
     surface_kept_folder_with(
         preserved_location,
@@ -3375,6 +4498,81 @@ fn surface_kept_folder_with(
     alert(location);
 }
 
+/// Spec 2026-10-10 W9 and §9: after a sign-out, ONE alert names our folder, then macOS's. Our folder was recorded by
+/// the keep step already; macOS's is saved for its row here, as before (the one route that tells the windows). Neither
+/// path is logged.
+fn surface_sign_out_folders(app: &tauri::AppHandle, result: &Result<SignedOut, SignOutFailure>) {
+    let (macos, ours) = sign_out_folders(result);
+    match macos {
+        Some(location) => save_kept_folder_for_row(app, location),
+        None if ours.is_some() => emit_kept_folder_changed(app),
+        None => {}
+    }
+    // Task 2191 (D11): on Windows "ours" is the folder files of unknown content were kept in.
+    #[cfg(target_os = "windows")]
+    let alert = match ours {
+        Some(kept) => sign_out::copy::windows_kept_files_alert(&kept.folder, kept.files),
+        None => sign_out::copy::sign_out_alert(None, macos),
+    };
+    #[cfg(not(target_os = "windows"))]
+    let alert = sign_out::copy::sign_out_alert(ours.map(|kept| (kept.folder.as_str(), kept.files)), macos);
+    let Some((title, message)) = alert else {
+        return;
+    };
+    app.dialog()
+        .message(message)
+        .title(title)
+        .kind(tauri_plugin_dialog::MessageDialogKind::Info)
+        .show(|_| {
+            tracing::debug!("kept-folder alert closed");
+        });
+    tracing::debug!("kept-folder alert shown");
+}
+
+/// The two folders a sign-out's result carries, whether it succeeded or failed after the removal (task 1882):
+/// macOS's, then ours. It replaces the helper that named macOS's folder only.
+fn sign_out_folders(result: &Result<SignedOut, SignOutFailure>) -> (Option<&str>, Option<&KeptUnsent>) {
+    match result {
+        Ok(done) => (done.preserved_location.as_deref(), done.kept_unsent.as_ref()),
+        Err(failure) => (failure.preserved_location.as_deref(), failure.kept_unsent.as_ref()),
+    }
+}
+
+/// U26: "Show in Finder" reveals only the folder saved for the row.
+fn reveal_target<'a>(saved: Option<&str>, path: &'a str) -> Result<&'a str, String> {
+    if saved == Some(path) {
+        Ok(path)
+    } else {
+        Err(sign_out::copy::K3_TOAST.to_string())
+    }
+}
+
+/// The row's folder (spec 2026-10-10 §9), or none.
+#[tauri::command]
+fn kept_unsent_folder() -> Result<Option<String>, String> {
+    sign_out::kept_record::saved_kept_unsent_at(&DesktopConfig::path()?)
+}
+
+/// The row's "Dismiss": forgets the folder it showed, never deletes it (§7.3).
+#[tauri::command]
+fn dismiss_kept_unsent_folder(app: tauri::AppHandle, path: String) -> Result<finder_removal::DismissOutcome, String> {
+    let outcome = sign_out::kept_record::dismiss_saved_kept_unsent_at(&DesktopConfig::path()?, &path)?;
+    emit_kept_folder_changed(&app);
+    Ok(outcome)
+}
+
+/// "Show in Finder" (spec 2026-10-10 §7.1): the opener's reveal, never `/usr/bin/open`. On macOS it fails only when
+/// the folder is gone, which is what K3 says.
+#[tauri::command]
+fn show_kept_unsent_folder(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    let saved = sign_out::kept_record::saved_kept_unsent_at(&DesktopConfig::path()?)?;
+    let target = reveal_target(saved.as_deref(), &path)?;
+    tracing::info!("kept folder reveal requested");
+    app.opener()
+        .reveal_item_in_dir(target)
+        .map_err(|_| sign_out::copy::K3_TOAST.to_string())
+}
+
 /// Rebase re-review I2: told to every window once a kept folder was saved for the Settings › Sync row, so a Sync tab
 /// that is open reads the folder again. A removal the reconciler runs in the background (after "Try again", or one
 /// that finished after its time limit) saves the folder long after the tab's own read, and so does a Repair that the
@@ -3392,11 +4590,11 @@ fn emit_kept_folder_changed<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
 /// Device RB3-F1 (lead ruling, 2026-10-10): the ONE place a kept folder is saved for the Settings › Sync row, and
 /// every save of it tells the windows once it is saved, so a Sync tab that is open follows a Repair that another
 /// window started (the compact window's Finder page), as it follows a sign-out or a late reconciler removal. The
-/// callers are `surface_kept_folder` (sign-out, the app-start sweep, the reconciler) and macOS Repair, which has no
-/// alert of its own (1882 spec §5: the page's result line carries the folder). A save that failed is logged without
-/// the path and the windows are told anyway; the tab reads the row again and finds what is there. A source pin
-/// (`rb3_f1_every_save_of_the_rows_folder_goes_through_the_one_function_that_tells_the_windows`) fails on any other
-/// route to `remember_kept_folder`.
+/// callers are `surface_kept_folder` (the app-start sweep, the reconciler), `surface_sign_out_folders` (sign-out) and
+/// macOS Repair, which has no alert of its own (1882 spec §5: the page's result line carries the folder). A save that
+/// failed is logged without the path and the windows are told anyway; the tab reads the row again and finds what is
+/// there. A source pin (`rb3_f1_every_save_of_the_rows_folder_goes_through_the_one_function_that_tells_the_windows`)
+/// fails on any other route to `remember_kept_folder`.
 fn save_kept_folder_for_row<R: tauri::Runtime>(app: &tauri::AppHandle<R>, location: &str) {
     save_kept_folder_for_row_with(location, remember_kept_folder, || emit_kept_folder_changed(app));
 }
@@ -3458,6 +4656,23 @@ fn install_keychain_session(
     Ok(())
 }
 
+/// What `unlock_vault` says on a Mac that holds a session token and no vault key (the first password sign-in that was never
+/// finished with the recovery phrase): the approved Set up this Mac sentence, which the Beebeeb window recognises to offer the
+/// phrase (`isNoVaultKey`, pinned equal in `tests/signInModel.test.ts`). Without it the person read the Keychain's own
+/// words, "unlock vault key from Keychain: secret not found". Windows and Linux keep what they showed.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const NO_VAULT_KEY_UNLOCK_ERROR: &str = "This Mac does not have your encryption keys yet. Restore them to continue.";
+
+/// The same test the startup restore applies to this failure (`error.contains("secret not found")`, in
+/// `restore_session_inner`): the token is there and the key is not.
+fn unlock_failure(error: String) -> String {
+    #[cfg(target_os = "macos")]
+    if error.contains("secret not found") {
+        return NO_VAULT_KEY_UNLOCK_ERROR.to_string();
+    }
+    error
+}
+
 /// Restore a Keychain-backed session into memory and start the engine for the
 /// configured sync root. Keychain may show the OS unlock prompt depending on
 /// the user's security settings. Until the user calls this command, hydration
@@ -3498,7 +4713,8 @@ async fn unlock_vault(app: tauri::AppHandle, state: State<'_, AppState>) -> Resu
         // session goes into memory in its turn only.
         let mut turn = acct.session_generation();
         let email = acct.auth_email.lock().ok().and_then(|guard| guard.clone());
-        let session = load_session_from_keychain(acct.id.as_str(), email)?
+        let session = load_session_from_keychain(acct.id.as_str(), email)
+            .map_err(unlock_failure)?
             .ok_or_else(|| "Sign in before unlocking the vault.".to_string())?;
         install_keychain_session(&state, &acct, &mut turn, session)?;
         tracing::info!("vault unlocked from Keychain");
@@ -3680,6 +4896,7 @@ async fn lock_vault(state: State<'_, AppState>) -> Result<SessionActionOutcome, 
         windows_cf::revoke_callbacks()
             .await
             .map_err(|e| format!("Could not disconnect Cloud Files: {e}"))?;
+        stop_own_data_proofs();
         windows_cf::wait_for_credential_release().await?;
     }
 
@@ -3760,6 +4977,20 @@ fn now_unix_seconds() -> i64 {
         .unwrap_or_default()
 }
 
+/// What `wait_for_file_provider_ipc_ready` fails with when the local sync socket does not come up in time. It is the
+/// sentence a person reads, and it is also what a Linux or Windows install saves as `finder_install_last_error`, so the
+/// classifier below recognises this exact text as a timeout: it holds neither "timed out" nor "timeout" (two-surface spec
+/// §10.2: no "daemon", no "Timed out waiting for"), and a reworded sentence must not turn the saved category into "unknown"
+/// (PR #140 review, P2-8).
+const FINDER_IPC_NOT_READY: &str = "Beebeeb wasn’t ready in time to add its Finder location.";
+
+/// Whether a Finder-install error is a wait that ran out: the typed sentence above, or an OS error that says so.
+#[cfg(any(test, not(target_os = "macos")))]
+fn finder_install_error_is_timeout(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("timed out") || lower.contains("timeout") || error.contains(FINDER_IPC_NOT_READY)
+}
+
 // The install-era Finder state (`finder_install_*` in desktop.toml and the helpers below) is for
 // Windows and Linux only. On macOS the reconciler owns the truth (spec 2026-10-06 §6.1).
 #[cfg(not(target_os = "macos"))]
@@ -3774,7 +5005,7 @@ fn classify_finder_install_error(error: &str) -> String {
         "provisioning".to_string()
     } else if lower.contains("disabled") || lower.contains("-2011") || lower.contains("sync is not enabled") {
         "disabled".to_string()
-    } else if lower.contains("timed out") || lower.contains("timeout") {
+    } else if finder_install_error_is_timeout(error) {
         "timeout".to_string()
     } else if lower.contains("not available") || lower.contains("only available") || lower.contains("unsupported") {
         "unsupported".to_string()
@@ -3998,10 +5229,37 @@ fn state_db_from_state_dir(state_dir: &std::path::Path) -> Result<Option<state_d
 }
 
 fn disposable_cache_roots() -> Vec<PathBuf> {
-    let mut roots = vec![std::env::temp_dir()];
-    if let Some(cache_dir) = dirs::cache_dir() {
-        roots.push(cache_dir);
+    disposable_cache_roots_in(
+        std::env::temp_dir(),
+        dirs::cache_dir(),
+        macos_hydrate_cache_root(),
+        &engine_bridge::FinderStagingBases::current(),
+    )
+}
+
+/// The hydrate cache's root on a Mac (task 1670); none elsewhere.
+fn macos_hydrate_cache_root() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        Some(crate::ipc_socket::macos_hydrate_cache_dir())
     }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+/// Spec 2026-10-10 §7.1 (U12): the roots `is_disposable_cache_path` accepts, from directories passed in, so a test can
+/// check a release layout. The temp dir, the cache dir, the macOS hydrate cache, then every staging folder (spec
+/// 2026-10-09 §8.4), never the whole data dir.
+fn disposable_cache_roots_in(
+    temp_dir: PathBuf,
+    cache_dir: Option<PathBuf>,
+    hydrate_cache_dir: Option<PathBuf>,
+    staging: &engine_bridge::FinderStagingBases,
+) -> Vec<PathBuf> {
+    let mut roots = vec![temp_dir];
+    roots.extend(cache_dir);
     // Task 1670 round 2, Codex P1 (PR #75): `hydrate_file` records a macOS
     // hydrate-cache destination as `cache_path` via `mark_cached`, same as
     // any other cache entry. Without this, `is_disposable_cache_path` (the
@@ -4018,13 +5276,12 @@ fn disposable_cache_roots() -> Vec<PathBuf> {
     // machinery, not the primary mechanism, but it closes the gap Codex
     // named precisely (this general machinery must never treat a path
     // holding decrypted plaintext as "not ours to remove").
-    #[cfg(target_os = "macos")]
-    roots.push(crate::ipc_socket::macos_hydrate_cache_dir());
+    roots.extend(hydrate_cache_dir);
     // Every folder a Finder write's plaintext copy is staged in, or was staged in by an earlier build (spec
     // 2026-10-09 §8.4): on macOS the data dir's `beebeeb/finder-writes`, which is under neither root above, so
     // without it a sign-out would skip those copies and leave plaintext on disk. The folders themselves, never the
     // whole data dir.
-    roots.extend(engine_bridge::finder_staging_candidates());
+    roots.extend(staging.candidates());
     roots
 }
 
@@ -4102,8 +5359,9 @@ struct LocalStatePurgeSummary {
 fn purge_local_state_files(
     db: &state_db::StateDb,
     sync_root: Option<&std::path::Path>,
+    kept: Option<&sign_out::kept_set::KeptSet>,
 ) -> Result<LocalStatePurgeSummary, String> {
-    purge_local_state_files_in(db, sync_root, &production_staging_dirs())
+    purge_local_state_files_in(db, sync_root, &production_staging_dirs(), kept)
 }
 
 /// The directories whose plaintext copies the purge sweeps as a whole. A unit test never sweeps the shared
@@ -4203,13 +5461,16 @@ fn orphan_staged_files(staging_dirs: &[PathBuf], uid: Option<u32>) -> Vec<PathBu
 /// [`purge_local_state_files`] with the staging directories to sweep. In this order: delete the files the rows
 /// point at, and every orphan in the staging directories this user owns, each behind `is_disposable_cache_path`;
 /// if ANY removal fails (a missing file is fine) return an error and clear no row, so a retry finds everything and
-/// nothing is forgotten while a plaintext copy is still on disk; only then clear the rows.
+/// nothing is forgotten while a plaintext copy is still on disk; only then clear the rows. Given a `KeptSet` (a
+/// macOS sign-out), the guard of [`purge_local_state_files_with`] runs before all of it, and the waiting writes'
+/// staged copies are deleted last.
 fn purge_local_state_files_in(
     db: &state_db::StateDb,
     sync_root: Option<&std::path::Path>,
     staging_dirs: &[PathBuf],
+    kept: Option<&sign_out::kept_set::KeptSet>,
 ) -> Result<LocalStatePurgeSummary, String> {
-    purge_local_state_files_as(db, sync_root, staging_dirs, current_uid())
+    purge_local_state_files_as(db, sync_root, staging_dirs, current_uid(), kept)
 }
 
 /// [`purge_local_state_files_in`] as the user `uid` (a test pretends to be another user).
@@ -4218,7 +5479,46 @@ fn purge_local_state_files_as(
     sync_root: Option<&std::path::Path>,
     staging_dirs: &[PathBuf],
     uid: Option<u32>,
+    kept: Option<&sign_out::kept_set::KeptSet>,
 ) -> Result<LocalStatePurgeSummary, String> {
+    purge_local_state_files_with(db, sync_root, staging_dirs, uid, kept, &|path| {
+        std::fs::remove_file(path)
+    })
+}
+
+/// [`purge_local_state_files_as`] with the removal passed in (a test makes one removal fail). Spec 2026-10-10 §5.2
+/// step 8 and W13: given a `KeptSet`, the guard comes first and refuses with `unsent_copy_failed: …` before any path
+/// is collected or deleted, unless every waiting change is kept or acknowledged. Then every other file is removed, and
+/// only after all of them the waiting writes' staged copies.
+fn purge_local_state_files_with(
+    db: &state_db::StateDb,
+    sync_root: Option<&std::path::Path>,
+    staging_dirs: &[PathBuf],
+    uid: Option<u32>,
+    kept: Option<&sign_out::kept_set::KeptSet>,
+    remove: &dyn Fn(&std::path::Path) -> std::io::Result<()>,
+) -> Result<LocalStatePurgeSummary, String> {
+    // Spec 2026-10-10 §5.2 step 8: given a `KeptSet` (macOS), the guard is the FIRST statement: one read, and a
+    // refusal before any path is collected or deleted. Without one there is no guard, and no copy is held back.
+    let waiting_copies: std::collections::HashSet<PathBuf> = match kept {
+        Some(kept) => {
+            let guard = db
+                .unkept_waiting_changes(kept)
+                .map_err(|e| format!("check what the sign-out kept: {e}"))?;
+            if !guard.unkept.is_empty() {
+                tracing::error!(
+                    unkept = guard.unkept.len(),
+                    "sign-out stopped: a waiting change was not kept; nothing was deleted"
+                );
+                return Err(sign_out::copy::coded(
+                    sign_out::copy::UNSENT_COPY_FAILED_CODE,
+                    sign_out::copy::E2_UNSENT_COPY_FAILED,
+                ));
+            }
+            guard.waiting_payloads.into_iter().map(PathBuf::from).collect()
+        }
+        None => std::collections::HashSet::new(),
+    };
     let mut paths: Vec<PathBuf> = db
         .local_state_file_paths()
         .map_err(|e| format!("list the local files: {e}"))?
@@ -4231,34 +5531,30 @@ fn purge_local_state_files_as(
             .into_iter()
             .filter(|path| !owned.contains(path)),
     );
-
+    // W13: every other file first, the waiting writes' staged copies last, so a failure on any other file leaves every
+    // waiting write as it was.
+    let (waiting_last, others_first): (Vec<PathBuf>, Vec<PathBuf>) =
+        paths.drain(..).partition(|path| waiting_copies.contains(path));
     let mut files_removed = 0usize;
     let mut files_skipped = 0usize;
-    let mut failed = 0usize;
-    let mut first_failure: Option<std::io::ErrorKind> = None;
-    for path_buf in &paths {
-        if !is_disposable_cache_path(path_buf) {
-            files_skipped += 1;
-            tracing::warn!(path = %path_buf.display(), "purge skipped a path outside the known cache/staging roots");
-            continue;
+    let (removed, skipped) = remove_purge_paths(&others_first, remove)?;
+    files_removed += removed;
+    files_skipped += skipped;
+    #[cfg(test)]
+    sign_out::crash_point("AfterFirstGroup");
+    // The waiting writes' staged copies one at a time: a removal that fails stops the purge before the next copy, and a
+    // test (spec 2026-10-10 U42) can stop the process between two of them.
+    for (index, path) in waiting_last.iter().enumerate() {
+        if index == 1 {
+            #[cfg(test)]
+            sign_out::crash_point("BetweenWaitingCopies");
         }
-        match std::fs::remove_file(path_buf) {
-            Ok(()) => files_removed += 1,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                failed += 1;
-                first_failure.get_or_insert(error.kind());
-                tracing::warn!(path = %path_buf.display(), error = %error, "failed to remove a local file in the purge");
-            }
-        }
+        let (removed, skipped) = remove_purge_paths(std::slice::from_ref(path), remove)?;
+        files_removed += removed;
+        files_skipped += skipped;
     }
-    if failed > 0 {
-        // No path in the message: it reaches the sign-out error and the engine-start error.
-        return Err(format!(
-            "{failed} local file(s) could not be removed ({})",
-            first_failure.map_or_else(|| "unknown".to_string(), |kind| kind.to_string())
-        ));
-    }
+    #[cfg(test)]
+    sign_out::crash_point("BeforeRowClear");
 
     let purge = db
         .purge_all_local_state()
@@ -4312,6 +5608,40 @@ fn purge_local_state_files_as(
         files_skipped,
         windows_placeholders_dehydrated,
     })
+}
+
+/// The purge's removal loop over one group: each path behind `is_disposable_cache_path`; a missing file is fine; any
+/// other failure returns an error with no path in it. `(removed, skipped)`.
+fn remove_purge_paths(
+    paths: &[PathBuf],
+    remove: &dyn Fn(&std::path::Path) -> std::io::Result<()>,
+) -> Result<(usize, usize), String> {
+    let (mut removed, mut skipped, mut failed) = (0usize, 0usize, 0usize);
+    let mut first_failure: Option<std::io::ErrorKind> = None;
+    for path in paths {
+        if !is_disposable_cache_path(path) {
+            skipped += 1;
+            tracing::warn!(path = %path.display(), "purge skipped a path outside the known cache/staging roots");
+            continue;
+        }
+        match remove(path) {
+            Ok(()) => removed += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                failed += 1;
+                first_failure.get_or_insert(error.kind());
+                tracing::warn!(path = %path.display(), error = %error, "failed to remove a local file in the purge");
+            }
+        }
+    }
+    if failed > 0 {
+        // No path in the message: it reaches the sign-out error and the engine-start error.
+        return Err(format!(
+            "{failed} local file(s) could not be removed ({})",
+            first_failure.map_or_else(|| "unknown".to_string(), |kind| kind.to_string())
+        ));
+    }
+    Ok((removed, skipped))
 }
 
 /// Resolve every `(file_id, server_relative_path)` candidate from
@@ -4538,9 +5868,7 @@ async fn wait_for_file_provider_ipc_ready(
         }
 
         if Instant::now() >= deadline {
-            return Err(
-                "Timed out waiting for the local Beebeeb sync daemon before installing Finder location.".to_string(),
-            );
+            return Err(FINDER_IPC_NOT_READY.to_string());
         }
         sleep(Duration::from_millis(100)).await;
     }
@@ -4726,6 +6054,8 @@ enum KeysFrom {
 /// memory call this right after the engine start, whatever its outcome.
 /// `finder_setup_wiring_tests` keeps that list complete.
 fn keys_arrived(state: &AppState, from: KeysFrom) {
+    // Keys are here: no recovery phrase is owed any more (review P2-3).
+    forget_pending_setup(&state.pending_setup);
     if from == KeysFrom::SignIn {
         lifecycle_log::event(lifecycle_log::LifecycleEvent::SignedIn);
     }
@@ -5171,7 +6501,7 @@ const SIGN_IN_LOCAL_DATA_UNREADABLE: &str = "Beebeeb couldn’t read this Mac’
 
 /// What a successful authentication became on this Mac (R8).
 #[cfg(not(target_os = "windows"))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum SignInSettlement {
     Fresh,
     Reauthenticated {
@@ -5182,6 +6512,10 @@ enum SignInSettlement {
     },
     AccountMismatch {
         pending_changes: u64,
+        /// On a Mac, the ask snapshot the switch step renders (spec 2026-10-10 W11); elsewhere `None`.
+        unsent: Option<sign_out::snapshot::AskCounts>,
+        /// On a Mac, the coded E3 when the switch's count could not be read (§5.3 row 1).
+        unsent_error: Option<String>,
     },
     /// The server could not say whose key this is: nothing changed, and the new session is revoked.
     Unconfirmed,
@@ -5237,7 +6571,7 @@ async fn settle_sign_in(
         decide_sign_in_in_turn(state, &acct, &sources, profile, token, &runner::api_base_url(), turn).await?;
     match kind {
         reauth::SignInKind::Fresh => Ok(SignInSettlement::Fresh),
-        reauth::SignInKind::DifferentAccount => Ok(SignInSettlement::AccountMismatch { pending_changes }),
+        reauth::SignInKind::DifferentAccount => Ok(switch_settlement(pending_changes, switch_snapshot(state))),
         reauth::SignInKind::NeedsKeyProof | reauth::SignInKind::Unconfirmed => Ok(SignInSettlement::Unconfirmed),
         // Lead ruling 12: this computer's own record of its account could not be read. Its own sentence, not the
         // "connect to the internet" one; nothing is stored, so the caller revokes the new session.
@@ -5253,6 +6587,28 @@ async fn settle_sign_in(
         reauth::SignInKind::KeyOutdated => {
             reauth_without_the_kept_key(state, &acct, &sources, token, profile, turn).await
         }
+    }
+}
+
+/// W11 and §5.3 row 1 (spec 2026-10-10): the switch settles with what its count found: a snapshot (macOS), none
+/// (elsewhere), or E3 for the switch step to show as a line. A count that cannot be read never fails the sign-in:
+/// nothing changed, and "Sign out and switch" counts again through the gate.
+#[cfg(not(target_os = "windows"))]
+fn switch_settlement(
+    pending_changes: u64,
+    counted: Result<Option<sign_out::snapshot::AskCounts>, String>,
+) -> SignInSettlement {
+    match counted {
+        Ok(unsent) => SignInSettlement::AccountMismatch {
+            pending_changes,
+            unsent,
+            unsent_error: None,
+        },
+        Err(error) => SignInSettlement::AccountMismatch {
+            pending_changes,
+            unsent: None,
+            unsent_error: Some(error),
+        },
     }
 }
 
@@ -5272,7 +6628,7 @@ fn reauth_swap_token(
     sources: &LocalSources,
     token: &str,
     profile: &account_dto::AccountProfile,
-    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] handoff_key: Option<&[u8; 32]>,
+    handoff_key: Option<&[u8; 32]>,
     turn: &mut account::SessionGeneration,
 ) -> Result<bool, ReauthError> {
     let email = session_email(Some(profile));
@@ -5309,12 +6665,11 @@ fn reauth_swap_token(
         *cached = Some(profile.clone());
     }
     reauth_settle_flags(&write, state, acct, email.as_deref().unwrap_or_default());
-    // Ruling F9: unlocked, so on a Mac sync resumes; Linux keeps today's flow (spec R8). Without keys here the
-    // recovery-phrase unlock asks instead. F9 re-review N-1: a browser sign-in whose handed-over key replaces the kept
-    // one is decided here, before the ask, and does not ask: `reauth_in_place` holds what is queued under the kept key
-    // as `key_replaced`, and a hold that fails must not leave an open request for a later start to serve with that key.
-    // The handoff's own install (`apply_session`) asks once the new key is in memory.
-    #[cfg(target_os = "macos")]
+    // Ruling F9: unlocked, so sync resumes; on Linux too since spec D11 (task 1888; Windows does not build this).
+    // Without keys here the recovery-phrase unlock asks instead. F9 re-review N-1: a browser sign-in whose handed-over
+    // key replaces the kept one is decided here, before the ask, and does not ask: `reauth_in_place` holds what is
+    // queued under the kept key as `key_replaced`, and a hold that fails must not leave an open request for a later
+    // start to serve with that key. The handoff's own install (`apply_session`) asks once the new key is in memory.
     if vault_unlocked && !handoff_replaces_kept_key(acct, handoff_key) {
         ask_to_resume_auth_paused(&write, acct);
     }
@@ -5854,6 +7209,9 @@ struct StateDbLocalData {
     sync_root: Option<PathBuf>,
     /// Directories whose plaintext copies the reset sweeps as a whole (see `purge_local_state_files_in`).
     staging_dirs: Vec<PathBuf>,
+    /// Spec 2026-10-10 W12: what the reset's keep step kept (macOS), from the keep until the binding hands its folder
+    /// on (`hand_on_reset_kept`), whether or not the purge after it finished.
+    kept: std::sync::Mutex<Option<sign_out::kept_set::KeptSet>>,
 }
 
 /// Where an engine start looks: the app-local state dir (`state.db`) and the sync root the engine will use.
@@ -5901,6 +7259,7 @@ impl StateDbLocalData {
             db,
             sync_root: Some(paths.sync_root.clone()),
             staging_dirs: paths.staging_dirs.clone(),
+            kept: Default::default(),
         })
     }
 }
@@ -5916,21 +7275,60 @@ impl account_binding::LocalData for StateDbLocalData {
             .map_err(|e| format!("inspect the local data: {e}"))
     }
 
-    /// The sign-out purge (its one deletion gate, `is_disposable_cache_path`, never reaches the lifecycle
-    /// log directory), then every remaining row. An error from either means nothing may start.
+    /// Spec 2026-10-10 W12: keep (no send, no ask: every missing write and other change is acknowledged), then the
+    /// sign-out purge with the guard (its one deletion gate, `is_disposable_cache_path`, never reaches the lifecycle
+    /// log directory), then every remaining row. A failed keep fails the reset, and nothing is deleted. An error from
+    /// any step means nothing may start.
     fn reset(&self) -> Result<(), String> {
-        let summary = purge_local_state_files_in(&self.db, self.sync_root.as_deref(), &self.staging_dirs)?;
+        #[cfg(target_os = "macos")]
+        let kept = Some(keep_in(
+            &self.db,
+            sign_out::keep::Acknowledge::Everything,
+            KeepCaller::Reset,
+        )?);
+        #[cfg(not(target_os = "macos"))]
+        let kept: Option<sign_out::kept_set::KeptSet> = None;
+        // W12: the folder is recorded now, so it is handed on to be surfaced whether or not the purge below then
+        // finishes.
+        *self.kept.lock().unwrap_or_else(|p| p.into_inner()) = kept.clone();
+        // Spec 2026-10-10 §15 question 3: a reset that stops without purging reopens Finder accepts at once (the keep
+        // step already reopens them on its own failure).
+        let reopen = || {
+            #[cfg(target_os = "macos")]
+            if let Err(error) = self.db.reopen_finder_accepts() {
+                tracing::warn!(%error, "could not reopen Finder accepts; the next engine start reopens them");
+            }
+        };
+        let summary =
+            match purge_local_state_files_in(&self.db, self.sync_root.as_deref(), &self.staging_dirs, kept.as_ref()) {
+                Ok(summary) => summary,
+                Err(error) => {
+                    reopen();
+                    return Err(error);
+                }
+            };
         tracing::info!(
             queued_ops_purged = summary.queued_ops_purged,
             files_removed = summary.files_removed,
             files_skipped = summary.files_skipped,
+            others_dropped = kept.as_ref().map_or(0, |kept| kept.others_acknowledged.len()),
             "R10: local data reset before sync started"
         );
+        // W13: the purge cleared the queue's rows, so no write can look missing any more. Best effort (§7.3), as the
+        // sign-out's: the warning names the step that failed, `path`, `read` or `write`, never an error's text (W10).
+        #[cfg(target_os = "macos")]
+        if let Err(step) = DesktopConfig::path()
+            .map_err(|_| "path".to_string())
+            .and_then(|path| sign_out::kept_record::clear_unfinished_at(&path))
+        {
+            tracing::warn!(step = %step, "could not clear the unfinished sign-out marker");
+        }
         // On a Mac the previous account's Finder domain is still registered: the debt is recorded in the same
         // transaction that clears the rows, so no crash can leave the rows gone and the debt forgotten.
-        self.db
-            .clear_account_data(cfg!(target_os = "macos"))
-            .map_err(|e| format!("clear the local data: {e}"))
+        self.db.clear_account_data(cfg!(target_os = "macos")).map_err(|e| {
+            reopen();
+            format!("clear the local data: {e}")
+        })
     }
 
     fn record_owner(&self, owner: &account_binding::Identity) -> Result<(), String> {
@@ -5967,7 +7365,12 @@ fn bind_data_to_session(
     data: &StateDbLocalData,
     session: &account_binding::Identity,
 ) -> Result<(), String> {
-    match account_binding::bind_before_engine_start(data, session, !cfg!(target_os = "windows"))? {
+    let bound = account_binding::bind_before_engine_start(data, session, !cfg!(target_os = "windows"));
+    // W12: a reset that kept files hands its folder on whatever the binding answered. A reset whose purge failed after
+    // a completed keep returns an error, and the folder it recorded is on disk either way.
+    #[cfg(target_os = "macos")]
+    hand_on_reset_kept(state, data);
+    match bound? {
         account_binding::Bound::Kept => {}
         account_binding::Bound::Reset => {
             tracing::warn!("R10: local data of another account was reset before sync started");
@@ -5980,6 +7383,18 @@ fn bind_data_to_session(
     #[cfg(not(target_os = "macos"))]
     let _ = state;
     Ok(())
+}
+
+/// W12: an R10 reset that kept files hands its folder to the state, to be surfaced once the start returns (the row,
+/// then one alert). Taken out, so it is surfaced once.
+#[cfg(target_os = "macos")]
+fn hand_on_reset_kept(state: &AppState, data: &StateDbLocalData) {
+    if let Some(kept) = data.kept.lock().unwrap_or_else(|p| p.into_inner()).take()
+        && let Some(folder) = kept.folder
+    {
+        *state.sign_out.reset_kept.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some((folder.to_string_lossy().into_owned(), kept.files));
+    }
 }
 
 /// Whether the engine may start once the local data is bound.
@@ -6088,7 +7503,9 @@ fn start_engine_bound(
 ) -> Result<EngineStart, String> {
     let turn = acct.session_generation();
     // Ruling F9: the ask is read before the keys are, so it is served only by a start that holds the session of the
-    // sign-in that asked, or a later one.
+    // sign-in that asked, or a later one. A Mac's only: off macOS the engine serves it after its reconcile pass (spec
+    // D11, task 1888).
+    #[cfg(target_os = "macos")]
     let resume_asked = acct.auth_resume_asked.load(Ordering::SeqCst);
     let (token, key) = match authorize_engine_start(state, acct, &*engine_slot, paths)
         .inspect_err(|error| record_engine_refusal(acct, turn, error))?
@@ -6097,7 +7514,11 @@ fn start_engine_bound(
         StartPermit::NoSession => return Ok(EngineStart::NoSession),
         StartPermit::FinderRemovalOwed => return Ok(EngineStart::FinderRemovalOwed),
     };
+    #[cfg(target_os = "macos")]
     resume_operations_paused_for_auth(acct, paths, resume_asked);
+    // Task 2267 (fix round 2): a "Keep on this PC only" a crash interrupted is settled before the engine exists.
+    #[cfg(target_os = "windows")]
+    settle_an_interrupted_keep(paths);
     **engine_slot = Some(spawn(paths.sync_root.clone(), token, key));
     *acct
         .engine_refusal
@@ -6106,13 +7527,12 @@ fn start_engine_bound(
     Ok(EngineStart::Started)
 }
 
-/// Lead ruling F9 (spec 2026-10-06 R8: "sync resumes"): a sign-in on a Mac that has put a session in memory asks the
-/// engine start that applies it to make the operations paused for `auth` due again, and so does the startup check that
-/// confirmed the stored token (F9 review I-2). Only inside the writer's checked turn (`_write`) and after the session is
-/// in memory, so a start that sees the ask also holds that session (see [`resume_operations_paused_for_auth`]). macOS
-/// only: Windows and Linux keep today's flow (spec R8), so nothing asks there and every start returns before it resumes
-/// anything.
-#[cfg(target_os = "macos")]
+/// Lead ruling F9 (spec 2026-10-06 R8: "sync resumes"): a sign-in that has put a session in memory asks for the
+/// operations paused for `auth` to be due again, and so does the startup check that confirmed the stored token (F9
+/// review I-2). Only inside the writer's checked turn (`_write`) and after the session is in memory. A Mac's engine
+/// start serves the ask (see [`resume_operations_paused_for_auth`]); since spec D11 (task 1888) Windows and Linux ask
+/// too, and their engine serves it after its reconcile pass and the key check
+/// ([`engine_bridge::EngineBridge::reconcile_then_resume`]).
 fn ask_to_resume_auth_paused(_write: &SessionWrite, acct: &AccountRuntime) {
     acct.auth_resume_asked.fetch_add(1, Ordering::SeqCst);
 }
@@ -6164,11 +7584,13 @@ async fn stop_the_outgoing_engine_and_hold_auth_paused(
 }
 
 /// Lead ruling F9 (spec 2026-10-06 R8 and §5.6): when a sign-in asked for it (`asked`, read before this start read its
-/// keys) and no start has served that ask yet, every operation paused for `auth` becomes due now, its attempts kept.
-/// It runs under the engine slot, after the binding (so another account's operations were already reset) and before
-/// the engine exists (so its first tick sends them). Operations paused for any other reason stay paused, those held as
+/// keys) and no start has served that ask yet, every operation paused for `auth` becomes due now, its attempts kept. It
+/// runs under the engine slot, after the binding (so another account's operations were already reset) and before the
+/// engine exists (so its first tick sends them). Operations paused for any other reason stay paused, those held as
 /// `key_replaced` included (F9 review I-1). A database that cannot be written leaves the ask open, so the next engine
-/// start tries again (F9 review M3); the engine starts either way.
+/// start tries again (F9 review M3); the engine starts either way. macOS only (spec D11, task 1888): off macOS the
+/// engine resumes them after its reconcile pass.
+#[cfg(target_os = "macos")]
 fn resume_operations_paused_for_auth(acct: &AccountRuntime, paths: &LocalDataPaths, asked: u64) {
     if asked <= acct.auth_resume_done.load(Ordering::SeqCst) {
         return;
@@ -6234,7 +7656,8 @@ fn spawn_bound_engine(
     sync_root: PathBuf,
 ) -> Result<EngineStart, String> {
     let paths = LocalDataPaths::production(&sync_root)?;
-    start_engine_bound(state, acct, engine_slot, &paths, |sync_root, token, key| {
+    let surface_app = app.clone();
+    let started = start_engine_bound(state, acct, engine_slot, &paths, |sync_root, token, key| {
         EngineRunner::spawn(
             app,
             sync_root,
@@ -6242,8 +7665,463 @@ fn spawn_bound_engine(
             key,
             acct.sync_paused.clone(),
             acct.auth_health.clone(),
+            runner::ResumeTicket {
+                asked: acct.auth_resume_asked.clone(),
+                done: acct.auth_resume_done.clone(),
+                pass_wanted: acct.reconcile_pass_wanted.clone(),
+                pass_served: acct.reconcile_pass_served.clone(),
+            },
         )
+    });
+    // W12: the R10 reset's kept folder is surfaced as the app-start sweep surfaces macOS's: the row, then one alert.
+    let reset_kept = state
+        .sign_out
+        .reset_kept
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .take();
+    if let Some((folder, files)) = reset_kept {
+        surface_reset_folder(&surface_app, &folder, files);
+    }
+    // Task 2267: a Windows start refused over local data that no owner record matches asks, in the background, whether
+    // that data is this account's own, and sync starts once it is proven (`prove_own_data_in_background`).
+    // The proof runs for the session this start read: the same account runtime, the turn read under the engine slot.
+    #[cfg(target_os = "windows")]
+    if matches!(&started, Err(error) if error == account_binding::OTHER_ACCOUNT_ON_WINDOWS)
+        && let Ok(active) = state.active_account()
+        && std::ptr::eq(Arc::as_ptr(&active), acct)
+    {
+        prove_own_data_in_background(surface_app, paths.sync_root.clone(), active, acct.session_generation());
+    }
+    started
+}
+
+/// Task 2267: the background half of a Windows start refused with `OTHER_ACCOUNT_ON_WINDOWS`. It proves the local
+/// data is the signed-in account's own (`own_data_proof`: its My Files rows decrypt under this session's key), records
+/// the session as the owner, and starts sync through the usual start, which binds again and now keeps everything.
+/// Another account's data is never adopted and nothing is deleted.
+///
+/// One proof per session (account runtime and turn) at a time: a start refused again while it runs asks nothing new,
+/// a proof for a session that has since changed does not hold the next session's back, and the slot is freed however
+/// the proof ends, a panic included. Sync starts only for the session that was proven, checked under the
+/// session-transition lock, so a Lock or a sign-out since leaves nothing to start.
+#[cfg(target_os = "windows")]
+fn prove_own_data_in_background(
+    app: tauri::AppHandle,
+    sync_root: PathBuf,
+    acct: Arc<account::AccountRuntime>,
+    turn: account::SessionGeneration,
+) {
+    type Key = (usize, account::SessionGeneration);
+    static IN_FLIGHT: std::sync::Mutex<Option<Key>> = std::sync::Mutex::new(None);
+    struct Flight(Key);
+    impl Drop for Flight {
+        fn drop(&mut self) {
+            let mut in_flight = IN_FLIGHT.lock().unwrap_or_else(|p| p.into_inner());
+            if *in_flight == Some(self.0) {
+                *in_flight = None;
+            }
+        }
+    }
+    let key = (Arc::as_ptr(&acct) as usize, turn);
+    {
+        let mut in_flight = IN_FLIGHT.lock().unwrap_or_else(|p| p.into_inner());
+        if *in_flight == Some(key) {
+            return;
+        }
+        *in_flight = Some(key);
+    }
+    let flight = Flight(key);
+    let proof = tauri::async_runtime::spawn(async move {
+        let _flight = flight;
+        match prove_own_data_of_session(&app, &sync_root, &acct, turn).await {
+            Ok(own_data_proof::Outcome::Adopted(tally)) => {
+                tracing::info!(?tally, "R10: this PC's local data is proven this account's own; starting sync");
+                let transition = SESSION_TRANSITION.lock().await;
+                if !session_still_active(&app, &acct, turn) {
+                    tracing::info!("R10: the session changed after the proof; nothing to start");
+                    return;
+                }
+                let state = app.state::<AppState>();
+                if let Err(error) = start_engine_if_possible(app.clone(), &state, &transition).await {
+                    tracing::warn!(%error, "R10: the start after the proof was refused");
+                }
+            }
+            Ok(outcome) => tracing::warn!(?outcome, "R10: this PC's local data was not adopted"),
+            Err(error) => tracing::warn!(%error, "R10: the ownership proof could not run"),
+        }
+    });
+    let mut proofs = OWN_DATA_PROOFS.lock().unwrap_or_else(|p| p.into_inner());
+    proofs.retain(|running| !running.inner().is_finished());
+    proofs.push(proof);
+}
+
+/// Task 2267 (review P2-2): the ownership proofs that may still be running. Each holds the session's key and token
+/// (its client is registered with `windows_cf::track_credentials`), so a Lock and a sign-out stop them
+/// (`stop_own_data_proofs`) before they wait for every credential to be released.
+#[cfg(target_os = "windows")]
+static OWN_DATA_PROOFS: std::sync::Mutex<Vec<tauri::async_runtime::JoinHandle<()>>> = std::sync::Mutex::new(Vec::new());
+
+/// Stop every running ownership proof. Both callers hold the session-transition lock, which a proof takes only to
+/// start sync after an adoption, so a proof is never stopped half way through a start. A proof stopped after it
+/// recorded the owner has recorded this same account's own data; one stopped before records nothing.
+#[cfg(target_os = "windows")]
+fn stop_own_data_proofs() {
+    let proofs = std::mem::take(&mut *OWN_DATA_PROOFS.lock().unwrap_or_else(|p| p.into_inner()));
+    for proof in proofs {
+        proof.abort();
+    }
+}
+
+/// Whether `acct` is still the active account and its session is still the one read at `turn`.
+#[cfg(target_os = "windows")]
+fn session_still_active(app: &tauri::AppHandle, acct: &Arc<account::AccountRuntime>, turn: account::SessionGeneration) -> bool {
+    acct.session_unchanged_since(turn)
+        && app
+            .state::<AppState>()
+            .active_account()
+            .is_ok_and(|active| Arc::ptr_eq(&active, acct))
+}
+
+/// How long the proof waits for the whole listing of this account's tree (the snapshot, then the trash, with the
+/// client's retries). A Lock or a sign-out does not wait for it: they stop the proof first.
+#[cfg(target_os = "windows")]
+const LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Self-review F5: how long one request of the proof's listing may take. The snapshot is the whole tree in one response,
+/// so the app's 30 s per request would refuse a large tree on a slow link every time, and say "connect to the internet"
+/// to someone who is online. Nobody waits on the proof (it runs in the background, and a Lock or a sign-out stops it).
+#[cfg(target_os = "windows")]
+const PROOF_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// The proof for the session read at `turn`, with its keys and identity read together as an engine start reads them.
+/// A session that changes stops the asking and records nothing (`session_still_active`). With no answer at all the
+/// refusal becomes the one that says to connect and open Beebeeb again; a token the server refused is not "offline",
+/// so that sentence is not shown for it. The next start asks again.
+#[cfg(target_os = "windows")]
+async fn prove_own_data_of_session(
+    app: &tauri::AppHandle,
+    sync_root: &Path,
+    acct: &Arc<account::AccountRuntime>,
+    turn: account::SessionGeneration,
+) -> Result<own_data_proof::Outcome, String> {
+    if !session_still_active(app, acct, turn) {
+        return Ok(own_data_proof::Outcome::Changed(own_data_proof::Tally::default()));
+    }
+    let Ok(((token, key), identity)) = keys_for_engine_start(acct) else {
+        return Ok(own_data_proof::Outcome::NotEligible);
+    };
+    let paths = LocalDataPaths::production(sync_root)?;
+    let Some(db) = state_db_from_state_dir(&paths.state_dir)? else {
+        return Ok(own_data_proof::Outcome::NotEligible);
+    };
+    let api = Arc::new(
+        api_client::ApiClient::new(runner::api_base_url(), String::clone(&token), *key)
+            .with_request_timeout(PROOF_REQUEST_TIMEOUT),
+    );
+    windows_cf::track_credentials(&api);
+    let outcome = own_data_proof::prove_and_adopt(
+        &db,
+        &identity,
+        &key,
+        || {
+            let api = Arc::clone(&api);
+            async move {
+                let listed = tokio::time::timeout(LIST_TIMEOUT, async {
+                    let snapshot = api.sync_snapshot().await;
+                    let trashed = match &snapshot {
+                        Ok(_) => api.list_trashed_files_all().await,
+                        Err(_) => Ok(Vec::new()),
+                    };
+                    own_data_proof::listing_of(snapshot, trashed)
+                })
+                .await;
+                listed.unwrap_or(own_data_proof::Listing::Unavailable)
+            }
+        },
+        || session_still_active(app, acct, turn),
+    )
+    .await?;
+    drop(api);
+    if matches!(outcome, own_data_proof::Outcome::Unavailable(tally) if tally.signed_out == 0) {
+        record_engine_refusal(acct, turn, account_binding::IDENTITY_UNKNOWN);
+    }
+    Ok(outcome)
+}
+
+/// Task 2267 (fix round 2): what Upload and Keep say when this PC's local data is not the signed-in account's own.
+#[cfg(any(target_os = "windows", test))]
+const FOUND_WHILE_PAUSED_NOT_YOURS: &str =
+    "Beebeeb couldn’t confirm these files belong to the account you’re signed in to, so nothing was changed.";
+
+/// Task 2267 (fix round 2): what Keep says when it stopped part way (the database could not be written). Every item it
+/// moved is forgotten in its own transaction, or settled at the next start (`settle_an_interrupted_keep`).
+#[cfg(target_os = "windows")]
+const FOUND_WHILE_PAUSED_KEEP_STOPPED: &str = "Beebeeb couldn’t finish moving these files. Anything already moved is in “Beebeeb - not uploaded”; the rest stays where it is and isn’t uploaded.";
+
+/// Task 2267 (lead review round 3, P2-2): what the card says when it cannot read the held changes. It reads them again
+/// at the next refresh; Upload waits for that read, since it sends only what the card showed.
+#[cfg(target_os = "windows")]
+const FOUND_WHILE_PAUSED_REVIEW_FAILED: &str =
+    "Beebeeb couldn’t read these changes, so nothing was uploaded or moved. It tries again in a moment.";
+
+/// Task 2267 (fix round 2): what Upload says when the held changes could not be released: nothing changed.
+#[cfg(target_os = "windows")]
+const FOUND_WHILE_PAUSED_UPLOAD_FAILED: &str =
+    "Beebeeb couldn’t start uploading these files, so they’re still waiting. Try again.";
+
+/// Task 2267 (fix round 2): what "Show in Explorer" says when the folder the last keep recorded is not there.
+#[cfg(any(target_os = "windows", test))]
+const KEPT_FOLDER_GONE: &str = "Beebeeb can’t find the folder it moved them to. It may have been moved or renamed.";
+
+/// Task 2267 (fix round 2): who is signed in, for a decision about the changes found while sync was paused: the
+/// session's own email and, when the cached profile is that account's, its user id ([`identity_of_session`]). No key is
+/// read. No session, or one that does not know who it is, decides nothing.
+#[cfg(any(target_os = "windows", test))]
+fn decision_identity(state: &AppState) -> Result<account_binding::Identity, String> {
+    let not_yours = || FOUND_WHILE_PAUSED_NOT_YOURS.to_string();
+    let acct = state.active_account().map_err(|_| not_yours())?;
+    let email = acct
+        .session
+        .lock()
+        .map_err(|_| not_yours())?
+        .as_ref()
+        .map(|session| session.email.clone())
+        .ok_or_else(not_yours)?;
+    let profile = acct.cached_profile.lock().ok().and_then(|guard| guard.clone());
+    Some(identity_of_session(email.as_deref(), profile.as_ref()))
+        .filter(|identity| identity.is_known())
+        .ok_or_else(not_yours)
+}
+
+/// Task 2267 (fix round 2): this PC's `state.db` under `state_dir`, only when its recorded owner is `identity`'s
+/// account. Another account's data, data nobody owns yet and no database decide nothing.
+#[cfg(any(target_os = "windows", test))]
+fn own_state_db(identity: &account_binding::Identity, state_dir: &Path) -> Result<state_db::StateDb, String> {
+    let db = state_db_from_state_dir(state_dir)?.ok_or_else(|| FOUND_WHILE_PAUSED_NOT_YOURS.to_string())?;
+    let owner = db.owner().map_err(|e| format!("read the local data owner: {e}"))?;
+    match owner {
+        Some(owner) if account_binding::same_account(&owner, identity) == Some(true) => Ok(db),
+        _ => Err(FOUND_WHILE_PAUSED_NOT_YOURS.to_string()),
+    }
+}
+
+/// Task 2267 (fix round 2): the signed-in account's own local data and the Beebeeb folder, for Upload and Keep.
+#[cfg(target_os = "windows")]
+fn own_local_data_for_decision(identity: &account_binding::Identity) -> Result<(state_db::StateDb, PathBuf), String> {
+    let sync_root = DesktopConfig::load()?
+        .sync_root
+        .ok_or_else(|| FOUND_WHILE_PAUSED_NOT_YOURS.to_string())?;
+    Ok((own_state_db(identity, &state_paths::beebeeb_state_dir()?)?, sync_root))
+}
+
+/// Task 2267 (fix round 2): the folder "Show in Explorer" opens: the dated folder the last keep recorded, only when it
+/// is a `YYYY-MM-DD` folder directly inside `Beebeeb - not uploaded` next to the Beebeeb folder, and is there.
+#[cfg(any(target_os = "windows", test))]
+fn kept_folder_to_show(sync_root: &Path, recorded: rusqlite::Result<Option<String>>) -> Result<PathBuf, String> {
+    let folder = PathBuf::from(
+        recorded
+            .map_err(|e| format!("read the kept folder: {e}"))?
+            .ok_or(KEPT_FOLDER_GONE)?,
+    );
+    let kept = sync_root
+        .parent()
+        .map(|parent| parent.join(found_while_paused::KEPT_FOLDER_NAME));
+    let dated = folder.file_name().and_then(|name| name.to_str()).is_some_and(|name| {
+        name.len() == 10
+            && name
+                .bytes()
+                .enumerate()
+                .all(|(at, byte)| if at == 4 || at == 7 { byte == b'-' } else { byte.is_ascii_digit() })
+    });
+    if dated && kept.is_some_and(|kept| folder.parent() == Some(kept.as_path())) && folder.is_dir() {
+        Ok(folder)
+    } else {
+        Err(KEPT_FOLDER_GONE.to_string())
+    }
+}
+
+/// Task 2267 (fix round 2, lead ruling (a) 4): a "Keep on this PC only" that a crash interrupted is settled before the
+/// engine exists: finished when the item had moved, undone when it had not (`found_while_paused::recover`). The engine
+/// start calls it after the binding, so it acts on this account's own data only. A database that cannot be read or
+/// written leaves the journal for the next start; the engine starts either way, and the item's changes stay held.
+#[cfg(target_os = "windows")]
+fn settle_an_interrupted_keep(paths: &LocalDataPaths) {
+    let path = state_paths::state_db_path_from_state_dir(&paths.state_dir);
+    let settled = state_db::StateDb::open(&path)
+        .map_err(|e| format!("open state.db: {e}"))
+        .and_then(|db| found_while_paused::recover(&db, &paths.sync_root));
+    match settled {
+        Ok(found_while_paused::Recovery::Nothing) => {}
+        Ok(recovery) => tracing::info!(?recovery, "keep: a move a crash interrupted was settled before sync started"),
+        Err(error) => tracing::warn!(%error, "keep: a move a crash interrupted is settled at the next start"),
+    }
+}
+
+/// Task 2267 (fix round 2), Settings › Sync: how many changes "Upload to my Beebeeb" released.
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+struct FoundWhilePausedReleased {
+    released: usize,
+}
+
+/// Task 2267 (lead review round 3, P2-2), Settings › Sync: the held changes by kind, the ids "Upload to my Beebeeb"
+/// sends back, and which service (if any) syncs the folder a keep moves them next to. Only on the signed-in account's
+/// own data, under the session-transition lock. Counts and ids only, never a name.
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn found_while_paused_review(state: State<'_, AppState>) -> Result<found_while_paused::Review, String> {
+    let _transition = SESSION_TRANSITION.lock().await;
+    let identity = decision_identity(&state)?;
+    tokio::task::spawn_blocking(move || -> Result<found_while_paused::Review, String> {
+        let (db, sync_root) = own_local_data_for_decision(&identity)?;
+        let mut review = found_while_paused::review(&db.found_while_paused_changes().map_err(|error| {
+            tracing::warn!(%error, "found while paused: the held changes could not be read");
+            FOUND_WHILE_PAUSED_REVIEW_FAILED.to_string()
+        })?);
+        review.synced_by = kept_folder_synced_by(&sync_root);
+        Ok(review)
     })
+    .await
+    .map_err(|e| format!("review task failed: {e}"))?
+}
+
+/// Task 2267 (lead review round 3, P3-4): the service that syncs the folder the kept folder is made in (next to the
+/// Beebeeb folder), if OneDrive or Dropbox does.
+#[cfg(target_os = "windows")]
+fn kept_folder_synced_by(sync_root: &Path) -> Option<String> {
+    let parent = sync_root.parent()?;
+    found_while_paused::synced_by(parent, &found_while_paused::cloud_synced_roots()).map(str::to_string)
+}
+
+/// Task 2267 (fix round 2), Settings › Sync, "Upload to my Beebeeb": the changes the card showed (`op_ids`, from
+/// [`found_while_paused_review`]; lead review round 3, P3-1) that are still held are due again, so the running engine
+/// uploads them. A change held after the card read them stays held. Only on the signed-in account's own data, and
+/// under the session-transition lock, so no sign-out or Lock runs in between.
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn found_while_paused_upload(state: State<'_, AppState>, op_ids: Vec<String>) -> Result<FoundWhilePausedReleased, String> {
+    let _transition = SESSION_TRANSITION.lock().await;
+    let identity = decision_identity(&state)?;
+    // Task 1888 (Task 1's ruling on 2267's held changes; review P2): a released change may be a ghost folder's create
+    // the reconcile pass left to the person; sent before a pass sees it, it would make a folder the server already has
+    // a second time. So the release asks for a pass, before it commits and again after: the engine's queue sends
+    // nothing while an ask is unserved, and its next successful tick runs the pass (no resume: a release is not a
+    // sign-in). Without the account there is no ask, so nothing is released.
+    let pass_wanted = state
+        .active_account()
+        .map_err(|_| FOUND_WHILE_PAUSED_UPLOAD_FAILED.to_string())?
+        .reconcile_pass_wanted
+        .clone();
+    let released = tokio::task::spawn_blocking(move || -> Result<usize, String> {
+        let (db, _) = own_local_data_for_decision(&identity)?;
+        pass_wanted.fetch_add(1, Ordering::SeqCst);
+        let released = db.release_found_while_paused(&op_ids, now_unix_seconds()).map_err(|error| {
+            tracing::warn!(%error, "found while paused: the held changes could not be released");
+            FOUND_WHILE_PAUSED_UPLOAD_FAILED.to_string()
+        })?;
+        pass_wanted.fetch_add(1, Ordering::SeqCst);
+        Ok(released)
+    })
+    .await
+    .map_err(|e| format!("upload task failed: {e}"))??;
+    tracing::info!(released, "found while paused: released to upload");
+    Ok(FoundWhilePausedReleased { released })
+}
+
+/// Task 2267 (fix round 2), Settings › Sync, "Keep on this PC only" (lead ruling (a)): every item made on this PC that
+/// a held change the card showed (`op_ids`, self-review of round 3, F7) acts on moves next to the Beebeeb folder and is
+/// forgotten (`found_while_paused::keep`). Only on the
+/// signed-in account's own data, and under the session-transition lock. Counts only in the log.
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn found_while_paused_keep(
+    state: State<'_, AppState>,
+    op_ids: Vec<String>,
+) -> Result<found_while_paused::KeepResult, String> {
+    let _transition = SESSION_TRANSITION.lock().await;
+    let identity = decision_identity(&state)?;
+    let kept = tokio::task::spawn_blocking(move || -> Result<found_while_paused::KeepResult, String> {
+        let (db, sync_root) = own_local_data_for_decision(&identity)?;
+        let today = found_while_paused::today();
+        let mut kept = found_while_paused::keep(&db, &sync_root, &today, &found_while_paused::rename_no_replace, &op_ids)
+            .map_err(|error| {
+                tracing::warn!(%error, "found while paused: the keep stopped");
+                FOUND_WHILE_PAUSED_KEEP_STOPPED.to_string()
+            })?;
+        kept.synced_by = kept_folder_synced_by(&sync_root);
+        Ok(kept)
+    })
+    .await
+    .map_err(|e| format!("keep task failed: {e}"))??;
+    tracing::info!(
+        moved_items = kept.moved_items,
+        moved_files = kept.moved_files,
+        not_moved = kept.not_moved,
+        stays_held = kept.stays_held,
+        "found while paused: kept on this PC"
+    );
+    Ok(kept)
+}
+
+/// Task 2267 (fix round 2), "Show in Explorer" after a keep: opens the folder the last keep recorded
+/// ([`kept_folder_to_show`]). The frontend never passes a path.
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn show_kept_folder() -> Result<(), String> {
+    tokio::task::spawn_blocking(|| -> Result<(), String> {
+        let cfg = DesktopConfig::load()?;
+        let sync_root = cfg.sync_root.clone().ok_or(KEPT_FOLDER_GONE)?;
+        let db = state_db_for_config(&cfg)?.ok_or(KEPT_FOLDER_GONE)?;
+        let folder = kept_folder_to_show(&sync_root, db.last_kept_dir())?;
+        std::process::Command::new("explorer")
+            .arg(&folder)
+            .spawn()
+            .map_err(|e| format!("open Explorer: {e}"))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("show task failed: {e}"))?
+}
+
+/// Task 2267: the changes found while sync was paused exist on Windows only (the ownership proof holds them). The
+/// commands are registered everywhere, because `generate_handler!` takes no `cfg`, and say so elsewhere.
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+async fn found_while_paused_review() -> Result<(), String> {
+    Err("This works on Windows only.".into())
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+async fn found_while_paused_upload() -> Result<(), String> {
+    Err("This works on Windows only.".into())
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+async fn found_while_paused_keep() -> Result<(), String> {
+    Err("This works on Windows only.".into())
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+async fn show_kept_folder() -> Result<(), String> {
+    Err("This works on Windows only.".into())
+}
+
+/// W12 and §9: the folder an R10 reset kept reaches the person as the app-start sweep's does. The reset recorded it
+/// already (W9), so the windows are told (an open Settings › Sync reads its row again), then one alert names it. The
+/// path is never logged.
+fn surface_reset_folder(app: &tauri::AppHandle, folder: &str, files: usize) {
+    emit_kept_folder_changed(app);
+    if let Some((title, message)) = sign_out::copy::sign_out_alert(Some((folder, files)), None) {
+        app.dialog()
+            .message(message)
+            .title(title)
+            .kind(tauri_plugin_dialog::MessageDialogKind::Info)
+            .show(|_| {});
+    }
 }
 
 /// Is a Finder domain removal owed before any engine may start? Read by the reconciler's facts. An unreadable
@@ -6317,6 +8195,7 @@ fn adopt_unbound_local_data_in(state_dir: &Path, candidate: Option<&account_bind
         db,
         sync_root: None,
         staging_dirs: Vec::new(),
+        kept: Default::default(),
     };
     match account_binding::adopt_unbound(&data, candidate) {
         Ok(true) => tracing::info!("R10: existing local data recorded as this computer's signed-in account's"),
@@ -8040,6 +9919,25 @@ mod reveal_and_open_file_tests {
     }
 }
 
+/// What [`sync_status`] counts in the state DB: rows moving (downloading + uploading), cloud-only rows (files and
+/// folders, as before task 2243), conflicts, and changes held back.
+fn sync_status_counts(db: &state_db::StateDb) -> (u32, u32, u32, u32) {
+    use state_db::FileStatus;
+    // Downloading + Uploading both count toward "in-flight sync work" for the WebView's syncing pill: there is no
+    // user-meaningful difference between "we're pulling" and "we're pushing" at the indicator level.
+    let count = |status| db.count_by_status(status).unwrap_or(0);
+    let syncing = count(FileStatus::Downloading) + count(FileStatus::Uploading);
+    // Desktop 0.8.15: queued changes held back (the `auth` pause) are not syncing; the UI shows them as
+    // "N changes on hold".
+    let on_hold = db.count_operations_on_hold().unwrap_or(0);
+    (
+        syncing,
+        count(FileStatus::CloudOnly),
+        count(FileStatus::Conflict),
+        on_hold,
+    )
+}
+
 /// Lightweight status endpoint for the WebView's settings page.
 /// Reports whether the Rust side has a session, where the sync root
 /// is on disk, whether the engine task is currently running, and the
@@ -8051,22 +9949,31 @@ mod reveal_and_open_file_tests {
 /// the event stream is still ramping up.
 ///
 /// File counts are read from the app-local SQLite state DB via a fresh
-/// connection per call.
-/// SQLite is happy to share read access with the runner's connection
-/// (default journal mode supports many concurrent readers); a poll
-/// takes well under a millisecond on a typical vault. If the DB
-/// doesn't exist yet (first launch, sync root not picked, or DB not
-/// initialised because no engine has run yet) we return zeros.
+/// connection per call, so the page cache starts empty each time: every
+/// count must come from a count query through an index, never from loading
+/// rows. Task 2243: counting the cloud-only files by loading them cost about
+/// 1,100 page reads per call on a 43k-row DB, polled every few seconds by
+/// every window ([`sync_status_counts`]). If the DB doesn't exist yet (first
+/// launch, sync root not picked, or DB not initialised because no engine has
+/// run yet) we return zeros.
+///
+/// `session_only` (task 2243): only `logged_in` and `session_revision`, read from
+/// memory, with no config file and no state DB. `AccountSessionBoundary` polls
+/// this every second in every window, hidden ones included, to see a sign-out.
 #[tauri::command]
-async fn sync_status(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
-    use state_db::FileStatus;
-
+async fn sync_status(state: State<'_, AppState>, session_only: Option<bool>) -> Result<serde_json::Value, String> {
     // session / engine / engine_state are per-account (decision 0800);
     // `auth_present` stays on `AppState`.
     let acct = state.active_account()?;
     let vault_unlocked = acct.session.lock().map(|g| g.is_some()).unwrap_or(false);
     let auth_present = state.auth_present.lock().map(|g| *g).unwrap_or(false);
     let logged_in = vault_unlocked || auth_present;
+    if session_only == Some(true) {
+        return Ok(serde_json::json!({
+            "logged_in": logged_in,
+            "session_revision": UI_SESSION_REVISION.load(std::sync::atomic::Ordering::SeqCst),
+        }));
+    }
     // Task 1546 finding 5: 3+ consecutive 401s from the engine's heartbeat /
     // sync-tick calls flip this — the trigger for the persistent "signed out
     // on this device" banner. Explicit and independent of `logged_in`: the
@@ -8106,39 +10013,13 @@ async fn sync_status(state: State<'_, AppState>) -> Result<serde_json::Value, St
         if db_path.exists() {
             state_db::StateDb::open(&db_path)
                 .ok()
-                .map(|db| {
-                    // Downloading + Uploading both count toward "in-flight
-                    // sync work" for the WebView's syncing pill — there's no
-                    // user-meaningful difference between "we're pulling" and
-                    // "we're pushing" at the indicator level.
-                    let downloading = db
-                        .list_by_status(FileStatus::Downloading)
-                        .ok()
-                        .map(|v| v.len() as u32)
-                        .unwrap_or(0);
-                    let uploading = db
-                        .list_by_status(FileStatus::Uploading)
-                        .ok()
-                        .map(|v| v.len() as u32)
-                        .unwrap_or(0);
-                    let cloud_only = db
-                        .list_by_status(FileStatus::CloudOnly)
-                        .ok()
-                        .map(|v| v.len() as u32)
-                        .unwrap_or(0);
-                    let conflicts = db
-                        .list_by_status(FileStatus::Conflict)
-                        .ok()
-                        .map(|v| v.len() as u32)
-                        .unwrap_or(0);
-                    (downloading + uploading, cloud_only, conflicts)
-                })
-                .unwrap_or((0, 0, 0))
+                .map(|db| sync_status_counts(&db))
+                .unwrap_or((0, 0, 0, 0))
         } else {
-            (0, 0, 0)
+            (0, 0, 0, 0)
         }
     } else {
-        (0, 0, 0)
+        (0, 0, 0, 0)
     };
 
     Ok(serde_json::json!({
@@ -8154,6 +10035,11 @@ async fn sync_status(state: State<'_, AppState>) -> Result<serde_json::Value, St
         "syncing": counts.0,
         "cloud_only": counts.1,
         "conflicts": counts.2,
+        // Desktop 0.8.15: changes held back, never counted in `syncing`.
+        "changes_on_hold": counts.3,
+        // Desktop 0.8.15: the start-up guard's pass, `{running, done, total}` (Windows; at rest
+        // elsewhere). While it runs, uploads and downloads flow; only freeing work waits.
+        "startup_guard": crate::unknown_check::STARTUP_GUARD.progress(),
         // WS1 — storage byte totals for the tray status line.
         // These are `null` here because polling the billing API on every
         // 3-second status tick would hammer the server. The tray's
@@ -8540,15 +10426,34 @@ fn free_up_space_windows(db: &state_db::StateDb, sync_root: &std::path::Path) ->
                 continue;
             }
         }
-        // OS-level unpin BEFORE dehydrating. This file passed the DB pinned-skip
+        // Task 2240 (spec D2, the lead's ruling on self-review #1): confirm before evict. A pin made in Explorer
+        // reaches the DB only when the tick's folder listing shows it, and a listing can lag while another process
+        // holds the file open, so the DB's "unpinned" may be stale. The file's own attributes decide: pinned on disk
+        // (or unreadable) keeps it local, and its OS pin is never cleared below.
+        let direct = crate::windows_cf::placeholders::read_os_placeholder_state(&canonical);
+        let pinned_on_disk = |attrs: u32| {
+            crate::state_db::decode_os_state(attrs, crate::state_db::FileStatus::Local).1
+                == Some(crate::state_db::PinState::Pinned)
+        };
+        if direct.is_none_or(pinned_on_disk) {
+            tracing::info!(file_id = %file_id, "free_up_space: the file is pinned on disk (or unreadable); keeping it local");
+            continue;
+        }
+        // OS-level unpin BEFORE dehydrating. This file passed both pin checks
         // above, so it is MEANT to be reclaimed — but its placeholder may still
-        // carry an OS pin (CfSetPinState) from an earlier "available offline"
-        // toggle or an inherited recursive parent pin that the DB no longer
-        // reflects. `CfDehydratePlaceholder` fails with ERROR_CLOUD_FILE_PINNED on
+        // carry a pin it inherits from a pinned folder, which the DB does not
+        // reflect (an explicit pin on the file itself was refused just above).
+        // `CfDehydratePlaceholder` fails with ERROR_CLOUD_FILE_PINNED on
         // any OS-pinned placeholder, so we clear the OS pin first (non-recursive —
         // this is a single file). Best-effort: a failure here is logged (never the
         // path) and we still attempt the dehydrate, which simply no-ops/errors if
         // the file was genuinely pinned.
+        // Task 1640: never free a file whose bytes are a change that is not sent (an edit, a
+        // queued upload) or are not known to be the agreed content: they are the only copy.
+        if !crate::windows_cf::placeholders::local_bytes_agreed(db, &file_id, &canonical) {
+            tracing::warn!(file_id = %file_id, "free_up_space: the file holds a change that is not sent; keeping it local");
+            continue;
+        }
         if let Err(error) = crate::windows_cf::placeholders::set_pin_state(&canonical, false, false) {
             tracing::warn!(file_id = %file_id, error = %error, "free_up_space: OS unpin before dehydrate failed; attempting dehydrate anyway");
         }
@@ -8905,6 +10810,22 @@ fn list_version_conflict_center() -> Result<Vec<engine_bridge::VersionConflictEn
     engine_bridge::version_conflict_feed_from_db(&db).map_err(|e| e.to_string())
 }
 
+/// Task 1640 (review N9): dismiss one informational review entry (`kept:<id>`, a kept copy). The
+/// copy itself stays where it is.
+#[tauri::command]
+fn dismiss_review_entry(entry_id: String) -> Result<(), String> {
+    let Some(id) = entry_id.strip_prefix("kept:").and_then(|id| id.parse::<i64>().ok()) else {
+        return Err("This entry can’t be dismissed.".to_string());
+    };
+    let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
+    let db = state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?;
+    match db.dismiss_kept_copy(id) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err("This entry can be dismissed once the file is closed and removed.".to_string()),
+        Err(e) => Err(format!("dismiss: {e}")),
+    }
+}
+
 fn file_versions_payload_for_frontend(body: serde_json::Value) -> Result<serde_json::Value, String> {
     let Some(versions) = body.get("versions") else {
         return Err("list_file_versions response missing versions array".to_string());
@@ -9179,7 +11100,28 @@ fn get_desktop_config() -> Result<config::DesktopSettings, String> {
 /// `pick_sync_root` or any other writer cannot race away a change between
 /// this load and save.
 #[tauri::command]
-fn set_desktop_config(config: config::DesktopSettings) -> Result<(), String> {
+async fn set_desktop_config(app: tauri::AppHandle, config: config::DesktopSettings) -> Result<(), String> {
+    apply_desktop_settings(&app, config).await
+}
+
+/// A settings write. Every field but the pause is merged into the file in one update; a pause (the compact flyout's
+/// Network page sends one) goes the way the menu's and the tray's go, `set_sync_paused`, so the file, the engine's
+/// flag, the engine-status event and the menu's label agree (task 1683 slice 1, review round 2 P2-3). A write without
+/// a pause touches neither the pause nor the label.
+async fn apply_desktop_settings(
+    app: &tauri::AppHandle<impl tauri::Runtime>,
+    mut config: config::DesktopSettings,
+) -> Result<(), String> {
+    let pause = config.pause_sync.take();
+    save_desktop_settings(config)?;
+    if let Some(paused) = pause {
+        set_sync_paused(app, paused).await?;
+    }
+    Ok(())
+}
+
+/// The write behind `set_desktop_config`: one update under the config-write lock (task 1889).
+fn save_desktop_settings(config: config::DesktopSettings) -> Result<(), String> {
     DesktopConfig::update(|cfg| {
         cfg.apply_settings(config);
         (true, ())
@@ -9285,15 +11227,18 @@ fn tray_recent_activity_from_db(db: &state_db::StateDb) -> Vec<TrayActivityItem>
     }
 
     if let Ok(events) = db.list_recent_local_activity(TRAY_RECENT_ACTIVITY_LIMIT) {
-        for event in events
-            .into_iter()
-            .filter(|event| event.event_type == state_db::LocalActivityKind::MovedToTrash)
-        {
+        for event in events.into_iter() {
+            // Task 1640: a kept copy of changes not sent, beside a file deleted elsewhere.
+            let (status, icon) = match event.event_type {
+                state_db::LocalActivityKind::MovedToTrash => ("Moved to trash", "trash"),
+                state_db::LocalActivityKind::KeptLocalCopy => ("Your changes, kept as a copy", "file"),
+                state_db::LocalActivityKind::Restored => continue,
+            };
             items.push(TrayActivityItem {
                 id: event.file_id.unwrap_or_else(|| format!("activity-{}", event.id)),
                 name: event.file_name,
-                status: "Moved to trash".to_string(),
-                icon: "trash".to_string(),
+                status: status.to_string(),
+                icon: icon.to_string(),
                 ok: Some(true),
                 active: None,
                 progress: None,
@@ -9393,11 +11338,14 @@ fn rehydrate_sync_paused(flag: &AtomicBool, fallback: bool) {
     }
 }
 
-async fn set_sync_paused(app: &tauri::AppHandle, paused: bool) -> Result<(), String> {
+async fn set_sync_paused(app: &tauri::AppHandle<impl tauri::Runtime>, paused: bool) -> Result<(), String> {
     let state = app.state::<AppState>();
     let acct = state.active_account()?;
     // Persist so the paused state survives a restart.
-    persist_sync_paused_at(&DesktopConfig::path()?, &acct.sync_paused, paused)?;
+    let persisted = persist_sync_paused_at(&DesktopConfig::path()?, &acct.sync_paused, paused);
+    // Two-surface F3: the menu's "Pause Sync" / "Resume Sync" follows what the file now says, also after a failure.
+    pause_state_changed(app);
+    persisted?;
     // Notify the WebView + tray tooltip listener.
     let event_state = if paused { "paused" } else { "idle" };
     let _ = app.emit("engine-status", serde_json::json!({ "state": event_state }));
@@ -9416,6 +11364,28 @@ async fn tray_pause_sync(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 async fn tray_resume_sync(app: tauri::AppHandle) -> Result<(), String> {
     set_sync_paused(&app, false).await
+}
+
+/// What sync is doing, for Settings › Sync and the Windows tray popover (0.8.15, see [`sync_activity`]): the live pause
+/// flag, the engine's last state, what is moving, the queue in counts, and the startup check while it runs. Counts
+/// only; reading it changes nothing and needs no session, so it answers while the vault is locked too.
+#[tauri::command]
+async fn sync_activity_summary(
+    state: State<'_, AppState>,
+    runtime: State<'_, popover_data::PopoverRuntime>,
+) -> Result<sync_activity::SyncActivitySummary, String> {
+    let paused = state.active_account()?.sync_paused.load(Ordering::Relaxed);
+    let engine = runtime.status.lock().map(|view| view.clone()).unwrap_or_default();
+    let transfers_active = runtime.transfers.active().len();
+    let queue = tokio::task::spawn_blocking(|| -> Result<Option<state_db::QueueHold>, String> {
+        let Some(db) = DesktopConfig::load().and_then(|cfg| state_db_for_config(&cfg))? else {
+            return Ok(None);
+        };
+        db.queue_hold_summary().map(Some).map_err(|e| format!("read the sync queue: {e}"))
+    })
+    .await
+    .map_err(|e| format!("sync activity task failed: {e}"))??;
+    Ok(sync_activity::summary(paused, &engine, transfers_active, queue))
 }
 
 /// The menu's Pause / Resume item: flips the pause the file holds. Returns which way it went (`true` = pausing) with the
@@ -9967,6 +11937,24 @@ fn mark_known_folder_onboarding_seen() -> Result<(), String> {
     })
 }
 
+/// Whether the Beebeeb window's one-time hint on Home ("Beebeeb lives in the menu bar", two-surface spec §7.6) has been
+/// dismissed. `false` for a fresh install and for a `desktop.toml` that has no such key.
+#[tauri::command]
+fn get_menu_bar_hint_seen() -> Result<bool, String> {
+    Ok(DesktopConfig::load()?.menu_bar_hint_seen)
+}
+
+/// "Got it" on that hint: it is never shown again. Idempotent, and a write only when it changes something. One update, so
+/// it lands next to any other save in flight (task 1889).
+#[tauri::command]
+fn mark_menu_bar_hint_seen() -> Result<(), String> {
+    DesktopConfig::update(|cfg| {
+        let changed = !cfg.menu_bar_hint_seen;
+        cfg.menu_bar_hint_seen = true;
+        (changed, ())
+    })
+}
+
 /// Resolve and dehydrate the local, unpinned files under each newly-excluded
 /// folder. Returns total bytes reclaimed. Shared by Windows (real CF
 /// dehydrate) and non-Windows (DB-only flip) via the inner cfg blocks —
@@ -10081,6 +12069,11 @@ fn dehydrate_excluded_subtrees_windows(
         if !allowed_roots.iter().any(|root| canonical.starts_with(root)) {
             continue;
         }
+        // Task 1640: an unsent change stays on disk; see `free_up_space_windows`.
+        if !crate::windows_cf::placeholders::local_bytes_agreed(db, &entry.file_id, &canonical) {
+            tracing::warn!(file_id = %entry.file_id, "set_selective_sync: the file holds a change that is not sent; keeping it local");
+            continue;
+        }
         match crate::windows_cf::placeholders::dehydrate_placeholder(&canonical) {
             Ok(freed) => {
                 bytes_freed = bytes_freed.saturating_add(freed);
@@ -10179,6 +12172,13 @@ struct VaultEntryRow {
     /// Whether this file is currently hydrated on disk (`status == Local`).
     /// Always `false` for folders.
     on_disk: bool,
+    /// The row's path. Rows of the same kind at one path are one entry in the tree (0.8.15, [`one_entry_per_path`]).
+    path: String,
+    /// Whether the server knows the row (`current_version` or `remote_updated_at` set). A folder this PC created and
+    /// never sent has neither.
+    server_known: bool,
+    /// Whether the row's status is `local`, the status a folder this PC created and never sent keeps.
+    local_status: bool,
 }
 
 /// Mutable accumulator for one folder while we aggregate the subtree.
@@ -10276,6 +12276,71 @@ fn list_shared_roots() -> Result<Vec<DesktopSharedRoot>, String> {
     shared_roots_from_db(&db, sync_root.as_deref())
 }
 
+/// One state DB row as the tree builder reads it.
+fn vault_entry_row(entry: &state_db::TreeRow) -> VaultEntryRow {
+    VaultEntryRow {
+        id: entry.file_id.clone(),
+        parent_id: entry.parent_id.clone(),
+        is_folder: entry.item_kind == state_db::ItemKind::Folder,
+        name: folder_leaf_name(&entry.path).unwrap_or_else(|| folder_fallback_label(&entry.file_id)),
+        size_bytes: entry.size_bytes,
+        on_disk: entry.status == state_db::FileStatus::Local,
+        path: entry.path.clone(),
+        server_known: entry.current_version > 0 || entry.remote_updated_at > 0,
+        local_status: entry.status == state_db::FileStatus::Local,
+    }
+}
+
+/// One entry per path in the Selective sync tree (0.8.15). Display only.
+///
+/// On Guus's PC 2,828 folder paths had two rows: a folder this PC created on 4 Oct whose `create_folder` never landed
+/// (`local`, no server version, a locally minted id, its operation paused) and the server's folder at the same path,
+/// which arrived later with a snapshot. The tree listed both: the same folder twice, once with 0 B and 0 files.
+///
+/// Here a row the server does not know folds into the row that stays at its path: the server's (a row the server
+/// knows, then one whose status is not `local`, then the smallest id, so the choice is stable). The folded row is not
+/// shown, its children hang under the row that stays, and nothing is counted twice. Two rows the server knows are two
+/// server items, and both stay. Rows with an empty path are left alone.
+///
+/// The state DB and the queue are untouched: nothing is deleted, re-parented on disk or resumed. 0.8.16 repairs the data.
+fn one_entry_per_path(rows: &[VaultEntryRow]) -> Vec<VaultEntryRow> {
+    use std::cmp::Reverse;
+    use std::collections::HashMap;
+
+    let mut at_path: HashMap<(bool, &str), Vec<&VaultEntryRow>> = HashMap::new();
+    for row in rows {
+        let path = row.path.trim_matches('/');
+        if !path.is_empty() {
+            at_path.entry((row.is_folder, path)).or_default().push(row);
+        }
+    }
+    // Folded row id -> the id of the row that stays at its path. A row that stays never folds, so one lookup resolves.
+    let mut folded_into: HashMap<&str, &str> = HashMap::new();
+    for same_path in at_path.values().filter(|rows| rows.len() > 1) {
+        let Some(stays) = same_path
+            .iter()
+            .max_by_key(|row| (row.server_known, !row.local_status, Reverse(row.id.as_str())))
+        else {
+            continue;
+        };
+        for row in same_path {
+            if row.id != stays.id && !row.server_known {
+                folded_into.insert(row.id.as_str(), stays.id.as_str());
+            }
+        }
+    }
+    rows.iter()
+        .filter(|row| !folded_into.contains_key(row.id.as_str()))
+        .map(|row| {
+            let mut row = row.clone();
+            if let Some(stays) = row.parent_id.as_deref().and_then(|parent| folded_into.get(parent)) {
+                row.parent_id = Some((*stays).to_string());
+            }
+            row
+        })
+        .collect()
+}
+
 /// Build the nested SelectiveSync folder tree from a flat set of local
 /// rows (already nested via `parent_id`, from task 0784).
 ///
@@ -10295,7 +12360,15 @@ fn list_shared_roots() -> Result<Vec<DesktopSharedRoot>, String> {
 ///   4. `excluded` is set per-node from the `excluded` id set.
 ///
 /// Children are sorted by lowercased name then id for a stable UI order.
+///
+/// First, one entry per path: a folder this PC created and never sent folds into the server's at its path (0.8.15,
+/// [`one_entry_per_path`]).
 fn build_vault_tree(rows: &[VaultEntryRow], excluded: &std::collections::HashSet<String>) -> Vec<VaultItem> {
+    build_vault_tree_of_rows(&one_entry_per_path(rows), excluded)
+}
+
+/// [`build_vault_tree`] over the rows as they are, with no merge: what 0.8.14 showed.
+fn build_vault_tree_of_rows(rows: &[VaultEntryRow], excluded: &std::collections::HashSet<String>) -> Vec<VaultItem> {
     use std::collections::HashMap;
 
     // 1. Index folders.
@@ -10492,14 +12565,16 @@ fn subtree_file_ids(rows: &[(String, Option<String>, bool)], root_folder_ids: &[
 /// A bare plaintext name passes straight through. We deliberately swallow the
 /// error to `None` so the SelectiveSync row falls back to a stable id label.
 fn try_decrypt_name(file_meta: &serde_json::Value, id: &str, master_key: &[u8; 32]) -> Option<String> {
-    let name_enc_str = file_meta.get("name_encrypted").and_then(|v| v.as_str())?;
-
-    // MasterKey::from_bytes consumes the array (it zeroizes on drop),
-    // so copy from the borrow first.
-    let mk_bytes: [u8; 32] = *master_key;
-    let mk = beebeeb_core::kdf::MasterKey::from_bytes(mk_bytes);
-
-    beebeeb_core::encrypt::decrypt_name(&mk, id, name_enc_str).ok()
+    let name = file_meta["name_encrypted"].as_str()?;
+    let mk = beebeeb_core::kdf::MasterKey::from_bytes(*master_key);
+    let owner = owner_keys::normalize_wrap(&file_meta["owner_wrapped_file_key"]).ok()?;
+    let foreign = !file_meta["acted_via_share_id"].is_null() || !file_meta["uploaded_by"].is_null();
+    if owner.is_some() || foreign {
+        let resolved = beebeeb_sync::key_resolution::resolve_owned_key(&mk, id, owner.as_deref(), None, foreign).ok()?;
+        return beebeeb_core::encrypt::decrypt_file_metadata_with_key(&resolved.key, name).ok()
+            .map(|m| m.name).filter(|name| reject_unsafe_rel_path(name).is_ok() && !name.contains('/') && !name.contains('\\'));
+    }
+    beebeeb_core::encrypt::decrypt_name(&mk, id, name).ok()
 }
 
 /// Build the nested SelectiveSync folder tree.
@@ -10550,19 +12625,9 @@ async fn list_vault_folders(state: State<'_, AppState>) -> Result<Vec<VaultItem>
 
         // Primary path: build from the local, already-nested state DB.
         if let Ok(Some(db)) = DesktopConfig::load().and_then(|cfg| state_db_for_config(&cfg))
-            && let Ok(entries) = db.list_files()
+            && let Ok(entries) = db.list_tree_rows()
         {
-            let rows: Vec<VaultEntryRow> = entries
-                .iter()
-                .map(|e| VaultEntryRow {
-                    id: e.file_id.clone(),
-                    parent_id: e.parent_id.clone(),
-                    is_folder: e.item_kind == state_db::ItemKind::Folder,
-                    name: folder_leaf_name(&e.path).unwrap_or_else(|| folder_fallback_label(&e.file_id)),
-                    size_bytes: e.size_bytes,
-                    on_disk: e.status == state_db::FileStatus::Local,
-                })
-                .collect();
+            let rows: Vec<VaultEntryRow> = entries.iter().map(vault_entry_row).collect();
             let tree = build_vault_tree(&rows, &excluded);
             if !tree.is_empty() {
                 return Ok(tree);
@@ -10598,6 +12663,7 @@ async fn list_vault_folders(state: State<'_, AppState>) -> Result<Vec<VaultItem>
             // id-based label so the user can still tell folders apart.
             let display = try_decrypt_name(f, id, &master_key)
                 .or_else(|| {
+                    if !f["acted_via_share_id"].is_null() || !f["uploaded_by"].is_null() || !f["owner_wrapped_file_key"].is_null() { return None; }
                     let path = f.get("path").and_then(|v| v.as_str()).unwrap_or("");
                     if path.is_empty() {
                         None
@@ -10635,7 +12701,7 @@ fn set_recursive_pin(item_id: String, pinned: bool) -> Result<engine_bridge::Pin
         .ok_or_else(|| "Choose a sync folder before changing offline availability.".to_string())?;
     let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
     if !db_path.exists() {
-        return Err("The local sync database has not been created yet. Start the daemon once before changing offline availability.".to_string());
+        return Err("Beebeeb hasn’t started syncing on this Mac yet. Try again once it has.".to_string());
     }
 
     let db = std::sync::Arc::new(state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?);
@@ -10748,6 +12814,22 @@ async fn account_profile(state: State<'_, AppState>) -> Result<account_dto::Acco
     })
 }
 
+/// `GET /api/v1/auth/me`, always from the server. `account_profile` serves what the session cached at sign-in, which is only
+/// as old as the sign-in: Settings › Security shows whether the authenticator app is on, and that must be what the account
+/// says now (turned off on the web, it said On until the next sign-in; PR #140 delta review, P2-B).
+///
+/// It writes nothing: not the cache, not the session. The cached profile is an input to `identity_of_session`, which takes
+/// it only when its email is exactly the session's; a profile fetched after the email was changed on the web (the legacy
+/// path) carries the new address, and caching it would make the session lose the user id it knows (follow-up P3-6). A caller
+/// that sees the session move while this runs is told "Account changed" by the command layer, so no turn is captured here.
+#[tauri::command]
+async fn account_profile_fresh(state: State<'_, AppState>) -> Result<account_dto::AccountProfile, String> {
+    session_command!(async {
+        let api = api_client_from_session(&state)?;
+        api.account_profile().await.map_err(|e| e.to_string())
+    })
+}
+
 /// The `account_profile` command's cache (Task 12 fix round 1, item 6): written only while no session transition
 /// happened since the fetch began (`turn`), checked under the session-write lock. The cached profile IS an input to a
 /// sign-in's decision (`credentials_identity`, the `cached_profile` trace), but this one is the session's OWN record,
@@ -10792,8 +12874,8 @@ async fn account_usage(state: State<'_, AppState>) -> Result<account_dto::Billin
     })
 }
 
-/// `GET /api/v1/me/region` — preferred region + available list. The frontend
-/// resolves the effective region's CITY from this (never the provider).
+/// `GET /api/v1/me/region` — preferred region + available list. The list is by COUNTRY (task
+/// 2050); no city and no provider reaches the frontend.
 #[tauri::command]
 async fn account_region(state: State<'_, AppState>) -> Result<account_dto::UserRegionResponse, String> {
     session_command!(async {
@@ -10804,15 +12886,17 @@ async fn account_region(state: State<'_, AppState>) -> Result<account_dto::UserR
     })
 }
 
-/// `PUT /api/v1/me/region` — set or clear the preferred storage region.
+/// `PUT /api/v1/me/region` — set or clear the preferred storage region (`europe` or a country
+/// id) and, for a country, "only store in <country>" (`region_strict`).
 #[tauri::command]
 async fn account_set_region(
     state: State<'_, AppState>,
     preferred_region: Option<String>,
+    region_strict: Option<bool>,
 ) -> Result<account_dto::SetPreferredRegionResponse, String> {
     session_command!(async {
         api_client_from_session(&state)?
-            .set_preferred_region(preferred_region.as_deref())
+            .set_preferred_region(preferred_region.as_deref(), region_strict)
             .await
             .map_err(|e| e.to_string())
     })
@@ -10905,10 +12989,12 @@ async fn account_activity_feed(
     limit: Option<u32>,
 ) -> Result<account_dto::ActivityFeed, String> {
     session_command!(async {
-        api_client_from_session(&state)?
-            .activity_feed(page, limit)
-            .await
-            .map_err(|e| e.to_string())
+        let mut feed = api_client_from_session(&state)?.activity_feed(page, limit).await.map_err(|e| e.to_string())?;
+        if page.unwrap_or(1) == 1 {
+            let bridge = parked_conflict_bridge(&state)?;
+            bridge.append_shared_activity(&mut feed).await.map_err(|e| e.to_string())?;
+        }
+        Ok(feed)
     })
 }
 
@@ -10952,6 +13038,7 @@ async fn account_update_notification_preferences(
 }
 
 fn trash_name_fallback(file_meta: &serde_json::Value, id: &str) -> String {
+    if !file_meta["acted_via_share_id"].is_null() || !file_meta["uploaded_by"].is_null() || !file_meta["owner_wrapped_file_key"].is_null() { return owner_keys::blocked_name(id); }
     let from_plain = ["display_name", "decrypted_name", "filename", "file_name", "name"]
         .into_iter()
         .find_map(|key| {
@@ -11151,10 +13238,13 @@ async fn desktop_trash_list(state: State<'_, AppState>) -> Result<Vec<account_dt
     session_command!(async {
         let api = api_client_from_session(&state)?;
         let raw = api.list_trashed_files_all().await.map_err(|e| e.to_string())?;
-        Ok(raw
-            .iter()
-            .filter_map(|file_meta| trash_item_from_meta(file_meta, api.master_key()))
-            .collect())
+        let db = DesktopConfig::load().ok().and_then(|cfg| state_db_for_config(&cfg).ok().flatten());
+        Ok(raw.iter().filter_map(|file_meta| {
+            let mut item = trash_item_from_meta(file_meta, api.master_key())?;
+            if let Some(db) = db.as_ref()
+                && let Ok(Some(name)) = owner_keys::stored_name(db, &item.id, api.master_key()) { item.name = name; }
+            Some(item)
+        }).collect())
     })
 }
 
@@ -11270,6 +13360,48 @@ async fn account_storage_breakdown(
     })
 }
 
+/// The overview's view of file rows. Folders carry no real size and no sync state worth surfacing; they are left out.
+fn file_overview_inputs(rows: Vec<(state_db::FileEntry, bool)>) -> Vec<account_dto::FileOverviewInput> {
+    rows.into_iter()
+        .filter(|(e, _)| !e.is_dir())
+        .map(|(e, pinned)| account_dto::FileOverviewInput {
+            path: e.path,
+            size_bytes: e.size_bytes,
+            status: e.status.as_str().to_string(),
+            pinned,
+            modified_at: e.modified_at,
+        })
+        .collect()
+}
+
+/// The newest `limit` local activity events, as the overview's recent list takes them.
+fn file_overview_activity(
+    db: &state_db::StateDb,
+    limit: usize,
+) -> Result<Vec<account_dto::FileOverviewActivityInput>, String> {
+    Ok(db
+        .list_recent_local_activity(limit)
+        .map_err(|e| format!("list local activity: {e}"))?
+        .into_iter()
+        .map(|event| account_dto::FileOverviewActivityInput {
+            event_type: event.event_type.as_str().to_string(),
+            file_name: event.file_name,
+            rel_path: event.rel_path,
+            occurred_at: event.occurred_at,
+        })
+        .collect())
+}
+
+/// The tray's recent list (task 2243): the overview's `recent`, without its totals.
+fn recent_files(db: &state_db::StateDb, limit: usize) -> Result<Vec<account_dto::RecentFile>, String> {
+    // The newest `limit` files and the newest `limit` events are all a list of `limit` can hold.
+    let rows = db.newest_file_rows(limit).map_err(|e| format!("list files: {e}"))?;
+    Ok(
+        account_dto::compute_file_overview(&file_overview_inputs(rows), &file_overview_activity(db, limit)?, limit)
+            .recent,
+    )
+}
+
 /// Per-PC **sync-state** overview for the in-app "Files" tab — the device
 /// lens that complements `account_storage_breakdown` (the by-TYPE / billing
 /// lens). Computed LOCALLY from the desktop SQLite mirror
@@ -11317,36 +13449,46 @@ async fn desktop_file_overview(
         let overview = tokio::task::spawn_blocking(move || -> Result<_, String> {
             let db = state_db::StateDb::open(&db_path).map_err(|e| format!("open state db: {e}"))?;
             let rows = db.file_overview_rows().map_err(|e| format!("list files: {e}"))?;
-            // Folders carry no real size and no sync state worth surfacing; exclude
-            // them from the overview.
-            let inputs: Vec<account_dto::FileOverviewInput> = rows
-                .into_iter()
-                .filter(|(e, _)| !e.is_dir())
-                .map(|(e, pinned)| account_dto::FileOverviewInput {
-                    path: e.path,
-                    size_bytes: e.size_bytes,
-                    status: e.status.as_str().to_string(),
-                    pinned,
-                    modified_at: e.modified_at,
-                })
-                .collect();
-            let activity: Vec<account_dto::FileOverviewActivityInput> = db
-                .list_recent_local_activity(limit)
-                .map_err(|e| format!("list local activity: {e}"))?
-                .into_iter()
-                .map(|event| account_dto::FileOverviewActivityInput {
-                    event_type: event.event_type.as_str().to_string(),
-                    file_name: event.file_name,
-                    rel_path: event.rel_path,
-                    occurred_at: event.occurred_at,
-                })
-                .collect();
-            Ok(account_dto::compute_file_overview(&inputs, &activity, limit))
+            Ok(account_dto::compute_file_overview(
+                &file_overview_inputs(rows),
+                &file_overview_activity(&db, limit)?,
+                limit,
+            ))
         })
         .await
         .map_err(|e| format!("file overview task failed: {e}"))??;
 
         Ok(overview)
+    })
+}
+
+/// The tray's recent list (task 2243), which it polls every few seconds while it is open. [`desktop_file_overview`]
+/// reads every row for its totals; this reads the newest rows alone.
+#[tauri::command]
+async fn desktop_recent_files(
+    state: State<'_, AppState>,
+    recent_limit: Option<usize>,
+) -> Result<Vec<account_dto::RecentFile>, String> {
+    session_command!(async {
+        {
+            let acct = state.active_account()?;
+            let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+            if guard.is_none() {
+                return Err("vault is locked".to_string());
+            }
+        }
+        let limit = recent_limit.unwrap_or(15);
+        tokio::task::spawn_blocking(move || -> Result<_, String> {
+            // As in the overview: no readable config, no sync root or no DB yet is an empty list, not an error (the tray
+            // shows an error as signed out).
+            let config = DesktopConfig::load().ok();
+            let Some(db) = config.as_ref().map(state_db_for_config).transpose()?.flatten() else {
+                return Ok(Vec::new());
+            };
+            recent_files(&db, limit)
+        })
+        .await
+        .map_err(|e| format!("recent files task failed: {e}"))?
     })
 }
 
@@ -11582,69 +13724,113 @@ pub struct SpeedtestLatency {
     pub max_ms: u64,
 }
 
+/// What a run measured, kept apart from how it is said: only the pings that were answered and the transfers that
+/// finished are in here. Failed ones are not zeros to average in (PR #140 review, P2-7).
+#[derive(Debug, Default)]
+struct SpeedtestSamples {
+    /// Round trips of the pings the server answered, in milliseconds.
+    ping_ms: Vec<u64>,
+    /// Bytes per second of each upload that finished.
+    up_bps: Vec<f64>,
+    /// Bytes per second of each download that finished.
+    down_bps: Vec<f64>,
+}
+
+const SPEEDTEST_NO_PING: &str = "Beebeeb didn’t answer any of the 5 pings. Check your internet connection and try again.";
+const SPEEDTEST_NO_UPLOAD: &str = "None of the 3 uploads finished. Check your internet connection and try again.";
+const SPEEDTEST_NO_DOWNLOAD: &str = "None of the 3 downloads finished. Check your internet connection and try again.";
+const SPEEDTEST_ALREADY_RUNNING: &str = "A speed test is already running.";
+
+/// A run's figures, or the plain reason there are none. A direction that never finished is not "0 Mbps" and an
+/// unanswered ping is not a latency: a run without a figure in all three is a failed run, never a result.
+fn speedtest_outcome(samples: &SpeedtestSamples) -> Result<SpeedtestResult, String> {
+    if samples.ping_ms.is_empty() {
+        return Err(SPEEDTEST_NO_PING.to_string());
+    }
+    if samples.up_bps.is_empty() {
+        return Err(SPEEDTEST_NO_UPLOAD.to_string());
+    }
+    if samples.down_bps.is_empty() {
+        return Err(SPEEDTEST_NO_DOWNLOAD.to_string());
+    }
+    let mean = |speeds: &[f64]| (speeds.iter().sum::<f64>() / speeds.len() as f64) as u64;
+    Ok(SpeedtestResult {
+        latency: SpeedtestLatency {
+            min_ms: *samples.ping_ms.iter().min().unwrap_or(&0),
+            avg_ms: samples.ping_ms.iter().sum::<u64>() / samples.ping_ms.len() as u64,
+            max_ms: *samples.ping_ms.iter().max().unwrap_or(&0),
+        },
+        upload_bps: mean(&samples.up_bps),
+        download_bps: mean(&samples.down_bps),
+    })
+}
+
+/// At most one speed test at a time: the test moves 60 MB, and a second press (the Settings page and the Bandwidth view
+/// both offer one) would halve both figures. Dropping the guard frees the slot, including when the command is cancelled.
+struct SpeedtestSlot<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl<'a> SpeedtestSlot<'a> {
+    fn take(flag: &'a std::sync::atomic::AtomicBool) -> Result<Self, String> {
+        flag.compare_exchange(false, true, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Acquire)
+            .map(|_| Self(flag))
+            .map_err(|_| SPEEDTEST_ALREADY_RUNNING.to_string())
+    }
+}
+
+impl Drop for SpeedtestSlot<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+static SPEEDTEST_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Run a network speedtest against the Beebeeb API.
 ///
 /// Parity with CLI (`repos/cli/src/commands/speedtest.rs`) and iOS
 /// (`SpeedtestScreen`): 5 latency pings + 3 × 10 MB download + 3 × 10 MB upload.
-/// Uses the authenticated session; returns `Err("vault is locked")` when none.
+/// Uses the authenticated session; returns `Err("vault is locked")` when none. A run in which nothing finished in one
+/// of the three parts is an `Err` with the reason (see [`speedtest_outcome`]), and a second run while one is going is
+/// refused.
 #[tauri::command]
 async fn run_speedtest(state: State<'_, AppState>) -> Result<SpeedtestResult, String> {
     session_command!(async {
         let api = api_client_from_session(&state)?;
+        let _slot = SpeedtestSlot::take(&SPEEDTEST_RUNNING)?;
+        let mut samples = SpeedtestSamples::default();
 
-        // Latency: 5 × GET /api/v1/health
-        let mut latencies: Vec<u64> = Vec::new();
+        // Latency: 5 × GET /api/v1/health. A ping the server did not answer has no round trip to report.
         for _ in 0..5 {
             let start = std::time::Instant::now();
-            // Ignore errors — a failed ping still has a measurable RTT and counts
-            // as a data point; the best-effort spirit matches the CLI.
-            let _ = api.ping_health().await;
-            latencies.push(start.elapsed().as_millis() as u64);
+            if api.ping_health().await.is_ok() {
+                samples.ping_ms.push(start.elapsed().as_millis() as u64);
+            }
         }
-        let min_ms = *latencies.iter().min().unwrap_or(&0);
-        let max_ms = *latencies.iter().max().unwrap_or(&0);
-        let avg_ms = latencies.iter().sum::<u64>() / latencies.len().max(1) as u64;
 
         // Upload: 3 × 10 MB POST /api/v1/speedtest
         let blob = vec![0u8; 10_000_000];
-        let mut up_speeds: Vec<f64> = Vec::new();
         for _ in 0..3 {
             let start = std::time::Instant::now();
             if api.speedtest_upload(&blob).await.is_ok() {
                 let elapsed = start.elapsed().as_secs_f64();
                 if elapsed > 0.0 {
-                    up_speeds.push(blob.len() as f64 / elapsed);
+                    samples.up_bps.push(blob.len() as f64 / elapsed);
                 }
             }
         }
-        let upload_bps = if up_speeds.is_empty() {
-            0
-        } else {
-            (up_speeds.iter().sum::<f64>() / up_speeds.len() as f64) as u64
-        };
 
         // Download: 3 × 10 MB GET /api/v1/speedtest?size=10000000
-        let mut dl_speeds: Vec<f64> = Vec::new();
         for _ in 0..3 {
             let start = std::time::Instant::now();
             if let Ok(data) = api.speedtest_download(10_000_000).await {
                 let elapsed = start.elapsed().as_secs_f64();
                 if elapsed > 0.0 {
-                    dl_speeds.push(data.len() as f64 / elapsed);
+                    samples.down_bps.push(data.len() as f64 / elapsed);
                 }
             }
         }
-        let download_bps = if dl_speeds.is_empty() {
-            0
-        } else {
-            (dl_speeds.iter().sum::<f64>() / dl_speeds.len() as f64) as u64
-        };
 
-        Ok(SpeedtestResult {
-            latency: SpeedtestLatency { min_ms, avg_ms, max_ms },
-            upload_bps,
-            download_bps,
-        })
+        speedtest_outcome(&samples)
     })
 }
 
@@ -11701,6 +13887,7 @@ pub(crate) fn open_conflict_window_impl(
     file_id: &str,
     file_name: &str,
     is_text: bool,
+    op_id: Option<&str>,
 ) -> Result<(), String> {
     let label = format!("conflict-{file_id}");
 
@@ -11714,8 +13901,10 @@ pub(crate) fn open_conflict_window_impl(
         return Ok(());
     }
 
+    // Task 2190: a parked conflict carries its queued write, which the window decides.
+    let op_param = op_id.map(|op| format!("&opId={}", urlencoding::encode(op))).unwrap_or_default();
     let url = format!(
-        "index.html?window=conflict&fileId={file_id}&fileName={enc_name}&isText={is_text}",
+        "index.html?window=conflict&fileId={file_id}&fileName={enc_name}&isText={is_text}{op_param}",
         enc_name = urlencoding::encode(file_name),
     );
 
@@ -11748,8 +13937,9 @@ async fn open_conflict_window(
     file_id: String,
     file_name: String,
     is_text: bool,
+    op_id: Option<String>,
 ) -> Result<(), String> {
-    open_conflict_window_impl(&app, &file_id, &file_name, is_text)
+    open_conflict_window_impl(&app, &file_id, &file_name, is_text, op_id.as_deref())
 }
 
 /// Show a native OS notification announcing a fresh conflict. Used
@@ -11958,6 +14148,173 @@ async fn resolve_conflict(
         );
 
         Ok(())
+    })
+}
+
+/// Task 2190 (plan §3.1): a bridge over the app-local state DB for a parked conflict. Unlike
+/// `resolve_conflict`, it needs no sync root: on a Mac a parked write's bytes are its staged copy.
+fn parked_conflict_bridge(state: &State<'_, AppState>) -> Result<engine_bridge::EngineBridge, String> {
+    let acct = state.active_account()?;
+    let (token, master_key) = {
+        let guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
+        match guard.as_ref() {
+            Some(s) => (s.token.clone(), s.master_key),
+            None => return Err("not signed in".into()),
+        }
+    };
+    let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
+    let db = std::sync::Arc::new(state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?);
+    let api = std::sync::Arc::new(api_client::ApiClient::new(runner::api_base_url(), token, master_key));
+    Ok(engine_bridge::EngineBridge::new(db, api))
+}
+
+/// Task 2190 (plan §3.2, D1): "Keep the other" keeps the Mac's bytes in the "Changes not sent"
+/// folder (spec 2026-10-10) FIRST: a new event folder, the copy under the file's path, and the copy
+/// added to its OWN list durably (review-169 blocker: never the sign-out's one folder slot, never its
+/// unfinished list), so Settings › Sync lists every copy until the person dismisses it. Any failure
+/// removes what it made, and the decision changes nothing.
+#[cfg(target_os = "macos")]
+fn keep_parked_copy(op_id: &str, source: &std::path::Path, rel_path: &str) -> anyhow::Result<std::path::PathBuf> {
+    keep_parked_copy_at(
+        op_id,
+        source,
+        rel_path,
+        &sign_out_kept_root().map_err(|e| anyhow::anyhow!(e))?,
+        &DesktopConfig::path().map_err(|e| anyhow::anyhow!(e))?,
+        &sign_out::kept_writer::SystemClone,
+        &config::RealConfigFs,
+    )
+}
+
+/// [`keep_parked_copy`] with its folder, its config file and its file system steps given.
+#[cfg(target_os = "macos")]
+fn keep_parked_copy_at(
+    op_id: &str,
+    source: &std::path::Path,
+    rel_path: &str,
+    root: &std::path::Path,
+    config_path: &std::path::Path,
+    clone: &dyn sign_out::kept_writer::CloneFile,
+    config_fs: &dyn config::ConfigFs,
+) -> anyhow::Result<std::path::PathBuf> {
+    use sign_out::kept_names::{KeptRole, event_folder_name, kept_relative_path};
+    let mut writer = sign_out::kept_writer::KeptWriter::create(root, &event_folder_name(chrono::Local::now()), clone)?;
+    let kept = match writer.keep(&kept_relative_path(Some(rel_path), op_id, KeptRole::Newest), source) {
+        Ok(kept) => kept,
+        Err(error) => {
+            writer.abandon();
+            return Err(error.into());
+        }
+    };
+    let event = writer.event().to_path_buf();
+    let folder = match writer.finish() {
+        Ok(folder) => folder,
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&event);
+            return Err(error.into());
+        }
+    };
+    let kept_text = kept.to_string_lossy().into_owned();
+    if let Err(error) = sign_out::kept_record::save_conflict_copy_durably(config_path, &kept_text, config_fs) {
+        let _ = std::fs::remove_dir_all(&folder.path);
+        return Err(anyhow::anyhow!("record the kept copy: {error}"));
+    }
+    Ok(kept)
+}
+
+/// Task 2190 (review-169 blocker): "Show in Finder" reveals only a copy the list holds.
+fn conflict_copy_reveal_target<'a>(listed: &[String], path: &'a str) -> Result<&'a str, String> {
+    if listed.iter().any(|copy| copy == path) {
+        Ok(path)
+    } else {
+        Err(sign_out::copy::K3_TOAST.to_string())
+    }
+}
+
+/// Task 2190: every copy "Keep the other" kept, oldest first, for Settings › Sync.
+#[tauri::command]
+fn kept_conflict_copies() -> Result<Vec<String>, String> {
+    sign_out::kept_record::saved_conflict_copies_at(&DesktopConfig::path()?)
+}
+
+/// Task 2190: "Show in Finder" for one kept copy.
+#[tauri::command]
+fn show_kept_conflict_copy(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    let listed = sign_out::kept_record::saved_conflict_copies_at(&DesktopConfig::path()?)?;
+    let target = conflict_copy_reveal_target(&listed, &path)?;
+    tracing::info!("kept copy reveal requested");
+    app.opener()
+        .reveal_item_in_dir(target)
+        .map_err(|_| sign_out::copy::K3_TOAST.to_string())
+}
+
+/// Task 2190: "Dismiss" forgets one kept copy from the list, never deletes it.
+#[tauri::command]
+fn dismiss_kept_conflict_copy(app: tauri::AppHandle, path: String) -> Result<bool, String> {
+    let dismissed = sign_out::kept_record::dismiss_saved_conflict_copy_at(&DesktopConfig::path()?, &path)?;
+    emit_kept_folder_changed(&app);
+    Ok(dismissed)
+}
+
+/// Task 2190 (plan §3.4): both sides of a parked conflict, for the conflict window. Read-only.
+#[tauri::command]
+async fn parked_conflict_preview(
+    state: State<'_, AppState>,
+    op_id: String,
+) -> Result<engine_bridge::ConflictContentPreview, String> {
+    session_command!(async {
+        let bridge = parked_conflict_bridge(&state)?;
+        bridge.parked_conflict_preview(&op_id).await.map_err(|e| e.to_string())
+    })
+}
+
+/// Task 2190 (plan §3.2): the person's decision on a parked conflict ("Keep this Mac's", "Keep the
+/// other", "Keep both"). A decision that changed something signals the File Provider, so Finder
+/// reads the item again; `Moved` changed nothing (the window asks the person to decide again).
+#[tauri::command]
+async fn resolve_parked_conflict(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    op_id: String,
+    choice: engine_bridge::ParkedChoice,
+    shown_version: Option<i64>,
+) -> Result<engine_bridge::ParkedResolution, String> {
+    session_command!(async {
+        let bridge = parked_conflict_bridge(&state)?;
+        let file_id = bridge.db().get_operation(&op_id).ok().flatten().and_then(|op| op.file_id);
+        let device = hostname::get()
+            .map(|name| name.to_string_lossy().trim_end_matches(".local").to_string())
+            .unwrap_or_else(|_| "this Mac".to_string());
+        let hhmm = chrono::Local::now().format("%H.%M").to_string();
+        #[cfg(target_os = "macos")]
+        let mut keep_copy = |source: &std::path::Path, rel: &str| keep_parked_copy(&op_id, source, rel);
+        #[cfg(not(target_os = "macos"))]
+        let mut keep_copy = |_: &std::path::Path, _: &str| -> anyhow::Result<std::path::PathBuf> {
+            anyhow::bail!("this decision is not available on this platform yet")
+        };
+        let done = bridge
+            .resolve_parked(&op_id, choice, shown_version, &mut keep_copy, &device, &hhmm)
+            .map_err(|e| e.to_string())?;
+        // The signal goes through the bridge gate. One it does not deliver (the gate is busy, or the
+        // signal fails) is owed to the next tick's signal, so Finder is never left stale.
+        #[cfg(target_os = "macos")]
+        if done != engine_bridge::ParkedResolution::Moved {
+            let mut ids: Vec<String> = file_id.into_iter().collect();
+            if let engine_bridge::ParkedResolution::KeptBoth { file_id: copy, .. } = &done {
+                ids.push(copy.clone());
+            }
+            if crate::finder_setup::macos_ports::signal_working_set().is_err() {
+                crate::runner::owe_working_set_signal(&ids);
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = file_id;
+        // Review-169 #8: an open Sync tab reads its kept rows again (a new kept copy, a dropped write).
+        if done != engine_bridge::ParkedResolution::Moved {
+            emit_kept_folder_changed(&app);
+        }
+        let _ = app.emit("conflict-resolved", serde_json::json!({ "op_id": op_id }));
+        Ok(done)
     })
 }
 
@@ -12437,12 +14794,30 @@ async fn check_for_updates_now(app: tauri::AppHandle) -> Result<ManualUpdateChec
     }
 }
 
+/// The code a refused in-place install leads with, so a caller can tell it from a failed one.
+const UPDATE_INSTALL_UNSUPPORTED_CODE: &str = "update_install_unsupported";
+
+/// Task 2176: the App Sandbox denies replacing the running bundle, so on a Mac an in-place install can only fail, after
+/// the download, with an error nobody can diagnose. A Mac is offered a download instead (two-surface spec §0 ruling 5),
+/// and both install commands refuse here, first, as defence in depth behind the window's own rule. Windows and Linux
+/// keep their installers.
+fn in_app_install_refusal(host: desktop_capabilities::HostOs) -> Result<(), String> {
+    if host == desktop_capabilities::HostOs::Macos {
+        return Err(format!(
+            "{UPDATE_INSTALL_UNSUPPORTED_CODE}: Beebeeb on a Mac downloads updates and cannot install them in place."
+        ));
+    }
+    Ok(())
+}
+
 /// Download and install the pending update, then relaunch.
 ///
 /// Called by the frontend when the user clicks "Restart to update" in the
-/// update-available banner. Returns an error string if installation fails.
+/// update-available banner (Windows and Linux; a Mac downloads, see `in_app_install_refusal`).
+/// Returns an error string if installation fails.
 #[tauri::command]
 async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
+    in_app_install_refusal(desktop_capabilities::host_os())?;
     let channel = configured_release_channel();
     let updater = updater_for_release_channel(&app, channel)?;
     let update = updater.check().await.map_err(|e| e.to_string())?;
@@ -12480,6 +14855,8 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
             });
 
             record_installed_release_channel(channel).map_err(|e| format!("record installed release channel: {e}"))?;
+            #[cfg(target_os = "macos")]
+            note_updater_relaunch(&app);
             app.restart();
         }
         None => {
@@ -12495,6 +14872,7 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
 /// install attempt so a stale Settings view cannot install a different build.
 #[tauri::command]
 async fn install_channel_downgrade(app: tauri::AppHandle, version: String) -> Result<(), String> {
+    in_app_install_refusal(desktop_capabilities::host_os())?;
     let channel = configured_release_channel();
     let updater = manifest_updater_for_release_channel(&app, channel)?;
     let update = updater.check().await.map_err(|e| e.to_string())?;
@@ -12556,6 +14934,8 @@ async fn install_channel_downgrade(app: tauri::AppHandle, version: String) -> Re
     });
 
     record_installed_release_channel(channel).map_err(|e| format!("record installed release channel: {e}"))?;
+    #[cfg(target_os = "macos")]
+    note_updater_relaunch(&app);
     app.restart()
 }
 
@@ -12891,189 +15271,412 @@ fn valid_macos_tray_scale_factor(scale_factor: f64) -> f64 {
     }
 }
 
-// ── slice 6: the real macOS Settings window ────────────────────────────────
+// ── The Beebeeb window on a Mac (task 1683 slice 1) ──────────────────────────
 //
-// The redesigned Settings window (task 1683 slice 4, `?window=settings-v2`)
-// was dev-URL-only until this slice: no window config opened it, so the
-// Preferences/Settings menu items still opened the legacy compact app window.
-// This is the flip: a configured, on-demand-built window with an overlay
-// title bar (the `.ms-toolbar` is the drag region; the traffic lights sit at
-// its left), opened top-right under the menu bar on the tray icon's display.
-//
-// `create: false` in tauri.conf.json keeps it off every platform's startup
-// set — nothing builds it except the macOS open path below, so Windows and
-// Linux never see a webview for it.
+// Two-surface spec `docs/specs/2026-10-24-macos-two-surface-app.md` §4, §7, §9: one window, label `main`, built on
+// demand from `tauri.macos.conf.json` (`create: false`) and destroyed when closed (`surfaces::policy::close_policy`).
+// It replaced the anchored Settings window (`macos-settings`), whose placement code retired with it. Every opener
+// shows and focuses the one window and navigates it through one request: Rust stores the latest `MainNav`, emits
+// `main:navigate`, and the window pulls it with `consume_main_navigation`. The window also pulls once as soon as it
+// listens, so a window built for the request still gets it.
 
-/// Logical width of the real macOS Settings window (the harness renders it
-/// at 560; see `tests/render-mac-settings.mjs`).
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-const MACOS_SETTINGS_V2_WIDTH: f64 = 560.0;
+/// The event that tells the Beebeeb window a request is waiting (`src/mainWindowModel.ts` `MAIN_NAVIGATE_EVENT`).
+const MAIN_NAVIGATE_EVENT: &str = "main:navigate";
 
-/// Pure anchor math for the Settings window: right-aligns the window's edge
-/// with the status item's right edge (the design's "top-right under the menu
-/// bar") and puts its top edge `MACOS_TRAY_FLYOUT_GAP` points below the
-/// icon's bottom edge, clamped so it never runs off either edge of the
-/// containing monitor. Same units and scale handling as
-/// `macos_tray_flyout_position`; pass `f64::NEG_INFINITY`/`f64::INFINITY`
-/// for the screen bounds to skip clamping.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn macos_settings_window_position(
-    icon_x: f64,
-    icon_y: f64,
-    icon_width: f64,
-    icon_height: f64,
-    window_width_logical: f64,
-    scale_factor: f64,
-    screen_min_x: f64,
-    screen_max_x: f64,
-) -> tauri::PhysicalPosition<i32> {
-    let scale_factor = valid_macos_tray_scale_factor(scale_factor);
-    let physical_window_width = window_width_logical * scale_factor;
-    let physical_gap = MACOS_TRAY_FLYOUT_GAP as f64 * scale_factor;
+/// One request to the Beebeeb window, serialised as `src/mainWindowModel.ts`'s `MainNav` reads it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "to", rename_all = "lowercase")]
+enum MainNav {
+    /// Home, and out of Settings (⌘1).
+    Home,
+    /// Settings on a section (`account`, `general`, `sync`, `about`); `None` opens the last section used in this
+    /// window, else General (§7.8).
+    Settings { section: Option<&'static str> },
+    /// Out of Settings, to where it was entered from (⌘[, View › Back).
+    Back,
+    /// “Sign in again”, asked for by `open_reauth_window`: the window shows that card whatever the session says, as
+    /// Linux's onboarding window does (`mode=reauth`), so the click always lands on it (review P3-1).
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    Reauth,
+}
 
-    let ideal_x = icon_x + icon_width - physical_window_width;
-    let max_x = (screen_max_x - physical_window_width).max(screen_min_x);
-
-    tauri::PhysicalPosition {
-        x: ideal_x.clamp(screen_min_x, max_x).round() as i32,
-        y: (icon_y + icon_height + physical_gap).round() as i32,
+impl MainNav {
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    const fn settings(section: Option<&'static str>) -> MainNav {
+        MainNav::Settings { section }
     }
 }
 
-/// Resolves the Settings window's anchor from the tray icon's current rect
-/// (queried on demand, not from a click event — Settings opens from the app
-/// menu, which has no icon rect). Same monitor/scale resolution as
-/// `macos_tray_flyout_anchor`; `None` means "no tray icon and no scale
-/// factor" and the caller degrades to centering.
-#[cfg(target_os = "macos")]
-fn macos_settings_anchor(app: &tauri::AppHandle) -> Option<tauri::PhysicalPosition<i32>> {
-    let rect = app.tray_by_id("tray")?.rect().ok().flatten()?;
-    let provisional = rect.position.to_physical::<f64>(1.0);
-    let monitor = macos_monitor_containing_physical_point(app, provisional.x, provisional.y);
+/// The latest request, kept until the window pulls it: one slot, so a burst of openers lands on the last one.
+static MAIN_NAV_PENDING: std::sync::Mutex<Option<MainNav>> = std::sync::Mutex::new(None);
 
-    let scale_factor = match monitor
-        .as_ref()
-        .map(|m| m.scale_factor())
-        .filter(|s| s.is_finite() && *s > 0.0)
-    {
-        Some(scale_factor) => scale_factor,
-        None => {
-            let primary_scale = app
-                .primary_monitor()
-                .ok()
-                .flatten()
-                .map(|m| m.scale_factor())
-                .filter(|s| s.is_finite() && *s > 0.0);
-            match primary_scale {
-                Some(scale_factor) => {
-                    tracing::warn!(
-                        icon_x = provisional.x,
-                        icon_y = provisional.y,
-                        scale_factor,
-                        "macos settings window: no monitor found under the tray icon; falling back to the primary monitor's scale factor"
-                    );
-                    scale_factor
-                }
-                None => {
-                    tracing::warn!(
-                        icon_x = provisional.x,
-                        icon_y = provisional.y,
-                        "macos settings window: no monitor and no primary-monitor scale factor available; falling back to 1.0 (window may mis-position)"
-                    );
-                    1.0
-                }
-            }
-        }
-    };
-
-    let icon_position = rect.position.to_physical::<f64>(scale_factor);
-    let icon_size = rect.size.to_physical::<f64>(scale_factor);
-    let (screen_min_x, screen_max_x) = match &monitor {
-        Some(m) => {
-            let position = m.position();
-            let size = m.size();
-            (position.x as f64, position.x as f64 + size.width as f64)
-        }
-        None => (f64::NEG_INFINITY, f64::INFINITY),
-    };
-
-    let result = macos_settings_window_position(
-        icon_position.x,
-        icon_position.y,
-        icon_size.width,
-        icon_size.height,
-        MACOS_SETTINGS_V2_WIDTH,
-        scale_factor,
-        screen_min_x,
-        screen_max_x,
-    );
-
-    tracing::info!(
-        icon_x = icon_position.x,
-        icon_y = icon_position.y,
-        scale_factor,
-        monitor_found = monitor.is_some(),
-        result_x = result.x,
-        result_y = result.y,
-        "macos settings window: computed anchor position"
-    );
-    Some(result)
+fn store_main_nav(slot: &std::sync::Mutex<Option<MainNav>>, nav: MainNav) {
+    *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(nav);
 }
 
-/// Opens (or focuses) the real macOS Settings window. The window never
-/// remembers its position: every open re-anchors it under the tray icon
-/// (top-right, on the icon's display). Built on demand from its
-/// `tauri.conf.json` entry (`create: false`), so no idle webview exists
-/// before the first open.
-#[cfg(target_os = "macos")]
-fn show_macos_settings_window(app: &tauri::AppHandle) {
-    const LABEL: &str = "macos-settings";
+fn take_main_nav(slot: &std::sync::Mutex<Option<MainNav>>, label: &str) -> Option<MainNav> {
+    if label != surfaces::policy::main_window_label(surfaces::policy::Platform::current()) {
+        return None;
+    }
+    slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take()
+}
 
-    let anchor = macos_settings_anchor(app);
-    if let Some(win) = app.get_webview_window(LABEL) {
-        match anchor {
-            Some(position) => {
-                let _ = win.set_position(tauri::Position::Physical(position));
-            }
-            None => {
-                tracing::warn!("macos settings window: no anchor available; leaving the existing window where it is");
-            }
-        }
+/// The Beebeeb window pulls the request it was told about (or the one it was built for).
+#[tauri::command]
+fn consume_main_navigation(window: tauri::WebviewWindow) -> Option<MainNav> {
+    take_main_nav(&MAIN_NAV_PENDING, window.label())
+}
+
+/// Opens (or shows and focuses) the Beebeeb window and asks it to show `nav`.
+#[cfg(target_os = "macos")]
+fn show_main_window(app: &tauri::AppHandle, nav: MainNav) {
+    let label = surfaces::policy::main_window_label(surfaces::policy::Platform::current());
+    store_main_nav(&MAIN_NAV_PENDING, nav);
+    // §9.1: the Dock icon (and with it the app menu) comes first, so it is there when the window is.
+    set_macos_dock_icon(app, true);
+    if let Some(win) = app.get_webview_window(label) {
+        unhide_app(app);
+        let _ = win.unminimize();
         let _ = win.show();
         let _ = win.set_focus();
+        let _ = win.emit(MAIN_NAVIGATE_EVENT, ());
         return;
     }
-
-    let Some(config) = app.config().app.windows.iter().find(|window| window.label == LABEL) else {
-        tracing::warn!("macos settings window: no tauri.conf.json entry named {LABEL}; cannot open Settings");
+    let Some(config) = app.config().app.windows.iter().find(|window| window.label == label) else {
+        tracing::warn!("main window: no tauri.macos.conf.json entry named {label}; cannot open the Beebeeb window");
+        refresh_macos_dock_icon(app, None);
         return;
     };
-
-    match tauri::WebviewWindowBuilder::from_config(app, config) {
-        Ok(builder) => match builder.build() {
-            Ok(win) => {
-                match anchor {
-                    Some(position) => {
-                        let _ = win.set_position(tauri::Position::Physical(position));
-                    }
-                    None => {
-                        tracing::warn!("macos settings window: no anchor available; centering on the primary display");
-                        let _ = win.center();
-                    }
-                }
-                let _ = win.show();
-                let _ = win.set_focus();
-            }
-            Err(error) => {
-                tracing::warn!(%error, "failed to create macos settings window");
-            }
-        },
+    match tauri::WebviewWindowBuilder::from_config(app, config).and_then(|builder| builder.build()) {
+        Ok(win) => {
+            place_main_window(app, &win, (config.width, config.height));
+            unhide_app(app);
+            let _ = win.show();
+            let _ = win.set_focus();
+        }
         Err(error) => {
-            tracing::warn!(%error, "failed to load the macos settings window config");
+            tracing::warn!(%error, "failed to create the Beebeeb window");
+            refresh_macos_dock_icon(app, None);
         }
     }
 }
 
+/// Unhides the app (`AppHandle::show`, NSApp `unhide:`), which the tray's Hide and ⌘H hide. Not a window: a window
+/// shown in a hidden app stays hidden, and tao's `set_focus` does nothing there, so every opener on a Mac calls this
+/// before it shows its window (review round 2, P2-2).
+#[cfg(target_os = "macos")]
+fn unhide_app(app: &tauri::AppHandle) {
+    let _ = app.show();
+}
+
+/// `RunEvent::Reopen` (double-clicking Beebeeb.app, Spotlight, the Dock; spec §7.3): the window as it was, or a new one
+/// on Home. With the window closed the app lives on in the menu bar, so this is the way back (review round 2, P2-1).
+/// Which of the two is `surfaces::launch::reopen_action`.
+#[cfg(target_os = "macos")]
+fn reopen_main_window(app: &tauri::AppHandle) {
+    let label = surfaces::policy::main_window_label(surfaces::policy::Platform::current());
+    let window = app.get_webview_window(label);
+    match (surfaces::launch::reopen_action(window.is_some()), window) {
+        (surfaces::launch::ReopenAction::BringForward, Some(win)) => {
+            set_macos_dock_icon(app, true);
+            unhide_app(app);
+            let _ = win.unminimize();
+            let _ = win.show();
+            let _ = win.set_focus();
+        }
+        _ => show_main_window(app, MainNav::Home),
+    }
+}
+
+/// How this launch happened (two-surface spec §7.3, task 1683 slice 6): the login item's signal (the one seam task 1845
+/// plugs into, `surfaces::launch::login_item_signal`) and the flag the updater left just before it restarted the app,
+/// which this launch consumes. A Mac only: Windows and Linux are launched the way they always were.
+#[cfg(target_os = "macos")]
+fn launch_source_now() -> surfaces::launch::LaunchSource {
+    let now = u64::try_from(now_unix_seconds()).unwrap_or(0);
+    let flag = state_paths::beebeeb_state_dir()
+        .ok()
+        .and_then(|dir| surfaces::launch::take_relaunch_flag(&dir, now));
+    surfaces::launch::launch_source(surfaces::launch::login_item_signal(), flag, now)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn launch_source_now() -> surfaces::launch::LaunchSource {
+    surfaces::launch::LaunchSource::Manual
+}
+
+/// Leaves the flag the next launch reads, just before the updater restarts the app: whether the Beebeeb window is open and
+/// whether an account is signed in. A failure is logged and the restart goes on; the next launch then opens what a manual
+/// one does.
+#[cfg(target_os = "macos")]
+fn note_updater_relaunch(app: &tauri::AppHandle) {
+    let label = surfaces::policy::main_window_label(surfaces::policy::Platform::current());
+    let window_open = app.get_webview_window(label).is_some();
+    let state = app.state::<AppState>();
+    let vault_unlocked = state
+        .active_account()
+        .ok()
+        .and_then(|acct| acct.session.lock().ok().map(|guard| guard.is_some()))
+        .unwrap_or(false);
+    let auth_present = state.auth_present.lock().map(|guard| *guard).unwrap_or(false);
+    let flag = surfaces::launch::RelaunchFlag {
+        written_at: u64::try_from(now_unix_seconds()).unwrap_or(0),
+        window_open,
+        signed_in: vault_unlocked || auth_present,
+    };
+    let written = state_paths::beebeeb_state_dir()
+        .and_then(|dir| surfaces::launch::write_relaunch_flag(&dir, &flag).map_err(|e| e.to_string()));
+    if let Err(error) = written {
+        tracing::warn!(%error, "could not leave the relaunch flag; the next launch opens as a manual one");
+    }
+}
+
+/// View › Back (⌘[): only an open window has somewhere to go back from; it never opens one.
+#[cfg(target_os = "macos")]
+fn back_in_main_window(app: &tauri::AppHandle) {
+    let label = surfaces::policy::main_window_label(surfaces::policy::Platform::current());
+    if let Some(win) = app.get_webview_window(label) {
+        store_main_nav(&MAIN_NAV_PENDING, MainNav::Back);
+        let _ = win.emit(MAIN_NAVIGATE_EVENT, ());
+    }
+}
+
+/// The displays in logical points (each one's physical frame over its own scale, which each `Display` keeps), and
+/// the index of the primary one.
+#[cfg(target_os = "macos")]
+fn macos_displays(win: &tauri::WebviewWindow) -> (Vec<surfaces::window_state::Display>, usize) {
+    use surfaces::window_state::{Display, PRect};
+    let monitors = win.available_monitors().unwrap_or_default();
+    let displays = monitors
+        .iter()
+        .map(|m| {
+            Display::from_physical(
+                PRect { x: m.position().x, y: m.position().y, w: m.size().width, h: m.size().height },
+                PRect {
+                    x: m.work_area().position.x,
+                    y: m.work_area().position.y,
+                    w: m.work_area().size.width,
+                    h: m.work_area().size.height,
+                },
+                m.scale_factor(),
+            )
+        })
+        .collect();
+    let primary = win
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .and_then(|p| monitors.iter().position(|m| m.name() == p.name() && m.position() == p.position()))
+        .unwrap_or(0);
+    (displays, primary)
+}
+
+/// The menu-bar icon's rect as tray-icon reports it (points × the icon's own scale).
+#[cfg(target_os = "macos")]
+fn macos_status_item_rect(app: &tauri::AppHandle) -> Option<surfaces::window_state::PRect> {
+    let rect = app.tray_by_id("tray")?.rect().ok().flatten()?;
+    let position = rect.position.to_physical::<f64>(1.0);
+    let size = rect.size.to_physical::<f64>(1.0);
+    Some(surfaces::window_state::PRect {
+        x: position.x.round() as i32,
+        y: position.y.round() as i32,
+        w: size.width.round().max(0.0) as u32,
+        h: size.height.round().max(0.0) as u32,
+    })
+}
+
+/// Where the Beebeeb window's frame is kept (logical points), in the app's config directory.
+#[cfg(target_os = "macos")]
+fn main_frame_path(app: &tauri::AppHandle) -> Option<PathBuf> {
+    app.path()
+        .app_config_dir()
+        .ok()
+        .map(|dir| dir.join(surfaces::window_state::MAIN_FRAME_FILENAME))
+}
+
+/// The kept frame, read back. A missing, empty, partial or unreadable file, or one that is not a usable frame, is no
+/// frame: the window then opens at its default place.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn read_kept_frame(path: &Path) -> Option<surfaces::window_state::LRect> {
+    let bytes = std::fs::read(path).ok()?;
+    surfaces::window_state::parse_kept_frame(std::str::from_utf8(&bytes).ok()?)
+}
+
+/// Writes the kept frame atomically: a temporary file next to it, then a rename over it, so a crash mid-write leaves
+/// the previous frame, never half a file.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn write_kept_frame(path: &Path, frame: &surfaces::window_state::LRect) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let temporary = path.with_extension("json.tmp");
+    std::fs::write(&temporary, serde_json::to_vec(frame).map_err(std::io::Error::other)?)?;
+    std::fs::rename(&temporary, path)
+}
+
+/// Keeps the Beebeeb window's frame, when it closes and when the app quits while it is open (§7.2). A full-screen
+/// or zoomed window keeps nothing, so the last ordinary frame stays (review item 8).
+#[cfg(target_os = "macos")]
+fn save_main_window_frame(app: &tauri::AppHandle) {
+    let label = surfaces::policy::main_window_label(surfaces::policy::Platform::current());
+    let Some(win) = app.get_webview_window(label) else {
+        return;
+    };
+    let (Ok(position), Ok(size), Ok(scale)) = (win.outer_position(), win.inner_size(), win.scale_factor()) else {
+        return;
+    };
+    let fullscreen = win.is_fullscreen().unwrap_or(false);
+    let zoomed = win.is_maximized().unwrap_or(false);
+    let Some(frame) = surfaces::window_state::frame_to_keep(
+        (position.x, position.y),
+        (size.width, size.height),
+        scale,
+        fullscreen,
+        zoomed,
+    ) else {
+        return;
+    };
+    let Some(path) = main_frame_path(app) else {
+        return;
+    };
+    if let Err(error) = write_kept_frame(&path, &frame) {
+        tracing::warn!(%error, "main window: its frame could not be kept");
+    }
+}
+
+/// §7.2, planned in full before any of it is applied (review item 4): the kept frame when at least half of it is on a
+/// display, else at its kept size (or `default_size`, the window's own config) centred on the menu-bar icon's display,
+/// else on the primary one. Logical points throughout, so a mixed-DPI desk places it where it was (review item 5).
+#[cfg(target_os = "macos")]
+fn place_main_window(app: &tauri::AppHandle, win: &tauri::WebviewWindow, default_size: (f64, f64)) {
+    use surfaces::window_state as placement;
+    let (displays, primary) = macos_displays(win);
+    let icon = macos_status_item_rect(app).and_then(|rect| placement::icon_display(rect, &displays));
+    let kept = main_frame_path(app).and_then(|path| read_kept_frame(&path));
+    let Some(frame) = placement::plan_main_window(kept, &displays, icon, primary, default_size) else {
+        tracing::warn!("main window: no display to place it on");
+        return;
+    };
+    if kept.is_some() && kept != Some(frame) {
+        tracing::info!("main window: less than half of its kept frame is on a display; centred again");
+    }
+    let _ = win.set_size(tauri::Size::Logical(tauri::LogicalSize::new(frame.w, frame.h)));
+    let _ = win.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(frame.x, frame.y)));
+}
+
+
+/// The activation policy last applied: 0 unknown (the app starts Regular), 1 Dock icon, 2 none.
+#[cfg(target_os = "macos")]
+static MACOS_DOCK_ICON: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// §9.1: Regular (a Dock icon and the app menu) or Accessory (neither). Applied only when it changes.
+#[cfg(target_os = "macos")]
+fn set_macos_dock_icon(app: &tauri::AppHandle, wanted: bool) {
+    let next = if wanted { 1 } else { 2 };
+    if MACOS_DOCK_ICON.swap(next, Ordering::SeqCst) == next {
+        return;
+    }
+    let policy = if wanted {
+        tauri::ActivationPolicy::Regular
+    } else {
+        tauri::ActivationPolicy::Accessory
+    };
+    if let Err(error) = app.set_activation_policy(policy) {
+        tracing::warn!(%error, wanted, "could not change the Dock icon");
+    }
+}
+
+/// The Dock icon for the windows that exist now, leaving out `gone` (a window being destroyed or hidden).
+#[cfg(target_os = "macos")]
+fn refresh_macos_dock_icon(app: &tauri::AppHandle, gone: Option<&str>) {
+    let windows: Vec<(String, bool)> = app
+        .webview_windows()
+        .into_iter()
+        .filter(|(label, _)| Some(label.as_str()) != gone)
+        .map(|(label, window)| {
+            let shown = window.is_visible().unwrap_or(false) || window.is_minimized().unwrap_or(false);
+            (label, shown)
+        })
+        .collect();
+    let wanted = surfaces::policy::dock_icon_wanted(windows.iter().map(|(label, shown)| (label.as_str(), *shown)));
+    set_macos_dock_icon(app, wanted);
+}
+
+/// What the app menu may offer around the Beebeeb window (two-surface spec §8.2, F15): View › Back only while
+/// Settings shows in an open window; View › Home, Beebeeb › Settings… and Check for Updates… (which opens Settings ›
+/// About) always, except while a sheet is open, so ⌘1, ⌘[, ⌘, and ⇧⌘U cannot unmount Settings › Account under its
+/// sheet (review item 6 chose disabling over a second way to answer the check).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MainMenuState {
+    settings: bool,
+    home: bool,
+    back: bool,
+    check_updates: bool,
+}
+
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn main_menu_state(main_open: bool, settings_showing: bool, sheet_open: bool) -> MainMenuState {
+    let sheet = main_open && sheet_open;
+    MainMenuState {
+        settings: !sheet,
+        home: !sheet,
+        back: main_open && settings_showing && !sheet,
+        check_updates: !sheet,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn apply_macos_main_menu_state(app: &tauri::AppHandle, state: MainMenuState) {
+    let Some(items) = app.try_state::<MacosMenuItems>() else {
+        return;
+    };
+    let _ = items.settings.set_enabled(state.settings);
+    let _ = items.check_updates.set_enabled(state.check_updates);
+    let _ = items.view_home.set_enabled(state.home);
+    let _ = items.view_back.set_enabled(state.back);
+}
+
+/// The Beebeeb window says whether Settings shows and whether a sheet is open; the menu follows (§8.2, F15).
+#[tauri::command]
+fn main_window_state(app: tauri::AppHandle, window: tauri::WebviewWindow, settings_showing: bool, sheet_open: bool) {
+    #[cfg(target_os = "macos")]
+    if window.label() == surfaces::policy::main_window_label(surfaces::policy::Platform::current()) {
+        apply_macos_main_menu_state(&app, main_menu_state(true, settings_showing, sheet_open));
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, window, settings_showing, sheet_open);
+}
+
+/// A window's life on a Mac, beside the global close handler: the Beebeeb window keeps its frame when it closes and
+/// resets the menu when it is gone, and every window that comes, goes or hides sets the Dock icon again (§9.1).
+#[cfg(target_os = "macos")]
+fn macos_window_lifecycle(window: &tauri::Window, event: &tauri::WindowEvent) {
+    let app = window.app_handle();
+    let main = window.label() == surfaces::policy::main_window_label(surfaces::policy::Platform::current());
+    match event {
+        tauri::WindowEvent::CloseRequested { .. } if main => save_main_window_frame(app),
+        tauri::WindowEvent::Destroyed => {
+            if main {
+                apply_macos_main_menu_state(app, main_menu_state(false, false, false));
+            }
+            refresh_macos_dock_icon(app, Some(window.label()));
+        }
+        tauri::WindowEvent::Focused(true) => refresh_macos_dock_icon(app, None),
+        _ => {}
+    }
+}
+
+/// The window-state plugin, on Windows and Linux only, with today's default file and denylist. A Mac does not run
+/// it (review item 5 on PR #134): it stores physical numbers without their scale, which cannot be placed back on a
+/// mixed-DPI desk, so `place_main_window` and `save_main_window_frame` keep the Beebeeb window's frame in points.
+#[cfg(not(target_os = "macos"))]
+fn window_state_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    tauri_plugin_window_state::Builder::default()
+        .with_denylist(window_state_denylist_labels())
+        .build()
+}
+
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn window_state_denylist_labels() -> &'static [&'static str] {
     &["tray", "windows-onboarding"]
 }
@@ -13084,7 +15687,7 @@ pub fn run() {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .try_init();
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         // Shared state — session installed via apply_session (the
         // browser-login handoff) after login. The sync engine task reads
         // from this.
@@ -13092,11 +15695,13 @@ pub fn run() {
         // Task 1683 slice 2: transfer board, last engine status, cached storage summary.
         .manage(popover_data::PopoverRuntime::default())
         .plugin(tauri_plugin_opener::init())
-        .plugin(
-            tauri_plugin_window_state::Builder::default()
-                .with_denylist(window_state_denylist_labels())
-                .build(),
-        )
+        // 0.8.15: before any window exists, so its `on_webview_ready` sees every webview (Ctrl+Shift+P printed in 0.8.14).
+        .plugin(webview_browser_keys::plugin());
+    // Windows and Linux keep the window-state plugin; a Mac keeps the Beebeeb window's frame itself (task 1683 slice 1,
+    // review item 5; see `window_state_plugin`).
+    #[cfg(not(target_os = "macos"))]
+    let builder = builder.plugin(window_state_plugin());
+    builder
         // Native folder picker for the first-launch sync-root chooser.
         .plugin(tauri_plugin_dialog::init())
         // Native OS notifications — Task 11. The first conflict
@@ -13110,6 +15715,10 @@ pub fn run() {
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec![])))
         .invoke_handler(tauri::generate_handler![
             app_version,
+            consume_main_navigation,
+            set_pending_setup,
+            pending_setup,
+            main_window_state,
             check_for_updates_now,
             consume_menu_update_check,
             install_update,
@@ -13126,6 +15735,7 @@ pub fn run() {
             free_up_space,
             export_diagnostics,
             list_version_conflict_center,
+            dismiss_review_entry,
             list_file_versions,
             restore_file_version,
             get_sync_root,
@@ -13136,6 +15746,21 @@ pub fn run() {
             finder_location_state,
             kept_unsynced_folder,
             dismiss_kept_unsynced_folder,
+            // Spec 2026-10-10 §9: the kept folder's own row.
+            kept_unsent_folder,
+            dismiss_kept_unsent_folder,
+            show_kept_unsent_folder,
+            // Spec 2026-10-10 §5.1 and §6: the sign-out flow's count and send phase (a Mac; elsewhere they say so),
+            // and the acknowledgement of a shown result (elsewhere nothing is pending, and it does nothing).
+            sign_out_count,
+            sign_out_unknown_files,
+            sign_out_send_start,
+            sign_out_send_stop,
+            sign_out_result_ack,
+            // §5.1: the compact page's and the menu's flow request, which Settings consumes (a Mac; elsewhere there is
+            // no flow, and they say so).
+            request_sign_out_flow,
+            consume_sign_out_flow_request,
             // Spec 2026-10-06: the macOS Finder reconciler's commands (registered on every
             // platform; without a reconciler they say so).
             finder_setup_state,
@@ -13162,6 +15787,7 @@ pub fn run() {
             // Wrappers over existing server endpoints (the "all pages empty"
             // fix) plus the locally-computed storage breakdown.
             account_profile,
+            account_profile_fresh,
             account_subscription,
             account_usage,
             account_region,
@@ -13183,6 +15809,7 @@ pub fn run() {
             desktop_trash_delete_permanently,
             account_storage_breakdown,
             desktop_file_overview,
+            desktop_recent_files,
             desktop_search_files,
             app_activity_snapshot,
             // Task 0090 — selective sync
@@ -13194,6 +15821,8 @@ pub fn run() {
             // Task 0804 — known-folder backup first-run onboarding prompt
             get_known_folder_onboarding_seen,
             mark_known_folder_onboarding_seen,
+            get_menu_bar_hint_seen,
+            mark_menu_bar_hint_seen,
             list_shared_roots,
             list_vault_folders,
             list_remote_tree,
@@ -13203,6 +15832,11 @@ pub fn run() {
             resolve_conflict,
             // Task 1546 finding 2 — real (non-placeholder) conflict content preview
             conflict_content_preview,
+            parked_conflict_preview,
+            resolve_parked_conflict,
+            kept_conflict_copies,
+            show_kept_conflict_copy,
+            dismiss_kept_conflict_copy,
             // Task 11 — native conflict notification
             notify_conflict,
             // First-launch onboarding (login + folder picker + sync status)
@@ -13213,6 +15847,7 @@ pub fn run() {
             browser_login::start_browser_login,
             open_onboarding_window,
             open_reauth_window,
+            quit_beebeeb,
             // PKG-SHELL — open the Windows main app window
             show_main_app_window,
             show_main_app_settings,
@@ -13221,6 +15856,11 @@ pub fn run() {
             tray_recent_activity,
             tray_pause_sync,
             tray_resume_sync,
+            sync_activity_summary,
+            found_while_paused_review,
+            found_while_paused_upload,
+            found_while_paused_keep,
+            show_kept_folder,
             upload_files_to_sync_root,
             create_folder_in_sync_root,
             report_problem,
@@ -13396,31 +16036,42 @@ pub fn run() {
             // App windows stay hidden (visible:false in tauri.conf.json) until
             // onboarding or the configured-startup path opens the right one.
             let no_sync_root = DesktopConfig::load().map(|c| c.sync_root.is_none()).unwrap_or(true);
-            // The decision is `surfaces::policy::startup_surface` (task 1683 slice 1):
-            // identical on every platform today, so this is a refactor, not a change.
-            if surfaces::policy::startup_surface(surfaces::policy::Platform::current(), no_sync_root)
-                == surfaces::policy::StartupSurface::Onboarding
-            {
-                let h = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    // Small delay so the tray and menu are fully initialised first.
-                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                    if let Err(e) = open_onboarding_window_impl(&h) {
-                        tracing::warn!(error = %e, "failed to open onboarding window");
-                    }
-                });
-            } else {
-                // Already configured — show the main app window after startup
-                // settles. On Windows this is the full sidebar/content shell
-                // (`main-app`); on macOS/Linux `show_main_app_window_impl`
-                // delegates to the compact app window, so behaviour there
-                // is unchanged. The short delay mirrors onboarding and avoids
-                // racing Tauri's window setup.
-                let h = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                    show_main_app_window_impl(&h);
-                });
+            // The decision is `surfaces::policy::startup_surface`: Windows and Linux ignore how the app was started; a Mac
+            // follows it (task 1683 slice 6, two-surface spec §7.3). How it was started is `launch_source_now()`.
+            let launch_source = launch_source_now();
+            tracing::info!(?launch_source, no_sync_root, "launch");
+            match surfaces::policy::startup_surface(surfaces::policy::Platform::current(), no_sync_root, launch_source) {
+                surfaces::policy::StartupSurface::Onboarding => {
+                    let h = app.handle().clone();
+                    tauri::async_runtime::spawn(async move {
+                        // Small delay so the tray and menu are fully initialised first.
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                        if let Err(e) = open_onboarding_window_impl(&h) {
+                            tracing::warn!(error = %e, "failed to open onboarding window");
+                        }
+                    });
+                }
+                surfaces::policy::StartupSurface::MainWindow => {
+                    // Already configured — show the main app window after startup
+                    // settles. On Windows this is the full sidebar/content shell
+                    // (`main-app`); on macOS/Linux `show_main_app_window_impl`
+                    // delegates to the compact app window, so behaviour there
+                    // is unchanged. The short delay mirrors onboarding and avoids
+                    // racing Tauri's window setup.
+                    let h = app.handle().clone();
+                    tauri::async_runtime::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                        show_main_app_window_impl(&h);
+                    });
+                }
+                // A Mac's login launch, or an update's relaunch with nothing open: the b in the menu bar is all there is.
+                surfaces::policy::StartupSurface::Nothing => {
+                    // The app starts Regular (a Dock icon and the app menu), and Accessory is otherwise applied only from window
+                    // events: with no window to open, nothing would ever take them away (PR #146 review, P2).
+                    #[cfg(target_os = "macos")]
+                    set_macos_dock_icon(app.handle(), false);
+                    tracing::info!("nothing opens by itself on this launch");
+                }
             }
 
             Ok(())
@@ -13430,13 +16081,18 @@ pub fn run() {
                 handle_desktop_menu_action(app, spec);
             }
         })
-        // Red-dot close button → hide to tray instead of quitting
-        //
-        // The decision is `surfaces::policy::close_policy` (task 1683 slice 1):
-        // Hide for every label on every platform today, so this is a refactor,
-        // not a change. Slice 6 makes macOS label-aware (onboarding and review
-        // are destroyed) by flipping `MACOS_LABEL_AWARE_CLOSE`, not by editing
-        // this closure.
+        // Spec 2026-10-10 §5.1: a page load that starts in a window (a reload) ends its sign-out flow, as a close does.
+        .on_page_load(|webview, payload| {
+            #[cfg(target_os = "macos")]
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
+                sign_out_flow_window_closed(webview.app_handle(), webview.label());
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (webview, payload);
+        })
+        // Red-dot close button: what happens is `surfaces::policy::close_policy`. Windows and Linux hide every
+        // window (to the tray), as before. On a Mac the Beebeeb window (`main`) is destroyed (two-surface spec §4,
+        // task 1683 slice 1) and every other window is hidden, as before.
         .on_window_event(|window, event| {
             // Spec §7: one read-only userEnabled check when the app becomes active.
             if let tauri::WindowEvent::Focused(true) = event
@@ -13449,17 +16105,53 @@ pub fn run() {
             if let tauri::WindowEvent::Focused(true) = event {
                 tauri::async_runtime::spawn(on_app_activated(window.app_handle().clone()));
             }
+            // Spec 2026-10-10 §5.1: a close (on macOS a hide), a destroy or a reload ends that window's sign-out flow.
+            #[cfg(target_os = "macos")]
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                sign_out_flow_window_closed(window.app_handle(), window.label());
+            }
+            #[cfg(target_os = "macos")]
+            if let tauri::WindowEvent::Destroyed = event {
+                sign_out_flow_window_closed(window.app_handle(), window.label());
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if surfaces::policy::close_policy(surfaces::policy::Platform::current(), window.label())
                     == surfaces::registry::ClosePolicy::Hide
                 {
                     api.prevent_close();
                     let _ = window.hide();
+                    // Two-surface §9.1: a hidden onboarding or conflict window no longer holds the Dock icon.
+                    #[cfg(target_os = "macos")]
+                    refresh_macos_dock_icon(window.app_handle(), Some(window.label()));
                 }
             }
+            // Task 1683 slice 1: the Beebeeb window's end resets the menu and saves its frame; the Dock icon follows.
+            #[cfg(target_os = "macos")]
+            macos_window_lifecycle(window, event);
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Beebeeb desktop");
+        .build(tauri::generate_context!())
+        .expect("error while building Beebeeb desktop")
+        .run(|app, event| {
+            // Review P1 on PR #134: on a Mac the Beebeeb window is destroyed on close, and when it was the last
+            // window Tauri asks to exit (`code: None`). Beebeeb lives on in the menu bar; an explicit exit still exits.
+            if let tauri::RunEvent::ExitRequested { code, api, .. } = &event
+                && surfaces::policy::keep_running_on_exit_request(surfaces::policy::Platform::current(), *code)
+            {
+                api.prevent_exit();
+            }
+            // Task 1683 slice 1 (review item 4): a quit while the Beebeeb window is open keeps its frame.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Exit = event {
+                save_main_window_frame(app);
+            }
+            // Review round 2, P2-1: opening the app again (Finder, Spotlight, the Dock) brings the window back.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = event {
+                reopen_main_window(app);
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = app;
+        });
 }
 
 // ── Update loop ───────────────────────────────────────────────────────────────
@@ -13534,6 +16226,9 @@ const MENU_VIEW_ACTIVITY_ID: &str = "menu_view_activity";
 #[cfg(test)]
 const MENU_VIEW_SHARED_ID: &str = "menu_view_shared";
 const MENU_VIEW_TRASH_ID: &str = "menu_view_trash";
+// The Beebeeb window's View items on a Mac (task 1683 slice 1, two-surface F11 and F15).
+const MENU_VIEW_HOME_ID: &str = "menu_view_home";
+const MENU_VIEW_BACK_ID: &str = "menu_view_back";
 const MENU_ZOOM_IN_ID: &str = "menu_zoom_in";
 const MENU_ZOOM_OUT_ID: &str = "menu_zoom_out";
 const MENU_ZOOM_RESET_ID: &str = "menu_zoom_reset";
@@ -13586,6 +16281,13 @@ impl DesktopMenuView {
     }
 }
 
+/// Where a View item takes the Beebeeb window (macOS only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MainMenuNav {
+    Home,
+    Back,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MenuZoomAction {
     In,
@@ -13605,6 +16307,8 @@ enum DesktopMenuAction {
     NewFolder,
     OpenWebApp,
     OpenView(DesktopMenuView),
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    NavigateMain(MainMenuNav),
     Zoom(MenuZoomAction),
     OpenExternal(&'static str),
     ReportProblem,
@@ -13741,17 +16445,276 @@ const DESKTOP_MENU_SPECS: &[DesktopMenuSpec] = &[
     },
 ];
 
+/// The macOS menu (task 1683 slice 1; two-surface spec §5.F rows F1-F15, §9.2): macOS title case and the ellipsis
+/// character, one ⌘, (F10's duplicate File › Settings is gone), the View items of the Beebeeb window. Review (⌘2) and
+/// Trash (⌘3) join with their panes in slice 4. Windows and Linux keep `DESKTOP_MENU_SPECS`, unchanged.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+const MACOS_MENU_SPECS: &[DesktopMenuSpec] = &[
+    DesktopMenuSpec {
+        id: MENU_PREFERENCES_ID,
+        label: "Settings…",
+        accelerator: Some("CmdOrCtrl+Comma"),
+        action: DesktopMenuAction::OpenSettings,
+    },
+    DesktopMenuSpec {
+        id: MENU_CHECK_UPDATES_ID,
+        label: "Check for Updates…",
+        accelerator: Some("CmdOrCtrl+Shift+U"),
+        action: DesktopMenuAction::CheckForUpdates,
+    },
+    DesktopMenuSpec {
+        id: MENU_TOGGLE_SYNC_ID,
+        // F3: the label follows the state (`refresh_macos_pause_menu_label`); this is the unpaused one.
+        label: MENU_PAUSE_SYNC_LABEL,
+        accelerator: Some("CmdOrCtrl+Shift+P"),
+        action: DesktopMenuAction::ToggleSync,
+    },
+    DesktopMenuSpec {
+        id: MENU_SIGN_OUT_ID,
+        // F4, slice 1: behaviour unchanged (slice 1b routes it through the confirm sheet once task 2175 passes).
+        label: "Sign Out…",
+        accelerator: Some("CmdOrCtrl+Shift+L"),
+        action: DesktopMenuAction::SignOut,
+    },
+    DesktopMenuSpec {
+        id: MENU_QUIT_ID,
+        label: "Quit Beebeeb",
+        accelerator: Some("CmdOrCtrl+Q"),
+        action: DesktopMenuAction::Quit,
+    },
+    DesktopMenuSpec {
+        id: MENU_OPEN_FOLDER_ID,
+        label: "Open in Finder",
+        accelerator: Some("CmdOrCtrl+O"),
+        action: DesktopMenuAction::OpenFolder,
+    },
+    DesktopMenuSpec {
+        id: MENU_UPLOAD_FILES_ID,
+        label: "Upload Files…",
+        accelerator: Some("CmdOrCtrl+U"),
+        action: DesktopMenuAction::UploadFiles,
+    },
+    DesktopMenuSpec {
+        id: MENU_NEW_FOLDER_ID,
+        label: "New Folder…",
+        accelerator: Some("CmdOrCtrl+Shift+N"),
+        action: DesktopMenuAction::NewFolder,
+    },
+    DesktopMenuSpec {
+        id: MENU_OPEN_WEB_APP_ID,
+        label: "Open Web App",
+        accelerator: Some("CmdOrCtrl+Shift+O"),
+        action: DesktopMenuAction::OpenWebApp,
+    },
+    DesktopMenuSpec {
+        id: MENU_VIEW_HOME_ID,
+        label: "Home",
+        accelerator: Some("CmdOrCtrl+Digit1"),
+        action: DesktopMenuAction::NavigateMain(MainMenuNav::Home),
+    },
+    DesktopMenuSpec {
+        id: MENU_VIEW_BACK_ID,
+        label: "Back",
+        accelerator: Some("CmdOrCtrl+BracketLeft"),
+        action: DesktopMenuAction::NavigateMain(MainMenuNav::Back),
+    },
+    // F12 and F13: the zoom and Help items are unchanged, words included.
+    DesktopMenuSpec {
+        id: MENU_ZOOM_IN_ID,
+        label: "Zoom in",
+        accelerator: Some("CmdOrCtrl+Equal"),
+        action: DesktopMenuAction::Zoom(MenuZoomAction::In),
+    },
+    DesktopMenuSpec {
+        id: MENU_ZOOM_OUT_ID,
+        label: "Zoom out",
+        accelerator: Some("CmdOrCtrl+Minus"),
+        action: DesktopMenuAction::Zoom(MenuZoomAction::Out),
+    },
+    DesktopMenuSpec {
+        id: MENU_ZOOM_RESET_ID,
+        label: "Actual size",
+        accelerator: Some("CmdOrCtrl+Digit0"),
+        action: DesktopMenuAction::Zoom(MenuZoomAction::Reset),
+    },
+    DesktopMenuSpec {
+        id: MENU_HELP_DOCS_ID,
+        label: "Documentation",
+        accelerator: None,
+        action: DesktopMenuAction::OpenExternal(DOCUMENTATION_URL),
+    },
+    DesktopMenuSpec {
+        id: MENU_HELP_SHORTCUTS_ID,
+        label: "Keyboard shortcuts",
+        accelerator: Some("CmdOrCtrl+Slash"),
+        action: DesktopMenuAction::OpenExternal(KEYBOARD_SHORTCUTS_URL),
+    },
+    DesktopMenuSpec {
+        id: MENU_HELP_REPORT_ID,
+        label: "Report a problem",
+        accelerator: None,
+        action: DesktopMenuAction::ReportProblem,
+    },
+    DesktopMenuSpec {
+        id: MENU_HELP_STATUS_ID,
+        label: "Service status",
+        accelerator: None,
+        action: DesktopMenuAction::OpenExternal(SERVICE_STATUS_URL),
+    },
+];
+
+/// F3's two labels.
+const MENU_PAUSE_SYNC_LABEL: &str = "Pause Sync";
+const MENU_RESUME_SYNC_LABEL: &str = "Resume Sync";
+
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn pause_menu_label(paused: bool) -> &'static str {
+    if paused { MENU_RESUME_SYNC_LABEL } else { MENU_PAUSE_SYNC_LABEL }
+}
+
+/// F3: the label for what the file says now (an unreadable file reads as not paused, as the menu toggle does).
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn pause_menu_label_now() -> &'static str {
+    pause_menu_label(DesktopConfig::load().map(|cfg| cfg.pause_sync).unwrap_or(false))
+}
+
+/// Every pause change calls this once it is written, through `set_sync_paused` (the menu, the tray commands, Home's
+/// Resume, and a settings write from the compact flyout's Network page): the menu's label follows the file (F3).
+fn pause_state_changed(app: &tauri::AppHandle<impl tauri::Runtime>) {
+    #[cfg(target_os = "macos")]
+    refresh_macos_pause_menu_label(app);
+    #[cfg(not(target_os = "macos"))]
+    let _ = app;
+}
+
+/// One entry of the macOS menu bar: an item from `MACOS_MENU_SPECS` by id, or one AppKit draws itself.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MacosMenuEntry {
+    Item(&'static str),
+    About,
+    Hide,
+    HideOthers,
+    ShowAll,
+    Cut,
+    Copy,
+    Paste,
+    SelectAll,
+    Minimize,
+    Zoom,
+    Close,
+    BringAllToFront,
+    Separator,
+}
+
+/// The macOS menu bar, top to bottom per menu (§9.2: "About Beebeeb · Settings… · Check for Updates… · Pause Sync ·
+/// — · Sign Out… · — · Hide Beebeeb · Hide Others · Show All · — · Quit Beebeeb"; F15's Window menu and View › Back).
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+const MACOS_MENU_LAYOUT: &[(&str, &[MacosMenuEntry])] = {
+    use MacosMenuEntry::*;
+    &[
+        (
+            "Beebeeb",
+            &[
+                About,
+                Item(MENU_PREFERENCES_ID),
+                Item(MENU_CHECK_UPDATES_ID),
+                Item(MENU_TOGGLE_SYNC_ID),
+                Separator,
+                Item(MENU_SIGN_OUT_ID),
+                Separator,
+                Hide,
+                HideOthers,
+                ShowAll,
+                Separator,
+                Item(MENU_QUIT_ID),
+            ],
+        ),
+        (
+            "File",
+            &[
+                Item(MENU_OPEN_FOLDER_ID),
+                Item(MENU_UPLOAD_FILES_ID),
+                Item(MENU_NEW_FOLDER_ID),
+                Separator,
+                Item(MENU_OPEN_WEB_APP_ID),
+            ],
+        ),
+        ("Edit", &[Cut, Copy, Paste, SelectAll]),
+        (
+            "View",
+            &[
+                Item(MENU_VIEW_HOME_ID),
+                Separator,
+                Item(MENU_VIEW_BACK_ID),
+                Separator,
+                Item(MENU_ZOOM_IN_ID),
+                Item(MENU_ZOOM_OUT_ID),
+                Item(MENU_ZOOM_RESET_ID),
+            ],
+        ),
+        ("Window", &[Minimize, Zoom, Close, Separator, BringAllToFront]),
+        (
+            "Help",
+            &[
+                Item(MENU_HELP_DOCS_ID),
+                Item(MENU_HELP_SHORTCUTS_ID),
+                Item(MENU_HELP_REPORT_ID),
+                Separator,
+                Item(MENU_HELP_STATUS_ID),
+            ],
+        ),
+    ]
+};
+
 #[cfg(test)]
 fn desktop_menu_specs() -> &'static [DesktopMenuSpec] {
     DESKTOP_MENU_SPECS
 }
 
+/// The menu table this build installs: a Mac's own, else the shared one (Windows, Linux).
+fn installed_menu_specs() -> &'static [DesktopMenuSpec] {
+    if cfg!(target_os = "macos") { MACOS_MENU_SPECS } else { DESKTOP_MENU_SPECS }
+}
+
 fn desktop_menu_spec(id: &str) -> Option<&'static DesktopMenuSpec> {
-    DESKTOP_MENU_SPECS.iter().find(|spec| spec.id == id)
+    installed_menu_specs().iter().find(|spec| spec.id == id)
 }
 
 fn desktop_menu_spec_required(id: &str) -> &'static DesktopMenuSpec {
     desktop_menu_spec(id).unwrap_or_else(|| panic!("missing desktop menu spec: {id}"))
+}
+
+/// The desktop a native menu is built for. Accelerators differ only where that platform's web view takes a key first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MenuPlatform {
+    MacOs,
+    Windows,
+    Linux,
+}
+
+impl MenuPlatform {
+    fn current() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::MacOs
+        } else if cfg!(target_os = "windows") {
+            Self::Windows
+        } else {
+            Self::Linux
+        }
+    }
+}
+
+/// The accelerator `spec` gets on `platform`.
+///
+/// Pause / Resume keeps Cmd+Shift+P on macOS only. On Windows, WebView2 acts on Ctrl+Shift+P first and prints the page
+/// (0.8.14, Guus's PC); a Ctrl+Alt chord would be AltGr on European keyboards. So Windows and Linux get no shortcut for it:
+/// the menu item, the tray menu and Settings › Sync still pause and resume.
+fn menu_accelerator(spec: &DesktopMenuSpec, platform: MenuPlatform) -> Option<&'static str> {
+    match (spec.id, platform) {
+        (MENU_TOGGLE_SYNC_ID, MenuPlatform::Windows | MenuPlatform::Linux) => None,
+        _ => spec.accelerator,
+    }
 }
 
 fn build_desktop_menu_item<M: tauri::Manager<tauri::Wry>>(
@@ -13759,7 +16722,7 @@ fn build_desktop_menu_item<M: tauri::Manager<tauri::Wry>>(
     spec: &DesktopMenuSpec,
 ) -> tauri::Result<MenuItem<tauri::Wry>> {
     let mut builder = MenuItemBuilder::new(spec.label).id(spec.id);
-    if let Some(accelerator) = spec.accelerator {
+    if let Some(accelerator) = menu_accelerator(spec, MenuPlatform::current()) {
         builder = builder.accelerator(accelerator);
     }
     builder.build(manager)
@@ -13807,6 +16770,103 @@ fn about_metadata() -> AboutMetadata<'static> {
     }
 }
 
+/// The menu items the app changes after it built the menu (macOS): Settings…, Check for Updates… and the View items
+/// follow the Beebeeb window (§8.2, F15), Pause Sync follows the pause (F3).
+#[cfg(target_os = "macos")]
+struct MacosMenuItems {
+    settings: MenuItem<tauri::Wry>,
+    check_updates: MenuItem<tauri::Wry>,
+    toggle_sync: MenuItem<tauri::Wry>,
+    view_home: MenuItem<tauri::Wry>,
+    view_back: MenuItem<tauri::Wry>,
+}
+
+#[cfg(target_os = "macos")]
+impl MacosMenuItems {
+    /// The one built item for `id` when it is one of these.
+    fn get(&self, id: &str) -> Option<&MenuItem<tauri::Wry>> {
+        match id {
+            MENU_PREFERENCES_ID => Some(&self.settings),
+            MENU_CHECK_UPDATES_ID => Some(&self.check_updates),
+            MENU_TOGGLE_SYNC_ID => Some(&self.toggle_sync),
+            MENU_VIEW_HOME_ID => Some(&self.view_home),
+            MENU_VIEW_BACK_ID => Some(&self.view_back),
+            _ => None,
+        }
+    }
+}
+
+/// F3: the menu says "Resume Sync" while the file says paused, else "Pause Sync". Called through
+/// `pause_state_changed` only.
+#[cfg(target_os = "macos")]
+fn refresh_macos_pause_menu_label(app: &tauri::AppHandle<impl tauri::Runtime>) {
+    let Some(items) = app.try_state::<MacosMenuItems>() else {
+        return;
+    };
+    let _ = items.toggle_sync.set_text(pause_menu_label_now());
+}
+
+/// The macOS menu bar from `MACOS_MENU_LAYOUT` (task 1683 slice 1). The items the app changes later are built from
+/// `MACOS_MENU_SPECS` first and placed where the layout names them.
+#[cfg(target_os = "macos")]
+fn setup_native_menu(app: &mut tauri::App) -> tauri::Result<()> {
+    use tauri::menu::IsMenuItem;
+    let kept = MacosMenuItems {
+        settings: build_desktop_menu_item(app, desktop_menu_spec_required(MENU_PREFERENCES_ID))?,
+        check_updates: build_desktop_menu_item(app, desktop_menu_spec_required(MENU_CHECK_UPDATES_ID))?,
+        toggle_sync: build_desktop_menu_item(app, desktop_menu_spec_required(MENU_TOGGLE_SYNC_ID))?,
+        view_home: build_desktop_menu_item(app, desktop_menu_spec_required(MENU_VIEW_HOME_ID))?,
+        view_back: build_desktop_menu_item(app, desktop_menu_spec_required(MENU_VIEW_BACK_ID))?,
+    };
+    let mut menus: Vec<Submenu<tauri::Wry>> = Vec::new();
+    for (title, entries) in MACOS_MENU_LAYOUT {
+        let mut items: Vec<Box<dyn IsMenuItem<tauri::Wry>>> = Vec::new();
+        for entry in entries.iter() {
+            let item: Box<dyn IsMenuItem<tauri::Wry>> = match *entry {
+                MacosMenuEntry::Item(id) => match kept.get(id) {
+                    Some(item) => Box::new(item.clone()),
+                    None => Box::new(build_desktop_menu_item(app, desktop_menu_spec_required(id))?),
+                },
+                MacosMenuEntry::About => {
+                    Box::new(PredefinedMenuItem::about(app, Some("About Beebeeb"), Some(about_metadata()))?)
+                }
+                MacosMenuEntry::Hide => Box::new(PredefinedMenuItem::hide(app, Some("Hide Beebeeb"))?),
+                MacosMenuEntry::HideOthers => Box::new(PredefinedMenuItem::hide_others(app, Some("Hide Others"))?),
+                MacosMenuEntry::ShowAll => Box::new(PredefinedMenuItem::show_all(app, Some("Show All"))?),
+                MacosMenuEntry::Cut => Box::new(PredefinedMenuItem::cut(app, None)?),
+                MacosMenuEntry::Copy => Box::new(PredefinedMenuItem::copy(app, None)?),
+                MacosMenuEntry::Paste => Box::new(PredefinedMenuItem::paste(app, None)?),
+                MacosMenuEntry::SelectAll => Box::new(PredefinedMenuItem::select_all(app, None)?),
+                MacosMenuEntry::Minimize => Box::new(PredefinedMenuItem::minimize(app, Some("Minimize"))?),
+                MacosMenuEntry::Zoom => Box::new(PredefinedMenuItem::maximize(app, Some("Zoom"))?),
+                MacosMenuEntry::Close => Box::new(PredefinedMenuItem::close_window(app, Some("Close"))?),
+                MacosMenuEntry::BringAllToFront => {
+                    Box::new(PredefinedMenuItem::bring_all_to_front(app, Some("Bring All to Front"))?)
+                }
+                MacosMenuEntry::Separator => Box::new(PredefinedMenuItem::separator(app)?),
+            };
+            items.push(item);
+        }
+        let refs: Vec<&dyn IsMenuItem<tauri::Wry>> = items.iter().map(|item| item.as_ref()).collect();
+        let submenu = Submenu::with_items(app, *title, true, &refs)?;
+        if *title == "Window" {
+            let _ = submenu.set_as_windows_menu_for_nsapp();
+        } else if *title == "Help" {
+            let _ = submenu.set_as_help_menu_for_nsapp();
+        }
+        menus.push(submenu);
+    }
+    let refs: Vec<&dyn IsMenuItem<tauri::Wry>> = menus.iter().map(|menu| menu as &dyn IsMenuItem<tauri::Wry>).collect();
+    let menu = Menu::with_items(app, &refs)?;
+    app.set_menu(menu)?;
+    app.manage(kept);
+    // No Beebeeb window yet: Back off, the rest on; and the pause label as the file says.
+    apply_macos_main_menu_state(app.handle(), main_menu_state(false, false, false));
+    pause_state_changed(app.handle());
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
 fn setup_native_menu(app: &mut tauri::App) -> tauri::Result<()> {
     let preferences = build_desktop_menu_item(app, desktop_menu_spec_required(MENU_PREFERENCES_ID))?;
     let check_updates = build_desktop_menu_item(app, desktop_menu_spec_required(MENU_CHECK_UPDATES_ID))?;
@@ -13912,9 +16972,8 @@ fn update_check_window_label() -> &'static str {
     if cfg!(target_os = "windows") {
         "main-app"
     } else if cfg!(target_os = "macos") {
-        // Slice 6: the real macOS Settings window drains the pending menu
-        // check in its About tab's update row.
-        "macos-settings"
+        // Task 1683 slice 1: the Beebeeb window drains the pending menu check in Settings › About's update row.
+        "main"
     } else {
         "settings"
     }
@@ -13922,8 +16981,9 @@ fn update_check_window_label() -> &'static str {
 
 fn request_menu_update_check(app: &tauri::AppHandle) {
     MENU_UPDATE_CHECK_PENDING.store(true, Ordering::SeqCst);
+    // F2: the Beebeeb window on Settings › About, which checks and answers in its row.
     #[cfg(target_os = "macos")]
-    show_macos_settings_window(app);
+    show_main_window(app, MainNav::settings(Some("about")));
     #[cfg(not(target_os = "macos"))]
     show_main_app_window_with_nav(app, Some("settings"));
     if let Some(window) = app.get_webview_window(update_check_window_label()) {
@@ -13943,6 +17003,377 @@ fn take_menu_update_check(pending: &AtomicBool, label: &str) -> bool {
     label == update_check_window_label() && pending.swap(false, Ordering::SeqCst)
 }
 
+/// Task 1683 slice 1 (two-surface spec `docs/specs/2026-10-24-macos-two-surface-app.md`): the Beebeeb window's request
+/// slot, what the menu may offer around it, and the macOS menu bar (§5.F rows F1-F15, §9.2). Pure, so they run on
+/// every platform; the window code that uses them is macOS only.
+#[cfg(test)]
+mod main_window_tests {
+    use super::*;
+
+    #[test]
+    fn a_request_serialises_as_the_window_reads_it() {
+        // `src/mainWindowModel.ts` `parseMainNav` reads exactly these three shapes.
+        let json = |nav: MainNav| serde_json::to_value(nav).unwrap();
+        assert_eq!(json(MainNav::Home), serde_json::json!({ "to": "home" }));
+        assert_eq!(json(MainNav::Back), serde_json::json!({ "to": "back" }));
+        assert_eq!(
+            json(MainNav::settings(Some("about"))),
+            serde_json::json!({ "to": "settings", "section": "about" })
+        );
+        assert_eq!(json(MainNav::settings(None)), serde_json::json!({ "to": "settings", "section": null }));
+    }
+
+    #[test]
+    fn the_slot_keeps_the_latest_request_and_gives_it_to_the_beebeeb_window_once() {
+        let slot = std::sync::Mutex::new(None);
+        let main = surfaces::policy::main_window_label(surfaces::policy::Platform::current());
+        store_main_nav(&slot, MainNav::Home);
+        store_main_nav(&slot, MainNav::settings(Some("account")));
+        for other in ["settings", "onboarding", "tray", "main-app", "conflict-1"] {
+            if other != main {
+                assert_eq!(take_main_nav(&slot, other), None, "{other} must not take the window's request");
+            }
+        }
+        assert_eq!(take_main_nav(&slot, main), Some(MainNav::settings(Some("account"))));
+        assert_eq!(take_main_nav(&slot, main), None, "taken once");
+    }
+
+    #[test]
+    fn the_menu_around_the_window_follows_section_8_2() {
+        // No window: Settings… and Home open it; Back has nothing to go back from.
+        let on = |back| MainMenuState { settings: true, home: true, back, check_updates: true };
+        assert_eq!(main_menu_state(false, false, false), on(false));
+        // Home in the window: as above.
+        assert_eq!(main_menu_state(true, false, false), on(false));
+        // Settings shows: Back on.
+        assert_eq!(main_menu_state(true, true, false), on(true));
+        // A sheet is open: ⌘1, ⌘[, ⌘, and Check for Updates… (which opens Settings › About) are all off, so nothing
+        // unmounts the section under the sheet (review item 6: disabled with the §8.2 items, not a second answer).
+        let off = MainMenuState { settings: false, home: false, back: false, check_updates: false };
+        assert_eq!(main_menu_state(true, true, true), off);
+        assert_eq!(main_menu_state(true, false, true), off);
+        // A sheet with no window cannot exist; a stale report of one never disables the openers.
+        assert_eq!(main_menu_state(false, true, true), on(false));
+    }
+
+    #[test]
+    fn the_pause_item_says_what_it_will_do() {
+        assert_eq!(pause_menu_label(false), "Pause Sync");
+        assert_eq!(pause_menu_label(true), "Resume Sync");
+    }
+
+    /// Review item 3: the label follows the file whichever way the pause was written: the menu or the tray
+    /// (`persist_sync_paused_at`) and a settings write from the compact flyout's Network page (`set_desktop_config`).
+    #[tokio::test]
+    async fn the_pause_label_follows_every_writer_of_the_pause() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        crate::config::CONFIG_DIR_OVERRIDE
+            .scope(dir.path().to_path_buf(), async {
+                assert_eq!(pause_menu_label_now(), "Pause Sync");
+                let patch: crate::config::DesktopSettings =
+                    serde_json::from_str(r#"{ "pause_sync": true }"#).expect("the Network page sends the pause");
+                save_desktop_settings(patch).expect("saved");
+                assert_eq!(pause_menu_label_now(), "Resume Sync");
+                let path = DesktopConfig::path().expect("the scoped config path");
+                let flag = std::sync::atomic::AtomicBool::new(true);
+                persist_sync_paused_at(&path, &flag, false).expect("the menu resumes");
+                assert_eq!(pause_menu_label_now(), "Pause Sync");
+            })
+            .await;
+    }
+
+    #[test]
+    fn every_pause_writer_refreshes_the_menu_label() {
+        // Every pause goes through `set_sync_paused`, which refreshes the label; a settings write only when it carries
+        // a pause (review round 2: no config read on every slider move).
+        let production = super::finder_setup_command_tests::production_source();
+        let body = |signature: &str| super::finder_setup_command_tests::body_between(&production, signature, "\n}\n");
+        assert!(body("async fn set_sync_paused(").contains("pause_state_changed(app);"));
+        assert!(body("async fn set_desktop_config(").contains("apply_desktop_settings(&app, config).await"));
+        let apply = body("async fn apply_desktop_settings(");
+        assert!(apply.contains("let pause = config.pause_sync.take();"), "{apply}");
+        assert!(apply.contains("set_sync_paused(app, paused).await?;"), "{apply}");
+        assert!(!apply.contains("pause_state_changed("), "a write without a pause refreshes nothing:\n{apply}");
+        assert!(
+            !production.contains("refresh_macos_pause_menu_label(app);\n    persisted?;"),
+            "set_sync_paused refreshes through the one shared call"
+        );
+    }
+
+    /// Review round 2, P2-3: a pause sent with the settings (the compact flyout's Network page) pauses the engine as the
+    /// menu's and the tray's do: the file, the engine's flag, the engine-status event and the menu label agree. A
+    /// settings write without a pause leaves the pause alone.
+    // The mock runtime is not built on Windows (Cargo.toml: `tauri/test` is off there, after slice 1's 0xc0000139 at
+    // load); Linux and macOS run this.
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn a_pause_sent_with_the_settings_pauses_the_engine() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        crate::config::CONFIG_DIR_OVERRIDE
+            .scope(dir.path().to_path_buf(), async {
+                let app = tauri::test::mock_app();
+                app.manage(AppState::default());
+                synthesize_single_account(&app.state::<AppState>(), account::AccountId("acct-test".into()));
+                let flag = || app.state::<AppState>().active_account().unwrap().sync_paused.load(Ordering::Relaxed);
+                let send = |json: &str| serde_json::from_str::<crate::config::DesktopSettings>(json).unwrap();
+
+                apply_desktop_settings(app.handle(), send(r#"{ "pause_sync": true }"#)).await.expect("saved");
+                assert!(flag(), "the engine's flag is paused");
+                assert!(DesktopConfig::load().unwrap().pause_sync, "and so is the file");
+                assert_eq!(pause_menu_label_now(), "Resume Sync");
+
+                apply_desktop_settings(app.handle(), send(r#"{ "upload_kbps_limit": 1000 }"#)).await.expect("saved");
+                assert!(flag(), "a speed change leaves the pause alone");
+                assert_eq!(DesktopConfig::load().unwrap().upload_kbps_limit, 1000);
+
+                apply_desktop_settings(app.handle(), send(r#"{ "pause_sync": false }"#)).await.expect("saved");
+                assert!(!flag(), "resumed");
+                assert!(!DesktopConfig::load().unwrap().pause_sync);
+            })
+            .await;
+    }
+
+    /// Review round 2: a kept frame that is missing, empty, partial, not UTF-8, not a frame, or names a display that is
+    /// gone falls back to the default placement, and nothing panics.
+    #[test]
+    fn a_bad_kept_frame_file_is_no_frame_and_the_window_opens_at_its_default_place() {
+        use surfaces::window_state::{Display, LRect, PRect, plan_main_window};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(surfaces::window_state::MAIN_FRAME_FILENAME);
+        assert_eq!(read_kept_frame(&path), None, "missing");
+        for bad in [&b""[..], b"{\"x\":12,\"y\"", b"\xff\xfe\x00", b"null", b"{\"x\":1,\"y\":2,\"w\":0,\"h\":3}"] {
+            std::fs::write(&path, bad).unwrap();
+            assert_eq!(read_kept_frame(&path), None, "{bad:?}");
+        }
+        let built_in = Display::from_physical(PRect { x: 0, y: 0, w: 3024, h: 1964 }, PRect { x: 0, y: 74, w: 3024, h: 1750 }, 2.0);
+        let default = plan_main_window(None, &[built_in], Some(0), 0, (920.0, 620.0));
+        assert!(default.is_some());
+        // A frame left on an external display that is gone: the default place, at the kept size.
+        let gone = LRect { x: 2500.0, y: 100.0, w: 920.0, h: 620.0 };
+        write_kept_frame(&path, &gone).unwrap();
+        assert_eq!(read_kept_frame(&path), Some(gone));
+        assert_eq!(plan_main_window(read_kept_frame(&path), &[built_in], Some(0), 0, (920.0, 620.0)), default);
+    }
+
+    #[test]
+    fn the_kept_frame_is_written_whole_or_not_at_all() {
+        use surfaces::window_state::LRect;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join(surfaces::window_state::MAIN_FRAME_FILENAME);
+        let first = LRect { x: 100.0, y: 80.0, w: 920.0, h: 620.0 };
+        let second = LRect { x: 2200.0, y: 300.0, w: 1000.0, h: 700.0 };
+        write_kept_frame(&path, &first).unwrap();
+        write_kept_frame(&path, &second).unwrap();
+        assert_eq!(read_kept_frame(&path), Some(second), "the second write replaced the first");
+        assert!(!path.with_extension("json.tmp").exists(), "no temporary file is left");
+        let production = super::finder_setup_command_tests::production_source();
+        let body = super::finder_setup_command_tests::body_between(&production, "fn write_kept_frame(", "\n}\n");
+        let written = body.find("std::fs::write(&temporary,").expect("written to a temporary file");
+        let renamed = body.find("std::fs::rename(&temporary, path)").expect("then renamed over the frame");
+        assert!(written < renamed, "{body}");
+    }
+
+    #[test]
+    fn the_menu_keeps_its_four_items_from_the_table_without_a_lookup_that_can_fail() {
+        // Review item 13.
+        let production = super::finder_setup_command_tests::production_source();
+        let body = super::finder_setup_command_tests::body_between(
+            &production,
+            "#[cfg(target_os = \"macos\")]\nfn setup_native_menu(",
+            "\n}\n",
+        );
+        assert!(!body.contains("HashMap"), "{body}");
+        assert!(!body.contains("AssetNotFound"), "{body}");
+        for id in ["MENU_PREFERENCES_ID", "MENU_CHECK_UPDATES_ID", "MENU_TOGGLE_SYNC_ID", "MENU_VIEW_HOME_ID", "MENU_VIEW_BACK_ID"] {
+            assert!(body.contains(&format!("desktop_menu_spec_required({id})")), "{id}:\n{body}");
+        }
+    }
+
+    #[test]
+    fn a_route_named_opener_asks_for_settings_or_home() {
+        assert_eq!(main_nav_for_route(Some("settings")), MainNav::settings(None));
+        assert_eq!(main_nav_for_route(None), MainNav::Home);
+        assert_eq!(main_nav_for_route(Some("finder")), MainNav::Home);
+    }
+
+    fn mac(id: &str) -> &'static DesktopMenuSpec {
+        MACOS_MENU_SPECS
+            .iter()
+            .find(|spec| spec.id == id)
+            .unwrap_or_else(|| panic!("no macOS menu item {id}"))
+    }
+
+    #[test]
+    fn the_macos_items_have_the_words_keys_and_targets_of_f1_to_f11() {
+        let rows: [(&str, &str, Option<&str>, DesktopMenuAction); 11] = [
+            (MENU_PREFERENCES_ID, "Settings…", Some("CmdOrCtrl+Comma"), DesktopMenuAction::OpenSettings),
+            (MENU_CHECK_UPDATES_ID, "Check for Updates…", Some("CmdOrCtrl+Shift+U"), DesktopMenuAction::CheckForUpdates),
+            (MENU_TOGGLE_SYNC_ID, "Pause Sync", Some("CmdOrCtrl+Shift+P"), DesktopMenuAction::ToggleSync),
+            (MENU_SIGN_OUT_ID, "Sign Out…", Some("CmdOrCtrl+Shift+L"), DesktopMenuAction::SignOut),
+            (MENU_QUIT_ID, "Quit Beebeeb", Some("CmdOrCtrl+Q"), DesktopMenuAction::Quit),
+            (MENU_OPEN_FOLDER_ID, "Open in Finder", Some("CmdOrCtrl+O"), DesktopMenuAction::OpenFolder),
+            (MENU_UPLOAD_FILES_ID, "Upload Files…", Some("CmdOrCtrl+U"), DesktopMenuAction::UploadFiles),
+            (MENU_NEW_FOLDER_ID, "New Folder…", Some("CmdOrCtrl+Shift+N"), DesktopMenuAction::NewFolder),
+            (MENU_OPEN_WEB_APP_ID, "Open Web App", Some("CmdOrCtrl+Shift+O"), DesktopMenuAction::OpenWebApp),
+            (
+                MENU_VIEW_HOME_ID,
+                "Home",
+                Some("CmdOrCtrl+Digit1"),
+                DesktopMenuAction::NavigateMain(MainMenuNav::Home),
+            ),
+            (
+                MENU_VIEW_BACK_ID,
+                "Back",
+                Some("CmdOrCtrl+BracketLeft"),
+                DesktopMenuAction::NavigateMain(MainMenuNav::Back),
+            ),
+        ];
+        for (id, label, accelerator, action) in rows {
+            let spec = mac(id);
+            assert_eq!((spec.label, spec.accelerator, spec.action), (label, accelerator, action), "{id}");
+        }
+    }
+
+    #[test]
+    fn the_zoom_and_help_items_keep_their_words_f12_f13() {
+        // "Unchanged": the same words, keys and targets as the shared table.
+        for id in [
+            MENU_ZOOM_IN_ID,
+            MENU_ZOOM_OUT_ID,
+            MENU_ZOOM_RESET_ID,
+            MENU_HELP_DOCS_ID,
+            MENU_HELP_SHORTCUTS_ID,
+            MENU_HELP_REPORT_ID,
+            MENU_HELP_STATUS_ID,
+        ] {
+            let shared = DESKTOP_MENU_SPECS.iter().find(|spec| spec.id == id).unwrap();
+            let spec = mac(id);
+            assert_eq!(
+                (spec.label, spec.accelerator, spec.action),
+                (shared.label, shared.accelerator, shared.action),
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
+    fn macos_binds_each_key_once_and_drops_the_legacy_items_f10_f11() {
+        let mut keys: Vec<&str> = MACOS_MENU_SPECS.iter().filter_map(|spec| spec.accelerator).collect();
+        let total = keys.len();
+        keys.sort();
+        keys.dedup();
+        assert_eq!(keys.len(), total, "a key is bound twice: {keys:?}");
+        let ids: Vec<&str> = MACOS_MENU_SPECS.iter().map(|spec| spec.id).collect();
+        // F10: File › Settings (the second ⌘,) is gone. F11: Files ⌘1, Activity ⌘2, Trash ⌘4 are gone.
+        for gone in [MENU_SETTINGS_ID, MENU_VIEW_FILES_ID, MENU_VIEW_ACTIVITY_ID, MENU_VIEW_TRASH_ID, MENU_VIEW_SHARED_ID] {
+            assert!(!ids.contains(&gone), "{gone}");
+        }
+        assert!(!MACOS_MENU_SPECS.iter().any(|spec| matches!(spec.action, DesktopMenuAction::OpenView(_))));
+        for spec in MACOS_MENU_SPECS {
+            assert!(!spec.label.contains("..."), "{}: macOS uses the ellipsis character", spec.id);
+        }
+    }
+
+    fn entries(title: &str) -> &'static [MacosMenuEntry] {
+        MACOS_MENU_LAYOUT
+            .iter()
+            .find(|(t, _)| *t == title)
+            .map(|(_, e)| *e)
+            .unwrap_or_else(|| panic!("no {title} menu"))
+    }
+
+    #[test]
+    fn the_macos_menu_bar_is_the_order_of_section_9_2_and_f15() {
+        use MacosMenuEntry::*;
+        let titles: Vec<&str> = MACOS_MENU_LAYOUT.iter().map(|(t, _)| *t).collect();
+        assert_eq!(titles, ["Beebeeb", "File", "Edit", "View", "Window", "Help"]);
+        assert_eq!(
+            entries("Beebeeb"),
+            [
+                About,
+                Item(MENU_PREFERENCES_ID),
+                Item(MENU_CHECK_UPDATES_ID),
+                Item(MENU_TOGGLE_SYNC_ID),
+                Separator,
+                Item(MENU_SIGN_OUT_ID),
+                Separator,
+                Hide,
+                HideOthers,
+                ShowAll,
+                Separator,
+                Item(MENU_QUIT_ID),
+            ]
+        );
+        assert_eq!(
+            entries("File"),
+            [
+                Item(MENU_OPEN_FOLDER_ID),
+                Item(MENU_UPLOAD_FILES_ID),
+                Item(MENU_NEW_FOLDER_ID),
+                Separator,
+                Item(MENU_OPEN_WEB_APP_ID),
+            ]
+        );
+        assert_eq!(entries("Edit"), [Cut, Copy, Paste, SelectAll]);
+        assert_eq!(
+            entries("View"),
+            [
+                Item(MENU_VIEW_HOME_ID),
+                Separator,
+                Item(MENU_VIEW_BACK_ID),
+                Separator,
+                Item(MENU_ZOOM_IN_ID),
+                Item(MENU_ZOOM_OUT_ID),
+                Item(MENU_ZOOM_RESET_ID),
+            ]
+        );
+        assert_eq!(entries("Window"), [Minimize, Zoom, Close, Separator, BringAllToFront]);
+    }
+
+    #[test]
+    fn every_macos_item_is_in_the_menu_bar_exactly_once_and_every_entry_has_an_item() {
+        let mut placed: Vec<&str> = MACOS_MENU_LAYOUT
+            .iter()
+            .flat_map(|(_, e)| e.iter())
+            .filter_map(|entry| match entry {
+                MacosMenuEntry::Item(id) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        for id in &placed {
+            mac(id);
+        }
+        placed.sort();
+        let mut specs: Vec<&str> = MACOS_MENU_SPECS.iter().map(|spec| spec.id).collect();
+        specs.sort();
+        assert_eq!(placed, specs);
+    }
+
+    #[test]
+    fn the_installed_table_is_the_platforms_own() {
+        // By content: a `const` slice has no fixed address to compare.
+        let ids = |table: &[DesktopMenuSpec]| table.iter().map(|spec| (spec.id, spec.label)).collect::<Vec<_>>();
+        let installed = ids(installed_menu_specs());
+        if cfg!(target_os = "macos") {
+            assert_eq!(installed, ids(MACOS_MENU_SPECS));
+            assert_eq!(desktop_menu_spec(MENU_PREFERENCES_ID).unwrap().label, "Settings…");
+            assert!(desktop_menu_spec(MENU_SETTINGS_ID).is_none());
+        } else {
+            assert_eq!(installed, ids(DESKTOP_MENU_SPECS));
+            assert_eq!(desktop_menu_spec(MENU_PREFERENCES_ID).unwrap().label, "Preferences...");
+        }
+    }
+
+    #[test]
+    fn the_window_commands_are_registered_once() {
+        let production = super::finder_setup_command_tests::production_source();
+        let handler = super::finder_setup_command_tests::body_between(&production, "tauri::generate_handler![", "])");
+        for command in ["consume_main_navigation,", "main_window_state,"] {
+            assert_eq!(handler.lines().filter(|line| line.trim() == command).count(), 1, "{command}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod menu_update_check_tests {
     use super::*;
@@ -13960,22 +17391,23 @@ mod menu_update_check_tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn menu_update_check_targets_the_macos_settings_window() {
-        // Slice 6: on macOS the native "Check for updates…" item opens the
-        // new real Settings window, so that window must be the one the
-        // pending request targets and the About tab's row answers inline.
-        assert_eq!(update_check_window_label(), "macos-settings");
+    fn menu_update_check_targets_the_beebeeb_window() {
+        // Task 1683 slice 1 (F2): on macOS "Check for Updates…" opens the Beebeeb window on Settings › About, so
+        // that window must be the one the pending request targets, and the About row answers inline.
+        assert_eq!(update_check_window_label(), "main");
+        assert_eq!(
+            update_check_window_label(),
+            surfaces::policy::main_window_label(surfaces::policy::Platform::Macos)
+        );
     }
 }
 
 fn handle_desktop_menu_action(app: &tauri::AppHandle, spec: &'static DesktopMenuSpec) {
     match spec.action {
         DesktopMenuAction::OpenSettings => {
+            // F1: the Beebeeb window on Settings (the last section used in it, else General).
             #[cfg(target_os = "macos")]
-            {
-                // Slice 6: the real macOS Settings window.
-                show_macos_settings_window(app);
-            }
+            show_main_window(app, MainNav::settings(None));
             #[cfg(not(target_os = "macos"))]
             show_main_app_window_with_nav(app, Some("settings"));
         }
@@ -13995,15 +17427,18 @@ fn handle_desktop_menu_action(app: &tauri::AppHandle, spec: &'static DesktopMenu
             let app = app.clone();
             spawn_menu_task(spec.id, async move {
                 let state = app.state::<AppState>();
-                let result = clear_session_impl(&state, false).await;
+                let result = clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep, None).await;
                 // Task 1882: the menu's sign-out names the folder of kept
                 // Finder files in the same alert as the `clear_session` command,
                 // also when it failed after the removal (review I1), and saves it for
                 // the Settings › Sync row (review I2).
-                surface_kept_folder(&app, sign_out_kept_folder(&result));
+                surface_sign_out_folders(&app, &result);
                 // FB-24 (M6): on every platform the person sees a sign-out that stopped (its error) and one that
                 // happened with a step it could not confirm (its warning); before, only Windows showed either.
                 match &result {
+                    // Spec 2026-10-10 §4 row 5: a waiting change opens the flow in Settings; never the error dialog.
+                    #[cfg(target_os = "macos")]
+                    Err(error) if error.message.starts_with("unsent_changes: ") => open_sign_out_flow(&app),
                     Err(error) => {
                         app.dialog()
                             .message(error.message.clone())
@@ -14057,6 +17492,16 @@ fn handle_desktop_menu_action(app: &tauri::AppHandle, spec: &'static DesktopMenu
         DesktopMenuAction::NewFolder => log_menu_result(spec.id, create_folder_in_sync_root_impl(app).map(|_| ())),
         DesktopMenuAction::OpenWebApp => log_menu_result(spec.id, open_external_url(app, WEB_APP_URL)),
         DesktopMenuAction::OpenView(view) => log_menu_result(spec.id, open_menu_view(app, view)),
+        // F11 and F15: View › Home opens the Beebeeb window on Home; View › Back leaves Settings in an open window.
+        DesktopMenuAction::NavigateMain(nav) => {
+            #[cfg(target_os = "macos")]
+            match nav {
+                MainMenuNav::Home => show_main_window(app, MainNav::Home),
+                MainMenuNav::Back => back_in_main_window(app),
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = nav;
+        }
         DesktopMenuAction::Zoom(action) => log_menu_result(spec.id, apply_menu_zoom(app, action)),
         DesktopMenuAction::OpenExternal(url) => log_menu_result(spec.id, open_external_url(app, url)),
         DesktopMenuAction::ReportProblem => {
@@ -14144,7 +17589,12 @@ fn apply_menu_zoom(app: &tauri::AppHandle, action: MenuZoomAction) -> Result<(),
 
     if !applied {
         show_main_app_window_impl(app);
-        for label in ["main-app", "settings"] {
+        // A Mac's main window is the Beebeeb window (F12); Windows and Linux keep today's order.
+        #[cfg(target_os = "macos")]
+        let labels = ["main"];
+        #[cfg(not(target_os = "macos"))]
+        let labels = ["main-app", "settings"];
+        for label in labels {
             if let Some(window) = app.get_webview_window(label) {
                 window
                     .set_zoom(scale)
@@ -14267,20 +17717,20 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
 
     tray.on_menu_event(|app, event| match event.id().as_ref() {
         "open_settings" => show_main_app_window_impl(app),
-        "tray_hide" => {
-            #[cfg(target_os = "windows")]
-            {
-                if let Some(win) = app.get_webview_window("main-app") {
+        "tray_hide" => match surfaces::policy::tray_hide(surfaces::policy::Platform::current()) {
+            // A Mac hides the app (⌘H): the Beebeeb window and the compact flyout; the Dock or a reopen unhides.
+            surfaces::policy::TrayHide::App => {
+                #[cfg(target_os = "macos")]
+                if let Err(error) = app.hide() {
+                    tracing::warn!(%error, "the tray's Hide could not hide the app");
+                }
+            }
+            surfaces::policy::TrayHide::Window(label) => {
+                if let Some(win) = app.get_webview_window(label) {
                     let _ = win.hide();
                 }
             }
-            #[cfg(not(target_os = "windows"))]
-            {
-                if let Some(win) = app.get_webview_window("settings") {
-                    let _ = win.hide();
-                }
-            }
-        }
+        },
         "tray_autostart" => {
             // Toggle autostart and rebuild the tray menu so the check
             // mark reflects the new state. TrayIcon::set_menu replaces
@@ -14431,7 +17881,7 @@ fn show_compact_app_window_impl(app: &tauri::AppHandle) {
 #[cfg(not(target_os = "windows"))]
 fn show_compact_app_window_with_nav(app: &tauri::AppHandle, nav: Option<&str>) {
     let (label, width, height, resizable) = (
-        surfaces::policy::main_window_label(surfaces::policy::Platform::current()),
+        surfaces::policy::compact_window_label(surfaces::policy::Platform::current()),
         MACOS_SETTINGS_WINDOW_WIDTH,
         MACOS_SETTINGS_WINDOW_HEIGHT,
         false,
@@ -14482,6 +17932,9 @@ fn show_compact_app_window_with_nav(app: &tauri::AppHandle, nav: Option<&str>) {
                 }
             }
         }
+        // The tray's Hide hides the app; a window shown in a hidden app stays hidden (review round 2, P2-2).
+        #[cfg(target_os = "macos")]
+        unhide_app(app);
         let _ = win.show();
         let _ = win.set_focus();
         if let Some(nav) = nav {
@@ -14544,6 +17997,8 @@ fn show_compact_app_window_with_nav(app: &tauri::AppHandle, nav: Option<&str>) {
                 });
             }
 
+            #[cfg(target_os = "macos")]
+            unhide_app(app);
             let _ = win.show();
             let _ = win.set_focus();
             if let Some(nav) = nav {
@@ -14553,6 +18008,16 @@ fn show_compact_app_window_with_nav(app: &tauri::AppHandle, nav: Option<&str>) {
         Err(error) => {
             tracing::warn!(%error, "failed to create compact app window");
         }
+    }
+}
+
+/// What a route-named opener (`show_main_app_window_with_nav`) asks of the Beebeeb window on a Mac: "settings"
+/// opens Settings (the last section used), anything else Home.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn main_nav_for_route(nav: Option<&str>) -> MainNav {
+    match nav {
+        Some("settings") => MainNav::settings(None),
+        _ => MainNav::Home,
     }
 }
 
@@ -14572,11 +18037,16 @@ fn show_main_app_window_impl(app: &tauri::AppHandle) {
 /// declared `visible: false` in tauri.conf.json, so the explicit `show()` +
 /// `set_focus()` are required.
 fn show_main_app_window_with_nav(app: &tauri::AppHandle, nav: Option<&str>) {
-    #[cfg(not(target_os = "windows"))]
+    // Task 1683 slice 1 (two-surface spec §7): on a Mac every opener that showed the compact window shows the Beebeeb
+    // window, on Settings for "settings" and on Home otherwise. Until slice 3 only the tray click still shows the
+    // compact flyout.
+    #[cfg(target_os = "macos")]
+    show_main_window(app, main_nav_for_route(nav));
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        // No dedicated main-app window outside Windows — reuse the compact app.
-        // There is no separate compact Settings page; Preferences and Settings
-        // both intentionally focus the same compact app window.
+        // No dedicated main-app window on Linux: reuse the compact app. There is no separate compact Settings page;
+        // Preferences and Settings both intentionally focus the same compact app window.
         let compact_nav = match nav {
             Some("settings") | None => None,
             Some(other) => Some(other),
@@ -14633,8 +18103,10 @@ mod tests {
         MENU_PREFERENCES_ID, MENU_QUIT_ID, MENU_SETTINGS_ID, MENU_SIGN_OUT_ID, MENU_TOGGLE_SYNC_ID,
         MENU_UPLOAD_FILES_ID, MENU_VIEW_ACTIVITY_ID, MENU_VIEW_FILES_ID, MENU_VIEW_SHARED_ID, MENU_VIEW_TRASH_ID,
         MENU_ZOOM_IN_ID, MENU_ZOOM_OUT_ID, MENU_ZOOM_RESET_ID, ManualUpdateCheckResult, MenuZoomAction,
-        UpdateAvailablePayload, VaultEntryRow, WINDOWS_MAIN_APP_VIEW_ROUTES, build_vault_tree, clear_cached_profile,
-        compact_menu_page_for_view, desktop_manifest_path_for_channel, desktop_menu_specs, disposable_cache_roots,
+        UpdateAvailablePayload, VaultEntryRow, VaultItem, WINDOWS_MAIN_APP_VIEW_ROUTES, build_vault_tree,
+        build_vault_tree_of_rows, clear_cached_profile, vault_entry_row,
+        MenuPlatform, compact_menu_page_for_view, desktop_manifest_path_for_channel, desktop_menu_spec_required,
+        desktop_menu_specs, disposable_cache_roots, menu_accelerator,
         file_versions_payload_for_frontend, folder_leaf_name, free_up_space_allowed_roots,
         installed_release_channel_from_config, is_disposable_cache_path, manual_update_available_result,
         manual_update_result_for_remote, manual_update_up_to_date_result, menu_view_nav_target, newly_excluded_ids,
@@ -14646,7 +18118,7 @@ mod tests {
     };
     #[cfg(not(target_os = "macos"))]
     use super::{
-        FINDER_USER_DISABLED_MESSAGE, classify_finder_install_error, clear_finder_install_failure,
+        FINDER_IPC_NOT_READY, FINDER_USER_DISABLED_MESSAGE, classify_finder_install_error, clear_finder_install_failure,
         finder_install_failure_state, finder_install_state_from_config, record_finder_install_result,
     };
     use crate::account_dto::AccountProfile;
@@ -14654,6 +18126,7 @@ mod tests {
     use crate::config::ReleaseChannel;
     use std::collections::HashSet;
 
+    /// A server-confirmed folder at its own path (`/<id>`), so no two helpers' rows share one.
     fn folder(id: &str, parent: Option<&str>, name: &str) -> VaultEntryRow {
         VaultEntryRow {
             id: id.to_string(),
@@ -14662,9 +18135,13 @@ mod tests {
             name: name.to_string(),
             size_bytes: 0,
             on_disk: false,
+            path: format!("/{id}"),
+            server_known: true,
+            local_status: false,
         }
     }
 
+    /// A server-confirmed file at its own path (`/<id>`).
     fn file(id: &str, parent: Option<&str>, size: i64, on_disk: bool) -> VaultEntryRow {
         VaultEntryRow {
             id: id.to_string(),
@@ -14673,7 +18150,19 @@ mod tests {
             name: String::new(),
             size_bytes: size,
             on_disk,
+            path: format!("/{id}"),
+            server_known: true,
+            local_status: on_disk,
         }
+    }
+
+    /// `row` at `path`, as a row the server knows (status not `local` unless the file is on disk) or as a row this PC
+    /// minted and never sent (status `local`).
+    fn at(mut row: VaultEntryRow, path: &str, server_known: bool) -> VaultEntryRow {
+        row.path = path.to_string();
+        row.server_known = server_known;
+        row.local_status = !server_known || row.on_disk;
+        row
     }
 
     #[test]
@@ -14763,7 +18252,7 @@ mod tests {
         })
         .unwrap();
 
-        let summary = purge_local_state_files(&db, None).expect("purge succeeds");
+        let summary = purge_local_state_files(&db, None, None).expect("purge succeeds");
 
         assert_eq!(summary.queued_ops_purged, 1);
         assert_eq!(
@@ -14819,7 +18308,7 @@ mod tests {
         db.set_owner(&crate::account_binding::Identity::new(Some("u-a"), None))
             .unwrap();
 
-        let Err(error) = super::purge_local_state_files_in(&db, None, &[]) else {
+        let Err(error) = super::purge_local_state_files_in(&db, None, &[], None) else {
             panic!("a file that cannot go fails the purge");
         };
         assert!(error.contains("could not be removed"), "{error}");
@@ -14838,7 +18327,7 @@ mod tests {
         );
 
         std::fs::remove_dir(&stuck).unwrap(); // the obstacle goes away
-        let summary = super::purge_local_state_files_in(&db, None, &[]).expect("the retry succeeds");
+        let summary = super::purge_local_state_files_in(&db, None, &[], None).expect("the retry succeeds");
         assert_eq!(summary.queued_ops_purged, 2);
         assert!(!removable.exists());
         assert!(db.list_due_operations(i64::MAX).unwrap().is_empty());
@@ -14862,13 +18351,14 @@ mod tests {
         std::fs::write(&outside, b"not in the staging dir").unwrap();
 
         let summary =
-            super::purge_local_state_files_in(&db, None, std::slice::from_ref(&staging)).expect("purge succeeds");
+            super::purge_local_state_files_in(&db, None, std::slice::from_ref(&staging), None).expect("purge succeeds");
 
         assert_eq!(summary.files_removed, 2, "both orphans are removed");
         assert!(!orphan.exists() && !deep.exists(), "no orphan survives");
         assert!(outside.exists(), "nothing outside the staging directory is touched");
         // A staging directory that does not exist is nothing to sweep, not an error.
-        super::purge_local_state_files_in(&db, None, &[root.join("missing")]).expect("a missing directory is fine");
+        super::purge_local_state_files_in(&db, None, &[root.join("missing")], None)
+            .expect("a missing directory is fine");
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -14926,11 +18416,11 @@ mod tests {
         std::fs::write(&foreign_file, b"not ours").unwrap();
         let me = std::fs::metadata(&staging).unwrap().uid();
 
-        let summary = super::purge_local_state_files_as(&db, None, std::slice::from_ref(&staging), Some(me + 1))
+        let summary = super::purge_local_state_files_as(&db, None, std::slice::from_ref(&staging), Some(me + 1), None)
             .expect("the purge succeeds");
         assert_eq!((summary.files_removed, summary.files_skipped), (0, 0));
         assert!(foreign_file.exists(), "a directory that is not ours is not swept");
-        let summary = super::purge_local_state_files_as(&db, None, std::slice::from_ref(&staging), Some(me))
+        let summary = super::purge_local_state_files_as(&db, None, std::slice::from_ref(&staging), Some(me), None)
             .expect("the purge succeeds");
         assert_eq!(summary.files_removed, 1, "ours is");
         assert!(!foreign_file.exists());
@@ -14977,7 +18467,7 @@ mod tests {
         db.mark_cached("file-b", outside_path.to_str().unwrap(), 12, 10)
             .unwrap();
 
-        let summary = purge_local_state_files(&db, None).expect("purge succeeds");
+        let summary = purge_local_state_files(&db, None, None).expect("purge succeeds");
 
         assert_eq!(summary.files_removed, 0);
         assert_eq!(summary.files_skipped, 1);
@@ -15227,6 +18717,13 @@ mod tests {
         assert_eq!(
             classify_finder_install_error("Timed out waiting for the Beebeeb File Provider domain"),
             "timeout"
+        );
+        // The sentence the sync-socket wait fails with now reads without either word (PR #140 review, P2-8).
+        assert_eq!(classify_finder_install_error(FINDER_IPC_NOT_READY), "timeout");
+        assert_eq!(
+            classify_finder_install_error("Timed out waiting for the local Beebeeb sync daemon before installing Finder location."),
+            "timeout",
+            "a failure saved before the rewording keeps its category"
         );
     }
 
@@ -15758,57 +19255,9 @@ mod tests {
         assert_eq!(super::valid_macos_tray_scale_factor(f64::INFINITY), 1.0);
     }
 
-    // ── slice 6: the Settings window anchors top-right under the menu bar ──
-
-    #[test]
-    fn macos_settings_window_position_aligns_right_edges_under_the_icon() {
-        // The design ruling (spec Q6): Settings opens top-right under the
-        // menu bar on the icon's display. The status item already sits in
-        // the menu bar's top-right region, so the window's RIGHT edge
-        // aligns with the icon's right edge and its top sits
-        // MACOS_TRAY_FLYOUT_GAP below the icon's bottom (the menu bar's
-        // bottom edge).
-        let position = super::macos_settings_window_position(1_000.0, 0.0, 24.0, 22.0, 560.0, 1.0, 0.0, 2_560.0);
-
-        assert_eq!(position.x, 464); // icon right edge 1024 - 560
-        assert_eq!(position.y, 28); // 0 + 22 + 6 gap
-    }
-
-    #[test]
-    fn macos_settings_window_position_scales_with_dpi() {
-        let position = super::macos_settings_window_position(2_000.0, 0.0, 48.0, 44.0, 560.0, 2.0, 0.0, 5_120.0);
-
-        assert_eq!(position.x, 928); // right edge 2048 - (560*2)
-        assert_eq!(position.y, 56); // 0 + 44 + 6*2 gap
-    }
-
-    #[test]
-    fn macos_settings_window_position_clamps_to_right_screen_edge() {
-        // The icon's right edge itself sits at the monitor's right edge, so
-        // right-aligning would push the window off-screen: clamp to the
-        // monitor instead.
-        let position = super::macos_settings_window_position(2_540.0, 0.0, 24.0, 22.0, 560.0, 1.0, 0.0, 2_560.0);
-
-        assert_eq!(position.x, 2_000); // 2560 - 560
-        assert_eq!(position.y, 28);
-    }
-
-    #[test]
-    fn macos_settings_window_position_clamps_to_left_screen_edge() {
-        let position = super::macos_settings_window_position(-1_400.0, 0.0, 24.0, 22.0, 560.0, 1.0, -1_440.0, 0.0);
-
-        assert_eq!(position.x, -1_440);
-        assert_eq!(position.y, 28);
-    }
-
-    #[test]
-    fn macos_settings_window_position_unbounded_when_no_monitor_found() {
-        let position =
-            super::macos_settings_window_position(500.0, 0.0, 24.0, 22.0, 560.0, 1.0, f64::NEG_INFINITY, f64::INFINITY);
-
-        assert_eq!(position.x, -36); // icon right edge 524 - 560, unclamped
-        assert_eq!(position.y, 28);
-    }
+    // The anchored Settings window's placement math and its five tests retired with that window (task 1683 slice
+    // 1, two-surface spec §2: "The anchored Settings placement (slice 6) retires"). The Beebeeb window's placement is
+    // `surfaces::window_state` and its tests.
 
     #[test]
     fn macos_window_mode_is_popover_when_anchor_present() {
@@ -16226,6 +19675,182 @@ mod tests {
         assert!(!d.excluded);
     }
 
+    /// 0.8.15 (Guus's PC, 0.8.14): Selective sync listed one folder twice. One row the server never confirmed (a folder
+    /// this PC created on 4 Oct whose `create_folder` stayed paused) and the server's row at the same path. The tree shows
+    /// one `Archive`, the server's; the never-sent child with a server twin folds into it too; a never-sent child with no
+    /// twin stays, under the server's folder; the same file twice is counted once.
+    #[test]
+    fn selective_sync_shows_one_folder_per_path_preferring_the_server_row() {
+        let rows = vec![
+            at(folder("ghost-archive", None, "Archive"), "Archive", false),
+            at(folder("srv-archive", None, "Archive"), "Archive", true),
+            at(folder("ghost-other", Some("ghost-archive"), "other"), "Archive/other", false),
+            at(folder("srv-other", Some("srv-archive"), "other"), "Archive/other", true),
+            at(folder("ghost-only", Some("ghost-archive"), "new"), "Archive/new", false),
+            at(file("f1", Some("srv-other"), 100, true), "Archive/other/a.txt", true),
+            at(file("f2", Some("srv-archive"), 50, false), "Archive/b.txt", true),
+            at(file("f2-again", Some("srv-archive"), 50, true), "Archive/b.txt", false),
+        ];
+        let tree = build_vault_tree(&rows, &HashSet::new());
+
+        let roots: Vec<(&str, &str)> = tree.iter().map(|n| (n.id.as_str(), n.name.as_str())).collect();
+        assert_eq!(roots, vec![("srv-archive", "Archive")], "one Archive, the server's");
+        let archive = &tree[0];
+        assert_eq!(
+            (archive.size_bytes, archive.file_count, archive.on_disk_bytes),
+            (150, 2, 100),
+            "two files, 150 bytes, 100 of them on disk: nothing counted twice"
+        );
+        let children: Vec<(&str, &str)> = archive.children.iter().map(|c| (c.id.as_str(), c.name.as_str())).collect();
+        assert_eq!(children, vec![("ghost-only", "new"), ("srv-other", "other")]);
+        let other = &archive.children[1];
+        assert_eq!((other.size_bytes, other.file_count, other.on_disk_bytes), (100, 1, 100));
+        assert!(archive.children[0].children.is_empty() && other.children.is_empty());
+        assert_eq!(rows.len(), 8, "the rows themselves are untouched (display only)");
+    }
+
+    /// The merge is narrow: two rows the server confirmed at one path are two server items and both stay (with their
+    /// own online-only state); two never-confirmed rows at one path are one entry (the smallest id, for a stable choice);
+    /// a file and a folder at one path are never merged; a row with no path is left alone.
+    #[test]
+    fn per_path_merge_keeps_two_server_items_and_never_mixes_kinds() {
+        let rows = vec![
+            at(folder("srv-a", None, "Photos"), "Photos", true),
+            at(folder("srv-b", None, "Photos"), "Photos", true),
+            at(folder("ghost-2", None, "Docs"), "Docs", false),
+            at(folder("ghost-1", None, "Docs"), "Docs", false),
+            at(file("a-file-named-docs", Some("ghost-2"), 7, true), "/Docs/", true),
+            at(folder("no-path-1", None, "Folder 1"), "", false),
+            at(folder("no-path-2", None, "Folder 2"), "", true),
+        ];
+        let mut excluded = HashSet::new();
+        excluded.insert("srv-b".to_string());
+        let tree = build_vault_tree(&rows, &excluded);
+
+        let ids: Vec<&str> = tree.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, vec!["ghost-1", "no-path-1", "no-path-2", "srv-a", "srv-b"]);
+        assert_eq!(tree.iter().map(|n| n.excluded).collect::<Vec<_>>(), vec![false, false, false, false, true]);
+        assert_eq!((tree[0].file_count, tree[0].size_bytes), (1, 7), "the file under the folded row counts once");
+    }
+
+    /// What "the server knows the row" is read from: a server version, or a server timestamp (Guus's DB had 16 server
+    /// files with a timestamp and no version filled yet). A folder this PC created and never sent has neither.
+    #[test]
+    fn a_row_is_server_known_by_its_version_or_its_server_timestamp() {
+        let row = |current_version: i64, remote_updated_at: i64, status: crate::state_db::FileStatus| {
+            vault_entry_row(&crate::state_db::TreeRow {
+                file_id: "id".into(),
+                path: "Archive".into(),
+                status,
+                size_bytes: 0,
+                parent_id: None,
+                item_kind: crate::state_db::ItemKind::Folder,
+                current_version,
+                remote_updated_at,
+            })
+        };
+        use crate::state_db::FileStatus::{CloudOnly, Local};
+        assert!(!row(0, 0, Local).server_known && row(0, 0, Local).local_status);
+        assert!(row(3, 0, CloudOnly).server_known && !row(3, 0, CloudOnly).local_status);
+        assert!(row(0, 1_761_480_000, CloudOnly).server_known);
+        assert_eq!((row(0, 0, Local).name, row(0, 0, Local).path), ("Archive".to_string(), "Archive".to_string()));
+    }
+
+    /// The rows behind `tests/fixtures/selective-sync-tree.json`, the browser fixture `tests/render-sync-activity.mjs`
+    /// screenshots: Guus's shape with synthetic names. Every top folder the server knows also has a row this PC created
+    /// on 4 Oct and never sent (and so do two subfolders, under the never-sent parents); every file hangs under the
+    /// server's folders; an `error` row with no parent repeats a file's path. `Music` has no twin.
+    fn guus_shaped_rows() -> Vec<VaultEntryRow> {
+        vec![
+            at(folder("srv-documents", None, "Documents"), "Documents", true),
+            at(folder("srv-photos", None, "Photos"), "Photos", true),
+            at(folder("srv-archive", None, "Archive"), "Archive", true),
+            at(folder("srv-music", None, "Music"), "Music", true),
+            at(folder("srv-taxes", Some("srv-documents"), "Taxes"), "Documents/Taxes", true),
+            at(folder("srv-2026", Some("srv-photos"), "2026"), "Photos/2026", true),
+            at(folder("srv-other", Some("srv-archive"), "other"), "Archive/other", true),
+            at(folder("ghost-documents", None, "Documents"), "Documents", false),
+            at(folder("ghost-photos", None, "Photos"), "Photos", false),
+            at(folder("ghost-archive", None, "Archive"), "Archive", false),
+            at(folder("ghost-taxes", Some("ghost-documents"), "Taxes"), "Documents/Taxes", false),
+            at(folder("ghost-other", Some("ghost-archive"), "other"), "Archive/other", false),
+            at(file("f-report", Some("srv-documents"), 2_400_000, true), "Documents/report.pdf", true),
+            at(file("f-return", Some("srv-taxes"), 860_000, false), "Documents/Taxes/return.pdf", true),
+            at(file("f-beach", Some("srv-2026"), 4_100_000, false), "Photos/2026/beach.jpg", true),
+            at(file("f-hike", Some("srv-2026"), 3_700_000, true), "Photos/2026/hike.jpg", true),
+            at(file("f-disk", Some("srv-other"), 512_000_000, false), "Archive/other/disk.img", true),
+            at(file("f-song", Some("srv-music"), 9_800_000, false), "Music/song.flac", true),
+            at(file("err-report", None, 2_400_000, false), "Documents/report.pdf", false),
+        ]
+    }
+
+    /// The browser fixture is what `build_vault_tree` returns for [`guus_shaped_rows`] (`after`) and what 0.8.14 returned
+    /// (`before`, no merge), so the Selective sync screenshots show the real output of both. `BB_UPDATE_FIXTURES=1`
+    /// rewrites the file.
+    #[test]
+    fn the_selective_sync_browser_fixture_is_the_trees_real_output() {
+        let rows = guus_shaped_rows();
+        let excluded = HashSet::new();
+        let fixture = serde_json::json!({
+            "before": build_vault_tree_of_rows(&rows, &excluded),
+            "after": build_vault_tree(&rows, &excluded),
+        });
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fixtures/selective-sync-tree.json");
+        if std::env::var_os("BB_UPDATE_FIXTURES").is_some() {
+            std::fs::write(path, format!("{}\n", serde_json::to_string_pretty(&fixture).unwrap())).unwrap();
+        }
+        let on_disk: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(on_disk, fixture, "rerun with BB_UPDATE_FIXTURES=1 after a deliberate change");
+        let roots = |tree: &serde_json::Value| -> Vec<String> {
+            tree.as_array().unwrap().iter().map(|n| n["name"].as_str().unwrap().to_string()).collect()
+        };
+        assert_eq!(roots(&fixture["before"]), ["Archive", "Archive", "Documents", "Documents", "Music", "Photos", "Photos"]);
+        assert_eq!(roots(&fixture["after"]), ["Archive", "Documents", "Music", "Photos"]);
+    }
+
+    /// 0.8.15 evidence, not part of the suite: build the tree from a COPY of a real state DB (opening it migrates it),
+    /// named by `BB_SELECTIVE_SYNC_DB`. Prints counts only, never a name.
+    #[test]
+    #[ignore = "reads a real state DB copy named by BB_SELECTIVE_SYNC_DB"]
+    fn selective_sync_tree_from_a_real_state_db_copy() {
+        fn walk(nodes: &[VaultItem], total: &mut usize, sibling_dupes: &mut usize, files: &mut i64, depth: usize) {
+            let mut names: Vec<String> = nodes.iter().map(|n| n.name.to_lowercase()).collect();
+            names.sort();
+            *sibling_dupes += names.windows(2).filter(|pair| pair[0] == pair[1]).count();
+            for node in nodes {
+                *total += 1;
+                if depth == 0 {
+                    *files += node.file_count;
+                }
+                walk(&node.children, total, sibling_dupes, files, depth + 1);
+            }
+        }
+        let path = std::env::var("BB_SELECTIVE_SYNC_DB").expect("BB_SELECTIVE_SYNC_DB names a state.db copy");
+        let db = crate::state_db::StateDb::open(&path).unwrap();
+        let rows: Vec<VaultEntryRow> = db.list_tree_rows().unwrap().iter().map(vault_entry_row).collect();
+        let mut folder_paths: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for row in rows.iter().filter(|row| row.is_folder) {
+            *folder_paths.entry(row.path.trim_matches('/')).or_default() += 1;
+        }
+        let tree = build_vault_tree(&rows, &HashSet::new());
+        let (mut nodes, mut sibling_dupes, mut files) = (0, 0, 0);
+        walk(&tree, &mut nodes, &mut sibling_dupes, &mut files, 0);
+        println!(
+            "rows={} folder_rows={} folder_paths={} folder_paths_with_2+_rows={} tree_roots={} tree_folders={} \
+             sibling_name_duplicates={} files_counted_under_roots={}",
+            rows.len(),
+            rows.iter().filter(|row| row.is_folder).count(),
+            folder_paths.len(),
+            folder_paths.values().filter(|n| **n > 1).count(),
+            tree.len(),
+            nodes,
+            sibling_dupes,
+            files
+        );
+        assert_eq!(nodes, folder_paths.len(), "one tree entry per folder path");
+        assert_eq!(sibling_dupes, 0);
+    }
+
     #[test]
     fn build_tree_is_cycle_safe() {
         // A → B → A parent cycle (corrupt data). With edges A→B and B→A,
@@ -16347,6 +19972,89 @@ mod tests {
         assert_eq!(settings.action, DesktopMenuAction::OpenSettings);
         assert_eq!(preferences.accelerator, Some("CmdOrCtrl+Comma"));
         assert_eq!(settings.accelerator, Some("CmdOrCtrl+Comma"));
+    }
+
+    /// Keys a Chromium web view (WebView2 on Windows) acts on itself, with a meaning other than the menu item's.
+    /// Microsoft's list (ICoreWebView2Settings3: find, print, reload, DevTools, caret browsing, back/forward) plus
+    /// Ctrl+Shift+P, which printed the page on Guus's PC in 0.8.14 instead of pausing sync. The zoom keys are left out on
+    /// purpose: the View menu's Ctrl+= / Ctrl+- / Ctrl+0 mean what WebView2 means by them.
+    const WEB_VIEW_BROWSER_KEYS: &[&str] = &[
+        "Ctrl+P",
+        "Ctrl+Shift+P",
+        "Ctrl+F",
+        "F3",
+        "Ctrl+G",
+        "Ctrl+Shift+G",
+        "Ctrl+R",
+        "Ctrl+Shift+R",
+        "F5",
+        "Ctrl+Shift+C",
+        "Ctrl+Shift+I",
+        "Ctrl+Shift+J",
+        "F7",
+        "F12",
+        "Alt+Left",
+        "Alt+Right",
+    ];
+
+    /// Ctrl+Alt+<key> is AltGr+<key> on most European layouts (it types @, €, { ...), so a menu shortcut there eats a
+    /// character on Windows and Linux.
+    fn is_altgr_chord(accelerator: &str) -> bool {
+        let parts: Vec<&str> = accelerator.split('+').collect();
+        parts.contains(&"Alt") && (parts.contains(&"Ctrl") || parts.contains(&"CmdOrCtrl"))
+    }
+
+    /// 0.8.15: the switch that turns WebView2's browser shortcuts off is registered on the builder, before the `setup`
+    /// hook builds the windows, so its `on_webview_ready` sees every webview.
+    #[test]
+    fn the_browser_keys_plugin_is_registered_before_any_window_is_built() {
+        let source = include_str!("lib.rs").replace("\r\n", "\n");
+        let run = &source[source.find("\npub fn run() {").expect("run()")..];
+        let plugin = run.find(".plugin(webview_browser_keys::plugin())").expect("registered");
+        let setup = run.find(".setup(|app|").expect("run() has a setup hook");
+        assert!(plugin < setup, "the browser-keys plugin is registered in run(), before .setup builds the windows");
+    }
+
+    #[test]
+    fn no_windows_or_linux_menu_shortcut_is_a_web_view_browser_key_or_an_altgr_chord() {
+        let mut checked = 0;
+        for platform in [MenuPlatform::Windows, MenuPlatform::Linux] {
+            for spec in desktop_menu_specs() {
+                let Some(accelerator) = menu_accelerator(spec, platform) else {
+                    continue;
+                };
+                checked += 1;
+                let on_this_platform = accelerator.replace("CmdOrCtrl", "Ctrl");
+                assert!(
+                    !WEB_VIEW_BROWSER_KEYS.contains(&on_this_platform.as_str()),
+                    "{:?}: \"{}\" uses {on_this_platform}, which the web view acts on first",
+                    platform,
+                    spec.label
+                );
+                assert!(
+                    !is_altgr_chord(accelerator),
+                    "{:?}: \"{}\" uses {accelerator}, which is AltGr on European keyboards",
+                    platform,
+                    spec.label
+                );
+            }
+        }
+        // Every other item keeps its shortcut on both platforms: 16 of the 20 items have one there.
+        assert_eq!(checked, 32, "the check must have looked at the shortcuts it guards");
+    }
+
+    #[test]
+    fn pause_and_resume_keeps_its_shortcut_on_macos_only() {
+        let toggle = desktop_menu_spec_required(MENU_TOGGLE_SYNC_ID);
+        assert_eq!(menu_accelerator(toggle, MenuPlatform::MacOs), Some("CmdOrCtrl+Shift+P"));
+        assert_eq!(menu_accelerator(toggle, MenuPlatform::Windows), None);
+        assert_eq!(menu_accelerator(toggle, MenuPlatform::Linux), None);
+        // Nothing else changes per platform.
+        for spec in desktop_menu_specs().iter().filter(|spec| spec.id != MENU_TOGGLE_SYNC_ID) {
+            for platform in [MenuPlatform::MacOs, MenuPlatform::Windows, MenuPlatform::Linux] {
+                assert_eq!(menu_accelerator(spec, platform), spec.accelerator, "{}", spec.label);
+            }
+        }
     }
 
     #[test]
@@ -17212,7 +20920,7 @@ mod popover_snapshot_command_tests {
     ///   cargo test --lib real_api_region_commands -- --ignored --nocapture
     /// ```
     #[test]
-    #[ignore = "needs a running local API with fsn1/hel1/nbg1 pools: BB_REAL_API_BASE and BB_REAL_API_TOKEN"]
+    #[ignore = "needs a running local API with de/fi pools: BB_REAL_API_BASE and BB_REAL_API_TOKEN"]
     fn real_api_region_commands_list_choose_and_refuse() {
         let base = std::env::var("BB_REAL_API_BASE").expect("BB_REAL_API_BASE");
         let token = std::env::var("BB_REAL_API_TOKEN").expect("BB_REAL_API_TOKEN");
@@ -17239,26 +20947,27 @@ mod popover_snapshot_command_tests {
             let ipc = serde_json::to_value(&listed).unwrap();
             println!("account_region IPC: {}", serde_json::to_string(&ipc).unwrap());
             let ids: Vec<&str> = listed.choices.iter().map(|c| c.id.as_str()).collect();
-            assert_eq!(ids, ["europe", "fsn1", "hel1", "nbg1", "ede"]);
+            assert_eq!(ids, ["europe", "fi", "de", "nl"]);
             assert!(!ipc.to_string().contains("provider"));
+            assert!(!ipc.to_string().contains("city"), "no city reaches the IPC");
 
             let saved = runtime
-                .block_on(account_set_region(app.state::<AppState>(), Some("hel1".into())))
-                .expect("account_set_region hel1");
-            assert_eq!(saved.preferred_region.as_deref(), Some("hel1"));
+                .block_on(account_set_region(app.state::<AppState>(), Some("fi".into()), Some(false)))
+                .expect("account_set_region fi");
+            assert_eq!(saved.preferred_region.as_deref(), Some("fi"));
             let read_back = runtime.block_on(account_region(app.state::<AppState>())).unwrap();
-            assert_eq!(read_back.preferred_region.as_deref(), Some("hel1"));
+            assert_eq!(read_back.preferred_region.as_deref(), Some("fi"));
 
             let refused = runtime
-                .block_on(account_set_region(app.state::<AppState>(), Some("ede".into())))
-                .expect_err("ede is coming soon");
-            println!("account_set_region ede -> {refused}");
+                .block_on(account_set_region(app.state::<AppState>(), Some("nl".into()), Some(false)))
+                .expect_err("nl is coming soon");
+            println!("account_set_region nl -> {refused}");
             assert!(refused.contains("region_unavailable"), "{refused}");
             let still = runtime.block_on(account_region(app.state::<AppState>())).unwrap();
-            assert_eq!(still.preferred_region.as_deref(), Some("hel1"), "a refusal changes nothing");
+            assert_eq!(still.preferred_region.as_deref(), Some("fi"), "a refusal changes nothing");
 
             let cleared = runtime
-                .block_on(account_set_region(app.state::<AppState>(), Some("europe".into())))
+                .block_on(account_set_region(app.state::<AppState>(), Some("europe".into()), Some(false)))
                 .expect("account_set_region europe");
             assert_eq!(cleared.preferred_region.as_deref(), Some("europe"));
         });
@@ -18446,7 +22155,7 @@ mod signout_teardown_tests {
                     .unwrap();
             }
             drop(db);
-            super::with_upload_staging_for_test(upload_staging.clone(), clear_session_impl(&state, false)).await
+            super::with_upload_staging_for_test(upload_staging.clone(), clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep, None)).await
         })
         .await;
 
@@ -18553,7 +22262,7 @@ mod signout_teardown_tests {
         });
         *acct.engine.lock().await = Some(EngineRunner::for_test_with_task(task));
 
-        let result = clear_session_impl(&state, false).await;
+        let result = clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep, None).await;
 
         assert!(
             result.is_ok(),
@@ -18610,7 +22319,7 @@ mod signout_teardown_tests {
             "the premise: already signed out"
         );
         acct.engine_stop_unconfirmed.store(true, Ordering::SeqCst);
-        let result = clear_session_impl(&state, false).await;
+        let result = clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep, None).await;
         #[cfg(not(target_os = "windows"))]
         assert_eq!(
             result,
@@ -18749,7 +22458,7 @@ mod signout_teardown_tests {
         });
         *acct.engine.lock().await = Some(EngineRunner::for_test_with_task(task));
 
-        let first = clear_session_impl(&state, false)
+        let first = clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep, None)
             .await
             .expect_err("the first attempt must fail while the engine stop is unconfirmed");
         assert!(
@@ -18757,7 +22466,7 @@ mod signout_teardown_tests {
             "first attempt must be the unconfirmed-stop refusal, got: {first}"
         );
 
-        let second = clear_session_impl(&state, false)
+        let second = clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep, None)
             .await
             .expect_err("the retry must also be refused, not silently proceed past the stop gate");
         assert!(
@@ -19140,6 +22849,25 @@ mod startup_session_tests {
             !command.contains("acct.cached_profile.lock() {"),
             "no unchecked write:\n{command}"
         );
+    }
+
+    /// PR #140 delta review, P2-B: Settings › Security says whether the authenticator is on from `account_profile_fresh`,
+    /// which asks the server every time. A read of the session's cache first would be `account_profile` again, and say On
+    /// for hours after the authenticator was turned off on the web. And (follow-up P3-6) it only reads: a profile cached
+    /// after an email change made on the web carries an address that is not the session's, and `identity_of_session` would
+    /// drop the user id the session knows.
+    #[test]
+    fn the_fresh_profile_asks_the_server_every_time_and_touches_neither_the_cache_nor_the_session() {
+        let production = production();
+        let command = body_of(&production, "async fn account_profile_fresh(");
+        assert!(command.contains("api.account_profile().await"), "it fetches:\n{command}");
+        for touches in ["cached_profile", ".as_ref()", "return Ok(", "cache_profile_in_turn", "session_generation", ".lock()", "acct"] {
+            assert!(!command.contains(touches), "{touches}: it must read the server and nothing else:\n{command}");
+        }
+        // And Security is the one that asks it: its page does not read the cached command.
+        let security = include_str!("../../src/MacSecurity.tsx").replace("\r\n", "\n");
+        assert!(security.contains("accountProfileFresh()"), "Security reads the fresh profile");
+        assert!(!security.contains("accountProfile()"), "and never the cached one");
     }
 
     /// Fix round 1, item 8 (review M7): every refusal says what fits its path, each in its own sentence.
@@ -20217,14 +23945,22 @@ mod finder_setup_wiring_tests {
             })
             .collect();
         let indent = |line: &str| line.len() - line.trim_start().len();
-        let (mut windows, mut notifications, mut dialogs) = (Vec::new(), 0, 0);
+        let (mut windows, mut notifications, mut dialogs, mut unhides) = (Vec::new(), 0, 0, 0);
         for (i, &(at, line)) in lines.iter().enumerate() {
             let code = line.trim();
             if code.starts_with("//") || !code.contains(".show(") {
                 continue;
             }
             let site = enclosing_fn(&production, at);
-            if code.starts_with(".show(|") {
+            // Task 1683 slice 1 (review round 2, P2-2): unhiding the app (`AppHandle::show`) is not a window; it lives
+            // in one helper, which every macOS opener calls before it shows (and focuses) its window.
+            if site == "unhide_app" && code == "let _ = app.show();" {
+                unhides += 1;
+                continue;
+            }
+            // A parentless dialog: the `.show(|…| …)` line of a chain, or a whole chain on one line
+            // (`app.dialog()…show(|_| {});`, which rustfmt keeps when it is short).
+            if code.starts_with(".show(|") || (code.starts_with("app.dialog().") && code.contains(".show(|")) {
                 dialogs += 1;
                 continue;
             }
@@ -20256,19 +23992,25 @@ mod finder_setup_wiring_tests {
             );
             windows.push(site);
         }
+        // 12 when f7b counted them (2026-10-09). Task 1683 slice 1 replaced the Settings window's two with the Beebeeb
+        // window's two (`show_main_window`) and added the reopen's (`reopen_main_window`): 13.
         assert_eq!(
             windows.len(),
-            12,
-            "the window show() sites f7b counted (2026-10-09): {windows:?}"
+            13,
+            "the window show() sites: {windows:?}"
         );
+        assert_eq!(unhides, 1, "the one app unhide, in unhide_app");
         assert_eq!(notifications, 3, "the three notification builders");
         // The menu's three sign-out message dialogs, and (task 1882, rebase 2026-10-10) the kept-folder alert,
-        // `show_preserved_files_alert`, (task 1885, I2) the menu's failed-open alert, `show_menu_open_failure`, and
-        // (task 1889, fix round 2 N2) the menu's failed-pause alert, `show_menu_pause_failure`.
-        // None of them is a window: macOS draws a parentless alert itself.
+        // `show_preserved_files_alert`, (task 1885, I2) the menu's failed-open alert, `show_menu_open_failure`,
+        // (task 1889, fix round 2 N2) the menu's failed-pause alert, `show_menu_pause_failure`, and (task 1887) the
+        // sign-out's kept-folders alert, `surface_sign_out_folders`, a late sign-out result, `show_late_result`, and
+        // the R10 reset's kept-folder alert, `surface_reset_folder`. None of them is a window: macOS draws a parentless
+        // alert itself.
         assert_eq!(
-            dialogs, 6,
-            "the three sign-out message dialogs, the kept-folder alert and the menu's failed-open and failed-pause alerts"
+            dialogs, 9,
+            "the three sign-out message dialogs, the three kept-folder alerts, the menu's failed-open and failed-pause \
+             alerts and the late sign-out result"
         );
     }
 
@@ -20406,7 +24148,7 @@ mod finder_setup_wiring_tests {
             updated_at: 100,
         })
         .unwrap();
-        let summary = super::purge_local_state_files(&db, None).expect("the purge runs");
+        let summary = super::purge_local_state_files(&db, None, None).expect("the purge runs");
         let survived = (log.exists(), rotated.exists(), ordinary.exists());
         std::fs::remove_dir_all(&root).ok();
         assert_eq!(
@@ -21483,7 +25225,7 @@ mod finder_lock_and_sign_out_tests {
             fx.reconciler(Some(Reconciler::RemovalFails));
             fx.install_keys();
             fx.install_finished_engine().await;
-            let done = clear_session_impl(&fx.state(), false)
+            let done = clear_session_impl(&fx.state(), false, None, crate::UnknownFilesArg::Keep, None)
                 .await
                 .expect("the sign-out happened");
             assert_eq!(
@@ -21492,6 +25234,7 @@ mod finder_lock_and_sign_out_tests {
                     outcome: SignOutOutcome::Completed,
                     warning: Some(ActionWarning::FinderRemovalUnconfirmed),
                     preserved_location: None,
+                    kept_unsent: None,
                 }
             );
             assert!(fx.acct.session.lock().unwrap().is_none(), "the keys are cleared");
@@ -21510,7 +25253,7 @@ mod finder_lock_and_sign_out_tests {
             fx.install_keys();
             fx.install_finished_engine().await;
             poison_session(&fx.acct);
-            let outcome = clear_session_impl(&fx.state(), false)
+            let outcome = clear_session_impl(&fx.state(), false, None, crate::UnknownFilesArg::Keep, None)
                 .await
                 .expect("a sign-out that cleared the key");
             assert_eq!(outcome, SignedOut::confirmed(SignOutOutcome::Completed));
@@ -21543,7 +25286,7 @@ mod finder_lock_and_sign_out_tests {
                 serde_json::Value::Null,
                 "the premise: a refusal is shown"
             );
-            let outcome = clear_session_impl(&fx.state(), false)
+            let outcome = clear_session_impl(&fx.state(), false, None, crate::UnknownFilesArg::Keep, None)
                 .await
                 .expect("the sign-out completes");
             assert_eq!(outcome, SignedOut::confirmed(SignOutOutcome::Completed));
@@ -21600,7 +25343,7 @@ mod finder_lock_and_sign_out_tests {
             fx.reconciler(Some(Reconciler::Answers));
             fx.install_keys();
             fx.install_finished_engine().await;
-            let outcome = tokio::time::timeout(Duration::from_secs(30), clear_session_impl(&fx.state(), false))
+            let outcome = tokio::time::timeout(Duration::from_secs(30), clear_session_impl(&fx.state(), false, None, crate::UnknownFilesArg::Keep, None))
                 .await
                 .expect("the sign-out does not wait for the gate its own test holds")
                 .expect("the sign-out completes");
@@ -21608,6 +25351,10 @@ mod finder_lock_and_sign_out_tests {
             fx.finish().await;
             assert!(!db.has_account_data().unwrap(), "no account row survives a sign-out");
             assert_eq!(db.owner().unwrap(), None, "and nobody owns what is left");
+            assert!(
+                !db.finder_accepts_closed().unwrap(),
+                "and Finder accepts are open: the purge cleared the key the keep step wrote"
+            );
         }));
     }
 
@@ -21706,7 +25453,7 @@ mod finder_lock_and_sign_out_tests {
         let mut fx = Fixture::new("finder-signout");
         runtime().block_on(async {
             fx.reconciler(Some(Reconciler::Answers));
-            let outcome = clear_session_impl(&fx.state(), false)
+            let outcome = clear_session_impl(&fx.state(), false, None, crate::UnknownFilesArg::Keep, None)
                 .await
                 .expect("a removal the reconciler confirmed");
             assert_eq!(outcome, SignedOut::confirmed(SignOutOutcome::NotSignedIn));
@@ -21749,17 +25496,17 @@ mod finder_lock_and_sign_out_tests {
                 fx.install_keys();
                 fx.install_finished_engine().await;
                 fx.acct.engine_stop_unconfirmed.store(true, Ordering::SeqCst);
-                let result = clear_session_impl(&fx.state(), false).await;
+                let result = clear_session_impl(&fx.state(), false, None, crate::UnknownFilesArg::Keep, None).await;
                 let failure = result.as_ref().expect_err("sign-out refuses after the removal");
                 assert_eq!(failure.message, UNCONFIRMED_ENGINE_STOP_ERROR, "{id}");
                 assert_eq!(
-                    sign_out_kept_folder(&result),
+                    sign_out_folders(&result).0,
                     expected,
                     "{id}: the error carries the kept folder"
                 );
                 // The alert text the command and the menu raise before they return the error.
                 assert_eq!(
-                    finder_removal::kept_folder_alert(sign_out_kept_folder(&result)).map(|(_, body)| body),
+                    sign_out::copy::sign_out_alert(None, sign_out_folders(&result).0).map(|(_, body)| body),
                     expected.map(|folder| format!("{}\n\n{folder}", finder_removal::PRESERVED_FILES_SENTENCE)),
                     "{id}"
                 );
@@ -21785,11 +25532,11 @@ mod finder_lock_and_sign_out_tests {
             let mut fx = Fixture::new(id);
             runtime().block_on(async {
                 fx.reconciler(Some(mode));
-                let result = clear_session_impl(&fx.state(), false).await;
+                let result = clear_session_impl(&fx.state(), false, None, crate::UnknownFilesArg::Keep, None).await;
                 let done = result.as_ref().expect("the sign-out happened");
                 assert_eq!(done.outcome, SignOutOutcome::NotSignedIn, "{id}");
                 assert_eq!(done.warning, warning, "{id}");
-                assert_eq!(sign_out_kept_folder(&result), folder, "{id}");
+                assert_eq!(sign_out_folders(&result).0, folder, "{id}");
                 fx.finish().await;
             });
         }
@@ -21811,7 +25558,7 @@ mod finder_lock_and_sign_out_tests {
                 fx.reconciler(mode);
                 let started = Instant::now();
                 let done = FINDER_WAIT_OVERRIDE
-                    .scope(SHORT_WAIT, clear_session_impl(&fx.state(), false))
+                    .scope(SHORT_WAIT, clear_session_impl(&fx.state(), false, None, crate::UnknownFilesArg::Keep, None))
                     .await
                     .expect("the sign-out happened");
                 assert_eq!(
@@ -21820,6 +25567,7 @@ mod finder_lock_and_sign_out_tests {
                         outcome: SignOutOutcome::NotSignedIn,
                         warning: Some(ActionWarning::FinderRemovalUnconfirmed),
                         preserved_location: None,
+                        kept_unsent: None,
                     },
                     "{id}: a removal nobody confirmed is not a plain success"
                 );
@@ -21859,7 +25607,7 @@ mod finder_lock_and_sign_out_tests {
                 fx.install_finished_engine().await;
                 // An earlier stop that was never confirmed: sign-out refuses AFTER the removal.
                 fx.acct.engine_stop_unconfirmed.store(true, Ordering::SeqCst);
-                let error = clear_session_impl(&fx.state(), false)
+                let error = clear_session_impl(&fx.state(), false, None, crate::UnknownFilesArg::Keep, None)
                     .await
                     .expect_err("sign-out refuses");
                 assert_eq!(error.message, UNCONFIRMED_ENGINE_STOP_ERROR, "{id}");
@@ -22013,7 +25761,7 @@ mod finder_lock_and_sign_out_tests {
             let restore = restore_stored_session(&state, &fx.acct, &base_url);
             let sign_out_then_answer = async {
                 let probe = server.next_request().await;
-                let signed_out = clear_session_impl(&state, false).await;
+                let signed_out = clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep, None).await;
                 server.release();
                 (probe, signed_out)
             };
@@ -22082,7 +25830,7 @@ mod finder_lock_and_sign_out_tests {
             );
             // "Sign out and switch" from here: the already-signed-out path, which must leave no key and no email.
             assert_eq!(
-                clear_session_impl(&state, false).await,
+                clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep, None).await,
                 Ok(SignedOut::confirmed(SignOutOutcome::NotSignedIn))
             );
             assert_eq!(
@@ -22198,7 +25946,7 @@ mod finder_lock_and_sign_out_tests {
             let signing_out = scope.spawn(move || {
                 runtime().block_on(SIGN_OUT_HOLDS_THE_ENGINE_SLOT.scope(
                     sign_out_holds_the_slot,
-                    with_the_shared_state_dir(clear_session_impl(&state, false)),
+                    with_the_shared_state_dir(clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep, None)),
                 ))
             });
             let deadline = Instant::now() + Duration::from_secs(60);
@@ -22364,7 +26112,7 @@ mod finder_lock_and_sign_out_tests {
             let decide = decide_sign_in_in_turn(&state, &fx.acct, &sources, &sam, "tok-new", &base_url, &turn);
             let sign_out_then_answer = async {
                 let proof = server.next_request().await;
-                let signed_out = clear_session_impl(&state, false).await;
+                let signed_out = clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep, None).await;
                 server.release();
                 (proof, signed_out)
             };
@@ -22847,7 +26595,13 @@ mod finder_lock_and_sign_out_tests {
         let (mut turn, read, signed_out) = std::thread::scope(|scope| {
             let frozen = gap_state.pending_2fa.lock().unwrap();
             let signing_out = scope.spawn(move || {
-                runtime().block_on(with_the_shared_state_dir(clear_session_impl(&signing_out_state, false)))
+                runtime().block_on(with_the_shared_state_dir(clear_session_impl(
+                    &signing_out_state,
+                    false,
+                    None,
+                    crate::UnknownFilesArg::Keep,
+                    None,
+                )))
             });
             let deadline = Instant::now() + Duration::from_secs(60);
             while acct.session.lock().unwrap().is_some() {
@@ -22914,7 +26668,13 @@ mod finder_lock_and_sign_out_tests {
         let (unlocked, signed_out) = std::thread::scope(|scope| {
             let frozen = gap_state.pending_2fa.lock().unwrap();
             let signing_out = scope.spawn(move || {
-                runtime().block_on(with_the_shared_state_dir(clear_session_impl(&signing_out_state, false)))
+                runtime().block_on(with_the_shared_state_dir(clear_session_impl(
+                    &signing_out_state,
+                    false,
+                    None,
+                    crate::UnknownFilesArg::Keep,
+                    None,
+                )))
             });
             let deadline = Instant::now() + Duration::from_secs(60);
             while acct.session.lock().unwrap().is_some() {
@@ -22998,7 +26758,7 @@ mod finder_lock_and_sign_out_tests {
             let gate = SIGN_OUT_TEST_PURGE_GATE.lock().await; // the sign-out waits here, inside its purge
             let state = fx.state();
             let sam = t12_profile("u-1", "sam@beebeeb.io");
-            let sign_out = clear_session_impl(&state, false);
+            let sign_out = clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep, None);
             let sign_in = async {
                 let deadline = Instant::now() + Duration::from_secs(30);
                 while !fx
@@ -23072,7 +26832,7 @@ mod finder_lock_and_sign_out_tests {
             fx.reconciler(Some(Reconciler::Answers));
             after_a_rejected_token(&fx);
             *fx.acct.engine.lock().await = Some(a_running_engine());
-            let signed_out = clear_session_impl(&fx.state(), false).await;
+            let signed_out = clear_session_impl(&fx.state(), false, None, crate::UnknownFilesArg::Keep, None).await;
             assert_eq!(signed_out, Ok(SignedOut::confirmed(SignOutOutcome::NotSignedIn)));
             assert!(fx.acct.engine.lock().await.is_none(), "the engine it found is stopped");
             assert!(
@@ -23882,14 +27642,30 @@ mod account_binding_tests {
             reset.contains("purge_local_state_files_in("),
             "the reset is the sign-out purge:\n{reset}"
         );
-        let purge = code_of(&production, "fn purge_local_state_files_as(");
-        let removals: Vec<usize> = purge.match_indices("remove_file(").map(|(at, _)| at).collect();
-        assert_eq!(removals.len(), 1, "one removal in the purge:\n{purge}");
+        // Task 1887: the purge's one removal is the `remove_file` its wrapper hands down, and it runs only in
+        // `remove_purge_paths`, right behind the gate.
+        let wrapper = code_of(&production, "fn purge_local_state_files_as(");
+        assert_eq!(
+            wrapper.matches("remove_file(").count(),
+            1,
+            "one removal in the purge:\n{wrapper}"
+        );
+        assert!(wrapper.contains("purge_local_state_files_with("), "{wrapper}");
+        let purge = code_of(&production, "fn purge_local_state_files_with(");
+        for needle in ["remove_file", "remove_dir", "remove("] {
+            assert!(
+                !purge.contains(needle),
+                "the purge removes only through `remove_purge_paths` ({needle}):\n{purge}"
+            );
+        }
+        let removal = code_of(&production, "fn remove_purge_paths(");
+        let removals: Vec<usize> = removal.match_indices("remove(").map(|(at, _)| at).collect();
+        assert_eq!(removals.len(), 1, "one removal in the purge:\n{removal}");
         assert!(
-            purge[..removals[0]]
+            removal[..removals[0]]
                 .rfind("is_disposable_cache_path(")
-                .is_some_and(|gate| purge[gate..removals[0]].lines().count() < 10),
-            "the gate runs right before the removal:\n{purge}"
+                .is_some_and(|gate| removal[gate..removals[0]].lines().count() < 10),
+            "the gate runs right before the removal:\n{removal}"
         );
     }
 
@@ -23899,8 +27675,11 @@ mod account_binding_tests {
     fn the_glue_forbids_a_reset_on_windows_only() {
         let production = production_source();
         let bind = code_of(&production, "fn bind_data_to_session(");
+        // Task 1887 (spec 2026-10-10 W12): the binding's answer is read once the reset's kept folder was handed on, so
+        // its error is returned by `match bound?`.
+        let flag = r#"bind_before_engine_start(data, session, !cfg!(target_os = "windows"));"#;
         assert!(
-            bind.contains(r#"bind_before_engine_start(data, session, !cfg!(target_os = "windows"))?"#),
+            bind.contains(&format!("let bound = account_binding::{flag}")) && bind.contains("match bound? {"),
             "{bind}"
         );
         assert!(
@@ -23911,6 +27690,296 @@ mod account_binding_tests {
             !bind.contains(".await"),
             "and never waits for it: the reconciler starts engines through here:\n{bind}"
         );
+    }
+
+    /// Task 2267: a Windows start refused with `OTHER_ACCOUNT_ON_WINDOWS` hands its data to the ownership proof, after
+    /// the start returned and whatever it returned, for the session that start read (the same account runtime, the
+    /// turn read under the engine slot). The proof starts sync only once it adopted, and then only under the
+    /// session-transition lock for that same session (fix round 1, findings 6 and 8). One proof per session at a time,
+    /// its slot freed however it ends, a panic included (finding 7). Each question is bounded and the asking stops
+    /// when the session changes (finding 4); a refused token is not reported as "offline" (finding 5).
+    #[test]
+    fn a_windows_refusal_over_unowned_data_asks_for_the_proof_and_only_an_adoption_starts_sync() {
+        let production = production_source();
+        let squeeze = crate::source_pin::squeeze;
+        let gate = squeeze(&code_of(&production, "fn spawn_bound_engine("));
+        let hook = squeeze(
+            "#[cfg(target_os = \"windows\")] if matches!(&started, Err(error) if error == account_binding::OTHER_ACCOUNT_ON_WINDOWS) && let Ok(active) = state.active_account() && std::ptr::eq(Arc::as_ptr(&active), acct) { prove_own_data_in_background(surface_app, paths.sync_root.clone(), active, acct.session_generation()); }",
+        );
+        let surfaced = gate.find(&squeeze("surface_reset_folder(&surface_app, &folder, files);")).expect("surfaced");
+        let asked = gate.find(&hook).unwrap_or_else(|| panic!("the hook: {gate}"));
+        assert!(surfaced < asked && gate.ends_with("started"), "{gate}");
+
+        let background = squeeze(&code_of(&production, "fn prove_own_data_in_background("));
+        for step in [
+            "impl Drop for Flight",
+            "if *in_flight == Some(key) { return; }",
+            "let _flight = flight;",
+        ] {
+            assert!(background.contains(&squeeze(step)), "{step}: {background}");
+        }
+        let adopted = background.find("Outcome::Adopted(tally)").expect("the adopted arm");
+        let locked = background.find(&squeeze("let transition = SESSION_TRANSITION.lock().await;")).expect("the lock");
+        let current = background.find(&squeeze("if !session_still_active(&app, &acct, turn)")).expect("the check");
+        let restart = background.find("start_engine_if_possible(").expect("a restart");
+        let other = background.find("Ok(outcome)=>").expect("every other outcome");
+        assert!(adopted < locked && locked < current && current < restart && restart < other, "{background}");
+        assert_eq!(background.matches("start_engine_if_possible(").count(), 1, "{background}");
+
+        let proof = squeeze(&code_of(&production, "async fn prove_own_data_of_session("));
+        for step in [
+            "keys_for_engine_start(acct)",
+            "own_data_proof::prove_and_adopt(",
+            // Fix round 2 (review P2-1): this account's tree, bounded; self-review F2: its trash too.
+            "tokio::time::timeout(LIST_TIMEOUT,",
+            "api.sync_snapshot().await",
+            "api.list_trashed_files_all().await",
+            "own_data_proof::listing_of(",
+            // Self-review F5: the proof's own client waits longer than the app's 30 s per request.
+            ".with_request_timeout(PROOF_REQUEST_TIMEOUT)",
+            // Review P2-2: the proof's client is one a Lock or a sign-out waits for.
+            "windows_cf::track_credentials(&api);",
+            "|| session_still_active(app, acct, turn)",
+            "Outcome::Unavailable(tally) if tally.signed_out == 0",
+            "record_engine_refusal(acct, turn, account_binding::IDENTITY_UNKNOWN);",
+        ] {
+            assert!(proof.contains(&squeeze(step)), "{step}: {proof}");
+        }
+        assert_eq!(proof.matches("api.get_file(").count(), 0, "no question per file: {proof}");
+        let still = squeeze(&code_of(&production, "fn session_still_active("));
+        assert!(still.contains(&squeeze("acct.session_unchanged_since(turn)")), "{still}");
+        assert!(still.contains(&squeeze("Arc::ptr_eq(&active, acct)")), "{still}");
+
+        // Review P2-2: a Lock and a sign-out stop every running proof before they wait for the credentials, so a proof
+        // never holds the key and the token past either.
+        assert!(
+            background.contains(&squeeze("OWN_DATA_PROOFS.lock()")) && background.contains("proofs.push(proof)"),
+            "the proof is kept to be stopped: {background}"
+        );
+        for (name, body) in [
+            ("lock_vault", code_of(&production, "async fn lock_vault(")),
+            ("clear_session_impl", code_of(&production, "async fn clear_session_impl(")),
+        ] {
+            let body = squeeze(&body);
+            let stop = body.find("stop_own_data_proofs();").unwrap_or_else(|| panic!("{name} stops the proofs: {body}"));
+            let wait = body
+                .find(&squeeze("windows_cf::wait_for_credential_release().await?;"))
+                .unwrap_or_else(|| panic!("{name} waits: {body}"));
+            assert!(stop < wait, "{name} stops the proofs before it waits: {body}");
+        }
+        let stops = squeeze(&code_of(&production, "fn stop_own_data_proofs("));
+        assert!(stops.contains(".abort()"), "{stops}");
+    }
+
+    /// Self-review F5: the proof's listing is not bounded by the app's 30 s per request. A large tree on a slow link has
+    /// minutes (a Lock or a sign-out stops the proof at once anyway), and the whole listing has room for more than one.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_proofs_listing_has_minutes_not_the_apps_thirty_seconds() {
+        assert!(PROOF_REQUEST_TIMEOUT >= std::time::Duration::from_secs(300), "{PROOF_REQUEST_TIMEOUT:?}");
+        assert!(PROOF_REQUEST_TIMEOUT.as_secs() > crate::link_health::API_REQUEST_TIMEOUT_SECS);
+        assert!(LIST_TIMEOUT >= PROOF_REQUEST_TIMEOUT * 2, "{LIST_TIMEOUT:?}");
+    }
+
+    /// Task 2267 (fix round 2): what Settings › Sync decides about the changes found while sync was paused. A keep a
+    /// crash interrupted is settled in the one engine start, after the binding (so it acts on this account's own data
+    /// only) and before the engine exists (lead ruling (a) 4). The three commands are registered; Upload and Keep run
+    /// under the session-transition lock and only on the signed-in account's own data; no command takes a path.
+    #[test]
+    fn the_found_while_paused_decision_is_wired_and_an_interrupted_keep_is_settled_before_the_engine() {
+        let production = production_source();
+        let squeeze = crate::source_pin::squeeze;
+        let bound = squeeze(&code_of(&production, "fn start_engine_bound("));
+        let at = |snippet: &str| {
+            bound
+                .find(&squeeze(snippet))
+                .unwrap_or_else(|| panic!("{snippet}:\n{bound}"))
+        };
+        let permitted = at("StartPermit::FinderRemovalOwed => return Ok(EngineStart::FinderRemovalOwed)");
+        let settled = at("#[cfg(target_os = \"windows\")] settle_an_interrupted_keep(paths);");
+        let spawned = at("spawn(paths.sync_root.clone()");
+        assert!(permitted < settled && settled < spawned, "{bound}");
+        let settle = squeeze(&code_of(&production, "fn settle_an_interrupted_keep("));
+        assert!(settle.contains(&squeeze("found_while_paused::recover(&db, &paths.sync_root)")), "{settle}");
+
+        let handler = body_between(&production, "tauri::generate_handler![", "])");
+        for command in ["found_while_paused_review,", "found_while_paused_upload,", "found_while_paused_keep,", "show_kept_folder,"] {
+            assert!(handler.contains(command), "{command} is registered");
+        }
+        let windows = "#[cfg(target_os = \"windows\")]\n#[tauri::command]\n";
+        for (signature, steps) in [
+            (
+                "async fn found_while_paused_review(state: State<'_, AppState>) -> Result<found_while_paused::Review, String> {",
+                &[
+                    "let _transition = SESSION_TRANSITION.lock().await;",
+                    "let identity = decision_identity(&state)?;",
+                    "own_local_data_for_decision(&identity)?",
+                    "found_while_paused::review(&db.found_while_paused_changes()",
+                    "review.synced_by = kept_folder_synced_by(&sync_root);",
+                ][..],
+            ),
+            (
+                // Lead review round 3, P3-1: only the changes the card showed.
+                "async fn found_while_paused_upload(state: State<'_, AppState>, op_ids: Vec<String>) -> Result<FoundWhilePausedReleased, String> {",
+                &[
+                    "let _transition = SESSION_TRANSITION.lock().await;",
+                    "let identity = decision_identity(&state)?;",
+                    "own_local_data_for_decision(&identity)?",
+                    "db.release_found_while_paused(&op_ids, now_unix_seconds())",
+                ][..],
+            ),
+            (
+                // Self-review of round 3, F7: only the changes the card showed.
+                "async fn found_while_paused_keep(\n    state: State<'_, AppState>,\n    op_ids: Vec<String>,\n) -> Result<found_while_paused::KeepResult, String> {",
+                &[
+                    "let _transition = SESSION_TRANSITION.lock().await;",
+                    "let identity = decision_identity(&state)?;",
+                    "own_local_data_for_decision(&identity)?",
+                    "found_while_paused::keep(&db, &sync_root, &today, &found_while_paused::rename_no_replace, &op_ids)",
+                    "kept.synced_by = kept_folder_synced_by(&sync_root);",
+                ][..],
+            ),
+            (
+                "async fn show_kept_folder() -> Result<(), String> {",
+                &["kept_folder_to_show(&sync_root, db.last_kept_dir()", "std::process::Command::new(\"explorer\").arg(&folder)"][..],
+            ),
+        ] {
+            let body = squeeze(&code_of(&production, &format!("{windows}{signature}")));
+            for step in steps {
+                assert!(body.contains(&squeeze(step)), "{step}: {body}");
+            }
+        }
+        let own = squeeze(&code_of(&production, "fn own_state_db("));
+        assert!(
+            own.contains(&squeeze("account_binding::same_account(&owner, identity) == Some(true)")),
+            "{own}"
+        );
+    }
+
+    /// Task 2267 (fix round 2): Upload and Keep act on this PC's local data only when its recorded owner is the
+    /// account signed in now. Another account's data, data with no owner, no database and no session change nothing.
+    #[test]
+    fn a_decision_about_found_changes_acts_only_on_the_signed_in_accounts_own_data() {
+        let refused = Err(FOUND_WHILE_PAUSED_NOT_YOURS.to_string());
+        let mine = local_data_of(Some(alice()));
+        assert!(own_state_db(&alice(), mine.dir.path()).is_ok(), "the owner decides");
+        assert_eq!(own_state_db(&bob(), mine.dir.path()).map(|_| ()), refused, "another account does not");
+        let unowned = local_data_of(None);
+        assert_eq!(own_state_db(&alice(), unowned.dir.path()).map(|_| ()), refused, "data nobody owns yet");
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(own_state_db(&alice(), empty.path()).map(|_| ()), refused, "no database");
+        let by_email = Identity::new(None, Some("A@Beebeeb.io"));
+        assert!(own_state_db(&by_email, mine.dir.path()).is_ok(), "the same account by its email");
+
+        assert_eq!(decision_identity(&AuthorizeFixture::with_session(&alice()).state), Ok(alice()));
+        assert_eq!(decision_identity(&AuthorizeFixture::without_session().state).map(|_| ()), refused, "no session");
+    }
+
+    /// Task 2267, lead ruling on self-review F9 (2026-10-29): Keep's stop message names the kept folder as it is made.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn keep_stopped_names_the_kept_folder_as_it_is_made() {
+        assert!(FOUND_WHILE_PAUSED_KEEP_STOPPED.contains("“Beebeeb - not uploaded”"), "{FOUND_WHILE_PAUSED_KEEP_STOPPED}");
+        let named = format!("“{}”", crate::found_while_paused::KEPT_FOLDER_NAME);
+        assert!(FOUND_WHILE_PAUSED_KEEP_STOPPED.contains(&named), "{FOUND_WHILE_PAUSED_KEEP_STOPPED}");
+    }
+
+    /// Task 2267 (fix round 2): "Show in Explorer" opens only the dated folder the last keep recorded, inside
+    /// `Beebeeb - not uploaded` next to the Beebeeb folder, and only while it is there.
+    #[test]
+    fn show_in_explorer_opens_only_a_dated_folder_in_the_kept_folder_next_to_the_beebeeb_folder() {
+        let top = tempfile::tempdir().unwrap();
+        let root = top.path().join("Beebeeb");
+        let kept = top.path().join("Beebeeb - not uploaded");
+        let dated = kept.join("2026-10-28");
+        for dir in [&root, &dated, &kept.join("notes"), &top.path().join("elsewhere").join("2026-10-28")] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let recorded = |path: &Path| Some(path.to_string_lossy().into_owned());
+        assert_eq!(kept_folder_to_show(&root, Ok(recorded(&dated))), Ok(dated.clone()));
+        for other in [
+            None,
+            recorded(&kept),
+            recorded(&kept.join("..")),
+            recorded(&dated.join("..")),
+            recorded(&dated.join("..").join("2026-10-28")),
+            recorded(&kept.join("notes")),
+            recorded(&kept.join("2026-10-29")),
+            recorded(&root),
+            recorded(&top.path().join("elsewhere").join("2026-10-28")),
+            Some("2026-10-28".to_string()),
+        ] {
+            assert!(kept_folder_to_show(&root, Ok(other.clone())).is_err(), "{other:?}");
+        }
+        assert!(kept_folder_to_show(&root, Err(rusqlite::Error::InvalidQuery)).is_err());
+    }
+
+    /// Task 2267 (fix round 2, lead ruling (a) 4), behaviourally: a keep that a crash interrupted after its move is
+    /// finished by the next engine start before the engine is created. When the engine exists the journal is gone and
+    /// the kept item's row and queued change are forgotten; its bytes are in the kept folder.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_keep_a_crash_interrupted_is_finished_before_the_next_engine_is_created() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let local = local_data_of(None);
+            let top = tempfile::tempdir().unwrap();
+            let root = top.path().join("Beebeeb");
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join("A.txt"), b"local bytes").unwrap();
+            assert_eq!(
+                local
+                    .data
+                    .db
+                    .adopt_owner_holding(None, &alice(), &std::collections::HashSet::new(), 5)
+                    .unwrap(),
+                Some(1),
+                "precondition: the PC is this account's and its change is held"
+            );
+            let crash_after_moving = |from: &Path, to: &Path| -> std::io::Result<()> {
+                crate::found_while_paused::rename_no_replace(from, to).unwrap();
+                panic!("the process ends here");
+            };
+            let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let held: Vec<String> =
+                    local.data.db.found_while_paused_ops().unwrap().into_iter().map(|op| op.op_id).collect();
+                crate::found_while_paused::keep(&local.data.db, &root, "2026-10-28", &crash_after_moving, &held)
+            }));
+            assert!(
+                crashed.is_err() && local.data.db.keep_journal().unwrap().is_some(),
+                "precondition: a keep was interrupted after its move"
+            );
+
+            let fx = AuthorizeFixture::with_session(&alice());
+            let mut slot = fx.acct.engine.lock().await;
+            let paths = LocalDataPaths::for_test(local.dir.path(), &root);
+            let seen = std::cell::RefCell::new(None);
+            let result = start_engine_bound(&fx.state, &fx.acct, &mut slot, &paths, |_root, _token, _key| {
+                *seen.borrow_mut() = Some((
+                    local.data.db.keep_journal().unwrap(),
+                    local.data.db.get_file("file-a").unwrap().is_some(),
+                    local.data.db.list_due_operations(i64::MAX).unwrap().len()
+                        + local.data.db.found_while_paused_ops().unwrap().len(),
+                ));
+                crate::runner::EngineRunner::for_test_with_task(tokio::spawn(async {}))
+            });
+            assert_eq!(result, Ok(EngineStart::Started));
+            assert_eq!(
+                seen.into_inner(),
+                Some((None, false, 0)),
+                "when the engine is created the keep is finished: no journal, no row, no queued change"
+            );
+            let kept = top
+                .path()
+                .join("Beebeeb - not uploaded")
+                .join("2026-10-28")
+                .join("A.txt");
+            assert_eq!(std::fs::read(kept).unwrap(), b"local bytes", "nothing lost");
+            assert!(!root.join("A.txt").exists());
+        });
     }
 
     // ---- the local data under test ----
@@ -23960,7 +28029,9 @@ mod account_binding_tests {
             file_id: Some("file-a".into()),
             parent_id: None,
             target_path: Some("/A.txt".into()),
-            metadata_json: None,
+            // A new file's upload says it creates the file, as the scan queues it: its row counts as made on this PC
+            // (task 2267, lead review round 2, P2-1).
+            metadata_json: Some(r#"{"operation":"create_file"}"#.into()),
             payload_path: Some(payload.to_str().unwrap().to_string()),
             base_version: None,
             base_object_version_id: None,
@@ -23982,6 +28053,7 @@ mod account_binding_tests {
                 db,
                 sync_root: None,
                 staging_dirs: Vec::new(),
+                kept: Default::default(),
             },
             files: vec![payload, cache, staged],
             staging,
@@ -24187,6 +28259,7 @@ mod account_binding_tests {
             db: crate::state_db::StateDb::open(dir.path().join("state.db")).unwrap(),
             sync_root: None,
             staging_dirs: Vec::new(),
+            kept: Default::default(),
         };
         assert_eq!(bind_before_engine_start(&data, &bob(), RESET_ALLOWED), Ok(Bound::Kept));
         assert_eq!(data.db.owner().unwrap(), Some(bob()));
@@ -24589,6 +28662,7 @@ mod account_binding_tests {
             db,
             sync_root: None,
             staging_dirs: Vec::new(),
+            kept: Default::default(),
         };
         assert_eq!(bind_data_to_session(&AppState::default(), &data, &bob()), Ok(()));
         let survived = (log.exists(), rotated.exists(), ordinary.exists());
@@ -24657,9 +28731,11 @@ mod account_binding_tests {
             return; // Windows refuses before any purge
         }
         let local = local_data_of(Some(alice()));
-        let payload = local.files[0].clone();
-        std::fs::remove_file(&payload).unwrap();
-        std::fs::create_dir(&payload).unwrap(); // a removal that fails
+        // The journal's staged copy, not the queued upload's: on a Mac a waiting write's copy that is not a regular
+        // file fails the reset's keep step, before the purge (task 1887, `the_r10_reset_keeps_before_it_purges`).
+        let journal_copy = local.files[2].clone();
+        std::fs::remove_file(&journal_copy).unwrap();
+        std::fs::create_dir(&journal_copy).unwrap(); // a removal that fails
         let fx = AuthorizeFixture::with_session(&bob());
         let slot = fx.acct.engine.try_lock().unwrap();
         let paths = LocalDataPaths::for_test(local.dir.path(), &local.staging);
@@ -24675,7 +28751,7 @@ mod account_binding_tests {
             1,
             "the queue is still there"
         );
-        std::fs::remove_dir(&payload).unwrap();
+        std::fs::remove_dir(&journal_copy).unwrap();
         let retry = authorize_engine_start(&fx.state, &fx.acct, &slot, &paths);
         // On a Mac the engine then waits for the previous account's Finder domain to be removed (F3).
         if cfg!(target_os = "macos") {
@@ -24820,6 +28896,15 @@ mod account_binding_tests {
         assert!(!finder_removal_owed_in(dir.path()));
     }
 
+    /// `purge` with the app's `desktop.toml` in a directory of its own. On a Mac a sign-out purge that completes clears
+    /// the unfinished sign-out marker in the file `DesktopConfig::path()` names (spec 2026-10-10 W13): a test that calls
+    /// the purge itself, outside the sign-out tests' purge gate, must never clear it in the sandbox those tests share.
+    #[cfg(not(target_os = "windows"))]
+    fn with_own_config<R>(purge: impl FnOnce() -> R) -> R {
+        let config = tempfile::tempdir().unwrap();
+        crate::config::CONFIG_DIR_OVERRIDE.sync_scope(config.path().to_path_buf(), purge)
+    }
+
     /// The sign-out purge, behaviourally (macOS and Linux), through the real function `clear_session_impl` calls and
     /// a state dir of its own: it clears every account row and the owner, records a removal debt only when the
     /// sign-out's Finder removal was not confirmed, and a failure of any step stops it with the sign-out sentence.
@@ -24833,7 +28918,7 @@ mod account_binding_tests {
                 .execute("INSERT INTO sync_state(key, value) VALUES ('cursor', '9')", [])
                 .unwrap();
             assert_eq!(
-                purge_local_data_for_sign_out(Ok(local.dir.path().to_path_buf()), None, owe),
+                with_own_config(|| purge_local_data_for_sign_out(Ok(local.dir.path().to_path_buf()), None, owe, None)),
                 Ok(())
             );
             assert!(!local.data.db.has_account_data().unwrap(), "no account row survives");
@@ -24856,7 +28941,7 @@ mod account_binding_tests {
         let local = local_data_of(Some(alice()));
         std::fs::remove_file(&local.files[0]).unwrap();
         std::fs::create_dir(&local.files[0]).unwrap();
-        let error = purge_local_data_for_sign_out(Ok(local.dir.path().to_path_buf()), None, false).unwrap_err();
+        let error = purge_local_data_for_sign_out(Ok(local.dir.path().to_path_buf()), None, false, None).unwrap_err();
         assert!(
             error.starts_with(SIGN_OUT_PURGE_FAILED) && error.contains("could not be removed"),
             "{error}"
@@ -24871,19 +28956,19 @@ mod account_binding_tests {
         )
         .unwrap();
         assert!(
-            purge_local_data_for_sign_out(Ok(broken.path().to_path_buf()), None, false)
+            purge_local_data_for_sign_out(Ok(broken.path().to_path_buf()), None, false, None)
                 .unwrap_err()
                 .starts_with(SIGN_OUT_PURGE_FAILED)
         );
         assert!(
-            purge_local_data_for_sign_out(Err("not initialised".into()), None, false)
+            purge_local_data_for_sign_out(Err("not initialised".into()), None, false, None)
                 .unwrap_err()
                 .starts_with(SIGN_OUT_PURGE_FAILED)
         );
         // No database yet is a fresh install: nothing to purge.
         let fresh = tempfile::tempdir().unwrap();
         assert_eq!(
-            purge_local_data_for_sign_out(Ok(fresh.path().to_path_buf()), None, true),
+            purge_local_data_for_sign_out(Ok(fresh.path().to_path_buf()), None, true, None),
             Ok(())
         );
     }
@@ -25717,6 +29802,7 @@ mod account_binding_tests {
                 db,
                 sync_root: None,
                 staging_dirs: Vec::new(),
+                kept: Default::default(),
             },
         )
     }
@@ -25983,11 +30069,12 @@ mod account_binding_tests {
             // `a_failed_sign_out_purge_stops_the_sign_out_on_macos_and_linux`).
             #[cfg(not(target_os = "windows"))]
             assert_eq!(
-                purge_local_data_for_sign_out(
+                with_own_config(|| purge_local_data_for_sign_out(
                     Ok(local.dir.path().to_path_buf()),
                     None,
-                    cfg!(target_os = "macos") && owe_after_sign_out
-                ),
+                    cfg!(target_os = "macos") && owe_after_sign_out,
+                    None
+                )),
                 Ok(())
             );
             // Windows signs out through `windows_cf::signout::purge`, which refuses while a change is queued (so the
@@ -26029,7 +30116,7 @@ mod account_binding_tests {
     fn a_registered_domain_is_no_longer_known_gone_so_a_later_first_start_owes_a_check() {
         let local = local_data_of(Some(alice()));
         assert_eq!(
-            purge_local_data_for_sign_out(Ok(local.dir.path().to_path_buf()), None, false),
+            with_own_config(|| purge_local_data_for_sign_out(Ok(local.dir.path().to_path_buf()), None, false, None)),
             Ok(())
         );
         assert!(
@@ -26101,7 +30188,7 @@ mod account_binding_tests {
         crate::state_db::StateDb::open(state_dir.path().join("state.db")).unwrap();
         // The function `clear_session_impl` calls, which reaches `purge_local_state_files`.
         assert_eq!(
-            purge_local_data_for_sign_out(Ok(state_dir.path().to_path_buf()), None, false),
+            with_own_config(|| purge_local_data_for_sign_out(Ok(state_dir.path().to_path_buf()), None, false, None)),
             Ok(())
         );
         let left: Vec<&PathBuf> = orphans.iter().filter(|orphan| orphan.exists()).collect();
@@ -26244,11 +30331,23 @@ mod account_binding_tests {
             purge.contains("db.clear_account_data(owe_finder_removal)"),
             "a sign-out leaves no account row and no owner"
         );
-        assert!(!purge.contains("tracing::warn!"), "no warn-and-continue left");
+        // Task 1887 (spec 2026-10-10 §7.3): the one warning is the unfinished-marker clear's, a best-effort step after
+        // the rows are cleared. A purge or a clear that fails still stops the sign-out.
+        assert_eq!(
+            purge.matches("tracing::warn!").count(),
+            1,
+            "no warn-and-continue left but the marker clear's:\n{purge}"
+        );
+        assert!(
+            crate::source_pin::squeeze(purge).contains(&crate::source_pin::squeeze(
+                "sign_out::kept_record::clear_unfinished_at(&path)) { tracing::warn!("
+            )),
+            "the one warning is the marker clear's:\n{purge}"
+        );
         let clear = body_between(&production, "async fn clear_session_impl(", "\n}\n");
         assert!(
             crate::source_pin::squeeze(clear).contains(&crate::source_pin::squeeze(
-                "purge_local_data_for_sign_out(state_paths::beebeeb_state_dir(), cfg_sync_root.as_deref(), owe_removal).map_err(&kept_with)?;"
+                "purge_local_data_for_sign_out(state_paths::beebeeb_state_dir(), cfg_sync_root.as_deref(), owe_removal, kept.as_ref()).map_err(&kept_with)?;"
             )),
             "sign-out returns the purge's error:\n{clear}"
         );
@@ -26742,12 +30841,12 @@ mod reauth_tests {
             ),
             (
                 "another account",
-                LoginOutcome::account_mismatch(3),
+                LoginOutcome::account_mismatch(3, None, None),
                 r#"{"requires_2fa":false,"reauthenticated":false,"vault_unlocked":false,"key_replaced":false,"account_mismatch":{"pending_changes":3}}"#,
             ),
             (
                 "another account, nothing waiting",
-                LoginOutcome::account_mismatch(0),
+                LoginOutcome::account_mismatch(0, None, None),
                 r#"{"requires_2fa":false,"reauthenticated":false,"vault_unlocked":false,"key_replaced":false,"account_mismatch":{"pending_changes":0}}"#,
             ),
         ];
@@ -26891,9 +30990,10 @@ mod reauth_tests {
         let production = production_source();
         let settle = code_of(&production, "async fn settle_sign_in(");
         assert!(
-            settle.contains(
-                "reauth::SignInKind::DifferentAccount => Ok(SignInSettlement::AccountMismatch { pending_changes }),"
-            ),
+            settle.contains(concat!(
+                "reauth::SignInKind::DifferentAccount => ",
+                "Ok(switch_settlement(pending_changes, switch_snapshot(state))),"
+            )),
             "{settle}"
         );
         assert!(settle.contains("reauth::SignInKind::NeedsKeyProof | reauth::SignInKind::Unconfirmed => Ok(SignInSettlement::Unconfirmed),"), "{settle}");
@@ -26902,12 +31002,22 @@ mod reauth_tests {
             ("desktop_login_2fa", code_of(&production, "async fn desktop_login_2fa(")),
             ("the browser handoff", browser_source()),
         ];
+        // The switch's pattern names three fields, which rustfmt lays over several lines, so its arm is read from the
+        // `=> {` that ends the pattern.
+        fn switch_arm(text: &str) -> &str {
+            let at = text
+                .find("SignInSettlement::AccountMismatch {")
+                .expect("the switch arm");
+            arm(&text[at..], "=> {")
+        }
         for (name, text) in &texts {
-            for needle in [
-                "SignInSettlement::AccountMismatch { pending_changes }",
-                "SignInSettlement::Unconfirmed",
+            for (needle, arm) in [
+                ("SignInSettlement::AccountMismatch", switch_arm(text)),
+                (
+                    "SignInSettlement::Unconfirmed",
+                    arm(text, "SignInSettlement::Unconfirmed"),
+                ),
             ] {
-                let arm = arm(text, needle);
                 for forbidden in [
                     "persist_",
                     "record_local_data_owner",
@@ -26988,13 +31098,16 @@ mod reauth_tests {
             }
         }
         let second_factor = &texts[1].1;
-        for needle in [
-            "SignInSettlement::AccountMismatch { pending_changes }",
-            "SignInSettlement::Unconfirmed",
-            "Err(failure) =>",
+        for (needle, arm) in [
+            ("SignInSettlement::AccountMismatch", switch_arm(second_factor)),
+            (
+                "SignInSettlement::Unconfirmed",
+                arm(second_factor, "SignInSettlement::Unconfirmed"),
+            ),
+            ("Err(failure) =>", arm(second_factor, "Err(failure) =>")),
         ] {
             assert!(
-                arm(second_factor, needle).contains("state.pending_2fa.lock()"),
+                arm.contains("state.pending_2fa.lock()"),
                 "the spent challenge is dropped on {needle}"
             );
         }
@@ -27089,14 +31202,15 @@ mod reauth_tests {
         assert!(in_place.contains("-> Result<bool, ReauthError>"), "{in_place}");
     }
 
-    /// Lead ruling F9: the operations paused for `auth` are resumed in the one engine start and nowhere else. The start
-    /// reads the ask before it reads the keys (so an ask is served only by a start that holds the session of the sign-in
-    /// that asked, or a later one), and resumes after the binding and before the engine exists. Exactly four writers
-    /// ask, in their turn and after their session is in memory: the re-sign-in in place (only when unlocked), the
-    /// browser handoff's install, the recovery-phrase unlock and (F9 review I-2) the startup restore whose probe
-    /// confirmed the stored token. The key-replaced re-sign-in and the Keychain unlock after a Lock never ask. After a
-    /// key replacement (F9 review I-1, M2) the `auth` pauses are held as `key_replaced`, under the engine slot, before
-    /// the kept key is removed or the slot is released. Compared with `squeeze`.
+    /// Lead ruling F9: on a Mac the operations paused for `auth` are resumed in the one engine start and nowhere else
+    /// in this file (spec D11, task 1888: off macOS the engine resumes them after its reconcile pass). The start reads
+    /// the ask before it reads the keys (so an ask is served only by a start that holds the session of the sign-in that
+    /// asked, or a later one), and resumes after the binding and before the engine exists. Exactly four writers ask, in
+    /// their turn and after their session is in memory: the re-sign-in in place (only when unlocked), the browser
+    /// handoff's install, the recovery-phrase unlock and (F9 review I-2) the startup restore whose probe confirmed the
+    /// stored token. The key-replaced re-sign-in and the Keychain unlock after a Lock never ask. After a key
+    /// replacement (F9 review I-1, M2) the `auth` pauses are held as `key_replaced`, under the engine slot, before the
+    /// kept key is removed or the slot is released. Compared with `squeeze`.
     #[test]
     fn the_queue_resumes_in_the_one_engine_start_after_a_sign_in_put_its_session_in_memory() {
         use crate::source_pin::squeeze;
@@ -27254,28 +31368,11 @@ mod reauth_tests {
             "the ask is made only inside a checked turn:\n{writer}"
         );
 
-        // Ruling F9, round 2: only a Mac asks; Windows and Linux keep today's flow (spec R8). Each ask is gated where it
-        // is made, the function too, so what the other platforms compile names it nowhere: nothing is asked there, and
-        // every start returns before it resumes anything.
+        // Ruling F9, round 2, as spec D11 (task 1888) amends it: every OS asks (see
+        // `windows_and_linux_ask_for_the_resume_at_the_four_sign_in_points`); the holds under the engine slot stay a
+        // Mac's (off macOS the engine's key check holds them, spec D12), and so does the resume in the engine start.
         let macos_only = squeeze("#[cfg(target_os = \"macos\")]");
         for (signature, gated) in [
-            ("fn install_new_session(", format!("{macos_only}{ask}")),
-            ("fn install_recovered_session(", format!("{macos_only}{ask}")),
-            ("fn reauth_swap_token(", format!("{macos_only}{asks_when_unlocked}")),
-            (
-                "async fn restore_stored_session(",
-                format!(
-                    "{macos_only}{}",
-                    squeeze("if token_confirmed { ask_to_resume_auth_paused(&write, acct); }")
-                ),
-            ),
-            (
-                "async fn restore_stored_session(",
-                format!(
-                    "{macos_only}{}",
-                    squeeze("let token_confirmed = matches!(probe, StartupSessionCheck::Authorized { .. });")
-                ),
-            ),
             (
                 "fn reauth_swap_token_without_key(",
                 format!(
@@ -27305,8 +31402,8 @@ mod reauth_tests {
                 "{signature} asks or holds on macOS only:\n{body}"
             );
         }
-        // What Windows and Linux compile names none of it: no ask, no hold, no slot taken around the swap, no startup
-        // check that resumes. Every start there returns before it resumes anything (spec R8: today's flow).
+        // What Windows and Linux compile names no hold under the slot and no resume in the engine start: the engine
+        // resumes there, after its reconcile pass and the key check (spec D11, D12).
         let other_platforms =
             super::finder_setup_command_tests::without_items(&production, &["#[cfg(target_os = \"macos\")]"]);
         let named = other_platforms
@@ -27314,10 +31411,10 @@ mod reauth_tests {
             .filter(|line| {
                 !line.trim_start().starts_with("//")
                     && [
-                        "ask_to_resume_auth_paused",
                         "hold_auth_paused_for_the_replaced_key",
                         "stop_the_outgoing_engine_and_hold_auth_paused",
-                        "token_confirmed",
+                        "resume_operations_paused_for_auth",
+                        "let resume_asked",
                     ]
                     .iter()
                     .any(|name| line.contains(name))
@@ -27337,6 +31434,156 @@ mod reauth_tests {
             2,
             "and both holds"
         );
+    }
+
+    /// Spec D11 (task 1888; the lead lifted the F9/R8 macOS-only ruling): every sign-in point that asks for the resume
+    /// asks on every OS that has it. No `#[cfg(target_os = "macos")]` stands in the four lines above any of the four
+    /// asks, nor above the writer or the startup check's `token_confirmed`. `reauth_swap_token` keeps its own
+    /// `not(windows)` gate (builder check Q2), so Windows has three asks and Linux four.
+    #[test]
+    fn windows_and_linux_ask_for_the_resume_at_the_four_sign_in_points() {
+        use crate::source_pin::squeeze;
+        let production = production_source();
+        let lines: Vec<&str> = production.lines().collect();
+        let macos_only = "#[cfg(target_os = \"macos\")]";
+        let asks: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| {
+                line.contains("ask_to_resume_auth_paused(")
+                    && !line.contains("fn ask_to_resume_auth_paused(")
+                    && !line.trim_start().starts_with("//")
+            })
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(asks.len(), 4, "four sign-in points ask");
+        for at in asks {
+            let above = lines[at.saturating_sub(4)..at].join("\n");
+            assert!(!above.contains(macos_only), "an ask gated to macOS:\n{above}\n{}", lines[at]);
+        }
+        for item in [
+            "fn ask_to_resume_auth_paused(",
+            "let token_confirmed = matches!(probe, StartupSessionCheck::Authorized { .. });",
+        ] {
+            let at = lines.iter().position(|line| line.contains(item)).unwrap_or_else(|| panic!("{item}"));
+            let above = lines[at.saturating_sub(4)..at].join("\n");
+            assert!(!above.contains(macos_only), "{item} gated to macOS:\n{above}");
+        }
+        let swap = lines
+            .iter()
+            .position(|line| line.starts_with("fn reauth_swap_token("))
+            .expect("fn reauth_swap_token(");
+        assert_eq!(lines[swap - 1], "#[cfg(not(target_os = \"windows\"))]", "its own gate is kept");
+        let ask = squeeze("ask_to_resume_auth_paused(&write, acct);");
+        let linux = squeeze(&super::finder_setup_command_tests::without_items(
+            &production,
+            &[macos_only, "#[cfg(target_os = \"windows\")]"],
+        ));
+        assert_eq!(linux.matches(&ask).count(), 4, "Linux compiles all four asks");
+        let windows = squeeze(&super::finder_setup_command_tests::without_items(
+            &production,
+            &[macos_only, "#[cfg(not(target_os = \"windows\"))]", "#[cfg(target_os = \"linux\")]"],
+        ));
+        assert_eq!(windows.matches(&ask).count(), 3, "Windows compiles three: no reauth_swap_token");
+    }
+
+    /// Spec D11: a Mac resumes in the engine start, before the engine exists; Windows and Linux do not resume there
+    /// (the engine does, after its pass). The start reads the ask, and resumes, on macOS only.
+    #[test]
+    fn start_engine_bound_resumes_before_the_spawn_on_macos_only() {
+        use crate::source_pin::squeeze;
+        let production = production_source();
+        let macos_only = squeeze("#[cfg(target_os = \"macos\")]");
+        let bound = squeeze(&code_of(&production, "fn start_engine_bound("));
+        for gated in [
+            "let resume_asked = acct.auth_resume_asked.load(Ordering::SeqCst);",
+            "resume_operations_paused_for_auth(acct, paths, resume_asked);",
+        ] {
+            assert!(bound.contains(&format!("{macos_only}{}", squeeze(gated))), "{gated} on macOS only:\n{bound}");
+        }
+        let resumed = bound.find("resume_operations_paused_for_auth(acct,paths,resume_asked);").unwrap();
+        assert!(resumed < bound.find("spawn(paths.sync_root.clone()").unwrap(), "before the spawn:\n{bound}");
+        let other_platforms =
+            super::finder_setup_command_tests::without_items(&production, &["#[cfg(target_os = \"macos\")]"]);
+        let other_bound = code_of(&other_platforms, "fn start_engine_bound(");
+        assert!(
+            !other_bound.contains("resume_operations_paused_for_auth") && !other_bound.contains("resume_asked"),
+            "Windows and Linux do not resume in the start:\n{other_bound}"
+        );
+        assert!(
+            !other_platforms.contains("fn resume_operations_paused_for_auth("),
+            "the start's resume is a Mac's"
+        );
+        // The engine gets the account's resume requests on every OS.
+        let spawn = squeeze(&code_of(&production, "fn spawn_bound_engine("));
+        assert!(
+            spawn.contains(&squeeze(
+                "runner::ResumeTicket { asked: acct.auth_resume_asked.clone(), done: acct.auth_resume_done.clone(),
+                 pass_wanted: acct.reconcile_pass_wanted.clone(), pass_served: acct.reconcile_pass_served.clone(), }"
+            )),
+            "{spawn}"
+        );
+    }
+
+    /// Spec D11 and I6: off macOS the engine runs the reconcile pass, then the key check and the resume, inside the
+    /// successful tick's arm (the pull proved the server accepts this session's token) and before that tick's queue
+    /// step. D11b: the send phase's wake runs no queue step until this run's first pass has committed.
+    #[test]
+    fn the_engine_reconciles_then_resumes_in_the_successful_tick_before_its_queue_step() {
+        use crate::source_pin::squeeze;
+        let runner = include_str!("runner.rs").replace("\r\n", "\n");
+        let runner = &runner[..runner.find("#[cfg(test)]\nmod tests").expect("runner's tests")];
+        let tick = &runner[runner.find("Ok(tick) => {").expect("the successful tick's arm")..];
+        let tick = squeeze(&tick[..tick.find("Err(e) => {").unwrap()]);
+        let pass = tick
+            .find(&squeeze(
+                "#[cfg(not(target_os = \"macos\"))]
+                 if tick.reached_server
+                     && let Err(error) = bridge.reconcile_then_resume(&sync_root, &resume, &mut reconciled_this_run).await {",
+            ))
+            .unwrap_or_else(|| panic!("the pass, off macOS, in the arm, only when the pull came back:\n{tick}"));
+        assert!(tick.find("auth_health.note_result(None);").unwrap() < pass, "after the pull succeeded");
+        assert!(pass < tick.find("queue_step(").unwrap(), "before the tick's queue step:\n{tick}");
+        assert_eq!(squeeze(runner).matches("reconcile_then_resume(").count(), 1, "one call");
+        // Review P2: the engine's queue reads the same ticket, so it sends nothing while a release waits for a pass.
+        assert!(squeeze(runner).contains(&squeeze(".with_resume(resume.clone())")), "the bridge shares the ticket");
+        assert!(
+            squeeze(runner).contains(&squeeze(
+                "#[cfg(not(target_os = \"macos\"))]
+                 let mut reconciled_this_run = false;"
+            )),
+            "per engine run"
+        );
+        // D11b.
+        let phase = &runner[runner.find("Wake::Phase => {").expect("the phase's arm")..];
+        let phase = squeeze(&phase[..phase.find("\n            }\n").unwrap()]);
+        let waits = phase
+            .find(&squeeze(
+                "#[cfg(not(target_os = \"macos\"))]
+                 if !reconciled_this_run { continue; }",
+            ))
+            .unwrap_or_else(|| panic!("the phase waits for the first pass:\n{phase}"));
+        assert!(waits < phase.find("queue_step(").unwrap(), "{phase}");
+    }
+
+    /// Task 1 ruling (1888 ledger, on 2267's held changes; review P2): "Upload to my Beebeeb" makes a held ghost folder's
+    /// create due again, so it asks for a pass before the release commits and again after it, on the pass counter (the
+    /// engine's queue waits for that pass; a release resumes no `auth` op).
+    #[test]
+    fn a_released_held_change_asks_for_a_pass() {
+        use crate::source_pin::squeeze;
+        let production = production_source();
+        let upload = squeeze(&code_of(&production, "async fn found_while_paused_upload("));
+        let ask = squeeze("pass_wanted.fetch_add(1, Ordering::SeqCst);");
+        let released = upload.find("db.release_found_while_paused(").expect("the release");
+        let before = upload.find(&ask).unwrap_or_else(|| panic!("asks for a pass:\n{upload}"));
+        let after = upload.rfind(&ask).unwrap();
+        assert!(before < released && released < after, "before the release commits, and again after it:\n{upload}");
+        assert!(
+            upload.contains(&squeeze("let pass_wanted = state.active_account()")) && upload.contains(&squeeze(".reconcile_pass_wanted.clone();")),
+            "the pass counter, not the sign-in counter:\n{upload}"
+        );
+        assert!(!upload.contains("auth_resume_asked"), "a release resumes no auth op:\n{upload}");
     }
 
     /// Spec §5.6: a re-sign-in whose kept key the server no longer accepts removes only that key. It never purges,
@@ -27759,9 +32006,7 @@ mod reauth_tests {
             "the gate is compiled into test builds only"
         );
         assert!(
-            gate < clear
-                .find("purge_local_data_for_sign_out(state_paths::")
-                .expect("the purge"),
+            gate < clear.find("purge_local_data_for_sign_out(").expect("the purge"),
             "the gate is taken before the purge"
         );
         // The one test that seeds the shared database itself works under the gate, from its first write to its last check.
@@ -29961,7 +34206,7 @@ mod reauth_tests {
                         assert_eq!(stored_token(&id), token_before, "{name}: and stores no token of B's");
 
                         // The confirmed switch: the full sign-out, which forgets A's email too (spec §5.6).
-                        clear_session_impl(&fx.state, true)
+                        clear_session_impl(&fx.state, true, None, crate::UnknownFilesArg::Keep, None)
                             .await
                             .unwrap_or_else(|e| panic!("{name}: sign-out: {e}"));
                         assert!(!keychain_vault_key_present(&id), "{name}: A's vault key is gone");
@@ -30037,7 +34282,7 @@ mod reauth_tests {
                         )
                         .unwrap();
                         fx.install_session("tok-a", [1u8; 32], Some("a@beebeeb.io"));
-                        clear_session_impl(&fx.state, forget_email)
+                        clear_session_impl(&fx.state, forget_email, None, crate::UnknownFilesArg::Keep, None)
                             .await
                             .unwrap_or_else(|e| panic!("{name}: sign-out: {e}"));
                         assert_eq!(
@@ -30081,7 +34326,7 @@ mod reauth_tests {
                     let before = fx.snapshot();
 
                     assert_eq!(
-                        clear_session_impl(&fx.state, true).await,
+                        clear_session_impl(&fx.state, true, None, crate::UnknownFilesArg::Keep, None).await,
                         Err(SIGN_OUT_EMAIL_NOT_FORGOTTEN.into())
                     );
                     assert_eq!(fx.snapshot(), before, "nothing was torn down");
@@ -31335,10 +35580,10 @@ mod finder_removal_wiring_tests {
 
         // Sign-out (command and menu) and the sweep.
         let command = code_only(&item(&source, "async fn clear_session("));
-        assert!(command.contains("surface_kept_folder(&app, sign_out_kept_folder(&result));"));
+        assert!(command.contains("surface_sign_out_folders(&app, &result);"));
         let menu = &source[source.find("DesktopMenuAction::SignOut => {").expect("menu sign-out")..];
         let menu = &menu[..menu.find("DesktopMenuAction::Quit").expect("next arm")];
-        assert!(code_only(menu).contains("surface_kept_folder(&app, sign_out_kept_folder(&result));"));
+        assert!(code_only(menu).contains("surface_sign_out_folders(&app, &result);"));
         assert!(code_only(&source).contains("surface_kept_folder(&alert_app, Some(location));"));
 
         // Repair and the add rollback record into the config they save afterwards (Windows and Linux). On macOS
@@ -31522,14 +35767,21 @@ mod finder_removal_wiring_tests {
         for failure in [
             "Some(take_slot_and_stop_engine_for_sign_out(&acct).await.map_err(&kept_with)?)",
             "let engine_slot = take_slot_and_stop_engine_for_sign_out(&acct).await.map_err(&kept_with)?;",
-            "purge_local_data_for_sign_out(state_paths::beebeeb_state_dir(), cfg_sync_root.as_deref(), owe_removal).map_err(&kept_with)?;",
+            "let kept = keep_for_sign_out(accepted.as_ref()).map_err(&kept_with)?;",
+            "sign_out_seam(\"before_keep\").map_err(&kept_with)?;",
+            "sign_out_seam(\"after_keep\").map_err(&kept_with)?;",
+            "purge_local_data_for_sign_out(state_paths::beebeeb_state_dir(), cfg_sync_root.as_deref(), owe_removal, kept.as_ref()).map_err(&kept_with)?;",
+            "sign_out_seam(\"after_purge\").map_err(&kept_with)?;",
             "clear_session_holding_slot(&acct, &engine_slot, account::SessionTransition::SignOut).map_err(&kept_with)?;",
             "finish_sign_out_turn(&acct, &engine_slot, true).map_err(&kept_with)?;",
             "finish_sign_out_turn(&acct, &engine_slot, false).map_err(&kept_with)?;",
+            // Task 2191 (review thread on #157): the Windows keychain step too.
+            "clear_keychain_session(acct.id.as_str()).map_err(&kept_with)?;",
         ] {
             assert!(squash_ws(&sign_out).contains(&squash_ws(failure)), "{failure}");
         }
-        assert_eq!(squash_ws(&sign_out).matches(".map_err(&kept_with)?").count(), 6);
+        // Task 1887: the keep step and its three test seams (test builds only) carry the folders too.
+        assert_eq!(squash_ws(&sign_out).matches(".map_err(&kept_with)?").count(), 11);
         assert_eq!(
             sign_out.matches("        preserved_location,\n").count(),
             2,
@@ -31537,10 +35789,10 @@ mod finder_removal_wiring_tests {
         );
         // ... and both ways out of a sign-out raise the alert, on success and on failure (I1).
         let command = code_only(&item(&source, "async fn clear_session("));
-        assert!(command.contains("surface_kept_folder(&app, sign_out_kept_folder(&result));"));
+        assert!(command.contains("surface_sign_out_folders(&app, &result);"));
         let menu = &source[source.find("DesktopMenuAction::SignOut => {").expect("menu sign-out")..];
         let menu = &menu[..menu.find("DesktopMenuAction::Quit").expect("next arm")];
-        assert!(code_only(menu).contains("surface_kept_folder(&app, sign_out_kept_folder(&result));"));
+        assert!(code_only(menu).contains("surface_sign_out_folders(&app, &result);"));
 
         // Repair: the folder goes into the result the Sync tab reads.
         let repair = code_only(&item(&source, "async fn reset_macos_integration("));
@@ -31678,7 +35930,7 @@ mod finder_removal_wiring_tests {
         let menu = &source[source.find("DesktopMenuAction::SignOut => {").expect("menu sign-out")..];
         let menu = squash(&menu[..menu.find("DesktopMenuAction::Quit").expect("next arm")]);
         assert!(menu.contains("spawn_menu_task(spec.id,asyncmove{"));
-        assert!(menu.contains("clear_session_impl(&state,false).await"));
+        assert!(menu.contains("clear_session_impl(&state,false,None,crate::UnknownFilesArg::Keep,None).await"));
         assert!(
             !menu.contains("remove_file_provider_domain"),
             "no removal in the menu handler itself"
@@ -31862,7 +36114,7 @@ mod config_write_pin_tests {
 
     /// Every `.rs` file under `src` as `(name relative to src, production text)`: LF line ends, test modules
     /// dropped, and lines that are comments dropped.
-    fn production_files() -> Vec<(String, String)> {
+    pub(super) fn production_files() -> Vec<(String, String)> {
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut files = Vec::new();
         let mut stack = vec![src.clone()];
@@ -31939,6 +36191,20 @@ mod config_write_pin_tests {
     /// are both on disk afterwards. This is the behaviour the converted sites share; the pin below holds the rest.
     #[tokio::test]
     async fn test_1889_the_real_writers_land_next_to_a_save_that_was_in_flight() {
+        let on_disk = with_a_save_in_flight(
+            |_| {},
+            || async {
+                super::mark_menu_bar_hint_seen().expect("mark_menu_bar_hint_seen");
+            },
+        )
+        .await;
+        assert_eq!(
+            on_disk.kept_unsynced_folder.as_deref(),
+            Some(KEPT),
+            "mark_menu_bar_hint_seen: the folder"
+        );
+        assert!(on_disk.menu_bar_hint_seen, "mark_menu_bar_hint_seen: its change");
+
         let on_disk = with_a_save_in_flight(
             |_| {},
             || async {
@@ -32029,7 +36295,7 @@ mod config_write_pin_tests {
             || async {
                 let mut settings = crate::config::DesktopSettings::from(&DesktopConfig::default());
                 settings.upload_kbps_limit = Some(1234);
-                super::set_desktop_config(settings).expect("set_desktop_config");
+                super::save_desktop_settings(settings).expect("set_desktop_config");
             },
         )
         .await;
@@ -32137,12 +36403,24 @@ mod config_write_pin_tests {
             lock < read && read < write && write < mirror,
             "the lock is held before the read and still held at the write and the mirror step:\n{one_place}"
         );
+        // Task 1887: the keep step's durable save is the same one place with a durable write step, never a second
+        // load-modify-save: `save_to_durable` is defined once and called once, from that place.
+        assert_eq!(
+            config.matches("save_to_durable(").count(),
+            2,
+            "the durable write is defined once and called once, from the one place"
+        );
+        assert!(one_place.contains("cfg.save_to_durable(path, fs_steps)"), "{one_place}");
 
         // Every other way in is that one place.
         for (start, calls) in [
             ("    pub(crate) fn update_at<R>(", "Self::try_update_at("),
             ("    pub(crate) fn try_update_at<R>(", "Self::try_update_at_then("),
             ("    pub(crate) fn update_at_then<R>(", "Self::try_update_at_then("),
+            (
+                "    pub(crate) fn update_at_durable_with<R>(",
+                "Self::try_update_at_then(",
+            ),
             (
                 "    pub(crate) fn update<R>(",
                 "Self::update_at(&Self::path()?, change)",
@@ -32175,10 +36453,12 @@ mod config_write_pin_tests {
     }
 
     /// The calls whose closure gets the config to change.
-    const UPDATE_CALLS: [&str; 5] = [
+    const UPDATE_CALLS: [&str; 7] = [
         "DesktopConfig::update(",
         "DesktopConfig::update_at(",
         "DesktopConfig::try_update_at(",
+        "DesktopConfig::update_at_then(",
+        "DesktopConfig::update_at_durable_with(",
         ".update_held(",
         ".update_held_at(",
     ];
@@ -32405,7 +36685,7 @@ mod config_write_pin_tests {
 
                 let patch: crate::config::DesktopSettings =
                     serde_json::from_str(r#"{ "upload_kbps_limit": 2000 }"#).expect("the window sends one field");
-                super::set_desktop_config(patch).expect("the speed is saved");
+                super::save_desktop_settings(patch).expect("the speed is saved");
 
                 let on_disk = DesktopConfig::load_from(&path).expect("reads back");
                 assert!(on_disk.pause_sync, "the tray's pause survived the speed change");
@@ -32489,6 +36769,8 @@ mod config_write_pin_tests {
             "DesktopConfig::try_update_at(&path, |cfg| { std::mem::swap(cfg, &mut stale); (true, ()) })",
             "DesktopConfig::update(|cfg| { cfg.clone_from(&stale); (true, ()) })",
             "DesktopConfig::update(|c| { let _old = std::mem::take(c); (true, ()) })",
+            "DesktopConfig::update_at_then(&path, |cfg| { *cfg = stale.clone(); (true, ()) }, |_| {})",
+            "DesktopConfig::update_at_durable_with(&path, |cfg| { *cfg = stale; (true, ()) }, &RealConfigFs)",
         ] {
             assert!(!whole_copy_writes(bad).is_empty(), "not found: {bad}");
         }
@@ -32496,6 +36778,8 @@ mod config_write_pin_tests {
             "DesktopConfig::update(|cfg| { cfg.sync_mode = Some(mode); (true, ()) })",
             "DesktopConfig::update(|cfg| { if *cfg == other { return (false, ()); } (true, ()) })",
             "held.update_held(|held| (clear_finder_install_failure(held), ()))",
+            "DesktopConfig::update_at_then(path, |cfg| { cfg.pause_sync = paused; (true, ()) }, |cfg| flag.store(cfg.pause_sync, Ordering::Relaxed))",
+            "DesktopConfig::update_at_durable_with(path, |cfg| (true, record_kept_unsent(cfg, folder)), fs_steps)",
         ] {
             assert_eq!(whole_copy_writes(good), Vec::<String>::new(), "found in: {good}");
         }
@@ -32576,7 +36860,7 @@ mod config_write_pin_tests {
         let update = "DesktopConfig::update(";
         let held = ".update_held(";
         // (the item, what it must contain). None loads a copy of its own: load, change and write are one update.
-        let sites: [(&str, &str); 16] = [
+        let sites: [(&str, &str); 17] = [
             ("persist_last_signed_in_email", update),
             ("forget_last_signed_in_email", "DesktopConfig::try_update_at("),
             ("persist_finder_install_result", held),
@@ -32585,13 +36869,16 @@ mod config_write_pin_tests {
             ("persist_sync_root_and_start_engine", held),
             ("ensure_sync_root_and_engine", update),
             ("pick_sync_root", update),
-            ("set_desktop_config", update),
+            // Task 1683 slice 1 (review item 3): the command is a wrapper that also refreshes the menu's pause label;
+            // its write moved, unchanged, to `save_desktop_settings`.
+            ("save_desktop_settings", update),
             ("set_sync_paused", "persist_sync_paused_at("),
             ("persist_sync_paused_at", "DesktopConfig::update_at_then("),
             ("set_sync_mode", update),
             ("set_selective_sync", update),
             ("set_known_folder_backup", update),
             ("mark_known_folder_onboarding_seen", update),
+            ("mark_menu_bar_hint_seen", update),
             ("record_installed_release_channel", update),
         ];
         for (name, must) in sites {
@@ -32637,5 +36924,3648 @@ mod config_write_pin_tests {
                 "{name} writes through the held-copy helpers:\n{body}"
             );
         }
+    }
+}
+
+/// Spec 2026-10-10 (task 1887): the sign-out's keep step and its purge, on a Mac.
+#[cfg(all(test, target_os = "macos"))]
+mod sign_out_keep_tests {
+    use super::*;
+    use crate::config::RealConfigFs;
+    use crate::engine_bridge::FinderStagingBases;
+    use crate::sign_out::copy::{
+        E1_UNSENT_CHANGES, E2_UNSENT_COPY_FAILED, E3_UNSENT_COUNT_FAILED, UNSENT_CHANGES_CODE, UNSENT_COPY_FAILED_CODE,
+        UNSENT_COUNT_FAILED_CODE, coded,
+    };
+    use crate::sign_out::keep::{Acknowledge, KeepInputs, KeptSet, keep_unsent};
+    use crate::sign_out::kept_names::{APP_BUNDLE_ID, kept_root};
+    use crate::sign_out::kept_record::{saved_kept_unsent_at, unfinished_at};
+    use crate::sign_out::kept_writer::SystemClone;
+    use crate::sign_out::snapshot::AskSnapshot;
+    use crate::sign_out::waiting::WaitingChanges;
+    use std::path::Path;
+
+    /// A state dir with `state.db` where the sign-out's purge looks for it, and a config file of its own.
+    struct PurgeFixture {
+        dir: tempfile::TempDir,
+        db: state_db::StateDb,
+    }
+
+    impl PurgeFixture {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let db = state_db::StateDb::open(state_paths::state_db_path_from_state_dir(dir.path())).unwrap();
+            Self { dir, db }
+        }
+        fn config(&self) -> PathBuf {
+            self.dir.path().join("desktop.toml")
+        }
+        fn staged(&self, name: &str) -> PathBuf {
+            self.dir.path().join("staging").join(name)
+        }
+        fn write(&self, op_id: &str, file_id: &str, bytes: &[u8]) -> PathBuf {
+            let staged = self.staged(op_id);
+            std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
+            std::fs::write(&staged, bytes).unwrap();
+            self.db
+                .hold_lock_for_test()
+                .execute_batch(&format!(
+                    "INSERT OR IGNORE INTO files (file_id, path) VALUES ('{file_id}', '{file_id}.txt');
+                     INSERT INTO operation_queue (op_id, kind, file_id, payload_path, write_id, write_origin)
+                     VALUES ('{op_id}', 'upload_version', '{file_id}', '{}', '{op_id}', 'minted');
+                     INSERT INTO staged_payloads (path, completed) VALUES ('{}', 0);",
+                    staged.display(),
+                    staged.display()
+                ))
+                .unwrap();
+            staged
+        }
+        fn keep(&self) -> KeptSet {
+            self.keep_into(&self.config())
+        }
+        /// The keep step, recording the folder in `config`.
+        fn keep_into(&self, config: &Path) -> KeptSet {
+            let root = self.dir.path().join("Documents").join("Changes not sent");
+            keep_unsent(KeepInputs {
+                db: &self.db,
+                acknowledge: Acknowledge::Nothing,
+                root: &root,
+                event_name: "event".into(),
+                config_path: config,
+                clone: &SystemClone,
+                config_fs: &RealConfigFs,
+            })
+            .unwrap()
+        }
+        /// `body` with the app's `desktop.toml` (`DesktopConfig::path()`, the file the sign-out's purge clears the marker
+        /// in) in this fixture's own directory, never in the sandbox other tests share. `body` gets that file's path.
+        fn with_own_config<R>(&self, body: impl FnOnce(&Path) -> R) -> R {
+            let dir = self.dir.path().join("config");
+            std::fs::create_dir_all(&dir).unwrap();
+            crate::config::CONFIG_DIR_OVERRIDE.sync_scope(dir, || body(&DesktopConfig::path().unwrap()))
+        }
+        fn queued(&self) -> usize {
+            self.db.waiting_rows().unwrap().len()
+        }
+    }
+
+    /// Everything `tracing` emits on this thread while `body` runs, as text.
+    fn capture_logs(body: impl FnOnce()) -> String {
+        #[derive(Clone)]
+        struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buffer = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer = Capture(buffer.clone());
+        // tracing caches each callsite's interest for the whole process. While only ONE dispatcher is alive,
+        // tracing-core takes that interest from the registering thread's own default, so a callsite first hit by another
+        // test thread, which has no subscriber, is cached as "never" and this capture misses its events. A second live
+        // dispatcher keeps registration on the all-dispatchers path.
+        let _second_dispatcher = tracing::Dispatch::new(tracing_subscriber::registry());
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .finish();
+        tracing::subscriber::with_default(subscriber, body);
+        let bytes = buffer.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    /// U12 on the release layout (spec §7.1, amended for `184ac962`).
+    #[test]
+    fn the_kept_folder_is_out_of_every_purges_reach() {
+        let container = Path::new("/Users/a/Library/Containers/io.beebeeb.app/Data");
+        let data = container.join("Library").join("Application Support");
+        let cache = container.join("Library").join("Caches");
+        let staging = FinderStagingBases {
+            data: Some(data.clone()),
+            cache: Some(cache.clone()),
+            temp: container.join("tmp"),
+        };
+        let hydrate = PathBuf::from("/Users/a/Library/Group Containers/R8352WDJJR.io.beebeeb.app.fileprovider/hydrate");
+        let roots = disposable_cache_roots_in(container.join("tmp"), Some(cache.clone()), Some(hydrate), &staging);
+        let staging_list = staging.candidates();
+        // The lists' shape first: a whole data dir in either list would otherwise show only as the unsandboxed root
+        // being under it.
+        let durable = data.join("beebeeb").join("finder-writes");
+        assert!(
+            roots.contains(&durable),
+            "the purge's allow-list holds the durable staging root"
+        );
+        assert!(staging_list.contains(&durable), "the orphan sweep holds it too");
+        assert!(
+            !roots.contains(&data) && !staging_list.contains(&data),
+            "never the whole data dir"
+        );
+        assert!(
+            staging_list.contains(&cache.join("beebeeb").join("finder-writes")),
+            "the old Caches root stays"
+        );
+        let kept = [
+            kept_root(Some(&container.join("Documents")), Some(&data), APP_BUNDLE_ID).unwrap(),
+            kept_root(Some(Path::new("/Users/a/Documents")), Some(&data), APP_BUNDLE_ID).unwrap(),
+        ];
+        for kept in &kept {
+            for root in roots.iter().chain(staging_list.iter()) {
+                assert!(
+                    !kept.starts_with(root),
+                    "{} is under {}",
+                    kept.display(),
+                    root.display()
+                );
+            }
+        }
+
+        let production = super::finder_setup_command_tests::production_source();
+        let wrapper = super::finder_setup_command_tests::body_between(
+            &production,
+            "fn disposable_cache_roots() -> Vec<PathBuf> {",
+            "\n}\n",
+        );
+        assert_eq!(wrapper.matches("disposable_cache_roots_in(").count(), 1, "{wrapper}");
+        assert!(
+            !wrapper.contains("roots.push") && !wrapper.contains("vec!["),
+            "the wrapper builds nothing itself: {wrapper}"
+        );
+        // The whole body is the one call: a root added after the core (the whole data dir, say) would put the kept
+        // folder's fallback under the purge, and the core's own test would not see it.
+        let body: String = wrapper
+            .split_once('{')
+            .map_or("", |(_, body)| body)
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert_eq!(
+            body.replace(",)", ")"),
+            "disposable_cache_roots_in(std::env::temp_dir(),dirs::cache_dir(),macos_hydrate_cache_root(),\
+             &engine_bridge::FinderStagingBases::current())",
+            "the wrapper is one call to its core and nothing else: {wrapper}"
+        );
+    }
+
+    /// U14: a waiting write, then an other change nobody acknowledged, each queued after the keep step.
+    #[test]
+    fn the_purge_guard_runs_before_any_file_is_deleted() {
+        let f = PurgeFixture::new();
+        let a = f.write("wa", "a", b"a");
+        let kept = f.keep();
+        let late = f.write("late", "late", b"late"); // the test seam: a waiting write after the keep step
+        let error = purge_local_state_files_as(&f.db, None, &[], None, Some(&kept))
+            .err()
+            .expect("the guard refuses");
+        assert_eq!(
+            error,
+            coded(UNSENT_COPY_FAILED_CODE, E2_UNSENT_COPY_FAILED),
+            "the refusal is E2 with its code"
+        );
+        assert!(late.exists() && a.exists(), "no staged copy was touched");
+        let folder = kept.folder.clone().unwrap();
+        assert!(folder.join("a.txt").exists(), "the kept folder stays");
+        assert_eq!(
+            saved_kept_unsent_at(&f.config()).unwrap(),
+            Some(folder.to_string_lossy().into_owned())
+        );
+        assert_eq!(f.queued(), 2, "no queue row is gone");
+
+        // A rename queued after the keep step: an other change, and nobody was asked about it.
+        let f = PurgeFixture::new();
+        let a = f.write("wa", "a", b"a");
+        let kept = f.keep();
+        f.db.hold_lock_for_test()
+            .execute(
+                "INSERT INTO operation_queue (op_id, kind, file_id, target_path) VALUES ('rn', 'rename_file', 'a', 'b.txt')",
+                [],
+            )
+            .unwrap();
+        let error = purge_local_state_files_as(&f.db, None, &[], None, Some(&kept))
+            .err()
+            .expect("the guard refuses an other change nobody acknowledged");
+        assert_eq!(error, coded(UNSENT_COPY_FAILED_CODE, E2_UNSENT_COPY_FAILED));
+        assert!(a.exists(), "no staged copy was touched");
+        assert!(kept.folder.unwrap().join("a.txt").exists(), "the kept folder stays");
+        assert_eq!(f.queued(), 2, "no queue row is gone");
+    }
+
+    /// Spec §2: an upload whose completion is recorded is not a waiting write. The keep step does not count it, so the
+    /// guard does not ask for it: it neither holds the purge nor survives it.
+    #[test]
+    fn a_completed_upload_does_not_hold_the_purge() {
+        let f = PurgeFixture::new();
+        let a = f.write("wa", "a", b"a");
+        let done = f.write("done", "d", b"done");
+        f.db.hold_lock_for_test()
+            .execute(
+                "INSERT INTO upload_resume (op_id, payload_path, payload_size, payload_mtime_ns, upload_session_id,
+                   server_file_id, object_version_id, chunk_size_bytes, chunk_count, completed_version)
+                 VALUES ('done', ?1, 4, 0, 's', 'd', 'v', 4, 1, 2)",
+                rusqlite::params![done.to_str().unwrap()],
+            )
+            .unwrap();
+        let kept = f.keep();
+        assert!(
+            !kept.keeps("done"),
+            "the keep step does not account for a completed upload"
+        );
+        purge_local_state_files_as(&f.db, None, &[], None, Some(&kept))
+            .expect("a completed upload does not hold the purge");
+        assert!(!a.exists() && !done.exists(), "both copies are removed");
+        assert_eq!(f.queued(), 0);
+    }
+
+    /// U39 (a) and (b); (c) is the async test below.
+    #[test]
+    fn a_purge_failure_after_the_keep_step_spares_waiting_copies_and_is_named_next_time() {
+        // (a) A removal fails on an orphan: every waiting copy is still there.
+        let f = PurgeFixture::new();
+        let a = f.write("wa", "a", b"a");
+        let b = f.write("wb", "b", b"b");
+        let orphan = f.staged("orphan");
+        std::fs::write(&orphan, b"orphan").unwrap();
+        f.db.hold_lock_for_test()
+            .execute(
+                "INSERT INTO staged_payloads (path, completed) VALUES (?1, 1)",
+                rusqlite::params![orphan.to_str().unwrap()],
+            )
+            .unwrap();
+        let kept = f.keep();
+        let fail_on_orphan = |path: &Path| {
+            if path == orphan {
+                Err(std::io::Error::other("injected"))
+            } else {
+                std::fs::remove_file(path)
+            }
+        };
+        assert!(purge_local_state_files_with(&f.db, None, &[], None, Some(&kept), &fail_on_orphan).is_err());
+        assert!(a.exists() && b.exists(), "the waiting writes' copies go last");
+        assert_eq!(f.queued(), 2);
+        let folder = kept.folder.unwrap().to_string_lossy().into_owned();
+        assert_eq!(
+            saved_kept_unsent_at(&f.config()).unwrap().as_deref(),
+            Some(folder.as_str()),
+            "the kept folder is recorded"
+        );
+        assert_eq!(
+            unfinished_at(&f.config()).unwrap(),
+            [folder],
+            "saved by the keep step, before the purge"
+        );
+
+        // (b) A removal fails on the second waiting copy: the first is gone, and the next count shows it missing.
+        let f = PurgeFixture::new();
+        let a = f.write("wa", "a", b"a");
+        let b = f.write("wb", "b", b"b");
+        let kept = f.keep();
+        let fail_on_b = |path: &Path| {
+            if path == b {
+                Err(std::io::Error::other("injected"))
+            } else {
+                std::fs::remove_file(path)
+            }
+        };
+        assert!(purge_local_state_files_with(&f.db, None, &[], None, Some(&kept), &fail_on_b).is_err());
+        assert!(!a.exists() && b.exists());
+        let counts = crate::sign_out::waiting::WaitingChanges::read(&f.db).unwrap().counts();
+        assert_eq!(counts.missing_files, 1);
+        assert_eq!(unfinished_at(&f.config()).unwrap().len(), 1);
+    }
+
+    /// U39 (c): a later sign-out that completes clears the list and never touches 1882's key.
+    #[tokio::test]
+    async fn a_completed_purge_clears_the_unfinished_list() {
+        let f = PurgeFixture::new();
+        f.write("wa", "a", b"a");
+        let config_dir = f.dir.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        crate::config::CONFIG_DIR_OVERRIDE
+            .scope(config_dir, async {
+                let config = DesktopConfig::path().unwrap();
+                crate::finder_removal::remember_kept_folder_at(&config, "/macos/kept").unwrap();
+                let root = f.dir.path().join("Documents").join("Changes not sent");
+                let kept = keep_unsent(KeepInputs {
+                    db: &f.db,
+                    acknowledge: Acknowledge::Nothing,
+                    root: &root,
+                    event_name: "event".into(),
+                    config_path: &config,
+                    clone: &SystemClone,
+                    config_fs: &RealConfigFs,
+                })
+                .unwrap();
+                assert_eq!(unfinished_at(&config).unwrap().len(), 1);
+                purge_local_data_for_sign_out(Ok(f.dir.path().to_path_buf()), None, false, Some(&kept)).unwrap();
+                let cfg = DesktopConfig::load_from(&config).unwrap();
+                assert!(
+                    cfg.kept_unsent_unfinished.is_empty(),
+                    "the rows are cleared, so nothing can look missing"
+                );
+                assert_eq!(cfg.kept_unsynced_folder.as_deref(), Some("/macos/kept"));
+                assert!(cfg.kept_unsent_folder.is_some(), "the row stays until dismissed");
+            })
+            .await;
+    }
+
+    /// W13: only a purge that cleared the rows clears the unfinished list. A sign-out purge that stops, on a file it
+    /// cannot remove or at the guard, returns its own error and leaves the list and the row naming the kept folder.
+    /// (A purge that completes clears the list: `a_completed_purge_clears_the_unfinished_list`.)
+    #[test]
+    fn a_sign_out_purge_that_stops_leaves_the_unfinished_list() {
+        // A file that is not a waiting write's copy cannot be removed (a directory where a file is expected).
+        let f = PurgeFixture::new();
+        let a = f.write("wa", "a", b"a");
+        let stuck = f.staged("stuck");
+        std::fs::create_dir_all(stuck.join("inner")).unwrap();
+        f.db.hold_lock_for_test()
+            .execute(
+                "INSERT INTO staged_payloads (path, completed) VALUES (?1, 1)",
+                rusqlite::params![stuck.to_str().unwrap()],
+            )
+            .unwrap();
+        f.with_own_config(|config| {
+            let kept = f.keep_into(config);
+            let folder = kept.folder.clone().unwrap().to_string_lossy().into_owned();
+            let error = purge_local_data_for_sign_out(Ok(f.dir.path().to_path_buf()), None, false, Some(&kept))
+                .expect_err("the purge stops");
+            assert!(
+                error.starts_with(SIGN_OUT_PURGE_FAILED) && error.contains("could not be removed"),
+                "{error}"
+            );
+            assert!(a.exists(), "the waiting write's copy goes last, so it is still there");
+            assert_eq!(f.queued(), 1, "no row is cleared");
+            assert_eq!(
+                unfinished_at(config).unwrap(),
+                [folder.as_str()],
+                "a purge that failed leaves the list"
+            );
+            assert_eq!(saved_kept_unsent_at(config).unwrap(), Some(folder), "and the row");
+        });
+
+        // The guard refuses a waiting write queued after the keep step.
+        let f = PurgeFixture::new();
+        f.write("wa", "a", b"a");
+        f.with_own_config(|config| {
+            let kept = f.keep_into(config);
+            let folder = kept.folder.clone().unwrap().to_string_lossy().into_owned();
+            let late = f.write("late", "late", b"late");
+            let error = purge_local_data_for_sign_out(Ok(f.dir.path().to_path_buf()), None, false, Some(&kept))
+                .expect_err("the guard refuses");
+            assert_eq!(
+                error,
+                coded(UNSENT_COPY_FAILED_CODE, E2_UNSENT_COPY_FAILED),
+                "the refusal reaches the caller as it is, never wrapped"
+            );
+            assert!(late.exists(), "nothing was deleted");
+            assert_eq!(
+                unfinished_at(config).unwrap(),
+                [folder.as_str()],
+                "a refused purge leaves the list"
+            );
+            assert_eq!(saved_kept_unsent_at(config).unwrap(), Some(folder), "and the row");
+        });
+    }
+
+    /// W13 and W10: a marker clear that fails does not stop a purge that cleared the rows (spec §7.3: best effort), and
+    /// its warning names the step that failed, never the error: a read error quotes a line of the file, and the list's
+    /// lines are kept folders' paths.
+    #[test]
+    fn a_failed_marker_clear_is_logged_without_the_kept_folder() {
+        let f = PurgeFixture::new();
+        f.write("wa", "a", b"a");
+        f.with_own_config(|config| {
+            let kept = f.keep_into(config);
+            let folder = kept.folder.clone().unwrap().to_string_lossy().into_owned();
+            // A line the parser stops at, and it names the folder (a hand edit, say): the clear cannot read the file.
+            let mut text = std::fs::read_to_string(config).unwrap();
+            text.push_str(&format!("\nnote = \"{folder}\" and more\n"));
+            std::fs::write(config, text).unwrap();
+            let mut purged = None;
+            let logs = capture_logs(|| {
+                purged = Some(purge_local_data_for_sign_out(
+                    Ok(f.dir.path().to_path_buf()),
+                    None,
+                    false,
+                    Some(&kept),
+                ));
+            });
+            assert_eq!(purged, Some(Ok(())), "a clear that fails does not stop the sign-out");
+            assert_eq!(f.queued(), 0, "the rows are cleared");
+            let warning = logs
+                .lines()
+                .find(|line| line.contains("could not clear the unfinished sign-out marker"))
+                .unwrap_or_else(|| panic!("the failed clear is logged:\n{logs}"));
+            assert!(
+                !logs.contains(&folder),
+                "no log carries the kept folder's path:\n{logs}"
+            );
+            assert!(warning.contains("step=read"), "the warning names the step: {warning}");
+        });
+    }
+
+    const U42: &str = "sign_out_keep_tests::an_interrupted_sign_out_still_names_its_folder_after_a_restart";
+
+    /// The layout the parent and the child share: `state.db`, staging, the kept root and the config base.
+    struct CrashDir {
+        dir: PathBuf,
+    }
+
+    impl CrashDir {
+        fn db(&self) -> state_db::StateDb {
+            state_db::StateDb::open(state_paths::state_db_path_from_state_dir(&self.dir)).unwrap()
+        }
+        fn kept_root(&self) -> PathBuf {
+            self.dir.join("kept")
+        }
+        async fn config(&self) -> PathBuf {
+            crate::config::CONFIG_DIR_OVERRIDE
+                .scope(self.dir.join("config"), async { DesktopConfig::path().unwrap() })
+                .await
+        }
+        fn seed(&self) {
+            let db = self.db();
+            for op in ["w1", "w2", "w3"] {
+                let staged = self.dir.join("staging").join(op);
+                std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
+                std::fs::write(&staged, op.as_bytes()).unwrap();
+                db.hold_lock_for_test()
+                    .execute_batch(&format!(
+                        "INSERT INTO files (file_id, path) VALUES ('{op}', '{op}.txt');
+                         INSERT INTO operation_queue (op_id, kind, file_id, payload_path, write_id, write_origin)
+                         VALUES ('{op}', 'upload_version', '{op}', '{p}', '{op}', 'minted');
+                         INSERT INTO staged_payloads (path, completed) VALUES ('{p}', 0);",
+                        p = staged.display()
+                    ))
+                    .unwrap();
+            }
+        }
+        /// One sign-out's keep and purge, acknowledging the writes already missing.
+        async fn sign_out(&self) -> Result<KeptSet, String> {
+            let db = self.db();
+            let config = self.config().await;
+            let waiting = crate::sign_out::waiting::WaitingChanges::read(&db).unwrap();
+            let snapshot = AskSnapshot::of(&waiting, "o", Vec::new());
+            let kept = keep_unsent(KeepInputs {
+                db: &db,
+                acknowledge: Acknowledge::Asked {
+                    others: &snapshot.others,
+                    missing: &snapshot.missing,
+                },
+                root: &self.kept_root(),
+                event_name: "event".into(),
+                config_path: &config,
+                clone: &SystemClone,
+                config_fs: &RealConfigFs,
+            })
+            .map_err(|failure| failure.message())?;
+            purge_local_state_files_with(&db, None, &[], None, Some(&kept), &|path| std::fs::remove_file(path))?;
+            Ok(kept)
+        }
+        /// Run the child to `point`; require that it reached it and died by a signal. The child writes its output to a
+        /// file in this directory: on this process's output, its harness's lines would be read as a second test run
+        /// by whatever reads `cargo test`'s output (the count guard does).
+        fn crash_at(&self, point: &str) {
+            use std::os::unix::process::ExitStatusExt;
+            let reached = self.dir.join("reached");
+            let _ = std::fs::remove_file(&reached);
+            let log = self.dir.join("child.log");
+            let output = std::fs::File::create(&log).unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", U42, "--test-threads=1", "--nocapture"])
+                .env("BB_TEST_CRASH_CHILD", &self.dir)
+                .env("BB_TEST_CRASH_AT", point)
+                .env("BB_TEST_CRASH_REACHED", &reached)
+                .env("HOME", self.dir.join("home"))
+                .stdout(output.try_clone().unwrap())
+                .stderr(output)
+                .status()
+                .unwrap();
+            // Each line marked, so a failure message never carries a line that reads as this harness's own.
+            let child: String = std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .lines()
+                .map(|line| format!("child| {line}\n"))
+                .collect();
+            assert_eq!(
+                std::fs::read_to_string(&reached).ok().as_deref(),
+                Some(format!("reached:{point}").as_str()),
+                "the child reached {point}; its output:\n{child}"
+            );
+            assert_eq!(
+                status.signal(),
+                Some(libc::SIGABRT),
+                "the child died there, with no return; its output:\n{child}"
+            );
+        }
+        /// After a "restart": the count from what the child left on disk.
+        async fn count(&self) -> (usize, Vec<String>, Option<String>) {
+            let config = self.config().await;
+            let waiting = crate::sign_out::waiting::WaitingChanges::read(&self.db()).unwrap();
+            let unfinished = crate::sign_out::kept_record::unfinished_at(&config).unwrap();
+            let snapshot = AskSnapshot::of(&waiting, "o", unfinished);
+            let row = DesktopConfig::load_from(&config).unwrap().kept_unsent_folder;
+            (snapshot.counts.missing_files, snapshot.counts.earlier_folders, row)
+        }
+    }
+
+    /// U42.
+    #[tokio::test]
+    async fn an_interrupted_sign_out_still_names_its_folder_after_a_restart() {
+        if let Ok(dir) = std::env::var("BB_TEST_CRASH_CHILD") {
+            let _ = CrashDir {
+                dir: PathBuf::from(dir),
+            }
+            .sign_out()
+            .await;
+            return; // reached only if the crash point was never hit; the parent then fails on `reached`
+        }
+        let f1 = |c: &CrashDir| c.kept_root().join("event").to_string_lossy().into_owned();
+        // Resolved: the writer records its resolved root, and these compare with what it recorded.
+        let crash_dir = |scratch: &tempfile::TempDir| CrashDir {
+            dir: std::fs::canonicalize(scratch.path()).unwrap(),
+        };
+        for (point, missing) in [
+            ("AfterKeepSave", 0),
+            ("AfterFirstGroup", 0),
+            ("BetweenWaitingCopies", 1),
+            ("BeforeRowClear", 3),
+        ] {
+            let scratch = tempfile::tempdir().unwrap();
+            let c = crash_dir(&scratch);
+            c.seed();
+            c.crash_at(point);
+            let (missing_files, earlier, row) = c.count().await;
+            assert_eq!(missing_files, missing, "{point}");
+            let expected: Vec<String> = if missing > 0 { vec![f1(&c)] } else { Vec::new() };
+            assert_eq!(earlier, expected, "{point}");
+            assert_eq!(row.as_deref(), Some(f1(&c).as_str()), "{point}");
+            assert_eq!(
+                crate::sign_out::kept_record::unfinished_at(&c.config().await).unwrap(),
+                [f1(&c)],
+                "{point}"
+            );
+            assert_eq!(
+                std::fs::read(Path::new(&f1(&c)).join("w1.txt")).unwrap(),
+                b"w1",
+                "{point}: F1 holds the bytes"
+            );
+        }
+        // (e) From (c)'s leftovers, a second sign-out dies at (c) again: the list holds both, oldest first.
+        let scratch = tempfile::tempdir().unwrap();
+        let c = crash_dir(&scratch);
+        c.seed();
+        c.crash_at("BetweenWaitingCopies");
+        c.crash_at("BetweenWaitingCopies");
+        let f2 = c.kept_root().join("event (2)").to_string_lossy().into_owned();
+        let config = c.config().await;
+        assert_eq!(
+            crate::sign_out::kept_record::unfinished_at(&config).unwrap(),
+            [f1(&c), f2.clone()]
+        );
+        assert_eq!(c.count().await.2.as_deref(), Some(f2.as_str()));
+        assert_eq!(
+            std::fs::read(Path::new(&f1(&c)).join("w1.txt")).unwrap(),
+            b"w1",
+            "F1 still holds its files"
+        );
+        // (f) From (e)'s leftovers, a sign-out that completes clears the list and never touches 1882's key. Its keep
+        // makes the newest folder, F3 (F2 is (e)'s), and the row names it.
+        crate::finder_removal::remember_kept_folder_at(&config, "/macos/kept").unwrap();
+        let kept = {
+            let db = c.db();
+            let waiting = crate::sign_out::waiting::WaitingChanges::read(&db).unwrap();
+            let snapshot = AskSnapshot::of(&waiting, "o", Vec::new());
+            keep_unsent(KeepInputs {
+                db: &db,
+                acknowledge: Acknowledge::Asked {
+                    others: &snapshot.others,
+                    missing: &snapshot.missing,
+                },
+                root: &c.kept_root(),
+                event_name: "event".into(),
+                config_path: &config,
+                clone: &SystemClone,
+                config_fs: &RealConfigFs,
+            })
+            .unwrap()
+        };
+        let f3 = c.kept_root().join("event (3)");
+        assert_eq!(
+            kept.folder.as_deref(),
+            Some(f3.as_path()),
+            "a file still had a copy, so (f) kept it in a third folder"
+        );
+        crate::config::CONFIG_DIR_OVERRIDE
+            .scope(
+                c.dir.join("config"),
+                purge_local_data_for_sign_out_async(c.dir.clone(), kept),
+            )
+            .await;
+        let text = std::fs::read_to_string(&config).unwrap();
+        assert!(!text.contains("kept_unsent_unfinished"), "{text}");
+        let after = DesktopConfig::load_from(&config).unwrap();
+        assert_eq!(
+            after.kept_unsent_folder.as_deref(),
+            Some(f3.to_string_lossy().as_ref()),
+            "the row names the newest folder"
+        );
+        assert_eq!(after.kept_unsynced_folder.as_deref(), Some("/macos/kept"));
+    }
+
+    async fn purge_local_data_for_sign_out_async(dir: PathBuf, kept: KeptSet) {
+        purge_local_data_for_sign_out(Ok(dir), None, false, Some(&kept)).unwrap();
+    }
+
+    /// U27, the purge half: the purge removes both staging roots' sources after keeping them.
+    #[test]
+    fn the_purge_removes_sources_from_every_staging_root() {
+        let f = PurgeFixture::new();
+        let caches = f.dir.path().join("Library/Caches/beebeeb/finder-writes/x");
+        let support = f.dir.path().join("Library/Application Support/beebeeb/finder-writes/y");
+        for path in [&caches, &support] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"bytes").unwrap();
+        }
+        f.db.hold_lock_for_test()
+            .execute_batch(&format!(
+                "INSERT INTO operation_queue (op_id, kind, file_id, payload_path, write_id, write_origin) VALUES
+                   ('ox', 'upload_version', 'x', '{}', 'ox', 'minted'), ('oy', 'upload_version', 'y', '{}', 'oy', 'minted');",
+                caches.display(),
+                support.display()
+            ))
+            .unwrap();
+        let kept = f.keep();
+        purge_local_state_files_as(&f.db, None, &[], None, Some(&kept)).unwrap();
+        assert!(!caches.exists() && !support.exists());
+        assert_eq!(f.queued(), 0);
+    }
+
+    /// `body` with a state dir and a config dir of its own (`state_paths::STATE_DIR_OVERRIDE`,
+    /// `config::CONFIG_DIR_OVERRIDE`), both new and both removed when it ends, panicking or not. A sign-out on a Mac
+    /// reads the queue before it changes anything, so a row queued in the state dir that the other sign-out tests share
+    /// would refuse their sign-outs, and a row a failed test left there would refuse every later one. Here no other
+    /// test's sign-out sees these rows, and no other test's config write meets the keys these tests check.
+    async fn in_own_dirs<T>(body: impl std::future::Future<Output = T>) -> T {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, config) = (dir.path().join("state"), dir.path().join("config"));
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::create_dir_all(&config).unwrap();
+        state_paths::STATE_DIR_OVERRIDE
+            .scope(state, crate::config::CONFIG_DIR_OVERRIDE.scope(config, body))
+            .await
+    }
+
+    /// The database in the test's own state dir (`in_own_dirs`), the one its sign-out reads and purges.
+    fn state_db_in_scratch() -> state_db::StateDb {
+        let dir = state_paths::beebeeb_state_dir().unwrap();
+        state_db::StateDb::open(state_paths::state_db_path_from_state_dir(&dir)).unwrap()
+    }
+
+    /// The database and config as a completed sign-out leaves them: no rows and no kept-folder keys.
+    fn clean_scratch(db: &state_db::StateDb) {
+        let _ = db.purge_all_local_state();
+        let _ = db.clear_account_data(false);
+        let _ = DesktopConfig::update(|cfg| {
+            let changed = cfg.kept_unsent_folder.take().is_some() | !cfg.kept_unsent_unfinished.is_empty();
+            cfg.kept_unsent_unfinished.clear();
+            (changed, ())
+        });
+    }
+
+    /// `signout_teardown_tests::test_account`, which that module keeps private.
+    fn test_account(state: &AppState, id: &str) -> Arc<crate::account::AccountRuntime> {
+        synthesize_single_account(state, AccountId(id.to_string()));
+        state.active_account().expect("synthesized account resolves")
+    }
+
+    /// Records the reconciler's removals and triggers, and confirms every removal and Lock.
+    fn recording_finder(state: &AppState) -> Arc<std::sync::Mutex<Vec<String>>> {
+        use crate::finder_setup::driver::{Event, FinderSetupHandle, FinderSetupView};
+        let (handle, mut rx) = FinderSetupHandle::for_test(FinderSetupView::initial(
+            crate::finder_setup::launch_location::LaunchLocation::Applications,
+        ));
+        let _ = state.finder_setup.set(handle);
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        tokio::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                match event {
+                    Event::Remove { ack, .. } => {
+                        log.lock().unwrap().push("remove".to_string());
+                        let _ = ack.send((Ok(()), finder_removal::KeptFolder::default()));
+                    }
+                    Event::Lock { ack } => {
+                        let _ = ack.send(());
+                    }
+                    Event::Trigger(trigger) => log.lock().unwrap().push(format!("{trigger:?}")),
+                    _ => {}
+                }
+            }
+        });
+        seen
+    }
+
+    /// A waiting save and its staged copy. The copy is in the test's own state dir (`in_own_dirs`): these tests run
+    /// at once and use the same op ids, and one of them makes its copy unreadable.
+    fn queue_write(db: &state_db::StateDb, op_id: &str, file_id: &str, bytes: &[u8]) -> PathBuf {
+        let staged = state_paths::beebeeb_state_dir()
+            .unwrap()
+            .join(format!("bb-1887-{op_id}"));
+        std::fs::write(&staged, bytes).unwrap();
+        db.hold_lock_for_test()
+            .execute_batch(&format!(
+                "INSERT OR IGNORE INTO files (file_id, path) VALUES ('{file_id}', '{file_id}.bin');
+                 INSERT INTO operation_queue (op_id, kind, file_id, payload_path, write_id, write_origin)
+                 VALUES ('{op_id}', 'upload_version', '{file_id}', '{}', '{op_id}', 'minted');",
+                staged.display()
+            ))
+            .unwrap();
+        staged
+    }
+
+    fn queue_rename(db: &state_db::StateDb, op_id: &str) {
+        db.hold_lock_for_test()
+            .execute(
+                "INSERT INTO operation_queue (op_id, kind, file_id) VALUES (?1, 'rename_file', 'f')",
+                rusqlite::params![op_id],
+            )
+            .unwrap();
+    }
+
+    fn ask(state: &AppState, owner: &str) -> String {
+        let snapshot = count_ask(owner).unwrap();
+        let id = snapshot.ask_id().to_string();
+        state.sign_out.snapshots.record(snapshot);
+        id
+    }
+
+    fn signed_out_state() -> (AppState, Arc<crate::account::AccountRuntime>) {
+        let state = AppState::default();
+        let acct = test_account(&state, "signout-1887");
+        set_auth_present(&state, false);
+        (state, acct)
+    }
+
+    async fn sign_out_with(
+        state: &AppState,
+        keep: Option<&str>,
+        seam: SignOutSeam,
+    ) -> Result<SignedOut, SignOutFailure> {
+        SIGN_OUT_SEAM.scope(seam, clear_session_impl(state, false, keep, crate::UnknownFilesArg::Keep, None)).await
+    }
+
+    fn no_seam() -> SignOutSeam {
+        Arc::new(|_| Ok(()))
+    }
+
+    /// U6. The switch's sign-out (`forget_email`) is the one that would forget the email prefill, so the refusal is
+    /// tested on it: the gate comes first, and nothing is touched (the Keychain session and the email prefill too).
+    #[tokio::test]
+    async fn clear_session_refuses_while_changes_wait() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            let staged = queue_write(&db, "w1", "f1", b"bytes");
+            let state = AppState::default();
+            let acct = test_account(&state, "signout-1887-u6");
+            let events = recording_finder(&state);
+            *acct.session.lock().unwrap() = Some(super::Session {
+                token: "t".into(),
+                master_key: [7u8; 32],
+                email: Some("a@beebeeb.io".into()),
+            });
+            persist_session_to_keychain(
+                &SessionWrite::for_test(),
+                "signout-1887-u6",
+                "tok-u6",
+                &[7u8; 32],
+                Some("a@beebeeb.io"),
+            )
+            .unwrap();
+            DesktopConfig::update(|cfg| {
+                cfg.last_signed_in_email = Some("prefill@beebeeb.io".into());
+                (true, ())
+            })
+            .unwrap();
+            set_auth_present(&state, true);
+            let failure = SIGN_OUT_SEAM
+                .scope(no_seam(), clear_session_impl(&state, true, None, crate::UnknownFilesArg::Keep, None))
+                .await
+                .unwrap_err();
+            assert!(failure.message.starts_with("unsent_changes: "), "{}", failure.message);
+            assert_eq!(db.waiting_rows().unwrap().len(), 1, "the queue is intact");
+            assert!(staged.exists(), "the staged copy is intact");
+            assert!(acct.session.lock().unwrap().is_some(), "the keys are in memory");
+            assert!(
+                load_session_from_keychain("signout-1887-u6", None).unwrap().is_some(),
+                "the Keychain session is untouched"
+            );
+            assert_eq!(
+                DesktopConfig::load().unwrap().last_signed_in_email.as_deref(),
+                Some("prefill@beebeeb.io"),
+                "the email prefill is untouched"
+            );
+            assert!(
+                events.lock().unwrap().iter().all(|event| event != "remove"),
+                "the reconciler got no removal"
+            );
+            let _ = clear_keychain_session("signout-1887-u6");
+            DesktopConfig::update(|cfg| (cfg.last_signed_in_email.take().is_some(), ())).unwrap();
+        })
+        .await;
+    }
+
+    /// U8 and U8b through the sign-out: the kept set is kept, one file per file, and then the queue is empty. The keep
+    /// step's own tests hold its half (names and bytes).
+    #[tokio::test]
+    async fn a_sign_out_keeps_the_kept_set_and_empties_the_queue() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            queue_write(&db, "s1", "report", b"first save");
+            queue_write(&db, "s2", "report", b"second save");
+            queue_write(&db, "c1", "notes", b"notes");
+            let (state, _acct) = signed_out_state();
+            recording_finder(&state);
+            let id = ask(&state, "main");
+            let done = sign_out_with(&state, Some(&id), no_seam()).await.unwrap();
+            let kept = done.kept_unsent.expect("a kept folder");
+            let folder = Path::new(&kept.folder);
+            assert_eq!(kept.files, 2, "two saves of one file keep one file (U8b)");
+            assert_eq!(std::fs::read(folder.join("report.bin")).unwrap(), b"second save");
+            assert_eq!(std::fs::read(folder.join("notes.bin")).unwrap(), b"notes");
+            assert_eq!(
+                std::fs::read_dir(folder).unwrap().count(),
+                2,
+                "no earlier-save copy of a minted save"
+            );
+            assert!(db.waiting_rows().unwrap().is_empty(), "the queue is empty");
+        })
+        .await;
+    }
+
+    /// U7.
+    #[test]
+    fn the_gate_comes_before_anything_changes() {
+        let production = super::finder_setup_command_tests::production_source();
+        let clear =
+            super::finder_setup_command_tests::body_between(&production, "async fn clear_session_impl(", "\n}\n");
+        let gate = clear.find("gate_sign_out(").expect("the gate");
+        for later in [
+            "forget_last_signed_in_email(",
+            "end_sessions_in_flight(",
+            "finder_remove_for(",
+            "take_slot_and_stop_engine_for_sign_out(",
+            "purge_local_data_for_sign_out(",
+        ] {
+            assert!(
+                gate < clear.find(later).unwrap_or_else(|| panic!("{later}")),
+                "the gate comes before {later}"
+            );
+        }
+    }
+
+    /// U9: the gate counted nothing; a write that arrives before the keep step is kept and counted.
+    #[tokio::test]
+    async fn a_write_that_arrives_after_the_count_is_kept_too() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            let (state, _acct) = signed_out_state();
+            recording_finder(&state);
+            let seam: SignOutSeam = Arc::new(move |point| {
+                if point == "before_keep" {
+                    let db = state_db_in_scratch();
+                    queue_write(&db, "late", "late", b"late bytes");
+                }
+                Ok(())
+            });
+            let done = sign_out_with(&state, None, seam).await.unwrap();
+            let kept = done.kept_unsent.expect("a kept folder");
+            assert_eq!(kept.files, 1);
+            assert_eq!(
+                std::fs::read(Path::new(&kept.folder).join("late.bin")).unwrap(),
+                b"late bytes"
+            );
+            assert_eq!(db.waiting_rows().unwrap().len(), 0, "the queue is empty");
+        })
+        .await;
+    }
+
+    /// U10 (spec, amended for `184ac962`).
+    #[test]
+    fn nothing_that_deletes_runs_between_stop_keep_and_purge() {
+        let production = super::finder_setup_command_tests::production_source();
+        let clear =
+            super::finder_setup_command_tests::body_between(&production, "async fn clear_session_impl(", "\n}\n");
+        let slot = clear
+            .find("let mut held_engine_slot = if already_signed_out {")
+            .expect("the stop expression");
+        let second_stop = clear.rfind("take_slot_and_stop_engine_for_sign_out(").unwrap();
+        let close = slot + clear[slot..].find("\n    };\n").expect("the expression's end");
+        let keep = clear.find("keep_for_sign_out(").expect("the keep call");
+        let purge = clear.find("purge_local_data_for_sign_out(").unwrap();
+        assert!(
+            second_stop < close && close < keep && keep < purge,
+            "stop arms, then `}};`, then keep, then purge"
+        );
+        let between = &clear[second_stop..purge];
+        for denied in [
+            "remove_file",
+            "remove_dir",
+            "purge_all_local_state(",
+            "purge_macos_hydrate_cache(",
+            "clear_session_holding_slot(",
+            "clear_keychain_session(",
+            "forget_last_signed_in_email(",
+            "start_engine",
+            "KeysArrived",
+        ] {
+            assert!(!between.contains(denied), "{denied} between the stop and the purge");
+        }
+    }
+
+    /// U13, the sign-out half: a failed copy leaves the keys in memory and asks the reconciler to restart sync.
+    #[tokio::test]
+    async fn a_failed_copy_keeps_the_keys_and_restarts_sync() {
+        in_own_dirs(async {
+            use std::os::unix::fs::PermissionsExt;
+            let db = state_db_in_scratch();
+            let staged = queue_write(&db, "w1", "f1", b"bytes");
+            std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let state = AppState::default();
+            let acct = test_account(&state, "signout-1887-u13");
+            let events = recording_finder(&state);
+            *acct.session.lock().unwrap() = Some(super::Session {
+                token: "t".into(),
+                master_key: [7u8; 32],
+                email: None,
+            });
+            set_auth_present(&state, true);
+            let id = ask(&state, "main");
+            let mut failure = None;
+            let logs = capture_logs_async(async {
+                failure = Some(sign_out_with(&state, Some(&id), no_seam()).await.unwrap_err());
+            })
+            .await;
+            let failure = failure.unwrap();
+            std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o600)).unwrap();
+            assert!(
+                failure.message.starts_with("unsent_copy_failed: "),
+                "{}",
+                failure.message
+            );
+            assert!(
+                logs.contains("sign-out stopped: the waiting changes could not be kept; nothing was purged"),
+                "the sign-out's failed keep is logged as the sign-out's: {logs}"
+            );
+            assert!(acct.session.lock().unwrap().is_some(), "the keys are in memory");
+            // `std::time::Duration`: `lib.rs` imports no `Duration` at the crate level.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            assert!(
+                events.lock().unwrap().iter().any(|event| event == "KeysArrived"),
+                "sync restarts: {:?}",
+                events.lock().unwrap()
+            );
+            assert_eq!(db.waiting_rows().unwrap().len(), 1);
+        })
+        .await;
+    }
+
+    /// U29 (b): a copy deleted before the call is a missing write the snapshot did not hold.
+    #[tokio::test]
+    async fn a_copy_missing_before_the_call_asks_again() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            let staged = queue_write(&db, "w1", "f1", b"bytes");
+            let (state, _acct) = signed_out_state();
+            recording_finder(&state);
+            let id = ask(&state, "main");
+            std::fs::remove_file(&staged).unwrap();
+            let failure = sign_out_with(&state, Some(&id), no_seam()).await.unwrap_err();
+            assert!(
+                failure.message.starts_with("unsent_changes: "),
+                "the gate refuses, the ask is shown again"
+            );
+            let fresh = count_ask("main").unwrap();
+            assert_eq!(fresh.counts.missing_files, 1);
+        })
+        .await;
+    }
+
+    /// U29 (c), through the sign-out: a copy missing at the ask and held by the snapshot is acknowledged; the sign-out
+    /// completes, the purge's guard lets the missing write go, and the other write is kept.
+    #[tokio::test]
+    async fn a_copy_missing_at_the_ask_is_let_go_and_the_sign_out_completes() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            let gone = queue_write(&db, "w1", "f1", b"gone");
+            queue_write(&db, "w2", "f2", b"kept");
+            std::fs::remove_file(&gone).unwrap();
+            let (state, _acct) = signed_out_state();
+            recording_finder(&state);
+            let id = ask(&state, "main");
+            let done = sign_out_with(&state, Some(&id), no_seam())
+                .await
+                .expect("the ask showed the missing write, so the sign-out completes");
+            let kept = done.kept_unsent.expect("a kept folder");
+            assert_eq!(kept.files, 1, "the other write is kept");
+            assert_eq!(std::fs::read(Path::new(&kept.folder).join("f2.bin")).unwrap(), b"kept");
+            assert!(db.waiting_rows().unwrap().is_empty(), "the queue is empty");
+        })
+        .await;
+    }
+
+    /// U30: the record is on disk before the purge, and only the keep step writes it. Two aborts: right after the keep
+    /// step, both keys name the folder; right after the purge, the rows are gone, so the marker is cleared and the row
+    /// stays (§7.3, "When it is cleared").
+    #[tokio::test]
+    async fn the_kept_folder_is_recorded_before_the_purge() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            for (point, marker_kept) in [("after_keep", true), ("after_purge", false)] {
+                queue_write(&db, "w1", "f1", b"bytes");
+                let (state, _acct) = signed_out_state();
+                recording_finder(&state);
+                let id = ask(&state, "main");
+                let seam: SignOutSeam = Arc::new(move |at| {
+                    if at == point {
+                        Err("aborted by the test".into())
+                    } else {
+                        Ok(())
+                    }
+                });
+                let failure = sign_out_with(&state, Some(&id), seam).await.unwrap_err();
+                let folder = failure.kept_unsent.expect("the failure carries the folder").folder;
+                let config = DesktopConfig::load().unwrap();
+                assert_eq!(config.kept_unsent_folder.as_deref(), Some(folder.as_str()), "{point}");
+                let expected: Vec<String> = if marker_kept { vec![folder.clone()] } else { Vec::new() };
+                assert_eq!(
+                    config.kept_unsent_unfinished, expected,
+                    "{point}: saved in the keep step's one write; cleared with the rows"
+                );
+                clean_scratch(&db);
+            }
+        })
+        .await;
+        let production = super::finder_setup_command_tests::production_source();
+        let clear =
+            super::finder_setup_command_tests::body_between(&production, "async fn clear_session_impl(", "\n}\n");
+        assert!(
+            !clear.contains("save_kept_unsent_durably("),
+            "the Err arm writes neither key; only the keep step does"
+        );
+        // The keep step's save is its last act, after its last flush: `finish()` (every `sync_all`) comes before it,
+        // and nothing after it copies or flushes.
+        let keep = include_str!("sign_out/keep.rs");
+        let keep = &keep[..keep.find("#[cfg(test)]\nmod tests").expect("the tests")];
+        let save = keep
+            .find("save_kept_unsent_durably(inputs.config_path")
+            .expect("the save");
+        assert!(
+            keep.find("writer.finish()").expect("the flushes") < save,
+            "the flushes come first"
+        );
+        let after = &keep[save..];
+        assert!(
+            !after.contains("writer.keep(") && !after.contains(".finish()") && !after.contains("sync_all"),
+            "{after}"
+        );
+        let writer = include_str!("sign_out/kept_writer.rs");
+        let finish = &writer[writer.find("pub(crate) fn finish(self)").expect("finish")..];
+        assert!(
+            finish[..finish.find("\n    }\n").unwrap()].contains("sync_all()"),
+            "finish flushes"
+        );
+        assert!(
+            clear.find("keep_for_sign_out(").expect("the keep call")
+                < clear.find("purge_local_data_for_sign_out(").expect("the purge")
+        );
+    }
+
+    /// U32, the macOS half: every new step is macOS only.
+    #[test]
+    fn the_unsent_gate_is_macos_only() {
+        let production = super::finder_setup_command_tests::production_source();
+        let clear =
+            super::finder_setup_command_tests::body_between(&production, "async fn clear_session_impl(", "\n}\n");
+        for call in ["gate_sign_out(", "keep_for_sign_out("] {
+            let at = clear.find(call).unwrap_or_else(|| panic!("{call}"));
+            let before = &clear[..at];
+            let cfg = before.rfind("#[cfg(").unwrap();
+            assert!(
+                before[cfg..].starts_with("#[cfg(target_os = \"macos\")]"),
+                "{call} is under cfg(macos)"
+            );
+        }
+        for definition in ["fn gate_sign_out(", "fn keep_for_sign_out(", "fn count_ask("] {
+            let at = production.find(definition).unwrap_or_else(|| panic!("{definition}"));
+            let before = &production[..at];
+            assert!(
+                before[before.rfind("#[cfg(").unwrap()..].starts_with("#[cfg(target_os = \"macos\")]"),
+                "{definition}"
+            );
+        }
+    }
+
+    /// U37, the keep step's snapshot: the one the gate accepted, by value, never a newer one.
+    #[tokio::test]
+    async fn the_keep_step_uses_the_snapshot_the_gate_accepted() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            queue_rename(&db, "r1");
+            let (state, _acct) = signed_out_state();
+            recording_finder(&state);
+            let id = ask(&state, "main");
+            let store = state.sign_out.snapshots.clone();
+            let seam: SignOutSeam = Arc::new(move |point| {
+                if point == "before_keep" {
+                    queue_rename(&state_db_in_scratch(), "r2");
+                    store.record(count_ask("main").unwrap()); // S′ holds both renames
+                }
+                Ok(())
+            });
+            let failure = sign_out_with(&state, Some(&id), seam).await.unwrap_err();
+            assert!(failure.message.starts_with("unsent_changes: "), "{}", failure.message);
+            assert_eq!(db.waiting_rows().unwrap().len(), 2, "nothing purged");
+            // Second run: S′ recorded without changing the queue; the sign-out completes and empties the store.
+            db.hold_lock_for_test()
+                .execute("DELETE FROM operation_queue WHERE op_id = 'r2'", [])
+                .unwrap();
+            let id = ask(&state, "main");
+            let store = state.sign_out.snapshots.clone();
+            let seam: SignOutSeam = Arc::new(move |point| {
+                if point == "before_keep" {
+                    store.record(count_ask("main").unwrap());
+                }
+                Ok(())
+            });
+            sign_out_with(&state, Some(&id), seam).await.unwrap();
+            assert_eq!(
+                state.sign_out.snapshots.newest_ask_id(),
+                None,
+                "a completed sign-out empties the store"
+            );
+        })
+        .await;
+    }
+
+    /// U41: entry point 7, the already-signed-out arm, keeps before it purges.
+    #[tokio::test]
+    async fn an_already_signed_out_sign_out_keeps_before_it_purges() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            queue_write(&db, "w1", "f1", b"already signed out");
+            let (state, _acct) = signed_out_state();
+            recording_finder(&state);
+            let id = ask(&state, "main");
+            let done = sign_out_with(&state, Some(&id), no_seam()).await.unwrap();
+            assert_eq!(
+                done.outcome,
+                SignOutOutcome::NotSignedIn,
+                "the already-signed-out arm ran"
+            );
+            let kept = done.kept_unsent.unwrap();
+            assert_eq!(
+                std::fs::read(Path::new(&kept.folder).join("f1.bin")).unwrap(),
+                b"already signed out"
+            );
+            assert!(db.waiting_rows().unwrap().is_empty());
+        })
+        .await;
+    }
+
+    /// U14 through the sign-out: the guard's refusal reaches the caller with its code, and the folder rides it.
+    #[tokio::test]
+    async fn a_guard_refusal_reaches_the_caller_with_its_code() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            queue_write(&db, "w1", "f1", b"bytes");
+            let (state, _acct) = signed_out_state();
+            recording_finder(&state);
+            let id = ask(&state, "main");
+            let seam: SignOutSeam = Arc::new(|point| {
+                if point == "after_keep" {
+                    queue_write(&state_db_in_scratch(), "late", "late", b"late"); // only a test seam can add one now
+                }
+                Ok(())
+            });
+            let failure = sign_out_with(&state, Some(&id), seam).await.unwrap_err();
+            assert!(
+                failure.message.starts_with("unsent_copy_failed: "),
+                "never wrapped: {}",
+                failure.message
+            );
+            assert!(failure.kept_unsent.is_some(), "the kept folder rides the failure");
+            assert_eq!(db.waiting_rows().unwrap().len(), 2, "nothing deleted");
+        })
+        .await;
+    }
+
+    /// Two sign-outs from one ask (a double click, or the menu's while Settings signs out): one sign-out, one folder.
+    /// The first one's gate takes the snapshot out of the store, so a second gate on the same ask refuses while the
+    /// first sign-out is still running, not only after its completion empties the store.
+    #[tokio::test]
+    async fn a_second_sign_out_with_the_same_ask_keeps_nothing_twice() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            queue_write(&db, "w1", "f1", b"once");
+            let (state, _acct) = signed_out_state();
+            recording_finder(&state);
+            let id = ask(&state, "main");
+            let (store, same_ask) = (state.sign_out.snapshots.clone(), id.clone());
+            let second_gate = Arc::new(std::sync::Mutex::new(None));
+            let seen = second_gate.clone();
+            let seam: SignOutSeam = Arc::new(move |point| {
+                if point == "before_keep" {
+                    // The second click's gate, on the queue as it is now, while the first sign-out runs.
+                    let waiting = crate::sign_out::waiting::WaitingChanges::read(&state_db_in_scratch()).unwrap();
+                    *seen.lock().unwrap() = Some(store.gate(&waiting, Some(&same_ask)));
+                }
+                Ok(())
+            });
+            let first = sign_out_with(&state, Some(&id), seam).await.unwrap();
+            assert!(first.kept_unsent.is_some());
+            assert_eq!(
+                *second_gate.lock().unwrap(),
+                Some(Err(crate::sign_out::snapshot::GateRefusal)),
+                "the first sign-out took the snapshot: a second gate on the same ask refuses while it runs"
+            );
+            queue_write(&db, "w2", "f2", b"again"); // something waits again, so the stale ask matters
+            let second = sign_out_with(&state, Some(&id), no_seam()).await.unwrap_err();
+            assert!(second.message.starts_with("unsent_changes: "), "{}", second.message);
+            assert_eq!(second.kept_unsent, None, "no second folder");
+        })
+        .await;
+    }
+
+    /// U39 (b), the ask's half: an interrupted sign-out's folder is named when the ask shows a missing write.
+    #[tokio::test]
+    async fn the_ask_names_the_earlier_folders_only_with_a_missing_write() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            let staged = queue_write(&db, "w1", "f1", b"bytes");
+            DesktopConfig::update(|cfg| {
+                cfg.kept_unsent_unfinished = vec!["/kept/earlier".into()];
+                (true, ())
+            })
+            .unwrap();
+            assert!(
+                count_ask("o").unwrap().counts.earlier_folders.is_empty(),
+                "no missing write: no A3e"
+            );
+            std::fs::remove_file(&staged).unwrap();
+            assert_eq!(count_ask("o").unwrap().counts.earlier_folders, ["/kept/earlier"]);
+            DesktopConfig::update(|cfg| {
+                cfg.kept_unsent_unfinished.clear();
+                (true, ())
+            })
+            .unwrap();
+        })
+        .await;
+    }
+
+    /// The sign-out of a person who is signed in, the usual one: it ends `Completed`, its result carries the kept folder
+    /// (the alert names it, W9), and it empties the store, also of a newer count another window recorded meanwhile.
+    #[tokio::test]
+    async fn a_signed_in_sign_out_completes_with_its_folder_and_empties_the_store() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            queue_write(&db, "w1", "f1", b"signed in");
+            let state = AppState::default();
+            let acct = test_account(&state, "signout-1887-completed");
+            recording_finder(&state);
+            *acct.session.lock().unwrap() = Some(super::Session {
+                token: "t".into(),
+                master_key: [7u8; 32],
+                email: None,
+            });
+            set_auth_present(&state, true);
+            let id = ask(&state, "main");
+            let store = state.sign_out.snapshots.clone();
+            let seam: SignOutSeam = Arc::new(move |point| {
+                if point == "before_keep" {
+                    store.record(count_ask("onboarding").unwrap()); // another window counts while this one signs out
+                }
+                Ok(())
+            });
+            let done = sign_out_with(&state, Some(&id), seam).await.unwrap();
+            assert_eq!(done.outcome, SignOutOutcome::Completed, "the signed-in arm ran");
+            let kept = done.kept_unsent.expect("the Completed arm carries the kept folder");
+            assert_eq!(kept.files, 1);
+            assert_eq!(
+                std::fs::read(Path::new(&kept.folder).join("f1.bin")).unwrap(),
+                b"signed in"
+            );
+            assert_eq!(
+                state.sign_out.snapshots.newest_ask_id(),
+                None,
+                "a completed signed-in sign-out empties the store"
+            );
+            assert!(acct.session.lock().unwrap().is_none(), "the keys are cleared");
+            assert!(db.waiting_rows().unwrap().is_empty(), "the queue is empty");
+        })
+        .await;
+    }
+
+    /// W1 and W6 with no ask: nothing waited at the gate, so the sign-out passed no `keepUnsent`. An other change (a
+    /// rename, a move, a new folder or a deletion) that arrives before the keep step stops the sign-out with
+    /// `unsent_changes`, so the ask is shown, and nothing is purged. (A write that arrives then is kept: U9.)
+    #[tokio::test]
+    async fn a_late_other_change_with_no_ask_stops_the_sign_out() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            let (state, _acct) = signed_out_state();
+            recording_finder(&state);
+            let seam: SignOutSeam = Arc::new(|point| {
+                if point == "before_keep" {
+                    queue_rename(&state_db_in_scratch(), "late-rename");
+                }
+                Ok(())
+            });
+            let result = sign_out_with(&state, None, seam).await;
+            assert_eq!(
+                db.waiting_rows().unwrap().len(),
+                1,
+                "the late rename is not purged unasked: {result:?}"
+            );
+            let failure = result.expect_err("the sign-out stops");
+            assert_eq!(
+                failure.message,
+                coded(UNSENT_CHANGES_CODE, E1_UNSENT_CHANGES),
+                "the ask is shown again"
+            );
+            assert_eq!(failure.kept_unsent, None, "nothing was kept");
+        })
+        .await;
+    }
+
+    /// `clear_session` hands `keepUnsent: { askId }` on to the gate (spec §5.1, the contract). A unit test cannot build
+    /// the command's `AppHandle`, so this checks the name the webview sends and the command's call.
+    /// Task 2191 (review thread on #157): a Windows sign-out that fails after its purge kept
+    /// copies names their folder: every failure from the purge on carries it.
+    #[test]
+    fn task_2191_a_failure_after_the_purge_names_the_kept_folder() {
+        let kept = Some(super::KeptUnsent { folder: "C:\\Beebeeb kept files".into(), files: 3 });
+        let failure = super::sign_out_failure_after_purge("Could not unregister Cloud Files: x".into(), &None, &None, &kept);
+        assert_eq!(failure.kept_unsent, kept);
+        let production = super::finder_setup_command_tests::production_source();
+        let body = crate::source_pin::squeeze(super::finder_setup_command_tests::body_between(
+            &production,
+            "async fn clear_session_impl(",
+            "\n}\n",
+        ));
+        let after = &body[body.find("windows_cf::signout::purge(").expect("the purge")..];
+        for step in ["Could not unregister Cloud Files", "Could not remove Explorer registration", "Could not initialize logout request"] {
+            assert!(
+                after.contains(&crate::source_pin::squeeze(&format!("failed_after_purge(format!(\"{step}"))),
+                "{step} carries the kept folder"
+            );
+        }
+        assert!(
+            after.contains(&crate::source_pin::squeeze(
+                "let kept_with = |message: String| sign_out_failure_after_purge(message, &preserved_location, &kept_unsent, &windows_kept);"
+            )),
+            "the later failures carry it too"
+        );
+        assert!(after.contains(&crate::source_pin::squeeze("clear_keychain_session(acct.id.as_str()).map_err(&kept_with)?;")));
+    }
+
+    #[test]
+    fn clear_session_hands_keep_unsent_on_to_the_gate() {
+        let arg: KeepUnsentArg =
+            serde_json::from_value(serde_json::json!({ "askId": "a1" })).expect("the webview sends askId");
+        assert_eq!(arg.ask_id, "a1");
+        assert!(
+            serde_json::from_value::<KeepUnsentArg>(serde_json::json!({ "ask_id": "a1" })).is_err(),
+            "askId is the only name it takes"
+        );
+        let production = super::finder_setup_command_tests::production_source();
+        let command = crate::source_pin::squeeze(super::finder_setup_command_tests::body_between(
+            &production,
+            "async fn clear_session(",
+            "\n}\n",
+        ));
+        for expected in [
+            // Tauri names the argument after the parameter, in camelCase: `keepUnsent`.
+            "keep_unsent: Option<KeepUnsentArg>",
+            "clear_session_impl(&state, forget_email.unwrap_or(false), keep_unsent.as_ref().map(|keep| keep.ask_id.as_str()),",
+            // Task 2191: and the Windows answer for files of unknown content, kept when absent.
+            "unknown_files.unwrap_or(UnknownFilesArg::Keep),",
+            "kept_folder.map(std::path::PathBuf::from))",
+        ] {
+            assert!(
+                command.contains(&crate::source_pin::squeeze(expected)),
+                "clear_session passes keepUnsent on: {expected}\n{command}"
+            );
+        }
+    }
+
+    /// Spec §5.3, "4. Gate | Read fails | E3 | Nothing changed": a gate that cannot read the queue answers E3 before the
+    /// Finder removal and the engine stop, and the keys stay in memory.
+    #[tokio::test]
+    async fn a_gate_that_cannot_read_the_queue_changes_nothing() {
+        in_own_dirs(async {
+            // A directory where `state.db` should be: it exists, and it cannot be opened.
+            let dir = state_paths::beebeeb_state_dir().unwrap();
+            std::fs::create_dir_all(state_paths::state_db_path_from_state_dir(&dir)).unwrap();
+            let state = AppState::default();
+            let acct = test_account(&state, "signout-1887-unread");
+            let events = recording_finder(&state);
+            *acct.session.lock().unwrap() = Some(super::Session {
+                token: "t".into(),
+                master_key: [7u8; 32],
+                email: None,
+            });
+            set_auth_present(&state, true);
+            let failure = sign_out_with(&state, None, no_seam()).await.unwrap_err();
+            assert!(
+                events.lock().unwrap().iter().all(|event| event != "remove"),
+                "the reconciler got no removal: {:?} ({})",
+                events.lock().unwrap(),
+                failure.message
+            );
+            assert_eq!(
+                failure.message,
+                coded(UNSENT_COUNT_FAILED_CODE, E3_UNSENT_COUNT_FAILED),
+                "E3 with its code"
+            );
+            assert!(acct.session.lock().unwrap().is_some(), "the keys are in memory");
+        })
+        .await;
+    }
+
+    /// The keep step opens `state.db` itself. When it cannot, the queue cannot be read: it answers E3 with its code, as a
+    /// failed read inside the keep step does, never the database's error, whose text names the database's absolute
+    /// path; and its log names the step, never the path (W10).
+    #[tokio::test]
+    async fn a_keep_step_that_cannot_open_the_queue_answers_e3_and_names_no_path() {
+        in_own_dirs(async {
+            let dir = state_paths::beebeeb_state_dir().unwrap();
+            std::fs::create_dir_all(state_paths::state_db_path_from_state_dir(&dir)).unwrap();
+            let mut kept = None;
+            let logs = capture_logs(|| kept = Some(keep_for_sign_out(None)));
+            let error = match kept.expect("the keep step ran") {
+                Ok(_) => panic!("a state.db that cannot be opened keeps nothing"),
+                Err(error) => error,
+            };
+            assert_eq!(
+                error,
+                coded(UNSENT_COUNT_FAILED_CODE, E3_UNSENT_COUNT_FAILED),
+                "E3 with its code"
+            );
+            let path = dir.to_string_lossy().into_owned();
+            assert!(!logs.contains(&path), "no log carries the path:\n{logs}");
+            let line = logs
+                .lines()
+                .find(|line| line.contains("the waiting changes could not be read"))
+                .unwrap_or_else(|| panic!("the stop is logged:\n{logs}"));
+            assert!(line.contains("step=state_db"), "the log names the step: {line}");
+        })
+        .await;
+    }
+
+    /// An ask that shows a missing write names the earlier folders (A3e). When the list cannot be read, the ask still
+    /// counts, without them, and its warning names the step that failed, never the error: a read error quotes a line of
+    /// the file, and the list's lines are kept folders' paths (W10).
+    #[tokio::test]
+    async fn an_ask_whose_unfinished_list_cannot_be_read_still_counts_and_logs_the_step() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            let staged = queue_write(&db, "w1", "f1", b"bytes");
+            std::fs::remove_file(&staged).unwrap(); // a missing write: the ask reads the list
+            let config = DesktopConfig::path().unwrap();
+            // A line the parser stops at, and it names a kept folder (a hand edit, say).
+            std::fs::write(
+                &config,
+                "kept_unsent_unfinished = [\"/kept/earlier\"]\nnote = \"/kept/earlier\" and more\n",
+            )
+            .unwrap();
+            let mut counted = None;
+            let logs = capture_logs(|| counted = Some(count_ask("o")));
+            let snapshot = counted.expect("the count ran").expect("the ask still counts");
+            assert_eq!(snapshot.counts.missing_files, 1);
+            assert!(snapshot.counts.earlier_folders.is_empty(), "no folder could be read");
+            let warning = logs
+                .lines()
+                .find(|line| line.contains("the unfinished sign-out list could not be read"))
+                .unwrap_or_else(|| panic!("the failed read is logged:\n{logs}"));
+            assert!(
+                !logs.contains("/kept/earlier") && !logs.contains(&*config.to_string_lossy()),
+                "no log carries a kept folder or the file's path:\n{logs}"
+            );
+            assert!(warning.contains("step=read"), "the warning names the step: {warning}");
+        })
+        .await;
+    }
+
+    /// U45 (spec 2026-10-10 §15 question 3): every sign-out that ends without purging leaves Finder accepts open at
+    /// once.
+    #[tokio::test]
+    async fn a_cancelled_or_failed_sign_out_leaves_accepts_open() {
+        in_own_dirs(async {
+            use std::os::unix::fs::PermissionsExt;
+            let db = state_db_in_scratch();
+            let staged = queue_write(&db, "w1", "f1", b"bytes");
+            let (state, _acct) = signed_out_state();
+            recording_finder(&state);
+            // Cancel: the person was asked and chose Cancel, so no `clear_session` ran at all. The ask itself closes
+            // nothing.
+            ask(&state, "main");
+            assert!(
+                !db.finder_accepts_closed().unwrap(),
+                "a cancelled sign-out: the ask closes nothing"
+            );
+            // The gate refuses: changes wait and no `keepUnsent`.
+            assert!(sign_out_with(&state, None, no_seam()).await.is_err());
+            assert!(!db.finder_accepts_closed().unwrap(), "refused at the gate");
+            // The keep step fails: a staged copy it cannot read.
+            std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let id = ask(&state, "main");
+            let failed = sign_out_with(&state, Some(&id), no_seam()).await;
+            std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o600)).unwrap();
+            assert!(failed.unwrap_err().message.starts_with("unsent_copy_failed: "));
+            assert!(!db.finder_accepts_closed().unwrap(), "a failed keep");
+            // The purge guard refuses after a completed keep (only a test seam can add a write then). The seam records
+            // that the keep step left accepts closed, so the reopen checked last is the guard's.
+            let id = ask(&state, "main");
+            let closed_after_the_keep = Arc::new(std::sync::Mutex::new(None));
+            let seen = closed_after_the_keep.clone();
+            let seam: SignOutSeam = Arc::new(move |point| {
+                if point == "after_keep" {
+                    let db = state_db_in_scratch();
+                    *seen.lock().unwrap() = Some(db.finder_accepts_closed().unwrap());
+                    queue_write(&db, "late", "late", b"late");
+                }
+                Ok(())
+            });
+            let refused = sign_out_with(&state, Some(&id), seam).await.unwrap_err();
+            assert_eq!(
+                *closed_after_the_keep.lock().unwrap(),
+                Some(true),
+                "the completed keep left accepts closed for the purge"
+            );
+            assert_eq!(
+                refused.message,
+                coded(UNSENT_COPY_FAILED_CODE, E2_UNSENT_COPY_FAILED),
+                "the purge guard refused (E2), never wrapped"
+            );
+            assert!(
+                refused.kept_unsent.is_some(),
+                "a refusal after a completed keep carries its folder"
+            );
+            assert!(!db.finder_accepts_closed().unwrap(), "a refused purge");
+        })
+        .await;
+    }
+
+    /// U45: the rule holds whatever the keep step kept. With nothing waiting, the keep step still closes accepts (an
+    /// accept could commit after its read), and a return before the purge reopens them, as after a keep that made a
+    /// folder.
+    #[tokio::test]
+    async fn a_sign_out_that_kept_nothing_and_stops_reopens_accepts() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            let (state, _acct) = signed_out_state();
+            recording_finder(&state);
+            let closed_after_the_keep = Arc::new(std::sync::Mutex::new(None));
+            let seen = closed_after_the_keep.clone();
+            let seam: SignOutSeam = Arc::new(move |point| {
+                if point == "after_keep" {
+                    *seen.lock().unwrap() = Some(state_db_in_scratch().finder_accepts_closed().unwrap());
+                    return Err("stopped by the test".to_string());
+                }
+                Ok(())
+            });
+            let failure = sign_out_with(&state, None, seam).await.unwrap_err();
+            assert_eq!(
+                (failure.message.as_str(), &failure.kept_unsent),
+                ("stopped by the test", &None),
+                "precondition: stopped right after a keep that kept nothing"
+            );
+            assert_eq!(
+                *closed_after_the_keep.lock().unwrap(),
+                Some(true),
+                "the keep step closed accepts, though nothing waited"
+            );
+            assert!(
+                !db.finder_accepts_closed().unwrap(),
+                "a sign-out that kept nothing and stopped reopens accepts"
+            );
+        })
+        .await;
+    }
+
+    /// U45: a quit between the keep step and the purge leaves the key on disk; the next launch reopens accepts first,
+    /// before the restore can start an engine. The reopen is the first statement of `restore_session_inner`, never in
+    /// the wrapper, whose two statements the startup-restore pin holds exact.
+    #[test]
+    fn accepts_reopen_when_the_app_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = state_db::StateDb::open(state_paths::state_db_path_from_state_dir(dir.path())).unwrap();
+        db.close_finder_accepts().unwrap();
+        reopen_finder_accepts_in(dir.path());
+        assert!(!db.finder_accepts_closed().unwrap());
+        let production = super::finder_setup_command_tests::production_source();
+        let restore =
+            super::finder_setup_command_tests::body_between(&production, "async fn restore_session_inner(", "\n}\n");
+        let reopen = restore
+            .find("reopen_finder_accepts_at_startup()")
+            .expect("the launch reopens accepts");
+        assert!(
+            reopen < restore.find("restore_stored_session(").expect("the restore"),
+            "before the restore"
+        );
+        assert!(
+            reopen < restore.find("start_engine_if_possible(").expect("the engine start"),
+            "before any engine can start"
+        );
+        let first = restore
+            .lines()
+            .skip(1)
+            .map(str::trim)
+            .find(|line| !line.is_empty() && !line.starts_with("//"))
+            .unwrap();
+        assert_eq!(
+            first, "#[cfg(target_os = \"macos\")]",
+            "the reopen opens the body:\n{restore}"
+        );
+    }
+
+    /// U45: the launch's reopen acts on the app's own state database (here the test's, through `in_own_dirs`), not
+    /// only on a directory its caller names, and it clears the key alone: the R10 owner record and a Finder removal
+    /// debt stay, or the restore's engine start would reset the local data as unowned.
+    #[tokio::test]
+    async fn the_launch_reopens_accepts_in_the_apps_state_db() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            let owner = crate::account_binding::Identity::new(Some("u-a"), Some("a@beebeeb.io"));
+            db.set_owner(&owner).unwrap();
+            db.set_finder_removal_owed(true).unwrap();
+            db.close_finder_accepts().unwrap();
+            reopen_finder_accepts_at_startup();
+            assert!(
+                !db.finder_accepts_closed().unwrap(),
+                "the launch reopens accepts in the app's state.db"
+            );
+            assert_eq!(db.owner().unwrap(), Some(owner), "the launch's reopen leaves the owner");
+            assert!(
+                db.finder_removal_owed().unwrap(),
+                "the launch's reopen leaves a removal debt"
+            );
+        })
+        .await;
+    }
+
+    /// The launch's reopen is best effort. A state database it cannot open is logged by its step, never by the error,
+    /// whose text names the database's path (W10).
+    #[tokio::test]
+    async fn a_launch_reopen_that_cannot_open_the_state_db_logs_the_step() {
+        in_own_dirs(async {
+            let dir = state_paths::beebeeb_state_dir().unwrap();
+            std::fs::create_dir_all(state_paths::state_db_path_from_state_dir(&dir)).unwrap();
+            let logs = capture_logs(reopen_finder_accepts_at_startup);
+            let path = dir.to_string_lossy().into_owned();
+            assert!(!logs.contains(&path), "no log carries the path:\n{logs}");
+            let warning = logs
+                .lines()
+                .find(|line| line.contains("could not reopen Finder accepts"))
+                .unwrap_or_else(|| panic!("the failed open is logged:\n{logs}"));
+            assert!(
+                warning.contains("step=state_db"),
+                "the warning names the step: {warning}"
+            );
+        })
+        .await;
+    }
+
+    /// U26.
+    #[test]
+    fn show_in_finder_reveals_only_the_saved_folder() {
+        assert_eq!(reveal_target(Some("/kept/a"), "/kept/a"), Ok("/kept/a"));
+        assert!(reveal_target(Some("/kept/a"), "/Users/a/Desktop").is_err());
+        assert!(reveal_target(None, "/kept/a").is_err());
+    }
+
+    /// U31.
+    #[test]
+    fn show_in_finder_uses_the_opener_reveal() {
+        let production = super::finder_setup_command_tests::production_source();
+        let body = super::finder_setup_command_tests::body_between(&production, "fn show_kept_unsent_folder(", "\n}\n");
+        assert!(body.contains("reveal_item_in_dir("), "{body}");
+        assert!(
+            !body.contains("Command::new(\"open\")") && !body.contains("\"/usr/bin/open\""),
+            "{body}"
+        );
+        assert!(
+            body.contains("\"kept folder reveal requested\""),
+            "D2 reads this line from stdout"
+        );
+    }
+
+    /// Everything `tracing` emits on this thread at `info` and above while `body` runs, as text: a copy of
+    /// `engine_bridge.rs`'s `capture_logs_async`. `#[tokio::test]` runs the future on the test's own thread, so a
+    /// thread-local subscriber sees all of it.
+    async fn capture_logs_async(body: impl std::future::Future<Output = ()>) -> String {
+        #[derive(Clone)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let writer = Capture(buffer.clone());
+        // tracing caches each callsite's interest for the whole process. While only ONE dispatcher is alive,
+        // tracing-core takes that interest from the registering thread's own default (`has_just_one`), so a callsite
+        // first hit by another test thread, which has no subscriber, is cached as "never" and this capture misses its
+        // events. A second live dispatcher keeps registration on the all-dispatchers path.
+        let _second_dispatcher = tracing::Dispatch::new(tracing_subscriber::registry());
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+        body.await;
+        drop(guard);
+        let bytes = buffer.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    /// U25 across a keeping sign-out: the keep step's own capture (`sign_out::keep`'s test) misses every line the
+    /// sign-out logs around it. No line of the whole sign-out names a kept path or a file name.
+    #[tokio::test]
+    async fn a_keeping_sign_out_logs_no_path_or_name() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            db.hold_lock_for_test()
+                .execute(
+                    "INSERT INTO files (file_id, path) VALUES ('secret', 'Secret Project/plan for Q4.docx')",
+                    [],
+                )
+                .unwrap();
+            queue_write(&db, "ws", "secret", b"plan"); // its `INSERT OR IGNORE` keeps the row above
+            let (state, _acct) = signed_out_state();
+            recording_finder(&state);
+            let id = ask(&state, "main");
+            let logs = capture_logs_async(async {
+                let done = sign_out_with(&state, Some(&id), no_seam()).await.unwrap();
+                assert_eq!(done.kept_unsent.map(|kept| kept.files), Some(1));
+            })
+            .await;
+            assert!(logs.contains("kept unsent changes"), "{logs}");
+            for leaked in ["Secret Project", "plan for Q4", ".docx", "Changes not sent"] {
+                assert!(!logs.contains(leaked), "{leaked} in {logs}");
+            }
+        })
+        .await;
+    }
+
+    /// W9, §9: both sign-out routes surface both folders, through one function.
+    #[test]
+    fn both_sign_out_routes_surface_both_folders() {
+        let production = super::finder_setup_command_tests::production_source();
+        let command = super::finder_setup_command_tests::body_between(&production, "async fn clear_session(", "\n}\n");
+        assert!(command.contains("surface_sign_out_folders(&app, &result)"), "{command}");
+        let menu = &production[production.find("DesktopMenuAction::SignOut =>").unwrap()..];
+        let menu = &menu[..menu.find("DesktopMenuAction::Quit").unwrap()];
+        assert!(menu.contains("surface_sign_out_folders(&app, &result)"), "{menu}");
+    }
+
+    /// W9 and §9, inside the one function both routes call: macOS's folder is saved for its row (which tells the
+    /// windows), ours (the keep step recorded it) only tells them, and the one alert names both, ours first. The
+    /// function needs the app's dialog, so its body is read; the folders it reads come out of the result, checked here
+    /// for a sign-out that completed and one that stopped after the keep step.
+    #[test]
+    fn the_sign_out_surface_names_our_folder_and_saves_macos_folder_for_its_row() {
+        let production = super::finder_setup_command_tests::production_source();
+        let surface = crate::source_pin::squeeze(super::finder_setup_command_tests::body_between(
+            &production,
+            "fn surface_sign_out_folders(",
+            "\n}\n",
+        ));
+        for step in [
+            "let (macos, ours) = sign_out_folders(result);",
+            "Some(location) => save_kept_folder_for_row(app, location),",
+            "None if ours.is_some() => emit_kept_folder_changed(app),",
+            "sign_out::copy::sign_out_alert(ours.map(|kept| (kept.folder.as_str(), kept.files)), macos)",
+        ] {
+            assert!(
+                surface.contains(&crate::source_pin::squeeze(step)),
+                "surface_sign_out_folders: {step}\n{surface}"
+            );
+        }
+        let kept = KeptUnsent {
+            folder: "/ours".into(),
+            files: 2,
+        };
+        let done: Result<SignedOut, SignOutFailure> = Ok(SignedOut {
+            preserved_location: Some("/macos".into()),
+            kept_unsent: Some(kept.clone()),
+            ..SignedOut::confirmed(SignOutOutcome::Completed)
+        });
+        assert_eq!(
+            sign_out_folders(&done),
+            (Some("/macos"), Some(&kept)),
+            "a sign-out that completed"
+        );
+        let stopped: Result<SignedOut, SignOutFailure> = Err(SignOutFailure {
+            message: "stopped after the keep step".into(),
+            preserved_location: Some("/macos".into()),
+            kept_unsent: Some(kept.clone()),
+        });
+        assert_eq!(
+            sign_out_folders(&stopped),
+            (Some("/macos"), Some(&kept)),
+            "a sign-out that stopped after the keep step"
+        );
+    }
+
+    /// §9: "Show in Finder" reveals a path only when it equals the saved record, so the webview cannot have the app
+    /// reveal any other path. U26 holds the comparison; this holds the command to it: it reads our record (never
+    /// 1882's), checks the path against it, and reveals only what the check returned.
+    #[test]
+    fn show_in_finder_reveals_only_what_the_saved_record_allows() {
+        let production = super::finder_setup_command_tests::production_source();
+        let body = crate::source_pin::squeeze(super::finder_setup_command_tests::body_between(
+            &production,
+            "fn show_kept_unsent_folder(",
+            "\n}\n",
+        ));
+        let squeeze = crate::source_pin::squeeze;
+        let read = body
+            .find(&squeeze(
+                "let saved = sign_out::kept_record::saved_kept_unsent_at(&DesktopConfig::path()?)?;",
+            ))
+            .unwrap_or_else(|| panic!("our record is read: {body}"));
+        let check = body
+            .find(&squeeze("let target = reveal_target(saved.as_deref(), &path)?;"))
+            .unwrap_or_else(|| panic!("the path is checked against it: {body}"));
+        let reveal = body
+            .find(".reveal_item_in_dir(target)")
+            .unwrap_or_else(|| panic!("only the checked path is revealed: {body}"));
+        assert!(read < check && check < reveal, "read, check, then reveal: {body}");
+        assert_eq!(body.matches("reveal_item_in_dir(").count(), 1, "one reveal: {body}");
+    }
+
+    /// §9, the row's other two commands: the row reads our record (never 1882's), its "Dismiss" goes through our
+    /// record's rule (only the folder the row showed) and then tells the windows, and the webview can call all three.
+    #[test]
+    fn the_rows_commands_use_our_record_and_are_registered() {
+        let production = super::finder_setup_command_tests::production_source();
+        let squeeze = crate::source_pin::squeeze;
+        let read = squeeze(super::finder_setup_command_tests::body_between(
+            &production,
+            "fn kept_unsent_folder(",
+            "\n}\n",
+        ));
+        assert!(
+            read.contains(&squeeze(
+                "sign_out::kept_record::saved_kept_unsent_at(&DesktopConfig::path()?)"
+            )),
+            "the row reads our record: {read}"
+        );
+        let dismiss = squeeze(super::finder_setup_command_tests::body_between(
+            &production,
+            "fn dismiss_kept_unsent_folder(",
+            "\n}\n",
+        ));
+        let cleared = dismiss
+            .find(&squeeze(
+                "sign_out::kept_record::dismiss_saved_kept_unsent_at(&DesktopConfig::path()?, &path)?;",
+            ))
+            .unwrap_or_else(|| panic!("the dismiss goes through our record's rule: {dismiss}"));
+        let told = dismiss
+            .find("emit_kept_folder_changed(&app);")
+            .unwrap_or_else(|| panic!("the windows are told: {dismiss}"));
+        assert!(cleared < told, "dismissed, then told: {dismiss}");
+        let handler = super::finder_setup_command_tests::body_between(&production, "tauri::generate_handler![", "])");
+        for command in [
+            "kept_unsent_folder",
+            "dismiss_kept_unsent_folder",
+            "show_kept_unsent_folder",
+        ] {
+            assert_eq!(
+                handler
+                    .lines()
+                    .filter(|line| line.trim() == format!("{command},"))
+                    .count(),
+                1,
+                "{command} is registered once"
+            );
+        }
+    }
+
+    /// U34 (f), and (a)'s disarm.
+    #[tokio::test]
+    async fn the_send_phase_is_owned_by_rust() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            queue_write(&db, "w1", "f1", b"bytes");
+            // Backing off far into the future (2100): only the phase's start makes it due now (§6.2).
+            db.hold_lock_for_test()
+                .execute(
+                    "UPDATE operation_queue SET next_retry_at = 4102444800 WHERE op_id = 'w1'",
+                    [],
+                )
+                .unwrap();
+            let next_retry_at = || -> i64 {
+                db.hold_lock_for_test()
+                    .query_row(
+                        "SELECT next_retry_at FROM operation_queue WHERE op_id = 'w1'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap()
+            };
+            let state = AppState::default();
+            let id = ask(&state, "main");
+            let link = Arc::new(runner::SendPhaseLink::default());
+            let stale = start_send_phase(&state.sign_out, "stale", "main", Some(link.clone()));
+            assert!(stale.err().unwrap().starts_with("unsent_changes: "));
+            assert_eq!(next_retry_at(), 4102444800, "a refused start makes nothing due");
+            let run = start_send_phase(&state.sign_out, &id, "main", Some(link.clone())).unwrap();
+            assert!(run.is_some() && link.is_armed());
+            assert!(
+                next_retry_at() <= now_unix_seconds(),
+                "the start made the live write due now"
+            );
+            assert!(
+                start_send_phase(&state.sign_out, &id, "main", Some(link.clone()))
+                    .unwrap()
+                    .is_none(),
+                "a second start starts nothing"
+            );
+            end_send_phase(&state.sign_out, Some(&link));
+            assert!(!link.is_armed() && state.sign_out.phase.lock().unwrap().is_none());
+        })
+        .await;
+    }
+
+    /// PR #130 review, "Do not treat a dead runner handle as a running engine": a runner whose task ended at startup
+    /// (the state dir, the database or the lock failed) leaves its handle in the slot. That is not a running engine:
+    /// `send_conditions` must say so, hand the phase no link, and the count must go straight to the honest ask
+    /// (`engine_stopped`), not offer a send nobody would run.
+    #[tokio::test]
+    async fn a_runner_that_ended_is_not_a_running_engine() {
+        use sign_out::waiting::{NotSending, readiness};
+        let state = AppState::default();
+        synthesize_single_account(&state, AccountId("dead-runner".to_string()));
+        let acct = state.active_account().unwrap();
+        *acct.session.lock().unwrap() = Some(Session {
+            token: "tok".into(),
+            master_key: [9u8; 32],
+            email: None,
+        });
+
+        // A runner whose task is still going: running, with its link.
+        let (hold, held) = tokio::sync::oneshot::channel::<()>();
+        *acct.engine.lock().await = Some(EngineRunner::for_test_with_task(tokio::spawn(async move {
+            let _ = held.await;
+        })));
+        let (conditions, link) = send_conditions(&state).await;
+        assert!(conditions.engine_running && link.is_some(), "a live runner is a running engine");
+        assert_eq!(readiness(conditions, false, true), None, "and it can send");
+
+        // The same slot, its task gone while the handle stays in it.
+        let _ = hold.send(());
+        let task = tokio::spawn(async {});
+        while !task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        *acct.engine.lock().await = Some(EngineRunner::for_test_with_task(task));
+        let (conditions, link) = send_conditions(&state).await;
+        assert!(!conditions.engine_running, "a runner whose task ended is not a running engine");
+        assert!(link.is_none(), "and the phase gets no link to arm");
+        assert_eq!(
+            readiness(conditions, false, true),
+            Some(NotSending::EngineStopped),
+            "the count goes straight to the ask with the engine-stopped line"
+        );
+    }
+
+    /// U46, the chain past the bridge: what the runner noted on the phase's link ends the phase at the driver's first
+    /// observation of it, long before the limit: `account` for a refusal the account cures, and `offline` and
+    /// `session` for an attempt's link failure and refused session (U16 reads those from an attempt alone).
+    /// `observe_phase` is the driver's own step, so this is the driver's reading, not a copy of it.
+    #[test]
+    fn an_attempts_refusal_ends_the_phase_at_its_first_observation() {
+        use crate::engine_bridge::TransferLoopOutcome;
+        use sign_out::send_phase::{PhaseEnd, PhaseStep, SIGN_OUT_SEND_LIMIT, SendPhase};
+        let waiting = sign_out::waiting::WaitingChanges {
+            files: Vec::new(),
+            others: vec![sign_out::waiting::OtherChange {
+                op_id: "r1".into(),
+                live: true,
+            }],
+        };
+        let good = sign_out::waiting::SendConditions {
+            engine_running: true,
+            vault_unlocked: true,
+            session_expired: false,
+            link_failed: false,
+            sync_paused: false,
+        };
+        for (outcome, end) in [
+            (
+                TransferLoopOutcome {
+                    account_refused: true,
+                    ..Default::default()
+                },
+                PhaseEnd::Account,
+            ),
+            (
+                TransferLoopOutcome {
+                    link_failed: true,
+                    ..Default::default()
+                },
+                PhaseEnd::Offline,
+            ),
+            (
+                TransferLoopOutcome {
+                    session_refused: true,
+                    ..Default::default()
+                },
+                PhaseEnd::Session,
+            ),
+        ] {
+            let link = Arc::new(runner::SendPhaseLink::default());
+            link.arm();
+            let run = PhaseRun {
+                owner: "main".into(),
+                link: Some(link.clone()),
+                stop: Default::default(),
+                closed: Default::default(),
+                started: std::time::Instant::now(),
+                changes_at_start: 1,
+            };
+            let mut phase = SendPhase::default();
+            assert_eq!(
+                phase.observe(&observe_phase(&run, &waiting, good)),
+                PhaseStep::Progress(1),
+                "nothing noted yet: it runs"
+            );
+            link.note(&outcome);
+            let observation = observe_phase(&run, &waiting, good);
+            assert!(observation.elapsed < SIGN_OUT_SEND_LIMIT);
+            assert_eq!(phase.observe(&observation), PhaseStep::End(end), "{outcome:?}");
+            assert_eq!(
+                serde_json::to_value(end).unwrap(),
+                end.as_str(),
+                "the reason the ask's A5 line is chosen by"
+            );
+        }
+    }
+
+    /// §5.1, the contract: `sign_out_count`'s answer.
+    #[test]
+    fn the_count_answers_the_contract_shape() {
+        let snapshot = AskSnapshot::of(&WaitingChanges::default(), "o", Vec::new());
+        let json = serde_json::to_value(SignOutCount {
+            counts: snapshot.counts,
+            can_send: false,
+            not_sending: Some(sign_out::waiting::NotSending::Offline),
+        })
+        .unwrap();
+        for key in [
+            "askId",
+            "files",
+            "copiedFiles",
+            "others",
+            "missingFiles",
+            "earlierFolders",
+            "canSend",
+            "notSending",
+        ] {
+            assert!(json.get(key).is_some(), "{key} in {json}");
+        }
+        assert_eq!(json["notSending"], "offline");
+    }
+
+    fn phase_owned_by(state: &AppState, owner: &str) -> Arc<std::sync::atomic::AtomicBool> {
+        let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        *state.sign_out.phase.lock().unwrap() = Some(crate::sign_out::send_phase::RunningPhase {
+            ask_id: "a".into(),
+            owner: owner.into(),
+            stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            closed: closed.clone(),
+        });
+        closed
+    }
+
+    /// U34 (b)-(e), (g), (h).
+    #[tokio::test]
+    async fn the_send_phase_is_owned_by_rust_and_a_close_ends_the_flow() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            queue_write(&db, "w1", "f1", b"bytes");
+            let state = AppState::default();
+            // (b) a close during that window's phase: ended `closed`, its snapshot dropped; a later Sign out
+            // refuses.
+            let id = ask(&state, "main");
+            let closed = phase_owned_by(&state, "main");
+            let outcome = flow_window_closed(&state.sign_out, "main");
+            assert!(outcome.phase_closed && closed.load(Ordering::SeqCst) && outcome.snapshot_dropped);
+            let refused = sign_out_with(&state, Some(&id), no_seam()).await.unwrap_err();
+            assert!(refused.message.starts_with("unsent_changes: "));
+            // (c) at the ask, no phase: the snapshot is dropped.
+            *state.sign_out.phase.lock().unwrap() = None;
+            ask(&state, "main");
+            assert!(flow_window_closed(&state.sign_out, "main").snapshot_dropped);
+            // (d) another window's close leaves a phase and a snapshot of `main` alone.
+            ask(&state, "main");
+            let closed = phase_owned_by(&state, "main");
+            for other in ["settings", "onboarding"] {
+                let outcome = flow_window_closed(&state.sign_out, other);
+                assert!(!outcome.phase_closed && !outcome.snapshot_dropped, "{other}");
+            }
+            assert!(!closed.load(Ordering::SeqCst));
+            *state.sign_out.phase.lock().unwrap() = None;
+            // (d), its other half: a close of `main` leaves a snapshot `onboarding` owns alone. (g) A close
+            // of `onboarding` drops it.
+            ask(&state, "onboarding");
+            let outcome = flow_window_closed(&state.sign_out, "main");
+            assert!(!outcome.snapshot_dropped, "(d) onboarding's snapshot stays");
+            assert!(
+                flow_window_closed(&state.sign_out, "onboarding").snapshot_dropped,
+                "(g)"
+            );
+            // (h) running when its window closes, then failing: the dialog, once.
+            state.sign_out.late_results.begin("main");
+            assert_eq!(flow_window_closed(&state.sign_out, "main").show, None);
+            assert!(
+                state
+                    .sign_out
+                    .late_results
+                    .complete(
+                        "main",
+                        Some(crate::sign_out::flow_window::Shown::Failure("x".into()))
+                    )
+                    .is_some()
+            );
+        })
+        .await;
+    }
+
+    /// U34's pins: the hook is called on every close, destroy and reload, with the window's own label; and its premise.
+    /// Each call is read inside its own arm, so one arm's call cannot stand in for the other's.
+    #[test]
+    fn every_close_destroy_and_reload_reaches_the_hook() {
+        let production = super::finder_setup_command_tests::production_source();
+        let handler = &production[production
+            .find(".on_window_event(|window, event| {")
+            .expect("the global handler")..];
+        let handler = &handler[..handler.find("\n        })\n").unwrap()];
+        let block = |source: &'static str, text: &str, opening: &str, closing: &str| -> String {
+            let at = text
+                .find(opening)
+                .unwrap_or_else(|| panic!("{source}: {opening}\n{text}"));
+            let end = text[at..]
+                .find(closing)
+                .unwrap_or_else(|| panic!("{source}: {opening} ends"));
+            text[at..at + end].to_string()
+        };
+        for arm in [
+            "if let tauri::WindowEvent::CloseRequested { .. } = event {",
+            "if let tauri::WindowEvent::Destroyed = event {",
+        ] {
+            let arm_block = block("the global handler", handler, arm, "\n            }\n");
+            assert!(
+                arm_block.contains("sign_out_flow_window_closed(window.app_handle(), window.label())"),
+                "{arm}\n{arm_block}"
+            );
+        }
+        let page_load = &production[production.find(".on_page_load(").expect("an on_page_load registration")..];
+        let page_load = &page_load[..page_load.find("\n        })\n").unwrap()];
+        let started = block(
+            "on_page_load",
+            page_load,
+            "if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {",
+            "\n            }\n",
+        );
+        assert!(
+            started.contains("sign_out_flow_window_closed(webview.app_handle(), webview.label())"),
+            "{page_load}"
+        );
+        // Task 1683 slice 1 (two-surface §8.2): the flow's window is now the Beebeeb window, and a close destroys
+        // it. The premise moved: the hook runs on `CloseRequested` AND on `Destroyed` (both arms pinned above), so a
+        // destroyed window still ends its flow; spec 1887 §5.1, "A close ends the flow", already covers a destroy.
+        assert_eq!(
+            surfaces::policy::close_policy(surfaces::policy::Platform::Macos, "main"),
+            surfaces::registry::ClosePolicy::Destroy,
+            "the premise: a close destroys the Beebeeb window"
+        );
+    }
+
+    /// U32, extended: the late result is macOS only, defined and registered. It reads the first definition of each
+    /// name, so every macOS command sits above its non-macOS twin, and that item's own attribute lines, so the `cfg`
+    /// of the item above cannot stand in for its own; and each call's own statement.
+    #[test]
+    fn the_late_result_is_macos_only() {
+        let production = super::finder_setup_command_tests::production_source();
+        let macos = "#[cfg(target_os = \"macos\")]";
+        for definition in [
+            "fn sign_out_result_ack(",
+            "fn sign_out_flow_window_closed(",
+            "fn sign_out_count(",
+            "fn sign_out_send_start(",
+        ] {
+            let at = production.find(definition).unwrap_or_else(|| panic!("{definition}"));
+            let line = production[..at].rfind('\n').map_or(0, |end| end + 1);
+            let attributes: Vec<&str> = production[..line]
+                .lines()
+                .rev()
+                .map(str::trim)
+                .take_while(|above| above.starts_with("#[") || above.starts_with("///"))
+                .collect();
+            assert!(attributes.contains(&macos), "{definition}: {attributes:?}");
+        }
+        let handler = super::finder_setup_command_tests::body_between(&production, "tauri::generate_handler![", "])");
+        assert_eq!(
+            handler
+                .lines()
+                .filter(|line| line.trim() == "sign_out_result_ack,")
+                .count(),
+            1,
+            "registered once"
+        );
+        // Read squeezed, as rustfmt lays the `complete` statement over several lines.
+        let squeeze = crate::source_pin::squeeze;
+        let command = squeeze(super::finder_setup_command_tests::body_between(
+            &production,
+            "async fn clear_session(",
+            "\n}\n",
+        ));
+        for statement in [
+            "state.sign_out.late_results.begin(",
+            "if let Some(shown) = state.sign_out.late_results.complete(",
+        ] {
+            let at = command
+                .find(&squeeze(statement))
+                .unwrap_or_else(|| panic!("{statement}\n{command}"));
+            assert!(command[..at].ends_with(&squeeze(macos)), "{statement}\n{command}");
+        }
+    }
+
+    /// U44 (b) and (e), through the classification `clear_session` hands to the record (§5.1 "A late result"): a
+    /// failure and a completed sign-out's warning need showing, each with its own text; an `unsent_changes:` refusal
+    /// and a completed sign-out with no warning do not, and leave nothing for a close to show.
+    #[test]
+    fn a_late_result_is_shown_only_when_it_needs_showing() {
+        use crate::sign_out::flow_window::{LateResults, Shown};
+        let failed = |message: &str| -> Result<SignedOut, SignOutFailure> {
+            Err(SignOutFailure {
+                message: message.into(),
+                preserved_location: None,
+                kept_unsent: None,
+            })
+        };
+        let done = |warning| -> Result<SignedOut, SignOutFailure> {
+            Ok(SignedOut {
+                warning,
+                ..SignedOut::confirmed(SignOutOutcome::Completed)
+            })
+        };
+        let refused = coded(UNSENT_CHANGES_CODE, E1_UNSENT_CHANGES);
+        let not_kept = coded(UNSENT_COPY_FAILED_CODE, E2_UNSENT_COPY_FAILED);
+        let cases = [
+            (failed(&refused), None),
+            (failed(&not_kept), Some(Shown::Failure(not_kept.clone()))),
+            (
+                failed(SIGN_OUT_PURGE_FAILED),
+                Some(Shown::Failure(SIGN_OUT_PURGE_FAILED.into())),
+            ),
+            (
+                done(Some(ActionWarning::FinderRemovalUnconfirmed)),
+                Some(Shown::Warning(FINDER_SIGN_OUT_UNCONFIRMED_WARNING.into())),
+            ),
+            (done(None), None),
+        ];
+        for (result, expected) in cases {
+            assert_eq!(late_result_of(&result), expected, "{result:?}");
+            // What a close then finds: that result once, or nothing.
+            let late = LateResults::default();
+            late.begin("main");
+            assert_eq!(late.complete("main", late_result_of(&result)), None);
+            assert_eq!(
+                late.window_closed("main"),
+                expected,
+                "a close after {result:?}"
+            );
+            assert_eq!(late.window_closed("main"), None);
+        }
+    }
+
+    /// §5.1 "A late result", the glue the pure tests cannot run (it needs the app's dialog and a Wry window), read from
+    /// its source: the call's record begins before the sign-out and completes after it with the classified result,
+    /// and what that returns is shown; the hook reads the closed window's own flow state, tells that window, and shows
+    /// what it took out; the acknowledgement names the calling window; the dialog keeps the menu's two titles.
+    #[test]
+    fn the_late_result_reaches_the_dialog_from_the_call_and_the_hook() {
+        use crate::source_pin::squeeze;
+        let production = super::finder_setup_command_tests::production_source();
+        let body = |start: &str| {
+            squeeze(super::finder_setup_command_tests::body_between(
+                &production,
+                start,
+                "\n}\n",
+            ))
+        };
+        let command = body("async fn clear_session(");
+        let begin = command
+            .find(&squeeze("state.sign_out.late_results.begin(window.label());"))
+            .unwrap_or_else(|| panic!("the record begins: {command}"));
+        let sign_out = command
+            .find("clear_session_impl(")
+            .unwrap_or_else(|| panic!("the sign-out: {command}"));
+        let complete = command
+            .find(&squeeze(
+                "if let Some(shown) = state.sign_out.late_results.complete(window.label(), late_result_of(&result)) {
+                    show_late_result(&app, shown);
+                }",
+            ))
+            .unwrap_or_else(|| {
+                panic!("the record completes with the classified result, and a Some is shown: {command}")
+            });
+        assert!(
+            begin < sign_out && sign_out < complete,
+            "begin, the sign-out, then complete: {command}"
+        );
+        let hook = body("fn sign_out_flow_window_closed(");
+        for step in [
+            "let closed = flow_window_closed(&state.sign_out, label);",
+            "let _ = app.emit_to(label, \"sign-out-flow-closed\", ());",
+            "if let Some(shown) = closed.show { show_late_result(app, shown); }",
+        ] {
+            assert!(hook.contains(&squeeze(step)), "the hook: {step}\n{hook}");
+        }
+        let ack = body("fn sign_out_result_ack(");
+        assert!(
+            ack.contains(&squeeze("state.sign_out.late_results.acknowledge(window.label());")),
+            "the acknowledgement names the calling window: {ack}"
+        );
+        let dialog = body("fn show_late_result(");
+        for step in [
+            "Shown::Failure(message) => (\"Sign-out paused\", message, tauri_plugin_dialog::MessageDialogKind::Error)",
+            "Shown::Warning(sentence) => (\"Signed out\", sentence, tauri_plugin_dialog::MessageDialogKind::Info)",
+            ".message(message).title(title).kind(kind).show(",
+        ] {
+            assert!(dialog.contains(&squeeze(step)), "the dialog: {step}\n{dialog}");
+        }
+    }
+    /// U19 (macOS half; the frontend half is F8, the Linux case is F8's last line).
+    #[tokio::test]
+    async fn the_switch_carries_a_snapshot_on_macos_only() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            queue_write(&db, "w1", "f1", b"bytes");
+            queue_rename(&db, "r1");
+            let state = AppState::default();
+            let unsent = switch_snapshot(&state).unwrap().expect("a snapshot on macOS");
+            assert_eq!((unsent.files, unsent.others), (1, 1));
+            assert_eq!(
+                state.sign_out.snapshots.newest_ask_id().as_deref(),
+                Some(unsent.ask_id.as_str()),
+                "recorded as the newest"
+            );
+            assert!(state.sign_out.phase.lock().unwrap().is_none(), "no send is started");
+            let json = serde_json::to_value(LoginOutcome::account_mismatch(2, Some(unsent), None)).unwrap();
+            assert_eq!(json["account_mismatch"]["pending_changes"], 2);
+            assert!(json["account_mismatch"]["unsent"]["askId"].is_string());
+            assert!(
+                json["account_mismatch"].get("unsent_error").is_none(),
+                "absent while the count worked"
+            );
+            assert!(
+                state.sign_out.snapshots.drop_owned_by("onboarding"),
+                "owned by the window the switch step runs in"
+            );
+            let without = serde_json::to_value(LoginOutcome::account_mismatch(2, None, None)).unwrap();
+            assert_eq!(
+                without["account_mismatch"],
+                serde_json::json!({ "pending_changes": 2 }),
+                "elsewhere: unchanged"
+            );
+        })
+        .await;
+    }
+
+    /// Spec §5.3 row 1: a switch count that cannot be read is E3, a line in the switch step. The sign-in settles as a
+    /// switch, with no snapshot and the coded E3; it is never a failed sign-in.
+    #[test]
+    fn a_switch_count_that_fails_is_a_line_in_the_step() {
+        let e3 = sign_out::copy::coded(
+            sign_out::copy::UNSENT_COUNT_FAILED_CODE,
+            sign_out::copy::E3_UNSENT_COUNT_FAILED,
+        );
+        let SignInSettlement::AccountMismatch {
+            pending_changes,
+            unsent,
+            unsent_error,
+        } = switch_settlement(3, Err(e3.clone()))
+        else {
+            panic!("a switch, not a failure");
+        };
+        assert_eq!(
+            (pending_changes, unsent, unsent_error.as_deref()),
+            (3, None, Some(e3.as_str()))
+        );
+        let json = serde_json::to_value(LoginOutcome::account_mismatch(3, None, Some(e3.clone()))).unwrap();
+        assert_eq!(
+            json["account_mismatch"],
+            serde_json::json!({ "pending_changes": 3, "unsent_error": e3 })
+        );
+        let production = super::finder_setup_command_tests::production_source();
+        let settle = super::finder_setup_command_tests::body_between(&production, "async fn settle_sign_in(", "\n}\n");
+        assert!(
+            settle.contains("switch_settlement(pending_changes, switch_snapshot(state))"),
+            "{settle}"
+        );
+    }
+
+    /// U21: the menu never purges a waiting write and never shows the error dialog for it.
+    #[test]
+    fn the_menu_never_purges_a_waiting_write() {
+        let state = AppState::default();
+        state.sign_out.flow_request.store(true, Ordering::SeqCst);
+        state.sign_out.flow_request.store(true, Ordering::SeqCst);
+        assert!(take_sign_out_flow_request(&state.sign_out), "one request");
+        assert!(!take_sign_out_flow_request(&state.sign_out), "not two");
+        let production = super::finder_setup_command_tests::production_source();
+        let menu = &production[production.find("DesktopMenuAction::SignOut =>").unwrap()..];
+        let menu = &menu[..menu.find("DesktopMenuAction::Quit").unwrap()];
+        let flow = menu
+            .find("Err(error) if error.message.starts_with(\"unsent_changes: \") => open_sign_out_flow(&app),")
+            .expect("the flow arm");
+        let paused = menu.find(".title(\"Sign-out paused\")").unwrap();
+        assert!(flow < paused, "the flow arm comes before the error dialog's arm");
+        assert!(
+            menu.contains("clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep, None)"),
+            "the menu never keeps on its own"
+        );
+    }
+
+    /// F9's Rust half: the compact page's request survives a Settings window that has not loaded yet.
+    #[test]
+    fn a_flow_request_waits_for_settings_to_consume_it() {
+        let state = AppState::default();
+        assert!(!take_sign_out_flow_request(&state.sign_out));
+        assert!(
+            !state.sign_out.flow_request.load(Ordering::SeqCst),
+            "asking when nothing waits leaves nothing"
+        );
+        state.sign_out.flow_request.store(true, Ordering::SeqCst);
+        assert!(take_sign_out_flow_request(&state.sign_out));
+    }
+
+    /// U19, from the count to the window (W11): the switch settles with the snapshot it counted (a Mac) or none
+    /// (elsewhere); both password sign-ins hand the settlement's snapshot and E3 on to `LoginOutcome`; and the browser
+    /// sign-in puts each in its `account_mismatch` event only when it is there. The sign-ins need a server, so their
+    /// text is read.
+    #[test]
+    fn the_switch_count_reaches_the_sign_in_window() {
+        let counts = sign_out::snapshot::AskCounts {
+            ask_id: "ask-1".to_string(),
+            files: 1,
+            copied_files: 1,
+            others: 1,
+            missing_files: 0,
+            earlier_folders: Vec::new(),
+        };
+        assert_eq!(
+            switch_settlement(2, Ok(Some(counts.clone()))),
+            SignInSettlement::AccountMismatch {
+                pending_changes: 2,
+                unsent: Some(counts),
+                unsent_error: None,
+            },
+            "a Mac: the snapshot rides the settlement"
+        );
+        assert_eq!(
+            switch_settlement(2, Ok(None)),
+            SignInSettlement::AccountMismatch {
+                pending_changes: 2,
+                unsent: None,
+                unsent_error: None,
+            },
+            "elsewhere: the count alone"
+        );
+        let squeeze = crate::source_pin::squeeze;
+        let production = super::finder_setup_command_tests::production_source();
+        for login in ["async fn desktop_login(", "async fn desktop_login_2fa("] {
+            let body = squeeze(super::finder_setup_command_tests::body_between(
+                &production,
+                login,
+                "\n}\n",
+            ));
+            assert!(
+                body.contains(&squeeze(
+                    "return Ok(LoginOutcome::account_mismatch(pending_changes, unsent, unsent_error));"
+                )),
+                "{login} hands both on"
+            );
+        }
+        let browser = squeeze(&include_str!("browser_login.rs").replace("\r\n", "\n"));
+        for step in [
+            "let mut payload = serde_json::json!({ \"pending_changes\": pending_changes });",
+            "if let Some(unsent) = unsent {
+                payload[\"unsent\"] = serde_json::to_value(unsent).unwrap_or(serde_json::Value::Null);
+            }",
+            "if let Some(unsent_error) = unsent_error {
+                payload[\"unsent_error\"] = serde_json::Value::String(unsent_error);
+            }",
+            "emit(app, \"account_mismatch\", payload);",
+        ] {
+            assert!(browser.contains(&squeeze(step)), "the browser sign-in's event: {step}");
+        }
+    }
+
+    // ---- the fix round after the /code-review of the Mac sign-in PR (task 1683 slice 2) ----
+
+    /// Review P2-3: ⌘W destroys the window and its flow with it, and a window opened again must be able to resume “Set up
+    /// this Mac”. Rust keeps the step for the process, answers it only while it is still true, and does not use it up by
+    /// reading it (the window may be closed again).
+    #[test]
+    fn a_pending_set_up_step_is_resumed_only_while_it_is_still_true() {
+        let alice = account_binding::Identity::new(Some("user-alice"), Some("alice@example.eu"));
+        let slot = Mutex::new(None);
+        assert_eq!(resume_pending_setup(&slot, true, false, &alice), None, "nothing was set");
+        remember_pending_setup(&slot, true, alice.clone());
+        assert_eq!(resume_pending_setup(&slot, true, false, &alice), Some(PendingSetup { key_replaced: true }));
+        assert_eq!(
+            resume_pending_setup(&slot, true, false, &alice),
+            Some(PendingSetup { key_replaced: true }),
+            "reading it does not use it up"
+        );
+        assert_eq!(resume_pending_setup(&slot, true, true, &alice), None, "the keys are here: nothing is owed");
+        assert_eq!(resume_pending_setup(&slot, false, false, &alice), None, "nobody is signed in: nothing to resume");
+        remember_pending_setup(&slot, false, alice.clone());
+        assert_eq!(
+            resume_pending_setup(&slot, true, false, &alice),
+            Some(PendingSetup { key_replaced: false }),
+            "the newest sign-in's step replaces an older one"
+        );
+        forget_pending_setup(&slot);
+        assert_eq!(resume_pending_setup(&slot, true, false, &alice), None);
+    }
+
+    /// Review P3-4 of the delta review: the step belongs to the account it was set for. A signs in without a key, A signs out
+    /// (the sign-out code is untouched and leaves the slot), B signs in and is signed in and locked: B must not be sent to
+    /// A's recovery phrase. Only the same account resumes; an identity that cannot be compared resumes nothing.
+    #[test]
+    fn a_pending_set_up_step_belongs_to_the_account_it_was_set_for() {
+        let alice = account_binding::Identity::new(Some("user-alice"), Some("alice@example.eu"));
+        let bob = account_binding::Identity::new(Some("user-bob"), Some("bob@example.eu"));
+        let slot = Mutex::new(None);
+        remember_pending_setup(&slot, true, alice.clone());
+        assert_eq!(resume_pending_setup(&slot, true, false, &alice), Some(PendingSetup { key_replaced: true }));
+        assert_eq!(resume_pending_setup(&slot, true, false, &bob), None, "another account is signed in and locked");
+        assert_eq!(
+            resume_pending_setup(&slot, true, false, &account_binding::Identity::default()),
+            None,
+            "an account that cannot be named is not compared, so nothing resumes"
+        );
+        // The same user under another spelling of its email, with no user id on one side: the canonical email decides.
+        let by_email = account_binding::Identity::new(None, Some(" Alice@Example.eu "));
+        let named_by_email = Mutex::new(None);
+        remember_pending_setup(&named_by_email, false, account_binding::Identity::new(None, Some("alice@example.eu")));
+        assert_eq!(resume_pending_setup(&named_by_email, true, false, &by_email), Some(PendingSetup { key_replaced: false }));
+        // B enters the step in its turn: the slot now answers B and no longer A.
+        remember_pending_setup(&slot, false, bob.clone());
+        assert_eq!(resume_pending_setup(&slot, true, false, &bob), Some(PendingSetup { key_replaced: false }));
+        assert_eq!(resume_pending_setup(&slot, true, false, &alice), None);
+    }
+
+    #[test]
+    fn arriving_keys_forget_the_pending_set_up_step() {
+        let alice = account_binding::Identity::new(Some("user-alice"), Some("alice@example.eu"));
+        for from in [KeysFrom::Unlock, KeysFrom::SignIn] {
+            let state = AppState::default();
+            remember_pending_setup(&state.pending_setup, false, alice.clone());
+            keys_arrived(&state, from);
+            assert_eq!(resume_pending_setup(&state.pending_setup, true, false, &alice), None, "{from:?}");
+        }
+    }
+
+    /// The window reads `{ "key_replaced": bool }` strictly (`flowForPendingSetup`), and an absent step is JSON null.
+    #[test]
+    fn the_pending_set_up_step_is_the_json_the_window_reads() {
+        assert_eq!(
+            serde_json::to_value(PendingSetup { key_replaced: true }).unwrap(),
+            serde_json::json!({ "key_replaced": true })
+        );
+        assert_eq!(serde_json::to_value(Option::<PendingSetup>::None).unwrap(), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn the_pending_set_up_commands_are_registered_and_touch_no_secret() {
+        let production = super::finder_setup_command_tests::production_source();
+        let handler = super::finder_setup_command_tests::body_between(&production, "tauri::generate_handler![", "])");
+        // Whole lines: `set_pending_setup,` contains `pending_setup,`, so a substring test cannot tell the two apart.
+        for name in ["set_pending_setup,", "pending_setup,"] {
+            assert!(handler.lines().any(|line| line.trim() == name), "{name} is registered");
+        }
+        for signature in ["fn set_pending_setup(", "fn pending_setup("] {
+            let body = super::finder_setup_command_tests::body_between(&production, signature, "\n}\n");
+            for forbidden in ["keychain", "Keychain", "master_key", "token"] {
+                assert!(!body.contains(forbidden), "{signature} must not touch {forbidden}:\n{body}");
+            }
+        }
+        // It asks the same thing `sync_status` does (a session in memory, or a token present) and nothing more.
+        let ask = super::finder_setup_command_tests::body_between(&production, "fn pending_setup(", "\n}\n");
+        assert!(
+            ask.contains("resume_pending_setup(\n        &state.pending_setup,\n        vault_unlocked || auth_present,\n        vault_unlocked,\n        &pending_setup_identity(&acct),\n    )"),
+            "{ask}"
+        );
+        // Both commands name the account the same way: the one whose credentials this Mac holds.
+        let set = super::finder_setup_command_tests::body_between(&production, "fn set_pending_setup(", "\n}\n");
+        assert!(set.contains("pending_setup_identity(&acct)"), "{set}");
+    }
+
+    /// Review P2-3 b: the Keychain holds a token and no key. `unlock_vault` says the approved Set up this Mac sentence on a
+    /// Mac (the window recognises it; `tests/signInModel.test.ts` pins the TypeScript copy equal), not the Keychain's words.
+    #[test]
+    fn unlock_vault_says_the_set_up_sentence_when_the_key_is_not_there() {
+        let keychain = "unlock vault key from Keychain: secret not found".to_string();
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(unlock_failure(keychain), NO_VAULT_KEY_UNLOCK_ERROR);
+            assert_eq!(
+                NO_VAULT_KEY_UNLOCK_ERROR,
+                "This Mac does not have your encryption keys yet. Restore them to continue."
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(unlock_failure(keychain.clone()), keychain, "Windows and Linux keep what they showed");
+        // Any other failure is shown as it is.
+        for other in ["load session from Keychain: the Keychain is locked", "Sign in before unlocking the vault.", ""] {
+            assert_eq!(unlock_failure(other.to_string()), other);
+        }
+    }
+
+    #[test]
+    fn unlock_vault_maps_only_the_keychain_load_and_never_the_session_it_installs() {
+        let production = super::finder_setup_command_tests::production_source();
+        let unlock = super::finder_setup_command_tests::body_between(&production, "async fn unlock_vault(", "\n}\n");
+        assert!(
+            unlock.contains("load_session_from_keychain(acct.id.as_str(), email)\n            .map_err(unlock_failure)?"),
+            "{unlock}"
+        );
+        // The startup restore's own test of the same failure is untouched: it reads the Keychain's words.
+        let restore = super::finder_setup_command_tests::body_between(&production, "async fn restore_session_inner(", "\n}\n");
+        assert!(!restore.contains("unlock_failure"), "{restore}");
+    }
+
+    /// Review P3-1: `open_reauth_window` on a Mac asks the window for “Sign in again”, whatever the session says; the
+    /// sign-in itself still lets the window decide.
+    #[test]
+    fn open_reauth_window_asks_the_beebeeb_window_for_sign_in_again() {
+        assert_eq!(serde_json::to_value(MainNav::Reauth).unwrap(), serde_json::json!({ "to": "reauth" }));
+        let production = super::finder_setup_command_tests::production_source();
+        let window = super::finder_setup_command_tests::body_between(&production, "async fn open_reauth_window(", "\n}\n");
+        let mac = super::finder_setup_command_tests::body_between(window, "#[cfg(target_os = \"macos\")]\n    {", "\n    }\n");
+        assert!(mac.contains("show_reauth_in_beebeeb_window(&app)"), "{mac}");
+        let ask = super::finder_setup_command_tests::body_between(&production, "fn show_reauth_in_beebeeb_window(", "\n}\n");
+        assert!(ask.contains("show_main_window(app, MainNav::Reauth);"), "{ask}");
+        // The plain sign-in is unchanged: Home, and the window decides.
+        let plain = super::finder_setup_command_tests::body_between(&production, "fn show_sign_in_in_beebeeb_window(app", "\n}\n");
+        assert!(plain.contains("show_main_window(app, MainNav::Home);"), "{plain}");
+    }
+
+    /// §6.4 (review I8): the switch's count logs the line `sign_out_count` logs, with counts only. A device step reads
+    /// it to prove a change was waiting (D1).
+    #[tokio::test]
+    async fn the_switch_count_logs_counts_only() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            let staged = queue_write(&db, "w1", "f1", b"bytes");
+            queue_rename(&db, "r1");
+            let state = AppState::default();
+            let mut counted = None;
+            let logs = capture_logs(|| counted = Some(switch_snapshot(&state)));
+            assert!(counted.expect("the count ran").unwrap().is_some(), "a snapshot");
+            let line = logs
+                .lines()
+                .find(|line| line.contains("sign-out flow counted"))
+                .unwrap_or_else(|| panic!("the switch's count is logged:\n{logs}"));
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            for field in [
+                "files=1",
+                "copied_files=1",
+                "others=1",
+                "missing_files=0",
+                "can_send=false",
+                "earlier_folder=false",
+            ] {
+                assert!(fields.contains(&field), "{field}: {line}");
+            }
+            assert!(
+                !logs.contains("f1.bin") && !logs.contains(&*staged.to_string_lossy()),
+                "no name and no path:\n{logs}"
+            );
+        })
+        .await;
+    }
+
+    /// §5.1, the entry points' side of the request. They need the app's windows, so their text is read: the request is
+    /// stored before Settings opens and is told, so a window that has not loaded yet finds it when it mounts; the
+    /// compact page's command opens the flow; Settings' command takes the one request; both are registered once.
+    #[test]
+    fn a_flow_request_is_stored_before_settings_opens_and_is_told() {
+        let squeeze = crate::source_pin::squeeze;
+        let production = super::finder_setup_command_tests::production_source();
+        let body = |start: &str| {
+            squeeze(super::finder_setup_command_tests::body_between(
+                &production,
+                start,
+                "\n}\n",
+            ))
+        };
+        let open = body("fn open_sign_out_flow(");
+        let at = |step: &str| {
+            open.find(&squeeze(step))
+                .unwrap_or_else(|| panic!("open_sign_out_flow: {step}\n{open}"))
+        };
+        let stored = at("app.state::<AppState>().sign_out.flow_request.store(true, Ordering::SeqCst);");
+        // Task 1683 slice 1 (two-surface §8.1, §8.2): the flow's owner is the Beebeeb window, on Settings › Account.
+        let shown = at("show_main_window(app, MainNav::settings(Some(\"account\")));");
+        let told = at("let _ = app.emit_to(\"main\", \"menu:sign-out-flow\", ());");
+        assert!(stored < shown && shown < told, "store, open, then tell: {open}");
+        assert!(
+            body("fn request_sign_out_flow(").contains(&squeeze("open_sign_out_flow(&app);")),
+            "the compact page's command opens the flow"
+        );
+        assert!(
+            body("fn consume_sign_out_flow_request(").contains(&squeeze("take_sign_out_flow_request(&state.sign_out)")),
+            "Settings takes the one request"
+        );
+        let handler = super::finder_setup_command_tests::body_between(&production, "tauri::generate_handler![", "])");
+        for command in ["request_sign_out_flow,", "consume_sign_out_flow_request,"] {
+            assert_eq!(
+                handler.lines().filter(|line| line.trim() == command).count(),
+                1,
+                "{command} registered once"
+            );
+        }
+    }
+
+    /// U20 (W12): spec A's R10 reset keeps every waiting write before its purge, asking nobody: the other changes are
+    /// dropped with their count in its log line, and the purge runs with the guard. A failed keep fails the reset and
+    /// deletes nothing. A reset whose purge fails after a completed keep still hands its folder on to be surfaced, as
+    /// the recorded folder is on disk either way.
+    #[tokio::test]
+    async fn the_r10_reset_keeps_before_it_purges() {
+        in_own_dirs(async {
+            let state_dir = state_paths::beebeeb_state_dir().unwrap();
+            let sync_root = tempfile::tempdir().unwrap();
+            let db = state_db_in_scratch();
+            queue_write(&db, "w1", "f1", b"another account's save");
+            queue_rename(&db, "r1");
+            let data =
+                StateDbLocalData::for_engine_start(&LocalDataPaths::for_test(&state_dir, sync_root.path())).unwrap();
+            let logs = capture_logs_async(async {
+                account_binding::LocalData::reset(&data).unwrap();
+            })
+            .await;
+            let kept = data.kept.lock().unwrap().clone().expect("the reset kept the write");
+            let folder = kept.folder.clone().unwrap();
+            assert_eq!(std::fs::read(folder.join("f1.bin")).unwrap(), b"another account's save");
+            assert_eq!(
+                DesktopConfig::load().unwrap().kept_unsent_folder,
+                Some(folder.to_string_lossy().into_owned()),
+                "recorded"
+            );
+            assert!(kept.others_acknowledged.contains("r1"));
+            assert!(
+                logs.contains("others_dropped=1"),
+                "the dropped rename is counted in the reset's line: {logs}"
+            );
+            assert!(
+                db.waiting_rows().unwrap().is_empty(),
+                "then the purge ran, with the guard"
+            );
+            assert!(
+                DesktopConfig::load().unwrap().kept_unsent_unfinished.is_empty(),
+                "a completed reset clears the unfinished list, as every completed purge does (§7.3)"
+            );
+            let production = super::finder_setup_command_tests::production_source();
+            let reset = super::finder_setup_command_tests::body_between(
+                &production,
+                "    fn reset(&self) -> Result<(), String> {",
+                "\n    }\n",
+            );
+            let squeezed = crate::source_pin::squeeze(reset);
+            let call = crate::source_pin::squeeze(
+                "purge_local_state_files_in(&self.db, self.sync_root.as_deref(), &self.staging_dirs, kept.as_ref())",
+            );
+            assert!(squeezed.contains(&call), "the guard is in the reset's path: {reset}");
+            // W13 and W10: the reset clears the unfinished list with the sign-out purge's own statement, so a clear
+            // that fails is logged by the step that failed, never by an error's text.
+            let marker_clear = crate::source_pin::squeeze(concat!(
+                "#[cfg(target_os = \"macos\")] if let Err(step) = DesktopConfig::path()",
+                ".map_err(|_| \"path\".to_string())",
+                ".and_then(|path| sign_out::kept_record::clear_unfinished_at(&path))",
+                " { tracing::warn!(step = %step, \"could not clear the unfinished sign-out marker\"); }",
+            ));
+            let sign_out_purge = crate::source_pin::squeeze(super::finder_setup_command_tests::body_between(
+                &production,
+                "fn purge_local_data_for_sign_out(",
+                "\n}\n",
+            ));
+            assert!(
+                sign_out_purge.contains(&marker_clear) && squeezed.contains(&marker_clear),
+                "the reset clears the marker as the sign-out does, its warning naming the step: {reset}"
+            );
+            // A failing copy: the reset fails, nothing is deleted, no record.
+            use std::os::unix::fs::PermissionsExt;
+            clean_scratch(&db);
+            let staged = queue_write(&db, "w2", "f2", b"bytes");
+            std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let data =
+                StateDbLocalData::for_engine_start(&LocalDataPaths::for_test(&state_dir, sync_root.path())).unwrap();
+            let mut failed = None;
+            let logs = capture_logs_async(async {
+                failed = Some(account_binding::LocalData::reset(&data));
+            })
+            .await;
+            // A copy the reset deleted cannot have its permissions put back: the next line names that failure.
+            let _ = std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o600));
+            assert!(staged.exists(), "nothing deleted: the staged copy is still there");
+            assert!(failed.unwrap().unwrap_err().starts_with("unsent_copy_failed: "));
+            let stopped = "R10: local data reset stopped: the waiting changes could not be kept; nothing was purged";
+            assert!(
+                logs.contains(stopped),
+                "the reset's failed keep is logged as the reset's: {logs}"
+            );
+            assert!(!logs.contains("sign-out stopped"), "a reset is not a sign-out: {logs}");
+            assert!(
+                !db.finder_accepts_closed().unwrap(),
+                "a reset that stops reopens Finder accepts (spec §15 question 3)"
+            );
+            assert_eq!(db.waiting_rows().unwrap().len(), 1, "nothing deleted");
+            assert_eq!(DesktopConfig::load().unwrap().kept_unsent_folder, None, "no record");
+            // W12: a reset whose purge fails after a completed keep still hands its folder on to be surfaced (the alert
+            // and the row), as the recorded folder is on disk either way.
+            clean_scratch(&db);
+            let blocker = std::env::temp_dir().join(format!("bb-1887-{}-blocker", std::process::id()));
+            std::fs::create_dir_all(&blocker).unwrap();
+            db.track_staged_payload(blocker.to_str().unwrap(), None, true).unwrap(); // a "file" no removal can take
+            queue_write(&db, "w3", "f3", b"kept, then the purge failed");
+            let data =
+                StateDbLocalData::for_engine_start(&LocalDataPaths::for_test(&state_dir, sync_root.path())).unwrap();
+            let failed = account_binding::LocalData::reset(&data);
+            std::fs::remove_dir(&blocker).unwrap();
+            assert!(failed.is_err(), "the purge failed on the folder at a journal path");
+            assert!(
+                !db.finder_accepts_closed().unwrap(),
+                "a reset whose purge failed reopens Finder accepts (spec §15 question 3)"
+            );
+            let surfaced = AppState::default();
+            hand_on_reset_kept(&surfaced, &data);
+            let (folder, files) = surfaced
+                .sign_out
+                .reset_kept
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("the recorded folder is handed on");
+            assert_eq!(files, 1);
+            assert_eq!(
+                std::fs::read(Path::new(&folder).join("f3.bin")).unwrap(),
+                b"kept, then the purge failed"
+            );
+            assert_eq!(
+                DesktopConfig::load().unwrap().kept_unsent_unfinished,
+                [folder.as_str()],
+                "a reset that stops after its keep leaves its folder named (W13)"
+            );
+            let bind =
+                super::finder_setup_command_tests::body_between(&production, "fn bind_data_to_session(", "\n}\n");
+            let ran = bind.find("bind_before_engine_start(").expect("the binding runs");
+            let handed = bind
+                .find("hand_on_reset_kept(state, data);")
+                .expect("the binding hands the folder on");
+            assert!(
+                ran < handed && handed < bind.find("match bound?").expect("before it looks at the result"),
+                "the folder is handed on after the binding ran, before its answer is looked at: {bind}"
+            );
+        })
+        .await;
+    }
+
+    /// W12 through the binding (U20): an R10 reset that completes, for another account's data and its waiting save,
+    /// hands its kept folder to the state, where the engine start surfaces it.
+    #[tokio::test]
+    async fn a_completed_r10_reset_hands_its_folder_on_through_the_binding() {
+        in_own_dirs(async {
+            let state_dir = state_paths::beebeeb_state_dir().unwrap();
+            let sync_root = tempfile::tempdir().unwrap();
+            let db = state_db_in_scratch();
+            let alice = account_binding::Identity::new(Some("u-alice"), Some("alice@beebeeb.io"));
+            let bob = account_binding::Identity::new(Some("u-bob"), Some("bob@beebeeb.io"));
+            db.set_owner(&alice).unwrap();
+            queue_write(&db, "w1", "f1", b"alice's save");
+            let data =
+                StateDbLocalData::for_engine_start(&LocalDataPaths::for_test(&state_dir, sync_root.path())).unwrap();
+            let state = AppState::default();
+            assert_eq!(bind_data_to_session(&state, &data, &bob), Ok(()), "the reset completed");
+            assert_eq!(db.owner().unwrap(), Some(bob), "the data is the new account's");
+            let (folder, files) = state
+                .sign_out
+                .reset_kept
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("a completed reset hands its folder on through the binding");
+            assert_eq!(files, 1);
+            assert_eq!(
+                std::fs::read(Path::new(&folder).join("f1.bin")).unwrap(),
+                b"alice's save"
+            );
+        })
+        .await;
+    }
+
+    /// W12 through the binding (U20): an R10 reset whose purge fails after a completed keep answers an error, so
+    /// nothing starts, and the binding still hands the kept folder to the state: it is recorded and on disk either way.
+    #[tokio::test]
+    async fn an_r10_reset_whose_purge_fails_hands_its_folder_on_through_the_binding() {
+        in_own_dirs(async {
+            let state_dir = state_paths::beebeeb_state_dir().unwrap();
+            let sync_root = tempfile::tempdir().unwrap();
+            let db = state_db_in_scratch();
+            let alice = account_binding::Identity::new(Some("u-alice"), Some("alice@beebeeb.io"));
+            let bob = account_binding::Identity::new(Some("u-bob"), Some("bob@beebeeb.io"));
+            db.set_owner(&alice).unwrap();
+            // A journal path that holds a directory: a removal the purge cannot make. In the test's own state dir.
+            let blocker = state_dir.join("bb-1887-blocker");
+            std::fs::create_dir_all(&blocker).unwrap();
+            db.track_staged_payload(blocker.to_str().unwrap(), None, true).unwrap();
+            queue_write(&db, "w1", "f1", b"kept, then the purge failed");
+            let data =
+                StateDbLocalData::for_engine_start(&LocalDataPaths::for_test(&state_dir, sync_root.path())).unwrap();
+            let state = AppState::default();
+            let bound = bind_data_to_session(&state, &data, &bob);
+            assert!(
+                bound
+                    .as_ref()
+                    .is_err_and(|error| error.contains("could not be removed")),
+                "the purge failed, so nothing starts: {bound:?}"
+            );
+            assert_eq!(db.owner().unwrap(), Some(alice), "no new owner over data still there");
+            let (folder, files) = state
+                .sign_out
+                .reset_kept
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("a failed purge's folder is handed on through the binding");
+            assert_eq!(files, 1);
+            assert_eq!(
+                std::fs::read(Path::new(&folder).join("f1.bin")).unwrap(),
+                b"kept, then the purge failed"
+            );
+        })
+        .await;
+    }
+
+    /// Spec §15 question 3 for the R10 reset's last step: a reset whose row clear fails, after its keep and its purge,
+    /// answers that error and reopens Finder accepts at once, as a reset whose purge fails does.
+    #[tokio::test]
+    async fn an_r10_reset_whose_row_clear_fails_reopens_finder_accepts() {
+        in_own_dirs(async {
+            let state_dir = state_paths::beebeeb_state_dir().unwrap();
+            let sync_root = tempfile::tempdir().unwrap();
+            let db = state_db_in_scratch();
+            queue_write(&db, "w1", "f1", b"a save");
+            let data =
+                StateDbLocalData::for_engine_start(&LocalDataPaths::for_test(&state_dir, sync_root.path())).unwrap();
+            // A row only the row clear deletes, and a trigger on the reset's own connection that refuses that delete.
+            data.db
+                .hold_lock_for_test()
+                .execute_batch(
+                    "INSERT INTO sync_state (key, value) VALUES ('bb-1887-clear-blocker', '1');
+                     CREATE TEMP TRIGGER bb_1887_clear_fails BEFORE DELETE ON sync_state
+                     WHEN OLD.key = 'bb-1887-clear-blocker'
+                     BEGIN SELECT RAISE(ABORT, 'the row clear fails'); END;",
+                )
+                .unwrap();
+            let error = account_binding::LocalData::reset(&data).expect_err("the row clear failed");
+            assert!(error.starts_with("clear the local data: "), "{error}");
+            assert!(
+                db.waiting_rows().unwrap().is_empty(),
+                "the keep and the purge ran first"
+            );
+            assert!(
+                !db.finder_accepts_closed().unwrap(),
+                "a reset whose row clear failed reopens Finder accepts (spec §15 question 3)"
+            );
+        })
+        .await;
+    }
+
+    /// U20, the surfacing (W12, §9): an R10 reset's kept folder reaches the person the way the app-start sweep's does.
+    /// The engine start that ran the reset needs the app, so its text is read: the start takes the handed-on folder
+    /// after the bound start returned, whatever it returned, and surfaces it once; the surface tells the windows (the
+    /// row), then shows one alert that names our folder alone.
+    #[test]
+    fn the_r10_reset_folder_is_surfaced_after_the_start_returns() {
+        let squeeze = crate::source_pin::squeeze;
+        let production = super::finder_setup_command_tests::production_source();
+        // A function's code without its comment lines, squeezed: a comment can neither meet nor break a step.
+        let body = |start: &str| {
+            let code: Vec<&str> = super::finder_setup_command_tests::body_between(&production, start, "\n}\n")
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect();
+            squeeze(&code.join("\n"))
+        };
+        let gate = body("fn spawn_bound_engine(");
+        let at = |step: &str| {
+            gate.find(&squeeze(step))
+                .unwrap_or_else(|| panic!("spawn_bound_engine: {step}\n{gate}"))
+        };
+        let cloned = at("let surface_app = app.clone();");
+        let started = at("let started = start_engine_bound(");
+        let taken = at("let reset_kept = state.sign_out.reset_kept.lock().unwrap_or_else(|p| p.into_inner()).take();");
+        let surfaced =
+            at("if let Some((folder, files)) = reset_kept { surface_reset_folder(&surface_app, &folder, files); }");
+        assert!(
+            cloned < started && started < taken && taken < surfaced,
+            "clone the app, start, then take and surface: {gate}"
+        );
+        let between = &gate[started..surfaced];
+        assert!(
+            !between.contains('?') && !between.contains("return") && gate.ends_with("started"),
+            "whatever the start returned, nothing returns before the surfacing; the start's result comes last: {gate}"
+        );
+        let surface = body("fn surface_reset_folder(");
+        let told = surface
+            .find(&squeeze("emit_kept_folder_changed(app);"))
+            .unwrap_or_else(|| panic!("the windows are told: {surface}"));
+        let alert = surface
+            .find(&squeeze("sign_out::copy::sign_out_alert(Some((folder, files)), None)"))
+            .unwrap_or_else(|| panic!("one alert, our folder alone: {surface}"));
+        let shown = surface
+            .find(".dialog()")
+            .unwrap_or_else(|| panic!("the alert is shown: {surface}"));
+        assert!(told < alert && alert < shown, "told, then the alert: {surface}");
+    }
+}
+
+/// U32, the other half (spec 2026-10-10 §10): Linux and Windows keep today's sign-out. Runs in the public CI only.
+#[cfg(all(test, not(target_os = "macos")))]
+mod sign_out_unchanged_elsewhere_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn the_unsent_gate_is_macos_only() {
+        // A state dir and a config dir of its own (as `sign_out_keep_tests` runs its sign-outs): the rename queued here
+        // is never seen by another test's sign-out, and if a sign-out refuses, the row stays only here.
+        let dir = tempfile::tempdir().unwrap();
+        let (state_dir, config_dir) = (dir.path().join("state"), dir.path().join("config"));
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let body = async {
+            let dir = state_paths::beebeeb_state_dir().unwrap();
+            let db = state_db::StateDb::open(state_paths::state_db_path_from_state_dir(&dir)).unwrap();
+            db.hold_lock_for_test()
+                .execute(
+                    "INSERT INTO operation_queue (op_id, kind, file_id) VALUES ('r1', 'rename_file', 'f')",
+                    [],
+                )
+                .unwrap();
+            let state = AppState::default();
+            synthesize_single_account(&state, AccountId("signout-1887-elsewhere".to_string()));
+            set_auth_present(&state, false);
+            let result = clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep, None).await;
+            #[cfg(target_os = "linux")]
+            {
+                assert!(result.is_ok(), "Linux purges as before: {result:?}");
+                assert!(db.waiting_rows().unwrap().is_empty());
+            }
+            #[cfg(target_os = "windows")]
+            {
+                assert!(
+                    !format!("{result:?}").contains("unsent_changes"),
+                    "Windows keeps its own preflight"
+                );
+            }
+        };
+        state_paths::STATE_DIR_OVERRIDE
+            .scope(state_dir, crate::config::CONFIG_DIR_OVERRIDE.scope(config_dir, body))
+            .await;
+    }
+}
+
+// ── Task 2176: a Mac downloads its update, it never installs one in place ─────────────────────────────────────────
+//
+// The App Sandbox denies replacing the running bundle (and the administrator prompt the updater falls back to), so on a
+// Mac `install_update` can only fail, after downloading 12 MB, with an error nobody can diagnose. A Mac is offered a
+// download instead (two-surface spec §0 ruling 5). These pins hold the Rust half: the commands refuse with a typed error
+// before they touch the updater, and nothing else in the app installs an update.
+#[cfg(test)]
+mod mac_update_tests {
+    use super::desktop_capabilities::HostOs;
+    use super::finder_setup_command_tests::{body_between, production_source};
+
+    #[test]
+    fn a_mac_refuses_an_in_place_install_with_a_typed_error_and_nothing_else_does() {
+        let refused = super::in_app_install_refusal(HostOs::Macos).expect_err("a Mac cannot install in place");
+        assert!(refused.starts_with("update_install_unsupported:"), "the typed code leads: {refused}");
+        assert!(refused.contains("downloads updates"), "{refused}");
+        for host in [HostOs::Windows, HostOs::Linux, HostOs::Unknown] {
+            assert_eq!(super::in_app_install_refusal(host), Ok(()), "{host:?} keeps its installer");
+        }
+    }
+
+    #[test]
+    fn both_install_commands_refuse_before_they_touch_the_updater() {
+        let production = production_source();
+        for signature in ["async fn install_update(", "async fn install_channel_downgrade("] {
+            let body = body_between(&production, signature, "\n}\n");
+            let refusal = body
+                .find("in_app_install_refusal(desktop_capabilities::host_os())?")
+                .unwrap_or_else(|| panic!("{signature} refuses on a Mac"));
+            let updater = body.find("updater_for_release_channel(").unwrap_or_else(|| panic!("{signature} builds the updater"));
+            assert!(refusal < updater, "{signature}: the refusal comes first");
+        }
+    }
+
+    #[test]
+    fn only_those_two_commands_install_an_update() {
+        let production = production_source();
+        assert_eq!(
+            production.matches(".download_and_install(").count(),
+            2,
+            "a third call site is an install that the refusal does not cover: decide it here, on purpose"
+        );
+        // The background loop only tells the window an update exists; it never downloads one.
+        let loop_body = body_between(&production, "async fn check_for_update(", "\n}\n");
+        assert!(loop_body.contains("\"update-available\""));
+        assert!(!loop_body.contains("download"), "the update loop announces, it does not install");
+    }
+}
+
+// ── Speed test: a run without figures is a failure, and one run at a time (PR #140 review, P2-7 / P3) ───────────────
+#[cfg(test)]
+mod speedtest_tests {
+    use super::{speedtest_outcome, SpeedtestSamples, SpeedtestSlot, SPEEDTEST_ALREADY_RUNNING, SPEEDTEST_NO_DOWNLOAD, SPEEDTEST_NO_PING, SPEEDTEST_NO_UPLOAD};
+    use std::sync::atomic::AtomicBool;
+
+    fn finished() -> SpeedtestSamples {
+        SpeedtestSamples { ping_ms: vec![20, 30, 40], up_bps: vec![4_000_000.0, 5_000_000.0], down_bps: vec![10_000_000.0, 12_000_000.0, 11_000_000.0] }
+    }
+
+    #[test]
+    fn a_run_that_finished_reports_the_means_and_the_latency_range() {
+        let result = speedtest_outcome(&finished()).expect("a run with figures in all three parts is a result");
+        assert_eq!((result.latency.min_ms, result.latency.avg_ms, result.latency.max_ms), (20, 30, 40));
+        assert_eq!(result.upload_bps, 4_500_000);
+        assert_eq!(result.download_bps, 11_000_000);
+    }
+
+    #[test]
+    fn a_run_in_which_every_ping_failed_is_a_failure_not_a_latency_of_zero() {
+        let samples = SpeedtestSamples { ping_ms: vec![], ..finished() };
+        assert_eq!(speedtest_outcome(&samples).unwrap_err(), SPEEDTEST_NO_PING);
+    }
+
+    #[test]
+    fn a_direction_that_never_finished_is_a_failure_not_zero_megabits() {
+        let no_up = SpeedtestSamples { up_bps: vec![], ..finished() };
+        assert_eq!(speedtest_outcome(&no_up).unwrap_err(), SPEEDTEST_NO_UPLOAD);
+        let no_down = SpeedtestSamples { down_bps: vec![], ..finished() };
+        assert_eq!(speedtest_outcome(&no_down).unwrap_err(), SPEEDTEST_NO_DOWNLOAD);
+        assert_eq!(speedtest_outcome(&SpeedtestSamples::default()).unwrap_err(), SPEEDTEST_NO_PING, "nothing at all names the first part that is missing");
+    }
+
+    #[test]
+    fn some_failed_transfers_do_not_fail_the_run_and_do_not_count_as_zero() {
+        // 1 of 3 uploads finished: its speed is the speed. A failed one is not a 0 in the mean.
+        let samples = SpeedtestSamples { up_bps: vec![6_000_000.0], ..finished() };
+        assert_eq!(speedtest_outcome(&samples).unwrap().upload_bps, 6_000_000);
+    }
+
+    #[test]
+    fn the_messages_are_plain_sentences_a_person_can_act_on() {
+        for message in [SPEEDTEST_NO_PING, SPEEDTEST_NO_UPLOAD, SPEEDTEST_NO_DOWNLOAD] {
+            assert!(message.ends_with("Check your internet connection and try again."), "{message}");
+        }
+    }
+
+    #[test]
+    fn a_second_test_is_refused_while_one_runs_and_the_slot_frees_when_it_ends() {
+        let flag = AtomicBool::new(false);
+        let first = SpeedtestSlot::take(&flag).expect("the first test starts");
+        assert_eq!(SpeedtestSlot::take(&flag).err().as_deref(), Some(SPEEDTEST_ALREADY_RUNNING));
+        drop(first);
+        assert!(SpeedtestSlot::take(&flag).is_ok(), "a finished (or cancelled) test frees the slot");
+    }
+
+    #[test]
+    fn the_command_takes_the_slot_before_it_sends_anything() {
+        let production = super::finder_setup_command_tests::production_source();
+        let body = super::finder_setup_command_tests::body_between(&production, "async fn run_speedtest(", "\n}\n");
+        let slot = body.find("SpeedtestSlot::take(&SPEEDTEST_RUNNING)").expect("run_speedtest takes the slot");
+        let first_request = body.find("api.ping_health()").expect("run_speedtest pings");
+        assert!(slot < first_request, "the slot comes before the first request");
+        assert!(body.contains("if api.ping_health().await.is_ok() {"), "only a ping the server answered is a round trip");
+        assert!(body.contains("speedtest_outcome(&samples)"), "the result goes through speedtest_outcome");
+    }
+}
+
+// ── The Finder install's "not ready in time" sentence keeps its category (PR #140 review, P2-8) ─────────────────────
+//
+// The sentence was reworded for people (no "daemon", no "Timed out waiting for"), and the Linux and Windows classifier
+// keyed on those words: the saved category would have become "unknown". The sentence is one constant, the classifier
+// recognises it, and these pins run on every OS (the classifier itself runs on Windows and Linux only).
+#[cfg(test)]
+mod finder_ipc_timeout_tests {
+    use super::finder_setup_command_tests::{body_between, production_source};
+    use super::{FINDER_IPC_NOT_READY, finder_install_error_is_timeout};
+
+    #[test]
+    fn the_sentence_a_person_reads_is_a_timeout_and_so_is_every_wording_that_was_saved_before() {
+        assert!(finder_install_error_is_timeout(FINDER_IPC_NOT_READY));
+        assert!(finder_install_error_is_timeout("Timed out waiting for the local Beebeeb sync daemon before installing Finder location."));
+        assert!(finder_install_error_is_timeout("Timed out waiting for the Beebeeb File Provider domain"));
+        assert!(finder_install_error_is_timeout("request timeout"));
+    }
+
+    #[test]
+    fn nothing_else_is_a_timeout() {
+        for error in [
+            "Entitlement com.apple.security.application-groups is ignored",
+            "NSFileProviderErrorDomain Code=-2011",
+            "File Provider is only available on macOS.",
+            "Beebeeb wasn’t ready to sync.",
+            "",
+        ] {
+            assert!(!finder_install_error_is_timeout(error), "{error:?}");
+        }
+    }
+
+    #[test]
+    fn the_wait_fails_with_the_constant_and_the_classifier_asks_the_predicate() {
+        let production = production_source();
+        let wait = body_between(&production, "async fn wait_for_file_provider_ipc_ready(", "\n}\n");
+        assert!(wait.contains("return Err(FINDER_IPC_NOT_READY.to_string());"), "the wait fails with the shared sentence");
+        assert!(!wait.contains("wasn’t ready in time"), "no second copy of the sentence to drift from the classifier");
+        let classifier = body_between(&production, "fn classify_finder_install_error(error: &str) -> String {", "\n}\n");
+        assert!(classifier.contains("finder_install_error_is_timeout(error)"), "the classifier asks the predicate");
+    }
+}
+
+// ── Task 1683 slice 6: launch and lifecycle (two-surface spec §7.3, §12 row 6) ────────────────────────────────────
+//
+// The decisions are plain functions in `surfaces::launch` and `surfaces::policy::startup_surface`, tested there. These pins
+// hold the wiring: the startup reads how the app was launched, nothing else decides it, the updater leaves its flag before
+// every restart, and the login item's mechanism is what it was (task 1845 owns changing it).
+#[cfg(test)]
+mod launch_wiring_tests {
+    use super::config_write_pin_tests::production_files;
+    use super::finder_setup_command_tests::{body_between, macos_compiled, production_source};
+
+    #[test]
+    fn startup_asks_the_policy_with_how_the_app_was_launched_and_handles_every_answer() {
+        let production = production_source();
+        let setup = &production[production.find(".setup(|app| {").expect("setup()")..];
+        let ask = setup.find("let launch_source = launch_source_now();").expect("setup reads how the app was launched");
+        let policy = setup.find("surfaces::policy::startup_surface(").expect("setup asks the policy");
+        assert!(ask < policy, "the launch is read before the policy is asked");
+        assert!(
+            setup[policy..].starts_with("surfaces::policy::startup_surface(surfaces::policy::Platform::current(), no_sync_root, launch_source)"),
+            "the policy gets the platform, whether this is a first run, and the launch"
+        );
+        for answer in ["StartupSurface::Onboarding =>", "StartupSurface::MainWindow =>", "StartupSurface::Nothing =>"] {
+            assert!(setup.contains(answer), "setup handles {answer}");
+        }
+        let nothing = &setup[setup.find("StartupSurface::Nothing =>").unwrap()..];
+        let nothing = &nothing[..nothing.find("\n                }\n").expect("the arm ends")];
+        assert!(!nothing.contains("show_") && !nothing.contains("open_"), "a launch that shows nothing opens nothing:\n{nothing}");
+    }
+
+    /// PR #146 review, P2: the app starts Regular (a Dock icon and the app menu) and Accessory is applied only from window
+    /// events, so a launch that opens no window must switch it itself: a Dock icon and a menu bar with no window behind
+    /// them are a Beebeeb that looks open and has nothing to show.
+    #[test]
+    fn a_launch_that_opens_nothing_takes_the_dock_icon_and_the_app_menu_away() {
+        let production = production_source();
+        let setup = &production[production.find(".setup(|app| {").expect("setup()")..];
+        let arm = &setup[setup.find("StartupSurface::Nothing =>").unwrap()..];
+        let arm = &arm[..arm.find("\n                }\n").expect("the arm ends")];
+        assert!(
+            arm.contains("#[cfg(target_os = \"macos\")]\n                    set_macos_dock_icon(app.handle(), false);"),
+            "the Nothing arm sets Accessory, on a Mac only:\n{arm}"
+        );
+    }
+
+    #[test]
+    fn how_the_app_was_launched_comes_from_the_one_seam_and_the_flag_and_from_nothing_else() {
+        let production = macos_compiled(&production_source());
+        let body = body_between(&production, "fn launch_source_now() -> surfaces::launch::LaunchSource {", "\n}\n");
+        assert!(body.contains("surfaces::launch::take_relaunch_flag("), "the flag is consumed here");
+        assert!(body.contains("surfaces::launch::login_item_signal()"), "the login item's word comes from the seam");
+        assert_eq!(
+            production.matches("login_item_signal()").count(),
+            1,
+            "the seam is read in one place; a second reader is a second opinion on how the app was launched"
+        );
+        // Every production file, not only lib.rs (PR #146 review, P3): a guess at a login launch belongs to task 1845's
+        // seam, `surfaces/launch.rs`, and to nothing else under `src-tauri/src`. `getppid(` is a call, not the letters.
+        let files = production_files();
+        assert!(files.len() > 20 && files.iter().any(|(name, _)| name == "surfaces/launch.rs"), "the scan found the tree");
+        for (name, text) in files.iter().filter(|(name, _)| name != "surfaces/launch.rs") {
+            for guess in ["XPC_SERVICE_NAME", "--autostart", "LaunchedAsLogInItem", "getppid("] {
+                assert!(!text.contains(guess), "{name}: {guess}: a guess at a login launch belongs to task 1845's seam, not here");
+            }
+        }
+    }
+
+    #[test]
+    fn the_updater_leaves_its_flag_before_every_restart_and_there_are_only_these_restarts() {
+        // Every production file (PR #146 review, P3): a restart anywhere in `src-tauri/src` is a relaunch with no flag.
+        let files = production_files();
+        let restarts: Vec<&str> = files
+            .iter()
+            .flat_map(|(name, text)| {
+                [".restart(", "process::restart", "request_restart", ".relaunch("]
+                    .into_iter()
+                    .flat_map(move |needle| text.matches(needle).map(move |_| name.as_str()))
+            })
+            .collect();
+        assert_eq!(restarts, ["lib.rs", "lib.rs"], "a third restart is a relaunch with no flag: decide it here, on purpose");
+        let production = macos_compiled(&production_source());
+        assert_eq!(production.matches("app.restart(").count(), 2);
+        assert_eq!(production.matches("note_updater_relaunch(&app);").count(), 2);
+        for signature in ["async fn install_update(", "async fn install_channel_downgrade("] {
+            let body = body_between(&production, signature, "\n}\n");
+            let note = body.find("note_updater_relaunch(&app);").unwrap_or_else(|| panic!("{signature} leaves the flag"));
+            let restart = body.find("app.restart(").unwrap_or_else(|| panic!("{signature} restarts"));
+            assert!(note < restart, "{signature}: the flag first, then the restart");
+        }
+    }
+
+    #[test]
+    fn opening_the_app_again_asks_reopen_action() {
+        let production = macos_compiled(&production_source());
+        let body = body_between(&production, "fn reopen_main_window(", "\n}\n");
+        assert!(body.contains("surfaces::launch::reopen_action("));
+        assert!(body.contains("show_main_window(app, MainNav::Home)"), "no window: Home");
+    }
+
+    #[test]
+    fn the_login_items_mechanism_is_the_one_it_was_and_task_1845_changes_it_on_purpose() {
+        let production = production_source();
+        assert_eq!(
+            production.matches(".plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec![])))").count(),
+            1,
+            "slice 6 does not touch how the login item is registered: a LaunchAgent that passes no argument"
+        );
+        assert!(production.contains("fn toggle_autostart("), "and the switch that registers it is still there");
+    }
+}
+
+/// Task 2243: what the window and tray polls cost the disk. Each command opens a fresh connection, so SQLite's
+/// page cache is empty every time, and each count below includes `StateDb::open` itself: every poll pays it.
+#[cfg(test)]
+mod task_2243_poll_cost_tests {
+    use super::*;
+    use rusqlite::{Connection, params};
+
+    /// A state.db at `path` with `rows` files of each status, written through another connection as the engine
+    /// writes them. The paths are long, as real ones are: reading the rows reads many pages.
+    fn seeded_state_db(path: &std::path::Path, rows: &[(&str, usize)]) {
+        state_db::StateDb::open(path).unwrap();
+        let mut conn = Connection::open(path).unwrap();
+        let tx = conn.transaction().unwrap();
+        for (status, count) in rows {
+            for i in 0..*count {
+                tx.execute(
+                    "INSERT INTO files (file_id, path, status, size_bytes, modified_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        format!("{status}-{i}"),
+                        format!(
+                            "Documents/Projects/Customer archive {i:05}/Correspondence and drafts/{status}-{i}.docx"
+                        ),
+                        status,
+                        1_000 + i as i64,
+                        1_700_000_000 + i as i64,
+                    ],
+                )
+                .unwrap();
+            }
+        }
+        tx.commit().unwrap();
+    }
+
+    /// `AccountSessionBoundary` polls `sync_status` every second in every window, hidden ones included, to see a
+    /// sign-out. It asks for the session only, and that answer returns before the config file, the state directory or
+    /// the state DB is touched: three windows each opening the DB every second were most of the reads left on Guus's PC
+    /// once the other polls stopped while their windows were hidden.
+    #[test]
+    fn task_2243_the_session_poll_reads_no_file() {
+        let source = include_str!("lib.rs").replace("\r\n", "\n");
+        let at = source.find("async fn sync_status(").expect("sync_status exists");
+        let body = crate::source_pin::squeeze(&source[at..at + source[at..].find("\n}\n").unwrap()]);
+        let early = body
+            .find("ifsession_only==Some(true){returnOk(serde_json::json!({")
+            .expect("the session-only answer returns at once");
+        let answer = &body[early..early + body[early..].find("}));}").expect("its end")];
+        assert!(answer.contains("\"logged_in\":logged_in"));
+        assert!(answer.contains("\"session_revision\":UI_SESSION_REVISION.load("));
+        for read in ["DesktopConfig::load(", "state_paths::", "StateDb::open("] {
+            let first = body.find(read).unwrap_or_else(|| panic!("the full answer reads {read}"));
+            assert!(early < first, "the session-only answer comes after {read}");
+        }
+    }
+
+    /// The counts come from `idx_status` alone. Loading the rows to count them read the whole set from disk on every
+    /// call: 1,062 page reads on Guus's 43k-row state.db, twice a second with two windows loaded.
+    #[test]
+    fn task_2243_sync_status_counts_without_reading_the_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let rows = [
+            ("cloud_only", 3000),
+            ("local", 3000),
+            ("downloading", 5),
+            ("uploading", 7),
+            ("conflict", 2),
+        ];
+        seeded_state_db(&path, &rows);
+        let db = state_db::StateDb::open(&path).unwrap();
+        assert_eq!(sync_status_counts(&db), (12, 3000, 2, 0));
+        let reads = db.page_reads();
+        assert!(reads <= 40, "one sync_status (the open and its counts) read {reads} pages from disk");
+    }
+
+    /// The tray's recent list is the overview's `recent`, read from the newest rows alone. The overview loads every row
+    /// for its totals: 5,461 page reads and 117 ms on Guus's state.db, every 5 s while the tray was loaded.
+    #[test]
+    fn task_2243_the_tray_recent_list_reads_only_the_newest_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        // Equal modification times across the two statuses, so ties are broken by path.
+        seeded_state_db(&path, &[("local", 3000), ("cloud_only", 3000)]);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "INSERT INTO files (file_id, path, status, item_kind, modified_at)
+                     VALUES ('folder-new', 'Documents/A newer folder', 'local', 'folder', 1800000000);
+                 UPDATE files SET pin_state = 'pinned' WHERE file_id IN ('local-2999', 'cloud_only-2990');
+                 UPDATE files SET pin_state = 'inherit', inherited_pin_state = 'pinned' WHERE file_id = 'local-2995';
+                 INSERT INTO local_activity (event_type, file_id, file_name, rel_path, occurred_at)
+                     VALUES ('moved_to_trash', 'gone-1', 'old plan.docx', 'Documents/old plan.docx', 1700002990),
+                            ('moved_to_trash', 'gone-2', 'older.docx', NULL, 1600000000);",
+            )
+            .unwrap();
+        }
+        let expected = {
+            let db = state_db::StateDb::open(&path).unwrap();
+            account_dto::compute_file_overview(
+                &file_overview_inputs(db.file_overview_rows().unwrap()),
+                &file_overview_activity(&db, 50).unwrap(),
+                50,
+            )
+            .recent
+        };
+        assert_eq!(expected.len(), 50);
+        assert!(
+            expected.iter().any(|f| f.activity_type.is_some()),
+            "precondition: a trash event is in the list"
+        );
+        assert!(
+            expected.iter().filter(|f| f.pinned).count() >= 2,
+            "precondition: pinned rows are in the list"
+        );
+
+        let db = state_db::StateDb::open(&path).unwrap();
+        let recent = recent_files(&db, 50).unwrap();
+        let reads = db.page_reads();
+        assert_eq!(
+            serde_json::to_value(&recent).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        assert!(reads <= 60, "the tray's recent list (the open and its reads) read {reads} pages from disk");
+    }
+
+    /// The tray's activity line asks for the queue's hold summary every 3 s. Its oldest and newest dates per reason
+    /// come from an index alone; looking each held operation up read the whole queue (627 pages on Guus's PC, with
+    /// 2,972 changes held since a sign-in expired).
+    #[test]
+    fn task_2243_the_hold_summary_reads_an_index_not_the_held_operations() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        state_db::StateDb::open(&path).unwrap();
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            let tx = conn.transaction().unwrap();
+            for i in 0..3000_i64 {
+                // Held ops carry their metadata, as real ones do: reading them reads many pages.
+                let (reason, attempts) = match i % 3 {
+                    0 => (Some("auth"), 0),
+                    1 => (Some("quota"), 0),
+                    _ => (None, if i % 2 == 0 { 5 } else { 1 }),
+                };
+                tx.execute(
+                    "INSERT INTO operation_queue (op_id, kind, file_id, target_path, metadata_json, attempts, max_attempts,
+                                                  paused_reason, created_at)
+                     VALUES (?1, 'upload_file', ?2, ?3, ?4, ?5, 5, ?6, ?7)",
+                    params![
+                        format!("op-{i}"),
+                        format!("file-{i}"),
+                        format!("Documents/Projects/Customer archive {i:05}/Correspondence and drafts/letter-{i}.docx"),
+                        format!("{{\"name_ct\":\"{}\",\"size\":{i}}}", "x".repeat(120)),
+                        attempts,
+                        reason,
+                        1_700_000_000 + i,
+                    ],
+                )
+                .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        let db = state_db::StateDb::open(&path).unwrap();
+        let hold = db.queue_hold_summary().unwrap();
+        let reads = db.page_reads();
+        assert_eq!((hold.waiting, hold.gave_up), (500, 500));
+        let groups: Vec<_> = hold
+            .held
+            .iter()
+            .map(|g| (g.reason.as_str(), g.count, g.oldest_at, g.newest_at))
+            .collect();
+        assert_eq!(
+            groups,
+            [
+                ("auth", 1000, 1_700_000_000, 1_700_002_997),
+                ("quota", 1000, 1_700_000_001, 1_700_002_998)
+            ]
+        );
+        assert!(reads <= 40, "the hold summary (the open and its reads) read {reads} pages from disk");
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod task_2190_kept_copies_tests {
+    use super::*;
+
+    /// Review-169 blocker: two "Keep the other" copies and a sign-out's kept folder are all listed
+    /// and revealable; the sign-out's one folder slot and its unfinished list still name only the
+    /// sign-out's folder, so its prompt never takes a decision's copy for an interrupted sign-out.
+    #[test]
+    fn task_2190_two_kept_copies_and_a_sign_out_folder_are_all_listed() {
+        use sign_out::kept_record::{
+            dismiss_saved_conflict_copy_at, save_kept_unsent_durably, saved_conflict_copies_at, saved_kept_unsent_at,
+            unfinished_at,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("Changes not sent");
+        let config_path = dir.path().join("desktop.toml");
+        let sign_out_folder = root.join("2026-10-28 at 09.00.00").to_string_lossy().into_owned();
+        save_kept_unsent_durably(&config_path, &sign_out_folder, &config::RealConfigFs).unwrap();
+        let (a, b) = (dir.path().join("a.staged"), dir.path().join("b.staged"));
+        std::fs::write(&a, b"edited on this Mac (a)").unwrap();
+        std::fs::write(&b, b"edited on this Mac (b)").unwrap();
+        let clone = sign_out::kept_writer::SystemClone;
+        let copy_a = keep_parked_copy_at("op-a", &a, "docs/a.txt", &root, &config_path, &clone, &config::RealConfigFs).unwrap();
+        let copy_b = keep_parked_copy_at("op-b", &b, "b.txt", &root, &config_path, &clone, &config::RealConfigFs).unwrap();
+        assert_eq!(std::fs::read(&copy_a).unwrap(), b"edited on this Mac (a)");
+        assert_eq!(std::fs::read(&copy_b).unwrap(), b"edited on this Mac (b)");
+        let listed = saved_conflict_copies_at(&config_path).unwrap();
+        assert_eq!(
+            listed,
+            vec![copy_a.to_string_lossy().into_owned(), copy_b.to_string_lossy().into_owned()],
+            "both copies listed, oldest first"
+        );
+        for copy in &listed {
+            assert!(conflict_copy_reveal_target(&listed, copy).is_ok(), "revealable: {copy}");
+        }
+        assert!(conflict_copy_reveal_target(&listed, &sign_out_folder).is_err(), "only a listed copy is revealed as one");
+        assert_eq!(saved_kept_unsent_at(&config_path).unwrap(), Some(sign_out_folder.clone()), "the sign-out's folder is still saved");
+        assert!(reveal_target(Some(&sign_out_folder), &sign_out_folder).is_ok(), "and still revealable");
+        assert_eq!(unfinished_at(&config_path).unwrap(), vec![sign_out_folder.clone()], "the sign-out prompt names only its own folder");
+        assert!(dismiss_saved_conflict_copy_at(&config_path, &listed[0]).unwrap());
+        assert_eq!(saved_conflict_copies_at(&config_path).unwrap(), vec![listed[1].clone()]);
+        assert!(std::path::Path::new(&listed[0]).exists(), "Dismiss never deletes the copy");
+    }
+
+    /// Review-169 #8: a decision that changed something tells an open Sync tab to read its rows again.
+    #[test]
+    fn task_2190_a_decision_tells_an_open_sync_tab() {
+        let source = include_str!("lib.rs").replace("\r\n", "\n");
+        let decide = &source[source.find("async fn resolve_parked_conflict(").expect("the decision command")..];
+        let decide = &decide[..decide.find("\n}\n").expect("its end")];
+        assert!(decide.contains(
+            "if done != engine_bridge::ParkedResolution::Moved {\n            emit_kept_folder_changed(&app);"
+        ));
     }
 }

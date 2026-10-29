@@ -15,16 +15,21 @@
  *
  * Layout (top → bottom):
  *   • Header   — BrandMark + "Beebeeb" + settings gear (→ main app Settings).
- *   • Status   — green check + a sync-state line derived from `sync_status`.
- *   • Recent   — scrollable list of recently-changed files (desktopFileOverview).
+ *   • Status   — what sync is doing, from `sync_status` + `sync_activity_summary` (0.8.15): moving, checking,
+ *                paused, waiting, on hold, or up to date — never "synced" while the queue holds work.
+ *   • Recent   — scrollable list of recently-changed files (desktopRecentFiles).
  *   • Actions  — Open folder · View online · Recycle bin.
  *
  * Data sources:
  *   sync_status              → SyncStatus (logged_in / engine / syncing / conflicts)
- *   desktop_file_overview(50) → FileOverview.recent[] (path, size_bytes, status, modified_at)
+ *   sync_activity_summary    → pause flag, engine state, transfers, queue counts, startup check (counts only)
+ *   desktop_recent_files(50) → RecentFile[] (path, size_bytes, status, modified_at)
  *   show_main_app_settings   → opens the main app and selects Settings
  *   open_finder_location     → opens the sync root in Explorer
  *   openUrl                  → app.beebeeb.io / app.beebeeb.io/trash
+ *
+ * Task 2243: the flyout stays loaded while hidden, so its polls read only while it is on screen
+ * (pollWhileVisible) and read at once when it is shown again.
  */
 
 import { useEffect, useState } from 'react'
@@ -32,7 +37,7 @@ import { emit } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
   command,
-  desktopFileOverview,
+  desktopRecentFiles,
   loadSyncStatus,
   openUrl,
   revealAndOpenFile,
@@ -40,6 +45,9 @@ import {
   type SyncStatus,
 } from './desktopApi'
 import { T, useToast } from './windows/ui'
+import { syncActivityView } from './windows/syncActivityModel'
+import { SyncActivityIcon, SyncCheckProgress, useSyncActivitySummary } from './windows/syncActivityUi'
+import { pollWhileVisible } from './windows/visiblePoll'
 
 // ── File-type classification (ported from repos/web file-icon.tsx getFileType,
 //    pure, no @beebeeb/shared import) ─────────────────────────────────────────
@@ -230,13 +238,18 @@ function parentFolder(path: string): string {
   return parts.length >= 2 ? parts[parts.length - 2] : 'Beebeeb'
 }
 
-/** Honest per-status subline. `<F>` is the parent folder. */
+/**
+ * Honest per-status subline. `<F>` is the parent folder. A file still uploading is not in Beebeeb yet, so it is never
+ * shown as synced (spec 1888/2226 D13).
+ */
 function statusSubline(status: string, folder: string): string {
   switch (status) {
     case 'cloud_only':
       return `Online-only in ${folder}`
     case 'downloading':
       return `Downloading to ${folder}`
+    case 'uploading':
+      return `Not uploaded yet — ${folder}`
     case 'conflict':
       return `Needs review — ${folder}`
     case 'error':
@@ -244,7 +257,6 @@ function statusSubline(status: string, folder: string): string {
     case 'moved_to_trash':
       return 'Moved to trash'
     case 'local':
-    case 'uploading':
     default:
       return `Synced to ${folder}`
   }
@@ -304,30 +316,29 @@ export default function WindowsTray() {
     }
   }, [])
 
-  // Poll sync status (~3s).
+  // Poll sync status (~3s) while the flyout is on screen.
   useEffect(() => {
     let cancelled = false
     const refresh = async () => {
       const next = await loadSyncStatus()
       if (!cancelled) setStatus(next)
     }
-    void refresh()
-    const id = window.setInterval(refresh, 3000)
+    const stop = pollWhileVisible(refresh, 3000)
     return () => {
       cancelled = true
-      window.clearInterval(id)
+      stop()
     }
   }, [])
 
-  // Poll recent files (~5s). A failed overview (e.g. vault locked) → empty
-  // "Sign in" state, not an error banner.
+  // Poll recent files (~5s) while the flyout is on screen. Task 2243: only the newest rows are read, not the
+  // whole overview. A failed read (e.g. vault locked) → empty "Sign in" state, not an error banner.
   useEffect(() => {
     let cancelled = false
     const refresh = async () => {
-      const result = await desktopFileOverview(TRAY_RECENT_LIMIT)
+      const result = await desktopRecentFiles(TRAY_RECENT_LIMIT)
       if (cancelled) return
       if (result.ok) {
-        setRecent(result.value.recent ?? [])
+        setRecent(result.value)
         setSignedOut(false)
       } else {
         setRecent([])
@@ -335,24 +346,18 @@ export default function WindowsTray() {
       }
       setLoaded(true)
     }
-    void refresh()
-    const id = window.setInterval(refresh, 5000)
+    const stop = pollWhileVisible(refresh, 5000)
     return () => {
       cancelled = true
-      window.clearInterval(id)
+      stop()
     }
   }, [])
 
-  // Status line — green for "synced"; honest phrasing for in-flight / paused /
-  // conflicts / signed out. Amber is encryption-only, so this never uses amber.
-  const statusLine: string = (() => {
-    if (!status?.logged_in) return 'Sign in to start syncing'
-    if (status.conflicts > 0) return `${status.conflicts} conflict${status.conflicts === 1 ? '' : 's'} to review`
-    if (status.syncing > 0) return `${status.syncing} file${status.syncing === 1 ? '' : 's'} syncing`
-    if (status.engine !== 'running') return 'Sync paused'
-    return 'Your files are synced'
-  })()
-  const statusIsGood = !!status?.logged_in && status.conflicts === 0 && status.engine === 'running'
+  // What sync is doing (0.8.15). On Guus's PC 0.8.14 said "Your files are synced" here while 2,924 changes were on
+  // hold, 43 had given up and the startup check was walking 37,169 files: it read only rows mid-transfer. The model
+  // reads the queue and the startup check too, and is green only when nothing is pending. Never amber.
+  const { summary } = useSyncActivitySummary()
+  const activity = syncActivityView(status, summary, { device: 'this PC' })
 
   const openSettings = async () => {
     await command<void>('show_main_app_settings')
@@ -464,44 +469,33 @@ export default function WindowsTray() {
         </button>
       </div>
 
-      {/* Status line */}
+      {/* Status: one headline, then every other pending count, and the startup check's progress while it runs */}
       <div
+        role="status"
+        aria-live="polite"
         style={{
           padding: '10px 14px',
-          height: 37,
+          minHeight: 37,
           boxSizing: 'border-box',
           display: 'flex',
-          alignItems: 'center',
+          alignItems: 'flex-start',
           gap: 8,
           borderBottom: `1px solid ${T.line}`,
+          flexShrink: 0,
         }}
       >
-        <span
-          aria-hidden
-          style={{
-            width: 16,
-            height: 16,
-            borderRadius: 999,
-            background: statusIsGood ? T.green : T.paper3,
-            color: statusIsGood ? 'white' : T.ink3,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            flexShrink: 0,
-          }}
-        >
-          {statusIsGood ? (
-            <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M3.5 8.5 L6.5 11.5 L12.5 4.5" />
-            </svg>
-          ) : (
-            <svg width="9" height="9" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-              <path d="M8 4 L8 9" />
-              <circle cx="8" cy="12" r="0.6" fill="currentColor" stroke="none" />
-            </svg>
-          )}
+        <span style={{ display: 'flex', paddingTop: 0.5 }}>
+          <SyncActivityIcon view={activity} />
         </span>
-        <span style={{ fontSize: 12.5, fontWeight: 500, color: T.ink2 }}>{statusLine}</span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 500, color: T.ink2, lineHeight: 1.35 }}>{activity.headline}</div>
+          {activity.details.map((line) => (
+            <div key={line} style={{ fontSize: 11, color: T.ink3, marginTop: 3, lineHeight: 1.35 }}>
+              {line}
+            </div>
+          ))}
+          {activity.progress && <SyncCheckProgress check={activity.progress} compact />}
+        </div>
       </div>
 
       <div title={status?.sync_root ?? undefined} style={{ padding: '6px 14px', fontSize: 11, fontFamily: T.fontMono, color: T.ink3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flexShrink: 0 }}>

@@ -1459,6 +1459,9 @@ fn write_refusal_category(error: &anyhow::Error) -> &'static str {
     if error.is::<crate::engine_bridge::StagedCopyGone>() {
         return "staged_copy_gone";
     }
+    if error.is::<crate::engine_bridge::AcceptsClosed>() {
+        return "accepts_closed";
+    }
     if error.is::<crate::engine_bridge::ItemInTrash>() {
         return "in_trash";
     }
@@ -2052,17 +2055,10 @@ async fn handle_connection(
             }
             IpcRequest::GetSyncSummary => {
                 let syncing = db
-                    .list_by_status(crate::state_db::FileStatus::Downloading)
-                    .map(|v| v.len() as u32)
+                    .count_by_status(crate::state_db::FileStatus::Downloading)
                     .unwrap_or(0);
-                let cloud_only = db
-                    .list_by_status(crate::state_db::FileStatus::CloudOnly)
-                    .map(|v| v.len() as u32)
-                    .unwrap_or(0);
-                let conflicts = db
-                    .list_by_status(crate::state_db::FileStatus::Conflict)
-                    .map(|v| v.len() as u32)
-                    .unwrap_or(0);
+                let cloud_only = db.count_by_status(crate::state_db::FileStatus::CloudOnly).unwrap_or(0);
+                let conflicts = db.count_by_status(crate::state_db::FileStatus::Conflict).unwrap_or(0);
                 IpcResponse::SyncSummary {
                     syncing,
                     cloud_only,
@@ -2572,6 +2568,12 @@ pub(crate) fn write_outcome_response(
         // Spec §8.7 S6: an engine-start sweep removed the staged copy before the accept
         // committed. Nothing was queued; the system hands the write over again.
         Err(e) if e.is::<crate::engine_bridge::StagedCopyGone>() => {
+            log_refused_write(op, write_refusal_category(&e));
+            IpcResponse::WriteRetryLater { message: e.to_string() }
+        }
+        // Spec 2026-10-10 §15 question 3: a sign-out closed accepts after its engine stop. Nothing was queued; the
+        // extension reports a transient error, so the system keeps the change and hands it over again.
+        Err(e) if e.is::<crate::engine_bridge::AcceptsClosed>() => {
             log_refused_write(op, write_refusal_category(&e));
             IpcResponse::WriteRetryLater { message: e.to_string() }
         }
@@ -6011,5 +6013,40 @@ mod tests {
             ),
             "any other failure is still an error"
         );
+    }
+
+    /// U45: the extension is told to retry, as for a copy an engine-start sweep removed: for a save, a rename or move,
+    /// a folder create and a delete alike.
+    #[test]
+    fn a_closed_accept_answers_write_retry_later() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::state_db::StateDb::open(dir.path().join("state.db")).unwrap();
+        let error = anyhow::Error::new(crate::engine_bridge::AcceptsClosed);
+        assert_eq!(write_refusal_category(&error), "accepts_closed");
+        let ops = ["create", "modify", "delete"];
+        let logs = capture_logs(|| {
+            for op in ops {
+                let response =
+                    write_outcome_response(op, &db, Err(anyhow::Error::new(crate::engine_bridge::AcceptsClosed)));
+                assert!(
+                    matches!(response, IpcResponse::WriteRetryLater { .. }),
+                    "{op}: {response:?}"
+                );
+            }
+        });
+        // Each refusal leaves one warning with its operation and its category.
+        let refusals: Vec<&str> = logs
+            .lines()
+            .filter(|line| line.contains("Finder write refused"))
+            .collect();
+        assert_eq!(refusals.len(), ops.len(), "one refusal logged per write:\n{logs}");
+        for (line, op) in refusals.iter().zip(ops) {
+            assert!(
+                line.contains("WARN")
+                    && line.contains(&format!("op=\"{op}\""))
+                    && line.contains("reason=\"accepts_closed\""),
+                "{op}: {line}"
+            );
+        }
     }
 }

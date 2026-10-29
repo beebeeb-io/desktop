@@ -26,6 +26,7 @@ import {
   type ClientDevice,
   type ClientSyncSession,
 } from '../../desktopApi'
+import { ageOf } from '../../relativeTime'
 import { T, Card, PageHeader, Chip, Skeleton, NavIcon, PrimaryBtn } from '../ui'
 
 // ── Date formatting (RFC3339 → human, shown in mono) ─────────────────────────
@@ -34,19 +35,20 @@ function relativeTime(iso: string | null | undefined): string | null {
   if (!iso) return null
   const then = Date.parse(iso)
   if (Number.isNaN(then)) return null
-  const diffMs = Date.now() - then
-  const sec = Math.round(diffMs / 1000)
-  if (sec < 0) return 'just now'
-  if (sec < 45) return 'just now'
-  const min = Math.round(sec / 60)
-  if (min < 60) return `${min} min ago`
-  const hr = Math.round(min / 60)
-  if (hr < 24) return `${hr}h ago`
-  const day = Math.round(hr / 24)
-  if (day < 14) return `${day}d ago`
-  // Older than two weeks — show a short absolute date.
-  const d = new Date(then)
-  return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })
+  const age = ageOf(new Date(then), Date.now(), 14)
+  switch (age.unit) {
+    case 'now':
+      return 'just now'
+    case 'minute':
+      return `${age.count} min ago`
+    case 'hour':
+      return `${age.count}h ago`
+    case 'day':
+      return `${age.count}d ago`
+    case 'date':
+      // Older than two weeks — show a short absolute date.
+      return age.date.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })
+  }
 }
 
 function shortPlatform(platform: string | null | undefined): string {

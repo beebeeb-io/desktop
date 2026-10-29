@@ -22,11 +22,13 @@ use serde::{Deserialize, Serialize};
 ///
 /// Every save of the config goes through the same `desktop.toml.tmp`, so two saves at once could
 /// tear each other's temp file, and two load-modify-save passes at once lose the earlier one's
-/// change. There is no public `save`: the only way to write the file is [`DesktopConfig::update_at`]
-/// (or [`DesktopConfig::update`], [`HeldConfig::update_held`] and
-/// [`DesktopConfig::ensure_account_id`], which are `update_at`), and it takes this lock across the
-/// whole load, change and write. The lock is not re-entrant: nothing inside an update closure may
-/// call another update.
+/// change. There is no public `save`: the file is written in one place, `try_update_at_then`, which
+/// takes this lock across the whole load, change and write. The ways in are
+/// [`DesktopConfig::update_at`] (and [`DesktopConfig::update`], [`HeldConfig::update_held`] and
+/// [`DesktopConfig::ensure_account_id`], which are `update_at`), [`DesktopConfig::try_update_at`],
+/// [`DesktopConfig::update_at_then`], and [`DesktopConfig::update_at_durable_with`], the one save
+/// that flushes its write (task 1887). The lock is not re-entrant: nothing inside an update closure
+/// may call another update.
 static CONFIG_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Takes [`CONFIG_WRITE_LOCK`]. A holder that panicked leaves the lock usable: the file itself is
@@ -201,6 +203,13 @@ pub struct DesktopConfig {
     #[serde(default)]
     pub known_folder_onboarding_seen: bool,
 
+    /// `true` once the person has dismissed the Beebeeb window's one-time hint on Home, "Beebeeb lives in the menu bar"
+    /// (two-surface spec §7.6, task 1683 slice 6). Defaults `false`: a fresh install shows it once, and so does an install
+    /// that predates it (one tip, one tap, and it explains that the window is optional). Like
+    /// `known_folder_onboarding_seen` it is not in `DesktopSettings`: a Settings save must never flip it.
+    #[serde(default)]
+    pub menu_bar_hint_seen: bool,
+
     /// Last known Finder/File Provider setup status. This is persisted so
     /// a failed deferred setup remains visible after navigation or restart.
     #[serde(default)]
@@ -256,6 +265,12 @@ pub struct DesktopConfig {
     /// content; eviction only removes unpinned files. `0` means Unlimited.
     #[serde(default = "default_local_cache_limit_bytes")]
     pub local_cache_limit_bytes: i64,
+    /// Task 2173: `"api"` forces today's API transport for file downloads; absent or `"auto"`
+    /// uses direct storage transfers when the server offers them. A support switch, edited by
+    /// hand (a Mac app does not see a shell's `BB_TRANSPORT`, which wins when set). Not in
+    /// `DesktopSettings`, so a settings save never touches it; absent from the file while unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
 
     // ── Desktop update channel ────────────────────────────────────────
     //
@@ -282,6 +297,26 @@ pub struct DesktopConfig {
     /// `DesktopSettings`/`apply_settings`, so a settings save can never clear it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kept_unsynced_folder: Option<String>,
+
+    /// Spec 2026-10-10 W9 (task 1887): the folder a sign-out last copied changes that had not reached the server into.
+    /// Settings › Sync shows it until it is dismissed. Saved by the keep step before the purge; never in
+    /// `DesktopSettings`, so a settings save cannot clear it; never logged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kept_unsent_folder: Option<String>,
+
+    /// Spec 2026-10-10 W13 (task 1887): every folder whose sign-out was interrupted after its keep step, oldest first.
+    /// Saved with `kept_unsent_folder` in one durable write before the purge's first deletion; a later keep adds to
+    /// it; only a purge that cleared the rows clears it. Absent from the file while empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kept_unsent_unfinished: Vec<String>,
+
+    /// Task 2190 (D1, review-169 blocker): every copy "Keep the other" kept of a Mac's changes in the
+    /// Changes not sent folder, oldest first. Settings › Sync lists each one, with "Show in Finder",
+    /// until the person dismisses it. Its own list: never `kept_unsent_folder` (one slot, the
+    /// sign-out's) nor `kept_unsent_unfinished`, so a decision never hides a sign-out's folder and a
+    /// sign-out never mistakes a decision's copy for an unfinished one. Never logged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kept_conflict_copies: Vec<String>,
 
     // ── Spec 2026-10-06 (macOS Finder setup reconciler) §9 ────────────
     //
@@ -361,6 +396,7 @@ impl Default for DesktopConfig {
             excluded_folder_ids: None,
             known_folder_backup: Vec::new(),
             known_folder_onboarding_seen: false,
+            menu_bar_hint_seen: false,
             finder_install_status: None,
             finder_install_last_error: None,
             finder_install_last_attempt_at: None,
@@ -371,9 +407,13 @@ impl Default for DesktopConfig {
             sync_overlays: None,
             theme: DesktopTheme::System,
             local_cache_limit_bytes: DEFAULT_LOCAL_CACHE_LIMIT_BYTES,
+            transport: None,
             release_channel: ReleaseChannel::Stable,
             installed_release_channel: None,
             kept_unsynced_folder: None,
+            kept_unsent_folder: None,
+            kept_unsent_unfinished: Vec::new(),
+            kept_conflict_copies: Vec::new(),
             finder_signed_out_by_choice: false,
             finder_last_failure: None,
         }
@@ -546,7 +586,9 @@ tokio::task_local! {
 }
 
 /// What stopped a [`DesktopConfig::try_update_at`]: the file could not be read (or parsed), or the
-/// changed config could not be written. Nothing was written in the first case.
+/// changed config could not be written. Nothing was written in the first case. A durable save's
+/// `Write` can also come after its rename, when the directory flush failed: the change is then in
+/// the file, but not flushed ([`DesktopConfig::update_at_durable_with`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum UpdateError {
     Read(String),
@@ -786,7 +828,7 @@ impl DesktopConfig {
     /// [`Self::update_at`] that says whether the read or the write failed, for a caller whose log
     /// line names which. The messages are the same strings `update_at` returns.
     pub(crate) fn try_update_at<R>(path: &Path, change: impl FnOnce(&mut Self) -> (bool, R)) -> Result<R, UpdateError> {
-        Self::try_update_at_then(path, change, |_| {})
+        Self::try_update_at_then(path, change, |_| {}, None)
     }
 
     /// [`Self::update_at`] with a step that runs while the lock is STILL held, once the file is final: after a successful
@@ -799,21 +841,42 @@ impl DesktopConfig {
         change: impl FnOnce(&mut Self) -> (bool, R),
         saved: impl FnOnce(&Self),
     ) -> Result<R, String> {
-        Self::try_update_at_then(path, change, saved).map_err(UpdateError::into_message)
+        Self::try_update_at_then(path, change, saved, None).map_err(UpdateError::into_message)
+    }
+
+    /// Spec 2026-10-10 §7.3 (task 1887): `update_at`, whose write survives a power loss once it returns: the temp file
+    /// is flushed before the rename, and the directory after it. Only the keep step's save uses it, with
+    /// `RealConfigFs`; every other save stays as it is. The file-system steps are passed in so a test can record their
+    /// order and fail one (U43). It is the one write place with a durable write step, so the lock and the read are
+    /// still taken in one place. An `Err` can come after the rename, when the directory flush failed: the change is
+    /// then in the file, so a caller that undoes its work on an error must take the change back (spec 2026-10-10 W8).
+    pub(crate) fn update_at_durable_with<R>(
+        path: &Path,
+        change: impl FnOnce(&mut Self) -> (bool, R),
+        fs_steps: &dyn ConfigFs,
+    ) -> Result<R, String> {
+        Self::try_update_at_then(path, change, |_| {}, Some(fs_steps)).map_err(UpdateError::into_message)
     }
 
     /// The one place the file is written: the lock is taken before the read and held through the write and `saved`.
+    /// `durable`: `None` is the plain write every save uses; `Some` is the keep step's durable write (task 1887, spec
+    /// 2026-10-10 §7.3), with its file-system steps.
     fn try_update_at_then<R>(
         path: &Path,
         change: impl FnOnce(&mut Self) -> (bool, R),
         saved: impl FnOnce(&Self),
+        durable: Option<&dyn ConfigFs>,
     ) -> Result<R, UpdateError> {
         let _writing = config_write_guard();
         let mut cfg = Self::load_from(path).map_err(UpdateError::Read)?;
         let read = cfg.clone();
         let (save, value) = change(&mut cfg);
         if save {
-            cfg.save_to(path).map_err(UpdateError::Write)?;
+            match durable {
+                None => cfg.save_to(path),
+                Some(fs_steps) => cfg.save_to_durable(path, fs_steps),
+            }
+            .map_err(UpdateError::Write)?;
             saved(&cfg);
         } else {
             saved(&read);
@@ -839,6 +902,61 @@ impl DesktopConfig {
 
         fs::rename(&tmp, path).map_err(|e| format!("rename {} → {}: {e}", tmp.display(), path.display()))?;
         Ok(())
+    }
+
+    /// The durable write. The caller holds the config-write lock.
+    fn save_to_durable(&self, path: &Path, fs_steps: &dyn ConfigFs) -> Result<(), String> {
+        let toml_str = toml::to_string_pretty(self).map_err(|e| format!("serialize: {e}"))?;
+        let tmp = path.with_extension("toml.tmp");
+        fs_steps
+            .write(&tmp, toml_str.as_bytes())
+            .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+        fs_steps
+            .sync_file(&tmp)
+            .map_err(|e| format!("flush {}: {e}", tmp.display()))?;
+        fs_steps
+            .rename(&tmp, path)
+            .map_err(|e| format!("rename {} → {}: {e}", tmp.display(), path.display()))?;
+        let dir = path
+            .parent()
+            .ok_or_else(|| "the config file has no directory".to_string())?;
+        fs_steps
+            .sync_dir(dir)
+            .map_err(|e| format!("flush {}: {e}", dir.display()))
+    }
+}
+
+/// The file-system steps of a durable save, so a test can record their order and fail one (spec 2026-10-10 U43).
+pub(crate) trait ConfigFs {
+    /// Write `bytes` to `path`, owner-only.
+    fn write(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()>;
+    fn sync_file(&self, path: &Path) -> std::io::Result<()>;
+    fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()>;
+    fn sync_dir(&self, dir: &Path) -> std::io::Result<()>;
+}
+
+// Outside tests, only the macOS sign-out builds one (spec 2026-10-10 W5).
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+pub(crate) struct RealConfigFs;
+
+impl ConfigFs for RealConfigFs {
+    fn write(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        fs::write(path, bytes)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(())
+    }
+    fn sync_file(&self, path: &Path) -> std::io::Result<()> {
+        fs::File::open(path)?.sync_all()
+    }
+    fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        fs::rename(from, to)
+    }
+    fn sync_dir(&self, dir: &Path) -> std::io::Result<()> {
+        fs::File::open(dir)?.sync_all()
     }
 }
 
@@ -1063,6 +1181,31 @@ mod tests {
         let s = toml::to_string_pretty(&cfg).expect("serialize");
         let back: DesktopConfig = toml::from_str(&s).expect("parse");
         assert!(back.known_folder_onboarding_seen);
+    }
+
+    #[test]
+    fn menu_bar_hint_seen_defaults_false_and_round_trips() {
+        // A fresh config, and a file that has no such key (every install before this one): the hint is not yet seen.
+        assert!(!DesktopConfig::default().menu_bar_hint_seen);
+        let cfg: DesktopConfig = toml::from_str("").expect("parse empty toml");
+        assert!(!cfg.menu_bar_hint_seen);
+
+        let mut cfg = DesktopConfig::default();
+        cfg.menu_bar_hint_seen = true;
+        let back: DesktopConfig = toml::from_str(&toml::to_string_pretty(&cfg).expect("serialize")).expect("parse");
+        assert!(back.menu_bar_hint_seen);
+    }
+
+    #[test]
+    fn a_settings_save_never_reads_or_writes_the_menu_bar_hint() {
+        // The hint belongs to Home, not to Settings: the settings DTO has no field for it, so no save can flip it.
+        let mut cfg = DesktopConfig::default();
+        cfg.menu_bar_hint_seen = true;
+        let dto = DesktopSettings::from(&cfg);
+        assert!(!serde_json::to_string(&dto).unwrap().contains("menu_bar_hint"));
+        let mut other = DesktopConfig::default();
+        other.apply_settings(dto);
+        assert!(!other.menu_bar_hint_seen, "applying the settings of a config that had seen it leaves the hint alone");
     }
 
     #[test]

@@ -1,311 +1,38 @@
 /**
- * Spec 2026-10-06 §10, Onboarding: on macOS there is no install button; the step shows Adding,
- * advances by itself on Ready, and on Failed / UserDisabled shows the one notice and one action
- * from finderSetupCopy.ts. On Linux/Windows the old step is unchanged.
+ * Onboarding's Finder step, which is Linux's (task 1683 slice 2). Spec 2026-10-06 §10 gave macOS no install button; spec C
+ * §11 then took macOS out of this window altogether: a Mac signs in in the Beebeeb window (`macSignIn.tsx`), and
+ * `Onboarding.tsx` is the Linux first-run window (Windows has `WindowsFirstRun.tsx`). What used to be tested here for
+ * macOS moved with the code: the Finder step and its use of `useFinderSetup` are `tests/macFinderScreen.test.tsx`
+ * (every assertion carried over), the routing from the session is `tests/signInModel.test.ts`, and the rail wording for
+ * macOS is gone with the rail's macOS variant.
  *
- * The macOS step consumes `useFinderSetup()` (lead ruling 7b), so these tests run the REAL hook
- * declaration inside the mounted component (the harness's `hookModules`), against a scripted
- * backend and a scripted event bus. Lead ruling 7a/c5: the `unavailable` presentation's "Try again"
- * re-reads (`retry()`), a failure notice's "Try again" asks the reconciler (`run('try_again')`);
- * both are pinned against each other below.
+ * What stays is the guard those tests were written to hold ("on macOS no code path calls install_finder_location"),
+ * stated now as what makes it true: this window never reads the platform or the Finder reconciler, so it cannot choose
+ * the Mac's step, and a Mac never builds it (`surfaces::policy::onboarding_surface`, `main.tsx`'s HostOnboarding).
  *
- * What this proves: the component's real handlers and render output for scripted answers. What it
- * does NOT prove: layout, React scheduling, a real Tauri event loop (Playwright / Task 21).
+ * What this proves: the component's real handlers and render output for scripted answers. What it does NOT prove:
+ * layout, or Linux hardware ("Linux UI not checked on hardware", spec C §16).
  */
 import { readFileSync } from 'node:fs'
 import { afterEach, describe, expect, test } from 'bun:test'
-import * as ReactReal from 'react'
 import { createElement, Fragment } from 'react'
-import { renderToString } from 'react-dom/server'
 import ts from 'typescript'
 import * as desktopApi from '../src/desktopApi'
 import * as finderInstallCard from '../src/finderInstallCard'
-import * as finderSetup from '../src/finderSetup'
-import * as copy from '../src/finderSetupCopy'
-import { FINDER_FAILURE_REASONS, type FinderSetupView } from '../src/finderSetup'
-import { ToastProvider } from '../src/windows/ui'
-import { elementsOf, loadComponent, mount, textOf, visibleErrorSurfaces, type Mounted } from './fixtures/componentHarness'
+import { elementsOf, loadComponent, mount, textOf, type Mounted } from './fixtures/componentHarness'
 
 const React = { createElement, Fragment }
 const Wordmark = () => null
 const Card = loadComponent('Onboarding.tsx', 'Card', { React, Wordmark })
 const FORBIDDEN = ['install_finder_location', 'continue_without_finder_location', 'finder_location_state', 'finder_domain_user_enabled']
 
-const view = (over: Partial<FinderSetupView> = {}): FinderSetupView => ({
-  setup: 'adding',
-  reason: null,
-  launch_location: 'applications',
-  attempt: 1,
-  max_attempts: 0,
-  last_failure: null,
-  ...over,
-})
-const failedView = (reason: (typeof FINDER_FAILURE_REASONS)[number]) =>
-  view({ setup: reason === 'user_disabled' ? 'user_disabled' : 'failed', reason })
-
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
 const mounted: Mounted[] = []
 afterEach(() => { while (mounted.length) mounted.pop()!.close() })
 
-/** A scripted stand-in for `subscribeFinderSetup`; the registration lands on the next microtask. */
-function fakeBus() {
-  const listeners: Array<(v: FinderSetupView) => void> = []
-  return {
-    get live() { return listeners.length },
-    subscribeFinderSetup(onView: (v: FinderSetupView) => void, options: { onSubscribed?: () => void } = {}) {
-      listeners.push(onView)
-      void Promise.resolve().then(() => options.onSubscribed?.())
-      return () => { const at = listeners.indexOf(onView); if (at >= 0) listeners.splice(at, 1) }
-    },
-    emit(next: FinderSetupView) { for (const listener of [...listeners]) listener(next) },
-  }
-}
-
-function openMacStep(initial: FinderSetupView | 'unreadable', backend: Record<string, (a: any) => unknown> = {}) {
-  const bus = fakeBus()
-  let done = 0
-  const copied: string[] = []
-  const m = mount('Onboarding.tsx', 'MacFinderStep', {
-    expand: true,
-    backend: {
-      finder_setup_state: () => { if (initial === 'unreadable') throw new Error('no reconciler'); return initial },
-      finder_setup_copy_details: () => 'details',
-      ...backend,
-    },
-    props: { onDone: () => { done += 1 } },
-    hookModules: [{
-      file: 'finderSetup.ts',
-      name: 'useFinderSetup',
-      bindings: {
-        loadFinderSetup: finderSetup.loadFinderSetup,
-        runFinderSetupAction: (action: copy.FinderSetupAction) =>
-          finderSetup.runFinderSetupAction(action, { writeClipboard: async (text) => { copied.push(await text) } }),
-        finderSetupLoadPresentation: copy.finderSetupLoadPresentation,
-        FINDER_ACTION_FAILED: copy.FINDER_ACTION_FAILED,
-        FINDER_COPIED_MS: copy.FINDER_COPIED_MS,
-        FINDER_ACTION_COMMAND: finderSetup.FINDER_ACTION_COMMAND,
-        commandUnavailableLabel: desktopApi.commandUnavailableLabel,
-        subscribeFinderSetup: bus.subscribeFinderSetup,
-        loadEngineRefusal: desktopApi.loadEngineRefusal,
-      },
-    }],
-    bindings: { Card, FINDER_SETUP_TITLE: copy.FINDER_SETUP_TITLE, finderActionButtonLabel: copy.finderActionButtonLabel },
-  })
-  mounted.push(m)
-  const settle = async () => { await m.flush(); await tick(); await m.flush() }
-  const calls = (name: string) => m.calls.filter((c) => c.name === name).length
-  return { m, bus, settle, calls, done: () => done, copied }
-}
-
 const buttons = (m: Mounted) => m.elements().filter((el) => el.type === 'button').map((el) => textOf(el.props.children).trim())
-const notices = (m: Mounted) => m.elements().filter((el) => el.props.role === 'alert' || el.props.role === 'status')
-const pageText = (m: Mounted) => textOf(m.elements()[0])
-const allStates: Array<FinderSetupView | 'unreadable'> = [
-  view({ setup: 'missing' }),
-  view(),
-  view({ setup: 'ready' }),
-  'unreadable',
-  ...FINDER_FAILURE_REASONS.map(failedView),
-]
 
-describe('Onboarding Finder step on macOS', () => {
-  test('shows Adding with no button, then advances by itself on a Ready event', async () => {
-    const s = openMacStep(view())
-    await s.settle()
-    expect(pageText(s.m)).toContain('Adding Beebeeb to Finder…')
-    expect(buttons(s.m)).toEqual([])
-    expect(s.done()).toBe(0)
-    s.bus.emit(view({ setup: 'ready' }))
-    await s.settle()
-    expect(s.done()).toBe(1)
-    await s.settle()
-    expect(s.done()).toBe(1)
-  })
-
-  // Must-render row 9: a failed + unknown with an engine refusal says the refusal's sentence.
-  test('an engine refusal on a failed + unknown is the notice; engine_stop_unconfirmed has no button', async () => {
-    const sentence = 'Beebeeb’s sync didn’t confirm it stopped. Quit and reopen Beebeeb before syncing again.'
-    const s = openMacStep(failedView('unknown'), {
-      sync_status: () => ({ logged_in: true, engine: 'stopped', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0, engine_refusal: { code: 'engine_stop_unconfirmed', sentence } }),
-    })
-    await s.settle()
-    expect(notices(s.m)).toHaveLength(1)
-    expect(textOf(notices(s.m)[0].props.children)).toContain(sentence)
-    expect(buttons(s.m)).toEqual([])
-  })
-
-  test('a Ready that is already there when the step opens advances too', async () => {
-    const s = openMacStep(view({ setup: 'ready' }))
-    await s.settle()
-    expect(s.done()).toBe(1)
-  })
-
-  test('each reason renders exactly one notice and the action from §6.2', async () => {
-    for (const reason of FINDER_FAILURE_REASONS) {
-      const s = openMacStep(failedView(reason))
-      await s.settle()
-      expect(notices(s.m)).toHaveLength(1)
-      expect(notices(s.m)[0].props.role).toBe(reason === 'user_disabled' ? 'status' : 'alert')
-      expect(textOf(notices(s.m)[0].props.children)).toContain(copy.FINDER_REASON_COPY[reason].sentence)
-      expect(buttons(s.m)).toEqual([copy.FINDER_ACTION_LABEL[copy.FINDER_REASON_COPY[reason].action]])
-      expect(s.m.toasts).toEqual([])
-      expect(s.done()).toBe(0)
-    }
-  })
-
-  test('no Install or Add to Finder button in any state, and none of the install-era commands is called', async () => {
-    for (const state of allStates) {
-      const s = openMacStep(state)
-      await s.settle()
-      expect(buttons(s.m).join('|')).not.toMatch(/Install|Add to Finder|Continue without/)
-      expect(s.m.calls.map((c) => c.name).filter((name) => FORBIDDEN.includes(name))).toEqual([])
-    }
-  })
-
-  test('each action sends its own command: Try again, Open System Settings, Show in Finder, Copy details', async () => {
-    const cases: Array<[typeof FINDER_FAILURE_REASONS[number], string, string]> = [
-      ['timeout', 'Try again', 'finder_setup_retry'],
-      ['user_disabled', 'Open System Settings', 'open_login_items_and_extensions_settings'],
-      ['not_in_applications', 'Show in Finder', 'finder_setup_show_app'],
-      ['folder_taken', 'Copy details', 'finder_setup_copy_details'],
-    ]
-    for (const [reason, label, command] of cases) {
-      const s = openMacStep(failedView(reason), { finder_setup_retry: () => undefined, open_login_items_and_extensions_settings: () => undefined, finder_setup_show_app: () => undefined })
-      await s.settle()
-      await s.m.click(label)
-      expect(s.calls(command)).toBe(1)
-      expect(s.m.toasts).toEqual([])
-    }
-  })
-
-  test('Copy details says Copied on its button after a success (FT-clipboard)', async () => {
-    const s = openMacStep(failedView('folder_taken'))
-    await s.settle()
-    await s.m.click('Copy details')
-    await s.settle()
-    expect(buttons(s.m)).toEqual(['Copied'])
-  })
-
-  test('Copy details puts the details on the pasteboard', async () => {
-    const s = openMacStep(failedView('folder_taken'))
-    await s.settle()
-    await s.m.click('Copy details')
-    expect(s.copied).toEqual(['details'])
-  })
-
-  test('a failed action is a toast, never a second inline surface', async () => {
-    const s = openMacStep(failedView('timeout'), { finder_setup_retry: () => { throw new Error('finder_setup_retry is not a registered command') } })
-    await s.settle()
-    await s.m.click('Try again')
-    expect(s.m.toasts.map((t) => t.message)).toEqual(['Beebeeb couldn’t retry adding itself to Finder.'])
-    expect(s.m.toasts.map((t) => t.title)).toEqual([undefined])
-    expect(JSON.stringify(s.m.toasts)).not.toContain('registered')
-    expect(s.m.elements().filter((el) => el.props.role === 'alert')).toHaveLength(1)
-    expect(visibleErrorSurfaces(s.m).filter((surface) => surface.startsWith('inline:'))).toHaveLength(1)
-  })
-
-  // Row 15: Rust's own answer to Try again carries the remedy, so it is said, neutrally, under the notice.
-  test('a failed Try again says Rust\'s sentence as a neutral note under the notice, no toast', async () => {
-    const sentence = 'Beebeeb adds itself to Finder when you’re signed in and the vault is unlocked.'
-    const s = openMacStep(failedView('timeout'), { finder_setup_retry: () => { throw sentence } })
-    await s.settle()
-    await s.m.click('Try again')
-    expect(s.m.toasts).toEqual([])
-    expect(s.m.elements().filter((el) => el.props.role === 'status').map((el) => textOf(el.props.children))).toContain(sentence)
-    expect(visibleErrorSurfaces(s.m).filter((surface) => surface.startsWith('inline:'))).toHaveLength(1)
-  })
-
-  test('the action is disabled while it runs, so it cannot be sent twice', async () => {
-    const s = openMacStep(failedView('timeout'), { finder_setup_retry: () => new Promise(() => {}) })
-    await s.settle()
-    await s.m.clickNoWait('Try again')
-    const button = s.m.elements().find((el) => el.type === 'button')!
-    expect(button.props.disabled).toBe(true)
-  })
-
-  describe('lead ruling 7a: a state that cannot be read is not "Adding"', () => {
-    test('one inline notice with the existing words and ONE action, never the Adding line', async () => {
-      const s = openMacStep('unreadable')
-      await s.settle()
-      expect(notices(s.m)).toHaveLength(1)
-      expect(textOf(notices(s.m)[0].props.children)).toContain(copy.FINDER_UNAVAILABLE_LINE)
-      expect(buttons(s.m)).toEqual(['Try again'])
-      expect(pageText(s.m)).not.toContain(copy.FINDER_ADDING_LINE)
-      expect(s.m.toasts).toEqual([])
-      expect(s.done()).toBe(0)
-    })
-
-    test('its Try again re-reads the state (retry) and never asks the reconciler (run try_again)', async () => {
-      let reads = 0
-      const s = openMacStep('unreadable', {
-        finder_setup_state: () => { reads += 1; if (reads === 1) throw new Error('not yet'); return view() },
-        finder_setup_retry: () => undefined,
-      })
-      await s.settle()
-      expect(s.calls('finder_setup_state')).toBe(1)
-      await s.m.click('Try again')
-      await s.settle()
-      expect(s.calls('finder_setup_state')).toBe(2)
-      expect(s.calls('finder_setup_retry')).toBe(0)
-      expect(pageText(s.m)).toContain(copy.FINDER_ADDING_LINE)
-      expect(buttons(s.m)).toEqual([])
-    })
-
-    test('a failure notice Try again asks the reconciler (run try_again) and never re-reads the state', async () => {
-      const s = openMacStep(failedView('timeout'), { finder_setup_retry: () => undefined })
-      await s.settle()
-      expect(s.calls('finder_setup_state')).toBe(1)
-      await s.m.click('Try again')
-      await s.settle()
-      expect(s.calls('finder_setup_retry')).toBe(1)
-      expect(s.calls('finder_setup_state')).toBe(1)
-    })
-  })
-
-  test('before the reconciler has said anything, and while it says Missing, nothing claims Adding and nothing is offered', async () => {
-    const waiting = openMacStep(view(), { finder_setup_state: () => new Promise(() => {}) })
-    await waiting.settle()
-    const missing = openMacStep(view({ setup: 'missing' }))
-    await missing.settle()
-    for (const s of [waiting, missing]) {
-      expect(pageText(s.m)).not.toContain(copy.FINDER_ADDING_LINE)
-      expect(buttons(s.m)).toEqual([])
-      expect(notices(s.m)).toEqual([])
-      expect(pageText(s.m)).toContain(copy.FINDER_SETUP_TITLE)
-    }
-  })
-
-  test('one subscription while the step is open, released when it closes', async () => {
-    const s = openMacStep(view())
-    await s.settle()
-    s.bus.emit(failedView('timeout'))
-    await s.settle()
-    expect(s.bus.live).toBe(1)
-    s.m.unmount()
-    expect(s.bus.live).toBe(0)
-  })
-})
-
-describe('Onboarding Finder step in real React', () => {
-  test('the real hook, the real ToastProvider and the step compose: the first paint is quiet, not "Adding"', () => {
-    // Server render: it runs every hook in React's own order (what the controlled-hook harness
-    // cannot show) but no effects, so this is the instant before the reconciler has answered.
-    const MacFinderStep = loadComponent('Onboarding.tsx', 'MacFinderStep', {
-      React,
-      useState: ReactReal.useState,
-      useEffect: ReactReal.useEffect,
-      Card,
-      useFinderSetup: finderSetup.useFinderSetup,
-      FINDER_SETUP_TITLE: copy.FINDER_SETUP_TITLE,
-    })
-    const html = renderToString(createElement(ToastProvider, null, createElement(MacFinderStep, { onDone: () => {} })))
-    expect(html).toContain(copy.FINDER_SETUP_TITLE)
-    expect(html).not.toContain('Adding')
-    expect(html).not.toContain('<button')
-  })
-})
-
-describe('Onboarding Finder step source contract', () => {
+describe('Onboarding source contract', () => {
   const source = readFileSync(new URL('../src/Onboarding.tsx', import.meta.url), 'utf8')
   const ast = ts.createSourceFile('Onboarding.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
   const textOfFunction = (name: string) => {
@@ -314,19 +41,28 @@ describe('Onboarding Finder step source contract', () => {
     return declaration.getText(ast)
   }
 
-  test('MacFinderStep takes the load, the subscription and the failed-action toast from useFinderSetup (ruling 7b)', () => {
-    const body = textOfFunction('MacFinderStep')
-    expect(body.includes('useFinderSetup(')).toBe(true)
-    const own = ['loadFinderSetup', 'subscribeFinderSetup', 'runFinderSetupAction', 'useToast', 'showToast', 'listen(']
-    expect(own.filter((name) => body.includes(name))).toEqual([])
-  })
-
   test('the install-era commands and the poll live only in the Windows/Linux step', () => {
     const rest = source.replace(textOfFunction('FinderInstallStep'), '')
     expect(FORBIDDEN.filter((name) => rest.includes(name))).toEqual([])
     const gone = ['USER_ENABLED_POLL_INTERVAL_MS', 'shouldRetryAfterUserEnabledPoll', 'finder_domain_user_enabled']
     expect(gone.filter((name) => source.includes(name))).toEqual([])
     expect(textOfFunction('FinderInstallStep').includes('desktop_platform')).toBe(false)
+  })
+
+  // Spec C §11: the macOS step, its routing by the reconciler, its platform fallback and its rail wording are removed.
+  test('nothing of macOS is left in the window: no Mac step, no reconciler, no platform read, no capability read', () => {
+    for (const gone of ['MacFinderStep', 'useFinderSetup', 'loadFinderSetup', 'FINDER_RAIL', 'FINDER_SETUP_TITLE', 'desktop_platform', 'useCapabilities', "'macos'"]) {
+      expect({ gone, found: source.includes(gone) }).toEqual({ gone, found: false })
+    }
+    expect(() => textOfFunction('MacFinderStep')).toThrow()
+  })
+
+  test('a Mac never loads this window: HostOnboarding renders nothing for it, so the install-era step is unreachable there', () => {
+    const main = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8')
+    const host = main.slice(main.indexOf('function HostOnboarding()'), main.indexOf('let component: ReactElement'))
+    expect(host).toContain("caps?.host_os === 'macos'")
+    expect(host.indexOf("host_os === 'macos'")).toBeLessThan(host.indexOf('<Onboarding'))
+    expect(host).toMatch(/host_os === 'macos'\) return null/)
   })
 })
 
@@ -335,32 +71,17 @@ function stubs() {
   return {
     SignInStep: make('SignInStep'),
     UnlockStep: make('UnlockStep'),
-    MacFinderStep: make('MacFinderStep'),
     FinderInstallStep: make('FinderInstallStep'),
     PinningStep: make('PinningStep'),
     ReadyStep: make('ReadyStep'),
   }
 }
 
-async function openOnboarding(
-  backend: Record<string, (a: any) => unknown>,
-  opts: { rail?: unknown[]; hostOs?: desktopApi.DesktopPlatform } = {},
-) {
+async function openOnboarding(backend: Record<string, (a: any) => unknown>, opts: { rail?: unknown[] } = {}) {
   const steps = stubs()
   const m = mount('Onboarding.tsx', 'OnboardingView', {
     backend,
-    bindings: {
-      ...desktopApi,
-      ...finderSetup,
-      ...steps,
-      Wordmark,
-      STEPS: opts.rail ?? [],
-      // The capability snapshot (main.tsx's CapabilityProvider); null = no snapshot.
-      useCapabilities: () => (opts.hostOs === undefined ? null : { host_os: opts.hostOs }),
-      FINDER_RAIL_TITLE: copy.FINDER_RAIL_TITLE,
-      FINDER_RAIL_DETAIL: copy.FINDER_RAIL_DETAIL,
-      useRegionLabel: () => 'the EU',
-    },
+    bindings: { ...desktopApi, ...steps, Wordmark, STEPS: opts.rail ?? [], useRegionLabel: () => 'the EU' },
   })
   mounted.push(m)
   await m.flush(); await tick(); await m.flush()
@@ -370,136 +91,45 @@ async function openOnboarding(
 }
 
 const signedIn = (over: Partial<desktopApi.SyncStatus> = {}) => ({ logged_in: true, engine: 'idle', sync_root: null, vault_unlocked: true, syncing: 0, cloud_only: 0, conflicts: 0, ...over })
+const signedOut = { logged_in: false, engine: 'idle', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0 }
 
-describe('Onboarding routes to the Finder step by the reconciler on macOS', () => {
-  test('macOS, keys present, Finder Ready: straight to the last step, without asking the install-era state', async () => {
-    const o = await openOnboarding({ sync_status: () => signedIn(), desktop_platform: () => 'macos', finder_setup_state: () => view({ setup: 'ready' }) })
-    expect(o.shown()).toEqual(['ReadyStep'])
-    expect(o.m.calls.map((c) => c.name).filter((name) => FORBIDDEN.includes(name))).toEqual([])
+describe('Onboarding routes by the sync folder (Linux)', () => {
+  test('keys present: a sync folder decides. None: the Finder step; one: the last step', async () => {
+    const without = await openOnboarding({ sync_status: () => signedIn() })
+    expect(without.shown()).toEqual(['FinderInstallStep'])
+    const withRoot = await openOnboarding({ sync_status: () => signedIn({ sync_root: '/home/sam/Beebeeb' }) })
+    expect(withRoot.shown()).toEqual(['ReadyStep'])
   })
 
-  test('macOS, keys present, Finder not Ready (adding, failed, or unreadable): the Finder step, the macOS one', async () => {
-    for (const state of [view(), failedView('timeout'), failedView('user_disabled'), 'unreadable' as const]) {
-      const o = await openOnboarding({
-        sync_status: () => signedIn(),
-        desktop_platform: () => 'macos',
-        finder_setup_state: () => { if (state === 'unreadable') throw new Error('no reconciler'); return state },
-      })
-      expect(o.shown()).toEqual(['MacFinderStep'])
-      expect(o.m.calls.map((c) => c.name).filter((name) => FORBIDDEN.includes(name))).toEqual([])
-    }
-  })
-
-  test('macOS, vault still locked: the unlock step comes first', async () => {
-    const o = await openOnboarding({ sync_status: () => signedIn({ vault_unlocked: false }), desktop_platform: () => 'macos', finder_setup_state: () => view({ setup: 'ready' }) })
+  test('vault still locked: the unlock step comes first', async () => {
+    const o = await openOnboarding({ sync_status: () => signedIn({ vault_unlocked: false }) })
     expect(o.shown()).toEqual(['UnlockStep'])
   })
 
-  test('signing in and unlocking lead to the macOS Finder step, which leads on to the offline folders', async () => {
-    const o = await openOnboarding({ sync_status: () => ({ logged_in: false, engine: 'idle', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0 }), desktop_platform: () => 'macos' })
+  test('signing in and unlocking lead to the Finder install step, which leads on to the offline folders', async () => {
+    const o = await openOnboarding({ sync_status: () => signedOut })
     expect(o.shown()).toEqual(['SignInStep'])
-    o.props('SignInStep').onDone({ kind: 'fresh' }); o.m.render()
+    o.props('SignInStep').onDone({ kind: 'fresh', vaultUnlocked: false }); o.m.render()
     expect(o.shown()).toEqual(['UnlockStep'])
     o.props('UnlockStep').onDone(); o.m.render()
-    expect(o.shown()).toEqual(['MacFinderStep'])
-    o.props('MacFinderStep').onDone(); o.m.render()
+    expect(o.shown()).toEqual(['FinderInstallStep'])
+    o.props('FinderInstallStep').onDone(); o.m.render()
     expect(o.shown()).toEqual(['PinningStep'])
   })
 
-  test('Windows and Linux keep the old rule (a sync folder decides) and the old step, without the reconciler', async () => {
-    for (const platform of ['windows', 'linux']) {
-      const without = await openOnboarding({ sync_status: () => signedIn(), desktop_platform: () => platform })
-      expect(without.shown()).toEqual(['FinderInstallStep'])
-      const withRoot = await openOnboarding({ sync_status: () => signedIn({ sync_root: '/home/sam/Beebeeb' }), desktop_platform: () => platform })
-      expect(withRoot.shown()).toEqual(['ReadyStep'])
-      for (const o of [without, withRoot]) expect(o.m.calls.map((c) => c.name)).not.toContain('finder_setup_state')
+  // The guard those tests held, as what makes it true: whatever the platform says, this window never asks.
+  test('it never reads the platform or the Finder reconciler, so no answer from either can choose another step', async () => {
+    for (const status of [signedIn(), signedIn({ sync_root: '/home/sam/Beebeeb' }), signedIn({ vault_unlocked: false }), signedOut]) {
+      const o = await openOnboarding({ sync_status: () => status, desktop_platform: () => 'macos', finder_setup_state: () => ({ setup: 'ready' }) })
+      const names = o.m.calls.map((c) => c.name)
+      expect(names).not.toContain('desktop_platform')
+      expect(names).not.toContain('finder_setup_state')
+      expect(names.filter((name) => FORBIDDEN.includes(name))).toEqual([])
     }
-  })
-
-  test('a platform that cannot be read, with no capability snapshot to ask, is the Windows/Linux step, not a blank page', async () => {
-    const o = await openOnboarding({ sync_status: () => signedIn(), desktop_platform: () => { throw new Error('no bridge') } })
-    expect(o.shown()).toEqual(['FinderInstallStep'])
-  })
-
-  test('reaching the Finder step before the platform is known shows neither step, then the right one (no flash of the wrong one)', async () => {
-    // The step can be reached by walking sign in -> unlock while `desktop_platform` is still
-    // pending (the mount read waits for both), so this is the only path the guard protects.
-    let resolve!: (platform: string) => void
-    const o = await openOnboarding({
-      sync_status: () => ({ logged_in: false, engine: 'idle', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0 }),
-      desktop_platform: () => new Promise((r) => { resolve = r as (platform: string) => void }),
-    })
-    o.props('SignInStep').onDone({ kind: 'fresh' }); o.m.render()
-    o.props('UnlockStep').onDone(); o.m.render()
-    expect(o.shown()).toEqual([])
-    resolve('macos')
-    await o.m.flush(); await tick(); await o.m.flush()
-    expect(o.shown()).toEqual(['MacFinderStep'])
   })
 })
 
-describe('Onboarding platform fallback: a Mac whose desktop_platform fails is still a Mac (Global Constraint: on macOS no code path calls install_finder_location)', () => {
-  const failing = () => { throw new Error('no bridge') }
-  const forbiddenCalls = (o: { m: Mounted }) => o.m.calls.map((c) => c.name).filter((name) => FORBIDDEN.includes(name))
-
-  test('desktop_platform fails, the capability snapshot says macos: the macOS step and no install-era command', async () => {
-    const o = await openOnboarding({ sync_status: () => signedIn(), desktop_platform: failing, finder_setup_state: () => view() }, { hostOs: 'macos' })
-    expect(o.shown()).toEqual(['MacFinderStep'])
-    expect(forbiddenCalls(o)).toEqual([])
-  })
-
-  test('the routing read follows the fallback too: Ready goes straight to the last step, without the install-era state', async () => {
-    const o = await openOnboarding({ sync_status: () => signedIn(), desktop_platform: failing, finder_setup_state: () => view({ setup: 'ready' }) }, { hostOs: 'macos' })
-    expect(o.shown()).toEqual(['ReadyStep'])
-    expect(forbiddenCalls(o)).toEqual([])
-  })
-
-  test('desktop_platform answering "unknown" falls back the same way', async () => {
-    const o = await openOnboarding({ sync_status: () => signedIn(), desktop_platform: () => 'unknown', finder_setup_state: () => view() }, { hostOs: 'macos' })
-    expect(o.shown()).toEqual(['MacFinderStep'])
-    expect(forbiddenCalls(o)).toEqual([])
-  })
-
-  test('desktop_platform fails, the snapshot says windows or linux: today\'s step', async () => {
-    for (const hostOs of ['windows', 'linux'] as const) {
-      const o = await openOnboarding({ sync_status: () => signedIn(), desktop_platform: failing }, { hostOs })
-      expect(o.shown()).toEqual(['FinderInstallStep'])
-      expect(o.m.calls.map((c) => c.name)).not.toContain('finder_setup_state')
-    }
-  })
-
-  test('both unknown (failed or "unknown" answer; an "unknown" snapshot or none): only then the Windows/Linux step', async () => {
-    const answers: Array<() => unknown> = [failing, () => 'unknown']
-    for (const answer of answers) {
-      for (const hostOs of ['unknown', undefined] as const) {
-        const o = await openOnboarding({ sync_status: () => signedIn(), desktop_platform: answer }, { hostOs })
-        expect(o.shown()).toEqual(['FinderInstallStep'])
-      }
-    }
-  })
-
-  test('the fallback is only a fallback: an answered platform wins over the snapshot', async () => {
-    for (const answered of ['windows', 'linux']) {
-      const o = await openOnboarding({ sync_status: () => signedIn(), desktop_platform: () => answered }, { hostOs: 'macos' })
-      expect(o.shown()).toEqual(['FinderInstallStep'])
-    }
-    const mac = await openOnboarding({ sync_status: () => signedIn(), desktop_platform: () => 'macos', finder_setup_state: () => view() }, { hostOs: 'windows' })
-    expect(mac.shown()).toEqual(['MacFinderStep'])
-  })
-
-  test('signing in and unlocking on a Mac whose desktop_platform fails also lands on the macOS step', async () => {
-    const o = await openOnboarding(
-      { sync_status: () => ({ logged_in: false, engine: 'idle', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0 }), desktop_platform: failing },
-      { hostOs: 'macos' },
-    )
-    o.props('SignInStep').onDone({ kind: 'fresh' }); o.m.render()
-    o.props('UnlockStep').onDone(); o.m.render()
-    expect(o.shown()).toEqual(['MacFinderStep'])
-    expect(forbiddenCalls(o)).toEqual([])
-  })
-})
-
-describe('Onboarding step rail: macOS promises no manual install (lead ruling, pre-review of Task 15)', () => {
+describe('Onboarding step rail: the same five rows on every platform that mounts it', () => {
   /** The module-level `STEPS` constant of Onboarding.tsx, evaluated as written (it is not exported). */
   function realSteps(): unknown[] {
     const source = readFileSync(new URL('../src/Onboarding.tsx', import.meta.url), 'utf8')
@@ -528,51 +158,16 @@ describe('Onboarding step rail: macOS promises no manual install (lead ruling, p
     ['Choose offline folders', 'Default is online-only; pin only what you need.'],
     ['Review status', 'Open the control center.'],
   ]
-  const onMac = unchanged.map((row, at) => (at === 2 ? ['Finder', 'Beebeeb adds itself to Finder after sign-in.'] : row))
-  const loggedOut = { logged_in: false, engine: 'idle', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0 }
 
-  test('the two macOS strings are named exports of the copy module, and promise no install', () => {
-    expect(copy.FINDER_RAIL_TITLE).toBe('Finder')
-    expect(copy.FINDER_RAIL_DETAIL).toBe('Beebeeb adds itself to Finder after sign-in.')
-    expect(`${copy.FINDER_RAIL_TITLE} ${copy.FINDER_RAIL_DETAIL}`).not.toMatch(/Install|Register|Add to Finder/)
-  })
-
-  test('the rail the source declares is the one the Windows/Linux strings below are held to', () => {
+  test('the rail the source declares is exactly today’s', () => {
     expect(realSteps().map((row: any) => [row.title, row.detail])).toEqual(unchanged)
   })
 
-  test('on macOS the Finder row says Finder and that it adds itself; every other row is unchanged', async () => {
-    const o = await openOnboarding({ sync_status: () => loggedOut, desktop_platform: () => 'macos' }, { rail: realSteps() })
-    expect(rail(o.m)).toEqual(onMac)
-  })
-
-  test('on Windows, Linux, an unknown platform and an unreadable one the rail is exactly today\'s', async () => {
-    for (const platform of ['windows', 'linux', 'unknown']) {
-      const o = await openOnboarding({ sync_status: () => loggedOut, desktop_platform: () => platform }, { rail: realSteps() })
+  test('the rail is drawn as declared, whatever the platform says: there is no variant for any platform any more', async () => {
+    for (const platform of ['linux', 'windows', 'unknown', 'macos']) {
+      const o = await openOnboarding({ sync_status: () => signedOut, desktop_platform: () => platform }, { rail: realSteps() })
       expect(rail(o.m)).toEqual(unchanged)
     }
-    const unreadable = await openOnboarding({ sync_status: () => loggedOut, desktop_platform: () => { throw new Error('no bridge') } }, { rail: realSteps() })
-    expect(rail(unreadable.m)).toEqual(unchanged)
-  })
-
-  test('the rail follows the fallback: desktop_platform fails and the snapshot says macos', async () => {
-    const o = await openOnboarding(
-      { sync_status: () => loggedOut, desktop_platform: () => { throw new Error('no bridge') } },
-      { rail: realSteps(), hostOs: 'macos' },
-    )
-    expect(rail(o.m)).toEqual(onMac)
-  })
-
-  test('until the platform has answered the rail stays today\'s, then becomes the macOS one', async () => {
-    let resolve!: (platform: string) => void
-    const o = await openOnboarding(
-      { sync_status: () => loggedOut, desktop_platform: () => new Promise((r) => { resolve = r as (platform: string) => void }) },
-      { rail: realSteps() },
-    )
-    expect(rail(o.m)).toEqual(unchanged)
-    resolve('macos')
-    await o.m.flush(); await tick(); await o.m.flush()
-    expect(rail(o.m)).toEqual(onMac)
   })
 })
 

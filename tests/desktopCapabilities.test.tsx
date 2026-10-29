@@ -23,7 +23,9 @@ test('real Windows settings omit four unsupported preference actions and the no-
   }
   expect(html).toContain('Always on')
   expect(html).toContain('Free up space')
-  expect(html).toContain('Pause syncing from the app menu')
+  // 0.8.15: Settings › Sync has its own Pause / Resume; the notice no longer sends people to the app menu.
+  expect(html).not.toContain('Pause syncing from the app menu')
+  expect(html).toMatch(/<button[^>]*>[\s\S]*?Pause syncing<\/button>/)
   expect(html).toMatch(/class="capability-notice"[^>]*>[\s\S]*?Files download when opened/)
 })
 
@@ -82,13 +84,17 @@ test('capability load failure keeps a styled inline explanation and two separate
 test('seven Rust wire fixtures distinguish install support and implemented preferences', () => {
   expect(Object.keys(cases)).toHaveLength(7)
   for (const [name, caps] of Object.entries(cases)) {
-    expect(canInstallUpdate(caps)).toBe(['macos', 'windows-nsis', 'windows-msi', 'linux-appimage'].includes(name))
+    // Task 2176: a sandboxed Mac downloads its updates and never installs them in place.
+    expect(canInstallUpdate(caps)).toBe(['windows-nsis', 'windows-msi', 'linux-appimage'].includes(name))
     expect(caps.metered_sync_control).toBe(false)
     expect(caps.sync_overlay_control).toBe(false)
     expect(caps.sync_mode_selection).toBe(false)
     expect(caps.hydrate_all_control).toBe(false)
   }
+  expect(cases.macos.update_format).toBe('download')
   expect(canInstallUpdate(null)).toBe(false)
+  // Defence in depth: a Mac that was told it can install (a stale payload, an older build's wire shape) still cannot.
+  expect(canInstallUpdate({ ...cases.macos, update_format: 'app_bundle' })).toBe(false)
   expect(canInstallUpdate({ ...cases['windows-nsis'], install_format: 'unknown', update_format: 'manual' })).toBe(false)
 })
 

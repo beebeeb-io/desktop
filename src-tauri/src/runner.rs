@@ -31,7 +31,7 @@
 //! popover snapshot consume this stream.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -183,12 +183,29 @@ const MACOS_UPLOAD_STAGING_SWEEP_EVERY_N_TICKS: u64 = 10;
 /// ```
 ///
 /// Packaged release builds ship without this variable set, so they always hit
-/// `https://api.beebeeb.io`.
+/// `https://api.beebeeb.io`. A unit-test build never does: see [`TEST_API_BASE`].
 pub(crate) fn api_base_url() -> String {
-    let base = std::env::var("BB_API_BASE").unwrap_or_default();
-    let trimmed = base.trim();
+    api_base_url_from(std::env::var("BB_API_BASE").ok().as_deref())
+}
+
+/// The production API, the default of every build but a unit-test build.
+#[cfg_attr(test, allow(dead_code))]
+const PRODUCTION_API_BASE: &str = "https://api.beebeeb.io";
+
+/// A unit-test build has no production default: with `BB_API_BASE` unset it talks to a closed
+/// loopback port, so no lib test can reach the production API (a test that needs a server starts
+/// its own and sets `BB_API_BASE`). After a CLI test once ran against the developer's live session.
+#[cfg(test)]
+const TEST_API_BASE: &str = "http://127.0.0.1:9";
+
+/// [`api_base_url`] for a given `BB_API_BASE` value.
+fn api_base_url_from(env: Option<&str>) -> String {
+    let trimmed = env.unwrap_or_default().trim();
     if trimmed.is_empty() {
-        return "https://api.beebeeb.io".to_string();
+        #[cfg(test)]
+        return TEST_API_BASE.to_string();
+        #[cfg(not(test))]
+        return PRODUCTION_API_BASE.to_string();
     }
     trimmed.trim_end_matches('/').to_string()
 }
@@ -223,15 +240,23 @@ fn platform_str() -> &'static str {
 /// This machine's hostname, or `"unknown"` if the OS won't tell us. Cross-
 /// platform via the `hostname` crate (already a dependency for the lock file).
 ///
-/// `pub(crate)` so the known-folder backup mirror can derive its
-/// `Backup/<device>/<folder>` destination from the SAME value this device
-/// registers with the server (`register_session`), keeping the backup path and
-/// the device row in lockstep.
+/// The device row's display name (`register_session`) uses it, and on macOS the
+/// backup source tag (spec §2: no macOS change). The Windows and Linux backup
+/// uses [`device_name`], which has no fallback, so a lossy name never starts a
+/// `Backups/unknown` folder (spec D9, tasks 1888, 2226).
 pub(crate) fn hostname_or_unknown() -> String {
     hostname::get()
         .ok()
         .and_then(|s| s.into_string().ok())
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Spec D9 (tasks 1888, 2226): this machine's name, or `None` when the OS will not give one that is valid Unicode. The
+/// backup mirror and the backup source key use this: with `None` they make nothing, so a lossy name never starts a
+/// second `Backups/<device>` folder. [`hostname_or_unknown`] stays for the device row's display name and the lock file.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub(crate) fn device_name() -> Option<String> {
+    hostname::get().ok().and_then(|s| s.into_string().ok())
 }
 
 /// The desktop crate version, surfaced on the device row as `bb_version`.
@@ -612,6 +637,118 @@ fn spawn_heartbeat_producer(
     })
 }
 
+/// Spec 2026-10-10 §6.2 (task 1887): the sign-out's send phase, as the runner sees it. Armed only while a phase runs;
+/// the runner's phase wake (`Wake::Phase`) runs the queue step alone then.
+#[derive(Default)]
+pub struct SendPhaseLink {
+    armed: AtomicBool,
+    pub(crate) wake: tokio::sync::Notify,
+    link: std::sync::OnceLock<Arc<crate::link_health::LinkMonitor>>,
+    signals: Mutex<AttemptSignals>,
+}
+
+/// What the phase's attempts met, since it was armed (§6.4: `offline`, `session`, and, by the §15 question 4 ruling,
+/// `account`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AttemptSignals {
+    pub link_failed: bool,
+    pub session_refused: bool,
+    pub account_refused: bool,
+}
+
+// The phase's side (`arm`, `disarm`, `wake`, `link_failed`, `signals`, and `EngineRunner::send_phase`) is called from
+// the sign-out flow, which only a Mac runs (W5); the runner's side (`attach`, `is_armed`, `note`) runs everywhere.
+impl SendPhaseLink {
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn arm(&self) {
+        *self.signals.lock().unwrap_or_else(|p| p.into_inner()) = AttemptSignals::default();
+        self.armed.store(true, Ordering::SeqCst);
+        self.wake.notify_one();
+    }
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn disarm(&self) {
+        self.armed.store(false, Ordering::SeqCst);
+    }
+    pub fn is_armed(&self) -> bool {
+        self.armed.load(Ordering::SeqCst)
+    }
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn wake(&self) {
+        self.wake.notify_one();
+    }
+    /// §6.1 condition 3: the link monitor has a failure since its last good answer.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn link_failed(&self) -> bool {
+        self.link.get().is_some_and(|link| link.snapshot().failure.is_some())
+    }
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn signals(&self) -> AttemptSignals {
+        *self.signals.lock().unwrap_or_else(|p| p.into_inner())
+    }
+    pub(crate) fn attach(&self, link: Arc<crate::link_health::LinkMonitor>) {
+        let _ = self.link.set(link);
+    }
+    pub(crate) fn note(&self, outcome: &crate::engine_bridge::TransferLoopOutcome) {
+        let mut signals = self.signals.lock().unwrap_or_else(|p| p.into_inner());
+        signals.link_failed |= outcome.link_failed;
+        signals.session_refused |= outcome.session_refused;
+        signals.account_refused |= outcome.account_refused;
+    }
+}
+
+/// The phase arm's gate (U35): armed, not paused, and at most once a second. (`runner.rs` imports `Duration` but not
+/// `Instant`.)
+pub(crate) fn phase_step_due(
+    armed: bool,
+    paused: bool,
+    last_run: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    armed && !paused && last_run.is_none_or(|last| now.duration_since(last) >= Duration::from_secs(1))
+}
+
+/// What woke the runner's loop (spec 2026-10-10 §6.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Wake {
+    Cancel,
+    Tick,
+    Phase,
+}
+
+/// The loop's one wait, in the order `run`'s `select!` always had (`biased`: the cancel first, then the tick), plus the
+/// send phase's wake. The phase's arm has no precondition. `select!` evaluates an `if` precondition once, when it
+/// starts waiting, so an arm disabled then cannot be woken by `notify_one` until another arm fires: a phase armed while
+/// the runner waits would get no queue step until the next tick, up to 30 s later. The `Notify` fires only when
+/// `arm()` or the phase's driver wakes it (a wake with no phase running finds `phase_step_due` false), and `notify_one`
+/// stores a permit when nobody waits, so a wake sent mid-tick is not lost.
+async fn next_wake(
+    cancel: &mut oneshot::Receiver<()>,
+    tick: &mut tokio::time::Interval,
+    send_phase: &SendPhaseLink,
+) -> Wake {
+    tokio::select! {
+        biased;
+        _ = cancel => Wake::Cancel,
+        _ = tick.tick() => Wake::Tick,
+        _ = send_phase.wake.notified() => Wake::Phase,
+    }
+}
+
+/// Spec D11 (task 1888): the account's resume requests, shared with the engine. `asked` counts the sign-ins that asked
+/// for the operations paused for `auth` to be due again (`ask_to_resume_auth_paused`); `done` is the ask the last
+/// resume served. Off macOS the engine serves them itself, after its reconcile pass and the key check
+/// ([`crate::engine_bridge::EngineBridge::reconcile_then_resume`]); a Mac serves them in the engine start.
+#[derive(Debug, Clone, Default)]
+pub struct ResumeTicket {
+    pub asked: Arc<AtomicU64>,
+    pub done: Arc<AtomicU64>,
+    /// Review P2 (task 1888): the releases that asked for a pass ("Upload to my Beebeeb" on a held change, Windows).
+    /// Separate from `asked`, so a release never resumes the operations paused for `auth`.
+    pub pass_wanted: Arc<AtomicU64>,
+    /// The release ask the last committed pass served: a pass serves what it read before it planned.
+    pub pass_served: Arc<AtomicU64>,
+}
+
 /// Owned handle to a running engine task. Drop it (or call
 /// [`Self::abort`]) to stop the engine.
 pub struct EngineRunner {
@@ -627,6 +764,8 @@ pub struct EngineRunner {
     /// [`EngineBridge`] `run` builds, so `abort()` can flip it BEFORE even
     /// sending the tick loop's cancel oneshot.
     stopping: Arc<AtomicBool>,
+    /// The sign-out's send phase (spec 2026-10-10 §6.2), shared with `run`'s loop.
+    send_phase: Arc<SendPhaseLink>,
 }
 
 impl EngineRunner {
@@ -643,6 +782,8 @@ impl EngineRunner {
     /// The token and the key arrive as `Zeroizing` values (R10, lead ruling 2): the copy that travelled
     /// from the session to here is wiped when `run` is done with it, and only `ApiClient` (which wipes
     /// its own on drop) keeps a plain one.
+    ///
+    /// `resume` is the account's resume requests (spec D11): off macOS the engine serves them after its reconcile pass.
     pub fn spawn(
         app: AppHandle,
         sync_root: PathBuf,
@@ -650,12 +791,15 @@ impl EngineRunner {
         master_key: zeroize::Zeroizing<[u8; 32]>,
         sync_paused: Arc<AtomicBool>,
         auth_health: Arc<AuthHealth>,
+        resume: ResumeTicket,
     ) -> Self {
         let (tx, rx) = oneshot::channel::<()>();
         let ipc_bind_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let ipc_bind_error_for_task = ipc_bind_error.clone();
         let stopping: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
         let stopping_for_task = stopping.clone();
+        let send_phase = Arc::new(SendPhaseLink::default());
+        let send_phase_for_task = send_phase.clone();
 
         let task = tokio::spawn(async move {
             run(
@@ -669,6 +813,8 @@ impl EngineRunner {
                     auth_health,
                     ipc_bind_error: ipc_bind_error_for_task,
                     stopping: stopping_for_task,
+                    send_phase: send_phase_for_task,
+                    resume,
                 },
             )
             .await;
@@ -679,6 +825,7 @@ impl EngineRunner {
             task: Some(task),
             ipc_bind_error,
             stopping,
+            send_phase,
         }
     }
 
@@ -690,6 +837,21 @@ impl EngineRunner {
     /// instead of only after the full readiness timeout.
     pub fn ipc_bind_error_handle(&self) -> Arc<Mutex<Option<String>>> {
         self.ipc_bind_error.clone()
+    }
+
+    /// The sign-out's send phase link (spec 2026-10-10 §6.2): the phase arms it, and this runner's loop runs its queue
+    /// step while it is armed.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn send_phase(&self) -> Arc<SendPhaseLink> {
+        self.send_phase.clone()
+    }
+
+    /// Whether the runner's task is still going. A task that ended by itself (startup could not prepare or open the
+    /// state dir, or take the lock) leaves this handle in the account's slot, and a slot that is occupied is not a
+    /// running engine (PR #130 review). A runner already told to stop is not running either.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn is_running(&self) -> bool {
+        !self.stopping.load(Ordering::SeqCst) && self.task.as_ref().is_some_and(|task| !task.is_finished())
     }
 
     /// Test-only constructor: wraps an already-spawned task in a runner
@@ -706,6 +868,7 @@ impl EngineRunner {
             task: Some(task),
             ipc_bind_error: Arc::new(Mutex::new(None)),
             stopping: Arc::new(AtomicBool::new(false)),
+            send_phase: Arc::new(SendPhaseLink::default()),
         }
     }
 
@@ -921,6 +1084,10 @@ struct RunnerControls {
     auth_health: Arc<AuthHealth>,
     ipc_bind_error: Arc<Mutex<Option<String>>>,
     stopping: Arc<AtomicBool>,
+    /// The sign-out's send phase (spec 2026-10-10 §6.2): the loop's third wake.
+    send_phase: Arc<SendPhaseLink>,
+    /// Spec D11: the account's resume requests, served after the reconcile pass (Windows and Linux).
+    resume: ResumeTicket,
 }
 
 /// The runner task body. Acquires the lock, opens the state DB,
@@ -944,6 +1111,8 @@ async fn run(
         auth_health,
         ipc_bind_error,
         stopping,
+        send_phase,
+        resume,
     } = controls;
 
     // Only consumed inside the `#[cfg(unix)]` IPC block below — Windows has
@@ -1113,10 +1282,16 @@ async fn run(
         .try_state::<crate::popover_data::PopoverRuntime>()
         .map(|runtime| runtime.transfers.clone())
         .unwrap_or_else(crate::transfer_progress::TransferBoard::new);
-    let bridge =
-        Arc::new(EngineBridge::new_with_stop_flag(db.clone(), api.clone(), stopping).with_transfers(transfers.clone()));
+    // Spec D11 (review P2): the bridge's queue reads the account's pass requests, so it sends nothing while a release
+    // waits for a pass.
+    let bridge = Arc::new(
+        EngineBridge::new_with_stop_flag(db.clone(), api.clone(), stopping)
+            .with_transfers(transfers.clone())
+            .with_resume(resume.clone()),
+    );
     // What each request saw of the link (offline vs server did not answer).
     let link = api.link();
+    send_phase.attach(link.clone());
     let tracker = Arc::new(StatusTracker::new(Some(sync_root.to_string_lossy().into_owned())));
     // `syncing` needs a pulse: the tick awaits every due upload to completion, so
     // the post-tick counts are almost always zero (see `engine_status`).
@@ -1241,6 +1416,13 @@ async fn run(
     // All idempotent — safe to run on every (re)spawn.
     #[cfg(target_os = "windows")]
     crate::windows_cf::seed_placeholders(bridge.clone(), &sync_root);
+    // Task 2191 (D9), revised in desktop 0.8.15: every file of unknown content that holds bytes
+    // and reads in sync is marked not in sync. The pass runs BESIDE the engine, not before it:
+    // 0.8.14 awaited it here, and on a PC with 37,169 such files nothing uploaded for over two
+    // hours. Uploads, downloads, deletes and renames start at once; the tick's freeing work waits
+    // for `STARTUP_GUARD` (spec U4). Nothing between here and the tick loop is awaited.
+    #[cfg(target_os = "windows")]
+    spawn_startup_guard(sync_root.clone());
 
     // Task 0780 — the UPLOAD trigger. On Windows the desktop binary IS the
     // Cloud Files provider and there is no extension/IPC socket to fire
@@ -1294,12 +1476,17 @@ async fn run(
     let mut upload_staging_sweep_tick_count: u64 = 1;
     // Spec §7.1: aliases older than 30 days go once a day (engine start sweeps them too).
     let mut last_alias_sweep = std::time::Instant::now();
+    // Spec 2026-10-10 §6.2: when the send phase's wake last ran the queue step.
+    let mut last_phase_run: Option<std::time::Instant> = None;
+    // Spec D11, D11b (task 1888): whether this engine run's first reconcile pass, with its key check and resume, has
+    // committed. Until it has, the send phase's wake sends nothing.
+    #[cfg(not(target_os = "macos"))]
+    let mut reconciled_this_run = false;
 
     loop {
-        tokio::select! {
-            biased;
-            _ = &mut cancel => break,
-            _ = tick.tick() => {
+        match next_wake(&mut cancel, &mut tick, &send_phase).await {
+            Wake::Cancel => break,
+            Wake::Tick => {
                 // Task 1670 round 3: run BEFORE the `sync_paused` check below
                 // — bounding staged plaintext lifetime is a security property
                 // independent of whether the user paused file sync, and
@@ -1345,10 +1532,23 @@ async fn run(
                 }
                 if last_alias_sweep.elapsed() >= std::time::Duration::from_secs(86_400) {
                     // A fixed category, never the error text (spec §11).
-                    if db.sweep_aliases(now_secs(), crate::state_db::ALIAS_MAX_AGE_SECS).is_err() {
+                    if db
+                        .sweep_aliases(now_secs(), crate::state_db::ALIAS_MAX_AGE_SECS)
+                        .is_err()
+                    {
                         tracing::warn!(reason = "database", "daily alias sweep failed");
                     }
                     last_alias_sweep = std::time::Instant::now();
+                }
+
+                // Task 2191 (D2, review-157 F2): the "not in sync" marks still to be made are local
+                // work, so they run on every tick: paused, offline or not.
+                #[cfg(target_os = "windows")]
+                {
+                    let mark_root = sync_root.clone();
+                    if let Err(e) = tokio::task::spawn_blocking(move || crate::windows_cf::retry_pending_marks(&mark_root)).await {
+                        tracing::warn!(error = %e, "pending-mark retry panicked; continuing");
+                    }
                 }
 
                 // Skip all sync work while the user has paused sync.
@@ -1389,7 +1589,12 @@ async fn run(
                             removed = outcome.removed_shared_file_ids.len(),
                             "revoked shared content removed from local Finder state"
                         );
-                        signal_working_set_owing(&mut owed_working_set_signal, &db, "shared_roots_changed", &outcome.removed_shared_file_ids);
+                        signal_working_set_owing(
+                            &mut owed_working_set_signal,
+                            &db,
+                            "shared_roots_changed",
+                            &outcome.removed_shared_file_ids,
+                        );
                     }
                     Ok(_) => {}
                     Err(e) => {
@@ -1418,35 +1623,32 @@ async fn run(
                         // (timestamp ≈ now) doesn't get auto-resolved
                         // on the very same tick.
                         sweep_auto_resolutions(&app, &bridge, &sync_root).await;
-                        let completed_sync_work = match bridge.process_due_operations(&sync_root, now_secs()).await {
-                            Ok(outcome) => {
-                                let completed = outcome.completed_op_ids.len() as u32;
-                                // Task 1697 review fix (T3): ONE signal per tick
-                                // carries the union of the local queue's
-                                // invalidations and the REMOTE ingestion applies —
-                                // in a mixed tick two signals would be redundant.
-                                let (reason, ids) = tick_working_set_signal(&outcome.invalidated_item_ids, &tick.applied_item_ids);
-                                signal_working_set_owing(&mut owed_working_set_signal, &db, reason, &ids);
-                                if !outcome.paused_op_ids.is_empty() || !outcome.retried_op_ids.is_empty() {
-                                    tracing::info!(
-                                        paused = outcome.paused_op_ids.len(),
-                                        retried = outcome.retried_op_ids.len(),
-                                        "sync operation queue processed with deferred work"
-                                    );
-                                }
-                                completed
-                            }
-                            Err(e) => {
-                                tracing::warn!(error = %e, "operation queue processing failed");
-                                // The local queue stalled, but this tick's REMOTE
-                                // ingestion may still have applied server-side
-                                // changes — Finder must hear about them anyway.
-                                if !tick.applied_item_ids.is_empty() {
-                                    signal_working_set_owing(&mut owed_working_set_signal, &db, "remote_changes_applied", &tick.applied_item_ids);
-                                }
-                                0
-                            }
-                        };
+                        // Spec D11, D12, I6 (task 1888): the reconcile pass, then the key check and the resume of what
+                        // a refused session paused, before this tick's queue step sends anything. A pass that fails
+                        // resumes nothing and is tried again next tick; the queue step still runs (the parent-first
+                        // gate keeps a ghost's children waiting), as before this pass existed. Only at a tick whose
+                        // pull came back (review P1): `Ok` alone is also a swallowed `/sync/ops` failure (offline, a
+                        // 5xx, a 401), which proves no token and leaves the rows the pass plans against stale.
+                        #[cfg(not(target_os = "macos"))]
+                        if tick.reached_server
+                            && let Err(error) = bridge
+                                .reconcile_then_resume(&sync_root, &resume, &mut reconciled_this_run)
+                                .await
+                        {
+                            tracing::warn!(
+                                %error,
+                                "the reconcile pass did not complete; held changes stay paused, next tick retries"
+                            );
+                        }
+                        let completed_sync_work = queue_step(
+                            &bridge,
+                            &sync_root,
+                            &db,
+                            &mut owed_working_set_signal,
+                            &tick.applied_item_ids,
+                            &send_phase,
+                        )
+                        .await;
                         enforce_cache_budget(&app, &bridge, &mut quota_warning_notifications);
 
                         // Windows Cloud Files: the one-shot `seed_placeholders`
@@ -1473,8 +1675,22 @@ async fn run(
                         // on disk). Idempotent — CfSetInSyncState on an already-
                         // in-sync placeholder is a Windows no-op. Bounded at
                         // MAX_IN_SYNC_STAMPS_PER_PASS files per tick.
+                        // Task 1640 (review P2-5): the pass may hash a file; off the async workers.
+                        // Desktop 0.8.15: freeing work, so it waits until the start-up guard's pass
+                        // has walked every file of unknown content (spec U4).
                         #[cfg(target_os = "windows")]
-                        crate::windows_cf::stamp_local_files_in_sync(&sync_root);
+                        if crate::unknown_check::STARTUP_GUARD.allows_freeing() {
+                            let stamp_root = sync_root.clone();
+                            if let Err(e) = tokio::task::spawn_blocking(move || {
+                                crate::windows_cf::stamp_local_files_in_sync(&stamp_root);
+                                // Task 1640 (review N13): kept copies whose original was in use.
+                                crate::windows_cf::retry_kept_originals(&stamp_root);
+                            })
+                            .await
+                            {
+                                tracing::warn!(error = %e, "stamp pass panicked; continuing");
+                            }
+                        }
 
                         let syncing_after_tick = sync_in_flight_count(&db);
                         let unresolved_after_tick = unresolved_sync_issue_count(&db);
@@ -1528,9 +1744,7 @@ async fn run(
                             }
                         }
 
-                        if should_notify_sync_complete
-                            && let Err(e) = crate::notify_sync_complete_impl(&app)
-                        {
+                        if should_notify_sync_complete && let Err(e) = crate::notify_sync_complete_impl(&app) {
                             tracing::warn!(error = %e, "notify_sync_complete failed");
                         }
                     }
@@ -1560,6 +1774,27 @@ async fn run(
                         refresh_status_ui_snapshot(&db, false, true);
                     }
                 }
+            }
+            // Spec 2026-10-10 §6.2: while a sign-out's send phase is armed, the tick's queue step alone, at most once a
+            // second. Never the remote tick, the sweeps or the shared-root refresh. The queue step pays its own
+            // working-set signal; there are no remote applies to merge here.
+            Wake::Phase => {
+                let now = std::time::Instant::now();
+                if !phase_step_due(
+                    send_phase.is_armed(),
+                    sync_paused.load(Ordering::Relaxed),
+                    last_phase_run,
+                    now,
+                ) {
+                    continue;
+                }
+                // Spec D11b (task 1888): nothing is sent before this run's first pass committed; the next tick runs it.
+                #[cfg(not(target_os = "macos"))]
+                if !reconciled_this_run {
+                    continue;
+                }
+                last_phase_run = Some(now);
+                queue_step(&bridge, &sync_root, &db, &mut owed_working_set_signal, &[], &send_phase).await;
             }
         }
     }
@@ -1602,7 +1837,7 @@ async fn run(
             status: "stopped".to_string(),
             // Report the last known counts so the row's progress numbers don't
             // reset to null on the terminal beat; zero speed, no current file.
-            files_synced: db.list_by_status(FileStatus::Local).ok().map(|v| v.len() as i64),
+            files_synced: db.count_by_status(FileStatus::Local).ok().map(i64::from),
             current_file: None,
             speed_bps: Some(0),
             ..Default::default()
@@ -1645,8 +1880,40 @@ fn emit_status(app: &AppHandle, state: &str, sync_root: Option<&PathBuf>, error:
     );
 }
 
+/// Desktop 0.8.15: every `engine-status` payload carries the start-up guard's progress as
+/// `startup_guard`: `{running, done, total}`, counts only.
+pub(crate) fn with_startup_guard(mut payload: serde_json::Value) -> serde_json::Value {
+    if let Some(object) = payload.as_object_mut() {
+        object.insert(
+            "startup_guard".to_string(),
+            serde_json::json!(crate::unknown_check::STARTUP_GUARD.progress()),
+        );
+    }
+    payload
+}
+
+/// Task 2191 (D9), desktop 0.8.15: begin the start-up guard's pass for this engine and walk it in
+/// its own task, off the async workers. Nothing waits for it: freeing work asks
+/// `STARTUP_GUARD.allows_freeing()`. The pass stops between rows when the engine stops (a lock or
+/// a sign-out revokes the callback bridge it holds); one that stopped or panicked leaves freeing
+/// held until the next engine start's pass has walked every row.
+#[cfg(target_os = "windows")]
+fn spawn_startup_guard(sync_root: PathBuf) {
+    let generation = crate::unknown_check::STARTUP_GUARD.begin();
+    let guard_root = sync_root;
+    tokio::spawn(async move {
+        let pass = tokio::task::spawn_blocking(move || {
+            crate::windows_cf::guard_unknown_placeholders(&guard_root, generation)
+        });
+        if let Err(e) = pass.await {
+            crate::unknown_check::STARTUP_GUARD.abandon(generation);
+            tracing::warn!(error = %e, "unknown-content guard panicked; freeing stays held until the next start");
+        }
+    });
+}
+
 fn emit_payload<R: tauri::Runtime>(app: &tauri::AppHandle<R>, payload: serde_json::Value) {
-    if let Err(e) = app.emit(crate::engine_status::EVENT, payload) {
+    if let Err(e) = app.emit(crate::engine_status::EVENT, with_startup_guard(payload)) {
         tracing::warn!(error = %e, "failed to emit engine-status event");
     }
 }
@@ -1723,7 +1990,7 @@ fn set_telemetry_state(telemetry: &Arc<Mutex<TelemetryState>>, state: &str) {
 /// shell. Counting reuses the `db` the loop already holds, so this adds one
 /// indexed count query per tick. No-op on non-Windows.
 fn file_status_count(db: &StateDb, status: FileStatus) -> u32 {
-    db.list_by_status(status).ok().map(|v| v.len() as u32).unwrap_or(0)
+    db.count_by_status(status).unwrap_or(0)
 }
 
 fn sync_in_flight_count(db: &StateDb) -> u32 {
@@ -1905,7 +2172,32 @@ struct OwedWorkingSetSignal {
     ids: Vec<String>,
 }
 
+/// Task 2190: working-set signals a command could not deliver (a decision on a parked conflict met a
+/// busy bridge gate, or the signal failed). The next tick takes them into its debt
+/// ([`OwedWorkingSetSignal::take_command_debt`]), so they are re-sent with its signal, and stay owed
+/// while the gate is busy, by the same rule as the tick's own.
+static COMMAND_OWED_SIGNAL: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Task 2190: owe `ids` to the next tick's working-set signal.
+pub(crate) fn owe_working_set_signal(ids: &[String]) {
+    let mut owed = COMMAND_OWED_SIGNAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    for id in ids {
+        if !owed.contains(id) {
+            owed.push(id.clone());
+        }
+    }
+}
+
 impl OwedWorkingSetSignal {
+    /// Task 2190: the commands' undelivered signals join this debt (once: the queue is emptied).
+    fn take_command_debt(&mut self) {
+        let taken = std::mem::take(&mut *COMMAND_OWED_SIGNAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
+        if !taken.is_empty() {
+            let merged = self.merged_with(&taken);
+            self.record(true, merged);
+        }
+    }
+
     /// A debt that opens with `ids`: changes recorded before the tick loop started, which the first
     /// tick's signal must carry. Bounded like any other debt.
     fn owing(ids: Vec<String>) -> Self {
@@ -1950,6 +2242,7 @@ impl OwedWorkingSetSignal {
 /// kept the startup resets (and a signal a busy gate dropped) from the system until the network came back.
 /// Nothing owed, nothing sent.
 fn signal_owed_debt_after_a_failed_tick(owed_working_set_signal: &mut OwedWorkingSetSignal, db: &StateDb) {
+    owed_working_set_signal.take_command_debt();
     if owed_working_set_signal.is_owing() {
         signal_working_set_owing(owed_working_set_signal, db, "owed_debt", &[]);
     }
@@ -1958,6 +2251,7 @@ fn signal_owed_debt_after_a_failed_tick(owed_working_set_signal: &mut OwedWorkin
 /// One working-set signal with the debt carried: signals `owed + ids`, and owes them again when the gate
 /// was busy. Every call site in the tick loop goes through this one.
 fn signal_working_set_owing(owed: &mut OwedWorkingSetSignal, db: &StateDb, reason: &str, ids: &[String]) {
+    owed.take_command_debt();
     let merged = owed.merged_with(ids);
     let dropped = signal_file_provider_working_set(db, reason, &merged);
     owed.record(dropped, merged);
@@ -1987,6 +2281,53 @@ fn tick_working_set_signal(local_invalidated: &[String], remote_applied: &[Strin
         (true, true) => unreachable!("handled above"),
     };
     (reason, ids)
+}
+
+/// The tick's queue step: one run of the local operation queue and the one working-set signal it owes. `applied` is
+/// the tick's remote applies, merged into that one signal (task 1697 review fix T3). Spec 2026-10-10 §6.2 (task 1887):
+/// the send phase's wake runs this same step between ticks, with no remote applies, so the phase adds no signal site;
+/// while a phase is armed, what each attempt met is noted on its link, the tick's attempts included. Returns how many
+/// operations completed.
+async fn queue_step(
+    bridge: &Arc<EngineBridge>,
+    sync_root: &Path,
+    db: &StateDb,
+    owed_working_set_signal: &mut OwedWorkingSetSignal,
+    applied: &[String],
+    send_phase: &SendPhaseLink,
+) -> u32 {
+    match bridge.process_due_operations(sync_root, now_secs()).await {
+        Ok(outcome) => {
+            if send_phase.is_armed() {
+                send_phase.note(&outcome);
+            }
+            let completed = outcome.completed_op_ids.len() as u32;
+            // Task 1697 review fix (T3): ONE signal per tick
+            // carries the union of the local queue's
+            // invalidations and the REMOTE ingestion applies —
+            // in a mixed tick two signals would be redundant.
+            let (reason, ids) = tick_working_set_signal(&outcome.invalidated_item_ids, applied);
+            signal_working_set_owing(owed_working_set_signal, db, reason, &ids);
+            if !outcome.paused_op_ids.is_empty() || !outcome.retried_op_ids.is_empty() {
+                tracing::info!(
+                    paused = outcome.paused_op_ids.len(),
+                    retried = outcome.retried_op_ids.len(),
+                    "sync operation queue processed with deferred work"
+                );
+            }
+            completed
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "operation queue processing failed");
+            // The local queue stalled, but this tick's REMOTE
+            // ingestion may still have applied server-side
+            // changes — Finder must hear about them anyway.
+            if !applied.is_empty() {
+                signal_working_set_owing(owed_working_set_signal, db, "remote_changes_applied", applied);
+            }
+            0
+        }
+    }
 }
 
 fn now_secs() -> i64 {
@@ -2060,7 +2401,7 @@ fn handle_new_conflict(app: &AppHandle, c: &ConflictDetected) {
     // `conflict_auto_opens_window` is true on every platform today (task 1683
     // slice 1 pins that for Windows and Linux); slice 6 makes macOS false.
     if crate::surfaces::policy::conflict_auto_opens_window(crate::surfaces::policy::Platform::current()) {
-        if let Err(e) = crate::open_conflict_window_impl(app, &c.file_id, &c.file_name, c.is_text) {
+        if let Err(e) = crate::open_conflict_window_impl(app, &c.file_id, &c.file_name, c.is_text, None) {
             tracing::warn!(error = %e, file_id = %c.file_id, "open_conflict_window failed");
         }
     }
@@ -2360,6 +2701,41 @@ mod tests {
     // Task 9 fix round 1 (item B): a working-set signal that meets a busy bridge gate is owed to the next
     // tick. The signal is the daemon's ONLY replica-refresh channel, so a dropped one would leave Finder
     // stale until some later tick happened to change a materialized parent.
+    /// Task 2190 (the lead's condition): a decision's working-set signal that was not delivered is
+    /// carried by the next tick's signal, through the same debt: taken once, kept while the gate is
+    /// busy, paid when delivered. Both tick-side signal sites take it first.
+    #[test]
+    fn task_2190_a_commands_undelivered_signal_is_carried_by_the_next_tick() {
+        owe_working_set_signal(&["parked".to_string()]);
+        owe_working_set_signal(&["parked".to_string(), "copy".to_string()]);
+        let mut owed = OwedWorkingSetSignal::default();
+        owed.take_command_debt();
+        assert_eq!(owed.merged_with(&[]), vec!["parked".to_string(), "copy".to_string()], "the next tick signals them");
+        owed.take_command_debt();
+        let merged = owed.merged_with(&["tick".to_string()]);
+        assert_eq!(merged, vec!["parked".to_string(), "copy".to_string(), "tick".to_string()], "taken once");
+        owed.record(true, merged);
+        assert!(owed.is_owing(), "a busy gate keeps them owed");
+        let merged = owed.merged_with(&[]);
+        owed.record(false, merged);
+        assert!(!owed.is_owing(), "delivered: paid");
+
+        // A Windows checkout is CRLF (core.autocrlf), as the other source-text pins here allow for.
+        let source = include_str!("runner.rs").replace("\r\n", "\n");
+        let body = |name: &str| {
+            let from = source.find(&format!("fn {name}(")).expect(name);
+            &source[from..from + source[from..].find("\n}\n").expect("the end of the fn")]
+        };
+        assert!(body("signal_working_set_owing").contains("owed.take_command_debt();"));
+        assert!(body("signal_owed_debt_after_a_failed_tick").contains("owed_working_set_signal.take_command_debt();"));
+        // The decision owes what its own signal did not deliver.
+        let lib = include_str!("lib.rs").replace("\r\n", "\n");
+        let decide = &lib[lib.find("async fn resolve_parked_conflict(").expect("the decision command")..];
+        assert!(decide.contains(
+            "if crate::finder_setup::macos_ports::signal_working_set().is_err() {\n                crate::runner::owe_working_set_signal(&ids);"
+        ));
+    }
+
     #[test]
     fn a_dropped_working_set_signal_is_owed_to_the_next_tick_and_a_delivered_one_clears_the_debt() {
         let mut owed = OwedWorkingSetSignal::default();
@@ -2504,10 +2880,13 @@ mod tests {
     }
 
     /// The tick loop signals through the owing wrapper only, at four named sites: revoked shared content,
-    /// the tick's one signal, a tick whose queue failed (its remote applies), and a failed tick that owes a
-    /// debt. A fifth call fails here, so no signal bypasses the debt. A failed tick reaches the first (it runs
-    /// before the tick, in every iteration) and the fourth; a delivered signal pays the debt, so at most one
-    /// signal is delivered per tick.
+    /// the queue step's one signal, a queue step that failed (the tick's remote applies), and a failed tick that
+    /// owes a debt. A fifth call fails here, so no signal bypasses the debt. The queue step's two sites are in
+    /// `queue_step`, which has two callers: the tick, and the send phase's wake while a sign-out's phase is armed
+    /// (spec 2026-10-10 §6.2), which passes no remote applies. A third caller fails here too. A failed tick reaches
+    /// the first site (it runs before the tick, in every iteration) and the fourth; a delivered signal pays the debt,
+    /// so at most one signal is delivered per tick. Between ticks, an armed phase's queue step signals as well: at
+    /// most once a second, and only while the phase is armed, at most a minute.
     #[test]
     fn every_working_set_signal_in_the_tick_loop_goes_through_the_owed_wrapper() {
         use crate::source_pin::squeeze;
@@ -2534,11 +2913,23 @@ mod tests {
         );
         for site in [
             "signal_working_set_owing(&mut owed_working_set_signal, &db, \"shared_roots_changed\", &outcome.removed_shared_file_ids)",
-            "signal_working_set_owing(&mut owed_working_set_signal, &db, reason, &ids)",
-            "signal_working_set_owing(&mut owed_working_set_signal, &db, \"remote_changes_applied\", &tick.applied_item_ids)",
+            "signal_working_set_owing(owed_working_set_signal, db, reason, &ids)",
+            "signal_working_set_owing(owed_working_set_signal, db, \"remote_changes_applied\", applied)",
             "signal_working_set_owing(owed_working_set_signal, db, \"owed_debt\", &[])",
         ] {
             assert_eq!(squeezed.matches(&squeeze(site)).count(), 1, "the site {site}");
+        }
+        // The queue step's two sites are `queue_step`'s; the tick and the phase's wake call it, once each.
+        assert_eq!(
+            squeezed.matches("queue_step(").count() - squeezed.matches("fnqueue_step(").count(),
+            2,
+            "the queue step's two callers"
+        );
+        for call in [
+            "queue_step(&bridge, &sync_root, &db, &mut owed_working_set_signal, &tick.applied_item_ids, &send_phase)",
+            "queue_step(&bridge, &sync_root, &db, &mut owed_working_set_signal, &[], &send_phase)",
+        ] {
+            assert_eq!(squeezed.matches(&squeeze(call)).count(), 1, "the call {call}");
         }
         // The fourth site's helper is called once, from the failed tick's arm of `run`.
         assert_eq!(
@@ -2553,6 +2944,163 @@ mod tests {
         assert!(
             at("\"sync tick failed\"") < call && call < at("refresh_status_ui_snapshot(&db, false, true)"),
             "in the failed tick's arm"
+        );
+    }
+
+    /// U35: the phase's wake runs the tick's own queue step (`queue_step`) with no remote applies, at most once a
+    /// second, never while paused or disarmed, and never the remote tick, a sweep or the shared-root refresh. The queue
+    /// step notes what each attempt met while a phase is armed, so the tick's attempts count too, and it pays the
+    /// working-set signal, so the phase adds no signal site.
+    #[test]
+    fn the_send_phase_runs_the_queue_step_alone() {
+        use crate::source_pin::squeeze;
+        let start = std::time::Instant::now();
+        let mut last = None;
+        let mut runs = 0;
+        for tenth in 0..=600u64 {
+            let now = start + std::time::Duration::from_millis(tenth * 100);
+            if phase_step_due(true, false, last, now) {
+                runs += 1;
+                last = Some(now);
+            }
+        }
+        assert!((60..=61).contains(&runs), "{runs} runs in 60 s");
+        assert!(!phase_step_due(true, true, None, start), "not while paused");
+        assert!(!phase_step_due(false, false, None, start), "never once disarmed");
+        let source = include_str!("runner.rs").replace("\r\n", "\n");
+        let arm = &source[source.find("Wake::Phase => {").expect("the phase's arm")..];
+        let arm = &arm[..arm.find("\n            }\n").unwrap()];
+        assert!(
+            squeeze(arm).contains(&squeeze(
+                "queue_step(&bridge, &sync_root, &db, &mut owed_working_set_signal, &[], &send_phase)"
+            )),
+            "the arm runs the tick's queue step, with no remote applies:\n{arm}"
+        );
+        for denied in [
+            "process_due_operations(",
+            "signal_working_set_owing(",
+            "sync_tick_outcome(",
+            "refresh_shared_roots(",
+            "sweep_",
+            "run_known_folder_mirror(",
+        ] {
+            assert!(!arm.contains(denied), "{denied} in the arm");
+        }
+        let step = &source[source.find("async fn queue_step(").expect("the queue step")..];
+        let step = &step[..step.find("\n}\n").unwrap()];
+        assert!(
+            squeeze(step).contains("ifsend_phase.is_armed(){send_phase.note(&outcome);}"),
+            "every attempt is noted while a phase is armed:\n{step}"
+        );
+        let tick =
+            &source[source.find("Wake::Tick => {").expect("the tick's arm")..source.find("Wake::Phase => {").unwrap()];
+        assert!(
+            squeeze(tick).contains(&squeeze(
+                "queue_step(&bridge, &sync_root, &db, &mut owed_working_set_signal, &tick.applied_item_ids, &send_phase)"
+            )),
+            "the tick's queue step is the same one, so the tick's attempts count too"
+        );
+        // No precondition on the wake. `select!` reads one when it starts waiting, so an arm disabled then stays
+        // disabled until another arm fires: up to a 30 s tick.
+        let wait = &source[source.find("async fn next_wake(").expect("next_wake")..];
+        let wait = &wait[..wait.find("\n}\n").unwrap()];
+        assert!(
+            wait.contains("_ = send_phase.wake.notified() => Wake::Phase,"),
+            "{wait}"
+        );
+        assert!(
+            !wait.contains(", if "),
+            "no arm of the wait has a precondition:\n{wait}"
+        );
+        // §6.2: the arm skips its step while sync is paused, as the tick does: it reads the runner's own pause flag.
+        assert!(
+            squeeze(arm).contains(&squeeze(
+                "phase_step_due(send_phase.is_armed(), sync_paused.load(Ordering::Relaxed), last_phase_run, now)"
+            )),
+            "the arm reads the pause flag the tick reads:\n{arm}"
+        );
+        // §6.1 condition 3: the phase reads the link monitor that this runner's requests write.
+        let start = source.find("async fn run(\n    app: AppHandle").expect("run exists");
+        let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+        assert_eq!(
+            body.matches("send_phase.attach(link.clone());").count(),
+            1,
+            "run attaches its link monitor to the phase's link"
+        );
+    }
+
+    /// U35: a phase armed while the runner already waits between ticks wakes it at once, not at its next tick 30 s
+    /// on. On tokio's paused clock: time moves only when every task waits, and then straight to the next timer, so no
+    /// real time passes and a loaded machine cannot flake the bound. With a precondition on the wake, the only timers
+    /// left are the 1 s timeout and the 30 s tick, so the clock moves to the timeout and the test is red at once.
+    #[tokio::test(start_paused = true)]
+    async fn a_phase_armed_while_the_runner_waits_wakes_it_at_once() {
+        let send_phase = Arc::new(SendPhaseLink::default());
+        let (_keep_open, mut cancel) = oneshot::channel::<()>();
+        let mut tick = tokio::time::interval(TICK_INTERVAL);
+        assert_eq!(
+            next_wake(&mut cancel, &mut tick, &send_phase).await,
+            Wake::Tick,
+            "an interval's first tick is at once"
+        );
+        let waiter = {
+            let send_phase = send_phase.clone();
+            tokio::spawn(async move { next_wake(&mut cancel, &mut tick, &send_phase).await })
+        };
+        // Paused clock: the waiter runs first and starts waiting, then the clock moves 50 ms. It now waits, 29.95 s
+        // from its next tick.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let armed_at = tokio::time::Instant::now();
+        send_phase.arm();
+        let woke = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("woken within a second of the arm, not at the next tick");
+        assert_eq!(woke.unwrap(), Wake::Phase);
+        assert!(armed_at.elapsed() < Duration::from_secs(1));
+    }
+
+    /// U46's chain, link by link: what an attempt met reaches the phase's signals, signals add up within a phase, and
+    /// arming a new phase forgets the last one's.
+    #[test]
+    fn an_attempts_refusal_reaches_the_phase_signals() {
+        use crate::engine_bridge::TransferLoopOutcome;
+        let link = SendPhaseLink::default();
+        link.arm();
+        assert_eq!(link.signals(), AttemptSignals::default());
+        link.note(&TransferLoopOutcome {
+            account_refused: true,
+            ..Default::default()
+        });
+        assert_eq!(
+            link.signals(),
+            AttemptSignals {
+                account_refused: true,
+                ..Default::default()
+            }
+        );
+        link.note(&TransferLoopOutcome {
+            link_failed: true,
+            ..Default::default()
+        });
+        assert_eq!(
+            link.signals(),
+            AttemptSignals {
+                account_refused: true,
+                link_failed: true,
+                session_refused: false
+            },
+            "they add up"
+        );
+        link.note(&TransferLoopOutcome {
+            session_refused: true,
+            ..Default::default()
+        });
+        assert!(link.signals().session_refused);
+        link.arm();
+        assert_eq!(
+            link.signals(),
+            AttemptSignals::default(),
+            "a new phase starts with none"
         );
     }
 
@@ -2824,43 +3372,53 @@ mod tests {
 
     // ── api_base_url() env-override ───────────────────────────────────────────
 
+    // The value is passed in: the real env var is process-wide and a parallel test sets it.
     #[test]
     fn api_base_url_trims_trailing_slash() {
-        // The trim-slash logic is a pure string operation — test it directly
-        // without touching the real env var (which could interfere with a
-        // parallel test run).
-        let raw = "http://localhost:3001/";
-        let result = raw.trim().trim_end_matches('/').to_string();
-        assert_eq!(result, "http://localhost:3001");
+        assert_eq!(api_base_url_from(Some("http://localhost:3001/")), "http://localhost:3001");
     }
 
     #[test]
     fn api_base_url_trims_multiple_trailing_slashes() {
-        let raw = "http://localhost:3001///";
-        let result = raw.trim().trim_end_matches('/').to_string();
-        assert_eq!(result, "http://localhost:3001");
+        assert_eq!(api_base_url_from(Some("http://localhost:3001///")), "http://localhost:3001");
     }
 
     #[test]
     fn api_base_url_trims_whitespace() {
-        let raw = "  http://10.100.0.239:3001  ";
-        let result = raw.trim().trim_end_matches('/').to_string();
-        assert_eq!(result, "http://10.100.0.239:3001");
+        assert_eq!(api_base_url_from(Some("  http://10.100.0.239:3001  ")), "http://10.100.0.239:3001");
     }
 
     #[test]
-    fn api_base_url_falls_back_to_prod_when_env_unset() {
-        // When BB_API_BASE is unset (or empty), we must return the prod URL.
-        // This test only guards the empty-string branch (we cannot guarantee
-        // BB_API_BASE is unset in all environments, but an empty override is the
-        // canonical "not set" sentinel the function uses).
-        let trimmed = "";
-        let result = if trimmed.is_empty() {
-            "https://api.beebeeb.io".to_string()
-        } else {
-            trimmed.trim_end_matches('/').to_string()
-        };
-        assert_eq!(result, "https://api.beebeeb.io");
+    fn a_unit_test_build_never_defaults_to_the_production_api() {
+        for unset in [None, Some(""), Some("   ")] {
+            let base = api_base_url_from(unset);
+            assert_eq!(base, "http://127.0.0.1:9", "{unset:?}: a closed loopback port");
+            assert!(!base.contains("beebeeb.io"), "{unset:?}: {base}");
+        }
+    }
+
+    #[test]
+    fn every_other_build_defaults_to_the_production_api() {
+        // A test build cannot run the production branch, so its source is pinned: the default
+        // without BB_API_BASE is the production constant, and that constant is production.
+        assert_eq!(PRODUCTION_API_BASE, "https://api.beebeeb.io");
+        // A Windows checkout has CRLF line endings, so the source is read with them normalized. The
+        // pin also runs on a CRLF copy, so a Mac shows what Windows CI would.
+        let checkout = normalized_line_endings(include_str!("runner.rs"));
+        for source in [checkout.clone(), checkout.replace('\n', "\r\n")] {
+            let source = normalized_line_endings(&source);
+            let body = &source[source.find("fn api_base_url_from(").expect("api_base_url_from")..];
+            let body = &body[..body.find("\n}\n").expect("its end")];
+            assert!(
+                body.contains("#[cfg(not(test))]\n        return PRODUCTION_API_BASE.to_string();"),
+                "the non-test default is the production API:\n{body}"
+            );
+        }
+    }
+
+    /// Source text with CRLF line endings (a Windows checkout) as LF.
+    fn normalized_line_endings(source: &str) -> String {
+        source.replace("\r\n", "\n")
     }
 
     // ── Engine status: the tick's payload and the pulse (task 1683 slice 2) ────
@@ -3306,6 +3864,7 @@ mod tests {
             task: Some(task),
             ipc_bind_error: Arc::new(Mutex::new(None)),
             stopping: Arc::new(AtomicBool::new(false)),
+            send_phase: Arc::new(SendPhaseLink::default()),
         };
 
         let outcome = runner.abort().await;
@@ -3339,6 +3898,7 @@ mod tests {
             task: Some(task),
             ipc_bind_error: Arc::new(Mutex::new(None)),
             stopping: Arc::new(AtomicBool::new(false)),
+            send_phase: Arc::new(SendPhaseLink::default()),
         };
 
         // GRACEFUL_ABORT_TIMEOUT (3s) + FORCE_ABORT_TIMEOUT (2s) — the task

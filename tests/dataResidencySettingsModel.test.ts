@@ -10,13 +10,13 @@ const regions: RegionInfo[] = [
   {
     continent: 'europe',
     display_name: 'Europe',
-    city: 'Falkenstein',
+    country: null,
     is_default: true,
   },
   {
     continent: 'us',
     display_name: 'North America',
-    city: 'Ashburn',
+    country: null,
     is_default: false,
   },
 ]
@@ -36,10 +36,9 @@ describe('dataResidencySettingsModel', () => {
         kind: 'region',
         displayName: 'Europe',
         // A response without `choices` names no country, and the client has no table to guess one from.
-        detail: 'Falkenstein',
-        locationLabel: 'Falkenstein',
+        detail: 'Any of our European data centers. We place your files.',
+        locationLabel: 'any of our European data centers',
         isDefault: true,
-        anyDatacenter: false,
         selected: true,
         comingSoon: false,
         disabled: true,

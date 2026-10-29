@@ -20,7 +20,7 @@ try {
    if(name==='desktop_config')return {theme:'light'}
    if(name==='sync_status')return {logged_in:f.account!==null,session_revision:f.revision,engine:'running',syncing:0,cloud_only:0,conflicts:0}
    if(name==='account_usage')return {used_bytes:f.account==='A'?55000000:32,quota_bytes:5000000000,percentage:0.01}
-   if(name==='account_region')return {region:{city:f.account==='A'?'Helsinki':'Ede',country:'Netherlands'}}
+   if(name==='account_region')return {preferred_region:null,regions:[{continent:'europe',display_name:'Europe',country:f.account==='A'?'Finland':'Netherlands',is_default:true}]}
    if(name==='known_folder_onboarding_seen')return true
    if(name==='get_known_folder_backup')return []
    throw new Error('fixture unavailable '+name)
