@@ -682,6 +682,54 @@ pub struct TransferLoopOutcome {
     pub account_refused: bool,
 }
 
+/// How many times one pass of `process_due_operations` may list its due work. Spec D7 (tasks 1888, 2226): on Windows
+/// and Linux a change in a folder made here is not due until that folder's create landed, so a pass that lands a
+/// folder create lists again for what the landing made due; a new tree up to this many levels deep goes up in one
+/// pass. macOS has no gate and lists once, as before.
+#[cfg(target_os = "macos")]
+const DUE_LISTINGS_PER_PASS: usize = 1;
+#[cfg(not(target_os = "macos"))]
+const DUE_LISTINGS_PER_PASS: usize = 16;
+
+/// The due work of one pass, in due order. It lists again only after a folder create of the pass landed (D7), at most
+/// `DUE_LISTINGS_PER_PASS` times in all, and an op listed earlier in the pass is not run again in it.
+struct DueOperations {
+    queue: VecDeque<PendingOperation>,
+    listed: HashSet<String>,
+    listings: usize,
+    folder_landed: bool,
+}
+
+impl DueOperations {
+    fn new(operations: Vec<PendingOperation>) -> Self {
+        Self {
+            listed: operations.iter().map(|op| op.op_id.clone()).collect(),
+            queue: operations.into(),
+            listings: 1,
+            folder_landed: false,
+        }
+    }
+
+    /// A folder create of this pass landed: the changes that waited for it may be due now.
+    fn folder_landed(&mut self) {
+        self.folder_landed = true;
+    }
+
+    fn next(&mut self, db: &StateDb, now: i64) -> anyhow::Result<Option<PendingOperation>> {
+        while self.queue.is_empty() && self.folder_landed && self.listings < DUE_LISTINGS_PER_PASS {
+            self.folder_landed = false;
+            self.listings += 1;
+            let listed = &mut self.listed;
+            self.queue = db
+                .list_due_operations(now)?
+                .into_iter()
+                .filter(|op| listed.insert(op.op_id.clone()))
+                .collect();
+        }
+        Ok(self.queue.pop_front())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationFailureClass {
     Retryable,
@@ -1102,9 +1150,9 @@ impl EngineBridge {
         if !self.is_stopping() {
             crate::windows_cf::upload_finalization::retry(&self.db, sync_root);
         }
-        let operations = self.db.list_due_operations(now)?;
+        let mut due = DueOperations::new(self.db.list_due_operations(now)?);
 
-        for op in operations {
+        while let Some(op) = due.next(&self.db, now)? {
             // Task 1538 Codex P1 (PR #49, lib.rs:1087 thread): stop draining
             // the queue the instant a caller asks this engine to stop,
             // rather than finishing every due operation first. `abort()`'s
@@ -1196,6 +1244,9 @@ impl EngineBridge {
                     }
                     if let Some(file_id) = &op.file_id {
                         outcome.invalidated_item_ids.push(file_id.clone());
+                    }
+                    if op.kind == OperationKind::CreateFolder {
+                        due.folder_landed();
                     }
                     outcome.completed_op_ids.push(op.op_id);
                 }
@@ -11648,6 +11699,55 @@ mod tests {
         assert_eq!(row.status, FileStatus::Trashing);
 
         let _ = server.finish();
+    }
+
+    /// Spec D7 (tasks 1888, 2226): a folder made here inside another new folder waits for that folder's create, and a
+    /// pass reads its due work once. A pass that lands a folder create lists again, so a new tree two levels deep goes
+    /// up in one pass, not one tick (`TICK_INTERVAL`, 30 s) per level.
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn a_new_folder_and_the_folder_inside_it_are_created_in_one_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = SyncMockServer::start(vec![
+            ("200 OK".into(), serde_json::json!({ "id": "folder-new" })),
+            ("200 OK".into(), serde_json::json!({ "id": "folder-sub" })),
+        ]);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [9u8; 32]);
+        for (op_id, file_id, parent_id, created_at) in
+            [("op-new", "folder-new", None, 100), ("op-sub", "folder-sub", Some("folder-new"), 101)]
+        {
+            bridge
+                .db
+                .enqueue_operation(&PendingOperation {
+                    op_id: op_id.into(),
+                    kind: OperationKind::CreateFolder,
+                    file_id: Some(file_id.into()),
+                    parent_id: parent_id.map(str::to_string),
+                    target_path: None,
+                    metadata_json: Some(serde_json::json!({ "name_encrypted": "sealed" }).to_string()),
+                    payload_path: None,
+                    base_version: None,
+                    base_object_version_id: None,
+                    attempts: 0,
+                    max_attempts: 25,
+                    next_retry_at: 0,
+                    last_error: None,
+                    backup_source_key: None,
+                    created_at,
+                    updated_at: created_at,
+                })
+                .unwrap();
+        }
+        assert_eq!(bridge.db.list_due_operations(200).unwrap().len(), 1, "the inner folder waits for its folder");
+
+        let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
+        assert_eq!(outcome.completed_op_ids, vec!["op-new".to_string(), "op-sub".to_string()], "both in one pass");
+        assert!(outcome.retried_op_ids.is_empty());
+        let requests = server.finish();
+        assert_eq!(requests.len(), 2);
+        let inner: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+        assert_eq!(inner["folder_id"], "folder-sub");
+        assert_eq!(inner["parent_id"], "folder-new", "sent after its folder landed, under it");
     }
 
     #[test]
