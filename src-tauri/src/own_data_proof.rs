@@ -140,12 +140,8 @@ pub fn probe(master_key: &[u8; 32], node: &serde_json::Value) -> Probe {
     let Some(file_id) = node.get("id").and_then(serde_json::Value::as_str) else {
         return Probe::Unproven;
     };
-    // Self-review F1: an API that does not say who sealed a name (its tree carried none of these before 2026-10-27)
-    // cannot tell a file received through a file request from anything else, so there a name that does not open
-    // proves nothing either way.
-    let says_who_sealed = ["file_request_id", "uploaded_by", "owner_wrapped_file_key"]
-        .iter()
-        .all(|field| node.get(*field).is_some());
+    // Lead review of round 2, P3-6: a node that does not say who sealed its name is no evidence of a file request, so a
+    // name that does not open is unproven there too (the production API says it, since 2026-10-27).
     match node
         .get("name_encrypted")
         .and_then(serde_json::Value::as_str)
@@ -155,8 +151,7 @@ pub fn probe(master_key: &[u8; 32], node: &serde_json::Value) -> Probe {
         // A plaintext (legacy) name, or none: proves nothing either way.
         None => Probe::Neutral,
         Some(sealed) if name_opens(master_key, file_id, sealed) => Probe::Own,
-        Some(_) if says_who_sealed => Probe::Unproven,
-        Some(_) => Probe::Neutral,
+        Some(_) => Probe::Unproven,
     }
 }
 
@@ -247,16 +242,30 @@ pub fn judge(master_key: &[u8; 32], rows: &[ProofRow], ops: &[ProofOp], nodes: &
             Probe::Missing => tally.missing += 1,
         }
     }
+    // Lead review of round 2, P1: a path proves a folder made here (its create sends no content, and task 1888 folds it
+    // into its server twin), never anything else. Every other change needs one anchor tied by real parent links.
     let proven: HashSet<String> = ops
         .iter()
         .filter(|op| {
-            let anchors: Vec<&str> = op.file_id.iter().chain(op.parent_id.iter()).map(String::as_str).collect();
-            !anchors.is_empty() && anchors.iter().all(|anchor| judge.anchor_is_proven(anchor))
+            let ties: Vec<Tie> = op.file_id.iter().chain(op.parent_id.iter()).map(|anchor| judge.anchor(anchor)).collect();
+            !ties.is_empty()
+                && !ties.contains(&Tie::Not)
+                && (op.kind == "create_folder" || ties.contains(&Tie::Linked))
         })
         .map(|op| op.op_id.clone())
         .collect();
     tally.proven_changes = proven.len();
     Judgement { tally, proven }
+}
+
+/// How a queued change's anchor is tied to this account's proven data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tie {
+    /// Up real parent links to an own row (or one gone from an own folder).
+    Linked,
+    /// Only through a path: a row at its own path (its twin) or the folder at its path (a row with no parent link).
+    ByPath,
+    Not,
 }
 
 /// The tree and the local rows, indexed, with each present node's probe computed once.
@@ -277,11 +286,16 @@ impl<'a> Judge<'a> {
 
     /// The folder `row` is in: its parent link, or, for a row without one, the row at its path's folder.
     fn parent_of(&self, row: &'a ProofRow) -> Option<&'a str> {
+        self.parent_link(row).map(|(parent, _)| parent)
+    }
+
+    /// [`Self::parent_of`], and whether it was found by the path (the row has no parent link).
+    fn parent_link(&self, row: &'a ProofRow) -> Option<(&'a str, bool)> {
         if let Some(parent) = row.parent_id.as_deref() {
-            return Some(parent);
+            return Some((parent, false));
         }
         let (folder, _) = row.path.trim_matches('/').rsplit_once('/')?;
-        self.by_path.get(folder).map(|parent| parent.file_id.as_str())
+        self.by_path.get(folder).map(|parent| (parent.file_id.as_str(), true))
     }
 
     /// A server-named row: its node's probe, or, when this account's tree does not hold it, `Gone` if its nearest
@@ -308,32 +322,42 @@ impl<'a> Judge<'a> {
         Probe::Missing
     }
 
-    /// Whether a queued change's anchor (the item it acts on, or the folder it acts in) is this account's proven data:
-    /// the first server-named row up its local parents (or at a local row's own path, its twin) is in My Files and
+    /// How a queued change's anchor (the item it acts on, or the folder it acts in) is tied to this account's proven
+    /// data: the first judged row up its local parents (or at a row made here's own path, its twin) is in My Files and
     /// proven its own (or gone from its own folder). An item made on this PC at the top level, or in a folder shared
-    /// with this account, or in one whose name proves nothing, is not.
-    fn anchor_is_proven(&self, anchor: &'a str) -> bool {
+    /// with this account, or in one whose name proves nothing, is not. The tie is `ByPath` when the walk went through
+    /// a twin or through the folder at a path (a row with no parent link).
+    fn anchor(&self, anchor: &'a str) -> Tie {
         let mut seen: HashSet<&str> = HashSet::new();
         let mut id = anchor;
+        let mut by_path = false;
+        let tied = |proven: bool, by_path: bool| match (proven, by_path) {
+            (false, _) => Tie::Not,
+            (true, false) => Tie::Linked,
+            (true, true) => Tie::ByPath,
+        };
         loop {
             if !seen.insert(id) {
-                return false;
+                return Tie::Not;
             }
             let Some(&row) = self.local.get(id) else {
                 // No local row: a node of this account's tree this PC has not written yet.
-                return self.present(id) == Some(Probe::Own);
+                return tied(self.present(id) == Some(Probe::Own), by_path);
             };
             if row.server_named {
-                return row.my_files && matches!(self.row(row), Probe::Own | Probe::Gone);
+                return tied(row.my_files && matches!(self.row(row), Probe::Own | Probe::Gone), by_path);
             }
             // A folder made here whose create never reached the server shares its path with the server's folder
             // (its twin, task 1888): it is that folder.
             if let Some(&twin) = self.by_path.get(row.path.trim_matches('/')).filter(|twin| twin.server_named) {
-                return twin.my_files && matches!(self.row(twin), Probe::Own | Probe::Gone);
+                return tied(twin.my_files && matches!(self.row(twin), Probe::Own | Probe::Gone), true);
             }
-            match self.parent_of(row) {
-                Some(parent) => id = parent,
-                None => return false,
+            match self.parent_link(row) {
+                Some((parent, found_by_path)) => {
+                    by_path |= found_by_path;
+                    id = parent;
+                }
+                None => return Tie::Not,
             }
         }
     }
@@ -570,10 +594,16 @@ mod tests {
         }
     }
 
-    /// A new item this PC made (its row is `Shape::Local`) in `parent`.
+    /// A new item this PC made (its row is `Shape::Local`) in `parent`. A new file's upload says it creates the file
+    /// (`metadata_json.operation`), as the engine queues it.
     fn create(op_id: &str, file_id: &str, parent: Option<&str>, folder: bool) -> PendingOperation {
-        let kind = if folder { OperationKind::CreateFolder } else { OperationKind::UploadVersion };
-        op(op_id, kind, Some(file_id), parent)
+        if folder {
+            return op(op_id, OperationKind::CreateFolder, Some(file_id), parent);
+        }
+        PendingOperation {
+            metadata_json: Some(r#"{"operation":"create_file"}"#.to_string()),
+            ..op(op_id, OperationKind::UploadVersion, Some(file_id), parent)
+        }
     }
 
     fn sealed_name(owner_key: [u8; 32], file_id: &str) -> String {
@@ -1129,12 +1159,12 @@ mod tests {
         assert!(matches!(outcome, Outcome::Adopted(t) if t.own == 2 && t.neutral == 1), "{outcome:?}");
     }
 
-    /// Self-review F1: a tree from an API that does not say who sealed a name (its nodes carry no `file_request_id`,
-    /// `uploaded_by` or `owner_wrapped_file_key` at all, as before 2026-10-27) cannot tell a file received through a
-    /// file request from anything else, so a name that does not open there proves nothing either way. An API that says
-    /// nobody else sealed it still makes it block.
+    /// Lead review of round 2, P3-6 (replaces self-review F1): a node that does not say who sealed its name (no
+    /// `file_request_id`, `uploaded_by` or `owner_wrapped_file_key` key at all) and whose name does not open under this
+    /// account's key is unproven, as one that says nobody else sealed it: a missing key is no evidence of a file
+    /// request. An own name still proves it.
     #[test]
-    fn a_name_that_does_not_open_proves_nothing_when_the_api_does_not_say_who_sealed_it() {
+    fn a_name_that_does_not_open_is_unproven_when_the_api_does_not_say_who_sealed_it() {
         let without = |mut node: serde_json::Value, fields: &[&str]| {
             for field in fields {
                 node.as_object_mut().unwrap().remove(*field);
@@ -1143,11 +1173,11 @@ mod tests {
         };
         let attribution = ["file_request_id", "uploaded_by", "owner_wrapped_file_key"];
         let received = |id: &str| with(mine(id), "name_encrypted", serde_json::json!(sealed_name(THEIRS, id)));
-        assert_eq!(probe(&MINE, &without(received(IDS[0]), &attribution)), Probe::Neutral, "the API does not say");
+        assert_eq!(probe(&MINE, &without(received(IDS[0]), &attribution)), Probe::Unproven, "the API does not say");
         assert_eq!(
             probe(&MINE, &without(received(IDS[0]), &["uploaded_by", "owner_wrapped_file_key"])),
-            Probe::Neutral,
-            "the API says only whether a file request sealed it"
+            Probe::Unproven,
+            "the API says only that no file request sealed it"
         );
         assert_eq!(probe(&MINE, &received(IDS[0])), Probe::Unproven, "the API says nobody else sealed it");
         assert_eq!(probe(&MINE, &without(mine(IDS[0]), &attribution)), Probe::Own, "an own name still proves it");
@@ -1160,7 +1190,8 @@ mod tests {
             without(mine(IDS[2]), &attribution),
         ]);
         let outcome = prove(&pc, &session(), MINE, &server);
-        assert!(matches!(outcome, Outcome::Adopted(t) if t.own == 2 && t.neutral == 1), "{outcome:?}");
+        assert!(matches!(outcome, Outcome::NotProven(t) if t.own == 2 && t.unproven == 1), "{outcome:?}");
+        assert_eq!(pc.db.0.owner().unwrap(), None);
     }
 
     /// Self-review F2: a row the person put in the trash on the server while sync was refused is not in the snapshot,
@@ -1289,7 +1320,9 @@ mod tests {
     /// The maintainer's PC (task 1888): 2,832 folders made here whose create never reached the server share their
     /// path with the server's own folder (their twin), and the uploads in them name the folder made here as their
     /// parent. A change there is tied to this account's data through the twin: it is not held. Without this rule all
-    /// 2,984 queued changes on that PC were held for review.
+    /// 2,984 queued changes on that PC were held for review. The new file's own row is linked to the server's folder
+    /// (a real parent link), so its upload is proven by more than a path (lead review of round 2, P1: content needs
+    /// one such link; `a_path_twin_proves_a_folder_made_here_but_never_the_content_in_it`).
     #[test]
     fn a_change_in_a_folder_made_here_whose_server_twin_is_own_is_not_held() {
         let pc = pc_with(&IDS);
@@ -1311,6 +1344,100 @@ mod tests {
             "{outcome:?}"
         );
         assert!(held_for_review(&pc).is_empty());
+    }
+
+    /// Lead review of round 2, P1: account A's rows made on this PC sit at the paths of account B's own rows (a
+    /// legacy database where A's synced rows are gone and A's unsent changes are not). A's new "Documents" folder is
+    /// tied to B's own "Documents" by its path, and a folder create sends no content, so it is proven (task 1888 folds
+    /// it into B's folder). A's files are tied to B's data by a path only: through the folder (its twin), as a file at
+    /// the path of one of B's files, or by the folder at their path when their row has no parent link. None of them
+    /// is sent without the person's click.
+    #[test]
+    fn a_path_twin_proves_a_folder_made_here_but_never_the_content_in_it() {
+        let pc = pc_with(&IDS);
+        add_row_at(&pc, "b-documents", "Documents", None, Shape::Snapshot, Namespace::MyFiles, ItemKind::Folder);
+        add_row_at(&pc, "b-notes", "Documents/notes.txt", Some("b-documents"), Shape::Snapshot, Namespace::MyFiles, ItemKind::File);
+        add_row_at(&pc, "a-documents", "Documents", None, Shape::Local, Namespace::MyFiles, ItemKind::Folder);
+        add_row_at(&pc, "a-report", "Documents/report.pdf", Some("a-documents"), Shape::Local, Namespace::MyFiles, ItemKind::File);
+        add_row_at(&pc, "a-notes", "Documents/notes.txt", Some("a-documents"), Shape::Local, Namespace::MyFiles, ItemKind::File);
+        add_row_at(&pc, "a-loose", "Documents/loose.txt", None, Shape::Local, Namespace::MyFiles, ItemKind::File);
+        pc.db.0.enqueue_operation(&create("op-a-documents", "a-documents", None, true)).unwrap();
+        pc.db.0.enqueue_operation(&create("op-a-report", "a-report", Some("a-documents"), false)).unwrap();
+        pc.db.0.enqueue_operation(&create("op-a-notes", "a-notes", Some("a-documents"), false)).unwrap();
+        pc.db.0.enqueue_operation(&create("op-a-loose", "a-loose", None, false)).unwrap();
+        adopt_unbound(&pc.db, None).unwrap();
+        let mut tree: Vec<_> = IDS.iter().map(|id| mine(id)).collect();
+        tree.push(mine("b-documents"));
+        tree.push(mine("b-notes"));
+
+        let outcome = prove(&pc, &session(), MINE, &Server::new(tree));
+
+        assert!(
+            matches!(outcome, Outcome::Adopted(t) if t.own == 5 && t.proven_changes == 2 && t.held_for_review == 3),
+            "{outcome:?}"
+        );
+        let mut now_due = due(&pc);
+        now_due.sort();
+        assert_eq!(now_due, vec!["held-1".to_string(), "op-a-documents".to_string()], "only the folder create");
+        assert_eq!(
+            held_for_review(&pc),
+            vec!["op-a-loose".to_string(), "op-a-notes".to_string(), "op-a-report".to_string()],
+            "no content is sent on a path's word"
+        );
+    }
+
+    /// Lead review of round 2, P2-1: a row counts as made on this PC only when a queued create names it. Every other
+    /// row is judged against the tree, even with both version columns at 0: one that is not in it is missing, and
+    /// blocks. Before, such a row was taken for this PC's own new item and skipped.
+    #[test]
+    fn a_row_is_made_here_only_when_a_queued_create_names_it() {
+        let pc = pc_with(&IDS);
+        add_row(&pc, "never-queued", None, Shape::Local);
+        add_row(&pc, "only-edited", None, Shape::Local);
+        add_row(&pc, "new-here", None, Shape::Local);
+        pc.db.0.enqueue_operation(&edit("op-edit", "only-edited")).unwrap();
+        pc.db.0.enqueue_operation(&create("op-new", "new-here", None, false)).unwrap();
+        adopt_unbound(&pc.db, None).unwrap();
+
+        let outcome = prove(&pc, &session(), MINE, &own_server());
+
+        assert!(
+            matches!(outcome, Outcome::NotProven(t) if t.checked == 5 && t.own == 3 && t.missing == 2),
+            "{outcome:?}"
+        );
+        assert_eq!(pc.db.0.owner().unwrap(), None);
+        let made_here: Vec<String> = pc
+            .db
+            .0
+            .own_data_proof_rows()
+            .unwrap()
+            .into_iter()
+            .filter(|row| !row.server_named)
+            .map(|row| row.file_id)
+            .collect();
+        assert_eq!(made_here, vec!["new-here".to_string()]);
+    }
+
+    /// Lead review of round 2, P3-2: an unproven change paused for any reason (quota, permission, a locked file) is held
+    /// for review too: queued again, it would lose that pause and be sent unjudged. A proven one keeps its reason.
+    #[test]
+    fn an_unproven_change_paused_for_any_reason_is_held() {
+        use crate::state_db::OperationPauseReason::{Locked, Permission, Quota};
+        let pc = pc_with(&IDS);
+        for (n, reason) in [Quota, Permission, Locked].into_iter().enumerate() {
+            let id = format!("new-{n}");
+            add_folder(&pc, &id, None, Shape::Local);
+            pc.db.0.enqueue_operation(&create(&format!("op-{n}"), &id, None, true)).unwrap();
+            pc.db.0.record_operation_pause(&format!("op-{n}"), reason, None, 5).unwrap();
+        }
+        pc.db.0.enqueue_operation(&edit("op-own-edit", IDS[1])).unwrap();
+        pc.db.0.record_operation_pause("op-own-edit", Quota, None, 5).unwrap();
+        adopt_unbound(&pc.db, None).unwrap();
+
+        assert!(matches!(prove(&pc, &session(), MINE, &own_server()), Outcome::Adopted(t) if t.held_for_review == 3));
+        assert_eq!(held_for_review(&pc), vec!["op-0".to_string(), "op-1".to_string(), "op-2".to_string()]);
+        let quota = pc.db.0.queue_hold_summary().unwrap().held.into_iter().find(|group| group.reason == "quota");
+        assert_eq!(quota.map(|group| group.count), Some(1), "the proven edit keeps its own pause");
     }
 
     /// The twin rule proves nothing by itself: a folder made here whose server twin's name proves nothing (or is not

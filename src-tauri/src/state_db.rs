@@ -2265,7 +2265,8 @@ pub struct ProofRow {
     pub path: String,
     /// In the person's own files (`namespace = 'my_files'`), not a folder shared with them.
     pub my_files: bool,
-    /// The server named it: `current_version > 0 OR remote_updated_at > 0`.
+    /// Judged against the server's tree: not made on this PC. A row made here has `current_version` and
+    /// `remote_updated_at` both at 0 and a queued create names it (lead review of round 2, P2-1).
     pub server_named: bool,
 }
 
@@ -2276,6 +2277,29 @@ pub struct ProofOp {
     pub op_id: String,
     pub file_id: Option<String>,
     pub parent_id: Option<String>,
+    /// `operation_queue.kind`, as stored.
+    pub kind: String,
+    /// It creates its item: a folder's create, or an upload that says it creates the file (`CREATE_OP_SQL`).
+    pub creates: bool,
+}
+
+/// Task 2267 (lead review of round 2, P2-1): an op (aliased `o`) that creates its item on the server: a folder's
+/// create, or an upload whose metadata says it creates the file (`engine_bridge::is_create_file_operation`).
+#[cfg(any(target_os = "windows", test))]
+const CREATE_OP_SQL: &str = "(o.kind = 'create_folder'
+     OR (o.kind IN ('upload_version', 'upload_file')
+         AND COALESCE(CASE WHEN json_valid(o.metadata_json) THEN json_extract(o.metadata_json, '$.operation') END = 'create_file', 0)))";
+
+/// A [`ProofOp`] from `op_id, file_id, parent_id, kind, <CREATE_OP_SQL>`.
+#[cfg(any(target_os = "windows", test))]
+fn proof_op_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProofOp> {
+    Ok(ProofOp {
+        op_id: row.get(0)?,
+        file_id: row.get::<_, Option<String>>(1)?.filter(|id| !id.is_empty()),
+        parent_id: row.get::<_, Option<String>>(2)?.filter(|id| !id.is_empty()),
+        kind: row.get(3)?,
+        creates: row.get(4)?,
+    })
 }
 
 /// One `files` row as the Selective sync tree reads it (0.8.15). A row the server never confirmed (a folder this PC
@@ -6128,17 +6152,21 @@ impl StateDb {
         Ok(account_rows(&conn)? > 0)
     }
 
-    /// Task 2267 (fix round 2): every `files` row as the ownership proof judges it, read once. A row the server named
-    /// has `current_version > 0` (a snapshot row carries the server's version) or `remote_updated_at > 0` (a delta or a
-    /// landing stamps the time); a row this PC made and never uploaded has both at 0. `remote_updated_at` alone is not
-    /// enough: the My Files ingest leaves it 0 for every snapshot row (the server sends `updated_at` as RFC 3339 text).
+    /// Task 2267 (fix round 2): every `files` row as the ownership proof judges it, read once. A row this PC made and
+    /// never uploaded has `current_version` and `remote_updated_at` both at 0 AND a queued create names it (lead review
+    /// of round 2, P2-1: absence of a server version alone is not evidence). Every other row is judged: a snapshot row
+    /// carries the server's version, a delta or a landing stamps the time (`remote_updated_at` alone is not enough: the
+    /// My Files ingest leaves it 0 for every snapshot row, the server sends `updated_at` as RFC 3339 text).
     #[cfg(any(target_os = "windows", test))]
     pub fn own_data_proof_rows(&self) -> Result<Vec<ProofRow>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        let mut stmt = conn.prepare(
-            "SELECT file_id, parent_id, namespace = 'my_files', (current_version > 0 OR remote_updated_at > 0), path
-             FROM files",
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT file_id, parent_id, namespace = 'my_files',
+                    NOT (current_version = 0 AND remote_updated_at = 0
+                         AND EXISTS (SELECT 1 FROM operation_queue o WHERE o.file_id = files.file_id AND {CREATE_OP_SQL})),
+                    path
+             FROM files"
+        ))?;
         let rows = stmt.query_map([], |row| {
             Ok(ProofRow {
                 file_id: row.get(0)?,
@@ -6155,14 +6183,10 @@ impl StateDb {
     #[cfg(any(target_os = "windows", test))]
     pub fn own_data_proof_ops(&self) -> Result<Vec<ProofOp>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        let mut stmt = conn.prepare("SELECT op_id, file_id, parent_id FROM operation_queue")?;
-        let rows = stmt.query_map([], |row| {
-            Ok(ProofOp {
-                op_id: row.get(0)?,
-                file_id: row.get::<_, Option<String>>(1)?.filter(|id| !id.is_empty()),
-                parent_id: row.get::<_, Option<String>>(2)?.filter(|id| !id.is_empty()),
-            })
-        })?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT op_id, file_id, parent_id, kind, {CREATE_OP_SQL} FROM operation_queue o"
+        ))?;
+        let rows = stmt.query_map([], proof_op_from_row)?;
         rows.collect()
     }
 
@@ -6170,8 +6194,8 @@ impl StateDb {
     /// not prove (`found_while_paused`), in ONE transaction. Only if the recorded owner is still `expected` and account
     /// data is still here, so a proof never replaces an owner recorded while it ran, nor names an owner of a database a
     /// sign-out emptied meanwhile. An operation queued after the proof read the queue is not in `proven`, so it is held
-    /// too. Operations paused for another reason keep it, except `auth`: an unproven one must not resume with the
-    /// account's other changes. Returns how many were held, or `None` when nothing was recorded.
+    /// too, and so is an unproven one paused for any reason (it would lose that pause when queued again). Returns how
+    /// many were held, or `None` when nothing was recorded.
     #[cfg(any(target_os = "windows", test))]
     pub fn adopt_owner_holding(
         &self,
@@ -6186,11 +6210,13 @@ impl StateDb {
             return Ok(None);
         }
         write_owner(&tx, owner)?;
+        // Lead review of round 2, P3-2: whatever the pause (quota, permission, a locked file …): queued again, an op
+        // loses its pause, and an unproven one would then be sent unjudged.
         let candidates: Vec<String> = {
             let mut stmt = tx.prepare(
-                "SELECT op_id FROM operation_queue WHERE paused_reason IS NULL OR paused_reason = ?1",
+                "SELECT op_id FROM operation_queue WHERE paused_reason IS NULL OR paused_reason != ?1",
             )?;
-            let rows = stmt.query_map(params![OperationPauseReason::Auth.as_str()], |row| row.get::<_, String>(0))?;
+            let rows = stmt.query_map(params![OperationPauseReason::FoundWhilePaused.as_str()], |row| row.get::<_, String>(0))?;
             rows.collect::<Result<Vec<String>>>()?
         };
         let mut held = 0;
@@ -6209,17 +6235,11 @@ impl StateDb {
     #[cfg(any(target_os = "windows", test))]
     pub fn found_while_paused_ops(&self) -> Result<Vec<ProofOp>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        let mut stmt = conn.prepare(
-            "SELECT op_id, file_id, parent_id FROM operation_queue WHERE paused_reason = ?1
-             ORDER BY created_at ASC, rowid ASC",
-        )?;
-        let rows = stmt.query_map(params![OperationPauseReason::FoundWhilePaused.as_str()], |row| {
-            Ok(ProofOp {
-                op_id: row.get(0)?,
-                file_id: row.get::<_, Option<String>>(1)?.filter(|id| !id.is_empty()),
-                parent_id: row.get::<_, Option<String>>(2)?.filter(|id| !id.is_empty()),
-            })
-        })?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT op_id, file_id, parent_id, kind, {CREATE_OP_SQL} FROM operation_queue o WHERE paused_reason = ?1
+             ORDER BY created_at ASC, rowid ASC"
+        ))?;
+        let rows = stmt.query_map(params![OperationPauseReason::FoundWhilePaused.as_str()], proof_op_from_row)?;
         rows.collect()
     }
 

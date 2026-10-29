@@ -338,12 +338,17 @@ On Windows a refusal over data with no owner, or an owner recorded by an email o
 the background (`own_data_proof.rs`, task 2267). It lists this account's whole tree once (the snapshot and
 the trash) and judges EVERY My Files row the server named, no sample: a row in the tree is its own when its
 name decrypts under this session's key; a row not in the tree is gone only when its nearest ancestor in
-the tree is its own. A name sealed under another key (when the API says nobody else sealed it), or a row
-this account cannot place, blocks; names that prove nothing never outnumber the own ones. Proven, the
+the tree is its own. A row counts as made on this PC (not judged) only when its version columns are both 0
+AND a queued create names it. A name that does not open under this key (unless the node says a file
+request or a collaborator sealed it; a node that says nothing is no evidence), or a row this account cannot
+place, blocks; names that prove nothing never outnumber the own ones. Proven, the
 session is recorded as the owner (`StateDb::adopt_owner_holding`) and sync starts through the same
-`spawn_bound_engine`. In the same transaction every queued change the proof cannot tie to an own row (a
-folder made here whose create never reached the server counts as the server folder at its path, task 1888)
-is held as `found_while_paused` (later changes to those items too, `insert_operation_conn`): never sent and
+`spawn_bound_engine`. In the same transaction every queued change the proof cannot tie to an own row,
+whatever its pause reason, is held as `found_while_paused` (later changes to those items too,
+`insert_operation_conn`). A path proves only a folder create (a folder made here whose create never reached
+the server counts as the server folder at its path, task 1888); any other change, file content above all,
+needs one anchor tied to an own row by real parent links, never by a twin or by the folder at its path
+alone. Held changes are never sent and
 never deleted until the person decides in Settings › Sync. "Upload to my Beebeeb" releases them; "Keep on
 this PC only" (`found_while_paused.rs`) MOVES the items made on this PC out of the sync root into
 `Beebeeb - kept on this PC\YYYY-MM-DD` next to it (same volume, rename only, never over a name, journaled
